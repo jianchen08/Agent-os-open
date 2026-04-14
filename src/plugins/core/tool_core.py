@@ -1,0 +1,385 @@
+"""Tool Core 插件 — 工具执行核心（M3 完善）。
+
+负责执行 LLM 返回的工具调用：
+- 从 state["raw_tool_calls"] 读取工具调用列表
+- 逐个执行已注册的工具函数
+- 使用 asyncio.wait_for 设置超时保护
+- 收集执行结果并写入 state
+- 支持 IsolationExecutor 在 Docker 容器中执行
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+import time
+from typing import Any, Callable, TYPE_CHECKING
+
+from pipeline.plugin import ICorePlugin, PluginContext
+from pipeline.types import ErrorPolicy, StateKeys
+from tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from src.isolation.executor import IsolationExecutor
+
+logger = logging.getLogger(__name__)
+
+
+class ToolCore(ICorePlugin):
+    """工具执行 Core — 从 raw_tool_calls 读取并执行工具调用。
+
+    执行流程：
+    1. 从 ctx.state["raw_tool_calls"] 获取待执行的工具调用列表
+    2. 逐个查找已注册的工具函数并执行
+    3. 使用 asyncio.wait_for 为每个调用设置超时保护
+    4. 收集所有结果（含成功/失败状态和耗时）
+    5. 将结果写入 state
+
+    Class Attributes:
+        error_policy: 错误策略为 RETRY（工具执行可重试）
+
+    Attributes:
+        _config: 插件配置字典
+        _tools: 已注册的工具函数映射，键为工具名，值为可调用对象
+        _tool_registry: 外部工具注册表引用（可选，用于批量注册）
+        _default_timeout: 工具执行默认超时时间（秒）
+        _isolation_executor: 隔离执行器实例（可选，用于 Docker 容器执行）
+    """
+
+    error_policy = ErrorPolicy.RETRY
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        """初始化 Tool Core 插件。
+
+        Args:
+            config: 插件配置字典，支持以下键：
+                - timeout: 工具执行超时时间（秒），默认 30
+        """
+        self._config = config or {}
+        self._tools: dict[str, Callable[..., Any]] = {}
+        self._tool_registry: ToolRegistry | None = None
+        self._default_timeout: float = self._config.get("timeout", 30.0)
+        self._isolation_executor: IsolationExecutor | None = None
+
+    @property
+    def name(self) -> str:
+        """插件唯一标识名称。"""
+        return "tool_core"
+
+    @property
+    def priority(self) -> int:
+        """插件执行优先级。"""
+        return 50
+
+    def register_tool(self, name: str, func: Callable[..., Any]) -> None:
+        """注册一个工具函数。
+
+        Args:
+            name: 工具名称，需与 LLM tool_calls 中的 name 匹配
+            func: 工具执行函数（同步或异步）
+        """
+        self._tools[name] = func
+        logger.debug("[%s] Tool registered: %s", self.name, name)
+
+    def register_tools_from_registry(self, registry: ToolRegistry) -> None:
+        """从 ToolRegistry 批量注册工具。
+
+        将 ToolRegistry 中所有已注册工具的处理函数导入到 ToolCore 中，
+        使 ToolCore 能够执行这些工具。
+
+        Args:
+            registry: 工具注册表实例
+        """
+        self._tool_registry = registry
+        for tool_def in registry.list_all():
+            handler = registry.get_handler(tool_def.name)
+            if handler is not None:
+                self._tools[tool_def.name] = handler
+                logger.debug(
+                    "[%s] Tool imported from registry: %s",
+                    self.name, tool_def.name,
+                )
+
+    def set_isolation_executor(self, executor: IsolationExecutor) -> None:
+        """设置隔离执行器。
+
+        注入 IsolationExecutor 实例后，ToolCore 将优先通过
+        执行器执行工具，根据 state["execution_contexts"] 中的
+        隔离决策在 Docker 或宿主机中执行。
+
+        Args:
+            executor: IsolationExecutor 实例
+        """
+        self._isolation_executor = executor
+        logger.info("[%s] IsolationExecutor 已注入", self.name)
+
+    def _get_tool(self, name: str) -> Callable[..., Any] | None:
+        """获取工具函数。
+
+        优先从本地注册表查找，然后从外部 ToolRegistry 查找。
+
+        Args:
+            name: 工具名称
+
+        Returns:
+            工具函数，未找到时返回 None
+        """
+        if name in self._tools:
+            return self._tools[name]
+        if self._tool_registry and self._tool_registry.has(name):
+            return self._tool_registry.get_handler(name)
+        return None
+
+    # 服务注入映射：tool_args 中的下划线前缀参数名 → ctx.get_service() 的 key
+    _SERVICE_INJECT_MAP: dict[str, str] = {
+        "_task_service": "task_service",
+        "_message_queue": "message_queue",
+        "_tool_registry": "tool_registry",
+        "_session": "db_session",
+    }
+
+    @staticmethod
+    def _normalize_tool_result(result: Any) -> Any:
+        """将工具返回值标准化为可 JSON 序列化的对象。
+
+        如果工具返回 ToolExecutionResult 实例，提取其 output/data 字段；
+        如果是 dict 或基础类型，直接返回；否则转为字符串。
+
+        Args:
+            result: 工具函数的原始返回值
+
+        Returns:
+            可 JSON 序列化的对象
+        """
+        if result is None:
+            return None
+
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+
+        if hasattr(result, "output"):
+            return result.output
+
+        if hasattr(result, "data"):
+            return result.data
+
+        if isinstance(result, (dict, list, str, int, float, bool)):
+            return result
+
+        return str(result)
+
+    async def _execute_single_tool(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        timeout: float,
+        services: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """执行单个工具调用。
+
+        执行前自动将 services 中的依赖注入到 tool_args（仅注入
+        工具尚未提供的下划线前缀参数），使工具函数能获取
+        TaskService、MessageQueue 等运行时依赖，无需 CLI 闭包包装。
+
+        Args:
+            tool_name: 工具名称
+            tool_args: 工具调用参数
+            timeout: 执行超时时间（秒）
+            services: 管道共享服务字典（来自 ctx._services）
+
+        Returns:
+            工具执行结果字典，包含 tool_name、success、data/error、duration_ms
+        """
+        # 自动注入服务依赖
+        if services:
+            for param_key, service_key in self._SERVICE_INJECT_MAP.items():
+                if param_key not in tool_args and service_key in services:
+                    tool_args[param_key] = services[service_key]
+
+        func = self._get_tool(tool_name)
+        if func is None:
+            logger.warning("[%s] Tool not found: %s", self.name, tool_name)
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": f"Tool '{tool_name}' not found",
+                "duration_ms": 0,
+            }
+
+        start = time.monotonic()
+        try:
+            if inspect.iscoroutinefunction(func):
+                result = await asyncio.wait_for(
+                    func(tool_args),
+                    timeout=timeout,
+                )
+            else:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(func, tool_args),
+                    timeout=timeout,
+                )
+
+            # ToolExecutionResult → 提取可序列化的 data/output
+            result = self._normalize_tool_result(result)
+
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.debug(
+                "[%s] Tool executed: %s (%.1fms)",
+                self.name, tool_name, duration_ms,
+            )
+            return {
+                "tool_name": tool_name,
+                "success": True,
+                "data": result,
+                "duration_ms": round(duration_ms, 1),
+            }
+        except asyncio.TimeoutError:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
+                self.name, tool_name, duration_ms, timeout,
+            )
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": f"Tool '{tool_name}' timed out after {timeout}s",
+                "duration_ms": round(duration_ms, 1),
+            }
+        except Exception as exc:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.error(
+                "[%s] Tool error: %s (%.1fms) — %s",
+                self.name, tool_name, duration_ms, exc,
+            )
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": str(exc),
+                "duration_ms": round(duration_ms, 1),
+            }
+
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+        """执行工具调用。
+
+        从 state["raw_tool_calls"] 读取工具调用列表，逐个执行，
+        收集结果后写入 state。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            核心执行结果字典，将合并到管道状态中，包含：
+            - tool_results: 工具执行结果列表
+            - raw_result: 最后一个工具的结果文本
+            - raw_error: 始终为 None（错误由各工具结果中的 error 字段表达）
+            - raw_tool_calls: 清空为空列表（已处理完毕）
+        """
+        tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
+
+        if not tool_calls:
+            return {
+                StateKeys.RAW_RESULT: "No tool calls to execute",
+                StateKeys.RAW_ERROR: None,
+                StateKeys.RAW_TOOL_CALLS: [],
+                StateKeys.TOOL_RESULTS: [],
+            }
+
+        timeout = self._default_timeout
+        results: list[dict[str, Any]] = []
+        last_result_text = ""
+
+        for tc in tool_calls:
+            tool_name = tc.get("name", "unknown")
+            tool_args = tc.get("args", tc.get("arguments", {}))
+
+            # LLM 返回的 arguments 可能是 JSON 字符串，需要解析
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except (json.JSONDecodeError, TypeError):
+                    # 解析失败，保留原始字符串包装为 dict
+                    tool_args = {"raw_arguments": tool_args}
+
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+
+            # 优先通过隔离执行器执行
+            if self._isolation_executor is not None:
+                func = self._get_tool(tool_name)
+                result = await self._isolation_executor.execute_tool(
+                    state=ctx.state,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    tool_func=func,  # type: ignore[arg-type]
+                    timeout=timeout,
+                )
+            else:
+                result = await self._execute_single_tool(
+                    tool_name, tool_args, timeout,
+                    services=ctx._services,
+                )
+            results.append(result)
+
+            # 最后一个工具的结果用于 LLM 上下文
+            if result["success"]:
+                last_result_text = str(result["data"])
+            else:
+                last_result_text = f"Error: {result['error']}"
+
+        logger.info(
+            "[%s] Executed %d tool(s): %s",
+            self.name,
+            len(results),
+            [r["tool_name"] for r in results],
+        )
+
+        # 更新 messages：追加工具结果消息，供下一轮 LLMCore 读取
+        current_messages: list[dict[str, Any]] = list(ctx.state.get("messages", []))
+        # 如果 messages 中已有 assistant 的 tool_calls 消息，只需追加 tool 结果
+        has_tool_call_msg = any(
+            m.get("role") == "assistant" and m.get("tool_calls")
+            for m in current_messages
+        )
+        # 如果没有 assistant tool_calls 消息，先构建 assistant tool_calls 消息
+        if not has_tool_call_msg and tool_calls:
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": tc.get("id", f"call_{i}"),
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": tc.get("args", tc.get("arguments", "")),
+                        },
+                    }
+                    for i, tc in enumerate(tool_calls)
+                ],
+            }
+            current_messages.append(assistant_msg)
+
+        # 追加 tool 结果消息
+        for i, result in enumerate(results):
+            tc_id = tool_calls[i].get("id", f"call_{i}") if i < len(tool_calls) else f"call_{i}"
+            result_data = result.get("data", result.get("error", ""))
+            try:
+                content_str = json.dumps(result_data, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                content_str = str(result_data)
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": content_str if result.get("success") else f"Error: {result.get('error', 'unknown')}",
+            }
+            current_messages.append(tool_msg)
+
+        return {
+            StateKeys.TOOL_RESULTS: results,
+            StateKeys.RAW_RESULT: last_result_text,
+            StateKeys.RAW_ERROR: None,
+            StateKeys.RAW_TOOL_CALLS: [],
+            "messages": current_messages,
+        }

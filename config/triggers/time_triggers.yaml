@@ -1,0 +1,108 @@
+# 时间触发器配置示例
+# 基于时间调度自动执行相应动作
+
+triggers:
+  # 每日项目报告
+  - id: "daily_project_report"
+    name: "每日项目报告"
+    description: "每天早上 9 点生成项目进度报告"
+    enabled: true
+    trigger_type: "time"
+    schedule:
+      type: "cron"
+      expression: "0 9 * * *" # 每天 9:00
+    actions:
+      - type: "api_call"
+        order: 0
+        config:
+          endpoint: "/api/reports/daily"
+          method: "POST"
+          body:
+            format: "markdown"
+          timeout: 30
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 每小时系统状态检查
+  - id: "hourly_health_check"
+    name: "每小时系统健康检查"
+    description: "每小时检查一次系统健康状态"
+    enabled: true
+    trigger_type: "time"
+    schedule:
+      type: "interval"
+      hours: 1
+    actions:
+      - type: "api_call"
+        order: 0
+        config:
+          endpoint: "/api/health/check"
+          method: "GET"
+          timeout: 10
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 每周数据清理
+  - id: "weekly_data_cleanup"
+    name: "每周数据清理"
+    description: "每周日凌晨 2 点执行数据清理"
+    enabled: true
+    trigger_type: "time"
+    schedule:
+      type: "cron"
+      expression: "0 2 * * 0" # 每周日 2:00
+    actions:
+      - type: "api_call"
+        order: 0
+        config:
+          endpoint: "/api/maintenance/cleanup"
+          method: "POST"
+          body:
+            retention_days: 30
+          timeout: 300
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 单次定时任务示例（已过期，禁用）
+  - id: "scheduled_announcement"
+    name: "定时发布公告"
+    description: "在指定时间发布系统公告（示例，已过期）"
+    enabled: false # 已过期，保持禁用状态
+    trigger_type: "time"
+    schedule:
+      type: "date"
+      datetime: "2026-12-31T23:59:59" # 更新到未来时间
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "🎉 新年快乐！"
+          priority: "high"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+      note: "示例触发器，实际使用时请更新时间并启用"
+
+  # 每 5 分钟检查超时任务
+  - id: "check_timeout_tasks"
+    name: "检查超时任务"
+    description: "每 5 分钟检查一次是否有超时的任务需要处理"
+    enabled: true
+    trigger_type: "time"
+    schedule:
+      type: "interval"
+      minutes: 5
+    actions:
+      - type: "api_call"
+        order: 0
+        config:
+          endpoint: "/api/tasks/check-timeout"
+          method: "POST"
+          timeout: 60
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"

@@ -1,0 +1,57 @@
+# 测试用主控 Agent 配置
+config_id: "test_main_agent"
+name: "测试主控"
+display_name: "测试主控智能体"
+description: |
+  测试用主控智能体，负责协调子Agent执行任务。
+
+agent_type: "main"
+category: "system"
+level: "L1"
+
+system_prompt: |
+  你是测试主控智能体，负责协调子Agent。
+
+tool_ids:
+  - "task_submit"
+  - "resource_search"
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "可扩展工具索引"
+      content: |
+        file_read, file_write, bash_execute
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+    - name: "会话信息"
+      type: "session"
+
+hard_constraints:
+  - "只负责派发，不做实现"
+  - "必须先搜索资源"
+
+soft_constraints:
+  - "优先使用工具"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 50
+max_reminders: 5
+timeout_seconds: -1
+
+tags:
+  - "main"
+  - "test"
+  - "L1"
+
+metadata:
+  author: "Test"
+  created_at: "2026-04-11"

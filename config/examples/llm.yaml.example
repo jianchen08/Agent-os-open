@@ -1,0 +1,102 @@
+# LLM 模型配置示例
+# 复制此文件为 llm.yaml 并填入实际配置
+
+models:
+  # 内部别名 -> 实际配置
+  # 使用别名可以在不修改代码的情况下切换模型
+  
+  gpt4:
+    provider: openai
+    model_name: gpt-4-turbo-preview    # 实际 API 模型名
+    display_name: GPT-4 Turbo          # 显示名称
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+      
+  gpt4o:
+    provider: openai
+    model_name: gpt-4o
+    display_name: GPT-4o
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+      
+  gpt4o-mini:
+    provider: openai
+    model_name: gpt-4o-mini
+    display_name: GPT-4o Mini
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+      
+  claude:
+    provider: anthropic
+    model_name: claude-3-5-sonnet-20241022
+    display_name: Claude 3.5 Sonnet
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+    
+  claude-haiku:
+    provider: anthropic
+    model_name: claude-3-haiku-20240307
+    display_name: Claude 3 Haiku
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+    
+  local:
+    provider: ollama
+    model_name: llama3
+    display_name: Llama 3 (Local)
+    api_base: http://localhost:11434
+    default_params:
+      temperature: 0.7
+      
+  # OpenAI 兼容格式的第三方 API
+  deepseek:
+    provider: openai_compatible
+    model_name: deepseek-chat
+    display_name: DeepSeek Chat
+    api_base: https://api.deepseek.com/v1
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+
+# 默认模型配置
+defaults:
+  chat: gpt4o              # 默认对话模型
+  reasoning: claude        # 默认推理模型（复杂任务）
+  embedding: openai        # 默认嵌入模型
+  fallback: claude-haiku   # 降级模型（主模型失败时使用）
+
+# 提供商配置
+providers:
+  openai:
+    api_key: ${OPENAI_API_KEY}           # 从环境变量读取
+    api_base: https://api.openai.com/v1
+    
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+    api_base: https://api.anthropic.com
+    
+  ollama:
+    api_base: http://localhost:11434
+    # Ollama 本地运行，无需 API Key
+    
+  openai_compatible:
+    # 用于兼容 OpenAI 格式的第三方 API
+    # 每个模型可以单独配置 api_base
+    api_key: ${OPENAI_COMPATIBLE_API_KEY}
+
+# 嵌入模型配置
+embeddings:
+  openai:
+    provider: openai
+    model_name: text-embedding-3-small
+    dimension: 1536
+    
+  local:
+    provider: ollama
+    model_name: nomic-embed-text
+    dimension: 768

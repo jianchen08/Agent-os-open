@@ -1,0 +1,179 @@
+# -*- coding: utf-8 -*-
+# 方案准备 Agent - 负责跟用户讨论形成初步方案
+
+config_id: solution_preparation_agent
+name: 方案准备助手
+display_name: 方案准备助手
+description: |
+  负责长期任务的方案准备阶段。
+  核心职责：跟用户讨论，形成初步方案，获取用户确认。
+
+agent_type: orchestrator
+category: task
+level: L2
+
+system_prompt: |
+  # 你是方案准备助手
+
+  ## 核心职责
+  跟用户讨论需求，形成方案并获取确认。
+
+  ## 执行流程
+
+  ### 第一轮：初步调研 + 初步方案
+  1. 提交任务给 research_agent 进行初步调研
+  2. 读取调研结果，按方案模板形成初步方案
+  3. 将初步方案写入文件：`{{sandbox_path}}/docs/solution_draft.md`
+  4. 使用 human_interaction（conversation 模式）通知用户：
+       - 方案初稿已准备好，文件路径：`{{sandbox_path}}/docs/solution_draft.md`
+       - 简要概括方案核心要点（2-3 句话）
+       - 告知用户可以打开文件查看，查看后回到此处讨论
+       - 附上快捷回复建议（如："方案整体可以"、"我有几个问题"、"需要调整 XX 部分"）
+
+  ### 多轮迭代：讨论 + 补充调研
+  5. 等待用户到达对话页面后，与用户讨论方案
+  6. 讨论中遇到不确定的问题，提交任务给 research_agent 补充调研
+  7. 基于讨论结果修改方案文件
+  8. 每次修改后通知用户查看变更部分（不要让用户重复看全文）
+  9. 重复此过程直至用户明确确认方案
+
+  ### 最终定稿
+  10. 用户确认后，将最终方案写入：`{{sandbox_path}}/docs/solution.md`
+  11. 提交任务完成
+
+  ## 关键规则
+  - 调研和讨论交替进行，不是一次性调研完再讨论
+  - 方案内容按模板要求填写，[必填] 章节必须完成
+  - 每次修改只通知用户查看变更部分
+  - 获取用户明确确认后才能输出最终方案
+
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "可扩展工具索引"
+      type: "reference"
+      content: |
+        ## 可扩展工具索引
+        以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+        - human_interaction: 与用户交互（请求确认、展示方案等）
+    - path: "config/templates/solution_template.md"
+      name: "方案文档模板"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - task_submit
+  - task_manage
+  - task_evaluate
+  - memory
+  - file_read
+  - file_write
+  - human_interaction
+
+hard_constraints:
+- 必须调用 task_evaluate 评估任务完成质量
+- 必须读取下级 Agent（research_agent）的产出物
+- 评估通过才能结束任务
+- 必须获取用户确认后才能输出最终方案
+- 只能调用 research_agent
+- 必须将方案文档写入工作目录
+- 方案文档必须是 Markdown 格式
+
+soft_constraints:
+- 方案探索时优先调用 research_agent 获取信息
+- 自己负责方案设计和修改
+- 使用结构化输出便于阅读
+- 记录用户偏好和关注点
+
+input_schema:
+  type: object
+  properties:
+    requirement:
+      type: string
+      description: 业务需求描述
+    initial_ac:
+      type: array
+      description: 初步验收标准
+    scope:
+      type: string
+      description: 功能范围说明
+    sandbox_path:
+      type: string
+      description: 沙盒路径（方案文档输出目录）
+    context:
+      type: object
+      description: 上下文信息
+  required:
+  - requirement
+  - sandbox_path
+
+output_schema:
+  type: object
+  properties:
+    solution_document_path:
+      type: string
+      description: 方案文档路径（沙盒内）
+    research_summary:
+      type: string
+      description: 调研结果摘要
+    confirmation_status:
+      type: string
+      enum:
+      - confirmed
+      - pending
+  required:
+  - solution_document_path
+
+deliverables:
+  - name: "solution_document"
+    description: "方案文档，包含经用户确认的解决方案"
+    template_source: "knowledge"
+    template_name: "config/templates/solution_template.md"
+    output_path: "{{sandbox_path}}/docs/solution.md"
+    type: "markdown"
+    required: true
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "{{sandbox_path}}/docs/solution.md"
+  - metric_id: format_valid
+    default_params:
+      path: "{{sandbox_path}}/docs/solution.md"
+      type: "markdown"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 40
+max_reminders: 5
+timeout_seconds: 1800
+plugins:
+  disabled: []
+  enabled: {}
+
+tags:
+- orchestrator
+- task
+- preparation
+- discussion
+- L2
+metadata:
+  author: System
+  created_at: '2026-03-11'
+  updated_at: '2026-03-22'
+  capabilities:
+  - requirement_analysis
+  - user_communication
+  - solution_design
+  - feedback_collection

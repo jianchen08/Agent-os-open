@@ -1,0 +1,182 @@
+# -*- coding: utf-8 -*-
+# AC 细化 Agent - L3 执行 Agent
+# 负责细化验收标准
+
+config_id: "ac_refine_agent"
+name: "AC细化专家"
+display_name: "AC细化专家"
+description: |
+  负责细化验收标准（Acceptance Criteria）。
+  将初步 AC 细化为可测试、可验证的具体标准。
+
+agent_type: "specialized"
+category: "evaluation"
+level: "L3"
+
+system_prompt: |
+  # 你是 AC 细化专家
+
+  你负责细化验收标准（Acceptance Criteria）。
+
+  ## 核心职责
+
+  1. **AC 分析**
+     - 理解初步验收标准
+     - 识别模糊或不完整的标准
+     - 关联任务和 AC
+
+  2. **AC 细化**
+     - 将模糊标准具体化
+     - 添加可测试的条件
+     - 定义验证方法
+
+  3. **AC 分类**
+     - 功能性 AC
+     - 非功能性 AC（性能、安全等）
+     - 边界条件 AC
+
+  4. **AC 验证设计**
+     - 设计验证步骤
+     - 定义预期结果
+     - 指定验证工具
+
+  ## AC 细化原则（SMART）
+
+  1. **Specific（具体）**：明确描述期望行为
+  2. **Measurable（可测量）**：有量化指标
+  3. **Achievable（可实现）**：技术上可行
+  4. **Relevant（相关）**：与需求直接相关
+  5. **Testable（可测试）**：可以验证
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 上下文变量配置
+context_variables:
+  enable: true
+  include_timestamp: true
+  variables:
+    agent_name: "AC细化专家"
+    agent_level: "L3"
+    agent_category: "evaluation"
+
+# 知识库配置
+knowledge:
+  mode: "compressed"
+  max_tokens: 1500
+  top_k: 3
+  score_threshold: 0.7
+
+# 可用工具
+tool_ids:
+  - "memory"  # 检索历史记忆
+  - "file_read"        # 文件读取
+  - "file_write"       # 文件写入
+  - "todo_manage"      # TODO 清单管理
+  - "task_evaluate"    # 任务评估
+
+# 约束
+hard_constraints:
+  - "每个 AC 必须有验证方法"
+  - "必须关联 AC 和任务"
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+  - "评估结果必须有明确的通过/不通过判定"
+  - "必须输出评估报告"
+
+soft_constraints:
+  - "优先细化 P0 级别的 AC"
+  - "考虑边界条件和异常情况"
+  - "验证方法优先选择自动化测试"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    initial_ac:
+      type: "array"
+      description: "初步验收标准"
+    task_chain:
+      type: "array"
+      description: "任务链"
+    detailed_plan:
+      type: "object"
+      description: "详细执行计划"
+    context:
+      type: "object"
+      description: "上下文信息"
+  required:
+    - "initial_ac"
+    - "task_chain"
+
+output_schema:
+  type: "object"
+  properties: {}
+  description: "输出统一写入文件，格式由模板定义"
+
+# 产出物定义
+deliverables:
+  - name: "refined_ac_report"
+    description: "细化后的验收标准报告，包含细化的AC列表、覆盖率分析和验证方法"
+    output_path: "{{workspace}}/reports/{{task_id}}_refined_ac.md"
+    type: "markdown"
+    required: true
+    template_source: "knowledge"
+    template_name: "config/templates/ac_refinement_template.md"
+
+# 推荐评估指标
+recommended_metrics:
+  - metric_id: "file_check"
+    default_params:
+      action: "read"
+      path: "{{workspace}}/reports/{{task_id}}_refined_ac.md"
+  - metric_id: "format_valid"
+    default_params:
+      path: "{{workspace}}/reports/{{task_id}}_refined_ac.md"
+      type: "markdown"
+
+# 元数据
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 300
+
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+
+tags:
+  - "specialized"
+  - "evaluation"
+  - "quality"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-15"
+  updated_at: "2026-03-22"
+  capabilities:
+    - "ac_refinement"
+    - "verification_design"
+    - "coverage_analysis"
+    - "quality_assurance"

@@ -1,0 +1,135 @@
+# 条件触发器配置示例
+# 基于复杂条件判断是否执行动作
+
+triggers:
+  # 失败任务自动重试
+  - id: "failed_task_auto_retry"
+    name: "失败任务自动重试"
+    description: "当任务失败且重试次数少于 3 次时自动重试"
+    enabled: true
+    trigger_type: "condition"
+    condition:
+      expression: "status == 'failed' and retry_count < 3"
+      watch_events:
+        - "task_status_changed"
+        - "ac_evaluated"
+      max_history: 50
+    actions:
+      - type: "task_retry"
+        order: 0
+        config:
+          max_retries: 3
+          delay_seconds: 60
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 连续失败告警
+  - id: "consecutive_failure_alert"
+    name: "连续失败告警"
+    description: "当同一任务连续失败 3 次时发送告警"
+    enabled: true
+    trigger_type: "condition"
+    condition:
+      expression: "history_count >= 3 and len([e for e in recent_events if e.data.get('status') == 'failed']) >= 3"
+      watch_events:
+        - "ac_evaluated"
+      max_history: 10
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "🚨 任务 {{task_id}} 连续失败 3 次，需要人工介入！"
+          priority: "high"
+      - type: "api_call"
+        order: 1
+        config:
+          endpoint: "/api/tasks/block"
+          method: "POST"
+          body:
+            reason: "consecutive_failures"
+            task_id: "{{task_id}}"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 项目完成率阈值通知
+  - id: "project_completion_threshold"
+    name: "项目完成率阈值通知"
+    description: "当项目完成率达到 80% 时发送通知"
+    enabled: true
+    trigger_type: "condition"
+    condition:
+      expression: "progress_percentage >= 80 and not notification_sent"
+      watch_events:
+        - "project_progress_updated"
+      max_history: 100
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "🎯 项目 {{project_id}} 完成度已达到 {{progress_percentage}}%"
+          priority: "high"
+      - type: "api_call"
+        order: 1
+        config:
+          endpoint: "/api/projects/{{project_id}}/milestone"
+          method: "POST"
+          body:
+            milestone: "80_percent_complete"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 系统负载监控
+  - id: "system_load_monitor"
+    name: "系统负载监控"
+    description: "当系统负载过高时发送告警"
+    enabled: true
+    trigger_type: "condition"
+    condition:
+      expression: "cpu_usage > 90 or memory_usage > 90"
+      watch_events:
+        - "system_metrics"
+      max_history: 20
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "⚠️ 系统负载过高！CPU: {{cpu_usage}}%, 内存: {{memory_usage}}%"
+          priority: "high"
+      - type: "api_call"
+        order: 1
+        config:
+          endpoint: "/api/system/scale"
+          method: "POST"
+          body:
+            action: "scale_up"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 任务队列堆积告警
+  - id: "task_queue_backlog_alert"
+    name: "任务队列堆积告警"
+    description: "当待处理任务数超过 100 时发送告警"
+    enabled: true
+    trigger_type: "condition"
+    condition:
+      expression: "pending_tasks > 100"
+      watch_events:
+        - "task_queue_stats"
+      max_history: 30
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "📊 待处理任务堆积：{{pending_tasks}} 个任务等待处理"
+          priority: "high"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"

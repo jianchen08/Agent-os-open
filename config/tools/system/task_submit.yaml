@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# 任务提交工具
+
+name: task_submit
+display_name: "任务提交"
+description: "任务提交工具：创建新任务并提交给执行系统"
+
+category: "task"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["task", "submit", "system"]

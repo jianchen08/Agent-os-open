@@ -1,0 +1,3 @@
+﻿After injection: {'action': 'test', '_task_service': 'MockTaskService', '_message_queue': 'MockMessageQueue', '_tool_registry': 'MockToolRegistry'}
+OK: Service injection works correctly
+OK: Existing params not overwritten

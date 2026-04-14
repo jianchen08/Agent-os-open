@@ -1,0 +1,8 @@
+channel:
+  type: cli
+  input:
+    adapter: CLIInputAdapter
+    prompt: "You> "
+  output:
+    adapter: CLIOutputAdapter
+    streaming: true

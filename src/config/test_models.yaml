@@ -1,0 +1,12 @@
+# 测试专用模型配置 — MiniMax M2.7
+test_model:
+  provider: minimax
+  model_name: MiniMax-M2.7
+  display_name: MiniMax-M2.7 (测试用)
+  api_base: https://api.minimaxi.com/v1
+  api_key: [REDACTED]
+  context_window: 204800
+  reasoning_model: true
+  default_params:
+    temperature: 0.7
+    max_tokens: 8192

@@ -1,0 +1,340 @@
+"""Agent 配置加载器。
+
+从 YAML 文件加载 Agent 配置，支持单文件加载和目录递归加载。
+处理嵌套数据结构的映射（如 static_vars → ContextConfig）。
+
+典型用法::
+
+    from agents.loader import AgentConfigLoader
+
+    # 加载单个 YAML
+    config = AgentConfigLoader.load_from_yaml("path/to/agent.yaml")
+
+    # 加载目录下所有 YAML
+    configs = AgentConfigLoader.load_from_directory("path/to/agents/")
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .types import (
+    AgentConfig,
+    AgentLevel,
+    AgentPluginsConfig,
+    AgentType,
+    ContextConfig,
+    ContextVarItem,
+    DeliverableSpec,
+    KnowledgeConfig,
+    MetricRef,
+    RuleReinforcement,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class AgentConfigLoader:
+    """Agent 配置加载器，从 YAML 文件加载 AgentConfig。"""
+
+    @staticmethod
+    def _parse_context_var_item(data: dict[str, Any]) -> ContextVarItem:
+        """解析上下文变量项。
+
+        Args:
+            data: 原始 YAML 字典。
+
+        Returns:
+            ContextVarItem 实例。
+        """
+        return ContextVarItem(
+            name=data.get("name", ""),
+            type=data.get("type", ""),
+            path=data.get("path", ""),
+            tags=data.get("tags", []),
+            inject_type=data.get("inject_type", ""),
+            top_k=data.get("top_k", 5),
+            content=data.get("content", ""),
+            memory_type=data.get("memory_type", ""),
+            memory_layer=data.get("memory_layer", ""),
+        )
+
+    @staticmethod
+    def _parse_context_config(data: dict[str, Any] | None) -> ContextConfig:
+        """解析上下文配置。
+
+        Args:
+            data: 原始 YAML 字典，可能为 None。
+
+        Returns:
+            ContextConfig 实例。
+        """
+        if data is None:
+            return ContextConfig()
+        items = [
+            AgentConfigLoader._parse_context_var_item(item)
+            for item in data.get("items", [])
+        ]
+        return ContextConfig(enabled=data.get("enabled", True), items=items)
+
+    @staticmethod
+    def _parse_knowledge_config(data: dict[str, Any] | None) -> KnowledgeConfig:
+        """解析知识库配置。
+
+        Args:
+            data: 原始 YAML 字典，可能为 None。
+
+        Returns:
+            KnowledgeConfig 实例。
+        """
+        if data is None:
+            return KnowledgeConfig()
+        return KnowledgeConfig(
+            mode=data.get("mode", "compressed"),
+            max_tokens=data.get("max_tokens", 1000),
+            top_k=data.get("top_k", 3),
+            score_threshold=data.get("score_threshold", 0.7),
+        )
+
+    @staticmethod
+    def _parse_rule_reinforcement(data: dict[str, Any] | None) -> RuleReinforcement:
+        """解析规则强化配置。
+
+        Args:
+            data: 原始 YAML 字典，可能为 None。
+
+        Returns:
+            RuleReinforcement 实例。
+        """
+        if data is None:
+            return RuleReinforcement()
+        return RuleReinforcement(
+            enabled=data.get("enabled", True),
+            include_hard_constraints=data.get("include_hard_constraints", True),
+            include_soft_constraints=data.get("include_soft_constraints", False),
+            include_system_prompt_rules=data.get(
+                "include_system_prompt_rules", True
+            ),
+            extraction_markers=data.get(
+                "extraction_markers", ["【重要】", "【必须】", "必须"]
+            ),
+            custom_rules=data.get("custom_rules", []),
+            template=data.get("template", ""),
+            max_rules=data.get("max_rules", 10),
+        )
+
+    @staticmethod
+    def _parse_deliverable(data: dict[str, Any]) -> DeliverableSpec:
+        """解析产出物定义。
+
+        Args:
+            data: 原始 YAML 字典。
+
+        Returns:
+            DeliverableSpec 实例。
+        """
+        return DeliverableSpec(
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            output_path=data.get("output_path", ""),
+            type=data.get("type", "markdown"),
+            template_source=data.get("template_source", ""),
+            template_name=data.get("template_name", ""),
+            required=data.get("required", True),
+        )
+
+    @staticmethod
+    def _parse_metric_ref(data: dict[str, Any]) -> MetricRef:
+        """解析评估指标引用。
+
+        Args:
+            data: 原始 YAML 字典。
+
+        Returns:
+            MetricRef 实例。
+        """
+        return MetricRef(
+            metric_id=data.get("metric_id", ""),
+            default_params=data.get("default_params", {}),
+        )
+
+    @staticmethod
+    def _parse_plugins_config(data: dict[str, Any] | None) -> AgentPluginsConfig:
+        """解析插件覆盖配置。
+
+        Args:
+            data: 原始 YAML 字典，可能为 None。
+
+        Returns:
+            AgentPluginsConfig 实例。
+        """
+        if data is None:
+            return AgentPluginsConfig()
+        return AgentPluginsConfig(
+            disabled=data.get("disabled", []),
+            enabled=data.get("enabled", {}),
+        )
+
+    @staticmethod
+    def _resolve_agent_type(raw: str) -> AgentType:
+        """解析 Agent 类型字符串。
+
+        旧文件中使用 "main"/"orchestrator"/"system" 等，
+        需要映射到 AgentType 枚举值。
+
+        Args:
+            raw: YAML 中的 agent_type 值。
+
+        Returns:
+            对应的 AgentType 枚举值。
+        """
+        mapping = {
+            "main": AgentType.MAIN,
+            "orchestrator": AgentType.SPECIALIZED,
+            "specialized": AgentType.SPECIALIZED,
+            "system": AgentType.SYSTEM,
+        }
+        return mapping.get(raw, AgentType.SPECIALIZED)
+
+    @staticmethod
+    def _resolve_agent_level(raw: str) -> AgentLevel:
+        """解析 Agent 层级字符串。
+
+        Args:
+            raw: YAML 中的 level 值（"L1"/"L2"/"L3"）。
+
+        Returns:
+            对应的 AgentLevel 枚举值。
+
+        Raises:
+            ValueError: 如果 level 值无法识别。
+        """
+        mapping = {
+            "L1": AgentLevel.L1_MAIN,
+            "L2": AgentLevel.L2_SUBTASK,
+            "L3": AgentLevel.L3_ATOMIC,
+        }
+        if raw in mapping:
+            return mapping[raw]
+        raise ValueError(f"无法识别的 Agent 层级: {raw!r}")
+
+    @classmethod
+    def load_from_yaml(cls, path: str | Path) -> AgentConfig:
+        """从单个 YAML 文件加载 Agent 配置。
+
+        Args:
+            path: YAML 文件路径。
+
+        Returns:
+            AgentConfig 实例。
+
+        Raises:
+            FileNotFoundError: 文件不存在。
+            ValueError: YAML 解析失败或必填字段缺失。
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Agent 配置文件不存在: {path}")
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"YAML 解析失败 ({path}): {e}") from e
+
+        if not isinstance(data, dict):
+            raise ValueError(f"YAML 内容不是字典类型 ({path})")
+
+        # 必填字段检查
+        if not data.get("config_id"):
+            raise ValueError(f"缺少必填字段 config_id ({path})")
+
+        # 解析层级和类型
+        raw_level = data.get("level", "L3")
+        try:
+            level = cls._resolve_agent_level(raw_level)
+        except ValueError as e:
+            raise ValueError(f"层级解析失败 ({path}): {e}") from e
+
+        raw_agent_type = data.get("agent_type", "specialized")
+        agent_type = cls._resolve_agent_type(raw_agent_type)
+
+        # 解析嵌套结构
+        static_vars = cls._parse_context_config(data.get("static_vars"))
+        dynamic_vars = cls._parse_context_config(data.get("dynamic_vars"))
+        knowledge = cls._parse_knowledge_config(data.get("knowledge"))
+        rule_reinforcement = cls._parse_rule_reinforcement(
+            data.get("rule_reinforcement")
+        )
+        plugins = cls._parse_plugins_config(data.get("plugins"))
+        deliverables = [
+            cls._parse_deliverable(d) for d in data.get("deliverables", [])
+        ]
+        recommended_metrics = [
+            cls._parse_metric_ref(m) for m in data.get("recommended_metrics", [])
+        ]
+
+        return AgentConfig(
+            config_id=data.get("config_id", ""),
+            name=data.get("name", ""),
+            display_name=data.get("display_name", data.get("name", "")),
+            description=data.get("description", ""),
+            agent_type=agent_type,
+            category=data.get("category", ""),
+            level=level,
+            system_prompt=data.get("system_prompt", ""),
+            tool_ids=data.get("tool_ids", []),
+            static_vars=static_vars,
+            dynamic_vars=dynamic_vars,
+            context_variables=data.get("context_variables", {}),
+            knowledge=knowledge,
+            hard_constraints=data.get("hard_constraints", []),
+            soft_constraints=data.get("soft_constraints", []),
+            rule_reinforcement=rule_reinforcement,
+            deliverables=deliverables,
+            recommended_metrics=recommended_metrics,
+            input_schema=data.get("input_schema", {}),
+            output_schema=data.get("output_schema", {}),
+            version=data.get("version", "1.0.0"),
+            is_active=data.get("is_active", True),
+            status=data.get("status", "active"),
+            max_iterations=data.get("max_iterations", 100),
+            max_reminders=data.get("max_reminders", 3),
+            timeout_seconds=data.get("timeout_seconds", -1),
+            tags=data.get("tags", []),
+            metadata=data.get("metadata", {}),
+            plugins=plugins,
+        )
+
+    @classmethod
+    def load_from_directory(cls, dir_path: str | Path) -> list[AgentConfig]:
+        """从目录递归加载所有 YAML Agent 配置。
+
+        Args:
+            dir_path: 目录路径。
+
+        Returns:
+            AgentConfig 列表。
+
+        Raises:
+            FileNotFoundError: 目录不存在。
+        """
+        dir_path = Path(dir_path)
+        if not dir_path.exists():
+            raise FileNotFoundError(f"Agent 配置目录不存在: {dir_path}")
+        if not dir_path.is_dir():
+            raise ValueError(f"路径不是目录: {dir_path}")
+
+        configs: list[AgentConfig] = []
+        for yaml_file in sorted(dir_path.rglob("*.yaml")):
+            try:
+                config = cls.load_from_yaml(yaml_file)
+                configs.append(config)
+                logger.debug("已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file)
+            except (ValueError, yaml.YAMLError) as e:
+                logger.warning("跳过无效配置文件 %s: %s", yaml_file, e)
+        return configs

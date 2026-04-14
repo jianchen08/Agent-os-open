@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# 任务评估工具
+
+name: task_evaluate
+display_name: "任务评估"
+description: "任务评估工具：评估任务完成度和验收标准"
+
+category: "evaluation"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["task", "evaluation", "system"]

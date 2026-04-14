@@ -1,0 +1,928 @@
+# -*- coding: utf-8 -*-
+# Agent 配置模板规范
+#
+# 本文档详细说明 Agent 配置的每个字段、可能的值及其使用场景。
+# 供 LLM 在创建或修改 Agent 配置时参考。
+#
+# ========================================
+
+# ==================== 公共字段 ====================
+
+config_id: {agent_id}
+# 【必填】Agent 唯一标识符
+# - 类型: string
+# - 作用: 用于数据库存储和检索 Agent 配置，必须全局唯一
+# - 命名规范: 使用 snake_case，如 "research_agent"、"code_analyzer"
+# - 示例: "research_agent", "general_agent", "main_agent"
+
+name: {agent_name}
+# 【必填】Agent 名称
+# - 类型: string
+# - 作用: 用于日志、显示和内部引用
+# - 命名规范: 中文或英文，简洁明了，如 "调研专家"、"CodeAnalyzer"
+# - 示例: "调研专家", "通用任务执行者", "主控智能体"
+
+description: |
+  {description}
+# 【必填】Agent 描述
+# - 类型: string (多行文本)
+# - 作用: 说明 Agent 的职责和能力，供上层 Agent 搜索和决策时参考
+# - 内容建议: 简要说明职责范围、核心能力、适用场景
+# - 示例: |
+#     通用调研Agent，负责各类调研任务：
+#     - 根据调研目标制定调研计划
+#     - 搜索网络、现有资源、文档资料
+#     - 输出结构化调研报告
+
+agent_type: {agent_type}
+# 【必填】Agent 功能类型
+# - 类型: string (枚举)
+# - 可能值:
+#   | 值 | 作用 | 使用场景 |
+#   |---|---|---|
+#   | "main" | 主控 Agent | 系统入口，负责接收用户需求、分配任务、与用户沟通，以及执行简单问答和单步工具调用。通常只有一个。|
+#   | "orchestrator" | 编排 Agent | 协调多个专业 Agent 执行复杂任务，负责任务编排、资源协调、结果整合。|
+#   | "specialized" | 专业 Agent | 执行特定领域的任务，如代码分析、文档编写、调研等。最常用的类型。|
+#   | "atomic" | 原子 Agent | 执行单一、原子化的任务。适用于：单一功能任务、同一上下文上的连续任务。|
+#   | "system" | 系统 Agent | 系统级功能，如错误处理、恢复、审计等。|
+# - 默认值: "specialized"
+# - 决策建议:
+#   - 创建主入口 Agent → "main"
+#   - 创建协调/编排 Agent → "orchestrator"
+#   - 创建新的专业领域 Agent → "specialized"
+#   - 创建系统功能 Agent → "system"
+
+category: {category}
+# 【必填】Agent 功能分类
+# - 类型: string (枚举)
+# - 可能值:
+#   | 值 | 作用 | 使用场景 |
+#   |---|---|---|
+#   | "analysis" | 分析类 | 分析和理解任务，如代码分析、需求分析、调研分析。|
+#   | "evaluation" | 评估类 | 评估和验证任务，如测试评估、质量检查、验收评估。|
+#   | "search" | 搜索类 | 搜索和检索任务，如资源搜索、文档检索。|
+#   | "code" | 代码类 | 代码相关任务，如代码生成、代码审查、代码重构。|
+#   | "generation" | 生成类 | 生成内容任务，如文档生成、报告生成、配置生成。|
+#   | "resource" | 资源类 | 资源管理任务，如资源创建、资源修改、资源分析。|
+#   | "modification" | 修改类 | 修改现有资源任务，如配置修改、代码修改。|
+#   | "task" | 任务类 | 任务管理任务，如任务分解、任务规划、任务调度。|
+#   | "system" | 系统类 | 系统级任务，如错误处理、恢复、审计。|
+# - 决策建议: 根据 Agent 的核心职责选择最匹配的分类，如果没有匹配的分类，写成"others"
+
+level: {level}
+# 【必填】Agent 级别
+# - 类型: string (枚举)
+# - 可能值:
+#   | 值 | 作用 | 对应 agent_type | 使用场景 | 必选工具 | 验收标准 |
+#   |---|---|---|---|---|---|
+#   | "L1" | 主控层 | main | 接收用户需求，分解为子任务，调度资源执行 | task_submit, task_manage, resource_search | 无 |
+#   | "L2" | 协调层 | orchestrator | 协调多个 L3 任务执行，整合结果 | task_submit, resource_search | 有 |
+#   | "L3" | 执行层 | specialized/atomic | 执行具体任务，完成后评估验收标准 | todo_manage, task_evaluate, resource_search | 有 |
+# - 决策建议:
+#   - 创建 main Agent → "L1"
+#   - 创建 orchestrator Agent → "L2"
+#   - 创建 specialized/atomic Agent → "L3" (最常用)
+
+# ==================== Prompt 模板 ====================
+#
+# 不同层级的 Agent 有不同的 Prompt 结构要求：
+#
+# ===== L1 (main) Prompt 结构 =====
+#   L1 是主控 Agent，需要包含人设部分，结构如下：
+#
+#   ## 人设
+#     {persona}  ← 唯一可变部分，自定义 Agent 人设/性格/沟通风格
+#
+#   ## 角色定位（以下内容固定，不可修改）
+#     你是 **L1 主 Agent**，负责澄清需求、分类任务、派发执行。
+#
+#   ## 任务分类
+#     - **即时响应**：简单问答、文件查看、单步操作 → 直接处理
+#     - **短期任务**：功能实现、bug修复、文档编写（< 2小时）→ 搜索资源后派发给专门 agent
+#     - **长期任务**：一个软件项目、一个游戏、一部网络小说等（> 1天）→ 先让 general_agent 分解，再执行任务链
+#
+#   ## 短期任务流程
+#     **示例**：实现用户登录 API、修复前端样式问题、编写模块文档
+#     ### 场景: 用户直接提交短期任务
+#     1. **确认需求和评估指标**
+#     2. **搜索相应资源**：如果你自己的默认资源无法满足需求，才使用 resource_search 查找合适的专门 agent
+#     3. **派发任务**：
+#        - 如无合适 agent → 使用 resource_generation 或 resource_modification 工作流创建/修改 agent
+#        - 如是相对不需要专门的通用任务 → `general_agent`
+#
+#   ## 长期任务流程
+#     **示例**：一个app，一个游戏，一部网络小说
+#     1. **澄清需求**
+#     2. **定义准备任务的AC**（任务链、调研、执行计划、细化的长期任务的AC）
+#     3. **派发准备任务给 `solution_preparation_agent`**：由其跟用户讨论，形成初步方案，获取用户确认
+#     4. **方案确认后，派发细化任务给 `solution_refinement_agent`**：由其将方案转化为可执行的任务链，输出标准化任务计划 Markdown 文件
+#     5. **收到任务链后**：
+#        - 搜索每个子任务的专门 agent
+#        - 如无合适 agent → 提交给 `resource_generator_agent` 创建/修改
+#        - 分析依赖，并行提交无依赖任务
+#        - 按依赖顺序逐批提交
+#     6. **整合反馈**
+#
+#
+# ===== L2 (orchestrator) Prompt 结构 =====
+#   L2 是协调 Agent，负责协调多个 L3 任务执行：
+#
+#   ## 核心职责
+#     负责规划和协调任务，具体执行提交给专业 Agent。
+#
+#   ## 执行步骤
+#     1. **阶段一（调用 xxx_agent）**
+#        - 目标：xxx
+#        - 需输出：xxx
+#     2. **阶段二（提交任务给 xxx_agent）**
+#        - 具体操作说明
+#     3. **评估结果**
+#        - 使用 task_evaluate 评估
+#
+#   ## 单步操作
+#     - 列出可以自己执行的单步操作
+#     - 例如：使用 resource_search 搜索现有资源
+#
+#   L2 Agent 应在 static_vars 中配置"下级 Agent 映射"表，格式如下：
+#   - name: "下级 Agent 映射"
+#     type: "reference"
+#     content: |
+#       ## 下级 Agent 映射
+#       | 阶段 | Agent | 说明 | 隔离级别 | 推荐指标 |
+#       |------|-------|------|----------|----------|
+#       | 调研 | research_agent | ... | container | file_check, semantic_check(可选) |
+#       | 生成 | agent_maker | ... | host | file_check, semantic_check |
+#
+#
+# ===== L3 (specialized/atomic) Prompt 结构 =====
+#   L3 是执行 Agent，负责执行具体任务：
+#
+#   ## 核心职责
+#     1. 任务理解
+#     2. 执行规划（todo_manage）
+#     3. 任务执行
+#     4. 任务评估（task_evaluate）
+#
+#   ## 执行流程
+#     详细说明执行步骤
+#
+
+system_prompt: |
+  # 你是 {agent_name}
+
+  {prompt_content}
+# 【必填】系统提示词
+# - 类型: string (多行文本)
+# - 作用: 定义 Agent 的角色、职责、行为规范和执行流程
+# - 按层级选择模板:
+#   - L1 (main): 必须包含"人设"章节，其他部分固定不可修改
+#   - L2 (orchestrator): 包含核心职责、执行步骤、单步操作
+#   - L3 (specialized/atomic): 包含核心职责、执行流程
+# - 支持占位符: {{workspace}}, {{task_id}} 等
+#
+# ===== L1 示例 =====
+#   system_prompt: |
+#     # 你是灵汐
+#     
+#     你是一位温柔而智慧的 AI 助手，名叫灵汐。你的名字取自"灵通万物，息润苍生"。
+#     
+#     ## 角色定位
+#     你是 **L1 主 Agent**，负责澄清需求、分类任务、派发执行。
+#     
+#     ## 任务分类
+#     - **即时响应**：简单问答、文件查看、单步操作 → 直接处理
+#     - **短期任务**：功能实现、bug修复、文档编写（< 2小时）→ 搜索资源后派发给专门 agent
+#     - **长期任务**：一个软件项目、一个游戏、一部网络小说等（> 1天）→ 先让 general_agent 分解，再执行任务链
+#     
+#     ## 短期任务流程
+#     ...
+#     
+#     ## 长期任务流程
+#     ...
+#     
+#     ## 工作原则
+#     - **按任务类型选择处理方式**
+#     - **必须先搜索资源**
+#     - **Agent 选择优先级**：专门 agent > general_agent
+#     - **只负责澄清、搜索、派发**，不做具体实现
+#
+# ===== L2 示例 =====
+#   system_prompt: |
+#     # 你是资源生成专家
+#     
+#     ## 核心职责
+#     负责规划和协调资源生成任务，具体执行提交给专业 Agent。
+#     
+#     ## 执行步骤
+#     1. **调研阶段（调用 research_agent）**
+#        - 调研目标：调研技术方案、搜索可复用资源
+#        - 需输出：调研报告
+#     2. **提交任务给 tool_maker 或 agent_maker**
+#        - tool_maker：生成工具
+#        - agent_maker：生成 Agent
+#     3. **评估生成结果**
+#        - 使用 task_evaluate 评估生成质量
+#     
+#     ## 单步操作
+#     - 使用 resource_search 搜索现有资源
+#     - 使用 file_read 读取参考资源
+#     
+#
+# ===== L3 示例 =====
+#   system_prompt: |
+#     # 你是调研专家
+#     
+#     ## 核心职责
+#     1. 理解调研目标
+#     2. 制定调研计划
+#     3. 执行调研搜索
+#     4. 输出调研报告
+#     
+#     ## 执行流程
+#     1. 使用 todo_manage 制定调研计划
+#     2. 使用 resource_search 搜索现有资源
+#     3. 使用 web_search 搜索网络资料
+#     4. 整理分析并输出结构化报告
+#     5. 使用 task_evaluate 自评调研质量
+
+# ==================== 变量注入配置 ====================
+#
+# 变量注入分为静态变量和动态变量，两者可注入的内容类型相同，区别在于注入时机：
+# - 静态变量（第1层）：会话级不变，可缓存，只在会话开始时注入一次
+# - 动态变量（第4层）：每轮变化，实时生成，每轮对话都会重新注入
+#
+# ===== 可注入内容类型 =====
+#   | type 值 | 作用 | 静态使用场景 | 动态使用场景 |
+#   |---|---|---|---|
+#   | "rules" | 注入硬约束和软约束 | 会话开始时注入约束规则 | 每轮强化提醒约束规则 |
+#   | "timestamp" | 注入当前时间戳 | 会话开始时的时间 | 每轮最新时间（推荐） |
+#   | "session" | 注入会话信息 | 会话基本信息 | 每轮最新会话状态 |
+#   | "agent" | 注入 Agent 自身信息 | Agent 配置信息 | 每轮 Agent 状态 |
+#   | "model" | 注入模型信息 | 模型能力信息 | 每轮模型状态 |
+#
+# ===== 文件内容注入 =====
+#   通过 path 字段指定文件路径，将文件内容读取并注入到上下文中：
+#   - path: "docs/project_rules.md"     # 读取文件内容注入上下文
+#     name: "项目规则"                   # 显示名称（用于上下文中的标题标注）
+#   - path: "config/style_guide.md"     # 支持多个文件
+#     name: "代码风格指南"
+#   - path: "/absolute/path/to/file.md" # 也支持绝对路径
+#     name: "外部文档"
+#   路径规则：
+#   - 相对路径：相对于项目根目录
+#   - 绝对路径：以 / 开头的完整路径
+#   - 编码：默认 UTF-8
+#   - 推荐放在 static_vars 中（文件内容会话内不变，可缓存）
+#
+# ===== 技能注入 =====
+#   技能（Skill）是可复用的能力单元，通过将 SKILL.md 文件注入到 Agent 上下文中来增强能力。
+#   技能文件位于 skills/ 目录下，每个技能包含一个 SKILL.md 描述文件和可选的 scripts/ 脚本目录。
+#
+#   技能注入方式：在 static_vars.items 中通过 path 字段引用技能的 SKILL.md 文件。
+#
+#   示例：
+#   static_vars:
+#     enabled: true
+#     items:
+#       - name: "行为约束"
+#         type: "rules"
+#       - path: "skills/skill-code-impl/SKILL.md"        # 注入代码实现技能
+#         name: "代码实现技能"
+#       - path: "skills/skill-tool-output-optimize/SKILL.md"  # 注入工具输出优化技能
+#         name: "工具输出优化技能"
+#
+#   技能使用原则：
+#   1. 固定技能（高频、核心能力）：通过 path 注入到 static_vars，Agent 启动时自动加载
+#   2. 按需技能（低频、扩展能力）：通过 resource_search 搜索后动态使用（需配备 resource_search 工具）
+#   3. 外部技能：从社区/厂商获取的技能，审查适配后放入 skills/ 目录即可使用
+#   4. 每个技能注入会增加上下文 token，建议固定注入 ≤ 5 个技能
+#
+#   当前可用技能：
+#   | 技能路径 | 说明 |
+#   |---|---|
+#   | skills/skill-code-impl/SKILL.md | 代码实现辅助（批量优化注释等） |
+#   | skills/skill-devops/SKILL.md | DevOps 运维（构建 Docker 镜像等） |
+#   | skills/skill-tool-output-optimize/SKILL.md | 工具输出优化（清理、收集、验证） |
+#
+# ===== 知识库注入 =====
+#   - knowledge_name: "xxx"      # 按名称注入知识库
+#     inject_type: "full"        # 注入方式: full(全量)/summary(摘要)/retrieval(检索)
+#   - tags: ["xxx"]              # 按标签检索知识库
+#     inject_type: "retrieval"
+#     top_k: 5                   # 检索数量
+#
+# ===== 动态检索 =====
+#   动态变量支持基于当前上下文的动态检索：
+#   - type: "knowledge_retrieval"  # 根据当前对话内容动态检索相关知识
+#     top_k: 3
+#   - type: "context_summary"      # 动态生成当前上下文摘要
+#     max_length: 500
+#
+# ===== 工具索引（仅配置了 resource_search 的 Agent 使用）=====
+#   通过 content 字段直接注入工具简短描述列表，让 Agent 知道有哪些工具可按需加载。
+#   【必须放在 static_vars.items 中】，因为工具索引是会话级不变的，可缓存。
+#   只需列出"当前未绑定但可能需要"的工具，已绑定的工具不需要重复列出。
+#   Agent 可根据任务需要，通过 resource_search 搜索后自动加载对应工具。
+#   格式：每行一个工具，`- 工具名: 一句话说明`，简洁即可。
+#
+#   全量内置工具清单（根据 Agent 已绑定的工具，从中筛选未绑定的填入）：
+#   | 工具名 | 说明 |
+#   |---|---|
+#   | file_read | 读取文件内容、列出目录结构 |
+#   | file_write | 创建、写入、编辑文件内容 |
+#   | bash_execute | 执行Shell命令 |
+#   | enhanced_search | 在文件中搜索文本、代码或文件名 |
+#   | web_search | 搜索互联网信息 |
+#   | fetch | 执行HTTP请求和网页抓取 |
+#   | lsp_definition | 跳转到代码定义 |
+#   | lsp_references | 查找代码引用 |
+#   | lsp_diagnostics | 获取代码诊断信息 |
+#   | file_jump | 跳转到指定文件 |
+#   | task_submit | 提交任务给Agent或工作流执行 |
+#   | task_manage | 查询和控制任务状态 |
+#   | task_evaluate | 评估任务是否满足验收标准 |
+#   | memory | 检索和存储记忆 |
+#   | resource_search | 搜索Agent/工具/工作流/脚本资源 |
+#   | todo_manage | 管理待办事项清单 |
+#   | evaluate | Schema验证、格式检查、JSON验证 |
+#   | yaml_validate | 验证YAML配置文件的格式和内容 |
+#   | human_interaction | 向用户提问并获取回答 |
+#   | trigger_setup | 设置触发器（延迟/定时/事件/条件） |
+#   | schema_evaluator | 验证JSON/YAML格式或正则模式校验 |
+#
+#   示例（假设该 Agent 已绑定 file_read, file_write, bash_execute, resource_search）：
+#   static_vars:
+#     enabled: true
+#     items:
+#       - name: "可扩展工具索引"
+#         content: |
+#           ## 可扩展工具索引
+#           以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+#           - enhanced_search: 在文件中搜索文本、代码或文件名
+#           - web_search: 搜索互联网信息
+#           - fetch: 执行HTTP请求和网页抓取
+#           - todo_manage: 管理待办事项清单
+#           - evaluate: Schema验证、格式检查
+#           - yaml_validate: 验证YAML配置文件
+#           - human_interaction: 向用户提问并获取回答
+#           - rollback_task: 创建检查点、回滚任务操作
+#           - state_update: 更新工作流共享状态变量
+#           - trigger_setup: 设置触发器（延迟/定时/事件/条件）
+#           - compatibility_checker: 检查配置变更的兼容性
+#           - schema_evaluator: 验证JSON/YAML格式或正则模式校验
+#           - resource_evaluator: 评估资源质量
+#           - memory: 检索和存储记忆
+#
+#   content 末尾必须附带使用说明，告知 Agent 如何加载这些工具：
+#     如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，
+#     工具将自动加载到当前会话，下一轮即可直接调用。
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+# 【可选】静态变量配置
+# - 类型: object
+# - 作用: 配置会话级不变的静态内容注入，只在会话开始时注入一次
+# - 特点: 可缓存，减少重复计算
+# - 示例:
+#   static_vars:
+#     enabled: true
+#     items:
+#       - type: "rules"
+#       - knowledge_name: "domain_knowledge"
+#         inject_type: "full"
+#       - path: "docs/project_rules.md"
+#         name: "项目规则"
+#       - path: "config/style_guide.md"
+#         name: "代码风格指南"
+#
+# ===== 文档上下文规则注入 =====
+#   文档上下文规则（config/rules/document_context_rules.md）是一种"索引规则"文档，不是功能性文档。
+#   它定义的是"如何获取和理解上下文"的方法，而不是具体功能需要的内容。
+#
+#   【核心区别】：
+#   - 文档上下文规则 = 索引规则（meta规则），指导"先读索引/目录，再读具体内容"
+#   - 功能性文档 = 具体任务需要的内容，如代码接口、章节大纲、实验方案等
+#
+#   【本质】：要求 Agent 在执行任务前，先通过项目索引文档理解整体结构，再进入具体实现。
+#
+#   【适用场景】：
+#   - Agent 需要直接操作代码文件、修改代码
+#   - Agent 需要理解项目结构来完成任务
+#   - Agent 的职责涉及代码生成、代码分析、工具创建等
+#
+#   【不适用场景】：
+#   - 主 Agent（L1）：只负责分解任务、派发任务，不直接执行代码 → 不需要
+#   - 评估/审计类 Agent：只做评估判断，不执行代码 → 不需要
+#   - 路由/分发类 Agent：只做路由决策，不执行代码 → 不需要
+#
+#   【是否需要应根据具体情况分析】：
+#   - 调度/协调类 Agent（L2）：可能需要，也可能不需要，取决于是否需要理解项目结构
+#     例如：如果一个协调 agent 需要读取代码文档来制定执行计划，就需要
+#   - 执行类 Agent（L3/executor/*）：通常需要，因为直接操作代码
+#   - 系统类 Agent（system/*）：取决于职责类型，与层级无关
+#
+#   【判断标准】：
+#   问自己：这个 Agent 是否需要先理解项目上下文（文档、索引、结构）才能有效执行任务？
+#   - 是 → 需要文档上下文规则
+#   - 否 → 不需要
+#
+#   注：此规则是跨领域通用的，不只适用于软件开发，还适用于小说创作、科研项目、视频制作等。
+#   核心原则：先读文档理解上下文，再动手执行。
+#
+#   【按层级建议】：
+#   | Agent 类型 | 是否需要文档上下文规则 | 判断依据 |
+#   |---|---|---|
+#   | 主 Agent（L1） | ❌ 不需要 | 只调度不执行，不读项目文档 |
+#   | 评估/审计/路由类 | ❌ 不需要 | 不执行具体任务 |
+#   | 调度/协调 Agent（L2） | ⚠️ 看情况 | 若需理解项目上下文则需要，否则不需要 |
+#   | 执行 Agent（L3） | ✅ 通常需要 | 直接执行任务，需要理解项目上下文 |
+#   | 系统执行类（如 recovery） | ⚠️ 看情况 | 若涉及具体执行则需要，否则不需要 |
+#
+#   【配置方式】：
+#   static_vars:
+#     enabled: true
+#     items:
+#       - name: "行为约束"
+#         type: "rules"
+#       - name: "文档上下文规则"        # 仅适用于需要它的 Agent
+#         type: "path"
+#         path: "config/rules/document_context_rules.md"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 【可选】动态变量配置
+# - 类型: object
+# - 作用: 配置每轮变化的动态内容注入，每轮对话都会重新生成
+# - 特点: 实时生成，保持最新状态
+# - 示例:
+#   dynamic_vars:
+#     enabled: true
+#     items:
+#       - type: "timestamp"           # 每轮最新时间
+#       - type: "rules"               # 每轮强化约束
+#       - type: "knowledge_retrieval" # 动态检索相关知识
+#         top_k: 3
+#       - path: "runtime_status.md"   # 每轮重新读取（文件可能变化）
+#         name: "运行时状态"
+
+# ==================== 工具配置 ====================
+#
+# ===== 工具数量阈值规则 =====
+#   Agent 的工具分为"直接加载"和"索引按需加载"两种：
+#   - 直接加载（tool_ids）：工具定义始终作为 prompt 前缀的一部分，享受缓存命中，成本最低
+#   - 索引按需加载（static_vars 中的工具索引）：工具仅显示简述，需要时通过 resource_search
+#     加载到 tools 字段，每次加载会触发一次额外 LLM 调用并导致 prompt 缓存失效
+#
+#   阈值规则：
+#   - 总工具数 ≤ 20 → 全部直接加载到 tool_ids，不使用索引
+#     原因：预加载成本（缓存命中的工具定义）低于动态加载成本（额外 LLM 调用 + 缓存失效重算）
+#   - 总工具数 > 20 → 核心高频工具直接加载，超出部分放入索引按需加载
+#     原因：工具过多会导致模型选择准确率下降，同时预加载 token 开销超过动态加载成本
+#
+#   判断方式：先列出该 Agent 可能需要的所有工具，如果总数 ≤ 20，全部放进 tool_ids；
+#   如果总数 > 20，选择最常用的 ≤ 20 个放进 tool_ids，其余放入 static_vars 的工具索引。
+
+tool_ids:
+  - "{tool_1}"
+  - "{tool_2}"
+# 【必填】可用工具 ID 列表
+# - 类型: list[string]
+# - 作用: 定义 Agent 可调用的工具
+# - 数量建议: 建议 ≤ 20 个，超过则将低频工具放入索引按需加载（参见上方阈值规则）
+# - 常用工具:
+#   | 工具 ID | 作用 | 使用场景 |
+#   |---|---|---|
+#   | "file_read" | 读取文件 | 需要读取文件内容的 Agent |
+#   | "file_write" | 写入/修改文件 | 需要创建或修改文件的 Agent |
+#   | "bash_execute" | 执行 Shell 命令 | 需要执行系统命令的 Agent |
+#   | "web_search" | 网络搜索 | 需要搜索网络信息的 Agent |
+#   | "web_fetch" | 获取网页内容 | 需要获取网页详细内容的 Agent |
+#   | "memory" | 记忆检索 | 需要检索历史经验的 Agent（L1/L2 推荐，L3 视情况：需要长上下文或记忆增强时配备）|
+#   | "resource_search" | 资源搜索 | 搜索 Agent/工具/工作流。（L1 必选；L2 仅通用 Agent 可配备；L3 基本不配备，仅用户明确要求的通用 L3 Agent 可配备）|
+#   | "todo_manage" | TODO 清单管理 | 需要规划执行步骤的 Agent（推荐：除特别简单的 Agent 外都可配备）|
+#   | "task_evaluate" | 任务评估 | 需要评估验收标准的 Agent（L2/L3 必选）|
+#   | "task_submit" | 提交子任务 | 需要提交子任务的 Agent（L1/L2 必选）|
+#   | "task_manage" | 管理任务状态 | 需要管理任务状态的 Agent（L1/L2 必选）|
+#   | "enhanced_search" | 增强搜索 | 需要在代码中搜索的 Agent |
+#   | "human_interaction" | 人工交互 | 需要向用户提问的 Agent |
+#   | "lsp_definition" | LSP 定义跳转 | 需要查找代码定义的 Agent |
+#   | "lsp_references" | LSP 引用查找 | 需要查找代码引用的 Agent |
+#   | "lsp_diagnostics" | LSP 诊断 | 需要获取代码诊断的 Agent |
+#   | "rollback_task" | 回滚任务 | 需要回滚操作的 Agent |
+#   | "trigger_setup" | 触发器设置 | 需要设置自动化触发器的 Agent |
+# - 按层级必选工具:
+#   - L1: task_submit, task_manage, resource_search
+#   - L2: task_submit, task_manage, task_evaluate（通用 Agent 可加 resource_search）
+#   - L3: todo_manage, task_evaluate（通用 Agent 可加 resource_search，需用户明确要求）
+# - 决策建议: 根据任务需求选择必要工具，避免授予过多权限
+
+# ==================== 约束配置 ====================
+#
+# 不同层级、不同类型的 Agent 有不同的必选约束：
+#
+# ===== L1 (main) 必选约束 =====
+#   - "只负责澄清、搜索、派发，不做具体实现"
+#   - "必须先搜索资源再派发任务"
+#   - "无依赖任务可并行提交"
+#
+# ===== L2 (orchestrator) 必选约束 =====
+#   - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+#   - "评估通过才能结束任务"
+#
+# ===== L3 (specialized/atomic) 必选约束 =====
+#   - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+#   - "必须输出规定的产出物"
+#   - "评估通过才能结束任务"
+
+# ===== 按类型必选约束 =====
+#   | 类型 | 必选约束 |
+#   |---|---|
+#   | code | "代码必须可运行"、"必须通过语法检查" |
+#   | generation | "必须输出指定格式的文件"、"输出内容必须符合模板要求" |
+#   | analysis | "分析结果必须有依据"、"必须输出结构化报告" |
+#   | modification | "修改前必须备份"、"修改后必须验证" |
+#   | evaluation | "评估结果必须有明确的通过/不通过判定"、"必须输出评估报告" |
+
+hard_constraints:
+  - "{constraint_1}"
+  - "{constraint_2}"
+# 【可选】硬约束
+# - 类型: list[string]
+# - 作用: 定义必须遵守的规则，违反会导致任务失败
+# - 特点: 强制性，不可违反
+# - 示例:
+#   hard_constraints:
+#     - "必须输出结构化的调研报告"
+#     - "必须明确调研类型"
+#     - "关键发现必须有信息来源"
+#     - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+#     - "代码必须可运行"
+
+soft_constraints:
+  - "{constraint_1}"
+  - "{constraint_2}"
+# 【可选】软约束
+# - 类型: list[string]
+# - 作用: 定义建议遵守的规则，违反不会导致失败但影响质量
+# - 特点: 建议性，优先遵守
+# - 示例:
+#   soft_constraints:
+#     - "优先搜索现有资源再搜索网络"
+#     - "提供多个可选方案"
+#     - "标注信息的可信度"
+#     - "建议使用有意义的变量名"
+#     - "建议添加单元测试"
+
+# ==================== Schema 配置 ====================
+
+input_schema:
+  type: "object"
+  properties:
+    {property_name}:
+      type: "string"
+      description: "{description}"
+  required:
+    - "{required_field}"
+# 【可选】输入 Schema
+# - 类型: object (JSON Schema)
+# - 作用: 定义 Agent 接收的参数结构，用于参数验证和文档生成
+# - 结构: 标准 JSON Schema 格式
+# - 示例:
+#   input_schema:
+#     type: "object"
+#     properties:
+#       research_goal:
+#         type: "string"
+#         description: "调研目标描述"
+#       research_type:
+#         type: "string"
+#         enum: ["technology", "resource", "market", "solution", "general", "auto"]
+#         description: "调研类型"
+#         default: "auto"
+#     required:
+#       - "research_goal"
+
+output_schema:
+  type: "object"
+  properties:
+    {property_name}:
+      type: "string"
+      description: "{description}"
+# 【可选】输出 Schema
+# - 类型: object (JSON Schema)
+# - 作用: 定义 Agent 输出的结构，用于结构化输出验证
+# - 结构: 标准 JSON Schema 格式
+# - 示例:
+#   output_schema:
+#     type: "object"
+#     properties:
+#       report_path:
+#         type: "string"
+#         description: "调研报告文件路径"
+#       status:
+#         type: "string"
+#         enum: ["success", "failed"]
+
+# ==================== 产出物定义 ====================
+#
+# 不同层级的 Agent 产出物定义：
+#
+# ===== L1 (main) =====
+#   无产出物（只负责分解和调度，不产出文件）
+#   但需在"常用 Agent 映射"表中列出各 Agent 的产出物摘要，便于派发任务时设置验收标准。
+#
+# ===== L2 (orchestrator) =====
+#   根据具体任务定义产出物：
+#   - 如果任务由下层 Agent 生成产出物，可将下层产出物作为本层产出物
+#   - 如果需要整合下层产出物，可定义整合后的产出物
+#   - 示例：solution_preparation_agent 的产出物是 "方案文档"
+#
+# ===== L3 (specialized/atomic) =====
+#   根据具体任务定义产出物：
+#   - 必须明确定义产出物名称、路径、类型
+#   - 示例：research_agent 的产出物是 "调研报告"
+#
+# ===== 映射表体现 =====
+#   L1 主 Agent 应在 static_vars 中配置"常用 Agent 映射"表，格式如下：
+#   - name: "常用 Agent 映射"
+#     type: "reference"
+#     content: |
+#       ## 常用 Agent 映射
+#       | 场景 | Agent | 说明 | 隔离级别 | 推荐指标 |
+#       |------|-------|------|----------|----------|
+#       | 调研/分析 | research_agent | ... | container | file_check, semantic_check(可选) |
+#       | Agent创建 | resource_generator_agent | ... | host | file_check, semantic_check |
+#       ### 隔离规则
+#       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
+#       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
+#       ### 评估规则
+#       - file_check：必选，检查文件是否存在（低成本）
+#       - semantic_check：可选，检查内容质量（调用 LLM，有成本）
+#       - 项目修改类：semantic_check 必选
+#       - 任务执行类：semantic_check 按任务重要程度决定
+
+deliverables:
+  - name: "{deliverable_name}"
+    description: "{description}"
+    output_path: "{path_template}"
+    type: "{file_type}"
+    required: true
+# 【可选】产出物定义
+# - 类型: list[object]
+# - 作用: 定义 Agent 执行完成后产出的文件，供上层 Agent 查询和设置评估指标
+# - 结构:
+#   deliverables:
+#     - name: 产出物名称（唯一标识）
+#       description: 产出物描述
+#       template_source: 模板来源（可选: "knowledge"）
+#       template_name: 模板名称（可选）
+#       output_path: 输出路径（支持 {{workspace}} 等占位符）
+#       type: 文件类型（如 "markdown", "json", "python"）
+#       required: 是否必须产出
+#       reference_template: 参考模板路径（可选，用于 semantic_check 评估）
+# - 示例:
+#   deliverables:
+#     - name: "research_report"
+#       description: "调研报告文件"
+#       template_source: "knowledge"
+#       template_name: "research_report"
+#       output_path: "{{workspace}}/research_report.md"
+#       type: "markdown"
+#       required: true
+#       reference_template: "config/templates/research_report_template.md"
+# - 决策建议:
+#   - L1 Agent: 无需定义 deliverables，但需在映射表中体现各 Agent 的产出物摘要
+#   - L2/L3 Agent: 根据任务产出定义 deliverables，产出物信息将被 L1 映射表引用
+
+# ==================== 推荐评估指标 ====================
+#
+# L1: 无（无验收标准）
+#   但需在"常用 Agent 映射"表中列出各 Agent 的推荐指标，便于派发任务时快速设置评估。
+# L2/L3: 根据产出物定义评估指标
+
+recommended_metrics:
+  - metric_id: "{metric_id}"
+    default_params:
+      {param_name}: "{param_value}"
+# 【可选】推荐评估指标
+# - 类型: list[object]
+# - 作用: 定义推荐的评估指标，供上层 Agent 参考
+# - 结构:
+#   recommended_metrics:
+#     - metric_id: 评估指标 ID
+#       default_params: 默认参数
+# - 常用评估指标:
+#   | metric_id | 作用 | 参数 | 使用场景 |
+#   |---|---|---|---|
+#   | "file_check" | 检查文件是否存在/可读 | action: "read"/"exists", path: 文件路径 | 验证文件产出（必选，低成本） |
+#   | "semantic_check" | 检查内容质量（结构、格式、语义） | criteria: {required_sections, reference_template} | 验证内容质量（可选，调用 LLM 有成本） |
+#   | "test_check" | 检查测试是否通过 | path: 测试路径 | 验证测试通过 |
+#   | "coverage_check" | 检查测试覆盖率 | path: 代码路径, threshold: 覆盖率阈值 | 验证测试覆盖率 |
+#   | "schema_validation" | 验证输出是否符合 Schema | schema: JSON Schema | 验证结构化输出 |
+# - 评估规则:
+#   - file_check：必选，检查文件是否存在（低成本）
+#   - semantic_check：可选，检查内容质量（调用 LLM，有成本）
+#   - 项目修改类（Agent/工具创建修改）：semantic_check 必选（影响项目质量）
+#   - 任务执行类（调研、方案、通用）：semantic_check 按任务重要程度决定
+# - 示例:
+#   recommended_metrics:
+#     - metric_id: file_check
+#       default_params:
+#         action: "read"
+#         path: "research_report.md"
+# - 决策建议:
+#   - L1 Agent: 无需定义 recommended_metrics，但需在映射表中体现各 Agent 的推荐指标
+#   - L2/L3 Agent: 根据 deliverables 定义对应的评估指标，指标信息将被 L1 映射表引用
+
+# ==================== 运行配置 ====================
+
+version: "1.0.0"
+# 【必填】配置版本号
+# - 类型: string
+# - 作用: 标识配置文件的版本
+# - 格式: 语义化版本 "major.minor.patch"
+# - 示例: "1.0.0", "2.0.1"
+
+is_active: true
+# 【必填】是否激活
+# - 类型: boolean
+# - 作用: 控制 Agent 是否可用
+# - 可能值:
+#   | 值 | 作用 | 使用场景 |
+#   |---|---|---|
+#   | true | Agent 可用 | 正常使用的 Agent |
+#   | false | Agent 不可用 | 临时禁用或废弃的 Agent |
+
+status: "active"
+# 【必填】Agent 状态
+# - 类型: string
+# - 作用: 标识 Agent 的当前状态
+# - 可能值:
+#   | 值 | 作用 | 使用场景 |
+#   |---|---|---|
+#   | "active" | 活跃状态 | 正常可用的 Agent |
+#   | "inactive" | 非活跃状态 | 临时禁用的 Agent |
+#   | "deprecated" | 已废弃 | 不再维护的 Agent |
+
+max_iterations: {max_iterations}
+# 【必填】最大迭代次数
+# - 类型: integer
+# - 作用: 限制 Agent 循环执行的最大次数，防止无限循环
+# - 统计方式: 每次调用 LLM 时迭代次数 +1
+# - 重置机制: 用户发送新消息或系统消息注入时会重置迭代计数
+# - 特殊值: -1 表示无限制，不进行迭代次数检查（适用于需要持续运行的后台任务或主 Agent）
+# - 建议值:
+#   | 层级 | 建议值 | 说明 |
+#   |---|---|---|
+#   | L1 | -1 或 100 | 主控 Agent 需要持续响应用户，建议无限制或较大值 |
+#   | L2 | 40 | 协调 Agent 只协调 L3 执行，不执行复杂操作 |
+#   | L3 | 100 | 执行 Agent 执行具体任务，需要多步骤工具调用 |
+#   | atomic | 10 | 原子任务通常单次完成 |
+#   | 定时/后台任务 | -1 | 需要持续运行的后台任务，设为无限制 |
+
+max_reminders: {max_reminders}
+# 【可选】最大提醒次数
+# - 类型: integer
+# - 作用: 限制系统提醒的最大次数，达到后任务失败
+# - 触发场景: Agent 输出文本响应但未调用 task_evaluate 时，系统注入提醒
+# - 达到最大次数: 任务标记为失败（上级 Agent 会收到系统通知）
+# - 特殊值: -1 表示不进行提醒检查（适用于不需要提醒的定时/后台任务）
+# - 建议值:
+#   | 层级 | 建议值 | 说明 |
+#   |---|---|---|
+#   | L1 | 10 | 主控 Agent 需要多次提醒（处理用户交互、多轮对话）|
+#   | L2 | 5 | 协调 Agent 中等提醒次数 |
+#   | L3 | 3 | 执行 Agent 提醒次数较少（有上层 agent 兜底）|
+#   | atomic | 2 | 原子任务基本不需要提醒 |
+#   | 定时/后台任务 | -1 | 后台任务不需要提醒机制 |
+
+timeout_seconds: {timeout_seconds}
+# 【必填】超时时间（秒）
+# - 类型: integer
+# - 作用: 限制 Agent 执行的最大时间，超时后检查是否有进展，无进展则停止
+# - 特殊值: -1 表示无限制，不进行超时检查（适用于需要持续运行的后台任务或主 Agent）
+# - 建议值:
+#   | 场景 | 建议值 | 说明 |
+#   |---|---|---|
+#   | L1 主控 Agent | -1 或 3600 | 主 Agent 需要持续运行，建议无限制 |
+#   | 定时/后台任务 | -1 | 需要持续运行的后台任务，设为无限制 |
+#   | 快速任务 | 300 (5分钟) | 简单查询、单步操作 |
+#   | 常规任务 | 600 (10分钟) | 常规执行任务 |
+#   | 复杂任务 | 1800 (30分钟) | 复杂分析、多步骤任务 |
+
+# ==================== 插件配置 ====================
+#
+# Agent 可通过 plugins 字段覆盖管道默认的插件列表。
+# 管道默认插件在 config/pipelines/default.yaml 中定义，
+# Agent 级别通过 disabled/enabled 进行增删改。
+#
+# 完整的参数传递链路：
+#   Agent YAML → AgentConfig → to_state() → ctx.state → 插件._apply_runtime_config()
+#
+# 以下参数会自动传递到对应插件：
+#   | 参数 | 目标插件 | 说明 |
+#   |---|---|---|
+#   | max_iterations | stop_check | 覆盖默认的迭代上限 |
+#   | timeout_seconds | stop_check | 覆盖默认的超时时间 |
+#   | max_reminders | task_reminder | 覆盖默认的最大提醒次数 |
+
+# plugins:
+#   disabled: []
+#   enabled: {}
+# 【可选】插件覆盖配置
+# - 类型: object
+# - 作用: 覆盖管道默认的插件列表，禁用不需要的插件或启用额外插件
+# - 结构:
+#   plugins:
+#     disabled:                    # 要禁用的默认插件列表（支持前缀匹配）
+#       - "plugin_name"            # 禁用指定插件
+#     enabled:                     # 要启用或覆盖配置的插件
+#       plugin_name:               # 插件名
+#         key: value               # 覆盖该插件的配置参数
+# - disabled 前缀匹配规则:
+#   写 "isolation" 可匹配 "isolation_guard"（自动补全后缀）
+# - 按层级建议:
+#   | 层级 | disabled | enabled | 说明 |
+#   |---|---|---|---|
+#   | L1 | [] | {} | 主控 Agent 使用默认插件即可 |
+#   | L2 | [] | {} | 协调 Agent 使用默认插件即可 |
+#   | L3 | [] | task_reminder: {max_reminders: 5} | 执行 Agent 可能需要更多提醒次数 |
+#   | atomic | [] | {} | 原子 Agent 使用默认即可 |
+# - 示例:
+#   plugins:
+#     disabled:
+#       - "knowledge_inject"       # 禁用知识注入
+#     enabled:
+#       task_reminder:
+#         max_reminders: 5         # 覆盖默认的 3 次提醒
+#         cooldown_seconds: 120    # 覆盖默认的 300 秒冷却
+#       context_compress:
+#         context_window: 64000    # 覆盖默认的 128K 上下文窗口
+#         compress_trigger_ratio: 0.6
+
+# ==================== 标签配置 ====================
+
+tags:
+  - "{tag_1}"
+  - "{tag_2}"
+# 【必填】标签列表
+# - 类型: list[string]
+# - 作用: 用于分类、检索和过滤 Agent
+# - 常用标签:
+#   - 层级标签: "L1", "L2", "L3"
+#   - 类型标签: "main", "specialized", "system"
+#   - 分类标签: "execution", "analysis", "code", "generation"
+#   - 领域标签: "research", "documentation", "testing"
+# - 示例:
+#   tags:
+#     - "specialized"
+#     - "research"
+#     - "analysis"
+#     - "L3"
+
+# ==================== 元数据配置 ====================
+
+metadata:
+  author: "System"
+  created_at: "{created_at}"
+  updated_at: "{updated_at}"
+  capabilities:
+    - "{capability_1}"
+    - "{capability_2}"
+# 【可选】元数据
+# - 类型: object
+# - 作用: 存储 Agent 的额外信息
+# - 结构:
+#   metadata:
+#     author: 作者
+#     created_at: 创建日期
+#     updated_at: 更新日期
+#     capabilities: 能力列表
+# - capabilities 常用值:
+#   | 能力 | 说明 |
+#   |---|---|
+#   | "requirement_analysis" | 需求分析 |
+#   | "resource_search" | 资源搜索 |
+#   | "web_research" | 网络调研 |
+#   | "information_synthesis" | 信息整合 |
+#   | "code_generation" | 代码生成 |
+#   | "file_operations" | 文件操作 |
+#   | "task_decomposition" | 任务分解 |
+#   | "evaluation" | 评估验证 |
+# - 示例:
+#   metadata:
+#     author: "System"
+#     created_at: "2026-01-11"
+#     updated_at: "2026-03-15"
+#     capabilities:
+#       - "requirement_analysis"
+#       - "resource_search"
+#       - "web_research"

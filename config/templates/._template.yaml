@@ -1,0 +1,314 @@
+# ============================================================
+# 评估指标模板
+# ============================================================
+#
+# 【评估指标是什么】
+# 评估指标是 Agent 任务完成后的"验收标准"，定义了用什么方式、按什么规则
+# 来判断任务的产出是否满足要求。每个评估指标是一个独立的检查单元，可以单独执行并给出"通过/未通过"的判断结果。
+#
+# 【评估指标的作用】
+# 1. 质量保障 — 自动化验证任务产出，确保代码规范、测试通过、功能正确
+# 2. 客观评判 — 用统一的评分标准替代主观判断，减少评估偏差
+# 3. 反馈驱动 — 评估结果包含具体的问题描述和改进建议，指导 Agent 修正
+# 4. 层级递进 — 从快速的基础检查到深度的语义审查，按需组合使用
+# 5. 灵活扩展 — 通过 YAML 配置新增指标，无需修改代码
+#
+# 【如何使用本模板】
+# 1. 复制本文件，重命名为 <id>.yaml（文件名必须与 id 字段一致）
+#    示例：id 为 bash_check → 文件名为 bash_check.yaml
+# 2. 按照各字段的注释说明填写内容
+# 3. 保存到 config/evaluation_metrics/ 目录下
+#
+# 【文件命名规则】
+#   格式：<id>.yaml，即文件名与 YAML 中的 id 字段完全一致
+#   命名风格：小写字母 + 下划线，如 file_check、bash_check、function_verify
+#   禁止：驼峰命名（fileCheck.yaml）、连字符（file-check.yaml）、中文
+#
+# 评估指标体系分为两类：
+#   1. Tool 评估（evaluator_type: tool）— 程序化确定性检查，快、可靠
+#   2. Agent 评估（evaluator_type: agent）— LLM 语义理解，慢、灵活
+
+
+# 现有指标：
+#   Tool:   file_check, format_valid, code_check, test_check, bash_check, api_check
+#   Agent:  semantic_check, function_verify
+# ============================================================
+
+# ===== 基本信息 =====
+# id（string，必填）
+#   指标唯一标识符，全局唯一
+#   命名规范：小写字母 + 下划线，如 file_check、bash_check
+#   用于代码中引用此指标
+
+id: template
+
+# name（string，必填）
+#   指标中文名称，简洁明了
+#   用于 UI 展示和日志输出
+
+name: 指标名称
+
+# description（string，必填）
+#   指标功能描述，说明这个指标做什么、适用什么场景
+#   帮助 Agent 和用户理解指标的用途
+
+description: 指标功能描述
+
+# ===== 评估器配置 =====
+# evaluator_id（string，必填）
+#   评估器的唯一标识，对应实际执行评估的工具或 Agent
+#   常用值：
+#     Tool 类型: file_read, bash_execute, fetch, schema_evaluator
+#     Agent 类型: evaluator_agent
+
+evaluator_id: tool_name
+
+# evaluator_type（string，必填）
+#   评估器类型，决定评估的执行方式
+#   可选值：
+#     tool   — 程序化评估，调用工具执行确定性检查
+#     agent  — LLM 语义评估，使用独立 Agent 进行理解判断
+
+evaluator_type: tool
+
+# default_config（object，可选）
+#   评估器的默认行为参数，定义"怎么评估"
+#   这些参数是评估指标固有的，不会被 Agent 覆盖
+#
+#   参数确定方法：
+#     1. 先列出评估器需要的所有参数
+#     2. 从中挑出"评估对象参数"（要检查什么）→ 放入 expected_input
+#     3. 剩下的"行为参数"（怎么检查）→ 放入 default_config
+#
+#   示例：
+#     file_read 工具的所有参数: action, path, pattern, max_results
+#     file_check 指标只需要: path → expected_input
+#     剩余的行为参数: action=read → default_config
+#     无关的参数: pattern, max_results（file_check 不需要，不使用）
+#
+#   与 expected_input 的关系：
+#     两者无重叠，各管各的。default_config 管行为，expected_input 管对象
+
+default_config:
+  param1: value1
+
+# ===== 预期输入定义 =====
+# expected_input（object，必填）
+#   Agent 在提交评估时需要提供的"评估对象参数"，定义"要评估什么"
+#   这些参数是动态的，每次评估的内容不同
+#
+#   参数确定方法：
+#     1. 先列出评估器需要的所有参数
+#     2. 从中挑出"评估对象参数"（要检查什么）→ 放入 expected_input
+#     3. 剩下的"行为参数"（怎么检查）→ 放入 default_config
+#
+#   params（object，必填）
+#     每个参数的名称、类型、是否必填、示例值
+#     type 支持: string, integer, number, boolean, array, object
+#     required: true 表示 Agent 必须提供此参数
+
+expected_input:
+  description: "评估的简要说明，告诉 Agent 这个指标检查什么"
+  params:
+    param_name:
+      type: string
+      description: "参数说明"
+      required: true
+      example: "示例值"
+
+# ===== 预期输出定义 =====
+# expected_output（object，必填）
+#   描述评估器实际返回的数据结构，即"评估器会返回什么"
+#   内容必须与评估器的真实输出一致，不要凭空编造
+#
+#   params（object，必填）
+#     返回字段的名称、类型、说明
+#     Tool 类型评估器通用返回：
+#       success (boolean) — 工具调用是否成功（成功不等于评估通过）
+#       data (object) — 工具返回的具体数据
+#       error (string) — 失败时的错误信息
+#     Agent 类型评估器统一返回（所有 Agent 评估器输出结构相同）：
+#       passed (boolean) — 评估是否通过
+#       score (number) — 评分 0-100
+#       feedback (string) — 结果描述
+#       suggestions (array) — 改进建议（可选）
+#       evaluation_details (object) — 详细信息（可选）
+#
+#   示例（file_check 使用 file_read 工具）：
+#     file_read 成功时返回: {success: true, data: {path: "src/main.py", content: "...", size: 1024}}
+#     file_read 失败时返回: {success: false, error: "文件不存在", error_code: "FILE_NOT_FOUND"}
+
+expected_output:
+  description: "返回文件检查结果"
+  params:
+    success:
+      type: boolean
+      description: "工具调用是否成功（true=文件存在，false=文件不存在）"
+    data:
+      type: object
+      description: "文件数据（成功时返回）"
+      properties:
+        path:
+          type: string
+          description: "文件路径"
+        content:
+          type: string
+          description: "文件内容"
+        size:
+          type: integer
+          description: "文件大小（字节）"
+    error:
+      type: string
+      description: "错误信息（失败时返回）"
+
+# ===== 评估判断标准 =====
+# expect（object，必填）
+#   定义如何根据 expected_output 的返回结果判断通过/失败
+#   即"返回的数据中，哪些字段满足什么条件算通过"
+#
+#   conditions（array，必填）
+#     条件列表，每个条件的 field 引用 expected_output 中的字段路径
+#     每个条件包含：
+#       field (string) — 从返回结果中取值的字段路径，支持嵌套（如 data.status）
+#       operator (string) — 运算符，支持：
+#         equals, not_equals, contains, not_contains,
+#         is_true, is_false,
+#         greater_than, less_than,
+#         in, not_in, matches（正则匹配）
+#       value (any) — 预期值（is_true/is_false 不需要）
+#
+#   logic（string，必填）
+#     多条件的组合逻辑：and（全部满足）/ or（任一满足）
+#
+#   pass_message（string，必填）— 通过时的消息
+#   fail_message（string，必填）— 失败时的消息
+#
+#   示例（file_check）：
+#     file_read 返回 success=true → 文件存在 → 评估通过
+#     file_read 返回 success=false → 文件不存在 → 评估失败
+#     所以只需判断 success 是否为 true
+
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+  logic: "and"
+  pass_message: "文件存在"
+  fail_message: "文件不存在或无法访问"
+
+# ===== 输入参数定义 =====
+# input_schema（object，必填）
+#   评估器的完整输入参数 Schema
+#   与底层工具的 input_schema 一致
+#   用于参数验证和 API 文档生成
+#
+#   required（array）— 必填参数列表
+#   properties（object）— 各参数的类型和说明
+
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: "操作类型"
+    param1:
+      type: string
+      description: "参数说明"
+  required: ["action"]
+
+# ===== 使用边界 =====
+# when_to_use（array，必填）
+#   适用场景列表，帮助 Agent 判断何时应该选择此指标
+#   写具体的场景描述，不要写泛泛的描述
+
+when_to_use:
+  - 场景描述1
+  - 场景描述2
+
+# when_not_use（array，必填）
+#   不适用场景列表，帮助 Agent 避免误用
+#   如果有其他更合适的指标，应该在这里指明
+
+when_not_use:
+  - 不适用场景1（应使用 xxx 指标）
+  - 不适用场景2（应使用 xxx 指标）
+
+# examples（array，必填）
+#   使用示例，帮助 Agent 理解如何提供参数
+#   每个示例包含 params 和可选的 description
+
+examples:
+  - params:
+      param1: "value1"
+    description: "示例说明"
+
+# caveats（array，必填）
+#   注意事项和限制，帮助 Agent 避免踩坑
+#   包括：前置条件、环境要求、已知限制等
+
+caveats:
+  - 注意事项1
+  - 注意事项2
+
+# ===== 依赖关系 =====
+# is_red_line（boolean，必填）
+#   是否为红线指标
+#   true: 此指标失败会阻塞任务，必须通过才能继续
+#   false: 此指标失败不阻塞，但会影响评分
+
+is_red_line: false
+
+# default_weight（number，必填）
+#   默认权重，用于加权评分计算
+#   常用值：1.0（普通）, 1.5（重要）, 2.0（非常关键）
+#   可在评估配置中覆盖
+
+default_weight: 1.0
+
+# level（integer，必填）
+#   指标层级，表示评估的深度
+#   L1 (1): 基础检查（存在性、格式等），执行最快
+#   L2 (2): 标准检查（代码规范、测试等），需要工具执行
+#   L3 (3): 深度评估（语义评估、功能验证），需要 LLM 推理
+
+level: 2
+
+# includes（array，必填）
+#   包含的子指标列表
+#   语义上表示"此指标隐含了哪些前置检查"
+#   如 code_check 包含 file_check（代码检查前先确认文件存在）
+#   空列表表示无子指标
+
+includes: []
+
+# requires（array，必填）
+#   前置依赖指标列表
+#   语义上表示"执行此指标前需要先执行哪些指标"
+#   如 function_verify 建议在 test_check 之后执行
+#   空列表表示无前置依赖
+
+requires: []
+
+# ===== 元数据 =====
+# source（string，必填）
+#   指标来源
+#   builtin — 系统内置指标
+#   custom — 用户自定义指标
+
+source: builtin
+
+# status（string，必填）
+#   指标状态
+#   active — 启用，可被使用
+#   deprecated — 已废弃，保留但不在推荐列表中显示
+#   draft — 草稿，开发中
+
+status: active
+
+# tags（array，必填）
+#   标签列表，用于搜索和分类
+#   帮助 Agent 和用户快速找到相关指标
+
+tags:
+  - tag1
+  - tag2

@@ -1,0 +1,15 @@
+# 审批配置
+
+enabled: true
+
+# 审批策略
+policies:
+  # HOST模式 + 危险操作才需要审批
+  host_dangerous:
+    enabled: true
+    action: "NEEDS_APPROVAL"
+
+# 用户信任策略（可扩展）
+user_trust:
+  enabled: false
+  trusted_users: []

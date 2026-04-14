@@ -1,0 +1,83 @@
+# 事件触发器配置示例
+# 基于系统事件自动执行相应动作
+
+triggers:
+  # 任务完成通知
+  - id: "task_complete_notification"
+    name: "任务完成通知"
+    description: "当任务状态变为 completed 时发送通知"
+    enabled: true
+    trigger_type: "event"
+    event:
+      type: "task_status_changed"
+      filter: "new_status == 'completed'"
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "✅ 任务 {{task_id}} 已完成！"
+          priority: "normal"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 验收标准评估失败告警
+  - id: "ac_failed_alert"
+    name: "验收标准失败告警"
+    description: "当验收标准评估失败时发送告警"
+    enabled: true
+    trigger_type: "event"
+    event:
+      type: "ac_evaluated"
+      filter: "status == 'failed'"
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "⚠️ 验收标准 {{ac_id}} 评估失败：{{result}}"
+          priority: "high"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # Agent 执行完成通知
+  - id: "agent_execution_completed"
+    name: "Agent 执行完成通知"
+    description: "Agent 执行完成后发送通知"
+    enabled: true
+    trigger_type: "event"
+    event:
+      type: "agent_execution_completed"
+      # 不过滤，所有执行完成都通知
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "🤖 Agent {{agent_id}} 执行完成"
+          priority: "normal"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"
+
+  # 项目进度更新通知
+  - id: "project_progress_update"
+    name: "项目进度更新通知"
+    description: "当项目任务完成超过 50% 时发送通知"
+    enabled: true
+    trigger_type: "event"
+    event:
+      type: "project_progress_updated"
+      filter: "progress_percentage >= 50"
+    actions:
+      - type: "notification"
+        order: 0
+        config:
+          channel: "websocket"
+          template: "📊 项目 {{project_id}} 进度已达到 {{progress_percentage}}%"
+          priority: "normal"
+    metadata:
+      created_at: "2025-01-29"
+      author: "system"

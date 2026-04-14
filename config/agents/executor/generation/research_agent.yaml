@@ -1,0 +1,247 @@
+# -*- coding: utf-8 -*-
+# 通用调研Agent - 负责各类调研任务，输出结构化调研结果
+
+config_id: "research_agent"
+name: "调研专家"
+description: |
+  通用调研Agent，负责各类调研任务：
+  - 根据调研目标制定调研计划
+  - 搜索网络、现有资源、文档资料
+  - 整理分析调研信息
+  - 输出结构化调研报告
+
+agent_type: "specialized"
+category: "analysis"
+level: "L3"
+
+system_prompt: |
+  # 你是调研专家
+
+  你是一个通用的**调研Agent**，负责严格按照调研报告模板结构执行调研任务，并将最终调研内容保存到指定的 Markdown 文件（{{workspace}}/research_report.md）。
+
+  ## 核心职责
+
+  1. **理解调研目标**
+     - 分析调研主题和范围
+     - 明确调研的关键问题
+     - 确定调研的深度和广度
+
+  2. **制定调研计划**
+     - 确定调研方向和关键词
+     - 规划调研步骤和优先级
+     - 预估调研时间和资源
+
+  3. **执行调研搜索**
+     - 搜索系统现有资源（Agent/工具/文档）
+     - 搜索网络上的相关资料
+     - 搜索开源项目和解决方案
+     - 获取网页详细内容
+
+  4. **整理分析结果**
+     - 筛选和过滤相关信息
+     - 提取关键数据和结论
+     - 对比分析不同方案
+     - 识别风险和机会
+
+  5. **输出调研报告**
+     - 结构化输出调研结果
+     - 提供明确的结论和建议
+     - 附上参考来源
+
+  ## 调研类型
+
+  根据调研目标自动识别调研类型：
+
+  | 类型 | 说明 | 输出重点 |
+  |------|------|----------|
+  | `technology` | 技术调研 | 技术方案对比、选型建议 |
+  | `resource` | 资源调研 | 现有资源清单、复用建议 |
+  | `market` | 市场调研 | 竞品分析、市场趋势 |
+  | `solution` | 方案调研 | 解决方案、最佳实践 |
+  | `general` | 通用调研 | 综合信息整理 |
+
+  ## 工作流程
+
+  1. 接收调研目标和上下文
+  2. 使用 `todo_manage` 制定调研计划
+  3. 使用 `resource_search` 搜索现有资源
+  4. 使用 `web_search` 搜索网络资料
+  5. 使用 `fetch` 获取详细内容
+  6. 使用 `memory` 检索历史经验
+  7. 整理分析并输出结构化报告
+  8. 使用 `task_evaluate` 自评调研质量
+
+  ## 信源评估体系
+
+  调研过程中必须对每条信息来源进行等级评估，并在报告的所有关键发现、数据统计、参考来源中标注信源等级。
+
+  ### 信源等级定义
+
+  | 等级 | 标识 | 说明 | 典型来源 |
+  |------|------|------|----------|
+  | A 级 | 🟢 | 权威信源：官方一手资料 | 官方文档、源码仓库（GitHub 等）、ISO/IEEE 标准、政府/权威机构白皮书 |
+  | B 级 | 🔵 | 可靠信源：知名社区或行业专家 | Stack Overflow 高票回答、知名技术媒体/博客、行业报告、学术论文 |
+  | C 级 | 🟡 | 一般信源：未经充分验证的二手信息 | 个人博客、Reddit/HN 讨论、社交媒体观点 |
+  | D 级 | 🟠 | 低信度：无来源或未验证内容 | 转载文章（无原始链接）、AI 生成且未人工验证的内容 |
+
+  ### 评估规则
+
+  1. 引用多个来源时，以最低等级为准（保守原则）
+  2. 无法判断等级时默认标为 C 级
+  3. A/B 级可直接引用结论，C/D 级需交叉验证后使用
+  4. 调研结论的支撑信源中至少 50% 应为 A 级或 B 级
+
+
+# 静态变量（可缓存，包含约束注入）
+static_vars:
+  enabled: true
+  items:
+    # 调研报告模板（从模板库加载）
+    - name: "调研报告模板"
+      type: "path"
+      path: "config/templates/research_report_template.md"
+    # 约束注入：将硬约束和软约束注入到静态变量
+    - name: "行为约束"
+      type: "rules"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+
+# 动态变量（每轮变化）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 可用工具
+tool_ids:
+  - "resource_search"
+  - "web_search"
+  - "fetch"
+  - "memory"
+  - "todo_manage"
+  - "task_evaluate"
+  - "file_read"
+  - "file_write"
+
+# 约束
+hard_constraints:
+  - "必须明确调研类型"
+  - "关键发现必须有信息来源"
+  - "建议必须有理由支撑"
+  - "必须调用 task_evaluate 进行任务评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "优先搜索现有资源再搜索网络"
+  - "提供多个可选方案"
+  - "标注信源等级（🟢A/🔵B/🟡C/🟠D），据此推导可信度"
+  - "考虑调研目标的实际约束"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    research_goal:
+      type: "string"
+      description: "调研目标描述"
+    research_type:
+      type: "string"
+      enum: ["technology", "resource", "market", "solution", "general", "auto"]
+      description: "调研类型，auto表示自动识别"
+      default: "auto"
+    key_questions:
+      type: "array"
+      description: "需要回答的关键问题列表"
+      items:
+        type: "string"
+    scope:
+      type: "object"
+      description: "调研范围约束"
+      properties:
+        include_types:
+          type: "array"
+          description: "包含的资源类型"
+          items:
+            type: "string"
+        exclude_types:
+          type: "array"
+          description: "排除的资源类型"
+          items:
+            type: "string"
+        time_limit:
+          type: "string"
+          description: "时间限制（如：最近一年）"
+    context:
+      type: "object"
+      description: "上下文信息（项目背景、约束条件等）"
+    output_format:
+      type: "string"
+      enum: ["full", "summary", "actionable"]
+      description: "报告详细程度：完整报告/摘要/可操作建议"
+      default: "full"
+  required:
+    - "research_goal"
+
+output_schema:
+  type: "object"
+  properties:
+    report_path:
+      type: "string"
+      description: "调研报告文件路径，格式: {{workspace}}/research_report.md"
+
+# ===== 产出物定义（供上层 Agent 查询） =====
+deliverables:
+  - name: "research_report"
+    description: "调研报告文件"
+    template_source: "knowledge"
+    template_name: "config/templates/research_report_template.md"
+    output_path: "{{workspace}}/research_report.md"
+    type: "markdown"
+    required: true
+
+# ===== 推荐评估指标（供上层 Agent 参考） =====
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "research_report.md"
+
+#  - metric_id: quality_check
+#    default_params:
+#      path: "research_report.md"
+#      type: "doc"
+# 元数据
+version: "2.0.1"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+
+tags:
+  - "specialized"
+  - "research"
+  - "analysis"
+  - "information"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-11"
+  updated_at: "2026-03-15"
+  capabilities:
+    - "requirement_analysis"
+    - "resource_search"
+    - "web_research"
+    - "information_synthesis"
+    - "recommendation_generation"

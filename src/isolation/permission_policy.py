@@ -1,0 +1,290 @@
+"""
+权限策略管理器
+
+暴露接口：
+- get_policy(self, policy_type: PermissionPolicyType | str) -> WorkspacePermissionPolicy：get_policy功能
+- get_default_policy(self) -> WorkspacePermissionPolicy：get_default_policy功能
+- get_readonly_policy(self) -> WorkspacePermissionPolicy：get_readonly_policy功能
+- list_policies(self) -> list[str]：list_policies功能
+- has_policy(self, policy_name: str) -> bool：has_policy功能
+- PermissionScope：PermissionScope类
+- PermissionPolicyType：PermissionPolicyType类
+- ReadPermission：ReadPermission类
+- WritePermission：WritePermission类
+- WorkspacePermissionPolicy：WorkspacePermissionPolicy类
+- PermissionPolicyManager：PermissionPolicyManager类
+"""
+
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class PermissionScope(str, Enum):
+    """权限范围枚举
+
+    定义文件操作的权限范围：
+    - PROJECT: 整个项目目录
+    - WORKSPACE: 仅指定的工作目录
+    - CUSTOM: 自定义路径列表
+    - NONE: 无权限
+    """
+
+    PROJECT = "project"
+    WORKSPACE = "workspace"
+    CUSTOM = "custom"
+    NONE = "none"
+
+
+class PermissionPolicyType(str, Enum):
+    """权限策略类型枚举
+
+    定义不同场景下的权限策略：
+    - DEFAULT: 默认策略，读取整个项目，写入仅限工作目录
+    - SUBTASK: 子任务策略，同 DEFAULT
+    - SYSTEM_CONFIG: 系统配置策略，修改前需要检查点
+    - READONLY: 只读策略，禁止所有写入
+    """
+
+    DEFAULT = "default"
+    SUBTASK = "subtask"
+    SYSTEM_CONFIG = "system_config"
+    READONLY = "readonly"
+
+
+@dataclass
+class ReadPermission:
+    """读取权限配置
+
+    定义读取操作的权限规则
+
+    Attributes:
+        scope: 权限范围
+        allow_all: 是否允许读取整个项目
+        custom_paths: 自定义路径列表（当 scope=CUSTOM 时使用）
+    """
+
+    scope: PermissionScope
+    allow_all: bool = True
+    custom_paths: list[str] | None = None
+
+
+@dataclass
+class WritePermission:
+    """写入权限配置
+
+    定义写入操作的权限规则
+
+    Attributes:
+        scope: 权限范围
+        allow_outside: 是否允许在工作目录外写入
+        require_checkpoint: 是否需要创建检查点
+        require_confirmation: 是否需要用户确认
+        allowed_operations: 允许的操作类型列表（create/modify/delete）
+        custom_paths: 自定义路径列表（当 scope=CUSTOM 时使用）
+    """
+
+    scope: PermissionScope
+    allow_outside: bool = False
+    require_checkpoint: bool = False
+    require_confirmation: bool = False
+    allowed_operations: list[str] | None = None
+    custom_paths: list[str] | None = None
+
+
+@dataclass
+class WorkspacePermissionPolicy:
+    """工作区权限策略
+
+    定义完整的读写权限规则
+
+    Attributes:
+        name: 策略名称
+        policy_type: 策略类型
+        read: 读取权限配置
+        write: 写入权限配置
+        description: 策略描述
+    """
+
+    name: str
+    policy_type: PermissionPolicyType
+    read: ReadPermission
+    write: WritePermission
+    description: str = ""
+
+
+class PermissionPolicyManager:
+    """权限策略管理器
+
+    管理不同场景下的权限策略，提供：
+    - 默认策略定义
+    - 策略获取接口
+    - 策略配置加载（可选）
+
+    使用场景：
+    - 获取任务的权限策略
+    - 检查文件操作权限
+    - 配置特殊目录的权限规则
+    """
+
+    # 默认权限策略定义
+    DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
+        "default": {
+            "read": {"scope": "project", "allow_all": True},
+            "write": {"scope": "workspace", "allow_outside": False},
+            "description": "默认策略：读取整个项目，写入仅限工作目录",
+        },
+        "subtask": {
+            "read": {"scope": "project", "allow_all": True},
+            "write": {"scope": "workspace", "allow_outside": False},
+            "description": "子任务策略：同默认策略",
+        },
+        "system_config": {
+            "read": {"scope": "project", "allow_all": True},
+            "write": {
+                "scope": "workspace",
+                "allow_outside": False,
+                "require_checkpoint": True,
+                "allowed_operations": ["create", "modify"],
+            },
+            "description": "系统配置策略：修改前需要创建检查点",
+        },
+        "readonly": {
+            "read": {"scope": "project", "allow_all": True},
+            "write": {"scope": "none", "allow_outside": False},
+            "description": "只读策略：禁止所有写入操作",
+        },
+    }
+
+    def __init__(self, custom_policies: dict[str, dict[str, Any]] | None = None):
+        """初始化权限策略管理器"""
+        self._policies: dict[str, WorkspacePermissionPolicy] = {}
+        self._load_default_policies()
+
+        # 加载自定义策略
+        if custom_policies:
+            self._load_custom_policies(custom_policies)
+
+    def _load_default_policies(self) -> None:
+        """加载默认策略"""
+        for policy_name, policy_config in self.DEFAULT_POLICIES.items():
+            policy = self._create_policy_from_config(
+                policy_name, policy_config, PermissionPolicyType(policy_name)
+            )
+            self._policies[policy_name] = policy
+
+        logger.info(
+            f"[PermissionPolicyManager] 默认策略已加载 | count={len(self._policies)}"
+        )
+
+    def _load_custom_policies(
+        self, custom_policies: dict[str, dict[str, Any]]
+    ) -> None:
+        """加载自定义策略"""
+        for policy_name, policy_config in custom_policies.items():
+            # 确定策略类型
+            policy_type_str = policy_config.get("policy_type", policy_name)
+            try:
+                policy_type = PermissionPolicyType(policy_type_str)
+            except ValueError:
+                policy_type = PermissionPolicyType.DEFAULT
+
+            policy = self._create_policy_from_config(
+                policy_name, policy_config, policy_type
+            )
+            self._policies[policy_name] = policy
+
+        logger.info(
+            f"[PermissionPolicyManager] 自定义策略已加载 | "
+            f"count={len(custom_policies)}"
+        )
+
+    def _create_policy_from_config(
+        self,
+        name: str,
+        config: dict[str, Any],
+        policy_type: PermissionPolicyType,
+    ) -> WorkspacePermissionPolicy:
+        """从配置创建策略对象"""
+        read_config = config.get("read", {})
+        write_config = config.get("write", {})
+
+        # 创建读取权限
+        read_scope = PermissionScope(read_config.get("scope", "project"))
+        read_permission = ReadPermission(
+            scope=read_scope,
+            allow_all=read_config.get("allow_all", True),
+            custom_paths=read_config.get("custom_paths"),
+        )
+
+        # 创建写入权限
+        write_scope = PermissionScope(write_config.get("scope", "workspace"))
+        write_permission = WritePermission(
+            scope=write_scope,
+            allow_outside=write_config.get("allow_outside", False),
+            require_checkpoint=write_config.get("require_checkpoint", False),
+            require_confirmation=write_config.get("require_confirmation", False),
+            allowed_operations=write_config.get("allowed_operations"),
+            custom_paths=write_config.get("custom_paths"),
+        )
+
+        return WorkspacePermissionPolicy(
+            name=name,
+            policy_type=policy_type,
+            read=read_permission,
+            write=write_permission,
+            description=config.get("description", ""),
+        )
+
+    def get_policy(
+        self, policy_type: PermissionPolicyType | str
+    ) -> WorkspacePermissionPolicy:
+        """获取指定类型的权限策略"""
+        # 支持字符串或枚举
+        if isinstance(policy_type, PermissionPolicyType):
+            policy_name = policy_type.value
+        else:
+            policy_name = policy_type
+
+        policy = self._policies.get(policy_name)
+        if not policy:
+            logger.warning(
+                f"[PermissionPolicyManager] 策略不存在，返回默认策略 | "
+                f"requested={policy_name}"
+            )
+            return self.get_default_policy()
+
+        return policy
+
+    def get_default_policy(self) -> WorkspacePermissionPolicy:
+        """获取默认权限策略"""
+        return self._policies.get(
+            "default",
+            self._create_policy_from_config(
+                "default",
+                self.DEFAULT_POLICIES["default"],
+                PermissionPolicyType.DEFAULT,
+            ),
+        )
+
+    def get_readonly_policy(self) -> WorkspacePermissionPolicy:
+        """获取只读权限策略"""
+        return self._policies.get(
+            "readonly",
+            self._create_policy_from_config(
+                "readonly",
+                self.DEFAULT_POLICIES["readonly"],
+                PermissionPolicyType.READONLY,
+            ),
+        )
+
+    def list_policies(self) -> list[str]:
+        """列出所有可用策略"""
+        return list(self._policies.keys())
+
+    def has_policy(self, policy_name: str) -> bool:
+        """检查策略是否存在"""
+        return policy_name in self._policies

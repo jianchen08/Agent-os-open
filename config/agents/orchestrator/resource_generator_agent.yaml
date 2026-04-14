@@ -1,0 +1,212 @@
+# -*- coding: utf-8 -*-
+# 资源生成 Agent - 负责生成缺失的工具和 Agent 资源
+
+config_id: resource_generator_agent
+name: 资源生成专家
+display_name: 资源生成专家
+description: |
+  负责生成缺失的工具和 Agent 资源。
+  核心职责：接收资源生成任务，协调完成资源生成。
+
+agent_type: orchestrator
+category: generation
+level: L2
+
+system_prompt: |
+  # 你是资源生成专家
+
+  ## 核心职责
+  负责规划和协调资源生成任务，具体执行提交给专业 Agent。
+
+  ## 执行步骤
+
+  1. **调研阶段（调用 research_agent）**
+     - 调研目标：调研技术方案、搜索可复用资源
+     - 需输出：调研报告
+
+  2. **提交任务给 tool_maker 或 agent_maker**
+     - tool_maker：生成工具（operation_type=create）
+     - agent_maker：生成 Agent（operation_type=create）
+     - 传递生成计划和资源类型
+     - 生成完成后自动自验证
+
+  3. **评估生成结果**
+     - 使用 task_evaluate 评估生成质量
+     - 评估调研报告完整性和生成方案合理性
+     - 评估通过即任务完成
+
+  ## 单步操作
+
+  - 使用 resource_search 搜索现有资源
+  - 使用 file_read 读取参考资源
+
+  ## 禁止行为
+
+  - ❌ 不直接编写资源文件
+  - ❌ 不跳过调研直接生成
+  - ❌ 不生成未经验证的资源
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "下级 Agent 映射"
+      type: "reference"
+      content: |
+        ## 下级 Agent 映射
+        | 阶段 | Agent | 说明 | 隔离级别 | 推荐指标 |
+        |------|-------|------|----------|----------|
+        | 调研 | research_agent | 调研技术方案、搜索可复用资源 | container | file_check, semantic_check(可选) |
+        | 工具生成 | tool_maker | 生成新工具代码和配置 | host | file_check, semantic_check |
+        | Agent生成 | agent_maker | 生成新 Agent 配置 | host | file_check, semantic_check |
+    - path: "config/templates/resource_generation_report_template.md"
+      name: "资源生成报告模板"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+- task_submit
+- task_manage
+- task_evaluate
+- rollback_task
+- resource_search
+- file_read
+
+hard_constraints:
+- 必须调用 task_evaluate 评估任务完成质量
+- 必须读取下级 Agent（research_agent, tool_maker, agent_maker）的产出物
+- 评估通过才能结束任务
+- 必须先调用 research_agent 完成调研并输出调研报告
+- 必须基于调研报告制定生成方案
+- 只能调用 research_agent, tool_maker, agent_maker
+- 必须先验证测试再提交评估
+- 生成失败必须回滚
+- 最多重试 3 次
+
+soft_constraints:
+- 优先复用现有资源
+- 保持向后兼容
+- 记录详细的生成日志
+- 关键生成需要确认
+
+input_schema:
+  type: object
+  properties:
+    resource_requirement:
+      type: object
+      description: 资源需求描述
+      properties:
+        name:
+          type: string
+          description: 资源名称
+        type:
+          type: string
+          enum:
+          - tool
+          - agent
+          description: 资源类型
+        description:
+          type: string
+          description: 资源描述
+        capabilities:
+          type: array
+          description: 期望能力列表
+        context:
+          type: object
+          description: 触发上下文
+      required:
+      - name
+      - type
+      - description
+    callback_task:
+      type: object
+      description: 资源生成完成后需要继续的任务
+  required:
+  - resource_requirement
+
+output_schema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: 生成是否成功
+    resource_type:
+      type: string
+      description: 资源类型
+    resource_id:
+      type: string
+      description: 生成的资源ID
+    resource_path:
+      type: string
+      description: 资源文件路径
+    generation_summary:
+      type: string
+      description: 生成摘要
+    retry_count:
+      type: integer
+      description: 重试次数
+    error_message:
+      type: string
+      description: 错误信息（失败时）
+  required:
+  - success
+
+deliverables:
+  - name: "generated_resource"
+    description: "生成的资源文件（工具或Agent配置）"
+    output_path: "{{workspace}}/generated_resource.yaml"
+    type: "yaml"
+    required: true
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "{{workspace}}/generated_resource.yaml"
+  - metric_id: semantic_check
+    default_params:
+      criteria:
+        required_sections:
+          - "基本信息"
+          - "生成概述"
+          - "生成资源清单"
+          - "验证结果"
+          - "评估结论"
+        reference_template: "config/templates/resource_generation_report_template.md"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 40
+max_reminders: 5
+timeout_seconds: 1800
+
+plugins:
+  disabled: []
+  enabled: {}
+
+tags:
+- orchestrator
+- generation
+- resource
+- L2
+
+metadata:
+  author: System
+  created_at: '2026-03-14'
+  updated_at: '2026-03-22'
+  capabilities:
+  - resource_generation
+  - backup_management
+  - rollback
+  - agent_coordination
+  - validation
+  - research_coordination
+  - research_report_generation

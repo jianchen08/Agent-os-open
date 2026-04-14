@@ -1,0 +1,207 @@
+# 工具隔离策略配置
+# 优先级：tools（工具名精确匹配）> categories（分类匹配）> default
+
+# ============================================
+# 默认策略（安全优先：未匹配到的工具默认隔离）
+# ============================================
+default:
+  isolation: container
+  execution: command_in_container
+  fallback: deny
+
+# ============================================
+# 工具级规则（优先级最高，精确匹配工具名）
+# ============================================
+tools:
+  # --- 执行类（强制隔离，在容器内执行命令，禁止降级）---
+  bash_execute:
+    isolation: container
+    execution: command_in_container
+    fallback: deny
+    disk_quota: "100m"
+    network: restricted
+  python_execute:
+    isolation: container
+    execution: command_in_container
+    fallback: deny
+    disk_quota: "100m"
+    network: restricted
+
+  # --- 网络类（强制隔离，SSRF 风险，容器 NAT 出站）---
+  fetch:
+    isolation: container
+    execution: command_in_container
+    network: nat
+    fallback: deny
+  web_search:
+    isolation: container
+    execution: command_in_container
+    network: nat
+    fallback: deny
+
+  # --- 桌面控制类（强制隔离）---
+  desktop_control:
+    isolation: container
+    execution: command_in_container
+    fallback: deny
+
+  # --- 文件操作类（宿主机执行，读写项目目录）---
+  file_read:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  file_write:
+    isolation: host
+    execution: host_direct
+    checkpoint: true
+    fallback: allow
+  edit:
+    isolation: host
+    execution: host_direct
+    checkpoint: true
+    fallback: allow
+
+  # --- 搜索类（宿主机执行，只读）---
+  glob:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  grep:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  enhanced_search:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+  # --- 代码分析类（宿主机执行，只读）---
+  lsp_definition:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  lsp_references:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  lsp_diagnostics:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  file_jump:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+  # --- 任务管理类（宿主机执行，内部 API）---
+  task_submit:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  task_manage:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  task_evaluate:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+  # --- 记忆/状态类（宿主机执行，内部数据）---
+  memory:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  state_update:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  todo_manage:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  rollback_task:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  trigger_setup:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+  # --- 评估/验证类（宿主机执行，纯计算）---
+  evaluate:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  schema_evaluator:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  resource_evaluator:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  yaml_validate:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  compatibility_checker:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+  # --- 组件创建（宿主机执行，需审批）---
+  component_create:
+    isolation: host
+    execution: host_direct
+    approval: true
+    fallback: allow
+
+  # --- 资源搜索（宿主机执行，只读）---
+  resource_search:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+
+# ============================================
+# 分类级规则（匹配不到具体工具名时，按分类兜底）
+# ============================================
+categories:
+  execution:
+    isolation: container
+    execution: command_in_container
+    fallback: deny
+  network:
+    isolation: container
+    execution: command_in_container
+    network: nat
+    fallback: deny
+  file:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  search:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  analysis:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  system:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  evaluation:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  task:
+    isolation: host
+    execution: host_direct
+    fallback: allow
+  memory:
+    isolation: host
+    execution: host_direct
+    fallback: allow

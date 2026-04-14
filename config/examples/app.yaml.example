@@ -1,0 +1,72 @@
+# 应用配置示例
+# 复制此文件为 app.yaml 并填入实际配置
+
+# 应用基本信息
+app:
+  name: "元思考 Agent 系统"
+  version: "1.0.0"
+  debug: false
+  environment: development  # development, staging, production
+
+# 服务器配置
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  reload: false  # 开发环境可设为 true
+
+# 数据库配置
+database:
+  url: ${DATABASE_URL}  # postgresql://user:pass@localhost:5432/meta_agent
+  pool_size: 20
+  max_overflow: 10
+  pool_timeout: 30
+  pool_recycle: 3600
+  echo: false  # 开发环境可设为 true 查看 SQL
+
+# Redis 缓存配置
+cache:
+  backend: redis
+  url: ${REDIS_URL}  # redis://localhost:6379/0
+  ttl: 3600
+  max_connections: 50
+
+# JWT 认证配置
+auth:
+  secret_key: ${JWT_SECRET_KEY}
+  algorithm: HS256
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 7
+
+# 任务调度配置
+scheduler:
+  max_concurrent_tasks: 10
+  task_timeout: 3600
+  retry_max_attempts: 3
+  retry_backoff_factor: 2
+
+# 记忆模块配置
+memory:
+  compression:
+    enabled: true
+    hot_days: 7
+    warm_days: 90
+    warm_ratio: 0.5
+    cold_ratio: 0.75
+  retrieval:
+    top_k: 5
+    similarity_threshold: 0.7
+
+# 日志配置
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: json  # json, text
+  file: /var/log/meta-agent/app.log
+  rotation: daily
+  retention_days: 30
+
+# 监控配置
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_interval: 30

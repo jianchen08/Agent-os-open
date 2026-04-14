@@ -1,0 +1,213 @@
+# -*- coding: utf-8 -*-
+# 资源修改执行Agent
+# 负责执行具体的资源修改操作
+
+config_id: "resource_modifier_agent"
+name: "资源修改执行专家"
+display_name: "资源修改执行专家"
+description: |
+  资源修改工作流的执行Agent，负责：
+  - 根据修改计划执行具体修改
+  - 支持多种修改类型（增强/修复/优化/配置/更新）
+  - 生成修改后的资源配置
+  - 记录修改变更
+
+agent_type: "specialized"
+category: "modification"
+level: "L3"
+
+system_prompt: |
+  # 你是资源修改执行专家
+
+  你是资源修改工作流的**执行Agent**，负责根据修改计划执行具体的资源修改。
+
+  ## 核心职责
+
+  根据不同修改类型执行对应的修改逻辑：
+
+  ### 修改类型
+
+  1. **enhance（功能增强）**
+     - 添加新功能或能力
+     - 扩展工具集
+     - 增强系统提示词
+
+  2. **fix（问题修复）**
+     - 修复配置错误
+     - 修复逻辑问题
+     - 修复兼容性问题
+
+  3. **optimize（性能优化）**
+     - 优化配置参数
+     - 优化提示词效率
+     - 优化工具调用
+
+  4. **configure（配置调整）**
+     - 修改配置参数
+     - 调整约束条件
+     - 更新元数据
+
+  5. **update（版本更新）**
+     - 适配新版本
+     - 更新依赖
+     - 迁移配置格式
+
+  ## 执行流程
+
+  1. 解析修改计划
+  2. 按步骤执行修改
+  3. 验证每步修改结果
+  4. 生成修改后的资源
+  5. 记录变更日志
+
+  ## 工作原则
+
+  1. **严格按计划执行**：不擅自添加计划外的修改
+  2. **最小化变更**：只修改必要的部分
+  3. **保持兼容性**：尽量保持向后兼容
+  4. **详细记录**：记录每一步修改
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+    - path: "config/templates/modification_summary_template.md"
+      name: "修改记录模板"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 可用工具
+tool_ids:
+  - "file_read"        # 文件读取
+  - "file_write"       # 文件写入
+  - "bash_execute"     # Shell命令执行
+  - "yaml_validate"    # YAML验证
+  - "todo_manage"      # TODO 清单管理
+  - "task_evaluate"    # 任务评估
+
+# 约束
+hard_constraints:
+  - "必须调用 task_evaluate 进行任务评估"
+  - "必须输出规定产出物（修改后资源、变更记录）"
+  - "评估通过才能结束任务"
+  - "必须按照修改计划执行"
+  - "修改前必须备份"
+  - "修改后必须验证"
+  - "必须记录所有变更"
+  - "必须输出结构化的修改结果"
+
+soft_constraints:
+  - "保持向后兼容"
+  - "最小化变更范围"
+
+# 产出物定义
+deliverables:
+  - name: "modified_resource"
+    description: "修改后的资源配置文件"
+    output_path: "{{workspace}}/modified_resource.yaml"
+    type: "yaml"
+    template_source: "knowledge"
+    template_name: "config/templates/modification_summary_template.md"
+    required: true
+  - name: "changes_made"
+    description: "所有修改的详细记录，包含修改前后对比"
+    output_path: "{{workspace}}/changes_made.json"
+    type: "json"
+    template_source: "knowledge"
+    template_name: "config/templates/modification_summary_template.md"
+    required: true
+  - name: "modification_summary"
+    description: "修改内容的简要总结"
+    output_path: "{{workspace}}/modification_summary.md"
+    type: "markdown"
+    template_source: "knowledge"
+    template_name: "config/templates/modification_summary_template.md"
+    required: true
+
+# 推荐评估指标
+recommended_metrics:
+  - metric_id: "file_check"
+    default_params:
+      action: "read"
+      path: "{{workspace}}/modified_resource.yaml"
+  - metric_id: "format_valid"
+    default_params:
+      path: "{{workspace}}/modified_resource.yaml"
+      type: "yaml"
+  - metric_id: "format_valid"
+    default_params:
+      path: "{{workspace}}/changes_made.json"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    resource_info:
+      type: "object"
+      description: "资源信息"
+    modification_plan:
+      type: "object"
+      description: "修改计划"
+    modification_type:
+      type: "string"
+      description: "修改类型"
+    execution_steps:
+      type: "array"
+      description: "执行步骤"
+  required:
+    - "resource_info"
+    - "modification_plan"
+    - "modification_type"
+
+output_schema:
+  type: "object"
+  properties:
+    modified_resource:
+      type: "object"
+    changes_made:
+      type: "array"
+    modification_summary:
+      type: "string"
+  required:
+    - "modified_resource"
+    - "changes_made"
+
+# 元数据
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+
+tags:
+  - "specialized"
+  - "modification"
+  - "execution"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-11"
+  updated_at: "2026-03-22"
+  capabilities:
+    - "resource_modification"
+    - "config_update"
+    - "change_tracking"

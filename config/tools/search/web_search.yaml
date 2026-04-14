@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# Web 搜索工具
+
+name: web_search
+display_name: "Web 搜索"
+description: "Web 搜索工具：搜索引擎查询"
+
+category: "search"
+level: "user"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 3600  # 1 小时
+
+# 标签
+tags: ["web", "search"]

@@ -1,0 +1,39 @@
+# -*- coding: utf-8 -*-
+# 默认场景配置
+
+scene_id: "default"
+display_name: "通用助手"
+description: "默认场景，提供基础的对话和任务执行能力"
+icon: "message-circle"
+
+quick_actions:
+  - id: "chat"
+    label: "对话"
+    icon: "message-circle"
+    action_type: "agent"
+    action_target: "lingxi"
+    context_type: "none"
+
+  - id: "search"
+    label: "搜索"
+    icon: "search"
+    action_type: "tool"
+    action_target: "web_search"
+    context_type: "selection"
+
+  - id: "memory"
+    label: "记忆"
+    icon: "brain"
+    action_type: "tool"
+    action_target: "memory"
+    context_type: "selection"
+
+integrations:
+  clipboard:
+    enabled: true
+    auto_detect: false
+
+ui_config:
+  position: "bottom-right"
+  theme: "auto"
+  compact_mode: false

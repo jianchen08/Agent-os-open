@@ -1,0 +1,58 @@
+# 成本控制配置
+# Token 预算和成本限制配置
+
+# 全局预算配置
+global:
+  # 每日 Token 限制
+  daily_token_limit: 100000
+  # 每月 Token 限制
+  monthly_token_limit: 3000000
+  # 单任务 Token 限制
+  per_task_token_limit: 50000
+  # 单会话 Token 限制
+  per_session_token_limit: 100000
+
+# 告警阈值配置
+alerts:
+  # 警告阈值 (80%)
+  warning_threshold: 0.8
+  # 严重阈值 (90%)
+  critical_threshold: 0.9
+  # 耗尽阈值 (100%)
+  exhausted_threshold: 1.0
+
+# 自动保护策略
+protection:
+  # 达到警告阈值自动保存检查点
+  auto_save_at_warning: true
+  # 达到严重阈值自动暂停
+  auto_pause_at_critical: true
+  # 达到配额自动停止
+  auto_stop_at_exhausted: true
+
+# 成本估算配置 ($/1K tokens)
+cost_rates:
+  # 默认成本率
+  default: 0.002
+  # 按模型配置成本率
+  models:
+    glm-4.7: 0.001
+    deepseek-chat: 0.0014
+    deepseek-reasoner: 0.0055
+    gpt-4: 0.03
+    gpt-4-turbo: 0.01
+    gpt-3.5-turbo: 0.0015
+    claude-3-opus: 0.015
+    claude-3-sonnet: 0.003
+    claude-3-haiku: 0.00025
+
+# 用户级别预算 (可选)
+user_budgets:
+  # 默认用户预算
+  default:
+    daily_token_limit: 100000
+    monthly_token_limit: 3000000
+  # VIP 用户预算示例
+  vip:
+    daily_token_limit: 500000
+    monthly_token_limit: 15000000

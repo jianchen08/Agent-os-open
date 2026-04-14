@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# 资源搜索工具
+
+name: resource_search
+display_name: "资源搜索"
+description: "资源搜索工具：搜索 Agent、工具、工作流、Skill 等资源"
+
+category: "search"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 300  # 5 分钟
+
+# 标签
+tags: ["resource", "search", "agent", "tool", "workflow", "skill"]

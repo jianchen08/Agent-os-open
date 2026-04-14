@@ -1,0 +1,216 @@
+# -*- coding: utf-8 -*-
+# 通用任务 Agent - L3 执行 Agent
+# 负责执行通用任务
+
+config_id: "general_agent"
+name: "通用任务执行者"
+display_name: "通用任务执行者"
+description: |
+  负责执行通用任务。
+  处理不需要专业化 Agent 的一般性任务。
+
+agent_type: "specialized"
+category: "task"
+level: "L3"
+
+system_prompt: |
+  # 你是通用任务执行者
+
+  你负责执行通用任务。
+
+  ## 核心职责
+
+  1. **任务理解**：分析任务描述，识别任务目标和验收标准(AC)
+  2. **执行规划**：使用 todo_manage 工具创建执行步骤清单
+  3. **任务执行**：按步骤执行，每完成一步更新 TODO 状态
+  4. **任务评估**：所有步骤完成后，**必须**调用 task_evaluate 工具进行评估
+
+  ## 执行流程
+
+  1. 理解任务目标和验收标准
+  2. 调用 todo_manage(action="write") 创建执行步骤清单
+  3. 按顺序执行每个步骤，完成后调用 todo_manage(action="update") 更新状态
+  4. **【重要】所有 TODO 完成后，立即调用 task_evaluate 工具评估验收标准**
+  5. 根据评估结果输出最终报告或修复问题
+
+  ## 注意事项
+
+  - TODO 清单是你自己的执行计划（HOW），验收标准是评估指标（WHAT）
+  - 每个工具只需调用一次，不要重复调用相同的工具
+  - 工具返回成功结果后，不要再次调用同一工具
+  - 如果工具返回"缓存结果"，说明操作已在之前完成，直接进行下一步
+  - 任务执行完成后，**必须调用 task_evaluate** 进行评估，否则任务不会被标记为完成
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 上下文变量配置
+context_variables:
+  enable: true
+  include_timestamp: true
+  variables:
+    agent_name: "通用任务执行者"
+    agent_level: "L3"
+    agent_category: "task"
+
+# 知识库配置
+knowledge:
+  mode: "compressed"
+  max_tokens: 1000
+  top_k: 3
+  score_threshold: 0.7
+
+# 可用工具（总工具数 ≤ 20，全部预加载）
+tool_ids:
+  - "file_read"          # 文件读取
+  - "file_write"         # 文件写入
+  - "bash_execute"       # Shell命令执行
+  - "enhanced_search"    # 文件内容/文件名搜索
+  - "web_search"         # 互联网搜索
+  - "fetch"              # HTTP请求/网页抓取
+  - "memory"             # 记忆检索与存储
+  - "evaluate"           # Schema验证/格式检查
+  - "todo_manage"        # TODO清单管理（规划执行步骤）
+  - "task_evaluate"      # 任务评估（执行完成后必须调用）
+
+# 约束
+hard_constraints:
+  - "必须记录执行步骤"
+  - "遇到无法解决的问题必须报告"
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "优先使用简单直接的方法"
+  - "执行前确认理解任务"
+  - "执行后验证结果"
+
+# 规则强化配置（在上下文末尾重复关键规则）
+rule_reinforcement:
+  enabled: true
+  include_hard_constraints: true
+  include_soft_constraints: false
+  include_system_prompt_rules: true
+  extraction_markers:
+    - "【重要】"
+    - "【必须】"
+    - "必须"
+  custom_rules: []
+  template: |
+    ---
+    【执行前请再次确认以下规则】
+    {rules}
+    ---
+  max_rules: 10
+
+# 产出物定义
+deliverables:
+  - name: "execution_report"
+    description: "执行报告，包含任务概述、执行记录、产出物索引、修改记录、已知问题与建议"
+    output_path: "{{workspace}}/reports/{{task_id}}_report.md"
+    type: "markdown"
+    template_source: "knowledge"
+    template_name: "config/templates/execution_report_template.md"
+    required: true
+
+# 推荐评估指标（L1 提交任务时可参考，复杂/重要任务可追加语义评估）
+recommended_metrics:
+  - metric_id: "file_check"
+    default_params:
+      action: "read"
+      path: "{{workspace}}/reports/{{task_id}}_report.md"
+  - metric_id: "format_valid"
+    default_params:
+      path: "{{workspace}}/reports/{{task_id}}_report.md"
+      type: "markdown"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    task:
+      type: "object"
+      description: "任务描述"
+      properties:
+        description:
+          type: "string"
+        inputs:
+          type: "object"
+        expected_outputs:
+          type: "array"
+        constraints:
+          type: "array"
+    context:
+      type: "object"
+      description: "上下文信息"
+  required:
+    - "task"
+
+output_schema:
+  type: "object"
+  properties:
+    execution_result:
+      type: "object"
+      description: "执行结果"
+      properties:
+        status:
+          type: "string"
+          enum: ["success", "partial", "failed"]
+        task_description:
+          type: "string"
+        steps_executed:
+          type: "array"
+        outputs:
+          type: "object"
+        issues:
+          type: "array"
+        suggestions:
+          type: "array"
+  required:
+    - "execution_result"
+
+# 元数据
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+
+tags:
+  - "specialized"
+  - "task"
+  - "general"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-15"
+  updated_at: "2026-03-22"
+  capabilities:
+    - "general_execution"
+    - "file_operations"
+    - "data_processing"
+    - "information_gathering"

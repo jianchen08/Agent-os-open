@@ -1,0 +1,23 @@
+# 工具权限配置
+# 按 Agent 层级配置可用工具的白名单/黑名单
+#
+# 配置说明:
+#   - allowed: ["*"] 表示允许所有工具
+#   - allowed: ["tool1", "tool2"] 表示只允许指定工具
+#   - denied: ["tool1", "tool2"] 表示禁止指定工具
+#   - denied 优先级高于 allowed
+
+tool_permissions:
+  # L1 主 Agent: 全局调度者，拥有所有工具权限
+  L1:
+    allowed: ["*"]
+
+  # L2 Sub Agent: 任务调度者，拥有所有工具权限
+  L2:
+    allowed: ["*"]
+
+  # L3 执行 Agent: 纯粹执行者，禁止调度类工具
+  L3:
+    denied:
+      - task_submit      # 禁止提交任务（只能执行，不能派发）
+      - agent_call       # 禁止调用其他 Agent

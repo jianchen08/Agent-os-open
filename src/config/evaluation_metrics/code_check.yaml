@@ -1,0 +1,150 @@
+# 代码静态检查评估指标
+# 使用通用工具 bash_execute 执行代码检查
+
+id: code_check
+name: 代码检查
+description: 检查代码的语法、Lint、类型等静态分析
+
+# ===== 评估器配置 =====
+evaluator_id: bash_execute
+evaluator_type: tool
+
+default_config:
+  action: execute
+  timeout: 60
+  use_isolation: true
+
+# ===== 预期输入定义 =====
+expected_input:
+  description: "检查代码的语法、Lint、类型等静态分析"
+  params:
+    command:
+      type: string
+      description: "检查命令（如 ruff check .、mypy src/）"
+      required: true
+      example: "ruff check src/"
+    working_dir:
+      type: string
+      description: "工作目录"
+      required: false
+      example: "."
+
+# ===== 预期输出定义 =====
+expected_output:
+  description: "返回代码检查结果"
+  params:
+    success:
+      type: boolean
+      description: "工具调用是否成功"
+    data:
+      type: object
+      description: "返回数据（成功时返回）"
+      properties:
+        status:
+          type: string
+          description: "命令状态"
+          enum: ["completed", "running", "terminated"]
+        exit_code:
+          type: integer
+          description: "命令退出码（0 表示检查通过）"
+        output:
+          type: string
+          description: "命令输出（含检查结果详情）"
+        summary:
+          type: array
+          description: "输出摘要"
+        elapsed_seconds:
+          type: number
+          description: "执行耗时（秒）"
+    error:
+      type: string
+      description: "错误信息（失败时返回）"
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+    - field: "data.status"
+      operator: "equals"
+      value: "completed"
+    - field: "data.exit_code"
+      operator: "equals"
+      value: 0
+  logic: "and"
+  pass_message: "代码检查通过"
+  fail_message: "代码检查发现问题"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: ["execute", "continue", "terminate", "input", "read_log"]
+      description: "操作类型"
+      default: "execute"
+    command:
+      type: string
+      description: "要执行的Shell命令"
+    pid:
+      type: integer
+      description: "进程ID（continue/terminate/input/read_log 时使用）"
+    timeout:
+      type: integer
+      description: "超时时间（秒）"
+      default: 30
+    working_dir:
+      type: string
+      description: "工作目录"
+    input_text:
+      type: string
+      description: "发送到进程的输入"
+    force:
+      type: boolean
+      description: "是否强制终止"
+      default: false
+    use_isolation:
+      type: boolean
+      description: "是否使用隔离环境"
+      default: true
+  required: ["action"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要验证代码语法正确性
+  - 需要检查代码规范（Lint）
+  - 需要进行类型检查
+when_not_use:
+  - 需要运行测试（应使用 test_check）
+  - 需要检查代码逻辑（应使用 function_verify）
+  - 需要执行自定义命令（应使用 bash_check）
+examples:
+  - params:
+      command: ruff check src/
+    description: "检查代码规范"
+  - params:
+      command: mypy src/
+    description: "类型检查"
+caveats:
+  - 需要安装对应的检查工具
+  - 类型检查需要类型注解
+  - 退出码 0 表示检查通过
+  - action/timeout/use_isolation 由 default_config 固定，Agent 无需关心
+
+# ===== 依赖关系 =====
+is_red_line: true
+default_weight: 1.5
+level: 2
+includes:
+  - file_check
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - code
+  - lint
+  - syntax
+  - type

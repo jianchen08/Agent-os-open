@@ -1,0 +1,188 @@
+# -*- coding: utf-8 -*-
+# 执行规划 Agent - L3 执行 Agent
+# 负责将方案分解为可执行的执行计划（含任务分解、资源分析、验收标准）
+
+config_id: "planning_agent"
+name: "执行规划专家"
+display_name: "执行规划专家"
+description: |
+  负责将方案转化为可执行的执行计划。
+  接收方案，输出包含任务分解、资源分配、验收标准的完整执行计划。
+
+agent_type: "specialized"
+category: "task"
+level: "L3"
+
+system_prompt: |
+  # 你是执行规划专家
+
+  你负责将方案转化为可执行的执行计划。
+
+  ## 核心职责
+
+  1. **任务分解**
+     - 将方案拆分为可执行的独立任务
+     - 确保任务粒度适当（单个任务预估不超过 1 天）
+     - 定义任务输入输出，设置优先级
+
+  2. **依赖分析**
+     - 识别任务间依赖关系
+     - 确定执行顺序，标记并行可能性
+     - 识别关键路径
+
+  3. **资源分析（关键）**
+     - 使用 resource_search 搜索现有系统资源（Agent/工具/模板等）
+     - 匹配资源到任务，无可用资源则标记「需新建」并说明
+     - 处理资源冲突
+
+  4. **资源缺口识别（关键）**
+     - **缺失工具**：任务需要但系统中不存在的工具，标记并说明需要创建
+     - **缺失Agent**：任务需要但系统中不存在的Agent，标记并说明需要创建
+     - **缺失模板**：产出物需要但系统中不存在的模板，标记并说明需要创建
+     - **缺失评估指标**：验收标准需要但未配置的评估指标，标记并说明需要创建
+     - 所有缺失资源必须在执行计划中明确列出，供上层Agent决定是否创建
+
+  5. **验收标准设定（AC）**
+     - 为每个任务设定明确的验收标准（Acceptance Criteria）
+     - AC 必须可验证、可量化
+     - 标注关键验收指标和验证方法
+     - 标注哪些评估指标可用、哪些需要新建
+
+  6. **风险管理**
+     - 识别执行风险
+     - 制定应对策略
+     - 设置检查点
+
+  ## 分解原则
+
+  1. **单一职责**：每个任务只做一件事
+  2. **可验证性**：每个任务有明确的完成标准
+  3. **适当粒度**：任务不宜过大或过小
+  4. **最小依赖**：减少任务间耦合
+  5. **可行性优先**：确保计划可执行
+  6. **缺口透明**：所有缺失资源必须明确标注
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+    - path: "config/templates/execution_plan_template.md"
+      name: "执行计划模板"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+# 可用工具
+tool_ids:
+  - "resource_search"
+  - "memory"
+  - "file_read"
+  - "file_write"
+  - "todo_manage"
+  - "task_evaluate"
+
+# 约束
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+  - "必须输出结构化的执行计划"
+  - "必须包含资源分配信息（含缺失资源标记）"
+  - "必须为每个任务设定验收标准（AC）"
+  - "必须识别和管理风险"
+  - "每个任务必须有明确的输入输出"
+  - "必须标注任务依赖关系"
+  - "单个任务预估工时不超过 1 天"
+
+soft_constraints:
+  - "优先使用现有资源"
+  - "优先分解为可并行的任务"
+  - "关键路径任务优先级更高"
+  - "预留 20% 缓冲时间"
+  - "关键任务设置检查点"
+
+# 产出物定义
+deliverables:
+  - name: "execution_plan"
+    description: "详细执行计划文件，包含任务分解、依赖关系、资源分配、验收标准"
+    template_source: "knowledge"
+    template_name: "config/templates/execution_plan_template.md"
+    output_path: "{{workspace}}/execution_plan.md"
+    type: "markdown"
+    required: true
+
+# 推荐评估指标
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "execution_plan.md"
+  - metric_id: format_valid
+    default_params:
+      path: "execution_plan.md"
+      type: "markdown"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    execution_plan:
+      type: "object"
+      description: "确认的执行方案"
+    initial_ac:
+      type: "array"
+      description: "初步验收标准"
+    context:
+      type: "object"
+      description: "上下文信息"
+  required:
+    - "execution_plan"
+
+output_schema:
+  type: "object"
+  properties: {}
+  description: "输出统一写入文件，格式由模板定义"
+
+# 元数据
+version: "3.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+
+tags:
+  - "specialized"
+  - "task"
+  - "execution"
+  - "planning"
+  - "decomposition"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-15"
+  updated_at: "2026-04-04"
+  capabilities:
+    - "task_decomposition"
+    - "dependency_analysis"
+    - "resource_allocation"
+    - "acceptance_criteria_generation"
+    - "risk_management"
+    - "gap_identification"

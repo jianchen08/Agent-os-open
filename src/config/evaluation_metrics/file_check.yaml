@@ -1,0 +1,109 @@
+# 文件/目录检查评估指标
+# 使用通用工具 file_read 检查文件存在性
+
+id: file_check
+name: 文件检查
+description: 检查文件是否存在
+
+# ===== 评估器配置 =====
+evaluator_id: file_read
+evaluator_type: tool
+
+default_config:
+  action: read
+
+# ===== 预期输入定义 =====
+expected_input:
+  description: "检查文件是否存在"
+  params:
+    path:
+      type: string
+      description: "文件路径"
+      required: true
+      example: "src/main.py"
+
+# ===== 预期输出定义 =====
+expected_output:
+  description: "返回文件检查结果"
+  params:
+    success:
+      type: boolean
+      description: "工具调用是否成功（true=文件存在，false=文件不存在）"
+    data:
+      type: object
+      description: "文件数据（成功时返回）"
+      properties:
+        path:
+          type: string
+          description: "文件路径"
+        content:
+          type: string
+          description: "文件内容"
+        size:
+          type: integer
+          description: "文件大小（字节）"
+    error:
+      type: string
+      description: "错误信息（失败时返回）"
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+  logic: "and"
+  pass_message: "文件存在"
+  fail_message: "文件不存在或无法访问"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: ["read", "search", "list"]
+      description: "操作类型：read(读取文件)、search(搜索文件)、list(列出目录)"
+      default: "list"
+    path:
+      type: string
+      description: "文件或目录路径"
+    pattern:
+      type: string
+      description: "搜索模式（action=search 时使用）"
+    max_results:
+      type: integer
+      description: "最大结果数"
+      default: 100
+  required: ["action"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要验证文件是否存在
+  - 需要验证目录是否存在
+when_not_use:
+  - 需要检查文件内容（应使用 semantic_check）
+  - 需要检查文件权限
+examples:
+  - params:
+      path: src/main.py
+    description: "检查文件是否存在"
+  - params:
+      path: src
+    description: "检查目录是否存在"
+caveats:
+  - 路径必须是有效路径
+  - action 由 default_config 固定为 read，Agent 无需关心
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 1
+includes: []
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - file
+  - existence

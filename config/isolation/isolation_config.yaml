@@ -1,0 +1,201 @@
+# 隔离系统配置
+
+# ============================================
+# 工作空间配置
+# ============================================
+workspace:
+  # 工作空间根目录
+  # 所有任务的工作文件存放在此目录下
+  # 支持绝对路径和相对路径（相对于项目根目录）
+  # 示例：
+  #   - "D:/workspaces" (Windows 绝对路径)
+  #   - "/tmp/ai_workspaces" (Linux 绝对路径)
+  #   - ".ai_workspaces" (相对路径，相对于项目根目录)
+  root: ".ai_workspaces"
+
+# ============================================
+# 协调器配置
+# ============================================
+coordinator:
+  # 全局开关
+  enabled: true  # 启用隔离系统
+
+  # 优雅降级：隔离失败时自动降级到宿主机
+  enable_fallback: true
+
+  # 默认隔离级别
+  default_level: container  # host | container | sandbox
+
+  # 环境复用：同一任务内的工具是否共享隔离环境
+  reuse_environment: true
+
+  # 注意：blacklist、safe_categories、isolated_categories、tool_policies
+  # 已迁移到 config/isolation/isolation_policy.yaml，由 IsolationPolicyManager 管理
+
+  # 资源限制
+  resource_limits:
+    max_environments: 50      # 最大环境数量
+    environment_ttl: 3600     # 环境默认TTL（秒）
+    default_timeout: 300      # 默认超时时间（秒）
+
+# ============================================
+# 提供者配置
+# ============================================
+providers:
+  # 宿主机提供者
+  host:
+    enabled: true
+
+  # Cua 提供者
+  cua:
+    enabled: true
+    # 镜像配置（使用预装了依赖的镜像）
+    image: "agent-runtime:latest"
+    # 资源限制（优化后）
+    limits:
+      memory: "512m"
+      cpus: "0.5"
+
+  # E2B 提供者
+  e2b:
+    enabled: true
+    # API Key（优先使用环境变量 E2B_API_KEY）
+    api_key: null
+    # 沙箱模板
+    template: "base-python"
+
+# 策略配置
+policy:
+  # 是否启用优雅降级
+  enable_fallback: true
+
+  # 自定义策略（覆盖默认策略）
+  # 格式: task_type 或 operation_type: isolation_level
+  custom:
+    # 示例：PROJECT 级别任务使用 E2B 沙箱
+    # project: sandbox
+    # 示例：代码执行使用沙箱
+    # code_execution: sandbox
+
+# ============================================
+# 权限策略配置
+# ============================================
+permission_policies:
+  # 默认权限策略
+  default_policy:
+    name: "default"
+    policy_type: "default"
+    description: "默认策略：读取整个项目，写入仅限工作目录"
+    read:
+      scope: "project"       # project | workspace | custom | none
+      allow_all: true        # 是否允许读取整个项目
+    write:
+      scope: "workspace"     # project | workspace | custom | none
+      allow_outside: false   # 是否允许在工作目录外写入
+
+  # 子任务权限策略
+  subtask_policy:
+    name: "subtask"
+    policy_type: "subtask"
+    description: "子任务策略：同默认策略"
+    read:
+      scope: "project"
+      allow_all: true
+    write:
+      scope: "workspace"
+      allow_outside: false
+
+  # 系统配置权限策略（需要检查点）
+  system_config_policy:
+    name: "system_config"
+    policy_type: "system_config"
+    description: "系统配置策略：修改前需要创建检查点"
+    read:
+      scope: "project"
+      allow_all: true
+    write:
+      scope: "workspace"
+      allow_outside: false
+      require_checkpoint: true    # 修改前需要创建检查点
+      allowed_operations:        # 允许的操作类型
+        - "create"
+        - "modify"
+
+  # 只读权限策略
+  readonly_policy:
+    name: "readonly"
+    policy_type: "readonly"
+    description: "只读策略：禁止所有写入操作"
+    read:
+      scope: "project"
+      allow_all: true
+    write:
+      scope: "none"            # 禁止写入
+      allow_outside: false
+
+  # 特殊目录权限规则
+  special_directories:
+    # 系统配置目录（需要检查点）
+    "config/":
+      read:
+        scope: "project"
+        allow_all: true
+      write:
+        scope: "workspace"
+        allow_outside: false
+        require_checkpoint: true
+
+    # 共享资源目录（只读）
+    "shared/":
+      read:
+        scope: "project"
+        allow_all: true
+      write:
+        scope: "none"
+
+    # 模板目录（只读）
+    "templates/":
+      read:
+        scope: "project"
+        allow_all: true
+      write:
+        scope: "none"
+
+  # 根任务权限策略（无 workspace 限制）
+  root_task_policy:
+    name: "root_task"
+    policy_type: "default"
+    description: "根任务权限策略：可写入整个项目，需要用户确认"
+    read:
+      scope: "project"
+      allow_all: true
+    write:
+      scope: "project"
+      allow_outside: true
+      require_confirmation: true
+
+# 环境生命周期（由任务状态驱动，不再使用 TTL 自动清理）
+lifecycle:
+  # 项目级环境生命周期（秒）
+  project_ttl: 604800  # 7天
+
+  # 模块级环境生命周期（秒）
+  module_ttl: 86400  # 1天
+
+  # 原子任务环境生命周期（秒）
+  atomic_ttl: 3600  # 1小时
+
+# ============================================
+# 容器生命周期配置
+# ============================================
+container_lifecycle:
+  # 项目关闭时的行为
+  # stop: 停止容器但保留（支持恢复）
+  # remove: 删除容器
+  on_shutdown: "stop"
+
+  # 项目启动时是否恢复已停止的容器
+  resume_on_startup: true
+
+  # 容器名称前缀
+  name_prefix: "cua-"

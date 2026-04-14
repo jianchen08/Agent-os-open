@@ -1,0 +1,98 @@
+# Default Pipeline Configuration
+# 默认管道配置 - 灵汐 Agent 基础配置
+#
+# 扁平格式，兼容 load_pipeline_config() 解析。
+# Agent 参数（system_prompt, tool_ids 等）由 CLIApplication 注入 state，
+# 插件运行时从 ctx.state / ctx.get_service() 自主读取。
+
+name: lingxi_agent
+
+input_routes:
+  - name: default
+    condition: "True"
+    target: core
+    plugins:
+      - task_event_receiver
+      - tool_schema
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+    priority: 10
+
+output_routes:
+  # 有工具调用时 → 切换到 tool_execute
+  - route_type: next_tool
+    condition: "raw_tool_calls != []"
+    priority: 1
+  # 无工具调用时 → 结束当前轮次
+  - route_type: end
+    condition: "True"
+    priority: 99
+
+# 普通 Input/Output 插件 — 由 build_plugin_registry 统一实例化
+# Agent 可通过 plugins.disabled / plugins.enabled 覆盖
+plugins:
+  # ── Input 插件链（按 priority 排序）──
+  - class: plugins.input.task_event_receiver.TaskEventReceiverPlugin
+    config:
+      enabled: true
+  - class: plugins.input.tool_schema.ToolSchemaPlugin
+    config:
+      enabled: true
+  - class: plugins.input.memory_read.MemoryReadPlugin
+    config:
+      retrieval: semantic
+      top_k: 5
+  - class: plugins.input.knowledge_inject.KnowledgeInjectPlugin
+    config:
+      mode: disabled
+  - class: plugins.input.prompt_build.PromptBuildPlugin
+    config:
+      enabled: true
+      include_tools_description_in_prompt: false
+      include_static_vars: true
+      include_compressed_layers: true
+  # ── Output 插件链（按 priority 排序）──
+  - class: plugins.output.stop_check.StopCheckPlugin
+    config:
+      enabled: true
+  - class: plugins.output.error_check.ErrorCheckPlugin
+    config:
+      enabled: true
+  - class: plugins.output.pending_tools.PendingToolsOutput
+    config:
+      enabled: true
+  - class: plugins.output.task_reminder.TaskReminder
+    config:
+      max_reminders: 3
+      cooldown_seconds: 300
+  - class: plugins.output.context_compress.ContextCompressPlugin
+    config:
+      context_window: 128000
+      compress_trigger_ratio: 0.5
+  - class: plugins.output.memory_write.MemoryWritePlugin
+    config:
+      write_user_messages: true
+      write_llm_responses: true
+  - class: plugins.output.track.TrackPlugin
+    config:
+      enabled: true
+      track_token_usage: true
+      track_execution_time: true
+
+# 核心 LLM/工具执行插件
+core_plugins:
+  llm_call:
+    class: plugins.core.llm_core.LLMCore
+    config:
+      provider: minimax
+      model_name: MiniMax-M2.7
+      api_base: "https://api.minimaxi.com/v1"
+      api_key: "${MINIMAX_API_KEY}"
+      default_params:
+        temperature: 0.7
+        max_tokens: 4096
+  tool_execute:
+    class: plugins.core.tool_core.ToolCore
+    config:
+      timeout: 120

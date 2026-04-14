@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# 评估工具
+
+name: evaluate
+display_name: "评估"
+description: "评估工具：评估任务完成度和质量"
+
+category: "evaluation"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["evaluation", "quality", "system"]

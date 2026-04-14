@@ -1,0 +1,143 @@
+# 数据格式验证评估指标
+# 使用 schema_evaluator 工具验证数据结构和正则模式
+
+id: format_valid
+name: 格式验证
+description: 验证数据格式是否符合 JSON/YAML/Schema 规范，或使用正则模式校验文本
+
+# ===== 评估器配置 =====
+evaluator_id: schema_evaluator
+evaluator_type: tool
+
+default_config:
+  format: json
+  pattern_mode: all
+
+# ===== 预期输入定义 =====
+expected_input:
+  description: "验证数据格式或使用正则模式校验"
+  params:
+    data:
+      type: string
+      description: "要验证的数据（字符串或对象）"
+      required: false
+    path:
+      type: string
+      description: "或指定文件路径"
+      required: false
+    schema:
+      type: object
+      description: "JSON Schema（format=schema 时使用）"
+      required: false
+    patterns:
+      type: array
+      items:
+        type: string
+      description: "正则表达式列表（format=regex 或配合其他格式使用时）"
+      required: false
+
+# ===== 预期输出定义 =====
+expected_output:
+  description: "返回格式验证结果"
+  params:
+    success:
+      type: boolean
+      description: "工具调用是否成功（true=格式有效，false=格式无效）"
+    data:
+      type: object
+      description: "验证详情（成功时返回）"
+      properties:
+        matched_patterns:
+          type: array
+          description: "匹配成功的正则模式"
+        unmatched_patterns:
+          type: array
+          description: "未匹配的正则模式"
+    error:
+      type: string
+      description: "错误信息（失败时返回）"
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+  logic: "and"
+  pass_message: "格式验证通过"
+  fail_message: "格式验证失败"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    data:
+      description: "要验证的数据（字符串或对象）"
+    path:
+      type: string
+      description: "或指定文件路径"
+    format:
+      type: string
+      enum: [json, yaml, schema, regex]
+      description: "验证格式类型：json/yaml/schema/regex"
+      default: json
+    schema:
+      type: object
+      description: "JSON Schema（format=schema 时使用）"
+    patterns:
+      type: array
+      items:
+        type: string
+      description: "正则表达式列表（format=regex 时必填）"
+    pattern_mode:
+      type: string
+      enum: [all, any]
+      default: all
+      description: "patterns 匹配模式：all(全部匹配) / any(任一匹配)"
+  required: ["format"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要验证 JSON 格式
+  - 需要验证 YAML 格式
+  - 需要验证数据结构
+  - 需要使用正则模式校验文本内容
+when_not_use:
+  - 需要验证文件存在性（应使用 file_check）
+  - 需要验证内容语义（应使用 semantic_check）
+examples:
+  - params:
+      path: /config/app.yaml
+    description: "验证 YAML 文件格式"
+  - params:
+      data: '{"name": "test"}'
+    description: "验证 JSON 字符串格式"
+  - params:
+      data: "## 摘要\n这是调研报告内容"
+      patterns:
+        - "^## 摘要$"
+        - "\\d{4}年"
+        - "来源:"
+    description: "用正则校验文本内容"
+caveats:
+  - 数据和路径二选一
+  - Schema 验证需要提供 schema 参数
+  - Regex 验证使用 Python re 模块，支持多行模式
+  - format 和 pattern_mode 由 default_config 固定，Agent 无需关心
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 2
+includes:
+  - file_check
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - schema
+  - json
+  - yaml
+  - regex
+  - validation

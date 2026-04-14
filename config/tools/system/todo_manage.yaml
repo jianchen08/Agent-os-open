@@ -1,0 +1,26 @@
+# -*- coding: utf-8 -*-
+# TODO 清单管理工具
+
+name: todo_manage
+display_name: "TODO 清单管理"
+description: |
+  TODO 清单管理：write(创建清单，传入字符串列表)、read(读取清单)、update(更新状态)、clear(清空)。
+
+category: "task"
+level: "system"
+
+requires_approval: false
+dangerous_operations: []
+
+injected_params:
+  - name: "session_id"
+    description: "当前会话ID"
+    required: true
+  - name: "agent_id"
+    description: "当前Agent ID"
+    required: false
+
+cache:
+  enabled: false
+
+tags: ["todo", "checklist"]

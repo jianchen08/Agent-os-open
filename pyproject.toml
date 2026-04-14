@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-os"
+version = "0.1.0"
+description = "Agent OS 插件化管道架构"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "aiohttp>=3.9",
+    "watchdog>=3.0",
+    "litellm>=1.0",
+    "pydantic>=2.0",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+agent-os = "channels.cli.cli_main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["src/tests"]
+markers = [
+    "integration: LLM integration tests (require --run-integration)",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

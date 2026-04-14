@@ -1,0 +1,87 @@
+# LLM 模型配置
+# 此文件由系统自动管理，请勿手动编辑
+
+models:
+  glm-5-turbo:
+    provider: zhipu_coding
+    model_name: glm-5-turbo
+    display_name: GLM-5-Turbo
+    context_window: 200000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 16384
+  glm-4.7:
+    provider: zhipu_coding
+    model_name: glm-4.7
+    display_name: GLM-4.7
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 128000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 8192
+  embedding-3:
+    provider: zhipu_coding
+    model_name: embedding-3
+    display_name: Embedding-3
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 128000
+    dimension: 2048
+  embedding-2:
+    provider: zhipu_coding
+    model_name: embedding-2
+    display_name: Embedding-2
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    context_window: 128000
+    dimension: 1024
+  deepseek-chat:
+    provider: deepseek
+    model_name: deepseek-chat
+    display_name: DeepSeek Chat
+    api_base: https://api.deepseek.com/v1
+    api_key: [REDACTED]
+    context_window: 6000
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+  deepseek-reasoner:
+    provider: deepseek
+    model_name: deepseek-reasoner
+    display_name: DeepSeek R1 思考模型
+    api_base: https://api.deepseek.com/v1
+    api_key: [REDACTED]
+    context_window: 64000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 4096
+  minimax-m2.7:
+    provider: minimax
+    model_name: MiniMax-M2.7
+    display_name: MiniMax-M2.7
+    api_base: https://api.minimaxi.com/v1
+    api_key: [REDACTED]
+    context_window: 204800
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 8192
+defaults:
+  chat: minimax-m2.7
+  reasoning: minimax-m2.7
+  embedding: embedding-3
+providers:
+  zhipu_coding:
+    api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+  zhipu:
+    api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
+    api_base: https://open.bigmodel.cn/api/paas/v4/
+  deepseek:
+    api_key: [REDACTED]
+    api_base: https://api.deepseek.com/v1
+  minimax:
+    api_key: [REDACTED]
+    api_base: https://api.minimaxi.com/v1
+embeddings: {}

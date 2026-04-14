@@ -1,0 +1,14 @@
+channel:
+  type: websocket
+  server:
+    host: "0.0.0.0"
+    port: 8765
+    ping_interval: 30
+    ping_timeout: 10
+  session:
+    timeout: 3600
+  input:
+    adapter: WebSocketInputAdapter
+  output:
+    adapter: WebSocketOutputAdapter
+    streaming: true
