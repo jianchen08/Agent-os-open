@@ -30,7 +30,7 @@ class SimpleStateMachine:
 
     # 合法转换：{from_status: [to_status, ...]}
     TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
-        TaskStatus.PENDING: [TaskStatus.RUNNING, TaskStatus.PAUSED],
+        TaskStatus.PENDING: [TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.COMPLETED, TaskStatus.FAILED],
         TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EVALUATING, TaskStatus.PAUSED],
         TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED],
         TaskStatus.FAILED: [TaskStatus.PENDING],
@@ -225,6 +225,37 @@ class TaskService:
         task = self._get_or_raise(task_id)
         self._transition_with_callback(task, TaskStatus.RUNNING)
         logger.info("Task resumed: %s", task_id)
+        return task
+
+    def reset_to_pending(self, task_id: str) -> TaskModel:
+        """强制重置任务为 pending（用于 Worker 启动恢复场景）。
+
+        绕过状态机，将 running/failed 等状态的任务重置为 pending，
+        以便重新拾取执行。同时清除 started_at 等运行时字段。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        old_status = task.status
+        task.status = TaskStatus.PENDING
+        task.started_at = ""
+        task.error = ""
+        self._storage.save(task)
+
+        if self._on_state_change:
+            try:
+                self._on_state_change(task.id, old_status.value, TaskStatus.PENDING.value)
+            except Exception as e:
+                logger.warning("State change callback failed: %s", e)
+
+        logger.info("Task reset to pending (recovery): %s (was %s)", task_id, old_status.value)
         return task
 
     def fail_task(self, task_id: str, error: str = "") -> TaskModel:

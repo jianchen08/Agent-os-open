@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import uuid as _uuid
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,42 @@ logger = logging.getLogger(__name__)
 # 默认管道配置路径 -- 优先项目根目录的 config/，回退到 src/config/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
+
+# Maximum number of messages retained in a persisted session
+MAX_SESSION_MESSAGES = 100
+
+
+def _get_session_dir() -> Path:
+    """Get the directory used to store CLI session metadata."""
+    session_dir = Path("data/session")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def _load_session_id(session_dir: Path) -> str | None:
+    """Load the previous session ID from disk.
+
+    Returns:
+        The stored session ID string, or None if not found.
+    """
+    id_file = session_dir / ".current_session_id"
+    if id_file.exists():
+        try:
+            return id_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return None
+
+
+def _save_session_id(session_dir: Path, session_id: str) -> None:
+    """Persist the current session ID to disk.
+
+    Args:
+        session_dir: Path to the session metadata directory.
+        session_id: The session identifier to store.
+    """
+    id_file = session_dir / ".current_session_id"
+    id_file.write_text(session_id, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +197,15 @@ class CLIApplication:
         self._input_route_table = pipeline_config.input_route_table
         self._output_route_table = pipeline_config.output_route_table
 
-        # 创建共享服务 → 注入 PipelineEngine
-        self._services = self._build_services()
+        # 加载 Agent 配置（默认灵汐 lingxi）— 直接从 AgentRegistry 加载
+        from agents.registry import AgentRegistry
+        agent_registry = AgentRegistry()
+        agent_config_dir = _PROJECT_ROOT / "config" / "agents"
+        if agent_config_dir.exists():
+            agent_registry.load_directory(agent_config_dir)
+
+        # 创建共享服务 → 注入 PipelineEngine（agent_registry 需要在 _build_services 前创建）
+        self._services = self._build_services(agent_registry=agent_registry)
 
         # 如果 ToolCore 存在，从 ToolRegistry 注册工具
         tool_core = self._plugin_registry.get_core("tool_execute")
@@ -176,16 +220,10 @@ class CLIApplication:
                     logger.warning("register_core_tools failed: %s", exc)
                 tool_core.register_tools_from_registry(tool_registry)
 
-        # 加载 Agent 配置（默认灵汐 lingxi）— 直接从 AgentRegistry 加载
-        from agents.registry import AgentRegistry
-        agent_registry = AgentRegistry()
-        agent_config_dir = _PROJECT_ROOT / "config" / "agents"
-        if agent_config_dir.exists():
-            agent_registry.load_directory(agent_config_dir)
-            for candidate in ["default", "lingxi"]:
-                self._agent_config = agent_registry.get(candidate)
-                if self._agent_config:
-                    break
+        for candidate in ["default", "lingxi"]:
+            self._agent_config = agent_registry.get(candidate)
+            if self._agent_config:
+                break
         if self._agent_config:
             logger.info(
                 "Agent config loaded: %s (%s), level=%s",
@@ -197,11 +235,13 @@ class CLIApplication:
             logger.info("No agent config loaded, using raw LLM without system prompt")
 
         # 创建管道引擎（直接调用，不需要 Worker 中间层）
+        checkpoint_mgr = self._services.get("checkpoint_manager")
         self._engine = PipelineEngine(
             input_route_table=self._input_route_table,
             output_route_table=self._output_route_table,
             plugin_registry=self._plugin_registry,
             services=self._services,
+            checkpoint_manager=checkpoint_mgr,
         )
         logger.info("PipelineEngine created (direct call, no Worker)")
 
@@ -228,7 +268,7 @@ class CLIApplication:
 
 
 
-    def _build_services(self) -> dict[str, Any]:
+    def _build_services(self, agent_registry: Any = None) -> dict[str, Any]:
         """构建共享服务字典。
 
         创建 ToolRegistry、记忆存储、MemoryService 等共享服务，
@@ -392,6 +432,7 @@ class CLIApplication:
                 data_dir=str(_PROJECT_ROOT / "data" / "pipelines")
             )
             services["execution_record_storage"] = execution_record_storage
+            sys._agent_os_execution_record_storage = execution_record_storage
             logger.info("Service created: execution_record_storage")
         except Exception as exc:
             logger.warning("Failed to create execution_record_storage service: %s", exc)
@@ -429,11 +470,11 @@ class CLIApplication:
         services["event_bus"] = self._event_bus
 
         # 10b. AgentRegistry — 供 TaskWorker 加载子 agent 配置
-        try:
+        if agent_registry is not None:
             services["agent_registry"] = agent_registry
             logger.info("Service injected: agent_registry (%d agents)", len(agent_registry._configs))
-        except Exception:
-            pass
+        else:
+            logger.warning("agent_registry not provided to _build_services, TaskWorker will not be able to load sub-agent configs")
 
         # 11. PipelineCheckpointManager + PipelineRecovery — 管道检查点与恢复
         try:
@@ -447,6 +488,19 @@ class CLIApplication:
             logger.info("Service created: checkpoint_manager, pipeline_recovery")
         except Exception as exc:
             logger.warning("Failed to create checkpoint services: %s", exc)
+
+        # 12. 注入 CLI 交互通知器 — 子 Agent 人类交互支持
+        try:
+            from channels.cli.cli_interaction import CLIInteractionNotifier
+            from human_interaction import get_human_interaction_service
+            cli_notifier = CLIInteractionNotifier(console=self._output_adapter.console)
+            human_svc = get_human_interaction_service()
+            human_svc.set_notifier(cli_notifier)
+            services["cli_notifier"] = cli_notifier
+            services["human_interaction_service"] = human_svc
+            logger.info("Service created: CLIInteractionNotifier -> HumanInteractionService")
+        except Exception as exc:
+            logger.warning("Failed to create CLIInteractionNotifier: %s", exc)
 
         return services
 
@@ -586,6 +640,96 @@ class CLIApplication:
             logger.warning("Failed to register basic tool calculator: %s", exc)
 
     # -----------------------------------------------------------------------
+    # 非交互模式：发送单条消息并等待任务闭环
+    # -----------------------------------------------------------------------
+
+    async def run_single(self, message: str) -> None:
+        """非交互模式：发送单条消息，等待后台任务闭环后退出。"""
+        import time as _time
+
+        t0 = _time.time()
+        console = self._output_adapter.console
+
+        console.print(f"\n[bold green]User:[/bold green] {message}\n")
+
+        tw = getattr(self, "_task_worker", None)
+        if tw and hasattr(tw, "start"):
+            await tw.start()
+            logger.info("TaskWorker started (single-message mode)")
+
+        try:
+            result = await self._engine.run(
+                user_input=message,
+                agent_config=self._agent_config,
+                conversation_history=None,
+                streaming=False,
+                auto_approve=True,
+                interaction_mode="auto",
+            )
+        except Exception as exc:
+            console.print(f"\n[red]Engine error: {exc}[/red]")
+            if tw and hasattr(tw, "stop"):
+                await tw.stop()
+            return
+
+        elapsed_l1 = _time.time() - t0
+        iters = result.get("iteration", 0)
+        pipeline_id = result.get("pipeline_id", "")
+        raw = result.get("raw_result", "")
+
+        ts = self._services.get("task_service")
+        task_ids = []
+        if ts:
+            try:
+                storage = getattr(ts, "_storage", None)
+                if storage is not None:
+                    all_tasks = getattr(storage, "_tasks", {})
+                    running_tasks = [
+                        (tid, t) for tid, t in all_tasks.items()
+                        if hasattr(t, "status") and t.status.value in ("running", "pending")
+                    ]
+                    if running_tasks:
+                        running_tasks.sort(key=lambda x: getattr(x[1], "created_at", ""), reverse=True)
+                        task_ids = [tid for tid, _ in running_tasks]
+            except Exception:
+                pass
+
+        console.print(f"\n[dim]L1 done: {elapsed_l1:.1f}s, {iters} iterations, pipeline={pipeline_id}[/dim]")
+        if task_ids:
+            console.print(f"[dim]Tasks submitted: {task_ids}, waiting for completion...[/dim]\n")
+
+            final_statuses = {}
+            for _ in range(120):
+                await asyncio.sleep(5)
+                if ts:
+                    try:
+                        remaining = []
+                        for tid in task_ids:
+                            task = ts.get_task(tid)
+                            if task:
+                                status = task.status if hasattr(task, "status") else task.get("status", "?")
+                                status_val = status.value if hasattr(status, "value") else str(status)
+                                if status_val in ("completed", "failed", "cancelled"):
+                                    final_statuses[tid] = status_val
+                                else:
+                                    remaining.append(tid)
+                        if not remaining:
+                            break
+                    except Exception:
+                        pass
+
+            elapsed_total = _time.time() - t0
+            for tid in task_ids:
+                status = final_statuses.get(tid, "timeout")
+                console.print(f"\n[bold]Task {tid}: {status}[/bold]")
+            console.print(f"[dim]Total: {elapsed_total:.1f}s[/dim]")
+        else:
+            console.print(f"\n[dim]No task submitted. Response: {str(raw)[:300]}[/dim]")
+
+        if tw and hasattr(tw, "stop"):
+            await tw.stop()
+
+    # -----------------------------------------------------------------------
     # Claude Code 风格 REPL 循环
     # -----------------------------------------------------------------------
 
@@ -640,21 +784,100 @@ class CLIApplication:
         # 跨轮次对话历史：累积所有轮次的 messages
         conversation_history: list[dict[str, Any]] = []
 
+        # 会话级 pipeline_run_id：同一会话共享，清空历史时重新生成
+        # Try to resume the previous session from a persisted checkpoint
+        session_dir = _get_session_dir()
+        checkpoint_mgr = self._services.get("checkpoint_manager")
+        restored = False
+
+        saved_session_id = _load_session_id(session_dir)
+        if saved_session_id is not None and checkpoint_mgr is not None:
+            try:
+                latest_checkpoint = await checkpoint_mgr.get_latest(saved_session_id)
+                if latest_checkpoint is not None:
+                    saved_messages = latest_checkpoint.get("state", {}).get("messages", [])
+                    if isinstance(saved_messages, list) and saved_messages:
+                        conversation_history = saved_messages
+                        session_pipeline_id = saved_session_id
+                        restored = True
+            except Exception as exc:
+                logger.debug("Failed to restore session checkpoint: %s", exc)
+
+        if not restored:
+            session_pipeline_id = _uuid.uuid4().hex[:12]
+            _save_session_id(session_dir, session_pipeline_id)
+
+        # Trim to MAX_SESSION_MESSAGES after restoration
+        if len(conversation_history) > MAX_SESSION_MESSAGES:
+            conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
+
+        if restored:
+            console.print(
+                f"[dim]已恢复上次会话 ({len(conversation_history)} 条消息)，"
+                f"使用 /clear 开启新会话[/dim]"
+            )
+
         # REPL 主循环
         while True:
             # 渲染状态栏提示符
             status_text = self._output_adapter.status_bar.render_simple()
             self._input_adapter._prompt_str = f"{status_text} > "
 
+            # 检查是否有子 Agent 待处理的交互请求
+            cli_notifier = self._services.get("cli_notifier")
+            if cli_notifier and cli_notifier.has_pending():
+                human_svc = self._services.get("human_interaction_service")
+                from channels.cli.cli_interaction import run_sub_conversation
+                await run_sub_conversation(
+                    console=console,
+                    input_adapter=self._input_adapter,
+                    notifier=cli_notifier,
+                    interaction_service=human_svc,
+                    idle_timeout=60,
+                )
+                continue
+
             # 读取用户输入
             initial_state = await self._input_adapter.receive()
 
             # 退出信号
             if initial_state.get("should_stop"):
-                self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
-                # 停止任务执行器
+                # Persist conversation history before exiting
+                if conversation_history and checkpoint_mgr is not None:
+                    try:
+                        await checkpoint_mgr.save(
+                            session_pipeline_id,
+                            {"messages": conversation_history},
+                            phase="session_end",
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to save session on exit: %s", exc)
+
+                # 停止任务执行器（会等待所有 pending 任务完成）
                 if hasattr(self, '_task_worker') and self._task_worker and hasattr(self._task_worker, 'stop'):
                     await self._task_worker.stop()
+
+                # 汇报所有已提交任务的最终状态
+                ts = self._services.get("task_service")
+                if ts and hasattr(ts, 'list_by_status'):
+                    try:
+                        from tasks.types import TaskStatus
+                        all_tasks = []
+                        for st in TaskStatus:
+                            all_tasks.extend(ts.list_by_status(st))
+                        if all_tasks:
+                            console.print("\n[bold]任务状态汇总:[/bold]")
+                            for t in all_tasks:
+                                tid = t.id if hasattr(t, 'id') else str(t.get('id', '?'))
+                                tstatus = t.status if hasattr(t, 'status') else t.get('status', '?')
+                                tstatus_str = tstatus.value if hasattr(tstatus, 'value') else str(tstatus)
+                                ttitle = t.title if hasattr(t, 'title') else t.get('title', '')
+                                icon = "✅" if tstatus_str == "completed" else "❌" if tstatus_str == "failed" else "🔄"
+                                console.print(f"  {icon} {tid[:12]} | {tstatus_str} | {ttitle}")
+                    except Exception as exc:
+                        logger.debug("任务状态汇总失败: %s", exc)
+
+                self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
                 break
 
             # 空输入 — 跳过
@@ -667,12 +890,32 @@ class CLIApplication:
                 if slash_result.output:
                     console.print(slash_result.output)
                 if slash_result.should_exit:
+                    # Persist conversation history before exiting
+                    if conversation_history and checkpoint_mgr is not None:
+                        try:
+                            await checkpoint_mgr.save(
+                                session_pipeline_id,
+                                {"messages": conversation_history},
+                                phase="session_end",
+                            )
+                        except Exception as exc:
+                            logger.debug("Failed to save session on exit: %s", exc)
                     console.print("[bold blue]Goodbye![/bold blue]")
                     break
                 continue
 
             # 退出处理
             if initial_state.get("should_stop"):
+                # Persist conversation history before exiting
+                if conversation_history and checkpoint_mgr is not None:
+                    try:
+                        await checkpoint_mgr.save(
+                            session_pipeline_id,
+                            {"messages": conversation_history},
+                            phase="session_end",
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to save session on exit: %s", exc)
                 console.print("[bold blue]Goodbye![/bold blue]")
                 break
 
@@ -682,12 +925,32 @@ class CLIApplication:
                 if cmd_result is None:
                     continue
                 if cmd_result.should_stop:
+                    # Persist conversation history before exiting
+                    if conversation_history and checkpoint_mgr is not None:
+                        try:
+                            await checkpoint_mgr.save(
+                                session_pipeline_id,
+                                {"messages": conversation_history},
+                                phase="session_end",
+                            )
+                        except Exception as exc:
+                            logger.debug("Failed to save session on exit: %s", exc)
                     self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
                     break
                 if cmd_result.should_clear_history:
                     conversation_history.clear()
+                    session_pipeline_id = _uuid.uuid4().hex[:12]
                     self._turn_count = 0
                     self._output_adapter.update_status_bar(turn_count=0, context_pct=0.0)
+                    # Clean up persisted session checkpoints on disk
+                    if cmd_result.should_clear_session:
+                        old_session_id = _load_session_id(session_dir)
+                        if old_session_id and checkpoint_mgr is not None:
+                            try:
+                                await checkpoint_mgr.cleanup_old(old_session_id, keep_count=0)
+                            except Exception as exc:
+                                logger.debug("Failed to cleanup session checkpoints: %s", exc)
+                        _save_session_id(session_dir, session_pipeline_id)
                 # 应用命令产生的 state 更新
                 if cmd_result.state_updates:
                     self._apply_command_updates(cmd_result.state_updates)
@@ -767,6 +1030,10 @@ class CLIApplication:
                         conversation_history.append({"role": "user", "content": user_input})
                     if raw_result:
                         conversation_history.append({"role": "assistant", "content": raw_result})
+
+                # Trim conversation history to MAX_SESSION_MESSAGES
+                if len(conversation_history) > MAX_SESSION_MESSAGES:
+                    conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
 
                 # 更新状态栏
                 ctx_pct = self._estimate_context_pct(conversation_history)
@@ -974,6 +1241,7 @@ def main() -> None:
         choices=["normal", "auto", "plan"],
         help="交互模式 (normal/auto/plan)",
     )
+    parser.add_argument("--message", "-m", type=str, default=None, help="直接发送消息（非交互模式）")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -1000,7 +1268,10 @@ def main() -> None:
     app._interaction_mode = args.mode
     app.setup_pipeline(config_path=args.config)
 
-    asyncio.run(app.run())
+    if args.message:
+        asyncio.run(app.run_single(args.message))
+    else:
+        asyncio.run(app.run())
 
 
 if __name__ == "__main__":

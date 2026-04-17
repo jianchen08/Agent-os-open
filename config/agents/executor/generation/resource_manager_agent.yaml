@@ -190,7 +190,6 @@ static_vars:
         - enhanced_search: 在文件中搜索文本、代码或文件名
         - web_search: 搜索互联网信息
         - yaml_validate: 验证YAML配置文件的格式和内容
-        - todo_manage: 管理待办事项清单
         - evaluate: Schema验证、格式检查
         - human_interaction: 向用户提问并获取回答
         - bash_execute: 执行Shell命令
@@ -211,7 +210,6 @@ tool_ids:
   - "bash_execute"     # Shell命令执行
   - "resource_search"  # 搜索现有资源
   - "memory"           # 记忆检索与存储
-  - "todo_manage"      # TODO 清单管理
   - "task_evaluate"    # 任务评估
 
 # 约束

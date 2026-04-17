@@ -38,9 +38,11 @@ tool_cache:
       enabled: false
     rollback_task:
       enabled: false
+    resource_merge:
+      enabled: true
+      ttl: 300
     state_update:
       enabled: false
-    todo_manage:
       enabled: false
     task_submit:
       enabled: false
@@ -48,6 +50,9 @@ tool_cache:
       enabled: false
     task_evaluate:
       enabled: false
+    human_interaction:
+      enabled: true
+      ttl: 0
 tools:
 - name: file_read
   description: 读取文件内容、列出目录结构。适用场景：需要读取文件内容、浏览目录结构。不适用场景：需要写入文件（使用 file_write）、执行代码（使用
@@ -205,16 +210,19 @@ tools:
   - compatibility
   - check
   - system
-- name: rollback_task
-  description: 任务回滚工具：创建检查点、回滚操作、查询操作历史。适用场景：将任务回滚到之前状态、查看任务操作历史、查看所有检查点、任务出错时撤销操作、关键步骤前创建检查点。不适用场景：任务尚未开始时、需要删除任务本身时（使用任务管理工具）、仅需查看任务状态时。注意事项：回滚操作不可逆，执行前请确认；回滚后任务状态会恢复到检查点时的状态；部分操作可能无法完全回滚（如已发送的通知）；需要确保有足够的权限执行回滚操作。
+- name: resource_merge
+  description: 基于 git 的资源合并与回滚工具。在 workspace 中通过 git 追踪文件变更，支持将修改后的资源合并到目标目录，以及回滚到之前的版本。适用场景：资源生成/修改时的
+    workspace 管理、文件变更追踪、合并到正式目录、版本回滚。不适用场景：仅读取文件（使用 file_read）、执行命令（使用 bash_execute）。注意事项：需要系统已安装
+    git；rollback 操作会将文件恢复到指定 commit 状态；cleanup 会删除 .git 目录且不可逆。
   category: task
   level: all
   requires_approval: false
   dangerous_operations: []
   tags:
+  - git
+  - merge
   - rollback
-  - checkpoint
-  - undo
+  - resource
 - name: state_update
   description: '在工作流执行过程中更新共享状态变量。适用场景：更新重试计数器、在工作流节点间传递累计结果、更新工作流级状态变量。不适用场景：仅需在节点内部使用临时变量时、需要更新数据库记录时（使用持久化工具）。注意事项：更新的变量会被添加到shared_variables中；支持increment(增量)和append(追加)操作；context参数用于获取当前状态值。示例：{"updates":
     {"retry_count": {"operation": "increment", "value": 1}}} 表示将retry_count增加1'
@@ -226,7 +234,6 @@ tools:
   - workflow
   - state
   - system
-- name: todo_manage
   description: TODO 清单管理：write(创建清单，传入字符串列表)、read(读取清单)、update(更新状态)、clear(清空)。
   category: task
   level: system
@@ -283,6 +290,17 @@ tools:
   - evaluate
   - metric
   - completion
+- name: human_interaction
+  description: 与用户交互工具。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页。
+  category: system
+  level: all
+  requires_approval: false
+  dangerous_operations: []
+  tags:
+  - interaction
+  - human
+  - approval
+  - conversation
 permission_policies:
   admin:
     can_approve: true
@@ -300,9 +318,8 @@ permission_policies:
     - schema_evaluator
     - resource_evaluator
     - compatibility_checker
-    - rollback_task
+    - resource_merge
     - state_update
-    - todo_manage
     - task_submit
     - task_manage
     - task_evaluate
@@ -326,9 +343,8 @@ permission_policies:
     - schema_evaluator
     - resource_evaluator
     - compatibility_checker
-    - rollback_task
+    - resource_merge
     - state_update
-    - todo_manage
     - task_submit
     - task_manage
     - task_evaluate

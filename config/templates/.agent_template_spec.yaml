@@ -77,7 +77,6 @@ level: {level}
 #   |---|---|---|---|---|---|
 #   | "L1" | 主控层 | main | 接收用户需求，分解为子任务，调度资源执行 | task_submit, task_manage, resource_search | 无 |
 #   | "L2" | 协调层 | orchestrator | 协调多个 L3 任务执行，整合结果 | task_submit, resource_search | 有 |
-#   | "L3" | 执行层 | specialized/atomic | 执行具体任务，完成后评估验收标准 | todo_manage, task_evaluate, resource_search | 有 |
 # - 决策建议:
 #   - 创建 main Agent → "L1"
 #   - 创建 orchestrator Agent → "L2"
@@ -159,7 +158,6 @@ level: {level}
 #
 #   ## 核心职责
 #     1. 任务理解
-#     2. 执行规划（todo_manage）
 #     3. 任务执行
 #     4. 任务评估（task_evaluate）
 #
@@ -239,7 +237,6 @@ system_prompt: |
 #     4. 输出调研报告
 #     
 #     ## 执行流程
-#     1. 使用 todo_manage 制定调研计划
 #     2. 使用 resource_search 搜索现有资源
 #     3. 使用 web_search 搜索网络资料
 #     4. 整理分析并输出结构化报告
@@ -343,7 +340,6 @@ system_prompt: |
 #   | task_evaluate | 评估任务是否满足验收标准 |
 #   | memory | 检索和存储记忆 |
 #   | resource_search | 搜索Agent/工具/工作流/脚本资源 |
-#   | todo_manage | 管理待办事项清单 |
 #   | evaluate | Schema验证、格式检查、JSON验证 |
 #   | yaml_validate | 验证YAML配置文件的格式和内容 |
 #   | human_interaction | 向用户提问并获取回答 |
@@ -361,7 +357,6 @@ system_prompt: |
 #           - enhanced_search: 在文件中搜索文本、代码或文件名
 #           - web_search: 搜索互联网信息
 #           - fetch: 执行HTTP请求和网页抓取
-#           - todo_manage: 管理待办事项清单
 #           - evaluate: Schema验证、格式检查
 #           - yaml_validate: 验证YAML配置文件
 #           - human_interaction: 向用户提问并获取回答
@@ -507,7 +502,6 @@ tool_ids:
 #   | "web_fetch" | 获取网页内容 | 需要获取网页详细内容的 Agent |
 #   | "memory" | 记忆检索 | 需要检索历史经验的 Agent（L1/L2 推荐，L3 视情况：需要长上下文或记忆增强时配备）|
 #   | "resource_search" | 资源搜索 | 搜索 Agent/工具/工作流。（L1 必选；L2 仅通用 Agent 可配备；L3 基本不配备，仅用户明确要求的通用 L3 Agent 可配备）|
-#   | "todo_manage" | TODO 清单管理 | 需要规划执行步骤的 Agent（推荐：除特别简单的 Agent 外都可配备）|
 #   | "task_evaluate" | 任务评估 | 需要评估验收标准的 Agent（L2/L3 必选）|
 #   | "task_submit" | 提交子任务 | 需要提交子任务的 Agent（L1/L2 必选）|
 #   | "task_manage" | 管理任务状态 | 需要管理任务状态的 Agent（L1/L2 必选）|
@@ -521,7 +515,6 @@ tool_ids:
 # - 按层级必选工具:
 #   - L1: task_submit, task_manage, resource_search
 #   - L2: task_submit, task_manage, task_evaluate（通用 Agent 可加 resource_search）
-#   - L3: todo_manage, task_evaluate（通用 Agent 可加 resource_search，需用户明确要求）
 # - 决策建议: 根据任务需求选择必要工具，避免授予过多权限
 
 # ==================== 约束配置 ====================

@@ -82,7 +82,6 @@ tool_ids:
   - "enhanced_search"  # 文件内容/文件名搜索
   - "resource_search"  # 搜索资源
   - "memory"           # 记忆检索与存储
-  - "todo_manage"      # TODO 清单管理
   - "task_evaluate"    # 任务评估
 
 # 约束

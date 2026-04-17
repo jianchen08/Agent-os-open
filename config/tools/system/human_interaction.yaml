@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+# 人类交互工具
+
+name: human_interaction
+display_name: "人类交互"
+description: "与用户交互工具。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页。"
+
+category: "system"
+level: "all"
+
+input_schema:
+  type: "object"
+  properties:
+    mode:
+      type: "string"
+      enum: ["choice", "conversation"]
+      description: "交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页）"
+    title:
+      type: "string"
+      description: "交互标题"
+    description:
+      type: "string"
+      description: "详细说明"
+    options:
+      type: "array"
+      items:
+        type: "object"
+        properties:
+          id: {"type": "string"}
+          label: {"type": "string"}
+      description: "选项列表（选择模式）"
+    questions:
+      type: "array"
+      items: {"type": "string"}
+      description: "问题列表（澄清场景）"
+    initial_message:
+      type: "string"
+      description: "开场消息（对话模式）"
+    suggestions:
+      type: "array"
+      items: {"type": "string"}
+      description: "快捷回复建议（对话模式）"
+    timeout_seconds:
+      type: "number"
+      default: 300
+      description: "超时时间（秒）"
+    priority:
+      type: "string"
+      enum: ["low", "normal", "high", "critical"]
+      default: "normal"
+      description: "优先级"
+  required: ["mode", "title"]
+
+injected_params:
+  - name: "user_id"
+    description: "用户ID"
+    required: true
+  - name: "session_id"
+    description: "会话ID"
+    required: true
+  - name: "thread_id"
+    description: "线程ID"
+    required: true
+  - name: "tab_id"
+    description: "标签ID"
+    required: true
+  - name: "agent_id"
+    description: "Agent ID"
+    required: false
+
+tags:
+  - "interaction"
+  - "human"
+  - "approval"
+  - "conversation"
+  - "system"

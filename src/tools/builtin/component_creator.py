@@ -1,4 +1,4 @@
-﻿"""
+"""
 组件创建工具
 
 将生成的组件（工具/Agent/工作流）保存到文件并同步到数据库。
@@ -123,7 +123,7 @@ async def _sync_to_database(component_type: str, file_path: Path) -> bool:
     try:
         # 延迟导入避免循环依赖
         from config.loader import ConfigLoader
-        from db.connection import get_db_manager
+        from infrastructure.db import get_db_manager
 
         async with get_db_manager().get_session() as session:
             loader = ConfigLoader()

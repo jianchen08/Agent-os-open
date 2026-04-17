@@ -187,36 +187,30 @@ class BaseRegistry(ABC, Generic[K, V]):
         return value
 
     def get(self, key: K) -> V:
-        """获取条目"""
-        with self._lock:
-            if key not in self._items:
-                raise KeyError(f"键 '{key}' 不存在")
-            return self._items[key]
+        """获取条目（无锁读取 — CPython dict 读操作是原子的）"""
+        if key not in self._items:
+            raise KeyError(f"键 '{key}' 不存在")
+        return self._items[key]
 
     def get_optional(self, key: K) -> V | None:
-        """可选获取条目"""
-        with self._lock:
-            return self._items.get(key)
+        """可选获取条目（无锁读取）"""
+        return self._items.get(key)
 
     def has(self, key: K) -> bool:
-        """检查键是否存在"""
-        with self._lock:
-            return key in self._items
+        """检查键是否存在（无锁读取）"""
+        return key in self._items
 
     def list_all(self) -> list[V]:
-        """列出所有条目"""
-        with self._lock:
-            return list(self._items.values())
+        """列出所有条目（无锁读取 — 返回快照）"""
+        return list(self._items.values())
 
     def list_keys(self) -> list[K]:
-        """列出所有键"""
-        with self._lock:
-            return list(self._items.keys())
+        """列出所有键（无锁读取 — 返回快照）"""
+        return list(self._items.keys())
 
     def count(self) -> int:
-        """获取条目数量"""
-        with self._lock:
-            return len(self._items)
+        """获取条目数量（无锁读取）"""
+        return len(self._items)
 
     def clear(self) -> None:
         """清空注册表"""
@@ -362,14 +356,12 @@ class CachedFactory(ABC, Generic[K, V]):
             return False
 
     def list_cached(self) -> list[K]:
-        """列出已缓存的键"""
-        with self._lock:
-            return list(self._cache.keys())
+        """列出已缓存的键（无锁读取 — 返回快照）"""
+        return list(self._cache.keys())
 
     def is_cached(self, key: K) -> bool:
-        """检查是否已缓存"""
-        with self._lock:
-            return key in self._cache
+        """检查是否已缓存（无锁读取）"""
+        return key in self._cache
 
     def list_available_types(self) -> list[K]:
         """列出所有可用类型"""

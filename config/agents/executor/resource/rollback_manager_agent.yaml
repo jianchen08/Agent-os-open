@@ -102,7 +102,6 @@ tool_ids:
   - "file_read"        # 文件读取
   - "file_write"       # 文件写入
   - "resource_search"  # 资源搜索
-  - "todo_manage"      # TODO 清单管理
   - "task_evaluate"    # 任务评估
 
 # 约束

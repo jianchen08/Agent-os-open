@@ -2,14 +2,15 @@
 
 enabled: true
 
-# 审批策略
 policies:
-  # HOST模式 + 危险操作才需要审批
-  host_dangerous:
+  # 高风险操作审批策略（由 security_check 插件统一判定）
+  # security_check 通过 security_rules.yaml 配置规则，
+  # 匹配到 needs_approval 动作时设置 approval_required=True，管道挂起等待人工审批
+  high_risk:
     enabled: true
     action: "NEEDS_APPROVAL"
+    description: "由 security_check 插件统一判定危险操作并触发审批流程"
 
-# 用户信任策略（可扩展）
 user_trust:
   enabled: false
   trusted_users: []

@@ -138,6 +138,7 @@ class ToolCore(ICorePlugin):
         "_message_queue": "message_queue",
         "_tool_registry": "tool_registry",
         "_session": "db_session",
+        "_memory_service": "memory_service",
     }
 
     @staticmethod
@@ -295,12 +296,31 @@ class ToolCore(ICorePlugin):
             tool_args = tc.get("args", tc.get("arguments", {}))
 
             # LLM 返回的 arguments 可能是 JSON 字符串，需要解析
+            args_parse_failed = False
             if isinstance(tool_args, str):
                 try:
                     tool_args = json.loads(tool_args)
                 except (json.JSONDecodeError, TypeError):
-                    # 解析失败，保留原始字符串包装为 dict
-                    tool_args = {"raw_arguments": tool_args}
+                    args_parse_failed = True
+                    logger.warning(
+                        "[%s] 工具 %s 的 arguments JSON 解析失败（可能过长被截断），"
+                        "长度=%d，前200字符: %s",
+                        self.name, tool_name, len(tool_args), tool_args[:200],
+                    )
+                    result = {
+                        "tool_name": tool_name,
+                        "success": False,
+                        "error": (
+                            f"工具 {tool_name} 的调用参数 JSON 格式无效（可能参数内容过长导致被截断）。"
+                            f"请将操作拆分为多个小步骤：\n"
+                            f"1. 如果是 file_write：请分多次写入，每次写入一个章节或部分内容\n"
+                            f"2. 如果是其他工具：请减少参数中的文本量\n"
+                            f"3. 不要一次性传入大量文本作为参数"
+                        ),
+                    }
+                    results.append(result)
+                    last_result_text = f"Error: {result['error']}"
+                    continue
 
             if not isinstance(tool_args, dict):
                 tool_args = {}

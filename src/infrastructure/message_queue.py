@@ -5,7 +5,8 @@
 - 去掉全局单例，改为普通类实例化
 - 保留核心功能：push/pop/peek/get_all/clear/size/get_statistics
 - 保留消息过期自动清理
-- 保留线程安全（threading.Lock）
+- 使用 asyncio.Lock 替代 threading.Lock（避免阻塞事件循环）
+- 使用 bisect.insort 优化优先级插入（O(log n) 替代 O(n log n) 全排序）
 - execution_id 改名为 target_id（更通用）
 
 暴露接口：
@@ -16,8 +17,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import bisect
 import logging
-import threading
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -63,13 +65,13 @@ class Message:
 
 
 class MessageQueue:
-    """线程安全的消息队列。
+    """异步安全的消息队列。
 
     管理待注入的消息，支持：
     - 按 session 分组存储消息
-    - 消息优先级排序（高优先级先出）
+    - 消息优先级排序（高优先级先出）— 使用 bisect.insort O(log n) 插入
     - 消息过期自动清理
-    - 线程安全操作
+    - asyncio.Lock 保护（不阻塞事件循环）
 
     使用示例::
 
@@ -81,14 +83,14 @@ class MessageQueue:
             content="请检查任务状态",
             priority=10,
         )
-        queue.push(msg)
-        popped = queue.pop("session_001")
+        await queue.push(msg)
+        popped = await queue.pop("session_001")
 
     Attributes:
         _queues: 按 session_id 分组的消息列表
         _max_queue_size: 单个 session 的最大队列长度
         _default_ttl: 消息默认过期秒数
-        _lock: 线程安全锁
+        _lock: asyncio 异步锁
     """
 
     DEFAULT_MAX_QUEUE_SIZE = 100
@@ -108,13 +110,14 @@ class MessageQueue:
         self._queues: dict[str, list[Message]] = defaultdict(list)
         self._max_queue_size = max_queue_size
         self._default_ttl = default_ttl
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def push(self, message: Message) -> bool:
+    async def push(self, message: Message) -> bool:
         """添加消息到队列。
 
-        队列满时自动移除最早的消息。消息无 expires_at 时
-        使用 default_ttl 设置默认过期时间。插入后按优先级重排序。
+        队列满时自动移除最低优先级的消息。消息无 expires_at 时
+        使用 default_ttl 设置默认过期时间。使用 bisect.insort
+        按 priority 降序插入（O(log n)）。
 
         Args:
             message: 要添加的消息
@@ -122,11 +125,10 @@ class MessageQueue:
         Returns:
             添加成功返回 True
         """
-        with self._lock:
+        async with self._lock:
             session_id = message.session_id
             queue = self._queues[session_id]
 
-            # 检查队列大小限制
             if len(queue) >= self._max_queue_size:
                 queue.pop(0)
                 logger.warning(
@@ -134,16 +136,12 @@ class MessageQueue:
                     session_id,
                 )
 
-            # 设置默认过期时间
             if message.expires_at is None:
                 message.expires_at = datetime.utcnow() + timedelta(
                     seconds=self._default_ttl
                 )
 
-            queue.append(message)
-
-            # 按优先级排序（优先级高的在前）
-            queue.sort(key=lambda m: m.priority, reverse=True)
+            bisect.insort(queue, message, key=lambda m: -m.priority)
 
             logger.debug(
                 "[MessageQueue] 消息已添加 | "
@@ -154,7 +152,7 @@ class MessageQueue:
 
             return True
 
-    def pop(self, session_id: str, target_id: str | None = None) -> Message | None:
+    async def pop(self, session_id: str, target_id: str | None = None) -> Message | None:
         """弹出最高优先级的消息。
 
         支持 target_id 精确匹配。不指定 target_id 时弹出队首消息。
@@ -166,7 +164,7 @@ class MessageQueue:
         Returns:
             弹出的消息，无可用消息返回 None
         """
-        with self._lock:
+        async with self._lock:
             queue = self._queues.get(session_id)
             if not queue:
                 return None
@@ -198,7 +196,7 @@ class MessageQueue:
 
             return message
 
-    def peek(self, session_id: str, target_id: str | None = None) -> Message | None:
+    async def peek(self, session_id: str, target_id: str | None = None) -> Message | None:
         """查看最高优先级的消息（不移除）。
 
         支持 target_id 精确匹配。
@@ -210,7 +208,7 @@ class MessageQueue:
         Returns:
             消息实例，无可用消息返回 None
         """
-        with self._lock:
+        async with self._lock:
             queue = self._queues.get(session_id)
             if not queue:
                 return None
@@ -229,7 +227,7 @@ class MessageQueue:
 
             return queue[0]
 
-    def get_all(self, session_id: str, target_id: str | None = None) -> list[Message]:
+    async def get_all(self, session_id: str, target_id: str | None = None) -> list[Message]:
         """获取会话的所有消息（不移除）。
 
         支持 target_id 过滤。
@@ -241,14 +239,14 @@ class MessageQueue:
         Returns:
             消息列表
         """
-        with self._lock:
+        async with self._lock:
             self._cleanup_expired(session_id)
             messages = list(self._queues.get(session_id, []))
             if target_id is not None:
                 messages = [m for m in messages if m.target_id == target_id]
             return messages
 
-    def clear(self, session_id: str) -> int:
+    async def clear(self, session_id: str) -> int:
         """清空会话的消息队列。
 
         Args:
@@ -257,7 +255,7 @@ class MessageQueue:
         Returns:
             清除的消息数量
         """
-        with self._lock:
+        async with self._lock:
             if session_id not in self._queues:
                 return 0
 
@@ -271,7 +269,7 @@ class MessageQueue:
 
             return count
 
-    def size(self, session_id: str) -> int:
+    async def size(self, session_id: str) -> int:
         """获取会话的消息数量。
 
         Args:
@@ -280,17 +278,17 @@ class MessageQueue:
         Returns:
             有效消息数量
         """
-        with self._lock:
+        async with self._lock:
             self._cleanup_expired(session_id)
             return len(self._queues.get(session_id, []))
 
-    def get_statistics(self) -> dict[str, Any]:
+    async def get_statistics(self) -> dict[str, Any]:
         """获取队列统计信息。
 
         Returns:
             包含 total_sessions、total_messages、各 session 消息数等统计字典
         """
-        with self._lock:
+        async with self._lock:
             total_messages = sum(len(q) for q in self._queues.values())
             sessions = list(self._queues.keys())
 

@@ -1,5 +1,5 @@
 """
-统一人类交互模块
+统一人类交互模块。
 
 提供统一的人类交互抽象层，支持两种交互模式：
 1. 选择模式 - 弹出选择框，等待用户做出决定
@@ -8,18 +8,18 @@
 所有需要人类参与的场景都通过此模块统一处理。
 """
 
-from src.core.human_interaction.interfaces import (
+from human_interaction.interfaces import (
     IHumanInteractionService,
     IInteractionNotifier,
 )
-from src.core.human_interaction.models import (
+from human_interaction.models import (
     InteractionMode,
     InteractionStatus,
     Priority,
     ResponseType,
     TimeoutAction,
 )
-from src.core.human_interaction.service import (
+from human_interaction.service import (
     HumanInteractionService,
     InteractionCancelledError,
     InteractionDeniedError,

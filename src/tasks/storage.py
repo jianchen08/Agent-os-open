@@ -1,14 +1,17 @@
-"""任务存储 — YAML 多文件持久化。
+"""任务存储 — 按根任务分目录 + YAML 扁平文件持久化。
 
-按根任务拆分为独立 YAML 文件：
-- 目录结构：data/tasks/{root_task_id}.yaml
-- 每个 YAML 文件包含一个根任务及其所有子任务
+存储结构：
+- data/tasks/tree_{根任务ID}/{任务ID}.yaml
+- 每个任务独立一个 YAML 文件
+- 同一根任务树下的所有任务文件放在同一目录
+- 向后兼容旧的顶层 *.yaml 文件（包含 tasks 列表的旧格式）
 - 内存 dict 缓存 + 文件持久化
 - 同步 API（任务系统不涉及高并发写入）
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -18,19 +21,26 @@ import yaml
 
 from tasks.types import TaskModel, TaskStatus
 
+logger = logging.getLogger(__name__)
+
 
 class TaskStorage:
-    """任务存储 — 内存缓存 + YAML 多文件持久化。
+    """任务存储 — 内存缓存 + 按根任务分目录 YAML 持久化。
 
-    按根任务（parent_task_id 为 None 的任务）拆分为独立 YAML 文件。
-    内存缓存仍用 dict[str, TaskModel]，方便查询。
+    每个根任务（parent_task_id 为 None）独占一个 tree_{id}/ 目录，
+    目录内每个任务一个 YAML 文件。
 
     Attributes:
-        _tasks: 内存中的任务缓存
-        _data_dir: YAML 文件目录路径
+        _tasks: 内存中的任务缓存（task_id → TaskModel）
+        _data_dir: 存储根目录路径
     """
 
     def __init__(self, data_dir: str | Path | None = None) -> None:
+        """初始化任务存储。
+
+        Args:
+            data_dir: 存储根目录，None 时仅使用内存缓存
+        """
         self._tasks: dict[str, TaskModel] = {}
         self._data_dir = Path(data_dir) if data_dir else None
         if self._data_dir:
@@ -38,12 +48,49 @@ class TaskStorage:
             self._load_all()
 
     def _load_all(self) -> None:
+        """加载所有任务文件。
+
+        优先加载新的目录结构（tree_*/），再加载旧的顶层 YAML 文件以兼容。
+        """
         if not self._data_dir:
             return
-        for yaml_file in self._data_dir.glob("*.yaml"):
-            self._load_file(yaml_file)
 
-    def _load_file(self, yaml_file: Path) -> None:
+        for tree_dir in sorted(self._data_dir.glob("tree_*")):
+            if not tree_dir.is_dir():
+                continue
+            for yaml_file in sorted(tree_dir.glob("*.yaml")):
+                self._load_task_file(yaml_file)
+
+        for yaml_file in sorted(self._data_dir.glob("*.yaml")):
+            self._load_legacy_file(yaml_file)
+
+    def _load_task_file(self, yaml_file: Path) -> None:
+        """加载单个任务 YAML 文件（新格式）。
+
+        新格式：YAML 直接是单个任务的字段字典。
+
+        Args:
+            yaml_file: 任务 YAML 文件路径
+        """
+        try:
+            text = yaml_file.read_text(encoding="utf-8")
+            data = yaml.safe_load(text)
+            if not isinstance(data, dict):
+                return
+            task = self._dict_to_task(data)
+            self._tasks[task.id] = task
+        except Exception as exc:
+            logger.warning("加载任务文件失败: %s — %s", yaml_file, exc)
+
+    def _load_legacy_file(self, yaml_file: Path) -> None:
+        """加载旧格式 YAML 文件（包含 tasks 列表）。
+
+        旧格式：YAML 中有 "tasks" 键，值为任务字典列表。
+        加载后不删除原文件，保持向后兼容。
+
+        Args:
+            yaml_file: 旧格式 YAML 文件路径
+        """
         try:
             text = yaml_file.read_text(encoding="utf-8")
             data = yaml.safe_load(text)
@@ -60,30 +107,78 @@ class TaskStorage:
             pass
 
     def _find_root_id(self, task: TaskModel) -> str:
+        """查找任务所属的根任务ID。
+
+        如果任务有 parent_task_id，直接返回（假设父任务是根任务）。
+        否则任务自身就是根任务，返回自身 ID。
+
+        Args:
+            task: 任务模型
+
+        Returns:
+            根任务ID
+        """
         if task.parent_task_id:
             return task.parent_task_id
         return task.id
 
-    def _get_file_path(self, root_id: str) -> Path | None:
+    def _get_tree_dir(self, root_id: str) -> Path | None:
+        """获取根任务对应的目录路径。
+
+        Args:
+            root_id: 根任务ID
+
+        Returns:
+            目录路径，无 data_dir 时返回 None
+        """
         if not self._data_dir:
             return None
-        return self._data_dir / f"{root_id}.yaml"
+        return self._data_dir / f"tree_{root_id}"
 
-    def _persist_root(self, root_id: str) -> None:
+    def _get_task_file_path(self, root_id: str, task_id: str) -> Path | None:
+        """获取任务文件的完整路径。
+
+        Args:
+            root_id: 根任务ID
+            task_id: 任务ID
+
+        Returns:
+            任务 YAML 文件路径，无 data_dir 时返回 None
+        """
+        tree_dir = self._get_tree_dir(root_id)
+        if tree_dir is None:
+            return None
+        return tree_dir / f"{task_id}.yaml"
+
+    def _ensure_tree_dir(self, root_id: str) -> Path | None:
+        """确保根任务目录存在。
+
+        Args:
+            root_id: 根任务ID
+
+        Returns:
+            目录路径，无 data_dir 时返回 None
+        """
+        tree_dir = self._get_tree_dir(root_id)
+        if tree_dir is None:
+            return None
+        tree_dir.mkdir(parents=True, exist_ok=True)
+        return tree_dir
+
+    def _persist_task(self, task: TaskModel) -> None:
+        """将单个任务持久化到对应的 YAML 文件。
+
+        Args:
+            task: 要持久化的任务模型
+        """
         if not self._data_dir:
             return
-        file_path = self._get_file_path(root_id)
+        root_id = self._find_root_id(task)
+        self._ensure_tree_dir(root_id)
+        file_path = self._get_task_file_path(root_id, task.id)
         if file_path is None:
             return
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        root_task = self._tasks.get(root_id)
-        subtasks = [t for t in self._tasks.values() if t.parent_task_id == root_id]
-        tasks_in_file: list[dict[str, Any]] = []
-        if root_task:
-            tasks_in_file.append(self._task_to_dict(root_task))
-        for sub in subtasks:
-            tasks_in_file.append(self._task_to_dict(sub))
-        data = {"tasks": tasks_in_file}
+        data = self._task_to_dict(task)
         file_path.write_text(
             yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2),
             encoding="utf-8",
@@ -91,6 +186,16 @@ class TaskStorage:
 
     @staticmethod
     def _task_to_dict(task: TaskModel) -> dict[str, Any]:
+        """将 TaskModel 转换为可序列化的字典。
+
+        枚举字段转换为原始值，便于 YAML 序列化。
+
+        Args:
+            task: 任务模型
+
+        Returns:
+            可序列化的任务字典
+        """
         d = asdict(task)
         d["status"] = task.status.value if hasattr(task.status, "value") else task.status
         d["priority"] = task.priority.value if hasattr(task.priority, "value") else task.priority
@@ -99,6 +204,16 @@ class TaskStorage:
 
     @staticmethod
     def _dict_to_task(data: dict[str, Any]) -> TaskModel:
+        """将字典反序列化为 TaskModel。
+
+        字符串状态/优先级/层级字段转换回枚举值。
+
+        Args:
+            data: 任务字典
+
+        Returns:
+            TaskModel 实例
+        """
         from pipeline.types import AgentLevel, TaskPriority
 
         if isinstance(data.get("status"), str):
@@ -110,14 +225,35 @@ class TaskStorage:
         return TaskModel(**data)
 
     def save(self, task: TaskModel) -> None:
+        """保存任务到内存缓存并持久化到文件。
+
+        Args:
+            task: 要保存的任务模型
+        """
         self._tasks[task.id] = task
-        root_id = self._find_root_id(task)
-        self._persist_root(root_id)
+        self._persist_task(task)
 
     def get(self, task_id: str) -> TaskModel | None:
+        """从内存缓存获取任务。
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            任务模型，不存在时返回 None
+        """
         return self._tasks.get(task_id)
 
     def update(self, task_id: str, **updates: Any) -> TaskModel | None:
+        """更新任务字段并持久化。
+
+        Args:
+            task_id: 任务ID
+            **updates: 要更新的字段键值对
+
+        Returns:
+            更新后的任务模型，不存在时返回 None
+        """
         task = self._tasks.get(task_id)
         if task is None:
             return None
@@ -125,28 +261,61 @@ class TaskStorage:
             if hasattr(task, key):
                 setattr(task, key, value)
         task.updated_at = datetime.now().isoformat()
-        root_id = self._find_root_id(task)
-        self._persist_root(root_id)
+        self._persist_task(task)
         return task
 
     def list_by_status(self, status: TaskStatus) -> list[TaskModel]:
+        """按状态筛选任务。
+
+        Args:
+            status: 任务状态
+
+        Returns:
+            匹配状态的任务列表
+        """
         return [t for t in self._tasks.values() if t.status == status]
 
     def list_by_parent(self, parent_id: str) -> list[TaskModel]:
+        """列出指定父任务的所有直接子任务。
+
+        Args:
+            parent_id: 父任务ID
+
+        Returns:
+            子任务列表
+        """
         return [t for t in self._tasks.values() if t.parent_task_id == parent_id]
 
     def delete(self, task_id: str) -> bool:
+        """删除任务。
+
+        从内存缓存和文件系统中移除任务。如果删除的是根任务
+        且该目录下已无其他任务文件，则删除整个目录。
+
+        Args:
+            task_id: 要删除的任务ID
+
+        Returns:
+            是否删除成功
+        """
         if task_id not in self._tasks:
             return False
         task = self._tasks[task_id]
         root_id = self._find_root_id(task)
         del self._tasks[task_id]
+
+        file_path = self._get_task_file_path(root_id, task_id)
+        if file_path and file_path.exists():
+            file_path.unlink()
+
         if root_id == task_id:
-            subtask_ids = [t.id for t in self._tasks.values() if t.parent_task_id == root_id]
-            if not subtask_ids:
-                file_path = self._get_file_path(root_id)
-                if file_path and file_path.exists():
-                    file_path.unlink()
-                return True
-        self._persist_root(root_id)
+            remaining = any(t.parent_task_id == root_id for t in self._tasks.values())
+            if not remaining:
+                tree_dir = self._get_tree_dir(root_id)
+                if tree_dir and tree_dir.exists():
+                    try:
+                        tree_dir.rmdir()
+                    except OSError:
+                        pass
+
         return True

@@ -115,10 +115,9 @@ static_vars:
         - enhanced_search: 在文件中搜索文本、代码或文件名
         - web_search: 搜索互联网信息
         - fetch: 执行HTTP请求和网页抓取
-        - todo_manage: 管理待办事项清单
         - memory: 检索和存储记忆
         - human_interaction: 向用户提问并获取回答
-        - rollback_task: 创建检查点、回滚任务操作
+        - resource_merge: 基于 git 的资源合并与回滚
         - schema_evaluator: 验证JSON/YAML格式或正则模式校验
 
 # 动态变量（每轮变化，实时生成）
@@ -133,6 +132,8 @@ tool_ids:
   - task_manage
   - task_evaluate
   - resource_search
+  - file_read
+  - file_write
 
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
@@ -275,7 +276,7 @@ recommended_metrics:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 40
+max_iterations: 120
 max_reminders: 5
 timeout_seconds: 1800
 tags:

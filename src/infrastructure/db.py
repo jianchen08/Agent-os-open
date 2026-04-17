@@ -191,3 +191,72 @@ async def close_engine() -> None:
             logger.warning("关闭 PostgreSQL engine 失败: %s", exc)
         finally:
             _engine = None
+
+
+class _DbSessionContext:
+    """数据库会话上下文管理器（兼容旧 db.connection 接口）"""
+
+    async def __aenter__(self):
+        session = await get_async_session()
+        self._session = session
+        return session
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._session:
+            try:
+                if exc_type:
+                    await self._session.rollback()
+                else:
+                    await self._session.commit()
+            except Exception:
+                await self._session.rollback()
+            finally:
+                await self._session.close()
+        return None
+
+
+async def get_session_context():
+    """获取数据库会话上下文管理器（兼容旧 db.connection 接口）。
+
+    Returns:
+        异步上下文管理器，使用方式::
+
+            async with get_session_context() as session:
+                result = await session.execute(...)
+    """
+    return _DbSessionContext()
+
+
+async def get_current_session():
+    """获取当前线程/请求的数据库会话（兼容旧 db.connection 接口）。
+
+    此函数为兼容旧代码设计，当前实现返回 None。
+    建议使用 get_async_session() 或 get_session_context() 替代。
+
+    Returns:
+        AsyncSession 实例或 None
+    """
+    return None
+
+
+class _DbManager:
+    """数据库管理器（兼容旧 db.connection 接口）"""
+
+    def get_session(self):
+        """获取数据库会话上下文管理器"""
+        return _DbSessionContext()
+
+
+_db_manager_instance: _DbManager | None = None
+
+
+def get_db_manager() -> _DbManager:
+    """获取数据库管理器单例（兼容旧 db.connection 接口）。
+
+    Returns:
+        _DbManager 实例
+    """
+    global _db_manager_instance
+    if _db_manager_instance is None:
+        _db_manager_instance = _DbManager()
+    return _db_manager_instance

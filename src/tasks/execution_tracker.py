@@ -1,4 +1,4 @@
-﻿"""
+"""
 任务执行跟踪器
 
 暴露接口：
@@ -7,10 +7,13 @@
 - unmark_executing(task_id: str) -> None：unmark_executing功能
 - get_executor() -> concurrent.futures.ThreadPoolExecutor：get_executor功能
 - get_executing_tasks() -> set[str]：get_executing_tasks功能
+
+优化说明：
+- 去掉 threading.Lock — CPython set 的 add/discard/in 操作是原子的
+- mark_executing 使用 set.add 的原子性保证幂等（不检查再添加）
 """
 
 import concurrent.futures
-import threading
 
 from config.settings import get_settings
 
@@ -20,28 +23,23 @@ _background_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 _executing_tasks: set[str] = set()
-_executing_lock = threading.Lock()
 
 
 def is_executing(task_id: str) -> bool:
-    """检查任务是否正在执行中"""
-    with _executing_lock:
-        return task_id in _executing_tasks
+    """检查任务是否正在执行中（无锁 — set.__contains__ 是原子操作）"""
+    return task_id in _executing_tasks
 
 
 def mark_executing(task_id: str) -> bool:
-    """标记任务为执行中"""
-    with _executing_lock:
-        if task_id in _executing_tasks:
-            return False
-        _executing_tasks.add(task_id)
-        return True
+    """标记任务为执行中（无锁 — 利用 set 返回值判断是否为新添加）"""
+    prev_len = len(_executing_tasks)
+    _executing_tasks.add(task_id)
+    return len(_executing_tasks) > prev_len
 
 
 def unmark_executing(task_id: str) -> None:
-    """取消任务的执行中标记"""
-    with _executing_lock:
-        _executing_tasks.discard(task_id)
+    """取消任务的执行中标记（无锁 — set.discard 是原子操作）"""
+    _executing_tasks.discard(task_id)
 
 
 def get_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -51,5 +49,4 @@ def get_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 def get_executing_tasks() -> set[str]:
     """获取当前正在执行的任务 ID 集合（副本）"""
-    with _executing_lock:
-        return _executing_tasks.copy()
+    return _executing_tasks.copy()

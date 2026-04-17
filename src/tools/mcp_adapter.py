@@ -1,9 +1,9 @@
-﻿"""
+"""
 MCP 工具适配器
 
 暴露接口：
 - mcp_tool_to_runnable(tool: Tool, handler: ToolHandler) -> ToolRunnable：mcp_tool_to_runnable功能
-- runnable_to_mcp_tool(runnable: ToolRunnable, source: ToolSource, category: ToolCategory | None, level: ToolLevel, requires_approval: bool) -> Tool：runnable_to_mcp_tool功能
+- runnable_to_mcp_tool(runnable: ToolRunnable, source: ToolSource, category: ToolCategory | None, level: ToolLevel) -> Tool：runnable_to_mcp_tool功能
 - batch_convert_mcp_tools(tools: list[Tool], handlers: dict[str, ToolHandler]) -> list[ToolRunnable]：batch_convert_mcp_tools功能
 - runnable(self) -> ToolRunnable：runnable功能
 - get_mcp_format(self) -> dict[str, Any]：get_mcp_format功能
@@ -64,7 +64,6 @@ class MCPToolAdapter:
                 "source": self.tool.source.value,
                 "category": self.tool.category.value if self.tool.category else None,
                 "level": self.tool.level.value,
-                "requires_approval": self.tool.requires_approval,
                 "version": self.tool.version,
                 "tags": self.tool.tags,
                 **self.tool.metadata,
@@ -98,7 +97,6 @@ def runnable_to_mcp_tool(
     source: ToolSource = ToolSource.CODE,
     category: ToolCategory | None = None,
     level: ToolLevel = ToolLevel.USER,
-    requires_approval: bool = False,
 ) -> Tool:
     """将 ToolRunnable 转换为 MCP 工具格式"""
     return Tool(
@@ -109,7 +107,6 @@ def runnable_to_mcp_tool(
         source=source,
         category=category,
         level=level,
-        requires_approval=requires_approval,
         metadata=runnable._metadata,
     )
 

@@ -12,7 +12,7 @@ model_name: minimax-m2.7
 agent_type: orchestrator
 category: "system"
 level: "L2"
-max_iterations: 40
+max_iterations: 100
 timeout_seconds: 600
 temperature: 0.3
 
@@ -219,7 +219,6 @@ tool_ids:
   - task_manage
   - memory
   - enhanced_search
-  - todo_manage
   - task_evaluate
 
 hard_constraints:

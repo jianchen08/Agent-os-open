@@ -230,7 +230,7 @@ class IsolationManager:
             from sqlalchemy import select
 
             from src.core.states.execution import ExecutionStatus
-            from src.db.connection import get_session_context
+            from infrastructure.db import get_session_context
             from src.db.models import Task
 
             terminal_statuses = {s.value for s in ExecutionStatus if s.is_terminal}

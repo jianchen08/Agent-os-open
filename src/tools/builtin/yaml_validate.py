@@ -1,4 +1,4 @@
-﻿"""
+"""
 YAML 验证工具
 
 暴露接口：
@@ -76,7 +76,6 @@ class YamlValidateTool(BuiltinTool):
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             tags=["yaml", "validate", "config"],
         )
 

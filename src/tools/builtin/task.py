@@ -48,6 +48,78 @@ class TaskTool:
         """初始化任务管理工具。"""
         self._task_service: TaskService | None = None
 
+    def _get_execution_record_storage(self):
+        """获取全局 ExecutionRecordStorage 实例。
+
+        Returns:
+            ExecutionRecordStorage 实例，获取失败时返回 None
+        """
+        try:
+            import sys
+            return getattr(sys, "_agent_os_execution_record_storage", None)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _calc_elapsed_seconds(task: TaskModel) -> float | None:
+        """计算任务已耗时（秒）。"""
+        if not task.started_at:
+            return None
+        from datetime import datetime
+        started = datetime.fromisoformat(task.started_at)
+        if task.completed_at:
+            completed = datetime.fromisoformat(task.completed_at)
+            return (completed - started).total_seconds()
+        return (datetime.now() - started).total_seconds()
+
+    @staticmethod
+    def _format_elapsed(seconds: float | None) -> str:
+        """将秒数格式化为可读字符串。"""
+        if seconds is None:
+            return "-"
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        minutes = int(seconds / 60)
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        remain_minutes = minutes % 60
+        return f"{hours}h{remain_minutes}m"
+
+    def _get_latest_activity(self, task: TaskModel) -> dict | None:
+        """获取任务的最新一条执行活动摘要。"""
+        storage = self._get_execution_record_storage()
+        if not storage or not task.pipeline_run_id:
+            return None
+        records = storage.list_by_pipeline(task.pipeline_run_id)
+        if not records:
+            return None
+        latest = records[-1]
+        return {
+            "iteration": latest.iteration,
+            "action": latest.name or latest.type,
+            "summary": (latest.content or "")[:100],
+            "at": latest.created_at,
+        }
+
+    def _get_recent_activities(self, task: TaskModel, limit: int = 5) -> list[dict]:
+        """获取任务最近 N 条执行活动摘要。"""
+        storage = self._get_execution_record_storage()
+        if not storage or not task.pipeline_run_id:
+            return []
+        records = storage.list_by_pipeline(task.pipeline_run_id)
+        recent = records[-limit:] if len(records) > limit else records
+        recent.reverse()
+        return [
+            {
+                "iteration": r.iteration,
+                "action": r.name or ("thinking" if r.type == "ai" else r.type),
+                "summary": (r.content or "")[:100],
+                "at": r.created_at,
+            }
+            for r in recent
+        ]
+
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
 
@@ -81,14 +153,14 @@ class TaskTool:
         """获取工具定义"""
         return Tool(
             name="task_manage",
-            description="任务管理工具：用于查询和控制任务状态。支持操作：get(查询详情)、list(列出列表)、update(更新状态)、status(状态概览)、pause(暂停)、resume(继续)、cancel(取消)、retry(重试)、delete(删除)、inject(向运行中的子任务注入指令)。权限：L1可管理所属会话的所有任务，L2只能管理自己提交的子任务。",
+            description="任务管理工具：用于查询和控制任务状态。支持操作：get(查询详情)、list(列出列表)、update(更新状态)、status(状态概览)、pause(暂停)、resume(继续)、cancel(取消)、retry(重试)、delete(删除)、inject(向运行中的子任务注入指令)、complete_container(标记容器完成，仅限L1)、fail_container(标记容器失败，仅限L1)。权限：L1可管理所属会话的所有任务，L2只能管理自己提交的子任务。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["get", "update", "list", "status", "pause", "resume", "cancel", "retry", "delete", "inject"],
-                        "description": "操作类型：get-查询单个任务详情，list-列出任务列表，update-更新任务状态，status-查看任务状态概览，pause-暂停任务，resume-继续执行，cancel-取消任务，retry-重试任务，delete-删除任务，inject-向运行中的子任务注入指令",
+                        "enum": ["get", "update", "list", "status", "pause", "resume", "cancel", "retry", "delete", "inject", "complete_container", "fail_container"],
+                        "description": "操作类型：get-查询单个任务详情，list-列出任务列表，update-更新任务状态，status-查看任务状态概览，pause-暂停任务，resume-继续执行，cancel-取消任务，retry-重试任务，delete-删除任务，inject-向运行中的子任务注入指令，complete_container-标记容器完成(仅限L1)，fail_container-标记容器失败(仅限L1)",
                     },
                     "task_scope": {
                         "type": "string",
@@ -123,6 +195,10 @@ class TaskTool:
                     "message": {
                         "type": "string",
                         "description": "注入的指令内容（inject操作时必填）",
+                    },
+                    "container_reason": {
+                        "type": "string",
+                        "description": "容器操作原因（complete_container/fail_container操作时填写）",
                     },
                     "include_details": {
                         "type": "boolean",
@@ -183,10 +259,8 @@ class TaskTool:
             source=ToolSource.CODE,
             category=ToolCategory.TASK,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
-            dangerous_operations=[],
             tags=["task", "management", "L1", "L2", "status", "control"],
-            injected_params=["session_id", "user_id", "task_id", "_session"],
+            injected_params=["session_id", "user_id", "_session"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -229,6 +303,10 @@ class TaskTool:
             return await self._delete_task(inputs, parent_agent_level)
         elif action == "inject":
             return await self._inject_task(inputs, parent_agent_level)
+        elif action == "complete_container":
+            return await self._complete_container(inputs, parent_agent_level)
+        elif action == "fail_container":
+            return await self._fail_container(inputs, parent_agent_level)
         else:
             return create_failure_result(
                 error=f"不支持的操作: {action}",
@@ -286,16 +364,17 @@ class TaskTool:
         all_tasks.sort(key=lambda t: t.created_at, reverse=True)
         return all_tasks[:limit]
 
-    def _task_to_dict(self, task: TaskModel) -> dict[str, Any]:
+    def _task_to_dict(self, task: TaskModel, include_details: bool = False) -> dict[str, Any]:
         """将 TaskModel 转换为工具返回的字典格式。
 
         Args:
             task: 任务模型
+            include_details: 是否包含详细活动信息
 
         Returns:
             可序列化的任务字典
         """
-        return {
+        result = {
             "task_id": task.id,
             "title": task.title,
             "description": task.description,
@@ -311,6 +390,10 @@ class TaskTool:
             "error": task.error,
             "result": task.result,
         }
+        if include_details:
+            result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
+            result["recent_activities"] = self._get_recent_activities(task)
+        return result
 
     async def _get_task_status(
         self, inputs: dict[str, Any], parent_agent_level: int
@@ -370,6 +453,8 @@ class TaskTool:
                     "task_scope": task.metadata.get("task_scope"),
                     "created_at": task.created_at,
                     "updated_at": task.updated_at,
+                    "elapsed_seconds": self._calc_elapsed_seconds(task),
+                    "latest_activity": self._get_latest_activity(task),
                 }
                 for task in filtered_tasks[:10]
             ]
@@ -433,7 +518,7 @@ class TaskTool:
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            task_dict = self._task_to_dict(task)
+            task_dict = self._task_to_dict(task, include_details=inputs.get("include_details", False))
             task_dict["hint"] = "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。"
 
             return create_success_result(
@@ -588,12 +673,18 @@ class TaskTool:
                 for t in filtered
             ]
             target_names = [t.metadata.get("target_name", "") for t in filtered]
+            latest_actions = []
+            elapsed_list = []
+            for t in filtered:
+                activity = self._get_latest_activity(t)
+                latest_actions.append(activity["action"] if activity else "-")
+                elapsed_list.append(self._format_elapsed(self._calc_elapsed_seconds(t)))
 
             return create_success_result(
                 data={
-                    "h": ["task_id", "title", "status", "priority", "target"],
+                    "h": ["task_id", "title", "status", "priority", "target", "latest_action", "elapsed"],
                     "d": [
-                        [task_ids[i], titles[i], statuses[i], priorities[i], target_names[i]]
+                        [task_ids[i], titles[i], statuses[i], priorities[i], target_names[i], latest_actions[i], elapsed_list[i]]
                         for i in range(len(task_ids))
                     ],
                     "c": len(task_ids),
@@ -986,7 +1077,7 @@ class TaskTool:
                 },
             )
 
-            success = queue.push(trigger_message)
+            success = await queue.push(trigger_message)
             if not success:
                 return create_failure_result(
                     error="消息队列已满，注入失败",
@@ -1062,13 +1153,11 @@ class TaskTool:
             old_status = task.status.value
             task_title = task.title
             workspace = task.metadata.get("workspace")
-            isolation_level = task.metadata.get("isolation_level")
 
             # 清理关联资源
             cleanup_results = await self._cleanup_task_resources(
                 task_id=task_id,
                 workspace=workspace,
-                isolation_level=isolation_level,
             )
 
             # 从存储中删除
@@ -1093,13 +1182,189 @@ class TaskTool:
                 error_code="DELETE_FAILED",
             )
 
+    async def _complete_container(
+        self, inputs: dict[str, Any], parent_agent_level: int
+    ) -> ToolExecutionResult:
+        """标记容器任务完成。
+
+        仅限 L1 主 Agent 调用。将 PENDING 状态的容器标记为 COMPLETED。
+
+        Args:
+            inputs: 工具输入参数，需含 task_id
+            parent_agent_level: 父 Agent 层级
+
+        Returns:
+            操作结果或错误
+        """
+        from datetime import datetime
+
+        if parent_agent_level != 1:
+            return create_failure_result(
+                error="容器操作仅限 L1 主 Agent 执行",
+                error_code="PERMISSION_DENIED",
+            )
+
+        task_id = inputs.get("task_id")
+        if not task_id:
+            return create_failure_result(
+                error="complete_container 操作必须提供 task_id",
+                error_code="MISSING_TASK_ID",
+            )
+
+        try:
+            service = self._get_task_service()
+        except RuntimeError as e:
+            return create_failure_result(error=str(e), error_code="SERVICE_UNAVAILABLE")
+
+        task = service.get_task(task_id)
+        if task is None:
+            return create_failure_result(
+                error=f"任务不存在: {task_id}",
+                error_code="TASK_NOT_FOUND",
+            )
+
+        subtasks = service.list_subtasks(task_id)
+        if not subtasks:
+            return create_failure_result(
+                error=f"任务 {task_id} 不是容器任务（无子任务），不能使用容器操作",
+                error_code="NOT_A_CONTAINER",
+            )
+
+        if task.status != TaskStatus.PENDING:
+            return create_failure_result(
+                error=f"容器当前状态为 {task.status.value}，只能操作 PENDING 状态的容器",
+                error_code="INVALID_STATUS",
+            )
+
+        reason = inputs.get("container_reason", inputs.get("reason", ""))
+
+        try:
+            service._transition_with_callback(task, TaskStatus.COMPLETED)
+            task.completed_at = datetime.now().isoformat()
+            service._storage.save(task)
+            logger.info("[TaskTool] 容器已完成: %s — %s", task_id, reason)
+            return create_success_result(
+                data={
+                    "task_id": task.id,
+                    "status": "completed",
+                    "message": f"容器 {task_id} 已标记为完成",
+                    "subtask_count": len(subtasks),
+                    "completed_subtasks": sum(
+                        1 for s in subtasks if s.status == TaskStatus.COMPLETED
+                    ),
+                },
+                metadata={"action": "complete_container"},
+            )
+        except InvalidTransitionError as e:
+            return create_failure_result(
+                error=f"容器完成失败（状态转换不合法）: {e}",
+                error_code="INVALID_TRANSITION",
+            )
+        except Exception as e:
+            logger.error("[TaskTool] 容器完成失败: %s", e)
+            return create_failure_result(
+                error=f"容器完成失败: {str(e)}",
+                error_code="CONTAINER_COMPLETE_FAILED",
+            )
+
+    async def _fail_container(
+        self, inputs: dict[str, Any], parent_agent_level: int
+    ) -> ToolExecutionResult:
+        """标记容器任务失败。
+
+        仅限 L1 主 Agent 调用。将 PENDING 状态的容器标记为 FAILED。
+
+        Args:
+            inputs: 工具输入参数，需含 task_id 和 container_reason
+            parent_agent_level: 父 Agent 层级
+
+        Returns:
+            操作结果或错误
+        """
+        from datetime import datetime
+
+        if parent_agent_level != 1:
+            return create_failure_result(
+                error="容器操作仅限 L1 主 Agent 执行",
+                error_code="PERMISSION_DENIED",
+            )
+
+        task_id = inputs.get("task_id")
+        if not task_id:
+            return create_failure_result(
+                error="fail_container 操作必须提供 task_id",
+                error_code="MISSING_TASK_ID",
+            )
+
+        reason = inputs.get("container_reason", inputs.get("reason", ""))
+        if not reason:
+            return create_failure_result(
+                error="fail_container 操作必须提供 container_reason 说明失败原因",
+                error_code="MISSING_REASON",
+            )
+
+        try:
+            service = self._get_task_service()
+        except RuntimeError as e:
+            return create_failure_result(error=str(e), error_code="SERVICE_UNAVAILABLE")
+
+        task = service.get_task(task_id)
+        if task is None:
+            return create_failure_result(
+                error=f"任务不存在: {task_id}",
+                error_code="TASK_NOT_FOUND",
+            )
+
+        subtasks = service.list_subtasks(task_id)
+        if not subtasks:
+            return create_failure_result(
+                error=f"任务 {task_id} 不是容器任务（无子任务），不能使用容器操作",
+                error_code="NOT_A_CONTAINER",
+            )
+
+        if task.status != TaskStatus.PENDING:
+            return create_failure_result(
+                error=f"容器当前状态为 {task.status.value}，只能操作 PENDING 状态的容器",
+                error_code="INVALID_STATUS",
+            )
+
+        try:
+            service._transition_with_callback(task, TaskStatus.FAILED)
+            task.completed_at = datetime.now().isoformat()
+            task.metadata = task.metadata or {}
+            task.metadata["container_reason"] = reason
+            service._storage.save(task)
+            logger.info("[TaskTool] 容器已失败: %s — %s", task_id, reason)
+            return create_success_result(
+                data={
+                    "task_id": task.id,
+                    "status": "failed",
+                    "message": f"容器 {task_id} 已标记为失败",
+                    "reason": reason,
+                    "subtask_count": len(subtasks),
+                },
+                metadata={"action": "fail_container"},
+            )
+        except InvalidTransitionError as e:
+            return create_failure_result(
+                error=f"容器失败操作失败（状态转换不合法）: {e}",
+                error_code="INVALID_TRANSITION",
+            )
+        except Exception as e:
+            logger.error("[TaskTool] 容器失败操作失败: %s", e)
+            return create_failure_result(
+                error=f"容器失败操作失败: {str(e)}",
+                error_code="CONTAINER_FAIL_FAILED",
+            )
+
     async def _cleanup_task_resources(
         self,
         task_id: str,
         workspace: str | None,
-        isolation_level: str | None,
     ) -> dict[str, Any]:
         """清理任务相关的资源（容器和工作空间）。
+
+        容器清理委托给 IsolationManager，不再直接操作 Docker SDK。
 
         Args:
             task_id: 任务 ID
@@ -1116,38 +1381,16 @@ class TaskTool:
         }
 
         try:
-            from isolation.manager import get_isolation_manager
+            from src.isolation.manager import get_isolation_manager
 
-            await get_isolation_manager()
-
-            container_name = f"cua-{task_id}"
-            try:
-                from docker.errors import NotFound
-                import docker
-
-                client = docker.from_env()
-                try:
-                    container = client.containers.get(container_name)
-                    container.stop(timeout=5)
-                    container.remove()
-                    cleanup_results["container_destroyed"] = True
-                    logger.info("[TaskTool] 已销毁容器: %s", container_name)
-                except NotFound:
-                    logger.debug("[TaskTool] 容器不存在: %s", container_name)
-                except Exception as e:
-                    cleanup_results["errors"].append(f"销毁容器失败: {str(e)}")
-                    logger.warning("[TaskTool] 销毁容器失败: %s, 错误: %s", container_name, e)
-                finally:
-                    client.close()
-            except ImportError:
-                logger.debug("[TaskTool] Docker SDK 未安装，跳过容器清理")
-            except Exception as e:
-                cleanup_results["errors"].append(f"Docker 操作失败: {str(e)}")
-                logger.warning("[TaskTool] Docker 操作失败: %s", e)
-
+            manager = await get_isolation_manager()
+            destroyed = await manager.destroy_environment(task_id)
+            cleanup_results["container_destroyed"] = destroyed
+            if destroyed:
+                logger.info("[TaskTool] 已通过 IsolationManager 销毁环境: %s", task_id)
         except Exception as e:
-            cleanup_results["errors"].append(f"获取隔离管理器失败: {str(e)}")
-            logger.warning("[TaskTool] 获取隔离管理器失败: %s", e)
+            cleanup_results["errors"].append(f"清理隔离环境失败: {str(e)}")
+            logger.warning("[TaskTool] 清理隔离环境失败: %s, 错误: %s", task_id, e)
 
         if workspace:
             try:

@@ -4,10 +4,13 @@
 
 id: function_verify
 name: 功能验证
-description: 验证实现是否真正满足需求，分析测试覆盖度，发现功能遗漏和隐患
+description: |
+  以用户真实使用场景为核心验证功能是否真正可用。
+  核心理念：用户怎么用，就怎么验证。
+  不是检查"代码有没有写"，而是模拟"用户真的去用"，用 bash_execute 真实运行来验证功能。
 
 # ===== 评估器配置 =====
-evaluator_id: evaluator_agent
+evaluator_id: function_verifier_agent
 evaluator_type: agent
 
 default_config:
@@ -15,23 +18,42 @@ default_config:
 
 # ===== 预期输入定义 =====
 expected_input:
-  description: "验证实现是否满足需求"
+  description: "验证功能是否真正可用。评估Agent必须先分析用户场景，再通过bash_execute真实运行验证。"
   params:
     requirement:
       type: string
       description: "需求描述"
       required: true
       example: "实现用户登录功能，密码错误时返回 401"
-    acceptance_criteria:
+    user_scenarios:
       type: array
       items:
-        type: string
-      description: "验收标准列表"
+        type: object
+        properties:
+          scenario:
+            type: string
+            description: "用户场景描述（Given-When-Then 格式）"
+          steps:
+            type: array
+            items:
+              type: string
+            description: "用户操作步骤（每步是一条可执行的命令或操作）"
+          expected_outcome:
+            type: string
+            description: "用户期望看到的结果"
+      description: |
+        用户真实使用场景列表。评估Agent必须按这些场景逐个用bash_execute真实运行验证。
+        如果调用方未提供，评估Agent必须自行根据需求推断至少3个用户场景。
       required: false
       example:
-        - "用户名和密码正确时返回 200 和 token"
-        - "密码错误时返回 401"
-        - "用户不存在时返回 404"
+        - scenario: "用户用正确密码登录"
+          steps:
+            - "python -c \"from auth import login; print(login('user', 'pass123'))\""
+          expected_outcome: "返回 200 和 token"
+        - scenario: "用户用错误密码登录"
+          steps:
+            - "python -c \"from auth import login; print(login('user', 'wrong'))\""
+          expected_outcome: "返回 401"
     implementation:
       type: string
       description: "实现代码或配置内容"
@@ -66,11 +88,11 @@ expected_input:
 # ===== 预期输出定义 =====
 # Agent 评估器统一返回结构（所有 Agent 评估器输出相同）
 expected_output:
-  description: "返回功能验证结果"
+  description: "返回功能验证结果（包含用户场景真实运行结果）"
   params:
     passed:
       type: boolean
-      description: "功能验证是否通过"
+      description: "功能验证是否通过（所有用户场景必须全部通过才算通过）"
     score:
       type: number
       description: "综合评分（0-100）"
@@ -96,6 +118,33 @@ expected_output:
       type: object
       description: "详细验证结果"
       properties:
+        user_scenario_results:
+          type: array
+          items:
+            type: object
+            properties:
+              scenario:
+                type: string
+                description: "用户场景描述"
+              steps_executed:
+                type: array
+                items:
+                  type: string
+                description: "实际执行的命令/操作"
+              actual_output:
+                type: string
+                description: "真实运行的输出结果"
+              expected_outcome:
+                type: string
+                description: "用户期望的结果"
+              status:
+                type: string
+                enum: ["passed", "failed", "error"]
+                description: "该场景验证结果"
+              evidence:
+                type: string
+                description: "判断依据（命令输出截图/日志片段）"
+          description: "用户场景逐个验证结果（必须通过bash_execute真实运行，禁止仅靠推理）"
         requirement_analysis:
           type: array
           items:
@@ -129,6 +178,11 @@ expected_output:
               items:
                 type: string
               description: "未覆盖的场景"
+            mock_issues:
+              type: array
+              items:
+                type: string
+              description: "发现的核心逻辑被mock的问题（假性测试）"
             coverage_score:
               type: number
               description: "测试覆盖度评分（0-100）"
@@ -170,11 +224,23 @@ input_schema:
     requirement:
       type: string
       description: "需求描述"
-    acceptance_criteria:
+    user_scenarios:
       type: array
       items:
-        type: string
-      description: "验收标准列表"
+        type: object
+        properties:
+          scenario:
+            type: string
+            description: "用户场景描述（Given-When-Then 格式）"
+          steps:
+            type: array
+            items:
+              type: string
+            description: "用户操作步骤（每步是一条可执行的命令或操作）"
+          expected_outcome:
+            type: string
+            description: "用户期望看到的结果"
+      description: "用户真实使用场景列表。未提供时评估Agent必须自行推断至少3个场景"
     implementation:
       type: string
       description: "实现代码或配置内容"
@@ -205,11 +271,10 @@ input_schema:
 
 # ===== 使用边界 =====
 when_to_use:
-  - 验证代码实现是否满足需求
-  - 验证方案/配置是否可行
-  - 分析测试覆盖度，发现遗漏场景
-  - 发现执行 Agent 未考虑的边界情况
-  - 发现代码中的安全隐患和逻辑漏洞
+  - 验证代码/配置/功能是否真正可用（不是"有没有写"，而是"能不能用"）
+  - 需要模拟用户真实操作路径来验证功能
+  - 需要发现执行 Agent 自测遗漏的场景
+  - 需要确认功能在真实运行环境下正常工作
 when_not_use:
   - 只需要检查代码规范（使用 code_check）
   - 只需要检查测试是否通过（使用 test_check）
@@ -218,11 +283,19 @@ when_not_use:
 examples:
   - params:
       requirement: "实现用户注册，密码至少8位包含字母和数字"
-      acceptance_criteria:
-        - "密码少于8位时返回 400"
-        - "密码不包含字母时返回 400"
-        - "密码不包含数字时返回 400"
-        - "注册成功时返回用户信息和 token"
+      user_scenarios:
+        - scenario: "用户用合法密码注册"
+          steps:
+            - "python -c \"from auth import register; print(register('testuser', 'Pass1234'))\""
+          expected_outcome: "返回用户信息和 token"
+        - scenario: "用户用太短的密码注册"
+          steps:
+            - "python -c \"from auth import register; print(register('testuser', 'abc'))\""
+          expected_outcome: "返回 400，提示密码太短"
+        - scenario: "用户用纯数字密码注册"
+          steps:
+            - "python -c \"from auth import register; print(register('testuser', '12345678'))\""
+          expected_outcome: "返回 400，提示密码需要包含字母"
       implementation: |
         def register(username, password):
             if len(password) < 8:
@@ -232,12 +305,13 @@ examples:
         def test_password_short(): ...
         def test_register_success(): ...
       test_result: "2 passed"
-    description: "验证用户注册功能是否满足需求"
+    description: "验证用户注册功能：提供用户场景，评估Agent逐个用bash_execute真实运行"
 caveats:
-  - 无法真正运行代码，依赖 LLM 的推理能力
-  - 应在 test_check 通过后执行，避免重复发现已知问题
-  - 验证质量取决于需求描述的清晰度和完整性
-  - 复杂系统可能需要结合人工审核
+  - 必须通过 bash_execute 工具实际运行代码/命令来验证功能，禁止仅靠阅读代码推理判断
+  - 验证时必须模拟用户真实操作路径：用户怎么用，就怎么跑
+  - 如果调用方未提供 user_scenarios，评估Agent必须自行根据需求推断至少3个典型用户场景并逐个验证
+  - 每个用户场景必须记录实际执行的命令和真实输出，作为验证证据
+  - 验证质量取决于需求描述的清晰度，复杂系统可能需要结合人工审核
 
 # ===== 依赖关系 =====
 is_red_line: false

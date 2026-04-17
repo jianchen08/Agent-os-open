@@ -1,4 +1,4 @@
-﻿"""
+"""
 文件读取工具
 
 暴露接口：
@@ -73,12 +73,6 @@ class FileReadTool:
             source=ToolSource.CODE,
             category=ToolCategory.FILE,
             level=ToolLevel.USER,
-            requires_approval=False,
-            dangerous_operations=[
-                "read:/etc/",
-                "read:/sys/",
-                "read:C:\\Windows\\",
-            ],
             tags=["file", "io", "read"],
             injected_params=["workspace"],
         )

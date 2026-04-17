@@ -1,4 +1,4 @@
-﻿"""
+"""
 Network Search Tool (Based on mcp-webgate)
 
 暴露接口：
@@ -152,7 +152,6 @@ class WebSearchMCPTool:
             source=ToolSource.MCP,
             category=ToolCategory.SEARCH,
             level=ToolLevel.USER,
-            requires_approval=False,
             tags=["web", "search", "internet", "mcp"],
             metadata={
                 "backend": "mcp-webgate",

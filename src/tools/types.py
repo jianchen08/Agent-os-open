@@ -1,4 +1,4 @@
-﻿"""
+"""
 工具类型定义
 
 暴露接口：
@@ -192,12 +192,8 @@ class Tool(BaseModel):
 
     # 状态与权限
     status: ToolStatus = Field(ToolStatus.ACTIVE, description="工具状态")
-    requires_approval: bool | None = Field(
-        None,
-        description="[废弃] 请使用 dangerous_operations 声明危险操作，由中间件统一决策审批"
-    )
     dangerous_operations: list[str] = Field(
-        default_factory=list, description="危险操作列表，用于审批决策"
+        default_factory=list, description="危险操作列表，由安全插件统一决策审批"
     )
 
     # 数据库同步字段
@@ -355,7 +351,6 @@ class Tool(BaseModel):
             "input_schema": self.input_schema,
             "source": self.source,
             "category": self.category if self.category else None,
-            "requires_approval": self.requires_approval,
         }
 
     def to_mcp_format(self) -> dict[str, Any]:
@@ -402,7 +397,6 @@ class Tool(BaseModel):
                 "source": self.source,
                 "category": self.category if self.category else None,
                 "level": self.level,
-                "requires_approval": self.requires_approval,
                 "version": self.version,
                 "tags": self.tags,
                 **self.metadata,

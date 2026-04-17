@@ -195,24 +195,23 @@ class HistoryBuffer:
         try:
             query_embedding = await self._embedding_fn(query)
 
-            similarities: list[tuple[MessageEntry, float]] = []
-            for entry in self._vector_index.values():
-                if filter_roles:
-                    role = entry.message.get("role")
-                    if role not in filter_roles:
-                        continue
+            entries = list(self._vector_index.values())
+            if filter_roles:
+                entries = [e for e in entries if e.message.get("role") in filter_roles]
 
-                if entry.embedding is None:
-                    continue
+            vectors = [e.embedding for e in entries if e.embedding is not None]
+            valid_entries = [e for e in entries if e.embedding is not None]
 
-                similarity = _cosine_similarity(query_embedding, entry.embedding)
-                if similarity >= min_similarity:
-                    similarities.append((entry, similarity))
+            if not vectors:
+                return []
 
-            similarities.sort(key=lambda x: x[1], reverse=True)
+            top_results = _batch_cosine_similarity(
+                query_embedding, vectors, top_k=top_k, min_similarity=min_similarity,
+            )
 
             results: list[str] = []
-            for entry, _ in similarities[:top_k]:
+            for idx, _ in top_results:
+                entry = valid_entries[idx]
                 content = entry.message.get("content", "")
                 role = entry.message.get("role", "")
                 results.append(f"[{role.upper()}] {content}")
@@ -376,7 +375,9 @@ class ConversationHistory:
 
 
 def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
-    """计算余弦相似度（纯 Python 实现）。
+    """计算余弦相似度。
+
+    优先使用 numpy 加速（约 50-100 倍），不可用时回退纯 Python。
 
     Args:
         vec1: 向量 1
@@ -388,11 +389,64 @@ def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     if not vec1 or not vec2 or len(vec1) != len(vec2):
         return 0.0
 
-    dot = sum(v1 * v2 for v1, v2 in zip(vec1, vec2))
-    norm1 = sum(v * v for v in vec1) ** 0.5
-    norm2 = sum(v * v for v in vec2) ** 0.5
+    try:
+        import numpy as np
+        a = np.asarray(vec1, dtype=np.float32)
+        b = np.asarray(vec2, dtype=np.float32)
+        denom = np.linalg.norm(a) * np.linalg.norm(b)
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+    except ImportError:
+        dot = sum(v1 * v2 for v1, v2 in zip(vec1, vec2))
+        norm1 = sum(v * v for v in vec1) ** 0.5
+        norm2 = sum(v * v for v in vec2) ** 0.5
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return dot / (norm1 * norm2)
 
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
 
-    return dot / (norm1 * norm2)
+def _batch_cosine_similarity(
+    query: list[float], vectors: list[list[float]], top_k: int, min_similarity: float = 0.0,
+) -> list[tuple[int, float]]:
+    """批量计算余弦相似度并返回 top-k 结果。
+
+    使用 numpy 矩阵运算一次性计算所有相似度，比逐条计算快数十倍。
+
+    Args:
+        query: 查询向量
+        vectors: 候选向量列表
+        top_k: 返回数量
+        min_similarity: 最小相似度阈值
+
+    Returns:
+        [(原始索引, 相似度), ...] 按相似度降序排列
+    """
+    if not query or not vectors:
+        return []
+
+    try:
+        import numpy as np
+        q = np.asarray(query, dtype=np.float32)
+        mat = np.asarray(vectors, dtype=np.float32)
+        q_norm = np.linalg.norm(q)
+        mat_norms = np.linalg.norm(mat, axis=1)
+
+        denom = q_norm * mat_norms
+        denom[denom == 0] = 1.0
+        similarities = np.dot(mat, q) / denom
+
+        mask = similarities >= min_similarity
+        indices = np.where(mask)[0]
+        valid_sims = similarities[indices]
+
+        top_local = np.argsort(valid_sims)[::-1][:top_k]
+        return [(int(indices[i]), float(valid_sims[i])) for i in top_local]
+    except ImportError:
+        results = []
+        for idx, vec in enumerate(vectors):
+            sim = _cosine_similarity(query, vec)
+            if sim >= min_similarity:
+                results.append((idx, sim))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]

@@ -2,49 +2,49 @@
 人类交互服务接口定义
 
 暴露接口：
-- set_notifier(self, notifier: IInteractionNotifier) -> None：set_notifier功能
-- IInteractionNotifier：IInteractionNotifier类
-- IHumanInteractionService：IHumanInteractionService类
+- IInteractionNotifier：交互通知器接口
+- IHumanInteractionService：人类交互服务接口
 """
 
 from abc import ABC, abstractmethod
 from typing import Any
 
-from src.core.human_interaction.models import Priority
-from src.db.models import ExecutionRecord
+from human_interaction.models import Priority
 
 
 class IInteractionNotifier(ABC):
-    """
-    交互通知器接口
-
-    负责将交互请求推送到前端
-    """
+    """交互通知器接口，负责将交互请求推送到前端。"""
 
     @abstractmethod
-    async def notify_request(self, request: ExecutionRecord) -> bool:
-        """通知有新的交互请求"""
+    async def notify_request(self, request: Any) -> bool:
+        """通知有新的交互请求。"""
         ...
 
     @abstractmethod
     async def notify_cancel(
         self, request_id: str, reason: str | None = None, thread_id: str = ""
     ) -> bool:
-        """通知请求已取消"""
+        """通知请求已取消。"""
         ...
 
     @abstractmethod
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
-        """通知请求已超时"""
+        """通知请求已超时。"""
         ...
 
     @abstractmethod
     async def notify_timeout_reminder(
-        self, request_id: str, remaining_seconds: int, thread_id: str = "",
-        *, title: str = "", mode: str = "",
-        options: list[dict] | None = None, questions: list[str] | None = None
+        self,
+        request_id: str,
+        remaining_seconds: int,
+        thread_id: str = "",
+        *,
+        title: str = "",
+        mode: str = "",
+        options: list[dict] | None = None,
+        questions: list[str] | None = None,
     ) -> bool:
-        """发送超时提醒"""
+        """发送超时提醒。"""
         ...
 
     @abstractmethod
@@ -57,13 +57,13 @@ class IInteractionNotifier(ABC):
         initial_message: str | None = None,
         suggestions: list[str] | None = None,
     ) -> bool:
-        """通知对话模式开始"""
+        """通知对话模式开始。"""
         ...
 
 
 class IHumanInteractionService(ABC):
     """
-    人类交互服务接口
+    人类交互服务接口。
 
     统一的人类交互抽象层，支持：
     - 选择模式：审批确认、澄清问题、方案选择
@@ -85,7 +85,7 @@ class IHumanInteractionService(ABC):
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """创建选择模式请求"""
+        """创建选择模式请求。"""
         ...
 
     @abstractmethod
@@ -101,7 +101,7 @@ class IHumanInteractionService(ABC):
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """创建对话模式请求"""
+        """创建对话模式请求。"""
         ...
 
     @abstractmethod
@@ -110,7 +110,7 @@ class IHumanInteractionService(ABC):
         request_id: str,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """等待用户选择"""
+        """等待用户选择。"""
         ...
 
     @abstractmethod
@@ -123,12 +123,12 @@ class IHumanInteractionService(ABC):
         feedback: str | None = None,
         user_id: str | None = None,
     ) -> bool:
-        """提交响应"""
+        """提交响应。"""
         ...
 
     @abstractmethod
     async def mark_as_viewed(self, request_id: str) -> bool:
-        """标记请求为已查看"""
+        """标记请求为已查看。"""
         ...
 
     @abstractmethod
@@ -137,12 +137,12 @@ class IHumanInteractionService(ABC):
         request_id: str,
         reason: str | None = None,
     ) -> bool:
-        """取消请求"""
+        """取消请求。"""
         ...
 
     @abstractmethod
-    async def get_request(self, request_id: str) -> ExecutionRecord | None:
-        """获取请求详情"""
+    async def get_request(self, request_id: str) -> dict[str, Any] | None:
+        """获取请求详情。"""
         ...
 
     @abstractmethod
@@ -151,8 +151,8 @@ class IHumanInteractionService(ABC):
         session_id: str | None = None,
         user_id: str | None = None,
         limit: int = 50,
-    ) -> list[ExecutionRecord]:
-        """获取待处理请求列表"""
+    ) -> list[dict[str, Any]]:
+        """获取待处理请求列表。"""
         ...
 
     @abstractmethod
@@ -160,11 +160,11 @@ class IHumanInteractionService(ABC):
         self,
         session_id: str,
         limit: int = 100,
-    ) -> list[ExecutionRecord]:
-        """获取交互历史"""
+    ) -> list[dict[str, Any]]:
+        """获取交互历史。"""
         ...
 
     @abstractmethod
     def set_notifier(self, notifier: IInteractionNotifier) -> None:
-        """设置通知器"""
+        """设置通知器。"""
         ...

@@ -411,7 +411,6 @@ tool_ids:
   - enhanced_search
   - file_read
   - evaluate
-  - todo_manage
   - task_evaluate
 
 # 约束配置

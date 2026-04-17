@@ -218,6 +218,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "type": "string",
                         "description": "父任务 ID。为长期任务创建子任务时需要指定此参数，将子任务关联到对应的长期任务。",
                     },
+                    "task_role": {
+                        "type": "string",
+                        "enum": ["solution_preparation", "solution_refinement", "final_validation"],
+                        "description": "子任务角色标记（可选）。用于长期任务容器的子任务，标记该子任务在容器中的角色。final_validation 表示最终验证任务，容器完成条件要求至少有一个 final_validation 子任务通过",
+                    },
                     "workspace": {
                         "type": "string",
                         "description": """
@@ -226,12 +231,6 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 - 绝对路径（如 "D:/projects/app"）：直接使用该路径，必须是完整路径
 - 子任务可指定子目录（如 "src/auth"）继承父任务目录
 """.strip(),
-                    },
-                    "isolation_level": {
-                        "type": "string",
-                        "enum": ["container", "host"],
-                        "default": "container",
-                        "description": "隔离级别。container（默认，Docker容器执行）、host（宿主机执行，需人工审批）",
                     },
                 },
                 "required": ["goal"],
@@ -281,13 +280,10 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             source=ToolSource.CODE,
             category=ToolCategory.TASK,
             level=ToolLevel.L1_L2_ONLY,
-            requires_approval=False,
-            dangerous_operations=[],
             tags=["task", "submit"],
             injected_params=[
                 "user_id",
                 "session_id",
-                "task_id",
                 "dependencies",
                 "tool_record_id",
                 "parent_agent_level",
@@ -307,6 +303,14 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         """
         task_scope = inputs.get("task_scope", "short_term")
         goal = inputs.get("goal")
+        if isinstance(goal, str):
+            import json
+            try:
+                goal = json.loads(goal)
+            except (json.JSONDecodeError, ValueError):
+                goal = None
+        if not isinstance(goal, dict):
+            goal = None
         parent_agent_level = inputs.get("parent_agent_level", 1)
 
         logger.info(
@@ -389,6 +393,13 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             )
 
         # ── 6. 创建任务 ──
+        raw_priority = inputs.get("priority", 5)
+        try:
+            from tasks.types import TaskPriority as TP
+            TP(raw_priority)
+        except (ValueError, AttributeError):
+            raw_priority = 5
+
         try:
             task = task_service.create_task(
                 title=goal["title"],
@@ -396,7 +407,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 parent_task_id=parent_task_id,
                 target_type=target_type,
                 dependencies=dependencies or None,
-                priority=inputs.get("priority", 5),
+                priority=raw_priority,
                 metadata=self._build_metadata(inputs, goal, acceptance_criteria),
             )
         except Exception as e:
@@ -406,25 +417,40 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="TASK_CREATE_FAILED",
             )
 
-        # ── 7. 发布事件 ──
+        # ── 7. 发布事件（BUG-FIX-P3：EventBus 不可用或失败时回滚任务） ──
         event_bus = self._get_event_bus()
-        if event_bus is not None:
+        if event_bus is None:
+            logger.error("[TaskSubmit] EventBus 不可用，回滚任务 %s", task.id)
             try:
-                await event_bus.emit("task.submitted", {
-                    "task_id": task.id,
-                    "target_type": target_type,
-                    "target_id": target_id,
-                    "user_input": goal.get("title", ""),
-                    "description": description or goal.get("description", ""),
-                    "acceptance_criteria": acceptance_criteria,
-                    "workspace": workspace,
-                    "priority": inputs.get("priority", 5),
-                })
-                logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
-            except Exception as e:
-                logger.warning("[TaskSubmit] 事件发布失败（任务已创建）: %s", e)
-        else:
-            logger.warning("[TaskSubmit] EventBus 不可用，跳过事件发布")
+                task_service._storage.delete(task.id)
+            except Exception as del_e:
+                logger.error("[TaskSubmit] 回滚失败（_storage.delete）: %s", del_e)
+            return create_failure_result(
+                error="任务提交失败：EventBus 不可用，无法触发后台执行",
+                error_code="EVENT_BUS_UNAVAILABLE",
+            )
+        try:
+            await event_bus.emit("task.submitted", {
+                "task_id": task.id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "user_input": goal.get("title", ""),
+                "description": description or goal.get("description", ""),
+                "acceptance_criteria": acceptance_criteria,
+                "workspace": workspace,
+                "priority": inputs.get("priority", 5),
+            })
+            logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
+        except Exception as e:
+            logger.error("[TaskSubmit] EventBus emit 失败，回滚任务 %s: %s", task.id, e)
+            try:
+                task_service._storage.delete(task.id)
+            except Exception as del_e:
+                logger.error("[TaskSubmit] 回滚失败（_storage.delete）: %s", del_e)
+            return create_failure_result(
+                error=f"任务提交失败：事件发布异常 - {e}",
+                error_code="EVENT_BUS_ERROR",
+            )
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
@@ -436,6 +462,13 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "target_type": target_type,
                 "target_id": target_id,
                 "submit_status": "submitted",
+                # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
+                "message": (
+                    f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
+                    "该任务需要一定时间完成，请先继续处理其他工作。"
+                    "系统会定期提醒你检查进度，收到提醒后再使用 task_manage 查看结果。"
+                    "在收到系统提醒前，不要查询任务状态。"
+                ),
             },
             metadata={
                 "action": "task_submit",
@@ -498,6 +531,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "status": task.status.value,
                 "task_scope": "long_term",
                 "submit_status": "submitted",
+                "message": (
+                    f"长期任务 [{task.title}]（ID: {task.id}）已提交，状态：异步执行中。"
+                    "该任务需要一定时间完成，请先继续处理其他工作。"
+                    "系统会定期提醒你检查进度，收到提醒后再使用 task_manage 查看结果。"
+                    "在收到系统提醒前，不要查询任务状态。"
+                ),
             },
             metadata={"action": "task_submit_long_term"},
         )
@@ -586,7 +625,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata.update(inputs["metadata"])
 
         # 存储验收标准（供 task_evaluate 使用）
-        if acceptance_criteria:
+        if acceptance_criteria and isinstance(acceptance_criteria, dict):
             metadata["acceptance_criteria"] = acceptance_criteria
             metadata["evaluation_metric_ids"] = list(acceptance_criteria.keys())
 
@@ -601,13 +640,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["max_retries"] = inputs["max_retries"]
         if inputs.get("needs_preparation"):
             metadata["needs_preparation"] = inputs["needs_preparation"]
-        if inputs.get("isolation_level"):
-            metadata["isolation_level"] = inputs["isolation_level"]
         if inputs.get("task_scope"):
             metadata["task_scope"] = inputs["task_scope"]
 
         # 存储执行者信息
         if inputs.get("target_id"):
             metadata["target_id"] = inputs["target_id"]
+
+        # 存储任务角色标记（用于容器完成条件判断）
+        # 可选值：solution_preparation、solution_refinement、final_validation
+        if inputs.get("task_role"):
+            metadata["task_role"] = inputs["task_role"]
 
         return metadata

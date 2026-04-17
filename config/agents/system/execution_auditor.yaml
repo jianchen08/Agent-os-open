@@ -483,7 +483,6 @@ tool_ids:
   - enhanced_search
   - evaluate
   - memory
-  - todo_manage
   - task_evaluate
 
 # 约束配置
@@ -504,7 +503,7 @@ soft_constraints:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 50
+max_iterations: 100
 max_reminders: 3
 timeout_seconds: 600
 

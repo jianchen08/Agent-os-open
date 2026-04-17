@@ -1,4 +1,4 @@
-﻿"""
+"""
 Schema 评估器
 
 暴露接口：
@@ -59,7 +59,6 @@ class SchemaEvaluator:
             },
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
-            requires_approval=False,
             tags=["evaluator", "schema", "json", "yaml", "regex"],
         )
 

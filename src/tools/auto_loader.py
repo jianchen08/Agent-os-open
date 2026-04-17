@@ -1,4 +1,4 @@
-﻿"""
+"""
 工具自动加载器
 
 暴露接口：
@@ -51,6 +51,7 @@ class ToolAutoLoader:
         self._db_session = db_session
         self._loading: set[str] = set()  # 正在加载的工具（防止循环）
         self._tool_guides: dict[str, str] = {}  # 工具使用指南缓存
+        self._file_index: dict[str, Path] | None = None  # 工具名→文件路径索引（惰性构建）
 
     def set_db_session(self, session: Any) -> None:
         """设置数据库会话（支持延迟注入）"""
@@ -161,7 +162,6 @@ class ToolAutoLoader:
             level=level,
             version=db_tool.version or "1.0.0",
             tags=db_tool.tags or [],
-            requires_approval=db_tool.requires_approval or False,
             db_id=db_id,
         )
 
@@ -198,29 +198,46 @@ class ToolAutoLoader:
         self._tool_guides[tool_name] = "\n\n".join(guide_parts)
 
     async def _load_from_python_code(self, tool_name: str) -> Tool | None:
-        """从 Python 代码动态加载工具"""
+        """从 Python 代码动态加载工具（使用文件索引加速查找）"""
         if not self.TOOL_CODE_DIR.exists():
             return None
 
-        # 搜索 Python 文件
+        # 惰性构建文件索引（只扫描一次）
+        if self._file_index is None:
+            self._file_index = self._build_file_index()
+
+        # 先尝试精确匹配索引
+        indexed_path = self._file_index.get(tool_name)
+        if indexed_path is not None:
+            try:
+                tool_instance = self._load_tool_from_file(indexed_path, tool_name)
+                if tool_instance:
+                    tool_def: Tool = tool_instance.get_tool_definition()
+                    self._registry.register_with_handler(
+                        tool=tool_def, handler=tool_instance.execute,
+                    )
+                    self._cache_python_guide(tool_name, tool_def)
+                    return tool_def
+            except Exception as e:
+                logger.debug("[自动加载] 索引文件加载失败: %s, 错误: %s", indexed_path, e)
+
+        # 索引未命中，退回全扫描（首次或索引不完整时）
         for py_file in self.TOOL_CODE_DIR.rglob("*.py"):
             if py_file.name.startswith("_"):
                 continue
 
             try:
-                # 动态加载模块
                 tool_instance = self._load_tool_from_file(py_file, tool_name)
                 if tool_instance:
-                    tool_def: Tool = tool_instance.get_tool_definition()
+                    tool_def = tool_instance.get_tool_definition()
 
-                    # 注册工具
                     self._registry.register_with_handler(
-                        tool=tool_def,
-                        handler=tool_instance.execute,
+                        tool=tool_def, handler=tool_instance.execute,
                     )
-
-                    # 缓存使用指南
                     self._cache_python_guide(tool_name, tool_def)
+
+                    # 更新索引
+                    self._file_index[tool_name] = py_file
 
                     return tool_def
 
@@ -229,6 +246,27 @@ class ToolAutoLoader:
                 continue
 
         return None
+
+    def _build_file_index(self) -> dict[str, Path]:
+        """构建工具名→文件路径的索引映射（扫描一次，后续直接命中）。
+
+        通过文件名启发式匹配：如 task.py → task, task_manage 等。
+        """
+        index: dict[str, Path] = {}
+        if not self.TOOL_CODE_DIR.exists():
+            return index
+
+        for py_file in self.TOOL_CODE_DIR.rglob("*.py"):
+            if py_file.name.startswith("_"):
+                continue
+            stem = py_file.stem
+            # 将文件名中的常见分隔符转为可能的工具名
+            candidates = {stem, stem.replace("_", ""), stem.replace("_", "-")}
+            for name in candidates:
+                if name not in index:
+                    index[name] = py_file
+
+        return index
 
     def _load_tool_from_file(
         self,

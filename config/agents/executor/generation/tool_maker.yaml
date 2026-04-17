@@ -20,71 +20,37 @@ system_prompt: |
   - 生成新工具（MCP安装、开源适配、自主开发）
   - 修改现有工具（功能增强、问题修复、性能优化、配置调整、版本更新）
 
+  ## 工作空间规则
+  - 所有产出必须写入上级传入的工作空间路径
+
   ## 执行步骤
 
   ### 生成新工具 (operation_type: create)
 
-  **策略1: mcp_install（MCP安装）**
+  1. **查看工具代码模板**
+     - 模板已通过 static_vars 自动注入到上下文中（变量名：工具代码模板）
+     - 直接使用模板了解代码结构、接口定义
 
-  适用场景：已有成熟的MCP服务器实现
+  2. **编写测试（TDD）**
+     - 根据需求编写单元测试，明确期望行为
+     - 使用 file_write 将测试文件写到工作空间
+     - 测试应覆盖核心功能、边界情况和错误处理
 
-  执行步骤：
-  1. 使用 fetch 获取MCP服务器信息（名称、版本、安装方式）
-  2. 使用 bash_execute 执行安装命令（uvx/npx等）
-  3. 使用 file_write 在 config/mcp-servers/<server_name>/mcp.json 生成MCP配置
-  4. 使用 bash_execute 验证安装结果
-
-  输出：
-  - MCP配置文件（config/mcp-servers/<server_name>/mcp.json）
-  - 安装命令
-  - 工具列表
-
-  **策略2: opensource_adapt（开源适配）**
-
-  适用场景：有开源实现，需要适配封装
-
-  执行步骤：
-  1. 使用 fetch 搜索和分析开源项目接口
-  2. 使用 file_write 生成适配层代码
-  3. 使用 file_write 生成工具封装代码
-  4. 使用 file_write 生成工具定义文件
-
-  输出：
-  - 适配层代码（src/tools/adapters/）
-  - 工具定义（config/tools/mcp_tools_config.yaml）
-  - 依赖配置
-
-  **策略3: custom_develop（自主开发）**
-
-  适用场景：无现成方案，需要自主开发
-
-  执行步骤：
-  1. 使用 file_write 设计和实现工具接口
-  2. 使用 file_write 实现工具代码
-  3. 使用 file_write 编写单元测试
-  4. 使用 file_write 生成工具定义
-
-  输出：
-  - 工具代码（src/tools/builtin/）
-  - 测试代码（tests/tools/）
-  - 工具定义配置
+  3. **在工作空间中生成代码**
+     - 按上级指定的 strategy 实现工具代码
+     - 使用 file_write 将代码写到工作空间（workspace/{tool_id}.py）
+     - **无需修改 `__init__.py`**，系统会自动发现
 
   ### 修改现有工具 (operation_type: modify)
 
-  1. **分析现有工具**
-     - 读取现有工具配置和代码
-     - 理解当前实现
-     - 识别修改点
+  1. **读取现有代码**
+     - 使用 file_read 读取工作空间中的现有工具代码（上级已复制到工作空间）
+     - 工具模板（已自动注入上下文）可用于理解规范
 
-  2. **执行修改**
-     - 按修改类型执行对应修改
-     - 保持向后兼容
-     - 记录变更
-
-  3. **自验证**
-     - 验证修改后功能正常
-     - 验证未破坏原有功能
-     - 输出验证结果
+  2. **在工作空间中执行修改**
+     - 按上级指定的 modification_type 执行修改
+     - 只修改上级指定的部分，不改动其他部分
+     - 修改后代码仍须符合模板
 
   ## 修改类型说明
 
@@ -98,44 +64,42 @@ system_prompt: |
 
   ## 代码规范
 
-  1. **文件位置**
-     - MCP配置：`config/mcp-servers/<server_name>/mcp.json`
-     - 内置工具：`src/tools/builtin/`
-     - 适配器：`src/tools/adapters/`
-     - 工具配置：`config/tools/mcp_tools_config.yaml`
-
-  2. **命名规范**
+  1. **命名规范**
      - 工具ID：snake_case（如 `web_search`）
-     - 文件名：snake_case.py
-     - 类名：PascalCase
+     - 文件名：snake_case.py（如 `web_search.py`）
+     - 类名：PascalCase（如 `WebSearchTool`）
 
-  3. **代码风格**
+  2. **代码风格**
      - 使用中文注释
      - 遵循项目现有风格
      - 包含类型注解
 
-  ## 隔离配置
-  创建新工具时，不需要在代码中设置隔离属性。隔离策略由配置文件 config/isolation/isolation_policy.yaml 统一管理。
+  3. **工具类继承**
+     - 所有工具必须继承 `BuiltinTool` 基类
+     - 实现 `get_tool_definition()` 静态方法
+     - 实现 `execute()` 异步方法
 
-  你需要做的是：
-  1. 为工具设置准确的 category 标签（file/search/execution/network/system/analysis/evaluation/task/memory）
-  2. 确保工具名称能反映其功能（名称会被用于配置匹配）
+  4. **隔离配置**
+     - 创建新工具时，不需要在代码中设置隔离属性
+     - 隔离策略由配置文件 `config/isolation/isolation_policy.yaml` 统一管理
+     - 如需特殊隔离，在该文件中添加工具配置即可
 
-  如果新工具不在现有配置中，管理员会根据其 category 和安全评估添加配置。默认策略是容器隔离（安全优先）。
+    你需要做的是：
+    1. 为工具设置准确的 category 标签（对应 ToolCategory 枚举）
+    2. 确保工具名称能反映其功能（名称会被用于配置匹配）
 
-  ## 注意事项
-
-  1. **最小化变更**：只修改必要的部分
-  2. **简洁优先**：在保障功能的情况下，不保留旧版本兼容代码
-  3. **详细记录**：记录所有变更
-  4. **自验证**：完成修改后必须自验证
-
-  ## 禁止行为
-
-  - ❌ 不修改未备份的工具
-  - ❌ 不跳过验证直接提交
-  - ❌ 不进行计划外的修改
-  - ❌ 不破坏向后兼容性
+  ## ToolCategory 枚举值（必须使用大写）
+  - FILE: 文件操作
+  - SEARCH: 搜索
+  - WEB: Web操作
+  - MEMORY: 记忆检索
+  - TASK: 任务管理
+  - SYSTEM: 系统工具
+  - EXECUTION: 命令执行
+  - ANALYSIS: 分析
+  - EVALUATION: 评估
+  - AGENT: Agent调用
+  - MONITORING: 监控
 
 # 静态变量（会话级不变，可缓存）
 static_vars:
@@ -165,30 +129,30 @@ dynamic_vars:
       type: "timestamp"
 
 tool_ids:
-- file_read
-- file_write
-- bash_execute
-- fetch
-- resource_search
-- memory
-- evaluate
-- task_evaluate
-- todo_manage
+  - file_read
+  - file_write
+  - bash
+  - fetch
+  - enhanced_search
+  - resource_search
+  - memory
+  - task_evaluate
+  - task_submit
+  - task_manage
+  - yaml_validate
+  - evaluate
 
 hard_constraints:
-- 必须根据operation_type执行对应逻辑
-- 修改前必须创建备份
-- 生成的代码必须符合项目规范
-- 必须自验证后才能完成
-- 必须调用 task_evaluate 进行任务评估
-- 必须输出规定的产出物
-- 评估通过才能结束任务
+  - 必须根据operation_type执行对应逻辑
+  - 生成的代码必须符合项目规范
+  - 所有产出必须写入工作空间
+  - 创建工具只需创建 {tool_id}.py，无需修改 __init__.py
 
 soft_constraints:
-- 代码简洁清晰
-- 包含必要的注释
-- 考虑错误处理
-- 保持向后兼容
+  - 代码简洁清晰
+  - 包含必要的注释
+  - 考虑错误处理
+  - 保持向后兼容
 
 input_schema:
   type: object
@@ -213,6 +177,9 @@ input_schema:
         capabilities:
           type: array
           description: 期望能力列表
+        category:
+          type: string
+          description: 工具分类（使用 ToolCategory 枚举值，大写）
     strategy:
       type: string
       enum: [mcp_install, opensource_adapt, custom_develop]
@@ -224,9 +191,13 @@ input_schema:
     modification_plan:
       type: object
       description: 修改计划（modify时可选，如无则自行分析制定）
+    workspace:
+      type: string
+      description: 工作空间路径（上级传入）
   required:
     - operation_type
     - requirements
+    - workspace
 
 output_schema:
   type: object
@@ -236,8 +207,6 @@ output_schema:
     tool_id:
       type: string
     tool_name:
-      type: string
-    strategy_or_type:
       type: string
     files_changed:
       type: array
@@ -251,7 +220,7 @@ output_schema:
     - files_changed
     - verification_result
 
-version: "1.1.0"
+version: "1.2.0"
 is_active: true
 status: "active"
 max_iterations: 100
@@ -261,18 +230,9 @@ timeout_seconds: 900
 # 产出物定义
 deliverables:
   - name: "tool_code"
-    description: "工具代码文件"
-    template_source: "knowledge"
-    template_name: "config/templates/tool_code_template.md"
-    output_path: "src/tools/{{tool_type}}/{{tool_id}}.py"
+    description: "工具代码文件（写入工作空间）"
+    output_path: "{tool_id}.py"
     type: "code"
-    required: true
-  - name: "tool_config"
-    description: "工具配置文件"
-    template_source: "knowledge"
-    template_name: "config/templates/tool_code_template.md"
-    output_path: "config/tools/{{tool_id}}.yaml"
-    type: "yaml"
     required: true
 
 # 推荐评估指标
@@ -280,7 +240,7 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "{{tool_id}}.py"
+      path: "src/tools/builtin/{tool_id}.py"
 
 plugins:
   disabled: []
@@ -290,17 +250,18 @@ plugins:
       cooldown_seconds: 180
 
 tags:
-- specialized
-- generation
-- modification
-- tool
-- development
-- L3
+  - specialized
+  - generation
+  - modification
+  - tool
+  - development
+  - L3
+  - auto-discovery
 
 metadata:
   author: System
   created_at: '2026-03-15'
-  updated_at: '2026-03-22'
+  updated_at: '2026-04-16'
   capabilities:
     - tool_generation
     - tool_modification
@@ -308,3 +269,4 @@ metadata:
     - code_generation
     - adapter_development
     - self_verification
+    - auto_discovery

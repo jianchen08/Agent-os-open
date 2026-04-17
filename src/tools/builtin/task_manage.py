@@ -9,14 +9,16 @@
 - cancel: 取消任务（→ failed）
 - retry: 重试失败任务（failed → running）
 - inject: 向任务会话注入消息
+- complete_container: 容器完成（仅限 L1 主 Agent）
+- fail_container: 容器失败（仅限 L1 主 Agent）
 
 通过 ctx.get_service("task_service") 获取 TaskService，
 通过 ctx.get_service("message_queue") 获取 MessageQueue（inject 操作需要）。
 
 简化原则：
-- 去掉权限检查（L1/L2 分级）
 - 去掉 delete 操作
-- 禁止设为 completed（完成只能通过 task_evaluate）
+- 禁止普通任务设为 completed（完成只能通过 task_evaluate）
+- 容器任务的 completed/failed 通过 complete_container/fail_container 操作
 
 暴露接口：
 - task_manage_schema: 工具参数 JSON Schema
@@ -30,13 +32,97 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+# BUG-FIX-P9：TaskService 单例缓存，避免每次调用新建实例
+_task_service_instance: Any = None
+
+
+def _get_task_service() -> Any:
+    """获取共享的 TaskService 实例（单例）。
+
+    获取优先级：
+    1. 模块级缓存实例
+    2. sys._agent_os_task_service（CLI 设置的全局共享实例）
+    3. 创建新实例（降级兜底）
+
+    Returns:
+        TaskService 实例，失败时返回 None
+    """
+    global _task_service_instance
+    if _task_service_instance is not None:
+        return _task_service_instance
+    try:
+        import sys
+        svc = getattr(sys, "_agent_os_task_service", None)
+        if svc is not None:
+            _task_service_instance = svc
+            return _task_service_instance
+        from tasks.service import TaskService
+        _task_service_instance = TaskService()
+        return _task_service_instance
+    except Exception as exc:
+        logger.error("[task_manage] TaskService 创建失败: %s", exc)
+        return None
+
+
+def _retry_emit_event(task_id: str) -> None:
+    """为 retry 操作发布 task.submitted 事件，触发 TaskWorker 重新执行。
+
+    BUG-FIX-P7：retry 操作将任务状态改为 running 后，需要通知 TaskWorker
+    重新启动管道。否则任务永远卡在 running 无人执行。
+
+    Args:
+        task_id: 要重新执行的任务 ID
+    """
+    import asyncio
+    import sys
+
+    event_bus = getattr(sys, "_agent_os_event_bus", None)
+    if event_bus is None:
+        logger.warning("[task_manage] retry: EventBus 不可用，任务 %s 可能需要手动恢复", task_id)
+        return
+
+    # 获取任务详情用于重建事件数据
+    task_service = _get_task_service()
+    task = task_service.get_task(task_id) if task_service else None
+    metadata = getattr(task, "metadata", {}) or {} if task else {}
+
+    event_data = {
+        "task_id": task_id,
+        "target_type": "agent",
+        "target_id": metadata.get("target_id", ""),
+        "user_input": task.title if task else "",
+        "description": task.description if task else "",
+        "acceptance_criteria": metadata.get("acceptance_criteria", {}),
+        "workspace": metadata.get("workspace", ""),
+        "priority": task.priority.value if task and hasattr(task.priority, "value") else 5,
+    }
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(event_bus.emit("task.submitted", event_data))
+        else:
+            loop.run_until_complete(event_bus.emit("task.submitted", event_data))
+        logger.info("[task_manage] retry: task.submitted 已发布 | task_id=%s", task_id)
+    except RuntimeError:
+        try:
+            asyncio.run(event_bus.emit("task.submitted", event_data))
+            logger.info("[task_manage] retry: task.submitted 已发布（asyncio.run）| task_id=%s", task_id)
+        except Exception as e:
+            logger.warning("[task_manage] retry: 事件发布失败 %s: %s", task_id, e)
+    except Exception as e:
+        logger.warning("[task_manage] retry: 事件发布失败 %s: %s", task_id, e)
+
+
+
 # 工具参数 Schema（OpenAI Function Calling 格式）
 task_manage_schema: dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "inject"],
+            "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "inject", "complete_container", "fail_container"],
             "description": "操作类型",
         },
         "task_id": {
@@ -60,13 +146,18 @@ task_manage_schema: dict[str, Any] = {
             "type": "string",
             "description": "注入消息的目标会话 ID（inject 操作必填）",
         },
+        "container_reason": {
+            "type": "string",
+            "description": "容器操作原因（complete_container/fail_container 操作时填写）",
+        },
     },
     "required": ["action"],
 }
 
 TASK_MANAGE_DESCRIPTION = (
-    "任务管理工具。支持获取、列表、暂停、恢复、取消、重试和消息注入等操作。"
-    "完成操作请使用 task_evaluate 工具。"
+    "任务管理工具。支持获取、列表、暂停、恢复、取消、重试、消息注入等操作。"
+    "还支持容器完成（complete_container）和容器失败（fail_container）操作，仅限主 Agent 使用。"
+    "普通任务完成请使用 task_evaluate 工具。"
 )
 
 
@@ -83,6 +174,7 @@ def task_manage_func(params: dict[str, Any]) -> dict[str, Any]:
         包含 success 和操作结果的字典
     """
     action = params.get("action")
+    parent_agent_level = params.get("parent_agent_level")
     if not action:
         return {
             "success": False,
@@ -90,15 +182,12 @@ def task_manage_func(params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "MISSING_ACTION",
         }
 
-    # 获取 TaskService
-    try:
-        from tasks.service import TaskService
-
-        task_service = TaskService()
-    except Exception as exc:
+    # BUG-FIX-P9：使用单例 TaskService，避免每次调用新建实例
+    task_service = _get_task_service()
+    if task_service is None:
         return {
             "success": False,
-            "error": f"TaskService 不可用: {exc}",
+            "error": "TaskService 不可用",
             "error_code": "SERVICE_UNAVAILABLE",
         }
 
@@ -112,6 +201,8 @@ def task_manage_func(params: dict[str, Any]) -> dict[str, Any]:
         "cancel": _action_cancel,
         "retry": _action_retry,
         "inject": _action_inject,
+        "complete_container": lambda svc, p: _action_container_op(svc, p, "complete"),
+        "fail_container": lambda svc, p: _action_container_op(svc, p, "fail"),
     }
 
     handler = dispatchers.get(action)
@@ -410,6 +501,11 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     try:
         task = task_service.start_task(task_id)
         logger.info("[task_manage] 任务重试成功: %s", task_id)
+
+        # BUG-FIX-P7：重试后发布 task.submitted 事件，触发 TaskWorker 重新执行
+        # 否则任务状态变为 running 但没有管道在执行，永远卡死
+        _retry_emit_event(task_id)
+
         return {
             "success": True,
             "task_id": task.id,
@@ -482,6 +578,8 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         }
 
     # 构造并推入消息
+    import asyncio
+
     from infrastructure.message_queue import Message, create_message_id
 
     message = Message(
@@ -493,7 +591,24 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         metadata={"source": "task_manage", "task_id": task_id},
     )
 
-    queue.push(message)
+    # BUG-FIX-P8：_action_inject 是同步函数，不能直接 await，
+    # 需要判断事件循环状态来安全调用异步 push
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(queue.push(message))
+        else:
+            loop.run_until_complete(queue.push(message))
+    except RuntimeError:
+        try:
+            asyncio.run(queue.push(message))
+        except Exception as e:
+            logger.error("[task_manage] inject: 消息推送失败: %s", e)
+            return {
+                "success": False,
+                "error": f"消息推送失败: {e}",
+                "error_code": "INJECT_FAILED",
+            }
 
     logger.info(
         "[task_manage] 消息已注入 | task_id=%s | session_id=%s | content_len=%d",
@@ -506,6 +621,113 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         "message_id": message.id,
         "message": f"消息已注入到会话 {session_id}",
     }
+
+
+def _action_container_op(task_service: Any, params: dict[str, Any], op: str) -> dict[str, Any]:
+    """容器操作：完成或失败（仅限 L1 主 Agent）。
+
+    将容器任务（父任务）标记为 completed 或 failed。
+    前提条件：
+    1. 调用者必须是 L1 主 Agent（parent_agent_level == 1）
+    2. 目标任务必须是容器（有子任务）
+    3. 目标任务当前状态必须是 PENDING
+
+    Args:
+        task_service: TaskService 实例
+        params: 工具参数，需含 task_id、可选含 container_reason
+        op: 操作类型，"complete" 或 "fail"
+
+    Returns:
+        操作结果字典
+    """
+    from tasks.state_machine import InvalidTransitionError
+    from tasks.types import TaskStatus
+
+    parent_agent_level = params.get("parent_agent_level", 1)
+
+    # 权限检查：仅 L1 主 Agent 可操作
+    if parent_agent_level != 1:
+        return {
+            "success": False,
+            "error": "容器操作仅限 L1 主 Agent 执行",
+            "error_code": "PERMISSION_DENIED",
+        }
+
+    task_id = params.get("task_id")
+    if not task_id:
+        return {
+            "success": False,
+            "error": f"{op}_container 操作必须提供 task_id",
+            "error_code": "MISSING_TASK_ID",
+        }
+
+    task = task_service.get_task(task_id)
+    if task is None:
+        return {
+            "success": False,
+            "error": f"任务不存在: {task_id}",
+            "error_code": "TASK_NOT_FOUND",
+        }
+
+    # 验证是容器任务（有子任务）
+    subtasks = task_service.list_subtasks(task_id)
+    if not subtasks:
+        return {
+            "success": False,
+            "error": f"任务 {task_id} 不是容器任务（无子任务），不能使用容器操作",
+            "error_code": "NOT_A_CONTAINER",
+        }
+
+    # 验证当前状态为 PENDING（容器在子任务执行期间保持 PENDING）
+    if task.status != TaskStatus.PENDING:
+        return {
+            "success": False,
+            "error": f"容器当前状态为 {task.status.value}，只能操作 PENDING 状态的容器",
+            "error_code": "INVALID_STATUS",
+        }
+
+    reason = params.get("container_reason", params.get("reason", ""))
+
+    try:
+        if op == "complete":
+            task_service._transition_with_callback(task, TaskStatus.COMPLETED)
+            from datetime import datetime
+            task.completed_at = datetime.now().isoformat()
+            task_service._storage.save(task)
+            logger.info("[task_manage] 容器已完成: %s — %s", task_id, reason)
+            return {
+                "success": True,
+                "task_id": task.id,
+                "status": "completed",
+                "message": f"容器 {task_id} 已标记为完成",
+                "subtask_count": len(subtasks),
+                "completed_subtasks": sum(1 for s in subtasks if s.status == TaskStatus.COMPLETED),
+            }
+        else:  # fail
+            task_service._transition_with_callback(task, TaskStatus.FAILED)
+            if reason:
+                task.error = reason
+                task_service._storage.save(task)
+            logger.info("[task_manage] 容器已标记失败: %s — %s", task_id, reason)
+            return {
+                "success": True,
+                "task_id": task.id,
+                "status": "failed",
+                "message": f"容器 {task_id} 已标记为失败",
+                "reason": reason,
+            }
+    except InvalidTransitionError as exc:
+        return {
+            "success": False,
+            "error": f"容器状态转换不合法: {exc}",
+            "error_code": "INVALID_TRANSITION",
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"容器操作失败: {exc}",
+            "error_code": "OPERATION_FAILED",
+        }
 
 
 def _task_to_dict(task: Any) -> dict[str, Any]:

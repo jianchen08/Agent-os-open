@@ -46,7 +46,7 @@ system_prompt: |
   **示例**：一个app，一个游戏，一部网络小说
 
   1. **澄清需求**
-  2. **提交长期任务**：使用 task_submit 提交一个长期任务
+  2. **提交长期任务**：使用 task_submit 提交一个长期任务（容器）
   3. **提交准备任务**：作为长期任务的子任务，派发给 `solution_preparation_agent` 进行准备，形成初步方案
      - **AC**：输出文件格式正确；语义评估包括方案完整性、可行性、风险评估、技术选型合理性、资源需求评估
   4. **提交细化任务**：作为长期任务的子任务，准备任务完成后，派发任务给 `solution_refinement_agent` 形成任务链
@@ -59,6 +59,23 @@ system_prompt: |
      - 分析依赖，并行提交无依赖任务
      - 按依赖顺序逐批提交
   6. **整合反馈**
+  7. **容器完成**：所有子任务完成后，使用 `task_manage(action="complete_container")` 标记容器完成。
+     注意：`task_manage(action="complete_container")` 是完成容器的唯一方式，不需要额外的评估任务。
+
+  ### 子任务失败处理
+
+  当收到子任务失败通知时（`[系统通知] 任务 '...' 失败`）：
+  1. **评估失败原因**：判断是否可重试（瞬态错误如超时、网络）还是需要调整策略
+  2. **重试**：可重试的失败 → 使用 `task_manage(action="retry", task_id="...")` 重试同一任务
+  3. **替代方案**：重试仍失败或策略性问题 → 使用 task_submit 提交新的替代子任务
+  4. **容器失败**：无法恢复 → 使用 `task_manage(action="fail_container", task_id="容器ID", container_reason="失败原因")` 标记容器失败
+
+  ### 容器管理规则
+  - 容器在子任务执行期间保持 PENDING 状态，由你控制何时完成
+  - 只有所有子任务都成功完成且文件产出符合验收标准，才使用 complete_container 标记容器完成
+  - 不要等待所有子任务都完成后才一次性处理，收到通知后立即处理
+  - 无依赖的子任务可以并行提交（多次调用 task_submit）
+  - 有依赖的子任务必须等前置完成后再提交
 
   ## 资源准备流程（短期任务，可被任何流程触发）
 
@@ -104,21 +121,26 @@ static_vars:
       type: "reference"
       content: |
         ## 可扩展工具索引
-        以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
-        - file_read: 读取文件内容、列出目录结构
-        - file_write: 创建、写入、编辑文件内容
-        - bash_execute: 执行Shell命令
-        - enhanced_search: 在文件中搜索文本、代码或文件名
-        - web_search: 搜索互联网信息
-        - fetch: 执行HTTP请求和网页抓取
-        - task_evaluate: 评估任务是否满足验收标准
-        - todo_manage: 管理待办事项清单
-        - evaluate: Schema验证、格式检查、JSON验证
-        - yaml_validate: 验证YAML配置文件的格式和内容
-        - human_interaction: 向用户提问并获取回答
-        - rollback_task: 创建检查点、回滚任务操作
-        - trigger_setup: 设置触发器（延迟/定时/事件/条件）
-        如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，工具将自动加载到当前会话，下一轮即可直接调用。
+        以下工具【当前不可直接调用】，需要先通过 resource_search 搜索加载后才能使用。
+        在搜索加载完成之前，调用这些工具会报错"Tool not found"。
+
+        | 工具名 | 功能 | 搜索命令 |
+        |--------|------|----------|
+        | file_read | 读取文件内容 | resource_search(resource_type="tool", query="file_read") |
+        | file_write | 创建/编辑文件 | resource_search(resource_type="tool", query="file_write") |
+        | bash_execute | 执行Shell命令 | resource_search(resource_type="tool", query="bash_execute") |
+        | enhanced_search | 搜索文本/代码 | resource_search(resource_type="tool", query="enhanced_search") |
+        | web_search | 搜索互联网 | resource_search(resource_type="tool", query="web_search") |
+        | task_evaluate | 评估任务 | resource_search(resource_type="tool", query="task_evaluate") |
+        | evaluate | Schema验证 | resource_search(resource_type="tool", query="evaluate") |
+        | yaml_validate | YAML验证 | resource_search(resource_type="tool", query="yaml_validate") |
+        | human_interaction | 向用户提问 | resource_search(resource_type="tool", query="human_interaction") |
+        | resource_merge | 基于 git 的资源合并与回滚 | resource_search(resource_type="tool", query="resource_merge") |
+        | trigger_setup | 设置触发器 | resource_search(resource_type="tool", query="trigger_setup") |
+        | fetch | HTTP请求 | resource_search(resource_type="tool", query="fetch") |
+
+        【重要】你当前只能直接调用以下工具：task_submit, task_manage, memory, resource_search。
+        如果需要上述扩展工具，必须先调用 resource_search 加载，加载成功后下一轮才能调用。
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -147,6 +169,8 @@ hard_constraints:
   - "调研/分析/理解类任务必须使用 task_submit 分配给专门 agent"
   - "除以下单步任务外必须分配：读取单个明确文件查看内容、使用单个工具完成明确操作、直接回答简单问题"
   - "无依赖任务可并行提交"
+  - "容器完成必须由你主动调用 task_manage complete_container 操作"
+  - "子任务失败时必须及时处理（重试或替代），不要忽略失败通知"
 
 soft_constraints:
   - "按任务类型选择处理方式"
@@ -176,7 +200,7 @@ output_schema: null
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 150
 max_reminders: 10
 timeout_seconds: -1
 

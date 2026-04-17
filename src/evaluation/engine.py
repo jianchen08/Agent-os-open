@@ -4,14 +4,14 @@
 1. 接收评估请求（指标 ID 列表 + 输入参数）
 2. 从 MetricLoader 获取指标定义
 3. 根据指标类型分发评估：
-   - tool → 调用工具执行评估（当前 Mock 实现）
+   - tool → 通过 ToolRegistry 调用真实工具执行评估
    - agent → 调用 LLM Agent 评估（当前 Mock 实现）
    - human → 等待人工审核（当前 Mock 实现）
 4. 使用 ExpectEvaluator 对评估输出进行期望判定
 5. 收集评估结果返回
 
-当前阶段（M5b）：评估器调用使用 Mock 实现，仅验证引擎的分发逻辑正确。
-真实评估器调用在后续里程碑（M6+）通过工具系统实现。
+tool 类型评估器通过注入 ToolRegistry 实现真实工具调用；
+当 ToolRegistry 不可用时自动 fallback 到 Mock 实现。
 """
 
 from __future__ import annotations
@@ -59,15 +59,18 @@ class EvaluationEngine:
         self,
         loader: MetricLoader,
         expect_evaluator: ExpectEvaluator | None = None,
+        tool_registry: Any | None = None,
     ) -> None:
         """初始化评估引擎。
 
         Args:
             loader: 指标加载器（必须已加载指标）
             expect_evaluator: 期望值评估器，None 时创建默认实例
+            tool_registry: 工具注册表，None 时工具型评估器 fallback 到 Mock
         """
         self._loader = loader
         self._expect_evaluator = expect_evaluator or ExpectEvaluator()
+        self._tool_registry = tool_registry
         self._evaluators: dict[MetricType, EvaluatorFunc] = {
             MetricType.TOOL: self._evaluate_tool,
             MetricType.AGENT: self._evaluate_agent,
@@ -283,23 +286,89 @@ class EvaluationEngine:
         metric_def: MetricDefinition,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """工具型评估器的 Mock 实现。
+        """工具型评估器 — 通过 ToolRegistry 调用真实工具。
 
-        在当前阶段（M5b），仅返回 Mock 输出。
-        真实实现需要通过 ToolRegistry 调用对应工具。
+        当 tool_registry 不可用或工具不存在时，fallback 到 Mock 实现。
 
         Args:
-            metric_def: 指标定义
+            metric_def: 指标定义（evaluator_id 指定要调用的工具）
             params: 合并后的输入参数
 
         Returns:
-            Mock 评估输出
+            工具执行结果字典，格式：{"success": bool, "data": dict, "error": str}
         """
+        evaluator_id = metric_def.evaluator_id
         logger.info(
-            "Mock tool evaluation: %s (evaluator_id=%s)",
-            metric_def.id, metric_def.evaluator_id,
+            "Tool evaluation: %s (evaluator_id=%s)",
+            metric_def.id, evaluator_id,
         )
-        # Mock: 返回成功结果
+
+        # 尝试通过 ToolRegistry 调用真实工具
+        if self._tool_registry is not None and evaluator_id:
+            handler = self._tool_registry.get_handler(evaluator_id)
+            if handler is not None:
+                try:
+                    import asyncio
+
+                    tool_result = handler(params)
+                    if asyncio.iscoroutine(tool_result):
+                        try:
+                            loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            loop = None
+
+                        if loop and loop.is_running():
+                            import concurrent.futures
+
+                            def _run_async(coro_factory, params):
+                                return asyncio.run(coro_factory(params))
+
+                            with concurrent.futures.ThreadPoolExecutor() as pool:
+                                tool_result = pool.submit(
+                                    _run_async, handler, params
+                                ).result()
+                        else:
+                            tool_result = asyncio.run(handler(params))
+
+                    # 将 ToolExecutionResult 转为标准 dict
+                    if hasattr(tool_result, "to_dict"):
+                        result_dict = tool_result.to_dict()
+                    elif isinstance(tool_result, dict):
+                        result_dict = tool_result
+                    else:
+                        result_dict = {"success": True, "data": tool_result}
+
+                    # 标准化：确保包含 success 字段
+                    if "success" not in result_dict:
+                        status = result_dict.get("status", "completed")
+                        result_dict["success"] = status == "completed"
+
+                    logger.info(
+                        "Tool evaluation completed: %s -> success=%s",
+                        metric_def.id, result_dict.get("success"),
+                    )
+                    return result_dict
+
+                except Exception as e:
+                    logger.error(
+                        "Tool execution failed for %s (evaluator_id=%s): %s",
+                        metric_def.id, evaluator_id, e,
+                    )
+                    return {
+                        "success": False,
+                        "error": str(e),
+                    }
+            else:
+                logger.warning(
+                    "Tool '%s' not found in registry, falling back to mock",
+                    evaluator_id,
+                )
+
+        # Fallback: Mock 实现
+        logger.info(
+            "Mock tool evaluation (fallback): %s (evaluator_id=%s)",
+            metric_def.id, evaluator_id,
+        )
         return {
             "success": True,
             "data": {

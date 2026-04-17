@@ -20,7 +20,7 @@ models:
     reasoning_model: true
     default_params:
       temperature: 0.7
-      max_tokens: 8192
+      max_tokens: 16384
   embedding-3:
     provider: zhipu_coding
     model_name: embedding-3
@@ -71,6 +71,13 @@ defaults:
   chat: minimax-m2.7
   reasoning: minimax-m2.7
   embedding: embedding-3
+  fallback_chain:
+    chat:
+      - deepseek-chat
+      - glm-4.7
+    reasoning:
+      - deepseek-reasoner
+      - glm-5-turbo
 providers:
   zhipu_coding:
     api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7

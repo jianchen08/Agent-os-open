@@ -227,7 +227,6 @@ tool_ids:
   - search_content
   - search_file
   - execute_command
-  - todo_manage
   - task_evaluate
   - resource_search
 

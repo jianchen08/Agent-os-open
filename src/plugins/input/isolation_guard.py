@@ -1,8 +1,8 @@
 """隔离环境守卫 Input 插件。
 
 在工具执行前根据安全策略决定是否在容器内执行。
-读取工具的 metadata（dangerous_operations、level），
-调用 decider 决定隔离级别，设置 execution_context。
+优先使用 IsolationDecider 从 isolation_policy.yaml 决策隔离级别，
+task metadata 可覆盖决策结果。
 
 State 命名空间：
     - execution_contexts : 各工具调用的执行上下文列表
@@ -15,6 +15,8 @@ from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
+from src.isolation.decider import IsolationDecider
+from src.isolation.policy import IsolationPolicyLoader
 
 logger = logging.getLogger(__name__)
 
@@ -25,26 +27,18 @@ class IsolationGuard(IInputPlugin):
     根据工具类型和配置的安全策略，决定每个工具调用
     应在何种隔离级别下执行（docker 或 host）。
 
+    决策优先级：
+    1. task metadata 中的 isolation_level 覆盖
+    2. IsolationDecider 基于 isolation_policy.yaml 策略决策
+    3. Docker 不可用时根据策略的 fallback 字段降级
+
     优先级：25（在参数注入之前，尽早决定执行环境）
     错误策略：SKIP（隔离决策失败不应阻断管道）
-
-    Attributes:
-        _config: 插件配置字典
     """
 
     error_policy = ErrorPolicy.SKIP
 
-    # 需要容器隔离的工具名称前缀
-    _CONTAINER_TOOLS = {"bash", "shell", "command", "terminal"}
-
-    # 需要 host 执行的工具名称前缀（需要访问本地文件系统）
-    _HOST_TOOLS = {
-        "file_write", "file_read", "edit_file",
-        "search", "list_dir", "read_file",
-    }
-
-    # 网络/安全相关的 host 工具
-    _NETWORK_TOOLS = {"web_search", "web_fetch", "web_request"}
+    _HOST_ONLY_CATEGORIES = {"system", "task", "memory"}
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化隔离环境守卫插件。
@@ -54,22 +48,12 @@ class IsolationGuard(IInputPlugin):
                 - enabled: 是否启用隔离守卫（默认 True）
                 - docker_available: Docker 是否可用（默认 False）
                 - force_host: 强制所有工具在 host 执行（默认 False）
-                - container_tools: 额外需要容器隔离的工具列表
-                - host_tools: 额外需要 host 执行的工具列表
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
         self._docker_available = self._config.get("docker_available", False)
         self._force_host = self._config.get("force_host", False)
-        self._container_tools = (
-            set(self._CONTAINER_TOOLS)
-            | set(self._config.get("container_tools", []))
-        )
-        self._host_tools = (
-            set(self._HOST_TOOLS)
-            | set(self._NETWORK_TOOLS)
-            | set(self._config.get("host_tools", []))
-        )
+        self._decider = IsolationDecider()
         self._enabled_by_agent: bool = True
 
     @property
@@ -88,9 +72,6 @@ class IsolationGuard(IInputPlugin):
         遍历当前管道状态中的工具调用列表，
         为每个工具调用决定隔离级别和执行上下文。
 
-        从 ctx.state["plugin_configs"] 读取 Agent 覆盖的配置，
-        Agent 可禁用此插件。
-
         Args:
             ctx: 插件执行上下文
 
@@ -105,7 +86,6 @@ class IsolationGuard(IInputPlugin):
         state = ctx.state
         core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
 
-        # LLM 调用不需要隔离决策
         if core_type != "tool_execute":
             return PluginResult()
 
@@ -129,10 +109,8 @@ class IsolationGuard(IInputPlugin):
         规则（按优先级）：
         1. 从 task metadata 读取 isolation_level 覆盖决策
         2. 从 task metadata 读取 workspace 传入上下文
-        3. bash / shell 命令 -> docker（如果有 docker 环境）
-        4. file_write / file 操作 -> host（需要访问本地文件系统）
-        5. web 请求 -> host（网络访问不需要隔离）
-        6. 默认 -> host
+        3. 使用 IsolationDecider 基于 isolation_policy.yaml 决策
+        4. Docker 不可用时根据策略 fallback 降级
 
         Args:
             tool_name: 工具名称
@@ -141,19 +119,16 @@ class IsolationGuard(IInputPlugin):
         Returns:
             执行上下文字典，包含 provider、level、tool_name、workspace 等信息
         """
-        # 从 task metadata 读取覆盖配置
         task_metadata = self._get_task_metadata(ctx)
         metadata_isolation = task_metadata.get("isolation_level")
         metadata_workspace = task_metadata.get("workspace")
 
-        # 强制 host 模式
         if self._force_host:
             return self._build_context(
                 tool_name, "host", "force_host",
                 workspace=metadata_workspace,
             )
 
-        # task metadata 中的 isolation_level 优先使用
         if metadata_isolation:
             if metadata_isolation == "container" and self._docker_available:
                 return self._build_context(
@@ -175,58 +150,41 @@ class IsolationGuard(IInputPlugin):
                     workspace=metadata_workspace,
                 )
 
-        # 匹配容器工具
-        if self._matches_tool(tool_name, self._container_tools):
-            if self._docker_available:
+        policy = self._decider.resolve(tool_name)
+        isolation = policy.isolation
+
+        if isolation.value == "container" and self._docker_available:
+            return self._build_context(
+                tool_name, "docker", "policy",
+                workspace=metadata_workspace,
+            )
+
+        if isolation.value == "container" and not self._docker_available:
+            if policy.fallback == "allow":
+                logger.info(
+                    "[IsolationGuard] Docker 不可用，策略允许降级 | tool=%s",
+                    tool_name,
+                )
                 return self._build_context(
-                    tool_name, "docker", "container_tool",
+                    tool_name, "host", "policy_fallback",
                     workspace=metadata_workspace,
                 )
-            logger.info(
-                "[IsolationGuard] Docker 不可用，回退 host | tool=%s",
+            logger.warning(
+                "[IsolationGuard] Docker 不可用且策略禁止降级 | tool=%s",
                 tool_name,
             )
             return self._build_context(
-                tool_name, "host", "container_tool_fallback",
+                tool_name, "host", "policy_fallback_forced",
                 workspace=metadata_workspace,
             )
 
-        # 匹配 host 工具
-        if self._matches_tool(tool_name, self._host_tools):
-            return self._build_context(
-                tool_name, "host", "host_tool",
-                workspace=metadata_workspace,
-            )
-
-        # 默认 host 执行
         return self._build_context(
-            tool_name, "host", "default",
+            tool_name, "host", "policy",
             workspace=metadata_workspace,
         )
 
-    def _matches_tool(self, tool_name: str, tool_set: set[str]) -> bool:
-        """检查工具名称是否匹配工具集合中的任一模式。
-
-        支持前缀匹配和精确匹配。
-
-        Args:
-            tool_name: 待检查的工具名称
-            tool_set: 工具名称集合
-
-        Returns:
-            是否匹配
-        """
-        tool_lower = tool_name.lower()
-        for pattern in tool_set:
-            if tool_lower == pattern or tool_lower.startswith(pattern + "_"):
-                return True
-        return False
-
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
         """从 ctx.state 读取 Agent 覆盖的运行时配置。
-
-        Agent 可通过 plugins.disabled 禁用此插件，
-        或通过 plugins.enabled.isolation_guard 覆盖参数。
 
         Args:
             ctx: 插件执行上下文
@@ -256,7 +214,7 @@ class IsolationGuard(IInputPlugin):
             tool_name: 工具名称
             provider: 执行提供者（docker / host）
             reason: 决策原因
-            workspace: 工作目录路径（来自 task metadata）
+            workspace: 工作目录路径
 
         Returns:
             执行上下文字典
@@ -274,8 +232,6 @@ class IsolationGuard(IInputPlugin):
     def _get_task_metadata(self, ctx: PluginContext) -> dict[str, Any]:
         """从 ctx.state 中获取当前 task 的 metadata。
 
-        通过 task_id 查找 TaskService，获取 task 的 metadata 字段。
-
         Args:
             ctx: 插件执行上下文
 
@@ -286,7 +242,6 @@ class IsolationGuard(IInputPlugin):
         if not task_id:
             return {}
 
-        # 尝试从 services 获取 TaskService
         try:
             task_service = ctx._services.get("task_service")
             if task_service is None:

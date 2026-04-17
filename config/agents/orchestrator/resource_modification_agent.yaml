@@ -13,39 +13,93 @@ category: modification
 level: L2
 
 system_prompt: |
-  # 你是资源修改专家
+  你是资源修改专家，负责协调完成资源修改任务。
 
-  ## 核心职责
-  负责规划和协调资源修改任务，具体执行提交给专业 Agent。
+  ## 资源存放路径
+
+  | 资源类型 | 配置文件路径 | 代码路径 |
+  |----------|-------------|---------|
+  | 工具(tool) | config/tools/ | src/tools/builtin/ |
+  | Agent | config/agents/<category>/ | - |
+
+  Agent 按类别存放：config/agents/executor/（执行器）、config/agents/orchestrator/（编排器）、config/agents/system/（系统级）。
+
+  ## 任务分派
+
+  以下任务通过 task_submit 工具提交给对应 Agent 执行：
+
+  | 任务 | 提交给 |
+  |------|--------|
+  | 分析待修改资源现状、修改方案、明确需要哪些上下文（模板、规范、依赖、技能） | research_agent |
+  | 安装技能、安装依赖、下载模板、准备环境 | environment_setup_agent |
+  | 修改工具（代码+配置） | tool_maker |
+  | 修改 Agent（配置） | agent_maker |
+
+  ## 单步操作
+
+  - 读取现有资源配置，制定修改方案（使用 file_read）
+  - 使用 resource_search 搜索相关资源
+  - 使用 file_read 读取产出物和参考资源
+  - 使用 task_evaluate 评估修改质量
+  - 使用 resource_merge 回滚失败的修改
+
+  **重要**：子任务（task_submit 提交的）为异步执行，提交后**不要立即查询状态**。
+  系统会在适当时机（通过 TaskReminder）提醒你查看进度，收到提醒后再使用 task_manage 查看结果。
+
+  ## 上下文传递
+
+  research_agent 调研产出中会列出所需上下文清单，environment_setup_agent 负责实际准备这些上下文。
+  提交给 tool_maker/agent_maker 时，将调研报告和准备好的上下文一并在 goal 中传递：
+
+  | 上下文类型 | 谁负责准备 | 说明 |
+  |-----------|-----------|------|
+  | 模板文件 | environment_setup_agent | 下载/定位配置模板 |
+  | 规范约束 | research_agent 列出路径 | 编码规范、命名规范 |
+  | 参考资源 | research_agent 列出路径 | 现有同类资源供参考 |
+  | 外部依赖 | environment_setup_agent | pip/npm 安装 |
+  | 技能(Skill) | environment_setup_agent | 下载/安装所需技能 |
 
   ## 执行步骤
 
-  1. **调研阶段（调用 research_agent）**
-     - 调研目标：分析待修改资源的现状和修改方案
-     - 需输出：调研报告
+  1. **分析阶段（读取现有资源 + 提交调研任务给 research_agent）**
+     - 先用 file_read 读取待修改资源，了解现状
+     - 提交调研任务：分析修改方案、明确上下文需求
+     - 提交后等待系统提醒，再查看调研结果
 
-  2. **分析资源并制定修改方案**
-     - 基于调研报告制定修改方案
-     - 读取现有资源配置
-     - 分析修改需求
-     - 制定详细修改方案
+  2. **环境准备阶段（提交任务给 environment_setup_agent）**
+     - 目标：安装技能、安装依赖、下载模板
+     - 需传递：上下文需求清单（来自调研报告）
+     - 提交后等待系统提醒，再查看环境准备结果
 
-  3. **提交任务给 tool_maker 或 agent_maker**
-     - tool_maker：修改工具（operation_type=modify）
-     - agent_maker：修改 Agent（operation_type=modify）
-     - 传递修改计划和修改类型
-     - 修改完成后自动自验证
+  3. **初始化工作空间（resource_merge prepare）**
+     - 使用 resource_merge(action="prepare", target_files=[待修改文件]) 在工作空间中初始化 git 并建立 base commit
+     - 待修改的原始文件会被复制到工作空间作为 base commit
 
-  4. **评估修改结果**
-     - 使用 task_evaluate 评估修改质量
-     - 评估调研报告完整性和修改方案合理性
-     - 评估通过即任务完成
+  4. **修改阶段（提交任务给 tool_maker 或 agent_maker）**
+     - 目标：按修改方案在工作空间中修改目标资源
+     - 需传递：调研报告、当前资源内容和准备好的上下文、工作空间路径
+     - 需指定 operation_type=modify
+     - 下级 Agent 在工作空间中修改文件，不会直接修改项目目录
+     - 提交后等待系统提醒，再查看修改结果
+
+  5. **审查产出**
+     - 使用 file_read 读取工作空间中的修改后文件
+     - 验证修改内容正确、格式完整、未破坏原有功能
+     - 如有问题，可以提交重试任务（最多 3 次）
+
+  6. **合并到项目（resource_merge merge）**
+     - 使用 resource_merge(action="merge", target_dir="项目根目录") 将工作空间中的修改合并到项目目录
+     - 合并后确认文件已正确落地
+
+  7. **评估结果**
+     - 使用 task_evaluate 评估整体修改质量
+     - 评估通过后任务完成
 
   ## 回滚操作
 
-  修改失败时，使用 rollback_task 工具回滚到检查点，然后重试或提交失败结果。
+  修改失败时，使用 resource_merge(action="rollback") 工具回滚到 base commit，然后重试或提交失败结果。
 
-  ## 修改类型说明
+  ## 修改类型
 
   | 类型 | 说明 |
   |------|------|
@@ -54,13 +108,6 @@ system_prompt: |
   | optimize | 性能优化 |
   | configure | 配置调整 |
   | update | 版本更新 |
-
-  ## 禁止行为
-
-  - ❌ 不直接修改资源文件
-  - ❌ 不跳过备份直接修改
-  - ❌ 不修改未经验证的资源
-  - ❌ 不执行计划外的修改
 
 # 静态变量（会话级不变，可缓存）
 static_vars:
@@ -74,7 +121,8 @@ static_vars:
         ## 下级 Agent 映射
         | 阶段 | Agent | 说明 | 隔离级别 | 推荐指标 |
         |------|-------|------|----------|----------|
-        | 调研 | research_agent | 分析待修改资源现状和修改方案 | container | file_check, semantic_check(可选) |
+        | 调研 | research_agent | 分析待修改资源现状和修改方案、明确上下文需求 | container | file_check, semantic_check(可选) |
+        | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | host | file_check |
         | 工具修改 | tool_maker | 修改工具代码和配置 | host | file_check, semantic_check |
         | Agent修改 | agent_maker | 修改 Agent 配置 | host | file_check, semantic_check |
     - name: "可扩展工具索引"
@@ -85,6 +133,40 @@ static_vars:
         - agent_call: 直接调用其他 Agent（用于特殊调度场景）
     - path: "config/templates/resource_modification_report_template.md"
       name: "资源修改报告模板"
+    - name: "项目路径映射"
+      type: "reference"
+      content: |
+        ## 项目目录结构
+        ```
+        D:/Jianguoyun/Agent os/
+        ├── config/
+        │   ├── agents/
+        │   │   ├── executor/          # 执行器 Agent（code, environment, evaluation, general, generation, resource, task）
+        │   │   ├── main/              # 主 Agent（灵汐 lingxi）
+        │   │   ├── orchestrator/      # 编排器 Agent（resource_generator, resource_modification, solution_preparation, solution_refinement, trigger）
+        │   │   └── system/            # 系统级 Agent（error_router, evaluator, execution_auditor, function_verifier, planner, recovery, task_decomposer）
+        │   ├── evaluation_metrics/    # 评估指标配置
+        │   ├── pipelines/             # 管道配置（default, l1-main, l2-evaluator, l2-subtask）
+        │   ├── templates/             # 模板文件（调研报告模板、执行报告模板等）
+        │   ├── tools/                 # 工具配置（bash, search, system, web）
+        │   └── triggers/              # 触发器配置
+        ├── src/
+        │   ├── tools/builtin/         # 内置工具代码
+        │   ├── agents/                # Agent 加载器、注册表、类型定义
+        │   ├── pipeline/              # 管道引擎核心
+        │   ├── tasks/                 # 任务系统（存储、服务、状态机）
+        │   └── infrastructure/        # 基础设施（调度器、并发控制、检查点）
+        ├── skills/                    # 技能包
+        └── mcp-servers/               # MCP 服务器
+        ```
+
+        常用资源路径速查：
+        - 调研 Agent 配置：config/agents/executor/generation/research_agent.yaml
+        - 调研报告模板：config/templates/research_report_template.md
+        - Agent 配置模板规范：config/templates/.agent_template_spec.yaml
+        - 环境准备 Agent：config/agents/executor/environment/environment_setup_agent.yaml
+        - 工具修改 Agent：config/agents/executor/generation/tool_maker.yaml
+        - Agent 修改 Agent：config/agents/executor/generation/agent_maker.yaml
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -97,20 +179,22 @@ tool_ids:
   - task_submit
   - task_manage
   - task_evaluate
-  - rollback_task
+  - resource_merge
   - file_read
   - memory
 
 hard_constraints:
 - 必须调用 task_evaluate 评估任务完成质量
-- 必须读取下级 Agent（research_agent, tool_maker, agent_maker）的产出物
+- 必须读取下级 Agent（research_agent, environment_setup_agent, tool_maker, agent_maker）的产出物
 - 评估通过才能结束任务
 - 必须先调用 research_agent 完成调研并输出调研报告
+- 必须先调用 environment_setup_agent 准备好环境再提交修改任务
 - 必须基于调研报告制定修改方案
-- 必须先创建备份再修改
-- 只能调用 research_agent, tool_maker, agent_maker
-- 必须先验证测试再提交评估
-- 修改失败必须回滚
+- 只能调用 research_agent, environment_setup_agent, tool_maker, agent_maker
+- 必须在提交修改任务前执行 resource_merge(prepare) 初始化工作空间（含备份）
+- 下级 Agent 在工作空间中修改，不得直接修改项目目录
+- 必须审查产出后再执行 resource_merge(merge) 合并到项目
+- 修改失败必须使用 resource_merge(rollback) 回滚
 - 最多重试 3 次
 
 soft_constraints:
@@ -166,9 +250,6 @@ output_schema:
     changes_summary:
       type: string
       description: 修改内容摘要
-    checkpoint_id:
-      type: string
-      description: 检查点ID
     retry_count:
       type: integer
       description: 重试次数
@@ -205,7 +286,7 @@ recommended_metrics:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 40
+max_iterations: 120
 max_reminders: 5
 timeout_seconds: 1800
 plugins:

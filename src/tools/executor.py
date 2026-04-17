@@ -1,4 +1,4 @@
-﻿"""
+"""
 工具执行器
 
 暴露接口：
@@ -128,7 +128,7 @@ class ToolExecutor(IToolExecutor):
     """
     工具执行器
 
-    负责工具的执行、验证和审批处理，支持：
+    负责工具的执行和验证，支持：
     - 传统 handler 执行模式
     - Runnable 执行模式
     - 混合模式（优先使用 Runnable）
@@ -223,7 +223,7 @@ class ToolExecutor(IToolExecutor):
             return False
 
         # 对于某些工具，即使配置了缓存，也需要根据输入判断是否缓存
-        no_cache_tools = ["task_submit", "todo_manage"]  # 不应该缓存的工具
+        no_cache_tools = ["task_submit"]
         if tool_name in no_cache_tools:
             return False
 
@@ -370,7 +370,6 @@ class ToolExecutor(IToolExecutor):
         tool_name: str,
         inputs: dict[str, Any],
         context: ExecutionContext,
-        approved: bool = False,
         timeout: float | None = None,
         use_runnable: bool | None = None,
         tool_call_id: str | None = None,
@@ -425,8 +424,7 @@ class ToolExecutor(IToolExecutor):
             f"[ToolExecutor] 执行配置 | "
             f"timeout={timeout} | "
             f"use_runnable={use_runnable} | "
-            f"use_cache={use_cache} | "
-            f"approved={approved}"
+            f"use_cache={use_cache}"
         )
 
         # 获取工具定义（支持动态加载）
@@ -635,7 +633,6 @@ class ToolExecutor(IToolExecutor):
         tool_name: str,
         inputs: dict[str, Any],
         context: ExecutionContext,
-        approved: bool = False,
         timeout: float | None = None,
     ) -> ToolExecutionResult:
         """强制使用 Runnable 模式执行"""
@@ -643,7 +640,6 @@ class ToolExecutor(IToolExecutor):
             tool_name=tool_name,
             inputs=inputs,
             context=context,
-            approved=approved,
             timeout=timeout,
             use_runnable=True,
         )
@@ -839,7 +835,6 @@ class ToolExecutor(IToolExecutor):
                 tool_name=call["tool_name"],
                 inputs=call.get("inputs", {}),
                 context=context,
-                approved=call.get("approved", False),
             )
             for call in calls
         ]
@@ -1313,7 +1308,7 @@ class ToolExecutor(IToolExecutor):
 
             db = self._db_session
             if db is None:
-                from db.connection import get_session_context
+                from infrastructure.db import get_session_context
 
                 async with get_session_context() as db_session:
                     return await self._create_nested_record_in_session(
@@ -1406,7 +1401,7 @@ class ToolExecutor(IToolExecutor):
 
             db = self._db_session
             if db is None:
-                from db.connection import get_session_context
+                from infrastructure.db import get_session_context
 
                 async with get_session_context() as db_session:
                     await self._update_nested_record_in_session(

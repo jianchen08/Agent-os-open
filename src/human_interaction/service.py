@@ -1,15 +1,16 @@
 """
-人类交互服务实现
+人类交互服务实现（纯内存版）。
+
+使用内存 dict 存储请求和响应，无外部数据库依赖。
 
 暴露接口：
-- get_human_interaction_service() -> HumanInteractionService：get_human_interaction_service功能
-- set_human_interaction_service(service: HumanInteractionService) -> None：set_human_interaction_service功能
-- reset_human_interaction_service() -> None：reset_human_interaction_service功能
-- set_notifier(self, notifier: IInteractionNotifier) -> None：set_notifier功能
-- InteractionTimeoutError：InteractionTimeoutError类
-- InteractionCancelledError：InteractionCancelledError类
-- InteractionDeniedError：InteractionDeniedError类
-- HumanInteractionService：HumanInteractionService类
+- get_human_interaction_service：获取全局单例
+- set_human_interaction_service：设置全局单例
+- reset_human_interaction_service：重置全局单例
+- HumanInteractionService：人类交互服务类
+- InteractionTimeoutError：交互超时异常
+- InteractionCancelledError：交互取消异常
+- InteractionDeniedError：交互拒绝异常
 """
 
 import asyncio
@@ -18,26 +19,22 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select, update
-
-from src.core.human_interaction.interfaces import (
+from human_interaction.interfaces import (
     IHumanInteractionService,
     IInteractionNotifier,
 )
-from src.core.human_interaction.models import (
+from human_interaction.models import (
     InteractionMode,
     InteractionStatus,
     Priority,
     ResponseType,
 )
-from src.db.models import ExecutionRecord
-from src.db.session_manager import managed_session
 
 logger = logging.getLogger(__name__)
 
 
 class InteractionTimeoutError(Exception):
-    """交互超时异常"""
+    """交互超时异常。"""
 
     def __init__(self, request_id: str, timeout: float):
         self.request_id = request_id
@@ -46,7 +43,7 @@ class InteractionTimeoutError(Exception):
 
 
 class InteractionCancelledError(Exception):
-    """交互取消异常"""
+    """交互取消异常。"""
 
     def __init__(self, request_id: str, reason: str | None = None):
         self.request_id = request_id
@@ -58,7 +55,7 @@ class InteractionCancelledError(Exception):
 
 
 class InteractionDeniedError(Exception):
-    """交互拒绝异常"""
+    """交互拒绝异常。"""
 
     def __init__(self, request_id: str, reason: str | None = None):
         self.request_id = request_id
@@ -71,13 +68,14 @@ class InteractionDeniedError(Exception):
 
 class HumanInteractionService(IHumanInteractionService):
     """
-    人类交互服务实现
+    人类交互服务（纯内存版）。
 
-    统一处理所有需要人类参与的场景：
+    使用内存 dict 存储 InteractionRecord，通过 asyncio.Event
+    实现请求-响应的异步等待。
+
+    支持：
     - 选择模式：审批确认、澄清问题、方案选择
     - 对话模式：跳转到对话标签页
-
-    使用 ExecutionRecord 进行持久化存储。
     """
 
     def __init__(
@@ -92,6 +90,8 @@ class HumanInteractionService(IHumanInteractionService):
         self._pending_events: dict[str, asyncio.Event] = {}
         self._timeout_tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._requests: dict[str, dict[str, Any]] = {}
+        self._responses: dict[str, dict[str, Any]] = {}
 
     async def create_choice_request(
         self,
@@ -107,35 +107,29 @@ class HumanInteractionService(IHumanInteractionService):
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """创建选择模式请求"""
+        """创建选择模式请求，返回 request_id。"""
         request_id = str(uuid4())
         timeout = timeout_seconds or int(self._default_timeout)
 
-        async with managed_session() as session:
-            record = ExecutionRecord(
-                id=request_id,
-                session_id=session_id,
-                type="interaction_request",
-                status=InteractionStatus.PENDING.value,
-                message_data={
-                    "interaction_mode": InteractionMode.CHOICE.value,
-                    "title": title,
-                    "description": description,
-                    "options": options,
-                    "questions": questions,
-                    "timeout_seconds": timeout,
-                    "priority": priority.value,
-                    "thread_id": thread_id,
-                    "tab_id": tab_id,
-                    "user_id": user_id,
-                    "agent_id": agent_id,
-                    "timeout_reminded": False,
-                    "viewed_at": None,
-                    "responded_at": None,
-                },
-            )
-            session.add(record)
-            await session.commit()
+        record = self._make_request_record(
+            request_id=request_id,
+            session_id=session_id,
+            mode=InteractionMode.CHOICE,
+            title=title,
+            description=description,
+            thread_id=thread_id,
+            tab_id=tab_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            extra={
+                "options": options,
+                "questions": questions,
+                "timeout_seconds": timeout,
+                "priority": priority.value,
+                "timeout_reminded": False,
+            },
+        )
+        self._requests[request_id] = record
 
         async with self._lock:
             self._pending_events[request_id] = asyncio.Event()
@@ -146,10 +140,9 @@ class HumanInteractionService(IHumanInteractionService):
         self._setup_timeout(request_id, timeout, thread_id)
 
         logger.info(
-            f"[HumanInteraction] 创建选择请求 | "
-            f"request_id={request_id} | title={title}"
+            "[HumanInteraction] 创建选择请求 | request_id=%s | title=%s",
+            request_id, title,
         )
-
         return request_id
 
     async def create_conversation_request(
@@ -164,38 +157,31 @@ class HumanInteractionService(IHumanInteractionService):
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """创建对话模式请求，返回 request_id"""
+        """创建对话模式请求，返回 request_id。"""
         request_id = str(uuid4())
 
-        async with managed_session() as session:
-            record = ExecutionRecord(
-                id=request_id,
-                session_id=session_id,
-                type="interaction_request",
-                status=InteractionStatus.PENDING.value,
-                message_data={
-                    "interaction_mode": InteractionMode.CONVERSATION.value,
-                    "title": title,
-                    "description": description,
-                    "initial_message": initial_message,
-                    "suggestions": suggestions,
-                    "thread_id": thread_id,
-                    "tab_id": tab_id,
-                    "user_id": user_id,
-                    "agent_id": agent_id,
-                    "viewed_at": None,
-                },
-            )
-            session.add(record)
-            await session.commit()
+        record = self._make_request_record(
+            request_id=request_id,
+            session_id=session_id,
+            mode=InteractionMode.CONVERSATION,
+            title=title,
+            description=description,
+            thread_id=thread_id,
+            tab_id=tab_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            extra={
+                "initial_message": initial_message,
+                "suggestions": suggestions,
+            },
+        )
+        self._requests[request_id] = record
 
         async with self._lock:
             self._pending_events[request_id] = asyncio.Event()
 
         if self._notifier:
-            saved_record = await self._get_request(request_id)
-            if saved_record:
-                await self._notifier.notify_request(saved_record)
+            await self._notifier.notify_request(record)
             await self._notifier.notify_conversation_start(
                 thread_id=thread_id,
                 tab_id=tab_id,
@@ -206,10 +192,9 @@ class HumanInteractionService(IHumanInteractionService):
             )
 
         logger.info(
-            f"[HumanInteraction] 创建对话请求 | "
-            f"request_id={request_id} | thread_id={thread_id} | tab_id={tab_id}"
+            "[HumanInteraction] 创建对话请求 | request_id=%s | thread_id=%s",
+            request_id, thread_id,
         )
-
         return request_id
 
     async def wait_for_conversation_arrival(
@@ -217,7 +202,7 @@ class HumanInteractionService(IHumanInteractionService):
         request_id: str,
         timeout: float = 60.0,
     ) -> dict[str, Any]:
-        """等待用户到达对话页面"""
+        """等待用户到达对话页面。"""
         event = self._pending_events.get(request_id)
         if not event:
             return {"status": "timeout", "message": "用户未到达对话页面"}
@@ -234,21 +219,22 @@ class HumanInteractionService(IHumanInteractionService):
         request_id: str,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """等待用户选择"""
+        """等待用户选择。"""
         event = self._pending_events.get(request_id)
         if not event:
-            record = await self._get_request(request_id)
+            record = self._requests.get(request_id)
             if not record:
                 raise ValueError(f"请求不存在: {request_id}")
             async with self._lock:
                 self._pending_events[request_id] = asyncio.Event()
                 event = self._pending_events[request_id]
 
-        record = await self._get_request(request_id)
+        record = self._requests.get(request_id)
         if not record:
             raise ValueError(f"请求不存在: {request_id}")
 
-        timeout = timeout or record.timeout_seconds or self._default_timeout
+        msg_data = record.get("message_data", {})
+        timeout = timeout or msg_data.get("timeout_seconds") or self._default_timeout
 
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
@@ -256,22 +242,25 @@ class HumanInteractionService(IHumanInteractionService):
             await self._handle_timeout(request_id)
             raise InteractionTimeoutError(request_id, timeout) from None
 
-        response = await self._get_response(request_id)
+        response = self._responses.get(request_id)
         if not response:
             raise InteractionTimeoutError(request_id, timeout)
 
-        if response.response_type == ResponseType.DENIED.value:
-            raise InteractionDeniedError(request_id, response.feedback)
+        resp_data = response.get("message_data", {})
+        resp_type = resp_data.get("response_type", "")
 
-        if response.response_type == ResponseType.CANCELLED.value:
-            raise InteractionCancelledError(request_id, response.feedback)
+        if resp_type == ResponseType.DENIED.value:
+            raise InteractionDeniedError(request_id, resp_data.get("feedback"))
+
+        if resp_type == ResponseType.CANCELLED.value:
+            raise InteractionCancelledError(request_id, resp_data.get("feedback"))
 
         return {
             "request_id": request_id,
-            "response_type": response.response_type,
-            "selected_option": response.selected_option,
-            "answers": response.answers,
-            "feedback": response.feedback,
+            "response_type": resp_type,
+            "selected_option": resp_data.get("selected_option"),
+            "answers": resp_data.get("answers"),
+            "feedback": resp_data.get("feedback"),
         }
 
     async def submit_response(
@@ -283,50 +272,41 @@ class HumanInteractionService(IHumanInteractionService):
         feedback: str | None = None,
         user_id: str | None = None,
     ) -> bool:
-        """提交响应"""
-        request_record = await self._get_request(request_id)
+        """提交响应。"""
+        request_record = self._requests.get(request_id)
         if not request_record:
-            logger.warning(f"[HumanInteraction] 请求不存在 | request_id={request_id}")
+            logger.warning("[HumanInteraction] 请求不存在 | request_id=%s", request_id)
             return False
 
-        if request_record.status != InteractionStatus.PENDING.value:
+        if request_record.get("status") != InteractionStatus.PENDING.value:
             logger.warning(
-                f"[HumanInteraction] 请求状态不允许响应 | "
-                f"request_id={request_id} | status={request_record.status}"
+                "[HumanInteraction] 请求状态不允许响应 | request_id=%s | status=%s",
+                request_id, request_record.get("status"),
             )
             return False
 
         response_id = str(uuid4())
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).isoformat()
 
-        async with managed_session() as session:
-            response_record = ExecutionRecord(
-                id=response_id,
-                session_id=request_record.session_id,
-                parent_record_id=request_id,
-                type="interaction_response",
-                status="completed",
-                message_data={
-                    "request_id": request_id,
-                    "response_type": response_type,
-                    "selected_option": selected_option,
-                    "answers": answers,
-                    "feedback": feedback,
-                    "user_id": user_id,
-                },
-            )
-            session.add(response_record)
+        self._responses[request_id] = {
+            "id": response_id,
+            "session_id": request_record.get("session_id"),
+            "parent_record_id": request_id,
+            "type": "interaction_response",
+            "status": "completed",
+            "message_data": {
+                "request_id": request_id,
+                "response_type": response_type,
+                "selected_option": selected_option,
+                "answers": answers,
+                "feedback": feedback,
+                "user_id": user_id,
+            },
+        }
 
-            await session.execute(
-                update(ExecutionRecord)
-                .where(ExecutionRecord.id == request_id)
-                .values(
-                    status=InteractionStatus.COMPLETED.value,
-                    message_data=request_record.message_data
-                    | {"responded_at": now.isoformat()},
-                )
-            )
-            await session.commit()
+        request_record["status"] = InteractionStatus.COMPLETED.value
+        msg_data = request_record.setdefault("message_data", {})
+        msg_data["responded_at"] = now
 
         async with self._lock:
             if request_id in self._pending_events:
@@ -336,58 +316,41 @@ class HumanInteractionService(IHumanInteractionService):
                 del self._timeout_tasks[request_id]
 
         logger.info(
-            f"[HumanInteraction] 响应已提交 | "
-            f"request_id={request_id} | response_type={response_type}"
+            "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",
+            request_id, response_type,
         )
-
         return True
 
     async def mark_as_viewed(self, request_id: str) -> bool:
-        """标记请求为已查看，conversation 模式下触发到达通知"""
-        async with managed_session() as session:
-            result = await session.execute(
-                update(ExecutionRecord)
-                .where(ExecutionRecord.id == request_id)
-                .where(ExecutionRecord.status == InteractionStatus.PENDING.value)
-                .values(
-                    status=InteractionStatus.VIEWED.value,
-                    message_data=ExecutionRecord.message_data
-                    | {"viewed_at": datetime.now(UTC).isoformat()},
-                )
-            )
-            await session.commit()
-            updated = result.rowcount > 0
+        """标记请求为已查看，conversation 模式下触发到达通知。"""
+        record = self._requests.get(request_id)
+        if not record or record.get("status") != InteractionStatus.PENDING.value:
+            return False
 
-        if updated:
-            async with self._lock:
-                if request_id in self._pending_events:
-                    self._pending_events[request_id].set()
+        record["status"] = InteractionStatus.VIEWED.value
+        record.setdefault("message_data", {})["viewed_at"] = datetime.now(UTC).isoformat()
 
-        return updated
+        async with self._lock:
+            if request_id in self._pending_events:
+                self._pending_events[request_id].set()
+
+        return True
 
     async def cancel_request(
         self,
         request_id: str,
         reason: str | None = None,
     ) -> bool:
-        """取消请求"""
-        request_record = await self._get_request(request_id)
-        if not request_record:
+        """取消请求。"""
+        record = self._requests.get(request_id)
+        if not record:
             return False
 
-        if request_record.status in (
-            InteractionStatus.COMPLETED.value,
-            InteractionStatus.TIMEOUT.value,
-        ):
+        status = record.get("status")
+        if status in (InteractionStatus.COMPLETED.value, InteractionStatus.TIMEOUT.value):
             return False
 
-        async with managed_session() as session:
-            await session.execute(
-                update(ExecutionRecord)
-                .where(ExecutionRecord.id == request_id)
-                .values(status=InteractionStatus.CANCELLED.value)
-            )
-            await session.commit()
+        record["status"] = InteractionStatus.CANCELLED.value
 
         async with self._lock:
             if request_id in self._pending_events:
@@ -397,99 +360,108 @@ class HumanInteractionService(IHumanInteractionService):
                 del self._timeout_tasks[request_id]
 
         if self._notifier:
+            msg_data = record.get("message_data") or {}
             await self._notifier.notify_cancel(
                 request_id, reason,
-                thread_id=(request_record.message_data or {}).get("thread_id", "")
+                thread_id=msg_data.get("thread_id", ""),
             )
 
         logger.info(
-            f"[HumanInteraction] 请求已取消 | "
-            f"request_id={request_id} | reason={reason}"
+            "[HumanInteraction] 请求已取消 | request_id=%s | reason=%s",
+            request_id, reason,
         )
-
         return True
 
-    async def get_request(self, request_id: str) -> ExecutionRecord | None:
-        """获取请求详情"""
-        return await self._get_request(request_id)
+    async def get_request(self, request_id: str) -> dict[str, Any] | None:
+        """获取请求详情。"""
+        return self._requests.get(request_id)
 
     async def get_pending_requests(
         self,
         session_id: str | None = None,
         user_id: str | None = None,
         limit: int = 50,
-    ) -> list[ExecutionRecord]:
-        """获取待处理请求列表"""
-        async with managed_session() as session:
-            query = (
-                select(ExecutionRecord)
-                .where(ExecutionRecord.type == "interaction_request")
-                .where(ExecutionRecord.status == InteractionStatus.PENDING.value)
-            )
-
-            if session_id:
-                query = query.where(ExecutionRecord.session_id == session_id)
-
-            query = query.order_by(ExecutionRecord.created_at.desc()).limit(limit)
-
-            result = await session.execute(query)
-            return list(result.scalars().all())
+    ) -> list[dict[str, Any]]:
+        """获取待处理请求列表。"""
+        results: list[dict[str, Any]] = []
+        for record in self._requests.values():
+            if record.get("status") != InteractionStatus.PENDING.value:
+                continue
+            msg_data = record.get("message_data") or {}
+            if session_id and record.get("session_id") != session_id:
+                continue
+            if user_id and msg_data.get("user_id") != user_id:
+                continue
+            results.append(record)
+            if len(results) >= limit:
+                break
+        return results
 
     async def get_interaction_history(
         self,
         session_id: str,
         limit: int = 100,
-    ) -> list[ExecutionRecord]:
-        """获取交互历史"""
-        async with managed_session() as session:
-            query = (
-                select(ExecutionRecord)
-                .where(ExecutionRecord.session_id == session_id)
-                .where(
-                    ExecutionRecord.type.in_(
-                        ["interaction_request", "interaction_response"]
-                    )
-                )
-                .order_by(ExecutionRecord.created_at.desc())
-                .limit(limit)
-            )
-
-            result = await session.execute(query)
-            return list(result.scalars().all())
+    ) -> list[dict[str, Any]]:
+        """获取交互历史。"""
+        results: list[dict[str, Any]] = []
+        for record in self._requests.values():
+            if record.get("session_id") == session_id:
+                results.append(record)
+        for resp in self._responses.values():
+            if resp.get("session_id") == session_id:
+                results.append(resp)
+        return results[:limit]
 
     def set_notifier(self, notifier: IInteractionNotifier) -> None:
-        """设置通知器"""
+        """设置通知器。"""
         self._notifier = notifier
 
-    async def _get_request(self, request_id: str) -> ExecutionRecord | None:
-        """获取请求记录"""
-        async with managed_session() as session:
-            result = await session.execute(
-                select(ExecutionRecord).where(ExecutionRecord.id == request_id)
-            )
-            return result.scalar_one_or_none()
+    def _make_request_record(
+        self,
+        request_id: str,
+        session_id: str,
+        mode: InteractionMode,
+        title: str,
+        description: str,
+        thread_id: str,
+        tab_id: str,
+        user_id: str | None,
+        agent_id: str | None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """构建请求记录字典。"""
+        message_data: dict[str, Any] = {
+            "interaction_mode": mode.value,
+            "title": title,
+            "description": description,
+            "thread_id": thread_id,
+            "tab_id": tab_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "viewed_at": None,
+        }
+        if extra:
+            message_data.update(extra)
 
-    async def _get_response(self, request_id: str) -> ExecutionRecord | None:
-        """获取响应记录"""
-        async with managed_session() as session:
-            result = await session.execute(
-                select(ExecutionRecord)
-                .where(ExecutionRecord.parent_record_id == request_id)
-                .where(ExecutionRecord.type == "interaction_response")
-            )
-            return result.scalar_one_or_none()
+        return {
+            "id": request_id,
+            "session_id": session_id,
+            "type": "interaction_request",
+            "status": InteractionStatus.PENDING.value,
+            "message_data": message_data,
+        }
 
     def _setup_timeout(self, request_id: str, timeout_seconds: int, thread_id: str = ""):
-        """设置超时任务"""
+        """设置超时任务。"""
 
         async def timeout_handler():
             try:
                 await asyncio.sleep(timeout_seconds - self._remind_before_seconds)
 
-                request = await self._get_request(request_id)
-                if request and request.status == InteractionStatus.PENDING.value:
+                record = self._requests.get(request_id)
+                if record and record.get("status") == InteractionStatus.PENDING.value:
                     if self._notifier:
-                        msg_data = request.message_data or {}
+                        msg_data = record.get("message_data") or {}
                         await self._notifier.notify_timeout_reminder(
                             request_id, self._remind_before_seconds, thread_id,
                             title=msg_data.get("title", ""),
@@ -498,52 +470,30 @@ class HumanInteractionService(IHumanInteractionService):
                             questions=msg_data.get("questions"),
                         )
 
-                    async with managed_session() as session:
-                        result = await session.execute(
-                            select(ExecutionRecord.message_data).where(
-                                ExecutionRecord.id == request_id
-                            )
-                        )
-                        current_data = result.scalar_one_or_none()
-                        if current_data is not None:
-                            merged_data = {
-                                **(current_data if isinstance(current_data, dict) else {}),
-                                "timeout_reminded": True,
-                            }
-                            await session.execute(
-                                update(ExecutionRecord)
-                                .where(ExecutionRecord.id == request_id)
-                                .values(message_data=merged_data)
-                            )
-                            await session.commit()
+                    record.setdefault("message_data", {})["timeout_reminded"] = True
 
                 await asyncio.sleep(self._remind_before_seconds)
 
-                request = await self._get_request(request_id)
-                if request and request.status == InteractionStatus.PENDING.value:
+                record = self._requests.get(request_id)
+                if record and record.get("status") == InteractionStatus.PENDING.value:
                     await self._handle_timeout(request_id)
 
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.error(f"[HumanInteraction] 超时处理失败 | error={e}")
+                logger.error("[HumanInteraction] 超时处理失败 | error=%s", e)
 
         task = asyncio.create_task(timeout_handler())
         self._timeout_tasks[request_id] = task
 
     async def _handle_timeout(self, request_id: str):
-        """处理超时"""
-        request = await self._get_request(request_id)
-        thread_id = (request.message_data or {}).get("thread_id", "") if request else ""
-
-        async with managed_session() as session:
-            await session.execute(
-                update(ExecutionRecord)
-                .where(ExecutionRecord.id == request_id)
-                .where(ExecutionRecord.status == InteractionStatus.PENDING.value)
-                .values(status=InteractionStatus.TIMEOUT.value)
-            )
-            await session.commit()
+        """处理超时。"""
+        record = self._requests.get(request_id)
+        thread_id = ""
+        if record:
+            msg_data = record.get("message_data") or {}
+            thread_id = msg_data.get("thread_id", "")
+            record["status"] = InteractionStatus.TIMEOUT.value
 
         async with self._lock:
             if request_id in self._pending_events:
@@ -552,14 +502,14 @@ class HumanInteractionService(IHumanInteractionService):
         if self._notifier:
             await self._notifier.notify_timeout(request_id, thread_id=thread_id)
 
-        logger.info(f"[HumanInteraction] 请求超时 | request_id={request_id}")
+        logger.info("[HumanInteraction] 请求超时 | request_id=%s", request_id)
 
 
 _service_instance: HumanInteractionService | None = None
 
 
 def get_human_interaction_service() -> HumanInteractionService:
-    """获取服务实例"""
+    """获取服务单例。"""
     global _service_instance
     if _service_instance is None:
         _service_instance = HumanInteractionService()
@@ -567,12 +517,12 @@ def get_human_interaction_service() -> HumanInteractionService:
 
 
 def set_human_interaction_service(service: HumanInteractionService) -> None:
-    """设置服务实例"""
+    """设置服务单例。"""
     global _service_instance
     _service_instance = service
 
 
 def reset_human_interaction_service() -> None:
-    """重置服务实例（用于测试）"""
+    """重置服务单例（用于测试）。"""
     global _service_instance
     _service_instance = None

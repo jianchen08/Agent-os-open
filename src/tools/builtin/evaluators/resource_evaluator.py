@@ -1,4 +1,4 @@
-﻿"""
+"""
 资源评估器
 
 暴露接口：
@@ -157,7 +157,6 @@ class ResourceEvaluator:
             },
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
-            requires_approval=False,
             tags=["evaluator", "resource"],
         )
 

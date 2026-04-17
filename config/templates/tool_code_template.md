@@ -27,7 +27,7 @@
 【工具类型选择指南】
 | 类型 | 适用场景 | 示例 |
 |------|----------|------|
-| 简单工具 | 单一功能、无状态、无子模块 | file_read, todo_manage |
+| 简单工具 | 单一功能、无状态、无子模块 | file_read |
 | 复杂工具 | 多功能、有子模块、需要拆分 | bash（含多个子命令） |
 | 需会话工具 | 需要访问会话上下文或状态 | task_submit, memory |
 | 评估器 | 对任务结果进行质量评估 | schema_evaluator |
@@ -52,7 +52,7 @@
 
 | 类型 | 代码组织 | 注册方式 | 示例 |
 |------|----------|----------|------|
-| 简单工具 | 单文件 `src/tools/builtin/{tool_id}.py` | `get_all_builtin_tools()` | file_read, todo_manage, evaluate |
+| 简单工具 | 单文件 `src/tools/builtin/{tool_id}.py` | `get_all_builtin_tools()` | file_read, evaluate |
 | 复杂工具 | 目录 `src/tools/builtin/{tool_id}/` | `get_all_builtin_tools()` | bash（含子模块） |
 | 需会话工具 | 单文件 | `get_all_builtin_tools_with_session()` | task_submit, task_manage, task_evaluate, memory |
 | 评估器 | `src/tools/builtin/evaluators/` | `get_all_builtin_tools()` | schema_evaluator, resource_evaluator |
@@ -163,35 +163,20 @@ class {ClassName}:
         return {"result": param}
 ```
 
-### 2.2 注册到 `__init__.py`
+### 2.2 注册说明
 
-**文件路径**：`src/tools/builtin/__init__.py`
+**无需手动注册！** 系统已实现自动发现机制：
 
-在 `get_all_builtin_tools()` 函数中添加：
+1. 将工具文件放入 `src/tools/builtin/` 目录
+2. 系统启动时自动扫描并发现所有 `BuiltinTool` 子类
+3. 通过 `get_tool_definition()` 获取工具名并注册
 
-```python
-from .{tool_id} import {ClassName}
+**不需要修改以下文件：**
+- ~~`src/tools/builtin/__init__.py`~~ — 已废弃手动注册，系统自动发现
+- ~~`scripts/tools/collect_tool_info.py`~~ — 已废弃，系统自动发现
+- ~~`config/tools/{category}/{tool_id}.yaml`~~ — 已废弃
 
-# 在返回列表中添加
-return [
-    # ... 已有工具 ...
-    {ClassName}(),
-]
-```
-
-如果是需会话的工具（需要数据库 session），在 `get_all_builtin_tools_with_session()` 函数中添加：
-
-```python
-from .{tool_id} import {ClassName}
-
-# 在返回列表中添加类（不实例化）
-return [
-    # ... 已有工具 ...
-    {ClassName},
-]
-```
-
-并在 `register_all_builtin_tools()` 中添加会话注册逻辑。
+如果是需会话的工具（需要数据库 session），在 `get_all_builtin_tools_with_session()` 中添加类（不实例化），并在 `register_all_builtin_tools()` 中添加会话注册逻辑。
 
 ---
 
@@ -430,54 +415,199 @@ mcp_servers:
 |------|----------|----------|
 | `config/tools/search/` | `resource_search.yaml`, `web_search.yaml` | 搜索类 |
 | `config/tools/shell/` | `shell_execute.yaml` | Shell 执行类 |
-| `config/tools/system/` | `evaluate.yaml`, `memory_retrieve.yaml`, `task_evaluate.yaml`, `task_manage.yaml`, `task_submit.yaml`, `todo_manage.yaml` | 系统类 |
+| `config/tools/system/` | `evaluate.yaml`, `memory_retrieve.yaml`, `task_evaluate.yaml`, `task_manage.yaml`, `task_submit.yaml` | 系统类 |
 | `config/tools/web/` | `fetch.yaml` | Web 操作类 |
 
 ---
 
-## 六、隔离策略配置
+## 六、隔离策略与安全检查配置
 
-**文件路径**：`config/isolation/isolation_policy.yaml`
+**核心原则**：隔离策略和安全检查由外部配置统一管理，**不需要在工具代码中设置**。
+工具只需在 `get_tool_definition()` 中正确设置 `category`，系统自动匹配隔离策略。
 
-隔离策略由配置文件统一管理，**不需要在工具代码中设置**。
+### 6.1 隔离策略
 
-### 6.1 隔离级别
+**配置文件**：`config/isolation/isolation_policy.yaml`
 
-| 隔离方式 | 说明 | 适用工具类型 |
-|----------|------|-------------|
-| `host` | 宿主机直接执行 | 文件操作、搜索、任务管理、评估验证 |
-| `container` | 容器隔离执行 | Shell 命令、网络请求、桌面控制 |
-
-### 6.2 匹配优先级
+#### 匹配优先级
 
 ```
 tools（工具名精确匹配）> categories（分类匹配）> default（默认策略）
 ```
 
-### 6.3 新工具的隔离配置
+#### 隔离方式
 
-创建新工具时，需要：
+| 隔离方式 | execution 执行方式 | 说明 |
+|----------|-------------------|------|
+| `host` | `host_direct` | 宿主机直接执行，无隔离 |
+| `container` | `command_in_container` | 容器隔离执行 |
 
-1. 为工具设置准确的 `category` 标签（对应 `ToolCategory` 枚举）
-2. 确保工具名称能反映其功能
-3. 在 `isolation_policy.yaml` 中添加对应配置：
+#### 降级策略
+
+| 降级策略 | 说明 | 适用场景 |
+|----------|------|----------|
+| `allow` | 隔离失败时自动降级到宿主机执行 | 一般工具 |
+| `deny` | 隔离失败时拒绝执行，不降级 | 高危工具（如命令执行） |
+
+#### 分类级策略（categories: 兜底匹配）
+
+| ToolCategory 值 | isolation | execution | fallback | 说明 |
+|-----------------|-----------|-----------|----------|------|
+| `execution` | container | command_in_container | **deny** | 命令执行类，禁止降级 |
+| `network` | container | command_in_container | allow | 网络类 |
+| `file` | container | command_in_container | allow | 文件操作类 |
+| `search` | container | command_in_container | allow | 搜索类 |
+| `analysis` | container | command_in_container | allow | 分析类 |
+| `system` | **host** | host_direct | allow | 系统工具类 |
+| `evaluation` | container | command_in_container | allow | 评估类 |
+| `task` | **host** | host_direct | allow | 任务管理类 |
+| `memory` | **host** | host_direct | allow | 记忆类 |
+
+#### 如何为新工具配置隔离
+
+**大多数情况无需配置**：只要在 `get_tool_definition()` 中设置正确的 `category`，系统自动匹配到 `categories:` 下的策略。
+
+**特殊情况需手动配置**（在 `isolation_policy.yaml` 的 `tools:` 下添加）：
+- 需要强制容器隔离且禁止降级（`fallback: deny`）
+- 需要特殊资源限制（`disk_quota`、`network`）
 
 ```yaml
 tools:
-  {tool_id}:
-    isolation: host/container
-    execution: host_direct/command_in_container
-    fallback: allow/deny
+  my_special_tool:
+    isolation: container
+    execution: command_in_container
+    fallback: deny
+    disk_quota: "100m"
+    network: restricted
 ```
 
-| 工具行为 | 推荐隔离策略 | 示例配置 |
-|----------|-------------|----------|
-| 只读文件/目录 | host, host_direct, allow | file_read, enhanced_search |
-| 读写文件 | host, host_direct, allow | file_write |
-| 执行命令 | container, command_in_container, deny | bash_execute |
-| 网络请求 | container, command_in_container, deny | fetch, web_search |
-| 纯计算/验证 | host, host_direct, allow | evaluate, yaml_validate |
-| 任务管理 | host, host_direct, allow | task_submit, todo_manage |
+#### 隔离判断流程
+
+```
+新工具创建后，系统如何确定隔离级别：
+
+1. 检查 tools: 下是否有精确匹配（按工具 name）
+   └─ 有 → 使用工具级配置
+   └─ 无 ↓
+
+2. 检查 categories: 下是否有分类匹配（按 category 枚举值）
+   └─ 有 → 使用分类级配置
+   └─ 无 ↓
+
+3. 使用 default: 默认策略（container, command_in_container, allow）
+```
+
+### 6.2 安全检查（dangerous_operations）
+
+**核心机制**：`dangerous_operations` 是工具声明自己可能执行的危险操作列表。
+系统通过 **隔离级别 + 危险操作** 的组合来决定：放行、拦截（block）、审批（needs_approval）。
+
+#### 安全检查流程（两层）
+
+```
+工具执行请求
+    │
+    ▼
+┌─ 第一层：security_check 插件（pipeline 层）────────────────┐
+│  1. 路径遍历检测（内置）→ block                            │
+│  2. 工作目录边界检查（内置）→ block                        │
+│  3. security_rules.yaml 规则匹配 → block / needs_approval │
+└─────────────────────────────────────────────────────────────┘
+    │ 通过
+    ▼
+┌─ 第二层：ApprovalDecisionEngine（审批决策引擎）──────────┐
+│  检测输入参数是否匹配 dangerous_operations 列表           │
+│                                                          │
+│  隔离级别        危险操作？        结果                   │
+│  ────────────────────────────────────────               │
+│  container       任意              → 自动批准            │
+│  host            无                → 自动批准            │
+│  host            有                → 需要审批            │
+└──────────────────────────────────────────────────────────┘
+```
+
+#### dangerous_operations 在代码中的定义
+
+在 `get_tool_definition()` 中声明：
+
+```python
+@staticmethod
+def get_tool_definition() -> Tool:
+    return Tool(
+        name="my_tool",
+        description="工具描述",
+        category=ToolCategory.FILE,
+        dangerous_operations=[
+            "delete_lines:",    # 删除行操作
+            "write:/etc/",      # 写入敏感路径
+        ],
+        # ...
+    )
+```
+
+#### 现有工具的危险操作声明示例
+
+| 工具 | dangerous_operations | 说明 |
+|------|---------------------|------|
+| `file_read` | `["read:/etc/", "read:/sys/"]` | 读取敏感路径标记为危险 |
+| `file_write` | `["write:/etc/", "delete_lines:"]` | 写入敏感路径/删除行标记为危险 |
+| `bash_execute` | `["rm -rf", "format", "shutdown"]` | 破坏性命令标记为危险 |
+| `enhanced_search` | `[]` | 无危险操作 |
+| `fetch` | `[]` | 无危险操作 |
+
+#### dangerous_operations 匹配机制
+
+`DangerChecker` 检测输入参数是否包含声明的危险操作：
+
+```
+匹配规则：
+1. 获取工具的命令输入字段（如 bash_execute → command 字段）
+2. 如果输入字段值中包含 dangerous_operations 中的字符串 → 匹配
+3. 如果没有命令输入字段，检查参数名是否以危险操作开头
+   例：参数名 "write:/etc/config" 匹配 "write:/etc/"
+```
+
+#### 如何判断工具需要声明哪些 dangerous_operations
+
+```
+判断流程：
+
+1. 工具是否会访问敏感路径？
+   └─ 是 → 添加 "操作类型:路径前缀"
+   └─ 例：file_read → "read:/etc/", "read:C:\Windows\"
+
+2. 工具是否可能执行破坏性操作？
+   └─ 是 → 添加具体操作标识
+   └─ 例：file_write → "delete_lines:", bash_execute → "rm -rf"
+
+3. 工具只做纯计算/查询？
+   └─ 是 → dangerous_operations: []
+
+4. 声明的危险操作什么时候会触发审批？
+   └─ 只在 HOST 隔离模式 + 输入匹配到危险操作时才触发
+   └─ 容器模式下即使匹配到也自动批准（容器已提供隔离保护）
+```
+
+#### 审批结果处理
+
+| 决策类型 | 触发条件 | 结果 |
+|----------|----------|------|
+| AUTO_APPROVED | 容器模式 / 无危险操作 | 自动执行 |
+| NEEDS_APPROVAL | HOST模式 + 匹配到危险操作 | 暂停等待人工审批 |
+| BLOCKED | security_rules.yaml 规则匹配 | 直接拦截，不执行 |
+
+#### 全局安全规则（security_rules.yaml）
+
+除了工具级 `dangerous_operations`，系统还有全局安全规则，由 `security_check` 插件统一执行：
+
+| 规则名 | 作用 | 动作 |
+|--------|------|------|
+| `dangerous_commands` | 拦截危险命令（rm -rf, curl, pip install 等） | block |
+| `protected_paths` | 拦截对系统关键路径的访问 | block |
+| `ssrf_protection` | 防止 SSRF 攻击（localhost, 内网 IP） | block |
+| `high_risk_operations` | 高风险操作需要审批（sudo, docker run） | needs_approval |
+
+**新工具无需修改 security_rules.yaml**，全局规则对所有工具自动生效。
 
 ---
 
@@ -515,25 +645,84 @@ tools:
 
 ### 8.1 检查清单
 
-| 步骤 | 操作 | 文件 |
-|------|------|------|
-| 1 | 创建工具代码文件 | `src/tools/builtin/{tool_id}.py` |
-| 2 | 注册到内置工具模块 | `src/tools/builtin/__init__.py` |
-| 3 | 运行自动生成脚本更新配置 | `scripts/tools/collect_tool_info.py` |
-| 4 | 创建工具专属配置文件 | `config/tools/{category}/{tool_id}.yaml` |
-| 5 | 配置隔离策略 | `config/isolation/isolation_policy.yaml` |
-| 6 | 在需要的 Agent 中引用 | Agent 配置的 `tool_ids` |
+| 步骤 | 操作 | 文件 | 备注 |
+|------|------|------|------|
+| 1 | 创建工具代码文件 | `src/tools/builtin/{tool_id}.py` | 继承 BuiltinTool，设置正确 category |
+| 2 | ~~注册到内置工具模块~~ | ~~`src/tools/builtin/__init__.py`~~ | **已废弃，系统自动发现** |
+| 3 | ~~运行自动生成脚本~~ | ~~`scripts/tools/collect_tool_info.py`~~ | **已废弃，系统自动发现** |
+| 4 | ~~创建工具专属配置文件~~ | ~~`config/tools/{category}/{tool_id}.yaml`~~ | **已废弃** |
+| 5 | 配置安全标记（如需要） | `config/tools/builtin_tools_config.yaml` | 设置 requires_approval 和 dangerous_operations |
+| 6 | 配置隔离策略（仅特殊需求） | `config/isolation/isolation_policy.yaml` | 大多数情况无需配置，category 自动匹配 |
+| 7 | 在需要的 Agent 中引用 | Agent 配置的 `tool_ids` | 在 Agent 的 tool_ids 中添加 |
 
 ### 8.2 工具类别与隔离速查
 
-| ToolCategory 值 | 典型工具 | 默认隔离 |
-|-----------------|----------|----------|
-| FILE | file_read, file_write | host |
-| SEARCH | enhanced_search, resource_search | host |
-| WEB | fetch, web_search | container |
-| MEMORY | memory | host |
-| TASK | task_submit, todo_manage | host |
-| SYSTEM | evaluate, yaml_validate | host |
-| EXECUTION | bash_execute | container |
-| ANALYSIS | lsp_definition | host |
-| EVALUATION | schema_evaluator | host |
+| ToolCategory 值 | isolation | execution | fallback | 说明 |
+|-----------------|-----------|-----------|----------|------|
+| `execution` | container | command_in_container | **deny** | 命令执行类，禁止降级 |
+| `network` | container | command_in_container | allow | 网络类 |
+| `file` | container | command_in_container | allow | 文件操作类 |
+| `search` | container | command_in_container | allow | 搜索类 |
+| `analysis` | container | command_in_container | allow | 分析类 |
+| `system` | **host** | host_direct | allow | 系统工具类 |
+| `evaluation` | container | command_in_container | allow | 评估类 |
+| `task` | **host** | host_direct | allow | 任务管理类 |
+| `memory` | **host** | host_direct | allow | 记忆类 | |
+
+---
+
+## 九、MCP 工具创建说明
+
+### 9.1 MCP 工具适用场景
+
+MCP 工具适用于：
+- 已有成熟的 MCP 服务器实现
+- 需要使用外部工具/服务
+- 不想在代码中实现复杂逻辑
+
+### 9.2 MCP 工具配置
+
+**文件路径**：`config/tools/mcp_tools_config.yaml`
+
+```yaml
+mcp_servers:
+  - name: "{server_name}"
+    command: "{启动命令}"
+    args: ["{参数}"]
+    env:
+      {KEY}: "{VALUE}"
+    tools:
+      - name: "{tool_name}"
+        description: "{工具描述}"
+        category: "{category}"
+```
+
+### 9.3 MCP 工具特点
+
+- **无需编写 Python 代码**：MCP 工具由外部 MCP 服务器提供
+- **无需注册到 `__init__.py`**：系统在启动时自动发现 MCP 工具
+- **配置驱动**：所有工具行为由 MCP 服务器实现
+
+### 9.4 三种工具类型对比
+
+| 类型 | 代码位置 | 注册方式 | 配置位置 |
+|------|----------|----------|----------|
+| 内置工具（Python） | `src/tools/builtin/{tool_id}.py` | 自动发现 | `builtin_tools_config.yaml` |
+| MCP 工具 | 外部 MCP 服务器 | 自动发现 | `mcp_tools_config.yaml` |
+| 评估器 | `src/tools/builtin/evaluators/` | 自动发现 | `builtin_tools_config.yaml` |
+
+### 9.5 创建工具的完整检查清单
+
+| 步骤 | 操作 | 适用类型 | 文件位置 |
+|------|------|----------|----------|
+| 1 | 创建工具代码文件 | Python 内置工具 | `src/tools/builtin/{tool_id}.py` |
+| 2 | 继承 BuiltinTool 基类 | Python 内置工具 | 继承 `src/tools/builtin/base.py` |
+| 3 | 实现 get_tool_definition() | Python 内置工具 | 返回 `Tool` 对象 |
+| 4 | 实现 execute() | Python 内置工具 | 返回 `ToolExecutionResult` |
+| 5 | 配置 MCP 服务器 | MCP 工具 | `config/tools/mcp_tools_config.yaml` |
+| 6 | 配置隔离策略（可选） | 特殊需求 | `config/isolation/isolation_policy.yaml` |
+
+**注意**：
+- **不需要修改 `src/tools/builtin/__init__.py`**
+- **不需要运行 `scripts/tools/collect_tool_info.py`**
+- 系统启动时会自动扫描并发现所有工具

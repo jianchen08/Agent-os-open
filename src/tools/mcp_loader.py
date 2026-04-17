@@ -1,4 +1,4 @@
-﻿"""
+"""
 MCP 工具加载器
 
 暴露接口：
@@ -41,7 +41,6 @@ class MCPServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list, description="命令参数")
     env: dict[str, str] = Field(default_factory=dict, description="环境变量")
     disabled: bool = Field(False, description="是否禁用")
-    auto_approve: list[str] = Field(default_factory=list, description="自动审批的工具")
 
 
 class MCPToolLoader:
@@ -99,9 +98,6 @@ class MCPToolLoader:
                     args=server_config.get("args", []),
                     env=server_config.get("env", {}),
                     disabled=server_config.get("disabled", False),
-                    auto_approve=server_config.get(
-                        "autoApprove", server_config.get("auto_approve", [])
-                    ),
                 )
             else:
                 continue
@@ -249,7 +245,6 @@ class MCPToolLoader:
                 args=resolved_args,
                 env=config.env,
                 disabled=config.disabled,
-                auto_approve=config.auto_approve,
             )
         return config
 
@@ -306,7 +301,6 @@ class MCPToolLoader:
             output_schema={"type": "object"},
             category=self._infer_tool_category(name, description),
             level="user",
-            requires_approval=False,
             version="1.0.0",
             status="active",
             source=ToolSource.MCP,
@@ -433,6 +427,7 @@ class MCPToolLoader:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
+                        limit=1024 * 1024,
                     )
                     client = MCPClient(process, config.name, use_sync=False)
 

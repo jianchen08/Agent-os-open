@@ -41,18 +41,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CommandResult:
-    """斜杠命令执行结果。
+    """Slash command execution result.
 
     Attributes:
-        output: 命令输出文本（用于 console.print）
-        should_stop: 是否应终止 REPL 循环
-        should_clear_history: 是否清空对话历史
-        state_updates: 需要注入到管道 state 的额外字段
+        output: Command output text (for console.print)
+        should_stop: Whether to terminate the REPL loop
+        should_clear_history: Whether to clear conversation history in memory
+        should_clear_session: Whether to clear persisted session checkpoints on disk
+        state_updates: Extra fields to inject into pipeline state
     """
 
     output: str | None = None
     should_stop: bool = False
     should_clear_history: bool = False
+    should_clear_session: bool = False
     state_updates: dict[str, Any] = field(default_factory=dict)
 
 
@@ -237,9 +239,9 @@ class SlashCommandRegistry:
         return CommandResult(state_updates={"compact_requested": True})
 
     async def _cmd_clear(self, args: str, ctx: dict[str, Any]) -> CommandResult:
-        """清空对话历史。"""
-        self._console.print("[green][OK] 对话历史已清空[/green]")
-        return CommandResult(should_clear_history=True)
+        """Clear conversation history and persisted session checkpoints."""
+        self._console.print("[green][OK] 对话历史已清空，已开启新会话[/green]")
+        return CommandResult(should_clear_history=True, should_clear_session=True)
 
     async def _cmd_model(self, args: str, ctx: dict[str, Any]) -> CommandResult:
         """查看或切换模型。"""

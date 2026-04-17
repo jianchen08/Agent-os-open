@@ -87,7 +87,6 @@ tool_ids:
   - "memory"
   - "file_read"
   - "file_write"
-  - "todo_manage"
   - "task_evaluate"
 
 # 约束

@@ -24,7 +24,7 @@ coordinator:
   enable_fallback: true
 
   # 默认隔离级别
-  default_level: container  # host | container | sandbox
+  default_level: container  # host | container
 
   # 环境复用：同一任务内的工具是否共享隔离环境
   reuse_environment: true
@@ -56,14 +56,6 @@ providers:
       memory: "512m"
       cpus: "0.5"
 
-  # E2B 提供者
-  e2b:
-    enabled: true
-    # API Key（优先使用环境变量 E2B_API_KEY）
-    api_key: null
-    # 沙箱模板
-    template: "base-python"
-
 # 策略配置
 policy:
   # 是否启用优雅降级
@@ -71,11 +63,7 @@ policy:
 
   # 自定义策略（覆盖默认策略）
   # 格式: task_type 或 operation_type: isolation_level
-  custom:
-    # 示例：PROJECT 级别任务使用 E2B 沙箱
-    # project: sandbox
-    # 示例：代码执行使用沙箱
-    # code_execution: sandbox
+  custom: {}
 
 # ============================================
 # 权限策略配置

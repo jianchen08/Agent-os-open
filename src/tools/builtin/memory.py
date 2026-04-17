@@ -1,4 +1,4 @@
-﻿"""
+"""
 记忆工具
 
 暴露接口：
@@ -9,13 +9,11 @@
 - MemoryTool：MemoryTool类
 """
 
+import logging
 import uuid
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from core.results import ToolExecutionResult
-from memory.service import MemoryService
 from memory.types import ContextRequest, Episode, Knowledge
 from tools.types import (
     Tool,
@@ -25,6 +23,8 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryTool:
@@ -39,11 +39,14 @@ class MemoryTool:
     - 搜索相似 Tag
     - 导入文本知识
     - 导入文件知识
+
+    数据库会话按需获取：仅向量检索等需要 DB 的操作才要求 session，
+    纯文件存储/检索操作通过注入的 _memory_service 工作，不依赖数据库。
     """
 
     def __init__(
         self,
-        session: AsyncSession | None = None,
+        session: Any | None = None,
         user_id: str | None = None,
         tag_network: Any | None = None,
         knowledge_importer: Any | None = None,
@@ -55,19 +58,17 @@ class MemoryTool:
         self.tag_network = tag_network
         self._knowledge_importer = knowledge_importer
 
-    def _get_session(self, inputs: dict[str, Any]) -> AsyncSession:
-        """从构造函数或注入参数获取 session"""
+    def _get_session(self, inputs: dict[str, Any]) -> Any | None:
+        """从构造函数或注入参数获取 session（按需，可能返回 None）"""
         if self._session:
             return self._session
 
-        # 从注入的参数获取
         session = inputs.get("_session") or inputs.get("db_session")
         if session:
             return session
 
-        # 从上下文变量获取（如果有的话）
         try:
-            from db.connection import get_current_session
+            from infrastructure.db import get_current_session
 
             current_session = get_current_session()
             if current_session:
@@ -75,19 +76,31 @@ class MemoryTool:
         except (ImportError, AttributeError):
             pass
 
-        # 如果都没有，抛出异常
-        raise RuntimeError(
-            "数据库会话未注入。请确保：\n"
-            "1. 工具在 WebSocket 连接时正确注册（传入 session）\n"
-            "2. 或者在工具执行时通过 injected_params 注入 _session"
-        )
+        return None
 
-    @property
-    def memory_service(self):
-        """获取记忆服务（延迟初始化）"""
-        if self._memory_service is None and self.session:
-            self._memory_service = MemoryService(session=self.session)
-        return self._memory_service
+    def _get_memory_service(self, inputs: dict[str, Any]):
+        """获取记忆服务：优先从注入参数获取，其次用 session 自建"""
+        injected = inputs.get("_memory_service")
+        if injected is not None:
+            self._memory_service = injected
+            return injected
+
+        if self._memory_service is not None:
+            return self._memory_service
+
+        session = self._get_session(inputs)
+        if session:
+            try:
+                from memory.service import MemoryService
+
+                self._memory_service = MemoryService(session=session)
+                return self._memory_service
+            except TypeError:
+                from memory.service import MemoryService
+
+                self._memory_service = MemoryService()
+                return self._memory_service
+        return None
 
     def set_tag_network(self, tag_network: Any):
         """设置 Tag 网络检索器"""
@@ -191,21 +204,20 @@ class MemoryTool:
             category=ToolCategory.MEMORY,
             level=ToolLevel.SYSTEM,
             source=ToolSource.CODE,
-            injected_params=["session_id", "user_id", "_session"],
+            injected_params=["session_id", "user_id", "_session", "_memory_service"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行记忆操作"""
-        # 获取数据库会话
-        try:
-            self.session = self._get_session(inputs)
-        except RuntimeError as e:
+        ms = self._get_memory_service(inputs)
+        if ms is None:
             return create_failure_result(
-                error=str(e),
-                error_code="SESSION_NOT_INJECTED",
+                error="记忆服务未初始化。请确保 memory_service 已注册到管道共享服务中。",
+                error_code="MEMORY_SERVICE_NOT_AVAILABLE",
             )
 
-        # 从注入参数获取 user_id（如果没有则保留构造函数中的值）
+        self._memory_service = ms
+
         if not self.user_id:
             self.user_id = inputs.get("user_id")
 
@@ -284,7 +296,7 @@ class MemoryTool:
             return create_failure_result("retrieval 注入方式需要提供 query")
 
         try:
-            results = await self.memory_service.retrieve(
+            results = await self._memory_service.retrieve(
                 user_id=uuid.UUID(self.user_id),
                 filter=filter,
                 inject_type=inject_type,

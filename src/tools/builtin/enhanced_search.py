@@ -1,4 +1,4 @@
-﻿"""
+"""
 增强代码搜索工具 - 集成ripgrep
 
 暴露接口：
@@ -111,8 +111,6 @@ class EnhancedSearchTool:
             source=ToolSource.CODE,
             category=ToolCategory.SEARCH,
             level=ToolLevel.USER,
-            requires_approval=False,
-            dangerous_operations=[],
             tags=["search", "code", "ripgrep", "performance", "filename"],
             injected_params=["workspace"],
         )

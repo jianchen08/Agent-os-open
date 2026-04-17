@@ -1,4 +1,4 @@
-﻿"""
+"""
 工作流状态更新工具
 
 暴露接口：
@@ -59,7 +59,6 @@ class StateUpdateTool(BuiltinTool):
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             tags=["workflow", "state", "system"],
         )
 

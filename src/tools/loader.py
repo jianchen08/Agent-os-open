@@ -1,4 +1,4 @@
-﻿"""
+"""
 动态工具加载器
 
 暴露接口：
@@ -10,6 +10,7 @@
 - is_available(self, tool_name: str) -> bool：is_available功能
 - get_loaded_tools(self) -> set：get_loaded_tools功能
 - get_available_tools(self) -> list[str]：get_available_tools功能
+- get_discovered_tools(self) -> dict：get_discovered_tools功能
 - DynamicToolLoader：DynamicToolLoader类
 """
 
@@ -71,7 +72,7 @@ class DynamicToolLoader:
         self._loading: dict[str, Any] = {}  # 正在加载的工具
         self._loaded: set = set()  # 已加载的工具
         self._tool_modules: dict[str, str] = {}  # 工具名 -> 模块路径
-        self._tool_classes: dict[str, str] = {}  # 工具名 -> 类名
+        self._tool_classes: dict[str, tuple[str, str]] = {}  # 工具名 -> (模块路径, 类名)
         self._discovered = False  # 是否已完成发现
 
     def _discover_tools(self) -> None:
@@ -148,7 +149,7 @@ class DynamicToolLoader:
                             tool_def = attr.get_tool_definition()
                             tool_name = tool_def.name
                             self._tool_modules[tool_name] = module_path
-                            self._tool_classes[tool_name] = attr_name
+                            self._tool_classes[tool_name] = (module_path, attr_name)
                             logger.debug(
                                 f"[动态加载] 发现工具（通过静态方法）| "
                                 f"name={tool_name} | class={attr_name} | module={module_path}"
@@ -162,7 +163,7 @@ class DynamicToolLoader:
                     tool_name = tool_def.name
 
                     self._tool_modules[tool_name] = module_path
-                    self._tool_classes[tool_name] = attr_name
+                    self._tool_classes[tool_name] = (module_path, attr_name)
 
                     logger.debug(
                         f"[动态加载] 发现工具 | "
@@ -225,8 +226,7 @@ class DynamicToolLoader:
 
         try:
             # 获取模块路径和类名
-            module_path = self._tool_modules[tool_name]
-            class_name = self._tool_classes[tool_name]
+            module_path, class_name = self._tool_classes[tool_name]
 
             # 动态导入模块
             module = importlib.import_module(module_path)
@@ -333,6 +333,16 @@ class DynamicToolLoader:
             self._discover_tools()
 
         return list(self._tool_modules.keys())
+
+    def get_discovered_tools(self) -> dict[str, tuple[str, str]]:
+        """获取所有已发现的工具映射
+
+        Returns:
+            dict: {工具名: (模块路径, 类名)}
+        """
+        if not self._discovered:
+            self._discover_tools()
+        return self._tool_classes.copy()
 
 
 # 全局动态加载器实例

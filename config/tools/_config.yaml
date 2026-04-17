@@ -28,7 +28,6 @@ permission_policies:
       - "task_submit"
       - "task_evaluate"
       - "memory"
-      - "todo_manage"
       - "evaluate"
       - "file_read"
       - "file_write"

@@ -121,7 +121,6 @@ class ResourceSearchTool:
             source=ToolSource.CODE,
             category=ToolCategory.SEARCH,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             injected_params=["session_id", "parent_record_id"],
             tags=["search", "resource", "system"],
         )
@@ -162,42 +161,45 @@ class ResourceSearchTool:
                 else:
                     search_engine_instance = search_engine
 
-                results = await self._search_with_engine(
-                    search_engine=search_engine_instance,
-                    resource_type=resource_type,
-                    query=query,
-                    limit=limit,
-                    detailed=detailed,
-                    category=category,
-                    language=language,
-                    level=level,
-                    exact=exact,
-                )
-                if results:
-                    return create_success_result(
-                        data={
-                            "query": query,
-                            **results,
-                            "total": sum(
-                                v for k, v in results.items() if k.endswith("_c")
-                            ),
-                            "mode": "vector",
-                        },
-                        metadata={"action": "resource_search"},
+                if search_engine_instance is None:
+                    logger.info("[resource_search] 搜索引擎实例为空，跳过向量检索")
+                else:
+                    results = await self._search_with_engine(
+                        search_engine=search_engine_instance,
+                        resource_type=resource_type,
+                        query=query,
+                        limit=limit,
+                        detailed=detailed,
+                        category=category,
+                        language=language,
+                        level=level,
+                        exact=exact,
                     )
+                    if results:
+                        return create_success_result(
+                            data={
+                                "query": query,
+                                **results,
+                                "total": sum(
+                                    v for k, v in results.items() if k.endswith("_c")
+                                ),
+                                "mode": "vector",
+                            },
+                            metadata={"action": "resource_search"},
+                        )
             except Exception as e:
                 logger.warning("Vector search failed, fallback to traversal: %s", e)
 
         results = {}
 
         if resource_type in ["agent", "all"]:
-            agent_names, agent_descriptions, _ = await self._search_agents(
+            agent_names, agent_descriptions, agent_ids, _ = await self._search_agents(
                 query, category, level, limit, detailed=False, exact=False
             )
             if agent_names:
-                results["agent_h"] = ["agent_name", "agent_description"]
+                results["agent_h"] = ["config_id", "agent_name", "agent_description"]
                 results["agent_d"] = [
-                    [agent_names[i], agent_descriptions[i]]
+                    [agent_ids[i], agent_names[i], agent_descriptions[i]]
                     for i in range(len(agent_names))
                 ]
                 results["agent_c"] = len(agent_names)
@@ -450,7 +452,7 @@ class ResourceSearchTool:
         """
         if self._search_engine is None:
             try:
-                from db.connection import get_async_session
+                from infrastructure.db import get_async_session
                 from memory.service import MemoryService
 
                 _instance_cache = {"instance": None}
@@ -459,10 +461,15 @@ class ResourceSearchTool:
                     """创建或复用 MemoryService 实例"""
                     if _instance_cache["instance"] is not None:
                         return _instance_cache["instance"]
-                    async for session in get_async_session():
-                        _instance_cache["instance"] = MemoryService(session=session)
-                        return _instance_cache["instance"]
-                    return None
+                    # BUG-FIX-fix_20260416_001: 修复 async for 误用为 coroutine 的问题
+                    # 问题根因: get_async_session() 是 async def 函数，返回 AsyncSession|None，
+                    #           不是异步生成器，不能用 async for 遍历
+                    # 修复方案: 改用 await 获取 session
+                    session = await get_async_session()
+                    if session is None:
+                        return None
+                    _instance_cache["instance"] = MemoryService(session=session)
+                    return _instance_cache["instance"]
 
                 self._search_engine = create_or_get_engine
             except Exception as e:
@@ -501,8 +508,8 @@ class ResourceSearchTool:
         if self.workflow_registry is None:
             from sqlalchemy import select
 
-            from db.connection import get_async_session
             from db.models import Workflow
+            from infrastructure.db import get_async_session
 
             class WorkflowRegistry:
                 """工作流注册表包装器"""
@@ -551,21 +558,22 @@ class ResourceSearchTool:
         limit: int,
         detailed: bool = False,
         exact: bool = False,
-    ) -> tuple[list[str], list[str], list[dict]]:
-        """搜索 Agent"""
+    ) -> tuple[list[str], list[str], list[str], list[dict]]:
+        """搜索 Agent，返回名称、描述、config_id、详情。"""
         agent_registry = self._get_agent_registry()
         if not agent_registry:
-            return [], [], []
+            return [], [], [], []
 
         names = []
         descriptions = []
+        config_ids = []
         details_list = []
         query_lower = query.lower()
 
         if detailed and exact:
             limit = 1
 
-        for agent_config in agent_registry.values():
+        for agent_config in agent_registry.list_all():
             if level != "all":
                 agent_level = getattr(agent_config, "level", "user")
                 if agent_level != level:
@@ -576,15 +584,20 @@ class ResourceSearchTool:
                 if agent_category != category:
                     continue
 
-            if self._match_query(
+            config_id = getattr(agent_config, "config_id", "")
+            matched = self._match_query(
                 query_lower,
                 agent_config.name,
                 agent_config.description,
                 agent_config.tags,
                 exact,
-            ):
+            )
+            if not matched and config_id and query_lower in config_id.lower():
+                matched = True
+            if matched:
                 names.append(agent_config.name)
                 descriptions.append(agent_config.description)
+                config_ids.append(config_id)
 
                 if detailed:
                     details_list.append(
@@ -603,7 +616,7 @@ class ResourceSearchTool:
                 if len(names) >= limit:
                     break
 
-        return names, descriptions, details_list
+        return names, descriptions, config_ids, details_list
 
     async def _search_tools(
         self,
@@ -715,15 +728,19 @@ class ResourceSearchTool:
         try:
             from sqlalchemy import select
 
-            from db.connection import get_session_context
             from db.models import ToolLibrary
+            from infrastructure.db import get_async_session
 
             names = []
             descriptions = []
             schemas_list = []
             query_lower = query.lower()
 
-            async with get_session_context() as session:
+            session = await get_async_session()
+            if session is None:
+                return [], [], []
+
+            async with session:
                 stmt = select(ToolLibrary).where(ToolLibrary.status == "active")
 
                 if level and level != "all":
@@ -863,9 +880,11 @@ class ResourceSearchTool:
     def _get_skill_registry(self):
         """获取 Skill 注册表（延迟加载）"""
         if self.skill_registry is None:
-            from skills.registry import get_global_skill_registry
-
-            self.skill_registry = get_global_skill_registry()
+            try:
+                from skills.registry import get_global_skill_registry
+                self.skill_registry = get_global_skill_registry()
+            except ImportError:
+                self.skill_registry = None
         return self.skill_registry
 
     async def _search_skills(

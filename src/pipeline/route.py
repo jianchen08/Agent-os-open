@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,7 @@ class InputRouteEntry:
         target: 路由目标：core / end / wait
         plugins: 要执行的插件名称列表
         priority: 优先级，数值越小越先匹配
+        result: 拦截原因模板，支持点号路径访问 state 嵌套字段
     """
 
     name: str
@@ -51,6 +53,37 @@ class InputRouteEntry:
     target: str = "core"
     plugins: list[str] = field(default_factory=list)
     priority: int = 0
+    result: str | None = None
+
+    def format_result(self, state: dict[str, Any]) -> str:
+        """格式化拦截原因模板。
+
+        支持点号路径访问 state 嵌套字段，例如模板
+        ``{security.decision.reason}`` 会从 state 中逐层查找
+        ``state["security"]["decision"]["reason"]`` 的值。
+        找不到的路径用空字符串替代。
+
+        Args:
+            state: 管道状态字典
+
+        Returns:
+            填充后的字符串；result 为 None 时返回空字符串
+        """
+        if self.result is None:
+            return ""
+
+        def _resolve(path: str) -> str:
+            """按点号分割路径，从 state 中逐层查找值。"""
+            keys = path.split(".")
+            value: Any = state
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
+                else:
+                    return ""
+            return str(value)
+
+        return re.sub(r"\{([^}]+)\}", lambda m: _resolve(m.group(1)), self.result)
 
 
 @dataclass
@@ -86,28 +119,24 @@ class InputRouteTable:
     def __init__(self, entries: list[InputRouteEntry] | None = None) -> None:
         self.entries: list[InputRouteEntry] = entries or []
 
-    def resolve(self, state: dict[str, Any]) -> tuple[list[str], str]:
-        """根据当前状态解析输入路由。
+    def resolve_plugins(self, state: dict[str, Any]) -> list[str]:
+        """根据 state 解析需要执行的 input 插件列表。
 
-        遍历所有条目，条件匹配的条目贡献其插件和目标。
-        插件列表去重保序；target 由优先级最高的匹配条目决定：
-        - "end" 立即结束管道
-        - "wait" 挂起管道
-        - "core" 继续执行核心阶段
+        遍历所有条目，收集所有条件匹配的条目的插件列表。
+        插件列表去重保序。
 
         Args:
             state: 管道当前状态字典
 
         Returns:
-            元组 (去重保序的插件名称列表, 目标字符串)
+            去重保序的插件名称列表
         """
-        matched_entries = sorted(
-            [e for e in self.entries if _eval_condition(e.condition, state)],
-            key=lambda e: e.priority,
-        )
+        matched_entries = [
+            e for e in self.entries if _eval_condition(e.condition, state)
+        ]
 
         if not matched_entries:
-            return [], "core"
+            return []
 
         # 插件去重保序
         seen: set[str] = set()
@@ -118,18 +147,64 @@ class InputRouteTable:
                     seen.add(plugin_name)
                     plugins.append(plugin_name)
 
-        # target 取优先级最高的匹配条目
-        target = matched_entries[0].target
+        return plugins
+
+    def resolve_target(self, state: dict[str, Any]) -> tuple[str, InputRouteEntry | None]:
+        """根据 state 解析路由目标和匹配的条目。
+
+        遍历所有条件匹配的条目，按优先级决定目标：
+        - "end" 立即结束管道
+        - "wait" 挂起管道
+        - "core" 继续执行核心阶段
+        end/wait 具有最高优先级：任一条目指定 end/wait 即生效。
+
+        Args:
+            state: 管道当前状态字典
+
+        Returns:
+            元组 (target, matched_entry)：
+            - target: "core" / "end" / "wait"
+            - matched_entry: 优先级最高的匹配条目（用于读取 result 模板）；
+              无匹配时为 None
+        """
+        matched_entries = sorted(
+            [e for e in self.entries if _eval_condition(e.condition, state)],
+            key=lambda e: e.priority,
+        )
+
+        if not matched_entries:
+            return "core", None
+
+        # 默认取优先级最高的匹配条目
+        best_entry = matched_entries[0]
+        target = best_entry.target
 
         # end 和 wait 具有最高优先级：任一条目指定 end/wait 即生效
         for entry in matched_entries:
             if entry.target == "end":
                 target = "end"
+                best_entry = entry
                 break
             if entry.target == "wait":
                 target = "wait"
+                best_entry = entry
                 break
 
+        return target, best_entry
+
+    def resolve(self, state: dict[str, Any]) -> tuple[list[str], str]:
+        """根据当前状态解析输入路由（兼容方法）。
+
+        内部委托给 resolve_plugins() 和 resolve_target()。
+
+        Args:
+            state: 管道当前状态字典
+
+        Returns:
+            元组 (去重保序的插件名称列表, 目标字符串)
+        """
+        plugins = self.resolve_plugins(state)
+        target, _ = self.resolve_target(state)
         return plugins, target
 
 

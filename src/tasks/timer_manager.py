@@ -1,32 +1,23 @@
-﻿"""
-计时器管理器
+"""计时器管理器
+
+管理任务超时计时器，支持创建、重置、取消和恢复。
 
 暴露接口：
-- get_timer_manager() -> TimerManager：get_timer_manager功能
-- is_active(self) -> bool：is_active功能
-- is_expired(self) -> bool：is_expired功能
-- is_cancelled(self) -> bool：is_cancelled功能
-- time_remaining(self) -> float | None：time_remaining功能
-- to_dict(self) -> dict[str, Any]：to_dict功能
-- get_instance(cls) -> 'TimerManager'：get_instance功能
-- reset_instance(cls) -> None：reset_instance功能
-- task_max_duration(self) -> int：task_max_duration功能
-- idle_threshold(self) -> int：idle_threshold功能
-- project_max_duration(self) -> int：project_max_duration功能
-- activity_threshold(self) -> int：activity_threshold功能
-- max_retries(self) -> int：max_retries功能
-- retry_interval(self) -> int：retry_interval功能
-- auto_restore(self) -> bool：auto_restore功能
-- restore_lookback(self) -> int：restore_lookback功能
-- get_timer_status(self, task_id: str) -> TimerState | None：get_timer_status功能
-- get_all_timers(self) -> list[TimerState]：get_all_timers功能
-- get_active_timers(self) -> list[TimerState]：get_active_timers功能
-- get_timer_count(self) -> int：get_timer_count功能
-- reload_config(self) -> None：reload_config功能
-- TimerStatus：TimerStatus类
-- TimerState：TimerState类
-- TimerManager：TimerManager类
+- get_timer_manager() -> TimerManager：获取单例
+- TimerManager：计时器管理器类
+  - create_timer(task_id, timeout, callback, root_task_id) -> TimerState
+  - reset_timer(task_id, new_timeout) -> TimerState | None
+  - cancel_timer(task_id) -> bool
+  - restore_from_storage(task_service, callback) -> int
+  - get_timer_status(task_id) -> TimerState | None
+  - get_all_timers() -> list[TimerState]
+  - get_active_timers() -> list[TimerState]
+  - reload_config() -> None
+- TimerStatus：计时器状态枚举
+- TimerState：计时器状态数据类
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -34,14 +25,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
-from sqlalchemy import select
+import yaml
 
-from config.system_config import get_system_config_manager
-from core.states import ExecutionStatus
-from db.models import Task
-from db.session_manager import managed_session
+if TYPE_CHECKING:
+    from tasks.service import TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +39,14 @@ logger = logging.getLogger(__name__)
 class TimerStatus(str, Enum):
     """计时器状态枚举"""
 
-    ACTIVE = "active"  # 活跃状态
-    EXPIRED = "expired"  # 已过期
-    CANCELLED = "cancelled"  # 已取消
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
 
 @dataclass
 class TimerState:
-    """
-    计时器状态数据类
+    """计时器状态数据类。
 
     Attributes:
         task_id: 任务ID
@@ -76,7 +65,7 @@ class TimerState:
     created_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
     timeout_at: datetime | None = None
-    timeout_duration: float = 3600.0  # 默认1小时
+    timeout_duration: float = 3600.0
     handle: asyncio.TimerHandle | None = field(default=None, repr=False)
     status: TimerStatus = TimerStatus.ACTIVE
     callback: Callable[[str], None] | None = field(default=None, repr=False)
@@ -118,13 +107,12 @@ class TimerState:
 
 
 class TimerManager:
-    """
-    计时器管理器（单例）
+    """计时器管理器（单例）
 
     核心职责:
       1. 创建和管理任务计时器
       2. 重置和取消计时器
-      3. 服务重启时从数据库恢复计时器
+      3. 服务重启时从存储恢复计时器
       4. 提供计时器状态查询
 
     使用方式:
@@ -137,7 +125,6 @@ class TimerManager:
     _instance: "TimerManager | None" = None
     _initialized: bool = False
 
-    # 默认配置值
     DEFAULT_CONFIG = {
         "timeout": {
             "task_max_duration": 3600,
@@ -176,11 +163,7 @@ class TimerManager:
         return cls._instance
 
     def __init__(self) -> None:
-        """
-        初始化计时器管理器
-
-        只在首次创建时执行初始化
-        """
+        """初始化计时器管理器，只在首次创建时执行"""
         if TimerManager._initialized:
             return
 
@@ -192,31 +175,39 @@ class TimerManager:
         logger.info("TimerManager 初始化完成")
 
     def _load_config(self) -> None:
-        """
-        从配置文件加载配置
+        """从 YAML 配置文件加载配置。
 
-        如果配置文件不存在或加载失败，使用默认配置
+        直接读取 config/system/long_term_task.yaml，
+        不再依赖 config.system_config 模块。
         """
         try:
-            config_manager = get_system_config_manager()
-            config = config_manager.load("long_term_task")
+            config_path = Path("config/system/long_term_task.yaml")
+            if config_path.exists():
+                text = config_path.read_text(encoding="utf-8")
+                config = yaml.safe_load(text)
+                if config and isinstance(config, dict):
+                    self._config = self._merge_config(self.DEFAULT_CONFIG, config)
+                    logger.info("从配置文件加载长期任务配置成功")
+                    return
 
-            if config:
-                # 合并配置，优先使用文件配置
-                self._config = self._merge_config(self.DEFAULT_CONFIG, config)
-                logger.info("从配置文件加载长期任务配置成功")
-            else:
-                self._config = self.DEFAULT_CONFIG.copy()
-                logger.info("使用默认长期任务配置")
-
+            self._config = self.DEFAULT_CONFIG.copy()
+            logger.info("使用默认长期任务配置")
         except Exception as e:
-            logger.warning(f"加载配置文件失败，使用默认配置: {e}")
+            logger.warning("加载配置文件失败，使用默认配置: %s", e)
             self._config = self.DEFAULT_CONFIG.copy()
 
     def _merge_config(
         self, default: dict[str, Any], override: dict[str, Any]
     ) -> dict[str, Any]:
-        """递归合并配置"""
+        """递归合并配置。
+
+        Args:
+            default: 默认配置
+            override: 覆盖配置
+
+        Returns:
+            合并后的配置
+        """
         result = default.copy()
 
         for key, value in override.items():
@@ -238,11 +229,8 @@ class TimerManager:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """
-        重置单例实例（仅用于测试）
-        """
+        """重置单例实例（仅用于测试）"""
         if cls._instance is not None:
-            # 取消所有计时器
             for timer in cls._instance._timers.values():
                 if timer.handle:
                     timer.handle.cancel()
@@ -250,8 +238,6 @@ class TimerManager:
 
         cls._instance = None
         cls._initialized = False
-
-    # ==================== 配置访问接口 ====================
 
     @property
     def task_max_duration(self) -> int:
@@ -293,8 +279,6 @@ class TimerManager:
         """获取恢复时检查的时间范围（秒）"""
         return self._config["recovery"]["restore_lookback"]
 
-    # ==================== 计时器管理接口 ====================
-
     async def create_timer(
         self,
         task_id: str,
@@ -302,18 +286,29 @@ class TimerManager:
         callback: Callable[[str], None] | None = None,
         root_task_id: str | None = None,
     ) -> TimerState:
-        """创建计时器"""
+        """创建计时器。
+
+        Args:
+            task_id: 任务ID
+            timeout: 超时时间（秒），None 时使用默认值
+            callback: 超时回调函数
+            root_task_id: 根任务ID
+
+        Returns:
+            创建的计时器状态
+
+        Raises:
+            ValueError: 计时器已存在
+        """
         if task_id in self._timers:
             raise ValueError(f"计时器已存在: {task_id}")
 
-        # 使用默认超时时间
         if timeout is None:
             timeout = float(self.task_max_duration)
 
         now = datetime.now(UTC)
         timeout_at = now + timedelta(seconds=timeout)
 
-        # 创建计时器状态
         timer = TimerState(
             task_id=task_id,
             root_task_id=root_task_id,
@@ -325,13 +320,12 @@ class TimerManager:
             callback=callback,
         )
 
-        # 设置定时器回调
         timer.handle = asyncio.get_event_loop().call_later(
             timeout, self._on_timeout, task_id
         )
 
         self._timers[task_id] = timer
-        logger.info(f"创建计时器: task_id={task_id}, timeout={timeout}s")
+        logger.info("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return timer
 
@@ -340,23 +334,28 @@ class TimerManager:
         task_id: str,
         new_timeout: float | None = None,
     ) -> TimerState | None:
-        """重置计时器"""
+        """重置计时器。
+
+        Args:
+            task_id: 任务ID
+            new_timeout: 新超时时间（秒），None 时保持原值
+
+        Returns:
+            重置后的计时器状态，不存在时返回 None
+        """
         if task_id not in self._timers:
-            logger.warning(f"计时器不存在: {task_id}")
+            logger.warning("计时器不存在: %s", task_id)
             return None
 
         old_timer = self._timers[task_id]
 
-        # 取消旧计时器
         if old_timer.handle:
             old_timer.handle.cancel()
 
-        # 使用新超时时间或原超时时间
         timeout = new_timeout if new_timeout is not None else old_timer.timeout_duration
         now = datetime.now(UTC)
         timeout_at = now + timedelta(seconds=timeout)
 
-        # 创建新计时器
         new_timer = TimerState(
             task_id=task_id,
             root_task_id=old_timer.root_task_id,
@@ -373,30 +372,40 @@ class TimerManager:
         )
 
         self._timers[task_id] = new_timer
-        logger.info(f"重置计时器: task_id={task_id}, timeout={timeout}s")
+        logger.info("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return new_timer
 
     async def cancel_timer(self, task_id: str) -> bool:
-        """取消计时器"""
+        """取消计时器。
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            是否取消成功
+        """
         if task_id not in self._timers:
-            logger.warning(f"计时器不存在: {task_id}")
+            logger.warning("计时器不存在: %s", task_id)
             return False
 
         timer = self._timers[task_id]
 
-        # 取消定时器句柄
         if timer.handle:
             timer.handle.cancel()
             timer.handle = None
 
         timer.status = TimerStatus.CANCELLED
-        logger.info(f"取消计时器: task_id={task_id}")
+        logger.info("取消计时器: task_id=%s", task_id)
 
         return True
 
     def _on_timeout(self, task_id: str) -> None:
-        """计时器超时回调"""
+        """计时器超时回调。
+
+        Args:
+            task_id: 超时的任务ID
+        """
         if task_id not in self._timers:
             return
 
@@ -404,19 +413,23 @@ class TimerManager:
         timer.status = TimerStatus.EXPIRED
         timer.handle = None
 
-        logger.warning(f"计时器超时: task_id={task_id}")
+        logger.warning("计时器超时: task_id=%s", task_id)
 
-        # 执行回调
         if timer.callback:
             try:
                 timer.callback(task_id)
             except Exception as e:
-                logger.error(f"执行超时回调失败: task_id={task_id}, error={e}")
-
-    # ==================== 状态查询接口 ====================
+                logger.error("执行超时回调失败: task_id=%s, error=%s", task_id, e)
 
     def get_timer_status(self, task_id: str) -> TimerState | None:
-        """获取计时器状态"""
+        """获取计时器状态。
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            计时器状态，不存在时返回 None
+        """
         return self._timers.get(task_id)
 
     def get_all_timers(self) -> list[TimerState]:
@@ -431,13 +444,22 @@ class TimerManager:
         """获取计时器总数"""
         return len(self._timers)
 
-    # ==================== 恢复接口 ====================
-
-    async def restore_from_db(
+    async def restore_from_storage(
         self,
+        task_service: TaskService,
         callback: Callable[[str], None] | None = None,
     ) -> int:
-        """从数据库恢复计时器"""
+        """从 TaskService 存储恢复计时器。
+
+        替代旧的 restore_from_db()，不再依赖 ORM 和数据库。
+
+        Args:
+            task_service: 任务服务实例
+            callback: 超时回调函数
+
+        Returns:
+            恢复的计时器数量
+        """
         if not self.auto_restore:
             logger.info("自动恢复已禁用，跳过计时器恢复")
             return 0
@@ -447,92 +469,85 @@ class TimerManager:
         lookback_time = datetime.now(UTC) - timedelta(seconds=self.restore_lookback)
 
         try:
-            async with managed_session() as session:
-                # 查找所有进行中的任务
-                result = await session.execute(
-                    select(Task).where(
-                        Task.status == ExecutionStatus.RUNNING.value,
-                        Task.updated_at >= lookback_time,
-                    )
-                )
-                tasks = result.scalars().all()
+            running_tasks = task_service.list_by_status(
+                __import__("tasks.types", fromlist=["TaskStatus"]).TaskStatus.RUNNING
+            )
 
-                for task in tasks:
-                    # 检查 task_metadata 中的 auto_execute 标志
-                    metadata = task.task_metadata or {}
-                    if not metadata.get("auto_execute", False):
-                        logger.debug(f"任务未启用自动执行，跳过恢复: task_id={task.id}")
-                        continue
+            for task in running_tasks:
+                if task.id in self._timers:
+                    logger.debug("计时器已存在，跳过恢复: task_id=%s", task.id)
+                    continue
 
-                    # 检查是否已有计时器
-                    if task.id in self._timers:
-                        logger.debug(f"计时器已存在，跳过恢复: task_id={task.id}")
-                        continue
+                updated_at_str = task.updated_at
+                if not updated_at_str:
+                    continue
 
-                    # 计算剩余时间
-                    updated_at = task.updated_at or task.created_at
-                    if not updated_at:
-                        continue
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_str)
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=UTC)
+                except (ValueError, TypeError):
+                    continue
 
-                    elapsed = (datetime.now(UTC) - updated_at).total_seconds()
-                    remaining = self.task_max_duration - elapsed
+                if updated_at < lookback_time:
+                    continue
 
-                    if remaining > 0:
-                        # 剩余时间 > 0: 创建计时器
-                        try:
-                            await self.create_timer(
-                                task_id=task.id,
-                                timeout=remaining,
-                                callback=callback,
-                                root_task_id=task.parent_task_id,
-                            )
-                            restored_count += 1
-                            logger.info(
-                                f"恢复计时器成功: task_id={task.id}, remaining={remaining:.1f}s"
-                            )
-                        except Exception as e:
-                            logger.error(f"恢复计时器失败: task_id={task.id}, error={e}")
-                    else:
-                        # 剩余时间 <= 0: 已超时，立即触发回调
-                        expired_count += 1
-                        logger.warning(
-                            f"任务已超时，立即触发回调: task_id={task.id}, elapsed={elapsed:.1f}s"
+                elapsed = (datetime.now(UTC) - updated_at).total_seconds()
+                remaining = self.task_max_duration - elapsed
+
+                if remaining > 0:
+                    try:
+                        await self.create_timer(
+                            task_id=task.id,
+                            timeout=remaining,
+                            callback=callback,
+                            root_task_id=task.parent_task_id,
                         )
-                        if callback:
-                            try:
-                                # 使用 asyncio.create_task 异步触发回调
-                                import asyncio
-
-                                asyncio.create_task(self._async_callback(callback, task.id))
-                            except Exception as e:
-                                logger.error(
-                                    f"触发超时回调失败: task_id={task.id}, error={e}"
-                                )
+                        restored_count += 1
+                        logger.info(
+                            "恢复计时器成功: task_id=%s, remaining=%.1fs",
+                            task.id, remaining,
+                        )
+                    except Exception as e:
+                        logger.error("恢复计时器失败: task_id=%s, error=%s", task.id, e)
+                else:
+                    expired_count += 1
+                    logger.warning(
+                        "任务已超时，立即触发回调: task_id=%s, elapsed=%.1fs",
+                        task.id, elapsed,
+                    )
+                    if callback:
+                        try:
+                            asyncio.create_task(self._async_callback(callback, task.id))
+                        except Exception as e:
+                            logger.error("触发超时回调失败: task_id=%s, error=%s", task.id, e)
 
             logger.info(
-                f"计时器恢复完成: restored={restored_count}, expired={expired_count}"
+                "计时器恢复完成: restored=%d, expired=%d",
+                restored_count, expired_count,
             )
 
         except Exception as e:
-            logger.error(f"从数据库恢复计时器失败: {e}", exc_info=True)
+            logger.error("从存储恢复计时器失败: %s", e, exc_info=True)
 
         return restored_count
 
     async def _async_callback(
         self, callback: Callable[[str], None], task_id: str
     ) -> None:
-        """异步执行回调函数"""
-        try:
-            import asyncio
+        """异步执行回调函数。
 
+        Args:
+            callback: 回调函数
+            task_id: 任务ID
+        """
+        try:
             if asyncio.iscoroutinefunction(callback):
                 await callback(task_id)
             else:
                 callback(task_id)
         except Exception as e:
-            logger.error(f"执行异步回调失败: task_id={task_id}, error={e}")
-
-    # ==================== 清理接口 ====================
+            logger.error("执行异步回调失败: task_id=%s, error=%s", task_id, e)
 
     async def cleanup_expired_timers(self) -> int:
         """清理已过期或已取消的计时器"""
@@ -546,7 +561,7 @@ class TimerManager:
             del self._timers[task_id]
 
         if to_remove:
-            logger.info(f"清理过期计时器: count={len(to_remove)}")
+            logger.info("清理过期计时器: count=%d", len(to_remove))
 
         return len(to_remove)
 

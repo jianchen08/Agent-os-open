@@ -47,18 +47,23 @@ class EvaluationExecutor:
         loader: MetricLoader | None = None,
         engine: EvaluationEngine | None = None,
         mapper: ResultMapper | None = None,
+        tool_registry: Any | None = None,
     ) -> None:
         """初始化评估执行器。
 
         Args:
             task_service: 任务服务实例（可选），提供 complete_evaluation 方法
             loader: 指标加载器，None 时创建默认实例并加载所有指标
-            engine: 评估引擎，None 时根据 loader 创建默认实例
+            engine: 评估引擎，None 时根据 loader 和 tool_registry 创建默认实例
             mapper: 结果映射器，None 时创建默认实例
+            tool_registry: 工具注册表，传递给 EvaluationEngine 用于真实工具调用
         """
         self._task_service = task_service
         self._loader = loader or MetricLoader()
-        self._engine = engine or EvaluationEngine(loader=self._loader)
+        self._engine = engine or EvaluationEngine(
+            loader=self._loader,
+            tool_registry=tool_registry,
+        )
         self._mapper = mapper or ResultMapper()
 
     def run_evaluation(

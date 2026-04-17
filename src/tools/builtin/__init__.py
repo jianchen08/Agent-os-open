@@ -26,47 +26,47 @@ __all__ = [
 
 
 def get_all_builtin_tools() -> list[Any]:
-    """获取所有内置工具实例（不需要依赖注入的工具）
-    
-    导入失败的模块自动跳过并记录警告。
+    """获取所有内置工具实例（使用自动发现机制）
+
+    通过 DynamicToolLoader 自动扫描 builtin 目录发现工具类。
+    需要依赖注入的工具（如 session）自动跳过，由 register_core_tools 处理。
     """
+    import importlib
     import logging
+
     _logger = logging.getLogger(__name__)
-    
+
+    from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
+    from tools.registry import ToolRegistry
+
+    loader = get_dynamic_tool_loader()
+    if loader is None:
+        registry = ToolRegistry()
+        loader = init_dynamic_tool_loader(registry)
+
+    if not loader._discovered:
+        loader._discover_tools()
+
     tools: list[Any] = []
-    
-    # 可用工具列表（延迟导入，导入失败的自动跳过）
-    _tool_modules = [
-        (".file_read", "FileReadTool"),
-        (".file_write", "FileWriteTool"),
-        (".bash", "BashTool"),
-        (".enhanced_search", "EnhancedSearchTool"),
-        (".web", "WebTool"),
-        (".web_search_mcp", "WebSearchMCPTool"),
-        (".evaluate", "EvaluateTool"),
-        (".resource_search", "ResourceSearchTool"),
-        (".yaml_validate", "YamlValidateTool"),
-        (".evaluators", "SchemaEvaluator"),
-        (".evaluators", "ResourceEvaluator"),
-        (".compatibility_checker", "CompatibilityCheckerTool"),
-        (".rollback", "RollbackTool"),
-        (".state_update", "StateUpdateTool"),
-        (".todo_manage", "TodoManageTool"),
-        (".trigger_setup", "TriggerSetupTool"),
-    ]
-    
-    for module_path, class_name in _tool_modules:
+
+    for tool_name, (module_path, class_name) in loader._tool_classes.items():
         try:
-            mod = __import__(module_path, fromlist=[class_name], level=1)
+            mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
+
+            if cls.__init__.__code__.co_argcount > 1:
+                _logger.debug(f"[内置工具] 跳过 {tool_name}（需要参数注入，由 register_core_tools 处理）")
+                continue
+
             if class_name == "WebTool":
                 tools.append(cls.from_config())
             else:
                 tools.append(cls())
+
+            _logger.debug(f"[内置工具] 已加载 {tool_name}")
         except Exception as e:
-            _logger.debug(f"[内置工具] 跳过 {class_name}: {e}")
-    
-    # LSP 工具（特殊处理）
+            _logger.debug(f"[内置工具] 跳过 {tool_name}: {e}")
+
     try:
         from .lsp_tools import LSPTools
         tools.extend(LSPTools.get_tools())

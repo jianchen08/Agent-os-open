@@ -1,4 +1,4 @@
-﻿"""
+"""
 触发器设置工具
 
 暴露接口：
@@ -103,7 +103,6 @@ class TriggerSetupTool:
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             tags=["trigger", "automation", "self-trigger"],
             when_to_use=[
                 "需要延迟执行某项任务时",
@@ -151,7 +150,7 @@ class TriggerSetupTool:
         if not execution_id:
             execution_id = f"exec_{uuid.uuid4().hex[:12]}"
 
-        if self._queue.size(session_id) >= self.MAX_TRIGGERS_PER_SESSION:
+        if await self._queue.size(session_id) >= self.MAX_TRIGGERS_PER_SESSION:
             return create_failure_result(
                 error=f"单会话触发器数量已达上限 ({self.MAX_TRIGGERS_PER_SESSION})",
                 error_code="TRIGGER_LIMIT_EXCEEDED",
@@ -231,7 +230,7 @@ class TriggerSetupTool:
             },
         )
 
-        self._queue.push(trigger_message)
+        await self._queue.push(trigger_message)
 
         logger.info(
             f"[TriggerSetupTool] 延迟触发器已设置 | "
@@ -306,7 +305,7 @@ class TriggerSetupTool:
             },
         )
 
-        self._queue.push(trigger_message)
+        await self._queue.push(trigger_message)
 
         logger.info(
             f"[TriggerSetupTool] 定时触发器已设置 | "
@@ -358,7 +357,7 @@ class TriggerSetupTool:
             },
         )
 
-        self._queue.push(trigger_message)
+        await self._queue.push(trigger_message)
 
         logger.info(
             f"[TriggerSetupTool] 事件触发器已设置 | "
@@ -410,7 +409,7 @@ class TriggerSetupTool:
             },
         )
 
-        self._queue.push(trigger_message)
+        await self._queue.push(trigger_message)
 
         logger.info(
             f"[TriggerSetupTool] 条件触发器已设置 | "

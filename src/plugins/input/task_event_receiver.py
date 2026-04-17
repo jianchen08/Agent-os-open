@@ -1,6 +1,7 @@
 """任务事件接收插件。
 
-接收任务状态变更事件，当任务到达终态时注入通知到对话中。
+接收任务状态变更事件，当任务到达终态时注入通知到对话中，
+由主 Agent（灵汐）根据通知决定后续操作（提交新任务、重试、标记容器完成等）。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
     """接收任务事件并注入到对话中。
 
     订阅任务状态变更事件，当任务到达终态（completed/failed）时，
-    将通知注入到 user_input 中，让主 Agent 知道子任务完成情况。
+    将通知注入到 user_input 中，由主 Agent 根据通知决定后续操作。
     """
 
     error_policy = ErrorPolicy.SKIP
@@ -32,6 +33,8 @@ class TaskEventReceiverPlugin(IInputPlugin):
         self._config = config or {}
         self._pending_events: list[dict[str, Any]] = []
         self._subscribed = False
+        self._event_bus: Any = None
+        self._task_service: Any = None
 
     @property
     def name(self) -> str:
@@ -116,14 +119,22 @@ class TaskEventReceiverPlugin(IInputPlugin):
             try:
                 event_bus.subscribe("task_state_changed", self._on_state_changed)
                 self._subscribed = True
+                self._event_bus = event_bus
                 logger.info("[TaskEventReceiver] Subscribed to task_state_changed events")
             except Exception as exc:
                 logger.warning("[TaskEventReceiver] Failed to subscribe: %s", exc)
 
+        # 获取 task_service
+        try:
+            self._task_service = ctx.get_service("task_service")
+        except KeyError:
+            pass
+
     async def _on_state_changed(self, data: dict[str, Any]) -> None:
         """处理任务状态变更事件。
 
-        只处理终态（completed/failed）。
+        终态（completed/failed）时将事件排入待处理队列，
+        在下一轮管道迭代时注入到主 Agent 对话中。
 
         Args:
             data: 事件数据，包含 task_id, old_status, new_status, task 等信息
@@ -137,20 +148,20 @@ class TaskEventReceiverPlugin(IInputPlugin):
         task = data.get("task")
         task_title = task.title if task and hasattr(task, "title") else "未知任务"
         task_error = task.error if task and hasattr(task, "error") else ""
+        task_id = data.get("task_id", "")
 
         event = {
             "type": "task_completed" if new_status == "completed" else "task_failed",
-            "task_id": data.get("task_id"),
+            "task_id": task_id,
             "title": task_title,
             "status": new_status,
             "error": task_error,
         }
         self._pending_events.append(event)
-        logger.info("[TaskEventReceiver] Queued event: %s for task %s", event["type"], event["task_id"])
+        logger.info("[TaskEventReceiver] Queued event: %s for task %s", event["type"], task_id)
 
     def shutdown(self) -> None:
         """关闭插件，取消订阅。"""
         if self._subscribed:
-            # 注：shutdown 时可能无法获取 EventBus 实例，记录日志即可
             logger.info("[TaskEventReceiver] Shutdown, events will be discarded")
             self._pending_events.clear()

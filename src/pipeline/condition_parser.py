@@ -30,6 +30,8 @@ _TOKEN_PATTERNS = [
     ("KEYWORD", r"\band\b|\bor\b|\bnot\b|\bin\b|\bis_empty\b|\bis_not_empty\b|\bnot_in\b"),
     ("OP", r"!=|==|>=|<=|>|<"),
     ("BRACKET", r"\[|\]"),
+    ("LPAREN", r"\("),
+    ("RPAREN", r"\)"),
     ("DOT", r"\."),
     ("COMMA", r","),
     ("IDENT", r"[a-zA-Z_][a-zA-Z0-9_]*"),
@@ -180,19 +182,56 @@ class _Parser:
         if tok[0] == "IDENT":
             name = self._advance()[1]
             value = self._resolve_name(name)
-            while self._peek() and self._peek()[0] == "BRACKET" and self._peek()[1] == "[":
-                self._advance()
-                key = self._parse_primary()
-                self._expect("BRACKET")
-                if isinstance(value, dict) and isinstance(key, (str, int)):
-                    value = value.get(key)
+            # 处理链式访问：下标 [key]、点号属性 .property、方法调用 .method(args)
+            while self._peek():
+                # 下标访问：value["key"]
+                if self._peek()[0] == "BRACKET" and self._peek()[1] == "[":
+                    self._advance()
+                    key = self._parse_primary()
+                    self._expect("BRACKET")
+                    if isinstance(value, dict) and isinstance(key, (str, int)):
+                        value = value.get(key)
+                    else:
+                        value = None
+                # 点号访问：value.property 或 value.method(args)
+                elif self._peek()[0] == "DOT":
+                    self._advance()  # 消耗 DOT
+                    dot_tok = self._peek()
+                    if dot_tok is None or dot_tok[0] != "IDENT":
+                        value = None
+                        break
+                    attr_name = self._advance()[1]  # 消耗属性/方法名 IDENT
+                    # 方法调用：value.method(args)
+                    if self._peek() and self._peek()[0] == "LPAREN":
+                        self._advance()  # 消耗 LPAREN
+                        args = self._parse_call_args()
+                        self._expect("RPAREN")
+                        if attr_name == "get" and isinstance(value, dict):
+                            if len(args) >= 1:
+                                value = value.get(args[0], args[1] if len(args) >= 2 else None)
+                            else:
+                                value = None
+                        else:
+                            # 不支持的方法调用，返回 None
+                            value = None
+                    else:
+                        # 属性访问：等价于 value["attr_name"]
+                        if isinstance(value, dict):
+                            value = value.get(attr_name)
+                        else:
+                            value = None
                 else:
-                    value = None
+                    break
             return value
 
         raise ValueError(f"Unexpected token: {tok}")
 
     def _parse_list(self) -> list[Any]:
+        """解析方括号列表字面量，如 [1, 2, 'a']。
+
+        Returns:
+            解析得到的列表
+        """
         self._expect("BRACKET")
         items: list[Any] = []
         while self._peek() and not (self._peek()[0] == "BRACKET" and self._peek()[1] == "]"):
@@ -201,6 +240,22 @@ class _Parser:
                 self._advance()
         self._expect("BRACKET")
         return items
+
+    def _parse_call_args(self) -> list[Any]:
+        """解析方法调用的参数列表，如 'allowed' 或 'allowed', True。
+
+        Returns:
+            参数值列表
+        """
+        args: list[Any] = []
+        # 处理空参数列表的情况
+        if self._peek() and self._peek()[0] == "RPAREN":
+            return args
+        while self._peek() and self._peek()[0] != "RPAREN":
+            args.append(self._parse_primary())
+            if self._peek() and self._peek()[0] == "COMMA":
+                self._advance()
+        return args
 
     def _resolve_name(self, name: str) -> Any:
         if name in self._context:

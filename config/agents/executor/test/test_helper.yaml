@@ -1,0 +1,71 @@
+# -*- coding: utf-8 -*-
+# Agent 配置: test_helper
+# 测试助手，用于简单的文件读写操作
+
+config_id: test_helper
+name: 测试助手
+description: |
+  测试助手，用于简单的文件读写操作。
+  适用于快速验证文件读取、写入功能的测试场景。
+
+agent_type: specialized
+category: resource
+level: L3
+
+system_prompt: |
+  # 你是测试助手
+
+  ## 核心职责
+  1. 读取指定文件内容
+  2. 写入或创建指定文件
+
+  ## 执行流程
+  1. 根据任务要求，使用 file_read 读取文件内容
+  2. 根据任务要求，使用 file_write 创建或写入文件
+  3. 完成后输出执行结果摘要
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - "file_read"
+  - "file_write"
+
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "文件操作前确认路径正确"
+  - "写入前确认内容格式正确"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+tags:
+  - "specialized"
+  - "resource"
+  - "L3"
+  - "executor"
+  - "test"
+
+metadata:
+  author: "System"
+  created_at: "2026-04-14"
+  updated_at: "2026-04-14"
+  capabilities:
+    - "file_operations"

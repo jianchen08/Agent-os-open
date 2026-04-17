@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -196,3 +197,24 @@ class CLIInputAdapter(IInputAdapter):
             是否为空输入
         """
         return state.get("_is_empty", False)
+
+    async def receive_with_timeout(self, timeout: int = 60) -> dict[str, Any] | None:
+        """带超时的异步输入。超时返回 None。
+
+        将同步阻塞的 receive() 方法包装为异步执行，
+        在指定超时时间内未完成则返回 None。
+
+        Args:
+            timeout: 超时秒数，默认 60
+
+        Returns:
+            管道状态字典，超时则返回 None
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.receive),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return None

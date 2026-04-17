@@ -63,13 +63,12 @@ security:
 # 隔离配置
 isolation:
   enabled: true  # 默认启用隔离
-  default_level: "container"  # 默认隔离级别：host/container/sandbox
+  default_level: "container"  # 默认隔离级别：host/container
   
   # 隔离级别映射
   level_mapping:
     host: "直接执行（宿主机）"
-    container: "半隔离（Docker容器）"
-    sandbox: "完全隔离（MicroVM）"
+    container: "容器隔离（Docker）"
 
 # 缓存配置
 cache:

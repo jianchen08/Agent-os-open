@@ -1,4 +1,4 @@
-﻿"""
+"""
 兼容性检查工具
 
 暴露接口：
@@ -68,7 +68,6 @@ class CompatibilityCheckerTool(BuiltinTool):
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             tags=["compatibility", "check", "system"],
         )
 

@@ -94,6 +94,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         """
         file_path = self._episodes_dir / f"{episode.id}.json"
         try:
+            self._episodes_dir.mkdir(parents=True, exist_ok=True)
             file_path.write_text(
                 json.dumps(episode.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -109,6 +110,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         """
         file_path = self._knowledge_dir / f"{knowledge.id}.json"
         try:
+            self._knowledge_dir.mkdir(parents=True, exist_ok=True)
             file_path.write_text(
                 json.dumps(knowledge.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",

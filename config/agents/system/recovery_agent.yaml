@@ -34,7 +34,7 @@ static_vars:
       content: |
         ## 可扩展工具索引
         以下工具未直接加载，可按需使用。
-        - rollback_task: 创建检查点、回滚任务操作
+        - resource_merge: 基于 git 的资源合并与回滚
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -306,7 +306,7 @@ system_prompt: |
   ### 检查点操作
   ```python
   # 回退到检查点
-  rollback_task(action="restore", checkpoint_id="cp_001")
+  resource_merge(action="rollback", checkpoint_id="abc123")
   ```
 
   ### 修改操作
@@ -375,7 +375,6 @@ tool_ids:
   - bash_execute
   - enhanced_search
   - memory
-  - todo_manage
   - task_evaluate
 
 # 约束配置
@@ -395,7 +394,7 @@ soft_constraints:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 20
+max_iterations: 60
 max_reminders: 3
 timeout_seconds: 600
 

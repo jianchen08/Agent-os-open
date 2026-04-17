@@ -1,0 +1,31 @@
+# 网络小说大纲生成Agent配置
+
+agent:
+  name: "网络小说大纲生成Agent"
+  version: "1.0.0"
+  description: "用于生成网络小说大纲的智能助手"
+
+# 生成参数配置
+generation:
+  default_genre: "都市"  # 默认题材
+  default_length: "medium"  # short/medium/long
+  max_characters: 20  # 最大角色数
+  max_chapters: 50  # 最大章节数
+  
+# 输出配置
+output:
+  format: "markdown"
+  template: "templates/outline_template.md"
+  save_path: "output/outlines"
+  
+# 模板类型
+templates:
+  - id: "standard"
+    name: "标准大纲"
+    path: "templates/standard_outline.md"
+  - id: "detailed"
+    name: "详细大纲"
+    path: "templates/detailed_outline.md"
+  - id: "simple"
+    name: "简略大纲"
+    path: "templates/simple_outline.md"

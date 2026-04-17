@@ -1,4 +1,4 @@
-﻿"""
+"""
 文件写入工具
 
 暴露接口：
@@ -102,13 +102,6 @@ class FileWriteTool(BuiltinTool):
             source=ToolSource.CODE,
             category=ToolCategory.FILE,
             level=ToolLevel.USER,
-            requires_approval=False,
-            dangerous_operations=[
-                "write:/etc/",
-                "write:/sys/",
-                "write:C:\\Windows\\",
-                "delete_lines:",
-            ],
             tags=["file", "edit", "write", "replace", "insert", "delete"],
             injected_params=["workspace"],
         )

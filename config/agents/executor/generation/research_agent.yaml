@@ -63,12 +63,11 @@ system_prompt: |
   ## 工作流程
 
   1. 接收调研目标和上下文
-  2. 使用 `todo_manage` 制定调研计划
-  3. 使用 `resource_search` 搜索现有资源
-  4. 使用 `web_search` 搜索网络资料
-  5. 使用 `fetch` 获取详细内容
-  6. 使用 `memory` 检索历史经验
-  7. 整理分析并输出结构化报告
+  2. 使用 `resource_search` 搜索现有资源
+  3. 使用 `web_search` 搜索网络资料
+  4. 使用 `fetch` 获取详细内容
+  5. 使用 `memory` 检索历史经验
+  6. 整理分析并输出结构化报告
   8. 使用 `task_evaluate` 自评调研质量
 
   ## 信源评估体系
@@ -120,7 +119,6 @@ tool_ids:
   - "web_search"
   - "fetch"
   - "memory"
-  - "todo_manage"
   - "task_evaluate"
   - "file_read"
   - "file_write"

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Web 操作工具
 
 暴露接口：
@@ -48,7 +48,6 @@ class WebTool:
         max_response_size: int = 10 * 1024 * 1024,  # 10MB
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
-        approval_domains: list[str] | None = None,
         verify_ssl: bool = True,
     ):
         """初始化 Web 工具"""
@@ -56,7 +55,6 @@ class WebTool:
         self.max_response_size = max_response_size
         self.allowed_domains = set(allowed_domains) if allowed_domains else None
         self.blocked_domains = set(blocked_domains or [])
-        self.approval_domains = set(approval_domains or [])
         self.verify_ssl = verify_ssl
 
     @classmethod
@@ -75,14 +73,12 @@ class WebTool:
                 timeout=config.get("timeout", 30),
                 allowed_domains=config.get("allowed_domains"),
                 blocked_domains=config.get("blocked_domains"),
-                approval_domains=config.get("approval_domains"),
                 verify_ssl=config.get("verify_ssl", True),
             )
 
             logger.info(
                 f"[WebTool] 从配置文件加载成功 | "
-                f"blocked_domains={len(instance.blocked_domains)} | "
-                f"approval_domains={len(instance.approval_domains)}"
+                f"blocked_domains={len(instance.blocked_domains)}"
             )
             return instance
 
@@ -143,7 +139,6 @@ class WebTool:
             },
             source=ToolSource.CODE,
             category=ToolCategory.WEB,
-            requires_approval=False,
             tags=["web", "http", "scrape"],
         )
 
@@ -199,11 +194,6 @@ class WebTool:
             for blocked in self.blocked_domains:
                 if domain == blocked or domain.endswith("." + blocked):
                     return False, f"域名在禁止列表中: {domain}"
-
-            # 检查审批域名
-            for approval in self.approval_domains:
-                if domain == approval or domain.endswith("." + approval):
-                    return False, f"域名需要审批: {domain}"
 
             # 检查允许列表（支持子域名匹配）
             if self.allowed_domains is not None:

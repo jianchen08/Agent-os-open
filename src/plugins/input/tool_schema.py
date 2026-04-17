@@ -106,6 +106,7 @@ class ToolSchemaPlugin(IInputPlugin):
 
         # 确定工具过滤列表：优先从 state 读取（Agent 配置注入），降级用插件配置
         active_tool_ids: list[str] = ctx.state.get("tool_ids", []) or self._tool_ids
+        logger.info("[%s] active_tool_ids=%s", self.name, active_tool_ids)
 
         # 获取所有工具或指定工具
         if active_tool_ids:

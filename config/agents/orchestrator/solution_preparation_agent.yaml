@@ -23,12 +23,11 @@ system_prompt: |
   ### 第一轮：初步调研 + 初步方案
   1. 提交任务给 research_agent 进行初步调研
   2. 读取调研结果，按方案模板形成初步方案
-  3. 将初步方案写入文件：`{{sandbox_path}}/docs/solution_draft.md`
+  3. 将初步方案写入文件：`docs/solution_draft.md`
   4. 使用 human_interaction（conversation 模式）通知用户：
-       - 方案初稿已准备好，文件路径：`{{sandbox_path}}/docs/solution_draft.md`
+       - 方案初稿已准备好，文件路径：`docs/solution_draft.md`
        - 简要概括方案核心要点（2-3 句话）
        - 告知用户可以打开文件查看，查看后回到此处讨论
-       - 附上快捷回复建议（如："方案整体可以"、"我有几个问题"、"需要调整 XX 部分"）
 
   ### 多轮迭代：讨论 + 补充调研
   5. 等待用户到达对话页面后，与用户讨论方案
@@ -38,7 +37,7 @@ system_prompt: |
   9. 重复此过程直至用户明确确认方案
 
   ### 最终定稿
-  10. 用户确认后，将最终方案写入：`{{sandbox_path}}/docs/solution.md`
+  10. 用户确认后，将最终方案写入：`docs/solution.md`
   11. 提交任务完成
 
   ## 关键规则
@@ -138,7 +137,7 @@ deliverables:
     description: "方案文档，包含经用户确认的解决方案"
     template_source: "knowledge"
     template_name: "config/templates/solution_template.md"
-    output_path: "{{sandbox_path}}/docs/solution.md"
+    output_path: "docs/solution.md"
     type: "markdown"
     required: true
 
@@ -146,16 +145,16 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "{{sandbox_path}}/docs/solution.md"
+      path: "docs/solution.md"
   - metric_id: format_valid
     default_params:
-      path: "{{sandbox_path}}/docs/solution.md"
+      path: "docs/solution.md"
       type: "markdown"
 
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 40
+max_iterations: 120
 max_reminders: 5
 timeout_seconds: 1800
 plugins:

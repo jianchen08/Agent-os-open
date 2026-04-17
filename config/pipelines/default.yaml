@@ -8,6 +8,50 @@
 name: lingxi_agent
 
 input_routes:
+  # 安全拦截 → 结束，并把原因写入 RAW_RESULT
+  - name: security_blocked
+    condition: "security.decision.get('allowed') == False"
+    target: end
+    plugins: []
+    priority: 0
+    result: "工具执行被安全检查拦截: {security.decision.reason}"
+
+  # 越权拦截 → 结束
+  - name: level_blocked
+    condition: "security.level_decision.get('allowed') == False"
+    target: end
+    plugins: []
+    priority: 0
+    result: "权限不足，无法调用工具: {security.level_decision.reason}"
+
+  # 工具执行 → 安全检查后执行 core
+  - name: tool_execute
+    condition: "core_type == 'tool_execute'"
+    target: core
+    plugins:
+      - task_event_receiver
+      - tool_schema
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+      - isolation_guard
+      - level_guard
+      - security_check
+    priority: 10
+
+  # LLM 调用 → 直接执行 core
+  - name: llm_call
+    condition: "core_type == 'llm_call'"
+    target: core
+    plugins:
+      - task_event_receiver
+      - tool_schema
+      - memory_read
+      - knowledge_inject
+      - prompt_build
+    priority: 20
+
+  # 默认路由
   - name: default
     condition: "True"
     target: core
@@ -17,14 +61,18 @@ input_routes:
       - memory_read
       - knowledge_inject
       - prompt_build
-    priority: 10
+    priority: 30
 
 output_routes:
   # 有工具调用时 → 切换到 tool_execute
   - route_type: next_tool
     condition: "raw_tool_calls != []"
     priority: 1
-  # 无工具调用时 → 结束当前轮次
+  # 提醒信号 → 继续下一轮 LLM 调用
+  - route_type: next_llm
+    condition: "True"
+    priority: 50
+  # 无匹配信号时 → 结束当前轮次（仅 fallback 使用）
   - route_type: end
     condition: "True"
     priority: 99
@@ -72,8 +120,9 @@ plugins:
       compress_trigger_ratio: 0.5
   - class: plugins.output.memory_write.MemoryWritePlugin
     config:
-      write_user_messages: true
-      write_llm_responses: true
+      enabled: false
+      write_user_messages: false
+      write_llm_responses: false
   - class: plugins.output.track.TrackPlugin
     config:
       enabled: true
@@ -91,7 +140,7 @@ core_plugins:
       api_key: "${MINIMAX_API_KEY}"
       default_params:
         temperature: 0.7
-        max_tokens: 4096
+        max_tokens: 40000
   tool_execute:
     class: plugins.core.tool_core.ToolCore
     config:

@@ -1,4 +1,4 @@
-﻿"""
+"""
 评估工具
 
 暴露接口：
@@ -92,7 +92,6 @@ class EvaluateTool:
             source=ToolSource.CODE,
             category=ToolCategory.EVALUATION,
             level=ToolLevel.SYSTEM,
-            requires_approval=False,
             tags=["validation", "evaluation", "schema"],
         )
 

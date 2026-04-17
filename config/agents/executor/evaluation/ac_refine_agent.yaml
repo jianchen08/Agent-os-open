@@ -86,7 +86,6 @@ tool_ids:
   - "memory"  # 检索历史记忆
   - "file_read"        # 文件读取
   - "file_write"       # 文件写入
-  - "todo_manage"      # TODO 清单管理
   - "task_evaluate"    # 任务评估
 
 # 约束

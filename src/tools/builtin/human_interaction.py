@@ -1,4 +1,4 @@
-﻿"""
+"""
 人类交互工具
 
 暴露接口：
@@ -10,12 +10,12 @@
 import logging
 from typing import Any
 
-from core.human_interaction import (
+from human_interaction import (
     InteractionMode,
     Priority,
     get_human_interaction_service,
 )
-from core.human_interaction.service import (
+from human_interaction.service import (
     InteractionCancelledError,
     InteractionDeniedError,
     InteractionTimeoutError,

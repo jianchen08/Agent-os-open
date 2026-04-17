@@ -92,7 +92,6 @@ tool_ids:
   - "file_write"       # 文件写入
   - "bash_execute"     # Shell命令执行
   - "yaml_validate"    # YAML验证
-  - "todo_manage"      # TODO 清单管理
   - "task_evaluate"    # 任务评估
 
 # 约束

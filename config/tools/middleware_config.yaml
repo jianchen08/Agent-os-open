@@ -18,32 +18,28 @@ reasoning:
 # 权限检查配置
 permission:
   # 路径权限规则
+  # 所有文件操作工具在容器模式下限制在 workspace 内
   path_rules:
-    # 写入类工具：路径必须在 workspace 内
     file_write:
       path:
-        condition: within_workspace
+        condition: within_workspace_if_container
         mode: write
-    
-    # 读取类工具：根据隔离模式决定
+
     file_read:
       path:
         condition: within_workspace_if_container
         mode: read
-    
-    # 搜索类工具：不限制
+
     enhanced_search:
       path:
-        condition: none
+        condition: within_workspace_if_container
         mode: read
-    
-    # Bash 工具：工作目录限制
+
     bash_execute:
       working_dir:
         condition: within_workspace
         mode: execute
 
-    # LSP 工具：文件路径读取，容器模式下限制在 workspace 内
     lsp_definition:
       file_path:
         condition: within_workspace_if_container
@@ -59,7 +55,6 @@ permission:
         condition: within_workspace_if_container
         mode: read
 
-    # 文件跳转工具：文件路径读取，容器模式下限制在 workspace 内
     file_jump:
       file_path:
         condition: within_workspace_if_container

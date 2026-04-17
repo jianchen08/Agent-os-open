@@ -211,7 +211,6 @@ tool_ids:
   - bash_execute
   - enhanced_search
   - evaluate
-  - todo_manage
 
 # 约束配置
 hard_constraints:

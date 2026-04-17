@@ -28,8 +28,6 @@ class IsolationLevel(str, Enum):
     CONTAINER = "container"
     HOST = "host"
 
-    SANDBOX = CONTAINER  # 别名，保持向后兼容
-
 
 class TaskType(str, Enum):
     """任务类型
