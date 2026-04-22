@@ -186,24 +186,32 @@ class WorkspaceLifecycleManager:
             meta = {"mode": "project_root", "path": str(root_path),
                     "branch": "main", "project_root": str(root_path)}
         else:
-            # 场景C：已有 .git -> 先提交未跟踪文件，再创建 worktree
+            # 场景C：已有 .git -> 复制项目文件到 workspace 目录
             self._ensure_git_user(root_path)
             self._git_add_commit_if_dirty(root_path, f"chore: auto-save before worktree for task {task_id}")
             branch = f"task/{task_id}"
             ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
-            ws_dir.parent.mkdir(parents=True, exist_ok=True)
-            if self._calc_project_size(str(root_path), task_id) > _SPARSE_THRESHOLD_BYTES:
-                self._setup_sparse_worktree(ws_dir, root_path, branch)
-            else:
-                rc, out, err = self._run_git("worktree", "add", "-b", branch, str(ws_dir), "HEAD", cwd=root_path)
-                logger.info("[WorkspaceLifecycle] worktree add: rc=%d, ws_dir=%s, exists=%s", rc, ws_dir, ws_dir.exists())
-                if rc == 0 and ws_dir.exists():
-                    rc2, _, err2 = self._run_git("checkout", "HEAD", "--", ".", cwd=ws_dir)
-                    logger.info("[WorkspaceLifecycle] checkout: rc=%d, config_exists=%s", rc2, (ws_dir / "config").exists())
-                elif rc != 0:
-                    logger.error("[WorkspaceLifecycle] worktree add FAILED: %s", err[:300])
-            meta = {"mode": "worktree", "path": str(ws_dir),
-                    "branch": branch, "project_root": str(root_path)}
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+            _SKIP_DIRS = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
+                          "node_modules", ".claude", ".codebuddy", ".workbuddy"}
+            for child in root_path.iterdir():
+                if child.name in _SKIP_DIRS or child.name.startswith("."):
+                    continue
+                dst = ws_dir / child.name
+                try:
+                    if child.is_dir():
+                        shutil.copytree(str(child), str(dst), dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(str(child), str(dst))
+                except OSError:
+                    pass
+            self._run_git("init", cwd=ws_dir)
+            self._ensure_git_user(ws_dir)
+            self._run_git("add", "-A", cwd=ws_dir)
+            self._run_git("commit", "-m", f"workspace snapshot for task {task_id}", cwd=ws_dir)
+            meta = {"mode": "project_root", "path": str(ws_dir),
+                    "branch": "main", "project_root": str(root_path)}
 
         self._ws_meta_store[task_id] = meta
         return meta
@@ -302,14 +310,36 @@ class WorkspaceLifecycleManager:
             return {"success": False, "error": f"未知工作模式: {mode}"}
 
     def _merge_project_root(self, workspace: str, ws_meta: dict) -> dict:
-        """project_root 模式合并：直接提交变更到独立仓库"""
+        """project_root 模式合并：将 workspace 中新增/修改的文件复制回主项目"""
+        import shutil
         ws_path = Path(workspace)
+        project_root = Path(ws_meta.get("project_root", workspace))
         self._ensure_git_user(ws_path)
         commit_hash = self._git_add_commit_if_dirty(ws_path, "chore: task completed")
         if commit_hash is None:
             _, h, _ = self._run_git("rev-parse", "HEAD", cwd=ws_path)
             commit_hash = h.strip() if h else None
-        return {"success": True, "action": "commit", "commit_hash": commit_hash}
+        _SKIP_MERGE = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
+                       "node_modules", ".claude", ".codebuddy", ".workbuddy"}
+        merged_files: list[str] = []
+        for child in ws_path.iterdir():
+            if child.name in _SKIP_MERGE or child.name.startswith("."):
+                continue
+            dst = project_root / child.name
+            try:
+                if child.is_dir():
+                    shutil.copytree(str(child), str(dst), dirs_exist_ok=True)
+                else:
+                    shutil.copy2(str(child), str(dst))
+                merged_files.append(child.name)
+            except OSError:
+                pass
+        if merged_files:
+            self._ensure_git_user(project_root)
+            self._run_git("add", "-A", cwd=project_root)
+            self._git_add_commit_if_dirty(project_root, f"merge: workspace {ws_path.name} completed")
+        return {"success": True, "action": "copy_merge", "commit_hash": commit_hash,
+                "merged_files": merged_files}
 
     def _merge_branch(self, workspace: str, ws_meta: dict) -> dict:
         """branch 模式合并：将 feature 分支合并到项目 main 分支"""
