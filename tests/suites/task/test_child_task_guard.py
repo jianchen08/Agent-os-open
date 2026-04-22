@@ -1,7 +1,7 @@
 """ChildTaskGuard 子任务守护插件单元测试。
 
 验证插件在以下场景中的行为：
-1. 有活跃子任务 → wait 挂起 + 重置计时器
+1. 有活跃子任务 → wait 挂起
 2. 无活跃子任务 → 不拦截
 3. 有工具调用 → 不拦截
 4. 非 llm_call → 不拦截
@@ -149,17 +149,6 @@ class TestActiveChildren:
         assert result.route_signal.route_type == "wait"
 
     @pytest.mark.asyncio
-    async def test_resets_idle_timer(self, guard, llm_state, make_ctx):
-        """触发 wait 时重置 idle 计时器。"""
-        task_svc = _mock_task_service([_mock_subtask("running")])
-        timer_mgr = _mock_timer_manager()
-        ctx = make_ctx(llm_state, task_svc, timer_mgr)
-
-        await guard.execute(ctx)
-
-        timer_mgr.reset_timer.assert_awaited_once_with("parent-task-001")
-
-    @pytest.mark.asyncio
     async def test_mixed_children_one_active_triggers_wait(self, guard, llm_state, make_ctx):
         """多个子任务中只要有一个活跃就触发 wait。"""
         task_svc = _mock_task_service([
@@ -218,16 +207,6 @@ class TestNoActiveChildren:
 
         assert result.route_signal is None
 
-    @pytest.mark.asyncio
-    async def test_no_timer_reset_without_children(self, guard, llm_state, make_ctx):
-        """无活跃子任务时不重置计时器。"""
-        task_svc = _mock_task_service([])
-        timer_mgr = _mock_timer_manager()
-        ctx = make_ctx(llm_state, task_svc, timer_mgr)
-
-        await guard.execute(ctx)
-
-        timer_mgr.reset_timer.assert_not_awaited()
 
 
 # ── 前置条件检查 ──
@@ -330,16 +309,3 @@ class TestServiceUnavailable:
         result = await guard.execute(ctx)
 
         assert result.route_signal is None
-
-    @pytest.mark.asyncio
-    async def test_reset_timer_failure_no_crash(self, guard, llm_state, make_ctx):
-        """reset_timer 抛异常时不崩溃，仍然返回 wait。"""
-        task_svc = _mock_task_service([_mock_subtask("running")])
-        timer_mgr = MagicMock()
-        timer_mgr.reset_timer = AsyncMock(side_effect=RuntimeError("timer error"))
-        ctx = make_ctx(llm_state, task_svc, timer_mgr)
-
-        result = await guard.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "wait"

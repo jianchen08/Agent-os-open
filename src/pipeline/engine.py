@@ -526,10 +526,31 @@ class PipelineEngine:
                             # BUG-FIX: 仅对 LLM 可自修正的错误追加提示（如参数格式错误），
                             # 超时/限流/网络/上下文溢出等 LLM 无法修正，追加提示无意义
                             error_lower = error_msg.lower()
-                            is_llm_fixable = (
-                                "invalid function arguments" in error_lower
-                                or "invalid params" in error_lower
+
+                            # BUG-FIX-fix_20260422_context_overflow: 优先识别上下文溢出错误，
+                            # MiniMax 等模型的上下文溢出可能包含 "invalid params"，需排除
+                            is_context_overflow = (
+                                "context window exceeds" in error_lower
+                                or "context_length_exceeded" in error_lower
+                                or "context length" in error_lower
+                                or ("max_tokens" in error_lower and "exceed" in error_lower)
+                                or ("token" in error_lower and "limit" in error_lower)
                             )
+
+                            if is_context_overflow:
+                                # 上下文溢出不能通过追加提示修复，需截断历史消息
+                                is_llm_fixable = False
+                                self._truncate_context_messages(state)
+                                logger.warning(
+                                    "Context overflow detected, truncated messages | error=%s",
+                                    error_msg[:200],
+                                )
+                            else:
+                                is_llm_fixable = (
+                                    "invalid function arguments" in error_lower
+                                    or "invalid params" in error_lower
+                                )
+
                             if is_llm_fixable:
                                 hint = self._build_llm_error_hint(error_msg)
                                 messages = list(state.get("messages", []))
@@ -718,6 +739,39 @@ class PipelineEngine:
         return (
             "请检查你的操作是否正确，调整后重试。"
             "如果多次失败，请尝试换一种方式完成任务。"
+        )
+
+    # BUG-FIX-fix_20260422_context_overflow: 上下文溢出时截断历史消息
+    CONTEXT_OVERFLOW_KEEP_RECENT = 6  # 保留最近 N 条消息（不含 system）
+
+    @staticmethod
+    def _truncate_context_messages(state: dict[str, Any]) -> None:
+        """截断上下文消息，保留 system 消息和最近 N 条对话消息。
+
+        当上下文溢出时调用此方法，移除较早的对话历史，
+        仅保留 system 指令和最近几轮交互，避免反复触发溢出。
+
+        Args:
+            state: 管道状态字典，包含 "messages" 键
+        """
+        messages = state.get("messages", [])
+        if not messages:
+            return
+
+        # 分离 system 消息和普通消息
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+
+        if len(other_msgs) <= PipelineEngine.CONTEXT_OVERFLOW_KEEP_RECENT:
+            return
+
+        # 保留最近 N 条消息
+        kept = other_msgs[-PipelineEngine.CONTEXT_OVERFLOW_KEEP_RECENT:]
+        truncated_count = len(other_msgs) - len(kept)
+        state["messages"] = system_msgs + kept
+        logger.info(
+            "Truncated context: removed %d older messages, kept %d recent + %d system",
+            truncated_count, len(kept), len(system_msgs),
         )
 
     async def _apply_route(self, route: RouteSignal, state: dict[str, Any]) -> bool:

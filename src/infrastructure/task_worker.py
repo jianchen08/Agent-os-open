@@ -767,6 +767,20 @@ class TaskWorker:
                 remind_count + 1, task_id,
             )
             self._try_resume_engine(task_id)
+
+            # BUG-FIX-fix_20260422_idle_timer_reset: 提醒后重新创建计时器
+            # 问题根因: ChildTaskGuard 不再重置计时器，提醒后无新计时器触发下次超时
+            # 修复方案: 异步重新创建 idle 计时器用于下一个超时周期
+            timer_manager = self._services.get("timer_manager")
+            if timer_manager:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
+                except RuntimeError:
+                    logger.warning(
+                        "TaskWorker: no event loop to recreate idle timer: task_id=%s",
+                        task_id,
+                    )
             return
 
         try:
@@ -803,6 +817,32 @@ class TaskWorker:
         if isinstance(task, dict):
             return task.get("parent_task_id")
         return getattr(task, "parent_task_id", None)
+
+    async def _recreate_idle_timer_async(self, task_id: str, timer_manager: Any) -> None:
+        """idle 超时提醒后异步重新创建计时器。
+
+        在 _on_idle_timeout 发送提醒后调用，为下一个超时周期创建新计时器。
+
+        Args:
+            task_id: 任务 ID
+            timer_manager: 计时器管理器实例
+        """
+        try:
+            try:
+                await timer_manager.cancel_timer(task_id)
+            except Exception:
+                pass
+            await timer_manager.create_timer(
+                task_id=task_id,
+                timeout=float(timer_manager.idle_threshold),
+                callback=lambda tid=task_id: self._on_idle_timeout(tid),
+            )
+            logger.info("TaskWorker: idle timer recreated after remind for task %s", task_id)
+        except Exception as e:
+            logger.warning(
+                "TaskWorker: recreate idle timer failed: task_id=%s, error=%s",
+                task_id, e,
+            )
 
     def _try_resume_engine(self, task_id: str) -> None:
         """通过标记请求主循环执行 resume，而非直接操作 engine。

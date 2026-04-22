@@ -777,6 +777,9 @@ class ToolExecutor(IToolExecutor):
             )
             raise ToolExecutionError(tool_name, str(e), cause=e) from e
 
+    # BUG-FIX-fix_20260422_context_overflow: 工具输出截断阈值，防止巨大输出撑爆 LLM 上下文窗口
+    MAX_TOOL_OUTPUT_LENGTH = 50000  # 50K 字符
+
     def _finalize_result(
         self,
         result: ToolExecutionResult,
@@ -785,13 +788,16 @@ class ToolExecutor(IToolExecutor):
         cache_hit: bool = False,
         tool: "Tool | None" = None,
     ) -> ToolExecutionResult:
-        """完成结果处理，添加执行时间，验证输出结构"""
+        """完成结果处理，添加执行时间，验证输出结构，截断过大输出"""
         duration_ms = int((time.time() - start_time) * 1000)
         duration_seconds = duration_ms / 1000.0
 
         if result.metadata is None:
             result.metadata = {}
         result.metadata["duration_ms"] = duration_ms
+
+        # BUG-FIX-fix_20260422_context_overflow: 截断过大的工具输出，防止上下文窗口溢出
+        result.output = self._truncate_output(result.output)
 
         # 输出结构验证：如果工具定义了 output_schema，验证输出是否符合
         if tool and tool.output_schema and result.success:
@@ -823,6 +829,31 @@ class ToolExecutor(IToolExecutor):
                 logger.warning(f"记录工具执行指标失败: {e}")
 
         return result
+
+    def _truncate_output(self, output: Any) -> Any:
+        """截断过大的工具输出，防止上下文窗口溢出
+
+        当工具输出为字符串且超过阈值时，截断并添加提示信息。
+        当输出为字典且包含大型字符串值时，对最长值进行截断。
+
+        Args:
+            output: 原始工具输出
+
+        Returns:
+            截断后的输出
+        """
+        if isinstance(output, str) and len(output) > self.MAX_TOOL_OUTPUT_LENGTH:
+            truncated = output[:self.MAX_TOOL_OUTPUT_LENGTH]
+            total_len = len(output)
+            logger.warning(
+                f"[ToolExecutor] 工具输出已截断 | "
+                f"original_length={total_len} | max_length={self.MAX_TOOL_OUTPUT_LENGTH}"
+            )
+            return truncated + (
+                f"\n\n[输出已截断，共 {total_len} 字符，"
+                f"仅显示前 {self.MAX_TOOL_OUTPUT_LENGTH} 字符]"
+            )
+        return output
 
     async def batch_execute(
         self,

@@ -193,15 +193,27 @@ class ResourceSearchTool:
         results = {}
 
         if resource_type in ["agent", "all"]:
-            agent_names, agent_descriptions, agent_ids, _ = await self._search_agents(
-                query, category, level, limit, detailed=False, exact=False
+            # BUG-FIX-fix_20260422_file_check_path: 使用 detailed=True 获取
+            # recommended_metrics，使 LLM 能看到正确的 file_check 路径
+            agent_names, agent_descriptions, agent_ids, agent_details = await self._search_agents(
+                query, category, level, limit, detailed=True, exact=False
             )
             if agent_names:
                 results["agent_h"] = ["config_id", "agent_name", "agent_description"]
-                results["agent_d"] = [
-                    [agent_ids[i], agent_names[i], agent_descriptions[i]]
-                    for i in range(len(agent_names))
-                ]
+                results["agent_d"] = []
+                for i in range(len(agent_names)):
+                    row = [agent_ids[i], agent_names[i], agent_descriptions[i]]
+                    detail = agent_details[i] if i < len(agent_details) else {}
+                    metrics = detail.get("recommended_metrics", [])
+                    if metrics:
+                        metrics_str = "; ".join(
+                            f"{m.get('metric_id', '')}({', '.join(f'{k}={v}' for k, v in m.get('default_params', {}).items())})"
+                            for m in metrics
+                        )
+                        row.append(f"推荐评估: {metrics_str}")
+                        if len(results["agent_h"]) == 3:
+                            results["agent_h"].append("recommended_metrics")
+                    results["agent_d"].append(row)
                 results["agent_c"] = len(agent_names)
 
         if resource_type in ["tool", "all"]:

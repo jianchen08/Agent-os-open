@@ -330,14 +330,31 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
         # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
-        if not acceptance_criteria and target_type == "agent" and target_id:
+        # BUG-FIX-fix_20260422_file_check_path: 即使 LLM 传了 acceptance_criteria，
+        # 如果 file_check.path 指向 agent 配置文件（config/agents/...）而非产出物，
+        # 也用自动补全的结果覆盖，防止 LLM 猜错路径。
+        if target_type == "agent" and target_id:
             auto_criteria = self._auto_fill_criteria(target_id)
             if auto_criteria:
-                acceptance_criteria = auto_criteria
-                logger.info(
-                    "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
-                    target_id, list(auto_criteria.keys()),
-                )
+                need_auto_fill = not acceptance_criteria
+                if not need_auto_fill and isinstance(acceptance_criteria, dict):
+                    fc = acceptance_criteria.get("file_check", {})
+                    fc_path = ""
+                    if isinstance(fc, dict):
+                        fc_path = fc.get("input_params", {}).get("path", "")
+                    if fc_path.startswith("config/agents/"):
+                        need_auto_fill = True
+                        logger.info(
+                            "[TaskSubmit] file_check.path 指向 agent 配置文件 (%s)，"
+                            "使用自动补全覆盖",
+                            fc_path,
+                        )
+                if need_auto_fill:
+                    acceptance_criteria = auto_criteria
+                    logger.info(
+                        "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
+                        target_id, list(auto_criteria.keys()),
+                    )
         injected_task_id = inputs.get("task_id")
         if parent_task_id is None and injected_task_id:
             parent_task_id = injected_task_id
@@ -668,7 +685,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["goal_context"] = goal["context"]
 
         # 存储执行相关参数
-        if inputs.get("workspace"):
+        # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
+        # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套
+        if inputs.get("workspace") and not inputs.get("parent_task_id"):
             metadata["workspace"] = inputs["workspace"]
         if inputs.get("max_retries"):
             metadata["max_retries"] = inputs["max_retries"]

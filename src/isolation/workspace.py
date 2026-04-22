@@ -74,6 +74,14 @@ def resolve_workspace(
     """
     root = config_root or get_workspace_config_root()
 
+    # BUG-FIX-fix_20260422_workspace_nesting: 统一路径分隔符为正斜杠，
+    # 避免 LLM 传入反斜杠路径导致 startswith / == 比较失败，产生双重嵌套
+    root = root.replace("\\", "/")
+    if task_workspace:
+        task_workspace = task_workspace.replace("\\", "/")
+    if parent_resolved_workspace:
+        parent_resolved_workspace = parent_resolved_workspace.replace("\\", "/")
+
     if parent_resolved_workspace is None:
         if not task_workspace:
             return f"{root}/{task_id}"

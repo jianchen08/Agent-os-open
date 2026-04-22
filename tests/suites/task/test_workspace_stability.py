@@ -271,7 +271,7 @@ class TestWorkspaceInheritance:
 
         result = worker._resolve_task_workspace("child001")
 
-        assert result == "D:\\Jianguoyun\\Agent os\\.ai_workspaces\\6723b1671933/child001"
+        assert result == "D:/Jianguoyun/Agent os/.ai_workspaces/6723b1671933/child001"
         assert result.count(".ai_workspaces") == 1
 
 

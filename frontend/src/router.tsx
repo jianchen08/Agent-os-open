@@ -330,7 +330,7 @@ function HomePage(): ReactNode {
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       {/* 顶部导航栏 */}
-      <header className="h-12 border-b flex items-center justify-between px-4 shrink-0">
+      <header className="h-10 border-b flex items-center justify-between px-3 shrink-0">
         <div className="flex items-center gap-2">
           <button
             onClick={() => setSidebarCollapsed(prev => !prev)}
@@ -388,15 +388,15 @@ function HomePage(): ReactNode {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0">
         {/* 左侧会话列表面板 */}
         <aside
           className={`${
-            sidebarCollapsed ? 'w-0' : 'w-64'
+            sidebarCollapsed ? 'w-0' : 'w-56'
           } border-r flex flex-col shrink-0 transition-all duration-200 overflow-hidden`}
         >
           {/* 新建会话按钮 */}
-          <div className="p-3 border-b shrink-0">
+          <div className="p-2.5 border-b shrink-0">
             <button
               onClick={handleCreateSession}
               className="w-full px-3 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
@@ -416,7 +416,7 @@ function HomePage(): ReactNode {
                 <div
                   key={session.id}
                   onClick={() => handleSelectSession(session.id)}
-                  className={`px-3 py-2.5 cursor-pointer text-sm truncate transition-colors ${
+                  className={`px-3 py-2 cursor-pointer text-sm truncate transition-colors ${
                     activeSessionId === session.id
                       ? 'bg-accent text-accent-foreground'
                       : 'hover:bg-accent/50'
@@ -431,7 +431,7 @@ function HomePage(): ReactNode {
         </aside>
 
         {/* 右侧聊天区域 */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 flex flex-col min-h-0">
           {activeSessionId ? (
             <ChatContainer
               sessionId={activeSessionId}
