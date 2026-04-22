@@ -40,11 +40,14 @@ interface SessionListState {
   copySession: (sessionId: string) => Promise<Session>
 }
 
+/** 默认主 Agent 名称 */
+const DEFAULT_AGENT_NAME = '灵汐'
+
 /**
- * 生成默认会话标题
+ * 生成默认会话标题，使用主 Agent 名称。
  */
-const generateSessionTitle = (index: number): string => {
-  return `新会话 ${index + 1}`
+const generateSessionTitle = (): string => {
+  return DEFAULT_AGENT_NAME
 }
 
 export const useSessionListStore = create<SessionListState>()((set, get) => ({
@@ -92,7 +95,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     try {
       const sessionTitle =
-        title || generateSessionTitle(useSessionStore.getState().sessions.length)
+        title || generateSessionTitle()
 
       const newSession = await createSessionApi({
         title: sessionTitle,

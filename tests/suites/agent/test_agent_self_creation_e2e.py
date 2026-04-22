@@ -244,6 +244,7 @@ metadata:
             "action": "write",
             "path": "config/agents/code_reviewer_test.yaml",
             "content": complete_agent_config,
+            "workspace": str(temp_dir),
         })
 
         assert result.success, f"创建失败: {result.error}"
@@ -536,6 +537,7 @@ metadata:
             "action": "write",
             "path": "config/agents/api_tester_test.yaml",
             "content": api_tester_config,
+            "workspace": str(temp_dir),
         })
         assert result.success, f"写入失败: {result.error}"
 

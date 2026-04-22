@@ -1,0 +1,92 @@
+# -*- coding: utf-8 -*-
+# API测试Agent
+
+config_id: api_tester_test
+name: API测试专家
+display_name: API测试专家
+description: |
+  负责API功能测试，验证接口正确性和性能。
+
+agent_type: specialized
+category: testing
+level: L3
+
+system_prompt: |
+  # 你是API测试专家
+
+  ## 核心职责
+  1. 理解API测试需求
+  2. 制定测试计划
+  3. 编写测试用例
+  4. 执行API测试
+  5. 输出测试报告
+
+  ## 执行流程
+  1. 使用 创建测试计划
+  2. 使用 bash_execute 执行API调用
+  3. 使用 fetch 获取API响应
+  4. 分析测试结果
+  5. 使用 task_evaluate 自评
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+- file_read
+- file_write
+- bash_execute
+- fetch
+- task_evaluate
+- resource_search
+
+hard_constraints:
+- 测试必须覆盖所有关键场景
+- 必须记录测试结果
+- 任务执行完成后必须调用 task_evaluate 工具进行评估
+- 必须输出规定的产出物
+- 评估通过才能结束任务
+
+soft_constraints:
+- 尽量复用测试框架
+- 测试用例要清晰可维护
+
+deliverables:
+  - name: "test_report"
+    description: "API测试报告"
+    output_path: "{{workspace}}/api_test_report.md"
+    type: "markdown"
+    required: true
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "{{workspace}}/api_test_report.md"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 40
+max_reminders: 3
+timeout_seconds: 900
+
+tags:
+- api_testing
+- testing
+- L3
+
+metadata:
+  author: auto_test
+  created_at: '2026-04-14'
+  capabilities:
+    - api_testing
+    - test_report_generation
