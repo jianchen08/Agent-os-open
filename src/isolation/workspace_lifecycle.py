@@ -194,8 +194,13 @@ class WorkspaceLifecycleManager:
             if self._calc_project_size(str(root_path), task_id) > _SPARSE_THRESHOLD_BYTES:
                 self._setup_sparse_worktree(ws_dir, root_path, branch)
             else:
-                self._run_git("worktree", "add", "-b", branch, str(ws_dir), "HEAD", cwd=root_path)
-                self._run_git("checkout", "HEAD", "--", ".", cwd=ws_dir)
+                rc, out, err = self._run_git("worktree", "add", "-b", branch, str(ws_dir), "HEAD", cwd=root_path)
+                logger.info("[WorkspaceLifecycle] worktree add: rc=%d, ws_dir=%s, exists=%s", rc, ws_dir, ws_dir.exists())
+                if rc == 0 and ws_dir.exists():
+                    rc2, _, err2 = self._run_git("checkout", "HEAD", "--", ".", cwd=ws_dir)
+                    logger.info("[WorkspaceLifecycle] checkout: rc=%d, config_exists=%s", rc2, (ws_dir / "config").exists())
+                elif rc != 0:
+                    logger.error("[WorkspaceLifecycle] worktree add FAILED: %s", err[:300])
             meta = {"mode": "worktree", "path": str(ws_dir),
                     "branch": branch, "project_root": str(root_path)}
 

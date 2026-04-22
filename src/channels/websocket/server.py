@@ -123,6 +123,7 @@ class WebSocketServer:
         self._app = web.Application()
         self._app.router.add_get("/ws", self._handle_websocket)
         self._app.router.add_get("/ws/{thread_id}", self._handle_websocket)
+        self._app.router.add_get("/ws/chat/{thread_id}", self._handle_websocket)
         self._app.router.add_get("/health", self._handle_health)
 
         self._runner = web.AppRunner(self._app)
@@ -177,6 +178,20 @@ class WebSocketServer:
         Returns:
             WebSocket 响应对象
         """
+        # 验证 token（从 query 参数获取）
+        token = request.query.get("token", "")
+        if token:
+            try:
+                from channels.api.auth import verify_token
+                payload = verify_token(token)
+                if payload is None:
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    await ws.close(code=4001, message=b"Invalid or expired token")
+                    return ws
+            except ImportError:
+                logger.warning("auth 模块不可用，跳过 token 验证")
+
         ws = web.WebSocketResponse(
             heartbeat=self.ping_interval,
             receive_timeout=self.ping_timeout,
