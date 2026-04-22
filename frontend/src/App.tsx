@@ -5,7 +5,7 @@
  */
 
 import { RouterProvider } from 'react-router-dom'
-import { ErrorBoundary } from './components/ErrorBoundary'
+import ErrorBoundary from './components/ErrorBoundary'
 import { createRouter } from './router'
 import { Toaster } from './components/ui/sonner'
 
