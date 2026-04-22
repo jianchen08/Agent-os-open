@@ -101,7 +101,7 @@ class MemoryStore:
         self.users["demo"] = {
             "id": demo_id,
             "username": "demo",
-            "password": "demo123",  # 内存存储，明文即可
+            "password": "demo12345",  # 内存存储，明文即可（8位以上满足前端验证）
             "email": "demo@example.com",
             "created_at": _now_iso(),
         }

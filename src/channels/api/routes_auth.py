@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
 from channels.api.auth import (
@@ -124,11 +124,17 @@ def register(request: RegisterRequest) -> TokenResponse:
 
 
 @router.get("/me", response_model=UserResponse, summary="获取当前用户信息")
-def get_me(token: str = "") -> UserResponse:
+def get_me(
+    authorization: str = Header(default=""),
+    token: str = "",
+) -> UserResponse:
     """通过 Bearer token 获取当前用户信息。
 
+    支持 Authorization: Bearer <token> 头和 ?token= query 参数。
+
     Args:
-        token: Query 参数中的 Bearer token
+        authorization: Authorization 请求头
+        token: Query 参数中的 token（备选）
 
     Returns:
         UserResponse 用户信息
@@ -136,9 +142,21 @@ def get_me(token: str = "") -> UserResponse:
     Raises:
         HTTPException: token 无效
     """
-    # 支持 query 参数传递 token（方便简单测试）
-    # 也支持 Authorization header
-    user_info = get_current_user(token)
+    # 优先从 Authorization 头提取 Bearer token
+    actual_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        actual_token = authorization[7:]
+    elif token:
+        actual_token = token
+
+    if not actual_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少认证凭据",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_info = get_current_user(actual_token)
     if user_info is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -162,10 +180,16 @@ def get_me(token: str = "") -> UserResponse:
 
 
 @router.post("/refresh", response_model=TokenResponse, summary="刷新令牌")
-def refresh_token(token: str = "") -> TokenResponse:
+def refresh_token(
+    authorization: str = Header(default=""),
+    token: str = "",
+) -> TokenResponse:
     """使用 refresh token 获取新的 access token。
 
+    支持 Authorization 头和 query 参数。
+
     Args:
+        authorization: Authorization 请求头
         token: Query 参数中的 refresh token
 
     Returns:
@@ -174,20 +198,27 @@ def refresh_token(token: str = "") -> TokenResponse:
     Raises:
         HTTPException: refresh token 无效或已撤销
     """
-    if not token:
+    # 提取 token：优先 Authorization 头，其次 query 参数
+    actual_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        actual_token = authorization[7:]
+    elif token:
+        actual_token = token
+
+    if not actual_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="缺少 refresh token",
         )
 
     # 检查是否已被撤销
-    if store.is_token_revoked(token):
+    if store.is_token_revoked(actual_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="refresh token 已被撤销",
         )
 
-    payload = verify_token(token)
+    payload = verify_token(actual_token)
     if payload is None or payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -211,7 +242,7 @@ def refresh_token(token: str = "") -> TokenResponse:
         )
 
     # 撤销旧的 refresh token
-    store.revoke_refresh_token(token)
+    store.revoke_refresh_token(actual_token)
 
     # 生成新 token
     token_data = {"sub": user_id, "username": username}
@@ -226,19 +257,31 @@ def refresh_token(token: str = "") -> TokenResponse:
 
 
 @router.post("/logout", summary="用户登出")
-def logout(token: str = "") -> dict[str, str]:
+def logout(
+    authorization: str = Header(default=""),
+    token: str = "",
+) -> dict[str, str]:
     """登出用户，撤销 refresh token。
 
+    支持 Authorization 头和 query 参数。
+
     Args:
+        authorization: Authorization 请求头
         token: Query 参数中的 refresh token
 
     Returns:
         登出成功消息
     """
-    if token:
-        # 撤销 refresh token
-        payload = verify_token(token)
+    # 提取 token
+    actual_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        actual_token = authorization[7:]
+    elif token:
+        actual_token = token
+
+    if actual_token:
+        payload = verify_token(actual_token)
         if payload and payload.get("type") == "refresh":
-            store.revoke_refresh_token(token)
+            store.revoke_refresh_token(actual_token)
 
     return {"message": "登出成功"}
