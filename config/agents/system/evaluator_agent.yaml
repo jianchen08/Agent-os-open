@@ -11,7 +11,9 @@ description: |
 
 plugins:
   disabled: []
-  enabled: {}
+  enabled:
+    task_reminder:
+      evaluation_mode: true
 
 tags:
   - evaluation
