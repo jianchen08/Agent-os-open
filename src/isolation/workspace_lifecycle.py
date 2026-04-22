@@ -188,11 +188,11 @@ class WorkspaceLifecycleManager:
             self._git_add_commit_if_dirty(root_path, f"chore: auto-save before worktree for task {task_id}")
             branch = f"task/{task_id}"
             ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
-            ws_dir.mkdir(parents=True, exist_ok=True)
             if self._calc_project_size(str(root_path), task_id) > _SPARSE_THRESHOLD_BYTES:
                 self._setup_sparse_worktree(ws_dir, root_path, branch)
             else:
                 self._run_git("worktree", "add", "-b", branch, str(ws_dir), "HEAD", cwd=root_path)
+                self._run_git("checkout", "HEAD", "--", ".", cwd=ws_dir)
             meta = {"mode": "worktree", "path": str(ws_dir),
                     "branch": branch, "project_root": str(root_path)}
 
