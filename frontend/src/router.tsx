@@ -24,6 +24,45 @@ import type { SendMessageParams } from './components/chat/types'
 const ModulesSettingsPage = lazy(() =>
   import('@/pages/settings/ModulesSettingsPage').then(m => ({ default: m.ModulesSettingsPage }))
 )
+const SettingsPage = lazy(() =>
+  import('@/pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage }))
+)
+const ToolsPage = lazy(() =>
+  import('@/pages/tools/ToolsPage').then(m => ({ default: m.ToolsPage }))
+)
+const AgentsPage = lazy(() =>
+  import('@/pages/agents/AgentsPage').then(m => ({ default: m.AgentsPage }))
+)
+const MonitoringPage = lazy(() =>
+  import('@/pages/monitoring/MonitoringPage').then(m => ({ default: m.MonitoringPage }))
+)
+const AdminPage = lazy(() =>
+  import('@/pages/admin/AdminPage').then(m => ({ default: m.AdminPage }))
+)
+const MemoryPage = lazy(() =>
+  import('@/pages/memory/MemoryPage').then(m => ({ default: m.MemoryPage }))
+)
+const DebugPage = lazy(() =>
+  import('@/pages/debug/DebugPage').then(m => ({ default: m.DebugPage }))
+)
+const DebugExecutionRecordsPage = lazy(() =>
+  import('@/pages/debug/DebugExecutionRecordsPage').then(m => ({ default: m.DebugExecutionRecordsPage }))
+)
+const DebugSessionsPage = lazy(() =>
+  import('@/pages/debug/DebugSessionsPage').then(m => ({ default: m.DebugSessionsPage }))
+)
+const DebugTasksPage = lazy(() =>
+  import('@/pages/debug/DebugTasksPage').then(m => ({ default: m.DebugTasksPage }))
+)
+const DebugEvaluationMetricsPage = lazy(() =>
+  import('@/pages/debug/DebugEvaluationMetricsPage').then(m => ({ default: m.DebugEvaluationMetricsPage }))
+)
+const DebugUsersPage = lazy(() =>
+  import('@/pages/debug/DebugUsersPage').then(m => ({ default: m.DebugUsersPage }))
+)
+
+/** 懒加载 fallback */
+const LazyFallback = <div className="p-4 text-muted-foreground">加载中...</div>
 
 // ============================================
 // 路由守卫
@@ -321,6 +360,24 @@ function HomePage(): ReactNode {
           />
         </div>
         <div className="flex items-center gap-3">
+          <nav className="flex items-center gap-1 mr-2 overflow-x-auto shrink min-w-0">
+            {[
+              { path: ROUTES.TOOLS, label: '工具' },
+              { path: ROUTES.AGENTS, label: '智能体' },
+              { path: ROUTES.MONITORING, label: '监控' },
+              { path: ROUTES.MEMORY, label: '记忆' },
+              { path: ROUTES.SETTINGS, label: '设置' },
+              { path: ROUTES.DEBUG.ROOT, label: '调试' },
+            ].map(item => (
+              <a
+                key={item.path}
+                href={item.path}
+                className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-colors whitespace-nowrap shrink-0"
+              >
+                {item.label}
+              </a>
+            ))}
+          </nav>
           <span className="text-sm text-muted-foreground">{user?.username}</span>
           <button
             onClick={handleLogout}
@@ -416,7 +473,19 @@ function HomePage(): ReactNode {
  *
  * 路由结构：
  * - / : 受保护的聊天主页（需登录）
+ * - /settings : 设置中心（懒加载）
  * - /settings/modules : 模块设置页（懒加载）
+ * - /tools : 工具管理（懒加载）
+ * - /agents : 智能体管理（懒加载）
+ * - /monitoring : 系统监控（懒加载）
+ * - /admin : 管理员面板（懒加载）
+ * - /memory : 记忆管理（懒加载）
+ * - /debug : 调试中心（懒加载）
+ * - /debug/execution-records : 执行记录（懒加载）
+ * - /debug/sessions : 调试会话（懒加载）
+ * - /debug/tasks : 调试任务（懒加载）
+ * - /debug/evaluation-metrics : 评估指标（懒加载）
+ * - /debug/users : 调试用户（懒加载）
  * - /login : 登录页
  * - /register : 注册页
  * - * : 兜底重定向到首页
@@ -432,11 +501,133 @@ export function createRouter() {
       ),
     },
     {
+      path: ROUTES.SETTINGS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <SettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
       path: '/settings/modules',
       element: (
-        <Suspense fallback={<div className="p-4 text-muted-foreground">加载中...</div>}>
-          <ModulesSettingsPage />
-        </Suspense>
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ModulesSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.TOOLS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ToolsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.AGENTS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <AgentsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.MONITORING,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <MonitoringPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.ADMIN,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <AdminPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.MEMORY,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <MemoryPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.ROOT,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.EXECUTION_RECORDS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugExecutionRecordsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.SESSIONS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugSessionsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.TASKS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugTasksPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.EVALUATION_METRICS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugEvaluationMetricsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.DEBUG.USERS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <DebugUsersPage />
+          </Suspense>
+        </ProtectedRoute>
       ),
     },
     {

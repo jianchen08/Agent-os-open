@@ -28,7 +28,7 @@ export function ModulesSettingsPage() {
   const activeReg = modules.find(m => m.schema.identity.id === activeModule)
 
   return (
-    <div className="h-full flex">
+    <div className="h-full flex overflow-hidden">
       {/* 模块列表 */}
       <div className="w-64 border-r border-border overflow-y-auto">
         <div className="p-4 text-sm font-medium text-foreground border-b border-border">

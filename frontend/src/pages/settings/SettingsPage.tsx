@@ -57,14 +57,14 @@ const SETTINGS_CARDS: SettingCard[] = [
  */
 export function SettingsPage() {
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
       <header className="h-12 border-b flex items-center px-4 shrink-0">
         <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">设置中心</h1>
       </header>
-      <main className="p-6">
+      <main className="flex-1 overflow-y-auto p-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {SETTINGS_CARDS.map(card => (
             <a

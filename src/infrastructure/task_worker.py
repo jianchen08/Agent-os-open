@@ -342,36 +342,6 @@ class TaskWorker:
                 task_service.fail_task(task_id, f"启动失败: {e}")
                 return
 
-        # ── 2.5 注册 idle 计时器（心跳检测） ──
-        timer_manager = self._services.get("timer_manager")
-        idle_timer_registered = False
-        if timer_manager:
-            try:
-                try:
-                    await timer_manager.cancel_timer(task_id)
-                except Exception:
-                    pass
-                await timer_manager.create_timer(
-                    task_id=task_id,
-                    timeout=float(timer_manager.idle_threshold),
-                    callback=lambda tid=task_id: self._on_idle_timeout(tid),
-                )
-                idle_timer_registered = True
-                logger.info(
-                    "TaskWorker: idle 计时器已注册: task_id=%s, timeout=%ds",
-                    task_id, timer_manager.idle_threshold,
-                )
-            except Exception as e:
-                # BUG-FIX: idle 计时器注册失败时直接拒绝任务（保守策略），
-                # 避免任务在无超时保护下无限运行
-                logger.error(
-                    "TaskWorker: 注册 idle 计时器失败，任务拒绝执行: task_id=%s, error=%s",
-                    task_id, e,
-                )
-                if task_service:
-                    task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
-                return
-
         # ── 3. 构建完整的 user_input ──
         user_input = task_data.get("user_input", "")
         description = task_data.get("description", "")
@@ -449,6 +419,8 @@ class TaskWorker:
         self._terminal_events[task_id] = terminal_evt
 
         # ── 5. 创建子 PipelineEngine 并执行 ──
+        timer_manager = self._services.get("timer_manager")
+        idle_timer_registered = False
         try:
             engine = PipelineEngine(
                 input_route_table=self._input_route_table,
@@ -471,6 +443,42 @@ class TaskWorker:
                         "TaskWorker: early bind_pipeline_run failed for %s: %s",
                         task_id, exc,
                     )
+
+            # BUG-FIX-fix_20260422_idle_timer_timing:
+            # 问题根因: idle 计时器在 start_task() 后立即注册，但 TaskWorker 的
+            #           _execute_background_task 可能因事件循环调度延迟（如上级管道
+            #           LLM 调用阻塞）导致实际管道执行推迟数分钟，这期间 idle 计时器
+            #           持续倒计时，留给实际管道执行的时间被大幅压缩甚至直接超时。
+            # 修复方案: 将 idle 计时器注册移到 engine.run() 之前，确保计时器只在
+            #           任务真正开始执行管道时才启动，不受上级管道阻塞影响。
+            # 影响范围: 所有通过 TaskWorker 执行的后台任务的 idle 超时行为
+            if timer_manager:
+                try:
+                    try:
+                        await timer_manager.cancel_timer(task_id)
+                    except Exception:
+                        pass
+                    await timer_manager.create_timer(
+                        task_id=task_id,
+                        timeout=float(timer_manager.idle_threshold),
+                        callback=lambda tid=task_id: self._on_idle_timeout(tid),
+                    )
+                    idle_timer_registered = True
+                    logger.info(
+                        "TaskWorker: idle 计时器已注册: task_id=%s, timeout=%ds",
+                        task_id, timer_manager.idle_threshold,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "TaskWorker: 注册 idle 计时器失败，任务拒绝执行: task_id=%s, error=%s",
+                        task_id, e,
+                    )
+                    if task_service:
+                        task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
+                    evt = self._terminal_events.pop(task_id, None)
+                    if evt is not None:
+                        evt.set()
+                    return
 
             pipeline_timeout = self._config.get("pipeline_timeout", 600)
             try:

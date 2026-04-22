@@ -69,7 +69,7 @@ export function AgentsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
       <header className="h-12 border-b flex items-center px-4 shrink-0">
         <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
           &larr; 返回
@@ -77,7 +77,7 @@ export function AgentsPage() {
         <h1 className="ml-4 text-base font-semibold">智能体管理</h1>
         <span className="ml-auto text-xs text-muted-foreground">共 {total} 个智能体</span>
       </header>
-      <main className="p-6 space-y-4">
+      <main className="flex-1 overflow-y-auto p-6 space-y-4">
         {/* 搜索 */}
         <input
           type="text"
