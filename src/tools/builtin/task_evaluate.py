@@ -656,6 +656,13 @@ class TaskEvaluateTool:
                 p.setdefault("criteria", task_desc)
             if workspace_abs and "workspace" not in p:
                 p["workspace"] = workspace_abs
+            # BUG-FIX: Substitute template variables {{workspace}} and {{task_id}}
+            for key, val in list(p.items()):
+                if isinstance(val, str):
+                    if workspace_abs:
+                        val = val.replace("{{workspace}}", workspace_abs)
+                    val = val.replace("{{task_id}}", task.id)
+                    p[key] = val
             params[metric_id] = p
 
         return params

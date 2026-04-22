@@ -1,4 +1,4 @@
-id: e2e_time_agent
+config_id: e2e_time_agent
 name: 时间助手
 description: 专门负责回答时间相关问题的时间助手Agent，能够获取当前精确时间、日期信息，并提供时间相关的专业咨询服务。
 version: "1.0"
@@ -59,7 +59,9 @@ constraints:
   - 遇到超出能力范围的问题，礼貌说明并引导
   - 不确定的信息不臆测，如实告知用户
 
-static_vars: []
+static_vars:
+  enabled: true
+  items: []
 
 deliverables: []
 

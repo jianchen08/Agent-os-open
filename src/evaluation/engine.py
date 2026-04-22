@@ -451,10 +451,14 @@ class EvaluationEngine:
 
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
+                # Resolve project root so evaluator agent can find template files
+                from pathlib import Path
+                project_root = str(Path(__file__).resolve().parent.parent.parent)
                 state = await engine.run(
                     user_input=eval_prompt,
                     agent_config=agent_config,
                     task_id=f"__eval__{metric_def.id}",
+                    project_root=project_root,
                 )
                 return state
 
