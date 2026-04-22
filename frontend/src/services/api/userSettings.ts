@@ -11,13 +11,13 @@
 import apiClient from '@/services/api/client'
 import {
   API_ENDPOINTS,
-} from '@/../constants/api'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
+} from '@/constants/api'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 import type {
   UserSettingsResponse,
   UserSettingsUpdateRequest,
-} from '@/../types/api'
+} from '@/types/api'
 
 export async function getUserSettings(
   options: RetryOptions = {}

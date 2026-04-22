@@ -13,7 +13,7 @@
  * - manualTrigger(triggerId, request): 手动触发触发器
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 export interface TriggerResponse {

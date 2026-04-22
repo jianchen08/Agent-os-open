@@ -52,20 +52,24 @@ class ThreadCreate(BaseModel):
 
 
 class ThreadResponse(BaseModel):
-    """线程响应模型。"""
-    id: str
-    title: str
+    """线程响应模型，字段名与前端 mapThreadToSession 对齐。"""
+    thread_id: str
+    intent: str | None = None
+    current_state: str = "active"
     created_at: str
     updated_at: str
-    message_count: int
+    agent_id: str | None = None
 
 
 class MessageResponse(BaseModel):
-    """消息响应模型。"""
+    """消息响应模型，字段名与前端 mapBackendMessageToMessage 对齐。"""
     id: str
+    thread_id: str
     role: str
     content: str
-    created_at: str
+    timestamp: str
+    sequence: int = 0
+    parentId: str | None = None
 
 
 # ============================================================

@@ -5,7 +5,7 @@
  * 与后端 /api/v1/cost-control/* 端点对齐
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 /**

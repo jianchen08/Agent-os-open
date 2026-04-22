@@ -21,9 +21,9 @@
 
 import {
   API_ENDPOINTS,
-} from '@/../constants/api'
-import type { RetryOptions } from '@/../utils/retry'
-import { requestWithRetry } from '@/../utils/retry'
+} from '@/constants/api'
+import type { RetryOptions } from '@/utils/retry'
+import { requestWithRetry } from '@/utils/retry'
 import apiClient from '@/services/api/client'
 
 /**

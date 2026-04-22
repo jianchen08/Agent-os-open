@@ -4,7 +4,7 @@
  * 提供任务的 CRUD 操作接口
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import type {
     AcceptanceCriterion,
     GetPhaseOutputResponse,
@@ -13,7 +13,7 @@ import type {
     GetTaskPhaseResponse,
     Project,
     TaskPhase,
-} from '@/../types/task'
+} from '@/types/task'
 import apiClient from '@/services/api/client'
 
 /**

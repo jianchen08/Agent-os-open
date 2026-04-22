@@ -11,7 +11,7 @@
  */
 
 import apiClient from '@/services/api/client'
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import { reportError } from '@/errorReporting'
 
 export interface User {

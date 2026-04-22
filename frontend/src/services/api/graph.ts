@@ -13,14 +13,14 @@
 import apiClient from '@/services/api/client'
 import {
   API_ENDPOINTS,
-} from '@/../constants/api'
+} from '@/constants/api'
 import {
   mapThreadDetailToGraph,
   type ThreadDetailResponse,
-} from '@/../utils/mappers'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
-import type { GraphData } from '@/../types/graph'
+} from '@/utils/mappers'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
+import type { GraphData } from '@/types/graph'
 
 /**
  * 参数验证错误

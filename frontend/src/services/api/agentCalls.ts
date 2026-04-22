@@ -7,7 +7,7 @@
  * - getAgentCallDetail(executionId): 获取 Agent 调用记录详情
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 export interface AgentCallRecordResponse {

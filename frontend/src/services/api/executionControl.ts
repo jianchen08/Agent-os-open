@@ -23,8 +23,8 @@
  */
 
 import apiClient from '@/services/api/client'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 
 /**
  * 执行状态类型

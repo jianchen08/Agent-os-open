@@ -36,10 +36,10 @@
 
 import {
   API_ENDPOINTS,
-} from '@/../constants/api'
+} from '@/constants/api'
 import apiClient from '@/services/api/client'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 
 /**
  * LLM 模型配置类型

@@ -6,7 +6,7 @@
  * - launchFloatingChat(request): 启动悬浮窗应用
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 export interface FloatingChatStatus {

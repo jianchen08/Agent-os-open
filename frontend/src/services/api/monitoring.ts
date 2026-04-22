@@ -12,7 +12,7 @@
 
 import {
   API_ENDPOINTS,
-} from '@/../constants/api'
+} from '@/constants/api'
 import type {
   SystemMetrics,
   SystemMetricsResponse,
@@ -20,9 +20,9 @@ import type {
   TaskListResponse,
   TaskStatistics,
   TaskStatisticsResponse,
-} from '@/../types/monitoring'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
+} from '@/types/monitoring'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 import apiClient from '@/services/api/client'
 
 export async function getSystemMetrics(

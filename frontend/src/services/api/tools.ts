@@ -7,15 +7,15 @@
 
 import {
     API_ENDPOINTS,
-} from '@/../constants/api'
-import { requestWithRetry } from '@/../utils/retry'
-import type { RetryOptions } from '@/../utils/retry'
+} from '@/constants/api'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 import type {
     ToolCategory,
     ToolExample,
     ToolSource,
     ToolStatus
-} from '@/../types/tool'
+} from '@/types/tool'
 import apiClient from '@/services/api/client'
 
 /**

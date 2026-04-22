@@ -10,7 +10,7 @@
  * - checkThinkingModeHealth(): 思考模式服务健康检查
  */
 
-import { API_ENDPOINTS } from '@/../constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 export interface ThinkingModeInfo {

@@ -18,14 +18,14 @@
 
 import {
     API_ENDPOINTS,
-} from '@/../constants/api'
-import type { Message, Session } from '@/../types/models'
+} from '@/constants/api'
+import type { Message, Session } from '@/types/models'
 import {
     mapThreadToSession,
     type ThreadStateResponse,
-} from '@/../utils/mappers'
-import type { RetryOptions } from '@/../utils/retry'
-import { requestWithRetry } from '@/../utils/retry'
+} from '@/utils/mappers'
+import type { RetryOptions } from '@/utils/retry'
+import { requestWithRetry } from '@/utils/retry'
 import apiClient from '@/services/api/client'
 // 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
 
@@ -43,7 +43,9 @@ interface ThreadListResponse {
  * 后端线程创建请求类型
  */
 interface ThreadCreateRequest {
-  /** 用户意图（可选） */
+  /** 线程标题（可选） */
+  title?: string
+  /** 用户意图（可选，兼容旧接口） */
   intent?: string
   /** 元数据（可选） */
   metadata?: Record<string, unknown>
@@ -203,12 +205,11 @@ export async function getSessions(
   options: RetryOptions = {}
 ): Promise<Session[]> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ThreadListResponse>(
+    const response = await apiClient.get<ThreadStateResponse[]>(
       API_ENDPOINTS.THREADS.LIST
     )
 
-    // 使用数据映射函数将Thread转换为Session
-    const threads = response.data.threads || []
+    const threads = Array.isArray(response.data) ? response.data : []
     return threads.map(mapThreadToSession)
   }, options)
 }
@@ -231,6 +232,7 @@ export async function createSession(
     const requestData: ThreadCreateRequest = {}
 
     if (options.title !== undefined) {
+      requestData.title = options.title
       requestData.intent = options.title
     }
 
@@ -303,14 +305,13 @@ export async function getMessages(
       if (filters.limit !== undefined) params.limit = filters.limit
     }
 
-    const response = await apiClient.get<BackendMessagesListResponse>(
+    const response = await apiClient.get<any>(
       API_ENDPOINTS.MESSAGES.LIST(sessionId),
       { params }
     )
 
-    // 将后端消息响应映射为前端消息模型
-    const messages = response.data.messages || []
-    return messages.map(msg => mapBackendMessageToMessage(msg, sessionId))
+    const rawMessages = Array.isArray(response.data) ? response.data : (response.data.messages || [])
+    return rawMessages.map((msg: BackendMessageResponse) => mapBackendMessageToMessage(msg, sessionId))
   }, options)
 }
 
