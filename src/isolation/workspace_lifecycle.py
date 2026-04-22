@@ -60,6 +60,8 @@ class WorkspaceLifecycleManager:
         cmd = ["git"] + list(args)
         try:
             r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0 and r.stderr:
+                logger.warning("[WorkspaceLifecycle] git %s failed (rc=%d): %s", " ".join(args), r.returncode, r.stderr[:200])
             return r.returncode, r.stdout.strip(), r.stderr.strip()
         except subprocess.TimeoutExpired:
             return -1, "", f"命令执行超时（{timeout}秒）"
@@ -188,6 +190,7 @@ class WorkspaceLifecycleManager:
             self._git_add_commit_if_dirty(root_path, f"chore: auto-save before worktree for task {task_id}")
             branch = f"task/{task_id}"
             ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
+            ws_dir.parent.mkdir(parents=True, exist_ok=True)
             if self._calc_project_size(str(root_path), task_id) > _SPARSE_THRESHOLD_BYTES:
                 self._setup_sparse_worktree(ws_dir, root_path, branch)
             else:
