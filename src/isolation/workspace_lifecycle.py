@@ -168,6 +168,7 @@ class WorkspaceLifecycleManager:
         """
         scenario, project_root = self._detect_scenario(str(self._base_path), task_data)
         root_path = Path(project_root)
+        logger.info("[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, base_path=%s, root_path=%s", task_id, scenario, self._base_path, root_path)
 
         if scenario == "new_project":
             # 场景A：创建新目录并初始化 git
