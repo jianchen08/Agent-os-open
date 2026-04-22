@@ -201,10 +201,6 @@ class TaskWorker:
 
     async def stop(self) -> None:
         """停止后台任务监听，等待所有 pending 任务完成。"""
-        import traceback as _tb
-        _stack = "".join(_tb.format_stack())
-        for _line in _stack.splitlines():
-            logger.info("TaskWorker.stop() STACK: %s", _line)
         self._running = False
         if self._event_bus:
             self._event_bus.unsubscribe("task.submitted", self._on_task_submitted)
