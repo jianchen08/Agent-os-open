@@ -1,7 +1,8 @@
-"""M6c Output 插件测试 — result_format, track, memory_write。
+"""M6c Output 插件测试 — result_format, track。
 
-验证三个 Output 插件的独立功能。
+验证两个 Output 插件的独立功能。
 PersistPlugin 已移除（其功能合并到 TrackPlugin）。
+MemoryWritePlugin 已废弃移除。
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import pytest
 
 from pipeline.plugin import PluginContext
 from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
-from plugins.output.memory_write import MemoryWritePlugin
 from plugins.output.result_format import ResultFormatPlugin
 from plugins.output.track import TrackPlugin
 
@@ -179,92 +179,5 @@ class TestTrackPlugin:
     async def test_no_route_signal(self, ctx):
         """测试不产生路由信号。"""
         plugin = TrackPlugin()
-        result = await plugin.execute(ctx)
-        assert result.route_signal is None
-
-
-# ── MemoryWritePlugin Tests ──
-
-
-class TestMemoryWritePlugin:
-    """记忆写入插件测试（M11b 真实版）。"""
-
-    def test_name_and_priority(self):
-        """测试插件名称和优先级。"""
-        plugin = MemoryWritePlugin()
-        assert plugin.name == "memory_write"
-        assert plugin.priority == 26
-        assert plugin.error_policy == ErrorPolicy.SKIP
-
-    @pytest.mark.asyncio
-    async def test_no_service_returns_empty(self, ctx):
-        """测试无记忆服务时静默跳过。"""
-        plugin = MemoryWritePlugin()
-        result = await plugin.execute(ctx)
-        # M11b 版本：无服务时返回空 OutputResult
-        assert result.state_updates == {}
-
-    @pytest.mark.asyncio
-    async def test_writes_user_message(self, ctx, base_state):
-        """测试写入用户消息。"""
-        base_state["user_message"] = "你好"
-        base_state["user_id"] = "user-123"
-
-        # Mock memory_store (M11b 版本用 memory_store 而非 memory_service)
-        saved_items = []
-        class MockMemoryStore:
-            async def save(self, episode, category):
-                saved_items.append((episode, category))
-
-        ctx._services["memory_store"] = MockMemoryStore()
-
-        plugin = MemoryWritePlugin()
-        result = await plugin.execute(ctx)
-
-        written = result.state_updates["memory.written"]
-        assert written["success"] is True
-        assert written["items"] >= 1
-
-    @pytest.mark.asyncio
-    async def test_writes_llm_response(self, ctx, base_state):
-        """测试写入 LLM 回复。"""
-        base_state[StateKeys.RAW_RESULT] = "这是AI的回复"
-        base_state["user_id"] = "user-123"
-
-        saved_items = []
-        class MockMemoryStore:
-            async def save(self, episode, category):
-                saved_items.append((episode, category))
-
-        ctx._services["memory_store"] = MockMemoryStore()
-
-        plugin = MemoryWritePlugin({"write_user_messages": False})
-        result = await plugin.execute(ctx)
-
-        written = result.state_updates["memory.written"]
-        assert written["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_handles_service_error(self, ctx, base_state):
-        """测试记忆服务异常处理。"""
-        base_state["user_message"] = "你好"
-        base_state["user_id"] = "user-123"
-
-        class FailingMemoryStore:
-            async def save(self, episode, category):
-                raise RuntimeError("Storage failed")
-
-        ctx._services["memory_store"] = FailingMemoryStore()
-
-        plugin = MemoryWritePlugin()
-        result = await plugin.execute(ctx)
-
-        written = result.state_updates["memory.written"]
-        assert written["success"] is False
-
-    @pytest.mark.asyncio
-    async def test_no_route_signal(self, ctx):
-        """测试不产生路由信号。"""
-        plugin = MemoryWritePlugin()
         result = await plugin.execute(ctx)
         assert result.route_signal is None

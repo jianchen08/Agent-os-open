@@ -10,7 +10,6 @@
 """
 
 import logging
-import uuid
 from typing import Any
 
 from core.results import ToolExecutionResult
@@ -44,17 +43,17 @@ class MemoryTool:
     纯文件存储/检索操作通过注入的 _memory_service 工作，不依赖数据库。
     """
 
+    SYSTEM_USER_ID = "system"
+
     def __init__(
         self,
         session: Any | None = None,
-        user_id: str | None = None,
         tag_network: Any | None = None,
         knowledge_importer: Any | None = None,
     ):
         """初始化记忆工具"""
         self._session = session
         self._memory_service = None
-        self.user_id = user_id
         self.tag_network = tag_network
         self._knowledge_importer = knowledge_importer
 
@@ -204,7 +203,7 @@ class MemoryTool:
             category=ToolCategory.MEMORY,
             level=ToolLevel.SYSTEM,
             source=ToolSource.CODE,
-            injected_params=["session_id", "user_id", "_session", "_memory_service"],
+            injected_params=["session_id", "_session", "_memory_service"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -217,9 +216,6 @@ class MemoryTool:
             )
 
         self._memory_service = ms
-
-        if not self.user_id:
-            self.user_id = inputs.get("user_id")
 
         action = inputs.get("action")
 
@@ -249,26 +245,23 @@ class MemoryTool:
         if not content:
             return create_failure_result("缺少 content 参数")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         try:
             if memory_type == "episode":
                 episode = Episode(
-                    user_id=uuid.UUID(self.user_id),
+                    user_id=self.SYSTEM_USER_ID,
                     intent_text=content,
                     tags=tags,
                 )
-                result = await self.memory_service.store_episode(episode)
+                result = await self._memory_service.store_episode(episode)
                 return create_success_result({"success": True, "episode_id": result})
             else:
                 knowledge = Knowledge(
-                    user_id=uuid.UUID(self.user_id),
+                    user_id=self.SYSTEM_USER_ID,
                     content=content,
                     source_type="manual",
                     extra_data={"tags": tags},
                 )
-                result = await self.memory_service.store_knowledge(knowledge)
+                result = await self._memory_service.store_knowledge(knowledge)
                 return create_success_result({"success": True, "knowledge_id": result})
 
         except Exception as e:
@@ -289,15 +282,12 @@ class MemoryTool:
         inject_type = inputs.get("inject_type", "retrieval")
         retrieval_method = inputs.get("retrieval_method", "vector")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         if inject_type == "retrieval" and not query:
             return create_failure_result("retrieval 注入方式需要提供 query")
 
         try:
             results = await self._memory_service.retrieve(
-                user_id=uuid.UUID(self.user_id),
+                user_id=self.SYSTEM_USER_ID,
                 filter=filter,
                 inject_type=inject_type,
                 retrieval_method=retrieval_method,
@@ -369,9 +359,6 @@ class MemoryTool:
         if not name:
             return create_failure_result("缺少 name 参数")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         if not self._knowledge_importer:
             return create_failure_result("知识导入器未初始化")
 
@@ -379,7 +366,7 @@ class MemoryTool:
             result = await self._knowledge_importer.import_text(
                 content=content,
                 name=name,
-                user_id=self.user_id,
+                user_id=self.SYSTEM_USER_ID,
                 tags=tags,
             )
 
@@ -405,16 +392,13 @@ class MemoryTool:
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         if not self._knowledge_importer:
             return create_failure_result("知识导入器未初始化")
 
         try:
             result = await self._knowledge_importer.import_file(
                 source_path=file_path,
-                user_id=self.user_id,
+                user_id=self.SYSTEM_USER_ID,
                 tags=tags,
             )
 
@@ -441,16 +425,13 @@ class MemoryTool:
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         if not self._knowledge_importer:
             return create_failure_result("知识导入器未初始化")
 
         try:
             result = await self._knowledge_importer.update_knowledge(
                 file_path=file_path,
-                user_id=self.user_id,
+                user_id=self.SYSTEM_USER_ID,
                 new_content=new_content,
                 new_tags=new_tags,
             )
@@ -477,16 +458,13 @@ class MemoryTool:
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
         if not self._knowledge_importer:
             return create_failure_result("知识导入器未初始化")
 
         try:
             success = await self._knowledge_importer.delete_knowledge(
                 file_path=file_path,
-                user_id=self.user_id,
+                user_id=self.SYSTEM_USER_ID,
                 delete_file=delete_file,
             )
 
@@ -496,28 +474,16 @@ class MemoryTool:
             return create_failure_result(f"删除失败: {str(e)}")
 
     async def _get_context(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """获取会话上下文"""
-        session_id = inputs.get("session_id")
-
-        if not session_id:
-            return create_failure_result("缺少 session_id 参数")
-
-        if not self.user_id:
-            return create_failure_result("缺少用户ID")
-
+        """获取记忆统计信息"""
         try:
-            request = ContextRequest(
-                user_id=uuid.UUID(self.user_id),
-                session_id=session_id,
-            )
-            context = await self.memory_service.get_context(request)
+            stats = await self._memory_service.get_stats(self.SYSTEM_USER_ID)
 
             return create_success_result(
                 {
                     "success": True,
-                    "context": context,
+                    "stats": stats,
                 }
             )
 
         except Exception as e:
-            return create_failure_result(f"获取上下文失败: {str(e)}")
+            return create_failure_result(f"获取统计信息失败: {str(e)}")

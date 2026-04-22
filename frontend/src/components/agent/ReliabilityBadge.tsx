@@ -1,0 +1,156 @@
+/**
+ * 可靠性评分徽章组件
+ *
+ * 显示 Agent 的可靠性评分 (0-100)
+ */
+
+import { cn } from '@/lib/utils'
+import { Minus, Star, TrendingDown, TrendingUp } from 'lucide-react'
+
+export interface ReliabilityBadgeProps {
+  /** 可靠性评分 (0-100) */
+  score: number
+  /** 尺寸 */
+  size?: 'sm' | 'md' | 'lg'
+  /** 是否显示趋势图标 */
+  showTrend?: boolean
+  /** 趋势方向 */
+  trend?: 'up' | 'down' | 'stable'
+  /** 自定义样式 */
+  className?: string
+}
+
+/**
+ * 可靠性评分徽章
+ *
+ * 根据评分显示不同颜色：
+ * - 90+ : 金色（优秀）
+ * - 70-89: 绿色（良好）
+ * - 50-69: 黄色（一般）
+ * - <50 : 红色（较差）
+ */
+export function ReliabilityBadge({
+  score,
+  size = 'md',
+  showTrend = false,
+  trend,
+  className,
+}: ReliabilityBadgeProps) {
+  /** 根据评分确定颜色 */
+  const getScoreColor = () => {
+    if (score >= 90)
+      return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30'
+    if (score >= 70)
+      return 'bg-status-success/20 text-status-success border-status-success/30'
+    if (score >= 50)
+      return 'bg-status-waiting/20 text-status-waiting border-status-waiting/30'
+    return 'bg-status-error/20 text-status-error border-status-error/30'
+  }
+
+  const sizeStyles = {
+    sm: 'text-xs px-1.5 py-0.5 gap-1',
+    md: 'text-sm px-2 py-1 gap-1.5',
+    lg: 'text-base px-3 py-1.5 gap-2',
+  }
+
+  const TrendIcon =
+    trend === 'up' ? TrendingUp : trend === 'down' ? TrendingDown : Minus
+
+  return (
+    <div
+      className={cn(
+        'inline-flex items-center rounded-full border font-code',
+        getScoreColor(),
+        sizeStyles[size],
+        className
+      )}
+    >
+      {score >= 90 && (
+        <Star
+          className={cn(
+            'fill-current',
+            size === 'sm' && 'w-3 h-3',
+            size === 'md' && 'w-3.5 h-3.5',
+            size === 'lg' && 'w-4 h-4'
+          )}
+        />
+      )}
+
+      <span>{Math.round(score)}%</span>
+
+      {showTrend && trend && (
+        <TrendIcon
+          className={cn(
+            size === 'sm' && 'w-3 h-3',
+            size === 'md' && 'w-3.5 h-3.5',
+            size === 'lg' && 'w-4 h-4',
+            trend === 'up' && 'text-status-success',
+            trend === 'down' && 'text-status-error',
+            trend === 'stable' && 'text-text-muted'
+          )}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 可靠性评分详情组件
+ */
+export interface ReliabilityDetailProps {
+  /** 可靠性评分 */
+  score: number
+  /** 总执行次数 */
+  totalExecutions: number
+  /** 成功率 */
+  successRate: number
+  /** 平均重试次数 */
+  avgRetries: number
+  /** 最后更新时间 */
+  lastUpdated?: string
+}
+
+/**
+ * 可靠性评分详情
+ */
+export function ReliabilityDetail({
+  score,
+  totalExecutions,
+  successRate,
+  avgRetries,
+  lastUpdated,
+}: ReliabilityDetailProps) {
+  return (
+    <div className="glass-panel rounded-lg p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-text-secondary">可靠性评分</span>
+        <ReliabilityBadge score={score} size="lg" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="flex justify-between">
+          <span className="text-text-muted">执行次数</span>
+          <span className="text-text-primary font-code">{totalExecutions}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-muted">成功率</span>
+          <span className="text-text-primary font-code">
+            {(successRate * 100).toFixed(1)}%
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-text-muted">平均重试</span>
+          <span className="text-text-primary font-code">
+            {avgRetries.toFixed(1)}
+          </span>
+        </div>
+        {lastUpdated && (
+          <div className="flex justify-between">
+            <span className="text-text-muted">更新时间</span>
+            <span className="text-text-primary text-xs">{lastUpdated}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

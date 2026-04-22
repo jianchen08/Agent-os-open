@@ -55,6 +55,13 @@ system_prompt: |
   | 权限 | 访问和操作权限 | 读写权限、审批权限 |
   | 网络 | 连接和通信条件 | 网络访问、通信渠道 |
 
+  ## 工作空间
+
+  - 使用相对路径操作文件（如 src/module/file.py）
+  - 可运行测试验证代码（pytest、mypy 等）
+  - 修改不影响主项目，系统会自动处理合并
+  - 完成后调用 task_evaluate 评估
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true

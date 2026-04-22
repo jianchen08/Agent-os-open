@@ -1,4 +1,4 @@
-﻿"""
+"""
 增强版 Bash 命令执行工具
 
 暴露接口：
@@ -16,6 +16,7 @@ import time
 from typing import Any, ClassVar
 
 from tools.builtin.base import BuiltinTool
+from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,
@@ -121,7 +122,7 @@ class SecurityChecker:
         return True, False, None
 
 
-class BashTool(BuiltinTool):
+class BashTool(BuiltinTool, WorkspaceAwareMixin):
     """
     增强版 Bash 命令执行工具
 
@@ -230,10 +231,12 @@ class BashTool(BuiltinTool):
                 "wget",
             ],
             tags=["bash", "shell", "command", "dangerous", "interactive", "long-running"],
+            injected_params=["workspace", "project_root"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行工具"""
+        self._init_workspace(inputs)
         action = inputs.get("action", BashAction.EXECUTE)
 
         # 根据 action 分发到不同处理器
@@ -275,7 +278,8 @@ class BashTool(BuiltinTool):
         warning = message if needs_warning else None
 
         timeout = inputs.get("timeout", self.timeout)
-        working_dir = inputs.get("working_dir")
+        wd = self.get_working_dir(inputs)
+        working_dir = str(wd) if wd else None
 
         # 隔离决策由上层 IsolationCoordinator 统一处理
         # bash 工具只负责执行命令，不再自己决定是否隔离

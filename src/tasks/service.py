@@ -135,7 +135,7 @@ class TaskService:
         # 触发状态变更回调（PENDING 状态）
         if self._on_state_change:
             try:
-                self._on_state_change(task.id, "", task.status.value)
+                self._on_state_change(task.id, "", task.status.value, task=task)
             except Exception as e:
                 logger.warning("State change callback failed: %s", e)
                 
@@ -164,12 +164,15 @@ class TaskService:
         logger.info("Task started: %s", task_id)
         return task
 
-    def complete_evaluation(self, task_id: str, passed: bool) -> TaskModel:
+    def complete_evaluation(
+        self, task_id: str, passed: bool, result: Any = None,
+    ) -> TaskModel:
         """完成评估（evaluating → completed / failed）。
 
         Args:
             task_id: 任务 ID
             passed: 评估是否通过
+            result: 评估结果数据（可选）
 
         Returns:
             更新后的 TaskModel
@@ -181,10 +184,10 @@ class TaskService:
         task = self._get_or_raise(task_id)
         target = TaskStatus.COMPLETED if passed else TaskStatus.FAILED
         self._transition_with_callback(task, target)
-        # 完成时设置 completed_at
-        if passed:
-            task.completed_at = datetime.now().isoformat()
-            self._storage.save(task)
+        task.completed_at = datetime.now().isoformat()
+        if result is not None:
+            task.result = result
+        self._storage.save(task)
         logger.info(
             "Task %s evaluation: %s", task_id,
             "passed" if passed else "failed",
@@ -415,6 +418,90 @@ class TaskService:
         """
         return self._storage.list_by_parent(parent_id)
 
+    def list_all(self, limit: int = 50, reverse: bool = True) -> list[TaskModel]:
+        """列出所有任务。
+
+        Args:
+            limit: 返回数量限制
+            reverse: 是否按创建时间倒序
+
+        Returns:
+            任务列表
+        """
+        all_tasks = list(self._storage._tasks.values()) if hasattr(self._storage, '_tasks') else self._storage.list_all()
+        all_tasks.sort(key=lambda t: t.created_at, reverse=reverse)
+        return all_tasks[:limit]
+
+    def can_transition(self, task_id: str, target_status: TaskStatus) -> bool:
+        """检查任务是否可以转换到目标状态。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态
+
+        Returns:
+            是否可以转换，任务不存在时返回 False
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return False
+        return self._state_machine.can_transition(task.status, target_status)
+
+    def get_valid_transitions(self, task_id: str) -> list[str]:
+        """获取任务可转换的目标状态列表。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            可转换状态值列表，任务不存在时返回空列表
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return []
+        return [s.value for s in self._state_machine.TRANSITIONS.get(task.status, [])]
+
+    def force_transition(self, task_id: str, target_status: TaskStatus) -> TaskModel:
+        """强制转换任务状态（含回调通知）。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, target_status)
+        return task
+
+    def delete_task(self, task_id: str) -> bool:
+        """删除任务。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            是否删除成功
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return False
+        self._storage.delete(task_id)
+        return True
+
+    def save_task(self, task: TaskModel) -> None:
+        """保存任务（供外部更新后调用）。
+
+        Args:
+            task: 任务模型
+        """
+        self._storage.save(task)
+
     # ── 进度 ─────────────────────────────────────────────
 
     def get_progress(self, parent_id: str) -> float:
@@ -451,10 +538,14 @@ class TaskService:
         self._state_machine.transition(task, target_status)
         self._storage.save(task)
 
-        # 触发状态变更回调
         if self._on_state_change:
             try:
-                self._on_state_change(task.id, old.value, target_status.value)
+                self._on_state_change(
+                    task.id,
+                    old.value,
+                    target_status.value,
+                    task=task,
+                )
             except Exception as e:
                 logger.warning("State change callback failed: %s", e)
 

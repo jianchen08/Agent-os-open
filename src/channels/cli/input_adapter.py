@@ -88,7 +88,8 @@ class CLIInputAdapter(IInputAdapter):
                 - _inline_extras: 行内快捷语法解析结果
         """
         try:
-            user_input = self._read_multiline()
+            loop = asyncio.get_running_loop()
+            user_input = await loop.run_in_executor(None, self._read_multiline)
         except (EOFError, KeyboardInterrupt):
             return {
                 "user_input": "",

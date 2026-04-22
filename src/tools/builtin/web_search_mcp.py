@@ -61,6 +61,7 @@ class WebSearchMCPConfig:
     max_query_budget: int = 32000
     max_result_length: int = 8000
     search_timeout: int = 8
+    mcp_overall_timeout: float = 135.0
 
 
 class WebSearchMCPTool:
@@ -83,7 +84,6 @@ class WebSearchMCPTool:
     def __init__(self, config: WebSearchMCPConfig | None = None):
         """初始化搜索工具"""
         self.config = config or WebSearchMCPConfig()
-        self.loader = MCPToolLoader()
 
     def _build_server_config(self) -> MCPServerConfig:
         """构建 MCP 服务器配置"""
@@ -111,8 +111,8 @@ class WebSearchMCPTool:
         )
 
     async def cleanup(self):
-        """清理资源"""
-        await self.loader.disconnect_all()
+        """清理资源（保留接口兼容，不再持有共享 loader）"""
+        pass
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -169,7 +169,17 @@ class WebSearchMCPTool:
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        """执行搜索"""
+        """执行搜索
+
+        BUG-FIX-fix_20260418_mcp_connection_conflict
+        问题根因: self.loader 是全局单例共享的 MCPToolLoader，当 LLM 一次返回多个
+                  web_search tool_calls 时，tool_core 串行调用 execute()，
+                  但所有调用共享同一个 MCP 子进程的 stdin/stdout，
+                  导致 readuntil() 并发冲突，所有调用都失败
+        修复方案: 每次 execute() 创建独立的 MCPToolLoader 实例，
+                  调用完毕后立即关闭连接，完全隔离 MCP 连接
+        影响范围: 所有 web_search MCP 工具调用
+        """
         query = inputs.get("query", "").strip()
         if not query:
             return create_failure_result(
@@ -183,50 +193,54 @@ class WebSearchMCPTool:
 
         server_config = self._build_server_config()
 
+        # BUG-FIX: 每次调用创建独立 loader，避免共享 MCP 连接的并发冲突
+        loader = MCPToolLoader()
         try:
-            try:
+            return await self._do_search(loader, server_config, query, max_results, search_mode)
+        finally:
+            await loader.disconnect_all()
 
-                async def _call_mcp_tool() -> Any:
-                    """通过 MCPToolLoader 统一调用（自动检测连接 + 失败重连）"""
-                    if search_mode in ("full", "summary"):
-                        num_results = (
-                            max_results
-                            if search_mode == "full"
-                            else min(max_results, 5)
-                        )
-                        return await self.loader.call_tool(
-                            server_config,
-                            "webgate_query",
-                            {
-                                "queries": query,
-                                "num_results_per_query": num_results,
-                            },
-                            timeout=60.0,
-                        )
-                    elif search_mode == "content_only":
-                        return await self.loader.call_tool(
-                            server_config,
-                            "webgate_fetch",
-                            {
-                                "url": query,
-                                "max_chars": self.config.max_query_budget,
-                            },
-                            timeout=60.0,
-                        )
-                    else:
-                        return None
-
-                result = await asyncio.wait_for(_call_mcp_tool(), timeout=90.0)
-
-                if result is None:
-                    return create_failure_result(
-                        error=f"Unsupported search mode: {search_mode}",
-                        error_code="INVALID_MODE",
-                    )
-            except TimeoutError:
+    async def _do_search(
+        self,
+        loader: MCPToolLoader,
+        server_config: MCPServerConfig,
+        query: str,
+        max_results: int,
+        search_mode: str,
+    ) -> ToolResult:
+        """使用独立 loader 执行实际搜索"""
+        try:
+            if search_mode in ("full", "summary"):
+                num_results = (
+                    max_results
+                    if search_mode == "full"
+                    else min(max_results, 5)
+                )
+                result = await loader.call_tool(
+                    server_config,
+                    "webgate_query",
+                    {
+                        "queries": query,
+                        "num_results_per_query": num_results,
+                    },
+                    timeout=60.0,
+                    overall_timeout=self.config.mcp_overall_timeout,
+                )
+            elif search_mode == "content_only":
+                result = await loader.call_tool(
+                    server_config,
+                    "webgate_fetch",
+                    {
+                        "url": query,
+                        "max_chars": self.config.max_query_budget,
+                    },
+                    timeout=60.0,
+                    overall_timeout=self.config.mcp_overall_timeout,
+                )
+            else:
                 return create_failure_result(
-                    error=f"Web 搜索超时（90秒），MCP 服务器可能无响应 | query={query}",
-                    error_code="MCP_TIMEOUT",
+                    error=f"Unsupported search mode: {search_mode}",
+                    error_code="INVALID_MODE",
                 )
 
             parsed_result = self._extract_mcp_content(result)
@@ -301,6 +315,40 @@ class WebSearchMCPTool:
 
         return result
 
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """规范化 URL：去除 trailing slash、统一小写"""
+        return url.rstrip("/").lower()
+
+    def _dedup_results(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """基于 URL 和内容前缀去重，去重后重新计算连续 index"""
+        if not self.config.enable_dedup or not results:
+            return results
+
+        seen_urls: set[str] = set()
+        seen_snippets: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+
+        for item in results:
+            norm_url = self._normalize_url(item.get("url", ""))
+            snippet_prefix = item.get("snippet", "")[:200]
+
+            if norm_url and norm_url in seen_urls:
+                continue
+            if snippet_prefix and snippet_prefix in seen_snippets:
+                continue
+
+            if norm_url:
+                seen_urls.add(norm_url)
+            if snippet_prefix:
+                seen_snippets.add(snippet_prefix)
+            deduped.append(item)
+
+        for i, item in enumerate(deduped):
+            item["index"] = i
+
+        return deduped
+
     def _parse_webgate_result(
         self, result: dict[str, Any], query: str, search_mode: str
     ) -> dict[str, Any]:
@@ -351,6 +399,8 @@ class WebSearchMCPTool:
                     }
                 )
 
+            citation_results = self._dedup_results(citation_results)
+
             return {
                 "query": query,
                 "results": citation_results,
@@ -391,6 +441,8 @@ class WebSearchMCPTool:
                     }
                 )
 
+        formatted_results = self._dedup_results(formatted_results)
+
         stats = result.get("stats", {})
 
         return {
@@ -413,14 +465,11 @@ async def web_search_mcp(
     config = WebSearchMCPConfig(max_results=max_results)
 
     tool = WebSearchMCPTool(config)
-    try:
-        result = await tool.execute(
-            {
-                "query": query,
-                "max_results": max_results,
-                "search_mode": search_mode,
-            }
-        )
-        return result.data if result.success else {"error": result.error}
-    finally:
-        await tool.cleanup()
+    result = await tool.execute(
+        {
+            "query": query,
+            "max_results": max_results,
+            "search_mode": search_mode,
+        }
+    )
+    return result.data if result.success else {"error": result.error}

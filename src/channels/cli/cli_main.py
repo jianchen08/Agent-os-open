@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys as _sys
 import uuid as _uuid
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,75 @@ from pipeline.route import (
 )
 
 logger = logging.getLogger(__name__)
+
+_LOGGING_INITIALIZED = False
+
+def setup_logging(
+    debug: bool = False,
+    log_dir: Path | str | None = None,
+) -> None:
+    """初始化统一日志系统（终端 + 文件）。
+
+    在所有入口点调用一次即可。重复调用不会重复初始化。
+
+    Args:
+        debug: 是否启用 DEBUG 级别（终端也会显示管道内部日志）
+        log_dir: 日志目录路径，默认为项目根目录下的 logs/
+    """
+    global _LOGGING_INITIALIZED
+    if _LOGGING_INITIALIZED:
+        return
+    _LOGGING_INITIALIZED = True
+
+    if log_dir is None:
+        log_dir = _PROJECT_ROOT / "logs"
+    else:
+        log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_level = logging.DEBUG if debug else logging.INFO
+    log_format = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        datefmt="%H:%M:%S",
+    )
+
+    from logging.handlers import RotatingFileHandler
+
+    file_handler = RotatingFileHandler(
+        filename=log_dir / "agent_os.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt="%H:%M:%S"))
+    logging.getLogger().addHandler(file_handler)
+
+    logger.info(
+        "Logging initialized: console_level=%s, file=agent_os.log (DEBUG)",
+        "DEBUG" if debug else "INFO",
+    )
+
+    if not debug:
+        _console_handler = logging.getLogger().handlers[0]
+        _console_handler.addFilter(
+            lambda record: not any(
+                record.name.startswith(_ns)
+                for _ns in (
+                    "pipeline.chain", "pipeline.engine", "pipeline.config",
+                    "pipeline.registry", "httpcore", "httpx", "LiteLLM",
+                    "LiteLLM.proxy", "LiteLLM.router", "LiteLLM.litellm_logging",
+                    "LiteLLM.http_handler",
+                    "infrastructure", "tools.builtin", "tools.global_registry",
+                    "plugins.core", "plugins.input", "plugins.output",
+                    "evaluation", "tasks", "memory",
+                    "__main__",
+                )
+            ) or record.levelno >= logging.WARNING
+        )
 
 # 默认管道配置路径（相对于包目录）
 # 默认管道配置路径 -- 优先项目根目录的 config/，回退到 src/config/
@@ -144,9 +214,7 @@ class CLIApplication:
         # 事件总线（用于接收子任务完成通知）
         from pipeline.event_bus import EventBus
         self._event_bus = EventBus()
-        # 设置为全局事件总线，供 task_evaluate 使用
-        import sys
-        sys._agent_os_event_bus = self._event_bus
+        _sys._agent_os_event_bus = self._event_bus
 
     def setup_pipeline(self, config_path: str | Path | None = None) -> None:
         """设置真实管道配置（从 YAML 加载 LLMCore + ToolCore + Output 插件）。
@@ -190,8 +258,8 @@ class CLIApplication:
             logger.error("Failed to load pipeline config: %s", exc)
             raise
 
-        # 构建插件注册表
-        self._plugin_registry = build_plugin_registry(pipeline_config)
+        # 构建插件注册表（传入 model_loader 以支持从 llm.yaml defaults 读取默认模型）
+        self._plugin_registry = build_plugin_registry(pipeline_config, model_loader=model_loader)
 
         # 使用配置中的路由表
         self._input_route_table = pipeline_config.input_route_table
@@ -219,6 +287,17 @@ class CLIApplication:
                 except Exception as exc:
                     logger.warning("register_core_tools failed: %s", exc)
                 tool_core.register_tools_from_registry(tool_registry)
+
+            # BUG-FIX-fix_20260419_isolation_executor_not_injected:
+            # 初始化隔离执行器并注入到 ToolCore，使工具能够在 Docker 容器中执行
+            # 之前 IsolationExecutor 从未被实例化，导致 IsolationGuard 的容器隔离决策无法生效
+            try:
+                from src.isolation.executor import IsolationExecutor
+                isolation_executor = IsolationExecutor()
+                tool_core.set_isolation_executor(isolation_executor)
+                logger.info("IsolationExecutor 已注入到 ToolCore")
+            except Exception as exc:
+                logger.warning("IsolationExecutor 初始化失败: %s，工具将在宿主机执行", exc)
 
         for candidate in ["default", "lingxi"]:
             self._agent_config = agent_registry.get(candidate)
@@ -260,9 +339,29 @@ class CLIApplication:
                 event_bus=self._event_bus,
             )
             logger.info("Task worker initialized")
+
+            _prt = self._input_route_table
+            _ort = self._output_route_table
+            _pr = self._plugin_registry
+            _svc = self._services
+
+            def _eval_pipeline_factory():
+                return PipelineEngine(
+                    input_route_table=_prt,
+                    output_route_table=_ort,
+                    plugin_registry=_pr,
+                    services=_svc,
+                )
+
+            _sys._agent_os_pipeline_factory = _eval_pipeline_factory
         except Exception as exc:
             logger.warning("Failed to initialize task worker: %s", exc)
             self._task_worker = None
+            console = self._output_adapter.console
+            console.print(
+                f"[bold red]⚠ 任务执行器初始化失败: {exc}[/bold red]\n"
+                "[dim]任务提交功能将不可用，请检查日志排查原因[/dim]"
+            )
 
         logger.info("Real pipeline setup complete: name=%s", pipeline_config.name)
 
@@ -292,7 +391,13 @@ class CLIApplication:
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
+            import sys as _sys_local
+            _sys_local._agent_os_tool_registry = tool_registry
             logger.info("Service created: tool_registry (%d basic tools registered)", tool_registry.count())
+
+            from tools.auto_loader import init_tool_auto_loader
+            init_tool_auto_loader(tool_registry)
+            logger.info("ToolAutoLoader initialized with service registry")
         except Exception as exc:
             logger.warning("Failed to create tool_registry service: %s", exc)
 
@@ -432,7 +537,7 @@ class CLIApplication:
                 data_dir=str(_PROJECT_ROOT / "data" / "pipelines")
             )
             services["execution_record_storage"] = execution_record_storage
-            sys._agent_os_execution_record_storage = execution_record_storage
+            _sys._agent_os_execution_record_storage = execution_record_storage
             logger.info("Service created: execution_record_storage")
         except Exception as exc:
             logger.warning("Failed to create execution_record_storage service: %s", exc)
@@ -448,23 +553,45 @@ class CLIApplication:
                 if event_bus_ref is None:
                     return
                 try:
+                    task_obj = kwargs.get("task")
+                    task_info = None
+                    if task_obj and hasattr(task_obj, "title"):
+                        task_info = {
+                            "title": getattr(task_obj, "title", ""),
+                            "error": getattr(task_obj, "error", "") or "",
+                            "parent_task_id": getattr(task_obj, "parent_task_id", ""),
+                            "priority": getattr(task_obj, "priority", ""),
+                            "agent_name": getattr(task_obj, "agent_name", ""),
+                        }
                     import asyncio
-                    asyncio.create_task(event_bus_ref.emit("task_state_changed", {
+                    event_data = {
                         "task_id": task_id,
                         "old_status": old_status,
                         "new_status": new_status,
                         "source": "task_service",
-                    }))
+                    }
+                    if task_info is not None:
+                        event_data["task"] = task_info
+                    asyncio.create_task(event_bus_ref.emit("task_state_changed", event_data))
                 except Exception:
                     pass
 
             task_service = TaskService(on_state_change=_on_task_state_change)
             services["task_service"] = task_service
-            import sys
-            sys._agent_os_task_service = task_service
+            _sys._agent_os_task_service = task_service
             logger.info("Service created: task_service (with state change callback)")
         except Exception as exc:
             logger.warning("Failed to create task_service: %s", exc)
+
+        # 9b. TimerManager — 任务超时计时器
+        try:
+            from tasks.timer_manager import TimerManager
+            timer_manager = TimerManager.get_instance()
+            services["timer_manager"] = timer_manager
+            logger.info("Service created: timer_manager (idle_threshold=%ds)",
+                        timer_manager.idle_threshold)
+        except Exception as exc:
+            logger.warning("Failed to create timer_manager: %s", exc)
 
         # 10. EventBus — 事件总线（共享实例，供任务系统使用）
         services["event_bus"] = self._event_bus
@@ -472,6 +599,7 @@ class CLIApplication:
         # 10b. AgentRegistry — 供 TaskWorker 加载子 agent 配置
         if agent_registry is not None:
             services["agent_registry"] = agent_registry
+            _sys._agent_os_agent_registry = agent_registry
             logger.info("Service injected: agent_registry (%d agents)", len(agent_registry._configs))
         else:
             logger.warning("agent_registry not provided to _build_services, TaskWorker will not be able to load sub-agent configs")
@@ -501,6 +629,18 @@ class CLIApplication:
             logger.info("Service created: CLIInteractionNotifier -> HumanInteractionService")
         except Exception as exc:
             logger.warning("Failed to create CLIInteractionNotifier: %s", exc)
+
+        _sys._agent_os_services = services
+
+        from infrastructure.service_provider import get_service_provider
+        sp = get_service_provider()
+        for _sp_name in [
+            "task_service", "execution_record_storage",
+            "agent_registry", "event_bus",
+        ]:
+            _sp_inst = services.get(_sp_name)
+            if _sp_inst is not None:
+                sp.register(_sp_name, _sp_inst)
 
         return services
 
@@ -718,6 +858,32 @@ class CLIApplication:
                     except Exception:
                         pass
 
+            if final_statuses and self._engine:
+                try:
+                    summary_lines = []
+                    for tid, st in final_statuses.items():
+                        task_obj = ts.get_task(tid) if ts else None
+                        title = getattr(task_obj, "title", tid) if task_obj else tid
+                        summary_lines.append(f"- 任务 [{title}](id={tid}): {st}")
+                    summary_text = "\n".join(summary_lines)
+                    followup = (
+                        f"[系统通知] 以下子任务已到达终态，请向用户汇报最终结果：\n{summary_text}\n\n"
+                        "请用简洁的方式向用户汇报任务执行结果。"
+                    )
+                    followup_result = await self._engine.run(
+                        user_input=followup,
+                        agent_config=self._agent_config,
+                        conversation_history=None,
+                        streaming=False,
+                        auto_approve=True,
+                        interaction_mode="auto",
+                    )
+                    followup_raw = followup_result.get("raw_result", "")
+                    if followup_raw:
+                        console.print(f"\n[bold green]Agent:[/bold green] {followup_raw}")
+                except Exception as exc:
+                    logger.warning("run_single followup failed: %s", exc)
+
             elapsed_total = _time.time() - t0
             for tid in task_ids:
                 status = final_statuses.get(tid, "timeout")
@@ -803,8 +969,29 @@ class CLIApplication:
             except Exception as exc:
                 logger.debug("Failed to restore session checkpoint: %s", exc)
 
+        # BUG-FIX-fix_20260418_session_pipeline_id:
+        # 回退：当 session_pipeline_id 对应的检查点不存在时（如旧版本遗留的不匹配 ID），
+        # 尝试从全局最新检查点恢复对话历史，优先使用 session_end 阶段的检查点。
+        if not restored and checkpoint_mgr is not None:
+            try:
+                fallback_checkpoint = await checkpoint_mgr.get_latest_any(phase="session_end")
+                if fallback_checkpoint is None:
+                    fallback_checkpoint = await checkpoint_mgr.get_latest_any()
+                if fallback_checkpoint is not None:
+                    fb_messages = fallback_checkpoint.get("state", {}).get("messages", [])
+                    fb_pipeline_id = fallback_checkpoint.get("metadata", {}).get("pipeline_id")
+                    if isinstance(fb_messages, list) and fb_messages and fb_pipeline_id:
+                        conversation_history = fb_messages
+                        session_pipeline_id = fb_pipeline_id
+                        restored = True
+                        logger.info("Restored from fallback checkpoint: pipeline_id=%s", fb_pipeline_id)
+            except Exception as exc:
+                logger.debug("Fallback restoration failed: %s", exc)
+
         if not restored:
             session_pipeline_id = _uuid.uuid4().hex[:12]
+            _save_session_id(session_dir, session_pipeline_id)
+        else:
             _save_session_id(session_dir, session_pipeline_id)
 
         # Trim to MAX_SESSION_MESSAGES after restoration
@@ -977,10 +1164,23 @@ class CLIApplication:
                 on_chunk = self._build_on_chunk_callback(console)
 
             # 更新状态栏：处理中
-            self._output_adapter.update_status_bar(is_processing=True)
+            task_stats = self._get_task_stats()
+            self._output_adapter.update_status_bar(
+                is_processing=True,
+                pipeline_running=True,
+                pipeline_iteration=0,
+                pipeline_max_iterations=self._engine.max_iterations if self._engine else 0,
+                running_task_count=task_stats["running"],
+                pending_task_count=task_stats["pending"],
+                completed_task_count=task_stats["completed"],
+                failed_task_count=task_stats["failed"],
+            )
             self._output_adapter.render_status_bar()
 
             # 执行管道 — 通过 Engine.run() 直接调用
+            # BUG-FIX-fix_20260418_session_pipeline_id:
+            # 传入 session_pipeline_id 使引擎自动检查点与会话恢复使用同一 ID，
+            # 避免 session_pipeline_id 和 PipelineEngine._pipeline_id 不一致导致恢复失败。
             try:
                 final_state = await self._engine.run(
                     user_input=user_input,
@@ -991,6 +1191,7 @@ class CLIApplication:
                         "on_chunk": on_chunk,
                         "auto_approve": (self._interaction_mode == "auto"),
                         "interaction_mode": self._interaction_mode,
+                        "pipeline_id": session_pipeline_id,
                     },
                 )
 
@@ -1037,15 +1238,33 @@ class CLIApplication:
 
                 # 更新状态栏
                 ctx_pct = self._estimate_context_pct(conversation_history)
+                task_stats = self._get_task_stats()
+                iteration = final_state.get("iteration", 0)
+                max_iterations = final_state.get("max_iterations", 0)
                 self._output_adapter.update_status_bar(
                     turn_count=self._turn_count,
                     context_pct=ctx_pct,
                     is_processing=False,
+                    pipeline_running=False,
+                    pipeline_iteration=iteration,
+                    pipeline_max_iterations=max_iterations,
+                    running_task_count=task_stats["running"],
+                    pending_task_count=task_stats["pending"],
+                    completed_task_count=task_stats["completed"],
+                    failed_task_count=task_stats["failed"],
                 )
 
             except Exception as exc:
                 await self._output_adapter.send({"error": str(exc)})
-                self._output_adapter.update_status_bar(is_processing=False)
+                task_stats = self._get_task_stats()
+                self._output_adapter.update_status_bar(
+                    is_processing=False,
+                    pipeline_running=False,
+                    running_task_count=task_stats["running"],
+                    pending_task_count=task_stats["pending"],
+                    completed_task_count=task_stats["completed"],
+                    failed_task_count=task_stats["failed"],
+                )
 
             # 管道结束后换行分隔
             console.print("")
@@ -1114,9 +1333,13 @@ class CLIApplication:
     def _build_on_chunk_callback(self, console: Console) -> Any:
         """构建流式输出的 on_chunk 回调。
 
-        根据 _show_thinking 设置决定是否显示推理过程。
-        思考内容由 LLMCore 提取后以 type='thinking' 的 chunk 传递，
-        本回调仅负责显示控制。
+        处理五种 chunk 类型：
+        - type='text': 正常回复内容，逐 token 输出
+        - type='thinking': 思考过程内容，根据 show_thinking 决定是否显示
+        - type='tool_call': LLM 返回工具调用，实时显示工具名称
+        - type='tool_result': 工具执行完成，显示执行结果
+        - type='tool_start': 工具开始执行，显示执行中指示
+        - type='iteration': 管道迭代进度，更新状态栏
 
         Args:
             console: rich Console 实例
@@ -1124,61 +1347,111 @@ class CLIApplication:
         Returns:
             on_chunk 回调函数
         """
-        def on_chunk(chunk: dict[str, Any]) -> None:
-            """流式回调：逐 token 输出到终端。
+        _displayed_tool_indices: set[int] = set()
 
-            接收两种 chunk 类型：
-            - type='text': 正常回复内容，始终输出
-            - type='thinking': 思考过程内容，根据 show_thinking 决定是否显示
-            """
+        def on_chunk(chunk: dict[str, Any]) -> None:
+            """流式回调：将管道事件实时输出到终端。"""
             chunk_type = chunk.get("type", "text")
             content = chunk.get("content", "")
-            if not content:
-                return
 
             if chunk_type == "thinking":
-                if self._show_thinking:
+                if self._show_thinking and content:
                     console.print(content, end="", highlight=False)
                 return
 
             if chunk_type == "text":
-                console.print(content, end="", highlight=False)
+                if content:
+                    console.print(content, end="", highlight=False)
+                return
+
+            if chunk_type == "tool_call":
+                tool_calls_data = chunk.get("tool_calls", [])
+                for tc in tool_calls_data:
+                    tc_idx = getattr(tc, "index", 0)
+                    if tc_idx in _displayed_tool_indices:
+                        continue
+                    func = getattr(tc, "function", None)
+                    if func:
+                        name = getattr(func, "name", "")
+                        if name:
+                            _displayed_tool_indices.add(tc_idx)
+                            args_str = getattr(func, "arguments", "")
+                            try:
+                                import json as _json
+                                args = _json.loads(args_str) if args_str else {}
+                            except Exception:
+                                args = {}
+                            self._output_adapter.show_tool_call(name, args)
+                return
+
+            if chunk_type == "tool_start":
+                tool_name = chunk.get("tool_name", "unknown")
+                console.print(
+                    f"  [dim yellow]>> 执行 {tool_name}...[/dim yellow]"
+                )
+                return
+
+            if chunk_type == "tool_result":
+                tool_name = chunk.get("tool_name", "unknown")
+                result = chunk.get("result", "")
+                success = chunk.get("success", True)
+                duration_ms = chunk.get("duration_ms", 0)
+                self._output_adapter.show_tool_result(
+                    tool_name, result, success=success, duration_ms=duration_ms
+                )
+                return
+
+            if chunk_type == "iteration":
+                iteration = chunk.get("iteration", 0)
+                max_iterations = chunk.get("max_iterations", 0)
+                self._output_adapter.update_status_bar(
+                    pipeline_iteration=iteration,
+                    pipeline_max_iterations=max_iterations,
+                    pipeline_running=True,
+                )
+                self._output_adapter.render_status_bar()
                 return
 
         return on_chunk
 
     def _display_tool_calls_from_state(self, state: dict[str, Any]) -> None:
-        """从管道最终 state 中显示工具调用信息。
+        """从管道最终 state 中显示工具调用信息（非流式模式的兜底显示）。
+
+        流式模式下工具调用已通过 on_chunk 实时显示，此方法仅显示
+        迭代信息等补充内容，避免重复显示。
 
         Args:
             state: 管道引擎的最终 state 字典
         """
-        # 工具调用结果
-        tool_results = state.get("tool_results")
-        if tool_results and isinstance(tool_results, list):
-            for tr in tool_results:
-                if isinstance(tr, dict):
-                    tool_name = tr.get("name", tr.get("tool_name", "unknown"))
-                    result = tr.get("result", tr.get("output", ""))
-                    success = not tr.get("error")
-                    self._output_adapter.show_tool_result(tool_name, str(result), success=success)
+        if not self._streaming:
+            tool_results = state.get("tool_results")
+            if tool_results and isinstance(tool_results, list):
+                for tr in tool_results:
+                    if isinstance(tr, dict):
+                        tool_name = tr.get("tool_name", "unknown")
+                        data = tr.get("data", tr.get("error", ""))
+                        success = tr.get("success", True)
+                        duration_ms = tr.get("duration_ms", 0)
+                        self._output_adapter.show_tool_call(tool_name)
+                        self._output_adapter.show_tool_result(
+                            tool_name, str(data), success=success,
+                            duration_ms=duration_ms,
+                        )
 
-        # 原始工具调用记录
-        raw_tool_calls = state.get("raw_tool_calls")
-        if raw_tool_calls and isinstance(raw_tool_calls, list):
-            for tc in raw_tool_calls:
-                if isinstance(tc, dict):
-                    func = tc.get("function", {})
-                    name = func.get("name", "unknown")
-                    args_str = func.get("arguments", "")
-                    try:
-                        import json
-                        args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    self._output_adapter.show_tool_call(name, args)
+            raw_tool_calls = state.get("raw_tool_calls")
+            if raw_tool_calls and isinstance(raw_tool_calls, list):
+                for tc in raw_tool_calls:
+                    if isinstance(tc, dict):
+                        func = tc.get("function", {})
+                        name = func.get("name", tc.get("name", "unknown"))
+                        args_str = func.get("arguments", tc.get("args", ""))
+                        try:
+                            import json
+                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                        self._output_adapter.show_tool_call(name, args)
 
-        # 迭代信息
         iteration = state.get("iteration", 0)
         max_iterations = state.get("max_iterations", 0)
         if iteration and max_iterations and iteration > 1:
@@ -1196,6 +1469,28 @@ class CLIApplication:
             if hasattr(self._agent_config, "config_id"):
                 return self._agent_config.config_id
         return "unknown"
+
+    def _get_task_stats(self) -> dict[str, int]:
+        """收集任务状态统计。
+
+        从 TaskService 中获取各状态的任务数量。
+
+        Returns:
+            包含 running/pending/completed/failed 计数的字典
+        """
+        stats = {"running": 0, "pending": 0, "completed": 0, "failed": 0}
+        task_service = self._services.get("task_service")
+        if task_service is None:
+            return stats
+        try:
+            from tasks.types import TaskStatus
+            stats["running"] = len(task_service.list_by_status(TaskStatus.RUNNING))
+            stats["pending"] = len(task_service.list_by_status(TaskStatus.PENDING))
+            stats["completed"] = len(task_service.list_by_status(TaskStatus.COMPLETED))
+            stats["failed"] = len(task_service.list_by_status(TaskStatus.FAILED))
+        except Exception as exc:
+            logger.debug("Failed to collect task stats: %s", exc)
+        return stats
 
     def _estimate_context_pct(self, history: list[dict[str, Any]]) -> float:
         """估算上下文占用百分比。
@@ -1244,24 +1539,7 @@ def main() -> None:
     parser.add_argument("--message", "-m", type=str, default=None, help="直接发送消息（非交互模式）")
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    # CLI 模式下抑制管道内部日志（除非 --debug）
-    if not args.debug:
-        for _ns in ("pipeline.chain", "pipeline.engine", "pipeline.config",
-                     "pipeline.registry", "httpcore", "httpx", "LiteLLM",
-                     "LiteLLM.proxy", "LiteLLM.router", "LiteLLM.litellm_logging",
-                     "LiteLLM.http_handler",
-                     "infrastructure", "tools.builtin", "tools.global_registry",
-                     "plugins.core", "plugins.input", "plugins.output",
-                     "evaluation", "tasks", "memory",
-                     "__main__"):
-            logging.getLogger(_ns).setLevel(logging.WARNING)
+    setup_logging(debug=args.debug)
 
     streaming = not args.no_streaming
     app = CLIApplication(streaming=streaming)

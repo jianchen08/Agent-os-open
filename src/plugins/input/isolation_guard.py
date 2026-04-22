@@ -38,8 +38,6 @@ class IsolationGuard(IInputPlugin):
 
     error_policy = ErrorPolicy.SKIP
 
-    _HOST_ONLY_CATEGORIES = {"system", "task", "memory"}
-
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化隔离环境守卫插件。
 
@@ -52,6 +50,11 @@ class IsolationGuard(IInputPlugin):
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
         self._docker_available = self._config.get("docker_available", False)
+        if not self._docker_available:
+            logger.warning(
+                "[%s] docker_available=False, tool isolation will be degraded to host execution",
+                self.name,
+            )
         self._force_host = self._config.get("force_host", False)
         self._decider = IsolationDecider()
         self._enabled_by_agent: bool = True
@@ -95,7 +98,7 @@ class IsolationGuard(IInputPlugin):
 
         execution_contexts = []
         for tc in tool_calls:
-            tool_name = tc.get("function", {}).get("name", "")
+            tool_name = tc.get("name", "")
             context = self._decide_isolation(tool_name, ctx)
             execution_contexts.append(context)
 
@@ -243,9 +246,11 @@ class IsolationGuard(IInputPlugin):
             return {}
 
         try:
-            task_service = ctx._services.get("task_service")
-            if task_service is None:
-                return {}
+            task_service = ctx.get_service("task_service")
+        except KeyError:
+            return {}
+
+        try:
             task = task_service.get_task(task_id)
             if task and task.metadata:
                 return task.metadata

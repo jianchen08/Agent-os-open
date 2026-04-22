@@ -1,0 +1,48 @@
+.lobe-chat-isolated {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.lobe-chat-isolated * {
+  box-sizing: border-box;
+}
+
+.lobe-chat-isolated p {
+  margin: 0;
+}
+
+.lobe-chat-isolated pre {
+  margin: 0.5em 0;
+}
+
+.lobe-chat-isolated code {
+  font-family: inherit;
+}
+
+.lobe-chat-isolated table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  margin: 0.5rem 0;
+}
+
+.lobe-chat-isolated thead {
+  background-color: hsl(var(--muted));
+}
+
+.lobe-chat-isolated th {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+}
+
+.lobe-chat-isolated td {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+}

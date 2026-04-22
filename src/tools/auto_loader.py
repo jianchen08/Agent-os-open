@@ -93,7 +93,11 @@ class ToolAutoLoader:
             self._loading.discard(tool_name)
 
     async def _load_from_database(self, tool_name: str) -> Tool | None:
-        """从数据库加载工具"""
+        """从数据库加载工具。
+
+        加载成功后注册到 ToolRegistry 并标记为动态工具，
+        以便 ToolSchemaPlugin 在下一轮将其 schema 注入给 LLM。
+        """
         if not self._db_session:
             return None
 
@@ -116,8 +120,15 @@ class ToolAutoLoader:
             # 创建通用执行器
             handler = self._create_db_handler(tool_name, db_tool)
 
+            # 检查是否为首次加载（非已注册工具）
+            is_new = not self._registry.has(tool_name)
+
             # 注册工具
             self._registry.register_with_handler(tool, handler)
+
+            # 首次加载时标记为动态工具
+            if is_new:
+                self._registry.mark_dynamic(tool_name)
 
             # 缓存使用指南
             self._cache_tool_guide(tool_name, db_tool)
@@ -198,7 +209,11 @@ class ToolAutoLoader:
         self._tool_guides[tool_name] = "\n\n".join(guide_parts)
 
     async def _load_from_python_code(self, tool_name: str) -> Tool | None:
-        """从 Python 代码动态加载工具（使用文件索引加速查找）"""
+        """从 Python 代码动态加载工具（使用文件索引加速查找）。
+
+        加载成功后注册到 ToolRegistry 并标记为动态工具，
+        以便 ToolSchemaPlugin 在下一轮将其 schema 注入给 LLM。
+        """
         if not self.TOOL_CODE_DIR.exists():
             return None
 
@@ -213,9 +228,18 @@ class ToolAutoLoader:
                 tool_instance = self._load_tool_from_file(indexed_path, tool_name)
                 if tool_instance:
                     tool_def: Tool = tool_instance.get_tool_definition()
+
+                    # 检查是否为首次加载
+                    is_new = not self._registry.has(tool_name)
+
                     self._registry.register_with_handler(
                         tool=tool_def, handler=tool_instance.execute,
                     )
+
+                    # 首次加载时标记为动态工具
+                    if is_new:
+                        self._registry.mark_dynamic(tool_name)
+
                     self._cache_python_guide(tool_name, tool_def)
                     return tool_def
             except Exception as e:
@@ -231,9 +255,17 @@ class ToolAutoLoader:
                 if tool_instance:
                     tool_def = tool_instance.get_tool_definition()
 
+                    # 检查是否为首次加载
+                    is_new = not self._registry.has(tool_name)
+
                     self._registry.register_with_handler(
                         tool=tool_def, handler=tool_instance.execute,
                     )
+
+                    # 首次加载时标记为动态工具
+                    if is_new:
+                        self._registry.mark_dynamic(tool_name)
+
                     self._cache_python_guide(tool_name, tool_def)
 
                     # 更新索引

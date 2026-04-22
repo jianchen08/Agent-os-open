@@ -11,8 +11,6 @@
 """
 
 from pipeline.types import (
-    AgentLevel,
-    TaskPriority,
     TargetType,
     StateKeys,
     RouteSignal,
@@ -41,8 +39,6 @@ from pipeline.config import PipelineConfig, load_pipeline_config, build_plugin_r
 
 __all__ = [
     # Types
-    "AgentLevel",
-    "TaskPriority",
     "TargetType",
     "StateKeys",
     "RouteSignal",

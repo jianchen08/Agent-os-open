@@ -35,6 +35,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
         self._subscribed = False
         self._event_bus: Any = None
         self._task_service: Any = None
+        self._current_task_id: str = ""
 
     @property
     def name(self) -> str:
@@ -60,6 +61,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
         """
         # 首次执行时订阅事件总线
         if not self._subscribed:
+            self._current_task_id = ctx.state.get("task_id", "")
             self._try_subscribe(ctx)
 
         if not self._pending_events:
@@ -68,14 +70,18 @@ class TaskEventReceiverPlugin(IInputPlugin):
         # 构建事件通知文本
         event_messages = []
         for event in self._pending_events:
+            parent_hint = ""
+            pid = event.get("parent_task_id", "")
+            if pid:
+                parent_hint = f" [容器 {pid}]"
             if event["type"] == "task_completed":
                 event_messages.append(
-                    f"[系统通知] 任务 '{event['title']}' 已完成"
+                    f"[系统通知] 任务 '{event['title']}' 已完成{parent_hint}"
                 )
             elif event["type"] == "task_failed":
                 error = event.get("error", "未知错误")
                 event_messages.append(
-                    f"[系统通知] 任务 '{event['title']}' 失败: {error}"
+                    f"[系统通知] 任务 '{event['title']}' 失败: {error}{parent_hint}"
                 )
 
         # 注入到 user_input
@@ -93,27 +99,18 @@ class TaskEventReceiverPlugin(IInputPlugin):
     def _try_subscribe(self, ctx: PluginContext) -> None:
         """尝试订阅事件总线。
 
-        优先通过 ctx.get_service 获取 EventBus，
-        回退到全局变量 sys._agent_os_event_bus。
+        通过 ctx.get_service 获取 EventBus 并订阅任务状态变更事件。
 
         Args:
             ctx: 插件执行上下文
         """
         event_bus = None
 
-        # 1. 尝试从服务注册表获取
+        # 通过服务注册表获取 EventBus
         try:
             event_bus = ctx.get_service("event_bus")
         except KeyError:
             pass
-
-        # 2. 回退到全局变量
-        if event_bus is None:
-            try:
-                import sys
-                event_bus = getattr(sys, "_agent_os_event_bus", None)
-            except Exception:
-                pass
 
         if event_bus is not None:
             try:
@@ -136,19 +133,45 @@ class TaskEventReceiverPlugin(IInputPlugin):
         终态（completed/failed）时将事件排入待处理队列，
         在下一轮管道迭代时注入到主 Agent 对话中。
 
+        仅接收 parent_task_id 与当前管道 task_id 匹配的事件，
+        避免并行管道之间的事件交叉污染。
+
         Args:
             data: 事件数据，包含 task_id, old_status, new_status, task 等信息
         """
         new_status = data.get("new_status")
 
-        # 只处理终态（TaskStatus.value 是小写）
         if new_status not in ("completed", "failed"):
             return
 
         task = data.get("task")
-        task_title = task.title if task and hasattr(task, "title") else "未知任务"
-        task_error = task.error if task and hasattr(task, "error") else ""
+
+        if isinstance(task, dict):
+            parent_id = task.get("parent_task_id", "")
+        elif task and hasattr(task, "parent_task_id"):
+            parent_id = getattr(task, "parent_task_id", "") or ""
+        else:
+            parent_id = ""
+
+        if self._current_task_id and parent_id != self._current_task_id:
+            logger.debug(
+                "[TaskEventReceiver] Skipping event: parent_id=%s != current=%s",
+                parent_id,
+                self._current_task_id,
+            )
+            return
+
         task_id = data.get("task_id", "")
+
+        if isinstance(task, dict):
+            task_title = task.get("title", "未知任务")
+            task_error = task.get("error", "")
+        elif task and hasattr(task, "title"):
+            task_title = task.title
+            task_error = getattr(task, "error", "") or ""
+        else:
+            task_title = "未知任务"
+            task_error = ""
 
         event = {
             "type": "task_completed" if new_status == "completed" else "task_failed",
@@ -156,9 +179,10 @@ class TaskEventReceiverPlugin(IInputPlugin):
             "title": task_title,
             "status": new_status,
             "error": task_error,
+            "parent_task_id": parent_id,
         }
         self._pending_events.append(event)
-        logger.info("[TaskEventReceiver] Queued event: %s for task %s", event["type"], task_id)
+        logger.info("[TaskEventReceiver] Queued event: %s for task %s (%s)", event["type"], task_id, task_title)
 
     def shutdown(self) -> None:
         """关闭插件，取消订阅。"""

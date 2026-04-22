@@ -69,6 +69,13 @@ system_prompt: |
   - 保留详细的操作日志
   - 异常情况及时上报
 
+  ## 工作空间
+
+  - 使用相对路径操作文件（如 src/module/file.py）
+  - 可运行测试验证代码（pytest、mypy 等）
+  - 修改不影响主项目，系统会自动处理合并
+  - 完成后调用 task_evaluate 评估
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true

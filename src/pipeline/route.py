@@ -91,19 +91,24 @@ class OutputRouteEntry:
     """输出路由条目。
 
     定义一个输出阶段的路由规则：当 route_type 和条件同时满足时，
-    该条目生效。
+    该条目生效。同时可通过 plugins 字段声明该条目关联的输出插件列表，
+    与 InputRouteEntry.plugins 对称，实现按 core_type 区分输出插件。
 
     Attributes:
+        name: 路由条目名称（标识用途）
         route_type: 匹配的路由信号类型
         condition: Python 布尔表达式字符串，空字符串视为始终匹配
         priority: 优先级，数值越小优先级越高
         target_core: 路由到核心插件时指定的核心类型
+        plugins: 该条目匹配时需要执行的输出插件名称列表
     """
 
-    route_type: str
+    name: str = ""
+    route_type: str = ""
     condition: str = ""
     priority: int = 0
     target_core: str | None = None
+    plugins: list[str] = field(default_factory=list)
 
 
 class InputRouteTable:
@@ -223,6 +228,49 @@ class OutputRouteTable:
         self.entries: list[OutputRouteEntry] = sorted(
             entries or [], key=lambda e: e.priority
         )
+
+    def resolve_plugins(self, state: dict[str, Any]) -> list[str]:
+        """根据 state 解析需要执行的 output 插件列表。
+
+        遍历所有条目，收集所有条件匹配的条目的插件列表。
+        插件列表去重保序，与 InputRouteTable.resolve_plugins() 对称。
+
+        当没有任何条目声明 plugins 字段时返回空列表，
+        调用方应回退到 registry.get_output_plugins() 获取全部插件。
+
+        Args:
+            state: 管道当前状态字典
+
+        Returns:
+            去重保序的插件名称列表；无匹配或无 plugins 声明时返回空列表
+        """
+        matched_entries = [
+            e for e in self.entries if _eval_condition(e.condition, state)
+        ]
+
+        if not matched_entries:
+            return []
+
+        seen: set[str] = set()
+        plugins: list[str] = []
+        for entry in matched_entries:
+            for plugin_name in entry.plugins:
+                if plugin_name not in seen:
+                    seen.add(plugin_name)
+                    plugins.append(plugin_name)
+
+        return plugins
+
+    def has_plugin_routing(self) -> bool:
+        """检查是否有任何条目声明了 plugins 字段。
+
+        用于调用方判断是否启用基于路由表的插件过滤，
+        还是回退到 registry 获取全部插件。
+
+        Returns:
+            存在声明 plugins 的条目时返回 True
+        """
+        return any(e.plugins for e in self.entries)
 
     def arbitrate(self, signals: list[RouteSignal], state: dict[str, Any]) -> RouteSignal:
         """仲裁输出路由信号。

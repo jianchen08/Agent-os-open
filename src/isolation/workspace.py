@@ -47,6 +47,7 @@ def resolve_workspace(
     task_workspace: str | None,
     parent_resolved_workspace: str | None = None,
     config_root: str | None = None,
+    nesting_mode: str = "nested",
 ) -> str:
     """统一解析任务的工作空间路径
 
@@ -56,14 +57,17 @@ def resolve_workspace(
       - 相对路径：config_root / task_workspace
       - 默认：config_root / task_id
     - 子任务（parent_resolved_workspace 有值）：
-      - 指定空间：parent_resolved_workspace / task_workspace
-      - 默认：parent_resolved_workspace / task_id
+      - nesting_mode="nested"（默认）：在父路径下创建独立子目录
+        - 指定空间：parent_resolved_workspace / task_workspace
+        - 默认：parent_resolved_workspace / task_id
+      - nesting_mode="shared"：子任务直接使用父 workspace 路径，不创建子目录
 
     Args:
         task_id: 当前任务 ID
         task_workspace: 当前任务 DB 中的 workspace 字段
         parent_resolved_workspace: 父任务已解析的工作空间路径（根任务时为 None）
         config_root: 工作空间根目录配置，默认从配置文件读取
+        nesting_mode: 子任务嵌套模式，"nested" 创建独立子目录，"shared" 共享父目录
 
     Returns:
         解析后的工作空间路径字符串
@@ -83,7 +87,39 @@ def resolve_workspace(
             return task_workspace
         return f"{root}/{task_workspace}"
     else:
+        # shared 模式：子任务直接复用父 workspace，不创建独立子目录
+        if nesting_mode == "shared":
+            logger.debug(
+                f"[resolve_workspace] shared 模式，子任务复用父工作空间 | "
+                f"task_id={task_id}, parent_workspace={parent_resolved_workspace}"
+            )
+            return parent_resolved_workspace
+
         if task_workspace:
+            # BUG-FIX-fix_20260420_workspace_abs_path:
+            # 问题根因: 子任务分支缺少绝对路径检查，当 task_workspace 是绝对路径(如
+            # D:\Jianguoyun\Agent os\.ai_workspaces\xxx)时，不以相对的 parent/root 前缀
+            # 开头，直接走到拼接逻辑，导致生成
+            # .ai_workspaces/parent/D:\Jianguoyun\Agent os\.ai_workspaces\xxx 这样的错误路径
+            # 修复方案: 增加绝对路径检查，与根任务分支(第76行)保持一致
+            if _is_absolute_path(task_workspace):
+                logger.debug(
+                    f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | "
+                    f"task_workspace={task_workspace}"
+                )
+                return task_workspace
+            if task_workspace.startswith(f"{parent_resolved_workspace}/") or task_workspace == parent_resolved_workspace:
+                logger.debug(
+                    f"[resolve_workspace] 子任务 task_workspace 已包含父路径前缀，直接返回 | "
+                    f"task_workspace={task_workspace}"
+                )
+                return task_workspace
+            if task_workspace.startswith(f"{root}/"):
+                logger.debug(
+                    f"[resolve_workspace] 子任务 task_workspace 已包含 root 前缀，直接返回 | "
+                    f"task_workspace={task_workspace}"
+                )
+                return task_workspace
             return f"{parent_resolved_workspace}/{task_workspace}"
         return f"{parent_resolved_workspace}/{task_id}"
 
@@ -92,6 +128,7 @@ async def resolve_workspace_chain(
     task_id: str,
     task_workspace: str | None,
     session,
+    nesting_mode: str = "nested",
 ) -> str:
     """递归解析任务工作空间路径（支持多层嵌套）
 
@@ -106,6 +143,7 @@ async def resolve_workspace_chain(
         task_id: 当前任务 ID
         task_workspace: 当前任务 DB 中的 workspace 字段
         session: 数据库会话（AsyncSession）
+        nesting_mode: 子任务嵌套模式，"nested" 创建独立子目录，"shared" 共享父目录
 
     Returns:
         解析后的工作空间路径字符串
@@ -126,7 +164,10 @@ async def resolve_workspace_chain(
         task_id=task.parent_task_id,
         task_workspace=None,
         session=session,
+        nesting_mode=nesting_mode,
     )
     return resolve_workspace(
-        task_id, task_workspace, parent_resolved_workspace=parent_workspace
+        task_id, task_workspace,
+        parent_resolved_workspace=parent_workspace,
+        nesting_mode=nesting_mode,
     )

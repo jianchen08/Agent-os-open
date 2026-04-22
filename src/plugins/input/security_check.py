@@ -143,6 +143,10 @@ class SecurityCheckPlugin(IInputPlugin):
             包含安全决策状态更新的插件执行结果。
             如果检查不通过，会设置 security.decision 为 blocked。
         """
+        # 幂等检查：如果已有安全决策则跳过，避免 YAML 继承场景下重复执行
+        if ctx.state.get("security.decision"):
+            return PluginResult()
+
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
@@ -189,9 +193,12 @@ class SecurityCheckPlugin(IInputPlugin):
                 decision = {"allowed": False, "reason": traversal_reason, "tool": tool_name}
                 return {"security.decision": decision}
 
-            # 2. 工作目录边界检查（内置，检查 6 个路径参数）
-            if self._workspace:
-                workspace_reason = self._check_workspace_boundary(args)
+            # 2. 工作目录边界检查（内置，优先从 state 动态获取 workspace）
+            # 动态获取 workspace：优先使用 state 中的值（支持 worktree 模式），
+            # 回退到配置中的静态值
+            workspace = ctx.state.get("workspace", self._workspace)
+            if workspace:
+                workspace_reason = self._check_workspace_boundary(args, workspace)
                 if workspace_reason:
                     logger.warning(
                         "[%s] Blocked out-of-workspace access | tool=%s | reason=%s",
@@ -421,61 +428,77 @@ class SecurityCheckPlugin(IInputPlugin):
         return ("", "")
 
     def _check_path_traversal(self, args: dict[str, Any]) -> str:
-        """检查路径遍历攻击（内置安全机制）。
+        """检查路径遍历攻击（增强版）。
 
         检测 ../ 等路径遍历模式，防止通过相对路径绕过工作目录限制。
-        使用 normpath 标准化后检查是否包含 .. 段，同时检测 URL 编码绕过。
-
-        Args:
-            args: 工具参数
-
-        Returns:
-            拦截原因字符串，空字符串表示通过
+        使用 Path.resolve() 解析绝对路径，同时检测 URL 编码绕过和符号链接。
         """
-        for key in self._path_params:
-            if key in args:
-                path = str(args[key])
-                # 使用 normpath 标准化后再检查
-                normalized = os.path.normpath(path)
-                # normpath 后如果路径以 .. 开头或包含 .. 分隔段，
-                # 说明存在路径遍历
-                parts = normalized.replace("\\", "/").split("/")
-                if ".." in parts:
-                    return f"Path traversal detected: {path}"
+        from pathlib import Path
 
-                # 检查编码绕过（URL 编码、双重编码等）
-                if "%" in path:
-                    try:
-                        decoded = urllib.parse.unquote(path)
-                        decoded_normalized = os.path.normpath(decoded)
-                        decoded_parts = decoded_normalized.replace("\\", "/").split("/")
-                        if ".." in decoded_parts:
-                            return f"Encoded path traversal detected: {path}"
-                    except Exception:
-                        pass
+        for key in self._path_params:
+            if key not in args:
+                continue
+
+            path = str(args[key])
+
+            # 1. 检查原始路径中的遍历模式
+            if ".." in path.replace("\\", "/"):
+                return f"Path traversal detected in raw path: {path}"
+
+            # 2. 使用 Path.resolve() 解析绝对路径（处理符号链接）
+            try:
+                resolved = Path(path).resolve()
+                if ".." in str(resolved):
+                    return f"Path traversal in resolved path: {path} -> {resolved}"
+            except (OSError, ValueError) as e:
+                return f"Invalid path: {path} ({e})"
+
+            # 3. 检查编码绕过（URL 编码、双重编码等）
+            if "%" in path:
+                try:
+                    decoded = urllib.parse.unquote(path)
+                    decoded2 = urllib.parse.unquote(decoded)
+                    if ".." in decoded.replace("\\", "/") or ".." in decoded2.replace("\\", "/"):
+                        return f"Encoded path traversal detected: {path}"
+                except Exception:
+                    pass
+
+            # 4. 检查空字节注入（Windows）
+            if "\x00" in path:
+                return f"Null byte injection detected: {path}"
 
         return ""
 
-    def _check_workspace_boundary(self, args: dict[str, Any]) -> str:
+    def _check_workspace_boundary(self, args: dict[str, Any], workspace: str | None = None) -> str:
         """检查文件操作是否在工作目录边界内（内置安全机制）。
 
         对绝对路径检查是否在 workspace 目录范围内，
-        使用 normpath 防止符号链接绕过。
+        使用 realpath 解析符号链接，防止通过符号链接绕过边界。
+
+        支持动态 workspace：优先使用传入的 workspace 参数（来自 state），
+        回退到实例属性 self._workspace（来自配置），确保 worktree 模式下
+        不会因路径与配置不一致而误判为越界。
 
         Args:
             args: 工具参数
+            workspace: 动态 workspace 路径（来自 state），为 None 时回退到配置值
 
         Returns:
             拦截原因字符串，空字符串表示通过
         """
+        # 动态获取 workspace：优先使用传入值，回退到配置值
+        effective_workspace = workspace or self._workspace
+        if not effective_workspace:
+            return ""
+
         for key in self._path_params:
             if key in args:
                 path = str(args[key])
                 if os.path.isabs(path):
-                    workspace_abs = os.path.abspath(self._workspace)
-                    # 使用 normpath 防止符号链接绕过
-                    real_path = os.path.normpath(path)
-                    if not real_path.startswith(workspace_abs):
+                    workspace_real = os.path.realpath(effective_workspace)
+                    # 使用 realpath 解析符号链接，防止通过符号链接绕过边界
+                    real_path = os.path.realpath(path)
+                    if not real_path.startswith(workspace_real):
                         return f"Path outside workspace: {path}"
 
         return ""

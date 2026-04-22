@@ -49,6 +49,8 @@ class MemoryReadPlugin(IInputPlugin):
                 - memory_type: 记忆类型（默认 semantic）
         """
         self._config = config or {}
+        self._top_k = self._config.get("top_k", 5)
+        self._memory_type = self._config.get("memory_type", "semantic")
         self._enabled_by_agent: bool = True
 
     @property
@@ -90,8 +92,8 @@ class MemoryReadPlugin(IInputPlugin):
 
         query = ctx.state.get("user_message", "")
         user_id = ctx.state.get("user_id")
-        top_k = self._config.get("top_k", 5)
-        memory_type = self._config.get("memory_type", "semantic")
+        top_k = self._top_k
+        memory_type = self._memory_type
 
         if not query:
             return PluginResult(state_updates={"memory.retrieved": []})
@@ -141,6 +143,6 @@ class MemoryReadPlugin(IInputPlugin):
 
         self._enabled_by_agent = True
         if "top_k" in config:
-            self._config["top_k"] = config["top_k"]
+            self._top_k = config["top_k"]
         if "memory_type" in config:
-            self._config["memory_type"] = config["memory_type"]
+            self._memory_type = config["memory_type"]

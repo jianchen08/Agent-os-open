@@ -81,6 +81,13 @@ class StatusBarRenderer:
         self.mode: str = "normal"
         self.task_count: int = 0
         self.is_processing: bool = False
+        self.pipeline_iteration: int = 0
+        self.pipeline_max_iterations: int = 0
+        self.pipeline_running: bool = False
+        self.running_task_count: int = 0
+        self.pending_task_count: int = 0
+        self.completed_task_count: int = 0
+        self.failed_task_count: int = 0
 
     def update(
         self,
@@ -91,6 +98,13 @@ class StatusBarRenderer:
         mode: str | None = None,
         task_count: int | None = None,
         is_processing: bool | None = None,
+        pipeline_iteration: int | None = None,
+        pipeline_max_iterations: int | None = None,
+        pipeline_running: bool | None = None,
+        running_task_count: int | None = None,
+        pending_task_count: int | None = None,
+        completed_task_count: int | None = None,
+        failed_task_count: int | None = None,
     ) -> None:
         """更新状态栏数据。
 
@@ -102,6 +116,13 @@ class StatusBarRenderer:
             mode: 交互模式 (normal/auto/plan)
             task_count: 任务数量
             is_processing: 是否正在处理
+            pipeline_iteration: 管道当前迭代次数
+            pipeline_max_iterations: 管道最大迭代次数
+            pipeline_running: 管道是否在运行循环中
+            running_task_count: 正在运行的任务数
+            pending_task_count: 等待中的任务数
+            completed_task_count: 已完成的任务数
+            failed_task_count: 已失败的任务数
         """
         if agent_name is not None:
             self.agent_name = agent_name
@@ -117,53 +138,111 @@ class StatusBarRenderer:
             self.task_count = task_count
         if is_processing is not None:
             self.is_processing = is_processing
+        if pipeline_iteration is not None:
+            self.pipeline_iteration = pipeline_iteration
+        if pipeline_max_iterations is not None:
+            self.pipeline_max_iterations = pipeline_max_iterations
+        if pipeline_running is not None:
+            self.pipeline_running = pipeline_running
+        if running_task_count is not None:
+            self.running_task_count = running_task_count
+        if pending_task_count is not None:
+            self.pending_task_count = pending_task_count
+        if completed_task_count is not None:
+            self.completed_task_count = completed_task_count
+        if failed_task_count is not None:
+            self.failed_task_count = failed_task_count
 
     def render(self) -> Text:
         """渲染状态栏文本。
 
+        左侧显示：模式标签、Agent名称、模型、轮次、上下文占用。
+        右侧显示：任务状态统计、管道循环状态。
+
         Returns:
             rich Text 对象
         """
-        parts: list[tuple[str, str]] = []
+        from rich.columns import Columns
 
-        # 模式标签
+        left_parts: list[tuple[str, str]] = []
+        right_parts: list[tuple[str, str]] = []
+
+        # --- 左侧 ---
         mode_styles = {
             "normal": "bold white",
             "auto": "bold green",
             "plan": "bold yellow",
         }
         mode_label = self.mode.upper()
-        parts.append((f" [{mode_label}]", mode_styles.get(self.mode, "white")))
+        left_parts.append((f" [{mode_label}]", mode_styles.get(self.mode, "white")))
 
-        # Agent 名称
-        parts.append((f" {self.agent_name}", "bold cyan"))
+        left_parts.append((f" {self.agent_name}", "bold cyan"))
 
-        # 模型
         if self.model_name and self.model_name != "unknown":
             model_short = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
-            parts.append((f" . {model_short}", "dim"))
+            left_parts.append((f" . {model_short}", "dim"))
 
-        # 轮次
         if self.turn_count > 0:
-            parts.append((f" . 轮次 {self.turn_count}", "dim"))
+            left_parts.append((f" . 轮次 {self.turn_count}", "dim"))
 
-        # 上下文占用
         ctx_color = "green" if self.context_pct < 50 else ("yellow" if self.context_pct < 80 else "red")
-        parts.append((f" . ctx {self.context_pct:.0f}%", ctx_color))
+        left_parts.append((f" . ctx {self.context_pct:.0f}%", ctx_color))
 
-        # 任务数
         if self.task_count > 0:
-            parts.append((f" . [task]{self.task_count}", "dim"))
+            left_parts.append((f" . [task]{self.task_count}", "dim"))
 
-        # 处理中指示
         if self.is_processing:
-            parts.append((" . ...", "bold yellow"))
+            left_parts.append((" . ...", "bold yellow"))
 
-        text = Text()
-        for content, style in parts:
-            text.append(content, style=style)
+        # --- 右侧：任务状态 ---
+        task_parts = []
+        if self.running_task_count > 0:
+            task_parts.append((f"run:{self.running_task_count}", "bold yellow"))
+        if self.pending_task_count > 0:
+            task_parts.append((f"pend:{self.pending_task_count}", "dim"))
+        if self.completed_task_count > 0:
+            task_parts.append((f"done:{self.completed_task_count}", "green"))
+        if self.failed_task_count > 0:
+            task_parts.append((f"fail:{self.failed_task_count}", "red"))
+        if task_parts:
+            right_parts.append(("tasks [", "dim"))
+            for i, (text, style) in enumerate(task_parts):
+                if i > 0:
+                    right_parts.append(("|", "dim"))
+                right_parts.append((text, style))
+            right_parts.append(("]", "dim"))
 
-        return text
+        # --- 右侧：管道循环状态 ---
+        if self.pipeline_running and self.pipeline_iteration > 0:
+            iter_text = f"loop {self.pipeline_iteration}"
+            if self.pipeline_max_iterations > 0:
+                iter_text += f"/{self.pipeline_max_iterations}"
+            right_parts.append((f" [{iter_text}]", "bold magenta"))
+
+        # 构建带右对齐的完整行
+        try:
+            from shutil import get_terminal_size
+            term_width = get_terminal_size().columns
+        except Exception:
+            term_width = 80
+
+        left_text = Text()
+        for content, style in left_parts:
+            left_text.append(content, style=style)
+
+        right_text = Text()
+        for content, style in right_parts:
+            right_text.append(content, style=style)
+
+        right_width = right_text.__len__()
+        padding_needed = max(2, term_width - len(left_text) - right_width - 2)
+
+        full_text = Text()
+        full_text.append_text(left_text)
+        full_text.append(" " * padding_needed)
+        full_text.append_text(right_text)
+
+        return full_text
 
     def render_simple(self) -> str:
         """渲染纯文本状态栏（用于 input 提示符）。
@@ -351,18 +430,20 @@ class CLIOutputAdapter(IOutputAdapter):
         else:
             self._console.print(f"  [dim][tool] 调用 {tool_name}({args_str})[/dim]")
 
-    def show_tool_result(self, tool_name: str, result: str, success: bool = True) -> None:
+    def show_tool_result(self, tool_name: str, result: str, success: bool = True, duration_ms: float = 0) -> None:
         """显示工具调用结果。
 
         Args:
             tool_name: 工具名称
             result: 结果文本
             success: 是否成功
+            duration_ms: 执行耗时（毫秒）
         """
         truncated = result[:100] + "..." if len(result) > 100 else result
         icon = "OK" if success else "FAIL"
         color = "green" if success else "red"
-        self._console.print(f"  [{color}]{icon} -> {truncated}[/{color}]")
+        duration_str = f" ({duration_ms:.0f}ms)" if duration_ms else ""
+        self._console.print(f"  [{color}]{icon}{duration_str} -> {truncated}[/{color}]")
 
     def show_task_notification(self, action: str, info: dict[str, Any]) -> None:
         """显示任务通知。
@@ -461,6 +542,13 @@ class CLIOutputAdapter(IOutputAdapter):
         mode: str | None = None,
         task_count: int | None = None,
         is_processing: bool | None = None,
+        pipeline_iteration: int | None = None,
+        pipeline_max_iterations: int | None = None,
+        pipeline_running: bool | None = None,
+        running_task_count: int | None = None,
+        pending_task_count: int | None = None,
+        completed_task_count: int | None = None,
+        failed_task_count: int | None = None,
     ) -> None:
         """更新状态栏数据。
 
@@ -472,6 +560,13 @@ class CLIOutputAdapter(IOutputAdapter):
             mode: 交互模式
             task_count: 任务数量
             is_processing: 是否正在处理
+            pipeline_iteration: 管道当前迭代次数
+            pipeline_max_iterations: 管道最大迭代次数
+            pipeline_running: 管道是否在运行循环中
+            running_task_count: 正在运行的任务数
+            pending_task_count: 等待中的任务数
+            completed_task_count: 已完成的任务数
+            failed_task_count: 已失败的任务数
         """
         self._status_bar.update(
             agent_name=agent_name,
@@ -481,6 +576,13 @@ class CLIOutputAdapter(IOutputAdapter):
             mode=mode,
             task_count=task_count,
             is_processing=is_processing,
+            pipeline_iteration=pipeline_iteration,
+            pipeline_max_iterations=pipeline_max_iterations,
+            pipeline_running=pipeline_running,
+            running_task_count=running_task_count,
+            pending_task_count=pending_task_count,
+            completed_task_count=completed_task_count,
+            failed_task_count=failed_task_count,
         )
 
     def render_status_bar(self) -> None:

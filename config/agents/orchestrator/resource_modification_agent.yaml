@@ -41,8 +41,6 @@ system_prompt: |
   - 使用 resource_search 搜索相关资源
   - 使用 file_read 读取产出物和参考资源
   - 使用 task_evaluate 评估修改质量
-  - 使用 resource_merge 回滚失败的修改
-
   **重要**：子任务（task_submit 提交的）为异步执行，提交后**不要立即查询状态**。
   系统会在适当时机（通过 TaskReminder）提醒你查看进度，收到提醒后再使用 task_manage 查看结果。
 
@@ -61,43 +59,31 @@ system_prompt: |
 
   ## 执行步骤
 
-  1. **分析阶段（读取现有资源 + 提交调研任务给 research_agent）**
+  1. **调研阶段（读取现有资源 + 提交调研任务给 research_agent + environment_setup_agent）**
      - 先用 file_read 读取待修改资源，了解现状
      - 提交调研任务：分析修改方案、明确上下文需求
-     - 提交后等待系统提醒，再查看调研结果
+     - 根据调研结果，提交环境准备任务：安装技能、安装依赖、下载模板
+     - 提交后等待系统提醒，再查看结果
 
-  2. **环境准备阶段（提交任务给 environment_setup_agent）**
-     - 目标：安装技能、安装依赖、下载模板
-     - 需传递：上下文需求清单（来自调研报告）
-     - 提交后等待系统提醒，再查看环境准备结果
-
-  3. **初始化工作空间（resource_merge prepare）**
-     - 使用 resource_merge(action="prepare", target_files=[待修改文件]) 在工作空间中初始化 git 并建立 base commit
-     - 待修改的原始文件会被复制到工作空间作为 base commit
-
-  4. **修改阶段（提交任务给 tool_maker 或 agent_maker）**
-     - 目标：按修改方案在工作空间中修改目标资源
-     - 需传递：调研报告、当前资源内容和准备好的上下文、工作空间路径
+  2. **修改阶段（提交任务给 tool_maker 或 agent_maker）**
+     - 目标：按修改方案修改目标资源
+     - 需传递：调研报告、当前资源内容和准备好的上下文
      - 需指定 operation_type=modify
-     - 下级 Agent 在工作空间中修改文件，不会直接修改项目目录
      - 提交后等待系统提醒，再查看修改结果
 
-  5. **审查产出**
-     - 使用 file_read 读取工作空间中的修改后文件
+  3. **审查阶段**
+     - 使用 file_read 读取修改后的文件
      - 验证修改内容正确、格式完整、未破坏原有功能
-     - 如有问题，可以提交重试任务（最多 3 次）
-
-  6. **合并到项目（resource_merge merge）**
-     - 使用 resource_merge(action="merge", target_dir="项目根目录") 将工作空间中的修改合并到项目目录
-     - 合并后确认文件已正确落地
-
-  7. **评估结果**
      - 使用 task_evaluate 评估整体修改质量
      - 评估通过后任务完成
+     - 如有问题，可以提交重试任务（最多 3 次）
 
-  ## 回滚操作
-
-  修改失败时，使用 resource_merge(action="rollback") 工具回滚到 base commit，然后重试或提交失败结果。
+  说明：
+  - 工作空间由系统自动管理（创建、分支、合并、清理）
+  - 子任务自动共享父任务空间
+  - 系统在评估通过后自动合并变更
+  - 如遇合并冲突，系统会通知你处理
+  高级操作（通常不需要）：查看变更 git_diff、查看状态 git_status、手动回滚 rollback
 
   ## 修改类型
 

@@ -31,6 +31,7 @@ input_routes:
     plugins:
       - task_event_receiver
       - tool_schema
+      - param_inject
       - memory_read
       - knowledge_inject
       - prompt_build
@@ -46,6 +47,7 @@ input_routes:
     plugins:
       - task_event_receiver
       - tool_schema
+      - param_inject
       - memory_read
       - knowledge_inject
       - prompt_build
@@ -58,6 +60,7 @@ input_routes:
     plugins:
       - task_event_receiver
       - tool_schema
+      - param_inject
       - memory_read
       - knowledge_inject
       - prompt_build
@@ -68,6 +71,12 @@ output_routes:
   - route_type: next_tool
     condition: "raw_tool_calls != []"
     priority: 1
+  # BUG-FIX-fix_20260421_wait_route: 之前缺少 wait 路由，child_task_guard 返回的 wait 信号
+  # 在路由仲裁中找不到匹配 → fallback 到 end → 管道直接结束 → TaskWorker 判定"迭代耗尽"。
+  # wait 信号用于管道挂起等待子任务完成，必须在 end 之前被匹配。
+  - route_type: wait
+    condition: "True"
+    priority: 10
   # 提醒信号 → 继续下一轮 LLM 调用
   - route_type: next_llm
     condition: "True"
@@ -81,53 +90,88 @@ output_routes:
 # Agent 可通过 plugins.disabled / plugins.enabled 覆盖
 plugins:
   # ── Input 插件链（按 priority 排序）──
-  - class: plugins.input.task_event_receiver.TaskEventReceiverPlugin
+  - name: task_event_receiver
     config:
       enabled: true
-  - class: plugins.input.tool_schema.ToolSchemaPlugin
+  - name: tool_schema
     config:
       enabled: true
-  - class: plugins.input.memory_read.MemoryReadPlugin
+  # BUG-FIX-fix_20260421_param_inject: ParamInjectPlugin 之前未注册到 pipeline 配置中，
+  # 导致 task_id、session_id、workspace 等 injected_params 永远不会被注入到工具调用参数中。
+  # 子任务提交时 parent_task_id 为 null，任务树结构断裂。
+  - name: param_inject
+    config:
+      inject_session_id: true
+      inject_user_id: true
+      inject_timestamp: true
+  - name: memory_read
     config:
       retrieval: semantic
       top_k: 5
-  - class: plugins.input.knowledge_inject.KnowledgeInjectPlugin
+  - name: knowledge_inject
     config:
       mode: disabled
-  - class: plugins.input.prompt_build.PromptBuildPlugin
+  - name: prompt_build
     config:
       enabled: true
       include_tools_description_in_prompt: false
       include_static_vars: true
       include_compressed_layers: true
   # ── Output 插件链（按 priority 排序）──
-  - class: plugins.output.stop_check.StopCheckPlugin
+  # P0: 系统级检查（停止/错误/深度保护）
+  - name: stop_check
     config:
       enabled: true
-  - class: plugins.output.error_check.ErrorCheckPlugin
+  - name: error_check
     config:
       enabled: true
-  - class: plugins.output.pending_tools.PendingToolsOutput
+  - name: delegate_depth_guard
     config:
       enabled: true
-  - class: plugins.output.task_reminder.TaskReminder
+      max_depth: 3
+  # P1: 工具调用与重复检测
+  - name: pending_tools
     config:
-      max_reminders: 3
-      cooldown_seconds: 300
-  - class: plugins.output.context_compress.ContextCompressPlugin
+      enabled: true
+  - name: duplicate_check
     config:
-      context_window: 128000
-      compress_trigger_ratio: 0.5
-  - class: plugins.output.memory_write.MemoryWritePlugin
+      max_duplicate_calls: 3
+      max_repetitive_output: 3
+  - name: output_repetition_guard
     config:
-      enabled: false
-      write_user_messages: false
-      write_llm_responses: false
-  - class: plugins.output.track.TrackPlugin
+      max_retries: 3
+      similarity_threshold: 0.85
+  - name: stuck_detector
+    config:
+      window_size: 5
+      similarity_threshold: 0.9
+      repeat_threshold: 3
+  # P2: 统计与安全
+  - name: track
     config:
       enabled: true
       track_token_usage: true
       track_execution_time: true
+  - name: sensitive_checker
+    config:
+      enabled: true
+  # P3: 结果处理
+  - name: result_format
+    config:
+      max_result_length: 2000
+      include_tool_name: true
+  - name: context_compress
+    config:
+      context_window: 128000
+      compress_trigger_ratio: 0.5
+  # P4: 任务管理
+  - name: child_task_guard
+    config:
+      idle_remind_limit: 3
+  - name: task_reminder
+    config:
+      max_reminders: 3
+      cooldown_seconds: 300
 
 # 核心 LLM/工具执行插件
 core_plugins:

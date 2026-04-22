@@ -20,6 +20,7 @@
 """
 
 from memory.types import (
+    ChunkData,
     Context,
     ContextRequest,
     ContextType,
@@ -67,6 +68,7 @@ from memory.variable_priority import VariablePriority
 
 __all__ = [
     # types
+    "ChunkData",
     "Episode",
     "Knowledge",
     "ToolInfo",

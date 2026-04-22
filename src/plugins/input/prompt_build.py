@@ -13,13 +13,13 @@
     3. static_vars        <- agent_config 或 state 读取
     4. knowledge.context  <- 知识注入插件产出
     5. memory.retrieved   <- 记忆检索插件产出
-    6. l3_memory          <- 关键词索引（从 ChunkService 读取）
-    7. l2_memory          <- 三元组摘要（从 ChunkService 读取）
-    8. l1_memory          <- 八段摘要（从 ChunkService 读取）
+    6. l2_memory          <- 三元组摘要（从 ChunkService 读取，含关键词）
+    7. l1_memory          <- 八段摘要（从 ChunkService 读取，含关键词）
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -108,8 +108,11 @@ class PromptBuildPlugin(IInputPlugin):
         """按旧代码 layer_order 顺序组装系统消息内容。
 
         顺序：system_prompt -> tools_description -> static_vars ->
-              l3_memory -> l2_memory -> l1_memory
+              memory.retrieved -> l2_memory -> l1_memory
         不含 recent_messages 和 dynamic_vars。
+
+        知识检索已统一到 static_vars 的 tags/retrieval 类型中，
+        不再单独读取 knowledge.context。
 
         Args:
             ctx: 插件执行上下文
@@ -130,35 +133,25 @@ class PromptBuildPlugin(IInputPlugin):
             if tool_desc:
                 parts.append(tool_desc)
 
-        # 3. static_vars
+        # 3. static_vars（含 rules/path/reference/tags 等类型，知识检索统一在此处理）
         if self._config.get("include_static_vars", True):
             static_vars_text = await self._load_static_vars(ctx)
             if static_vars_text:
                 parts.append(static_vars_text)
 
-        # 4. knowledge.context（知识注入插件产出）
-        knowledge_context = ctx.state.get("knowledge.context", "")
-        if knowledge_context:
-            parts.append(knowledge_context)
-
-        # 5. memory.retrieved（记忆检索插件产出）
+        # 4. memory.retrieved（记忆检索插件产出）
         memory_retrieved = ctx.state.get("memory.retrieved", "")
         if memory_retrieved:
             parts.append(memory_retrieved)
 
-        # 6-8. 压缩层（l3 -> l2 -> l1）
+        # 5-6. 压缩层（l2 -> l1，关键词随压缩块一起加载）
         if self._config.get("include_compressed_layers", True):
-            # L3: 关键词索引
-            l3_text = await self._load_l3_keywords(ctx)
-            if l3_text:
-                parts.append(l3_text)
-
-            # L2: 三元组摘要
+            # L2: 三元组摘要（含关键词）
             l2_text = await self._load_compressed_layer(ctx, "L2")
             if l2_text:
                 parts.append(l2_text)
 
-            # L1: 八段摘要
+            # L1: 八段摘要（含关键词）
             l1_text = await self._load_compressed_layer(ctx, "L1")
             if l1_text:
                 parts.append(l1_text)
@@ -166,11 +159,14 @@ class PromptBuildPlugin(IInputPlugin):
         return "\n\n".join(parts)
 
     async def _load_static_vars(self, ctx: PluginContext) -> str:
-        """从 agent_config 或 state 加载静态变量。
+        """从 state 中的 context.static_vars 加载静态变量。
 
-        支持 4 种类型：timestamp / session / file / content
+        静态变量在构建时拼入系统提示词（system_message），不属于动态变量。
+        支持的类型：rules / path / reference / content / timestamp / session / tags(retrieval)。
+
         支持 3 种模式：exact(直接文本) / vector(向量检索) / hybrid
         支持 output_format: full / summary
+        支持 inject_type: full / summary / retrieval（用于 tags 类型的知识检索）
 
         Args:
             ctx: 插件执行上下文
@@ -178,22 +174,20 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             格式化后的静态变量文本，或空字符串
         """
-        # 从 state 读取 agent 配置中的 static_vars 定义
         static_vars_def = ctx.state.get("context.static_vars", [])
         if not static_vars_def:
-            # 尝试从插件配置读取
             static_vars_def = self._config.get("static_vars", [])
         if not static_vars_def:
             return ""
 
         parts: list[str] = []
         session_id = ctx.state.get("context.session_id", "")
+        constraints = ctx.state.get("constraints", {})
 
         for var_def in static_vars_def:
             if not isinstance(var_def, dict):
                 continue
 
-            # 检查 enabled 开关
             if not var_def.get("enabled", True):
                 continue
 
@@ -204,7 +198,29 @@ class PromptBuildPlugin(IInputPlugin):
 
             content = ""
 
-            if var_type == "timestamp":
+            if var_type == "rules":
+                rules_parts = []
+                for c in constraints.get("hard", []):
+                    rules_parts.append(f"- [必须] {c}")
+                for c in constraints.get("soft", []):
+                    rules_parts.append(f"- [建议] {c}")
+                content = "\n".join(rules_parts)
+
+            elif var_type == "path":
+                file_path = var_def.get("path", "")
+                if file_path:
+                    try:
+                        from pathlib import Path
+                        p = Path(file_path)
+                        if p.exists():
+                            content = await asyncio.to_thread(p.read_text, "utf-8")
+                    except Exception as e:
+                        logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
+
+            elif var_type in ("reference", "content"):
+                content = var_def.get("content", "") or var_def.get("value", "")
+
+            elif var_type == "timestamp":
                 now = datetime.now(UTC)
                 fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
                 content = now.strftime(fmt)
@@ -212,24 +228,12 @@ class PromptBuildPlugin(IInputPlugin):
             elif var_type == "session":
                 content = session_id
 
-            elif var_type == "file":
-                file_path = var_def.get("path", "")
-                if file_path:
-                    try:
-                        from pathlib import Path
-                        p = Path(file_path)
-                        if p.exists():
-                            content = p.read_text(encoding="utf-8")
-                    except Exception as e:
-                        logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
-
-            elif var_type == "content":
-                content = var_def.get("value", "")
+            elif var_type == "retrieval" or (not var_type and var_def.get("tags")):
+                content = await self._retrieve_by_tags(ctx, var_def)
 
             if not content:
                 continue
 
-            # 向量检索模式：通过 retriever 服务检索相关内容
             if mode in ("vector", "hybrid") and content:
                 try:
                     retriever = ctx.get_service("retriever")
@@ -243,7 +247,6 @@ class PromptBuildPlugin(IInputPlugin):
                 except (KeyError, Exception) as e:
                     logger.debug("[%s] 静态变量向量检索跳过 | name=%s | error=%s", self.name, var_name, e)
 
-            # 摘要模式标记
             if output_format == "summary":
                 content = f"[摘要] {content}"
 
@@ -254,6 +257,81 @@ class PromptBuildPlugin(IInputPlugin):
             return ""
 
         return "## 静态变量\n" + "\n\n".join(parts)
+
+    async def _retrieve_by_tags(self, ctx: PluginContext, var_def: dict[str, Any]) -> str:
+        """通过 tags 从知识库检索内容。
+
+        优先读取 state["knowledge.context"]（由 knowledge_inject 插件产出），
+        避免与 knowledge_inject 重复调用 KnowledgeService。
+        仅在 knowledge.context 为空时才自行检索。
+
+        支持 inject_type: full(完整内容) / summary(摘要) / retrieval(检索)
+        当 var_def 中有 tags 但无 type 字段时，自动触发此方法。
+
+        Args:
+            ctx: 插件执行上下文
+            var_def: 变量定义字典，包含 tags/inject_type/top_k 等
+
+        Returns:
+            检索到的知识内容，或空字符串
+        """
+        tags = var_def.get("tags", [])
+        if not tags:
+            return ""
+
+        inject_type = var_def.get("inject_type", "full")
+        top_k = var_def.get("top_k", 5)
+
+        # 优先读取 knowledge_inject 插件已产出的知识内容，避免重复检索
+        cached_context = ctx.state.get("knowledge.context", "")
+        if cached_context:
+            if inject_type == "summary":
+                snippet = cached_context[:200] + "..." if len(cached_context) > 200 else cached_context
+                return f"- {snippet}"
+            return cached_context
+
+        # 降级：knowledge_inject 未产出时自行检索
+        try:
+            semantic_storage = ctx.get_service("semantic_storage")
+        except KeyError:
+            logger.debug("[%s] No semantic_storage service, skipping tags retrieval", self.name)
+            return ""
+
+        try:
+            from memory.knowledge_service import KnowledgeService
+            knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
+            user_id = ctx.state.get("user_id", "")
+            result = await knowledge_service.list_semantic_memory(user_id)
+            items = result.get("items", [])
+        except Exception as e:
+            logger.debug("[%s] 知识检索失败 | tags=%s | error=%s", self.name, tags, e)
+            return ""
+
+        if not items:
+            return ""
+
+        filtered = []
+        for item in items:
+            item_tags = item.get("tags", [])
+            if not item_tags:
+                item_content = item.get("content", "")
+                if item_content:
+                    filtered.append(item_content)
+            elif any(t in item_tags for t in tags):
+                filtered.append(item.get("content", ""))
+
+        filtered = [c for c in filtered if c][:top_k]
+        if not filtered:
+            return ""
+
+        if inject_type == "summary":
+            parts = []
+            for c in filtered:
+                snippet = c[:200] + "..." if len(c) > 200 else c
+                parts.append(f"- {snippet}")
+            return "\n".join(parts)
+
+        return "\n\n".join(f"---\n{c}" for c in filtered)
 
     async def _load_compressed_layer(self, ctx: PluginContext, layer: str) -> str:
         """从 ChunkService 读取指定层的压缩块。
@@ -288,55 +366,27 @@ class PromptBuildPlugin(IInputPlugin):
         layer_name = layer_names.get(layer, layer)
 
         chunk_texts = []
+        all_keywords: set[str] = set()
         for chunk in chunks:
             chunk_header = f"[{chunk.sequence_start}-{chunk.sequence_end}]"
             chunk_texts.append(f"{chunk_header} {chunk.content}")
+            if hasattr(chunk, "keywords") and chunk.keywords:
+                all_keywords.update(chunk.keywords)
 
-        return f"## {layer_name}（{layer}）\n" + "\n".join(chunk_texts)
-
-    async def _load_l3_keywords(self, ctx: PluginContext) -> str:
-        """从 L1 和 L2 压缩块提取关键词索引。
-
-        读取 L1 和 L2 压缩块的 keywords 字段，去重后格式化为关键词列表。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            格式化后的关键词索引文本，或空字符串
-        """
-        try:
-            chunk_service = ctx.get_service("chunk_service")
-        except KeyError:
-            logger.debug("[%s] No chunk_service, skipping L3 keywords", self.name)
-            return ""
-
-        session_id = ctx.state.get("context.session_id", "")
-        if not session_id:
-            return ""
-
-        all_keywords: set[str] = set()
-
-        for layer in ("L1", "L2"):
-            try:
-                chunks = await chunk_service.find_by_session(session_id, layer)
-                for chunk in chunks:
-                    if hasattr(chunk, "keywords") and chunk.keywords:
-                        all_keywords.update(chunk.keywords)
-            except Exception as e:
-                logger.warning("[%s] 读取 %s 关键词失败 | error=%s", self.name, layer, e)
-
-        if not all_keywords:
-            return ""
-
-        keywords_list = sorted(all_keywords)
-        return "## 关键词索引（L3）\n" + ", ".join(keywords_list)
+        result = f"## {layer_name}（{layer}）\n" + "\n".join(chunk_texts)
+        if all_keywords:
+            keywords_str = ", ".join(sorted(all_keywords))
+            result += f"\n\n## 关键词索引（{layer}）\n{keywords_str}"
+        return result
 
     def _build_dynamic_vars(self, ctx: PluginContext) -> str:
         """构建动态变量内容。
 
-        包含日期、时间、Agent 名称、会话 ID 等动态信息。
-        动态变量不拼入 SystemMessage，由 LLMCore 追加在历史消息之后。
+        动态变量由 LLMCore 追加到消息列表末尾（在历史消息之后），
+        不拼入系统提示词。包含日期、时间、Agent 名称、会话 ID 等。
+
+        优先从 state["context.dynamic_vars"] 读取 Agent YAML 配置的
+        dynamic_vars.items，回退到硬编码的默认动态变量。
 
         Args:
             ctx: 插件执行上下文
@@ -347,15 +397,44 @@ class PromptBuildPlugin(IInputPlugin):
         now = datetime.now(UTC)
         parts: list[str] = []
 
-        parts.append(f"- 日期: {now.strftime('%Y-%m-%d')}")
-        parts.append(f"- 时间: {now.strftime('%H:%M:%S')}")
+        dynamic_vars_def = ctx.state.get("context.dynamic_vars", [])
+        if dynamic_vars_def:
+            session_id = ctx.state.get("context.session_id", "")
+            agent_name = ctx.state.get("context.agent_name", "")
 
-        agent_name = ctx.state.get("context.agent_name", "")
-        if agent_name:
-            parts.append(f"- Agent: {agent_name}")
+            for var_def in dynamic_vars_def:
+                if not isinstance(var_def, dict):
+                    continue
+                if not var_def.get("enabled", True):
+                    continue
 
-        session_id = ctx.state.get("context.session_id", "")
-        if session_id:
-            parts.append(f"- 会话: {session_id}")
+                var_type = var_def.get("type", "")
+                var_name = var_def.get("name", var_type)
+
+                if var_type == "timestamp":
+                    fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
+                    parts.append(f"- {var_name}: {now.strftime(fmt)}")
+                elif var_type == "session":
+                    parts.append(f"- {var_name}: {session_id}")
+                elif var_type == "agent":
+                    parts.append(f"- {var_name}: {agent_name}")
+                elif var_type == "model":
+                    model_info = ctx.state.get("llm_model", "")
+                    parts.append(f"- {var_name}: {model_info}")
+                elif var_type in ("reference", "content"):
+                    content = var_def.get("content", "")
+                    if content:
+                        parts.append(f"- {var_name}: {content}")
+        else:
+            parts.append(f"- 日期: {now.strftime('%Y-%m-%d')}")
+            parts.append(f"- 时间: {now.strftime('%H:%M:%S')}")
+
+            agent_name = ctx.state.get("context.agent_name", "")
+            if agent_name:
+                parts.append(f"- Agent: {agent_name}")
+
+            session_id = ctx.state.get("context.session_id", "")
+            if session_id:
+                parts.append(f"- 会话: {session_id}")
 
         return "\n".join(parts)

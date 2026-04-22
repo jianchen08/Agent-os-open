@@ -137,7 +137,7 @@ def _register_agent(
             }
 
         # 构建 AgentConfig
-        level_str = config.get("level", "l1_main")
+        level_str = config.get("level", "L1")
         try:
             level = AgentLevel(level_str)
         except ValueError:

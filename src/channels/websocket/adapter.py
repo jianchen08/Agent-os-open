@@ -194,7 +194,7 @@ class WebSocketOutputAdapter(IOutputAdapter):
         self._full_content = ""
         self._stream_start_sent = True
 
-    async def send_pipeline_start(self, session_id: str, agent_level: str = "l1_main") -> None:
+    async def send_pipeline_start(self, session_id: str, agent_level: str = "L1") -> None:
         """发送 pipeline_start 事件。
 
         在管道引擎开始执行时调用。

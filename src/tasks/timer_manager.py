@@ -396,6 +396,7 @@ class TimerManager:
             timer.handle = None
 
         timer.status = TimerStatus.CANCELLED
+        del self._timers[task_id]
         logger.info("取消计时器: task_id=%s", task_id)
 
         return True

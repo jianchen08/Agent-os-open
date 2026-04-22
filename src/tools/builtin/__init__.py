@@ -54,7 +54,13 @@ def get_all_builtin_tools() -> list[Any]:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
 
-            if cls.__init__.__code__.co_argcount > 1:
+            import inspect
+            sig = inspect.signature(cls.__init__)
+            required_params = [
+                p for p in sig.parameters.values()
+                if p.name != "self" and p.default is inspect.Parameter.empty
+            ]
+            if required_params:
                 _logger.debug(f"[内置工具] 跳过 {tool_name}（需要参数注入，由 register_core_tools 处理）")
                 continue
 
@@ -274,11 +280,12 @@ def register_core_tools(
     from .file_read import FileReadTool
     from .file_write import FileWriteTool
     from .lsp_tools import LSPTools
+    from .resource_merge import ResourceMergeTool
     from .resource_search import ResourceSearchTool
     from .web import WebTool
     from .web_search_mcp import WebSearchMCPTool
+    from .human_interaction import HumanInteractionTool
 
-    # 工具映射表（不需要依赖注入的工具）
     core_tool_map = {
         "bash_execute": BashTool,
         "file_read": FileReadTool,
@@ -287,6 +294,8 @@ def register_core_tools(
         "web_search": WebSearchMCPTool,
         "fetch": WebTool,
         "resource_search": ResourceSearchTool,
+        "resource_merge": ResourceMergeTool,
+        "human_interaction": HumanInteractionTool,
     }
 
     # LSP 工具实例（共享）
@@ -392,7 +401,11 @@ def register_core_tools(
             continue
 
         try:
-            tool_instance = tool_class()
+            # resource_search 需要 tool_registry 参数以支持动态工具加载
+            if tool_name == "resource_search":
+                tool_instance = tool_class(tool_registry=registry)
+            else:
+                tool_instance = tool_class()
             tool = tool_instance.get_tool_definition()
             name = registry.register_with_handler(
                 tool=tool,

@@ -60,6 +60,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
         self._mode = self._config.get("mode", "disabled")
         self._top_k = self._config.get("top_k", 5)
         self._max_tokens = self._config.get("max_tokens", 2000)
+        self._knowledge_service: KnowledgeService | None = None
 
     @property
     def name(self) -> str:
@@ -92,21 +93,30 @@ class KnowledgeInjectPlugin(IInputPlugin):
             return PluginResult(state_updates={"knowledge.context": ""})
 
         try:
-            # 从服务注册表获取 semantic_storage
+            # 从服务注册表获取 semantic_storage（延迟初始化并缓存 KnowledgeService）
             try:
                 semantic_storage = ctx.get_service("semantic_storage")
             except KeyError:
                 logger.debug("[%s] No semantic_storage service, skipping", self.name)
                 return PluginResult(state_updates={"knowledge.context": ""})
 
+            if self._knowledge_service is None:
+                self._knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
             knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
 
-            # 列出用户知识
+            # TODO: KnowledgeService.list_semantic_memory 当前仅按 user_id 列出全部知识，
+            # 不支持基于 query 的相关性检索。待知识服务 API 支持 query 参数后，
+            # 应替换为 knowledge_service.search(user_id, query, top_k) 以提升检索精度。
+            # 当前临时方案：列出全部知识后在客户端按 query 关键词做基础过滤。
             result = await knowledge_service.list_semantic_memory(user_id)
             items = result.get("items", [])
 
             if not items:
                 return PluginResult(state_updates={"knowledge.context": ""})
+
+            # 客户端侧基础相关性过滤：按 query 中的关键词对 items 进行排序和筛选
+            if query:
+                items = self._filter_by_relevance(items, query)
 
             # 根据模式格式化
             if self._mode == "full":
@@ -194,3 +204,39 @@ class KnowledgeInjectPlugin(IInputPlugin):
             topics.append(f"- {topic}")
 
         return f"知识库中找到 {count} 条相关内容：\n" + "\n".join(topics)
+
+    def _filter_by_relevance(
+        self, items: list[dict[str, Any]], query: str,
+    ) -> list[dict[str, Any]]:
+        """按 query 关键词对知识条目做基础相关性排序和筛选。
+
+        将 query 分词后，统计每个 item 的 content 中命中的关键词数量，
+        按命中数降序排序，过滤掉零命中的条目。保留原始顺序作为同分时的稳定排序。
+
+        Args:
+            items: 知识条目列表
+            query: 用户查询文本
+
+        Returns:
+            按相关性排序后的知识条目列表
+        """
+        # 简单分词：按空白字符拆分，过滤短词
+        query_words = {w.lower() for w in query.split() if len(w) > 1}
+        if not query_words:
+            return items[:self._top_k]
+
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for idx, item in enumerate(items):
+            content = item.get("content", "").lower()
+            tags = " ".join(item.get("tags", [])).lower()
+            combined = f"{content} {tags}"
+            hit_count = sum(1 for w in query_words if w in combined)
+            # (命中数, 原始索引, item) — 按命中数降序，索引升序保持稳定
+            scored.append((hit_count, idx, item))
+
+        # 过滤零命中，按命中数降序排序
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        filtered = [item for hit, _, item in scored if hit > 0]
+
+        # 若全部零命中，回退到原始列表（保证有内容可用）
+        return filtered[:self._top_k] if filtered else items[:self._top_k]

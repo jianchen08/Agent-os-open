@@ -1,32 +1,14 @@
 """管道核心类型定义。
 
-包含所有枚举、常量、数据类和工厂函数，
-供管道引擎、插件、路由表等模块共同使用。
+只包含管道框架自身的类型。Agent 层级（AgentLevel）定义在 agents.types，
+任务优先级（TaskPriority）定义在 tasks.types，管道需要时通过参数传入。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum
+from enum import Enum
 from typing import Any
-
-
-class AgentLevel(Enum):
-    """Agent 层级枚举。"""
-
-    L1_MAIN = "l1_main"
-    L2_SUBTASK = "l2_subtask"
-    L3_ATOMIC = "l3_atomic"
-
-
-class TaskPriority(IntEnum):
-    """任务优先级枚举，数值越小优先级越高。"""
-
-    CRITICAL = 1
-    HIGH = 3
-    NORMAL = 5
-    LOW = 7
-    BACKGROUND = 9
 
 
 class TargetType(Enum):
@@ -82,7 +64,7 @@ class RouteSignal:
     由插件产生，经输出路由表仲裁后决定管道下一步走向。
 
     Attributes:
-        route_type: 路由类型，支持 next_llm / next_tool / end / delegate / wait
+        route_type: 路由类型，支持 next_llm / next_tool / end / delegate / wait / decision
         target: 路由目标，可为字符串、字符串列表或 None
         reason: 路由原因描述
         payload: 附加数据
@@ -109,7 +91,7 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.ENDED: False,
         StateKeys.SESSION_ID: "",
         StateKeys.TASK_ID: "",
-        StateKeys.AGENT_LEVEL: AgentLevel.L1_MAIN.value,
+        StateKeys.AGENT_LEVEL: "L1",
         StateKeys.RAW_RESULT: None,
         StateKeys.RAW_ERROR: None,
         StateKeys.RAW_TOOL_CALLS: [],

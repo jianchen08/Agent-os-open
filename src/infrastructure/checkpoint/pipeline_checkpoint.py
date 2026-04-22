@@ -197,6 +197,31 @@ class PipelineCheckpointManager:
 
         return await self.load(latest_id)
 
+    async def get_latest_any(self, phase: str | None = None) -> dict[str, Any] | None:
+        """获取所有管道中最新的一条检查点。
+
+        当按 pipeline_id 查找失败时，回退到全局最新检查点，
+        确保 CLI 重启后即使 session_id 不匹配也能恢复历史。
+
+        Args:
+            phase: 可选的 phase 过滤条件，如 "session_end" / "auto"
+
+        Returns:
+            最新检查点的完整数据（含 metadata 和 state），不存在返回 None
+        """
+        all_checkpoints = await self.list_checkpoints(limit=50)
+        if not all_checkpoints:
+            return None
+
+        for metadata in all_checkpoints:
+            if phase and metadata.get("phase") != phase:
+                continue
+            latest_id = metadata.get("checkpoint_id")
+            if latest_id:
+                return await self.load(latest_id)
+
+        return None
+
     async def cleanup_old(self, pipeline_id: str, keep_count: int = 5) -> int:
         """清理旧检查点，只保留最近的 N 个。
 

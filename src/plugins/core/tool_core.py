@@ -177,6 +177,7 @@ class ToolCore(ICorePlugin):
         tool_args: dict[str, Any],
         timeout: float,
         services: dict[str, Any] | None = None,
+        on_chunk: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict[str, Any]:
         """执行单个工具调用。
 
@@ -184,82 +185,129 @@ class ToolCore(ICorePlugin):
         工具尚未提供的下划线前缀参数），使工具函数能获取
         TaskService、MessageQueue 等运行时依赖，无需 CLI 闭包包装。
 
+        执行完成后通过 on_chunk 发射 tool_result 事件，供 CLI 实时显示。
+
         Args:
             tool_name: 工具名称
             tool_args: 工具调用参数
             timeout: 执行超时时间（秒）
             services: 管道共享服务字典（来自 ctx._services）
+            on_chunk: 流式事件回调（来自 CLI 的 on_chunk）
 
         Returns:
             工具执行结果字典，包含 tool_name、success、data/error、duration_ms
         """
-        # 自动注入服务依赖
+        if on_chunk:
+            on_chunk({"type": "tool_start", "tool_name": tool_name})
+
         if services:
             for param_key, service_key in self._SERVICE_INJECT_MAP.items():
                 if param_key not in tool_args and service_key in services:
                     tool_args[param_key] = services[service_key]
+                    logger.debug(
+                        "[%s] Injected service '%s' to tool '%s'",
+                        self.name, service_key, tool_name,
+                    )
 
         func = self._get_tool(tool_name)
         if func is None:
             logger.warning("[%s] Tool not found: %s", self.name, tool_name)
-            return {
+            result = {
                 "tool_name": tool_name,
                 "success": False,
                 "error": f"Tool '{tool_name}' not found",
                 "duration_ms": 0,
             }
+            if on_chunk:
+                on_chunk({
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": f"Tool '{tool_name}' not found",
+                    "success": False,
+                    "duration_ms": 0,
+                })
+            return result
 
         start = time.monotonic()
         try:
             if inspect.iscoroutinefunction(func):
-                result = await asyncio.wait_for(
+                raw_result = await asyncio.wait_for(
                     func(tool_args),
                     timeout=timeout,
                 )
             else:
-                result = await asyncio.wait_for(
+                raw_result = await asyncio.wait_for(
                     asyncio.to_thread(func, tool_args),
                     timeout=timeout,
                 )
 
-            # ToolExecutionResult → 提取可序列化的 data/output
-            result = self._normalize_tool_result(result)
+            normalized = self._normalize_tool_result(raw_result)
 
             duration_ms = (time.monotonic() - start) * 1000
             logger.debug(
                 "[%s] Tool executed: %s (%.1fms)",
                 self.name, tool_name, duration_ms,
             )
-            return {
+            result = {
                 "tool_name": tool_name,
                 "success": True,
-                "data": result,
+                "data": normalized,
                 "duration_ms": round(duration_ms, 1),
             }
+            if on_chunk:
+                display_result = str(normalized)[:200] if normalized else ""
+                on_chunk({
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": display_result,
+                    "success": True,
+                    "duration_ms": round(duration_ms, 1),
+                })
+            return result
         except asyncio.TimeoutError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.warning(
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
                 self.name, tool_name, duration_ms, timeout,
             )
-            return {
+            error_msg = f"Tool '{tool_name}' timed out after {timeout}s"
+            result = {
                 "tool_name": tool_name,
                 "success": False,
-                "error": f"Tool '{tool_name}' timed out after {timeout}s",
+                "error": error_msg,
                 "duration_ms": round(duration_ms, 1),
             }
+            if on_chunk:
+                on_chunk({
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": error_msg,
+                    "success": False,
+                    "duration_ms": round(duration_ms, 1),
+                })
+            return result
         except Exception as exc:
             duration_ms = (time.monotonic() - start) * 1000
             logger.error(
                 "[%s] Tool error: %s (%.1fms) — %s",
                 self.name, tool_name, duration_ms, exc,
             )
-            return {
+            error_msg = str(exc)
+            result = {
                 "tool_name": tool_name,
                 "success": False,
-                "error": str(exc),
+                "error": error_msg,
                 "duration_ms": round(duration_ms, 1),
             }
+            if on_chunk:
+                on_chunk({
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": error_msg,
+                    "success": False,
+                    "duration_ms": round(duration_ms, 1),
+                })
+            return result
 
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:
         """执行工具调用。
@@ -290,6 +338,7 @@ class ToolCore(ICorePlugin):
         timeout = self._default_timeout
         results: list[dict[str, Any]] = []
         last_result_text = ""
+        on_chunk = ctx.state.get("on_chunk")
 
         for tc in tool_calls:
             tool_name = tc.get("name", "unknown")
@@ -335,10 +384,20 @@ class ToolCore(ICorePlugin):
                     tool_func=func,  # type: ignore[arg-type]
                     timeout=timeout,
                 )
+                if on_chunk:
+                    display_data = result.get("data", result.get("error", ""))
+                    on_chunk({
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": str(display_data)[:200] if display_data else "",
+                        "success": result.get("success", True),
+                        "duration_ms": result.get("duration_ms", 0),
+                    })
             else:
                 result = await self._execute_single_tool(
                     tool_name, tool_args, timeout,
                     services=ctx._services,
+                    on_chunk=on_chunk,
                 )
             results.append(result)
 
@@ -396,10 +455,61 @@ class ToolCore(ICorePlugin):
             }
             current_messages.append(tool_msg)
 
-        return {
+        # BUG-FIX-fix_20260418_all_tools_failed
+        # 问题根因: 工具全部失败时 raw_error 始终为 None，导致 error_check 插件
+        #           无法识别，Output 插件链无 route_signal，管道异常退出
+        # 修复方案: 检测所有工具失败的情况，设置 raw_error 让 error_check 能处理
+        # 影响范围: 所有工具执行流程
+        all_failed = results and all(not r.get("success") for r in results)
+        raw_error = None
+        if all_failed:
+            error_summary = "; ".join(
+                f"{r.get('tool_name', 'unknown')}: {r.get('error', 'unknown')}"
+                for r in results
+            )
+            raw_error = f"所有工具执行失败: {error_summary}"
+
+        # BUG-FIX-fix_20260418_task_inject: 检测 task_failed 标记，直接结束管道
+        has_task_failed = False
+        for r in results:
+            tool_data = r.get("data", {})
+            if isinstance(tool_data, dict):
+                meta = tool_data.get("metadata", {})
+                if isinstance(meta, dict) and meta.get("task_failed"):
+                    has_task_failed = True
+                    if not raw_error:
+                        raw_error = tool_data.get("error", "任务系统级失败")
+                    break
+
+        submitted_task_ids = list(ctx.state.get("submitted_task_ids", []))
+        evaluation_completed = False
+        for r in results:
+            if not r.get("success"):
+                continue
+            tool_data = r.get("data", {})
+            if not isinstance(tool_data, dict):
+                continue
+            meta = tool_data.get("metadata", {})
+            if isinstance(meta, dict) and meta.get("action") == "task_submit":
+                tid = tool_data.get("task_id")
+                if tid and tid not in submitted_task_ids:
+                    submitted_task_ids.append(tid)
+            tool_name = r.get("tool_name", "")
+            if tool_name == "task_evaluate" and tool_data.get("overall_passed") is True:
+                evaluation_completed = True
+
+        return_dict = {
             StateKeys.TOOL_RESULTS: results,
             StateKeys.RAW_RESULT: last_result_text,
-            StateKeys.RAW_ERROR: None,
+            StateKeys.RAW_ERROR: raw_error,
             StateKeys.RAW_TOOL_CALLS: [],
             "messages": current_messages,
         }
+        if submitted_task_ids:
+            return_dict["submitted_task_ids"] = submitted_task_ids
+        if evaluation_completed:
+            return_dict["task_evaluation_completed"] = True
+        if has_task_failed:
+            return_dict[StateKeys.ENDED] = True
+
+        return return_dict

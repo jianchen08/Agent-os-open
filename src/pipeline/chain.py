@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from typing import Any
 
@@ -127,10 +128,11 @@ class PluginChain:
             return PluginResult()
 
         if policy == ErrorPolicy.RETRY:
-            max_retries = 3
-            base_delay = 1.0
+            # BUG-FIX: 从插件实例读取重试参数，避免硬编码导致无法按场景调优
+            max_retries = getattr(plugin, "max_retries", 3)
+            base_delay = getattr(plugin, "retry_delay", 1.0)
             for attempt in range(1, max_retries + 1):
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = base_delay * (2 ** (attempt - 1)) * (0.5 + random.random() * 0.5)
                 logger.warning(
                     "[%s] RETRY attempt %d/%d (delay=%.1fs): %s",
                     plugin.name, attempt, max_retries, delay, exc,
@@ -146,7 +148,7 @@ class PluginChain:
                     exc = retry_exc
                     logger.warning("[%s] RETRY attempt %d failed: %s", plugin.name, attempt, retry_exc)
             logger.error("[%s] RETRY exhausted after %d attempts: %s", plugin.name, max_retries, exc)
-            return PluginResult(error=exc, skip_remaining=True)
+            return PluginResult(error=exc)
 
         if policy == ErrorPolicy.FALLBACK:
             fallback = getattr(plugin, "fallback_state", {})

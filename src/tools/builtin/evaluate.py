@@ -12,6 +12,7 @@ from typing import Any
 import jsonschema
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -23,7 +24,7 @@ from tools.types import (
 )
 
 
-class EvaluateTool:
+class EvaluateTool(BuiltinTool):
     """
     评估工具
 

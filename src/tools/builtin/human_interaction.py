@@ -2,7 +2,7 @@
 人类交互工具
 
 暴露接口：
-- create_human_interaction_tool(user_id: str | None, session_id: str | None, thread_id: str | None, tab_id: str | None, agent_id: str | None) -> HumanInteractionTool：create_human_interaction_tool功能
+- create_human_interaction_tool(pipeline_id: str | None) -> HumanInteractionTool：create_human_interaction_tool功能
 - get_tool_definition() -> Tool：get_tool_definition功能
 - HumanInteractionTool：HumanInteractionTool类
 """
@@ -45,18 +45,10 @@ class HumanInteractionTool(BuiltinTool):
 
     def __init__(
         self,
-        user_id: str | None = None,
-        session_id: str | None = None,
-        thread_id: str | None = None,
-        tab_id: str | None = None,
-        agent_id: str | None = None,
+        pipeline_id: str | None = None,
     ):
         """初始化人类交互工具"""
-        self.user_id = user_id
-        self.session_id = session_id
-        self.thread_id = thread_id
-        self.tab_id = tab_id
-        self.agent_id = agent_id
+        self.pipeline_id = pipeline_id
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -124,11 +116,7 @@ class HumanInteractionTool(BuiltinTool):
             level=ToolLevel.ALL,
             tags=["interaction", "human", "approval", "conversation"],
             injected_params=[
-                "user_id",
-                "session_id",
-                "thread_id",
-                "tab_id",
-                "agent_id",
+                "pipeline_id",
             ],
         )
 
@@ -136,22 +124,19 @@ class HumanInteractionTool(BuiltinTool):
         """执行人类交互工具"""
         mode = inputs.get("mode")
 
-        # 优先使用构造函数注入的上下文，否则从 inputs 获取
-        session_id = self.session_id or inputs.get("session_id")
-        thread_id = self.thread_id or inputs.get("thread_id") or inputs.get("task_id")
-        tab_id = self.tab_id or inputs.get("tab_id") or inputs.get("task_id")
+        pipeline_id = self.pipeline_id or inputs.get("pipeline_id")
 
-        if not session_id or not thread_id or not tab_id:
+        if not pipeline_id:
             return create_failure_result(
-                error="缺少必要的上下文信息（session_id, thread_id, tab_id）"
+                error="缺少必要的上下文信息（pipeline_id）"
             )
 
         service = get_human_interaction_service()
 
         if mode == InteractionMode.CHOICE.value:
-            return await self._execute_choice_mode(inputs, service, session_id, thread_id, tab_id)
+            return await self._execute_choice_mode(inputs, service, pipeline_id)
         elif mode == InteractionMode.CONVERSATION.value:
-            return await self._execute_conversation_mode(inputs, service, session_id, thread_id, tab_id)
+            return await self._execute_conversation_mode(inputs, service, pipeline_id)
         else:
             return create_failure_result(error=f"不支持的交互模式: {mode}")
 
@@ -159,9 +144,7 @@ class HumanInteractionTool(BuiltinTool):
         self,
         inputs: dict[str, Any],
         service,
-        session_id: str,
-        thread_id: str,
-        tab_id: str,
+        pipeline_id: str,
     ) -> ToolExecutionResult:
         """执行选择模式"""
         title = inputs.get("title", "")
@@ -175,17 +158,17 @@ class HumanInteractionTool(BuiltinTool):
 
         try:
             request_id = await service.create_choice_request(
-                session_id=session_id,
-                thread_id=thread_id,
-                tab_id=tab_id,
+                session_id=pipeline_id,
+                thread_id=pipeline_id,
+                tab_id=pipeline_id,
                 title=title,
                 description=description,
                 options=options,
                 questions=questions,
                 timeout_seconds=timeout_seconds,
                 priority=priority,
-                user_id=self.user_id,
-                agent_id=self.agent_id,
+                user_id=None,
+                agent_id=pipeline_id,
             )
 
             response = await service.wait_for_choice(request_id, timeout=timeout_seconds)
@@ -232,9 +215,7 @@ class HumanInteractionTool(BuiltinTool):
         self,
         inputs: dict[str, Any],
         service,
-        session_id: str,
-        thread_id: str,
-        tab_id: str,
+        pipeline_id: str,
     ) -> ToolExecutionResult:
         """执行对话模式"""
         title = inputs.get("title", "")
@@ -245,15 +226,15 @@ class HumanInteractionTool(BuiltinTool):
 
         try:
             request_id = await service.create_conversation_request(
-                session_id=session_id,
-                thread_id=thread_id,
-                tab_id=tab_id,
+                session_id=pipeline_id,
+                thread_id=pipeline_id,
+                tab_id=pipeline_id,
                 title=title,
                 description=description,
                 initial_message=initial_message,
                 suggestions=suggestions,
-                user_id=self.user_id,
-                agent_id=self.agent_id,
+                user_id=None,
+                agent_id=pipeline_id,
             )
 
             # BUG-FIX-fix_20260408_human_interaction_response:
@@ -270,17 +251,9 @@ class HumanInteractionTool(BuiltinTool):
 
 
 def create_human_interaction_tool(
-    user_id: str | None = None,
-    session_id: str | None = None,
-    thread_id: str | None = None,
-    tab_id: str | None = None,
-    agent_id: str | None = None,
+    pipeline_id: str | None = None,
 ) -> HumanInteractionTool:
     """创建人类交互工具实例"""
     return HumanInteractionTool(
-        user_id=user_id,
-        session_id=session_id,
-        thread_id=thread_id,
-        tab_id=tab_id,
-        agent_id=agent_id,
+        pipeline_id=pipeline_id,
     )

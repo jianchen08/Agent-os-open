@@ -112,6 +112,18 @@ class IsolationExecutor:
         Returns:
             工具执行结果字典，包含 tool_name、success、data/error、duration_ms
         """
+        # 惰性初始化：首次执行时检查 Docker 可用性
+        if self._docker_available is None:
+            available, reason = await self._docker_provider.is_available()
+            self._docker_available = available
+            if available:
+                logger.info("[IsolationExecutor] Docker 可用，容器隔离已就绪")
+            else:
+                logger.warning(
+                    "[IsolationExecutor] Docker 不可用: %s，所有工具将在宿主机执行",
+                    reason,
+                )
+
         # 查找当前工具的执行上下文
         context = self._find_execution_context(state, tool_name)
         provider = context.get("provider", "host") if context else "host"

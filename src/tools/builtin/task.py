@@ -10,6 +10,7 @@
 
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -47,18 +48,36 @@ class TaskTool:
     def __init__(self) -> None:
         """初始化任务管理工具。"""
         self._task_service: TaskService | None = None
+        self._message_queue: Any = None
+
+    def _get_message_queue(self):
+        """获取全局 MessageQueue 实例。
+
+        通过 ServiceProvider 统一获取，兼容 ToolCore 注入和 sys 全局变量。
+
+        Returns:
+            MessageQueue 实例，获取失败时返回 None
+        """
+        if self._message_queue is not None:
+            return self._message_queue
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        mq = provider.get("message_queue")
+        if mq is not None:
+            self._message_queue = mq
+        return self._message_queue
 
     def _get_execution_record_storage(self):
         """获取全局 ExecutionRecordStorage 实例。
 
+        通过 ServiceProvider 统一获取。
+
         Returns:
             ExecutionRecordStorage 实例，获取失败时返回 None
         """
-        try:
-            import sys
-            return getattr(sys, "_agent_os_execution_record_storage", None)
-        except Exception:
-            return None
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get("execution_record_storage")
 
     @staticmethod
     def _calc_elapsed_seconds(task: TaskModel) -> float | None:
@@ -114,6 +133,7 @@ class TaskTool:
             {
                 "iteration": r.iteration,
                 "action": r.name or ("thinking" if r.type == "ai" else r.type),
+                "action_type": r.type,
                 "summary": (r.content or "")[:100],
                 "at": r.created_at,
             }
@@ -123,10 +143,7 @@ class TaskTool:
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
 
-        获取优先级：
-        1. 缓存的实例（已被外部注入）
-        2. sys._agent_os_task_service（CLI 设置的全局共享实例）
-        3. 创建新实例（降级兜底）
+        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
 
         Returns:
             TaskService 实例
@@ -136,31 +153,61 @@ class TaskTool:
         """
         if self._task_service is not None:
             return self._task_service
-        try:
-            import sys
-            global_ts = getattr(sys, "_agent_os_task_service", None)
-            if global_ts is not None:
-                self._task_service = global_ts
-                return self._task_service
-            self._task_service = TaskService()
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        service = provider.get_or_create("task_service", lambda: TaskService())
+        if service is not None:
+            self._task_service = service
             return self._task_service
-        except Exception as e:
-            logger.error("[TaskTool] TaskService 创建失败: %s", e)
-            raise RuntimeError(f"任务服务初始化失败: {e}") from e
+        raise RuntimeError("任务服务初始化失败")
 
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
         return Tool(
             name="task_manage",
-            description="任务管理工具：用于查询和控制任务状态。支持操作：get(查询详情)、list(列出列表)、update(更新状态)、status(状态概览)、pause(暂停)、resume(继续)、cancel(取消)、retry(重试)、delete(删除)、inject(向运行中的子任务注入指令)、complete_container(标记容器完成，仅限L1)、fail_container(标记容器失败，仅限L1)。权限：L1可管理所属会话的所有任务，L2只能管理自己提交的子任务。",
+            description=(
+                "任务管理工具：用于查询和控制任务的生命周期。\n\n"
+                "## 常用场景\n"
+                "- **查看下级执行情况**：使用 list + parent_task_id 筛选某容器下的所有子任务，返回每个子任务的状态、最新执行动作和耗时\n"
+                "- **查看全局进度**：使用 status 获取状态统计概览和最近任务列表\n"
+                "- **查看单个任务详情**：使用 get + include_details=true 展开最近执行活动记录\n"
+                "- **干预子任务执行**：使用 inject 向运行中/暂停的子任务注入新指令（如调整方向、补充要求）\n"
+                "- **容器任务管理**：L1 使用 complete_container/fail_container 标记长期任务完成或失败\n\n"
+                "## 支持的操作\n"
+                "- get：查询单个任务详情（include_details=true 可展开执行活动）\n"
+                "- list：列出任务列表（支持 parent_task_id 筛选子任务、status 按状态过滤）\n"
+                "- status：全局状态概览（各状态统计 + 最近任务摘要）\n"
+                "- update：更新任务状态\n"
+                "- pause/resume/cancel/retry：任务生命周期控制\n"
+                "- inject：向运行中或暂停的子任务注入指令\n"
+                "- delete：删除任务\n"
+                "- complete_container/fail_container：标记容器完成/失败（仅L1）\n\n"
+                "## 权限\n"
+                "- L1：可管理所属会话的所有任务\n"
+                "- L2：只能管理自己提交的子任务"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["get", "update", "list", "status", "pause", "resume", "cancel", "retry", "delete", "inject", "complete_container", "fail_container"],
-                        "description": "操作类型：get-查询单个任务详情，list-列出任务列表，update-更新任务状态，status-查看任务状态概览，pause-暂停任务，resume-继续执行，cancel-取消任务，retry-重试任务，delete-删除任务，inject-向运行中的子任务注入指令，complete_container-标记容器完成(仅限L1)，fail_container-标记容器失败(仅限L1)",
+                        "description": (
+                            "操作类型，根据场景选择：\n"
+                            "- get：查询单个任务详情，需要 task_id；加 include_details=true 可展开最近执行活动\n"
+                            "- list：列出任务列表；传 parent_task_id 可查看某容器下所有子任务的执行情况（状态+最新动作+耗时）\n"
+                            "- status：查看全局状态概览（各状态数量统计 + 最近任务摘要），适合快速了解整体进度\n"
+                            "- update：更新任务状态字段\n"
+                            "- pause：暂停运行中的任务\n"
+                            "- resume：恢复暂停的任务\n"
+                            "- cancel：取消任务\n"
+                            "- retry：重试失败的任务（重置为pending重新执行）\n"
+                            "- inject：向运行中或暂停的子任务注入新指令（如调整方向、补充要求），子任务下一轮会看到该消息\n"
+                            "- delete：删除任务及关联资源\n"
+                            "- complete_container：标记容器任务完成（仅L1），需所有子任务已到达终态\n"
+                            "- fail_container：标记容器任务失败（仅L1）"
+                        ),
                     },
                     "task_scope": {
                         "type": "string",
@@ -194,7 +241,7 @@ class TaskTool:
                     },
                     "message": {
                         "type": "string",
-                        "description": "注入的指令内容（inject操作时必填）",
+                        "description": "注入的指令内容（inject操作时必填）。该消息会以user角色注入到子任务的下一轮对话中，子任务Agent会看到并据此调整执行方向。示例：'注意：需求有变更，请改用方案B'、'请优先处理登录模块'",
                     },
                     "container_reason": {
                         "type": "string",
@@ -202,50 +249,25 @@ class TaskTool:
                     },
                     "include_details": {
                         "type": "boolean",
-                        "description": "是否包含详细信息，默认为false",
+                        "description": "是否包含详细信息（仅get操作生效）。设为true时返回 recent_activities（最近执行活动列表，含迭代轮次、动作名称、内容摘要、时间）和 elapsed_seconds（已耗时）",
                         "default": False,
                     },
                     "include_agent_calls": {
                         "type": "boolean",
-                        "description": "是否包含Agent调用记录，默认为false",
+                        "description": "是否只返回工具调用类型的活动记录（仅get操作生效，会自动启用详细信息）。设为true时返回 recent_activities 中只包含 action_type=tool 的记录（工具名+输入+输出），不含AI思考内容",
                         "default": False,
                     },
                     "parent_task_id": {
                         "type": "string",
-                        "description": "父任务ID，用于筛选子任务",
+                        "description": "父任务ID。list操作时传入可筛选该容器下的所有子任务，查看每个子任务的状态、最新执行动作和耗时；inject操作时L2需传入以验证权限",
                     },
                     "project_id": {
                         "type": "string",
                         "description": "项目ID，用于筛选特定项目的任务",
                     },
-                    "priority": {
-                        "type": "integer",
-                        "description": "优先级，范围0-10，数字越大优先级越高，默认为5",
-                        "default": 5,
-                        "minimum": 0,
-                        "maximum": 10,
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "截止日期，ISO 8601格式，如2024-01-01T00:00:00",
-                        "format": "date-time",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "任务标签列表，用于分类和筛选",
-                    },
-                    "user_id": {
-                        "type": "string",
-                        "description": "用户ID，用于数据隔离",
-                    },
                     "session_id": {
                         "type": "string",
                         "description": "会话ID，用于筛选特定会话的任务",
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "任务的元数据，可存储额外信息",
                     },
                     "limit": {
                         "type": "integer",
@@ -274,6 +296,11 @@ class TaskTool:
         """
         action = inputs.get("action")
         parent_agent_level = inputs.get("parent_agent_level", 1)
+
+        # ToolCore 通过 _SERVICE_INJECT_MAP 自动注入服务到 inputs，
+        # 在此捕获并缓存到实例属性，供后续 _get_message_queue() 使用
+        if inputs.get("_message_queue") and self._message_queue is None:
+            self._message_queue = inputs["_message_queue"]
 
         try:
             self._get_task_service()
@@ -360,16 +387,21 @@ class TaskTool:
             任务模型列表（按创建时间倒序）
         """
         service = self._get_task_service()
-        all_tasks = list(service._storage._tasks.values())
-        all_tasks.sort(key=lambda t: t.created_at, reverse=True)
-        return all_tasks[:limit]
+        return service.list_all(limit=limit)
 
-    def _task_to_dict(self, task: TaskModel, include_details: bool = False) -> dict[str, Any]:
+    def _task_to_dict(
+        self, task: TaskModel, include_details: bool = False, include_agent_calls: bool = False
+    ) -> dict[str, Any]:
         """将 TaskModel 转换为工具返回的字典格式。
+
+        BUG-FIX-fix_20260417_task_manage_records: 新增 include_agent_calls 参数，
+        之前该参数在 schema 中定义但从未被使用。现在传 include_agent_calls=true 时
+        自动启用 include_details，并筛选只返回工具调用类型的活动记录。
 
         Args:
             task: 任务模型
             include_details: 是否包含详细活动信息
+            include_agent_calls: 是否只返回工具调用类型的活动记录
 
         Returns:
             可序列化的任务字典
@@ -390,9 +422,12 @@ class TaskTool:
             "error": task.error,
             "result": task.result,
         }
-        if include_details:
+        if include_details or include_agent_calls:
             result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
-            result["recent_activities"] = self._get_recent_activities(task)
+            activities = self._get_recent_activities(task)
+            if include_agent_calls and not include_details:
+                activities = [a for a in activities if a.get("action_type") == "tool"]
+            result["recent_activities"] = activities
         return result
 
     async def _get_task_status(
@@ -518,7 +553,11 @@ class TaskTool:
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            task_dict = self._task_to_dict(task, include_details=inputs.get("include_details", False))
+            task_dict = self._task_to_dict(
+                task,
+                include_details=inputs.get("include_details", False),
+                include_agent_calls=inputs.get("include_agent_calls", False),
+            )
             task_dict["hint"] = "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。"
 
             return create_success_result(
@@ -588,16 +627,15 @@ class TaskTool:
                     )
 
                 # 检查状态转换合法性
-                if not service._state_machine.can_transition(task.status, target_status):
-                    valid = [s.value for s in service._state_machine.TRANSITIONS.get(task.status, [])]
+                if not service.can_transition(task_id, target_status):
+                    valid = service.get_valid_transitions(task_id)
                     return create_failure_result(
                         error=f"非法状态转换: {task.status.value} -> {new_status}。当前状态可转换为: {valid}",
                         error_code="INVALID_TRANSITION",
                     )
 
                 old_status = task.status.value
-                service._state_machine.transition(task, target_status)
-                service._storage.save(task)
+                service.force_transition(task_id, target_status)
 
                 return create_success_result(
                     data={
@@ -970,18 +1008,50 @@ class TaskTool:
             old_status = task.status.value
 
             # 利用状态机从 failed -> pending
-            service._transition_with_callback(task, TaskStatus.PENDING)
+            service.force_transition(task.id, TaskStatus.PENDING)
             task.error = None
-            service._storage.save(task)
+            service.save_task(task)
+
+            # 发出 task.submitted 事件，触发 TaskWorker 重新执行
+            execution_warning = None
+            target_id = task.metadata.get("target_id", "")
+            if target_id:
+                try:
+                    from infrastructure.service_provider import get_service_provider
+                    provider = get_service_provider()
+                    event_bus = provider.get("event_bus")
+                    if event_bus is not None:
+                        if hasattr(event_bus, 'has_subscribers') and not event_bus.has_subscribers("task.submitted"):
+                            execution_warning = "后台执行器(TaskWorker)未启动，任务已重置为pending但不会自动执行"
+                        else:
+                            await event_bus.emit("task.submitted", {
+                                "task_id": task.id,
+                                "target_type": task.target_type or "agent",
+                                "target_id": target_id,
+                                "user_input": task.title,
+                                "description": task.description,
+                                "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
+                                "workspace": task.metadata.get("workspace", ""),
+                            })
+                            logger.info("[TaskTool] retry 已发出 task.submitted 事件: task_id=%s", task_id)
+                    else:
+                        execution_warning = "EventBus 不可用，任务已重置为pending但不会自动执行"
+                except Exception as emit_exc:
+                    logger.warning("[TaskTool] retry 发出 task.submitted 失败: %s", emit_exc)
+                    execution_warning = f"事件发送失败: {emit_exc}"
+
+            result_data = {
+                "task_id": task_id,
+                "retried": True,
+                "old_status": old_status,
+                "new_status": TaskStatus.PENDING.value,
+                "reason": reason,
+            }
+            if execution_warning:
+                result_data["warning"] = execution_warning
 
             return create_success_result(
-                data={
-                    "task_id": task_id,
-                    "retried": True,
-                    "old_status": old_status,
-                    "new_status": TaskStatus.PENDING.value,
-                    "reason": reason,
-                },
+                data=result_data,
                 metadata={"action": "retry_task"},
             )
 
@@ -1048,26 +1118,28 @@ class TaskTool:
                     error_code="INVALID_STATUS",
                 )
 
-            target_session_id = task.metadata.get("session_id")
-            target_execution_id = task.execution_record_id
-
-            if not target_session_id:
+            # BUG-FIX-fix_20260417_task_manage_records: 系统已从 session 改为 pipeline，
+            # 投递地址使用 task.pipeline_run_id（子管道的 pipeline_id）而非 session_id
+            target_pipeline_id = task.pipeline_run_id
+            if not target_pipeline_id:
                 return create_failure_result(
-                    error="任务缺少 session_id，无法注入",
-                    error_code="MISSING_SESSION_ID",
+                    error="任务尚未启动或 pipeline_run_id 未绑定，无法注入",
+                    error_code="MISSING_PIPELINE_ID",
                 )
 
-            from triggers.message_queue import (
-                TriggerMessage,
-                create_message_id,
-                get_trigger_message_queue,
-            )
+            from infrastructure.message_queue import Message, create_message_id
 
-            queue = get_trigger_message_queue()
-            trigger_message = TriggerMessage(
+            queue = self._get_message_queue()
+            if not queue:
+                return create_failure_result(
+                    error="消息队列服务不可用，无法注入",
+                    error_code="QUEUE_UNAVAILABLE",
+                )
+
+            msg = Message(
                 id=create_message_id(),
-                session_id=target_session_id,
-                execution_id=target_execution_id or "",
+                pipeline_id=target_pipeline_id,
+                target_id=task_id,
                 content=message,
                 priority=100,
                 metadata={
@@ -1077,7 +1149,7 @@ class TaskTool:
                 },
             )
 
-            success = await queue.push(trigger_message)
+            success = await queue.push(msg)
             if not success:
                 return create_failure_result(
                     error="消息队列已满，注入失败",
@@ -1085,18 +1157,17 @@ class TaskTool:
                 )
 
             logger.info(
-                "[TaskTool] 指令注入成功 | task_id=%s | session_id=%s | "
-                "execution_id=%s | message_preview=%s...",
-                task_id, target_session_id, target_execution_id, message[:50],
+                "[TaskTool] 指令注入成功 | task_id=%s | pipeline_id=%s | "
+                "message_preview=%s...",
+                task_id, target_pipeline_id, message[:50],
             )
 
             return create_success_result(
                 data={
                     "task_id": task_id,
                     "injected": True,
-                    "message_id": trigger_message.id,
-                    "target_session_id": target_session_id,
-                    "target_execution_id": target_execution_id,
+                    "message_id": msg.id,
+                    "target_pipeline_id": target_pipeline_id,
                     "message_preview": message[:100],
                 },
                 metadata={"action": "inject_task"},
@@ -1161,7 +1232,7 @@ class TaskTool:
             )
 
             # 从存储中删除
-            service._storage.delete(task_id)
+            service.delete_task(task_id)
 
             return create_success_result(
                 data={
@@ -1239,9 +1310,9 @@ class TaskTool:
         reason = inputs.get("container_reason", inputs.get("reason", ""))
 
         try:
-            service._transition_with_callback(task, TaskStatus.COMPLETED)
+            service.force_transition(task.id, TaskStatus.COMPLETED)
             task.completed_at = datetime.now().isoformat()
-            service._storage.save(task)
+            service.save_task(task)
             logger.info("[TaskTool] 容器已完成: %s — %s", task_id, reason)
             return create_success_result(
                 data={
@@ -1329,11 +1400,11 @@ class TaskTool:
             )
 
         try:
-            service._transition_with_callback(task, TaskStatus.FAILED)
+            service.force_transition(task.id, TaskStatus.FAILED)
             task.completed_at = datetime.now().isoformat()
             task.metadata = task.metadata or {}
             task.metadata["container_reason"] = reason
-            service._storage.save(task)
+            service.save_task(task)
             logger.info("[TaskTool] 容器已失败: %s — %s", task_id, reason)
             return create_success_result(
                 data={
@@ -1400,9 +1471,20 @@ class TaskTool:
                     workspace_path = Path(workspace_config_root) / workspace
 
                 if workspace_path.exists():
-                    shutil.rmtree(str(workspace_path))
-                    cleanup_results["workspace_cleaned"] = True
-                    logger.info("[TaskTool] 已清理工作空间: %s", workspace_path)
+                    git_path = workspace_path / ".git"
+                    if git_path.is_file():
+                        # worktree 中 .git 是文件（指向 .git/worktrees/xxx），走 git cleanup 流程
+                        self._remove_worktree(workspace_path, cleanup_results)
+                    elif git_path.is_dir():
+                        # 普通仓库目录，走原有的 shutil.rmtree 流程
+                        shutil.rmtree(str(workspace_path))
+                        cleanup_results["workspace_cleaned"] = True
+                        logger.info("[TaskTool] 已清理工作空间: %s", workspace_path)
+                    else:
+                        # 无 .git 标识的普通目录，直接删除
+                        shutil.rmtree(str(workspace_path))
+                        cleanup_results["workspace_cleaned"] = True
+                        logger.info("[TaskTool] 已清理普通目录: %s", workspace_path)
                 else:
                     logger.debug("[TaskTool] 工作空间不存在: %s", workspace_path)
             except Exception as e:
@@ -1410,3 +1492,51 @@ class TaskTool:
                 logger.warning("[TaskTool] 清理工作空间失败: %s, 错误: %s", workspace, e)
 
         return cleanup_results
+
+    def _remove_worktree(
+        self,
+        workspace_path: Path,
+        cleanup_results: dict[str, Any],
+    ) -> None:
+        """移除 git worktree 并清理对应分支。
+
+        worktree 的 .git 是一个文件（指向主仓库 .git/worktrees/xxx），
+        需要通过 git worktree remove 命令正确清理，而非直接 shutil.rmtree。
+
+        Args:
+            workspace_path: worktree 的工作空间路径
+            cleanup_results: 清理结果字典，用于记录错误信息
+        """
+        try:
+            # 读取 .git 文件内容，定位主仓库路径
+            git_file_content = (workspace_path / ".git").read_text(encoding="utf-8").strip()
+            # 格式为 "gitdir: /path/to/main-repo/.git/worktrees/xxx"
+            if git_file_content.startswith("gitdir: "):
+                worktree_gitdir = Path(git_file_content[len("gitdir: "):])
+                # 主仓库根目录: .git/worktrees/xxx 的上上级
+                main_repo = worktree_gitdir.parent.parent.parent
+            else:
+                main_repo = workspace_path.parent
+
+            # 在主仓库中执行 git worktree remove --force
+            subprocess.run(
+                ["git", "worktree", "remove", str(workspace_path), "--force"],
+                cwd=str(main_repo),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info("[TaskTool] 已通过 git worktree remove 清理 worktree: %s", workspace_path)
+            cleanup_results["workspace_cleaned"] = True
+        except subprocess.CalledProcessError as e:
+            cleanup_results["errors"].append(
+                f"git worktree remove 失败: {e.stderr.strip() if e.stderr else str(e)}"
+            )
+            logger.warning(
+                "[TaskTool] git worktree remove 失败: %s, stderr: %s",
+                workspace_path,
+                e.stderr,
+            )
+        except Exception as e:
+            cleanup_results["errors"].append(f"清理 worktree 失败: {str(e)}")
+            logger.warning("[TaskTool] 清理 worktree 失败: %s, 错误: %s", workspace_path, e)

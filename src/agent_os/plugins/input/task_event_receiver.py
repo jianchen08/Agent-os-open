@@ -34,9 +34,12 @@ class TaskEventReceiverPlugin(IInputPlugin):
         self._pending_events: list[dict[str, Any]] = []
         self._event_bus: Any = None
         self._subscribed = False
+        self._current_task_id: str = ""
 
     def _on_task_completed(self, event: dict[str, Any]) -> None:
         """任务完成事件处理。"""
+        if not self._is_relevant_event(event):
+            return
         self._pending_events.append({
             "type": "task_completed",
             "data": event,
@@ -45,11 +48,42 @@ class TaskEventReceiverPlugin(IInputPlugin):
 
     def _on_task_failed(self, event: dict[str, Any]) -> None:
         """任务失败事件处理。"""
+        if not self._is_relevant_event(event):
+            return
         self._pending_events.append({
             "type": "task_failed",
             "data": event,
         })
         logger.debug("[TaskEventReceiver] 收到任务失败事件: %s", event.get("task_id"))
+
+    def _is_relevant_event(self, event: dict[str, Any]) -> bool:
+        """判断事件是否属于当前管道的子任务。
+
+        仅当事件的 parent_task_id 与当前管道 task_id 匹配时才接收，
+        避免并行管道之间的事件交叉污染。
+
+        Args:
+            event: 事件数据
+
+        Returns:
+            事件是否与当前管道相关
+        """
+        if not self._current_task_id:
+            return True
+        parent_id = ""
+        task = event.get("task")
+        if isinstance(task, dict):
+            parent_id = task.get("parent_task_id", "")
+        elif task and hasattr(task, "parent_task_id"):
+            parent_id = getattr(task, "parent_task_id", "") or ""
+        if parent_id != self._current_task_id:
+            logger.debug(
+                "[TaskEventReceiver] Skipping event: parent_id=%s != current=%s",
+                parent_id,
+                self._current_task_id,
+            )
+            return False
+        return True
 
     def _subscribe_events(self, ctx: PluginContext) -> None:
         """订阅事件。"""
@@ -77,6 +111,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
         """
         # 首次执行时订阅事件
         if not self._subscribed:
+            self._current_task_id = ctx.state.get("task_id", "")
             self._subscribe_events(ctx)
 
         # 没有待处理事件，直接返回

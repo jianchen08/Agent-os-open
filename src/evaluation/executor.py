@@ -48,21 +48,27 @@ class EvaluationExecutor:
         engine: EvaluationEngine | None = None,
         mapper: ResultMapper | None = None,
         tool_registry: Any | None = None,
+        pipeline_factory: Any | None = None,
+        agent_registry: Any | None = None,
     ) -> None:
         """初始化评估执行器。
 
         Args:
             task_service: 任务服务实例（可选），提供 complete_evaluation 方法
             loader: 指标加载器，None 时创建默认实例并加载所有指标
-            engine: 评估引擎，None 时根据 loader 和 tool_registry 创建默认实例
+            engine: 评估引擎，None 时根据 loader 和其他参数创建默认实例
             mapper: 结果映射器，None 时创建默认实例
             tool_registry: 工具注册表，传递给 EvaluationEngine 用于真实工具调用
+            pipeline_factory: 创建 PipelineEngine 的工厂，传递给 EvaluationEngine
+            agent_registry: AgentRegistry 实例，传递给 EvaluationEngine
         """
         self._task_service = task_service
         self._loader = loader or MetricLoader()
         self._engine = engine or EvaluationEngine(
             loader=self._loader,
             tool_registry=tool_registry,
+            pipeline_factory=pipeline_factory,
+            agent_registry=agent_registry,
         )
         self._mapper = mapper or ResultMapper()
 
@@ -72,6 +78,7 @@ class EvaluationExecutor:
         metric_ids: list[str] | None = None,
         input_params: dict[str, dict[str, Any]] | None = None,
         fail_fast: bool = False,
+        skip_state_update: bool = False,
     ) -> EvaluationResult:
         """执行评估并可选回写任务状态。
 
@@ -80,37 +87,48 @@ class EvaluationExecutor:
         2. 构建评估配置
         3. 调用评估引擎执行评估
         4. 映射评估结果
-        5. 通过 TaskService 回写状态（如果注入了 task_service）
+        5. 通过 TaskService 回写状态（如果注入了 task_service 且 skip_state_update=False）
 
         Args:
             task_id: 任务 ID
             metric_ids: 要评估的指标 ID 列表，None 表示评估所有已加载指标
             input_params: 各指标的输入参数
             fail_fast: 是否在首个指标失败时停止
+            skip_state_update: 是否跳过任务状态回写（由调用方自行管理状态）
 
         Returns:
             评估结果
         """
-        # 确保指标已加载
         if not self._loader.metrics:
             self._loader.load_all()
 
-        # 构建评估配置
         config = EvaluationConfig(
             metric_ids=metric_ids or [],
             input_params=input_params or {},
             fail_fast=fail_fast,
         )
 
-        # 执行评估
         result = self._engine.evaluate(task_id=task_id, config=config)
 
-        # 映射结果并回写任务状态
         overall_passed = self._mapper.map_to_task_status(result)
 
-        if self._task_service is not None:
+        if not skip_state_update and self._task_service is not None:
             try:
-                self._task_service.complete_evaluation(task_id, overall_passed)
+                eval_data = {
+                    "overall_passed": overall_passed,
+                    "summary": result.summary or self._mapper.build_summary(result),
+                    "metrics": [
+                        {
+                            "metric_id": r.metric_id,
+                            "passed": r.passed,
+                            "message": r.message,
+                        }
+                        for r in result.results
+                    ],
+                }
+                self._task_service.complete_evaluation(
+                    task_id, overall_passed, result=eval_data,
+                )
                 logger.info(
                     "Task %s evaluation completed: %s",
                     task_id,

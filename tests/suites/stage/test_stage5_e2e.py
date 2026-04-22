@@ -32,7 +32,6 @@ from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 from plugins.input.memory_read import MemoryReadPlugin
 from plugins.input.prompt_build import PromptBuildPlugin
 from plugins.output.error_check import ErrorCheckPlugin
-from plugins.output.memory_write import MemoryWritePlugin
 
 
 # ── 测试用内存后端 ──
@@ -153,7 +152,7 @@ class TestKnowledgeInjectionE2E:
     """5.1 知识注入端到端测试。
 
     验证完整链路：
-    MemoryWritePlugin 写入 → MemoryReadPlugin 检索 →
+    直接写入 Episode → MemoryReadPlugin 检索 →
     KnowledgeInjectPlugin 注入 → PromptBuildPlugin 包含在 system prompt
     """
 
@@ -163,20 +162,14 @@ class TestKnowledgeInjectionE2E:
         base_state: dict,
     ) -> None:
         """验证 Episode 写入 → 检索 → 出现在 Prompt 中的全链路。"""
-        # ── 步骤 1: MemoryWritePlugin 写入用户消息 ──
-        base_state["user_message"] = "Python 异常处理最佳实践"
-        base_state["user_id"] = "user-e2e"
-
-        write_ctx = make_ctx(base_state, memory_store=json_store)
-        write_plugin = MemoryWritePlugin()
-        write_result = await write_plugin.execute(write_ctx)
-
-        # 写入成功
-        assert write_result.state_updates["memory.written"]["success"] is True
-        assert write_result.state_updates["memory.written"]["items"] >= 1
-
-        # 应用 state 更新
-        base_state.update(write_result.state_updates)
+        # ── 步骤 1: 直接通过 json_store 写入 Episode ──
+        episode = Episode(
+            user_id="user-e2e",
+            session_id="stage5-test-session",
+            intent_text="Python 异常处理最佳实践",
+            execution_summary="用户询问 Python 异常处理",
+        )
+        await json_store.save(episode, "episode")
 
         # ── 步骤 2: MemoryReadPlugin 检索 ──
         read_state = create_initial_state(
@@ -186,7 +179,6 @@ class TestKnowledgeInjectionE2E:
             user_id="user-e2e",
         )
         read_ctx = make_ctx(read_state, retriever=retriever)
-        # MemoryWritePlugin 写入的是 Episode，检索时需指定 memory_type="episode"
         read_plugin = MemoryReadPlugin(config={"memory_type": "episode"})
         read_result = await read_plugin.execute(read_ctx)
 

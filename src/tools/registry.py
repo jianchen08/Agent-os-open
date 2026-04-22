@@ -1,4 +1,4 @@
-﻿"""
+"""
 工具注册表
 
 暴露接口：
@@ -82,6 +82,9 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 已知的工具名称（用于按需加载判断）
         self._known_tool_names: set[str] = set()
 
+        # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）
+        self._dynamic_tool_names: set[str] = set()
+
         # 使用统计（用于 LRU 卸载策略）
         self._usage_count: dict[str, int] = {}  # 工具使用次数
         self._last_used: dict[str, float] = {}  # 最后使用时间戳
@@ -100,6 +103,25 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         """配置工具卸载策略"""
         self._max_tools = max_tools
         self._unload_threshold = unload_threshold
+
+    def mark_dynamic(self, name: str) -> None:
+        """将工具标记为动态加载的工具。
+
+        由 ToolAutoLoader 在运行时动态加载工具后调用，
+        ToolSchemaPlugin 会查询此集合来决定向 LLM 展示哪些额外工具。
+
+        Args:
+            name: 工具名称
+        """
+        self._dynamic_tool_names.add(name)
+
+    def get_dynamic_tool_names(self) -> set[str]:
+        """获取所有动态加载的工具名称集合。
+
+        Returns:
+            动态加载的工具名称集合
+        """
+        return self._dynamic_tool_names
 
     def register(
         self,
@@ -352,7 +374,9 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         return self._runnables.get(name)
 
     def get_handler(self, name: str) -> ToolHandler | None:
-        """获取处理函数"""
+        """获取处理函数（支持按需自动加载）"""
+        if name not in self._handlers:
+            self._try_load_tool_on_demand(name)
         return self._handlers.get(name)
 
     def has(self, name: str) -> bool:
@@ -378,6 +402,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 清理相关数据
         self._handlers.pop(name, None)
         self._runnables.pop(name, None)
+        self._dynamic_tool_names.discard(name)
 
         return tool
 
@@ -484,3 +509,4 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         super().clear()
         self._handlers.clear()
         self._runnables.clear()
+        self._dynamic_tool_names.clear()

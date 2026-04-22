@@ -3,8 +3,6 @@
 负责在管道循环的输入阶段从消息队列中获取待注入消息，
 将消息内容作为 user 角色消息注入到 state["messages"] 前部。
 
-参考 plugins/input/knowledge_inject.py 的插件风格。
-
 State 命名空间：
     - messages: 本插件向 messages 列表前部注入 user 消息
 """
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 class MessageInjectPlugin(IInputPlugin):
     """消息注入 Input 插件。
 
-    从 MessageQueue 中按 session_id 弹出消息，将消息内容
+    从 MessageQueue 中按 pipeline_id 弹出消息，将消息内容
     以 user 角色注入到 state["messages"] 前部，使管道
     在下一轮处理时能消费该消息。
 
@@ -36,7 +34,7 @@ class MessageInjectPlugin(IInputPlugin):
     """
 
     error_policy = ErrorPolicy.FALLBACK
-    fallback_state: dict[str, Any] = {}
+    fallback_state: dict[str, Any] = {"messages": []}
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化消息注入插件。
@@ -61,7 +59,7 @@ class MessageInjectPlugin(IInputPlugin):
         """从消息队列弹出消息并注入到管道状态。
 
         通过 ctx.get_service("message_queue") 获取队列实例，
-        按 ctx.state["session_id"] 弹出最高优先级消息，
+        按 ctx.state["pipeline_id"] 弹出最高优先级消息，
         将消息内容以 {"role": "user", "content": ...} 格式
         插入到 state["messages"] 列表前部。
 
@@ -73,7 +71,6 @@ class MessageInjectPlugin(IInputPlugin):
         Returns:
             包含 messages 更新的插件执行结果
         """
-        # 获取消息队列服务
         try:
             queue = ctx.get_service("message_queue")
         except KeyError:
@@ -84,41 +81,36 @@ class MessageInjectPlugin(IInputPlugin):
             logger.warning("[%s] message_queue is not a MessageQueue instance", self.name)
             return PluginResult()
 
-        # 获取 session_id
-        session_id = ctx.state.get("session_id")
-        if not session_id:
-            logger.debug("[%s] No session_id in state, skipping", self.name)
+        pipeline_id = ctx.state.get("pipeline_id")
+        if not pipeline_id:
+            logger.debug("[%s] No pipeline_id in state, skipping", self.name)
             return PluginResult()
 
-        # 从队列弹出消息
         try:
-            message = queue.pop(session_id)
+            message = await queue.pop(pipeline_id)
         except Exception as exc:
             logger.error("[%s] Failed to pop message: %s", self.name, exc)
             return PluginResult()
 
         if message is None:
-            logger.debug("[%s] No messages in queue for session %s", self.name, session_id)
+            logger.debug("[%s] No messages in queue for pipeline %s", self.name, pipeline_id)
             return PluginResult()
 
-        # 构造 user 消息并注入到 messages 前部
         user_msg: dict[str, str] = {
             "role": "user",
             "content": message.content,
         }
 
-        # 获取现有 messages 列表
         messages = ctx.state.get("messages", [])
         if not isinstance(messages, list):
             messages = []
 
-        # 注入到前部
         updated_messages = [user_msg] + list(messages)
 
         logger.info(
-            "[%s] Message injected | session_id=%s | message_id=%s | "
+            "[%s] Message injected | pipeline_id=%s | message_id=%s | "
             "target_id=%s | content_len=%d",
-            self.name, session_id, message.id,
+            self.name, pipeline_id, message.id,
             message.target_id, len(message.content),
         )
 

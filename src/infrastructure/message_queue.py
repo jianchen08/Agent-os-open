@@ -1,13 +1,7 @@
 """消息队列 — 管道间消息传递基础设施。
 
-从旧代码 triggers/message_queue.py 简化迁移：
-- 重命名：TriggerMessage → Message，TriggerMessageQueue → MessageQueue
-- 去掉全局单例，改为普通类实例化
-- 保留核心功能：push/pop/peek/get_all/clear/size/get_statistics
-- 保留消息过期自动清理
-- 使用 asyncio.Lock 替代 threading.Lock（避免阻塞事件循环）
-- 使用 bisect.insort 优化优先级插入（O(log n) 替代 O(n log n) 全排序）
-- execution_id 改名为 target_id（更通用）
+用于 L1 Agent 向运行中的子任务管道定向注入指令。
+消息按 pipeline_id 隔离，每个管道只能取到发给自己的消息。
 
 暴露接口：
 - Message: 消息数据类
@@ -35,8 +29,8 @@ class Message:
 
     Attributes:
         id: 消息唯一标识
-        session_id: 目标会话 ID
-        target_id: 目标实体 ID（如任务 ID、执行记录 ID 等）
+        pipeline_id: 目标管道 ID（投递地址）
+        target_id: 目标实体 ID（如任务 ID）
         content: 消息内容
         priority: 优先级（数字越大越优先）
         created_at: 创建时间
@@ -45,7 +39,7 @@ class Message:
     """
 
     id: str
-    session_id: str
+    pipeline_id: str
     target_id: str
     content: str
     priority: int = 0
@@ -54,11 +48,7 @@ class Message:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def is_expired(self) -> bool:
-        """检查消息是否已过期。
-
-        Returns:
-            已过期返回 True，未过期或无过期时间返回 False
-        """
+        """检查消息是否已过期。"""
         if self.expires_at is None:
             return False
         return datetime.utcnow() > self.expires_at
@@ -68,7 +58,7 @@ class MessageQueue:
     """异步安全的消息队列。
 
     管理待注入的消息，支持：
-    - 按 session 分组存储消息
+    - 按 pipeline_id 分组存储消息
     - 消息优先级排序（高优先级先出）— 使用 bisect.insort O(log n) 插入
     - 消息过期自动清理
     - asyncio.Lock 保护（不阻塞事件循环）
@@ -78,17 +68,17 @@ class MessageQueue:
         queue = MessageQueue()
         msg = Message(
             id=create_message_id(),
-            session_id="session_001",
+            pipeline_id="abc123",
             target_id="task_001",
             content="请检查任务状态",
             priority=10,
         )
         await queue.push(msg)
-        popped = await queue.pop("session_001")
+        popped = await queue.pop("abc123")
 
     Attributes:
-        _queues: 按 session_id 分组的消息列表
-        _max_queue_size: 单个 session 的最大队列长度
+        _queues: 按 pipeline_id 分组的消息列表
+        _max_queue_size: 单个管道的最大队列长度
         _default_ttl: 消息默认过期秒数
         _lock: asyncio 异步锁
     """
@@ -104,7 +94,7 @@ class MessageQueue:
         """初始化消息队列。
 
         Args:
-            max_queue_size: 单个 session 队列最大长度，超出后移除最早消息
+            max_queue_size: 单个管道队列最大长度，超出后移除最早消息
             default_ttl: 消息默认过期秒数
         """
         self._queues: dict[str, list[Message]] = defaultdict(list)
@@ -126,14 +116,14 @@ class MessageQueue:
             添加成功返回 True
         """
         async with self._lock:
-            session_id = message.session_id
-            queue = self._queues[session_id]
+            pipeline_id = message.pipeline_id
+            queue = self._queues[pipeline_id]
 
             if len(queue) >= self._max_queue_size:
                 queue.pop(0)
                 logger.warning(
-                    "[MessageQueue] 队列已满，移除最早消息 | session_id=%s",
-                    session_id,
+                    "[MessageQueue] 队列已满，移除最早消息 | pipeline_id=%s",
+                    pipeline_id,
                 )
 
             if message.expires_at is None:
@@ -145,33 +135,33 @@ class MessageQueue:
 
             logger.debug(
                 "[MessageQueue] 消息已添加 | "
-                "message_id=%s | session_id=%s | "
+                "message_id=%s | pipeline_id=%s | "
                 "priority=%d | queue_size=%d",
-                message.id, session_id, message.priority, len(queue),
+                message.id, pipeline_id, message.priority, len(queue),
             )
 
             return True
 
-    async def pop(self, session_id: str, target_id: str | None = None) -> Message | None:
+    async def pop(self, pipeline_id: str, target_id: str | None = None) -> Message | None:
         """弹出最高优先级的消息。
 
         支持 target_id 精确匹配。不指定 target_id 时弹出队首消息。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
             target_id: 目标实体 ID，None 时弹出队首
 
         Returns:
             弹出的消息，无可用消息返回 None
         """
         async with self._lock:
-            queue = self._queues.get(session_id)
+            queue = self._queues.get(pipeline_id)
             if not queue:
                 return None
 
-            self._cleanup_expired(session_id)
+            self._cleanup_expired(pipeline_id)
 
-            queue = self._queues.get(session_id)
+            queue = self._queues.get(pipeline_id)
             if not queue:
                 return None
 
@@ -189,33 +179,33 @@ class MessageQueue:
 
             logger.debug(
                 "[MessageQueue] 消息已弹出 | "
-                "message_id=%s | session_id=%s | "
+                "message_id=%s | pipeline_id=%s | "
                 "target_id=%s | remaining=%d",
-                message.id, session_id, target_id, len(queue),
+                message.id, pipeline_id, target_id, len(queue),
             )
 
             return message
 
-    async def peek(self, session_id: str, target_id: str | None = None) -> Message | None:
+    async def peek(self, pipeline_id: str, target_id: str | None = None) -> Message | None:
         """查看最高优先级的消息（不移除）。
 
         支持 target_id 精确匹配。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
             target_id: 目标实体 ID，None 时查看队首
 
         Returns:
             消息实例，无可用消息返回 None
         """
         async with self._lock:
-            queue = self._queues.get(session_id)
+            queue = self._queues.get(pipeline_id)
             if not queue:
                 return None
 
-            self._cleanup_expired(session_id)
+            self._cleanup_expired(pipeline_id)
 
-            queue = self._queues.get(session_id)
+            queue = self._queues.get(pipeline_id)
             if not queue:
                 return None
 
@@ -227,115 +217,107 @@ class MessageQueue:
 
             return queue[0]
 
-    async def get_all(self, session_id: str, target_id: str | None = None) -> list[Message]:
-        """获取会话的所有消息（不移除）。
+    async def get_all(self, pipeline_id: str, target_id: str | None = None) -> list[Message]:
+        """获取管道的所有消息（不移除）。
 
         支持 target_id 过滤。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
             target_id: 目标实体 ID，None 时返回全部
 
         Returns:
             消息列表
         """
         async with self._lock:
-            self._cleanup_expired(session_id)
-            messages = list(self._queues.get(session_id, []))
+            self._cleanup_expired(pipeline_id)
+            messages = list(self._queues.get(pipeline_id, []))
             if target_id is not None:
                 messages = [m for m in messages if m.target_id == target_id]
             return messages
 
-    async def clear(self, session_id: str) -> int:
-        """清空会话的消息队列。
+    async def clear(self, pipeline_id: str) -> int:
+        """清空管道的消息队列。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
 
         Returns:
             清除的消息数量
         """
         async with self._lock:
-            if session_id not in self._queues:
+            if pipeline_id not in self._queues:
                 return 0
 
-            count = len(self._queues[session_id])
-            del self._queues[session_id]
+            count = len(self._queues[pipeline_id])
+            del self._queues[pipeline_id]
 
             logger.debug(
-                "[MessageQueue] 队列已清空 | session_id=%s | cleared=%d",
-                session_id, count,
+                "[MessageQueue] 队列已清空 | pipeline_id=%s | cleared=%d",
+                pipeline_id, count,
             )
 
             return count
 
-    async def size(self, session_id: str) -> int:
-        """获取会话的消息数量。
+    async def size(self, pipeline_id: str) -> int:
+        """获取管道的消息数量。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
 
         Returns:
             有效消息数量
         """
         async with self._lock:
-            self._cleanup_expired(session_id)
-            return len(self._queues.get(session_id, []))
+            self._cleanup_expired(pipeline_id)
+            return len(self._queues.get(pipeline_id, []))
 
     async def get_statistics(self) -> dict[str, Any]:
-        """获取队列统计信息。
-
-        Returns:
-            包含 total_sessions、total_messages、各 session 消息数等统计字典
-        """
+        """获取队列统计信息。"""
         async with self._lock:
             total_messages = sum(len(q) for q in self._queues.values())
-            sessions = list(self._queues.keys())
+            pipelines = list(self._queues.keys())
 
             return {
-                "total_sessions": len(sessions),
+                "total_pipelines": len(pipelines),
                 "total_messages": total_messages,
-                "sessions": {
-                    sid: len(queue) for sid, queue in self._queues.items()
+                "pipelines": {
+                    pid: len(queue) for pid, queue in self._queues.items()
                 },
                 "max_queue_size": self._max_queue_size,
                 "default_ttl": self._default_ttl,
             }
 
-    def _cleanup_expired(self, session_id: str) -> int:
-        """清理指定会话的过期消息。
+    def _cleanup_expired(self, pipeline_id: str) -> int:
+        """清理指定管道的过期消息。
 
         必须在持有锁的上下文中调用。
 
         Args:
-            session_id: 会话 ID
+            pipeline_id: 管道 ID
 
         Returns:
             清理的过期消息数量
         """
-        if session_id not in self._queues:
+        if pipeline_id not in self._queues:
             return 0
 
-        queue = self._queues[session_id]
+        queue = self._queues[pipeline_id]
         original_size = len(queue)
 
-        self._queues[session_id] = [m for m in queue if not m.is_expired()]
+        self._queues[pipeline_id] = [m for m in queue if not m.is_expired()]
 
-        cleaned = original_size - len(self._queues[session_id])
+        cleaned = original_size - len(self._queues[pipeline_id])
 
         if cleaned > 0:
             logger.debug(
-                "[MessageQueue] 清理过期消息 | session_id=%s | cleaned=%d",
-                session_id, cleaned,
+                "[MessageQueue] 清理过期消息 | pipeline_id=%s | cleaned=%d",
+                pipeline_id, cleaned,
             )
 
         return cleaned
 
 
 def create_message_id() -> str:
-    """创建消息 ID。
-
-    Returns:
-        格式为 ``msg_<hex12>`` 的唯一标识字符串
-    """
+    """创建消息 ID。"""
     return f"msg_{uuid.uuid4().hex[:12]}"

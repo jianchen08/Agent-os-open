@@ -110,7 +110,7 @@ class MockOutputPlugin(IOutputPlugin):
 
     @property
     def route_signals(self) -> list[str]:
-        # 返回空列表表示关注所有 core_type（会被 get_output_plugins 包含）
+        # 所有 Output 插件均会被执行，route_signals 仅作声明用途
         return []
 
     async def execute(self, ctx: PluginContext) -> OutputResult:

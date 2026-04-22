@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -121,7 +122,11 @@ class MCPToolLoader:
             return tools
 
         except Exception as e:
-            raise MCPConnectionError(config.name, str(e)) from e
+            raise MCPConnectionError(
+                message=f"MCP 服务器 '{config.name}' 加载工具失败",
+                details={"server": config.name, "error": str(e)},
+                cause=e,
+            ) from e
 
     async def load_from_config(
         self,
@@ -357,6 +362,61 @@ class MCPToolLoader:
         # 默认为系统工具
         return "system"
 
+    def _start_stderr_consumer(self, process, server_name: str):
+        """启动后台任务消费子进程 stderr，防止管道缓冲区满导致进程挂起
+
+        当 MCP 子进程向 stderr 输出大量日志时，管道缓冲区（通常 64KB）填满后
+        操作系统会阻塞写操作，导致子进程挂起。此方法通过后台线程或异步任务
+        持续消费 stderr 输出来避免该问题。
+
+        Args:
+            process: 子进程对象（subprocess.Popen 或 asyncio.subprocess.Process）
+            server_name: MCP 服务器名称，用于日志前缀
+        """
+        if isinstance(process, subprocess.Popen):
+            # sync 模式：使用守护线程消费 stderr
+            def _consume():
+                try:
+                    for line in process.stderr:
+                        if not line:
+                            break
+                        text = line.decode(errors='replace').strip()
+                        if text:
+                            logger.debug("[MCP:%s stderr] %s", server_name, text)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        process.stderr.close()
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=_consume, daemon=True)
+            thread.start()
+        else:
+            # async 模式：使用 asyncio 任务消费 stderr
+            async def _consume_async():
+                try:
+                    while True:
+                        line = await process.stderr.readline()
+                        if not line:
+                            break
+                        text = line.decode(errors='replace').strip()
+                        if text:
+                            logger.debug("[MCP:%s stderr] %s", server_name, text)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        process.stderr.close()
+                    except Exception:
+                        pass
+
+            try:
+                asyncio.ensure_future(_consume_async())
+            except RuntimeError:
+                pass
+
     async def _connect_server(self, config: MCPServerConfig) -> Any:
         """连接 MCP 服务器
 
@@ -418,6 +478,7 @@ class MCPToolLoader:
                         stderr=subprocess.PIPE,
                         env=env,
                     )
+                    self._start_stderr_consumer(process, config.name)
                     client = MCPClient(process, config.name, use_sync=True)
                 else:
                     process = await asyncio.create_subprocess_exec(
@@ -429,6 +490,7 @@ class MCPToolLoader:
                         env=env,
                         limit=1024 * 1024,
                     )
+                    self._start_stderr_consumer(process, config.name)
                     client = MCPClient(process, config.name, use_sync=False)
 
                 await client.initialize()
@@ -459,7 +521,11 @@ class MCPToolLoader:
                     logger.error(
                         "连接 MCP 服务器最终失败 %s: %s", config.name, e
                     )
-                    raise MCPConnectionError(config.name, str(e)) from last_error
+                    raise MCPConnectionError(
+                        message=f"连接 MCP 服务器 '{config.name}' 失败（重试 {max_retries} 次后）",
+                        details={"server": config.name, "error": str(e)},
+                        cause=last_error,
+                    ) from last_error
 
     def get_server_status(self) -> dict[str, str]:
         """获取所有服务器状态"""
@@ -474,6 +540,7 @@ class MCPToolLoader:
         tool_name: str,
         arguments: dict[str, Any],
         timeout: float = 60.0,
+        overall_timeout: float | None = None,
     ) -> Any:
         """统一工具调用入口（自动检测连接状态 + 失败重连重试）
 
@@ -482,32 +549,55 @@ class MCPToolLoader:
         1. 调用前检测子进程存活状态
         2. 调用失败时自动清理死连接并重建
         3. 最多重试 1 次（连接恢复后）
+        4. overall_timeout 保护整个重试流程不被无限挂起
 
         Args:
             server_config: MCP 服务器配置
             tool_name: 工具名称
             arguments: 工具参数
             timeout: 单次调用超时时间（秒）
+            overall_timeout: 整体超时时间（秒），None 表示不限制
 
         Returns:
             工具调用结果
         """
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            client = await self._connect_server(server_config)
+        logger = logging.getLogger(__name__)
+
+        async def _call_with_retry() -> Any:
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                client = await self._connect_server(server_config)
+                try:
+                    return await client.call_tool(tool_name, arguments, timeout=timeout)
+                except MCPConnectionError:
+                    if attempt < max_attempts - 1:
+                        logger.warning(
+                            "MCP 工具调用失败，清理连接并重试 | server=%s | tool=%s",
+                            server_config.name,
+                            tool_name,
+                        )
+                        await self.disconnect_server(server_config.name)
+                    else:
+                        raise
+
+        if overall_timeout is not None:
             try:
-                return await client.call_tool(tool_name, arguments, timeout=timeout)
-            except MCPConnectionError:
-                if attempt < max_attempts - 1:
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
-                        "MCP 工具调用失败，清理连接并重试 | server=%s | tool=%s",
-                        server_config.name,
-                        tool_name,
-                    )
-                    await self.disconnect_server(server_config.name)
-                else:
-                    raise
+                return await asyncio.wait_for(
+                    _call_with_retry(), timeout=overall_timeout
+                )
+            except asyncio.TimeoutError:
+                raise MCPConnectionError(
+                    message=(
+                        f"MCP 整体调用超时（{overall_timeout}s），"
+                        f"含重试仍未完成 | server={server_config.name} | tool={tool_name}"
+                    ),
+                    details={
+                        "server": server_config.name,
+                        "tool": tool_name,
+                        "overall_timeout": overall_timeout,
+                    },
+                )
+        return await _call_with_retry()
 
     async def disconnect_server(self, server_name: str) -> None:
         """断开服务器连接"""
@@ -566,7 +656,10 @@ class MCPClient:
         response = await self._read_response()
 
         if "error" in response:
-            raise MCPConnectionError(self.name, f"MCP 初始化失败: {response['error']}")
+            raise MCPConnectionError(
+                message=f"MCP 服务器 '{self.name}' 初始化失败: {response['error']}",
+                details={"server": self.name, "error": response["error"]},
+            )
 
     async def list_tools(self) -> Any:
         """列出可用工具"""
@@ -582,7 +675,8 @@ class MCPClient:
 
         if "error" in response:
             raise MCPConnectionError(
-                self.name, f"获取工具列表失败: {response['error']}"
+                message=f"MCP 服务器 '{self.name}' 获取工具列表失败: {response['error']}",
+                details={"server": self.name, "error": response["error"]},
             )
 
         class ToolsResponse:
@@ -618,8 +712,8 @@ class MCPClient:
             await asyncio.wait_for(self._send_request(request), timeout=timeout)
         except TimeoutError:
             raise MCPConnectionError(
-                self.name,
-                f"工具调用请求发送超时（{timeout}秒）",
+                message=f"MCP 服务器 '{self.name}' 工具调用请求发送超时（{timeout}秒）",
+                details={"server": self.name, "timeout": timeout},
             ) from None
 
         try:
@@ -628,12 +722,15 @@ class MCPClient:
             )
         except TimeoutError:
             raise MCPConnectionError(
-                self.name,
-                f"工具调用响应超时（{timeout}秒），工具: {name}",
+                message=f"MCP 服务器 '{self.name}' 工具调用响应超时（{timeout}秒），工具: {name}",
+                details={"server": self.name, "tool": name, "timeout": timeout},
             ) from None
 
         if "error" in response:
-            raise MCPConnectionError(self.name, f"工具调用失败: {response['error']}")
+            raise MCPConnectionError(
+                message=f"MCP 服务器 '{self.name}' 工具调用失败: {response['error']}",
+                details={"server": self.name, "error": response["error"]},
+            )
 
         return response.get("result")
 
@@ -658,7 +755,10 @@ class MCPClient:
     async def _send_request(self, request: dict[str, Any]) -> None:
         """发送请求"""
         if not self.process or not self.process.stdin:
-            raise MCPConnectionError(self.name, "MCP 进程未启动")
+            raise MCPConnectionError(
+                message=f"MCP 服务器 '{self.name}' 进程未启动，无法发送请求",
+                details={"server": self.name},
+            )
 
         message = json.dumps(request) + "\n"
         if self._use_sync:
@@ -688,7 +788,10 @@ class MCPClient:
         修复日期: 2026-04-07
         """
         if not self.process or not self.process.stdout:
-            raise MCPConnectionError(self.name, "MCP 进程未启动")
+            raise MCPConnectionError(
+                message=f"MCP 服务器 '{self.name}' 进程未启动，无法读取响应",
+                details={"server": self.name},
+            )
 
         max_attempts = 500
         for _ in range(max_attempts):
@@ -705,12 +808,15 @@ class MCPClient:
                     )
             except TimeoutError:
                 raise MCPConnectionError(
-                    self.name,
-                    f"MCP 响应读取超时（{timeout}秒），服务器可能无响应或已挂起",
+                    message=f"MCP 服务器 '{self.name}' 响应读取超时（{timeout}秒），服务器可能无响应或已挂起",
+                    details={"server": self.name, "timeout": timeout},
                 ) from None
 
             if not line:
-                raise MCPConnectionError(self.name, "MCP 连接已关闭")
+                raise MCPConnectionError(
+                    message=f"MCP 服务器 '{self.name}' 连接已关闭",
+                    details={"server": self.name},
+                )
 
             line_str = line.decode().strip() if isinstance(line, bytes) else line.strip()
             if not line_str:
@@ -726,7 +832,10 @@ class MCPClient:
                 )
                 continue
 
-        raise MCPConnectionError(self.name, "MCP 响应超时：未找到有效的 JSON 响应")
+        raise MCPConnectionError(
+            message=f"MCP 服务器 '{self.name}' 响应超时：未找到有效的 JSON 响应",
+            details={"server": self.name},
+        )
 
     def _sync_readline(self) -> bytes:
         """同步从子进程 stdout 读取一行"""

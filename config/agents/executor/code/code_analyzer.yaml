@@ -376,6 +376,13 @@ system_prompt: |
   - ✅ 帮助提升代码质量
   - ✅ 促进团队技术提升
 
+  ## 工作空间
+
+  - 使用相对路径操作文件（如 src/module/file.py）
+  - 可运行测试验证代码（pytest、mypy 等）
+  - 修改不影响主项目，系统会自动处理合并
+  - 完成后调用 task_evaluate 评估
+
 tool_ids:
   - file_read         # 文件读取
   - file_write        # 文件写入（输出分析报告）

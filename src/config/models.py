@@ -183,7 +183,9 @@ class ModelConfigLoader:
         default_id = defaults.get(model_type, "")
         models = llm_data.get("models", {})
         if default_id and default_id in models:
-            return dict(models[default_id])
+            result = dict(models[default_id])
+            result["_id"] = default_id
+            return result
 
         return None
 

@@ -109,8 +109,8 @@ class TaskStorage:
     def _find_root_id(self, task: TaskModel) -> str:
         """查找任务所属的根任务ID。
 
-        如果任务有 parent_task_id，直接返回（假设父任务是根任务）。
-        否则任务自身就是根任务，返回自身 ID。
+        沿 parent_task_id 链递归回溯，直到找到 parent_task_id 为 None 的根任务。
+        支持多层嵌套（如 A → B → C，C 的根是 A）。
 
         Args:
             task: 任务模型
@@ -118,9 +118,25 @@ class TaskStorage:
         Returns:
             根任务ID
         """
-        if task.parent_task_id:
-            return task.parent_task_id
-        return task.id
+        visited: set[str] = set()
+        current_id: str | None = task.id
+        current_parent: str | None = task.parent_task_id
+
+        while current_parent:
+            if current_parent in visited:
+                logger.warning(
+                    "检测到 parent_task_id 循环: %s, 截断使用 %s",
+                    visited, current_parent,
+                )
+                break
+            visited.add(current_parent)
+            parent_task = self._tasks.get(current_parent)
+            if parent_task is None:
+                break
+            current_id = parent_task.id
+            current_parent = parent_task.parent_task_id
+
+        return current_id if current_id else task.id
 
     def _get_tree_dir(self, root_id: str) -> Path | None:
         """获取根任务对应的目录路径。
@@ -214,7 +230,8 @@ class TaskStorage:
         Returns:
             TaskModel 实例
         """
-        from pipeline.types import AgentLevel, TaskPriority
+        from agents.types import AgentLevel
+        from tasks.types import TaskPriority
 
         if isinstance(data.get("status"), str):
             data["status"] = TaskStatus(data["status"])

@@ -70,7 +70,7 @@ class ICorePlugin(IPlugin):
         fallback_state: 错误策略为 FALLBACK 时使用的默认状态更新
     """
 
-    fallback_state: dict[str, Any] = field(default_factory=dict)
+    fallback_state: dict[str, Any] = {}
 
     @abstractmethod
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:
@@ -89,17 +89,14 @@ class IOutputPlugin(IPlugin):
 
     负责在管道循环的输出阶段处理核心结果，
     例如结果格式化、后处理、路由信号生成等。
-
-    每个 Output 插件声明自己关注的 route_signal 类型，
-    仅当信号匹配时才执行。
     """
 
     @property
     def route_signals(self) -> list[str]:
-        """本插件关注的路由信号类型列表。
+        """本插件可能产出的路由信号类型列表（仅声明用途，不影响执行过滤）。
 
         Returns:
-            路由信号类型字符串列表，空列表表示关注所有信号。
+            路由信号类型字符串列表，空列表表示不声明。
         """
         return []
 
@@ -166,8 +163,6 @@ class OutputResult(PluginResult):
     继承 PluginResult，专门用于输出插件返回。
     route_signal 字段在输出插件中用于产生路由信号。
     """
-
-    route_signal: RouteSignal | None = None
 
 
 def find_plugin_config(

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable
@@ -183,6 +184,14 @@ class LLMCore(ICorePlugin):
             tool_calls = response.tool_calls
             thinking_text = response.thinking_text
 
+            llm_usage = None
+            if response.usage:
+                llm_usage = {
+                    "input_tokens": response.usage.get("prompt_tokens", 0),
+                    "output_tokens": response.usage.get("completion_tokens", 0),
+                    "total_tokens": response.usage.get("total_tokens", 0),
+                }
+
             logger.info(
                 "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d)",
                 self.name, streaming, bool(thinking_text),
@@ -228,6 +237,7 @@ class LLMCore(ICorePlugin):
                 StateKeys.RAW_TOOL_CALLS: tool_calls,
                 StateKeys.RAW_THINKING: thinking_text,
                 "messages": history,
+                "llm_usage": llm_usage or {},
             }
 
         except Exception as exc:
@@ -265,13 +275,7 @@ class LLMCore(ICorePlugin):
         # 3. 动态变量（追加在历史消息之后）
         dynamic_vars = state.get("prompt.dynamic_vars", "")
         if dynamic_vars:
-            if self._provider == "minimax":
-                if system_msg and messages:
-                    messages[0]["content"] = messages[0].get("content", "") + "\n\n" + dynamic_vars
-                else:
-                    messages.insert(0, {"role": "system", "content": dynamic_vars})
-            else:
-                messages.append({"role": "system", "content": dynamic_vars})
+            messages.append({"role": "system", "content": dynamic_vars})
 
         logger.info(
             "[%s] _build_messages assembled %d messages | "
@@ -290,9 +294,9 @@ class LLMCore(ICorePlugin):
                 prefix += f" name={name}"
             if tc_list:
                 logger.info("%s tool_calls=%s", prefix,
-                            json.dumps(tc_list, ensure_ascii=False)[:1000] if tc_list else "[]")
+                            json.dumps(tc_list, ensure_ascii=False) if tc_list else "[]")
             else:
-                logger.info("%s content=%s", prefix, (str(content) or "")[:2000])
+                logger.info("%s content=%s", prefix, str(content) or "")
 
         return messages
 
@@ -366,6 +370,8 @@ class LLMCore(ICorePlugin):
         provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
+    _LLM_CALL_TIMEOUT = 120
+
     async def _call_llm(
         self,
         messages: list[dict[str, Any]],
@@ -374,10 +380,11 @@ class LLMCore(ICorePlugin):
         stream: bool = False,
         on_chunk: Callable[[dict[str, Any]], Any] | None = None,
     ) -> LLMResponse:
-        """通过 adapter 调用 LLM。
+        """通过 adapter 调用 LLM，带超时保护。
 
         合并了原来的 _call_completion 和 _call_streaming，
         统一通过 adapter.completion() 处理。
+        使用 asyncio.wait_for 添加超时，防止 LLM API 无响应时 pipeline 永久挂起。
 
         Args:
             messages: 对话消息列表
@@ -387,6 +394,9 @@ class LLMCore(ICorePlugin):
 
         Returns:
             统一的 LLMResponse 响应结构
+
+        Raises:
+            asyncio.TimeoutError: LLM 调用超时时抛出
         """
         kwargs: dict[str, Any] = {
             "model": self._get_model_string(),
@@ -398,18 +408,28 @@ class LLMCore(ICorePlugin):
         if self._api_key:
             kwargs["api_key"] = self._api_key
 
-        # 从 state 读取工具 Schema（由 ToolSchemaPlugin 注入）
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:
             logger.info("[%s] tool_schemas count=%d | %s",
                         self.name, len(tool_schemas),
                         ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas))
 
-        return await self._adapter.completion(
-            model=kwargs.pop("model"),
-            messages=kwargs.pop("messages"),
-            tools=tool_schemas or None,
-            stream=stream,
-            on_chunk=on_chunk,
-            **kwargs,
-        )
+        timeout = ctx.state.get("llm_call_timeout", self._LLM_CALL_TIMEOUT)
+        try:
+            return await asyncio.wait_for(
+                self._adapter.completion(
+                    model=kwargs.pop("model"),
+                    messages=kwargs.pop("messages"),
+                    tools=tool_schemas or None,
+                    stream=stream,
+                    on_chunk=on_chunk,
+                    **kwargs,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "[%s] LLM call timed out after %ds (model=%s)",
+                self.name, timeout, self._get_model_string(),
+            )
+            raise

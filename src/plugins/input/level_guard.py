@@ -112,7 +112,7 @@ class LevelGuardPlugin(IInputPlugin):
             return {"security.level_decision": {"allowed": True, "reason": "not a tool execution"}}
 
         # 获取当前 Agent 层级
-        agent_level = ctx.state.get(StateKeys.AGENT_LEVEL, "l1_main")
+        agent_level = ctx.state.get(StateKeys.AGENT_LEVEL, "L1")
 
         # 获取当前工具调用
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
@@ -161,11 +161,11 @@ class LevelGuardPlugin(IInputPlugin):
         Returns:
             允许的工具名集合，None 表示全部允许
         """
-        if "l1" in agent_level or agent_level == "L1":
+        if agent_level == "l1" or agent_level == "L1" or agent_level.startswith("l1_") or agent_level.startswith("L1_"):
             return self._l1_allowed
-        elif "l2" in agent_level or agent_level == "L2":
+        elif agent_level == "l2" or agent_level == "L2" or agent_level.startswith("l2_") or agent_level.startswith("L2_"):
             return self._l2_allowed
-        elif "l3" in agent_level or agent_level == "L3":
+        elif agent_level == "l3" or agent_level == "L3" or agent_level.startswith("l3_") or agent_level.startswith("L3_"):
             return self._l3_allowed
         else:
             # 未知层级，严格模式禁止，非严格模式允许

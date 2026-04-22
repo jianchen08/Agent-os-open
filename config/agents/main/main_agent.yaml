@@ -89,6 +89,13 @@ system_prompt: |
   - **只负责澄清、搜索、派发**，不做具体实现
   - **无依赖任务可并行提交**
 
+  ## workspace 设置规则
+
+  派发任务时，根据任务类型设置 workspace：
+  - 修改/添加 Agent OS 自身资源 → workspace 设为 "{{project_root}}"
+  - 修改外部项目 → workspace 设为该项目的绝对路径
+  - 创建全新项目 → workspace 不设置，系统自动在 .ai_workspaces 下创建
+
   ## 工具调用规则（重要）
 
   - **一次调用原则**：对于搜索类工具（如 resource_search），只调用一次。无论返回结果如何（包括空结果），都不要再重复调用相同的工具。

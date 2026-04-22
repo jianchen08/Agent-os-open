@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.builtin.shared import format_size
+from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,
@@ -25,7 +26,7 @@ from tools.types import (
 )
 
 
-class EnhancedSearchTool:
+class EnhancedSearchTool(WorkspaceAwareMixin):
     """
     增强代码搜索工具
 
@@ -117,9 +118,8 @@ class EnhancedSearchTool:
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行搜索"""
-        workspace = inputs.get("workspace")
-        if workspace:
-            self.base_path = Path(workspace)
+        self._init_workspace(inputs)
+        self.base_path = self._workspace
 
         query = inputs.get("query")
         if not query:
@@ -198,7 +198,7 @@ class EnhancedSearchTool:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=Path.cwd(),
+                cwd=str(self._workspace),
             )
 
             try:

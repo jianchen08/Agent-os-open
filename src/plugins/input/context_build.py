@@ -46,7 +46,7 @@ class ContextBuildPlugin(IInputPlugin):
     fallback_state: dict[str, Any] = {
         "context.system_prompt": "",
         "context.agent_name": "",
-        "context.agent_level": "l1_main",
+        "context.agent_level": "L1",
         "context.session_id": "",
         "context.task_id": "",
     }
@@ -64,7 +64,7 @@ class ContextBuildPlugin(IInputPlugin):
         self._config = config or {}
         self._system_prompt = self._config.get("system_prompt", "")
         self._agent_name = self._config.get("agent_name", "")
-        self._agent_level = self._config.get("agent_level", "l1_main")
+        self._agent_level = self._config.get("agent_level", "L1")
         self._extra_context = self._config.get("extra_context", {})
 
     @property
@@ -135,7 +135,7 @@ class ContextBuildPlugin(IInputPlugin):
         updates["context.is_tool_execution"] = core_type == "tool_execute"
 
         # 7. 项目级标记
-        updates["context.is_project"] = self._agent_level == "l1_main"
+        updates["context.is_project"] = self._agent_level == "L1"
 
         logger.debug(
             "[%s] Context built | agent=%s | level=%s | iteration=%d",

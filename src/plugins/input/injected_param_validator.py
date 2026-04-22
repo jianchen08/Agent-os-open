@@ -23,6 +23,7 @@ _KNOWN_INJECT_SOURCES: dict[str, str] = {
     "user_id": "ParamInjectPlugin",
     "timestamp": "ParamInjectPlugin",
     "task_id": "TaskWorker/ToolCore 上下文注入",
+    "pipeline_id": "ParamInjectPlugin",
     "dependencies": "TaskWorker 上下文注入",
     "tool_record_id": "ToolCore 内部注入",
     "parent_agent_level": "TaskWorker 上下文注入",

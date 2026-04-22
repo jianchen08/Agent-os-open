@@ -12,12 +12,59 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
 import litellm
 
+litellm.suppress_debug_info = True
+litellm.set_verbose = False
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
+
+_THINK_PATTERN = re.compile(
+    r"<think[^>]*>(.*?)</think[^>]*>",
+    re.DOTALL,
+)
+_THINK_PATTERN_NO_GT = re.compile(
+    r"<think\s(.*?)</think[^>]*>",
+    re.DOTALL,
+)
+
+
+def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str | None]:
+    """从 content 中提取 <think/> 标签内容，返回 (thinking_text, cleaned_content)。
+
+    BUG-FIX-fix_20260418_163500_think_extract
+    问题根因: MiniMax-M2.7 等推理模型的思考内容包裹在 <think/> 标签中
+    混在 content 字段返回，litellm 不会自动映射到 reasoning_content
+    修复方案: 手动解析 <think/> 标签，将思考内容与正文分离
+    影响范围: 所有未自动映射 reasoning_content 的推理模型
+
+    支持两种标签格式：
+    1. 标准 XML: <think\\n...\\n</think/> 或 <think type="x">...</think...>
+    2. MiniMax: <think\\n...\\n</think/> (开始标签无 >)
+
+    Args:
+        content: LLM 返回的原始 content 文本
+
+    Returns:
+        (thinking_text, cleaned_content) 元组
+    """
+    if not content:
+        return None, content
+
+    pattern, matches = _THINK_PATTERN, _THINK_PATTERN.findall(content)
+    if not matches:
+        pattern, matches = _THINK_PATTERN_NO_GT, _THINK_PATTERN_NO_GT.findall(content)
+    if not matches:
+        return None, content
+
+    thinking = "\n".join(m.strip() for m in matches if m.strip())
+    cleaned = pattern.sub("", content).strip()
+    return thinking if thinking else None, cleaned if cleaned else None
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +237,7 @@ class LiteLLMAdapter:
         result_text = choice.message.content
         tool_calls = self._parse_tool_calls(choice.message.tool_calls)
 
-        # LiteLLM 统一将各提供商的推理内容映射到 message.reasoning_content
+        # 优先从 reasoning_content 提取思考内容
         thinking_text: str | None = None
         if hasattr(choice.message, "reasoning_content") and choice.message.reasoning_content:
             thinking_text = choice.message.reasoning_content
@@ -199,6 +246,17 @@ class LiteLLMAdapter:
                 logger.info(
                     "[LiteLLMAdapter] 使用 reasoning_content 作为 result_text (len=%d)",
                     len(result_text),
+                )
+
+        # 兜底：当 reasoning_content 为空时，手动从 content 中提取 <think/> 标签
+        if not thinking_text and result_text:
+            extracted_thinking, cleaned_content = _extract_thinking_from_content(result_text)
+            if extracted_thinking:
+                thinking_text = extracted_thinking
+                result_text = cleaned_content
+                logger.info(
+                    "[LiteLLMAdapter] 从 <think/> 标签提取 thinking (thinking=%d, content=%d)",
+                    len(thinking_text), len(result_text or ""),
                 )
 
         # 解析 usage 信息
@@ -244,18 +302,28 @@ class LiteLLMAdapter:
             "model": model,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             **kwargs,
         }
         if tools:
             call_kwargs["tools"] = tools
 
-        response = await litellm.acompletion(**call_kwargs)
+        response = await litellm.acompletion(**call_kwargs, drop_params=True)
 
         result_parts: list[str] = []
         thinking_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
+        stream_usage: dict[str, Any] | None = None
 
         async for chunk in response:
+            # 收集流式 usage（通常在最后一个 chunk）
+            if hasattr(chunk, "usage") and chunk.usage:
+                stream_usage = {
+                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                }
+
             if not chunk.choices:
                 continue
 
@@ -296,11 +364,22 @@ class LiteLLMAdapter:
         thinking_text = "".join(thinking_parts) if thinking_parts else None
         tool_calls = self._normalize_tool_calls(tool_calls_map)
 
+        # 兜底：当流式中未收到 reasoning_content 时，从收集的文本中提取 <think/> 标签
+        if not thinking_text and result_text:
+            extracted_thinking, cleaned_content = _extract_thinking_from_content(result_text)
+            if extracted_thinking:
+                thinking_text = extracted_thinking
+                result_text = cleaned_content
+                logger.info(
+                    "[LiteLLMAdapter] 流式模式从 <think/> 标签提取 thinking (thinking=%d, content=%d)",
+                    len(thinking_text), len(result_text or ""),
+                )
+
         return LLMResponse(
             text=result_text,
             tool_calls=tool_calls,
             thinking_text=thinking_text,
-            usage=None,
+            usage=stream_usage,
         )
 
     def _parse_tool_calls(self, raw_tool_calls: Any) -> list[dict[str, Any]]:

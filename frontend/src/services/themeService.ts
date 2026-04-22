@@ -1,0 +1,499 @@
+/**
+ * 主题服务
+ *
+ * 提供主题应用、合并等工具函数
+ * 主题配置完全由前端管理，无后端依赖
+ */
+
+import type { ThemeConfig } from '@/types/theme'
+import {
+  darkTheme,
+  lightTheme,
+  deepSpaceTheme,
+  oceanBreezeTheme,
+  modernDarkTheme,
+  modernLightTheme,
+  highContrastTheme,
+} from '@/config/themes'
+import { mergeTheme as mergeUserTheme } from '@/services/themeStorage'
+
+/**
+ * 获取预设主题配置
+ *
+ * @param themeId - 主题 ID
+ * @returns 主题配置，如果不存在则返回 null
+ */
+export function getPresetTheme(themeId: string): ThemeConfig | null {
+  const presetThemes: Record<string, ThemeConfig> = {
+    dark: darkTheme,
+    light: lightTheme,
+    'deep-space': deepSpaceTheme,
+    'ocean-breeze': oceanBreezeTheme,
+    'modern-dark': modernDarkTheme,
+    'modern-light': modernLightTheme,
+    'high-contrast': highContrastTheme,
+  }
+  return presetThemes[themeId] || null
+}
+
+/**
+ * 获取所有预设主题
+ *
+ * @returns 预设主题列表
+ */
+export function getAllPresetThemes(): ThemeConfig[] {
+  return [darkTheme, lightTheme]
+}
+
+/**
+ * 编译主题配置为 CSS 变量字符串
+ *
+ * 将主题配置转换为 CSS 变量声明，用于批量设置到 DOM
+ *
+ * @param config - 主题配置
+ * @returns CSS 变量字符串
+ */
+export function compileThemeVariables(config: ThemeConfig): string {
+  const vars: string[] = []
+
+  // === 基础颜色 ===
+  vars.push(`--primary: ${config.colors.primary}`)
+  vars.push(`--secondary: ${config.colors.secondary}`)
+  vars.push(`--accent: ${config.colors.accent}`)
+
+  // === 背景色 ===
+  Object.entries(config.colors.background).forEach(([key, value]) => {
+    vars.push(`--bg-${kebabCase(key)}: ${value}`)
+  })
+
+  // === 文字色 ===
+  Object.entries(config.colors.text).forEach(([key, value]) => {
+    vars.push(`--text-${kebabCase(key)}: ${value}`)
+  })
+
+  // === 边框色 ===
+  Object.entries(config.colors.border).forEach(([key, value]) => {
+    vars.push(`--border-${kebabCase(key)}: ${value}`)
+  })
+
+  // === 状态色 ===
+  Object.entries(config.colors.status).forEach(([key, value]) => {
+    vars.push(`--status-${kebabCase(key)}: ${value}`)
+  })
+
+  // === 消息气泡 ===
+  vars.push(`--bubble-user-bg: ${config.colors.bubble.user_bg}`)
+  vars.push(`--bubble-user-text: ${config.colors.bubble.user_text}`)
+  vars.push(`--bubble-ai-bg: ${config.colors.bubble.ai_bg}`)
+  vars.push(`--bubble-ai-text: ${config.colors.bubble.ai_text}`)
+  if (config.colors.bubble.user_radius) {
+    vars.push(`--bubble-user-radius: ${config.colors.bubble.user_radius}`)
+  }
+  if (config.colors.bubble.user_shadow) {
+    vars.push(`--bubble-user-shadow: ${config.colors.bubble.user_shadow}`)
+  }
+  if (config.colors.bubble.user_border) {
+    vars.push(`--bubble-user-border: ${config.colors.bubble.user_border}`)
+  }
+  if (config.colors.bubble.user_padding) {
+    vars.push(`--bubble-user-padding: ${config.colors.bubble.user_padding}`)
+  }
+  if (config.colors.bubble.ai_radius) {
+    vars.push(`--bubble-ai-radius: ${config.colors.bubble.ai_radius}`)
+  }
+  if (config.colors.bubble.ai_shadow) {
+    vars.push(`--bubble-ai-shadow: ${config.colors.bubble.ai_shadow}`)
+  }
+  if (config.colors.bubble.ai_border) {
+    vars.push(`--bubble-ai-border: ${config.colors.bubble.ai_border}`)
+  }
+  if (config.colors.bubble.ai_padding) {
+    vars.push(`--bubble-ai-padding: ${config.colors.bubble.ai_padding}`)
+  }
+
+  // === 组件样式：按钮 ===
+  if (config.components.button?.variants) {
+    const variants = config.components.button.variants
+
+    // Primary 按钮
+    if (variants.primary) {
+      vars.push(`--btn-primary-bg: ${variants.primary.bg}`)
+      vars.push(`--btn-primary-text: ${variants.primary.text}`)
+      vars.push(`--btn-primary-border: ${variants.primary.border}`)
+      if (variants.primary.hoverBg) {
+        vars.push(`--btn-primary-hover-bg: ${variants.primary.hoverBg}`)
+      }
+    }
+
+    // Secondary 按钮
+    if (variants.secondary) {
+      vars.push(`--btn-secondary-bg: ${variants.secondary.bg}`)
+      vars.push(`--btn-secondary-text: ${variants.secondary.text}`)
+      vars.push(`--btn-secondary-border: ${variants.secondary.border}`)
+      if (variants.secondary.hoverBg) {
+        vars.push(`--btn-secondary-hover-bg: ${variants.secondary.hoverBg}`)
+      }
+    }
+
+    // Ghost 按钮
+    if (variants.ghost) {
+      vars.push(`--btn-ghost-bg: ${variants.ghost.bg}`)
+      vars.push(`--btn-ghost-text: ${variants.ghost.text}`)
+      vars.push(`--btn-ghost-border: ${variants.ghost.border}`)
+      if (variants.ghost.hoverBg) {
+        vars.push(`--btn-ghost-hover-bg: ${variants.ghost.hoverBg}`)
+      }
+    }
+
+    // Destructive 按钮
+    if (variants.destructive) {
+      vars.push(`--btn-destructive-bg: ${variants.destructive.bg}`)
+      vars.push(`--btn-destructive-text: ${variants.destructive.text}`)
+      vars.push(`--btn-destructive-border: ${variants.destructive.border}`)
+      if (variants.destructive.hoverBg) {
+        vars.push(`--btn-destructive-hover-bg: ${variants.destructive.hoverBg}`)
+      }
+    }
+  }
+
+  // === 按钮额外样式 ===
+  if (config.components.button) {
+    // 圆角样式：rounded/square/pill
+    const styleRadiusMap: Record<string, string> = {
+      rounded: '0.5rem',
+      square: '0.125rem',
+      pill: '9999px',
+    }
+    const btnRadius = styleRadiusMap[config.components.button.style] || '0.5rem'
+    vars.push(`--btn-radius: ${btnRadius}`)
+
+    // 阴影
+    if (config.components.button.shadow) {
+      vars.push(`--btn-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1)`)
+      vars.push(`--btn-shadow-hover: 0 6px 10px -1px rgba(0, 0, 0, 0.15)`)
+    } else {
+      vars.push(`--btn-shadow: none`)
+      vars.push(`--btn-shadow-hover: none`)
+    }
+
+    // 悬停效果
+    vars.push(`--btn-hover-effect: ${config.components.button.hoverEffect}`)
+  }
+
+  // === 组件样式：输入框 ===
+  if (config.components.input) {
+    if (config.components.input.focusBorder) {
+      vars.push(`--input-focus-border: ${config.components.input.focusBorder}`)
+    }
+    if (config.components.input.focusGlow) {
+      vars.push(`--input-focus-ring: ${config.components.input.focusGlow}`)
+    }
+    // 输入框样式：filled/outlined/underline
+    if (config.components.input.style) {
+      vars.push(`--input-style: ${config.components.input.style}`)
+    }
+  }
+
+  // 输入框背景色（从 background.input 获取）
+  if (config.colors.background.input) {
+    vars.push(`--bg-input: ${config.colors.background.input}`)
+  }
+
+  // === 组件样式：卡片 ===
+  if (config.components.card) {
+    if (config.components.card.border) {
+      vars.push(`--card-border: ${config.components.card.border}`)
+    }
+    if (config.components.card.blur) {
+      vars.push(`--card-backdrop-blur: ${config.components.card.blur}`)
+    }
+  }
+
+  // === 组件样式：徽章 ===
+  if (config.components.badge) {
+    vars.push(`--badge-radius: ${config.components.badge.borderRadius}`)
+    if (config.components.badge.variants) {
+      const variants = config.components.badge.variants
+      if (variants.default) {
+        vars.push(`--badge-default-bg: ${variants.default.bg}`)
+        vars.push(`--badge-default-text: ${variants.default.text}`)
+        vars.push(`--badge-default-border: ${variants.default.border}`)
+      }
+      if (variants.secondary) {
+        vars.push(`--badge-secondary-bg: ${variants.secondary.bg}`)
+        vars.push(`--badge-secondary-text: ${variants.secondary.text}`)
+        vars.push(`--badge-secondary-border: ${variants.secondary.border}`)
+      }
+      if (variants.success) {
+        vars.push(`--badge-success-bg: ${variants.success.bg}`)
+        vars.push(`--badge-success-text: ${variants.success.text}`)
+        vars.push(`--badge-success-border: ${variants.success.border}`)
+      }
+      if (variants.warning) {
+        vars.push(`--badge-warning-bg: ${variants.warning.bg}`)
+        vars.push(`--badge-warning-text: ${variants.warning.text}`)
+        vars.push(`--badge-warning-border: ${variants.warning.border}`)
+      }
+      if (variants.error) {
+        vars.push(`--badge-error-bg: ${variants.error.bg}`)
+        vars.push(`--badge-error-text: ${variants.error.text}`)
+        vars.push(`--badge-error-border: ${variants.error.border}`)
+      }
+      if (variants.info) {
+        vars.push(`--badge-info-bg: ${variants.info.bg}`)
+        vars.push(`--badge-info-text: ${variants.info.text}`)
+        vars.push(`--badge-info-border: ${variants.info.border}`)
+      }
+    }
+  }
+
+  // === 组件样式：对话框 ===
+  if (config.components.dialog) {
+    vars.push(`--dialog-radius: ${config.components.dialog.borderRadius}`)
+    vars.push(`--dialog-overlay-bg: ${config.components.dialog.overlayBg}`)
+    vars.push(`--dialog-overlay-opacity: ${config.components.dialog.overlayOpacity}`)
+    vars.push(`--dialog-shadow: ${config.components.dialog.shadow}`)
+    vars.push(`--dialog-border: ${config.components.dialog.border}`)
+  }
+
+  // === 组件样式：标签页 ===
+  if (config.components.tabs) {
+    vars.push(`--tabs-radius: ${config.components.tabs.borderRadius}`)
+    vars.push(`--tabs-list-bg: ${config.components.tabs.listBg}`)
+    vars.push(`--tabs-active-bg: ${config.components.tabs.activeBg}`)
+    vars.push(`--tabs-active-text: ${config.components.tabs.activeText}`)
+    vars.push(`--tabs-inactive-text: ${config.components.tabs.inactiveText}`)
+  }
+
+  // === 组件样式：Toast ===
+  if (config.components.toast) {
+    vars.push(`--toast-radius: ${config.components.toast.borderRadius}`)
+    vars.push(`--toast-shadow: ${config.components.toast.shadow}`)
+    if (config.components.toast.variants) {
+      const variants = config.components.toast.variants
+      if (variants.default) {
+        vars.push(`--toast-default-bg: ${variants.default.bg}`)
+        vars.push(`--toast-default-text: ${variants.default.text}`)
+        vars.push(`--toast-default-border: ${variants.default.border}`)
+      }
+      if (variants.success) {
+        vars.push(`--toast-success-bg: ${variants.success.bg}`)
+        vars.push(`--toast-success-text: ${variants.success.text}`)
+        vars.push(`--toast-success-border: ${variants.success.border}`)
+      }
+      if (variants.error) {
+        vars.push(`--toast-error-bg: ${variants.error.bg}`)
+        vars.push(`--toast-error-text: ${variants.error.text}`)
+        vars.push(`--toast-error-border: ${variants.error.border}`)
+      }
+      if (variants.warning) {
+        vars.push(`--toast-warning-bg: ${variants.warning.bg}`)
+        vars.push(`--toast-warning-text: ${variants.warning.text}`)
+        vars.push(`--toast-warning-border: ${variants.warning.border}`)
+      }
+      if (variants.info) {
+        vars.push(`--toast-info-bg: ${variants.info.bg}`)
+        vars.push(`--toast-info-text: ${variants.info.text}`)
+        vars.push(`--toast-info-border: ${variants.info.border}`)
+      }
+    }
+  }
+
+  // === 组件样式：进度条 ===
+  if (config.components.progress) {
+    vars.push(`--progress-radius: ${config.components.progress.borderRadius}`)
+    vars.push(`--progress-track-bg: ${config.components.progress.trackBg}`)
+    if (config.components.progress.variants) {
+      vars.push(`--progress-default: ${config.components.progress.variants.default}`)
+      vars.push(`--progress-success: ${config.components.progress.variants.success}`)
+      vars.push(`--progress-warning: ${config.components.progress.variants.warning}`)
+      vars.push(`--progress-error: ${config.components.progress.variants.error}`)
+    }
+  }
+
+  // === 组件样式：下拉菜单 ===
+  if (config.components.dropdownMenu) {
+    vars.push(`--dropdown-radius: ${config.components.dropdownMenu.borderRadius}`)
+    vars.push(`--dropdown-shadow: ${config.components.dropdownMenu.shadow}`)
+    vars.push(`--dropdown-border: ${config.components.dropdownMenu.border}`)
+    vars.push(`--dropdown-item-hover-bg: ${config.components.dropdownMenu.itemHoverBg}`)
+    vars.push(`--dropdown-item-hover-text: ${config.components.dropdownMenu.itemHoverText}`)
+  }
+
+  // === 发光效果 ===
+  if (config.components.glow) {
+    Object.entries(config.components.glow).forEach(([key, value]) => {
+      if (key !== 'defaultGlowIntensity') {
+        vars.push(`--status-${kebabCase(key)}-shadow: ${value}`)
+      }
+    })
+  }
+
+  // === 圆角 ===
+  if (config.components.borderRadius) {
+    Object.entries(config.components.borderRadius).forEach(([key, value]) => {
+      if (key !== 'defaultRadius') {
+        vars.push(`--radius-${key}: ${value}`)
+      }
+    })
+  }
+
+  // === 阴影 ===
+  if (config.components.shadows) {
+    Object.entries(config.components.shadows).forEach(([level, shadows]) => {
+      if (level !== 'defaultShadow' && typeof shadows === 'object') {
+        Object.entries(shadows).forEach(([size, value]) => {
+          vars.push(`--shadow-${level}-${size}: ${value}`)
+        })
+      }
+    })
+  }
+
+  return vars.join('; ')
+}
+
+/**
+ * 应用主题到 DOM
+ *
+ * 将主题配置批量应用到 document.documentElement
+ *
+ * @param config - 主题配置
+ * @param debug - 是否输出调试信息
+ */
+export function applyTheme(config: ThemeConfig, debug = false): void {
+  if (debug) {
+    console.group('🎨 应用主题')
+    console.log('主题 ID:', config.id)
+    console.log('主题名称:', config.name)
+  }
+
+  const root = document.documentElement
+
+  // 设置主题类名（用于 Tailwind 的 dark 模式）
+  root.classList.remove('light', 'dark')
+  if (config.category === 'dark') {
+    root.classList.add('dark')
+  } else if (config.category === 'light') {
+    root.classList.add('light')
+  }
+
+  // 编译并应用 CSS 变量 - 使用 setProperty 而不是覆盖 cssText
+  const cssVars = compileThemeVariables(config)
+  const varEntries = cssVars.split(';').filter(v => v.trim())
+
+  varEntries.forEach(entry => {
+    const [key, value] = entry.split(':').map(s => s.trim())
+    if (key && value) {
+      root.style.setProperty(key, value)
+    }
+  })
+
+  // 应用背景样式
+  if (config.backgrounds?.main) {
+    if (config.backgrounds.main.type === 'gradient') {
+      root.style.setProperty('--bg-main-gradient', config.backgrounds.main.value)
+      document.body.style.background = config.backgrounds.main.value
+    } else {
+      root.style.setProperty('--bg-main-gradient', 'none')
+      document.body.style.background = config.backgrounds.main.value
+    }
+  }
+
+  if (debug) {
+    console.log(`✅ 应用了 ${varEntries.length} 个 CSS 变量`)
+    console.groupEnd()
+  }
+}
+
+/**
+ * 清除主题样式
+ *
+ * 移除所有主题相关的 CSS 变量和类名
+ */
+export function clearTheme(): void {
+  const root = document.documentElement
+  root.classList.remove('light', 'dark')
+  root.style.cssText = ''
+}
+
+/**
+ * 主题合并工具
+ *
+ * 合并基础主题和用户自定义配置
+ *
+ * @param base - 基础主题配置
+ * @param custom - 用户自定义配置
+ * @returns 合并后的主题配置
+ */
+export function mergeTheme(
+  base: ThemeConfig,
+  custom: Partial<ThemeConfig>
+): ThemeConfig {
+  return mergeUserTheme(base, custom)
+}
+
+/**
+ * 验证主题配置
+ *
+ * 检查主题配置是否完整有效
+ *
+ * @param config - 主题配置
+ * @returns 验证结果
+ */
+export function validateThemeConfig(config: unknown): { valid: boolean; errors?: string[] } {
+  const errors: string[] = []
+
+  if (!config || typeof config !== 'object') {
+    return { valid: false, errors: ['配置不是对象'] }
+  }
+
+  const theme = config as Partial<ThemeConfig>
+
+  // 检查必需字段
+  if (!theme.id || typeof theme.id !== 'string') {
+    errors.push('缺少或无效的 id 字段')
+  }
+
+  if (!theme.name || typeof theme.name !== 'string') {
+    errors.push('缺少或无效的 name 字段')
+  }
+
+  if (!theme.colors || typeof theme.colors !== 'object') {
+    errors.push('缺少或无效的 colors 字段')
+  } else {
+    // 检查必需的颜色字段
+    const requiredColorFields = ['primary', 'secondary', 'accent', 'background', 'text', 'border']
+    for (const field of requiredColorFields) {
+      if (!(field in theme.colors)) {
+        errors.push(`缺少必需的颜色字段: ${field}`)
+      }
+    }
+  }
+
+  if (!theme.components || typeof theme.components !== 'object') {
+    errors.push('缺少或无效的 components 字段')
+  }
+
+  if (!theme.effects || typeof theme.effects !== 'object') {
+    errors.push('缺少或无效的 effects 字段')
+  }
+
+  if (!theme.backgrounds || typeof theme.backgrounds !== 'object') {
+    errors.push('缺少或无效的 backgrounds 字段')
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors: errors.length > 0 ? errors : undefined,
+  }
+}
+
+/**
+ * 转换驼峰命名为短横线命名
+ *
+ * @param str - 驼峰命名字符串
+ * @returns 短横线命名字符串
+ */
+function kebabCase(str: string): string {
+  return str.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase()
+}

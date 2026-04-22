@@ -13,6 +13,7 @@ from typing import Any
 
 from tools.builtin.base import BuiltinTool
 from tools.builtin.shared import format_size
+from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,
@@ -23,7 +24,7 @@ from tools.types import (
 )
 
 
-class FileWriteTool(BuiltinTool):
+class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     """
     文件写入工具
 
@@ -108,9 +109,7 @@ class FileWriteTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行工具"""
-        workspace = inputs.get("workspace")
-        if workspace:
-            self.base_path = Path(workspace)
+        self._init_workspace(inputs)
 
         action = inputs.get("action")
 
@@ -129,13 +128,6 @@ class FileWriteTool(BuiltinTool):
                 error=f"不支持的操作: {action}",
                 error_code="INVALID_ACTION",
             )
-
-    def _resolve_path(self, path_str: str) -> Path:
-        """解析路径（路径边界检查由中间层统一控制）"""
-        path = Path(path_str)
-        if not path.is_absolute():
-            path = self.base_path / path
-        return path.resolve()
 
     def _create_backup(self, path: Path) -> Path | None:
         """创建备份文件"""
@@ -193,7 +185,7 @@ class FileWriteTool(BuiltinTool):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self._resolve_path(path_str)
+            path = self.resolve_path(path_str)
 
             # 无行号参数：全量写入
             if start_line is None and end_line is None:
@@ -319,7 +311,7 @@ class FileWriteTool(BuiltinTool):
             if new_str is None:
                 new_str = ""
 
-            path = self._resolve_path(path_str)
+            path = self.resolve_path(path_str)
 
             # 文件必须存在
             if not path.exists():
@@ -405,7 +397,7 @@ class FileWriteTool(BuiltinTool):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self._resolve_path(path_str)
+            path = self.resolve_path(path_str)
 
             # 文件必须存在
             if not path.exists():
@@ -494,7 +486,7 @@ class FileWriteTool(BuiltinTool):
                     error_code="MISSING_END_LINE",
                 )
 
-            path = self._resolve_path(path_str)
+            path = self.resolve_path(path_str)
 
             # 文件必须存在
             if not path.exists():
@@ -592,7 +584,7 @@ class FileWriteTool(BuiltinTool):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self._resolve_path(path_str)
+            path = self.resolve_path(path_str)
 
             # 如果文件不存在，创建新文件（等同于全量写入）
             if not path.exists():

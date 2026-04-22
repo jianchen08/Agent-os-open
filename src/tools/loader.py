@@ -50,6 +50,8 @@ CORE_SYSTEM_TOOLS = [
     "memory",
     # 资源搜索（核心）
     "resource_search",
+    # 人类交互（核心）
+    "human_interaction",
 ]
 
 

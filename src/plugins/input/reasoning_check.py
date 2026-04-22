@@ -14,6 +14,7 @@ State 命名空间：
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
@@ -112,7 +113,8 @@ class ReasoningCheckPlugin(IInputPlugin):
                     "passed": False,
                     "reason": f"Too many reasoning steps: {step_count} > {self._max_steps}",
                     "step_count": step_count,
-                }
+                },
+                StateKeys.SHOULD_STOP: True,
             }
 
         # 2. 重复推理检查
@@ -123,7 +125,8 @@ class ReasoningCheckPlugin(IInputPlugin):
                     "passed": False,
                     "reason": f"Too many duplicate steps: {duplicate_count} > {self._max_duplicates}",
                     "duplicate_count": duplicate_count,
-                }
+                },
+                StateKeys.SHOULD_STOP: True,
             }
 
         # 3. 推理 token 估算
@@ -134,7 +137,8 @@ class ReasoningCheckPlugin(IInputPlugin):
                     "passed": False,
                     "reason": f"Reasoning too long: {estimated_tokens} > {self._max_tokens} tokens",
                     "estimated_tokens": estimated_tokens,
-                }
+                },
+                StateKeys.SHOULD_STOP: True,
             }
 
         return {
@@ -149,8 +153,10 @@ class ReasoningCheckPlugin(IInputPlugin):
     def _count_reasoning_steps(self, text: str) -> int:
         """计算推理步数。
 
-        通过统计常见的推理标记（如 "步骤"、"step"、编号列表）
-        来估算推理步数。
+        通过统计常见的推理标记来估算推理步数。
+        仅统计出现在推理上下文块中的标记，避免普通文本误报。
+        推理上下文块包括：<think/>、[Reasoning]、[思考]、
+        "推理过程"/"思考过程" 引导的段落等。
 
         Args:
             text: LLM 输出文本
@@ -159,18 +165,53 @@ class ReasoningCheckPlugin(IInputPlugin):
             推理步数
         """
         import re
-        # 匹配步骤标记
+
+        # 先尝试定位推理上下文块；若未找到则回退到全文
+        reasoning_blocks = self._extract_reasoning_blocks(text)
+        search_text = "\n".join(reasoning_blocks) if reasoning_blocks else text
+
+        # 仅在推理上下文中统计结构化步骤标记
         step_patterns = [
-            r"步骤\s*\d+",
-            r"Step\s*\d+",
-            r"^\d+\.\s",
-            r"首先|其次|然后|接着|最后|因此|综上",
+            r"(?:步骤|step)\s*[:：]?\s*\d+",
+            r"(?:Step|STEP)\s*\d+[:：]",
+            r"^#{1,3}\s+(?:步骤|Step)\s*\d+",
         ]
         count = 0
         for pattern in step_patterns:
-            matches = re.findall(pattern, text, re.MULTILINE | re.IGNORECASE)
+            matches = re.findall(pattern, search_text, re.MULTILINE | re.IGNORECASE)
             count += len(matches)
         return count
+
+    def _extract_reasoning_blocks(self, text: str) -> list[str]:
+        """从文本中提取推理上下文块。
+
+        识别包含推理标记的块（如 <think/> 标签、[Reasoning] 标题、
+        "推理过程"/"思考过程" 段落等），仅在这些块内统计推理步骤，
+        从而避免普通文本中的误报。
+
+        Args:
+            text: LLM 输出文本
+
+        Returns:
+            提取到的推理上下文块列表
+        """
+        import re
+
+        blocks: list[str] = []
+
+        # 1. <think ...>...</think > 标签内容
+        think_matches = re.findall(r"<think[^>]*>(.*?)</think\s*>", text, re.DOTALL | re.IGNORECASE)
+        blocks.extend(think_matches)
+
+        # 2. [Reasoning] / [思考] / [推理过程] 标题段落（到下一个空行或标题）
+        section_matches = re.findall(
+            r"(?:^|\n)(?:#{1,3}\s+)?\[*(?:Reasoning|思考|推理过程|Thought)\]*\s*\n(.*?)(?=\n\s*\n|\n#|\Z)",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        blocks.extend(section_matches)
+
+        return blocks
 
     def _count_duplicate_steps(self, text: str) -> int:
         """计算重复推理步数。

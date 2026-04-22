@@ -4,7 +4,8 @@
 命中时直接返回缓存结果并跳过后续插件执行。
 
 使用基于 (tool_name + sorted_args_json) 的 MD5 哈希作为缓存 key，
-支持 TTL 过期和最大缓存条目限制。
+    支持 TTL 过期和最大缓存条目限制。
+    淘汰策略为 LRU（基于最近访问时间）。
 
 State 命名空间：
     - cache_hit : 是否命中缓存
@@ -31,6 +32,7 @@ class ToolCache(IInputPlugin):
     基于 (tool_name + sorted_args_json) 的 MD5 哈希作为缓存 key，
     使用内存缓存存储工具执行结果。命中缓存时直接返回结果，
     跳过后续所有插件和工具执行。
+    淘汰策略为 LRU（基于最近访问时间），每次缓存命中时更新访问时间。
 
     配置项：
     - enabled: 是否启用缓存（默认 True）
@@ -60,7 +62,7 @@ class ToolCache(IInputPlugin):
         self._enabled = self._config.get("enabled", True)
         self._default_ttl = self._config.get("default_ttl", 300)
         self._max_size = self._config.get("max_size", 100)
-        self._cache: dict[str, tuple[Any, float]] = {}
+        self._cache: dict[str, tuple[Any, float, float]] = {}
 
     @property
     def name(self) -> str:
@@ -99,8 +101,10 @@ class ToolCache(IInputPlugin):
             cache_key = self._make_cache_key(tc)
             entry = self._cache.get(cache_key)
             if entry is not None:
-                result, expire_time = entry
+                result, expire_time, _last_access = entry
                 if now < expire_time:
+                    # LRU: 命中时更新访问时间
+                    self._cache[cache_key] = (result, expire_time, now)
                     cached_results.append(result)
                     logger.debug(
                         "[%s] Cache hit | key=%s",
@@ -139,7 +143,7 @@ class ToolCache(IInputPlugin):
 
         cache_key = self._make_cache_key(tool_call)
         expire_time = time.time() + self._default_ttl
-        self._cache[cache_key] = (result, expire_time)
+        self._cache[cache_key] = (result, expire_time, time.time())
 
         if len(self._cache) > self._max_size:
             self._evict_expired()
@@ -164,18 +168,19 @@ class ToolCache(IInputPlugin):
     def _evict_expired(self) -> None:
         """清理过期的缓存条目。
 
-        如果清理后仍超过 max_size，移除最早的条目。
+        如果清理后仍超过 max_size，按 LRU 策略移除最久未访问的条目。
         """
         now = time.time()
         expired_keys = [
-            k for k, (_, exp) in self._cache.items() if now >= exp
+            k for k, (_, exp, _) in self._cache.items() if now >= exp
         ]
         for k in expired_keys:
             del self._cache[k]
 
         if len(self._cache) > self._max_size:
+            # LRU: 按 last_access_time 排序，移除最久未访问的条目
             sorted_items = sorted(
-                self._cache.items(), key=lambda item: item[1][1],
+                self._cache.items(), key=lambda item: item[1][2],
             )
             to_remove = len(self._cache) - self._max_size
             for k, _ in sorted_items[:to_remove]:

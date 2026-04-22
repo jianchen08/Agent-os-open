@@ -145,8 +145,13 @@ class EvaluationResult:
         """根据各指标结果计算综合判定。
 
         红线指标未通过则整体不通过；非红线指标按权重计算。
-        当前简化版：所有指标通过则通过。
+        当前简化版：所有指标通过则通过。无指标时判定为不通过。
         """
+        if not self.results:
+            self.overall_passed = False
+            self.summary = "无评估指标"
+            return
+
         self.overall_passed = all(r.passed for r in self.results)
         passed_count = sum(1 for r in self.results if r.passed)
         total = len(self.results)

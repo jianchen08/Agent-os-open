@@ -42,54 +42,36 @@ class TaskSubmitTool(BuiltinTool):
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        获取优先级：
-        1. 缓存的实例（已被外部注入）
-        2. sys._agent_os_task_service（CLI 设置的全局共享实例）
-        3. 创建新实例（降级兜底）
+        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
 
         Returns:
             TaskService 实例，创建失败时返回 None
         """
         if self._task_service is not None:
             return self._task_service
-        try:
-            import sys
-            global_ts = getattr(sys, "_agent_os_task_service", None)
-            if global_ts is not None:
-                self._task_service = global_ts
-                return self._task_service
-            from tasks.service import TaskService
-            self._task_service = TaskService()
-            return self._task_service
-        except Exception as e:
-            logger.error("[TaskSubmit] TaskService 创建失败: %s", e)
-            return None
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        service = provider.get_or_create("task_service", lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService())
+        if service is not None:
+            self._task_service = service
+        return self._task_service
 
     def _get_event_bus(self) -> Any:
         """获取共享的 EventBus 实例。
 
-        获取优先级：
-        1. 缓存的实例（已被外部注入）
-        2. sys._agent_os_event_bus（CLI 设置的全局实例）
-        3. 创建新实例（降级兜底）
+        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
 
         Returns:
             EventBus 实例，获取失败时返回 None
         """
         if self._event_bus is not None:
             return self._event_bus
-        try:
-            from pipeline.event_bus import EventBus
-            import sys
-            global_bus = getattr(sys, "_agent_os_event_bus", None)
-            if global_bus is not None:
-                self._event_bus = global_bus
-                return self._event_bus
-            self._event_bus = EventBus()
-            return self._event_bus
-        except Exception as e:
-            logger.error("[TaskSubmit] EventBus 创建失败: %s", e)
-            return None
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        bus = provider.get_or_create("event_bus", lambda: __import__("pipeline.event_bus", fromlist=["EventBus"]).EventBus())
+        if bus is not None:
+            self._event_bus = bus
+        return self._event_bus
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -226,10 +208,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     "workspace": {
                         "type": "string",
                         "description": """
-工作目录。不指定则在 .ai_workspaces/{任务ID}/ 下自动创建。
-- 相对路径（如 "my-app"）：在 .ai_workspaces/ 下创建
-- 绝对路径（如 "D:/projects/app"）：直接使用该路径，必须是完整路径
-- 子任务可指定子目录（如 "src/auth"）继承父任务目录
+工作空间路径。不设置：系统在 .ai_workspaces 下创建新目录（新建项目）。
+设置为已存在的项目目录（绝对路径）：系统创建隔离副本进行修改（改造现有项目）。
+改造 Agent OS 自身时，使用 {{project_root}} 变量。子任务不需要设置此参数，自动继承父任务的工作空间。
 """.strip(),
                     },
                 },
@@ -284,6 +265,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             injected_params=[
                 "user_id",
                 "session_id",
+                "task_id",
                 "dependencies",
                 "tool_record_id",
                 "parent_agent_level",
@@ -335,6 +317,34 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         description = inputs.get("description") or goal.get("description", "")
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
+
+        # BUG-FIX-fix_20260420_eval_inject: LLM 可能传入非 dict 类型的
+        # acceptance_criteria（如字符串、列表），导致跳过自动补全又跳过验证。
+        # 统一规范化为 dict，非 dict 视为空以触发自动补全。
+        if not isinstance(acceptance_criteria, dict):
+            logger.warning(
+                "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict 以触发自动补全",
+                type(acceptance_criteria).__name__,
+            )
+            acceptance_criteria = {}
+
+        # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
+        # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
+        if not acceptance_criteria and target_type == "agent" and target_id:
+            auto_criteria = self._auto_fill_criteria(target_id)
+            if auto_criteria:
+                acceptance_criteria = auto_criteria
+                logger.info(
+                    "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
+                    target_id, list(auto_criteria.keys()),
+                )
+        injected_task_id = inputs.get("task_id")
+        if parent_task_id is None and injected_task_id:
+            parent_task_id = injected_task_id
+            logger.info(
+                "[TaskSubmit] 自动注入 parent_task_id=%s (来自管道所属任务)",
+                parent_task_id,
+            )
         workspace = inputs.get("workspace", "")
 
         logger.info(
@@ -401,6 +411,15 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             raw_priority = 5
 
         try:
+            child_agent_level = min(parent_agent_level + 1, 3)
+            from agents.types import AgentLevel
+            level_values = {"L1": 1, "L2": 2, "L3": 3}
+            level_str = f"L{child_agent_level}"
+            if level_str in level_values:
+                child_level = AgentLevel(level_str)
+            else:
+                child_level = AgentLevel.L3_ATOMIC
+
             task = task_service.create_task(
                 title=goal["title"],
                 description=description,
@@ -408,6 +427,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 target_type=target_type,
                 dependencies=dependencies or None,
                 priority=raw_priority,
+                agent_level=child_level,
                 metadata=self._build_metadata(inputs, goal, acceptance_criteria),
             )
         except Exception as e:
@@ -429,6 +449,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error="任务提交失败：EventBus 不可用，无法触发后台执行",
                 error_code="EVENT_BUS_UNAVAILABLE",
             )
+
+        # BUG-FIX-C3：emit 前检查是否有订阅者，防止 TaskWorker 未启动时任务永远不被执行
+        if hasattr(event_bus, 'has_subscribers') and not event_bus.has_subscribers("task.submitted"):
+            logger.error("[TaskSubmit] 无订阅者: task.submitted, 回滚任务 %s", task.id)
+            try:
+                task_service._storage.delete(task.id)
+            except Exception as del_e:
+                logger.error("[TaskSubmit] 回滚失败: %s", del_e)
+            return create_failure_result(
+                error="任务提交失败：后台执行器(TaskWorker)未启动，无法处理任务",
+                error_code="NO_SUBSCRIBER",
+            )
+
         try:
             await event_bus.emit("task.submitted", {
                 "task_id": task.id,
@@ -465,9 +498,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
                 "message": (
                     f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
-                    "该任务需要一定时间完成，请先继续处理其他工作。"
-                    "系统会定期提醒你检查进度，收到提醒后再使用 task_manage 查看结果。"
-                    "在收到系统提醒前，不要查询任务状态。"
+                    "该任务需要一定时间完成。"
+                    "子任务完成后系统会自动通知你并恢复执行。"
+                    "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
                 ),
             },
             metadata={
@@ -560,17 +593,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 return False
             return True
 
-        if parent_agent_level == 1:
-            logger.debug("[TaskSubmit] L1 Agent 可以指定 parent_task_id | value=%s", parent_task_id)
-            return True
-
-        if parent_agent_level >= 2:
-            if parent_task_id is not None:
-                logger.debug(
-                    "[TaskSubmit] L2+ Agent parent_task_id 已由系统注入 | level=%s | parent_task_id=%s",
-                    parent_agent_level, parent_task_id,
-                )
-            return True
+        if parent_agent_level == 1 and parent_task_id is not None:
+            task_service = self._get_task_service()
+            if task_service and task_service.get_task(parent_task_id) is None:
+                logger.error("[TaskSubmit] parent_task_id 不存在: %s", parent_task_id)
+                return False
 
         return True
 
@@ -625,9 +652,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata.update(inputs["metadata"])
 
         # 存储验收标准（供 task_evaluate 使用）
-        if acceptance_criteria and isinstance(acceptance_criteria, dict):
-            metadata["acceptance_criteria"] = acceptance_criteria
-            metadata["evaluation_metric_ids"] = list(acceptance_criteria.keys())
+        # BUG-FIX-fix_20260420_eval_inject: 防御性检查，确保非 dict 类型不会静默丢失
+        if acceptance_criteria:
+            if isinstance(acceptance_criteria, dict):
+                metadata["acceptance_criteria"] = acceptance_criteria
+                metadata["evaluation_metric_ids"] = list(acceptance_criteria.keys())
+            else:
+                logger.warning(
+                    "[TaskSubmit] _build_metadata 收到非 dict 的 acceptance_criteria: %s，跳过存储",
+                    type(acceptance_criteria).__name__,
+                )
 
         # 存储 goal 中的上下文
         if goal.get("context"):
@@ -653,3 +687,64 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["task_role"] = inputs["task_role"]
 
         return metadata
+
+    def _auto_fill_criteria(self, target_id: str) -> dict[str, Any]:
+        """从 agent 配置的 recommended_metrics 自动构建验收标准。
+
+        当 LLM 不传 acceptance_criteria 时，尝试从对应 agent 的 YAML 配置中
+        读取 recommended_metrics 并转换为 task_evaluate 可用的格式。
+
+        Args:
+            target_id: agent 配置 ID
+
+        Returns:
+            验收标准字典，找不到时返回空 dict
+        """
+        import yaml
+        from pathlib import Path
+
+        # BUG-FIX-fix_20260420_eval_inject: 使用文件路径推导项目根目录，
+        # 而非 Path.cwd()，避免工作目录变化导致找不到配置。
+        # task_submit.py 位于 src/tools/builtin/，向上 4 层即为项目根目录。
+        _project_root = Path(__file__).resolve().parent.parent.parent.parent
+        config_dir = _project_root / "config" / "agents"
+
+        if not config_dir.exists():
+            logger.warning(
+                "[TaskSubmit] agent 配置目录不存在: %s", config_dir,
+            )
+            return {}
+
+        yaml_path = None
+        for p in config_dir.rglob(f"{target_id}.yaml"):
+            yaml_path = p
+            break
+
+        if not yaml_path or not yaml_path.exists():
+            logger.debug(
+                "[TaskSubmit] 未找到 agent 配置: %s (搜索目录: %s)",
+                target_id, config_dir,
+            )
+            return {}
+
+        try:
+            with open(yaml_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            recommended = config.get("recommended_metrics", [])
+            if not recommended:
+                return {}
+            criteria = {}
+            for metric in recommended:
+                metric_id = metric.get("metric_id")
+                if not metric_id:
+                    continue
+                default_params = metric.get("default_params", {})
+                criteria[metric_id] = {"input_params": default_params}
+            logger.info(
+                "[TaskSubmit] 从 %s 加载了 %d 个推荐指标",
+                yaml_path.name, len(criteria),
+            )
+            return criteria
+        except Exception as e:
+            logger.debug("[TaskSubmit] 自动补全验收标准失败: %s", e)
+            return {}

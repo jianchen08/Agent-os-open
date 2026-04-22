@@ -633,45 +633,8 @@ class TestErrorCheckPlugin:
         assert result.route_signal.route_type == "end"
 
 
-# ── MemoryWritePlugin ───────────────────────
-
-class TestMemoryWritePlugin:
-    """记忆写入插件测试（M11b 真实版）。"""
-
-    def test_write_user_and_llm(self) -> None:
-        """正常 — 写入用户消息和 LLM 回复。"""
-        from plugins.output.memory_write import MemoryWritePlugin
-
-        mock_store = AsyncMock()
-        plugin = MemoryWritePlugin()
-        ctx = make_ctx(
-            state={
-                "user_message": "你好",
-                StateKeys.RAW_RESULT: "你好！有什么可以帮你？",
-                StateKeys.SESSION_ID: "sess-001",
-                StateKeys.ITERATION: 1,
-            },
-            services={"memory_store": mock_store},
-        )
-        result = run(plugin.execute(ctx))
-
-        assert result.state_updates["memory.written"]["success"] is True
-        assert result.state_updates["memory.written"]["items"] == 2  # user + llm
-        assert mock_store.save.call_count == 2
-
-    def test_no_memory_store_skips(self) -> None:
-        """边界 — 无记忆存储服务时跳过。"""
-        from plugins.output.memory_write import MemoryWritePlugin
-
-        plugin = MemoryWritePlugin()
-        ctx = make_ctx(state={"user_message": "test"}, services={})
-        result = run(plugin.execute(ctx))
-
-        # M11b 版本：无服务时返回空 OutputResult
-        assert result.state_updates == {}
-
-
 # ── PersistPlugin 已移除（功能合并到 TrackPlugin） ──
+# ── MemoryWritePlugin 已废弃移除 ──
 
 # ── ResultFormatPlugin ──────────────────────
 

@@ -12,6 +12,51 @@ workspace:
   #   - "/tmp/ai_workspaces" (Linux 绝对路径)
   #   - ".ai_workspaces" (相对路径，相对于项目根目录)
   root: ".ai_workspaces"
+  nesting_mode: "shared"
+  sparse_threshold_mb: 500
+
+  # 三层过滤配置
+  worktree_include_patterns:
+    - "src"
+    - "config"
+    - "tests"
+    - "pyproject.toml"
+    - "package.json"
+    - "Cargo.toml"
+    - "go.mod"
+  worktree_exclude_patterns:
+    - ".venv"
+    - "node_modules"
+    - "build"
+    - "dist"
+    - ".gradle"
+    - "target"
+    - ".idea"
+    - ".vscode"
+    - "__pycache__"
+    - ".pytest_cache"
+    - ".mypy_cache"
+    - ".tox"
+  large_file_threshold_mb: 50
+  worktree_link_patterns:
+    - "assets"
+    - "node_modules"
+    - "vendor"
+    - "data"
+
+  scenario_detection:
+    auto_detect: true
+
+  new_project:
+    auto_git_init: true
+
+  existing_project:
+    default_merge_strategy: "git_merge"
+    auto_cleanup: true
+    auto_rollback_on_failure: true
+    auto_commit_before_evaluate: true
+
+  max_eval_retries: 3
 
 # ============================================
 # 协调器配置

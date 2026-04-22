@@ -2,8 +2,6 @@
 
 包含 Agent 配置的所有枚举、数据类和工厂函数，
 供加载器、注册表、上下文构建器和 Schema 验证器共同使用。
-
-与 pipeline.types.AgentLevel 对齐，但使用旧文件中的 "L1"/"L2"/"L3" 值格式。
 """
 
 from __future__ import annotations
@@ -14,10 +12,7 @@ from typing import Any
 
 
 class AgentLevel(Enum):
-    """Agent 层级枚举。
-
-    与 pipeline.types.AgentLevel 对齐，值使用旧文件 YAML 中的 "L1"/"L2"/"L3" 格式。
-    """
+    """Agent 层级枚举。"""
 
     L1_MAIN = "L1"
     L2_SUBTASK = "L2"
@@ -240,8 +235,12 @@ class AgentConfig:
     def to_state(self) -> dict[str, Any]:
         """将 Agent 配置转换为管道 state 注入字典。
 
-        包含 system_prompt、tool_ids、constraints 和 plugin_configs，
-        供 PipelineEngine 在运行时注入到管道 state 中。
+        包含 system_prompt、tool_ids、constraints、static_vars、dynamic_vars
+        和 plugin_configs，供 PipelineEngine 在运行时注入到管道 state 中。
+
+        静态变量通过 context.static_vars 传递给 PromptBuildPlugin，
+        由插件在构建系统提示词时动态加载（支持文件读取、向量检索等模式）。
+        动态变量通过 context.dynamic_vars 传递，由 LLMCore 追加到消息列表末尾。
 
         Returns:
             包含 Agent 参数的状态字典
@@ -258,6 +257,38 @@ class AgentConfig:
             "hard": self.hard_constraints or [],
             "soft": self.soft_constraints or [],
         }
+
+        if self.static_vars.enabled and self.static_vars.items:
+            state["context.static_vars"] = [
+                {
+                    "name": item.name,
+                    "type": item.type,
+                    "path": item.path,
+                    "content": item.content,
+                    "tags": item.tags,
+                    "inject_type": item.inject_type,
+                    "top_k": item.top_k,
+                    "memory_type": item.memory_type,
+                    "memory_layer": item.memory_layer,
+                }
+                for item in self.static_vars.items
+            ]
+
+        if self.dynamic_vars.enabled and self.dynamic_vars.items:
+            state["context.dynamic_vars"] = [
+                {
+                    "name": item.name,
+                    "type": item.type,
+                    "path": item.path,
+                    "content": item.content,
+                    "tags": item.tags,
+                    "inject_type": item.inject_type,
+                    "top_k": item.top_k,
+                    "memory_type": item.memory_type,
+                    "memory_layer": item.memory_layer,
+                }
+                for item in self.dynamic_vars.items
+            ]
 
         if self.max_iterations:
             state["max_iterations"] = self.max_iterations
@@ -292,15 +323,15 @@ class AgentConfig:
         return configs
 
     def _build_full_system_prompt(self) -> str:
-        """构建完整的系统提示词。
+        """构建核心系统提示词。
 
-        组装逻辑：system_prompt + 硬约束 + 软约束 + 静态上下文
+        仅组装 system_prompt 原文 + 硬约束 + 软约束。
+        静态上下文（模板、规则、文件内容等）由 PromptBuildPlugin
+        在运行时通过 _load_static_vars() 动态加载并拼入系统提示词。
 
         Returns:
-            组装后的系统提示词字符串
+            核心系统提示词字符串
         """
-        from agents.context_builder import ContextBuilder
-
         parts: list[str] = []
 
         if self.system_prompt:
@@ -315,15 +346,5 @@ class AgentConfig:
             parts.append("\n## 软约束（尽量遵守）\n")
             for i, c in enumerate(self.soft_constraints, 1):
                 parts.append(f"{i}. {c}")
-
-        builder = ContextBuilder()
-        static_ctx = builder.build_static_context(self)
-        if static_ctx.get("enabled") and static_ctx.get("items"):
-            parts.append("\n## 上下文信息\n")
-            for item in static_ctx["items"]:
-                name = item.get("name", "")
-                content = item.get("content", "")
-                if content and name != "行为约束":
-                    parts.append(f"\n### {name}\n{content}")
 
         return "\n".join(parts)

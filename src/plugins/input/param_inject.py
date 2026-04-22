@@ -12,13 +12,41 @@ State 命名空间：
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_project_root() -> Path | None:
+    """推导 Agent OS 项目根目录。
+
+    从本文件（param_inject.py）向上逐级查找，找到同时包含
+    config/ 和 src/ 目录的祖先目录即为项目根目录。
+    结果会被缓存到模块级变量以避免重复计算。
+
+    Returns:
+        项目根目录的 Path 对象，未找到时返回 None
+    """
+    if _resolve_project_root._cached is not None:
+        return _resolve_project_root._cached
+
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "config").is_dir() and (parent / "src").is_dir():
+            _resolve_project_root._cached = parent
+            return parent
+
+    return None
+
+
+_resolve_project_root._cached: Path | None = None
 
 
 class ParamInjectPlugin(IInputPlugin):
@@ -100,7 +128,15 @@ class ParamInjectPlugin(IInputPlugin):
         injected_calls = []
         for tc in tool_calls:
             injected_tc = dict(tc)
-            args = dict(injected_tc.get("args", {}))
+            raw_args = injected_tc.get("args", injected_tc.get("arguments", {}))
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except (json.JSONDecodeError, TypeError):
+                    raw_args = {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+            args = dict(raw_args)
 
             # 注入运行时参数（仅当参数不存在时才注入）
             if self._inject_session_id and "session_id" not in args:
@@ -114,8 +150,48 @@ class ParamInjectPlugin(IInputPlugin):
                     args["user_id"] = user_id
 
             if self._inject_timestamp and "timestamp" not in args:
-                from datetime import UTC, datetime
                 args["timestamp"] = datetime.now(UTC).isoformat()
+
+            # BUG-FIX-fix_20260418_task_inject: 注入 task_id
+            # 问题根因: task_evaluate 声明 injected_params=["task_id"] 但实际注入链断裂
+            # 修复方案: 在 ParamInjectPlugin 中补充 task_id 注入，从 state 获取
+            # 影响范围: 所有声明 injected_params 含 task_id 的工具
+            if "task_id" not in args:
+                task_id = ctx.state.get(StateKeys.TASK_ID, "")
+                if task_id:
+                    args["task_id"] = task_id
+
+            # 注入 pipeline_id（仅当参数不存在且 state 中有值时才注入）
+            if "pipeline_id" not in args:
+                pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+                if pipeline_id:
+                    args["pipeline_id"] = pipeline_id
+
+            if "workspace" not in args:
+                workspace = ctx.state.get("workspace", "")
+                if workspace:
+                    args["workspace"] = workspace
+
+            # 注入 project_root：从 state 获取 Agent OS 项目根目录
+            # 供 workspace_aware 等工具使用，与 workspace 注入同源
+            if "project_root" not in args:
+                project_root = ctx.state.get("project_root", "")
+                if project_root:
+                    args["project_root"] = project_root
+
+            # 注入 parent_agent_level：从 state 中获取当前 Agent 层级
+            # 供 task_submit / task_manage 等工具判断权限和设置子任务层级
+            if "parent_agent_level" not in args:
+                raw_level = (
+                    ctx.state.get(StateKeys.AGENT_LEVEL)
+                    or ctx.state.get("context.agent_level", "")
+                )
+                if raw_level:
+                    level_str = str(raw_level).upper().lstrip("L")
+                    try:
+                        args["parent_agent_level"] = int(level_str)
+                    except (ValueError, TypeError):
+                        pass
 
             # 注入工具默认参数
             tool_name = injected_tc.get("name", "")
@@ -123,6 +199,15 @@ class ParamInjectPlugin(IInputPlugin):
                 for param, value in self._default_params[tool_name].items():
                     if param not in args:
                         args[param] = value
+
+            # 替换 {{project_root}} 模板变量
+            # 将 args 中所有字符串值里的 {{project_root}} 替换为 Agent OS 实际项目根路径
+            _project_root_path = _resolve_project_root()
+            if _project_root_path is not None:
+                _pr_str = str(_project_root_path)
+                for key, val in args.items():
+                    if isinstance(val, str) and "{{project_root}}" in val:
+                        args[key] = val.replace("{{project_root}}", _pr_str)
 
             injected_tc["args"] = args
             injected_calls.append(injected_tc)

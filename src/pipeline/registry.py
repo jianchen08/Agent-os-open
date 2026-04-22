@@ -10,6 +10,7 @@ PipelineRegistry 提供跨管道路由能力（平权式）。
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
@@ -76,7 +77,12 @@ class PluginRegistry:
         """
         self._plugins[plugin.name] = plugin
         if isinstance(plugin, ICorePlugin):
-            # Core 插件按 core_type 注册
+            # Core 插件按 core_type 注册，但 register() 使用 plugin.name 作为 key
+            # 与 register_core(name, plugin) 的 name 语义不同，发出警告
+            logger.warning(
+                "Core plugin '%s' registered via register(), consider using register_core() for explicit core_type mapping",
+                plugin.name,
+            )
             self._core_plugins[plugin.name] = plugin
         logger.debug("Plugin registered: %s (type=%s)", plugin.name, type(plugin).__name__)
 
@@ -118,24 +124,64 @@ class PluginRegistry:
     def get_output_plugins(
         self, core_type: str | None = None
     ) -> list[IOutputPlugin]:
-        """获取输出插件列表。
+        """获取所有输出插件列表。
 
-        可选按 core_type 过滤，仅返回声明关注该类型的输出插件。
-        未声明 route_signals 的输出插件（空列表）视为关注所有类型。
+        core_type 参数保留签名兼容性但不再用于过滤。
+        Output 插件自身通过 execute() 内部逻辑判断是否需要处理。
 
         Args:
-            core_type: 核心类型标识，None 时返回所有输出插件
+            core_type: 核心类型标识（保留签名兼容，不再用于过滤）
 
         Returns:
-            匹配的输出插件列表
+            所有输出插件列表，按优先级排序
         """
         output_plugins: list[IOutputPlugin] = []
         for plugin in self._plugins.values():
             if isinstance(plugin, IOutputPlugin):
-                signals = plugin.route_signals
-                if core_type is None or not signals or core_type in signals:
-                    output_plugins.append(plugin)
+                output_plugins.append(plugin)
         return sorted(output_plugins, key=lambda p: p.priority)
+
+    def fork(self) -> PluginRegistry:
+        """创建插件注册表的深拷贝副本。
+
+        每个 PipelineEngine 应持有独立的 PluginRegistry 实例，
+        避免多个管道共享同一插件实例导致状态互相污染（如 TrackPlugin
+        的 _record_count 在父子管道间累积）。
+
+        对于有状态的插件（如 TrackPlugin），通过 type(plugin)(config)
+        创建全新实例；对于无状态插件，直接复用原实例。
+
+        Returns:
+            全新的 PluginRegistry 实例，包含独立的新插件实例
+        """
+        new_registry = PluginRegistry()
+
+        core_name_to_plugin_name: dict[str, str] = {}
+        for core_name, plugin in self._core_plugins.items():
+            core_name_to_plugin_name[core_name] = plugin.name
+
+        for name, plugin in self._plugins.items():
+            new_instance = plugin
+            if hasattr(plugin, "_config"):
+                try:
+                    new_instance = type(plugin)(copy.deepcopy(plugin._config))
+                except Exception:
+                    logger.debug(
+                        "PluginRegistry.fork: 无法重建插件 %s, 复用原实例", name
+                    )
+            new_registry._plugins[name] = new_instance
+
+        for core_name, plugin_name in core_name_to_plugin_name.items():
+            new_registry._core_plugins[core_name] = new_registry._plugins[plugin_name]
+
+            orig = self._plugins.get(plugin_name)
+            forked = new_registry._plugins.get(plugin_name)
+            if hasattr(orig, "_tools") and hasattr(forked, "_tools"):
+                forked._tools = dict(orig._tools)
+            if hasattr(orig, "_tool_registry") and hasattr(forked, "_tool_registry"):
+                forked._tool_registry = orig._tool_registry
+
+        return new_registry
 
     def replace(self, name: str, new_plugin: IPlugin) -> IPlugin | None:
         """替换已注册的插件。

@@ -12,7 +12,18 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pipeline.types import AgentLevel, TaskPriority
+from agents.types import AgentLevel
+from enum import IntEnum
+
+
+class TaskPriority(IntEnum):
+    """任务优先级枚举，数值越小优先级越高。"""
+
+    CRITICAL = 1
+    HIGH = 3
+    NORMAL = 5
+    LOW = 7
+    BACKGROUND = 9
 
 
 class TaskStatus(Enum):

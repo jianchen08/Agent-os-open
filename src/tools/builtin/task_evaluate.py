@@ -168,6 +168,10 @@ class TaskEvaluateTool:
 
         通过 injected_params 获取 task_id 等运行时参数，
         通过 TaskService 获取任务数据，通过 EvaluationExecutor 执行评估。
+
+        BUG-FIX-fix_20260418_task_inject: 系统级错误直接标记任务失败
+        问题根因: INJECTION_ERROR/SERVICE_UNAVAILABLE 时 LLM 无意义重试
+        修复方案: 系统级错误直接 fail_task + 返回 task_failed 标记
         """
         action = inputs.get("action", "auto_complete")
         task_id = inputs.get("task_id")
@@ -177,15 +181,22 @@ class TaskEvaluateTool:
             return create_failure_result(
                 error="TaskService 不可用",
                 error_code="SERVICE_UNAVAILABLE",
+                metadata={"task_failed": True},
             )
 
         if not task_id:
             task_id = self._infer_task_id(task_service)
+            if task_id:
+                logger.warning(
+                    "[TaskEvaluate] task_id 为推断值: %s，注入链可能断裂",
+                    task_id,
+                )
 
         if not task_id:
             return create_failure_result(
                 error="系统错误：task_id 未注入，请联系管理员",
                 error_code="INJECTION_ERROR",
+                metadata={"task_failed": True},
             )
 
         task = task_service.get_task(task_id)
@@ -295,6 +306,7 @@ class TaskEvaluateTool:
                 task_id=task.id,
                 metric_ids=metric_ids,
                 input_params=input_params,
+                skip_state_update=True,
             )
             return self._handle_evaluation_result(inputs, task_service, task, result)
         except Exception as e:
@@ -358,13 +370,24 @@ class TaskEvaluateTool:
             return self._fail_task(task_service, task, eval_result, max_retries)
         else:
             min_remaining = max_retries - min(retry_counts.values())
+            failed_details = []
+            for r in eval_result.results:
+                if not r.passed:
+                    detail = f"- [{r.metric_id}] 未通过"
+                    if r.message:
+                        detail += f": {r.message}"
+                    if r.score is not None:
+                        detail += f" (得分: {r.score})"
+                    failed_details.append(detail)
+            feedback = "评估未通过，请根据以下反馈继续改进：\n" + "\n".join(failed_details)
+            feedback += f"\n\n剩余重试次数：{min_remaining}"
             return create_success_result(
                 data=self._build_result_data(eval_result),
                 metadata={
                     "action": inputs.get("action", "auto_complete"),
                     "result": "retry",
                     "retry_remaining": min_remaining,
-                    "message": f"评估未通过，请继续改进。剩余重试次数：{min_remaining}",
+                    "message": feedback,
                 },
             )
 
@@ -383,10 +406,18 @@ class TaskEvaluateTool:
         Returns:
             工具执行结果
         """
-        try:
-            task_service.complete_evaluation(task.id, passed=True)
-        except Exception as e:
-            logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
+        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            try:
+                eval_data = self._build_result_data(eval_result)
+                task_service.complete_evaluation(task.id, passed=True, result=eval_data)
+            except Exception as e:
+                logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
+                return create_failure_result(
+                    error=f"complete_evaluation(passed=True) 失败: {e}",
+                    metadata={"eval_data": str(self._build_result_data(eval_result))[:200]},
+                )
+        else:
+            logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
 
         return create_success_result(
             data=self._build_result_data(eval_result),
@@ -418,9 +449,17 @@ class TaskEvaluateTool:
             工具执行结果
         """
         try:
-            task_service.complete_evaluation(task.id, passed=False)
+            if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                eval_data = self._build_result_data(eval_result)
+                task_service.complete_evaluation(task.id, passed=False, result=eval_data)
+            else:
+                logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
         except Exception as e:
             logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
+            return create_failure_result(
+                error=f"complete_evaluation(passed=False) 失败: {e}",
+                metadata={"eval_data": str(self._build_result_data(eval_result))[:200]},
+            )
 
         failed_metrics = [
             r.metric_id for r in eval_result.results if not r.passed
@@ -445,35 +484,27 @@ class TaskEvaluateTool:
             task: TaskModel 实例
         """
         try:
-            task_service._storage.save(task)
+            task_service.save_task(task)
         except Exception as e:
             logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
 
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        获取优先级：
-        1. sys._agent_os_task_service（CLI 设置的全局共享实例）
-        2. 创建新实例（降级兜底）
+        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
 
         Returns:
             TaskService 实例，获取失败返回 None
         """
-        try:
-            import sys
-
-            global_ts = getattr(sys, "_agent_os_task_service", None)
-            if global_ts is not None:
-                return global_ts
-            from tasks.service import TaskService
-
-            return TaskService()
-        except Exception as e:
-            logger.error("[TaskEvaluate] TaskService 创建失败: %s", e)
-            return None
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get_or_create("task_service", lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService())
 
     def _create_executor(self, task_service: Any) -> Any:
         """创建 EvaluationExecutor 实例。
+
+        从全局变量获取 pipeline_factory 和 agent_registry，
+        传递给 EvaluationExecutor 以支持 Agent 型评估器。
 
         Args:
             task_service: TaskService 实例，用于状态回写
@@ -483,7 +514,81 @@ class TaskEvaluateTool:
         """
         from evaluation.executor import EvaluationExecutor
 
-        return EvaluationExecutor(task_service=task_service)
+        pipeline_factory = self._get_pipeline_factory()
+        agent_registry = self._get_agent_registry()
+        tool_registry = self._get_tool_registry()
+
+        return EvaluationExecutor(
+            task_service=task_service,
+            pipeline_factory=pipeline_factory,
+            agent_registry=agent_registry,
+            tool_registry=tool_registry,
+        )
+
+    @staticmethod
+    def _get_pipeline_factory() -> Any:
+        """获取管道工厂（创建 PipelineEngine 的可调用对象）。
+
+        通过 ServiceProvider 统一获取，保留从 _agent_os_services 构建的兜底逻辑。
+        """
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        factory = provider.get("pipeline_factory")
+        if factory is not None:
+            return factory
+
+        # 兜底：从 _agent_os_services 构建 pipeline factory
+        services = provider.get("services")
+        if services is None:
+            return None
+
+        try:
+            from pipeline.engine import PipelineEngine
+
+            input_routes = services.get("input_route_table")
+            output_routes = services.get("output_route_table")
+            plugin_registry = services.get("plugin_registry")
+
+            if input_routes and output_routes and plugin_registry:
+                def _factory():
+                    return PipelineEngine(
+                        input_route_table=input_routes,
+                        output_route_table=output_routes,
+                        plugin_registry=plugin_registry,
+                        services=services,
+                    )
+                return _factory
+        except Exception:
+            pass
+
+        return None
+
+    @staticmethod
+    def _get_agent_registry() -> Any:
+        """获取 AgentRegistry 实例。
+
+        通过 ServiceProvider 统一获取。
+        """
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get("agent_registry")
+
+    @staticmethod
+    def _get_tool_registry() -> Any:
+        """获取 ToolRegistry 实例。
+
+        通过 ServiceProvider 统一获取，保留从全局注册表模块获取的兜底逻辑。
+        """
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        registry = provider.get("tool_registry")
+        if registry is not None:
+            return registry
+        try:
+            from tools.global_registry import get_global_tool_registry_sync
+            return get_global_tool_registry_sync()
+        except Exception:
+            return None
 
     def _get_metric_ids(self, task: Any) -> list[str]:
         """从任务模型中提取评估指标 ID 列表。
@@ -505,6 +610,17 @@ class TaskEvaluateTool:
     def _get_input_params(self, task: Any) -> dict[str, dict[str, Any]]:
         """从任务模型的 acceptance_criteria 中提取各指标的输入参数。
 
+        对于 input_params 为空的指标，自动从任务描述中构建 criteria。
+        对于工具型评估指标（如 file_check），自动注入 workspace 参数，
+        确保评估工具在正确的工作目录下解析文件路径。
+
+        BUG-FIX-fix_20260419_eval_workspace:
+        问题根因: file_check 评估器调用 file_read 时未传递 workspace，
+                 导致 file_read 在项目根目录而非任务工作空间中查找文件，
+                 文件路径解析错误使评估永远失败。
+        修复方案: 从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中。
+        影响范围: 所有使用工具型评估指标（file_check、bash_check 等）的任务评估
+
         Args:
             task: TaskModel 实例
 
@@ -512,13 +628,107 @@ class TaskEvaluateTool:
             key=metric_id, value=input_params 的字典
         """
         params: dict[str, dict[str, Any]] = {}
+        ac = {}
         if task.metadata and "acceptance_criteria" in task.metadata:
             ac = task.metadata["acceptance_criteria"]
             if isinstance(ac, dict):
                 for metric_id, config in ac.items():
                     if isinstance(config, dict) and "input_params" in config:
                         params[metric_id] = config["input_params"]
+
+        task_desc = ""
+        if hasattr(task, "description") and task.description:
+            task_desc = task.description
+        elif hasattr(task, "title") and task.title:
+            task_desc = task.title
+
+        all_metric_ids = set()
+        if task.metadata and "evaluation_metric_ids" in task.metadata:
+            all_metric_ids = set(task.metadata["evaluation_metric_ids"])
+        if isinstance(ac, dict):
+            all_metric_ids.update(ac.keys())
+
+        workspace_abs = self._resolve_task_workspace_abs(task)
+
+        for metric_id in all_metric_ids:
+            p = params.get(metric_id, {})
+            if not p.get("criteria") and task_desc:
+                p.setdefault("criteria", task_desc)
+            if workspace_abs and "workspace" not in p:
+                p["workspace"] = workspace_abs
+            params[metric_id] = p
+
         return params
+
+    @staticmethod
+    def _resolve_task_workspace_abs(task: Any) -> str | None:
+        """解析任务的绝对工作空间路径。
+
+        BUG-FIX-fix_20260421_eval_workspace_unify:
+        问题根因: 此方法独立实现了 workspace 路径解析逻辑，与 TaskWorker 使用的
+                 resolve_workspace() 链路不一致，导致评估时和执行时的 workspace 路径不同，
+                 file_check 始终找不到 agent 写入的文件。
+        修复方案: 复用 TaskWorker._resolve_task_workspace 的同一套链路解析逻辑，
+                 确保评估和执行使用完全一致的 workspace 路径。
+        影响范围: 所有使用工具型评估指标（file_check 等）的任务评估
+
+        Args:
+            task: TaskModel 实例
+
+        Returns:
+            绝对工作空间路径字符串，无法解析时返回 None
+        """
+        from pathlib import Path
+        from isolation.workspace import get_workspace_config_root, resolve_workspace
+
+        metadata = task.metadata if task.metadata else {}
+        task_workspace = metadata.get("workspace")
+
+        root = get_workspace_config_root()
+
+        task_service = None
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            services = provider.get("services")
+            if services:
+                task_service = services.get("task_service")
+        except Exception:
+            pass
+
+        if not task_service:
+            if task_workspace:
+                return str(Path.cwd() / task_workspace)
+            return str(Path.cwd() / root / task.id)
+
+        ancestor_chain: list[tuple[str, str | None]] = []
+        current_id = task.id
+        visited: set[str] = set()
+
+        while current_id and current_id not in visited:
+            t = task_service.get_task(current_id)
+            if t is None:
+                break
+            visited.add(current_id)
+            stored_ws = (t.metadata or {}).get("workspace") if t.metadata else None
+            ancestor_chain.append((current_id, stored_ws))
+            current_id = t.parent_task_id if hasattr(t, "parent_task_id") else None
+
+        if not ancestor_chain:
+            return str(Path.cwd() / root / task.id)
+
+        resolved: str | None = None
+        for tid, tws in reversed(ancestor_chain):
+            if resolved is None:
+                resolved = resolve_workspace(tid, tws, config_root=root)
+            elif tid == task.id:
+                resolved = resolve_workspace(tid, task_workspace, parent_resolved_workspace=resolved)
+            else:
+                resolved = resolve_workspace(tid, tws, parent_resolved_workspace=resolved)
+
+        if resolved:
+            return str(Path.cwd() / resolved)
+        return None
 
     def _build_result_data(self, result: Any) -> dict[str, Any]:
         """将评估结果构建为工具返回数据。
@@ -550,7 +760,11 @@ class TaskEvaluateTool:
         """从 TaskService 推断当前活跃的 task_id。
 
         当 task_id 未通过注入获取时，尝试从 TaskService 中
-        查找当前处于 running 状态的任务作为 fallback。
+        查找当前处于 RUNNING 或 EVALUATING 状态的任务作为 fallback。
+
+        BUG-FIX-fix_20260418_task_inject: 扩展推断范围
+        问题根因: 原仅查 RUNNING 状态，任务可能已转为 EVALUATING
+        修复方案: 覆盖 RUNNING + EVALUATING 两种状态
 
         Args:
             task_service: TaskService 实例
@@ -559,27 +773,26 @@ class TaskEvaluateTool:
             task_id 字符串，未找到返回 None
         """
         try:
-            from tasks.types import TaskStatus
-
-            running_tasks = task_service.list_by_status(TaskStatus.RUNNING)
-            if running_tasks:
-                if len(running_tasks) > 1:
-                    logger.warning(
-                        "[TaskEvaluate] 有 %d 个 running 任务，使用最新的",
-                        len(running_tasks),
+            for status in [TaskStatus.RUNNING, TaskStatus.EVALUATING]:
+                tasks = task_service.list_by_status(status)
+                if tasks:
+                    if len(tasks) > 1:
+                        logger.warning(
+                            "[TaskEvaluate] 有 %d 个 %s 任务，使用最新的",
+                            len(tasks), status.value,
+                        )
+                    latest = max(
+                        tasks,
+                        key=lambda t: t.created_at
+                        if hasattr(t, "created_at")
+                        else "",
                     )
-                latest = max(
-                    running_tasks,
-                    key=lambda t: t.created_at
-                    if hasattr(t, "created_at")
-                    else "",
-                )
-                tid = latest.id if hasattr(latest, "id") else latest.get("id")
-                logger.info(
-                    "[TaskEvaluate] 推断 task_id=%s (从 running 任务列表)",
-                    tid,
-                )
-                return tid
+                    tid = latest.id if hasattr(latest, "id") else latest.get("id")
+                    logger.info(
+                        "[TaskEvaluate] 推断 task_id=%s (从 %s 任务列表)",
+                        tid, status.value,
+                    )
+                    return tid
         except Exception as exc:
             logger.warning("[TaskEvaluate] 推断 task_id 失败: %s", exc)
         return None

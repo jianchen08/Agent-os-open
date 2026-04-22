@@ -968,111 +968,36 @@ class ResourceSearchTool:
         self, tool_names: list[str], session_id: str = "", parent_record_id: str = ""
     ) -> None:
         """
-        注入动态工具
+        通过 auto_loader 将搜索到的工具动态加载到全局 ToolRegistry。
 
-        优先通过全局注册表查找当前会话的 ToolCoordinator，
-        回退到依赖注入的回调函数。
+        加载后的工具会被 registry 标记为动态工具，
+        后续 ToolSchemaPlugin 会自动将其 schema 合并到 LLM 可见的工具列表中。
 
         Args:
             tool_names: 要注入的工具名称列表
-            session_id: 会话 ID（用于会话隔离）
-            parent_record_id: 父记录 ID（用于会话隔离）
-
-        Raises:
-            RuntimeError: 工具加载或注入失败时抛出
+            session_id: 会话 ID（保留参数，暂未使用）
+            parent_record_id: 父记录 ID（保留参数，暂未使用）
         """
         logger.info(
-            f"[resource_search] 开始注入动态工具: tool_names={tool_names}, session_id={session_id}, parent_record_id={parent_record_id}"
+            "[resource_search] 开始注入动态工具: tool_names=%s", tool_names
         )
 
-        tool_coordinator = self._find_tool_coordinator(session_id, parent_record_id)
+        from tools.auto_loader import get_tool_auto_loader
 
-        if tool_coordinator:
-            for tool_name in tool_names:
-                try:
-                    from tools.auto_loader import get_tool_auto_loader
-
-                    auto_loader = get_tool_auto_loader()
-                    if not auto_loader:
-                        raise RuntimeError("ToolAutoLoader 未初始化")
-
-                    tool = await auto_loader.auto_load_tool(tool_name)
-                    if not tool:
-                        raise RuntimeError(f"工具 {tool_name} 加载失败")
-
-                    tool_coordinator.add_dynamic_tool(tool_name)
-                    logger.info(
-                        f"[resource_search] 动态工具注入成功（全局注册表）: {tool_name}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"[resource_search] 动态工具注入失败: {tool_name}, 错误: {e}"
-                    )
-            return
-
-        if not self._dynamic_tool_injector:
-            logger.warning(
-                "[resource_search] 未找到 ToolCoordinator 且未注入 dynamic_tool_injector，无法注入动态工具"
-            )
+        auto_loader = get_tool_auto_loader()
+        if not auto_loader:
+            logger.warning("[resource_search] ToolAutoLoader 未初始化，无法注入动态工具")
             return
 
         for tool_name in tool_names:
             try:
-                success = await self._dynamic_tool_injector(tool_name)
-
-                if success:
-                    logger.info(f"[resource_search] 动态工具注入成功: {tool_name}")
-                else:
-                    raise RuntimeError(f"工具 {tool_name} 注入失败")
-
+                tool = await auto_loader.auto_load_tool(tool_name)
+                if not tool:
+                    logger.warning("[resource_search] 工具加载失败: %s", tool_name)
+                    continue
+                logger.info("[resource_search] 动态工具加载成功: %s", tool_name)
             except Exception as e:
                 logger.error(
-                    f"[resource_search] 动态工具注入失败: {tool_name}, 错误: {e}"
+                    "[resource_search] 动态工具加载失败: %s, 错误: %s",
+                    tool_name, e,
                 )
-
-    def _find_tool_coordinator(self, session_id: str, parent_record_id: str):
-        """
-        通过全局注册表查找当前会话的 ToolCoordinator
-
-        会话隔离依赖 session_id + parent_record_id 唯一标识一个 Agent 实例：
-        - 主 Agent（如灵汐 L1）：parent_record_id 为空
-        - 子 Agent（如通用任务执行者 L3）：parent_record_id 为父执行记录 ID
-
-        查找优先级：
-        1. 精确匹配 (session_id, parent_record_id)
-        2. 匹配 session_id 且 parent_record_id 为空（主 Agent）
-        3. 匹配 session_id 的任意 ToolCoordinator
-        """
-        if not session_id:
-            return None
-
-        try:
-            from agents.coordinators.tool_coordinator import (
-                get_global_tool_coordinator,
-            )
-
-            if parent_record_id:
-                tc = get_global_tool_coordinator(session_id, parent_record_id)
-                if tc:
-                    return tc
-
-            tc = get_global_tool_coordinator(session_id, "")
-            if tc:
-                return tc
-
-            from agents.coordinators.tool_coordinator import (
-                _global_tool_coordinators,
-            )
-
-            for key, coordinator in _global_tool_coordinators.items():
-                if key[0] == session_id and not key[1]:
-                    return coordinator
-
-            for key, coordinator in _global_tool_coordinators.items():
-                if key[0] == session_id:
-                    return coordinator
-
-            return None
-        except Exception as e:
-            logger.warning(f"[resource_search] 查找 ToolCoordinator 失败: {e}")
-            return None

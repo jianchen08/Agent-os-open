@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import os
 import re
@@ -20,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from pipeline.plugin import ICorePlugin, IPlugin
+from pipeline.plugin import ICorePlugin, IInputPlugin, IOutputPlugin, IPlugin
 from pipeline.registry import PluginRegistry
 from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
 
@@ -198,10 +199,12 @@ def load_pipeline_config(
     output_entries: list[OutputRouteEntry] = []
     for entry_data in raw.get("output_routes", []):
         output_entries.append(OutputRouteEntry(
-            route_type=entry_data["route_type"],
+            name=entry_data.get("name", ""),
+            route_type=entry_data.get("route_type", ""),
             condition=entry_data.get("condition", ""),
             priority=entry_data.get("priority", 0),
             target_core=entry_data.get("target_core"),
+            plugins=entry_data.get("plugins", []),
         ))
     output_route_table = OutputRouteTable(output_entries)
 
@@ -214,6 +217,9 @@ def load_pipeline_config(
     )
 
 
+_ALLOWED_PREFIXES = ("plugins.", "pipeline.", "agents.", "tools.")
+
+
 def _import_class(dotted_path: str) -> type:
     """动态导入类。
 
@@ -224,25 +230,114 @@ def _import_class(dotted_path: str) -> type:
         导入的类对象
 
     Raises:
-        ImportError: 导入失败
+        ImportError: 导入失败或模块不在白名单中
     """
     try:
         module_path, class_name = dotted_path.rsplit(".", 1)
+        if not any(module_path.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
+            raise ImportError(
+                f"Security: module '{module_path}' is not in allowed prefixes"
+            )
         module = importlib.import_module(module_path)
         cls = getattr(module, class_name)
+        if not isinstance(cls, type):
+            raise ImportError(f"'{dotted_path}' is not a class")
         return cls
     except (ImportError, AttributeError) as exc:
         raise ImportError(f"Failed to import class '{dotted_path}': {exc}") from exc
 
 
-def build_plugin_registry(config: PipelineConfig) -> PluginRegistry:
+_PLUGIN_SEARCH_PACKAGES = [
+    ("plugins.input", IInputPlugin),
+    ("plugins.output", IOutputPlugin),
+]
+
+
+def _discover_plugin_class(name: str) -> type | None:
+    """按插件名自动发现插件类。
+
+    在 plugins.input 和 plugins.output 包下查找同名模块，
+    导入后扫描其中唯一的 IPlugin 子类。
+
+    Args:
+        name: 插件名称，对应模块文件名（如 "track" 对应 track.py）
+
+    Returns:
+        找到的插件类，未找到返回 None
+    """
+    for package_name, base_cls in _PLUGIN_SEARCH_PACKAGES:
+        module_name = f"{package_name}.{name}"
+        try:
+            module = importlib.import_module(module_name)
+        except (ImportError, ModuleNotFoundError):
+            continue
+
+        found: list[type] = []
+        for attr_name in dir(module):
+            if attr_name.startswith("_"):
+                continue
+            attr = getattr(module, attr_name)
+            if (
+                isinstance(attr, type)
+                and issubclass(attr, base_cls)
+                and attr is not base_cls
+            ):
+                found.append(attr)
+
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            logger.warning(
+                "Module '%s' contains %d plugin classes, skipping auto-discovery",
+                module_name, len(found),
+            )
+
+    return None
+
+
+def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
+    """从插件配置中解析插件类，支持 class: 和 name: 两种方式。
+
+    优先使用 class: 方式（向后兼容），其次用 name: 方式自动发现。
+
+    Args:
+        plugin_conf: 插件配置字典，包含 class 或 name 字段
+
+    Returns:
+        解析到的插件类，失败返回 None
+    """
+    class_path = plugin_conf.get("class", "")
+    if class_path:
+        return _import_class(class_path)
+
+    plugin_name = plugin_conf.get("name", "")
+    if not plugin_name:
+        return None
+
+    plugin_cls = _discover_plugin_class(plugin_name)
+    if plugin_cls is None:
+        raise ImportError(
+            f"Plugin '{plugin_name}' not found in plugins.input or plugins.output"
+        )
+    return plugin_cls
+
+
+def build_plugin_registry(
+    config: PipelineConfig,
+    model_loader: Any | None = None,
+) -> PluginRegistry:
     """根据配置构建插件注册表。
 
     遍历配置中的 plugins 和 core_plugins，
     动态导入插件类、实例化并注册到 PluginRegistry。
 
+    对于 llm_call 类型的 core plugin，若 core_plugins.config 中未指定
+    model_name（为空），则自动从 model_loader 读取 llm.yaml 中 defaults.chat
+    配置，实现模型配置的集中管理。
+
     Args:
         config: 管道配置实例
+        model_loader: 可选的 ModelConfigLoader 实例，用于加载默认模型配置
 
     Returns:
         已注册所有插件的 PluginRegistry 实例
@@ -251,20 +346,23 @@ def build_plugin_registry(config: PipelineConfig) -> PluginRegistry:
 
     # 注册普通插件（Input / Output）
     for plugin_conf in config.plugins:
-        class_path = plugin_conf.get("class", "")
         plugin_config = plugin_conf.get("config", {})
+        plugin_id = plugin_conf.get("class", "") or plugin_conf.get("name", "")
 
-        if not class_path:
-            logger.warning("Plugin config missing 'class' field, skipping")
+        if not plugin_id:
+            logger.warning("Plugin config missing 'class' or 'name' field, skipping")
             continue
 
         try:
-            plugin_cls = _import_class(class_path)
+            plugin_cls = _resolve_plugin_class(plugin_conf)
+            if plugin_cls is None:
+                logger.warning("Plugin config missing 'class' or 'name' field, skipping")
+                continue
             plugin_instance: IPlugin = plugin_cls(config=plugin_config)
             registry.register(plugin_instance)
-            logger.info("Plugin loaded: %s", class_path)
+            logger.info("Plugin loaded: %s", plugin_id)
         except Exception as exc:
-            logger.error("Failed to load plugin '%s': %s", class_path, exc)
+            logger.warning("Failed to load plugin '%s': %s", plugin_id, exc)
 
     # 注册核心插件
     for core_type, core_conf in config.core_plugins.items():
@@ -274,6 +372,35 @@ def build_plugin_registry(config: PipelineConfig) -> PluginRegistry:
         if not class_path:
             logger.warning("Core plugin config missing 'class' field for '%s', skipping", core_type)
             continue
+
+        # FEATURE-llm-config-loader: 对于 llm_call 类型，若未指定 model_name
+        # 则从 model_loader 读取 llm.yaml defaults.chat 配置
+        if core_type == "llm_call" and model_loader is not None:
+            configured_model = plugin_config.get("model_name", "")
+            if not configured_model:
+                logger.info(
+                    "[build_plugin_registry] llm_call 未指定 model_name，"
+                    "从 model_loader 读取 defaults.chat"
+                )
+                default_model_conf = model_loader.get_default_model("chat")
+                if default_model_conf:
+                    llm_conf = model_loader.get_llm_core_config(
+                        default_model_conf.get("_id", "") or "minimax-m2.7"
+                    )
+                    if llm_conf:
+                        merged_config = dict(plugin_config)
+                        merged_config.update(llm_conf)
+                        plugin_config = merged_config
+                        logger.info(
+                            "[build_plugin_registry] 使用默认模型: %s (%s)",
+                            default_model_conf.get("display_name", ""),
+                            default_model_conf.get("model_name", ""),
+                        )
+                else:
+                    logger.warning(
+                        "[build_plugin_registry] llm.yaml defaults.chat 未配置，"
+                        "使用 core_plugins 中的原有配置"
+                    )
 
         try:
             plugin_cls = _import_class(class_path)

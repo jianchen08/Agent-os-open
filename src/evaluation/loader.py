@@ -52,8 +52,9 @@ class MetricLoader:
                          None 时使用默认路径 config/evaluation_metrics/
         """
         if metrics_dir is None:
-            # 默认路径：src/agent_os/config/evaluation_metrics/
-            base = Path(__file__).resolve().parent.parent / "config" / "evaluation_metrics"
+            base = Path.cwd() / "config" / "evaluation_metrics"
+            if not base.exists():
+                base = Path(__file__).resolve().parent.parent / "config" / "evaluation_metrics"
             self._metrics_dir = base
         else:
             self._metrics_dir = Path(metrics_dir)

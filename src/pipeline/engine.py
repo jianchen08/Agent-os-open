@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import uuid as _uuid
 from pathlib import Path
@@ -31,7 +32,7 @@ from pipeline.plugin import (
 )
 from pipeline.registry import PipelineRegistry, PluginRegistry
 from pipeline.route import InputRouteTable, OutputRouteTable
-from pipeline.types import RouteSignal, StateKeys
+from pipeline.types import RouteSignal, StateKeys, TargetType
 
 if TYPE_CHECKING:
     from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
@@ -77,7 +78,7 @@ class PipelineEngine:
     ) -> None:
         self.input_route_table = input_route_table
         self.output_route_table = output_route_table
-        self.plugin_registry = plugin_registry
+        self.plugin_registry = plugin_registry.fork()
         self.pipeline_registry = pipeline_registry
         self._services = services or {}
         self.max_iterations = max_iterations
@@ -198,6 +199,7 @@ class PipelineEngine:
         """
         state: dict[str, Any] = {
             StateKeys.ITERATION: 0,
+            StateKeys.CORE_TYPE: TargetType.LLM_CALL.value,
             StateKeys.ENDED: False,
             "user_input": user_input,
             "messages": list(conversation_history) if conversation_history else [],
@@ -290,6 +292,17 @@ class PipelineEngine:
             for name, config in plugins_config.enabled.items():
                 existing = self.plugin_registry.get(name)
                 if existing is not None:
+                    if isinstance(config, dict) and hasattr(existing, '_config'):
+                        merged_config = {**existing._config, **config}
+                        try:
+                            new_plugin = type(existing)(config=merged_config)
+                            # 在 result 列表中替换旧引用
+                            for idx, p in enumerate(result):
+                                if p is existing:
+                                    result[idx] = new_plugin
+                                    break
+                        except Exception:
+                            pass
                     continue
                 logger.info(
                     "Agent enables non-default plugin: %s (config=%s)",
@@ -320,6 +333,40 @@ class PipelineEngine:
                 return True
         return False
 
+    def _resolve_output_plugins(
+        self, state: dict[str, Any], core_type: str,
+    ) -> list[IOutputPlugin]:
+        """解析当前迭代需要执行的 Output 插件列表。
+
+        优先使用 output_route_table 的插件路由（与 input_routes 对称），
+        当路由表中没有声明 plugins 字段时，回退到 registry 获取全部输出插件。
+        兼容测试中使用的 Mock 路由表（无 has_plugin_routing 方法）。
+
+        Args:
+            state: 管道当前状态字典
+            core_type: 当前核心类型标识
+
+        Returns:
+            匹配的输出插件实例列表
+        """
+        ort = self.output_route_table
+        if hasattr(ort, "has_plugin_routing") and ort.has_plugin_routing():
+            plugin_names = ort.resolve_plugins(state)
+            if plugin_names:
+                plugins: list[IOutputPlugin] = []
+                for name in plugin_names:
+                    plugin = self.plugin_registry.get(name)
+                    if isinstance(plugin, IOutputPlugin):
+                        plugins.append(plugin)
+                    else:
+                        logger.debug(
+                            "Output route plugin '%s' not found or not IOutputPlugin, skipping",
+                            name,
+                        )
+                return sorted(plugins, key=lambda p: p.priority)
+
+        return self.plugin_registry.get_output_plugins(core_type=core_type)
+
     async def _run_loop(self, state: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:
         """管道核心循环。
 
@@ -343,154 +390,234 @@ class PipelineEngine:
         Returns:
             管道最终状态字典
         """
-        while not state.get(StateKeys.ENDED, False):
-            # 1. 递增迭代计数器
-            state[StateKeys.ITERATION] = state.get(StateKeys.ITERATION, 0) + 1
-            iteration = state[StateKeys.ITERATION]
-            if resumed:
-                logger.info("=== Pipeline iteration %d (resumed) ===", iteration)
-            else:
-                logger.info("=== Pipeline iteration %d ===", iteration)
+        _pipeline_log_handler = None
+        _pipeline_loggers: list[logging.Logger] = []
+        pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
+        try:
+            try:
+                _log_dir = Path.cwd() / "logs"
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                log_mode = "a" if resumed else "w"
+                _pipeline_log_handler = logging.FileHandler(
+                    str(_log_dir / f"pipeline_{pipeline_run_id}.log"),
+                    encoding="utf-8", mode=log_mode,
+                )
+                _pipeline_log_handler.setLevel(logging.DEBUG)
+                _pipeline_log_handler.setFormatter(logging.Formatter(
+                    "%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S",
+                ))
+                for _ln in [
+                    "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
+                    "pipeline.route", "pipeline.config", "pipeline.registry",
+                    "plugins.core", "plugins.input", "plugins.output",
+                    "infrastructure.task_worker", "tasks",
+                    "tools.builtin", "evaluation",
+                    "llm.adapter",
+                ]:
+                    _lg = logging.getLogger(_ln)
+                    if _lg.level == logging.NOTSET:
+                        _lg.setLevel(logging.DEBUG)
+                    _lg.addHandler(_pipeline_log_handler)
+                    _pipeline_loggers.append(_lg)
+            except Exception:
+                _pipeline_log_handler = None
 
-            # 自动保存检查点（每次迭代开始）
-            if self._checkpoint_manager is not None:
-                try:
-                    pipeline_id = state.get(StateKeys.PIPELINE_ID, "default")
-                    await self._checkpoint_manager.save(pipeline_id, state, phase="auto")
-                except Exception as exc:
-                    logger.debug("Checkpoint auto-save failed: %s", exc)
+            while not state.get(StateKeys.ENDED, False):
+                # 1. 递增迭代计数器
+                state[StateKeys.ITERATION] = state.get(StateKeys.ITERATION, 0) + 1
+                iteration = state[StateKeys.ITERATION]
 
-            # 2. 第一步：解析插件列表
-            plugin_names = self.input_route_table.resolve_plugins(state)
-            logger.info("Input route resolved plugins: %s", plugin_names)
+                # 安全阀：迭代次数过多时终止（在 Core 执行前检查，避免浪费最后一轮调用）
+                if iteration > self.max_iterations:
+                    logger.warning("Pipeline exceeded %d iterations, forcing end", self.max_iterations)
+                    state[StateKeys.ENDED] = True
+                    break
 
-            # 3. target == "core": 继续执行（解析插件后不判断 target，因为 state 还没被 input 插件更新）
+                if resumed:
+                    logger.info("=== Pipeline iteration %d (resumed) ===", iteration)
+                else:
+                    logger.info("=== Pipeline iteration %d ===", iteration)
 
-            # 4. 获取 Input 插件 → PluginChain 执行
-            input_plugins: list[IInputPlugin] = []
-            for name in plugin_names:
-                plugin = self.plugin_registry.get(name)
-                if isinstance(plugin, IInputPlugin):
-                    input_plugins.append(plugin)
+                # 发射 iteration 事件供 CLI 状态栏实时更新
+                on_chunk_cb = state.get("on_chunk")
+                if on_chunk_cb:
+                    try:
+                        on_chunk_cb({
+                            "type": "iteration",
+                            "iteration": iteration,
+                            "max_iterations": self.max_iterations,
+                        })
+                    except Exception as exc:
+                        logger.debug("on_chunk iteration emit failed: %s", exc)
 
-            if input_plugins:
-                input_ctx = PluginContext(state=state, config={}, _services=self._services)
-                input_chain = PluginChain(input_plugins)
-                input_results = await input_chain.execute(input_ctx)
-                for result in input_results:
-                    if result.state_updates:
-                        state.update(result.state_updates)
-                logger.debug("Input chain completed: %d results", len(input_results))
-
-            # 5. 第二步：用更新后的 state 解析 target
-            target, matched_entry = self.input_route_table.resolve_target(state)
-            logger.info("Input route resolved target: %s (entry=%s)", target, matched_entry.name if matched_entry else "none")
-
-            # 6. target == "end": 将拦截原因写入 RAW_RESULT，然后结束
-            if target == "end":
-                if matched_entry and matched_entry.result:
-                    result_msg = matched_entry.format_result(state)
-                    state[StateKeys.RAW_RESULT] = result_msg
-                    logger.info("Input route end with result: %s", result_msg)
-                state[StateKeys.ENDED] = True
-                logger.info("Pipeline ended by input route (target=end)")
-                break
-
-            # 7. target == "wait": 挂起并保存 state 快照
-            if target == "wait":
-                self._suspended_state = dict(state)
-                logger.info("Pipeline suspended by input route (target=wait), state saved")
+                # 自动保存检查点（每次迭代开始）
                 if self._checkpoint_manager is not None:
                     try:
                         pipeline_id = state.get(StateKeys.PIPELINE_ID, "default")
-                        await self._checkpoint_manager.save(pipeline_id, state, phase="suspended")
+                        await self._checkpoint_manager.save(pipeline_id, state, phase="auto")
                     except Exception as exc:
-                        logger.debug("Checkpoint suspended-save failed: %s", exc)
-                break
+                        logger.debug("Checkpoint auto-save failed: %s", exc)
 
-            # 8. 获取 Core 插件 → 执行，更新 state
-            core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
-            core_plugin = self.plugin_registry.get_core(core_type)
-            if core_plugin is not None:
-                core_ctx = PluginContext(state=state, config={}, _services=self._services)
-                try:
-                    core_result = await core_plugin.execute(core_ctx)
-                    if isinstance(core_result, dict):
-                        state.update(core_result)
-                    logger.debug("Core plugin executed: core_type=%s", core_type)
-                except Exception as exc:
-                    logger.error("Core plugin error: %s", exc)
-                    state[StateKeys.RAW_ERROR] = str(exc)
-                    state[StateKeys.RAW_RESULT] = None
+                # 2. 第一步：解析插件列表
+                plugin_names = self.input_route_table.resolve_plugins(state)
+                logger.info("Input route resolved plugins: %s", plugin_names)
 
-                    if core_type == "llm_call":
-                        error_msg = str(exc)
-                        hint = self._build_llm_error_hint(error_msg)
-                        messages = list(state.get("messages", []))
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
-                                f"错误信息：{error_msg[:500]}\n\n"
-                                f"建议：{hint}"
-                            ),
-                        })
-                        state["messages"] = messages
-            else:
-                logger.warning("No core plugin registered for type: %s", core_type)
+                # 3. target == "core": 继续执行（解析插件后不判断 target，因为 state 还没被 input 插件更新）
 
-            # 9. 获取 Output 插件 → PluginChain 执行
-            output_plugins = self.plugin_registry.get_output_plugins(
-                core_type=core_type
-            )
-            route_signals: list[RouteSignal] = []
+                # 4. 获取 Input 插件 → PluginChain 执行
+                input_plugins: list[IInputPlugin] = []
+                for name in plugin_names:
+                    plugin = self.plugin_registry.get(name)
+                    if isinstance(plugin, IInputPlugin):
+                        input_plugins.append(plugin)
 
-            if output_plugins:
-                output_ctx = PluginContext(state=state, config={}, _services=self._services)
-                output_chain = PluginChain(output_plugins)
-                output_results = await output_chain.execute(output_ctx)
-                for result in output_results:
-                    if result.state_updates:
-                        state.update(result.state_updates)
-                    if result.route_signal is not None:
-                        route_signals.append(result.route_signal)
-                logger.debug("Output chain completed: %d results, %d signals", len(output_results), len(route_signals))
-
-            # 10-11. 收集 route_signals → 输出路由表仲裁 → apply_route
-            if route_signals:
-                resolved = self.output_route_table.arbitrate(route_signals, state)
-                logger.info(
-                    "Route arbitrated: type=%s, target=%s, reason=%s",
-                    resolved.route_type, resolved.target, resolved.reason,
-                )
-                await self._apply_route(resolved, state)
-            else:
-                if core_type == "tool_execute":
-                    logger.debug("No route signals after tool execution, defaulting to next_llm")
-                    state[StateKeys.CORE_TYPE] = "llm_call"
-                else:
-                    logger.debug("No route signals after LLM response, ending turn")
-                    state[StateKeys.ENDED] = True
-
-            # 安全阀：迭代次数过多时终止
-            if state[StateKeys.ITERATION] >= self.max_iterations:
-                logger.warning("Pipeline exceeded %d iterations, forcing end", self.max_iterations)
-                state[StateKeys.ENDED] = True
-
-        # 管道结束后，再执行一次 Output 插件链以保存 PipelineRunSummary 等终态数据
-        if state.get(StateKeys.ENDED, False):
-            state[StateKeys.ENDED] = True
-            output_plugins = self.plugin_registry.get_output_plugins(state)
-            if output_plugins:
-                try:
-                    output_ctx = PluginContext(state=state, config={}, _services=self._services)
-                    output_chain = PluginChain(output_plugins)
-                    await output_chain.execute(output_ctx)
-                    for result in output_chain.results:
+                if input_plugins:
+                    input_ctx = PluginContext(state=state, config={}, _services=self._services)
+                    input_chain = PluginChain(input_plugins)
+                    input_results = await input_chain.execute(input_ctx)
+                    for result in input_results:
                         if result.state_updates:
                             state.update(result.state_updates)
-                except Exception as exc:
-                    logger.debug("Post-end output chain failed (non-critical): %s", exc)
+                    logger.debug("Input chain completed: %d results", len(input_results))
+
+                # 5. 第二步：用更新后的 state 解析 target
+                target, matched_entry = self.input_route_table.resolve_target(state)
+                logger.info("Input route resolved target: %s (entry=%s)", target, matched_entry.name if matched_entry else "none")
+
+                # 6. target == "end": 将拦截原因写入 RAW_RESULT，然后结束
+                if target == "end":
+                    if matched_entry and matched_entry.result:
+                        result_msg = matched_entry.format_result(state)
+                        state[StateKeys.RAW_RESULT] = result_msg
+                        logger.info("Input route end with result: %s", result_msg)
+                    state[StateKeys.ENDED] = True
+                    logger.info("Pipeline ended by input route (target=end)")
+                    break
+
+                # 7. target == "wait": 挂起并保存 state 快照
+                if target == "wait":
+                    self._suspended_state = copy.deepcopy(state)
+                    logger.info("Pipeline suspended by input route (target=wait), state saved")
+                    if self._checkpoint_manager is not None:
+                        try:
+                            pipeline_id = state.get(StateKeys.PIPELINE_ID, "default")
+                            await self._checkpoint_manager.save(pipeline_id, state, phase="suspended")
+                        except Exception as exc:
+                            logger.debug("Checkpoint suspended-save failed: %s", exc)
+                    break
+
+                # 8. 获取 Core 插件 → 执行，更新 state
+                core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
+                core_plugin = self.plugin_registry.get_core(core_type)
+                if core_plugin is not None:
+                    core_ctx = PluginContext(state=state, config={}, _services=self._services)
+                    try:
+                        core_result = await core_plugin.execute(core_ctx)
+                        if isinstance(core_result, dict):
+                            state.update(core_result)
+                        logger.debug("Core plugin executed: core_type=%s", core_type)
+                    except Exception as exc:
+                        logger.error("Core plugin error: %s", exc)
+                        state[StateKeys.RAW_ERROR] = str(exc)
+                        state[StateKeys.RAW_RESULT] = None
+
+                        if core_type == "llm_call":
+                            error_msg = str(exc)
+                            # BUG-FIX: 仅对 LLM 可自修正的错误追加提示（如参数格式错误），
+                            # 超时/限流/网络/上下文溢出等 LLM 无法修正，追加提示无意义
+                            error_lower = error_msg.lower()
+                            is_llm_fixable = (
+                                "invalid function arguments" in error_lower
+                                or "invalid params" in error_lower
+                            )
+                            if is_llm_fixable:
+                                hint = self._build_llm_error_hint(error_msg)
+                                messages = list(state.get("messages", []))
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
+                                        f"错误信息：{error_msg[:500]}\n\n"
+                                        f"建议：{hint}"
+                                    ),
+                                })
+                                state["messages"] = messages
+                else:
+                    logger.warning("No core plugin registered for type: %s", core_type)
+
+                # 9. 获取 Output 插件 → PluginChain 执行
+                output_plugins = self._resolve_output_plugins(state, core_type)
+                route_signals: list[RouteSignal] = []
+
+                if output_plugins:
+                    plugin_names = [getattr(p, "name", type(p).__name__) for p in output_plugins]
+                    logger.debug(
+                        "Output plugins for core_type=%s: %s",
+                        core_type, plugin_names,
+                    )
+                    output_ctx = PluginContext(state=state, config={}, _services=self._services)
+                    output_chain = PluginChain(output_plugins)
+                    output_results = await output_chain.execute(output_ctx)
+                    for result in output_results:
+                        if result.state_updates:
+                            state.update(result.state_updates)
+                        if result.route_signal is not None:
+                            route_signals.append(result.route_signal)
+                    signal_summary = ", ".join(
+                        f"{s.route_type}({s.reason[:60]})" for s in route_signals
+                    ) if route_signals else "none"
+                    logger.info(
+                        "Output chain: %d plugins, %d signals [%s], ended=%s",
+                        len(output_results), len(route_signals), signal_summary,
+                        state.get(StateKeys.ENDED, False),
+                    )
+
+                # 10-11. 收集 route_signals → 输出路由表仲裁 → apply_route
+                if route_signals:
+                    resolved = self.output_route_table.arbitrate(route_signals, state)
+                    logger.info(
+                        "Route arbitrated: type=%s, target=%s, reason=%s",
+                        resolved.route_type, resolved.target, resolved.reason,
+                    )
+                    should_break = await self._apply_route(resolved, state)
+                    if should_break:
+                        break
+                else:
+                    if core_type == "tool_execute":
+                        logger.debug("No route signals after tool execution, defaulting to next_llm")
+                        state[StateKeys.CORE_TYPE] = "llm_call"
+                    else:
+                        logger.warning(
+                            "No route signals after LLM response (iter=%d), "
+                            "ending pipeline. output_plugins_count=%d, "
+                            "raw_tool_calls=%d, ended=%s",
+                            iteration, len(output_plugins) if output_plugins else 0,
+                            len(state.get("raw_tool_calls", [])),
+                            state.get(StateKeys.ENDED, False),
+                        )
+                        state[StateKeys.ENDED] = True
+
+            # 管道结束后，再执行一次 Output 插件链以保存 PipelineRunSummary 等终态数据
+            if state.get(StateKeys.ENDED, False):
+                state[StateKeys.ENDED] = True
+                core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
+                output_plugins = self._resolve_output_plugins(state, core_type)
+                if output_plugins:
+                    try:
+                        output_ctx = PluginContext(state=state, config={}, _services=self._services)
+                        output_chain = PluginChain(output_plugins)
+                        post_end_results = await output_chain.execute(output_ctx)
+                        for result in post_end_results:
+                            if result.state_updates:
+                                state.update(result.state_updates)
+                    except Exception as exc:
+                        logger.debug("Post-end output chain failed (non-critical): %s", exc)
+
+        finally:
+            if _pipeline_log_handler:
+                _pipeline_log_handler.close()
+                for _lg in _pipeline_loggers:
+                    _lg.removeHandler(_pipeline_log_handler)
 
         return state
 
@@ -593,7 +720,7 @@ class PipelineEngine:
             "如果多次失败，请尝试换一种方式完成任务。"
         )
 
-    async def _apply_route(self, route: RouteSignal, state: dict[str, Any]) -> None:
+    async def _apply_route(self, route: RouteSignal, state: dict[str, Any]) -> bool:
         """应用路由信号到管道状态。
 
         根据路由类型更新状态字典：
@@ -601,27 +728,33 @@ class PipelineEngine:
         - next_tool → state["core_type"] = "tool_execute"
         - end → state["ended"] = True
         - delegate → 通过 pipeline_registry.route() 路由，不设 ended=True
-        - wait → 不做变更（管道挂起）
+        - wait → 保存挂起状态快照
 
         Args:
             route: 仲裁后的路由信号
             state: 管道状态字典（原地修改）
+
+        Returns:
+            是否应中断管道循环（wait 时为 True）
         """
         route_type = route.route_type
 
         if route_type == "next_llm":
             state[StateKeys.CORE_TYPE] = "llm_call"
             logger.info("Route applied: next_llm")
+            return False
 
         elif route_type == "next_tool":
             state[StateKeys.CORE_TYPE] = "tool_execute"
             if route.target:
                 state["tool_name"] = route.target
             logger.info("Route applied: next_tool, target=%s", route.target)
+            return False
 
         elif route_type == "end":
             state[StateKeys.ENDED] = True
             logger.info("Route applied: end, reason=%s", route.reason)
+            return False
 
         elif route_type == "delegate":
             if self.pipeline_registry is not None:
@@ -639,18 +772,21 @@ class PipelineEngine:
                         target_str, child_id,
                     )
             else:
-                # BUG-FIX-P6：pipeline_registry 为 None 时，强制结束管道并记录错误，
-                # 避免静默降级导致管道卡死或无限循环
                 logger.error(
                     "Route delegate but pipeline_registry is None, "
                     "ending pipeline to prevent dead loop"
                 )
                 state[StateKeys.ENDED] = True
                 state["raw_error"] = "delegate route failed: no pipeline_registry configured"
+            return False
 
         elif route_type == "wait":
-            logger.info("Route applied: wait")
+            self._suspended_state = copy.deepcopy(state)
+            state[StateKeys.ENDED] = False
+            logger.info("Route applied: wait, pipeline suspended")
+            return True
 
         else:
             logger.warning("Unknown route type: %s, defaulting to end", route_type)
             state[StateKeys.ENDED] = True
+            return False

@@ -57,7 +57,6 @@ class CircuitBreaker(IInputPlugin):
         self._recovery_timeout = self._config.get("recovery_timeout", 60)
         self._half_open_max_calls = self._config.get("half_open_max_calls", 1)
         self._state = self.CLOSED
-        self._failure_count = 0
         self._last_failure_time: float = 0.0
         self._half_open_calls = 0
         self._enabled_by_agent: bool = True
@@ -228,5 +227,4 @@ class CircuitBreaker(IInputPlugin):
     def _transition_to_closed(self) -> None:
         """将熔断器状态转为 CLOSED。"""
         self._state = self.CLOSED
-        self._failure_count = 0
         self._half_open_calls = 0

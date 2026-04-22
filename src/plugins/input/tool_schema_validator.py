@@ -120,7 +120,10 @@ class ToolSchemaValidator(IInputPlugin):
                     validated_calls.append(tc)
                 continue
 
-            input_schema = tool_def.get("input_schema") if isinstance(tool_def, dict) else None
+            input_schema = (
+                tool_def.get("input_schema") if isinstance(tool_def, dict)
+                else getattr(tool_def, "input_schema", None)
+            )
             if input_schema is None:
                 validated_calls.append(tc)
                 continue
@@ -167,8 +170,9 @@ class ToolSchemaValidator(IInputPlugin):
         state_updates["schema_validated"] = validated_calls
         if all_fix_messages:
             state_updates["schema_fixes"] = all_fix_messages
-            # 用修复后的调用替换原始 RAW_TOOL_CALLS
-            state_updates[StateKeys.RAW_TOOL_CALLS] = validated_calls
+        # 始终用验证后的调用列表更新 RAW_TOOL_CALLS，
+        # 确保下游插件拿到的是经过验证和修复的数据
+        state_updates[StateKeys.RAW_TOOL_CALLS] = validated_calls
 
         return PluginResult(state_updates=state_updates)
 

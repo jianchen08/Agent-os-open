@@ -60,6 +60,8 @@ class EvaluationEngine:
         loader: MetricLoader,
         expect_evaluator: ExpectEvaluator | None = None,
         tool_registry: Any | None = None,
+        pipeline_factory: Callable[[], Any] | None = None,
+        agent_registry: Any | None = None,
     ) -> None:
         """初始化评估引擎。
 
@@ -67,10 +69,14 @@ class EvaluationEngine:
             loader: 指标加载器（必须已加载指标）
             expect_evaluator: 期望值评估器，None 时创建默认实例
             tool_registry: 工具注册表，None 时工具型评估器 fallback 到 Mock
+            pipeline_factory: 创建 PipelineEngine 实例的可调用对象
+            agent_registry: AgentRegistry 实例，用于获取 evaluator_agent 配置
         """
         self._loader = loader
         self._expect_evaluator = expect_evaluator or ExpectEvaluator()
         self._tool_registry = tool_registry
+        self._pipeline_factory = pipeline_factory
+        self._agent_registry = agent_registry
         self._evaluators: dict[MetricType, EvaluatorFunc] = {
             MetricType.TOOL: self._evaluate_tool,
             MetricType.AGENT: self._evaluate_agent,
@@ -303,132 +309,390 @@ class EvaluationEngine:
             metric_def.id, evaluator_id,
         )
 
-        # 尝试通过 ToolRegistry 调用真实工具
+        handler = None
         if self._tool_registry is not None and evaluator_id:
             handler = self._tool_registry.get_handler(evaluator_id)
-            if handler is not None:
-                try:
-                    import asyncio
 
-                    tool_result = handler(params)
-                    if asyncio.iscoroutine(tool_result):
-                        try:
-                            loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            loop = None
+        if handler is None and evaluator_id:
+            handler = self._get_builtin_evaluator_handler(evaluator_id)
 
-                        if loop and loop.is_running():
-                            import concurrent.futures
+        if handler is not None:
+            try:
+                import asyncio
 
-                            def _run_async(coro_factory, params):
-                                return asyncio.run(coro_factory(params))
+                tool_result = handler(params)
+                if asyncio.iscoroutine(tool_result):
+                    import concurrent.futures
 
-                            with concurrent.futures.ThreadPoolExecutor() as pool:
-                                tool_result = pool.submit(
-                                    _run_async, handler, params
-                                ).result()
-                        else:
-                            tool_result = asyncio.run(handler(params))
+                    def _run_async(coro):
+                        return asyncio.run(coro)
 
-                    # 将 ToolExecutionResult 转为标准 dict
-                    if hasattr(tool_result, "to_dict"):
-                        result_dict = tool_result.to_dict()
-                    elif isinstance(tool_result, dict):
-                        result_dict = tool_result
-                    else:
-                        result_dict = {"success": True, "data": tool_result}
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        tool_result = pool.submit(
+                            _run_async, tool_result
+                        ).result()
 
-                    # 标准化：确保包含 success 字段
-                    if "success" not in result_dict:
-                        status = result_dict.get("status", "completed")
-                        result_dict["success"] = status == "completed"
+                if hasattr(tool_result, "to_dict"):
+                    result_dict = tool_result.to_dict()
+                elif isinstance(tool_result, dict):
+                    result_dict = tool_result
+                else:
+                    result_dict = {"success": True, "data": tool_result}
 
-                    logger.info(
-                        "Tool evaluation completed: %s -> success=%s",
-                        metric_def.id, result_dict.get("success"),
-                    )
-                    return result_dict
+                if "success" not in result_dict:
+                    status = result_dict.get("status", "completed")
+                    result_dict["success"] = status == "completed"
 
-                except Exception as e:
-                    logger.error(
-                        "Tool execution failed for %s (evaluator_id=%s): %s",
-                        metric_def.id, evaluator_id, e,
-                    )
-                    return {
-                        "success": False,
-                        "error": str(e),
-                    }
-            else:
-                logger.warning(
-                    "Tool '%s' not found in registry, falling back to mock",
-                    evaluator_id,
+                logger.info(
+                    "Tool evaluation completed: %s -> success=%s",
+                    metric_def.id, result_dict.get("success"),
                 )
+                return result_dict
 
-        # Fallback: Mock 实现
-        logger.info(
-            "Mock tool evaluation (fallback): %s (evaluator_id=%s)",
-            metric_def.id, evaluator_id,
+            except Exception as e:
+                logger.error(
+                    "Tool execution failed for %s (evaluator_id=%s): %s",
+                    metric_def.id, evaluator_id, e,
+                )
+                return {
+                    "success": False,
+                    "error": str(e),
+                }
+
+        raise RuntimeError(
+            f"Tool '{evaluator_id}' not found in registry. "
+            f"Metric: {metric_def.id}"
         )
-        return {
-            "success": True,
-            "data": {
-                "status": "completed",
-                "exit_code": 0,
-            },
-        }
+
+    @staticmethod
+    def _get_builtin_evaluator_handler(evaluator_id: str) -> Any | None:
+        """获取内置评估器的 handler。
+
+        当 tool_registry 中找不到评估器时，尝试直接从
+        evaluators 子模块中实例化。
+
+        Args:
+            evaluator_id: 评估器 ID（如 schema_evaluator）
+
+        Returns:
+            可调用的 handler，或 None
+        """
+        try:
+            if evaluator_id == "schema_evaluator":
+                from tools.builtin.evaluators.schema_evaluator import SchemaEvaluator
+                inst = SchemaEvaluator()
+                return inst.execute
+            elif evaluator_id == "resource_evaluator":
+                from tools.builtin.evaluators.resource_evaluator import ResourceEvaluator
+                inst = ResourceEvaluator()
+                return inst.execute
+        except Exception as e:
+            logger.debug("Failed to load builtin evaluator %s: %s", evaluator_id, e)
+        return None
 
     def _evaluate_agent(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Agent 型评估器的 Mock 实现。
+        """Agent 型评估器 — 创建子管道运行 evaluator_agent。
 
-        在当前阶段（M5b），仅返回 Mock 输出。
-        真实实现需要创建独立 LLM Agent 执行评估。
+        通过 pipeline_factory 创建独立的 PipelineEngine，加载 evaluator_agent
+        配置，运行评估管道。管道中的 task_reminder 插件（评估者模式）会自动
+        在 Agent 未输出正确格式时发送提醒。
+
+        当 pipeline_factory 或 agent_registry 不可用时，fallback 到 Mock。
 
         Args:
             metric_def: 指标定义
             params: 合并后的输入参数
 
         Returns:
-            Mock 评估输出
+            评估输出字典
         """
+        evaluator_id = metric_def.evaluator_id
+
+        if self._pipeline_factory is None:
+            raise RuntimeError(
+                f"Agent evaluation requires pipeline_factory but it is None. "
+                f"Metric: {metric_def.id}, evaluator: {evaluator_id}"
+            )
+        if self._agent_registry is None:
+            raise RuntimeError(
+                f"Agent evaluation requires agent_registry but it is None. "
+                f"Metric: {metric_def.id}, evaluator: {evaluator_id}"
+            )
+
+        agent_config = self._agent_registry.get(evaluator_id)
+        if agent_config is None:
+            for cfg in self._agent_registry.list_all():
+                cfg_name = getattr(cfg, "name", None) or getattr(cfg, "display_name", None)
+                if cfg_name == evaluator_id:
+                    agent_config = cfg
+                    break
+        if agent_config is None:
+            raise RuntimeError(
+                f"Agent '{evaluator_id}' not found in registry "
+                f"(tried config_id and name). "
+                f"Available agents: {[getattr(c, 'config_id', '?') for c in self._agent_registry.list_all()]}"
+            )
+
         logger.info(
-            "Mock agent evaluation: %s (evaluator_id=%s)",
-            metric_def.id, metric_def.evaluator_id,
+            "Agent evaluation: %s (evaluator_id=%s) — launching sub-pipeline",
+            metric_def.id, evaluator_id,
         )
-        # Mock: 返回通过结果
-        return {
-            "passed": True,
-            "score": 85.0,
-            "feedback": "Mock agent evaluation passed",
-        }
+
+        eval_prompt = self._build_agent_eval_prompt(metric_def, params)
+
+        try:
+            import asyncio
+            import json
+            import re
+
+            async def _run_eval_pipeline() -> dict[str, Any]:
+                engine = self._pipeline_factory()
+                state = await engine.run(
+                    user_input=eval_prompt,
+                    agent_config=agent_config,
+                    task_id=f"__eval__{metric_def.id}",
+                )
+                return state
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    pipeline_state = pool.submit(
+                        lambda: asyncio.run(_run_eval_pipeline())
+                    ).result()
+            else:
+                pipeline_state = asyncio.run(_run_eval_pipeline())
+
+            raw_output = pipeline_state.get("raw_result", "")
+            final_output = pipeline_state.get("final_output", raw_output)
+            output_text = str(final_output) if final_output else ""
+
+            eval_result = self._parse_evaluation_result(output_text)
+            if eval_result is not None:
+                logger.info(
+                    "Agent evaluation completed: %s -> passed=%s, score=%s",
+                    metric_def.id, eval_result.get("passed"), eval_result.get("score"),
+                )
+                return eval_result
+
+            stop_reason = pipeline_state.get("router.stop_reason", "")
+            max_reminders = pipeline_state.get("evaluate_reminder_count", 0)
+            if "timeout" in stop_reason:
+                return {
+                    "passed": False,
+                    "score": 0.0,
+                    "feedback": f"评估管道超时: {stop_reason}",
+                }
+            if max_reminders > 0:
+                return {
+                    "passed": False,
+                    "score": 0.0,
+                    "feedback": f"evaluator_agent 经 {max_reminders} 次提醒后仍未输出有效评估结论",
+                }
+            return {
+                "passed": False,
+                "score": 0.0,
+                "feedback": "evaluator_agent 未能输出有效的 evaluation_result JSON",
+            }
+
+        except Exception as e:
+            logger.error(
+                "Agent evaluation pipeline failed for %s: %s",
+                metric_def.id, e,
+            )
+            return {
+                "passed": False,
+                "score": 0.0,
+                "feedback": f"评估管道执行异常: {e}",
+            }
+
+    @staticmethod
+    def _parse_evaluation_result(text: str) -> dict[str, Any] | None:
+        """从 evaluator_agent 的输出文本中提取 evaluation_result JSON。
+
+        支持多种格式：
+        - 嵌套：{"evaluation_result": {"passed": true, "score": 85, ...}}
+        - 直接：{"passed": true, "score": 85, ...}
+        - Markdown code block 包裹的 JSON
+
+        使用括号配对计数提取 JSON 块，支持嵌套结构。
+
+        Args:
+            text: evaluator_agent 的输出文本
+
+        Returns:
+            解析后的评估结果字典，解析失败返回 None
+        """
+        import json
+        import re
+
+        def _extract_json_blocks(s: str) -> list[str]:
+            """通过括号配对计数从文本中提取所有顶层 JSON 对象"""
+            blocks = []
+            i = 0
+            while i < len(s):
+                if s[i] == '{':
+                    depth = 0
+                    start = i
+                    in_string = False
+                    escape_next = False
+                    while i < len(s):
+                        ch = s[i]
+                        if escape_next:
+                            escape_next = False
+                        elif ch == '\\' and in_string:
+                            escape_next = True
+                        elif ch == '"' and not escape_next:
+                            in_string = not in_string
+                        elif not in_string:
+                            if ch == '{':
+                                depth += 1
+                            elif ch == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    blocks.append(s[start:i + 1])
+                                    break
+                        i += 1
+                i += 1
+            return blocks
+
+        code_block_pattern = re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', re.DOTALL)
+        for match in code_block_pattern.finditer(text):
+            candidate = match.group(1).strip()
+            if candidate.startswith('{'):
+                try:
+                    parsed = json.loads(candidate)
+                    result = EvaluationEngine._extract_eval_from_parsed(parsed)
+                    if result is not None:
+                        return result
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+        for block in _extract_json_blocks(text):
+            try:
+                parsed = json.loads(block)
+                result = EvaluationEngine._extract_eval_from_parsed(parsed)
+                if result is not None:
+                    return result
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+        return None
+
+    @staticmethod
+    def _extract_eval_from_parsed(parsed: dict[str, Any]) -> dict[str, Any] | None:
+        """从已解析的 JSON 对象中提取评估结果
+
+        支持嵌套格式（evaluation_result 键）和直接格式（passed 键在顶层）。
+
+        Args:
+            parsed: 已解析的 JSON 对象
+
+        Returns:
+            标准化的评估结果字典，不符合格式返回 None
+        """
+        if not isinstance(parsed, dict):
+            return None
+
+        if "evaluation_result" in parsed and isinstance(parsed["evaluation_result"], dict):
+            inner = parsed["evaluation_result"]
+            if "passed" in inner:
+                return {
+                    "passed": bool(inner["passed"]),
+                    "score": float(inner.get("score", 0)),
+                    "feedback": str(inner.get("feedback", "")),
+                    "suggestions": inner.get("suggestions", []),
+                }
+
+        if "passed" in parsed:
+            return {
+                "passed": bool(parsed["passed"]),
+                "score": float(parsed.get("score", 0)),
+                "feedback": str(parsed.get("feedback", "")),
+                "suggestions": parsed.get("suggestions", []),
+            }
+
+        return None
+
+    @staticmethod
+    def _build_agent_eval_prompt(
+        metric_def: MetricDefinition,
+        params: dict[str, Any],
+    ) -> str:
+        """构建发给 evaluator_agent 的评估指令。
+
+        Args:
+            metric_def: 指标定义
+            params: 合并后的输入参数
+
+        Returns:
+            评估指令文本
+        """
+        parts = [
+            "请执行以下评估任务：",
+            "",
+            f"## 评估指标：{metric_def.name or metric_def.id}",
+        ]
+
+        if metric_def.description:
+            parts.append(f"## 指标描述：{metric_def.description}")
+
+        criteria = params.get("criteria", "")
+        if criteria:
+            parts.append(f"## 评估标准：{criteria}")
+
+        content = params.get("content", "")
+        if content:
+            parts.append(f"## 待评估内容：\n{content}")
+
+        summary = params.get("summary", "")
+        if summary:
+            parts.append(f"## 任务执行摘要：{summary}")
+
+        parts.append("")
+        parts.append(
+            "请根据以上信息进行评估验证，并在完成后输出评估结论 JSON：\n"
+            '```json\n'
+            '{"evaluation_result": {"passed": true/false, "score": 0-100, "feedback": "评估说明..."}}\n'
+            '```'
+        )
+
+        return "\n".join(parts)
 
     def _evaluate_human(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """人工审核型评估器的 Mock 实现。
+        """人工审核型评估器（未实现）。
 
-        在当前阶段（M5b），仅返回 Mock 输出。
-        真实实现需要通过 human_interaction 工具等待人工审核。
+        TODO: 通过 human_interaction 工具等待人工审核。
+        当前为占位实现，返回 passed=True 避免阻塞流程。
+        上层调用方应检查 evaluator_type != human 再使用。
 
         Args:
             metric_def: 指标定义
             params: 合并后的输入参数
 
         Returns:
-            Mock 评估输出
+            占位评估输出
         """
-        logger.info(
-            "Mock human evaluation: %s (evaluator_id=%s)",
+        logger.warning(
+            "Human evaluation NOT IMPLEMENTED: %s (evaluator_id=%s) "
+            "— returning placeholder passed result",
             metric_def.id, metric_def.evaluator_id,
         )
-        # Mock: 返回审核通过结果
         return {
             "passed": True,
             "score": 100.0,
-            "feedback": "Mock human review passed",
+            "feedback": "人工审核尚未实现，返回占位结果",
         }

@@ -6,7 +6,6 @@ Web 操作工具
 - get_tool_definition() -> Tool：get_tool_definition功能
 - handle_data(self, data)：handle_data功能
 - WebTool：WebTool类
-- TextExtractor：TextExtractor类
 """
 
 import logging
@@ -173,6 +172,15 @@ class WebTool:
                 error_code="INVALID_ACTION",
             )
 
+    @staticmethod
+    def _http_recovery_hint(status_code: int) -> str:
+        """根据 HTTP 状态码返回错误恢复建议。"""
+        hints = {
+            403: "\n建议：该网站拒绝访问，请尝试其他来源或使用 web_search 搜索替代信息。",
+            404: "\n建议：页面不存在，请使用 web_search 搜索替代来源。",
+        }
+        return hints.get(status_code, "")
+
     def _check_url_security(self, url: str) -> tuple[bool, str | None]:
         """检查 URL 安全性"""
         try:
@@ -250,8 +258,9 @@ class WebTool:
                     data = content.decode("utf-8", errors="ignore")
 
                 if response.status_code >= 400:
+                    hint = self._http_recovery_hint(response.status_code)
                     return create_failure_result(
-                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}",
+                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}{hint}",
                         error_code=f"HTTP_{response.status_code}",
                     )
 
@@ -322,8 +331,9 @@ class WebTool:
                     data = content.decode("utf-8", errors="ignore")
 
                 if response.status_code >= 400:
+                    hint = self._http_recovery_hint(response.status_code)
                     return create_failure_result(
-                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}",
+                        error=f"HTTP {response.status_code}: {data if isinstance(data, str) else str(data)[:500]}{hint}",
                         error_code=f"HTTP_{response.status_code}",
                     )
 
@@ -391,26 +401,27 @@ class WebTool:
 
                 # 如果需要提取文本
                 if extract_text:
-                    # 简单的文本提取（去除 HTML 标签）
-                    from html.parser import HTMLParser
+                    import trafilatura
 
-                    class TextExtractor(HTMLParser):
-                        def __init__(self):
-                            super().__init__()
-                            self.text = []
-
-                        def handle_data(self, data):
-                            self.text.append(data)
-
-                    parser = TextExtractor()
-                    parser.feed(html_text)
-                    result_data["text"] = " ".join(parser.text)
+                    extracted = trafilatura.extract(
+                        html_text,
+                        include_tables=True,
+                        include_links=False,
+                        include_formatting=False,
+                        favor_precision=True,
+                    )
+                    if extracted:
+                        result_data["text"] = extracted
+                    else:
+                        result_data["text"] = ""
+                        logger.warning(f"[WebTool] trafilatura 未能提取正文: {url}")
                 else:
                     result_data["html"] = html_text
 
                 if response.status_code >= 400:
+                    hint = self._http_recovery_hint(response.status_code)
                     return create_failure_result(
-                        error=f"HTTP {response.status_code}",
+                        error=f"HTTP {response.status_code}{hint}",
                         error_code=f"HTTP_{response.status_code}",
                     )
 
