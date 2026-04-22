@@ -206,10 +206,13 @@ class ResourceSearchTool:
                     detail = agent_details[i] if i < len(agent_details) else {}
                     metrics = detail.get("recommended_metrics", [])
                     if metrics:
-                        metrics_str = "; ".join(
-                            f"{m.get('metric_id', '')}({', '.join(f'{k}={v}' for k, v in m.get('default_params', {}).items())})"
-                            for m in metrics
-                        )
+                        def _metric_str(m):
+                            mid = getattr(m, "metric_id", None) or (m.get("metric_id", "") if isinstance(m, dict) else "")
+                            params = getattr(m, "default_params", None) or (m.get("default_params", {}) if isinstance(m, dict) else {})
+                            if isinstance(params, dict) and params:
+                                return f"{mid}({', '.join(f'{k}={v}' for k, v in params.items())})"
+                            return str(mid)
+                        metrics_str = "; ".join(_metric_str(m) for m in metrics)
                         row.append(f"推荐评估: {metrics_str}")
                         if len(results["agent_h"]) == 3:
                             results["agent_h"].append("recommended_metrics")
