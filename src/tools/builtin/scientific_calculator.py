@@ -93,7 +93,7 @@ class ScientificCalculatorTool(BuiltinTool):
                     "operation": {
                         "type": "string",
                         "description": "运算类型，可选值：calculate（计算表达式）、evaluate（求值单个操作）",
-                        enum=["calculate", "evaluate"],
+                        "enum": ["calculate", "evaluate"],
                     },
                     "expression": {
                         "type": "string",
