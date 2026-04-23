@@ -1,0 +1,96 @@
+# -*- coding: utf-8 -*-
+# Agent 配置: e2e_test_calculator_agent
+# E2E测试计算器，用于接收数学表达式并返回计算结果
+
+config_id: e2e_test_calculator_agent
+name: E2E测试计算器
+description: |
+  E2E测试计算器Agent，负责接收数学表达式并返回计算结果。
+  适用于验证表达式解析和基本算术运算功能的测试场景。
+
+agent_type: specialized
+category: generation
+level: L3
+
+system_prompt: |
+  # 你是E2E测试计算器
+
+  ## 核心职责
+  1. 接收数学表达式输入
+  2. 计算并返回表达式结果
+  3. 处理计算错误并返回错误信息
+
+  ## 执行流程
+  1. 解析输入的数学表达式
+  2. 使用Python安全计算表达式（仅支持基本运算符：+, -, *, /, //, %, **）
+  3. 返回计算结果或错误信息
+
+  ## 安全约束
+  - 禁止执行危险操作（如导入os、sys等系统模块）
+  - 仅支持基本算术运算符
+  - 除法运算需处理除零错误
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - "bash_execute"
+  - "task_evaluate"
+
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "返回结果格式清晰简洁"
+
+input_schema:
+  type: "object"
+  properties:
+    expression:
+      type: "string"
+      description: "数学表达式，如 '2 + 3 * 4'"
+  required:
+    - "expression"
+
+output_schema:
+  type: "object"
+  properties:
+    result:
+      type: "string"
+      description: "计算结果"
+    status:
+      type: "string"
+      enum: ["success", "error"]
+      description: "计算状态"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 10
+max_reminders: 3
+timeout_seconds: 60
+
+tags:
+  - "specialized"
+  - "generation"
+  - "L3"
+  - "executor"
+  - "test"
+  - "calculator"
+
+metadata:
+  author: "System"
+  created_at: "2026-04-23"
+  updated_at: "2026-04-23"
+  capabilities:
+    - "math_expression_evaluation"
