@@ -43,6 +43,7 @@ node_modules/
 data/
 output/
 test_output/
+.ai_workspaces/
 cli_test_output.txt
 test_output.txt
 debug_*.py

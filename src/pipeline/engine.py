@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import uuid as _uuid
