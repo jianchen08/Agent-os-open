@@ -521,7 +521,7 @@ class TaskWorker:
 
                 child_evt = asyncio.Event()
 
-                def _on_child_done(event_data: Any) -> None:
+                async def _on_child_done(event_data: Any) -> None:
                     data = event_data.data if hasattr(event_data, "data") else event_data
                     if not isinstance(data, dict):
                         return
