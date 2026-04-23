@@ -90,6 +90,9 @@ output_routes:
 # Agent 可通过 plugins.disabled / plugins.enabled 覆盖
 plugins:
   # ── Input 插件链（按 priority 排序）──
+  - name: context_window_guard
+    config:
+      enabled: true
   - name: task_event_receiver
     config:
       enabled: true
@@ -123,6 +126,9 @@ plugins:
     config:
       enabled: true
   - name: error_check
+    config:
+      enabled: true
+  - name: llm_error_recovery
     config:
       enabled: true
   - name: delegate_depth_guard

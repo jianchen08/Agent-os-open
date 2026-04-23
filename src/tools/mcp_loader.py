@@ -380,7 +380,7 @@ class MCPToolLoader:
                     for line in process.stderr:
                         if not line:
                             break
-                        text = line.decode(errors='replace').strip()
+                        text = line.decode('utf-8', errors='replace').strip()
                         if text:
                             logger.debug("[MCP:%s stderr] %s", server_name, text)
                 except Exception:
@@ -401,7 +401,7 @@ class MCPToolLoader:
                         line = await process.stderr.readline()
                         if not line:
                             break
-                        text = line.decode(errors='replace').strip()
+                        text = line.decode('utf-8', errors='replace').strip()
                         if text:
                             logger.debug("[MCP:%s stderr] %s", server_name, text)
                 except Exception:

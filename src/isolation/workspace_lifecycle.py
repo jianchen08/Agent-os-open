@@ -288,12 +288,11 @@ class WorkspaceLifecycleManager:
 
             def _copy_ignore(_dir: str, contents: list[str]) -> list[str]:
                 """shutil.copytree ignore callback."""
-                return [c for c in contents
-                        if c in _SKIP_NAMES or c.startswith(".")]
+                return [c for c in contents if c in _SKIP_NAMES]
 
             _SKIP_TOP = _SKIP_NAMES | {".coverage"}
             for child in root_path.iterdir():
-                if child.name in _SKIP_TOP or child.name.startswith("."):
+                if child.name in _SKIP_TOP:
                     continue
                 dst = ws_dir / child.name
                 try:
@@ -420,13 +419,17 @@ class WorkspaceLifecycleManager:
         if commit_hash is None:
             _, h, _ = self._run_git("rev-parse", "HEAD", cwd=ws_path)
             commit_hash = h.strip() if h else None
-        _SKIP_MERGE = {".git", ".ai_workspaces", "__pycache__",
-                       ".pytest_cache", "node_modules", ".claude",
-                       ".codebuddy", ".workbuddy", ".trae",
-                       ".mypy_cache", "dist", ".next", "build"}
+        _SKIP_MERGE = frozenset({
+                ".git", ".ai_workspaces", "__pycache__",
+                ".pytest_cache", ".mypy_cache", "node_modules",
+                ".claude", ".codebuddy", ".workbuddy", ".trae",
+                ".coverage", "logs", "data", ".venv", ".env",
+                "dist", ".next", ".nuxt", "build", ".cache",
+                ".tox", ".eggs", "*.egg-info",
+            })
         merged_files: list[str] = []
         for child in ws_path.iterdir():
-            if child.name in _SKIP_MERGE or child.name.startswith("."):
+            if child.name in _SKIP_MERGE:
                 continue
             dst = project_root / child.name
             try:

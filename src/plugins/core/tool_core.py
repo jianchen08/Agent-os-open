@@ -503,6 +503,7 @@ class ToolCore(ICorePlugin):
             StateKeys.RAW_RESULT: last_result_text,
             StateKeys.RAW_ERROR: raw_error,
             StateKeys.RAW_TOOL_CALLS: [],
+            "_executed_tool_calls": tool_calls,
             "messages": current_messages,
         }
         if submitted_task_ids:

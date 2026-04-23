@@ -290,8 +290,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             try:
                 goal = json.loads(goal)
             except (json.JSONDecodeError, ValueError):
-                goal = None
+                # LLM 可能将 goal 作为纯文本标题传递而非 JSON 对象，
+                # 此时将其作为 title 使用
+                goal = {"title": goal}
+                logger.info(
+                    "[TaskSubmit] goal 为纯文本，自动包装为 {'title': '%s'}",
+                    goal["title"][:80],
+                )
         if not isinstance(goal, dict):
+            logger.warning(
+                "[TaskSubmit] goal 类型异常: %s (value=%s)",
+                type(goal).__name__ if goal is not None else "None",
+                str(goal)[:200] if goal else "None",
+            )
             goal = None
         parent_agent_level = inputs.get("parent_agent_level", 1)
 

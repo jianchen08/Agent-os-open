@@ -133,6 +133,13 @@ class ParamInjectPlugin(IInputPlugin):
                 try:
                     raw_args = json.loads(raw_args)
                 except (json.JSONDecodeError, TypeError):
+                    tool_name = injected_tc.get("name", "?")
+                    logger.warning(
+                        "[%s] 工具 %s 的 arguments JSON 解析失败，"
+                        "长度=%d，前200字符: %s",
+                        self.name, tool_name,
+                        len(raw_args), raw_args[:200],
+                    )
                     raw_args = {}
             if not isinstance(raw_args, dict):
                 raw_args = {}
