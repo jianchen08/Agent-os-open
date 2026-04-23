@@ -318,12 +318,15 @@ async def main():
 
     # Step 5: Check task data
     print("\n--- Step 5: 任务数据检查 ---")
-    # Also try to extract task_id from CP7_final_eval
-    if not task_id and "CP7_final_eval" in checkpoints:
+    # Also try to extract task_id from CP7_final_eval or CP4
+    if not task_id:
         import re
-        m = re.search(r"Task ([a-f0-9]+)", checkpoints["CP7_final_eval"])
-        if m:
-            task_id = m.group(1)
+        for key in ("CP7_final_eval", "CP4_tool_eval"):
+            line = checkpoints.get(key, "")
+            m = re.search(r"Task ([a-f0-9]+)", line)
+            if m:
+                task_id = m.group(1)
+                break
     task_data = await check_task_data(task_id)
     print(f"  任务状态: {task_data.get('status', 'N/A')}")
     print(f"  任务标题: {task_data.get('title', 'N/A')}")
