@@ -13,6 +13,7 @@ evaluator_type: tool
 default_config:
   action: execute
   use_isolation: true
+  timeout: 15
 
 # ===== 预期输入定义 =====
 expected_input:

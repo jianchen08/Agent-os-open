@@ -266,6 +266,20 @@ class EvaluationEngine:
                 output=output,
             )
 
+            logger.info(
+                "Expect evaluation: %s -> passed=%s, score=%s, "
+                "message=%s",
+                metric_def.id, result.passed, result.score,
+                result.message[:100] if result.message else "",
+            )
+            if not result.passed and result.details:
+                failed = result.details.get("failed_conditions", [])
+                if failed:
+                    logger.info(
+                        "Failed conditions for %s: %s",
+                        metric_def.id, failed,
+                    )
+
             # 尝试提取 score（agent/human 类型可能返回 score）
             if "score" in output:
                 result.score = float(output["score"])
@@ -343,9 +357,15 @@ class EvaluationEngine:
                     status = result_dict.get("status", "completed")
                     result_dict["success"] = status == "completed"
 
+                actual_status = result_dict.get("data", result_dict).get(
+                    "status", result_dict.get("status")
+                )
+                actual_exit = result_dict.get("data", result_dict).get("exit_code")
                 logger.info(
-                    "Tool evaluation completed: %s -> success=%s",
+                    "Tool evaluation completed: %s -> success=%s, "
+                    "cmd_status=%s, exit_code=%s",
                     metric_def.id, result_dict.get("success"),
+                    actual_status, actual_exit,
                 )
                 return result_dict
 
