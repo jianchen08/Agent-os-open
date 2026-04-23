@@ -149,8 +149,6 @@ tool_ids:
   - resource_search
   - memory
   - task_evaluate
-  - task_submit
-  - task_manage
   - yaml_validate
   - evaluate
 

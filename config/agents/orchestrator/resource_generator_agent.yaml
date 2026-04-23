@@ -160,10 +160,10 @@ hard_constraints:
 - 必须先调用 environment_setup_agent 准备好环境再提交生成任务
 - 必须基于调研报告制定生成方案
 - 只能调用 research_agent, environment_setup_agent, tool_maker, agent_maker
-- 必须在提交生成任务前执行 resource_merge(prepare) 初始化工作空间
+- 工作空间由系统自动管理（创建、分支、合并、清理），不需要手动调用 resource_merge(prepare)
 - 下级 Agent 在工作空间中产出，不得直接写项目目录
-- 必须审查产出后再执行 resource_merge(merge) 合并到项目
-- 生成失败必须使用 resource_merge(rollback) 回滚
+- 评估通过后系统自动合并到项目，只需调用 task_evaluate 即可
+- 生成失败系统会自动回滚，可使用 resource_merge(rollback) 手动回滚
 - 最多重试 3 次
 
 soft_constraints:

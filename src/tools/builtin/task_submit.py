@@ -476,6 +476,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             )
 
         try:
+            # Determine is_root: container sub-tasks (parent is long_term) get own workspace,
+            # agent sub-tasks (parent is short_term) share parent workspace.
+            is_root = True
+            if parent_task_id and task_service:
+                try:
+                    parent_task = task_service.get_task(parent_task_id)
+                    if parent_task and parent_task.metadata:
+                        parent_scope = parent_task.metadata.get("task_scope", "short_term")
+                        if parent_scope != "long_term":
+                            is_root = False
+                except Exception:
+                    pass
+
             await event_bus.emit("task.submitted", {
                 "task_id": task.id,
                 "target_type": target_type,
@@ -485,6 +498,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "acceptance_criteria": acceptance_criteria,
                 "workspace": workspace,
                 "priority": inputs.get("priority", 5),
+                "is_root": is_root,
             })
             logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
         except Exception as e:

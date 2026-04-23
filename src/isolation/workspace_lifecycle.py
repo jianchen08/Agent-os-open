@@ -222,24 +222,15 @@ class WorkspaceLifecycleManager:
         return self._start_root_task(task_id, workspace, task_data)
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
-        """子任务启动：父 mode == project_root 时创建 feature 分支，否则共享父工作空间"""
+        """子任务启动：直接共享父工作空间"""
         parent_info = self._task_tree.get_parent_info(task_id)
         parent_ws = parent_info.get("workspace", "")
         parent_meta = parent_info.get("ws_meta", {})
-        parent_mode = parent_meta.get("mode", "shared")
+        parent_path = parent_meta.get("path", parent_ws)
 
-        if parent_mode == "project_root":
-            branch = f"feature/{task_id}"
-            project_root = Path(parent_meta.get("path", parent_ws))
-            rc, _, stderr = self._run_git("checkout", "-b", branch, cwd=project_root)
-            if rc != 0:
-                logger.warning("[WorkspaceLifecycle] 创建 feature 分支失败: %s", stderr)
-            meta = {"mode": "branch", "path": str(project_root), "branch": branch,
-                    "parent_workspace": parent_ws, "project_root": str(project_root)}
-        else:
-            meta = {"mode": "shared", "path": parent_ws,
-                    "parent_workspace": parent_ws,
-                    "project_root": parent_meta.get("project_root", "")}
+        meta = {"mode": "shared", "path": parent_path,
+                "parent_workspace": parent_ws,
+                "project_root": parent_meta.get("project_root", "")}
         self._ws_meta_store[task_id] = meta
         return meta
 
@@ -404,7 +395,10 @@ class WorkspaceLifecycleManager:
         lock = self._get_merge_lock(project_root)
         with lock:
             if mode == "project_root":
-                return self._merge_project_root(workspace, ws_meta)
+                result = self._merge_project_root(workspace, ws_meta)
+                if result.get("success"):
+                    self._cleanup_project_root(workspace)
+                return result
             if mode == "branch":
                 return self._merge_branch(workspace, ws_meta)
             if mode == "worktree":
@@ -473,6 +467,16 @@ class WorkspaceLifecycleManager:
             self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
             if branch:
                 self._run_git("branch", "-D", branch, cwd=project_root)
+
+    def _cleanup_project_root(self, workspace: str):
+        """合并成功后清理 workspace 目录"""
+        ws_path = Path(workspace)
+        if ws_path.exists() and ".ai_workspaces" in str(ws_path):
+            try:
+                shutil.rmtree(str(ws_path))
+                logger.info("[WorkspaceLifecycle] 已清理 workspace: %s", workspace)
+            except OSError as e:
+                logger.warning("[WorkspaceLifecycle] 清理 workspace 失败: %s, %s", workspace, e)
 
     # ── 7. 评估失败 ──────────────────────────────────────────────
 
