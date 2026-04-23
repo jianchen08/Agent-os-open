@@ -167,7 +167,40 @@ class ExecutionRecordStorage:
 
     @staticmethod
     def _record_to_dict(record: ExecutionRecordData) -> dict[str, Any]:
-        return asdict(record)
+        try:
+            return asdict(record)
+        except TypeError:
+            return ExecutionRecordStorage._safe_record_to_dict(record)
+
+    @staticmethod
+    def _safe_record_to_dict(record: ExecutionRecordData) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for fld in record.__dataclass_fields__:
+            val = getattr(record, fld)
+            if fld == "tool_input" and isinstance(val, dict):
+                result[fld] = ExecutionRecordStorage._sanitize_dict(val)
+            else:
+                result[fld] = val
+        return result
+
+    @staticmethod
+    def _sanitize_dict(d: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for k, v in d.items():
+            if isinstance(v, (str, int, float, bool, type(None))):
+                result[k] = v
+            elif isinstance(v, dict):
+                result[k] = ExecutionRecordStorage._sanitize_dict(v)
+            elif isinstance(v, list):
+                result[k] = [
+                    ExecutionRecordStorage._sanitize_dict(i) if isinstance(i, dict)
+                    else str(i) if not isinstance(i, (str, int, float, bool, type(None)))
+                    else i
+                    for i in v
+                ]
+            else:
+                result[k] = str(v)
+        return result
 
     @staticmethod
     def _dict_to_record(data: dict[str, Any]) -> ExecutionRecordData:

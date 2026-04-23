@@ -21,8 +21,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 NEW_AGENT_ID = "e2e_test_calculator_agent"
 NEW_AGENT_PATH = Path(f"config/agents/executor/test/{NEW_AGENT_ID}.yaml")

@@ -132,6 +132,19 @@ class ModelConfigLoader:
 
     # ── 公共查询接口 ──────────────────────────────────────────
 
+    @staticmethod
+    def _case_insensitive_lookup(
+        mapping: dict[str, Any], key: str,
+    ) -> dict[str, Any] | None:
+        """在字典中执行大小写不敏感的键查找。"""
+        if key in mapping:
+            return dict(mapping[key])
+        lower = key.lower()
+        for k, v in mapping.items():
+            if k.lower() == lower:
+                return dict(v)
+        return None
+
     def get_model_config(self, model_id: str) -> dict[str, Any] | None:
         """根据模型 ID 获取模型配置。
 
@@ -143,17 +156,19 @@ class ModelConfigLoader:
         Returns:
             模型配置字典，若未找到返回 ``None``。
         """
-        # 先在 LLM models 中查找
+        # 先在 LLM models 中查找（大小写不敏感）
         llm_data = self._load_llm_data()
         models = llm_data.get("models", {})
-        if model_id in models:
-            return dict(models[model_id])
+        result = self._case_insensitive_lookup(models, model_id)
+        if result is not None:
+            return result
 
         # 再在 embedding embeddings 中查找
         emb_data = self._load_embedding_data()
         embeddings = emb_data.get("embeddings", {})
-        if model_id in embeddings:
-            return dict(embeddings[model_id])
+        result = self._case_insensitive_lookup(embeddings, model_id)
+        if result is not None:
+            return result
 
         return None
 
