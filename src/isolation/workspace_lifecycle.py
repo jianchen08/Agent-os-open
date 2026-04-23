@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache"})
 _SPARSE_THRESHOLD_BYTES = 50 * 1024 * 1024  # sparse checkout 大小阈值（50MB）
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
+_GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
 
 
 class WorkspaceLifecycleManager:
@@ -130,21 +131,21 @@ class WorkspaceLifecycleManager:
         # Remove any stale index.lock before add/commit operations
         self._remove_index_lock(cwd)
 
-        rc, _, stderr = self._run_git("add", "-A", cwd=cwd)
+        rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
         if rc != 0:
             # If add failed due to index.lock, remove it and retry once
             if "index.lock" in (stderr or ""):
                 if self._remove_index_lock(cwd):
-                    rc, _, stderr = self._run_git("add", "-A", cwd=cwd)
+                    rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
             if rc != 0:
                 logger.warning("[WorkspaceLifecycle] git add -A failed after retry: %s", stderr)
                 return False
 
-        rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd)
+        rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
         if rc != 0:
             if "index.lock" in (stderr or ""):
                 if self._remove_index_lock(cwd):
-                    rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd)
+                    rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
             if rc != 0:
                 logger.warning("[WorkspaceLifecycle] git commit failed after retry: %s", stderr)
                 return False
@@ -280,8 +281,11 @@ class WorkspaceLifecycleManager:
             branch = f"task/{task_id}"
             ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
             ws_dir.mkdir(parents=True, exist_ok=True)
-            _SKIP_COPY = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
-                          "node_modules", ".claude", ".codebuddy", ".workbuddy"}
+            _SKIP_COPY = {".git", ".ai_workspaces", "__pycache__",
+                          ".pytest_cache", ".mypy_cache",
+                          "node_modules", ".claude", ".codebuddy",
+                          ".workbuddy", ".trae", ".coverage",
+                          "logs", "data", ".venv", ".env"}
             for child in root_path.iterdir():
                 if child.name in _SKIP_COPY or child.name.startswith("."):
                     continue
