@@ -253,6 +253,7 @@ class ModelConfigLoader:
             "model_name": model_conf.get("model_name", model_id),
             "api_base": api_base,
             "api_key": api_key,
+            "context_window": model_conf.get("context_window"),
             "default_params": default_params,
         }
 

@@ -60,7 +60,7 @@ class WorkspaceLifecycleManager:
         """执行 git 命令（同步，使用 subprocess）"""
         cmd = ["git"] + list(args)
         try:
-            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
             if r.returncode != 0 and r.stderr:
                 logger.warning("[WorkspaceLifecycle] git %s failed (rc=%d): %s", " ".join(args), r.returncode, r.stderr[:200])
             return r.returncode, r.stdout.strip(), r.stderr.strip()

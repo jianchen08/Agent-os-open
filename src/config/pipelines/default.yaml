@@ -66,6 +66,12 @@ plugins:
     config:
       enabled: true
 
+  # 0.5 上下文窗口守卫（Input 类型 — 在 LLM 调用前检查上下文大小，超阈值触发压缩）
+  - class: plugins.input.context_window_guard.ContextWindowGuardPlugin
+    config:
+      enabled: true
+      trigger_ratio: 0.7
+
   # 1. 工具 Schema 注入（Input 类型 — 在 LLM 调用前注入 tool_schemas）
   - class: plugins.input.tool_schema.ToolSchemaPlugin
     config:
@@ -87,6 +93,11 @@ plugins:
   - class: plugins.output.error_check.ErrorCheckPlugin
     config:
       max_retries: 3
+
+  # 4.5 LLM 错误恢复（系统级，在 error_check 之后执行）
+  - class: plugins.output.llm_error_recovery.LLMErrorRecoveryPlugin
+    config:
+      enabled: true
 
   # 5. 待处理工具检测
   - class: plugins.output.pending_tools.PendingToolsOutput

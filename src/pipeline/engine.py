@@ -548,6 +548,7 @@ class PipelineEngine:
                             state[StateKeys.RAW_RESULT] = None
 
                             if core_type == "llm_call":
+                                # 将错误信息存入 state，由 llm_error_recovery 插件处理
                                 error_msg = str(exc)
                                 error_lower = error_msg.lower()
 
@@ -559,31 +560,21 @@ class PipelineEngine:
                                     or ("token" in error_lower and "limit" in error_lower)
                                 )
 
-                                if is_context_overflow:
-                                    is_llm_fixable = False
-                                    self._truncate_context_messages(state)
-                                    logger.warning(
-                                        "Context overflow detected, truncated messages | error=%s",
-                                        error_msg[:200],
-                                    )
-                                else:
-                                    is_llm_fixable = (
-                                        "invalid function arguments" in error_lower
-                                        or "invalid params" in error_lower
-                                    )
+                                is_llm_fixable = (
+                                    "invalid function arguments" in error_lower
+                                    or "invalid params" in error_lower
+                                )
 
-                                if is_llm_fixable:
-                                    hint = self._build_llm_error_hint(error_msg)
-                                    messages = list(state.get("messages", []))
-                                    messages.append({
-                                        "role": "user",
-                                        "content": (
-                                            f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
-                                            f"错误信息：{error_msg[:500]}\n\n"
-                                            f"建议：{hint}"
-                                        ),
-                                    })
-                                    state["messages"] = messages
+                                error_type = (
+                                    "context_overflow" if is_context_overflow
+                                    else ("llm_fixable" if is_llm_fixable else "unknown")
+                                )
+
+                                state["llm_error_info"] = {
+                                    "error_msg": error_msg,
+                                    "error_type": error_type,
+                                    "core_type": core_type,
+                                }
                             break  # exit retry loop after error handling
                 else:
                     logger.warning("No core plugin registered for type: %s", core_type)
@@ -726,75 +717,6 @@ class PipelineEngine:
             logger.error("Failed to restore from checkpoint: %s", exc)
             return False
 
-    @staticmethod
-    def _build_llm_error_hint(error_msg: str) -> str:
-        """根据 LLM 错误信息生成给大模型的恢复建议。
-
-        Args:
-            error_msg: 原始错误信息字符串
-
-        Returns:
-            面向大模型的恢复建议文本
-        """
-        error_lower = error_msg.lower()
-        if "invalid function arguments" in error_lower or "invalid params" in error_lower:
-            return (
-                "你上一次的工具调用参数 JSON 格式无效，可能是因为参数内容过长被截断。"
-                "请尝试以下方法：\n"
-                "1. 如果是 file_write：请将长内容拆分为多次写入，每次只写入一个章节（使用 action='write' 多次调用）\n"
-                "2. 如果是其他工具：请减少参数中的文本量，分步操作\n"
-                "3. 不要在一次工具调用中传入超过 2000 字符的文本内容"
-            )
-        if "timeout" in error_lower or "timed out" in error_lower:
-            return (
-                "上一次 LLM 调用超时。请尝试简化你的请求或缩短输出内容。"
-            )
-        if "rate limit" in error_lower or "429" in error_lower:
-            return (
-                "API 调用频率超限，请稍后重试。你可以先输出一段文本回复，下一轮再尝试工具调用。"
-            )
-        if "context_length" in error_lower or "token limit" in error_lower or "max_tokens" in error_lower:
-            return (
-                "对话上下文过长，已超出模型限制。请尝试完成当前任务并调用 task_evaluate 结束，"
-                "或者精简后续操作步骤。"
-            )
-        return (
-            "请检查你的操作是否正确，调整后重试。"
-            "如果多次失败，请尝试换一种方式完成任务。"
-        )
-
-    # BUG-FIX-fix_20260422_context_overflow: 上下文溢出时截断历史消息
-    CONTEXT_OVERFLOW_KEEP_RECENT = 6  # 保留最近 N 条消息（不含 system）
-
-    @staticmethod
-    def _truncate_context_messages(state: dict[str, Any]) -> None:
-        """截断上下文消息，保留 system 消息和最近 N 条对话消息。
-
-        当上下文溢出时调用此方法，移除较早的对话历史，
-        仅保留 system 指令和最近几轮交互，避免反复触发溢出。
-
-        Args:
-            state: 管道状态字典，包含 "messages" 键
-        """
-        messages = state.get("messages", [])
-        if not messages:
-            return
-
-        # 分离 system 消息和普通消息
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        other_msgs = [m for m in messages if m.get("role") != "system"]
-
-        if len(other_msgs) <= PipelineEngine.CONTEXT_OVERFLOW_KEEP_RECENT:
-            return
-
-        # 保留最近 N 条消息
-        kept = other_msgs[-PipelineEngine.CONTEXT_OVERFLOW_KEEP_RECENT:]
-        truncated_count = len(other_msgs) - len(kept)
-        state["messages"] = system_msgs + kept
-        logger.info(
-            "Truncated context: removed %d older messages, kept %d recent + %d system",
-            truncated_count, len(kept), len(system_msgs),
-        )
 
     async def _apply_route(self, route: RouteSignal, state: dict[str, Any]) -> bool:
         """应用路由信号到管道状态。

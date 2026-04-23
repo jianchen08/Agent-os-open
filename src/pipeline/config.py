@@ -373,15 +373,24 @@ def build_plugin_registry(
             logger.warning("Core plugin config missing 'class' field for '%s', skipping", core_type)
             continue
 
-        # FEATURE-llm-config-loader: 对于 llm_call 类型，若未指定 model_name
-        # 则从 model_loader 读取 llm.yaml defaults.chat 配置
+        # FEATURE-llm-config-loader: 对于 llm_call 类型，始终从 model_loader
+        # 加载完整模型配置（含 context_window），pipeline config 可覆盖
         if core_type == "llm_call" and model_loader is not None:
             configured_model = plugin_config.get("model_name", "")
-            if not configured_model:
-                logger.info(
-                    "[build_plugin_registry] llm_call 未指定 model_name，"
-                    "从 model_loader 读取 defaults.chat"
-                )
+            if configured_model:
+                # 有 model_name → 从 llm.yaml 加载该模型的完整配置
+                llm_conf = model_loader.get_llm_core_config(configured_model)
+                if llm_conf:
+                    # pipeline config 覆盖模型配置（如 api_key 等）
+                    merged_config = dict(llm_conf)
+                    merged_config.update(plugin_config)
+                    plugin_config = merged_config
+                    logger.info(
+                        "[build_plugin_registry] 使用模型: %s (context_window=%s)",
+                        configured_model, llm_conf.get("context_window"),
+                    )
+            else:
+                # 无 model_name → 使用 defaults.chat
                 default_model_conf = model_loader.get_default_model("chat")
                 if default_model_conf:
                     llm_conf = model_loader.get_llm_core_config(

@@ -108,6 +108,7 @@ class LLMCore(ICorePlugin):
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
+        self._context_window: int | None = self._config.get("context_window")
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
@@ -238,6 +239,7 @@ class LLMCore(ICorePlugin):
                 StateKeys.RAW_THINKING: thinking_text,
                 "messages": history,
                 "llm_usage": llm_usage or {},
+                "context_window": self._context_window,
             }
 
         except Exception as exc:
