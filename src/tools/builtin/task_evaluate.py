@@ -664,13 +664,23 @@ class TaskEvaluateTool:
                 p.setdefault("criteria", task_desc)
             if workspace_abs and "workspace" not in p:
                 p["workspace"] = workspace_abs
-            # BUG-FIX: Substitute template variables {{workspace}} and {{task_id}}
+            # BUG-FIX: Substitute template variables {{workspace}}, {{task_id}}, {tool_id}
             for key, val in list(p.items()):
                 if isinstance(val, str):
                     if workspace_abs:
                         val = val.replace("{{workspace}}", workspace_abs)
                     val = val.replace("{{task_id}}", task.id)
                     p[key] = val
+
+        # Resolve {tool_id} template from workspace files
+        _tool_id_val = self._resolve_tool_id_from_workspace(task, workspace_abs)
+        if _tool_id_val:
+            for metric_id in all_metric_ids:
+                p = params.get(metric_id, {})
+                for key, val in list(p.items()):
+                    if isinstance(val, str) and "{tool_id}" in val:
+                        p[key] = val.replace("{tool_id}", _tool_id_val)
+                params[metric_id] = p
             params[metric_id] = p
 
         return params
@@ -743,6 +753,26 @@ class TaskEvaluateTool:
 
         if resolved:
             return str(Path.cwd() / resolved)
+        return None
+
+    @staticmethod
+    def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:
+        """从工作空间文件中推断 tool_id，用于替换 {tool_id} 模板变量。
+
+        在 src/tools/builtin/ 目录下查找 .py 文件（排除 test_ 前缀和 __init__.py），
+        返回第一个匹配的文件名（不含 .py 后缀）作为 tool_id。
+        """
+        if not workspace_abs:
+            return None
+        from pathlib import Path
+        tools_dir = Path(workspace_abs) / "src" / "tools" / "builtin"
+        if not tools_dir.exists():
+            return None
+        for py_file in tools_dir.glob("*.py"):
+            name = py_file.stem
+            if name.startswith("test_") or name.startswith("__"):
+                continue
+            return name
         return None
 
     def _build_result_data(self, result: Any) -> dict[str, Any]:

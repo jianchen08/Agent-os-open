@@ -105,7 +105,6 @@ static_vars:
         | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | container | file_check, semantic_check(可选) |
         | 资源创建 | resource_generator_agent | 编排创建新资源（Agent、工具） | host | file_check, semantic_check |
         | 资源修改 | resource_modification_agent | 编排修改已有资源（Agent/工具→resource_modifier_agent） | host | file_check, semantic_check |
-
         ### 隔离规则
         - container（默认）：不指定 isolation_level，产出物自动在工作空间中
         - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
@@ -159,7 +158,6 @@ tool_ids:
 
 # 约束
 hard_constraints:
-  - "必须先搜索资源再派发任务"
   - "Agent 选择优先级：专门 agent > general_agent"
   - "派发任务规则：如无合适 agent → 使用 resource_generation 或 resource_modification 工作流创建/修改 agent；如是相对不需要专门的通用任务 → general_agent"
   - "分配优先于执行：遇到任务时，先想'能否分配'，而非'自己执行'"

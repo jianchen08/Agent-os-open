@@ -330,33 +330,27 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
         # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
-        # BUG-FIX-fix_20260422_file_check_path: 即使 LLM 传了 acceptance_criteria，
-        # 如果 file_check.path 指向 agent 配置文件（config/agents/...）而非产出物，
-        # 也用自动补全的结果覆盖，防止 LLM 猜错路径。
+        # BUG-FIX-fix_20260423_merge_criteria: 始终将目标 agent 的 recommended_metrics
+        # 合并进 acceptance_criteria，确保不会因为调用方只传了部分指标而丢失关键评估。
         if target_type == "agent" and target_id:
             auto_criteria = self._auto_fill_criteria(
                 target_id, context=inputs,
             )
             if auto_criteria:
-                need_auto_fill = not acceptance_criteria
-                if not need_auto_fill and isinstance(acceptance_criteria, dict):
-                    fc = acceptance_criteria.get("file_check", {})
-                    fc_path = ""
-                    if isinstance(fc, dict):
-                        fc_path = fc.get("input_params", {}).get("path", "")
-                    if fc_path.startswith("config/agents/"):
-                        need_auto_fill = True
-                        logger.info(
-                            "[TaskSubmit] file_check.path 指向 agent 配置文件 (%s)，"
-                            "使用自动补全覆盖",
-                            fc_path,
-                        )
-                if need_auto_fill:
+                if not acceptance_criteria:
                     acceptance_criteria = auto_criteria
                     logger.info(
                         "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
                         target_id, list(auto_criteria.keys()),
                     )
+                elif isinstance(acceptance_criteria, dict):
+                    for metric_key, metric_val in auto_criteria.items():
+                        if metric_key not in acceptance_criteria:
+                            acceptance_criteria[metric_key] = metric_val
+                            logger.info(
+                                "[TaskSubmit] 合并缺失指标 %s (来自 %s recommended_metrics)",
+                                metric_key, target_id,
+                            )
         injected_task_id = inputs.get("task_id")
         if parent_task_id is None and injected_task_id:
             parent_task_id = injected_task_id

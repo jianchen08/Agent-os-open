@@ -54,7 +54,7 @@ async def send_message(token: str, thread_id: str):
         await ws.recv()  # connection_confirmation
         await ws.send(json.dumps({
             "type": "user_input",
-            "content": "请帮我生成一个科学计算器工具，支持三角函数、对数、幂运算等功能。",
+            "content": "请帮我创建一个科学计算器工具，支持三角函数、对数、幂运算等功能。不需要确认，直接派发执行。",
         }))
         deadline = time.time() + 120
         while time.time() < deadline:
