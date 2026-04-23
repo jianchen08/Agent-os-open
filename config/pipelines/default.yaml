@@ -135,8 +135,8 @@ plugins:
       enabled: true
   - name: duplicate_check
     config:
-      max_duplicate_calls: 3
-      max_repetitive_output: 3
+      max_duplicate_calls: 6
+      max_repetitive_output: 5
   - name: output_repetition_guard
     config:
       max_retries: 3

@@ -334,7 +334,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         # 如果 file_check.path 指向 agent 配置文件（config/agents/...）而非产出物，
         # 也用自动补全的结果覆盖，防止 LLM 猜错路径。
         if target_type == "agent" and target_id:
-            auto_criteria = self._auto_fill_criteria(target_id)
+            auto_criteria = self._auto_fill_criteria(
+                target_id, context=inputs,
+            )
             if auto_criteria:
                 need_auto_fill = not acceptance_criteria
                 if not need_auto_fill and isinstance(acceptance_criteria, dict):
@@ -707,7 +709,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         return metadata
 
-    def _auto_fill_criteria(self, target_id: str) -> dict[str, Any]:
+    def _auto_fill_criteria(
+        self,
+        target_id: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """从 agent 配置的 recommended_metrics 自动构建验收标准。
 
         当 LLM 不传 acceptance_criteria 时，尝试从对应 agent 的 YAML 配置中
@@ -715,6 +721,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         Args:
             target_id: agent 配置 ID
+            context: 额外上下文（如 inputs/goal），用于替换模板变量
 
         Returns:
             验收标准字典，找不到时返回空 dict
@@ -752,16 +759,41 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             recommended = config.get("recommended_metrics", [])
             if not recommended:
                 return {}
+
+            # Build template variables from context
+            tmpl_vars: dict[str, str] = {}
+            if context:
+                for key in ("tool_id", "task_id"):
+                    val = context.get(key)
+                    if val:
+                        tmpl_vars[key] = str(val)
+                # Also check nested goal/inputs
+                goal = context.get("goal") or {}
+                if isinstance(goal, dict):
+                    for key in ("tool_id", "title"):
+                        val = goal.get(key)
+                        if val:
+                            tmpl_vars.setdefault(key, str(val))
+
             criteria = {}
             for metric in recommended:
                 metric_id = metric.get("metric_id")
                 if not metric_id:
                     continue
                 default_params = metric.get("default_params", {})
+                # Replace template variables like {tool_id} in param values
+                if tmpl_vars:
+                    replaced = {}
+                    for k, v in default_params.items():
+                        if isinstance(v, str):
+                            for var_name, var_val in tmpl_vars.items():
+                                v = v.replace("{" + var_name + "}", var_val)
+                        replaced[k] = v
+                    default_params = replaced
                 criteria[metric_id] = {"input_params": default_params}
             logger.info(
-                "[TaskSubmit] 从 %s 加载了 %d 个推荐指标",
-                yaml_path.name, len(criteria),
+                "[TaskSubmit] 从 %s 加载了 %d 个推荐指标 (vars=%s)",
+                yaml_path.name, len(criteria), list(tmpl_vars.keys()),
             )
             return criteria
         except Exception as e:

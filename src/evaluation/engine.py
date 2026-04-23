@@ -135,6 +135,7 @@ class EvaluationEngine:
             result = self._evaluate_metric(
                 metric_def=metric_def,
                 input_params=config.input_params.get(metric_def.id, {}),
+                task_id=task_id,
             )
             results.append(result)
 
@@ -187,6 +188,7 @@ class EvaluationEngine:
             result = self._evaluate_metric(
                 metric_def=metric_def,
                 input_params=merged_params,
+                task_id=task_id,
             )
             results.append(result)
 
@@ -223,12 +225,14 @@ class EvaluationEngine:
         return self._evaluate_metric(
             metric_def=metric_def,
             input_params=input_params or {},
+            task_id=task_id,
         )
 
     def _evaluate_metric(
         self,
         metric_def: MetricDefinition,
         input_params: dict[str, Any],
+        task_id: str = "",
     ) -> MetricResult:
         """执行单个指标的评估流程。
 
@@ -257,7 +261,9 @@ class EvaluationEngine:
             merged_params = {**metric_def.default_config, **input_params}
 
             # 调用评估器获取输出
-            output = evaluator(metric_def, merged_params)
+            output = evaluator(
+                metric_def, merged_params, task_id,
+            )
 
             # 使用期望评估器判定
             result = self._expect_evaluator.evaluate(
@@ -305,6 +311,7 @@ class EvaluationEngine:
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
+        task_id: str = "",
     ) -> dict[str, Any]:
         """工具型评估器 — 通过 ToolRegistry 调用真实工具。
 
@@ -410,10 +417,12 @@ class EvaluationEngine:
             logger.debug("Failed to load builtin evaluator %s: %s", evaluator_id, e)
         return None
 
+
     def _evaluate_agent(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
+        task_id: str = "",
     ) -> dict[str, Any]:
         """Agent 型评估器 — 创建子管道运行 evaluator_agent。
 
@@ -471,9 +480,14 @@ class EvaluationEngine:
 
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
-                # Resolve project root so evaluator agent can find template files
                 from pathlib import Path
-                project_root = str(Path(__file__).resolve().parent.parent.parent)
+                # Use task workspace if available, fall back to
+                # project root
+                project_root = _resolve_eval_project_root(
+                    task_id, params,
+                ) or str(
+                    Path(__file__).resolve().parent.parent.parent
+                )
                 state = await engine.run(
                     user_input=eval_prompt,
                     agent_config=agent_config,
@@ -696,6 +710,7 @@ class EvaluationEngine:
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
+        task_id: str = "",
     ) -> dict[str, Any]:
         """人工审核型评估器（未实现）。
 
@@ -720,3 +735,38 @@ class EvaluationEngine:
             "score": 100.0,
             "feedback": "人工审核尚未实现，返回占位结果",
         }
+
+
+def _resolve_eval_project_root(
+    task_id: str,
+    params: dict[str, Any],
+) -> str | None:
+    """Resolve the project root for evaluator agent pipelines."""
+    workspace = params.get("workspace")
+    if workspace:
+        from pathlib import Path
+        p = Path(workspace)
+        if p.is_absolute() and p.exists():
+            return str(p)
+        abs_p = Path.cwd() / workspace
+        if abs_p.exists():
+            return str(abs_p)
+
+    if not task_id:
+        return None
+
+    try:
+        from tasks.service import TaskService
+        ts = TaskService()
+        task = ts.get_task(task_id)
+        if task and task.metadata:
+            ws = task.metadata.get("workspace")
+            if ws:
+                from pathlib import Path
+                abs_ws = Path.cwd() / ws
+                if abs_ws.exists():
+                    return str(abs_ws)
+    except Exception:
+        pass
+
+    return None

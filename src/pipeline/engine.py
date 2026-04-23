@@ -511,58 +511,79 @@ class PipelineEngine:
                 core_plugin = self.plugin_registry.get_core(core_type)
                 if core_plugin is not None:
                     core_ctx = PluginContext(state=state, config={}, _services=self._services)
-                    try:
-                        core_result = await core_plugin.execute(core_ctx)
-                        if isinstance(core_result, dict):
-                            state.update(core_result)
-                        logger.debug("Core plugin executed: core_type=%s", core_type)
-                    except Exception as exc:
-                        logger.error("Core plugin error: %s", exc)
-                        state[StateKeys.RAW_ERROR] = str(exc)
-                        state[StateKeys.RAW_RESULT] = None
-
-                        if core_type == "llm_call":
-                            error_msg = str(exc)
-                            # BUG-FIX: 仅对 LLM 可自修正的错误追加提示（如参数格式错误），
-                            # 超时/限流/网络/上下文溢出等 LLM 无法修正，追加提示无意义
-                            error_lower = error_msg.lower()
-
-                            # BUG-FIX-fix_20260422_context_overflow: 优先识别上下文溢出错误，
-                            # MiniMax 等模型的上下文溢出可能包含 "invalid params"，需排除
-                            is_context_overflow = (
-                                "context window exceeds" in error_lower
-                                or "context_length_exceeded" in error_lower
-                                or "context length" in error_lower
-                                or ("max_tokens" in error_lower and "exceed" in error_lower)
-                                or ("token" in error_lower and "limit" in error_lower)
+                    # Core plugin retry with exponential backoff
+                    max_core_retries = getattr(core_plugin, "max_retries", 3)
+                    core_retry_delay = getattr(core_plugin, "retry_delay", 1.0)
+                    core_error_policy = getattr(core_plugin, "error_policy", None)
+                    core_attempts = 0
+                    while True:
+                        core_attempts += 1
+                        try:
+                            core_result = await core_plugin.execute(core_ctx)
+                            if isinstance(core_result, dict):
+                                state.update(core_result)
+                            logger.debug("Core plugin executed: core_type=%s", core_type)
+                            break  # success, exit retry loop
+                        except Exception as exc:
+                            # Check if retryable (RETRY policy + attempts left)
+                            from pipeline.types import ErrorPolicy as _EP
+                            import random as _rand
+                            is_retryable = (
+                                core_error_policy == _EP.RETRY
+                                and core_attempts < max_core_retries + 1
                             )
-
-                            if is_context_overflow:
-                                # 上下文溢出不能通过追加提示修复，需截断历史消息
-                                is_llm_fixable = False
-                                self._truncate_context_messages(state)
+                            if is_retryable:
+                                delay = core_retry_delay * (2 ** (core_attempts - 1)) * (0.5 + _rand.random() * 0.5)
                                 logger.warning(
-                                    "Context overflow detected, truncated messages | error=%s",
-                                    error_msg[:200],
+                                    "[%s] Core retry %d/%d (delay=%.1fs): %s",
+                                    core_type, core_attempts, max_core_retries,
+                                    delay, exc,
                                 )
-                            else:
-                                is_llm_fixable = (
-                                    "invalid function arguments" in error_lower
-                                    or "invalid params" in error_lower
+                                await asyncio.sleep(delay)
+                                continue
+                            # Non-retryable or exhausted retries
+                            logger.error("Core plugin error: %s", exc)
+                            state[StateKeys.RAW_ERROR] = str(exc)
+                            state[StateKeys.RAW_RESULT] = None
+
+                            if core_type == "llm_call":
+                                error_msg = str(exc)
+                                error_lower = error_msg.lower()
+
+                                is_context_overflow = (
+                                    "context window exceeds" in error_lower
+                                    or "context_length_exceeded" in error_lower
+                                    or "context length" in error_lower
+                                    or ("max_tokens" in error_lower and "exceed" in error_lower)
+                                    or ("token" in error_lower and "limit" in error_lower)
                                 )
 
-                            if is_llm_fixable:
-                                hint = self._build_llm_error_hint(error_msg)
-                                messages = list(state.get("messages", []))
-                                messages.append({
-                                    "role": "user",
-                                    "content": (
-                                        f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
-                                        f"错误信息：{error_msg[:500]}\n\n"
-                                        f"建议：{hint}"
-                                    ),
-                                })
-                                state["messages"] = messages
+                                if is_context_overflow:
+                                    is_llm_fixable = False
+                                    self._truncate_context_messages(state)
+                                    logger.warning(
+                                        "Context overflow detected, truncated messages | error=%s",
+                                        error_msg[:200],
+                                    )
+                                else:
+                                    is_llm_fixable = (
+                                        "invalid function arguments" in error_lower
+                                        or "invalid params" in error_lower
+                                    )
+
+                                if is_llm_fixable:
+                                    hint = self._build_llm_error_hint(error_msg)
+                                    messages = list(state.get("messages", []))
+                                    messages.append({
+                                        "role": "user",
+                                        "content": (
+                                            f"[系统错误] 上一次 LLM 调用失败，请根据以下提示调整你的操作：\n\n"
+                                            f"错误信息：{error_msg[:500]}\n\n"
+                                            f"建议：{hint}"
+                                        ),
+                                    })
+                                    state["messages"] = messages
+                            break  # exit retry loop after error handling
                 else:
                     logger.warning("No core plugin registered for type: %s", core_type)
 

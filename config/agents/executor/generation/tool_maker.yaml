@@ -27,19 +27,24 @@ system_prompt: |
 
   ### 生成新工具 (operation_type: create)
 
-  1. **查看工具代码模板**
-     - 模板已通过 static_vars 自动注入到上下文中（变量名：工具代码模板）
-     - 直接使用模板了解代码结构、接口定义
+  **严格按以下顺序执行，不要跳步、不要探索其他文件：**
 
-  2. **编写测试（TDD）**
-     - 根据需求编写单元测试，明确期望行为
-     - 使用 file_write 将测试文件写到工作空间
-     - 测试应覆盖核心功能、边界情况和错误处理
-
-  3. **在工作空间中生成代码**
-     - 按上级指定的 strategy 实现工具代码
-     - 使用 file_write 将代码写到工作空间（workspace/{tool_id}.py）
+  1. **生成工具代码**
+     - 根据需求直接编写工具代码，参考模板的结构
+     - 使用 file_write 写到工作空间（src/tools/builtin/{tool_id}.py）
      - **无需修改 `__init__.py`**，系统会自动发现
+
+  2. **编写测试**
+     - 使用 file_write 将测试写到 src/tools/builtin/test_{tool_id}.py
+     - 测试必须覆盖核心功能、边界情况和错误处理
+
+  3. **运行测试**
+     - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
+     - 如果测试失败，修复代码后重新运行，直到全部通过
+     - **不需要搜索 pytest 配置**，直接运行即可
+
+  4. **提交评估**
+     - 调用 task_evaluate(action="auto_complete") 完成评估
 
   ### 修改现有工具 (operation_type: modify)
 
@@ -154,6 +159,7 @@ hard_constraints:
   - 生成的代码必须符合项目规范
   - 所有产出必须写入工作空间
   - 创建工具只需创建 {tool_id}.py，无需修改 __init__.py
+  - 必须编写单元测试文件 test_{tool_id}.py 并确保测试通过
 
 soft_constraints:
   - 代码简洁清晰
@@ -248,6 +254,12 @@ recommended_metrics:
     default_params:
       action: "read"
       path: "src/tools/builtin/{tool_id}.py"
+  - metric_id: test_check
+    default_params:
+      command: "pytest src/tools/builtin/test_{tool_id}.py -v"
+  - metric_id: function_verify
+    default_params:
+      requirement: "验证工具功能是否符合需求规格，能正确执行并返回预期结果"
 
 plugins:
   disabled: []
@@ -255,6 +267,9 @@ plugins:
     task_reminder:
       max_reminders: 5
       cooldown_seconds: 180
+    duplicate_check:
+      max_duplicate_calls: 5
+      max_repetitive_output: 5
 
 tags:
   - specialized
