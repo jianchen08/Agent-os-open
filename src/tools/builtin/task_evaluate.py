@@ -632,9 +632,17 @@ class TaskEvaluateTool:
         if task.metadata and "acceptance_criteria" in task.metadata:
             ac = task.metadata["acceptance_criteria"]
             if isinstance(ac, dict):
+                _non_param_keys = {"expected_output", "pass_threshold", "description"}
                 for metric_id, config in ac.items():
-                    if isinstance(config, dict) and "input_params" in config:
-                        params[metric_id] = config["input_params"]
+                    if isinstance(config, dict):
+                        if "input_params" in config:
+                            params[metric_id] = config["input_params"]
+                        else:
+                            # LLM may put params at top level; filter known non-param keys
+                            params[metric_id] = {
+                                k: v for k, v in config.items()
+                                if k not in _non_param_keys
+                            }
 
         task_desc = ""
         if hasattr(task, "description") and task.description:

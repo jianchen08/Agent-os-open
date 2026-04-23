@@ -93,8 +93,8 @@ async def test_step1_service_init():
         bus = EventBus()
         received = []
         bus.subscribe("test.evt", lambda d: received.append(d))
-        asyncio.get_event_loop().run_until_complete(bus.emit("test.evt", {"t": 1}))
-        checks.append(("EventBus", True, f"emit/subscribe OK"))
+        await bus.emit("test.evt", {"t": 1})
+        checks.append(("EventBus", True, f"emit/subscribe OK, received={len(received)}"))
     except Exception as e:
         checks.append(("EventBus", False, str(e)))
 
