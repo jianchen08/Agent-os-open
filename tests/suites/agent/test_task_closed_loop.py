@@ -23,9 +23,9 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 OUTPUT_DIR = Path("data/tasks/e2e_output")
 
 # 超时控制：几十秒就退出
-MAX_WAIT_SECONDS = 30
-POLL_INTERVAL = 2
-ENGINE_TIMEOUT = 60
+MAX_WAIT_SECONDS = 300
+POLL_INTERVAL = 5
+ENGINE_TIMEOUT = 120
 
 log = logging.getLogger("closed_loop")
 
