@@ -277,22 +277,39 @@ class WorkspaceLifecycleManager:
         else:
             # 场景C：已有 .git -> 复制项目文件到 workspace 目录
             self._ensure_git_user(root_path)
-            self._git_add_commit_if_dirty(root_path, f"chore: auto-save before worktree for task {task_id}")
+            self._git_add_commit_if_dirty(
+                root_path,
+                f"chore: auto-save before worktree for task {task_id}")
             branch = f"task/{task_id}"
-            ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
+            ws_dir = Path(
+                task_data.get("workspace_root", ".ai_workspaces")
+            ) / task_id
             ws_dir.mkdir(parents=True, exist_ok=True)
-            _SKIP_COPY = {".git", ".ai_workspaces", "__pycache__",
-                          ".pytest_cache", ".mypy_cache",
-                          "node_modules", ".claude", ".codebuddy",
-                          ".workbuddy", ".trae", ".coverage",
-                          "logs", "data", ".venv", ".env"}
+            # Names to skip at ANY depth during copytree
+            _SKIP_NAMES = frozenset({
+                ".git", ".ai_workspaces", "__pycache__",
+                ".pytest_cache", ".mypy_cache", "node_modules",
+                ".claude", ".codebuddy", ".workbuddy", ".trae",
+                ".coverage", "logs", "data", ".venv", ".env",
+                "dist", ".next", ".nuxt", "build", ".cache",
+                ".tox", ".eggs", "*.egg-info", ".mypy_cache",
+            })
+
+            def _copy_ignore(_dir: str, contents: list[str]) -> list[str]:
+                """shutil.copytree ignore callback."""
+                return [c for c in contents
+                        if c in _SKIP_NAMES or c.startswith(".")]
+
+            _SKIP_TOP = _SKIP_NAMES | {".coverage"}
             for child in root_path.iterdir():
-                if child.name in _SKIP_COPY or child.name.startswith("."):
+                if child.name in _SKIP_TOP or child.name.startswith("."):
                     continue
                 dst = ws_dir / child.name
                 try:
                     if child.is_dir():
-                        shutil.copytree(str(child), str(dst), dirs_exist_ok=True)
+                        shutil.copytree(
+                            str(child), str(dst),
+                            dirs_exist_ok=True, ignore=_copy_ignore)
                     else:
                         shutil.copy2(str(child), str(dst))
                 except OSError:
@@ -409,8 +426,10 @@ class WorkspaceLifecycleManager:
         if commit_hash is None:
             _, h, _ = self._run_git("rev-parse", "HEAD", cwd=ws_path)
             commit_hash = h.strip() if h else None
-        _SKIP_MERGE = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
-                       "node_modules", ".claude", ".codebuddy", ".workbuddy"}
+        _SKIP_MERGE = {".git", ".ai_workspaces", "__pycache__",
+                       ".pytest_cache", "node_modules", ".claude",
+                       ".codebuddy", ".workbuddy", ".trae",
+                       ".mypy_cache", "dist", ".next", "build"}
         merged_files: list[str] = []
         for child in ws_path.iterdir():
             if child.name in _SKIP_MERGE or child.name.startswith("."):
@@ -418,7 +437,8 @@ class WorkspaceLifecycleManager:
             dst = project_root / child.name
             try:
                 if child.is_dir():
-                    shutil.copytree(str(child), str(dst), dirs_exist_ok=True)
+                    shutil.copytree(
+                        str(child), str(dst), dirs_exist_ok=True)
                 else:
                     shutil.copy2(str(child), str(dst))
                 merged_files.append(child.name)

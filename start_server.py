@@ -84,6 +84,7 @@ class PipelineContext:
 
 # 全局管道上下文（延迟初始化）
 _pipeline_ctx: PipelineContext | None = None
+_task_worker_started: bool = False
 
 
 def _init_pipeline_context() -> PipelineContext:
@@ -178,6 +179,38 @@ def _init_pipeline_context() -> PipelineContext:
             checkpoint_manager=checkpoint_mgr,
         )
         logger.info("PipelineEngine 创建完成")
+
+        # 初始化 TaskWorker — 处理 task_submit 提交的任务
+        try:
+            from infrastructure.task_worker import TaskWorker
+            event_bus = services.get("event_bus")
+            task_service = services.get("task_service")
+            if event_bus and task_service:
+                _task_worker = TaskWorker(
+                    task_service=task_service,
+                    plugin_registry=plugin_registry,
+                    input_route_table=pipeline_config.input_route_table,
+                    output_route_table=pipeline_config.output_route_table,
+                    services=services,
+                    event_bus=event_bus,
+                )
+                # 存储为模块全局变量，供 WebSocket handler 启动
+                globals()["_task_worker"] = _task_worker
+
+                def _eval_pipeline_factory():
+                    return PipelineEngine(
+                        input_route_table=pipeline_config.input_route_table,
+                        output_route_table=pipeline_config.output_route_table,
+                        plugin_registry=plugin_registry,
+                        services=services,
+                    )
+
+                sys._agent_os_pipeline_factory = _eval_pipeline_factory
+                logger.info("TaskWorker 初始化完成（将在首次请求时启动）")
+            else:
+                logger.warning("缺少 event_bus 或 task_service，TaskWorker 未初始化")
+        except Exception as exc:
+            logger.warning("TaskWorker 初始化失败: %s", exc)
 
         return PipelineContext(
             engine=engine,
@@ -792,6 +825,18 @@ def create_combined_app() -> FastAPI:
 
                 # ---- 用户输入：启动流式回复 ----
                 if msg_type == "user_input":
+                    # 首次请求时启动 TaskWorker
+                    global _task_worker_started
+                    if not _task_worker_started:
+                        _task_worker_started = True
+                        try:
+                            tw = globals().get("_task_worker")
+                            if tw and hasattr(tw, "start"):
+                                await tw.start()
+                                logger.info("TaskWorker started (web server mode)")
+                        except Exception as exc:
+                            logger.warning("TaskWorker start failed: %s", exc)
+
                     # 提取用户文本内容
                     user_content = (
                         message.get("data", {}).get("content")
