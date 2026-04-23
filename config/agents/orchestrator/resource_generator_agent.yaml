@@ -249,20 +249,8 @@ deliverables:
     required: true
 
 recommended_metrics:
-  - metric_id: file_check
-    default_params:
-      action: "read"
-      path: "{{workspace}}/generated_resource.yaml"
   - metric_id: semantic_check
-    default_params:
-      criteria:
-        required_sections:
-          - "基本信息"
-          - "生成概述"
-          - "生成资源清单"
-          - "验证结果"
-          - "评估结论"
-        reference_template: "config/templates/resource_generation_report_template.md"
+    default_params: {}
 
 version: "1.0.0"
 is_active: true
