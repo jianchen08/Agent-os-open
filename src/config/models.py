@@ -188,8 +188,10 @@ class ModelConfigLoader:
             emb_data = self._load_embedding_data()
             default_id = emb_data.get("default_embedding", "")
             embeddings = emb_data.get("embeddings", {})
-            if default_id and default_id in embeddings:
-                return dict(embeddings[default_id])
+            if default_id:
+                result = self._case_insensitive_lookup(embeddings, default_id)
+                if result is not None:
+                    return result
             return None
 
         # chat / reasoning 类型从 llm.yaml defaults 查找
@@ -197,8 +199,10 @@ class ModelConfigLoader:
         defaults = llm_data.get("defaults", {})
         default_id = defaults.get(model_type, "")
         models = llm_data.get("models", {})
-        if default_id and default_id in models:
-            result = dict(models[default_id])
+        if default_id:
+            result = self._case_insensitive_lookup(models, default_id)
+            if result is not None:
+                return result
             result["_id"] = default_id
             return result
 
