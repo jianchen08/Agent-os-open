@@ -793,6 +793,13 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         val = goal.get(key)
                         if val:
                             tmpl_vars.setdefault(key, str(val))
+                    # Extract agent_id from goal.context (set by L2 agents)
+                    goal_ctx = goal.get("context")
+                    if isinstance(goal_ctx, dict):
+                        for key in ("agent_id", "agent_name", "output_dir"):
+                            val = goal_ctx.get(key)
+                            if val:
+                                tmpl_vars.setdefault(key, str(val))
 
             criteria = {}
             for metric in recommended:
@@ -800,7 +807,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 if not metric_id:
                     continue
                 default_params = metric.get("default_params", {})
-                # Replace template variables like {tool_id} in param values
+                # 如果参数值包含未解析的 {{...}} 模板变量，跳过整个指标。
+                # 模板变量应在提交时被替换为具体值，不应存储模板字符串。
+                has_unresolved = any(
+                    isinstance(v, str) and "{{" in v and "}}" in v
+                    for v in default_params.values()
+                )
+                if has_unresolved:
+                    logger.info(
+                        "[TaskSubmit] 跳过指标 %s: 包含未解析的模板变量 (params=%s)",
+                        metric_id, default_params,
+                    )
+                    continue
+                # 用已知变量替换单花括号模板变量 {var}
                 if tmpl_vars:
                     replaced = {}
                     for k, v in default_params.items():
