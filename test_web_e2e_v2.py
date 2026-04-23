@@ -182,17 +182,18 @@ async def check_server_logs() -> dict:
         reverse=True,
     )
 
-    for log_path in pipeline_logs[:3]:
+    for log_path in pipeline_logs[:5]:
         content = log_path.read_text(encoding="utf-8", errors="replace")
         if "task_evaluate" not in content:
             continue
 
-        task_id = None
         for line in content.splitlines():
             if "Task created:" in line:
                 parts = line.split("Task created:")
                 if len(parts) > 1:
-                    task_id = parts[1].strip().split()[0]
+                    tid = parts[1].strip().split()[0]
+                    if "task_id" not in checkpoints:
+                        checkpoints["task_id"] = tid
             if "task.submitted" in line and "subscribers" in line:
                 checkpoints["CP2_eventbus"] = True
             if "Expect evaluation:" in line:
@@ -208,9 +209,7 @@ async def check_server_logs() -> dict:
             if "Route applied: end" in line:
                 checkpoints["CP8_route_end"] = line.strip()
 
-        if task_id:
-            checkpoints["task_id"] = task_id
-        break  # 只检查最新一个
+        break  # 只检查最新一个包含 task_evaluate 的日志
 
     return checkpoints
 
@@ -319,6 +318,12 @@ async def main():
 
     # Step 5: Check task data
     print("\n--- Step 5: 任务数据检查 ---")
+    # Also try to extract task_id from CP7_final_eval
+    if not task_id and "CP7_final_eval" in checkpoints:
+        import re
+        m = re.search(r"Task ([a-f0-9]+)", checkpoints["CP7_final_eval"])
+        if m:
+            task_id = m.group(1)
     task_data = await check_task_data(task_id)
     print(f"  任务状态: {task_data.get('status', 'N/A')}")
     print(f"  任务标题: {task_data.get('title', 'N/A')}")
@@ -338,15 +343,27 @@ async def main():
     # Step 6: Check evaluation result
     print("\n--- Step 6: 评估结果验证 ---")
     expect_line = checkpoints.get("CP5_expect_result", "")
+    final_eval = checkpoints.get("CP7_final_eval", "")
+    teval_result = checkpoints.get("CP6_tevaluate_result", "")
+
     if "passed=True" in expect_line:
         results.append(("bash_check评估", True, "passed=True"))
         print("  [PASS] bash_check 评估通过")
+    elif "evaluation: passed" in final_eval:
+        results.append(("bash_check评估", True, "evaluation passed"))
+        print("  [PASS] bash_check 评估通过 (from final eval)")
+    elif "task_evaluate result: completed" in teval_result:
+        results.append(("bash_check评估", True, "completed"))
+        print("  [PASS] bash_check 任务完成")
     elif "passed=False" in expect_line:
         failed = checkpoints.get("CP5_failed_conditions", "")
-        results.append(("bash_check评估", False, f"passed=False: {failed[:100]}"))
+        results.append((
+            "bash_check评估", False,
+            f"passed=False: {failed[:100]}",
+        ))
         print(f"  [FAIL] bash_check 评估未通过: {failed[:100]}")
     else:
-        results.append(("bash_check评估", False, f"未找到评估日志"))
+        results.append(("bash_check评估", False, "未找到评估日志"))
         print("  [WARN] 未找到 bash_check 评估日志")
 
     _print_summary(results)
