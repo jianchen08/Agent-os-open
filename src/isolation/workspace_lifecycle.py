@@ -80,12 +80,98 @@ class WorkspaceLifecycleManager:
         self._run_git("config", "user.email", "agent@agent-os.local", cwd=cwd)
         self._run_git("config", "user.name", "Agent OS", cwd=cwd)
 
+    def _remove_index_lock(self, cwd: Path) -> bool:
+        """Remove stale git index.lock if it exists. Returns True if a lock was removed."""
+        lock_path = cwd / ".git" / "index.lock"
+        if lock_path.exists():
+            try:
+                lock_path.unlink()
+                logger.info("[WorkspaceLifecycle] Removed stale index.lock: %s", lock_path)
+                return True
+            except OSError as e:
+                logger.warning("[WorkspaceLifecycle] Failed to remove index.lock %s: %s", lock_path, e)
+                return False
+        return False
+
+    def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
+        """Initialize a new git repo and make the initial commit with all files.
+
+        Handles edge cases: stale index.lock, pre-existing but empty .git directory,
+        and ensures the init -> add -> commit sequence completes atomically.
+
+        Returns:
+            True if the repo was successfully initialized with a commit, False otherwise.
+        """
+        git_dir = cwd / ".git"
+        needs_init = True
+        if git_dir.exists():
+            # .git exists — check if it is a valid repo with at least one commit
+            rc, _, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
+            if rc == 0:
+                # Valid repo with commits — no need to re-init
+                needs_init = False
+            else:
+                # Empty/corrupt .git — remove it and start fresh
+                logger.info("[WorkspaceLifecycle] Existing .git is empty/corrupt, removing: %s", git_dir)
+                try:
+                    shutil.rmtree(str(git_dir))
+                except OSError as e:
+                    logger.warning("[WorkspaceLifecycle] Failed to remove corrupt .git: %s", e)
+                    return False
+
+        if needs_init:
+            rc, _, stderr = self._run_git("init", cwd=cwd)
+            if rc != 0:
+                logger.warning("[WorkspaceLifecycle] git init failed: %s", stderr)
+                return False
+
+        self._ensure_git_user(cwd)
+
+        # Remove any stale index.lock before add/commit operations
+        self._remove_index_lock(cwd)
+
+        rc, _, stderr = self._run_git("add", "-A", cwd=cwd)
+        if rc != 0:
+            # If add failed due to index.lock, remove it and retry once
+            if "index.lock" in (stderr or ""):
+                if self._remove_index_lock(cwd):
+                    rc, _, stderr = self._run_git("add", "-A", cwd=cwd)
+            if rc != 0:
+                logger.warning("[WorkspaceLifecycle] git add -A failed after retry: %s", stderr)
+                return False
+
+        rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd)
+        if rc != 0:
+            if "index.lock" in (stderr or ""):
+                if self._remove_index_lock(cwd):
+                    rc, _, stderr = self._run_git("commit", "-m", message, cwd=cwd)
+            if rc != 0:
+                logger.warning("[WorkspaceLifecycle] git commit failed after retry: %s", stderr)
+                return False
+
+        return True
+
     def _git_add_commit_if_dirty(self, cwd: Path, message: str) -> str | None:
         """暂存并提交变更（如果有），返回 commit hash 或 None"""
-        self._run_git("add", "-A", cwd=cwd)
+        # Remove stale index.lock before any git operations
+        self._remove_index_lock(cwd)
+
+        rc, _, _ = self._run_git("add", "-A", cwd=cwd)
+        if rc != 0:
+            # Retry after removing index.lock
+            self._remove_index_lock(cwd)
+            rc, _, _ = self._run_git("add", "-A", cwd=cwd)
+            if rc != 0:
+                return None
+
         rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
         if rc == 0 and status.strip():
-            self._run_git("commit", "-m", message, cwd=cwd)
+            commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
+            if commit_rc != 0:
+                self._remove_index_lock(cwd)
+                commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
+                if commit_rc != 0:
+                    return None
             _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
             return h.strip() if h else None
         return None
@@ -165,6 +251,12 @@ class WorkspaceLifecycleManager:
                  Agent 在空目录中无法读取项目文件，路径不对齐。
         修复方案: 用 self._base_path（项目根目录）做场景检测，
                  workspace 仅作为 worktree 的目标路径。
+
+        BUG-FIX-fix_20260423_index_lock:
+        问题根因: 场景C中 ws_dir 可能有残留的 .git（无提交）和 index.lock，
+                 导致 git add/commit 失败。
+        修复方案: 使用 _git_init_and_initial_commit 统一处理 init/add/commit，
+                 自动清理 index.lock 和空的 .git 目录。
         """
         scenario, project_root = self._detect_scenario(str(self._base_path), task_data)
         root_path = Path(project_root)
@@ -173,16 +265,12 @@ class WorkspaceLifecycleManager:
         if scenario == "new_project":
             # 场景A：创建新目录并初始化 git
             root_path.mkdir(parents=True, exist_ok=True)
-            self._run_git("init", cwd=root_path)
-            self._ensure_git_user(root_path)
+            self._git_init_and_initial_commit(root_path, "chore: initial project")
             meta = {"mode": "project_root", "path": str(root_path),
                     "branch": "main", "project_root": str(root_path)}
         elif not (root_path / ".git").exists():
             # 场景B：已有项目但无 .git -> 初始化并提交现有文件
-            self._run_git("init", cwd=root_path)
-            self._ensure_git_user(root_path)
-            self._run_git("add", "-A", cwd=root_path)
-            self._run_git("commit", "-m", "chore: initial commit for workspace isolation", cwd=root_path)
+            self._git_init_and_initial_commit(root_path, "chore: initial commit for workspace isolation")
             meta = {"mode": "project_root", "path": str(root_path),
                     "branch": "main", "project_root": str(root_path)}
         else:
@@ -192,11 +280,10 @@ class WorkspaceLifecycleManager:
             branch = f"task/{task_id}"
             ws_dir = Path(task_data.get("workspace_root", ".ai_workspaces")) / task_id
             ws_dir.mkdir(parents=True, exist_ok=True)
-            import shutil
-            _SKIP_DIRS = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
+            _SKIP_COPY = {".git", ".ai_workspaces", "__pycache__", ".pytest_cache",
                           "node_modules", ".claude", ".codebuddy", ".workbuddy"}
             for child in root_path.iterdir():
-                if child.name in _SKIP_DIRS or child.name.startswith("."):
+                if child.name in _SKIP_COPY or child.name.startswith("."):
                     continue
                 dst = ws_dir / child.name
                 try:
@@ -206,10 +293,9 @@ class WorkspaceLifecycleManager:
                         shutil.copy2(str(child), str(dst))
                 except OSError:
                     pass
-            self._run_git("init", cwd=ws_dir)
-            self._ensure_git_user(ws_dir)
-            self._run_git("add", "-A", cwd=ws_dir)
-            self._run_git("commit", "-m", f"workspace snapshot for task {task_id}", cwd=ws_dir)
+            # Initialize ws_dir as a git repo with all copied files
+            if not self._git_init_and_initial_commit(ws_dir, f"workspace snapshot for task {task_id}"):
+                logger.warning("[WorkspaceLifecycle] Failed to initialize workspace git repo: %s", ws_dir)
             meta = {"mode": "project_root", "path": str(ws_dir),
                     "branch": "main", "project_root": str(root_path)}
 

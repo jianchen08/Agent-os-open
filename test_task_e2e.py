@@ -20,6 +20,9 @@ SRC_DIR = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
 os.chdir(str(PROJECT_ROOT))
 
+# Ensure UTF-8 encoding on Windows for print statements
+os.environ["PYTHONIOENCODING"] = "utf-8"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
