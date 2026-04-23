@@ -52,7 +52,9 @@ class EventBus:
         )
         for callback in callbacks:
             try:
-                await callback(data)
+                result = callback(data)
+                if asyncio.iscoroutine(result):
+                    await result
             except Exception as exc:
                 logger.error(
                     "Event callback error for %s: %s", event_type, exc, exc_info=True
