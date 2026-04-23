@@ -311,14 +311,8 @@ async def main():
             print(f"    {k}: {v}")
 
     task_id = checkpoints.get("task_id")
-    if task_id:
-        results.append(("任务ID获取", True, task_id))
-    else:
-        results.append(("任务ID获取", False, "未找到"))
 
-    # Step 5: Check task data
-    print("\n--- Step 5: 任务数据检查 ---")
-    # Also try to extract task_id from CP7_final_eval or CP4
+    # Fallback: extract task_id from evaluation log lines
     if not task_id:
         import re
         for key in ("CP7_final_eval", "CP4_tool_eval"):
@@ -327,6 +321,14 @@ async def main():
             if m:
                 task_id = m.group(1)
                 break
+
+    if task_id:
+        results.append(("任务ID获取", True, task_id))
+    else:
+        results.append(("任务ID获取", False, "未找到"))
+
+    # Step 5: Check task data
+    print("\n--- Step 5: 任务数据检查 ---")
     task_data = await check_task_data(task_id)
     print(f"  任务状态: {task_data.get('status', 'N/A')}")
     print(f"  任务标题: {task_data.get('title', 'N/A')}")
