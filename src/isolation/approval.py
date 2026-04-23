@@ -16,8 +16,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from src.isolation.policy import ToolIsolationPolicy
-from src.isolation.types import IsolationLevel
+from isolation.policy import ToolIsolationPolicy
+from isolation.types import IsolationLevel
 
 if TYPE_CHECKING:
     from src.tools.types import Tool

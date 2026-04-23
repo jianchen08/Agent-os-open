@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from src.isolation.types import IsolationLevel
+from isolation.types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 

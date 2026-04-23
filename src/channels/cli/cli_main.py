@@ -292,7 +292,7 @@ class CLIApplication:
             # 初始化隔离执行器并注入到 ToolCore，使工具能够在 Docker 容器中执行
             # 之前 IsolationExecutor 从未被实例化，导致 IsolationGuard 的容器隔离决策无法生效
             try:
-                from src.isolation.executor import IsolationExecutor
+                from isolation.executor import IsolationExecutor
                 isolation_executor = IsolationExecutor()
                 tool_core.set_isolation_executor(isolation_executor)
                 logger.info("IsolationExecutor 已注入到 ToolCore")

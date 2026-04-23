@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.isolation.decider import IsolationDecider
-from src.isolation.providers.base import IsolationProvider
-from src.isolation.providers.docker_provider import DockerProvider
-from src.isolation.providers.host_provider import HostProvider
-from src.isolation.types import (
+from isolation.decider import IsolationDecider
+from isolation.providers.base import IsolationProvider
+from isolation.providers.docker_provider import DockerProvider
+from isolation.providers.host_provider import HostProvider
+from isolation.types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

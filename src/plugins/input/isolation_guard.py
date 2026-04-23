@@ -15,8 +15,8 @@ from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
-from src.isolation.decider import IsolationDecider
-from src.isolation.policy import IsolationPolicyLoader
+from isolation.decider import IsolationDecider
+from isolation.policy import IsolationPolicyLoader
 
 logger = logging.getLogger(__name__)
 

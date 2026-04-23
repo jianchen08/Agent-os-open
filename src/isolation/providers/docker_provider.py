@@ -12,8 +12,8 @@ import shutil
 from datetime import UTC, datetime
 from typing import Any
 
-from src.isolation.providers.base import IsolationProvider
-from src.isolation.types import (
+from isolation.providers.base import IsolationProvider
+from isolation.types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

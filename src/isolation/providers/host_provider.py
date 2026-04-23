@@ -14,9 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.isolation.checkpoint import CheckpointManager
-from src.isolation.providers.base import IsolationProvider
-from src.isolation.types import (
+from isolation.checkpoint import CheckpointManager
+from isolation.providers.base import IsolationProvider
+from isolation.types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

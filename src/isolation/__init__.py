@@ -6,11 +6,11 @@
 - HOST: 直接执行（宿主机）
 """
 
-from src.isolation.decider import IsolationDecider, IsolationError
-from src.isolation.executor import IsolationExecutor
-from src.isolation.manager import IsolationManager, get_isolation_manager
-from src.isolation.permission_checker import PermissionChecker, check_write_permission
-from src.isolation.permission_policy import (
+from isolation.decider import IsolationDecider, IsolationError
+from isolation.executor import IsolationExecutor
+from isolation.manager import IsolationManager, get_isolation_manager
+from isolation.permission_checker import PermissionChecker, check_write_permission
+from isolation.permission_policy import (
     PermissionPolicyManager,
     PermissionPolicyType,
     PermissionScope,
@@ -18,10 +18,10 @@ from src.isolation.permission_policy import (
     WorkspacePermissionPolicy,
     WritePermission,
 )
-from src.isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
-from src.isolation.providers.base import IsolationProvider
-from src.isolation.workspace import get_workspace_config_root, resolve_workspace, resolve_workspace_chain
-from src.isolation.types import (
+from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
+from isolation.providers.base import IsolationProvider
+from isolation.workspace import get_workspace_config_root, resolve_workspace, resolve_workspace_chain
+from isolation.types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

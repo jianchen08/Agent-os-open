@@ -11,8 +11,8 @@
 import logging
 from dataclasses import replace
 
-from src.isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
-from src.isolation.types import IsolationLevel
+from isolation.policy import IsolationPolicyLoader, ToolIsolationPolicy
+from isolation.types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 

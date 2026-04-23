@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from src.isolation.providers.docker_provider import DockerProvider
-from src.isolation.types import (
+from isolation.providers.docker_provider import DockerProvider
+from isolation.types import (
     IsolationContext,
     IsolationLevel,
     OperationType,

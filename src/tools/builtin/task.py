@@ -1452,7 +1452,7 @@ class TaskTool:
         }
 
         try:
-            from src.isolation.manager import get_isolation_manager
+            from isolation.manager import get_isolation_manager
 
             manager = await get_isolation_manager()
             destroyed = await manager.destroy_environment(task_id)

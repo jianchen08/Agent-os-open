@@ -22,7 +22,7 @@ from pipeline.types import ErrorPolicy, StateKeys
 from tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from src.isolation.executor import IsolationExecutor
+    from isolation.executor import IsolationExecutor
 
 logger = logging.getLogger(__name__)
 

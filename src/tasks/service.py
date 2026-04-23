@@ -32,7 +32,7 @@ class SimpleStateMachine:
     TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
         TaskStatus.PENDING: [TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.COMPLETED, TaskStatus.FAILED],
         TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EVALUATING, TaskStatus.PAUSED],
-        TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED],
+        TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.RUNNING],
         TaskStatus.FAILED: [TaskStatus.PENDING],
         TaskStatus.COMPLETED: [],
         TaskStatus.PAUSED: [TaskStatus.PENDING, TaskStatus.RUNNING],

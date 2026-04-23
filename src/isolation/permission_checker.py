@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.isolation.permission_policy import (
+from isolation.permission_policy import (
     PermissionScope,
     WorkspacePermissionPolicy,
 )
@@ -239,7 +239,7 @@ def check_write_permission(
 
     # 如果传入的是字典，转换为策略对象
     if isinstance(policy, dict):
-        from src.isolation.permission_policy import (
+        from isolation.permission_policy import (
             PermissionPolicyType,
             ReadPermission,
             WritePermission,

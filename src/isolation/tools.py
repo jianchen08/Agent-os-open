@@ -7,8 +7,8 @@
 import logging
 from typing import Any
 
-from src.isolation.manager import get_isolation_manager
-from src.isolation.types import IsolationLevel, OperationType, TaskType
+from isolation.manager import get_isolation_manager
+from isolation.types import IsolationLevel, OperationType, TaskType
 
 logger = logging.getLogger(__name__)
 
