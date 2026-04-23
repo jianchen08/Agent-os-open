@@ -21,6 +21,17 @@ import copy
 import logging
 import uuid as _uuid
 from pathlib import Path
+
+
+def _safe_deepcopy(state: dict) -> dict:
+    """Deep-copy state, skipping keys that hold non-deepcopyable values."""
+    safe = {}
+    for k, v in state.items():
+        try:
+            safe[k] = copy.deepcopy(v)
+        except (TypeError, AttributeError):
+            pass
+    return safe
 from typing import TYPE_CHECKING, Any
 
 from pipeline.chain import PluginChain
@@ -497,7 +508,7 @@ class PipelineEngine:
 
                 # 7. target == "wait": 挂起并保存 state 快照
                 if target == "wait":
-                    self._suspended_state = copy.deepcopy(state)
+                    self._suspended_state = _safe_deepcopy(state)
                     logger.info("Pipeline suspended by input route (target=wait), state saved")
                     if self._checkpoint_manager is not None:
                         try:
@@ -779,7 +790,7 @@ class PipelineEngine:
             return False
 
         elif route_type == "wait":
-            self._suspended_state = copy.deepcopy(state)
+            self._suspended_state = _safe_deepcopy(state)
             state[StateKeys.ENDED] = False
             logger.info("Route applied: wait, pipeline suspended")
             return True
