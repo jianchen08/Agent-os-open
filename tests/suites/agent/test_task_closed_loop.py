@@ -192,18 +192,25 @@ async def main() -> bool:
         checks["task_exists"] = False
         print("  [FAIL] 任务不存在")
 
-    # 检查产出文件
-    if output_path.exists():
-        content = output_path.read_text(encoding="utf-8")
+    # 检查产出文件（子 agent 在 workspace 中执行，文件在 workspace 目录下）
+    ws_output_path = Path(f".ai_workspaces/{task_id}") / output_path if task_id else output_path
+    found_path = None
+    for candidate in [output_path, ws_output_path]:
+        if candidate.exists():
+            found_path = candidate
+            break
+
+    if found_path:
+        content = found_path.read_text(encoding="utf-8")
         has_hello = "Hello from E2E" in content
         checks["output_exists"] = True
         checks["output_correct"] = has_hello
-        print(f"  产出文件: 存在 ({len(content)} chars)")
+        print(f"  产出文件: {found_path} ({len(content)} chars)")
         print(f"  内容: {content[:100]}")
         print(f"  内容验证: {'PASS' if has_hello else 'FAIL'}")
     else:
         checks["output_exists"] = False
-        print(f"  产出文件: 不存在 ({output_path})")
+        print(f"  产出文件: 不存在 ({output_path} 或 {ws_output_path})")
 
     # ── 7. 检查执行记录和日志 ──
     print(f"\n[6/6] 检查执行记录和日志...")
