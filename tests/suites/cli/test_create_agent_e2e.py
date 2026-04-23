@@ -42,6 +42,7 @@ TEST_BACKUP_DIR = Path(__file__).parent / "output" / "test_create_agent_e2e"
 NEW_AGENT_ID = "e2e_time_agent"
 NEW_AGENT_SEARCH_PATTERNS = [
     PROJECT_ROOT / "config" / "agents" / "executor" / "test" / f"{NEW_AGENT_ID}.yaml",
+    PROJECT_ROOT / "config" / "agents" / "executor" / "assistant" / f"{NEW_AGENT_ID}.yaml",
     PROJECT_ROOT / "config" / "agents" / f"{NEW_AGENT_ID}.yaml",
 ]
 
@@ -55,7 +56,7 @@ TASK_SUBMIT_MSG = (
 )
 
 from channels.cli.cli_main import setup_logging
-setup_logging(debug=True)
+setup_logging(debug=False)
 
 pytestmark = pytest.mark.integration
 
@@ -209,6 +210,11 @@ async def test_create_agent_e2e() -> None:
             if p.exists():
                 p.unlink()
                 print(f"  [清理] 删除旧产出: {p}", flush=True)
+        # 也搜索 worktree 中残留的旧产出
+        for yaml_file in (PROJECT_ROOT / "config" / "agents").rglob(f"{NEW_AGENT_ID}.yaml"):
+            if yaml_file.exists():
+                yaml_file.unlink()
+                print(f"  [清理] 删除旧产出: {yaml_file}", flush=True)
 
         # ================================================================
         # Phase 2: SUBMIT — 通过 engine.run() 提交自然语言请求
@@ -271,13 +277,11 @@ async def test_create_agent_e2e() -> None:
         from tasks.types import TaskStatus
 
         poll_elapsed = 0
-        agent_found = False
+        terminal_statuses = {"completed", "failed", "cancelled"}
 
         while poll_elapsed < TOTAL_TIMEOUT:
-            print(f"  [DEBUG] 开始 sleep(30) | elapsed={time.time() - start_time:.1f}s", flush=True)
             await asyncio.sleep(MONITOR_INTERVAL)
             poll_elapsed += MONITOR_INTERVAL
-            print(f"  [DEBUG] sleep 结束 | elapsed={time.time() - start_time:.1f}s", flush=True)
 
             print(f"\n  --- [{poll_elapsed:>3d}s] 轮询 ---", flush=True)
 
@@ -285,7 +289,6 @@ async def test_create_agent_e2e() -> None:
             agent_path = _find_agent_yaml()
             if agent_path:
                 print(f"    产出文件: {agent_path}", flush=True)
-                agent_found = True
             else:
                 print(f"    产出文件: 尚未创建", flush=True)
 
@@ -303,6 +306,7 @@ async def test_create_agent_e2e() -> None:
                                 pass
 
             # 打印各任务状态
+            running_tasks = []
             for td in all_tasks:
                 tid = td.get("id", "?")
                 title = td.get("title", "?")[:40]
@@ -310,28 +314,31 @@ async def test_create_agent_e2e() -> None:
                 prid = td.get("pipeline_run_id", "")
                 target = td.get("metadata", {}).get("target_id", "")
                 print(f"    [{tid[:8]}] {status:12s} | {title} | target={target}", flush=True)
+                if status not in terminal_statuses:
+                    running_tasks.append(td)
                 if prid:
                     pdata = _read_pipeline_record(prid)
                     if pdata:
                         _print_pipeline_progress(pdata)
 
-            # 仅在产出文件已创建时提前退出
-            terminal_statuses = {"completed", "failed", "cancelled"}
-            running_tasks = [t for t in all_tasks if t.get("status") not in terminal_statuses]
-            if agent_found:
-                print(f"\n  产出已创建 ({poll_elapsed}s)", flush=True)
-                if not agent_path.is_relative_to(PROJECT_ROOT / "config"):
+            # 所有任务到达终态时退出
+            if all_tasks and not running_tasks:
+                print(f"\n  所有任务已达终态 ({poll_elapsed}s)", flush=True)
+                # 等待 merge 操作完成
+                if agent_path and not agent_path.is_relative_to(PROJECT_ROOT / "config"):
                     print("  等待 merge 操作完成...", flush=True)
                     for _ in range(6):
                         await asyncio.sleep(10)
-                        merged = any(
-                            p.exists()
-                            for p in NEW_AGENT_SEARCH_PATTERNS
-                        )
+                        merged = any(p.exists() for p in NEW_AGENT_SEARCH_PATTERNS)
                         if merged:
                             print("  merge 完成！", flush=True)
                             break
                 break
+
+            # 如果有任务在运行但超时，打印警告
+            if running_tasks:
+                running_ids = [t.get("id", "?")[:8] for t in running_tasks]
+                print(f"    运行中任务: {running_ids}", flush=True)
 
         # ================================================================
         # Phase 4: VERIFICATION — 验证产出
@@ -396,6 +403,27 @@ async def test_create_agent_e2e() -> None:
         )
         print(f"  [V7 PASS] AgentRegistry 加载成功", flush=True)
         print(f"    config_id={got.config_id}, name={got.display_name}, level={got.level}", flush=True)
+
+        # V7b: 执行记录完整 — 至少一个管道有 summary 和 records
+        all_pipelines = _find_all_pipeline_records()
+        pipelines_with_summary = [
+            (rid, data) for rid, data in all_pipelines.items()
+            if data.get("summary") and data.get("records")
+        ]
+        assert pipelines_with_summary, (
+            "V7b FAIL: 无管道执行记录包含 summary+records "
+            f"(共 {len(all_pipelines)} 个管道文件)"
+        )
+        for rid, data in pipelines_with_summary:
+            summary = data["summary"]
+            records = data["records"]
+            print(
+                f"  [V7b PASS] 管道 {rid[:12]}: "
+                f"status={summary.get('status', '?')} "
+                f"iterations={summary.get('total_iterations', 0)} "
+                f"records={len(records)}",
+                flush=True,
+            )
 
         # ================================================================
         # Phase 4b: WORKTREE 闭环验证 — 场景 A（改造自身项目，有 git）

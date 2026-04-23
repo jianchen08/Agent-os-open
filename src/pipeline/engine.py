@@ -621,7 +621,7 @@ class PipelineEngine:
                         logger.debug("No route signals after tool execution, defaulting to next_llm")
                         state[StateKeys.CORE_TYPE] = "llm_call"
                     else:
-                        logger.warning(
+                        logger.debug(
                             "No route signals after LLM response (iter=%d), "
                             "ending pipeline. output_plugins_count=%d, "
                             "raw_tool_calls=%d, ended=%s",
