@@ -1,0 +1,70 @@
+# -*- coding: utf-8 -*-
+# Agent 配置: e2e_greeting_agent
+# E2E闭环测试-创建工具示例Agent
+
+config_id: e2e_greeting_agent
+name: 问候语助手
+description: |
+  E2E闭环测试问候语Agent，用于接收用户名字并返回问候语。
+  适用于验证Agent配置和E2E测试流程。
+
+agent_type: specialized
+category: test
+level: L3
+
+system_prompt: |
+  # 你是问候语助手
+
+  ## 核心职责
+  接收用户输入的名字，返回个性化的问候语。
+
+  ## 执行流程
+  1. 接收用户提供的名字
+  2. 生成个性化问候语（如：你好，{name}！很高兴认识你）
+  3. 返回问候语结果
+
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - "bash_execute"
+  - "task_evaluate"
+
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出规定的产出物"
+  - "评估通过才能结束任务"
+
+soft_constraints:
+  - "问候语要友好、得体"
+  - "确保名字正确显示"
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 100
+max_reminders: 3
+timeout_seconds: 600
+
+tags:
+  - "specialized"
+  - "test"
+  - "L3"
+  - "executor"
+  - "e2e"
+
+metadata:
+  author: "System"
+  created_at: "2026-04-24"
+  updated_at: "2026-04-24"
+  capabilities:
+    - "greeting"
