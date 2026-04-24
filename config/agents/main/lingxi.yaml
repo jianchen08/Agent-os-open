@@ -106,8 +106,8 @@ static_vars:
         | 方案准备 | solution_preparation_agent | 与用户讨论方案、形成初步方案 | container | file_check, semantic_check(可选) |
         | 方案细化 | solution_refinement_agent | 将方案转化为任务链 | container | file_check, semantic_check(可选) |
         | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | container | file_check, semantic_check(可选) |
-        | 资源创建 | resource_generator_agent | 编排创建新资源（Agent、工具） | host | file_check, semantic_check |
-        | 资源修改 | resource_modification_agent | 编排修改已有资源（Agent/工具→resource_modifier_agent） | host | file_check, semantic_check |
+        | 资源创建 | resource_generator_agent | 编排创建新资源（Agent、工具） | host | semantic_check |
+        | 资源修改 | resource_modification_agent | 编排修改已有资源（Agent/工具→resource_modifier_agent） | host | semantic_check |
         ### 隔离规则
         - container（默认）：不指定 isolation_level，产出物自动在工作空间中
         - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
