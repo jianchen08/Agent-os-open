@@ -17,6 +17,7 @@ import hashlib
 import logging
 import os
 import platform
+import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,21 +118,28 @@ class ProcessManager:
 
         # 确定平台特定的执行方式
         is_windows = platform.system() == "Windows"
+        use_bash = is_windows and shutil.which("bash")
 
-        if is_windows:
-            full_command = f'cmd /c "{command}"'
+        if use_bash:
+            # Windows + Git Bash: 直接用 bash -c 执行，支持 heredoc 等 Unix 语法
+            process = await asyncio.create_subprocess_exec(
+                "bash", "-c", command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                env={**os.environ, **(env or {})} if env else None,
+            )
         else:
-            full_command = command
-
-        # 创建进程
-        process = await asyncio.create_subprocess_shell(
-            full_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.PIPE,
-            cwd=working_dir,
-            env={**os.environ, **(env or {})} if env else None,
-        )
+            full_command = f'cmd /c "{command}"' if is_windows else command
+            process = await asyncio.create_subprocess_shell(
+                full_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                env={**os.environ, **(env or {})} if env else None,
+            )
 
         pid = process.pid
 

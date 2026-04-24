@@ -279,6 +279,9 @@ class OutputRouteTable:
         匹配规则：条目的 route_type 与某个信号的 route_type 相同，
         且条目的 condition 对当前 state 求值为 True。
 
+        end 信号具有最高优先级：当 end 和 next_llm 同时存在时，
+        end 始终胜出，避免关键结束信号被低优先级信号覆盖。
+
         Args:
             signals: 输出插件产生的路由信号列表
             state: 管道当前状态字典
@@ -288,10 +291,25 @@ class OutputRouteTable:
         """
         signal_types = {s.route_type for s in signals}
 
+        # end 信号最高优先：任何插件发出 end 时立即生效，
+        # 防止 next_llm 等继续信号覆盖终止意图
+        if "end" in signal_types:
+            for entry in self.entries:
+                if entry.route_type == "end":
+                    if _eval_condition(entry.condition, state):
+                        matched_signal = next(
+                            s for s in signals if s.route_type == "end"
+                        )
+                        return RouteSignal(
+                            route_type="end",
+                            target=entry.target_core,
+                            reason=matched_signal.reason or "matched route entry: end",
+                            payload=matched_signal.payload,
+                        )
+
         for entry in self.entries:
             if entry.route_type in signal_types:
                 if _eval_condition(entry.condition, state):
-                    # 找到匹配的信号
                     matched_signal = next(
                         s for s in signals if s.route_type == entry.route_type
                     )

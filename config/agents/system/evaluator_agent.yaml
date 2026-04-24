@@ -210,6 +210,7 @@ system_prompt: |
 
 tool_ids:
   - file_read
+  - file_write
   - bash_execute
   - enhanced_search
   - evaluate

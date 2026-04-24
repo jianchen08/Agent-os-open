@@ -7,6 +7,8 @@
 """
 
 import json
+import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +114,34 @@ class FileReadTool(WorkspaceAwareMixin):
 
     def _resolve_path(self, path_str: str) -> Path:
         """解析路径（路径边界检查由中间层统一控制）。
+
+        当 Agent 在 path 中重复包含了 workspace 前缀时，
+        自动去重避免路径嵌套（如 base/a/ + base/a/f → base/a/f）。
+
+        BUG-FIX-fix_20260419_path_dedup:
+        问题根因: 当 path 以 workspace 前缀开头时，直接用 Path(path) 仍是相对路径，
+                 .resolve() 会拼接到 CWD 下导致双重嵌套。
+        修复方案: 检测到前缀重复时，去掉重复前缀后重新拼接。
+
+        BUG-FIX-fix_20260420_workspace_fallback:
+        问题根因: workspace 模式下所有相对路径都拼接到 workspace 目录下，
+                 导致 agent 无法读取项目自身的文件（如 config/templates/xxx）。
+        修复方案: 如果 workspace 下找不到文件/目录，从 workspace 绝对路径中
+                 提取项目根目录，尝试在项目根下查找。
+
+        BUG-FIX-fix_20260424_unix_path_on_windows:
+        问题根因: Git Bash 生成的路径如 /d/Jianguoyun/... 在 Windows 上
+                 不被识别为绝对路径，导致被错误拼接到 base_path 下。
+        修复方案: 在路径解析前，先检测并转换 Git Bash 风格的绝对路径。
+        """
+        # Windows: 转换 Git Bash 风格绝对路径 (/d/path → D:\path)
+        if platform.system() == "Windows":
+            normalized = path_str.replace("\\", "/")
+            drive_match = re.match(r'^/([a-zA-Z])/(.+)', normalized)
+            if drive_match:
+                drive_letter = drive_match.group(1).upper()
+                rest_path = drive_match.group(2)
+                return Path(f"{drive_letter}:\\{rest_path}").resolve()
 
         当 Agent 在 path 中重复包含了 workspace 前缀时，
         自动去重避免路径嵌套（如 base/a/ + base/a/f → base/a/f）。

@@ -292,6 +292,15 @@ class EvaluationEngine:
             elif "passed" in output and isinstance(output["passed"], bool):
                 result.score = 100.0 if output["passed"] else 0.0
 
+            # 记录评估器输入/输出
+            result.evaluator_input = merged_params
+            result.evaluator_output = output
+
+            # Agent 类型评估器返回的子管道 ID
+            _pid = output.get("pipeline_run_id")
+            if _pid:
+                result.pipeline_run_id = str(_pid)
+
             return result
 
         except Exception as e:
@@ -303,6 +312,7 @@ class EvaluationEngine:
                 passed=False,
                 message=f"评估执行异常: {e}",
                 error=str(e),
+                evaluator_input=input_params,
             )
 
     # ── 默认评估器实现（Mock） ────────────────────────────
@@ -510,36 +520,59 @@ class EvaluationEngine:
             else:
                 pipeline_state = asyncio.run(_run_eval_pipeline())
 
+            # 提取子管道 ID
+            _pipeline_run_id = pipeline_state.get(
+                "pipeline_id", ""
+            )
+
             raw_output = pipeline_state.get("raw_result", "")
-            final_output = pipeline_state.get("final_output", raw_output)
+            final_output = pipeline_state.get(
+                "final_output", raw_output
+            )
             output_text = str(final_output) if final_output else ""
 
             eval_result = self._parse_evaluation_result(output_text)
             if eval_result is not None:
                 logger.info(
                     "Agent evaluation completed: %s -> passed=%s, score=%s",
-                    metric_def.id, eval_result.get("passed"), eval_result.get("score"),
+                    metric_def.id,
+                    eval_result.get("passed"),
+                    eval_result.get("score"),
                 )
+                eval_result["pipeline_run_id"] = _pipeline_run_id
                 return eval_result
 
-            stop_reason = pipeline_state.get("router.stop_reason", "")
-            max_reminders = pipeline_state.get("evaluate_reminder_count", 0)
+            stop_reason = pipeline_state.get(
+                "router.stop_reason", ""
+            )
+            max_reminders = pipeline_state.get(
+                "evaluate_reminder_count", 0
+            )
             if "timeout" in stop_reason:
                 return {
                     "passed": False,
                     "score": 0.0,
                     "feedback": f"评估管道超时: {stop_reason}",
+                    "pipeline_run_id": _pipeline_run_id,
                 }
             if max_reminders > 0:
                 return {
                     "passed": False,
                     "score": 0.0,
-                    "feedback": f"evaluator_agent 经 {max_reminders} 次提醒后仍未输出有效评估结论",
+                    "feedback": (
+                        f"evaluator_agent 经 {max_reminders}"
+                        " 次提醒后仍未输出有效评估结论"
+                    ),
+                    "pipeline_run_id": _pipeline_run_id,
                 }
             return {
                 "passed": False,
                 "score": 0.0,
-                "feedback": "evaluator_agent 未能输出有效的 evaluation_result JSON",
+                "feedback": (
+                    "evaluator_agent 未能输出有效的"
+                    " evaluation_result JSON"
+                ),
+                "pipeline_run_id": _pipeline_run_id,
             }
 
         except Exception as e:

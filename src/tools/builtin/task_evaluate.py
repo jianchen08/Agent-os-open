@@ -362,6 +362,10 @@ class TaskEvaluateTool:
         if task.metadata is None:
             task.metadata = {}
         task.metadata["eval_retry_count"] = retry_counts
+
+        # 追加本次评估记录到历史（保留所有评估尝试）
+        self._append_eval_history(task, eval_result)
+
         self._save_task(task_service, task)
 
         if not has_failure:
@@ -487,6 +491,47 @@ class TaskEvaluateTool:
             task_service.save_task(task)
         except Exception as e:
             logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
+
+    @staticmethod
+    def _append_eval_history(task: Any, eval_result: Any) -> None:
+        """将本次评估结果追加到 task.metadata 的 evaluation_history。
+
+        每次评估（无论通过/失败/重试）都会被记录，包含时间戳、
+        评估指标详情（含评估器输入/输出和 Agent 管道 ID）。
+
+        Args:
+            task: TaskModel 实例
+            eval_result: EvaluationResult 实例
+        """
+        from datetime import datetime
+
+        metrics = []
+        for r in eval_result.results:
+            m: dict[str, Any] = {
+                "metric_id": r.metric_id,
+                "passed": r.passed,
+                "score": r.score,
+                "message": r.message,
+                "error": r.error,
+            }
+            if hasattr(r, "evaluator_input") and r.evaluator_input:
+                m["evaluator_input"] = r.evaluator_input
+            if hasattr(r, "evaluator_output") and r.evaluator_output:
+                m["evaluator_output"] = r.evaluator_output
+            if hasattr(r, "pipeline_run_id") and r.pipeline_run_id:
+                m["pipeline_run_id"] = r.pipeline_run_id
+            metrics.append(m)
+
+        history = task.metadata.get("evaluation_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "timestamp": datetime.now().isoformat(),
+            "passed": eval_result.overall_passed,
+            "summary": getattr(eval_result, "summary", ""),
+            "metrics": metrics,
+        })
+        task.metadata["evaluation_history"] = history
 
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
@@ -778,26 +823,36 @@ class TaskEvaluateTool:
     def _build_result_data(self, result: Any) -> dict[str, Any]:
         """将评估结果构建为工具返回数据。
 
+        包含评估器输入/输出和 Agent 评估的管道 ID，
+        便于回溯评估过程和追踪子管道执行记录。
+
         Args:
             result: EvaluationResult 实例
 
         Returns:
             可序列化的结果字典
         """
+        metrics = []
+        for r in result.results:
+            m: dict[str, Any] = {
+                "metric_id": r.metric_id,
+                "passed": r.passed,
+                "score": r.score,
+                "message": r.message,
+                "error": r.error,
+            }
+            if r.evaluator_input:
+                m["evaluator_input"] = r.evaluator_input
+            if r.evaluator_output:
+                m["evaluator_output"] = r.evaluator_output
+            if r.pipeline_run_id:
+                m["pipeline_run_id"] = r.pipeline_run_id
+            metrics.append(m)
         return {
             "task_id": result.task_id,
             "overall_passed": result.overall_passed,
             "summary": result.summary,
-            "metrics": [
-                {
-                    "metric_id": r.metric_id,
-                    "passed": r.passed,
-                    "score": r.score,
-                    "message": r.message,
-                    "error": r.error,
-                }
-                for r in result.results
-            ],
+            "metrics": metrics,
         }
 
     @staticmethod

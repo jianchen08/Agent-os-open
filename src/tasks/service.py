@@ -169,6 +169,10 @@ class TaskService:
     ) -> TaskModel:
         """完成评估（evaluating → completed / failed）。
 
+        评估结果会同时写入 task.result（最新一次）和追加到
+        task.metadata["evaluation_history"]（保留全部历史），
+        确保多次评估的每次结果都可追溯。
+
         Args:
             task_id: 任务 ID
             passed: 评估是否通过
@@ -187,6 +191,18 @@ class TaskService:
         task.completed_at = datetime.now().isoformat()
         if result is not None:
             task.result = result
+            # 追加到评估历史（保留所有评估记录）
+            if task.metadata is None:
+                task.metadata = {}
+            history = task.metadata.get("evaluation_history", [])
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "timestamp": datetime.now().isoformat(),
+                "passed": passed,
+                "data": result,
+            })
+            task.metadata["evaluation_history"] = history
         self._storage.save(task)
         logger.info(
             "Task %s evaluation: %s", task_id,

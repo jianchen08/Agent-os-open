@@ -113,6 +113,9 @@ class MetricResult:
         message: 结果消息
         details: 详细评估数据
         error: 评估过程中的错误信息
+        evaluator_input: 评估器接收的输入参数（合并默认配置后的完整参数）
+        evaluator_output: 评估器的原始输出（评估器函数的返回值）
+        pipeline_run_id: Agent 评估时子管道的运行 ID，仅 agent 类型有值
     """
 
     metric_id: str
@@ -121,6 +124,9 @@ class MetricResult:
     message: str = ""
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    evaluator_input: dict[str, Any] = field(default_factory=dict)
+    evaluator_output: dict[str, Any] = field(default_factory=dict)
+    pipeline_run_id: str | None = None
 
 
 @dataclass

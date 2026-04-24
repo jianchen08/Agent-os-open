@@ -121,7 +121,12 @@ class EvaluationExecutor:
                         {
                             "metric_id": r.metric_id,
                             "passed": r.passed,
+                            "score": r.score,
                             "message": r.message,
+                            "error": r.error,
+                            "evaluator_input": r.evaluator_input,
+                            "evaluator_output": r.evaluator_output,
+                            "pipeline_run_id": r.pipeline_run_id,
                         }
                         for r in result.results
                     ],
