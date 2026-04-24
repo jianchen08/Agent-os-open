@@ -143,20 +143,6 @@ class FileReadTool(WorkspaceAwareMixin):
                 rest_path = drive_match.group(2)
                 return Path(f"{drive_letter}:\\{rest_path}").resolve()
 
-        当 Agent 在 path 中重复包含了 workspace 前缀时，
-        自动去重避免路径嵌套（如 base/a/ + base/a/f → base/a/f）。
-
-        BUG-FIX-fix_20260419_path_dedup:
-        问题根因: 当 path 以 workspace 前缀开头时，直接用 Path(path) 仍是相对路径，
-                 .resolve() 会拼接到 CWD 下导致双重嵌套。
-        修复方案: 检测到前缀重复时，去掉重复前缀后重新拼接。
-
-        BUG-FIX-fix_20260420_workspace_fallback:
-        问题根因: workspace 模式下所有相对路径都拼接到 workspace 目录下，
-                 导致 agent 无法读取项目自身的文件（如 config/templates/xxx）。
-        修复方案: 如果 workspace 下找不到文件/目录，从 workspace 绝对路径中
-                 提取项目根目录，尝试在项目根下查找。
-        """
         path = Path(path_str)
         if not path.is_absolute():
             path_str_normalized = str(path).replace("\\", "/")
