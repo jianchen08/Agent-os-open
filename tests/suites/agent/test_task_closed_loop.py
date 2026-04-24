@@ -20,9 +20,9 @@ from typing import Any
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-# 超时控制：几十秒就退出
-MAX_WAIT_SECONDS = 300
-POLL_INTERVAL = 5
+# 超时控制：资源生成流程涉及多级 Agent，需要更长等待
+MAX_WAIT_SECONDS = 600
+POLL_INTERVAL = 10
 ENGINE_TIMEOUT = 120
 
 log = logging.getLogger("closed_loop")
@@ -66,28 +66,20 @@ async def main() -> bool:
         print("  [FAIL] 无 task_service")
         return False
 
-    # ── 3. 发消息让 Agent 提交任务（创建工具） ──
-    tool_path = Path("config/agents/executor/test/e2e_greeting_agent.yaml")
-    if tool_path.exists():
-        tool_path.unlink()
+    # ── 3. 发消息让 Agent 创建工具 ──
+    tool_file = "e2e_greeting"
+    tool_py_path = Path(f"src/tools/builtin/{tool_file}.py")
+    tool_test_path = Path(f"src/tools/builtin/test_{tool_file}.py")
 
-    print(f"\n[3/6] 发消息给 Agent：创建工具任务...")
-    print(f"  产出目标: {tool_path}")
+    print(f"\n[3/6] 发消息给 Agent：创建工具...")
+    print(f"  期望产出: {tool_py_path}")
 
     try:
         result = await asyncio.wait_for(
             app._engine.run(
                 user_input=(
-                    "请帮我创建一个短期任务，交给 general_agent 执行。\n"
-                    "任务标题：E2E闭环测试-创建工具\n"
-                    f"任务描述：请创建一个名为 e2e_greeting_agent 的 Agent 配置文件，"
-                    f"保存到 {tool_path}。该 Agent 的功能是接收用户名字并返回问候语。"
-                    "要求：config_id 为 e2e_greeting_agent，agent_type 为 specialized，"
-                    "level 为 L3，category 为 test。"
-                    "system_prompt 中说明核心职责是接收名字返回问候语。"
-                    "tool_ids 包含 bash_execute 和 task_evaluate。"
-                    "完成后使用 task_evaluate 的 auto_complete 模式完成任务。\n"
-                    f"验收标准：file_check，文件 {tool_path} 必须存在且包含 'e2e_greeting_agent'。"
+                    "我需要一个工具：e2e_greeting，功能是接收一个名字参数，"
+                    "返回个性化的问候语。比如传入 name='Alice' 返回 '你好，Alice！很高兴认识你'。"
                 ),
                 agent_config=app._agent_config,
                 conversation_history=None,
@@ -192,24 +184,38 @@ async def main() -> bool:
         checks["task_exists"] = False
         print("  [FAIL] 任务不存在")
 
-    # 检查产出文件（子 agent 在 workspace 中执行，工具文件在 workspace 目录下）
-    ws_tool_path = Path(f".ai_workspaces/{task_id}") / tool_path if task_id else tool_path
-    found_path = None
-    for candidate in [tool_path, ws_tool_path]:
-        if candidate.exists():
-            found_path = candidate
-            break
+    # 检查产出文件（资源生成流程产出在工作空间或项目目录）
+    found_py = None
+    found_test = None
+    search_dirs = [Path(".")] + list(Path(".ai_workspaces").iterdir()) if Path(".ai_workspaces").exists() else [Path(".")]
 
-    if found_path:
-        content = found_path.read_text(encoding="utf-8")
-        has_config_id = "e2e_greeting_agent" in content
+    for base in search_dirs:
+        if not base.is_dir():
+            continue
+        candidate_py = base / tool_py_path
+        candidate_test = base / tool_test_path
+        if candidate_py.exists():
+            found_py = candidate_py
+        if candidate_test.exists():
+            found_test = candidate_test
+
+    if found_py:
+        content = found_py.read_text(encoding="utf-8")
+        has_greeting = "greeting" in content.lower() or "e2e_greeting" in content
         checks["output_exists"] = True
-        checks["output_correct"] = has_config_id
-        print(f"  产出文件: {found_path} ({len(content)} chars)")
-        print(f"  config_id 验证: {'PASS' if has_config_id else 'FAIL'}")
+        checks["output_correct"] = has_greeting
+        print(f"  工具代码: {found_py} ({len(content)} chars)")
+        print(f"  内容验证: {'PASS' if has_greeting else 'FAIL'}")
     else:
         checks["output_exists"] = False
-        print(f"  产出文件: 不存在 ({tool_path} 或 {ws_tool_path})")
+        print(f"  工具代码: 不存在 ({tool_py_path})")
+
+    if found_test:
+        checks["test_exists"] = True
+        print(f"  测试文件: {found_test}")
+    else:
+        checks["test_exists"] = False
+        print(f"  测试文件: 不存在 ({tool_test_path})")
 
     # ── 7. 检查执行记录和日志 ──
     print(f"\n[6/6] 检查执行记录和日志...")
