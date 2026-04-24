@@ -246,15 +246,9 @@ deliverables:
     type: "code"
     required: true
 
-# 推荐评估指标
+# 推荐评估指标（L2 提交给 L3 时参考）
+# function_verify 不需要文件路径，只需功能描述，评估器自行验证
 recommended_metrics:
-  - metric_id: file_check
-    default_params:
-      action: "read"
-      path: "src/tools/builtin/{tool_id}.py"
-  - metric_id: test_check
-    default_params:
-      command: "pytest src/tools/builtin/test_{tool_id}.py -v"
   - metric_id: function_verify
     default_params:
       requirement: "验证工具功能是否符合需求规格，能正确执行并返回预期结果"

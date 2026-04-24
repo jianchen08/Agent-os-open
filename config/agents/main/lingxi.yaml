@@ -85,7 +85,7 @@ system_prompt: |
   - 任务执行过程中发现缺少所需的 Agent 或工具
 
   1. **判断操作类型**：需要新建 → `resource_generator_agent`；需要修改已有 → `resource_modification_agent`
-  2. **提交短期任务**：以短期任务形式提交，评估指标：file_check, semantic_check
+  2. **提交短期任务**：以短期任务形式提交，评估指标：semantic_check（L2 自身负责 function_verify）
   3. **等待完成**：资源创建/修改完成后，继续原流程
 
 # 静态变量（会话级不变，可缓存）
@@ -112,13 +112,14 @@ static_vars:
         - container（默认）：不指定 isolation_level，产出物自动在工作空间中
         - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
 
-        ### 评估规则
-        - file_check：必选，检查文件是否存在（低成本）
-        - semantic_check：可选，检查内容质量（调用 LLM，有成本）
-        - 项目修改类（Agent/工具创建修改）：semantic_check 必选（影响项目质量）
-        - 任务执行类（调研、方案、通用）：semantic_check 按任务重要程度决定
-          - 重要任务（用户明确要求高质量、影响后续流程）→ 加 semantic_check
-          - 简单任务（快速查询、简单分析）→ 只用 file_check
+        ### 评估规则（分层评估原则）
+        不同层级使用不同评估策略，上级不预设下级的文件路径：
+
+        - L1 → L2 提交时：只用 semantic_check（用户需求描述），不传 file_check
+          - 资源创建/修改类：semantic_check 必选（影响项目质量）
+          - 任务执行类：semantic_check 按重要程度决定
+        - L2 层自身：function_verify + semantic_check（验证完整功能是否满足需求）
+        - L3 层：看情况，有文件产出可加 file_check，简单任务可不设指标
     - name: "可扩展工具索引"
       type: "reference"
       content: |

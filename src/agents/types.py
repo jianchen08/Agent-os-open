@@ -247,6 +247,11 @@ class AgentConfig:
         """
         state: dict[str, Any] = {}
 
+        if self.name:
+            state["agent_name"] = self.name
+        if self.agent_type:
+            state["agent_type"] = self.agent_type.value
+
         if self.system_prompt:
             state["system_prompt"] = self._build_full_system_prompt()
 
