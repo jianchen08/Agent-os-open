@@ -73,6 +73,7 @@ class TaskWorker:
         self._idle_remind_counts: dict[str, int] = {}
         self._resume_requested: dict[str, bool] = {}
         self._last_container_check: float = 0.0
+        self._active_tasks: set[str] = set()  # 管道正在执行中的任务（含运行工具/评估器）
 
     async def start(self) -> None:
         """启动后台任务监听，并恢复残留的 running 任务。"""
@@ -481,6 +482,7 @@ class TaskWorker:
                     return
 
             pipeline_timeout = self._config.get("pipeline_timeout", 600)
+            self._active_tasks.add(task_id)
             try:
                 pipeline_state = await asyncio.wait_for(
                     engine.run(
@@ -590,6 +592,7 @@ class TaskWorker:
                 self._idle_remind_counts.pop(task_id, None)
 
             self._suspended_engines.pop(task_id, None)
+            self._active_tasks.discard(task_id)
             logger.info("TaskWorker: pipeline completed for task %s", task_id)
 
         except Exception as exc:
@@ -759,6 +762,31 @@ class TaskWorker:
 
         idle_remind_limit = 3
         remind_count = self._idle_remind_counts.get(task_id, 0)
+
+        # BUG-FIX-fix_20260424_active_pipeline_idle:
+        # 管道在执行工具（如 task_evaluate 触发评估器）时，引擎不处于 suspended 状态
+        # 但实际上仍在工作，不应因 idle 超时而被终止。
+        # 如果任务在 _active_tasks 中，重新创建计时器而不是失败。
+        if task_id in self._active_tasks:
+            logger.info(
+                "TaskWorker: idle 超时但管道仍在执行中，重建计时器: task_id=%s (remind #%d)",
+                task_id, remind_count + 1,
+            )
+            self._idle_remind_counts[task_id] = remind_count + 1
+            if remind_count + 1 >= idle_remind_limit * 3:
+                logger.warning(
+                    "TaskWorker: 管道活跃但提醒已达上限(%d)，强制失败: task_id=%s",
+                    idle_remind_limit * 3, task_id,
+                )
+            else:
+                timer_manager = self._services.get("timer_manager")
+                if timer_manager:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
+                    except RuntimeError:
+                        pass
+                return
 
         if task_id in self._suspended_engines and remind_count < idle_remind_limit:
             self._idle_remind_counts[task_id] = remind_count + 1
