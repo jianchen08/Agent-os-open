@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -93,11 +94,11 @@ class CLIInteractionNotifier(IInteractionNotifier):
         self._pending_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def notify_request(self, request: Any) -> bool:
-        """在终端显示子 Agent 的交互请求。
+        """接收交互请求并入队，不直接显示面板。
 
-        choice 模式：显示标题、描述和选项列表。
-        conversation 模式：显示标题和初始消息。
-        显示后将请求信息放入待处理队列。
+        只打印一行简短提示，通知用户有 Agent 请求交互。
+        完整面板由 run_sub_conversation() 在进入子对话后显示，
+        避免在主循环阻塞于 input() 时打印面板导致需要额外按回车。
 
         Args:
             request: 交互请求对象（需有 .id 和 .message_data 属性）
@@ -111,28 +112,12 @@ class CLIInteractionNotifier(IInteractionNotifier):
 
         mode = msg_data.get("interaction_mode", "choice")
         title = msg_data.get("title", "子 Agent 请求")
-        description = msg_data.get("description", "")
         agent_id = msg_data.get("agent_id", "unknown")
 
-        if mode == "choice":
-            content = self._render_choice_content(description, msg_data)
-            panel = Panel(
-                content,
-                title=f"[bold cyan]{title}[/bold cyan]",
-                subtitle=f"[dim]agent: {agent_id}[/dim]",
-                border_style="cyan",
-            )
-        else:
-            initial_message = msg_data.get("initial_message", "")
-            content = initial_message or description or "(对话模式)"
-            panel = Panel(
-                content,
-                title=f"[bold green]{title}[/bold green]",
-                subtitle=f"[dim]agent: {agent_id}[/dim]",
-                border_style="green",
-            )
-
-        self._console.print(panel)
+        self._console.print(
+            f"[bold yellow]✨ {agent_id} 请求交互"
+            f" — {title} ({mode}) — 按 Enter 进入对话[/bold yellow]"
+        )
 
         request_id = getattr(request, "id", None) or (request.get("id", "") if isinstance(request, dict) else "")
         await self._pending_queue.put({
@@ -141,7 +126,7 @@ class CLIInteractionNotifier(IInteractionNotifier):
         })
 
         logger.info(
-            "[CLINotifier] 交互请求已显示 | request_id=%s | mode=%s",
+            "[CLINotifier] 交互请求已入队 | request_id=%s | mode=%s",
             request_id, mode,
         )
 
@@ -243,7 +228,7 @@ async def run_sub_conversation(
     input_adapter: CLIInputAdapter,
     notifier: CLIInteractionNotifier,
     interaction_service: Any,
-    idle_timeout: int = 60,
+    idle_timeout: int = 86400,
 ) -> None:
     """处理子 Agent 的交互请求，进入子对话模式。
 
@@ -260,9 +245,8 @@ async def run_sub_conversation(
         input_adapter: CLI 输入适配器
         notifier: CLI 交互通知器
         interaction_service: 交互服务实例（需有 submit_response 方法）
-        idle_timeout: 空闲超时秒数，默认 60
+        idle_timeout: 空闲超时秒数，默认 86400（1天）
     """
-    loop = asyncio.get_event_loop()
 
     pending = notifier.get_next_pending()
     if not pending:
@@ -279,8 +263,27 @@ async def run_sub_conversation(
         f"\n[bold magenta]─── 进入 {agent_name} 对话 ───"
         f"（{idle_timeout}秒无输入自动退出）[/bold magenta]"
     )
-    if title:
-        console.print(f"[dim]主题: {title}[/dim]")
+
+    # 显示第一个请求的完整面板
+    description = msg_data.get("description", "")
+    if mode == "choice":
+        content = CLIInteractionNotifier._render_choice_content(description, msg_data)
+        panel = Panel(
+            content,
+            title=f"[bold cyan]{title}[/bold cyan]",
+            subtitle=f"[dim]agent: {agent_name}[/dim]",
+            border_style="cyan",
+        )
+    else:
+        initial_message = msg_data.get("initial_message", "")
+        content = initial_message or description or "(对话模式)"
+        panel = Panel(
+            content,
+            title=f"[bold green]{title}[/bold green]",
+            subtitle=f"[dim]agent: {agent_name}[/dim]",
+            border_style="green",
+        )
+    console.print(panel)
 
     original_prompt = input_adapter._prompt_str
     input_adapter._prompt_str = f"[{agent_name}] > "
@@ -297,11 +300,8 @@ async def run_sub_conversation(
                 )
 
             try:
-                user_input = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        lambda _p=input_adapter._prompt_str: input(f"\n{_p}"),
-                    ),
+                user_input = await _async_input(
+                    prompt=f"\n{input_adapter._prompt_str}",
                     timeout=idle_timeout,
                 )
             except asyncio.TimeoutError:
@@ -473,3 +473,41 @@ def _resolve_choice(user_input: str, options: list[dict]) -> str | None:
             return opt.get("id")
 
     return None
+
+
+async def _async_input(prompt: str, timeout: float) -> str:
+    """带超时的异步 input()，使用 daemon thread 避免僵尸线程。
+
+    与 run_in_executor 不同，daemon thread 在超时后不会阻塞程序退出，
+    也不会与后续的 input() 调用产生线程池竞争。
+
+    Args:
+        prompt: 输入提示符
+        timeout: 超时秒数
+
+    Returns:
+        用户输入的文本
+
+    Raises:
+        asyncio.TimeoutError: 超时
+    """
+    result: list[str | None] = [None]
+    done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _read() -> None:
+        try:
+            result[0] = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            result[0] = None
+        finally:
+            loop.call_soon_threadsafe(done.set)
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+
+    await asyncio.wait_for(done.wait(), timeout=timeout)
+
+    if result[0] is None:
+        raise asyncio.TimeoutError()
+    return result[0]

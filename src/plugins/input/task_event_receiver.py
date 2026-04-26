@@ -153,11 +153,12 @@ class TaskEventReceiverPlugin(IInputPlugin):
         else:
             parent_id = ""
 
-        if self._current_task_id and parent_id != self._current_task_id:
+        # 子任务完成通知由 TaskWorker._build_child_notifications 在 resume 时统一处理，
+        # 此处跳过以避免重复通知
+        if parent_id:
             logger.debug(
-                "[TaskEventReceiver] Skipping event: parent_id=%s != current=%s",
+                "[TaskEventReceiver] Skipping child task event: parent_id=%s (handled by TaskWorker)",
                 parent_id,
-                self._current_task_id,
             )
             return
 

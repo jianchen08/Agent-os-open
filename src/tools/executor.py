@@ -1055,8 +1055,8 @@ class ToolExecutor(IToolExecutor):
 
         self._fix_acceptance_criteria_inputs(inputs)
 
-        task_scope = inputs.get("task_scope", "short_term")
-        if task_scope == "short_term" and "target_type" in inputs:
+        task_scope = inputs.get("task_scope", "non_container")
+        if task_scope == "non_container" and "target_type" in inputs:
             ac = inputs.get("acceptance_criteria")
             if not ac or not isinstance(ac, dict) or len(ac) == 0:
                 target_id = inputs.get("target_id", "unknown")

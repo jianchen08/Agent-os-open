@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
 from typing import Any
 
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
@@ -139,7 +138,7 @@ class TaskWorker:
 
         Worker 启动时扫描所有 status=running 和 status=pending 的任务，
         running 任务先重置为 pending，然后统一通过 task.submitted 事件触发执行。
-        跳过长期任务（task_scope=long_term）。
+        跳过容器任务（task_scope=container）。
         """
         if not self._task_service:
             return
@@ -150,10 +149,10 @@ class TaskWorker:
         # 1. running 任务重置为 pending
         running_tasks = self._task_service.list_by_status(TaskStatus.RUNNING)
         for task in running_tasks:
-            task_scope = task.metadata.get("task_scope", "short_term")
-            if task_scope == "long_term":
+            task_scope = task.metadata.get("task_scope", "non_container")
+            if task_scope == "container":
                 logger.debug(
-                    "TaskWorker: 跳过长期任务恢复: task_id=%s", task.id,
+                    "TaskWorker: 跳过容器任务恢复: task_id=%s", task.id,
                 )
                 continue
             try:
@@ -173,8 +172,8 @@ class TaskWorker:
         recovered = 0
         pending_tasks = self._task_service.list_by_status(TaskStatus.PENDING)
         for task in pending_tasks:
-            task_scope = task.metadata.get("task_scope", "short_term")
-            if task_scope == "long_term":
+            task_scope = task.metadata.get("task_scope", "non_container")
+            if task_scope == "container":
                 continue
             if not task.metadata.get("target_id"):
                 continue
@@ -295,6 +294,58 @@ class TaskWorker:
 
             await self._check_stale_containers()
 
+            await self._notify_suspended_pipelines(task_id, new_status, data)
+
+    async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
+        """任务系统通知挂起的管道：子任务到达终态。
+
+        通过管道基础设施提供的 inject_and_wake 接口发送通知，
+        不直接操作管道内部状态。任务系统只消费管道提供的接口。
+
+        只通知直接等待该任务的管道（通过 watching_task_ids 判断），
+        避免嵌套子任务完成时误通知上级管道。
+        """
+        task_info = data.get("task", {})
+        if isinstance(task_info, dict):
+            title = task_info.get("title", task_id)
+            error = task_info.get("error", "")
+        else:
+            title = getattr(task_info, "title", task_id)
+            error = getattr(task_info, "error", "") or ""
+
+        if new_status == "completed":
+            notification = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
+                "请继续执行后续流程，提交下一个子任务。"
+            )
+        else:
+            err_hint = f": {error[:100]}" if error else ""
+            notification = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+            )
+
+        for key, engine in list(self._services.items()):
+            if not key.startswith("__suspended_engine_"):
+                continue
+            if not hasattr(engine, "inject_and_wake"):
+                continue
+            watching = getattr(engine, "_watching_task_ids", [])
+            if watching and task_id not in watching:
+                logger.debug(
+                    "TaskWorker: 跳过无关管道: pipeline_key=%s, task=%s, watching=%s",
+                    key, task_id, watching,
+                )
+                continue
+            try:
+                engine.inject_and_wake(notification)
+                logger.info(
+                    "TaskWorker: 已通过管道接口通知挂起管道: pipeline_key=%s, task=%s",
+                    key, task_id,
+                )
+            except Exception as exc:
+                logger.warning("TaskWorker: 通知挂起管道失败: %s", exc)
+
     async def _execute_background_task(self, task_data: dict[str, Any]) -> None:
         """执行后台任务的完整生命周期。
 
@@ -310,15 +361,66 @@ class TaskWorker:
         target_id = task_data.get("target_id", "")
         task_service = self._task_service
 
-        # ── 0. 跳过长期任务 ──
+        # ── 0. 跳过容器任务 ──
         if task_service:
             task = task_service.get_task(task_id)
             if task is not None:
-                task_scope = task.metadata.get("task_scope", "short_term")
-                if task_scope == "long_term":
+                task_scope = task.metadata.get("task_scope", "non_container")
+                if task_scope == "container":
                     logger.info(
-                        "TaskWorker: 跳过长期任务 %s (task_scope=long_term)", task_id,
+                        "TaskWorker: 跳过容器任务 %s (task_scope=container)", task_id,
                     )
+                    # BUG-FIX-fix_20260425_container_workspace_init:
+                    # 问题根因: 容器任务直接 return，未初始化工作空间（git init），
+                    #          后续子任务 is_root=True 走 _start_root_task，
+                    #          但 base_path 为空目录，创建空 project 而非基于容器空间做 worktree。
+                    # 修复方案: 容器任务跳过前先调用 lifecycle 初始化容器空间，
+                    #          增加 3 次重试，失败则 fail_task 报错。
+                    # 影响范围: 所有容器任务的子任务工作空间隔离
+                    lifecycle: WorkspaceLifecycleManager | None = self._services.get("workspace_lifecycle_manager")
+                    if not lifecycle:
+                        logger.error(
+                            "TaskWorker: WorkspaceLifecycleManager 不可用，无法初始化容器空间: task_id=%s",
+                            task_id,
+                        )
+                        task_service.fail_task(task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用")
+                        return
+
+                    _CONTAINER_INIT_RETRIES = 3
+                    _init_ok = False
+                    _last_err: Exception | None = None
+                    for _attempt in range(1, _CONTAINER_INIT_RETRIES + 1):
+                        try:
+                            container_ws = task.metadata.get("workspace") or None
+                            lifecycle.init_container_workspace(task_id, container_ws, task_data)
+                            container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
+                            if container_workspace_path:
+                                task.metadata["container_workspace"] = container_workspace_path
+                                self._task_service.save_task(task)
+                                logger.info(
+                                    "TaskWorker: 容器空间已初始化: task_id=%s, workspace=%s (attempt %d)",
+                                    task_id, container_workspace_path, _attempt,
+                                )
+                                _init_ok = True
+                                break
+                            else:
+                                _last_err = RuntimeError("init_container_workspace 成功但未返回有效 path")
+                        except Exception as e:
+                            _last_err = e
+                            logger.warning(
+                                "TaskWorker: 容器空间初始化失败 (attempt %d/%d): task_id=%s, error=%s",
+                                _attempt, _CONTAINER_INIT_RETRIES, task_id, e,
+                            )
+
+                    if not _init_ok:
+                        logger.error(
+                            "TaskWorker: 容器空间初始化最终失败 (%d 次重试耗尽): task_id=%s, error=%s",
+                            _CONTAINER_INIT_RETRIES, task_id, _last_err,
+                        )
+                        task_service.fail_task(
+                            task_id,
+                            f"容器空间初始化失败（{_CONTAINER_INIT_RETRIES} 次重试耗尽）：{_last_err}",
+                        )
                     return
 
         # ── 1. 加载 AgentConfig ──
@@ -350,6 +452,37 @@ class TaskWorker:
         explicit_workspace = task_data.get("workspace") or None
         workspace = self._resolve_task_workspace(task_id, explicit_workspace)
 
+        # ── 3.x.0 等待父容器工作空间就绪（解决竞态条件） ──
+        # BUG-FIX-fix_20260425_container_workspace_race:
+        # 问题根因: 容器任务和子任务通过 asyncio.create_task 并行执行，
+        #           子任务可能在容器工作空间初始化完成前就调用 on_task_start，
+        #           导致 _find_container_workspace 返回 None → 失败。
+        # 修复方案: 子任务启动前检查父容器是否为 container 类型，
+        #           如果是则轮询等待其 container_workspace 元数据就绪（最多 30s）。
+        if task_service:
+            _t = task_service.get_task(task_id)
+            if _t and _t.parent_task_id:
+                _parent = task_service.get_task(_t.parent_task_id)
+                if _parent and _parent.metadata.get("task_scope") == "container":
+                    _WAIT_INTERVAL = 1.0
+                    _WAIT_MAX = 30.0
+                    _waited = 0.0
+                    while _waited < _WAIT_MAX:
+                        _parent_refreshed = task_service.get_task(_t.parent_task_id)
+                        if _parent_refreshed and _parent_refreshed.metadata.get("container_workspace"):
+                            logger.info(
+                                "TaskWorker: 父容器工作空间已就绪: parent=%s, waited=%.1fs",
+                                _t.parent_task_id, _waited,
+                            )
+                            break
+                        await asyncio.sleep(_WAIT_INTERVAL)
+                        _waited += _WAIT_INTERVAL
+                    else:
+                        logger.warning(
+                            "TaskWorker: 等待父容器工作空间超时(%.1fs): parent=%s, 继续执行",
+                            _waited, _t.parent_task_id,
+                        )
+
         # ── 3.x 生命周期钩子：任务启动 + 工作空间状态注入 ──
         lifecycle: WorkspaceLifecycleManager | None = self._services.get("workspace_lifecycle_manager")
         ws_meta: dict[str, Any] = {}
@@ -362,10 +495,15 @@ class TaskWorker:
                     task_id, ws_meta.get("mode"),
                 )
             except Exception as e:
-                logger.warning(
+                # BUG-FIX-fix_20260425_container_workspace_init:
+                # 容器子任务找不到容器工作空间等致命错误应直接 fail_task
+                logger.error(
                     "TaskWorker: lifecycle on_task_start failed: task_id=%s, error=%s",
                     task_id, e,
                 )
+                if task_service:
+                    task_service.fail_task(task_id, f"工作空间初始化失败: {e}")
+                return
 
         # BUG-FIX-fix_20260421_goal_context_injection:
         # 问题根因: task_submit 将 goal.context 存入 metadata["goal_context"]，
@@ -481,8 +619,12 @@ class TaskWorker:
                         evt.set()
                     return
 
-            pipeline_timeout = self._config.get("pipeline_timeout", 600)
+            pipeline_timeout = self._config.get("pipeline_timeout", 1800)
+            # Agent-level timeout override: respect agent's own timeout_seconds setting
+            if agent_config and hasattr(agent_config, 'timeout_seconds') and agent_config.timeout_seconds > 0:
+                pipeline_timeout = max(pipeline_timeout, agent_config.timeout_seconds)
             self._active_tasks.add(task_id)
+            project_root = ws_meta.get("project_root", workspace) if ws_meta else workspace
             try:
                 pipeline_state = await asyncio.wait_for(
                     engine.run(
@@ -491,6 +633,7 @@ class TaskWorker:
                         task_id=task_id,
                         acceptance_criteria=acceptance_criteria,
                         workspace=workspace,
+                        project_root=project_root,
                     ),
                     timeout=pipeline_timeout,
                 )
@@ -705,9 +848,22 @@ class TaskWorker:
                             logger.info("TaskWorker: lifecycle on_eval_failed, task_id=%s", task_id)
                 except Exception as hook_exc:
                     logger.warning(
-                        "TaskWorker: lifecycle terminal hook failed: task_id=%s, error=%s",
+                        "TaskWorker: lifecycle terminal hook failed: task_id=%s, error=%s, retrying once",
                         task_id, hook_exc,
                     )
+                    try:
+                        lifecycle.restore_ws_meta(task_id)
+                        ws_meta_retry = lifecycle._ws_meta_store.get(task_id, ws_meta)
+                        if _s == "completed":
+                            lifecycle.on_eval_passed(task_id, workspace, ws_meta_retry)
+                        elif _s == "failed":
+                            lifecycle.on_eval_failed(task_id, workspace, ws_meta_retry)
+                        logger.info("TaskWorker: lifecycle hook retry succeeded: task_id=%s", task_id)
+                    except Exception as retry_exc:
+                        logger.error(
+                            "TaskWorker: lifecycle hook retry also failed: task_id=%s, error=%s",
+                            task_id, retry_exc,
+                        )
         except asyncio.TimeoutError:
             logger.warning("TaskWorker: task %s timed out waiting for terminal state", task_id)
             if task_service:
@@ -1065,113 +1221,9 @@ class TaskWorker:
         return _normalize_value(criteria)
 
     async def _check_stale_containers(self) -> None:
-        """检查并处理长时间无活动的容器任务。
+        """容器终态检查（已禁用超时自动判定）。
 
-        当容器任务（PENDING 状态且有子任务）超过指定时间无子任务状态变化时，
-        自动将其标记为 failed，防止容器因主 Agent 异常而永远挂起。
-
-        超时条件（同时满足）：
-        1. 容器状态为 PENDING
-        2. 容器有子任务
-        3. 所有子任务都已到达终态（completed/failed）
-        4. 距离最后一个子任务状态变更超过 timeout 秒
-
-        触发时机：每次收到子任务终态事件时调用（事件驱动，非轮询）。
-        内置 30 秒节流，避免高频终态事件导致全量扫描。
+        容器的完成/失败由主 Agent 通过 complete_container / fail_container 决定，
+        系统不做自动判定。
         """
-        if not self._task_service:
-            return
-
-        now = time.monotonic()
-        if now - self._last_container_check < _CONTAINER_CHECK_MIN_INTERVAL:
-            return
-        self._last_container_check = now
-
-        try:
-            # 局部导入：避免模块级循环依赖
-            from tasks.types import TaskStatus
-
-            timeout_seconds = self._config.get("container_timeout_seconds", 1800)  # 默认30分钟
-
-            all_pending = self._task_service.list_by_status(TaskStatus.PENDING)
-            for container in all_pending:
-                subtasks = self._task_service.list_subtasks(container.id)
-                if not subtasks:
-                    continue
-
-                # 所有子任务都必须已到达终态
-                all_terminal = all(
-                    s.status in (TaskStatus.COMPLETED, TaskStatus.FAILED)
-                    for s in subtasks
-                )
-                if not all_terminal:
-                    continue
-
-                # 计算最后活动时间：取所有子任务中最新的时间戳
-                last_activity = self._latest_subtask_timestamp(subtasks)
-
-                # 如果没有子任务时间戳，回退到容器的 created_at
-                if last_activity is None:
-                    last_activity = self._parse_timestamp(container.created_at)
-
-                if last_activity is None:
-                    continue
-
-                if datetime.now() - last_activity < timedelta(seconds=timeout_seconds):
-                    continue
-
-                logger.warning(
-                    "TaskWorker: 容器超时无活动 | container_id=%s | subtasks=%d | timeout=%ds",
-                    container.id, len(subtasks), timeout_seconds,
-                )
-                try:
-                    self._task_service.fail_task(
-                        container.id,
-                        f"容器超时（{timeout_seconds}秒无活动），"
-                        f"所有子任务已到达终态但容器未被主Agent处理",
-                    )
-                except Exception as e:
-                    logger.error(
-                        "TaskWorker: 容器超时标记失败 | container_id=%s | error=%s",
-                        container.id, e,
-                    )
-        except Exception as e:
-            logger.error("TaskWorker: 容器超时检查失败 | error=%s", e)
-
-    @staticmethod
-    def _latest_subtask_timestamp(subtasks: list[Any]) -> Any | None:
-        """从子任务列表中提取最新的时间戳。
-
-        依次检查每个子任务的 completed_at、updated_at、created_at，
-        返回其中最新的 datetime 对象。
-
-        Args:
-            subtasks: 子任务 TaskModel 列表
-
-        Returns:
-            最新的 datetime 对象，无有效时间戳时返回 None
-        """
-        latest: datetime | None = None
-        for s in subtasks:
-            for ts in (s.completed_at, s.updated_at, s.created_at):
-                parsed = TaskWorker._parse_timestamp(ts)
-                if parsed is not None and (latest is None or parsed > latest):
-                    latest = parsed
-        return latest
-
-    @staticmethod
-    def _parse_timestamp(value: str | None) -> Any | None:
-        """将 ISO 格式时间字符串解析为 datetime 对象。
-
-        Args:
-            value: ISO 格式的时间字符串，None 时返回 None
-
-        Returns:
-            datetime 对象，解析失败时返回 None
-        """
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value)
-        except (ValueError, TypeError):
-            return None
+        return

@@ -99,7 +99,7 @@ class HumanInteractionTool(BuiltinTool):
                     },
                     "timeout_seconds": {
                         "type": "number",
-                        "default": 300,
+                        "default": 86400,
                         "description": "超时时间（秒）",
                     },
                     "priority": {
@@ -151,7 +151,7 @@ class HumanInteractionTool(BuiltinTool):
         description = inputs.get("description", "")
         options = inputs.get("options")
         questions = inputs.get("questions")
-        timeout_seconds = inputs.get("timeout_seconds", 300)
+        timeout_seconds = inputs.get("timeout_seconds", 86400)
         priority_str = inputs.get("priority", "normal")
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
@@ -187,14 +187,14 @@ class HumanInteractionTool(BuiltinTool):
         except InteractionTimeoutError as e:
             logger.warning(f"[HumanInteractionTool] 交互超时 | request_id={e.request_id}")
             return create_failure_result(
-                error=f"交互超时: {e.timeout}秒内未收到响应",
+                error=f"人类交互超时（等待了{e.timeout}秒），用户未在规定时间内响应。你可以根据当前任务上下文决定下一步操作。",
                 error_code="INTERACTION_TIMEOUT",
             )
 
         except InteractionCancelledError as e:
             logger.info(f"[HumanInteractionTool] 交互取消 | request_id={e.request_id}")
             return create_failure_result(
-                error=f"交互已取消: {e.reason or '用户取消'}",
+                error=f"人类交互已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。",
                 error_code="INTERACTION_CANCELLED",
             )
 
@@ -209,7 +209,10 @@ class HumanInteractionTool(BuiltinTool):
 
         except Exception as e:
             logger.error(f"[HumanInteractionTool] 选择模式执行失败 | error={e}", exc_info=True)
-            return create_failure_result(error=f"选择模式执行失败: {str(e)}")
+            return create_failure_result(
+                error=f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。",
+                error_code="INTERACTION_FAILED",
+            )
 
     async def _execute_conversation_mode(
         self,
@@ -222,7 +225,7 @@ class HumanInteractionTool(BuiltinTool):
         description = inputs.get("description", "")
         initial_message = inputs.get("initial_message")
         suggestions = inputs.get("suggestions")
-        timeout_seconds = inputs.get("timeout_seconds", 60)
+        timeout_seconds = inputs.get("timeout_seconds", 86400)
 
         try:
             request_id = await service.create_conversation_request(
@@ -247,7 +250,10 @@ class HumanInteractionTool(BuiltinTool):
 
         except Exception as e:
             logger.error(f"[HumanInteractionTool] 对话模式执行失败 | error={e}", exc_info=True)
-            return create_failure_result(error=f"对话模式执行失败: {str(e)}")
+            return create_failure_result(
+                error=f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。",
+                error_code="INTERACTION_FAILED",
+            )
 
 
 def create_human_interaction_tool(

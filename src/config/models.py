@@ -267,6 +267,10 @@ class ModelConfigLoader:
         # default_params: 使用模型配置中的值，或默认值
         default_params = model_conf.get("default_params", {"temperature": 0.7, "max_tokens": 4096})
 
+        # call_timeout: 优先模型配置，回退到 defaults 节
+        defaults = self._load_llm_data().get("defaults", {})
+        call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
+
         return {
             "provider": provider_name,
             "model_name": model_conf.get("model_name", model_id),
@@ -274,6 +278,7 @@ class ModelConfigLoader:
             "api_key": api_key,
             "context_window": model_conf.get("context_window"),
             "default_params": default_params,
+            "call_timeout": call_timeout,
         }
 
     def resolve_env_or_model(self, value: str, provider_name: str = "") -> str:

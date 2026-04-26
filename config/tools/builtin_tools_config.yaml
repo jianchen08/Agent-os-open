@@ -243,22 +243,31 @@ tools:
   - todo
   - checklist
 - name: task_submit
-  description: '任务提交工具。将任务提交给指定的 Agent 或工作流执行。
+  description: '任务提交工具。将任务提交给指定的 Agent 执行，或创建容器任务组织复杂工作。
 
+    task_scope 参数决定任务类型：
+    - non_container（默认）：实际执行的任务，必须指定 target_type 和 target_id
+    - container：容器任务，用于组织复杂长期任务的子任务链，不能指定 target_type 和 target_id
 
     【核心功能】
 
-    - 将复杂任务分配给合适的 Agent 或工作流执行
+    - 将任务分配给合适的 Agent 执行（non_container）
+
+    - 创建容器任务组织复杂项目（container）
 
     - 为任务配置验收标准，确保执行结果可验证
 
     - 支持立即执行、排队等待、计划执行三种模式
 
 
-    【示例】
+    【示例 - 普通任务】
 
     {"target_type": "agent", "target_id": "general_agent", "goal": {"title": "实现用户登录"},
-    "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}'
+    "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}
+
+    【示例 - 容器任务】
+
+    {"task_scope": "container", "goal": {"title": "开发Roguelike游戏"}, "needs_preparation": true}'
   category: task
   level: l1_l2_only
   requires_approval: false

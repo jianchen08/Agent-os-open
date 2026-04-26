@@ -409,7 +409,7 @@ soft_constraints:
 deliverables:
   - name: "analysis_report"
     description: "代码分析报告"
-    output_path: "{{workspace}}/analysis_report.md"
+    output_path: "docs/{title}_analysis_report.md"
     type: "markdown"
     required: true
     template_source: "knowledge"
@@ -420,10 +420,10 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "analysis_report.md"
+      path: "docs/{title}_analysis_report.md"
   - metric_id: format_valid
     default_params:
-      path: "analysis_report.md"
+      path: "docs/{title}_analysis_report.md"
       type: "markdown"
 
 # 运行配置
@@ -432,7 +432,7 @@ is_active: true
 status: "active"
 max_iterations: 100
 max_reminders: 3
-timeout_seconds: 600
+timeout_seconds: 1500
 
 metadata:
   author: "System"

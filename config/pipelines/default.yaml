@@ -7,6 +7,11 @@
 
 name: lingxi_agent
 
+task_worker:
+  pipeline_timeout: 1800
+  child_wait_timeout: 3600
+  terminal_wait_timeout: 3600
+
 input_routes:
   # 安全拦截 → 结束，并把原因写入 RAW_RESULT
   - name: security_blocked
@@ -40,11 +45,12 @@ input_routes:
       - security_check
     priority: 10
 
-  # LLM 调用 → 直接执行 core
+  # LLM 调用 → 上下文守卫 + 直接执行 core
   - name: llm_call
     condition: "core_type == 'llm_call'"
     target: core
     plugins:
+      - context_window_guard
       - task_event_receiver
       - tool_schema
       - param_inject
@@ -125,6 +131,7 @@ plugins:
   - name: stop_check
     config:
       enabled: true
+      max_duration_seconds: 1800
   - name: error_check
     config:
       enabled: true
@@ -166,6 +173,7 @@ plugins:
     config:
       max_result_length: 2000
       include_tool_name: true
+      result_format: "yaml"
   - name: context_compress
     config:
       context_window: 128000
@@ -184,14 +192,28 @@ core_plugins:
   llm_call:
     class: plugins.core.llm_core.LLMCore
     config:
-      provider: minimax
-      model_name: MiniMax-M2.7
-      api_base: "https://api.minimaxi.com/v1"
-      api_key: "${MINIMAX_API_KEY}"
+      # BUG-FIX-fix_20260426_model_config: 明确使用 glm-5.1 模型
+      # 不再硬编码 MiniMax，让系统回退到 llm.yaml defaults.chat (glm-5.1)
+      model_name: glm-5.1
       default_params:
         temperature: 0.7
-        max_tokens: 40000
+        max_tokens: 16384
+      # litellm 内置重试（处理瞬态错误 + 过载）
+      num_retries: 3
+      retry_delay: 60
+      # engine.py 层过载兜底（litellm 重试耗尽后触发）
+      overload_retry_delay: 180
+      max_retries: 2
+      # LLM 调用超时（秒），glm-5.1 推理模型需要更长超时
+      llm_call_timeout: 300
   tool_execute:
     class: plugins.core.tool_core.ToolCore
     config:
       timeout: 120
+      result_format: "yaml"
+      level_timeouts:
+        "1": 3600
+        "2": 3600
+        "3": 1800
+      tool_timeouts:
+        human_interaction: 1800

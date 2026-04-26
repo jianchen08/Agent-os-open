@@ -173,7 +173,7 @@ class TaskTool:
                 "- **查看全局进度**：使用 status 获取状态统计概览和最近任务列表\n"
                 "- **查看单个任务详情**：使用 get + include_details=true 展开最近执行活动记录\n"
                 "- **干预子任务执行**：使用 inject 向运行中/暂停的子任务注入新指令（如调整方向、补充要求）\n"
-                "- **容器任务管理**：L1 使用 complete_container/fail_container 标记长期任务完成或失败\n\n"
+                "- **容器任务管理**：L1 使用 complete_container/fail_container 标记容器任务完成或失败\n\n"
                 "## 支持的操作\n"
                 "- get：查询单个任务详情（include_details=true 可展开执行活动）\n"
                 "- list：列出任务列表（支持 parent_task_id 筛选子任务、status 按状态过滤）\n"
@@ -211,8 +211,8 @@ class TaskTool:
                     },
                     "task_scope": {
                         "type": "string",
-                        "enum": ["all", "long_term", "short_term"],
-                        "description": "任务范围过滤：all-全部任务，long_term-长期任务，short_term-短期任务",
+                        "enum": ["all", "container", "non_container"],
+                        "description": "任务范围过滤：all-全部任务，container-容器任务，non_container-非容器任务",
                         "default": "all",
                     },
                     "task_id": {
@@ -377,7 +377,7 @@ class TaskTool:
         else:
             return False, f"只有 L1 和 L2 Agent 能使用 task_manage 工具，当前层级：L{parent_agent_level}"
 
-    def _get_all_tasks(self, limit: int = 50) -> list[TaskModel]:
+    def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
         """获取全部任务列表。
 
         Args:
@@ -406,21 +406,31 @@ class TaskTool:
         Returns:
             可序列化的任务字典
         """
+        # 精简 metadata：去掉 evaluation_history（按需查看），只保留评估结果摘要
+        metadata = dict(task.metadata) if task.metadata else {}
+        eval_summary = None
+        if "evaluation_history" in metadata:
+            history = metadata.pop("evaluation_history")
+            if history:
+                last = history[-1]
+                eval_summary = {
+                    "passed": last.get("passed"),
+                    "summary": last.get("summary", ""),
+                    "attempt_count": len(history),
+                }
+        if eval_summary:
+            metadata["evaluation_summary"] = eval_summary
+
         result = {
             "task_id": task.id,
             "title": task.title,
-            "description": task.description,
             "status": task.status.value,
             "parent_task_id": task.parent_task_id,
-            "target_type": task.target_type,
             "priority": task.priority.value if hasattr(task.priority, "value") else task.priority,
-            "metadata": task.metadata,
+            "metadata": metadata,
             "created_at": task.created_at,
-            "updated_at": task.updated_at,
-            "started_at": task.started_at,
             "completed_at": task.completed_at,
             "error": task.error,
-            "result": task.result,
         }
         if include_details or include_agent_calls:
             result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
@@ -445,7 +455,7 @@ class TaskTool:
         try:
             task_scope = inputs.get("task_scope", "all")
             project_id = inputs.get("project_id")
-            limit = inputs.get("limit", 50)
+            limit = inputs.get("limit", 5)
 
             tasks = self._get_all_tasks(limit)
 
@@ -462,7 +472,7 @@ class TaskTool:
                         continue
 
                 if task_scope != "all":
-                    scope = task.metadata.get("task_scope", "short_term")
+                    scope = task.metadata.get("task_scope", "non_container")
                     if scope != task_scope:
                         continue
 
@@ -680,7 +690,16 @@ class TaskTool:
             status_filter = inputs.get("status")
             session_id = inputs.get("session_id")
             user_parent_task_id = inputs.get("parent_task_id")
-            limit = inputs.get("limit", 50)
+            limit = inputs.get("limit", 5)
+
+            # 默认只展示自己的子任务：未显式传 parent_task_id 时，
+            # 用注入的 task_id（当前任务ID）作为 parent_task_id
+            injected_task_id = inputs.get("task_id")
+            if not user_parent_task_id:
+                if parent_agent_level == 2 and inputs.get("parent_task_id"):
+                    user_parent_task_id = inputs["parent_task_id"]
+                elif injected_task_id:
+                    user_parent_task_id = injected_task_id
 
             tasks = self._get_all_tasks(limit)
 
@@ -697,7 +716,7 @@ class TaskTool:
                     if task.parent_task_id != inputs["parent_task_id"]:
                         continue
 
-                if user_parent_task_id and parent_agent_level == 1:
+                if user_parent_task_id:
                     if task.parent_task_id != user_parent_task_id:
                         continue
 
@@ -1220,6 +1239,12 @@ class TaskTool:
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
+            if task.metadata.get("task_scope") == "container":
+                return create_failure_result(
+                    error=f"容器任务不允许直接删除（task_id={task_id}），请使用 complete_container 或 fail_container 管理",
+                    error_code="CANNOT_DELETE_CONTAINER",
+                )
+
             reason = inputs.get("reason", "用户请求删除")
             old_status = task.status.value
             task_title = task.title
@@ -1463,25 +1488,52 @@ class TaskTool:
             cleanup_results["errors"].append(f"清理隔离环境失败: {str(e)}")
             logger.warning("[TaskTool] 清理隔离环境失败: %s, 错误: %s", task_id, e)
 
-        if workspace:
-            try:
-                workspace_path = Path(workspace)
-                if not workspace_path.is_absolute():
-                    workspace_config_root = ".ai_workspaces"
-                    workspace_path = Path(workspace_config_root) / workspace
+        # 优先使用 lifecycle 进行工作空间清理
+        lifecycle_cleaned = False
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            lifecycle = provider.get("workspace_lifecycle_manager")
+            if lifecycle:
+                lifecycle.restore_ws_meta(task_id)
+                cleanup_result = lifecycle.cleanup_workspace(task_id)
+                if cleanup_result:
+                    lifecycle_cleaned = True
+                    cleanup_results["workspace_cleaned"] = True
+                    logger.info("[TaskTool] 已通过 lifecycle 清理工作空间: %s", task_id)
+        except Exception as e:
+            logger.debug("[TaskTool] lifecycle 清理不可用，回退到原有逻辑: %s", e)
 
-                if workspace_path.exists():
+        if not lifecycle_cleaned and workspace:
+            try:
+                from isolation.workspace import get_workspace_config_root
+
+                workspace_path = Path(workspace)
+                ws_root = get_workspace_config_root()
+
+                if not workspace_path.is_absolute():
+                    workspace_path = Path(ws_root) / workspace
+
+                ws_root_resolved = Path(ws_root).resolve()
+                ws_path_resolved = workspace_path.resolve()
+
+                if not ws_path_resolved.is_relative_to(ws_root_resolved):
+                    logger.warning(
+                        "[TaskTool] 拒绝删除工作空间（不在配置根目录下）: %s (root=%s)",
+                        ws_path_resolved, ws_root_resolved,
+                    )
+                    cleanup_results["errors"].append(
+                        f"安全拦截：路径 {ws_path_resolved} 不在工作空间根目录 {ws_root_resolved} 下，已跳过删除"
+                    )
+                elif workspace_path.exists():
                     git_path = workspace_path / ".git"
                     if git_path.is_file():
-                        # worktree 中 .git 是文件（指向 .git/worktrees/xxx），走 git cleanup 流程
                         self._remove_worktree(workspace_path, cleanup_results)
                     elif git_path.is_dir():
-                        # 普通仓库目录，走原有的 shutil.rmtree 流程
                         shutil.rmtree(str(workspace_path))
                         cleanup_results["workspace_cleaned"] = True
                         logger.info("[TaskTool] 已清理工作空间: %s", workspace_path)
                     else:
-                        # 无 .git 标识的普通目录，直接删除
                         shutil.rmtree(str(workspace_path))
                         cleanup_results["workspace_cleaned"] = True
                         logger.info("[TaskTool] 已清理普通目录: %s", workspace_path)

@@ -1,11 +1,14 @@
 """触发器管理器。
 
 管理触发器的注册、评估和执行，支持事件触发、条件触发和定时触发。
+通过 ServiceProvider 获取管道引擎实例，触发时使用 inject_and_wake 唤醒管道。
 
 公共 API:
     TriggerManager: 触发器管理器类
+    get_trigger_manager: 获取全局单例
 """
 
+import asyncio
 import datetime
 import logging
 from typing import Any
@@ -13,6 +16,8 @@ from typing import Any
 from .types import TriggerConfig, TriggerStatus, TriggerType
 
 logger = logging.getLogger(__name__)
+
+_TRIGGER_CHECK_INTERVAL = 5.0
 
 
 class TriggerManager:
@@ -22,25 +27,37 @@ class TriggerManager:
     - 注册/注销触发器
     - 评估事件触发器
     - 评估条件触发器
-    - 检查定时触发器
+    - 检查定时/延迟/周期触发器
     - 按类型/状态查询触发器
+    - 后台定期检查并唤醒管道
     """
 
     def __init__(self) -> None:
         """初始化管理器。"""
         self._triggers: dict[str, TriggerConfig] = {}
+        self._check_task: asyncio.Task | None = None
+        self._running = False
 
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
 
-        注册后自动将状态设为 ACTIVE。
+        注册后自动将状态设为 ACTIVE，并启动后台检查循环（如果未运行）。
 
         Args:
             config: 触发器配置。
         """
         config.status = TriggerStatus.ACTIVE
+        if "register_time" not in config.metadata:
+            config.metadata["register_time"] = datetime.datetime.utcnow().isoformat()
+        if "last_fire_time" not in config.metadata:
+            config.metadata["last_fire_time"] = None
         self._triggers[config.trigger_id] = config
-        logger.info(f"注册触发器: {config.trigger_id} - {config.name}")
+        logger.info(
+            f"注册触发器: {config.trigger_id} - {config.name} "
+            f"(type={config.trigger_type.value}, max_fires={config.max_fires}, "
+            f"max_time={config.max_time_seconds}s)"
+        )
+        self._ensure_check_loop()
 
     def unregister(self, trigger_id: str) -> bool:
         """注销触发器。
@@ -84,15 +101,14 @@ class TriggerManager:
             if not self._match_event_filter(trigger, event_data):
                 continue
 
-            # 触发
+            if not self._check_stop_conditions(trigger):
+                continue
+
             trigger.fire_count += 1
+            trigger.metadata["last_fire_time"] = datetime.datetime.utcnow().isoformat()
             fired.append(trigger.trigger_id)
 
-            # 检查是否达到最大触发次数
-            if (
-                trigger.max_fires > 0
-                and trigger.fire_count >= trigger.max_fires
-            ):
+            if self._is_max_fires_reached(trigger):
                 trigger.status = TriggerStatus.FIRED
 
             logger.info(
@@ -125,18 +141,19 @@ class TriggerManager:
             if not trigger.condition_expression:
                 continue
 
+            if not self._check_stop_conditions(trigger):
+                continue
+
             try:
                 result = self._eval_condition(
                     trigger.condition_expression, context
                 )
                 if result:
                     trigger.fire_count += 1
+                    trigger.metadata["last_fire_time"] = datetime.datetime.utcnow().isoformat()
                     fired.append(trigger.trigger_id)
 
-                    if (
-                        trigger.max_fires > 0
-                        and trigger.fire_count >= trigger.max_fires
-                    ):
+                    if self._is_max_fires_reached(trigger):
                         trigger.status = TriggerStatus.FIRED
 
                     logger.info(
@@ -154,11 +171,11 @@ class TriggerManager:
     def check_scheduled(
         self, now: datetime.datetime
     ) -> list[str]:
-        """检查定时/延迟触发器。
+        """检查定时/延迟/周期触发器。
 
         对于 DELAY 类型，检查从注册时刻起是否已过 delay_seconds。
         对于 SCHEDULED 类型，检查 scheduled_at 是否已到。
-        不处理 cron 表达式（需要外部调度器驱动）。
+        对于 INTERVAL 类型，检查距离上次触发是否已过 interval_seconds。
 
         Args:
             now: 当前时间。
@@ -172,24 +189,32 @@ class TriggerManager:
             if trigger.status != TriggerStatus.ACTIVE:
                 continue
 
+            if not self._check_stop_conditions(trigger, now):
+                trigger.status = TriggerStatus.FIRED
+                continue
+
             should_fire = False
 
             if trigger.trigger_type == TriggerType.DELAY:
                 should_fire = self._check_delay(trigger, now)
             elif trigger.trigger_type == TriggerType.SCHEDULED:
                 should_fire = self._check_scheduled_time(trigger, now)
+            elif trigger.trigger_type == TriggerType.INTERVAL:
+                should_fire = self._check_interval(trigger, now)
 
             if should_fire:
                 trigger.fire_count += 1
+                trigger.metadata["last_fire_time"] = now.isoformat()
                 fired.append(trigger.trigger_id)
 
-                if (
-                    trigger.max_fires > 0
-                    and trigger.fire_count >= trigger.max_fires
-                ):
+                if self._is_max_fires_reached(trigger):
                     trigger.status = TriggerStatus.FIRED
 
-                logger.info(f"定时触发器触发: {trigger.trigger_id}")
+                logger.info(
+                    f"触发器触发: {trigger.trigger_id} "
+                    f"(type={trigger.trigger_type.value}, "
+                    f"第 {trigger.fire_count} 次)"
+                )
 
         return fired
 
@@ -251,6 +276,166 @@ class TriggerManager:
             return False
         trigger.status = TriggerStatus.CANCELLED
         return True
+
+    def start_check_loop(self) -> None:
+        """启动后台触发器检查循环。
+
+        安全重复调用，已有运行中的任务时不重复创建。
+        """
+        self._ensure_check_loop()
+
+    def stop_check_loop(self) -> None:
+        """停止后台触发器检查循环。"""
+        self._running = False
+        if self._check_task is not None and not self._check_task.done():
+            self._check_task.cancel()
+            self._check_task = None
+            logger.info("[TriggerManager] 后台检查循环已停止")
+
+    async def _check_loop(self) -> None:
+        """后台定期检查触发器并唤醒对应管道。
+
+        每隔 _TRIGGER_CHECK_INTERVAL 秒检查一次所有定时/延迟/周期触发器，
+        到期的触发器通过管道的 inject_and_wake 接口注入消息并唤醒。
+        """
+        logger.info("[TriggerManager] 后台检查循环已启动")
+        self._running = True
+
+        while self._running:
+            try:
+                await asyncio.sleep(_TRIGGER_CHECK_INTERVAL)
+
+                now = datetime.datetime.utcnow()
+                fired_ids = self.check_scheduled(now)
+
+                for trigger_id in fired_ids:
+                    trigger = self._triggers.get(trigger_id)
+                    if trigger is None:
+                        continue
+                    await self._wake_pipeline(trigger)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[TriggerManager] 检查循环异常: {e}", exc_info=True)
+
+        self._running = False
+        logger.info("[TriggerManager] 后台检查循环已退出")
+
+    async def _wake_pipeline(self, trigger: TriggerConfig) -> None:
+        """通过管道的 inject_and_wake 接口唤醒挂起的管道。
+
+        从 ServiceProvider 获取 services 字典，
+        通过 pipeline_id 找到对应的挂起管道引擎实例，
+        注入触发器消息并唤醒。
+
+        Args:
+            trigger: 已触发的触发器配置
+        """
+        if not trigger.pipeline_id or not trigger.message:
+            logger.debug(
+                f"[TriggerManager] 触发器 {trigger.trigger_id} "
+                f"无 pipeline_id 或 message，跳过唤醒"
+            )
+            return
+
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            services = provider.get("services")
+            if services is None:
+                logger.warning("[TriggerManager] services 不可用，无法唤醒管道")
+                return
+
+            engine_key = f"__suspended_engine_{trigger.pipeline_id}"
+            engine = services.get(engine_key)
+            if engine is None:
+                logger.debug(
+                    f"[TriggerManager] 管道 {trigger.pipeline_id} 未挂起，跳过唤醒"
+                )
+                return
+
+            fire_info = (
+                f"[触发器通知] 触发器 '{trigger.name or trigger.trigger_id}' 已触发 "
+                f"(第 {trigger.fire_count} 次"
+            )
+            if trigger.max_fires > 0:
+                fire_info += f"/共 {trigger.max_fires} 次"
+            fire_info += f")\n{trigger.message}"
+
+            if trigger.status == TriggerStatus.FIRED:
+                fire_info += (
+                    "\n\n[系统提示] 触发器已达停止条件，"
+                    "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
+                )
+
+            if hasattr(engine, "inject_and_wake"):
+                engine.inject_and_wake(fire_info)
+                logger.info(
+                    f"[TriggerManager] 已唤醒管道 {trigger.pipeline_id} "
+                    f"(trigger={trigger.trigger_id}, "
+                    f"fire_count={trigger.fire_count})"
+                )
+            else:
+                logger.warning(
+                    f"[TriggerManager] 管道引擎 {engine_key} 无 inject_and_wake 方法"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"[TriggerManager] 唤醒管道失败: {e}", exc_info=True
+            )
+
+    def _ensure_check_loop(self) -> None:
+        """确保后台检查循环正在运行。"""
+        if self._check_task is not None and not self._check_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._check_task = loop.create_task(self._check_loop())
+        except RuntimeError:
+            logger.debug("[TriggerManager] 无运行中的事件循环，检查循环将在首次注册时启动")
+
+    def _check_stop_conditions(self, trigger: TriggerConfig, now: datetime.datetime | None = None) -> bool:
+        """检查触发器是否仍满足继续触发的条件。
+
+        检查 max_time_seconds（最长运行时间）是否已超。
+
+        Args:
+            trigger: 触发器配置。
+            now: 当前时间，None 时使用 utcnow()。
+
+        Returns:
+            True 表示仍可继续触发，False 表示应停止。
+        """
+        if trigger.max_time_seconds > 0:
+            register_time_str = trigger.metadata.get("register_time")
+            if register_time_str:
+                try:
+                    register_time = datetime.datetime.fromisoformat(register_time_str)
+                    check_time = now or datetime.datetime.utcnow()
+                    elapsed = (check_time - register_time).total_seconds()
+                    if elapsed >= trigger.max_time_seconds:
+                        logger.info(
+                            f"[TriggerManager] 触发器 {trigger.trigger_id} "
+                            f"已达最长运行时间 ({trigger.max_time_seconds}s)"
+                        )
+                        return False
+                except (ValueError, TypeError):
+                    pass
+
+        return True
+
+    def _is_max_fires_reached(self, trigger: TriggerConfig) -> bool:
+        """检查是否达到最大触发次数。
+
+        Args:
+            trigger: 触发器配置。
+
+        Returns:
+            True 表示已达最大次数。
+        """
+        return trigger.max_fires > 0 and trigger.fire_count >= trigger.max_fires
 
     def _match_event_filter(
         self, trigger: TriggerConfig, event_data: dict[str, Any]
@@ -381,3 +566,59 @@ class TriggerManager:
             return False
 
         return now >= trigger.scheduled_at
+
+    def _check_interval(
+        self, trigger: TriggerConfig, now: datetime.datetime
+    ) -> bool:
+        """检查周期触发器是否到期。
+
+        基于 last_fire_time + interval_seconds 计算下次触发时间。
+        首次触发基于 register_time + interval_seconds。
+
+        Args:
+            trigger: 触发器配置。
+            now: 当前时间。
+
+        Returns:
+            是否到期。
+        """
+        if trigger.trigger_type != TriggerType.INTERVAL:
+            return False
+        if trigger.interval_seconds <= 0:
+            return False
+
+        last_fire_str = trigger.metadata.get("last_fire_time")
+
+        if trigger.fire_count == 0 or not last_fire_str:
+            reference_str = trigger.metadata.get("register_time")
+            if not reference_str:
+                return False
+            try:
+                reference_time = datetime.datetime.fromisoformat(reference_str)
+            except (ValueError, TypeError):
+                return False
+        else:
+            try:
+                reference_time = datetime.datetime.fromisoformat(last_fire_str)
+            except (ValueError, TypeError):
+                return False
+
+        next_fire_time = reference_time + datetime.timedelta(
+            seconds=trigger.interval_seconds
+        )
+        return now >= next_fire_time
+
+
+_trigger_manager: TriggerManager | None = None
+
+
+def get_trigger_manager() -> TriggerManager:
+    """获取全局 TriggerManager 单例。
+
+    Returns:
+        TriggerManager 实例
+    """
+    global _trigger_manager
+    if _trigger_manager is None:
+        _trigger_manager = TriggerManager()
+    return _trigger_manager

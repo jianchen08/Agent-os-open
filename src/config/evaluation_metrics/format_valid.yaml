@@ -62,6 +62,8 @@ expect:
   conditions:
     - field: "success"
       operator: "is_true"
+    - field: "data.passed"
+      operator: "is_true"
   logic: "and"
   pass_message: "格式验证通过"
   fail_message: "格式验证失败"

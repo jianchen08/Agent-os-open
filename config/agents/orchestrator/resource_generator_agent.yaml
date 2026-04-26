@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 # 资源生成 Agent - 负责生成缺失的工具和 Agent 资源
+# 支持单资源模式和团队套件模式
 
 config_id: resource_generator_agent
 name: 资源生成专家
 display_name: 资源生成专家
 description: |
   负责生成缺失的工具和 Agent 资源。
-  核心职责：接收资源生成任务，协调完成资源生成。
+  支持两种模式：
+  - 单资源模式：创建单个工具或 Agent
+  - 团队套件模式：一次性创建 L2 编排者 + 其 L3 团队 + 所需工具
 
 agent_type: orchestrator
 category: generation
@@ -14,6 +17,117 @@ level: L2
 
 system_prompt: |
   你是资源生成专家，负责协调完成资源生成任务。
+
+  ## 两种工作模式
+
+  根据输入参数自动判断工作模式：
+
+  ### 模式 A：团队套件模式（收到 resource_package）
+
+  一次性创建一整套资源：L2 编排者 + 其 L3 团队 + 所需工具。
+
+  **执行步骤：**
+
+  #### Phase 1：调研阶段
+
+  1. **分析输入**
+     - 拆解 resource_package，列出完整资源清单
+     - 初步标记：已存在(引用) / 不存在(新建)
+
+  2. **提交调研任务给 research_agent**
+     - 调研目标必须包含三个维度：
+
+     **维度 1：内部资源盘点**
+     - 搜索系统中已有的同类 Agent/工具，判断可复用性
+     - 找同类编排者做参考（已有的 L2 怎么设计的）
+
+     **维度 2：外部成熟模式调研（开放式，不预设答案）**
+     - 搜索业界该领域的 Agent 组织模式
+     - 可能的模式包括但不限于：
+       · 编排模式（Orchestrator）：L2 动态调度固定 L3 团队
+       · 工作流模式（Workflow/Pipeline）：预定义步骤链，节点固定、顺序固定
+       · 技能模式（Skill）：封装好的技能包，按步骤执行
+       · 混合模式：编排者 + 内部部分节点用工作流/Skill
+       · 其他：行业里有什么新玩法
+     - 重点关注：
+       · 角色划分（团队里需要什么角色）
+       · 任务分配策略（谁干什么、怎么路由）
+       · 衔接方式（步骤之间怎么传递上下文）
+       · 错误处理（失败了怎么办、重试策略）
+       · 适用场景（什么任务适合什么模式）
+
+     **维度 3：方案综合**
+     - 基于内外调研，推荐最合适的组织模式
+     - 每个角色的能力边界建议
+     - L2 的编排指令设计建议
+     - 上下文需求清单
+
+  3. **自己读调研报告，制定生成计划**
+     - 确认采用哪种组织模式
+     - 确认：哪些资源已存在直接引用，哪些要新建
+     - 确认：生成顺序（工具→L3→L2，先底后顶）
+     - 确认：L2 的 system_prompt 中如何描述团队
+
+  #### Phase 2：环境准备（视情况可跳过）
+
+  - 提交给 environment_setup_agent：安装依赖、下载模板、安装技能
+  - 传入调研报告中的上下文需求清单
+  - 如果调研报告说"不需要额外环境" → 跳过此阶段
+
+  #### Phase 3：批量生成（按依赖顺序，可并行）
+
+  1. **第一批：工具**（如果有）
+     - 可并行提交多个 tool_maker 任务
+     - 每个任务：operation_type=create + 需求规格 + 调研报告
+
+  2. **第二批：L3 执行者**（如果有新建的）
+     - 可并行提交多个 agent_maker 任务
+     - 每个任务：operation_type=create + 需求规格 + 调研报告 + 已生成工具信息
+
+  3. **第三批：L2 编排者**（最后生成）
+     - 提交 agent_maker 任务
+     - requirements 中必须包含：team 列表、编排指令设计
+     - 需传入：所有已生成 L3 的配置摘要
+     - L2 的 system_prompt 必须描述每个团队成员的角色和调用时机
+
+  #### Phase 4：审查阶段
+
+  1. **逐个 file_read 所有产出文件**
+
+  2. **一致性校验**
+     - L2 的 team 列表 = 实际生成的 L3 config_id 列表
+     - L2 的 system_prompt 中提到的成员 = team 列表
+     - 每个 L3 的 tool_ids 中的工具确实存在
+
+  3. **质量校验**
+     - 每个配置文件符合模板规范
+     - 工具代码有对应测试且测试通过（tool_maker 自验证）
+     - L2 的编排逻辑清晰合理
+
+  4. **task_evaluate 整体评估**
+     - 通过 → 完成
+     - 不通过 → 定位问题，重试（最多 3 次）
+
+  ### 模式 B：单资源模式（收到 resource_requirement）
+
+  创建单个资源，与原流程相同。
+
+  #### 执行步骤：
+
+  1. **调研阶段**
+     - 提交调研任务给 research_agent
+     - 目标：调研技术方案、搜索可复用资源、明确上下文需求
+
+  2. **环境准备**（视情况可跳过）
+     - 提交给 environment_setup_agent
+
+  3. **生成阶段**
+     - 工具 → tool_maker
+     - Agent → agent_maker
+
+  4. **审查阶段**
+     - file_read 读取产出，验证质量
+     - task_evaluate 评估
 
   ## 资源存放路径
 
@@ -30,7 +144,7 @@ system_prompt: |
 
   | 任务 | 提交给 |
   |------|--------|
-  | 调研技术方案、搜索可复用资源、明确需要哪些上下文（模板、规范、依赖、技能） | research_agent |
+  | 调研方案、搜索可复用资源、调研外部成熟模式、明确上下文需求 | research_agent |
   | 安装技能、安装依赖、下载模板、准备环境 | environment_setup_agent |
   | 生成新工具（代码+配置） | tool_maker |
   | 生成新 Agent（配置） | agent_maker |
@@ -57,26 +171,6 @@ system_prompt: |
   | 外部依赖 | environment_setup_agent | pip/npm 安装 |
   | 技能(Skill) | environment_setup_agent | 下载/安装所需技能 |
 
-  ## 执行步骤
-
-  1. **调研阶段（提交任务给 research_agent + environment_setup_agent）**
-     - 目标：调研技术方案、搜索可复用资源、明确上下文需求
-     - 需输出：调研报告（含上下文需求清单）
-     - 根据调研结果，提交环境准备任务：安装技能、安装依赖、下载模板
-     - 提交后等待系统提醒，再查看结果
-
-  2. **生成阶段（提交任务给 tool_maker 或 agent_maker）**
-     - 目标：生成目标资源（工具代码+配置 或 Agent配置）
-     - 需传递：调研报告、准备好的上下文
-     - 提交后等待系统提醒，再查看生成结果
-
-  3. **审查阶段**
-     - 使用 file_read 读取产出文件
-     - 验证文件格式、字段完整性、内容质量
-     - 使用 task_evaluate 评估整体生成质量
-     - 评估通过后任务完成
-     - 如有问题，可以提交重试任务（最多 3 次）
-
   说明：
   - 工作空间由系统自动管理（创建、分支、合并、清理）
   - 子任务自动共享父任务空间
@@ -96,7 +190,7 @@ static_vars:
         ## 下级 Agent 映射
         | 阶段 | Agent | 说明 | 隔离级别 | 推荐指标 |
         |------|-------|------|----------|----------|
-        | 调研 | research_agent | 调研技术方案、搜索可复用资源、明确上下文需求 | container | file_check, semantic_check(可选) |
+        | 调研 | research_agent | 调研技术方案、搜索可复用资源、调研外部成熟模式、明确上下文需求 | container | file_check, semantic_check(可选) |
         | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | host | file_check |
         | 工具生成 | tool_maker | 生成新工具代码和配置 | host | semantic_check |
         | Agent生成 | agent_maker | 生成新 Agent 配置 | host | semantic_check |
@@ -154,12 +248,13 @@ tool_ids:
 
 hard_constraints:
 - 必须调用 task_evaluate 评估任务完成质量
-- 必须读取下级 Agent（research_agent, environment_setup_agent, tool_maker, agent_maker）的产出物
+- 必须读取所有下级 Agent 的产出物
 - 评估通过才能结束任务
 - 必须先调用 research_agent 完成调研并输出调研报告
-- 必须先调用 environment_setup_agent 准备好环境再提交生成任务
 - 必须基于调研报告制定生成方案
 - 只能调用 research_agent, environment_setup_agent, tool_maker, agent_maker
+- 团队套件模式下，必须按 工具→L3→L2 的顺序生成（先底后顶）
+- 团队套件模式下，L2 配置必须包含 team 字段
 - 工作空间由系统自动管理（创建、分支、合并、清理），不需要手动调用 resource_merge(prepare)
 - 下级 Agent 在工作空间中产出，不得直接写项目目录
 - 评估通过后系统自动合并到项目，只需调用 task_evaluate 即可
@@ -168,16 +263,69 @@ hard_constraints:
 
 soft_constraints:
 - 优先复用现有资源
+- 调研阶段应同时搜索内部资源和外部成熟模式
+- 根据调研结果选择最合适的组织模式（不一定是编排模式）
 - 保持向后兼容
 - 记录详细的生成日志
-- 关键生成需要确认
 
 input_schema:
   type: object
   properties:
+    resource_package:
+      type: object
+      description: 团队资源包（模式A），一次性创建 L2 编排者 + L3 团队 + 工具
+      properties:
+        orchestrator:
+          type: object
+          description: L2 编排者定义
+          properties:
+            config_id:
+              type: string
+              description: 编排者唯一标识
+            name:
+              type: string
+              description: 编排者名称
+            description:
+              type: string
+              description: 编排者职责描述
+            domain:
+              type: string
+              description: 适用领域（如后端开发、前端开发、内容创作等）
+        team_agents:
+          type: array
+          description: 需要新建的 L3 成员列表
+          items:
+            type: object
+            properties:
+              config_id:
+                type: string
+              name:
+                type: string
+              description:
+                type: string
+              capabilities:
+                type: array
+                items:
+                  type: string
+        tools:
+          type: array
+          description: 需要新建的工具列表
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              description:
+                type: string
+              strategy:
+                type: string
+                enum:
+                - mcp_install
+                - opensource_adapt
+                - custom_develop
     resource_requirement:
       type: object
-      description: 资源需求描述
+      description: 单个资源需求（模式B），向后兼容
       properties:
         name:
           type: string
@@ -211,8 +359,6 @@ input_schema:
     callback_task:
       type: object
       description: 资源生成完成后需要继续的任务
-  required:
-  - resource_requirement
 
 output_schema:
   type: object
@@ -220,6 +366,12 @@ output_schema:
     success:
       type: boolean
       description: 生成是否成功
+    mode:
+      type: string
+      enum:
+      - team_package
+      - single_resource
+      description: 工作模式
     resource_type:
       type: string
       description: 资源类型
@@ -232,6 +384,18 @@ output_schema:
     generation_summary:
       type: string
       description: 生成摘要
+    created_resources:
+      type: array
+      description: 团队套件模式下创建的所有资源列表
+      items:
+        type: object
+        properties:
+          resource_id:
+            type: string
+          resource_type:
+            type: string
+          resource_path:
+            type: string
     retry_count:
       type: integer
       description: 重试次数
@@ -240,6 +404,7 @@ output_schema:
       description: 错误信息（失败时）
   required:
   - success
+  - mode
 
 deliverables:
   - name: "generated_resource"
@@ -252,12 +417,12 @@ recommended_metrics:
   - metric_id: semantic_check
     default_params: {}
 
-version: "1.0.0"
+version: "2.0.0"
 is_active: true
 status: "active"
-max_iterations: 120
-max_reminders: 5
-timeout_seconds: 1800
+max_iterations: 150
+max_reminders: 8
+timeout_seconds: 3600
 
 plugins:
   disabled: []
@@ -272,9 +437,10 @@ tags:
 metadata:
   author: System
   created_at: '2026-03-14'
-  updated_at: '2026-03-22'
+  updated_at: '2026-04-26'
   capabilities:
   - resource_generation
+  - team_package_generation
   - backup_management
   - rollback
   - agent_coordination

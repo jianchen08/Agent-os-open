@@ -1,9 +1,13 @@
 """
 触发器设置工具
 
+通过 TriggerManager 注册触发器，支持延迟、定时、周期、事件和条件五种触发类型。
+周期触发和定时触发到期后，TriggerManager 的后台检查循环会通过管道的
+inject_and_wake 接口唤醒挂起的管道，注入预设消息。
+
 暴露接口：
-- get_tool_definition() -> Tool：get_tool_definition功能
-- TriggerSetupTool：TriggerSetupTool类
+- get_tool_definition() -> Tool：工具定义
+- TriggerSetupTool：触发器设置工具类
 """
 
 import logging
@@ -20,9 +24,11 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
-from triggers.message_queue import (
-    TriggerMessage,
-    get_trigger_message_queue,
+from triggers.manager import get_trigger_manager
+from triggers.types import (
+    TriggerConfig,
+    TriggerType,
+    parse_duration,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,11 +38,14 @@ class TriggerSetupTool:
     """
     触发器设置工具
 
-    允许 Agent 设置触发器，在指定条件满足时向当前会话注入消息。
+    允许 Agent 设置触发器，在指定条件满足时向当前会话注入消息并唤醒管道。
 
-    触发器只能触发自己所在的会话，通过注入参数自动获取：
-    - session_id: 系统注入
-    - execution_id: 系统注入
+    支持五种触发类型：
+    - delay: 延迟触发（几秒后，最大 24 小时）
+    - schedule: 定时触发（指定 ISO 8601 时间，最大 7 天）
+    - interval: 周期触发（按固定间隔重复触发，支持停止条件）
+    - event: 事件触发（监听 task_completed, file_changed 等）
+    - condition: 条件触发（如 task_status == 'pending'）
 
     使用示例:
         # 延迟触发
@@ -52,29 +61,57 @@ class TriggerSetupTool:
             schedule_time="2026-03-15T18:00:00",
             message="下班前检查任务进度"
         )
+
+        # 周期触发（每30分钟，最多10次）
+        trigger_setup(
+            trigger_type="interval",
+            interval="30m",
+            message="检查服务状态",
+            max_count=10
+        )
+
+        # 周期触发（每1小时，最多运行3天）
+        trigger_setup(
+            trigger_type="interval",
+            interval="1h",
+            message="执行数据同步",
+            max_time="3d"
+        )
     """
 
-    MAX_DELAY_SECONDS = 86400  # 24小时
-    MAX_SCHEDULE_HOURS = 168  # 7天
+    MAX_DELAY_SECONDS = 86400
+    MAX_SCHEDULE_HOURS = 168
     MAX_TRIGGERS_PER_SESSION = 10
+    MAX_INTERVAL_SECONDS = 86400 * 30
 
     def __init__(self):
         """初始化触发器设置工具"""
-        self._queue = get_trigger_message_queue()
+        self._manager = get_trigger_manager()
 
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
         return Tool(
             name="trigger_setup",
-            description="设置触发器，在指定条件满足时向当前会话注入消息并触发执行。触发器只能触发自己所在的会话。支持延迟触发、定时触发、事件触发和条件触发四种类型。",
+            description=(
+                "设置触发器，在指定条件满足时向当前会话注入消息并唤醒管道。"
+                "触发器只能触发自己所在的会话。"
+                "支持延迟触发、定时触发、周期触发、事件触发和条件触发五种类型。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "trigger_type": {
                         "type": "string",
-                        "enum": ["delay", "schedule", "event", "condition"],
-                        "description": "触发类型: delay=延迟触发(几秒后), schedule=定时触发(指定时间), event=事件触发, condition=条件触发",
+                        "enum": ["delay", "schedule", "interval", "event", "condition"],
+                        "description": (
+                            "触发类型: "
+                            "delay=延迟触发(几秒后), "
+                            "schedule=定时触发(指定时间), "
+                            "interval=周期触发(按间隔重复), "
+                            "event=事件触发, "
+                            "condition=条件触发"
+                        ),
                     },
                     "message": {
                         "type": "string",
@@ -88,6 +125,26 @@ class TriggerSetupTool:
                         "type": "string",
                         "description": "定时触发时间（trigger_type=schedule 时必填），ISO 8601 格式，如: 2026-03-15T15:00:00",
                     },
+                    "interval": {
+                        "type": "string",
+                        "description": (
+                            "周期间隔（trigger_type=interval 时必填），"
+                            "支持格式: '30s', '5m', '1h', '1d', '1h30m'。"
+                            "最小 10 秒，最大 30 天"
+                        ),
+                    },
+                    "max_count": {
+                        "type": "integer",
+                        "description": "最大触发次数（0 或不填表示无限），到达后触发器自动停止",
+                    },
+                    "max_time": {
+                        "type": "string",
+                        "description": (
+                            "最长运行时间（到达后触发器自动停止），"
+                            "支持格式: '30m', '2h', '3d', '1h30m'。"
+                            "不填表示无限"
+                        ),
+                    },
                     "event_type": {
                         "type": "string",
                         "description": "监听的事件类型（trigger_type=event 时必填），如: task_completed, file_changed",
@@ -96,17 +153,22 @@ class TriggerSetupTool:
                         "type": "string",
                         "description": "条件表达式（trigger_type=condition 时必填），如: task_status == 'pending'",
                     },
+                    "name": {
+                        "type": "string",
+                        "description": "触发器名称（可选），便于识别",
+                    },
                 },
                 "required": ["trigger_type", "message"],
             },
-            injected_params=["session_id", "execution_id"],
+            injected_params=["session_id", "execution_id", "pipeline_id"],
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
-            tags=["trigger", "automation", "self-trigger"],
+            tags=["trigger", "automation", "self-trigger", "interval"],
             when_to_use=[
                 "需要延迟执行某项任务时",
                 "需要在特定时间点执行任务时",
+                "需要按固定间隔重复执行任务时（如每30分钟检查一次）",
                 "需要监听某个事件并响应时",
                 "需要等待某个条件满足时执行任务时",
             ],
@@ -118,7 +180,9 @@ class TriggerSetupTool:
                 "触发器只能触发自己所在的会话",
                 "延迟时间最大为24小时",
                 "定时触发时间不能超过7天",
+                "周期间隔最小10秒，最大30天",
                 "单会话最多设置10个触发器",
+                "设置 max_count 或 max_time 后，到达条件时触发器自动停止",
             ],
         )
 
@@ -128,6 +192,7 @@ class TriggerSetupTool:
         message = inputs.get("message")
         session_id = inputs.get("session_id")
         execution_id = inputs.get("execution_id")
+        pipeline_id = inputs.get("pipeline_id")
 
         if not trigger_type:
             return create_failure_result(
@@ -150,7 +215,11 @@ class TriggerSetupTool:
         if not execution_id:
             execution_id = f"exec_{uuid.uuid4().hex[:12]}"
 
-        if await self._queue.size(session_id) >= self.MAX_TRIGGERS_PER_SESSION:
+        active_count = sum(
+            1 for t in self._manager._triggers.values()
+            if t.session_id == session_id and t.status.value in ("active", "pending")
+        )
+        if active_count >= self.MAX_TRIGGERS_PER_SESSION:
             return create_failure_result(
                 error=f"单会话触发器数量已达上限 ({self.MAX_TRIGGERS_PER_SESSION})",
                 error_code="TRIGGER_LIMIT_EXCEEDED",
@@ -159,19 +228,23 @@ class TriggerSetupTool:
         try:
             if trigger_type == "delay":
                 return await self._setup_delay_trigger(
-                    inputs, session_id, execution_id, message
+                    inputs, session_id, execution_id, pipeline_id, message
                 )
             elif trigger_type == "schedule":
                 return await self._setup_schedule_trigger(
-                    inputs, session_id, execution_id, message
+                    inputs, session_id, execution_id, pipeline_id, message
+                )
+            elif trigger_type == "interval":
+                return await self._setup_interval_trigger(
+                    inputs, session_id, execution_id, pipeline_id, message
                 )
             elif trigger_type == "event":
                 return await self._setup_event_trigger(
-                    inputs, session_id, execution_id, message
+                    inputs, session_id, execution_id, pipeline_id, message
                 )
             elif trigger_type == "condition":
                 return await self._setup_condition_trigger(
-                    inputs, session_id, execution_id, message
+                    inputs, session_id, execution_id, pipeline_id, message
                 )
             else:
                 return create_failure_result(
@@ -186,11 +259,41 @@ class TriggerSetupTool:
                 error_code="TRIGGER_SETUP_FAILED",
             )
 
+    def _parse_max_time(self, max_time_str: str | None) -> float:
+        """解析 max_time 参数为秒数。
+
+        Args:
+            max_time_str: 时长字符串，如 '30m', '2h', '3d'，None 表示无限
+
+        Returns:
+            秒数，0 表示无限
+        """
+        if not max_time_str:
+            return 0.0
+        return parse_duration(max_time_str)
+
+    def _parse_max_count(self, max_count: Any) -> int:
+        """解析 max_count 参数。
+
+        Args:
+            max_count: 最大触发次数，None 或 0 表示无限
+
+        Returns:
+            整数，0 表示无限
+        """
+        if max_count is None:
+            return 0
+        count = int(max_count)
+        if count < 0:
+            return 0
+        return count
+
     async def _setup_delay_trigger(
         self,
         inputs: dict[str, Any],
         session_id: str,
         execution_id: str,
+        pipeline_id: str | None,
         message: str,
     ) -> ToolExecutionResult:
         """设置延迟触发器"""
@@ -215,22 +318,22 @@ class TriggerSetupTool:
             )
 
         trigger_id = f"trigger_delay_{uuid.uuid4().hex[:12]}"
-        expires_at = datetime.utcnow() + timedelta(seconds=delay_seconds)
 
-        trigger_message = TriggerMessage(
-            id=trigger_id,
+        config = TriggerConfig(
+            trigger_id=trigger_id,
+            name=inputs.get("name", f"延迟触发器-{delay_seconds}s"),
+            trigger_type=TriggerType.DELAY,
+            delay_seconds=float(delay_seconds),
+            max_fires=1,
+            message=message,
             session_id=session_id,
-            execution_id=execution_id,
-            content=message,
-            priority=inputs.get("priority", 0),
-            expires_at=expires_at,
+            pipeline_id=pipeline_id or "",
             metadata={
-                "trigger_type": "delay",
-                "delay_seconds": delay_seconds,
+                "execution_id": execution_id,
             },
         )
 
-        await self._queue.push(trigger_message)
+        self._manager.register(config)
 
         logger.info(
             f"[TriggerSetupTool] 延迟触发器已设置 | "
@@ -243,12 +346,8 @@ class TriggerSetupTool:
             data={
                 "success": True,
                 "trigger_id": trigger_id,
-                "message": f"触发器已设置，将在 {delay_seconds} 秒后触发",
-            },
-            metadata={
                 "trigger_type": "delay",
-                "delay_seconds": delay_seconds,
-                "expires_at": expires_at.isoformat(),
+                "message": f"触发器已设置，将在 {delay_seconds} 秒后触发",
             },
         )
 
@@ -257,6 +356,7 @@ class TriggerSetupTool:
         inputs: dict[str, Any],
         session_id: str,
         execution_id: str,
+        pipeline_id: str | None,
         message: str,
     ) -> ToolExecutionResult:
         """设置定时触发器"""
@@ -292,20 +392,22 @@ class TriggerSetupTool:
 
         trigger_id = f"trigger_schedule_{uuid.uuid4().hex[:12]}"
 
-        trigger_message = TriggerMessage(
-            id=trigger_id,
+        config = TriggerConfig(
+            trigger_id=trigger_id,
+            name=inputs.get("name", f"定时触发器-{schedule_time_str}"),
+            trigger_type=TriggerType.SCHEDULED,
+            scheduled_at=schedule_time,
+            max_fires=1,
+            message=message,
             session_id=session_id,
-            execution_id=execution_id,
-            content=message,
-            priority=inputs.get("priority", 0),
-            expires_at=schedule_time + timedelta(minutes=5),
+            pipeline_id=pipeline_id or "",
             metadata={
-                "trigger_type": "schedule",
+                "execution_id": execution_id,
                 "schedule_time": schedule_time_str,
             },
         )
 
-        await self._queue.push(trigger_message)
+        self._manager.register(config)
 
         logger.info(
             f"[TriggerSetupTool] 定时触发器已设置 | "
@@ -318,11 +420,99 @@ class TriggerSetupTool:
             data={
                 "success": True,
                 "trigger_id": trigger_id,
+                "trigger_type": "schedule",
                 "message": f"触发器已设置，将在 {schedule_time_str} 触发",
             },
+        )
+
+    async def _setup_interval_trigger(
+        self,
+        inputs: dict[str, Any],
+        session_id: str,
+        execution_id: str,
+        pipeline_id: str | None,
+        message: str,
+    ) -> ToolExecutionResult:
+        """设置周期触发器"""
+        interval_str = inputs.get("interval")
+
+        if not interval_str:
+            return create_failure_result(
+                error="interval 类型触发器需要提供 interval 参数（如 '30m', '1h', '1d'）",
+                error_code="MISSING_INTERVAL",
+            )
+
+        try:
+            interval_seconds = parse_duration(interval_str)
+        except ValueError as e:
+            return create_failure_result(
+                error=f"无效的间隔格式: {e}",
+                error_code="INVALID_INTERVAL",
+            )
+
+        if interval_seconds < 10:
+            return create_failure_result(
+                error="周期间隔最小为 10 秒",
+                error_code="INTERVAL_TOO_SHORT",
+            )
+
+        if interval_seconds > self.MAX_INTERVAL_SECONDS:
+            return create_failure_result(
+                error=f"周期间隔超过最大限制 ({self.MAX_INTERVAL_SECONDS} 秒 = 30天)",
+                error_code="INTERVAL_EXCEEDS_LIMIT",
+            )
+
+        max_count = self._parse_max_count(inputs.get("max_count"))
+        max_time_seconds = self._parse_max_time(inputs.get("max_time"))
+
+        if max_count == 0 and max_time_seconds == 0:
+            max_count = 1
+
+        trigger_id = f"trigger_interval_{uuid.uuid4().hex[:12]}"
+
+        config = TriggerConfig(
+            trigger_id=trigger_id,
+            name=inputs.get("name", f"周期触发器-{interval_str}"),
+            trigger_type=TriggerType.INTERVAL,
+            interval_seconds=interval_seconds,
+            max_fires=max_count,
+            max_time_seconds=max_time_seconds,
+            message=message,
+            session_id=session_id,
+            pipeline_id=pipeline_id or "",
             metadata={
-                "trigger_type": "schedule",
-                "schedule_time": schedule_time_str,
+                "execution_id": execution_id,
+                "interval_str": interval_str,
+            },
+        )
+
+        self._manager.register(config)
+
+        desc_parts = [f"每 {interval_str} 触发一次"]
+        if max_count > 0:
+            desc_parts.append(f"最多 {max_count} 次")
+        if max_time_seconds > 0:
+            desc_parts.append(f"最长运行 {inputs.get('max_time', '')}")
+        desc = "，".join(desc_parts)
+
+        logger.info(
+            f"[TriggerSetupTool] 周期触发器已设置 | "
+            f"trigger_id={trigger_id} | "
+            f"session_id={session_id} | "
+            f"interval={interval_str}({interval_seconds}s) | "
+            f"max_count={max_count} | max_time={max_time_seconds}s"
+        )
+
+        return create_success_result(
+            data={
+                "success": True,
+                "trigger_id": trigger_id,
+                "trigger_type": "interval",
+                "interval": interval_str,
+                "interval_seconds": interval_seconds,
+                "max_count": max_count,
+                "max_time_seconds": max_time_seconds,
+                "message": f"周期触发器已设置：{desc}",
             },
         )
 
@@ -331,6 +521,7 @@ class TriggerSetupTool:
         inputs: dict[str, Any],
         session_id: str,
         execution_id: str,
+        pipeline_id: str | None,
         message: str,
     ) -> ToolExecutionResult:
         """设置事件触发器"""
@@ -342,22 +533,28 @@ class TriggerSetupTool:
                 error_code="MISSING_EVENT_TYPE",
             )
 
+        max_count = self._parse_max_count(inputs.get("max_count"))
+        if max_count == 0:
+            max_count = 1
+
         trigger_id = f"trigger_event_{uuid.uuid4().hex[:12]}"
 
-        trigger_message = TriggerMessage(
-            id=trigger_id,
+        config = TriggerConfig(
+            trigger_id=trigger_id,
+            name=inputs.get("name", f"事件触发器-{event_type}"),
+            trigger_type=TriggerType.EVENT,
+            event_name=event_type,
+            max_fires=max_count,
+            message=message,
             session_id=session_id,
-            execution_id=execution_id,
-            content=message,
-            priority=inputs.get("priority", 0),
-            expires_at=datetime.utcnow() + timedelta(hours=24),
+            pipeline_id=pipeline_id or "",
             metadata={
-                "trigger_type": "event",
+                "execution_id": execution_id,
                 "event_type": event_type,
             },
         )
 
-        await self._queue.push(trigger_message)
+        self._manager.register(config)
 
         logger.info(
             f"[TriggerSetupTool] 事件触发器已设置 | "
@@ -370,11 +567,8 @@ class TriggerSetupTool:
             data={
                 "success": True,
                 "trigger_id": trigger_id,
-                "message": f"事件触发器已设置，监听事件: {event_type}",
-            },
-            metadata={
                 "trigger_type": "event",
-                "event_type": event_type,
+                "message": f"事件触发器已设置，监听事件: {event_type}",
             },
         )
 
@@ -383,6 +577,7 @@ class TriggerSetupTool:
         inputs: dict[str, Any],
         session_id: str,
         execution_id: str,
+        pipeline_id: str | None,
         message: str,
     ) -> ToolExecutionResult:
         """设置条件触发器"""
@@ -394,22 +589,28 @@ class TriggerSetupTool:
                 error_code="MISSING_CONDITION",
             )
 
+        max_count = self._parse_max_count(inputs.get("max_count"))
+        if max_count == 0:
+            max_count = 1
+
         trigger_id = f"trigger_condition_{uuid.uuid4().hex[:12]}"
 
-        trigger_message = TriggerMessage(
-            id=trigger_id,
+        config = TriggerConfig(
+            trigger_id=trigger_id,
+            name=inputs.get("name", f"条件触发器-{condition[:30]}"),
+            trigger_type=TriggerType.CONDITION,
+            condition_expression=condition,
+            max_fires=max_count,
+            message=message,
             session_id=session_id,
-            execution_id=execution_id,
-            content=message,
-            priority=inputs.get("priority", 0),
-            expires_at=datetime.utcnow() + timedelta(hours=24),
+            pipeline_id=pipeline_id or "",
             metadata={
-                "trigger_type": "condition",
+                "execution_id": execution_id,
                 "condition": condition,
             },
         )
 
-        await self._queue.push(trigger_message)
+        self._manager.register(config)
 
         logger.info(
             f"[TriggerSetupTool] 条件触发器已设置 | "
@@ -422,10 +623,7 @@ class TriggerSetupTool:
             data={
                 "success": True,
                 "trigger_id": trigger_id,
-                "message": f"条件触发器已设置，条件: {condition}",
-            },
-            metadata={
                 "trigger_type": "condition",
-                "condition": condition,
+                "message": f"条件触发器已设置，条件: {condition}",
             },
         )

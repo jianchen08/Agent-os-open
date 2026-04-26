@@ -200,6 +200,7 @@ class AgentConfig:
         tags: 标签列表。
         metadata: 元数据。
         plugins: 插件覆盖配置（disabled/enabled）。
+        model_name: 指定 LLM 模型标识（如 minimax-m2.7、glm-4.7），覆盖 pipeline 默认模型。
     """
 
     config_id: str = ""
@@ -209,6 +210,7 @@ class AgentConfig:
     agent_type: AgentType = AgentType.SPECIALIZED
     category: str = ""
     level: AgentLevel = AgentLevel.L3_ATOMIC
+    model_name: str = ""
     system_prompt: str = ""
     tool_ids: list[str] = field(default_factory=list)
     static_vars: ContextConfig = field(default_factory=ContextConfig)
@@ -246,11 +248,6 @@ class AgentConfig:
             包含 Agent 参数的状态字典
         """
         state: dict[str, Any] = {}
-
-        if self.name:
-            state["agent_name"] = self.name
-        if self.agent_type:
-            state["agent_type"] = self.agent_type.value
 
         if self.system_prompt:
             state["system_prompt"] = self._build_full_system_prompt()
@@ -301,7 +298,12 @@ class AgentConfig:
         if self.max_reminders:
             state["max_reminders"] = self.max_reminders
 
-        if self.timeout_seconds and self.timeout_seconds > 0:
+        # BUG-FIX-fix_20260425_timeout_neg1:
+        # 问题根因: timeout_seconds=-1（无限制）时，原条件 `self.timeout_seconds and self.timeout_seconds > 0`
+        #           会将 -1 过滤掉（-1 and False → False），导致 state 中无此键，
+        #           stop_check 插件使用默认值 600s，主管道被错误超时终止。
+        # 修复方案: 使用 `is not None and != 0` 判断，允许 -1 通过。
+        if self.timeout_seconds is not None and self.timeout_seconds != 0:
             state["timeout_seconds"] = self.timeout_seconds
 
         plugin_configs = self.get_plugin_configs()

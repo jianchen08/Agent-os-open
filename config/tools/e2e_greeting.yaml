@@ -1,0 +1,52 @@
+# -*- coding: utf-8 -*-
+# e2e_greeting 问候语工具配置
+
+name: e2e_greeting
+display_name: "问候语生成"
+description: "生成个性化问候语，支持多语言和时间感知问候"
+
+category: "utility"
+level: "user"
+
+# 参数配置
+parameters:
+  name:
+    type: "string"
+    required: true
+    description: "用户名称"
+  language:
+    type: "string"
+    required: false
+    default: "zh-CN"
+    description: "语言选择，支持 zh-CN/en-US/ja-JP"
+  time_context:
+    type: "boolean"
+    required: false
+    default: true
+    description: "是否启用时间感知问候"
+
+# 问候语模板
+templates:
+  zh-CN:
+    morning: "早上好，{name}！今天又是美好的一天~"
+    afternoon: "下午好，{name}！工作顺利吗？"
+    evening: "晚上好，{name}！休息一下吧~"
+    night: "晚安，{name}！好梦~"
+  en-US:
+    morning: "Good morning, {name}! Have a wonderful day~"
+    afternoon: "Good afternoon, {name}! How's your day going?"
+    evening: "Good evening, {name}! Time to relax~"
+    night: "Good night, {name}! Sweet dreams~"
+
+# 超时配置
+timeout:
+  default: 5
+  max: 30
+
+# 缓存配置
+cache:
+  enabled: true
+  default_ttl: 60
+
+# 标签
+tags: ["greeting", "e2e", "utility", "personalized"]

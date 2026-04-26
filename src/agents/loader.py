@@ -286,6 +286,7 @@ class AgentConfigLoader:
             agent_type=agent_type,
             category=data.get("category", ""),
             level=level,
+            model_name=data.get("model_name", ""),
             system_prompt=data.get("system_prompt", ""),
             tool_ids=data.get("tool_ids", []),
             static_vars=static_vars,

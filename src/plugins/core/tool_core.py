@@ -19,6 +19,7 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
+from tools.format_manager import FormatManager, ToolFormat, get_format_manager
 from tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -62,6 +63,12 @@ class ToolCore(ICorePlugin):
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
         self._isolation_executor: IsolationExecutor | None = None
+        fmt_str = self._config.get("result_format", "yaml")
+        try:
+            self._result_format = ToolFormat(fmt_str.lower())
+        except ValueError:
+            self._result_format = ToolFormat.YAML
+        self._format_manager: FormatManager = get_format_manager()
 
     @property
     def name(self) -> str:
@@ -335,7 +342,8 @@ class ToolCore(ICorePlugin):
                 StateKeys.TOOL_RESULTS: [],
             }
 
-        timeout = self._default_timeout
+        default_timeout = self._default_timeout
+        tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
         results: list[dict[str, Any]] = []
         last_result_text = ""
         on_chunk = ctx.state.get("on_chunk")
@@ -373,6 +381,8 @@ class ToolCore(ICorePlugin):
 
             if not isinstance(tool_args, dict):
                 tool_args = {}
+
+            timeout = tool_timeouts.get(tool_name, default_timeout)
 
             # 优先通过隔离执行器执行
             if self._isolation_executor is not None:
@@ -445,7 +455,9 @@ class ToolCore(ICorePlugin):
             tc_id = tool_calls[i].get("id", f"call_{i}") if i < len(tool_calls) else f"call_{i}"
             result_data = result.get("data", result.get("error", ""))
             try:
-                content_str = json.dumps(result_data, ensure_ascii=False, default=str)
+                content_str = self._format_manager.serialize(
+                    result_data, fmt=self._result_format
+                )
             except (TypeError, ValueError):
                 content_str = str(result_data)
             tool_msg = {
@@ -491,9 +503,14 @@ class ToolCore(ICorePlugin):
                 continue
             meta = tool_data.get("metadata", {})
             if isinstance(meta, dict) and meta.get("action") == "task_submit":
-                tid = tool_data.get("task_id")
+                # task_id 在 output/data 子字典中（ToolExecutionResult.to_dict() 嵌套结构）
+                inner = tool_data.get("data") or tool_data.get("output") or {}
+                tid = inner.get("task_id") if isinstance(inner, dict) else None
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
+                    logger.info(
+                        "[%s] Detected task_submit: task_id=%s", self.name, tid,
+                    )
             tool_name = r.get("tool_name", "")
             if tool_name == "task_evaluate" and tool_data.get("overall_passed") is True:
                 evaluation_completed = True

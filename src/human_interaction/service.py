@@ -81,8 +81,8 @@ class HumanInteractionService(IHumanInteractionService):
     def __init__(
         self,
         notifier: IInteractionNotifier | None = None,
-        default_timeout: float = 300.0,
-        remind_before_seconds: int = 60,
+        default_timeout: float = 86400.0,
+        remind_before_seconds: int = 300,
     ):
         self._notifier = notifier
         self._default_timeout = default_timeout
@@ -200,7 +200,7 @@ class HumanInteractionService(IHumanInteractionService):
     async def wait_for_conversation_arrival(
         self,
         request_id: str,
-        timeout: float = 60.0,
+        timeout: float = 86400.0,
     ) -> dict[str, Any]:
         """等待用户到达对话页面。"""
         event = self._pending_events.get(request_id)

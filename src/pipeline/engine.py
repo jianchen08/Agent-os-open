@@ -17,10 +17,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import logging
 import uuid as _uuid
 from pathlib import Path
+
+_current_pipeline_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_pipeline_id", default=None,
+)
 
 
 def _safe_deepcopy(state: dict) -> dict:
@@ -50,6 +55,17 @@ if TYPE_CHECKING:
     from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
 
 logger = logging.getLogger(__name__)
+
+
+class _PipelineLogFilter(logging.Filter):
+    """只放行当前 context 中匹配 pipeline_id 的日志记录。"""
+
+    def __init__(self, pipeline_id: str):
+        super().__init__()
+        self.pipeline_id = pipeline_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _current_pipeline_id.get() == self.pipeline_id
 
 
 class PipelineEngine:
@@ -98,6 +114,8 @@ class PipelineEngine:
         self._suspended_state: dict[str, Any] | None = None
         self._checkpoint_manager = checkpoint_manager
         self._pipeline_id: str = _uuid.uuid4().hex[:12]
+        self._wake_event: asyncio.Event | None = None
+        self._watching_task_ids: list[str] = []
 
     async def run(
         self,
@@ -126,8 +144,11 @@ class PipelineEngine:
         Returns:
             管道最终状态字典
         """
-        # 使用引擎实例级 pipeline_id（一个 Engine 实例 = 一个会话）
-        if "pipeline_id" not in extra_state:
+        # 同步引擎实例级 pipeline_id：CLI 重启时通过 extra_state 传入会话恢复的 pipeline_id，
+        # 需同步到 self._pipeline_id 以确保内部路径（检查点、日志等）使用一致 ID。
+        if "pipeline_id" in extra_state:
+            self._pipeline_id = extra_state["pipeline_id"]
+        else:
             extra_state["pipeline_id"] = self._pipeline_id
 
         if initial_state is not None and user_input is None:
@@ -162,6 +183,9 @@ class PipelineEngine:
 
         if agent_config and hasattr(agent_config, "max_iterations") and agent_config.max_iterations:
             self.max_iterations = agent_config.max_iterations
+
+        self._apply_agent_plugin_configs(agent_config)
+        self._apply_agent_model_override(agent_config)
 
         return await self._run_loop(state, resumed=False)
 
@@ -323,6 +347,122 @@ class PipelineEngine:
 
         return result
 
+    def _apply_agent_plugin_configs(
+        self, agent_config: Any | None,
+    ) -> None:
+        """将 Agent 配置的插件覆盖直接合并到 plugin_registry。
+
+        遍历 agent_config.plugins.enabled，将配置合并到 registry 中
+        已有的同名插件实例上（原地替换），使后续 _run_loop 通过
+        registry.get() 拿到的就是合并后的插件。
+
+        Args:
+            agent_config: Agent 配置实例
+        """
+        if not agent_config or not hasattr(agent_config, "plugins"):
+            return
+
+        plugins_config = agent_config.plugins
+        if not hasattr(plugins_config, "enabled") or not plugins_config.enabled:
+            return
+
+        for name, override in plugins_config.enabled.items():
+            if not isinstance(override, dict):
+                continue
+            existing = self.plugin_registry.get(name)
+            if existing is None:
+                continue
+            if not hasattr(existing, "_config"):
+                continue
+            merged_config = {**existing._config, **override}
+            try:
+                new_plugin = type(existing)(config=merged_config)
+                self.plugin_registry._plugins[name] = new_plugin
+                # 同步 core_plugins 映射
+                for core_key, pname in list(
+                    self.plugin_registry._core_plugins.items()
+                ):
+                    if pname == name:
+                        self.plugin_registry._core_plugins[core_key] = name
+                logger.debug(
+                    "Agent plugin config merged: %s + %s -> %s",
+                    name, list(override.keys()), list(merged_config.keys()),
+                )
+            except Exception:
+                logger.debug(
+                    "Agent plugin config merge failed for %s", name,
+                )
+
+    def _apply_agent_model_override(self, agent_config: Any | None) -> None:
+        """将 Agent 配置中的 model_name 覆盖到 llm_call 核心插件。
+
+        当 Agent YAML 声明了 model_name（如 minimax-m2.7）时，
+        从 llm.yaml 加载该模型的完整配置（provider、api_base、api_key、context_window 等），
+        重建 llm_call 插件实例替换原有插件，使 Agent 使用指定模型。
+
+        Args:
+            agent_config: Agent 配置实例
+        """
+        if not agent_config or not hasattr(agent_config, "model_name"):
+            return
+
+        model_id = agent_config.model_name
+        if not model_id:
+            return
+
+        llm_call = self.plugin_registry.get_core("llm_call")
+        if llm_call is None:
+            return
+
+        model_loader = None
+        services = getattr(self, "_services", {})
+        if services:
+            model_loader = services.get("model_loader")
+
+        if model_loader is None:
+            try:
+                from config.models import ModelConfigLoader
+                model_loader = ModelConfigLoader()
+            except Exception:
+                logger.warning(
+                    "[_apply_agent_model_override] ModelConfigLoader 不可用，跳过模型覆盖"
+                )
+                return
+
+        llm_conf = model_loader.get_llm_core_config(model_id)
+        if not llm_conf:
+            logger.warning(
+                "[_apply_agent_model_override] 模型 %r 未在 llm.yaml 中找到配置，跳过覆盖",
+                model_id,
+            )
+            return
+
+        # 以现有 llm_call 配置为基础，用模型配置覆盖
+        # 这样 provider/api_base/api_key 等字段跟随模型配置
+        if hasattr(llm_call, "_config") and isinstance(llm_call._config, dict):
+            merged_config = dict(llm_call._config)
+            merged_config.update(llm_conf)
+        else:
+            merged_config = dict(llm_conf)
+        merged_config["model_name"] = llm_conf.get("model_name", model_id)
+
+        try:
+            new_plugin = type(llm_call)(config=merged_config)
+            plugin_name = getattr(llm_call, "name", "LLMCorePlugin")
+            self.plugin_registry._core_plugins["llm_call"] = new_plugin
+            self.plugin_registry._plugins[plugin_name] = new_plugin
+            logger.info(
+                "[_apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
+                getattr(agent_config, "config_id", "?"),
+                merged_config.get("model_name"),
+                merged_config.get("provider"),
+                merged_config.get("context_window"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[_apply_agent_model_override] 重建 llm_call 插件失败: %s", exc,
+            )
+
     @staticmethod
     def _matches_disabled(plugin_name: str, disabled_names: list[str]) -> bool:
         """检查插件名称是否匹配禁用列表。
@@ -405,6 +545,7 @@ class PipelineEngine:
         _pipeline_log_handler = None
         _pipeline_loggers: list[logging.Logger] = []
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
+        _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
         try:
             try:
                 _log_dir = Path.cwd() / "logs"
@@ -418,6 +559,7 @@ class PipelineEngine:
                 _pipeline_log_handler.setFormatter(logging.Formatter(
                     "%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S",
                 ))
+                _pipeline_log_handler.addFilter(_PipelineLogFilter(pipeline_run_id))
                 for _ln in [
                     "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
                     "pipeline.route", "pipeline.config", "pipeline.registry",
@@ -433,6 +575,15 @@ class PipelineEngine:
                     _pipeline_loggers.append(_lg)
             except Exception:
                 _pipeline_log_handler = None
+
+            # BUG-FIX-fix_20260426_context_guard: context_window 需在首次迭代前注入 state，
+            # 否则 context_window_guard 在第一次 LLM 调用前无法获取到 context_window，
+            # 导致守卫完全失效。llm_core 只在调用成功后才写入 context_window，
+            # 但 guard 是 Input 插件，在 llm_call 之前执行。
+            if not state.get("context_window"):
+                _llm_core = self.plugin_registry.get_core("llm_call")
+                if _llm_core and hasattr(_llm_core, "_context_window") and _llm_core._context_window:
+                    state["context_window"] = _llm_core._context_window
 
             while not state.get(StateKeys.ENDED, False):
                 # 1. 递增迭代计数器
@@ -506,7 +657,7 @@ class PipelineEngine:
                     logger.info("Pipeline ended by input route (target=end)")
                     break
 
-                # 7. target == "wait": 挂起并保存 state 快照
+                # 7. target == "wait": 挂起并等待唤醒信号
                 if target == "wait":
                     self._suspended_state = _safe_deepcopy(state)
                     logger.info("Pipeline suspended by input route (target=wait), state saved")
@@ -516,7 +667,14 @@ class PipelineEngine:
                             await self._checkpoint_manager.save(pipeline_id, state, phase="suspended")
                         except Exception as exc:
                             logger.debug("Checkpoint suspended-save failed: %s", exc)
-                    break
+                    await self._suspend_and_wait(state)
+                    if self._suspended_state is not None:
+                        state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
+                        state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
+                        self._suspended_state = None
+                    else:
+                        break
+                    logger.info("Pipeline woken up, resuming loop iteration")
 
                 # 8. 获取 Core 插件 → 执行，更新 state
                 core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
@@ -545,11 +703,31 @@ class PipelineEngine:
                                 and core_attempts < max_core_retries + 1
                             )
                             if is_retryable:
-                                delay = core_retry_delay * (2 ** (core_attempts - 1)) * (0.5 + _rand.random() * 0.5)
+                                # API overload (529/overloaded) uses
+                                # a much longer delay
+                                exc_lower = str(exc).lower()
+                                is_overload = (
+                                    "overloaded" in exc_lower
+                                    or "529" in exc_lower
+                                )
+                                if is_overload:
+                                    delay = getattr(
+                                        core_plugin,
+                                        "overload_retry_delay", 180.0,
+                                    )
+                                else:
+                                    delay = core_retry_delay * (
+                                        2 ** (core_attempts - 1)
+                                    ) * (
+                                        0.5 + _rand.random() * 0.5
+                                    )
                                 logger.warning(
-                                    "[%s] Core retry %d/%d (delay=%.1fs): %s",
-                                    core_type, core_attempts, max_core_retries,
-                                    delay, exc,
+                                    "[%s] Core retry %d/%d"
+                                    " (delay=%.1fs%s): %s",
+                                    core_type, core_attempts,
+                                    max_core_retries, delay,
+                                    " [OVERLOAD]" if is_overload else "",
+                                    exc,
                                 )
                                 await asyncio.sleep(delay)
                                 continue
@@ -663,6 +841,7 @@ class PipelineEngine:
                 _pipeline_log_handler.close()
                 for _lg in _pipeline_loggers:
                     _lg.removeHandler(_pipeline_log_handler)
+            _current_pipeline_id.reset(_pipeline_id_token)
 
         return state
 
@@ -670,6 +849,58 @@ class PipelineEngine:
     def is_suspended(self) -> bool:
         """管道是否处于暂停状态。"""
         return self._suspended_state is not None
+
+    async def _suspend_and_wait(self, state: dict[str, Any]) -> None:
+        """挂起管道，等待外部通过 wake() 或 inject_and_wake() 唤醒。
+
+        管道挂起后不退出 _run_loop，而是 await 内部 _wake_event。
+        任何外部系统都可以通过 inject_and_wake() 注入消息并唤醒管道。
+
+        挂起时记录 submitted_task_ids，供外部判断该管道等待哪些任务。
+        这是管道基础设施的通用机制，不依赖任何业务系统。
+        """
+        self._wake_event = asyncio.Event()
+        pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
+        self._watching_task_ids = list(state.get("submitted_task_ids", []))
+        self._services[f"__suspended_engine_{pipeline_id}"] = self
+        logger.info(
+            "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
+            pipeline_id, self._watching_task_ids,
+        )
+        try:
+            await self._wake_event.wait()
+        finally:
+            self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+            self._wake_event = None
+            self._watching_task_ids = []
+        logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)
+
+    def wake(self) -> None:
+        """唤醒挂起的管道（不注入消息）。
+
+        供任何外部系统在需要时主动恢复管道。
+        """
+        if self._wake_event is not None:
+            self._wake_event.set()
+
+    def inject_and_wake(self, user_input: str) -> None:
+        """向挂起的管道注入消息并唤醒。
+
+        将 user_input 前置注入到 _suspended_state，然后唤醒管道。
+        下一轮迭代时 LLM 会看到注入的消息。
+
+        这是管道基础设施提供的通用消息注入能力，
+        任何外部系统都可以调用来通知管道。
+
+        Args:
+            user_input: 要注入的消息文本
+        """
+        if self._suspended_state is not None and user_input:
+            orig = self._suspended_state.get("user_input", "")
+            self._suspended_state["user_input"] = f"{user_input}\n\n{orig}".strip()
+            logger.info("[Engine] 消息已注入到挂起管道 state (%d 字符)", len(user_input))
+        if self._wake_event is not None:
+            self._wake_event.set()
 
     async def save_checkpoint(self, phase: str = "manual") -> str | None:
         """手动保存管道检查点。
@@ -793,6 +1024,12 @@ class PipelineEngine:
             self._suspended_state = _safe_deepcopy(state)
             state[StateKeys.ENDED] = False
             logger.info("Route applied: wait, pipeline suspended")
+            await self._suspend_and_wait(state)
+            if self._suspended_state is not None:
+                state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
+                state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
+                self._suspended_state = None
+                return False
             return True
 
         else:

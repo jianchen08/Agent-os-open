@@ -324,12 +324,26 @@ class CLIApplication:
         )
         logger.info("PipelineEngine created (direct call, no Worker)")
 
+        # Register llm_core as a service for context_window_guard
+        llm_core_plugin = self._plugin_registry.get_core("llm_call")
+        if llm_core_plugin is not None:
+            self._services["llm_core"] = llm_core_plugin
+            logger.info("Service registered: llm_core (from plugin registry)")
+
         # 初始化任务执行器（事件驱动，用于后台任务处理）
         try:
             from tasks.service import TaskService
             task_service = self._services.get("task_service") or TaskService()
 
             from infrastructure.task_worker import TaskWorker
+            import yaml as _yaml
+            _tw_config: dict[str, Any] = {}
+            try:
+                with open(config_path, encoding="utf-8") as _f:
+                    _raw_cfg = _yaml.safe_load(_f) or {}
+                _tw_config = _raw_cfg.get("task_worker", {})
+            except Exception:
+                pass
             self._task_worker = TaskWorker(
                 task_service=task_service,
                 plugin_registry=self._plugin_registry,
@@ -337,6 +351,7 @@ class CLIApplication:
                 output_route_table=self._output_route_table,
                 services=self._services,
                 event_bus=self._event_bus,
+                config=_tw_config,
             )
             logger.info("Task worker initialized")
 
@@ -491,6 +506,32 @@ class CLIApplication:
             logger.info("Service created: chunk_service")
         except Exception as exc:
             logger.warning("Failed to create chunk_service: %s", exc)
+
+        # 5.5.1 MemoryContextService — 上下文压缩共享服务
+        try:
+            from config.models import ModelConfigLoader as _MCL
+
+            _loader = _MCL()
+            _llm_data = _loader._load_llm_data()
+            _defaults = _llm_data.get("defaults", {})
+            _model_id = _defaults.get("chat", "")
+            _llm_conf = _loader.get_llm_core_config(_model_id) if _model_id else {}
+            _ctx_window = _llm_conf.get("context_window", 128000)
+
+            from memory.memory_context_service import MemoryContextService
+
+            context_service = MemoryContextService(
+                config={
+                    "context_window": _ctx_window,
+                    "compress_trigger_ratio": 0.5,
+                },
+            )
+            services["context_service"] = context_service
+            logger.info(
+                "Service created: context_service (context_window=%d)", _ctx_window,
+            )
+        except Exception as exc:
+            logger.warning("Failed to create context_service: %s", exc)
 
         # 5.6 TagNetworkRetriever — 三阶段检索（同步创建，异步初始化在 run() 中）
         try:

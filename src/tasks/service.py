@@ -158,8 +158,8 @@ class TaskService:
         """
         task = self._get_or_raise(task_id)
         self._transition_with_callback(task, TaskStatus.RUNNING)
-        # 设置开始时间
-        task.started_at = datetime.now().isoformat()
+        if not task.started_at:
+            task.started_at = datetime.now().isoformat()
         self._storage.save(task)
         logger.info("Task started: %s", task_id)
         return task

@@ -677,7 +677,7 @@ deliverables:
 #       description: 产出物描述
 #       template_source: 模板来源（可选: "knowledge"）
 #       template_name: 模板名称（可选）
-#       output_path: 输出路径（支持 {{workspace}} 等占位符）
+#       output_path: 输出路径（支持 {title} 等占位符，格式: docs/{title}_{产出物类型}.md）
 #       type: 文件类型（如 "markdown", "json", "python"）
 #       required: 是否必须产出
 #       reference_template: 参考模板路径（可选，用于 semantic_check 评估）
@@ -687,7 +687,7 @@ deliverables:
 #       description: "调研报告文件"
 #       template_source: "knowledge"
 #       template_name: "research_report"
-#       output_path: "{{workspace}}/research_report.md"
+#       output_path: "docs/{title}_research_report.md"
 #       type: "markdown"
 #       required: true
 #       reference_template: "config/templates/research_report_template.md"
@@ -730,7 +730,7 @@ recommended_metrics:
 #     - metric_id: file_check
 #       default_params:
 #         action: "read"
-#         path: "research_report.md"
+#         path: "docs/{title}_research_report.md"
 # - 决策建议:
 #   - L1 Agent: 无需定义 recommended_metrics，但需在映射表中体现各 Agent 的推荐指标
 #   - L2/L3 Agent: 根据 deliverables 定义对应的评估指标，指标信息将被 L1 映射表引用

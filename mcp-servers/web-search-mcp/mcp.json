@@ -3,8 +3,8 @@
     "web-search": {
       "command": "node",
       "args": [
-        "/Users/mark/Projects/web-search-mcp/dist/simple-test.js"
+        "dist/index.js"
       ]
     }
   }
-} 
+}

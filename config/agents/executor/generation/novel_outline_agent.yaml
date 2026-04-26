@@ -95,7 +95,7 @@ system_prompt: |
 
   ### 第四步：输出最终大纲
 
-  - 使用 file_write 将大纲写入 `{{workspace}}/novel_outline.md`
+  - 使用 file_write 将大纲写入验收标准中指定路径的文件
   - 确认文件写入成功
   - 使用 task_evaluate 评估任务完成度
 
@@ -217,13 +217,13 @@ is_active: true
 status: "active"
 max_iterations: 100
 max_reminders: 3
-timeout_seconds: 600
+timeout_seconds: 1500
 
 # 产出物定义
 deliverables:
   - name: "novel_outline"
     description: "网络小说大纲文件"
-    output_path: "{{workspace}}/novel_outline.md"
+    output_path: "docs/{title}_novel_outline.md"
     type: "markdown"
     required: true
     reference_template: "config/templates/novel_outline_template.md"
@@ -233,7 +233,7 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "novel_outline.md"
+      path: "docs/{title}_novel_outline.md"
   - metric_id: semantic_check
     default_params:
       criteria: "大纲是否包含：1)完整的世界观设定 2)清晰的人物设定 3)明确的主线剧情 4)详细的章节大纲 5)伏笔和悬念设计"

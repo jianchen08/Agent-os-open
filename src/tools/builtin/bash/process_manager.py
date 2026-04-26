@@ -1,4 +1,4 @@
-﻿"""
+"""
 进程管理器
 
 暴露接口：
@@ -116,7 +116,7 @@ class ProcessManager:
         log_filename = self._generate_log_filename(command)
         log_file = self.log_dir / log_filename
 
-        # 确定平台特定的执行方式
+        merged_env = {**os.environ, **(env or {})}
         is_windows = platform.system() == "Windows"
         use_bash = is_windows and shutil.which("bash")
 
@@ -128,7 +128,7 @@ class ProcessManager:
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
                 cwd=working_dir,
-                env={**os.environ, **(env or {})} if env else None,
+                env=merged_env,
             )
         else:
             full_command = f'cmd /c "{command}"' if is_windows else command
@@ -138,7 +138,7 @@ class ProcessManager:
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
                 cwd=working_dir,
-                env={**os.environ, **(env or {})} if env else None,
+                env=merged_env,
             )
 
         pid = process.pid
@@ -176,7 +176,7 @@ class ProcessManager:
                     line = await stream.readline()
                     if not line:
                         break
-                    text = line.decode("utf-8", errors="replace")
+                    text = line.decode("utf-8", errors="replace").replace("\x00", "")
                     self._append_to_log(log_file, prefix + text)
                 except Exception:
                     break
@@ -309,7 +309,11 @@ class ProcessManager:
 
         # 读取日志内容
         lines = self._read_log_lines(proc_info.log_file)
-        return "\n".join(lines)
+        raw_output = "\n".join(lines)
+
+        # 清理 null bytes 和控制字符，防止 LLM API 拒绝
+        raw_output = raw_output.replace("\x00", "")
+        return raw_output
 
     def get_summary(self, pid: int) -> dict[str, Any] | None:
         """

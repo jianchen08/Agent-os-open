@@ -186,6 +186,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             # 无行号参数：全量写入
             if start_line is None and end_line is None:
@@ -199,7 +200,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
                 return create_success_result(
                     data={
-                        "file": path.name,
+                        "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
                     },
@@ -209,13 +210,13 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
             # 有行号参数：需要文件存在
             if not path.exists():
                 return create_failure_result(
-                    error=f"文件不存在: {path}",
+                    error=f"文件不存在: {display_path}",
                     error_code="FILE_NOT_FOUND",
                 )
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -274,7 +275,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
                 return create_success_result(
                     data={
-                        "file": path.name,
+                        "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
                     },
@@ -312,17 +313,18 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 new_str = ""
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
             if not path.exists():
                 return create_failure_result(
-                    error=f"文件不存在: {path}",
+                    error=f"文件不存在: {display_path}",
                     error_code="FILE_NOT_FOUND",
                 )
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -358,7 +360,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "file": path.name,
+                    "file": display_path,
                     "replacements": lines_affected,
                     "backup": backup_path.name if backup_path else None,
                 },
@@ -398,17 +400,18 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
             if not path.exists():
                 return create_failure_result(
-                    error=f"文件不存在: {path}",
+                    error=f"文件不存在: {display_path}",
                     error_code="FILE_NOT_FOUND",
                 )
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -446,7 +449,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "file": path.name,
+                    "file": display_path,
                     "inserted_at": line,
                     "lines": len(insert_lines),
                     "backup": backup_path.name if backup_path else None,
@@ -487,17 +490,18 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
             if not path.exists():
                 return create_failure_result(
-                    error=f"文件不存在: {path}",
+                    error=f"文件不存在: {display_path}",
                     error_code="FILE_NOT_FOUND",
                 )
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -551,7 +555,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "file": path.name,
+                    "file": display_path,
                     "deleted_lines": f"{start_line}-{end_line}",
                     "count": lines_affected,
                     "backup": backup_path.name if backup_path else None,
@@ -585,6 +589,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 )
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             # 如果文件不存在，创建新文件（等同于全量写入）
             if not path.exists():
@@ -598,7 +603,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
                 return create_success_result(
                     data={
-                        "file": path.name,
+                        "file": display_path,
                         "lines": lines_affected,
                         "backup": backup_path.name if backup_path else None,
                     },
@@ -607,7 +612,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -635,7 +640,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "file": path.name,
+                    "file": display_path,
                     "lines": lines_affected,
                     "backup": backup_path.name if backup_path else None,
                 },

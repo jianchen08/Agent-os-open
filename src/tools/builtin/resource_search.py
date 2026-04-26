@@ -521,9 +521,17 @@ class ResourceSearchTool:
     def _get_workflow_registry(self):
         """获取 Workflow 注册表（延迟加载）"""
         if self.workflow_registry is None:
+            try:
+                from db.models import Workflow
+            except ImportError:
+                Workflow = None
+
+            if Workflow is None:
+                logger.debug("[resource_search] db.models.Workflow 不可用，跳过工作流注册表加载")
+                return None
+
             from sqlalchemy import select
 
-            from db.models import Workflow
             from infrastructure.db import get_async_session
 
             class WorkflowRegistry:
@@ -741,9 +749,17 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从数据库 tool_library 表搜索工具（内存注册表无结果时的回退）"""
         try:
+            from db.models import ToolLibrary
+        except ImportError:
+            ToolLibrary = None
+
+        if ToolLibrary is None:
+            logger.debug("[resource_search] db.models.ToolLibrary 不可用，跳过数据库工具搜索")
+            return [], [], []
+
+        try:
             from sqlalchemy import select
 
-            from db.models import ToolLibrary
             from infrastructure.db import get_async_session
 
             names = []

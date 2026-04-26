@@ -90,11 +90,11 @@ class TaskSubmitTool(BuiltinTool):
                     "target_type": {
                         "type": "string",
                         "enum": ["agent"],
-                        "description": "目标类型，固定为 agent。短期任务必填，长期任务不需要",
+                        "description": "目标类型，固定为 agent。non_container 必填，container 不需要",
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "目标 Agent ID。短期任务必填，长期任务不需要。可通过 resource_search 查找",
+                        "description": "目标 Agent ID。non_container 必填，container 不需要。可通过 resource_search 查找",
                     },
                     "goal": {
                         "type": "object",
@@ -122,7 +122,7 @@ class TaskSubmitTool(BuiltinTool):
                     "acceptance_criteria": {
                         "type": "object",
                         "description": """
-验收标准字典。短期任务必填，长期任务不需要。
+验收标准字典。non_container 必填，container 不需要。
 key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
 【获取推荐指标】
@@ -192,18 +192,31 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     },
                     "task_scope": {
                         "type": "string",
-                        "enum": ["short_term", "long_term"],
-                        "default": "short_term",
-                        "description": "任务范围：short_term（短期任务）或 long_term（长期任务）",
+                        "enum": ["non_container", "container"],
+                        "default": "non_container",
+                        "description": (
+                            "任务范围：container（容器任务，用于组织复杂长期任务的子任务链，"
+                            "不能指定 target_type 和 target_id）或 "
+                            "non_container（非容器任务，实际执行的任务，"
+                            "必须指定 target_type 和 target_id）"
+                        ),
                     },
                     "parent_task_id": {
                         "type": "string",
-                        "description": "父任务 ID。为长期任务创建子任务时需要指定此参数，将子任务关联到对应的长期任务。",
+                        "description": (
+                            "父任务 ID。为容器任务创建子任务时需要指定此参数，"
+                            "将子任务关联到对应的容器。"
+                        ),
                     },
                     "task_role": {
                         "type": "string",
                         "enum": ["solution_preparation", "solution_refinement", "final_validation"],
-                        "description": "子任务角色标记（可选）。用于长期任务容器的子任务，标记该子任务在容器中的角色。final_validation 表示最终验证任务，容器完成条件要求至少有一个 final_validation 子任务通过",
+                        "description": (
+                            "子任务角色标记（可选）。用于容器任务的子任务，"
+                            "标记该子任务在容器中的角色。"
+                            "final_validation 表示最终验证任务，"
+                            "容器完成条件要求至少有一个 final_validation 子任务通过"
+                        ),
                     },
                     "workspace": {
                         "type": "string",
@@ -220,7 +233,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "if": {
                             "not": {
                                 "required": ["task_scope"],
-                                "properties": {"task_scope": {"const": "long_term"}}
+                                "properties": {"task_scope": {"const": "container"}}
                             }
                         },
                         "then": {
@@ -244,7 +257,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     {
                         "if": {
                             "required": ["task_scope"],
-                            "properties": {"task_scope": {"const": "long_term"}}
+                            "properties": {"task_scope": {"const": "container"}}
                         },
                         "then": {
                             "not": {
@@ -266,6 +279,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "user_id",
                 "session_id",
                 "task_id",
+                "pipeline_id",
                 "dependencies",
                 "tool_record_id",
                 "parent_agent_level",
@@ -283,7 +297,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         5. 通过 EventBus 发布 task.submitted 事件
         6. 返回提交结果
         """
-        task_scope = inputs.get("task_scope", "short_term")
+        task_scope = inputs.get("task_scope", "non_container")
         goal = inputs.get("goal")
         if isinstance(goal, str):
             import json
@@ -319,8 +333,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="MISSING_GOAL",
             )
 
-        # 长期任务走独立分支
-        if task_scope == "long_term":
+        # 容器任务走独立分支
+        if task_scope == "container":
             return await self._execute_long_term(inputs)
 
         target_type = inputs.get("target_type")
@@ -341,8 +355,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
         # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
-        # BUG-FIX-fix_20260423_merge_criteria: 始终将目标 agent 的 recommended_metrics
-        # 合并进 acceptance_criteria，确保不会因为调用方只传了部分指标而丢失关键评估。
+        # BUG-FIX-fix_20260424_use_recommended_only: 当目标 agent 定义了
+        # recommended_metrics 时，只使用这些指标，忽略 LLM 传入的额外指标。
+        # 原因：上级不知道下级的具体文件路径，LLM 可能添加路径错误的 file_check。
         if target_type == "agent" and target_id:
             auto_criteria = self._auto_fill_criteria(
                 target_id, context=inputs,
@@ -354,14 +369,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "[TaskSubmit] 自动补全验收标准 | target_id=%s | metrics=%s",
                         target_id, list(auto_criteria.keys()),
                     )
-                elif isinstance(acceptance_criteria, dict):
-                    for metric_key, metric_val in auto_criteria.items():
-                        if metric_key not in acceptance_criteria:
-                            acceptance_criteria[metric_key] = metric_val
-                            logger.info(
-                                "[TaskSubmit] 合并缺失指标 %s (来自 %s recommended_metrics)",
-                                metric_key, target_id,
-                            )
+                else:
+                    # recommended_metrics 存在时，以配置为准，忽略 LLM 传入的额外指标
+                    discarded = [
+                        k for k in acceptance_criteria
+                        if k not in auto_criteria
+                    ]
+                    if discarded:
+                        logger.info(
+                            "[TaskSubmit] 丢弃 LLM 传入的非推荐指标: %s "
+                            "(以 %s recommended_metrics 为准)",
+                            discarded, target_id,
+                        )
+                    acceptance_criteria = auto_criteria
         injected_task_id = inputs.get("task_id")
         if parent_task_id is None and injected_task_id:
             parent_task_id = injected_task_id
@@ -372,7 +392,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         workspace = inputs.get("workspace", "")
 
         logger.info(
-            "[TaskSubmit] 短期任务 | target_type=%s | target_id=%s",
+            "[TaskSubmit] 非容器任务 | target_type=%s | target_id=%s",
             target_type, target_id,
         )
         logger.debug(
@@ -380,7 +400,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             goal.get("title", "N/A"), len(acceptance_criteria),
         )
 
-        # ── 2. 短期任务必填参数验证 ──
+        # ── 2. 非容器任务必填参数验证 ──
         if not target_type:
             return create_failure_result(
                 error="目标类型不能为空",
@@ -487,15 +507,15 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             )
 
         try:
-            # Determine is_root: container sub-tasks (parent is long_term) get own workspace,
-            # agent sub-tasks (parent is short_term) share parent workspace.
+            # Determine is_root: container sub-tasks (parent is container) get own workspace,
+            # agent sub-tasks (parent is non_container) share parent workspace.
             is_root = True
             if parent_task_id and task_service:
                 try:
                     parent_task = task_service.get_task(parent_task_id)
                     if parent_task and parent_task.metadata:
-                        parent_scope = parent_task.metadata.get("task_scope", "short_term")
-                        if parent_scope != "long_term":
+                        parent_scope = parent_task.metadata.get("task_scope", "non_container")
+                        if parent_scope != "container":
                             is_root = False
                 except Exception:
                     pass
@@ -548,9 +568,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         )
 
     async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """处理长期任务提交。
+        """处理容器任务提交。
 
-        长期任务不指定执行者，只创建一个 pending 状态的父任务框架。
+        容器任务不指定执行者，只创建一个 pending 状态的父任务框架。
 
         Args:
             inputs: 工具输入参数
@@ -562,14 +582,14 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         parent_agent_level = inputs.get("parent_agent_level", 1)
 
         logger.info(
-            "[TaskSubmit] 长期任务提交 | title=%s | parent_agent_level=%s",
+            "[TaskSubmit] 容器任务提交 | title=%s | parent_agent_level=%s",
             goal.get("title") if goal else "N/A", parent_agent_level,
         )
 
         if parent_agent_level != 1:
             return create_failure_result(
-                error="长期任务只能由 L1 Agent 提交",
-                error_code="L2_CANNOT_SUBMIT_LONG_TERM",
+                error="容器任务只能由 L1 Agent 提交",
+                error_code="L2_CANNOT_SUBMIT_CONTAINER",
             )
 
         task_service = self._get_task_service()
@@ -587,29 +607,74 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 metadata=self._build_metadata(inputs, goal, {}),
             )
         except Exception as e:
-            logger.error("[TaskSubmit] 长期任务创建失败: %s", e)
+            logger.error("[TaskSubmit] 容器任务创建失败: %s", e)
             return create_failure_result(
-                error=f"长期任务创建失败: {e}",
+                error=f"容器任务创建失败: {e}",
                 error_code="TASK_CREATE_FAILED",
             )
 
-        logger.info("[TaskSubmit] 长期任务提交成功 | task_id=%s | title=%s", task.id, task.title)
+        # 将当前管道 ID 绑定到容器任务，使子任务完成时能通知父管道
+        pipeline_id = inputs.get("pipeline_id")
+        if pipeline_id:
+            try:
+                task_service.bind_pipeline_run(task.id, pipeline_id)
+                logger.info(
+                    "[TaskSubmit] 容器任务已绑定管道 | task_id=%s | pipeline_id=%s",
+                    task.id, pipeline_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[TaskSubmit] 容器任务绑定管道失败 | task_id=%s | error=%s",
+                    task.id, exc,
+                )
+
+        logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
+
+        # BUG-FIX-fix_20260425_container_workspace_race:
+        # 问题根因: 容器任务不发布 task.submitted 事件，TaskWorker 不会收到通知，
+        #           因此不会调用 _execute_background_task 中的 init_container_workspace。
+        #           子任务提交后找不到容器工作空间 → 初始化失败。
+        # 修复方案: 容器任务也发布 task.submitted 事件，TaskWorker 会跳过业务逻辑执行，
+        #           但会执行容器工作空间初始化（mkdir + git init）。
+        event_bus = self._get_event_bus()
+        if event_bus:
+            try:
+                await event_bus.emit("task.submitted", {
+                    "task_id": task.id,
+                    "target_type": None,
+                    "target_id": None,
+                    "user_input": goal.get("title", ""),
+                    "description": description or goal.get("description", ""),
+                    "acceptance_criteria": {},
+                    "workspace": inputs.get("workspace"),
+                    "parent_task_id": None,
+                    "is_root": True,
+                })
+                logger.info("[TaskSubmit] 容器任务事件已发布 | task_id=%s", task.id)
+            except Exception as exc:
+                logger.warning("[TaskSubmit] 容器任务事件发布失败 | task_id=%s | error=%s", task.id, exc)
 
         return create_success_result(
             data={
                 "task_id": task.id,
                 "title": task.title,
                 "status": task.status.value,
-                "task_scope": "long_term",
+                "task_scope": "container",
                 "submit_status": "submitted",
+                # BUG-FIX-fix_20260425_container_flow:
+                # 问题根因: 容器任务返回消息说"请先继续处理其他工作"和"在收到系统提醒前，不要查询任务状态"，
+                #           导致 LLM 误以为不需要继续操作，直接结束对话，未提交子任务。
+                # 修复方案: 容器任务只是组织框架，LLM 必须在同一轮对话中立即提交准备子任务。
+                #           返回消息明确引导 LLM 继续提交 solution_preparation_agent 子任务。
                 "message": (
-                    f"长期任务 [{task.title}]（ID: {task.id}）已提交，状态：异步执行中。"
-                    "该任务需要一定时间完成，请先继续处理其他工作。"
-                    "系统会定期提醒你检查进度，收到提醒后再使用 task_manage 查看结果。"
-                    "在收到系统提醒前，不要查询任务状态。"
+                    f"容器任务 [{task.title}]（ID: {task.id}）已提交。"
+                    "容器只是组织框架，不直接执行。你现在必须立即继续操作："
+                    f"下一步——使用 task_submit(parent_task_id='{task.id}', target_type='agent', "
+                    "target_id='solution_preparation_agent') 提交方案准备子任务。"
+                    "请在同一轮对话中立即调用，不要等待。"
                 ),
             },
-            metadata={"action": "task_submit_long_term"},
+            metadata={"action": "task_submit_container"},
         )
 
     def _validate_parent_task_id(
@@ -625,9 +690,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         Returns:
             验证是否通过
         """
-        if task_scope == "long_term":
+        if task_scope == "container":
             if parent_task_id is not None:
-                logger.warning("[TaskSubmit] 长期任务不能有父任务 | parent_task_id=%s", parent_task_id)
+                logger.warning("[TaskSubmit] 容器任务不能有父任务 | parent_task_id=%s", parent_task_id)
                 return False
             return True
 

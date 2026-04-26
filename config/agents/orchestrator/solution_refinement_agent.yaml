@@ -133,7 +133,7 @@ output_schema:
 deliverables:
   - name: "task_plan"
     description: "任务计划文档，包含任务分解、依赖关系、执行顺序"
-    output_path: "docs/task_plan.md"
+    output_path: "docs/{title}_task_plan.md"
     type: "markdown"
     required: true
     template_source: "knowledge"
@@ -143,10 +143,10 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "docs/task_plan.md"
+      path: "docs/{title}_task_plan.md"
   - metric_id: format_valid
     default_params:
-      path: "docs/task_plan.md"
+      path: "docs/{title}_task_plan.md"
       type: "markdown"
 
 version: "1.0.0"
@@ -154,7 +154,7 @@ is_active: true
 status: "active"
 max_iterations: 120
 max_reminders: 5
-timeout_seconds: 1800
+timeout_seconds: 3600
 plugins:
   disabled: []
   enabled: {}

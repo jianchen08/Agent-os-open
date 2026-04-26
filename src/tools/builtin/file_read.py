@@ -189,16 +189,17 @@ class FileReadTool(WorkspaceAwareMixin):
                 )
 
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             if not path.exists():
                 return create_failure_result(
-                    error=f"文件不存在: {path}",
+                    error=f"文件不存在: {display_path}",
                     error_code="FILE_NOT_FOUND",
                 )
 
             if not path.is_file():
                 return create_failure_result(
-                    error=f"路径不是文件: {path}",
+                    error=f"路径不是文件: {display_path}",
                     error_code="NOT_A_FILE",
                 )
 
@@ -222,7 +223,7 @@ class FileReadTool(WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "file": path.name,
+                    "file": display_path,
                     "lines": lines,
                     "size": format_size(file_size),
                     "content": content,
@@ -343,16 +344,17 @@ class FileReadTool(WorkspaceAwareMixin):
         try:
             path_str = inputs.get("path", str(self.base_path))
             path = self.resolve_path(path_str)
+            display_path = self._format_output_path(path, path_str)
 
             if not path.exists():
                 return create_failure_result(
-                    error=f"路径不存在: {path}",
+                    error=f"路径不存在: {display_path}",
                     error_code="PATH_NOT_FOUND",
                 )
 
             if not path.is_dir():
                 return create_failure_result(
-                    error=f"路径不是目录: {path}",
+                    error=f"路径不是目录: {display_path}",
                     error_code="NOT_A_DIRECTORY",
                 )
 

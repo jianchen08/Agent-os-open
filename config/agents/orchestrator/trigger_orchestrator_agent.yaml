@@ -40,10 +40,12 @@ system_prompt: |
      - 判断任务复杂度（简单/复杂）
 
   2. **使用 trigger_setup 注册触发器**
-     - 设置触发类型（cron/interval）
-     - 设置触发频率
-     - 设置停止条件
-     - 设置触发后的执行参数
+     - 触发类型：delay（延迟）、schedule（定时）、interval（周期）、event（事件）、condition（条件）
+     - 周期触发参数：interval（间隔，如 "30m"、"1h"、"1d"）、max_count（最大次数）、max_time（最长运行时间，如 "3d"、"2h"）
+     - 定时触发参数：schedule_time（ISO 8601 格式时间）
+     - 延迟触发参数：delay_seconds（秒数）
+     - 必须设置 message 参数（触发时注入的消息内容）
+     - 至少设置 max_count 或 max_time 之一作为停止条件
 
   3. **等待触发**
      - 触发器注册成功后，不调用 task_evaluate
@@ -132,6 +134,7 @@ tool_ids:
   - task_manage
   - task_evaluate
   - resource_search
+  - trigger_setup
   - file_read
   - file_write
 
@@ -169,27 +172,30 @@ input_schema:
         trigger_type:
           type: string
           enum:
-          - cron
+          - delay
+          - schedule
           - interval
-          description: 触发类型
+          - event
+          - condition
+          description: 触发类型（delay=延迟, schedule=定时, interval=周期, event=事件, condition=条件）
         interval:
           type: string
-          description: 触发频率（如 "1h"、"30m"、"24h"、"0 9 * * *"）
-        stop_condition:
-          type: object
-          description: 停止条件
-          properties:
-            type:
-              type: string
-              enum:
-              - count
-              - datetime
-              - manual
-              - none
-              description: 停止条件类型
-            value:
-              type: string
-              description: 停止条件值（次数/日期时间/无）
+          description: 周期间隔（interval类型必填），如 "30m"、"1h"、"1d"、"1h30m"
+        delay_seconds:
+          type: integer
+          description: 延迟秒数（delay类型必填）
+        schedule_time:
+          type: string
+          description: 定时触发时间（schedule类型必填），ISO 8601 格式
+        max_count:
+          type: integer
+          description: 最大触发次数（0或不填=无限），到达后自动停止
+        max_time:
+          type: string
+          description: 最长运行时间（到达后自动停止），如 "30m"、"2h"、"3d"
+        message:
+          type: string
+          description: 触发时注入的消息内容（必填）
     task_description:
       type: string
       description: 触发后需要执行的任务描述
@@ -273,12 +279,12 @@ recommended_metrics:
       path: "{{workspace}}/trigger_config.json"
       type: "json"
 
-version: "1.0.0"
+version: "2.0.0"
 is_active: true
 status: "active"
 max_iterations: 120
 max_reminders: 5
-timeout_seconds: 1800
+timeout_seconds: 3600
 tags:
 - orchestrator
 - task
@@ -287,7 +293,7 @@ tags:
 metadata:
   author: System
   created_at: '2026-04-02'
-  updated_at: '2026-04-02'
+  updated_at: '2026-04-26'
   capabilities:
   - trigger_registration
   - task_scheduling

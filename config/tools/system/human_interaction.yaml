@@ -42,7 +42,7 @@ input_schema:
       description: "快捷回复建议（对话模式）"
     timeout_seconds:
       type: "number"
-      default: 300
+      default: 86400
       description: "超时时间（秒）"
     priority:
       type: "string"

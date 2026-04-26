@@ -107,6 +107,18 @@ class MemoryStore:
             "username": "demo",
             "password": "demo12345",  # 内存存储，明文即可（8位以上满足前端验证）
             "email": "demo@example.com",
+            "role": "user",
+            "created_at": _now_iso(),
+        }
+
+        # 创建管理员用户
+        admin_id = str(uuid.uuid4())
+        self.users["admin"] = {
+            "id": admin_id,
+            "username": "admin",
+            "password": "admin123",
+            "email": "admin@example.com",
+            "role": "admin",
             "created_at": _now_iso(),
         }
 

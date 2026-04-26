@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# E2E 问候语工具
+
+name: e2e_greeting
+display_name: "问候语"
+description: "E2E 问候语工具：提供个性化的问候服务，支持基于时间的问候、自定义问候内容和场景问候。适用场景：用户打招呼、晨间问候、节日祝福、场景化问候。"
+
+category: "communication"
+level: "system"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: false
+
+# 标签
+tags: ["greeting", "问候", "e2e", "communication"]

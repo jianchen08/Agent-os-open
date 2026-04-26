@@ -82,6 +82,7 @@ class LLMCore(ICorePlugin):
     error_policy = ErrorPolicy.RETRY
     max_retries: int = 3
     retry_delay: float = 1.0
+    overload_retry_delay: float = 180.0
 
     def __init__(
         self,
@@ -112,11 +113,20 @@ class LLMCore(ICorePlugin):
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
+        # LLM 调用超时（秒）
+        self._call_timeout: int = self._config.get("call_timeout", 300)
+
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
             self.max_retries = self._config["max_retries"]
         if "retry_delay" in self._config:
             self.retry_delay = self._config["retry_delay"]
+        if "overload_retry_delay" in self._config:
+            self.overload_retry_delay = self._config["overload_retry_delay"]
+
+        # litellm 内置重试参数（透传给 litellm.acompletion）
+        self._num_retries: int = self._config.get("num_retries", 3)
+        self._retry_delay: float = self._config.get("retry_delay", 60.0)
 
         # 构建适配器
         if adapter is not None:
@@ -274,10 +284,16 @@ class LLMCore(ICorePlugin):
         history = state.get("messages", [])
         messages.extend(history)
 
-        # 3. 动态变量（追加在历史消息之后）
+        # 3. 动态变量（每轮变化的上下文：时间戳、session_id 等）
+        #    不修改系统消息（动态变量每轮变化，不应污染静态系统提示）
+        #    使用 user 角色 + name=dynamic_context，兼容所有 provider
         dynamic_vars = state.get("prompt.dynamic_vars", "")
         if dynamic_vars:
-            messages.append({"role": "system", "content": dynamic_vars})
+            messages.append({
+                "role": "user",
+                "name": "dynamic_context",
+                "content": dynamic_vars,
+            })
 
         logger.info(
             "[%s] _build_messages assembled %d messages | "
@@ -307,8 +323,10 @@ class LLMCore(ICorePlugin):
     ) -> list[dict[str, Any]]:
         """针对特定 LLM 提供商的消息格式修正。
 
-        MiniMax API 要求 system 消息只能在第一位，非首位 system 消息
-        会被转换为 user+name=system（与旧代码 MinimaxClient 行为一致）。
+        MiniMax API 要求：
+        1. system 消息只能在第一位，非首位 system 消息转为 user+name=system
+        2. assistant(tool_calls) 后只能紧跟 tool 消息，中间插入的非 tool
+           消息（如 TaskReminder 注入的 system/user）需移到 tool 消息组之后
 
         Args:
             messages: 原始消息列表
@@ -320,16 +338,33 @@ class LLMCore(ICorePlugin):
             return messages
 
         converted_count = 0
-        result = []
+        relocated_count = 0
+
+        # Phase 1: 标准转换（system→user, tool 内容清理）
+        # MiniMax 要求所有 user 消息的 name 字段一致，因此统一不设置 name
+        converted: list[dict[str, Any]] = []
         for idx, msg in enumerate(messages):
             if msg.get("role") == "system" and idx > 0:
                 converted_count += 1
                 new_msg = dict(msg)
                 new_msg["role"] = "user"
-                new_msg["name"] = "system"
-                result.append(new_msg)
+                new_msg.pop("name", None)
+                converted.append(new_msg)
+            elif msg.get("role") == "user" and msg.get("name"):
+                new_msg = dict(msg)
+                new_msg.pop("name", None)
+                converted.append(new_msg)
+            elif msg.get("role") == "tool":
+                new_msg = dict(msg)
+                content = new_msg.get("content", "")
+                if isinstance(content, str):
+                    content = content.replace("\x00", "")
+                    if len(content) > 8000:
+                        content = content[:8000] + "\n...[truncated]"
+                    new_msg["content"] = content
+                converted.append(new_msg)
             else:
-                result.append(msg)
+                converted.append(msg)
 
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
@@ -344,10 +379,58 @@ class LLMCore(ICorePlugin):
                                 self.name, idx, fn.get("name", "?"), args_str[:500],
                             )
 
+        # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
+        result: list[dict[str, Any]] = []
+        i = 0
+        while i < len(converted):
+            msg = converted[i]
+            result.append(msg)
+
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # 收集紧随其后的 tool 消息
+                tool_group: list[dict[str, Any]] = []
+                intruders: list[dict[str, Any]] = []
+                j = i + 1
+                while j < len(converted):
+                    if converted[j].get("role") == "tool":
+                        tool_group.append(converted[j])
+                        j += 1
+                    elif tool_group:
+                        # 已经有 tool 消息了，后续非 tool 消息是新的对话轮次，停止
+                        break
+                    else:
+                        # assistant(tool_calls) 后第一个消息不是 tool → 非法插入
+                        intruders.append(converted[j])
+                        j += 1
+                if intruders:
+                    relocated_count += len(intruders)
+                    result.extend(tool_group)
+                    # 将非法消息转为 user 角色放在 tool 组之后
+                    for intr in intruders:
+                        if intr.get("role") not in ("user", "tool"):
+                            moved = dict(intr)
+                            moved["role"] = "user"
+                            moved["name"] = intr.get("role", "system")
+                            result.append(moved)
+                        else:
+                            result.append(intr)
+                    i = j
+                    continue
+                elif tool_group:
+                    result.extend(tool_group)
+                    i = j
+                    continue
+            i += 1
+
         if converted_count:
             logger.info(
                 "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user+name=system",
                 self.name, converted_count,
+            )
+        if relocated_count:
+            logger.info(
+                "[%s] MiniMax: 重定位 %d 条 assistant(tool_calls) 与 tool 之间的非法消息",
+                self.name, relocated_count,
             )
 
         return result
@@ -372,7 +455,7 @@ class LLMCore(ICorePlugin):
         provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
-    _LLM_CALL_TIMEOUT = 120
+    _LLM_CALL_TIMEOUT = 300
 
     async def _call_llm(
         self,
@@ -409,6 +492,9 @@ class LLMCore(ICorePlugin):
             kwargs["api_base"] = self._api_base
         if self._api_key:
             kwargs["api_key"] = self._api_key
+        if self._num_retries:
+            kwargs["num_retries"] = self._num_retries
+            kwargs["retry_delay"] = self._retry_delay
 
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:
@@ -416,7 +502,7 @@ class LLMCore(ICorePlugin):
                         self.name, len(tool_schemas),
                         ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas))
 
-        timeout = ctx.state.get("llm_call_timeout", self._LLM_CALL_TIMEOUT)
+        timeout = ctx.state.get("llm_call_timeout", self._call_timeout)
         try:
             return await asyncio.wait_for(
                 self._adapter.completion(

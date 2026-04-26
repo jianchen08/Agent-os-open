@@ -25,7 +25,12 @@ class WorkspaceAwareMixin:
         Args:
             inputs: 工具执行时接收的输入参数字典。
         """
-        self._workspace: Path = Path(inputs["workspace"]) if inputs.get("workspace") else Path.cwd()
+        if inputs.get("workspace"):
+            self._workspace: Path = Path(inputs["workspace"])
+        elif inputs.get("project_root"):
+            self._workspace: Path = Path(inputs["project_root"])
+        else:
+            self._workspace: Path = Path.cwd()
 
         if inputs.get("project_root"):
             self._project_root: Path = Path(inputs["project_root"])
@@ -76,6 +81,31 @@ class WorkspaceAwareMixin:
                 return (self._workspace / relative_part).resolve()
 
         return (self._workspace / path).resolve()
+
+    def _format_output_path(self, resolved_path: Path, original_input: str) -> str:
+        """将解析后的路径按输入格式返回。
+
+        输入是相对路径 → 返回相对路径（相对于项目根）
+        输入是绝对路径 → 返回绝对路径
+
+        Args:
+            resolved_path: 通过 resolve_path 解析后的绝对路径
+            original_input: 用户原始输入的路径字符串
+
+        Returns:
+            格式化后的路径字符串
+        """
+        original = Path(original_input)
+        if original.is_absolute():
+            return str(resolved_path)
+
+        try:
+            return str(resolved_path.relative_to(self._project_root))
+        except ValueError:
+            try:
+                return str(resolved_path.relative_to(self._workspace))
+            except ValueError:
+                return str(resolved_path)
 
     def get_working_dir(self, inputs: dict[str, Any]) -> Path | None:
         """获取当前工具的工作目录。

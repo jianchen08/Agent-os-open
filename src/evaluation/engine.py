@@ -498,11 +498,19 @@ class EvaluationEngine:
                 ) or str(
                     Path(__file__).resolve().parent.parent.parent
                 )
+                # 将 evaluation_mode 注入 plugin_configs，确保 TaskReminder
+                # 能检测到评估模式（不依赖共享 plugin_registry 的合并）
+                _plugin_configs = {
+                    "task_reminder": {"evaluation_mode": True},
+                }
+
                 state = await engine.run(
                     user_input=eval_prompt,
                     agent_config=agent_config,
                     task_id=f"__eval__{metric_def.id}",
                     project_root=project_root,
+                    workspace=project_root,
+                    plugin_configs=_plugin_configs,
                 )
                 return state
 

@@ -153,8 +153,9 @@ class CLIInputAdapter(IInputAdapter):
     def _read_multiline(self) -> str:
         """读取多行输入。
 
-        支持 \\ 续行：行尾的反斜杠表示输入未结束，
-        继续读取下一行直到遇到无反斜杠结尾的行为止。
+        支持：
+        - 反斜杠续行：行尾的 \\ 表示输入未结束
+        - 多行粘贴：快速连续到达的行自动合并为一条消息
 
         Returns:
             拼接后的完整输入文本
@@ -165,6 +166,9 @@ class CLIInputAdapter(IInputAdapter):
         line = input(f"\n{self._prompt_str}")
         lines.append(line)
 
+        # 多行粘贴检测：快速到达的额外行合并为同一条消息
+        self._drain_paste_lines(lines)
+
         # 续行检测：行尾有 \\ 表示续接
         while lines[-1].rstrip().endswith("\\"):
             # 去掉末尾的续行符
@@ -172,10 +176,71 @@ class CLIInputAdapter(IInputAdapter):
             try:
                 continuation = input(self._continuation_prompt)
                 lines.append(continuation)
+                # 续行后也可能有粘贴
+                self._drain_paste_lines(lines)
             except (EOFError, KeyboardInterrupt):
                 break
 
         return "\n".join(lines)
+
+    def _drain_paste_lines(self, lines: list[str]) -> None:
+        """读取快速连续到达的额外行（多行粘贴检测）。
+
+        终端粘贴多行文本时，每行作为独立输入事件到达。
+        此方法检测快速到达的行并合并为同一条消息。
+        仅在交互式终端（TTY）下生效。
+        """
+        import sys
+
+        if not sys.stdin.isatty():
+            return
+
+        import time
+
+        # 等待粘贴数据到达
+        time.sleep(0.01)
+
+        if not self._has_pending_input():
+            return
+
+        # 读取第一条额外行
+        try:
+            first_extra = input()
+        except EOFError:
+            return
+
+        # 首条额外行为空则视为误触（如连按 Enter），跳过
+        if not first_extra.strip():
+            return
+
+        lines.append(first_extra)
+
+        # 继续读取快速到达的行
+        time.sleep(0.005)
+        while self._has_pending_input():
+            try:
+                line = input()
+                lines.append(line)
+                time.sleep(0.005)
+            except EOFError:
+                break
+
+    @staticmethod
+    def _has_pending_input() -> bool:
+        """检查标准输入是否有待处理的数据（非阻塞）。"""
+        import sys
+
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                return msvcrt.kbhit()
+            else:
+                import select
+
+                return bool(select.select([sys.stdin], [], [], 0.0)[0])
+        except Exception:
+            return False
 
     def is_slash_command(self, state: dict[str, Any]) -> bool:
         """判断 state 是否来自斜杠命令输入。

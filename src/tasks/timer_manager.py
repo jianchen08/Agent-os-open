@@ -386,7 +386,7 @@ class TimerManager:
             是否取消成功
         """
         if task_id not in self._timers:
-            logger.warning("计时器不存在: %s", task_id)
+            logger.debug("计时器不存在: %s", task_id)
             return False
 
         timer = self._timers[task_id]

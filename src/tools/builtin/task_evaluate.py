@@ -151,7 +151,14 @@ class TaskEvaluateTool:
                     },
                     "summary": {
                         "type": "string",
-                        "description": "任务完成说明（可选），用于语义类评估器",
+                        "description": (
+                            "任务完成摘要（推荐填写）。内容应包含："
+                            "1) 完成了什么工作（简要说明实现思路和做了哪些改动）；"
+                            "2) 产出了什么（文件、配置、数据等产物）；"
+                            "3) 产物的存放路径（相对路径，如 src/auth/login.py、config/rules.yaml）。"
+                            "示例：'实现了用户登录功能，新增 JWT 认证模块。产出：src/auth/login.py、src/auth/jwt_handler.py、tests/test_login.py。'"
+                            "评估器将依据此摘要了解任务成果并验证产物。"
+                        ),
                     },
                 },
                 "required": [],
@@ -350,10 +357,19 @@ class TaskEvaluateTool:
         has_failure = False
         exhausted = False
 
+        _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")
+
         for r in eval_result.results:
             if not r.passed:
                 has_failure = True
                 mid = r.metric_id
+                output_str = str(r.evaluator_output or "").lower()
+                message_str = (r.message or "").lower()
+                is_unrecoverable = any(p in output_str or p in message_str for p in _UNRECOVERABLE_PATTERNS)
+                if is_unrecoverable:
+                    retry_counts[mid] = max_retries
+                    exhausted = True
+                    continue
                 current = retry_counts.get(mid, 0) + 1
                 retry_counts[mid] = current
                 if current >= max_retries:
@@ -734,12 +750,12 @@ class TaskEvaluateTool:
     def _resolve_task_workspace_abs(task: Any) -> str | None:
         """解析任务的绝对工作空间路径。
 
-        BUG-FIX-fix_20260421_eval_workspace_unify:
-        问题根因: 此方法独立实现了 workspace 路径解析逻辑，与 TaskWorker 使用的
-                 resolve_workspace() 链路不一致，导致评估时和执行时的 workspace 路径不同，
-                 file_check 始终找不到 agent 写入的文件。
-        修复方案: 复用 TaskWorker._resolve_task_workspace 的同一套链路解析逻辑，
-                 确保评估和执行使用完全一致的 workspace 路径。
+        BUG-FIX-fix_20260425_eval_ws_meta:
+        问题根因: 容器子任务的实际工作空间是 worktree（如 .ai_workspaces/容器__wt_任务ID前8位），
+                 但 resolve_workspace 链路计算出的是 拼接路径（如 .ai_workspaces/容器/任务ID），
+                 两者不一致导致 file_check 永远找不到 agent 写入的文件。
+        修复方案: 优先使用 task.metadata.ws_meta.path（TaskWorker 执行时保存的实际工作空间路径），
+                 仅在 ws_meta 不可用时才走 resolve_workspace 计算逻辑。
         影响范围: 所有使用工具型评估指标（file_check 等）的任务评估
 
         Args:
@@ -749,11 +765,24 @@ class TaskEvaluateTool:
             绝对工作空间路径字符串，无法解析时返回 None
         """
         from pathlib import Path
-        from isolation.workspace import get_workspace_config_root, resolve_workspace
 
         metadata = task.metadata if task.metadata else {}
-        task_workspace = metadata.get("workspace")
 
+        # 优先使用 ws_meta.path — 这是 TaskWorker 执行时保存的实际工作空间路径
+        ws_meta = metadata.get("ws_meta")
+        if ws_meta and isinstance(ws_meta, dict):
+            ws_path = ws_meta.get("path")
+            if ws_path:
+                p = Path(ws_path)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                if p.exists():
+                    return str(p)
+
+        # fallback: 原有的 resolve_workspace 链路
+        from isolation.workspace import get_workspace_config_root, resolve_workspace
+
+        task_workspace = metadata.get("workspace")
         root = get_workspace_config_root()
 
         task_service = None
@@ -834,20 +863,26 @@ class TaskEvaluateTool:
         """
         metrics = []
         for r in result.results:
-            m: dict[str, Any] = {
-                "metric_id": r.metric_id,
-                "passed": r.passed,
-                "score": r.score,
-                "message": r.message,
-                "error": r.error,
-            }
-            if r.evaluator_input:
-                m["evaluator_input"] = r.evaluator_input
-            if r.evaluator_output:
-                m["evaluator_output"] = r.evaluator_output
-            if r.pipeline_run_id:
-                m["pipeline_run_id"] = r.pipeline_run_id
-            metrics.append(m)
+            if r.passed:
+                metrics.append({
+                    "metric_id": r.metric_id,
+                    "passed": True,
+                })
+            else:
+                m: dict[str, Any] = {
+                    "metric_id": r.metric_id,
+                    "passed": False,
+                    "score": r.score,
+                    "message": r.message,
+                    "error": r.error,
+                }
+                if r.evaluator_input:
+                    m["evaluator_input"] = r.evaluator_input
+                if r.evaluator_output:
+                    m["evaluator_output"] = r.evaluator_output
+                if r.pipeline_run_id:
+                    m["pipeline_run_id"] = r.pipeline_run_id
+                metrics.append(m)
         return {
             "task_id": result.task_id,
             "overall_passed": result.overall_passed,

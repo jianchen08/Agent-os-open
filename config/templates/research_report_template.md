@@ -15,7 +15,7 @@
 1. 调研 Agent 通过 static_vars 加载本模板内容
 2. 按模板章节顺序填写调研结果
 3. [必填] 章节必须填写，[可选] 章节根据调研需要填写
-4. 最终输出到 {{workspace}}/research_report.md
+4. 最终输出到 docs/{调研主题}_research_report.md（具体路径以验收标准为准）
 
 【适用场景】
 | 调研类型 | 说明 |

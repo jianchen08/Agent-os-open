@@ -9,6 +9,7 @@ Web 操作工具
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -55,6 +56,13 @@ class WebTool:
         self.allowed_domains = set(allowed_domains) if allowed_domains else None
         self.blocked_domains = set(blocked_domains or [])
         self.verify_ssl = verify_ssl
+        self._proxy_url: str | None = None
+        # Check proxy environment variables
+        for env_var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            proxy = os.environ.get(env_var)
+            if proxy:
+                self._proxy_url = proxy
+                break
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "WebTool":
@@ -225,7 +233,7 @@ class WebTool:
             params = inputs.get("params", {})
             timeout = inputs.get("timeout", self.timeout)
 
-            async with httpx.AsyncClient(verify=self.verify_ssl) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, proxy=self._proxy_url) as client:
                 response = await client.get(
                     url,
                     headers=headers,
@@ -297,7 +305,7 @@ class WebTool:
             params = inputs.get("params", {})
             timeout = inputs.get("timeout", self.timeout)
 
-            async with httpx.AsyncClient(verify=self.verify_ssl) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, proxy=self._proxy_url) as client:
                 response = await client.post(
                     url,
                     headers=headers,
@@ -369,7 +377,7 @@ class WebTool:
             timeout = inputs.get("timeout", self.timeout)
             extract_text = inputs.get("extract_text", True)
 
-            async with httpx.AsyncClient(verify=self.verify_ssl) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, proxy=self._proxy_url) as client:
                 response = await client.get(
                     url,
                     headers=headers,

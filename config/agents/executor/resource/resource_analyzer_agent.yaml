@@ -109,21 +109,21 @@ soft_constraints:
 deliverables:
   - name: "analysis_report"
     description: "资源状态分析报告，包含现状评估、影响分析、风险评估"
-    output_path: "{{workspace}}/analysis_report.md"
+    output_path: "docs/{title}_analysis_report.md"
     type: "markdown"
     template_source: "knowledge"
     template_name: "config/templates/resource_analysis_template.md"
     required: true
   - name: "risk_assessment"
     description: "修改风险等级评估和缓解建议"
-    output_path: "{{workspace}}/risk_assessment.json"
+    output_path: "docs/{title}_risk_assessment.json"
     type: "json"
     template_source: "knowledge"
     template_name: "config/templates/resource_analysis_template.md"
     required: true
   - name: "modification_scope"
     description: "建议的修改范围和边界"
-    output_path: "{{workspace}}/modification_scope.json"
+    output_path: "docs/{title}_modification_scope.json"
     type: "json"
     template_source: "knowledge"
     template_name: "config/templates/resource_analysis_template.md"
@@ -134,14 +134,14 @@ recommended_metrics:
   - metric_id: "file_check"
     default_params:
       action: "read"
-      path: "{{workspace}}/analysis_report.md"
+      path: "docs/{title}_analysis_report.md"
   - metric_id: "format_valid"
     default_params:
-      path: "{{workspace}}/analysis_report.md"
+      path: "docs/{title}_analysis_report.md"
       type: "markdown"
   - metric_id: "format_valid"
     default_params:
-      path: "{{workspace}}/risk_assessment.json"
+      path: "docs/{title}_risk_assessment.json"
 
 # 输入输出 Schema
 input_schema:
@@ -189,7 +189,7 @@ is_active: true
 status: "active"
 max_iterations: 100
 max_reminders: 3
-timeout_seconds: 600
+timeout_seconds: 1500
 
 plugins:
   disabled: []

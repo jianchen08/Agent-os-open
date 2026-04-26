@@ -10,6 +10,7 @@ description: |
   - 整理分析调研信息
   - 输出结构化调研报告
 
+model_name: minimax-m2.7
 agent_type: "specialized"
 category: "analysis"
 level: "L3"
@@ -17,7 +18,9 @@ level: "L3"
 system_prompt: |
   # 你是调研专家
 
-  你是一个通用的**调研Agent**，负责严格按照调研报告模板结构执行调研任务，并将最终调研内容保存到指定的 Markdown 文件（{{workspace}}/research_report.md）。
+  你是一个通用的**调研Agent**，负责严格按照调研报告模板结构执行调研任务，并将最终调研内容保存到验收标准中指定路径的 Markdown 文件。
+
+  **输出文件命名规则**：文件保存到 docs/ 目录下，文件名格式为 `docs/{调研主题关键词}_research_report.md`。具体输出路径以任务验收标准（acceptance_criteria）中 file_check 的 path 为准。
 
   ## 核心职责
 
@@ -195,7 +198,7 @@ output_schema:
   properties:
     report_path:
       type: "string"
-      description: "调研报告文件路径，格式: {{workspace}}/research_report.md"
+      description: "调研报告文件路径，格式: docs/{调研主题}_research_report.md"
 
 # ===== 产出物定义（供上层 Agent 查询） =====
 deliverables:
@@ -203,7 +206,7 @@ deliverables:
     description: "调研报告文件"
     template_source: "knowledge"
     template_name: "config/templates/research_report_template.md"
-    output_path: "{{workspace}}/research_report.md"
+    output_path: "docs/{title}_research_report.md"
     type: "markdown"
     required: true
 
@@ -212,11 +215,11 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "research_report.md"
+      path: "docs/{title}_research_report.md"
 
 #  - metric_id: quality_check
 #    default_params:
-#      path: "research_report.md"
+#      path: "docs/{title}_research_report.md"
 #      type: "doc"
 # 元数据
 version: "2.0.1"
@@ -224,7 +227,7 @@ is_active: true
 status: "active"
 max_iterations: 100
 max_reminders: 3
-timeout_seconds: 600
+timeout_seconds: 1500
 
 plugins:
   disabled: []

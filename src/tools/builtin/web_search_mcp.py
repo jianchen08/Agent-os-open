@@ -257,6 +257,20 @@ class WebSearchMCPTool:
                     "mode": search_mode,
                 }
 
+            # 检测后端不可用的静默失败：
+            # full/summary 模式下 fetched=0 且 failed=0 说明后端完全没响应
+            if search_mode in ("full", "summary") and search_results.get("total", 0) == 0:
+                stats = search_results.get("stats", {})
+                if stats.get("fetched", 0) == 0 and stats.get("failed", 0) == 0:
+                    return create_failure_result(
+                        error=(
+                            f"搜索后端无响应，请检查 SearXNG 是否运行："
+                            f"{self.config.searxng_url}\n"
+                            f"提示：docker start searxng 或 docker run -p 8080:8080 searxng/searxng"
+                        ),
+                        error_code="BACKEND_UNREACHABLE",
+                    )
+
             return create_success_result(
                 data=search_results,
                 metadata={

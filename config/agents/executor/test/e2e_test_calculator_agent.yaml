@@ -78,7 +78,7 @@ is_active: true
 status: "active"
 max_iterations: 10
 max_reminders: 3
-timeout_seconds: 60
+timeout_seconds: 1500
 
 tags:
   - "specialized"
