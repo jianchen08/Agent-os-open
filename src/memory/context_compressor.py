@@ -110,34 +110,45 @@ class ContextCompressor:
     # 一次性压缩模板：L1 + L2 + 关键词
     COMPRESS_PROMPT = """## 任务
 将以下对话历史一次性压缩完成，输出三部分：
-1. **十段摘要 (l1)**：结构化记录对话核心信息，保留对继续当前任务至关重要的内容
-2. **三要素摘要 (l2)**：从 l1 中提炼最核心的意图、过程、结果
-3. **关键词 (keywords)**：5-10 个反映核心主题的关键词
+1. **l1**：结构化记录对话的完整细节，目标是让另一个 AI 能无障碍地接手继续执行任务
+2. **l2**：从 l1 中提炼最核心的意图、过程、结果
+3. **keywords**：5-10 个反映核心主题的关键词
+
+## 要求
+- l1 的每个字段要**保留具体细节**（名称、数值、路径、引用、关键数据），不要泛泛概括
+- 宁可多保留也不要遗漏，压缩的目的是让后续能继续任务，不是写摘要
+- 适用于任何类型任务（编码、调研、写作、分析、翻译等），根据实际内容填充
+- 无内容填 null
+- 如果有背景信息（前次压缩摘要），请在此基础上整合新内容，但是关注点不要在之前的内容里，而是放在新的对话内容上
+
+{previous_l1_section}
+## 当前用户消息
+{user_message}
 
 ## 对话历史
 {messages}
 
 ## 输出格式
-严格输出以下 JSON，不要输出任何其他内容。每个字段简洁精炼，无内容填 null。
+严格输出以下 JSON，不要输出任何其他内容。
 
 ```json
 {{
   "l1": {{
     "session_title": "会话主题（一句话）",
-    "current_state": "当前工作状态、进度、待解决问题",
-    "task_specification": "用户要求完成的具体任务",
-    "files_and_functions": "涉及的主要文件和函数",
-    "workflow": "执行的主要步骤和工作流程",
-    "errors_and_corrections": "遇到的错误和解决方案",
-    "codebase_info": "内容的相关的重要信息和关键细节",
-    "learnings": "从对话中获得的关键认知",
-    "key_results": "已完成的关键成果",
-    "worklog": "未完成事项和待跟进问题"
+    "current_state": "当前进度和状态（含具体数据：已处理几条/共几条、当前在第几步、阻塞在哪里等）",
+    "task_specification": "用户要求完成的具体任务（含验收标准、输出格式、特殊要求等）",
+    "key_entities": "对话中涉及的所有重要实体（文件、文档、工具、资源、人名、术语、URL等，逐个列出）",
+    "workflow": "已执行的每个步骤及具体结果（做了什么、输出了什么、遇到了什么）",
+    "errors_and_corrections": "每个问题/错误的完整信息（问题描述、原因、解决方案、结果）",
+    "domain_knowledge": "对话中发现的重要事实、规则、约束（领域知识、架构信息、业务逻辑等）",
+    "decisions": "对话中确认的重要决策和理由（为什么选A不选B、排除了什么方案及原因）",
+    "key_results": "已完成的具体成果（产出物的位置、内容摘要、关键数据）",
+    "pending": "未完成的具体待办（还需处理什么、还剩哪些步骤）"
   }},
   "l2": {{
-    "intent": "用户最终要达成什么",
-    "process": "关键步骤和决策",
-    "results": "完成了什么，还剩什么"
+    "intent": "用户的目标和验收标准（含具体要求：输出格式、数量、质量标准等）",
+    "process": "已执行的关键步骤（含具体操作和产出）及重要决策（含理由）",
+    "results": "已完成的具体成果（产出物及位置）和未完成的具体待办"
   }},
   "keywords": ["关键词1", "关键词2", "关键词3"]
 }}
@@ -178,12 +189,17 @@ class ContextCompressor:
         self._llm_call_fn = llm_call_fn
 
     async def compress_all(
-        self, messages: list[dict[str, Any]],
+        self,
+        messages: list[dict[str, Any]],
+        previous_l1: str = "",
+        user_message: str = "",
     ) -> dict[str, Any]:
         """一次性完成 L1 + L2 + 关键词压缩（单次 LLM 调用）。
 
         Args:
             messages: 对话消息列表
+            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
+            user_message: 当前用户消息（作为最新上下文）
 
         Returns:
             {"l1": str, "l2": str, "keywords": list[str]}
@@ -196,7 +212,27 @@ class ContextCompressor:
 
         messages_text = self._format_messages(messages)
 
-        prompt = self.COMPRESS_PROMPT.format(messages=messages_text)
+        # 构建前次压缩背景段落
+        if previous_l1:
+            previous_l1_section = (
+                "## 背景信息（前次压缩摘要，请在此基础上整合新内容）\n"
+                f"{previous_l1}\n"
+            )
+        else:
+            previous_l1_section = ""
+
+        # 提取用户消息（如果未显式传入，从消息列表中提取）
+        if not user_message:
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    user_message = msg.get("content", "")
+                    break
+
+        prompt = self.COMPRESS_PROMPT.format(
+            messages=messages_text,
+            previous_l1_section=previous_l1_section,
+            user_message=user_message or "（无明确用户消息）",
+        )
 
         try:
             response = await self._call_llm(prompt)
@@ -269,7 +305,9 @@ class ContextCompressor:
         # 一次性压缩 L0 → L1 + L2
         if l0_tokens > 0:
             messages = [{"role": "user", "content": l0}]
-            result = await self.compress_all(messages)
+            result = await self.compress_all(
+                messages, previous_l1=l1 if l1 else "",
+            )
 
             compressed_l1 = result.get("l1", "")
             compressed_l2 = result.get("l2", "")

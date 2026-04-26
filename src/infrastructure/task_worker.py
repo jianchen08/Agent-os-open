@@ -451,6 +451,7 @@ class TaskWorker:
         acceptance_criteria = task_data.get("acceptance_criteria", {})
         explicit_workspace = task_data.get("workspace") or None
         workspace = self._resolve_task_workspace(task_id, explicit_workspace)
+        task_data["_has_explicit_workspace"] = bool(explicit_workspace)
 
         # ── 3.x.0 等待父容器工作空间就绪（解决竞态条件） ──
         # BUG-FIX-fix_20260425_container_workspace_race:
@@ -541,8 +542,7 @@ class TaskWorker:
         # ── 3.x 注入场景化工作空间提示 ──
         if ws_meta:
             _SCENE_PROMPTS = {
-                "project_root": "你正在创建一个全新的项目。当前目录就是项目根目录，先规划目录结构再逐步实现。可运行测试。完成后调用 task_evaluate",
-                "branch": "你在项目的功能分支中工作。使用相对路径。可运行测试。评估通过后系统自动合并到项目主线",
+                "plain": "你在一个临时工作目录中工作。使用相对路径。完成后直接调用 task_evaluate",
                 "worktree": "你在一个隔离的项目完整副本中工作。使用相对路径。修改不影响主项目。可运行 pytest/mypy/lint。评估通过后系统自动合并",
                 "shared": "你在父任务的工作空间中工作。使用相对路径。完成后直接调用 task_evaluate",
             }
@@ -787,7 +787,7 @@ class TaskWorker:
                         # ── 生命周期钩子：评估前保存 ──
                         if lifecycle:
                             try:
-                                lifecycle.on_before_evaluate(workspace)
+                                lifecycle.on_before_evaluate(workspace, ws_meta)
                             except Exception as e:
                                 logger.warning(
                                     "TaskWorker: lifecycle on_before_evaluate failed: task_id=%s, error=%s",

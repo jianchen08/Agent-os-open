@@ -146,8 +146,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if len(other_msgs) <= keep_count:
             return None
 
-        old_msgs = other_msgs[:-keep_count]
-        recent_msgs = other_msgs[-keep_count:]
+        split_idx = len(other_msgs) - keep_count
+        old_msgs, recent_msgs = self._split_preserving_tool_pairs(
+            other_msgs, split_idx,
+        )
 
         summary = await self._build_compression_summary(ctx, old_msgs, context_window)
         if not summary:
@@ -166,13 +168,62 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         return result
 
+    @staticmethod
+    def _split_preserving_tool_pairs(
+        messages: list[dict[str, Any]],
+        split_idx: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """按 split_idx 分割消息列表，保证 tool call/result 配对完整。
+
+        如果 recent 段包含 tool result 但对应的 assistant(tool_calls)
+        落在了 old 段，则将那个 assistant 消息也移入 recent 段。
+
+        Args:
+            messages: 非系统消息列表
+            split_idx: 初步分割位置
+
+        Returns:
+            (old_msgs, recent_msgs) 保证工具调用配对完整
+        """
+        old_msgs = list(messages[:split_idx])
+        recent_msgs = list(messages[split_idx:])
+
+        # 收集 recent 段中所有 tool result 的 tool_call_id
+        recent_tool_ids: set[str] = set()
+        for msg in recent_msgs:
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id")
+                if tc_id:
+                    recent_tool_ids.add(tc_id)
+
+        if not recent_tool_ids:
+            return old_msgs, recent_msgs
+
+        # 从 old 段末尾向前扫描，找到包含这些 tool_call_id 的 assistant 消息
+        # 将它们（以及可能连续的 tool result）移入 recent 段
+        move_count = 0
+        for i in range(len(old_msgs) - 1, -1, -1):
+            msg = old_msgs[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                call_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
+                if call_ids & recent_tool_ids:
+                    move_count = len(old_msgs) - i
+                    break
+
+        if move_count > 0:
+            migrated = old_msgs[-move_count:]
+            old_msgs = old_msgs[:-move_count]
+            recent_msgs = migrated + recent_msgs
+
+        return old_msgs, recent_msgs
+
     async def _build_compression_summary(
         self,
         ctx: PluginContext,
         old_msgs: list[dict[str, Any]],
         context_window: int,
     ) -> str | None:
-        """通过记忆系统 ContextCompressor 一次性压缩旧消息。
+        """通过记忆系统 ContextCompressor 一次性压缩旧消息，并保存到 ChunkService。
 
         Args:
             ctx: 插件执行上下文
@@ -196,31 +247,130 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 config=config,
             )
 
-            result = await compressor.compress_all(old_msgs)
+            result = await compressor.compress_all(
+                old_msgs,
+                previous_l1=await self._load_previous_l1(ctx),
+            )
             l1_summary = result.get("l1", "")
             l2_summary = result.get("l2", "")
+            keywords = result.get("keywords", [])
 
-            if l1_summary:
-                l1_tokens = len(l1_summary) // 2
-                l1_budget = config.get_budgets().get("L1", 1000)
-                if l1_tokens > l1_budget and l2_summary:
-                    logger.info(
-                        "[%s] L1 超预算，使用 L2: %d -> %d 字符",
-                        self.name, len(l1_summary), len(l2_summary),
-                    )
-                    return l2_summary
+            if not l1_summary:
+                return None
 
+            # 保存到 ChunkService
+            await self._save_chunks(ctx, old_msgs, l1_summary, l2_summary, keywords)
+
+            l1_tokens = len(l1_summary) // 2
+            l1_budget = config.get_budgets().get("L1", 1000)
+            if l1_tokens > l1_budget and l2_summary:
                 logger.info(
-                    "[%s] 一次性压缩完成: %d 条消息 -> L1≈%d字符 L2≈%d字符",
-                    self.name, len(old_msgs), len(l1_summary), len(l2_summary),
+                    "[%s] L1 超预算，使用 L2: %d -> %d 字符",
+                    self.name, len(l1_summary), len(l2_summary),
                 )
-                return l1_summary
+                return l2_summary
 
-            return None
+            logger.info(
+                "[%s] 一次性压缩完成: %d 条消息 -> L1≈%d字符 L2≈%d字符",
+                self.name, len(old_msgs), len(l1_summary), len(l2_summary),
+            )
+            return l1_summary
 
         except Exception as exc:
             logger.warning("[%s] 记忆系统压缩失败: %s", self.name, exc)
             return None
+
+    async def _load_previous_l1(self, ctx: PluginContext) -> str:
+        """从 ChunkService 加载该会话所有历史压缩的 L1 内容作为背景。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            所有历史 L1 内容拼接，无则返回空字符串
+        """
+        try:
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            return ""
+
+        session_id = ctx.state.get("context.session_id", "")
+        if not session_id:
+            return ""
+
+        try:
+            chunks = await chunk_service.find_by_session(session_id, "L1")
+            if chunks:
+                return "\n\n---\n\n".join(chunk.content for chunk in chunks if chunk.content)
+        except Exception:
+            pass
+
+        return ""
+
+    async def _save_chunks(
+        self,
+        ctx: PluginContext,
+        old_msgs: list[dict[str, Any]],
+        l1_summary: str,
+        l2_summary: str,
+        keywords: list[str],
+    ) -> None:
+        """将压缩结果保存到 ChunkService。
+
+        Args:
+            ctx: 插件执行上下文
+            old_msgs: 被压缩的旧消息列表
+            l1_summary: L1 摘要 JSON
+            l2_summary: L2 摘要 JSON
+            keywords: 关键词列表
+        """
+        try:
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            logger.debug("[%s] 无 chunk_service，跳过持久化", self.name)
+            return
+
+        from memory.types import ChunkData
+        from pipeline.types import StateKeys
+
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
+            return
+
+        msg_count = len(old_msgs)
+
+        try:
+            l1_chunk = ChunkData(
+                pipeline_run_id=pipeline_run_id,
+                layer="L1",
+                content=l1_summary,
+                token_count=len(l1_summary) // 2,
+                message_count=msg_count,
+                sequence_start=1,
+                sequence_end=msg_count,
+                keywords=keywords,
+            )
+            await chunk_service.save(l1_chunk)
+
+            if l2_summary:
+                l2_chunk = ChunkData(
+                    pipeline_run_id=pipeline_run_id,
+                    layer="L2",
+                    content=l2_summary,
+                    token_count=len(l2_summary) // 2,
+                    message_count=msg_count,
+                    sequence_start=1,
+                    sequence_end=msg_count,
+                    keywords=keywords,
+                )
+                await chunk_service.save(l2_chunk)
+
+            logger.info(
+                "[%s] 压缩块已保存 | L1≈%d字符 L2≈%d字符 keywords=%d",
+                self.name, len(l1_summary), len(l2_summary), len(keywords),
+            )
+        except Exception as exc:
+            logger.warning("[%s] 保存压缩块失败: %s", self.name, exc)
 
     def _get_llm_call_fn(self, ctx: PluginContext):
         """从上下文中获取 LLM 调用函数。
