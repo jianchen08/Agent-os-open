@@ -150,6 +150,23 @@ class WorkspaceLifecycleManager:
             return "main"
         return "master"
 
+    def _assert_on_branch(self, expected: str, cwd: Path) -> bool:
+        """验证 cwd 当前处于期望分支，绝不 checkout 切换。
+
+        主仓库 / 容器空间都不允许 git checkout，修改任何分支应通过 worktree。
+        Returns:
+            True if on expected branch, False otherwise.
+        """
+        rc, current, _ = self._run_git(
+            "rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+        if rc == 0 and current.strip() == expected:
+            return True
+        logger.warning(
+            "[WorkspaceLifecycle] EXPECT %s but on %s — "
+            "不允许 checkout 切换分支: cwd=%s",
+            expected, current.strip() if rc == 0 else "(unknown)", cwd)
+        return False
+
     def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
         """Initialize a new git repo and make the initial commit with all files.
 
@@ -628,17 +645,26 @@ class WorkspaceLifecycleManager:
                 "merged_files": merged_files}
 
     def _merge_branch(self, workspace: str, ws_meta: dict) -> dict:
-        """branch 模式合并：将 feature 分支合并到项目主分支"""
+        """branch 模式合并：验证在主分支上后 git merge，失败降级为文件复制。
+
+        不执行 git checkout，当前必须在目标分支上。
+        """
         project_root = Path(ws_meta.get("project_root", workspace))
         branch = ws_meta.get("branch", "")
         self._ensure_git_user(project_root)
         main_branch = self._resolve_main_branch(project_root)
-        self._run_git("checkout", main_branch, cwd=project_root)
+        if not self._assert_on_branch(main_branch, project_root):
+            logger.warning(
+                "[WorkspaceLifecycle] 不在 %s 上，降级为 copy_merge",
+                main_branch)
+            return self._copy_merge(workspace, str(project_root))
         rc, _, stderr = self._run_git("merge", branch, cwd=project_root)
         if rc != 0:
             self._run_git("merge", "--abort", cwd=project_root)
-            logger.warning("[WorkspaceLifecycle] branch 合并失败: %s", stderr)
-            return {"success": False, "error": f"合并失败: {stderr}"}
+            logger.warning(
+                "[WorkspaceLifecycle] git merge 失败，降级为 copy_merge: %s",
+                stderr[:200])
+            return self._copy_merge(workspace, str(project_root))
         self._verify_merge_in_main(branch, cwd=project_root)
         return {"success": True, "action": "merged", "branch": branch}
 
@@ -704,33 +730,41 @@ class WorkspaceLifecycleManager:
     # ── 9. 安全合并 ──────────────────────────────────────────────
 
     def _safe_merge(self, workspace: str, ws_meta: dict) -> dict:
-        """安全合并：先尝试 git merge，任何失败都降级为文件复制
+        """安全合并：验证在主分支上后尝试 git merge，失败降级为文件复制。
 
-        BUG-FIX-fix_20260425_safe_merge_fallback:
-        问题根因: git merge 可能因多种原因失败（未跟踪文件冲突、分支不存在等），
-                 原逻辑仅在 diff 冲突时降级为 copy_merge，非冲突类失败直接返回错误，
-                 导致 worktree 被清理后文件丢失。
-        修复方案: 任何 git merge 失败都降级为 _copy_merge，确保文件不丢失。
+        设计原则：不执行 git checkout 切换分支。
+        合并层级逐层向上：子任务 worktree → 容器空间 → 主仓库。
         """
         project_root = ws_meta.get("project_root", "")
         branch = ws_meta.get("branch", "")
         if not project_root:
             return {"success": False, "error": "缺少 project_root 信息"}
         proj_path, ws_path = Path(project_root), Path(workspace)
+        # workspace 中提交所有变更
         self._ensure_git_user(ws_path)
-        self._git_add_commit_if_dirty(ws_path, "chore: auto commit before merge")
+        self._git_add_commit_if_dirty(
+            ws_path, "chore: auto commit before merge")
+        # 目标目录提交暂存变更
         self._ensure_git_user(proj_path)
         main_branch = self._resolve_main_branch(proj_path)
-        self._run_git("checkout", main_branch, cwd=proj_path)
-        self._git_add_commit_if_dirty(proj_path, "chore: stage untracked files before merge")
-        if branch:
-            rc, _, stderr = self._run_git("merge", branch, cwd=proj_path)
-            if rc == 0:
-                return {"success": True, "action": "merged", "method": "git_merge"}
+        if not self._assert_on_branch(main_branch, proj_path):
             logger.warning(
-                "[WorkspaceLifecycle] git merge 失败，降级为 copy_merge: branch=%s, error=%s",
-                branch, stderr[:200] if stderr else "(empty)",
-            )
+                "[WorkspaceLifecycle] 不在 %s 上，降级为 copy_merge",
+                main_branch)
+            return self._copy_merge(workspace, project_root)
+        self._git_add_commit_if_dirty(
+            proj_path, "chore: stage untracked files before merge")
+        # 尝试 git merge（不切换分支，在当前分支上合并）
+        if branch:
+            rc, _, stderr = self._run_git(
+                "merge", branch, cwd=proj_path)
+            if rc == 0:
+                return {"success": True, "action": "merged",
+                        "method": "git_merge"}
+            logger.warning(
+                "[WorkspaceLifecycle] git merge 失败，"
+                "降级为 copy_merge: branch=%s, error=%s",
+                branch, stderr[:200] if stderr else "(empty)")
             self._run_git("merge", "--abort", cwd=proj_path)
             return self._copy_merge(workspace, project_root)
         return self._copy_merge(workspace, project_root)

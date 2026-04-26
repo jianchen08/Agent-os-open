@@ -14,6 +14,7 @@ from typing import Any
 
 from core.results import ToolExecutionResult
 from memory.types import ContextRequest, Episode, Knowledge
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -26,7 +27,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class MemoryTool:
+class MemoryTool(BuiltinTool):
     """
     记忆工具
 

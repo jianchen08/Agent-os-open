@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from tools.builtin.base import BuiltinTool
 from tools.builtin.shared import format_size
 from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
@@ -26,7 +27,7 @@ from tools.types import (
 )
 
 
-class EnhancedSearchTool(WorkspaceAwareMixin):
+class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
     """
     增强代码搜索工具
 

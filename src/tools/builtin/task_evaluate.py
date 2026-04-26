@@ -11,6 +11,7 @@ from typing import Any
 from tasks.types import TaskStatus
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -118,7 +119,7 @@ def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error_code": "EVAL_FAILED", "error": str(e)}
 
 
-class TaskEvaluateTool:
+class TaskEvaluateTool(BuiltinTool):
     """任务评估工具。
 
     负责：

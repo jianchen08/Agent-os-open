@@ -18,6 +18,7 @@ import httpx
 import yaml
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -30,7 +31,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class WebTool:
+class WebTool(BuiltinTool):
     """
     Web 操作工具
 

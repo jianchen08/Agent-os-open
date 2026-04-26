@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tasks.service import TaskService
 from tasks.state_machine import InvalidTransitionError
 from tasks.types import TaskModel, TaskStatus
@@ -30,7 +31,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class TaskTool:
+class TaskTool(BuiltinTool):
     """任务管理工具。
 
     提供：

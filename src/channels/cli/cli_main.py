@@ -102,16 +102,13 @@ def setup_logging(
             lambda record: not any(
                 record.name.startswith(_ns)
                 for _ns in (
-                    "pipeline.chain", "pipeline.engine", "pipeline.config",
-                    "pipeline.registry", "httpcore", "httpx", "LiteLLM",
-                    "LiteLLM.proxy", "LiteLLM.router", "LiteLLM.litellm_logging",
-                    "LiteLLM.http_handler",
-                    "infrastructure", "tools.builtin", "tools.global_registry",
-                    "plugins.core", "plugins.input", "plugins.output",
+                    "pipeline.", "httpcore", "httpx", "LiteLLM",
+                    "isolation.", "infrastructure.",
+                    "tools.", "plugins.",
                     "evaluation", "tasks", "memory",
                     "__main__",
                 )
-            ) or record.levelno >= logging.WARNING
+            ) or record.levelno >= logging.ERROR
         )
 
 # 默认管道配置路径（相对于包目录）

@@ -19,7 +19,6 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from tools.format_manager import FormatManager, ToolFormat, get_format_manager
 from tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -63,12 +62,6 @@ class ToolCore(ICorePlugin):
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
         self._isolation_executor: IsolationExecutor | None = None
-        fmt_str = self._config.get("result_format", "yaml")
-        try:
-            self._result_format = ToolFormat(fmt_str.lower())
-        except ValueError:
-            self._result_format = ToolFormat.YAML
-        self._format_manager: FormatManager = get_format_manager()
 
     @property
     def name(self) -> str:
@@ -119,6 +112,34 @@ class ToolCore(ICorePlugin):
         Args:
             executor: IsolationExecutor 实例
         """
+
+    def _get_schema_timeout_default(self, tool_name: str) -> float | None:
+        """从工具 schema 中获取 timeout_seconds 的默认值。
+
+        当 LLM 调用工具时未传递 timeout_seconds 参数，
+        从工具定义的 input_schema 中读取默认值作为 ToolCore 超时。
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            schema 中的默认超时秒数，无则返回 None
+        """
+        if self._tool_registry is None:
+            return None
+        tool_def = self._tool_registry.get_tool(tool_name)
+        if tool_def is None:
+            return None
+        schema = getattr(tool_def, "input_schema", None)
+        if not isinstance(schema, dict):
+            return None
+        timeout_prop = schema.get("properties", {}).get("timeout_seconds")
+        if not isinstance(timeout_prop, dict):
+            return None
+        default = timeout_prop.get("default")
+        if default is not None and float(default) > 0:
+            return float(default)
+        return None
         self._isolation_executor = executor
         logger.info("[%s] IsolationExecutor 已注入", self.name)
 
@@ -342,8 +363,6 @@ class ToolCore(ICorePlugin):
                 StateKeys.TOOL_RESULTS: [],
             }
 
-        default_timeout = self._default_timeout
-        tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
         results: list[dict[str, Any]] = []
         last_result_text = ""
         on_chunk = ctx.state.get("on_chunk")
@@ -382,7 +401,19 @@ class ToolCore(ICorePlugin):
             if not isinstance(tool_args, dict):
                 tool_args = {}
 
-            timeout = tool_timeouts.get(tool_name, default_timeout)
+            # 允许工具通过 timeout_seconds 参数覆盖默认超时
+            timeout = self._default_timeout
+            if isinstance(tool_args, dict) and "timeout_seconds" in tool_args:
+                try:
+                    requested = float(tool_args["timeout_seconds"])
+                    if requested > 0:
+                        timeout = requested
+                except (ValueError, TypeError):
+                    pass
+            elif self._tool_registry is not None:
+                schema_default = self._get_schema_timeout_default(tool_name)
+                if schema_default is not None:
+                    timeout = schema_default
 
             # 优先通过隔离执行器执行
             if self._isolation_executor is not None:
@@ -455,9 +486,7 @@ class ToolCore(ICorePlugin):
             tc_id = tool_calls[i].get("id", f"call_{i}") if i < len(tool_calls) else f"call_{i}"
             result_data = result.get("data", result.get("error", ""))
             try:
-                content_str = self._format_manager.serialize(
-                    result_data, fmt=self._result_format
-                )
+                content_str = json.dumps(result_data, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
                 content_str = str(result_data)
             tool_msg = {
@@ -503,14 +532,9 @@ class ToolCore(ICorePlugin):
                 continue
             meta = tool_data.get("metadata", {})
             if isinstance(meta, dict) and meta.get("action") == "task_submit":
-                # task_id 在 output/data 子字典中（ToolExecutionResult.to_dict() 嵌套结构）
-                inner = tool_data.get("data") or tool_data.get("output") or {}
-                tid = inner.get("task_id") if isinstance(inner, dict) else None
+                tid = tool_data.get("task_id")
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
-                    logger.info(
-                        "[%s] Detected task_submit: task_id=%s", self.name, tid,
-                    )
             tool_name = r.get("tool_name", "")
             if tool_name == "task_evaluate" and tool_data.get("overall_passed") is True:
                 evaluation_completed = True

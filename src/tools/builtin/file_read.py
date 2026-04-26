@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from tools.builtin.base import BuiltinTool
 from tools.builtin.shared import format_size
 from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
@@ -41,7 +42,7 @@ MAX_FILE_SIZE = 2 * 1024 * 1024
 BINARY_SNIFF_SIZE = 8192
 
 
-class FileReadTool(WorkspaceAwareMixin):
+class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     """
     文件读取工具
 

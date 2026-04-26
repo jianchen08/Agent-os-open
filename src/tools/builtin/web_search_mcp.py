@@ -16,6 +16,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
+from tools.builtin.base import BuiltinTool
 from tools.mcp_loader import MCPServerConfig, MCPToolLoader
 from tools.types import (
     Tool,
@@ -64,7 +65,7 @@ class WebSearchMCPConfig:
     mcp_overall_timeout: float = 135.0
 
 
-class WebSearchMCPTool:
+class WebSearchMCPTool(BuiltinTool):
     """
     Network Search Tool (Based on mcp-webgate)
 
