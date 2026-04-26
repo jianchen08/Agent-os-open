@@ -299,11 +299,8 @@ class TaskWorker:
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
         """任务系统通知挂起的管道：子任务到达终态。
 
-        通过管道基础设施提供的 inject_and_wake 接口发送通知，
-        不直接操作管道内部状态。任务系统只消费管道提供的接口。
-
-        只通知直接等待该任务的管道（通过 watching_task_ids 判断），
-        避免嵌套子任务完成时误通知上级管道。
+        通过子任务的 parent_pipeline_id 直接定位父管道，O(1) 查找。
+        回退：若无 parent_pipeline_id，扫描所有 __suspended_engine_* 兜底。
         """
         task_info = data.get("task", {})
         if isinstance(task_info, dict):
@@ -325,6 +322,34 @@ class TaskWorker:
                 "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
             )
 
+        # 主路径：通过 parent_pipeline_id 直接查找
+        parent_pipeline_id = None
+        task_obj = None
+        task_service = self._task_service
+        if task_service:
+            try:
+                task_obj = task_service.get_task(task_id)
+                if task_obj:
+                    parent_pipeline_id = getattr(task_obj, "parent_pipeline_id", None)
+            except Exception:
+                pass
+
+        if parent_pipeline_id:
+            engine_key = f"__suspended_engine_{parent_pipeline_id}"
+            engine = self._services.get(engine_key)
+            if engine and hasattr(engine, "inject_and_wake"):
+                try:
+                    engine.inject_and_wake(notification)
+                    logger.info(
+                        "TaskWorker: 通过 parent_pipeline_id 直接通知: "
+                        "pipeline=%s, task=%s, status=%s",
+                        parent_pipeline_id, task_id, new_status,
+                    )
+                    return
+                except Exception as exc:
+                    logger.warning("TaskWorker: inject_and_wake 失败: %s", exc)
+
+        # 回退：扫描所有挂起管道（兼容旧任务无 parent_pipeline_id 的情况）
         for key, engine in list(self._services.items()):
             if not key.startswith("__suspended_engine_"):
                 continue
@@ -340,7 +365,7 @@ class TaskWorker:
             try:
                 engine.inject_and_wake(notification)
                 logger.info(
-                    "TaskWorker: 已通过管道接口通知挂起管道: pipeline_key=%s, task=%s",
+                    "TaskWorker: 回退扫描通知挂起管道: pipeline_key=%s, task=%s",
                     key, task_id,
                 )
             except Exception as exc:

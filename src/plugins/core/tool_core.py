@@ -282,6 +282,11 @@ class ToolCore(ICorePlugin):
                 "data": normalized,
                 "duration_ms": round(duration_ms, 1),
             }
+            # BUG-FIX: 保留 ToolExecutionResult 的 metadata 供下游提取
+            # （如 task_submit 的 action 标记），_normalize_tool_result 只取 data，
+            # metadata 被丢弃导致 tool_core 的 submitted_task_ids 收集失败。
+            if hasattr(raw_result, "metadata") and isinstance(raw_result.metadata, dict) and raw_result.metadata:
+                result["metadata"] = raw_result.metadata
             if on_chunk:
                 display_result = str(normalized)[:200] if normalized else ""
                 on_chunk({
@@ -530,7 +535,9 @@ class ToolCore(ICorePlugin):
             tool_data = r.get("data", {})
             if not isinstance(tool_data, dict):
                 continue
-            meta = tool_data.get("metadata", {})
+            # BUG-FIX: metadata 可能从 ToolExecutionResult 传递到 r["metadata"]，
+            # 也可能嵌套在 tool_data（normalized output）中，两个位置都要检查。
+            meta = tool_data.get("metadata") or r.get("metadata", {})
             if isinstance(meta, dict) and meta.get("action") == "task_submit":
                 tid = tool_data.get("task_id")
                 if tid and tid not in submitted_task_ids:

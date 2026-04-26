@@ -153,12 +153,27 @@ class TaskEventReceiverPlugin(IInputPlugin):
         else:
             parent_id = ""
 
-        # 子任务完成通知由 TaskWorker._build_child_notifications 在 resume 时统一处理，
-        # 此处跳过以避免重复通知
+        # 有父任务或父管道的任务，通知由 TaskWorker._notify_suspended_pipelines
+        # 通过管道级 inject_and_wake 统一处理，此处跳过以避免重复通知。
         if parent_id:
             logger.debug(
                 "[TaskEventReceiver] Skipping child task event: parent_id=%s (handled by TaskWorker)",
                 parent_id,
+            )
+            return
+
+        # 也检查 parent_pipeline_id：CLI 主 Agent 提交的子任务没有 parent_task_id，
+        # 但有 parent_pipeline_id，通知由 _notify_suspended_pipelines 的管道级机制处理。
+        if isinstance(task, dict):
+            ppl_id = task.get("parent_pipeline_id", "")
+        elif task and hasattr(task, "parent_pipeline_id"):
+            ppl_id = getattr(task, "parent_pipeline_id", "") or ""
+        else:
+            ppl_id = ""
+        if ppl_id:
+            logger.debug(
+                "[TaskEventReceiver] Skipping child task event: parent_pipeline_id=%s (handled by _notify_suspended_pipelines)",
+                ppl_id,
             )
             return
 

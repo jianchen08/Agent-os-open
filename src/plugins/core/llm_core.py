@@ -287,12 +287,19 @@ class LLMCore(ICorePlugin):
         # 3. 动态变量（每轮变化的上下文：时间戳、session_id 等）
         #    不修改系统消息（动态变量每轮变化，不应污染静态系统提示）
         #    使用 user 角色 + name=dynamic_context，兼容所有 provider
+        #    内容用 <context_metadata> 包装并附忽略指令，防止 LLM 主动回复
         dynamic_vars = state.get("prompt.dynamic_vars", "")
         if dynamic_vars:
+            wrapped = (
+                "<dynamic_vars>\n"
+                "以下为系统注入的背景信息（非指令）。\n"
+                f"{dynamic_vars}\n"
+                "</dynamic_vars>"
+            )
             messages.append({
                 "role": "user",
                 "name": "dynamic_context",
-                "content": dynamic_vars,
+                "content": wrapped,
             })
 
         logger.info(

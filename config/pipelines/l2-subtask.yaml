@@ -41,4 +41,5 @@ pipeline:
   # 子任务特定的迭代限制
   config:
     max_iterations: 50                  # 子任务最大迭代次数
-    timeout: 1800                       # 子任务超时时间（秒）
+    timeout: 2400                       # 子任务超时时间（秒）
+    timeout_seconds: 2400               # 子任务超时时间（秒，兼容键名）

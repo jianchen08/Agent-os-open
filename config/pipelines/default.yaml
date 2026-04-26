@@ -8,7 +8,7 @@
 name: lingxi_agent
 
 task_worker:
-  pipeline_timeout: 1800
+  pipeline_timeout: 7200
   child_wait_timeout: 3600
   terminal_wait_timeout: 3600
 
@@ -131,7 +131,7 @@ plugins:
   - name: stop_check
     config:
       enabled: true
-      max_duration_seconds: 1800
+      max_duration_seconds: 7200
   - name: error_check
     config:
       enabled: true

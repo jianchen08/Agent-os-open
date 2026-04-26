@@ -508,6 +508,7 @@ class CLIApplication:
                 content_store=json_store,
                 vector_retriever=vector_retriever,
                 embedding_fn=embedding_fn,
+                data_dir=str(_PROJECT_ROOT / "data" / "memory"),
             )
             services["tag_service"] = tag_service
             logger.info("Service created: tag_service")
@@ -521,6 +522,7 @@ class CLIApplication:
                 content_store=json_store,
                 vector_retriever=vector_retriever,
                 tag_service=tag_service,
+                data_dir=str(_PROJECT_ROOT / "data" / "memory"),
             )
             services["chunk_service"] = chunk_service
             logger.info("Service created: chunk_service")
@@ -621,6 +623,7 @@ class CLIApplication:
                             "title": getattr(task_obj, "title", ""),
                             "error": getattr(task_obj, "error", "") or "",
                             "parent_task_id": getattr(task_obj, "parent_task_id", ""),
+                            "parent_pipeline_id": getattr(task_obj, "parent_pipeline_id", ""),
                             "priority": getattr(task_obj, "priority", ""),
                             "agent_name": getattr(task_obj, "agent_name", ""),
                         }

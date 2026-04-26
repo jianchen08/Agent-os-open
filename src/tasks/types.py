@@ -76,6 +76,7 @@ class TaskModel:
         title: 任务标题
         description: 任务描述
         parent_task_id: 父任务 ID（用于子任务层级）
+        parent_pipeline_id: 创建该任务的父管道 ID，用于子任务完成时直接通知父管道
         dependencies: 依赖的任务 ID 列表
         agent_name: 执行者角色名（如 "灵汐"），由 Agent 配置注入
         agent_level: Agent 层级
@@ -101,6 +102,7 @@ class TaskModel:
 
     # ── 层级关系（任务管理） ──
     parent_task_id: str | None = None
+    parent_pipeline_id: str | None = field(default=None, metadata={"description": "创建该任务的父管道 ID，用于子任务完成时直接通知父管道"})
     dependencies: list[str] | None = None
 
     # ── 执行者（身份 vs 实例） ──
@@ -133,6 +135,7 @@ def create_task(
     priority: TaskPriority | int = TaskPriority.NORMAL,
     agent_level: AgentLevel | str = AgentLevel.L1_MAIN,
     parent_task_id: str | None = None,
+    parent_pipeline_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     agent_name: str = "",
     dependencies: list[str] | None = None,
@@ -168,6 +171,7 @@ def create_task(
         priority=priority,
         agent_level=agent_level,
         parent_task_id=parent_task_id,
+        parent_pipeline_id=parent_pipeline_id,
         metadata=metadata or {},
         agent_name=agent_name,
         dependencies=dependencies,

@@ -464,10 +464,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             else:
                 child_level = AgentLevel.L3_ATOMIC
 
+            pipeline_id = inputs.get("pipeline_id")
             task = task_service.create_task(
                 title=goal["title"],
                 description=description,
                 parent_task_id=parent_task_id,
+                parent_pipeline_id=pipeline_id,
                 target_type=target_type,
                 dependencies=dependencies or None,
                 priority=raw_priority,
@@ -601,9 +603,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         try:
             description = inputs.get("description") or goal.get("description", "")
+            pipeline_id = inputs.get("pipeline_id")
             task = task_service.create_task(
                 title=goal["title"],
                 description=description,
+                parent_pipeline_id=pipeline_id,
                 metadata=self._build_metadata(inputs, goal, {}),
             )
         except Exception as e:
