@@ -528,6 +528,8 @@ class WorkspaceLifecycleManager:
         whitelist = self._config.get("workspace", {}).get("worktree_include_patterns", ["src", "config"])
         if whitelist:
             self._run_git("sparse-checkout", "set", *whitelist, cwd=ws_dir)
+        # sparse-checkout patterns 已设好，checkout 把文件拉出来
+        self._run_git("checkout", "HEAD", cwd=ws_dir)
         link_patterns = self._config.get("workspace", {}).get("worktree_link_patterns", [])
         for link_name in link_patterns:
             src, dst = project_root / link_name, ws_dir / link_name

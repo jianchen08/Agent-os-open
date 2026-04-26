@@ -44,10 +44,6 @@ class WorkspaceAwareMixin:
         当相对路径已包含 workspace 的完整路径或尾部组件前缀时自动去重，
         避免产生类似 workspace/workspace/file 的重复路径。
 
-        去重策略：
-        1. 完整匹配：路径字符串以 workspace 完整路径开头
-        2. 尾部匹配：路径字符串以 workspace 路径的尾部组件开头
-
         Args:
             path_str: 待解析的路径字符串。
 
