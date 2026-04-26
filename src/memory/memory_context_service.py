@@ -15,6 +15,9 @@ from typing import Any, Callable, Awaitable
 
 from memory.context_compressor import CompressionConfig, ContextCompressor
 
+# LLM 调用函数类型：接收 prompt 字符串，返回响应字符串
+LLMCallFn = Callable[[str], Awaitable[str]]
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +42,7 @@ class MemoryContextService:
         compressor: ContextCompressor | None = None,
         config: dict[str, Any] | None = None,
         token_estimate_fn: Callable[[str], int] | None = None,
+        llm_call_fn: LLMCallFn | None = None,
     ) -> None:
         """初始化记忆上下文服务。
 
@@ -46,6 +50,7 @@ class MemoryContextService:
             compressor: 上下文压缩器（可选）
             config: 服务配置，需包含 context_window, compress_trigger_ratio, budgets
             token_estimate_fn: token 估算函数
+            llm_call_fn: LLM 调用函数（可选，支持后续通过 set_llm_call_fn 延迟注入）
         """
         compression_config = CompressionConfig(
             context_window=config.get("context_window", 128000) if config else 128000,
@@ -54,6 +59,7 @@ class MemoryContextService:
         self._compressor = compressor or ContextCompressor(config=compression_config)
         self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.5}
         self._token_estimate_fn = token_estimate_fn or self._default_token_estimate
+        self._llm_call_fn: LLMCallFn | None = llm_call_fn
 
         # 内存存储：{session_id: {"L0": [messages], "L1": str, "L2": str}}
         self._layers: dict[str, dict[str, Any]] = {}
@@ -75,6 +81,19 @@ class MemoryContextService:
         for key in required_keys:
             if key not in self._config:
                 raise KeyError(f"配置缺失: {key}")
+
+    def set_llm_call_fn(self, llm_call_fn: LLMCallFn) -> None:
+        """延迟注入 LLM 调用函数。
+
+        允许在服务创建后才提供 LLM 能力（例如从 services 中获取 llm_core 后），
+        压缩器将在首次压缩时自动使用此函数。
+
+        Args:
+            llm_call_fn: 异步 LLM 调用函数
+        """
+        self._llm_call_fn = llm_call_fn
+        self._compressor.set_llm_call_fn(llm_call_fn)
+        logger.debug("[MemoryContextService] LLM 调用函数已注入")
 
     @staticmethod
     def _default_token_estimate(text: str) -> int:
@@ -144,6 +163,13 @@ class MemoryContextService:
         Args:
             session_id: 会话 ID
         """
+        if not self._llm_call_fn:
+            logger.warning(
+                "[MemoryContextService] 跳过压缩：未提供 LLM 调用函数，"
+                "请通过 set_llm_call_fn() 注入或初始化时传入 llm_call_fn 参数",
+            )
+            return
+
         data = self._get_session_data(session_id)
 
         l0_content = self._format_messages_to_string(data["L0"])

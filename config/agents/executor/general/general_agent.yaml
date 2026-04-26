@@ -90,6 +90,7 @@ tool_ids:
   - "memory"             # 记忆检索与存储
   - "evaluate"           # Schema验证/格式检查
   - "task_evaluate"      # 任务评估（执行完成后必须调用）
+  - "human_interaction"  # 向用户提问并获取回答
 
 # 约束
 hard_constraints:

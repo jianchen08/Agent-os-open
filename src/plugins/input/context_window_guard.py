@@ -172,7 +172,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         old_msgs: list[dict[str, Any]],
         context_window: int,
     ) -> str | None:
-        """通过记忆系统 ContextCompressor 压缩旧消息为摘要。
+        """通过记忆系统 ContextCompressor 一次性压缩旧消息。
 
         Args:
             ctx: 插件执行上下文
@@ -180,7 +180,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             context_window: 模型上下文窗口大小
 
         Returns:
-            压缩摘要文本，失败返回 None
+            压缩摘要文本（L1，或 L2 如果 L1 超预算），失败返回 None
         """
         try:
             from memory.context_compressor import CompressionConfig, ContextCompressor
@@ -196,25 +196,25 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 config=config,
             )
 
-            summary = await compressor.compress_to_l1(old_msgs)
+            result = await compressor.compress_all(old_msgs)
+            l1_summary = result.get("l1", "")
+            l2_summary = result.get("l2", "")
 
-            if summary:
-                l1_tokens = len(summary) // 2
+            if l1_summary:
+                l1_tokens = len(l1_summary) // 2
                 l1_budget = config.get_budgets().get("L1", 1000)
-                if l1_tokens > l1_budget:
-                    l2_summary = await compressor.compress_to_l2(summary)
-                    if l2_summary:
-                        logger.info(
-                            "[%s] L1 摘要超预算，进一步压缩到 L2: %d -> %d 字符",
-                            self.name, len(summary), len(l2_summary),
-                        )
-                        return l2_summary
+                if l1_tokens > l1_budget and l2_summary:
+                    logger.info(
+                        "[%s] L1 超预算，使用 L2: %d -> %d 字符",
+                        self.name, len(l1_summary), len(l2_summary),
+                    )
+                    return l2_summary
 
                 logger.info(
-                    "[%s] L1 压缩完成: %d 条消息 -> %d 字符摘要",
-                    self.name, len(old_msgs), len(summary),
+                    "[%s] 一次性压缩完成: %d 条消息 -> L1≈%d字符 L2≈%d字符",
+                    self.name, len(old_msgs), len(l1_summary), len(l2_summary),
                 )
-                return summary
+                return l1_summary
 
             return None
 
@@ -235,14 +235,19 @@ class ContextWindowGuardPlugin(IInputPlugin):
             异步 LLM 调用函数，或 None
         """
         llm_core = ctx.get_service("llm_core")
-        if llm_core and hasattr(llm_core, "_adapter"):
+        if llm_core and hasattr(llm_core, "_adapter") and hasattr(llm_core, "_get_model_string"):
             async def _call_via_core(prompt: str) -> str:
-                from llm.adapter import LLMResponse
-                response: LLMResponse = await llm_core._adapter.call(
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False,
-                )
-                return response.content or ""
+                kwargs: dict[str, Any] = {
+                    "model": llm_core._get_model_string(),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                }
+                if getattr(llm_core, "_api_base", None):
+                    kwargs["api_base"] = llm_core._api_base
+                if getattr(llm_core, "_api_key", None):
+                    kwargs["api_key"] = llm_core._api_key
+                response = await llm_core._adapter.completion(**kwargs)
+                return response.text or ""
             return _call_via_core
 
         try:
@@ -253,19 +258,17 @@ class ContextWindowGuardPlugin(IInputPlugin):
             api_key = ctx.state.get("api_key")
 
             if api_key:
-                adapter = LiteLLMAdapter(
-                    model=model_name,
-                    api_base=api_base,
-                    api_key=api_key,
-                )
+                adapter = LiteLLMAdapter()
 
                 async def _call_via_adapter(prompt: str) -> str:
-                    from llm.adapter import LLMResponse
-                    response: LLMResponse = await adapter.call(
+                    response = await adapter.completion(
+                        model=model_name,
                         messages=[{"role": "user", "content": prompt}],
                         stream=False,
+                        api_base=api_base,
+                        api_key=api_key,
                     )
-                    return response.content or ""
+                    return response.text or ""
 
                 return _call_via_adapter
         except Exception as exc:

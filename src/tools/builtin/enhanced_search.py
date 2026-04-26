@@ -8,10 +8,13 @@
 
 import asyncio
 import json
+import logging
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from tools.builtin.base import BuiltinTool
 from tools.builtin.shared import format_size
@@ -45,7 +48,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
         self.ripgrep_available = self._check_ripgrep()
 
         if self.ripgrep_available:
-            print("[Ripgrep] 检测到ripgrep，已启用高性能模式")
+            logger.info("[Ripgrep] 检测到ripgrep，已启用高性能模式")
         else:
             print(
                 "[Search] ripgrep未安装，使用Python模式（建议安装ripgrep以获得更好性能）"

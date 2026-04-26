@@ -127,7 +127,7 @@ class ToolCore(ICorePlugin):
         """
         if self._tool_registry is None:
             return None
-        tool_def = self._tool_registry.get_tool(tool_name)
+        tool_def = self._tool_registry.get_optional(tool_name)
         if tool_def is None:
             return None
         schema = getattr(tool_def, "input_schema", None)

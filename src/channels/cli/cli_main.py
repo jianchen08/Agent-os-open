@@ -106,6 +106,7 @@ def setup_logging(
                     "isolation.", "infrastructure.",
                     "tools.", "plugins.",
                     "evaluation", "tasks", "memory",
+                    "human_interaction", "channels.cli.",
                     "__main__",
                 )
             ) or record.levelno >= logging.ERROR
@@ -326,6 +327,28 @@ class CLIApplication:
         if llm_core_plugin is not None:
             self._services["llm_core"] = llm_core_plugin
             logger.info("Service registered: llm_core (from plugin registry)")
+
+            # 将 LLM 调用能力注入到 context_service（延迟注入）
+            context_svc = self._services.get("context_service")
+            if context_svc is not None and hasattr(llm_core_plugin, "_adapter"):
+                from llm.adapter import LLMResponse
+
+                async def _llm_call_fn(prompt: str) -> str:
+                    call_kwargs: dict[str, Any] = {}
+                    if llm_core_plugin._api_base:
+                        call_kwargs["api_base"] = llm_core_plugin._api_base
+                    if llm_core_plugin._api_key:
+                        call_kwargs["api_key"] = llm_core_plugin._api_key
+                    response: LLMResponse = await llm_core_plugin._adapter.completion(
+                        model=llm_core_plugin._get_model_string(),
+                        messages=[{"role": "user", "content": prompt}],
+                        stream=False,
+                        **call_kwargs,
+                    )
+                    return response.text or ""
+
+                context_svc.set_llm_call_fn(_llm_call_fn)
+                logger.info("Service injected: context_service <- llm_core adapter")
 
         # 初始化任务执行器（事件驱动，用于后台任务处理）
         try:
@@ -1105,8 +1128,18 @@ class CLIApplication:
                 self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
                 break
 
-            # 空输入 — 跳过
-            if initial_state.get("empty_input"):
+            # 空输入 — 检查是否有待处理的交互请求
+            if initial_state.get("_is_empty"):
+                if cli_notifier and cli_notifier.has_pending():
+                    human_svc = self._services.get("human_interaction_service")
+                    from channels.cli.cli_interaction import run_sub_conversation
+                    await run_sub_conversation(
+                        console=console,
+                        input_adapter=self._input_adapter,
+                        notifier=cli_notifier,
+                        interaction_service=human_svc,
+                        idle_timeout=60,
+                    )
                 continue
 
             # 斜杠命令处理

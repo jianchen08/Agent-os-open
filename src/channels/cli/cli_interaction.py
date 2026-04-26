@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -223,48 +222,14 @@ class CLIInteractionNotifier(IInteractionNotifier):
         return "\n".join(content_parts) if content_parts else "(无详细内容)"
 
 
-async def run_sub_conversation(
+def _show_request_panel(
     console: Console,
-    input_adapter: CLIInputAdapter,
-    notifier: CLIInteractionNotifier,
-    interaction_service: Any,
-    idle_timeout: int = 86400,
+    title: str,
+    agent_name: str,
+    mode: str,
+    msg_data: dict[str, Any],
 ) -> None:
-    """处理子 Agent 的交互请求，进入子对话模式。
-
-    从 notifier 取出 pending 请求，显示子 Agent 名称并切换提示符，
-    进入循环等待用户输入，提交响应给交互服务。
-
-    退出条件：
-    - 用户超时（idle_timeout 秒无输入）
-    - 用户输入 /back
-    - 子 Agent 不再提问（90秒无新请求）
-
-    Args:
-        console: rich Console 实例
-        input_adapter: CLI 输入适配器
-        notifier: CLI 交互通知器
-        interaction_service: 交互服务实例（需有 submit_response 方法）
-        idle_timeout: 空闲超时秒数，默认 86400（1天）
-    """
-
-    pending = notifier.get_next_pending()
-    if not pending:
-        return
-
-    msg_data = pending.get("message_data", {})
-    request_id = pending.get("request_id", "")
-    agent_name = msg_data.get("agent_id", "子 Agent")
-    title = msg_data.get("title", "")
-    mode = msg_data.get("interaction_mode", "choice")
-    options = msg_data.get("options") or []
-
-    console.print(
-        f"\n[bold magenta]─── 进入 {agent_name} 对话 ───"
-        f"（{idle_timeout}秒无输入自动退出）[/bold magenta]"
-    )
-
-    # 显示第一个请求的完整面板
+    """显示交互请求的面板。"""
     description = msg_data.get("description", "")
     if mode == "choice":
         content = CLIInteractionNotifier._render_choice_content(description, msg_data)
@@ -285,6 +250,48 @@ async def run_sub_conversation(
         )
     console.print(panel)
 
+
+async def run_sub_conversation(
+    console: Console,
+    input_adapter: CLIInputAdapter,
+    notifier: CLIInteractionNotifier,
+    interaction_service: Any,
+    idle_timeout: int = 86400,
+) -> None:
+    """处理子 Agent 的交互请求，进入子对话模式。
+
+    使用同步 input() 直接读取用户输入，避免多线程 stdin 冲突。
+
+    退出条件：
+    - 用户输入 /back
+    - 子 Agent 不再提问
+
+    Args:
+        console: rich Console 实例
+        input_adapter: CLI 输入适配器
+        notifier: CLI 交互通知器
+        interaction_service: 交互服务实例（需有 submit_response 方法）
+        idle_timeout: 未使用，保留接口兼容
+    """
+
+    pending = notifier.get_next_pending()
+    if not pending:
+        return
+
+    msg_data = pending.get("message_data", {})
+    request_id = pending.get("request_id", "")
+    agent_name = msg_data.get("agent_id", "子 Agent")
+    title = msg_data.get("title", "")
+    mode = msg_data.get("interaction_mode", "choice")
+    options = msg_data.get("options") or []
+
+    console.print(
+        f"\n[bold magenta]─── 进入 {agent_name} 对话 ───"
+        f"（输入 /back 返回主对话）[/bold magenta]"
+    )
+
+    _show_request_panel(console, title, agent_name, mode, msg_data)
+
     original_prompt = input_adapter._prompt_str
     input_adapter._prompt_str = f"[{agent_name}] > "
 
@@ -299,16 +306,7 @@ async def run_sub_conversation(
                     "[dim]请输入回复内容 (输入 /back 返回主对话):[/dim]"
                 )
 
-            try:
-                user_input = await _async_input(
-                    prompt=f"\n{input_adapter._prompt_str}",
-                    timeout=idle_timeout,
-                )
-            except asyncio.TimeoutError:
-                console.print(
-                    f"[yellow]子 Agent 对话超时 ({idle_timeout}秒无输入)[/yellow]"
-                )
-                break
+            user_input = input(f"\n{input_adapter._prompt_str}")
 
             if user_input.strip().lower() in ("/back", "/done", "/返回"):
                 console.print(
@@ -317,6 +315,11 @@ async def run_sub_conversation(
                 break
 
             if not user_input.strip():
+                if mode == "choice" and options:
+                    console.print(
+                        "[yellow]请输入选项编号 (如 1) 或选项 ID "
+                        f"(可选: {', '.join(o.get('id', '') for o in options)})[/yellow]"
+                    )
                 continue
 
             await _submit_user_response(
@@ -327,46 +330,22 @@ async def run_sub_conversation(
                 options=options,
             )
 
-            try:
-                next_pending = await asyncio.wait_for(
-                    _wait_for_next_pending(notifier),
-                    timeout=90,
-                )
-                if next_pending is None:
-                    console.print("[dim]子 Agent 不再有新的交互请求[/dim]")
-                    break
-
-                pending = next_pending
-                msg_data = pending.get("message_data", {})
-                request_id = pending.get("request_id", "")
-                mode = msg_data.get("interaction_mode", "choice")
-                title = msg_data.get("title", "")
-                options = msg_data.get("options") or []
-
-                console.print("")
-                if mode == "choice":
-                    content = CLIInteractionNotifier._render_choice_content(
-                        msg_data.get("description", ""), msg_data,
-                    )
-                    panel = Panel(
-                        content,
-                        title=f"[bold cyan]{title}[/bold cyan]",
-                        border_style="cyan",
-                    )
-                else:
-                    initial_msg = msg_data.get("initial_message", "")
-                    panel = Panel(
-                        initial_msg or "(对话模式)",
-                        title=f"[bold green]{title}[/bold green]",
-                        border_style="green",
-                    )
-                console.print(panel)
-
-            except asyncio.TimeoutError:
-                console.print(
-                    "[yellow]等待子 Agent 新请求超时 (90秒)[/yellow]"
-                )
+            # 提交后短暂等待，检查队列是否有后续请求
+            await asyncio.sleep(0.5)
+            next_pending = notifier.get_next_pending()
+            if next_pending is None:
+                console.print("[dim]子 Agent 不再有新的交互请求[/dim]")
                 break
+
+            pending = next_pending
+            msg_data = pending.get("message_data", {})
+            request_id = pending.get("request_id", "")
+            mode = msg_data.get("interaction_mode", "choice")
+            title = msg_data.get("title", "")
+            options = msg_data.get("options") or []
+
+            console.print("")
+            _show_request_panel(console, title, agent_name, mode, msg_data)
 
     finally:
         input_adapter._prompt_str = original_prompt
@@ -419,34 +398,11 @@ async def _submit_user_response(
         )
 
 
-async def _wait_for_next_pending(
-    notifier: CLIInteractionNotifier,
-) -> dict[str, Any] | None:
-    """异步等待下一个待处理请求。
-
-    使用短间隔轮询 notifier 的 pending 队列，
-    直到有新请求或被外部超时取消。
-
-    Args:
-        notifier: CLI 交互通知器
-
-    Returns:
-        待处理请求字典，如果没有则返回 None
-    """
-    while True:
-        pending = notifier.get_next_pending()
-        if pending is not None:
-            return pending
-        await asyncio.sleep(0.5)
-
-
 def _resolve_choice(user_input: str, options: list[dict]) -> str | None:
     """解析用户输入，匹配选项。
 
-    支持以下输入方式：
-    - 数字编号（1, 2, 3...）匹配选项位置
-    - 选项 ID 精确匹配
-    - 选项 label 部分匹配（不区分大小写）
+    仅支持数字编号（1, 2, 3...）匹配选项位置。
+    非数字输入或无效编号将返回 None，由调用方将原始输入作为 feedback 返回。
 
     Args:
         user_input: 用户输入的文本
@@ -463,51 +419,4 @@ def _resolve_choice(user_input: str, options: list[dict]) -> str | None:
         if 0 <= index < len(options):
             return options[index].get("id")
 
-    for opt in options:
-        if opt.get("id") == user_input:
-            return opt.get("id")
-
-    for opt in options:
-        label = opt.get("label", "")
-        if user_input.lower() in label.lower():
-            return opt.get("id")
-
     return None
-
-
-async def _async_input(prompt: str, timeout: float) -> str:
-    """带超时的异步 input()，使用 daemon thread 避免僵尸线程。
-
-    与 run_in_executor 不同，daemon thread 在超时后不会阻塞程序退出，
-    也不会与后续的 input() 调用产生线程池竞争。
-
-    Args:
-        prompt: 输入提示符
-        timeout: 超时秒数
-
-    Returns:
-        用户输入的文本
-
-    Raises:
-        asyncio.TimeoutError: 超时
-    """
-    result: list[str | None] = [None]
-    done = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def _read() -> None:
-        try:
-            result[0] = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            result[0] = None
-        finally:
-            loop.call_soon_threadsafe(done.set)
-
-    thread = threading.Thread(target=_read, daemon=True)
-    thread.start()
-
-    await asyncio.wait_for(done.wait(), timeout=timeout)
-
-    if result[0] is None:
-        raise asyncio.TimeoutError()
-    return result[0]

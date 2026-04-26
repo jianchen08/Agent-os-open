@@ -107,94 +107,46 @@ class ContextCompressor:
         _stats: 统计信息
     """
 
-    # L0 → L1：十模块压缩模板
-    TEN_SECTION_PROMPT = """你正在做一次梦，对记忆文件做一次反思性的回顾。把你最近学到的东西整合成持久的、组织良好的记忆，方便未来的会话快速定位。
+    # 一次性压缩模板：L1 + L2 + 关键词
+    COMPRESS_PROMPT = """## 任务
+将以下对话历史一次性压缩完成，输出三部分：
+1. **十段摘要 (l1)**：结构化记录对话核心信息，保留对继续当前任务至关重要的内容
+2. **三要素摘要 (l2)**：从 l1 中提炼最核心的意图、过程、结果
+3. **关键词 (keywords)**：5-10 个反映核心主题的关键词
 
-请将以下对话历史压缩成结构化的记忆文件。
-
-要求：严格按照10个模块格式输出，每段简洁精炼，总长度控制在 {max_tokens} tokens 以内。
-
-## Session Title
-（简短描述这个会话的主题/标题）
-
-## Current State
-（当前的工作状态、进度、悬而未决的问题）
-
-## Task Specification
-（用户要求完成的具体任务）
-
-## Files and Functions
-（涉及的主要文件和函数）
-
-## Workflow
-（执行的主要步骤和工作流程）
-
-## Errors & Corrections
-（遇到的错误和解决方案）
-
-## Codebase Documentation
-（代码库相关的重要信息）
-
-## Learnings
-（从这次会话中学到的新知识、技巧）
-
-## Key Results
-（取得的关键结果、完成的里程碑）
-
-## Worklog
-（未完成的事项、待跟进的问题）
-
----
-
-对话历史：
+## 对话历史
 {messages}
 
-请开始压缩（严格按10模块格式）："""
+## 输出格式
+严格输出以下 JSON，不要输出任何其他内容。每个字段简洁精炼，无内容填 null。
 
-    # L1 → L2：三模块压缩模板
-    TRIPLET_PROMPT = """请将以下十模块摘要进一步压缩成核心三要素。
-
-要求：只保留最核心的信息，总长度控制在 {max_tokens} tokens 以内。
-
-格式：
-## 意图
-（用户最终要达成什么）
-
-## 过程
-（关键步骤和决策）
-
-## 结果
-（完成了什么，还剩什么）
-
----
-
-十模块摘要：
-{summary}
-
-请压缩成三要素："""
-
-    # 关键词提取模板
-    KEYWORD_PROMPT = """请从以下内容中提取 5-10 个最重要的关键词。
-
-要求：
-1. 关键词应反映核心主题、实体、操作和概念
-2. 优先提取专有名词、技术术语、关键动作
-3. 每个关键词 1-4 个字
-
-输出格式（JSON 数组）：
-["关键词1", "关键词2", "关键词3", ...]
-
----
-
-内容：
-{content}
-
-请提取关键词（只输出 JSON 数组）："""
+```json
+{{
+  "l1": {{
+    "session_title": "会话主题（一句话）",
+    "current_state": "当前工作状态、进度、待解决问题",
+    "task_specification": "用户要求完成的具体任务",
+    "files_and_functions": "涉及的主要文件和函数",
+    "workflow": "执行的主要步骤和工作流程",
+    "errors_and_corrections": "遇到的错误和解决方案",
+    "codebase_info": "内容的相关的重要信息和关键细节",
+    "learnings": "从对话中获得的关键认知",
+    "key_results": "已完成的关键成果",
+    "worklog": "未完成事项和待跟进问题"
+  }},
+  "l2": {{
+    "intent": "用户最终要达成什么",
+    "process": "关键步骤和决策",
+    "results": "完成了什么，还剩什么"
+  }},
+  "keywords": ["关键词1", "关键词2", "关键词3"]
+}}
+```"""
 
     def __init__(
         self,
         llm_call_fn: Callable[[str], Awaitable[str]] | None = None,
-        config: CompressionConfig | None = None,
+         config: CompressionConfig | None = None,
     ) -> None:
         """初始化上下文压缩器。
 
@@ -217,127 +169,73 @@ class ContextCompressor:
             "total_tokens_compressed": 0,
         }
 
-    async def compress(
-        self, messages: list[dict[str, Any]], preserve_structure: bool = True,
-    ) -> str:
-        """压缩对话历史（兼容旧接口）。
+    def set_llm_call_fn(self, llm_call_fn: Callable[[str], Awaitable[str]]) -> None:
+        """延迟注入 LLM 调用函数。
 
         Args:
-            messages: 对话消息列表
-            preserve_structure: 是否保留结构
-
-        Returns:
-            压缩后的文本
+            llm_call_fn: 异步 LLM 调用函数
         """
-        return await self.compress_to_l1(messages)
+        self._llm_call_fn = llm_call_fn
 
-    async def compress_to_l1(self, messages: list[dict[str, Any]]) -> str:
-        """L0 → L1：压缩成十模块摘要。
+    async def compress_all(
+        self, messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """一次性完成 L1 + L2 + 关键词压缩（单次 LLM 调用）。
 
         Args:
             messages: 对话消息列表
 
         Returns:
-            十模块摘要文本
+            {"l1": str, "l2": str, "keywords": list[str]}
 
         Raises:
             RuntimeError: LLM 调用失败时
         """
         if not messages:
-            return ""
-
-        # 生成缓存键
-        cache_key = self._generate_cache_key(messages, "L1")
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+            return {"l1": "", "l2": "", "keywords": []}
 
         messages_text = self._format_messages(messages)
-        max_tokens = self.budgets.get("L1", 1000)
 
-        prompt = self.TEN_SECTION_PROMPT.format(
-            messages=messages_text, max_tokens=max_tokens,
-        )
-
-        try:
-            summary = await self._call_llm(prompt)
-            summary = self._truncate_to_budget(summary, max_tokens)
-
-            self._cache_put(cache_key, summary)
-            self._stats["l0_to_l1_count"] += 1
-            self._stats["total_tokens_compressed"] += self._estimate_tokens(messages_text)
-
-            return summary
-
-        except Exception as e:
-            logger.error("[ContextCompressor] L0→L1 压缩失败 | error=%s", e)
-            raise RuntimeError(f"L1 压缩失败: {e}") from e
-
-    async def compress_to_l2(self, l1_summary: str) -> str:
-        """L1 → L2：压缩成三元组摘要。
-
-        Args:
-            l1_summary: L1 摘要文本
-
-        Returns:
-            三元组摘要文本
-
-        Raises:
-            RuntimeError: LLM 调用失败时
-        """
-        if not l1_summary:
-            return ""
-
-        cache_key = self._generate_cache_key([{"content": l1_summary}], "L2")
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        max_tokens = self.budgets.get("L2", 500)
-        prompt = self.TRIPLET_PROMPT.format(summary=l1_summary, max_tokens=max_tokens)
-
-        try:
-            summary = await self._call_llm(prompt)
-            summary = self._truncate_to_budget(summary, max_tokens)
-
-            self._cache_put(cache_key, summary)
-            self._stats["l1_to_l2_count"] += 1
-
-            return summary
-
-        except Exception as e:
-            logger.error("[ContextCompressor] L1→L2 压缩失败 | error=%s", e)
-            raise RuntimeError(f"L2 压缩失败: {e}") from e
-
-    async def extract_keywords(self, content: str) -> list[str]:
-        """从内容中提取关键词。
-
-        Args:
-            content: 内容文本
-
-        Returns:
-            关键词列表
-        """
-        import json
-        import re
-
-        if not content:
-            return []
-
-        prompt = self.KEYWORD_PROMPT.format(content=content[:2000])
+        prompt = self.COMPRESS_PROMPT.format(messages=messages_text)
 
         try:
             response = await self._call_llm(prompt)
-            json_match = re.search(r'\[.*?\]', response, re.DOTALL)
-            if json_match:
-                keywords = json.loads(json_match.group())
-                if isinstance(keywords, list):
-                    return [
-                        kw.strip() for kw in keywords
-                        if isinstance(kw, str) and kw.strip()
-                    ][:10]
-            return []
+            raw_json = self._extract_json(response)
+
+            import json
+            parsed = json.loads(raw_json)
+
+            l1_data = parsed.get("l1", {})
+            l1_str = json.dumps(l1_data, ensure_ascii=False, indent=2) if l1_data else ""
+
+            l2_data = parsed.get("l2", {})
+            l2_str = json.dumps(l2_data, ensure_ascii=False, indent=2) if l2_data else ""
+
+            raw_keywords = parsed.get("keywords", [])
+            keywords = [
+                kw.strip() for kw in raw_keywords
+                if isinstance(kw, str) and kw.strip()
+            ][:10]
+
+            l1_max = self.budgets.get("L1", 1000)
+            l2_max = self.budgets.get("L2", 500)
+            l1_str = self._truncate_to_budget(l1_str, l1_max)
+            l2_str = self._truncate_to_budget(l2_str, l2_max)
+
+            self._stats["l0_to_l1_count"] += 1
+            self._stats["l1_to_l2_count"] += 1
+            self._stats["total_tokens_compressed"] += self._estimate_tokens(messages_text)
+
+            logger.info(
+                "[ContextCompressor] 一次性压缩完成 | L1≈%d字符 L2≈%d字符 keywords=%d",
+                len(l1_str), len(l2_str), len(keywords),
+            )
+
+            return {"l1": l1_str, "l2": l2_str, "keywords": keywords}
+
         except Exception as e:
-            logger.warning("[ContextCompressor] 关键词提取失败: %s", e)
-            return []
+            logger.error("[ContextCompressor] 一次性压缩失败 | error=%s", e)
+            raise RuntimeError(f"压缩失败: {e}") from e
 
     async def progressive_compress(
         self,
@@ -368,33 +266,33 @@ class ContextCompressor:
 
         new_l1, new_l2 = l1, l2
 
-        # 步骤1：L0 → L1
+        # 一次性压缩 L0 → L1 + L2
         if l0_tokens > 0:
             messages = [{"role": "user", "content": l0}]
-            compressed_l1 = await self.compress_to_l1(messages)
+            result = await self.compress_all(messages)
 
-            if new_l1:
-                new_l1 = new_l1 + "\n\n---\n\n" + compressed_l1
-            else:
-                new_l1 = compressed_l1
+            compressed_l1 = result.get("l1", "")
+            compressed_l2 = result.get("l2", "")
 
-            l1_tokens = self._estimate_tokens(new_l1)
+            if compressed_l1:
+                if new_l1:
+                    new_l1 = new_l1 + "\n\n---\n\n" + compressed_l1
+                else:
+                    new_l1 = compressed_l1
+                l1_tokens = self._estimate_tokens(new_l1)
 
-        # 步骤2：L1 → L2
-        if l1_tokens > l1_budget:
-            overflow = self._extract_overflow(new_l1, l1_budget)
-            if overflow:
-                compressed_l2 = await self.compress_to_l2(overflow)
-
+            if compressed_l2:
                 if new_l2:
                     new_l2 = new_l2 + "\n\n---\n\n" + compressed_l2
                 else:
                     new_l2 = compressed_l2
-
-                new_l1 = self._keep_within_budget(new_l1, l1_budget)
                 l2_tokens = self._estimate_tokens(new_l2)
 
-        # 步骤3：L2 超预算
+        # L1 超预算：溢出部分已有 L2，直接裁剪 L1
+        if l1_tokens > l1_budget:
+            new_l1 = self._keep_within_budget(new_l1, l1_budget)
+
+        # L2 超预算
         if l2_tokens > l2_budget:
             new_l2 = self._keep_within_budget(new_l2, l2_budget)
 
@@ -473,9 +371,7 @@ class ContextCompressor:
         return "\n\n---\n\n".join(remaining_parts) if remaining_parts else ""
 
     def _truncate_to_budget(self, text: str, max_tokens: int) -> str:
-        """截断文本到预算内。
-
-        简化估算：1 个中文字 ≈ 1.5 token，1 个英文词 ≈ 1 token。
+        """截断文本到预算内，保持 JSON 结构完整。
 
         Args:
             text: 文本
@@ -488,9 +384,57 @@ class ContextCompressor:
         if estimated <= max_tokens:
             return text
 
-        # 粗略截断：按字符数估算
+        import json
+
         max_chars = int(max_tokens * 1.5)
-        return text[:max_chars]
+        truncated = text[:max_chars]
+
+        # 如果是 JSON，尝试保持结构完整
+        try:
+            json.loads(text)
+            # 找到最后一个完整的 key-value 对
+            last_comma = truncated.rfind(',\n')
+            if last_comma > 0:
+                truncated = text[:last_comma] + "\n}"
+            if json.loads(truncated):
+                return truncated
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        return truncated
+
+    def _extract_json(self, text: str) -> str:
+        """从 LLM 响应中提取 JSON 并格式化。
+
+        处理 LLM 可能包裹代码块或添加额外文本的情况。
+
+        Args:
+            text: LLM 原始响应
+
+        Returns:
+            格式化后的 JSON 字符串
+        """
+        import json
+        import re
+
+        if not text:
+            return text
+
+        # 尝试从 markdown 代码块中提取
+        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            # 尝试直接匹配 { ... }
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            json_str = json_match.group(0) if json_match else text
+
+        try:
+            parsed = json.loads(json_str)
+            return json.dumps(parsed, ensure_ascii=False, indent=2)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("[ContextCompressor] JSON 解析失败，返回原文")
+            return text.strip()
 
     def _format_messages(self, messages: list[dict[str, Any]]) -> str:
         """格式化消息为文本。

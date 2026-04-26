@@ -114,9 +114,10 @@ class TestAddMessage:
     async def test_超过阈值触发压缩(self) -> None:
         """token 数超过阈值时应触发压缩。"""
         compressor = _make_compressor()
+        llm_fn = AsyncMock(return_value="压缩摘要")
         # 使用很小的 context_window 和触发比例
         config = {"context_window": 100, "compress_trigger_ratio": 0.5}
-        svc = MemoryContextService(compressor=compressor, config=config)
+        svc = MemoryContextService(compressor=compressor, config=config, llm_call_fn=llm_fn)
         # 添加足够长的消息以触发压缩
         for i in range(10):
             await svc.add_message("s1", {"role": "user", "content": "这是一段很长的消息内容用于触发压缩" * 5})
@@ -126,8 +127,9 @@ class TestAddMessage:
     async def test_压缩后L0清空(self) -> None:
         """压缩后 L0 消息应被清空。"""
         compressor = _make_compressor()
+        llm_fn = AsyncMock(return_value="压缩摘要")
         config = {"context_window": 100, "compress_trigger_ratio": 0.1}
-        svc = MemoryContextService(compressor=compressor, config=config)
+        svc = MemoryContextService(compressor=compressor, config=config, llm_call_fn=llm_fn)
         await svc.add_message("s1", {"role": "user", "content": "很长的消息" * 50})
         data = svc._get_session_data("s1")
         assert len(data["L0"]) == 0
