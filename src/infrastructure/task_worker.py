@@ -71,7 +71,8 @@ class TaskWorker:
         self._suspended_engines: dict[str, Any] = {}
         self._idle_remind_counts: dict[str, int] = {}
         self._resume_requested: dict[str, bool] = {}
-        self._wake_events: dict[str, asyncio.Event] = {}  # parent_task_id → Event，由 _notify_suspended_pipelines 唤醒
+        # parent_task_id → Event，_notify_suspended_pipelines 成功后 set
+        self._wake_events: dict[str, asyncio.Event] = {}
         self._last_container_check: float = 0.0
         self._active_tasks: set[str] = set()  # 管道正在执行中的任务（含运行工具/评估器）
 
@@ -249,6 +250,7 @@ class TaskWorker:
             except Exception as e:
                 logger.warning("TaskWorker.stop: failed to cleanup tasks: %s", e)
         self._terminal_events.clear()
+        self._wake_events.clear()
 
         logger.info("TaskWorker stopped")
 
@@ -1108,13 +1110,13 @@ class TaskWorker:
             )
 
     def _try_resume_engine(self, task_id: str) -> None:
-        """通过标记请求主循环执行 resume，而非直接操作 engine。
+        """通过标记和 wake_event 请求主循环执行 resume。
 
         idle 超时回调是同步的，不能直接 await engine.resume()。
         旧方案通过 asyncio.create_task fire-and-forget 执行 resume，
-        存在竞态和异常静默问题。新方案仅标记 _resume_requested，
-        由主循环的 _on_child_done 回调检测标记并唤醒 child_evt，
-        统一由主循环执行 resume，保证 engine 操作的串行性。
+        存在竞态和异常静默问题。新方案标记 _resume_requested 并
+        直接 set wake_event，由主循环统一执行 resume，
+        保证 engine 操作的串行性。
 
         Args:
             task_id: 挂起管道对应的任务 ID
@@ -1125,23 +1127,10 @@ class TaskWorker:
         self._resume_requested[task_id] = True
         logger.debug("TaskWorker: resume requested for task %s", task_id)
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._notify_resume(task_id))
-        except RuntimeError:
-            logger.warning("TaskWorker: no event loop for resume notification: task_id=%s", task_id)
-
-    async def _notify_resume(self, task_id: str) -> None:
-        """发送虚拟事件唤醒主循环中等待的 child_evt。"""
-        if self._event_bus:
-            try:
-                await self._event_bus.emit("task_state_changed", {
-                    "task_id": task_id,
-                    "new_status": "running",
-                    "task": {"parent_task_id": task_id},
-                })
-            except Exception as exc:
-                logger.warning("TaskWorker: _notify_resume failed for %s: %s", task_id, exc)
+        # 直接 set wake_event 唤醒 while 循环，无需发虚假事件
+        wake_evt = self._wake_events.get(task_id)
+        if wake_evt is not None:
+            wake_evt.set()
 
     def _build_child_notifications(self, parent_task_id: str, task_service: Any) -> str:
         """构建子任务完成通知文本，供 resume 后注入到管道 user_input。
