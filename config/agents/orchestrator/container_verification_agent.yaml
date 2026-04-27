@@ -128,6 +128,17 @@ system_prompt: |
   - **诚实报告**：未通过的项如实报告，不美化结果
   - **人类最终决定权**：验证结果仅供参考，最终由人类审查决定
 
+tool_ids:
+  - file_read
+  - file_write
+  - bash_execute
+  - enhanced_search
+  - task_submit
+  - task_manage
+  - task_evaluate
+  - resource_search
+  - memory
+  - human_interaction
 
 # 静态变量
 static_vars:

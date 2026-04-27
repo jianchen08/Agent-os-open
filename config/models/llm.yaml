@@ -103,3 +103,10 @@ providers:
     api_key: [REDACTED]
     api_base: https://api.minimaxi.com/v1
 embeddings: {}
+
+# litellm.Router 并发控制配置
+# AdaptiveRouterAdapter 在 min-max 范围内自适应调整
+concurrency:
+  min_concurrency: 1
+  max_concurrency: 3
+  default_concurrency: 2

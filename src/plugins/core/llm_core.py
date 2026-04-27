@@ -13,11 +13,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any, Callable
 
-from llm.adapter import FallbackAdapter, LiteLLMAdapter, LLMAdapter, LLMResponse
+from llm.adapter import (
+    FallbackAdapter,
+    LiteLLMAdapter,
+    LLMAdapter,
+    LLMResponse,
+    RouterAdapter,
+)
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
+from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +88,16 @@ class LLMCore(ICorePlugin):
     """
 
     error_policy = ErrorPolicy.RETRY
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    overload_retry_delay: float = 180.0
+    max_retries: int = 1  # Router 已有 num_retries + fallback，Engine 层不重复重试
+    retry_delay: float = 5.0
+    overload_retry_delay: float = 60.0
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
         *,
         adapter: LLMAdapter | None = None,
+        router: Any | None = None,
     ) -> None:
         """初始化 LLM Core 插件。
 
@@ -102,7 +111,8 @@ class LLMCore(ICorePlugin):
                 - max_retries: 最大重试次数（覆盖类属性）
                 - retry_delay: 首次重试延迟秒数（覆盖类属性）
                 - fallback_models: 备用模型配置列表（用于构建 FallbackAdapter）
-            adapter: 可选的外部注入适配器实例，若提供则忽略 config 中的 fallback 配置
+            adapter: 可选的外部注入适配器实例，若提供则忽略 router 和 config 中的 fallback 配置
+            router: 可选的 litellm.Router 实例，若提供则创建 RouterAdapter（优先于 config 构建）
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
@@ -124,15 +134,23 @@ class LLMCore(ICorePlugin):
         if "overload_retry_delay" in self._config:
             self.overload_retry_delay = self._config["overload_retry_delay"]
 
-        # litellm 内置重试参数（透传给 litellm.acompletion）
+        # litellm 内置重试参数（透传给 litellm.acompletion，Router 模式下由 Router 管理）
         self._num_retries: int = self._config.get("num_retries", 3)
         self._retry_delay: float = self._config.get("retry_delay", 60.0)
 
-        # 构建适配器
+        # 构建适配器：adapter > router > config
         if adapter is not None:
             self._adapter = adapter
+            self._use_router = isinstance(adapter, (RouterAdapter,)) or hasattr(adapter, '_router')
+        elif router is not None:
+            self._adapter = RouterAdapter(router)
+            self._use_router = True
+            logger.info(
+                "[%s] 使用 RouterAdapter (model=%s)", self.name, self._model,
+            )
         else:
             self._adapter = self._build_adapter()
+            self._use_router = False
 
     def _build_adapter(self) -> LLMAdapter:
         """根据配置构建 LLM 适配器。
@@ -183,8 +201,12 @@ class LLMCore(ICorePlugin):
             Exception: LLM 调用失败时抛出异常
         """
         messages = self._build_messages(ctx.state)
-        streaming = ctx.state.get("streaming", False)
+        streaming = ctx.state.get("streaming", True)
         on_chunk: Callable[[dict[str, Any]], Any] | None = ctx.state.get("on_chunk")
+
+        # 流式模式下包装 on_chunk，注入重复检测
+        if streaming and on_chunk:
+            on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
             response: LLMResponse = await self._call_llm(
@@ -194,6 +216,57 @@ class LLMCore(ICorePlugin):
             result_text = response.text
             tool_calls = response.tool_calls
             thinking_text = response.thinking_text
+
+            # 流式重复检测：模型在流式输出中陷入重复循环
+            if response.stream_repetition:
+                logger.warning(
+                    "[%s] 流式输出重复检测触发，"
+                    "丢弃重复内容并添加提醒",
+                    self.name,
+                )
+                history = list(ctx.state.get("messages", []))
+                history.append({
+                    "role": "system",
+                    "content": (
+                        "[StreamRepetitionGuard] "
+                        "检测到流式输出中出现重复内容，"
+                        "已截断。请重新组织输出，避免重复。"
+                    ),
+                })
+                return {
+                    StateKeys.RAW_RESULT: None,
+                    StateKeys.RAW_ERROR: None,
+                    StateKeys.RAW_TOOL_CALLS: [],
+                    StateKeys.RAW_THINKING: None,
+                    "messages": history,
+                    "llm_usage": {},
+                    "context_window": self._context_window,
+                }
+
+            # 思考内容过长检测：截断思考，注入指令直接输出
+            if response.thinking_truncated:
+                logger.warning(
+                    "[%s] 思考内容过长，截断并指示直接输出",
+                    self.name,
+                )
+                history = list(ctx.state.get("messages", []))
+                history.append({
+                    "role": "system",
+                    "content": (
+                        "[ThinkingTruncationGuard] "
+                        "上一轮思考内容过长已截断。"
+                        "请不要思考太长，直接给出结论。"
+                    ),
+                })
+                return {
+                    StateKeys.RAW_RESULT: None,
+                    StateKeys.RAW_ERROR: None,
+                    StateKeys.RAW_TOOL_CALLS: [],
+                    StateKeys.RAW_THINKING: None,
+                    "messages": history,
+                    "llm_usage": {},
+                    "context_window": self._context_window,
+                }
 
             llm_usage = None
             if response.usage:
@@ -221,13 +294,23 @@ class LLMCore(ICorePlugin):
             # 因为 system_message 和 dynamic_vars 由 _build_messages() 每次重新组装
             history = list(ctx.state.get("messages", []))
             if tool_calls:
+                # 预先解析 tool_call_id，确保 assistant 消息和 state 中的 raw_tool_calls 使用一致的 id
+                resolved_ids: list[str] = []
+                for tc in tool_calls:
+                    resolved_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
+
+                # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
+                for i, tc in enumerate(tool_calls):
+                    if "id" not in tc or not tc["id"]:
+                        tc["id"] = resolved_ids[i]
+
                 # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": result_text or "",
                     "tool_calls": [
                         {
-                            "id": tc.get("id", f"call_{i}"),
+                            "id": resolved_ids[i],
                             "type": "function",
                             "function": {
                                 "name": tc.get("name", ""),
@@ -462,8 +545,6 @@ class LLMCore(ICorePlugin):
         provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
-    _LLM_CALL_TIMEOUT = 300
-
     async def _call_llm(
         self,
         messages: list[dict[str, Any]],
@@ -472,11 +553,10 @@ class LLMCore(ICorePlugin):
         stream: bool = False,
         on_chunk: Callable[[dict[str, Any]], Any] | None = None,
     ) -> LLMResponse:
-        """通过 adapter 调用 LLM，带超时保护。
+        """通过 adapter 调用 LLM。
 
-        合并了原来的 _call_completion 和 _call_streaming，
-        统一通过 adapter.completion() 处理。
-        使用 asyncio.wait_for 添加超时，防止 LLM API 无响应时 pipeline 永久挂起。
+        Router 模式：用模型 ID 作为路由别名，不传 api_key/api_base/num_retries。
+        直连模式：用完整的 "provider/model" 字符串，透传所有参数。
 
         Args:
             messages: 对话消息列表
@@ -486,22 +566,30 @@ class LLMCore(ICorePlugin):
 
         Returns:
             统一的 LLMResponse 响应结构
-
-        Raises:
-            asyncio.TimeoutError: LLM 调用超时时抛出
         """
-        kwargs: dict[str, Any] = {
-            "model": self._get_model_string(),
-            "messages": self._normalize_messages_for_provider(messages),
-            **self._default_params,
-        }
-        if self._api_base:
-            kwargs["api_base"] = self._api_base
-        if self._api_key:
-            kwargs["api_key"] = self._api_key
-        if self._num_retries:
-            kwargs["num_retries"] = self._num_retries
-            kwargs["retry_delay"] = self._retry_delay
+        normalized_messages = self._normalize_messages_for_provider(messages)
+
+        if self._use_router:
+            # Router 路径：model 用路由别名，凭证和重试由 Router 管理
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": normalized_messages,
+                **self._default_params,
+            }
+        else:
+            # 直连路径：用完整 litellm 模型字符串，透传凭证和重试
+            kwargs = {
+                "model": self._get_model_string(),
+                "messages": normalized_messages,
+                **self._default_params,
+            }
+            if self._api_base:
+                kwargs["api_base"] = self._api_base
+            if self._api_key:
+                kwargs["api_key"] = self._api_key
+            if self._num_retries:
+                kwargs["num_retries"] = self._num_retries
+                kwargs["retry_delay"] = self._retry_delay
 
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:
@@ -510,21 +598,20 @@ class LLMCore(ICorePlugin):
                         ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas))
 
         timeout = ctx.state.get("llm_call_timeout", self._call_timeout)
+        kwargs["timeout"] = timeout
         try:
-            return await asyncio.wait_for(
-                self._adapter.completion(
-                    model=kwargs.pop("model"),
-                    messages=kwargs.pop("messages"),
-                    tools=tool_schemas or None,
-                    stream=stream,
-                    on_chunk=on_chunk,
-                    **kwargs,
-                ),
-                timeout=timeout,
+            return await self._adapter.completion(
+                model=kwargs.pop("model"),
+                messages=kwargs.pop("messages"),
+                tools=tool_schemas or None,
+                stream=stream,
+                on_chunk=on_chunk,
+                **kwargs,
             )
         except asyncio.TimeoutError:
             logger.error(
                 "[%s] LLM call timed out after %ds (model=%s)",
-                self.name, timeout, self._get_model_string(),
+                self.name, timeout,
+                self._model if self._use_router else self._get_model_string(),
             )
             raise

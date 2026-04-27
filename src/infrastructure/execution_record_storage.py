@@ -14,6 +14,7 @@ token 用量、耗时和错误信息。按 pipeline_run_id 拆分为独立 YAML 
 from __future__ import annotations
 
 import logging
+import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -110,12 +111,33 @@ class ExecutionRecordStorage:
         if self._data_dir:
             self._data_dir.mkdir(parents=True, exist_ok=True)
             self._load_all()
+        self._pipeline_root_map: dict[str, str] = {}
+        self._map_file = self._data_dir / "_pipeline_root_map.json" if self._data_dir else None
+        if self._map_file:
+            self._load_root_map()
 
     def _load_all(self) -> None:
         if not self._data_dir:
             return
-        for yaml_file in self._data_dir.glob("*.yaml"):
+        # 扁平文件（向后兼容）
+        for yaml_file in sorted(self._data_dir.glob("*.yaml")):
             self._load_pipeline_file(yaml_file)
+        # 子目录中的分组文件
+        for subdir in sorted(self._data_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            for yaml_file in sorted(subdir.glob("*.yaml")):
+                self._load_pipeline_file(yaml_file)
+
+    def _load_root_map(self) -> None:
+        if not self._map_file or not self._map_file.exists():
+            return
+        try:
+            text = self._map_file.read_text(encoding="utf-8")
+            self._pipeline_root_map = json.loads(text)
+        except Exception:
+            logger.warning("管道映射文件损坏，使用空映射: %s", self._map_file)
+            self._pipeline_root_map = {}
 
     def _load_pipeline_file(self, yaml_file: Path) -> None:
         try:
@@ -139,7 +161,14 @@ class ExecutionRecordStorage:
     def _get_pipeline_file(self, pipeline_run_id: str) -> Path | None:
         if not self._data_dir:
             return None
-        return self._data_dir / f"{pipeline_run_id}.yaml"
+        root_id = self._pipeline_root_map.get(pipeline_run_id)
+        if root_id:
+            return self._data_dir / root_id / f"{pipeline_run_id}.yaml"
+        # 向后兼容：检查扁平位置
+        flat_path = self._data_dir / f"{pipeline_run_id}.yaml"
+        if flat_path.exists():
+            return flat_path
+        return flat_path
 
     def _persist_pipeline(self, pipeline_run_id: str) -> None:
         if not self._data_dir:
@@ -147,13 +176,13 @@ class ExecutionRecordStorage:
         file_path = self._get_pipeline_file(pipeline_run_id)
         if file_path is None:
             return
-        self._data_dir.mkdir(parents=True, exist_ok=True)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         summary = self._summaries.get(pipeline_run_id)
         records = [
             r for r in self._records.values()
             if r.pipeline_run_id == pipeline_run_id
         ]
-        records.sort(key=lambda r: r.sequence)
+        records.sort(key=lambda r: (r.sequence, r.created_at or ""))
         data: dict[str, Any] = {}
         if summary:
             data["summary"] = self._summary_to_dict(summary)
@@ -256,6 +285,16 @@ class ExecutionRecordStorage:
             file_path = self._get_pipeline_file(session_id)
             if file_path and file_path.exists():
                 file_path.unlink()
+                # 清理空目录
+                if file_path.parent != self._data_dir:
+                    try:
+                        if not any(file_path.parent.iterdir()):
+                            file_path.parent.rmdir()
+                    except OSError:
+                        pass
+                # 清理映射
+                self._pipeline_root_map.pop(session_id, None)
+                self._persist_root_map()
         logger.debug("删除会话 %s 的执行记录: %d 条", session_id, len(to_delete))
         return len(to_delete)
 
@@ -266,7 +305,7 @@ class ExecutionRecordStorage:
             r for r in self._records.values()
             if r.pipeline_run_id == pipeline_run_id
         ]
-        records.sort(key=lambda r: r.sequence)
+        records.sort(key=lambda r: (r.sequence, r.created_at or ""))
         return records
 
     def save_summary(self, summary: PipelineRunSummary) -> str:
@@ -279,6 +318,31 @@ class ExecutionRecordStorage:
         logger.debug("保存管道摘要: %s (iterations=%d, status=%s)",
                       summary.run_id, summary.total_iterations, summary.status)
         return summary.run_id
+
+    def register_pipeline(self, pipeline_run_id: str, root_task_id: str) -> None:
+        old_root = self._pipeline_root_map.get(pipeline_run_id)
+        if old_root == root_task_id:
+            return
+        self._pipeline_root_map[pipeline_run_id] = root_task_id
+        self._persist_root_map()
+        # 如果扁平位置有文件，迁移到子目录
+        if self._data_dir:
+            flat_path = self._data_dir / f"{pipeline_run_id}.yaml"
+            if flat_path.exists():
+                target_dir = self._data_dir / root_task_id
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / f"{pipeline_run_id}.yaml"
+                flat_path.rename(target_path)
+                logger.info("迁移管道文件: %s -> %s", flat_path.name, root_task_id)
+
+    def _persist_root_map(self) -> None:
+        if not self._data_dir or not self._map_file:
+            return
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._map_file.write_text(
+            json.dumps(self._pipeline_root_map, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def get_summary(self, run_id: str) -> PipelineRunSummary | None:
         return self._summaries.get(run_id)

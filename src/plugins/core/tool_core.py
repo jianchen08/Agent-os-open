@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import time
+import uuid
 from typing import Any, Callable, TYPE_CHECKING
 
 from pipeline.plugin import ICorePlugin, PluginContext
@@ -468,13 +469,18 @@ class ToolCore(ICorePlugin):
             for m in current_messages
         )
         # 如果没有 assistant tool_calls 消息，先构建 assistant tool_calls 消息
+        # 预先解析 tool_call_id 列表，确保 assistant 消息和 tool 结果使用一致的 id
+        tc_ids: list[str] = []
+        for i, tc in enumerate(tool_calls):
+            tc_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
+
         if not has_tool_call_msg and tool_calls:
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": tc.get("id", f"call_{i}"),
+                        "id": tc_ids[i],
                         "type": "function",
                         "function": {
                             "name": tc.get("name", ""),
@@ -488,7 +494,7 @@ class ToolCore(ICorePlugin):
 
         # 追加 tool 结果消息
         for i, result in enumerate(results):
-            tc_id = tool_calls[i].get("id", f"call_{i}") if i < len(tool_calls) else f"call_{i}"
+            tc_id = tc_ids[i] if i < len(tc_ids) else f"call_{uuid.uuid4().hex[:8]}"
             result_data = result.get("data", result.get("error", ""))
             try:
                 content_str = json.dumps(result_data, ensure_ascii=False, default=str)

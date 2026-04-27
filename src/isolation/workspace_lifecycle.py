@@ -612,7 +612,10 @@ class WorkspaceLifecycleManager:
                 self._cleanup_worktree(workspace, ws_meta, tag_task_id=task_id)
                 return result
             if mode == "shared":
-                return self._safe_merge(workspace, ws_meta)
+                # shared 模式不触发合并：子任务共享父工作空间，
+                # 合并由父任务完成时负责（避免下下级重复合并到容器）
+                logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
+                return {"success": True, "action": "none"}
             logger.warning("[WorkspaceLifecycle] 未知 mode: %s, task_id=%s", mode, task_id)
             return {"success": False, "error": f"未知工作模式: {mode}"}
 

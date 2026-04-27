@@ -48,7 +48,7 @@ soft_constraints:
   - "文件操作前确认路径正确"
 
 version: "1.0.0"
-is_active: true
+is_active: false
 status: "active"
 max_iterations: 100
 max_reminders: 3

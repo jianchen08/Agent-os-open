@@ -260,7 +260,7 @@ async def run_sub_conversation(
 ) -> None:
     """处理子 Agent 的交互请求，进入子对话模式。
 
-    使用同步 input() 直接读取用户输入，避免多线程 stdin 冲突。
+    通过 run_in_executor 调用 input()，避免阻塞事件循环。
 
     退出条件：
     - 用户输入 /back
@@ -295,30 +295,61 @@ async def run_sub_conversation(
     original_prompt = input_adapter._prompt_str
     input_adapter._prompt_str = f"[{agent_name}] > "
 
+    async def _read_input(prompt: str) -> str:
+        """在 executor 中读取输入，避免阻塞事件循环。
+
+        使用 sys.stdout.write + sys.stdin.readline 代替 input()，
+        避免 Windows Console API 冲突。
+        """
+        import sys
+
+        sys.stderr.flush()
+
+        def _do_read():
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            line = sys.stdin.readline()
+            if line.endswith("\n"):
+                line = line[:-1]
+            if line.endswith("\r"):
+                line = line[:-1]
+            return line
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _do_read)
+
     try:
         while True:
             if mode == "choice" and options:
                 console.print(
-                    "[dim]请输入选项编号或选项 ID (输入 /back 返回主对话):[/dim]"
+                    "[dim]请输入选项编号或选项 ID "
+                    "(输入 /back 返回主对话):[/dim]"
                 )
             elif mode == "conversation":
                 console.print(
-                    "[dim]请输入回复内容 (输入 /back 返回主对话):[/dim]"
+                    "[dim]请输入回复内容 "
+                    "(输入 /back 返回主对话):[/dim]"
                 )
 
-            user_input = input(f"\n{input_adapter._prompt_str}")
+            user_input = await _read_input(
+                f"\n{input_adapter._prompt_str}"
+            )
 
             if user_input.strip().lower() in ("/back", "/done", "/返回"):
                 console.print(
-                    "[bold magenta]─── 返回主 Agent 对话 ───[/bold magenta]\n"
+                    "[bold magenta]─── 返回主 Agent 对话"
+                    " ───[/bold magenta]\n"
                 )
                 break
 
             if not user_input.strip():
                 if mode == "choice" and options:
+                    opt_ids = ", ".join(
+                        o.get("id", "") for o in options
+                    )
                     console.print(
                         "[yellow]请输入选项编号 (如 1) 或选项 ID "
-                        f"(可选: {', '.join(o.get('id', '') for o in options)})[/yellow]"
+                        f"(可选: {opt_ids})[/yellow]"
                     )
                 continue
 
@@ -334,7 +365,9 @@ async def run_sub_conversation(
             await asyncio.sleep(0.5)
             next_pending = notifier.get_next_pending()
             if next_pending is None:
-                console.print("[dim]子 Agent 不再有新的交互请求[/dim]")
+                console.print(
+                    "[dim]子 Agent 不再有新的交互请求[/dim]"
+                )
                 break
 
             pending = next_pending
@@ -345,7 +378,9 @@ async def run_sub_conversation(
             options = msg_data.get("options") or []
 
             console.print("")
-            _show_request_panel(console, title, agent_name, mode, msg_data)
+            _show_request_panel(
+                console, title, agent_name, mode, msg_data
+            )
 
     finally:
         input_adapter._prompt_str = original_prompt

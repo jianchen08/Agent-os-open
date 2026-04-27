@@ -86,6 +86,10 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         "items": {"type": "string"},
                         "description": "要读取的字段列表（仅支持 YAML/JSON 文件）。例如：['id', 'name', 'expected_input']。支持嵌套字段，用点号分隔：['agent.tools', 'agent.config.timeout']。不指定则返回完整内容。",
                     },
+                    "tail": {
+                        "type": "integer",
+                        "description": "仅读取文件最后 N 行（仅 action=read 时有效）。不指定则返回完整内容。",
+                    },
                 },
                 "required": ["action"],
             },
@@ -218,6 +222,23 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 1 if content and not content.endswith("\n") else 0
             )
 
+            tail = inputs.get("tail")
+            if tail and isinstance(tail, int) and tail > 0:
+                all_lines = content.splitlines()
+                total_lines = len(all_lines)
+                if tail < total_lines:
+                    content = '\n'.join(all_lines[-tail:])
+                    return create_success_result(
+                        data={
+                            "file": display_path,
+                            "total_lines": total_lines,
+                            "lines": tail,
+                            "size": format_size(file_size),
+                            "content": content,
+                        },
+                        metadata={"action": "read_file_tail"},
+                    )
+
             fields = inputs.get("fields")
             if fields:
                 return self._extract_fields(content, path, fields)
@@ -340,6 +361,20 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             current = current[key]
         current[keys[-1]] = value
 
+    def _count_file_lines(self, path: Path, file_size: int) -> str:
+        """统计文本文件行数，二进制/大文件返回 '-'"""
+        suffix = path.suffix.lower()
+        if suffix in BINARY_EXTENSIONS or file_size > MAX_FILE_SIZE:
+            return "-"
+        try:
+            with open(path, 'rb') as f:
+                content = f.read()
+            if b'\x00' in content[:BINARY_SNIFF_SIZE]:
+                return "-"
+            return str(content.count(b'\n') + (1 if content and not content.endswith(b'\n') else 0))
+        except Exception:
+            return "-"
+
     async def _list_directory(self, inputs: dict[str, Any]) -> ToolResult:
         """列出目录内容"""
         try:
@@ -362,6 +397,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             dirs = []
             file_names = []
             file_sizes = []
+            file_lines = []
 
             for item in path.iterdir():
                 try:
@@ -371,19 +407,21 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         stat = item.stat()
                         file_names.append(item.name)
                         file_sizes.append(format_size(stat.st_size))
+                        file_lines.append(self._count_file_lines(item, stat.st_size))
                 except Exception:
                     continue
 
-            # 按文件名排序，保持 names 和 sizes 对应
+            dirs.sort()
             if file_names:
-                sorted_pairs = sorted(zip(file_names, file_sizes, strict=False), key=lambda x: x[0])
-                file_names = [p[0] for p in sorted_pairs]
-                file_sizes = [p[1] for p in sorted_pairs]
+                sorted_data = sorted(zip(file_names, file_sizes, file_lines, strict=False), key=lambda x: x[0])
+                file_names = [p[0] for p in sorted_data]
+                file_sizes = [p[1] for p in sorted_data]
+                file_lines = [p[2] for p in sorted_data]
 
             return create_success_result(
                 data={
-                    "h": ["dir", "file_name", "file_size"],
-                    "d": [[dirs[i] if i < len(dirs) else "", file_names[i] if i < len(file_names) else "", file_sizes[i] if i < len(file_sizes) else ""] for i in range(max(len(dirs), len(file_names)))],
+                    "h": ["dir", "file_name", "file_size", "lines"],
+                    "d": [[dirs[i] if i < len(dirs) else "", file_names[i] if i < len(file_names) else "", file_sizes[i] if i < len(file_sizes) else "", file_lines[i] if i < len(file_lines) else ""] for i in range(max(len(dirs), len(file_names)))],
                     "c": len(dirs) + len(file_names),
                 },
                 metadata={"action": "list_directory"},

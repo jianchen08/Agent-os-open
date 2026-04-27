@@ -30,6 +30,10 @@ from tools.types import (
 
 logger = logging.getLogger(__name__)
 
+# Suppress trafilatura's verbose logging
+for _traf_logger in ("trafilatura", "trafilatura.utils", "trafilatura.core"):
+    logging.getLogger(_traf_logger).setLevel(logging.CRITICAL)
+
 
 class WebTool(BuiltinTool):
     """

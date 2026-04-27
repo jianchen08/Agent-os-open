@@ -116,6 +116,8 @@ class PipelineEngine:
         self._pipeline_id: str = _uuid.uuid4().hex[:12]
         self._wake_event: asyncio.Event | None = None
         self._watching_task_ids: list[str] = []
+        self._consecutive_core_errors: int = 0
+        self._max_consecutive_core_errors: int = 3
 
     async def run(
         self,
@@ -396,9 +398,9 @@ class PipelineEngine:
     def _apply_agent_model_override(self, agent_config: Any | None) -> None:
         """将 Agent 配置中的 model_name 覆盖到 llm_call 核心插件。
 
-        当 Agent YAML 声明了 model_name（如 minimax-m2.7）时，
-        从 llm.yaml 加载该模型的完整配置（provider、api_base、api_key、context_window 等），
-        重建 llm_call 插件实例替换原有插件，使 Agent 使用指定模型。
+        当 Agent YAML 声明了 model_name（如 minimax-m2.7）时：
+        - Router 模式：直接切换路由别名，不重建插件
+        - 直连模式：从 llm.yaml 加载完整配置重建插件
 
         Args:
             agent_config: Agent 配置实例
@@ -414,6 +416,24 @@ class PipelineEngine:
         if llm_call is None:
             return
 
+        # Router 模式：只需切换路由别名，不重建插件
+        if getattr(llm_call, "_use_router", False):
+            llm_call._model = model_id
+            # 更新 context_window（从 model_loader 读取）
+            services = getattr(self, "_services", {})
+            model_loader = services.get("model_loader") if services else None
+            if model_loader:
+                conf = model_loader.get_model_config(model_id)
+                if conf:
+                    llm_call._provider = conf.get("provider", llm_call._provider)
+                    llm_call._context_window = conf.get("context_window")
+            logger.info(
+                "[_apply_agent_model_override] Router 模式切换模型: %s (provider=%s, context_window=%s)",
+                model_id, llm_call._provider, llm_call._context_window,
+            )
+            return
+
+        # 直连模式：重建插件（原有逻辑）
         model_loader = None
         services = getattr(self, "_services", {})
         if services:
@@ -447,7 +467,12 @@ class PipelineEngine:
         merged_config["model_name"] = llm_conf.get("model_name", model_id)
 
         try:
-            new_plugin = type(llm_call)(config=merged_config)
+            # 复用已有的 AdaptiveRouterAdapter（自适应并发）
+            existing_adapter = getattr(llm_call, "_adapter", None)
+            if existing_adapter is not None:
+                new_plugin = type(llm_call)(config=merged_config, adapter=existing_adapter)
+            else:
+                new_plugin = type(llm_call)(config=merged_config)
             plugin_name = getattr(llm_call, "name", "LLMCorePlugin")
             self.plugin_registry._core_plugins["llm_call"] = new_plugin
             self.plugin_registry._plugins[plugin_name] = new_plugin
@@ -546,6 +571,8 @@ class PipelineEngine:
         _pipeline_loggers: list[logging.Logger] = []
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
         _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
+        # 重置连续错误计数器
+        self._consecutive_core_errors = 0
         try:
             try:
                 _log_dir = Path.cwd() / "logs"
@@ -693,6 +720,7 @@ class PipelineEngine:
                             if isinstance(core_result, dict):
                                 state.update(core_result)
                             logger.debug("Core plugin executed: core_type=%s", core_type)
+                            self._consecutive_core_errors = 0
                             break  # success, exit retry loop
                         except Exception as exc:
                             # Check if retryable (RETRY policy + attempts left)
@@ -735,6 +763,19 @@ class PipelineEngine:
                             logger.error("Core plugin error: %s", exc)
                             state[StateKeys.RAW_ERROR] = str(exc)
                             state[StateKeys.RAW_RESULT] = None
+
+                            # 追踪连续核心错误，超过阈值强制结束管道
+                            self._consecutive_core_errors += 1
+                            if (
+                                self._consecutive_core_errors
+                                >= self._max_consecutive_core_errors
+                            ):
+                                logger.error(
+                                    "Pipeline force-ending:"
+                                    " %d consecutive core errors",
+                                    self._consecutive_core_errors,
+                                )
+                                state[StateKeys.ENDED] = True
 
                             if core_type == "llm_call":
                                 # 将错误信息存入 state，由 llm_error_recovery 插件处理
@@ -836,6 +877,9 @@ class PipelineEngine:
                     except Exception as exc:
                         logger.debug("Post-end output chain failed (non-critical): %s", exc)
 
+        except asyncio.CancelledError:
+            logger.info("Pipeline cancelled by CLI user")
+            state[StateKeys.ENDED] = True
         finally:
             if _pipeline_log_handler:
                 _pipeline_log_handler.close()
@@ -868,7 +912,14 @@ class PipelineEngine:
             pipeline_id, self._watching_task_ids,
         )
         try:
-            await self._wake_event.wait()
+            try:
+                await asyncio.wait_for(
+                    self._wake_event.wait(), timeout=3000,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[Engine] 管道等待唤醒超时(3000s)，自动恢复"
+                )
         finally:
             self._services.pop(f"__suspended_engine_{pipeline_id}", None)
             self._wake_event = None

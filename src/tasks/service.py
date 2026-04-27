@@ -382,6 +382,22 @@ class TaskService:
         logger.info("Task %s bound to pipeline_run %s", task_id, pipeline_run_id)
         return task
 
+    def get_root_task_id(self, task_id: str) -> str | None:
+        """获取任务所属的根任务 ID。
+
+        沿 parent_task_id 链向上遍历，直到找到最顶层根任务。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            根任务 ID，任务不存在时返回 None
+        """
+        task = self._storage.get(task_id)
+        if task is None:
+            return None
+        return self._storage._find_root_id(task)
+
     def bind_execution_record(self, task_id: str, record_id: str) -> TaskModel:
         """将任务绑定到执行记录（出生证明）。
 

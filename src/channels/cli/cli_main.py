@@ -209,6 +209,10 @@ class CLIApplication:
         self._show_thinking: bool = False
         self._turn_count: int = 0
 
+        # 并发执行状态
+        self._pipeline_task: asyncio.Task | None = None
+        self._input_task: asyncio.Task | None = None
+
         # 事件总线（用于接收子任务完成通知）
         from pipeline.event_bus import EventBus
         self._event_bus = EventBus()
@@ -256,8 +260,18 @@ class CLIApplication:
             logger.error("Failed to load pipeline config: %s", exc)
             raise
 
-        # 构建插件注册表（传入 model_loader 以支持从 llm.yaml defaults 读取默认模型）
-        self._plugin_registry = build_plugin_registry(pipeline_config, model_loader=model_loader)
+        # 构建 litellm.Router（内置并发控制和 fallback）
+        router = None
+        try:
+            from llm.router_factory import build_router
+            router = build_router(model_loader)
+        except Exception as exc:
+            logger.warning("Router 构建失败，回退到直连模式: %s", exc)
+
+        # 构建插件注册表（传入 model_loader + router）
+        self._plugin_registry = build_plugin_registry(
+            pipeline_config, model_loader=model_loader, router=router,
+        )
 
         # 使用配置中的路由表
         self._input_route_table = pipeline_config.input_route_table
@@ -272,6 +286,11 @@ class CLIApplication:
 
         # 创建共享服务 → 注入 PipelineEngine（agent_registry 需要在 _build_services 前创建）
         self._services = self._build_services(agent_registry=agent_registry)
+
+        # 注入 model_loader 和 router 到 services（供 engine 模型覆盖使用）
+        self._services["model_loader"] = model_loader
+        if router is not None:
+            self._services["llm_router"] = router
 
         # 如果 ToolCore 存在，从 ToolRegistry 注册工具
         tool_core = self._plugin_registry.get_core("tool_execute")
@@ -334,17 +353,26 @@ class CLIApplication:
                 from llm.adapter import LLMResponse
 
                 async def _llm_call_fn(prompt: str) -> str:
-                    call_kwargs: dict[str, Any] = {}
-                    if llm_core_plugin._api_base:
-                        call_kwargs["api_base"] = llm_core_plugin._api_base
-                    if llm_core_plugin._api_key:
-                        call_kwargs["api_key"] = llm_core_plugin._api_key
-                    response: LLMResponse = await llm_core_plugin._adapter.completion(
-                        model=llm_core_plugin._get_model_string(),
-                        messages=[{"role": "user", "content": prompt}],
-                        stream=False,
-                        **call_kwargs,
-                    )
+                    if router is not None:
+                        # Router 模式：用路由别名，凭证由 Router 管理
+                        response: LLMResponse = await llm_core_plugin._adapter.completion(
+                            model=llm_core_plugin._model,
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=False,
+                        )
+                    else:
+                        # 直连模式：透传凭证
+                        call_kwargs: dict[str, Any] = {}
+                        if llm_core_plugin._api_base:
+                            call_kwargs["api_base"] = llm_core_plugin._api_base
+                        if llm_core_plugin._api_key:
+                            call_kwargs["api_key"] = llm_core_plugin._api_key
+                        response = await llm_core_plugin._adapter.completion(
+                            model=llm_core_plugin._get_model_string(),
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=False,
+                            **call_kwargs,
+                        )
                     return response.text or ""
 
                 context_svc.set_llm_call_fn(_llm_call_fn)
@@ -1088,8 +1116,65 @@ class CLIApplication:
                 )
                 continue
 
-            # 读取用户输入
-            initial_state = await self._input_adapter.receive()
+            # === 并发执行：管道后台运行 + 输入始终可读 ===
+            # 确保输入任务始终活跃（不被 cancel，避免线程池竞争）
+            if self._input_task is None or self._input_task.done():
+                self._input_task = asyncio.create_task(
+                    self._input_adapter.receive()
+                )
+
+            # 如果管道在运行，并发等待管道完成或用户新输入
+            if (
+                self._pipeline_task is not None
+                and not self._pipeline_task.done()
+            ):
+                done, _ = await asyncio.wait(
+                    {self._pipeline_task, self._input_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if self._pipeline_task in done:
+                    # 管道完成 — 处理结果
+                    try:
+                        final_state = self._pipeline_task.result()
+                    except asyncio.CancelledError:
+                        self._pipeline_task = None
+                        console.print(
+                            "\n[yellow]管道已取消[/yellow]"
+                        )
+                        continue
+                    except Exception as exc:
+                        final_state = {"error": str(exc)}
+                    self._pipeline_task = None
+                    conversation_history = (
+                        await self._handle_pipeline_result(
+                            final_state, initial_state,
+                            conversation_history,
+                            session_pipeline_id, console,
+                        )
+                    )
+                    console.print("")
+                    continue
+                else:
+                    # 用户输入了新内容 — 取消管道
+                    self._pipeline_task.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            self._pipeline_task, timeout=3.0
+                        )
+                    except (
+                        asyncio.CancelledError,
+                        asyncio.TimeoutError,
+                    ):
+                        pass
+                    self._pipeline_task = None
+                    console.print(
+                        "\n[yellow]上一个请求已取消[/yellow]"
+                    )
+
+            # 读取用户输入（复用已完成的 _input_task）
+            initial_state = await self._input_task
+            self._input_task = None
 
             # 退出信号
             if initial_state.get("should_stop"):
@@ -1229,7 +1314,7 @@ class CLIApplication:
                 console.print("[dim]使用 /mode normal 或 /mode auto 切换模式后执行[/dim]\n")
                 continue
 
-            # 正常处理：通过 Engine.run() 直接执行
+            # 启动管道（后台执行，不阻塞 CLI）
             user_input = initial_state.get("user_input", "")
 
             # 流式回调
@@ -1243,105 +1328,166 @@ class CLIApplication:
                 is_processing=True,
                 pipeline_running=True,
                 pipeline_iteration=0,
-                pipeline_max_iterations=self._engine.max_iterations if self._engine else 0,
+                pipeline_max_iterations=(
+                    self._engine.max_iterations
+                    if self._engine else 0
+                ),
                 running_task_count=task_stats["running"],
                 pending_task_count=task_stats["pending"],
                 completed_task_count=task_stats["completed"],
                 failed_task_count=task_stats["failed"],
             )
-            self._output_adapter.render_status_bar()
 
-            # 执行管道 — 通过 Engine.run() 直接调用
             # BUG-FIX-fix_20260418_session_pipeline_id:
-            # 传入 session_pipeline_id 使引擎自动检查点与会话恢复使用同一 ID，
-            # 避免 session_pipeline_id 和 PipelineEngine._pipeline_id 不一致导致恢复失败。
-            try:
-                final_state = await self._engine.run(
+            # 传入 session_pipeline_id 使引擎自动检查点与会话恢复使用同一 ID。
+            self._pipeline_task = asyncio.create_task(
+                self._engine.run(
                     user_input=user_input,
                     agent_config=self._agent_config,
-                    conversation_history=conversation_history if conversation_history else None,
-                    **{
-                        "streaming": self._streaming,
-                        "on_chunk": on_chunk,
-                        "auto_approve": (self._interaction_mode == "auto"),
-                        "interaction_mode": self._interaction_mode,
-                        "pipeline_id": session_pipeline_id,
-                    },
+                    conversation_history=(
+                        conversation_history
+                        if conversation_history else None
+                    ),
+                    streaming=self._streaming,
+                    on_chunk=on_chunk,
+                    auto_approve=(
+                        self._interaction_mode == "auto"
+                    ),
+                    interaction_mode=self._interaction_mode,
+                    pipeline_id=session_pipeline_id,
+                )
+            )
+            # 不 await — 直接回到循环顶部进入并发等待
+
+    async def _handle_pipeline_result(
+        self,
+        final_state: dict[str, Any],
+        initial_state: dict[str, Any],
+        conversation_history: list[dict[str, Any]],
+        session_pipeline_id: str,
+        console: Console,
+    ) -> list[dict[str, Any]]:
+        """处理管道执行结果：更新历史、绑定任务、刷新状态栏。"""
+        # 错误结果直接显示
+        if "error" in final_state and final_state.get("error"):
+            await self._output_adapter.send(
+                {"error": final_state["error"]}
+            )
+            self._update_status_bar_idle()
+            return conversation_history
+
+        # 回填 pipeline_run_id 到关联的任务
+        pipeline_run_id = final_state.get("pipeline_id", "")
+        if pipeline_run_id:
+            submitted_task_id = final_state.get(
+                "submitted_task_id"
+            )
+            if submitted_task_id:
+                task_service = self._services.get("task_service")
+                if (
+                    task_service
+                    and hasattr(task_service, "bind_pipeline_run")
+                ):
+                    try:
+                        task_service.bind_pipeline_run(
+                            submitted_task_id, pipeline_run_id
+                        )
+                        logger.info(
+                            "Bound task %s to pipeline_run %s",
+                            submitted_task_id,
+                            pipeline_run_id,
+                        )
+                        exec_storage = self._services.get(
+                            "execution_record_storage"
+                        )
+                        if exec_storage:
+                            root_id = (
+                                task_service.get_root_task_id(
+                                    submitted_task_id
+                                )
+                            )
+                            if root_id:
+                                exec_storage.register_pipeline(
+                                    pipeline_run_id, root_id
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to bind pipeline_run_id: %s",
+                            exc,
+                        )
+            logger.info(
+                "Pipeline run completed: pipeline_id=%s",
+                pipeline_run_id,
+            )
+
+        await self._output_adapter.send(
+            final_state, streamed=self._streaming
+        )
+
+        # 显示管道产生的工具调用信息
+        self._display_tool_calls_from_state(final_state)
+
+        # 更新对话轮次
+        self._turn_count += 1
+
+        # 更新对话历史
+        final_messages = final_state.get("messages", [])
+        if final_messages:
+            conversation_history = list(final_messages)
+        else:
+            user_input = initial_state.get("user_input", "")
+            raw_result = final_state.get("raw_result", "")
+            if user_input:
+                conversation_history.append(
+                    {"role": "user", "content": user_input}
+                )
+            if raw_result:
+                conversation_history.append(
+                    {
+                        "role": "assistant",
+                        "content": raw_result,
+                    }
                 )
 
-                # 回填 pipeline_run_id 到关联的任务
-                pipeline_run_id = final_state.get("pipeline_id", "")
-                if pipeline_run_id:
-                    # 检查是否有通过 task_submit 工具创建的任务
-                    submitted_task_id = final_state.get("submitted_task_id")
-                    if submitted_task_id:
-                        task_service = self._services.get("task_service")
-                        if task_service and hasattr(task_service, "bind_pipeline_run"):
-                            try:
-                                task_service.bind_pipeline_run(submitted_task_id, pipeline_run_id)
-                                logger.info("Bound task %s to pipeline_run %s", submitted_task_id, pipeline_run_id)
-                            except Exception as exc:
-                                logger.warning("Failed to bind pipeline_run_id: %s", exc)
-                    # 无论是否有任务，都记录 pipeline_id 到日志
-                    logger.info("Pipeline run completed: pipeline_id=%s", pipeline_run_id)
+        # Trim conversation history
+        if len(conversation_history) > MAX_SESSION_MESSAGES:
+            conversation_history = (
+                conversation_history[-MAX_SESSION_MESSAGES:]
+            )
 
-                await self._output_adapter.send(final_state, streamed=self._streaming)
+        # 更新状态栏
+        ctx_pct = self._estimate_context_pct(
+            conversation_history
+        )
+        task_stats = self._get_task_stats()
+        iteration = final_state.get("iteration", 0)
+        max_iterations = final_state.get("max_iterations", 0)
+        self._output_adapter.update_status_bar(
+            turn_count=self._turn_count,
+            context_pct=ctx_pct,
+            is_processing=False,
+            pipeline_running=False,
+            pipeline_iteration=iteration,
+            pipeline_max_iterations=max_iterations,
+            running_task_count=task_stats["running"],
+            pending_task_count=task_stats["pending"],
+            completed_task_count=task_stats["completed"],
+            failed_task_count=task_stats["failed"],
+        )
 
-                # 显示管道产生的工具调用信息
-                self._display_tool_calls_from_state(final_state)
+        return conversation_history
 
-                # 更新对话轮次
-                self._turn_count += 1
-
-                # 更新对话历史
-                final_messages = final_state.get("messages", [])
-                if final_messages:
-                    conversation_history = list(final_messages)
-                else:
-                    # 如果管道没有维护 messages，手动构建
-                    user_input = initial_state.get("user_input", "")
-                    raw_result = final_state.get("raw_result", "")
-                    if user_input:
-                        conversation_history.append({"role": "user", "content": user_input})
-                    if raw_result:
-                        conversation_history.append({"role": "assistant", "content": raw_result})
-
-                # Trim conversation history to MAX_SESSION_MESSAGES
-                if len(conversation_history) > MAX_SESSION_MESSAGES:
-                    conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
-
-                # 更新状态栏
-                ctx_pct = self._estimate_context_pct(conversation_history)
-                task_stats = self._get_task_stats()
-                iteration = final_state.get("iteration", 0)
-                max_iterations = final_state.get("max_iterations", 0)
-                self._output_adapter.update_status_bar(
-                    turn_count=self._turn_count,
-                    context_pct=ctx_pct,
-                    is_processing=False,
-                    pipeline_running=False,
-                    pipeline_iteration=iteration,
-                    pipeline_max_iterations=max_iterations,
-                    running_task_count=task_stats["running"],
-                    pending_task_count=task_stats["pending"],
-                    completed_task_count=task_stats["completed"],
-                    failed_task_count=task_stats["failed"],
-                )
-
-            except Exception as exc:
-                await self._output_adapter.send({"error": str(exc)})
-                task_stats = self._get_task_stats()
-                self._output_adapter.update_status_bar(
-                    is_processing=False,
-                    pipeline_running=False,
-                    running_task_count=task_stats["running"],
-                    pending_task_count=task_stats["pending"],
-                    completed_task_count=task_stats["completed"],
-                    failed_task_count=task_stats["failed"],
-                )
-
-            # 管道结束后换行分隔
-            console.print("")
+    def _update_status_bar_idle(self) -> None:
+        """将状态栏更新为空闲状态。"""
+        task_stats = self._get_task_stats()
+        self._output_adapter.update_status_bar(
+            is_processing=False,
+            pipeline_running=False,
+            running_task_count=task_stats["running"],
+            pending_task_count=task_stats["pending"],
+            completed_task_count=task_stats["completed"],
+            failed_task_count=task_stats["failed"],
+        )
 
     async def _handle_slash_command(self, state: dict[str, Any]) -> CommandResult | None:
         """处理斜杠命令。

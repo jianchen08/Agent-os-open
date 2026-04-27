@@ -34,6 +34,7 @@ input_routes:
     condition: "core_type == 'tool_execute'"
     target: core
     plugins:
+      - message_inject
       - task_event_receiver
       - tool_schema
       - param_inject
@@ -50,6 +51,7 @@ input_routes:
     condition: "core_type == 'llm_call'"
     target: core
     plugins:
+      - message_inject
       - context_window_guard
       - task_event_receiver
       - tool_schema
@@ -64,6 +66,7 @@ input_routes:
     condition: "True"
     target: core
     plugins:
+      - message_inject
       - task_event_receiver
       - tool_schema
       - param_inject
@@ -96,6 +99,9 @@ output_routes:
 # Agent 可通过 plugins.disabled / plugins.enabled 覆盖
 plugins:
   # ── Input 插件链（按 priority 排序）──
+  - name: message_inject
+    config:
+      enabled: true
   - name: context_window_guard
     config:
       enabled: true
@@ -148,8 +154,8 @@ plugins:
       enabled: true
   - name: duplicate_check
     config:
-      max_duplicate_calls: 6
-      max_repetitive_output: 5
+      max_duplicate_calls: 10
+      max_repetitive_output: 8
   - name: output_repetition_guard
     config:
       max_retries: 3

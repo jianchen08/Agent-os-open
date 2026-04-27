@@ -131,10 +131,8 @@ class ResourceSearchTool:
         query = inputs.get("query", "")
         mode = inputs.get("mode", "simple")
         filters = inputs.get("filters", {})
-        limit = min(
-            inputs.get("limit", ToolLimits.RESOURCE_SEARCH_DEFAULT),
-            ToolLimits.RESOURCE_SEARCH_DEFAULT,
-        )
+        raw_limit = inputs.get("limit", ToolLimits.RESOURCE_SEARCH_DEFAULT)
+        limit = min(int(raw_limit), ToolLimits.RESOURCE_SEARCH_DEFAULT)
 
         detailed = mode == "detailed"
         exact = detailed

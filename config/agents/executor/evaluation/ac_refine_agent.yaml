@@ -151,7 +151,7 @@ recommended_metrics:
 
 # 元数据
 version: "1.0.0"
-is_active: true
+is_active: false
 status: "active"
 max_iterations: 100
 max_reminders: 3

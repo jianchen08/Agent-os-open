@@ -626,6 +626,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     "[TaskSubmit] 容器任务已绑定管道 | task_id=%s | pipeline_id=%s",
                     task.id, pipeline_id,
                 )
+                # 按根任务分组执行记录
+                exec_storage = self._get_execution_record_storage()
+                if exec_storage:
+                    root_id = task_service.get_root_task_id(task.id)
+                    if root_id:
+                        exec_storage.register_pipeline(pipeline_id, root_id)
             except Exception as exc:
                 logger.warning(
                     "[TaskSubmit] 容器任务绑定管道失败 | task_id=%s | error=%s",

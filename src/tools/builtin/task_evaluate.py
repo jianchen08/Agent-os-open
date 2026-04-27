@@ -380,6 +380,9 @@ class TaskEvaluateTool(BuiltinTool):
             task.metadata = {}
         task.metadata["eval_retry_count"] = retry_counts
 
+        # 注册评估子管道到根任务子目录
+        self._register_eval_pipelines(task_service, task, eval_result)
+
         # 追加本次评估记录到历史（保留所有评估尝试）
         self._append_eval_history(task, eval_result)
 
@@ -508,6 +511,27 @@ class TaskEvaluateTool(BuiltinTool):
             task_service.save_task(task)
         except Exception as e:
             logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
+
+    @staticmethod
+    def _register_eval_pipelines(
+        task_service: Any, task: Any, eval_result: Any,
+    ) -> None:
+        """将 Agent 型评估产生的子管道注册到根任务子目录。"""
+        try:
+            root_id = task_service.get_root_task_id(task.id)
+            if not root_id:
+                return
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            exec_storage = provider.get("execution_record_storage")
+            if not exec_storage:
+                return
+            for r in eval_result.results:
+                pid = getattr(r, "pipeline_run_id", None)
+                if pid:
+                    exec_storage.register_pipeline(pid, root_id)
+        except Exception as exc:
+            logger.debug("[TaskEvaluate] 注册评估管道分组失败: %s", exc)
 
     @staticmethod
     def _append_eval_history(task: Any, eval_result: Any) -> None:

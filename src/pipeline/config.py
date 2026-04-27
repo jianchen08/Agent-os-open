@@ -325,6 +325,7 @@ def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
 def build_plugin_registry(
     config: PipelineConfig,
     model_loader: Any | None = None,
+    router: Any | None = None,
 ) -> PluginRegistry:
     """根据配置构建插件注册表。
 
@@ -338,6 +339,7 @@ def build_plugin_registry(
     Args:
         config: 管道配置实例
         model_loader: 可选的 ModelConfigLoader 实例，用于加载默认模型配置
+        router: 可选的 litellm.Router 实例，传入后 LLMCore 使用 RouterAdapter
 
     Returns:
         已注册所有插件的 PluginRegistry 实例
@@ -413,7 +415,15 @@ def build_plugin_registry(
 
         try:
             plugin_cls = _import_class(class_path)
-            core_instance: ICorePlugin = plugin_cls(config=plugin_config)
+            # llm_call: 优先使用 AdaptiveRouterAdapter（自适应并发控制）
+            if core_type == "llm_call" and model_loader is not None:
+                from llm.router_factory import get_or_create_adapter
+                _adapter = get_or_create_adapter(model_loader)
+                core_instance: ICorePlugin = plugin_cls(config=plugin_config, adapter=_adapter)
+            elif core_type == "llm_call" and router is not None:
+                core_instance = plugin_cls(config=plugin_config, router=router)
+            else:
+                core_instance = plugin_cls(config=plugin_config)
             registry.register_core(core_type, core_instance)
             logger.info("Core plugin loaded: %s (core_type=%s)", class_path, core_type)
         except Exception as exc:

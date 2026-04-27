@@ -150,6 +150,30 @@ class CLIInputAdapter(IInputAdapter):
 
         return state
 
+    def _read_line(self, prompt: str) -> str:
+        """读取一行输入。
+
+        Windows 上使用 sys.stdout.write + sys.stdin.readline 代替 input()，
+        避免线程池中 input() 的 Windows Console API 与 rich Console 输出冲突
+        导致提示符不显示或无法输入。
+
+        Args:
+            prompt: 输入提示符
+
+        Returns:
+            用户输入的一行文本（不含换行符）
+        """
+        import sys
+
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if line.endswith("\n"):
+            line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+        return line
+
     def _read_multiline(self) -> str:
         """读取多行输入。
 
@@ -160,10 +184,13 @@ class CLIInputAdapter(IInputAdapter):
         Returns:
             拼接后的完整输入文本
         """
+        import sys
+
         lines: list[str] = []
 
-        # 首行
-        line = input(f"\n{self._prompt_str}")
+        # 首行 — 使用 _read_line 避免 Windows input() 问题
+        sys.stderr.flush()
+        line = self._read_line(f"\n{self._prompt_str}")
         lines.append(line)
 
         # 多行粘贴检测：快速到达的额外行合并为同一条消息
@@ -174,7 +201,7 @@ class CLIInputAdapter(IInputAdapter):
             # 去掉末尾的续行符
             lines[-1] = lines[-1].rstrip()[:-1]
             try:
-                continuation = input(self._continuation_prompt)
+                continuation = self._read_line(self._continuation_prompt)
                 lines.append(continuation)
                 # 续行后也可能有粘贴
                 self._drain_paste_lines(lines)
@@ -189,10 +216,18 @@ class CLIInputAdapter(IInputAdapter):
         终端粘贴多行文本时，每行作为独立输入事件到达。
         此方法检测快速到达的行并合并为同一条消息。
         仅在交互式终端（TTY）下生效。
+
+        注意：Windows 上 msvcrt.kbhit() 会检测残留按键事件
+        （如 Enter 的 key-up），但 input() 需要完整行才能返回，
+        导致死锁。因此 Windows 上跳过粘贴检测。
         """
         import sys
 
         if not sys.stdin.isatty():
+            return
+
+        # Windows 上 kbhit() 不可靠，会因残留按键事件导致 input() 死锁
+        if sys.platform == "win32":
             return
 
         import time

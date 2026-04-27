@@ -71,6 +71,7 @@ class TaskWorker:
         self._suspended_engines: dict[str, Any] = {}
         self._idle_remind_counts: dict[str, int] = {}
         self._resume_requested: dict[str, bool] = {}
+        self._wake_events: dict[str, asyncio.Event] = {}  # parent_task_id → Event，由 _notify_suspended_pipelines 唤醒
         self._last_container_check: float = 0.0
         self._active_tasks: set[str] = set()  # 管道正在执行中的任务（含运行工具/评估器）
 
@@ -345,6 +346,12 @@ class TaskWorker:
                         "pipeline=%s, task=%s, status=%s",
                         parent_pipeline_id, task_id, new_status,
                     )
+                    # 唤醒 while 循环中等待的 wake_event
+                    parent_task_id = getattr(task_obj, "parent_task_id", None) if task_obj else None
+                    if parent_task_id:
+                        wake_evt = self._wake_events.get(parent_task_id)
+                        if wake_evt is not None:
+                            wake_evt.set()
                     return
                 except Exception as exc:
                     logger.warning("TaskWorker: inject_and_wake 失败: %s", exc)
@@ -368,6 +375,13 @@ class TaskWorker:
                     "TaskWorker: 回退扫描通知挂起管道: pipeline_key=%s, task=%s",
                     key, task_id,
                 )
+                # 回退路径：通过 _suspended_engines 反查 parent_task_id
+                for pid, pengine in self._suspended_engines.items():
+                    if pengine is engine:
+                        wake_evt = self._wake_events.get(pid)
+                        if wake_evt is not None:
+                            wake_evt.set()
+                        break
             except Exception as exc:
                 logger.warning("TaskWorker: 通知挂起管道失败: %s", exc)
 
@@ -582,16 +596,33 @@ class TaskWorker:
         terminal_evt = asyncio.Event()
         self._terminal_events[task_id] = terminal_evt
 
+        # ── 4.5 检查任务是否已有 pipeline_run_id（重试时复用） ──
+        existing_pipeline_id = None
+        if task_service:
+            _task_for_id = task_service.get_task(task_id)
+            if _task_for_id and _task_for_id.pipeline_run_id:
+                existing_pipeline_id = _task_for_id.pipeline_run_id
+
         # ── 5. 创建子 PipelineEngine 并执行 ──
         timer_manager = self._services.get("timer_manager")
         idle_timer_registered = False
         try:
+            checkpoint_mgr = self._services.get("checkpoint_manager")
             engine = PipelineEngine(
                 input_route_table=self._input_route_table,
                 output_route_table=self._output_route_table,
                 plugin_registry=self._plugin_registry,
                 services=self._services,
+                checkpoint_manager=checkpoint_mgr,
             )
+
+            # 复用已有的 pipeline_run_id，确保任务重试时管道 ID 不变
+            if existing_pipeline_id:
+                engine._pipeline_id = existing_pipeline_id
+                logger.info(
+                    "TaskWorker: reusing existing pipeline_id %s for task %s (retry)",
+                    existing_pipeline_id, task_id,
+                )
 
             # BUG-FIX-fix_20260417_task_manage_records: 管道启动前立即绑定 pipeline_run_id
             # 之前只在 cli_main.py 管道完成后才回填，导致运行中查询执行记录必然为空
@@ -602,6 +633,12 @@ class TaskWorker:
                         "TaskWorker: bound task %s to pipeline_run %s (early binding)",
                         task_id, engine._pipeline_id,
                     )
+                    # 按根任务分组执行记录
+                    exec_storage = self._services.get("execution_record_storage")
+                    if exec_storage:
+                        root_id = task_service.get_root_task_id(task_id)
+                        if root_id:
+                            exec_storage.register_pipeline(engine._pipeline_id, root_id)
                 except Exception as exc:
                     logger.warning(
                         "TaskWorker: early bind_pipeline_run failed for %s: %s",
@@ -650,11 +687,45 @@ class TaskWorker:
                 pipeline_timeout = max(pipeline_timeout, agent_config.timeout_seconds)
             self._active_tasks.add(task_id)
             project_root = ws_meta.get("project_root", workspace) if ws_meta else workspace
+
+            # ── 5.5 重试时从管道执行记录恢复对话历史 ──
+            # 直接从 ExecutionRecordStorage 读取该 pipeline_run_id 的所有记录，
+            # 转换为 messages 格式作为 conversation_history 传入，
+            # 确保重试时管道 ID 不变、历史完整。
+            conversation_history: list[dict[str, Any]] | None = None
+            if existing_pipeline_id:
+                exec_storage = self._services.get("execution_record_storage")
+                if exec_storage:
+                    try:
+                        prev_records = exec_storage.list_by_pipeline(existing_pipeline_id)
+                        if prev_records:
+                            conversation_history = []
+                            for r in prev_records:
+                                msg: dict[str, Any] = {"role": r.role, "content": r.content}
+                                if r.name:
+                                    msg["name"] = r.name
+                                if r.tool_call_id:
+                                    msg["tool_call_id"] = r.tool_call_id
+                                if r.tool_input:
+                                    msg["tool_input"] = r.tool_input
+                                conversation_history.append(msg)
+                            logger.info(
+                                "TaskWorker: restored %d messages from pipeline records "
+                                "for task %s (retry, pipeline=%s)",
+                                len(conversation_history), task_id, existing_pipeline_id,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "TaskWorker: failed to restore pipeline history for task %s: %s",
+                            task_id, exc,
+                        )
+
             try:
                 pipeline_state = await asyncio.wait_for(
                     engine.run(
                         user_input=full_input,
                         agent_config=agent_config,
+                        conversation_history=conversation_history,
                         task_id=task_id,
                         acceptance_criteria=acceptance_criteria,
                         workspace=workspace,
@@ -689,26 +760,13 @@ class TaskWorker:
                 )
                 self._suspended_engines[task_id] = engine
 
-                child_evt = asyncio.Event()
-
-                async def _on_child_done(event_data: Any) -> None:
-                    data = event_data.data if hasattr(event_data, "data") else event_data
-                    if not isinstance(data, dict):
-                        return
-                    child_parent = self._find_parent_task_id(data)
-                    if child_parent == task_id:
-                        new_status = data.get("new_status", "")
-                        if new_status in _TERMINAL_STATES:
-                            child_evt.set()
-                    if self._resume_requested.pop(task_id, False):
-                        child_evt.set()
-
-                if self._event_bus:
-                    self._event_bus.subscribe("task_state_changed", _on_child_done)
+                # 注册 wake_event，由 _notify_suspended_pipelines 或 _try_resume_engine set
+                wake_evt = asyncio.Event()
+                self._wake_events[task_id] = wake_evt
 
                 child_wait_timeout = self._config.get("child_wait_timeout", 600)
                 try:
-                    await asyncio.wait_for(child_evt.wait(), timeout=child_wait_timeout)
+                    await asyncio.wait_for(wake_evt.wait(), timeout=child_wait_timeout)
                     if self._resume_requested.pop(task_id, False):
                         logger.info(
                             "TaskWorker: idle timeout requested resume for task %s",
@@ -725,11 +783,7 @@ class TaskWorker:
                         task_id,
                     )
                 finally:
-                    if self._event_bus:
-                        try:
-                            self._event_bus.unsubscribe("task_state_changed", _on_child_done)
-                        except Exception:
-                            pass
+                    self._wake_events.pop(task_id, None)
 
                 if not engine.is_suspended:
                     logger.info(

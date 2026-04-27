@@ -123,7 +123,14 @@ task_manage_schema: dict[str, Any] = {
         "action": {
             "type": "string",
             "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "inject", "complete_container", "fail_container"],
-            "description": "操作类型",
+            "description": (
+                "操作类型。"
+                "retry: 重试失败任务，按以下策略处理，禁止跳步："
+                "①查看失败原因→②retry(瞬态错误)→③retry+message(补充修正信息)→"
+                "④task_submit重新提交同步骤新任务(不能跳步)→⑤多次失败后通知人类。"
+                "inject: 向运行中的任务注入消息。"
+                "complete_container/fail_container: 容器操作，仅主Agent可用。"
+            ),
         },
         "task_id": {
             "type": "string",
@@ -140,11 +147,11 @@ task_manage_schema: dict[str, Any] = {
         },
         "message": {
             "type": "string",
-            "description": "注入消息内容（inject 操作必填）",
-        },
-        "session_id": {
-            "type": "string",
-            "description": "注入消息的目标会话 ID（inject 操作必填）",
+            "description": (
+                "消息内容。"
+                "inject 操作必填。"
+                "retry 操作可选：携带补充信息，新管道首次迭代时自动注入，用于纠正失败原因。"
+            ),
         },
         "container_reason": {
             "type": "string",
@@ -156,7 +163,7 @@ task_manage_schema: dict[str, Any] = {
 
 TASK_MANAGE_DESCRIPTION = (
     "任务管理工具。支持获取、列表、暂停、恢复、取消、重试、消息注入等操作。"
-    "还支持容器完成（complete_container）和容器失败（fail_container）操作，仅限主 Agent 使用。"
+    "还支持容器完成和容器失败操作（仅限主 Agent）。"
     "普通任务完成请使用 task_evaluate 工具。"
 )
 
@@ -458,9 +465,12 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     failed → running 直接转换，需要先重置状态为 pending
     再启动。
 
+    可选参数 message：重试时携带补充信息。消息会在新管道启动后
+    由 MessageInjectPlugin 自动注入到会话中，Agent 第一轮即可看到。
+
     Args:
         task_service: TaskService 实例
-        params: 工具参数，需含 task_id
+        params: 工具参数，需含 task_id，可选含 message
 
     Returns:
         操作结果字典
@@ -481,9 +491,6 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "TASK_NOT_FOUND",
         }
 
-    # 重置为 pending 再启动
-    # 当前状态机不支持 failed → pending 直接转换，
-    # 直接修改 task 状态再通过 storage 保存
     from tasks.types import TaskStatus
 
     if task.status != TaskStatus.FAILED:
@@ -492,6 +499,16 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error": f"只能重试失败的任务，当前状态: {task.status.value}",
             "error_code": "INVALID_STATUS",
         }
+
+    # 如果提供了 message，先推入 MessageQueue
+    # TaskWorker retry 时复用同一 pipeline_run_id，新管道启动后
+    # MessageInjectPlugin 会自动消费这条消息
+    message_content = params.get("message")
+    message_injected = False
+    if message_content and task.pipeline_run_id:
+        message_injected = _push_retry_message(
+            task_id, task.pipeline_run_id, message_content, params,
+        )
 
     # 通过 TaskStorage 直接更新（绕过状态机终态限制）
     task.status = TaskStatus.PENDING
@@ -503,15 +520,17 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         logger.info("[task_manage] 任务重试成功: %s", task_id)
 
         # BUG-FIX-P7：重试后发布 task.submitted 事件，触发 TaskWorker 重新执行
-        # 否则任务状态变为 running 但没有管道在执行，永远卡死
         _retry_emit_event(task_id)
 
-        return {
+        result = {
             "success": True,
             "task_id": task.id,
             "status": task.status.value,
             "message": f"任务 {task_id} 已重新启动",
         }
+        if message_injected:
+            result["message"] += "，并已注入补充信息"
+        return result
     except Exception as exc:
         return {
             "success": False,
@@ -520,22 +539,76 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _push_retry_message(
+    task_id: str, pipeline_id: str, content: str, params: dict[str, Any],
+) -> bool:
+    """为 retry 操作推送补充消息到 MessageQueue。
+
+    Args:
+        task_id: 任务 ID
+        pipeline_id: 目标管道 ID（= task.pipeline_run_id）
+        content: 消息内容
+        params: 原始工具参数（用于获取 _message_queue）
+
+    Returns:
+        是否成功推送
+    """
+    import asyncio
+
+    from infrastructure.message_queue import Message, create_message_id
+
+    queue = params.get("_message_queue")
+    if queue is None:
+        logger.warning("[task_manage] retry: MessageQueue 不可用，跳过消息注入")
+        return False
+
+    message = Message(
+        id=create_message_id(),
+        pipeline_id=pipeline_id,
+        target_id=task_id,
+        content=content,
+        priority=8,  # 高优先级，确保新管道第一轮就能消费
+        metadata={"source": "task_manage_retry", "task_id": task_id},
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(queue.push(message))
+        else:
+            loop.run_until_complete(queue.push(message))
+    except RuntimeError:
+        try:
+            asyncio.run(queue.push(message))
+        except Exception as e:
+            logger.error("[task_manage] retry: 消息推送失败: %s", e)
+            return False
+    except Exception as e:
+        logger.error("[task_manage] retry: 消息推送失败: %s", e)
+        return False
+
+    logger.info(
+        "[task_manage] retry: 补充消息已推送 | task_id=%s | pipeline=%s",
+        task_id, pipeline_id,
+    )
+    return True
+
+
 def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """向任务会话注入消息。
 
     通过 MessageQueue.push 将消息推入队列，由 MessageInjectPlugin
-    在管道输入阶段自动消费。
+    在管道输入阶段自动消费。需要任务处于运行状态（有 pipeline_run_id）。
 
     Args:
         task_service: TaskService 实例
-        params: 工具参数，需含 task_id、message、session_id
+        params: 工具参数，需含 task_id、message
 
     Returns:
         操作结果字典
     """
     task_id = params.get("task_id")
     message_content = params.get("message")
-    session_id = params.get("session_id")
 
     if not task_id:
         return {
@@ -549,12 +622,6 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error": "inject 操作必须提供 message",
             "error_code": "MISSING_MESSAGE",
         }
-    if not session_id:
-        return {
-            "success": False,
-            "error": "inject 操作必须提供 session_id",
-            "error_code": "MISSING_SESSION_ID",
-        }
 
     # 检查任务是否存在
     task = task_service.get_task(task_id)
@@ -565,15 +632,22 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "TASK_NOT_FOUND",
         }
 
+    # 从任务的 pipeline_run_id 获取管道路由地址
+    pipeline_id = task.pipeline_run_id
+    if not pipeline_id:
+        return {
+            "success": False,
+            "error": f"任务 {task_id} 没有关联的管道实例，无法注入消息。"
+                     "请确认任务是否正在运行。",
+            "error_code": "NO_PIPELINE",
+        }
+
     # 获取 MessageQueue
-    # 工具函数无法直接访问 PluginContext，
-    # 通过 params["_message_queue"] 注入（由 ToolCore 在执行时传入）
     queue = params.get("_message_queue")
     if queue is None:
         return {
             "success": False,
-            "error": "MessageQueue 服务未注入，无法执行 inject 操作。"
-                     "请在管道配置中确保 message_queue 服务已注册。",
+            "error": "MessageQueue 服务未注入，无法执行 inject 操作。",
             "error_code": "SERVICE_UNAVAILABLE",
         }
 
@@ -584,7 +658,7 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     message = Message(
         id=create_message_id(),
-        session_id=session_id,
+        pipeline_id=pipeline_id,
         target_id=task_id,
         content=message_content,
         priority=params.get("priority", 5),
@@ -611,15 +685,15 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             }
 
     logger.info(
-        "[task_manage] 消息已注入 | task_id=%s | session_id=%s | content_len=%d",
-        task_id, session_id, len(message_content),
+        "[task_manage] 消息已注入 | task_id=%s | pipeline=%s | content_len=%d",
+        task_id, pipeline_id, len(message_content),
     )
 
     return {
         "success": True,
         "task_id": task_id,
         "message_id": message.id,
-        "message": f"消息已注入到会话 {session_id}",
+        "message": f"消息已注入到任务 {task_id}",
     }
 
 
