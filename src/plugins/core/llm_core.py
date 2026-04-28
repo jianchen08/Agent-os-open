@@ -347,6 +347,9 @@ class LLMCore(ICorePlugin):
                 "messages": history,
                 "llm_usage": llm_usage or {},
                 "context_window": self._context_window,
+                "llm_model": self._model,
+                "llm_provider": self._provider,
+                "llm_api_base": self._api_base,
             }
 
         except Exception as exc:
@@ -511,15 +514,26 @@ class LLMCore(ICorePlugin):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    args_str = fn.get("arguments", "")
-                    if isinstance(args_str, str) and args_str:
+                    if not isinstance(fn, dict):
+                        continue
+                    args_val = fn.get("arguments", "")
+                    # arguments 必须是合法 JSON 字符串，否则 Minimax 会拒绝请求
+                    if not isinstance(args_val, str) or not args_val:
+                        if args_val != "":
+                            logger.warning(
+                                "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments 类型异常 (%s)，重置为 {{}}",
+                                self.name, idx, fn.get("name", "?"), type(args_val).__name__,
+                            )
+                        fn["arguments"] = "{}"
+                    else:
                         try:
-                            json.loads(args_str)
+                            json.loads(args_val)
                         except (json.JSONDecodeError, TypeError):
                             logger.warning(
-                                "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments 不是合法 JSON: %s",
-                                self.name, idx, fn.get("name", "?"), args_str[:500],
+                                "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments 不是合法 JSON，重置为 {{}}: %s",
+                                self.name, idx, fn.get("name", "?"), args_val[:500],
                             )
+                            fn["arguments"] = "{}"
 
         # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
         result: list[dict[str, Any]] = []
@@ -574,6 +588,100 @@ class LLMCore(ICorePlugin):
                 "[%s] MiniMax: 重定位 %d 条 assistant(tool_calls) 与 tool 之间的非法消息",
                 self.name, relocated_count,
             )
+
+        # Phase 3: 最终验证 — 确保每个 tool result 紧跟匹配的 assistant(tool_calls)
+        # Phase 0 只检查 tool_call_id 是否存在，不检查位置；Phase 2 只处理
+        # assistant(tool_calls) 与 tool 之间的插入消息。这里兜底处理：
+        # tool result 出现在非 assistant(tool_calls) 之后的情况（如上下文截断、
+        # 执行记录恢复丢失 assistant 消息等）。
+        validated: list[dict[str, Any]] = []
+        expecting_tool_ids: set[str] = set()
+        dropped_count = 0
+        for msg in result:
+            if msg.get("role") == "assistant":
+                if msg.get("tool_calls"):
+                    expecting_tool_ids = {
+                        tc.get("id")
+                        for tc in msg["tool_calls"]
+                        if tc.get("id")
+                    }
+                else:
+                    expecting_tool_ids = set()
+                validated.append(msg)
+            elif msg.get("role") == "tool":
+                if expecting_tool_ids:
+                    tc_id = msg.get("tool_call_id")
+                    if tc_id in expecting_tool_ids:
+                        expecting_tool_ids.discard(tc_id)
+                        validated.append(msg)
+                    else:
+                        dropped_count += 1
+                        logger.warning(
+                            "[%s] MiniMax Phase 3: dropping tool result with "
+                            "unexpected tool_call_id=%s (expected %s)",
+                            self.name, tc_id, expecting_tool_ids,
+                        )
+                else:
+                    dropped_count += 1
+                    logger.warning(
+                        "[%s] MiniMax Phase 3: dropping orphaned tool result "
+                        "(tool_call_id=%s, no preceding assistant with tool_calls)",
+                        self.name, msg.get("tool_call_id", "?"),
+                    )
+            else:
+                expecting_tool_ids = set()
+                validated.append(msg)
+        if dropped_count:
+            logger.warning(
+                "[%s] MiniMax Phase 3: dropped %d invalid tool results",
+                self.name, dropped_count,
+            )
+        result = validated
+
+        # Phase 4: 补全缺失的 tool result — 确保每个 assistant(tool_calls)
+        # 后面紧跟完整的 tool 结果。Minimax 要求每个 tool_call 都必须有对应的
+        # tool result，否则报 "tool call result does not follow tool call"。
+        final: list[dict[str, Any]] = []
+        patch_count = 0
+        i = 0
+        while i < len(result):
+            msg = result[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                final.append(msg)
+                required_ids = {
+                    tc.get("id")
+                    for tc in msg["tool_calls"]
+                    if tc.get("id")
+                }
+                # 收集紧跟的 tool 结果
+                j = i + 1
+                while j < len(result) and result[j].get("role") == "tool":
+                    tc_id = result[j].get("tool_call_id")
+                    required_ids.discard(tc_id)
+                    final.append(result[j])
+                    j += 1
+                # 对缺失的 tool_call_id 补充 dummy tool result
+                for missing_id in required_ids:
+                    patch_count += 1
+                    logger.warning(
+                        "[%s] MiniMax Phase 4: 补全缺失 tool result tool_call_id=%s",
+                        self.name, missing_id,
+                    )
+                    final.append({
+                        "role": "tool",
+                        "tool_call_id": missing_id,
+                        "content": "Tool execution result unavailable.",
+                    })
+                i = j
+            else:
+                final.append(msg)
+                i += 1
+        if patch_count:
+            logger.warning(
+                "[%s] MiniMax Phase 4: patched %d missing tool results",
+                self.name, patch_count,
+            )
+        result = final
 
         return result
 
@@ -695,6 +803,15 @@ class LLMCore(ICorePlugin):
 
         timeout = ctx.state.get("llm_call_timeout", self._call_timeout)
         kwargs["timeout"] = timeout
+
+        # 调用前记录模型/API 信息
+        model_str = self._model
+        api_base = kwargs.get("api_base") or self._api_base or "default"
+        logger.info(
+            "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s, timeout=%ss",
+            self.name, model_str, self._provider, api_base, stream, timeout,
+        )
+
         try:
             return await self._adapter.completion(
                 model=kwargs.pop("model"),

@@ -104,7 +104,7 @@ class TestCLIInteractionNotifier:
     """Tests for CLIInteractionNotifier rendering and queue management."""
 
     async def test_notify_request_choice_mode(self) -> None:
-        """notify_request in choice mode renders a Panel and enqueues."""
+        """notify_request in choice mode enqueues without rendering."""
         notifier, buf, _ = _make_notifier()
         options = _sample_options()
         record = _build_request_record(options=options)
@@ -112,12 +112,8 @@ class TestCLIInteractionNotifier:
         result = await notifier.notify_request(record)
 
         assert result is True
-        output = buf.getvalue()
-        # The title should appear in the rendered output
-        assert "Test Request" in output
-        # Options labels should be visible
-        assert "Approve" in output
-        assert "Reject" in output
+        # Rendering deferred to run_sub_conversation(); no console output
+        assert buf.getvalue() == ""
         # Queue should have exactly one pending item
         assert notifier.has_pending()
         pending = notifier.get_next_pending()
@@ -125,7 +121,7 @@ class TestCLIInteractionNotifier:
         assert pending["request_id"] == "req-001"
 
     async def test_notify_request_conversation_mode(self) -> None:
-        """notify_request in conversation mode renders with green border."""
+        """notify_request in conversation mode enqueues without rendering."""
         notifier, buf, _ = _make_notifier()
         record = _build_request_record(
             mode="conversation",
@@ -136,8 +132,8 @@ class TestCLIInteractionNotifier:
         result = await notifier.notify_request(record)
 
         assert result is True
-        output = buf.getvalue()
-        assert "Chat with me" in output
+        # Rendering deferred to run_sub_conversation(); no console output
+        assert buf.getvalue() == ""
         # Queue should contain the request
         assert notifier.has_pending()
         pending = notifier.get_next_pending()

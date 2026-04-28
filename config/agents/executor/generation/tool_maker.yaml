@@ -131,8 +131,9 @@ static_vars:
         - web_search: 搜索互联网信息
         - yaml_validate: 验证YAML配置文件的格式和内容
         如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，工具将自动加载到当前会话，下一轮即可直接调用。
-    - path: "config/templates/tool_code_template.md"
-      name: "工具代码模板"
+    - name: "工具代码模板"
+      type: "path"
+      path: "config/templates/tool_code_template.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

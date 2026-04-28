@@ -68,13 +68,20 @@ expected_output:
 
 # ===== 评估判断标准 =====
 # 基于工具返回结果进行判断
+# 工具返回结构: {success: bool, data: {status, selected_option, feedback}}
 expect:
   conditions:
-    - field: "passed"
+    - field: "success"
       operator: "is_true"
       logic: "and"
       pass_message: "审核通过"
       fail_message: "审核未通过"
+    - field: "data.selected_option"
+      operator: "equals"
+      value: "approve"
+      logic: "and"
+      pass_message: "用户选择通过"
+      fail_message: "用户选择不通过"
 
 # ===== 输入参数定义（与 human_interaction 工具 input_schema 一致）=====
 input_schema:
@@ -131,12 +138,12 @@ input_mapping:
 # ===== 输出映射模板 =====
 # 将工具输出映射到评估结果
 output_mapping:
-  passed: "{% if response.choice == 'approve' %}true{% else %}false{% endif %}"
-  score: "{% if response.choice == 'approve' %}100{% else %}0{% endif %}"
-  feedback: "{{ response.feedback | default('审核完成') }}"
+  passed: "{% if data.selected_option == 'approve' %}true{% else %}false{% endif %}"
+  score: "{% if data.selected_option == 'approve' %}100{% else %}0{% endif %}"
+  feedback: "{{ data.feedback | default('审核完成') }}"
   details:
     status: "{{ status }}"
-    choice: "{{ response.choice }}"
+    selected_option: "{{ data.selected_option }}"
 
 # ===== 使用边界 =====
 when_to_use:

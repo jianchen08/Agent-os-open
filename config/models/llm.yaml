@@ -114,5 +114,5 @@ embeddings: {}
 # AdaptiveRouterAdapter 在 min-max 范围内自适应调整
 concurrency:
   min_concurrency: 1
-  max_concurrency: 3
-  default_concurrency: 2
+  max_concurrency: 4
+  default_concurrency: 3

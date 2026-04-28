@@ -183,6 +183,7 @@ class MetricLoader:
             default_config=data.get("default_config", {}),
             expect=expect,
             input_schema=data.get("input_schema", {}),
+            input_mapping=data.get("input_mapping", {}),
             is_red_line=data.get("is_red_line", False),
             default_weight=data.get("default_weight", 1.0),
             level=data.get("level", 1),

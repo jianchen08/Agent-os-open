@@ -194,8 +194,9 @@ static_vars:
         | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | host | file_check |
         | 工具操作 | tool_maker | 创建或修改工具代码和配置 | host | semantic_check |
         | Agent操作 | agent_maker | 创建或修改 Agent 配置 | host | semantic_check |
-    - path: "config/templates/resource_generation_report_template.md"
-      name: "资源操作报告模板"
+    - name: "资源操作报告模板"
+      type: "path"
+      path: "config/templates/resource_generation_report_template.md"
     - name: "项目路径映射"
       type: "reference"
       content: |

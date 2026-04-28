@@ -42,8 +42,9 @@ static_vars:
   items:
     - name: "行为约束"
       type: "rules"
-    - path: "config/rules/document_context_rules.md"
-      name: "文档上下文规则"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
 
 # 动态变量
 dynamic_vars:

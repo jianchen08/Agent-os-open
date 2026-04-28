@@ -26,6 +26,52 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+
+def cleanup_litellm_logging() -> None:
+    """清理 LiteLLM 内部 LoggingWorker 后台任务。
+
+    LiteLLM 的 LoggingWorker 会创建长期运行的后台 asyncio Task，
+    在 asyncio.run() 结束事件循环时这些 Task 不会被正确取消，
+    导致 "Task was destroyed but it is pending!" 警告。
+
+    此函数尝试取消这些未完成的 Task，消除关闭时的警告噪音。
+    """
+    try:
+        # litellm 内部可能有多个 logging worker 实例
+        from litellm.litellm_core_utils import logging_worker as _lw
+
+        for attr_name in ("_workers", "_instance", "_instances"):
+            obj = getattr(_lw, attr_name, None)
+            if obj is None:
+                continue
+            if isinstance(obj, dict):
+                for worker in obj.values():
+                    _cancel_worker_tasks(worker)
+            elif isinstance(obj, list):
+                for worker in obj:
+                    _cancel_worker_tasks(worker)
+            else:
+                _cancel_worker_tasks(obj)
+    except Exception:
+        pass
+
+
+def _cancel_worker_tasks(worker: Any) -> None:
+    """取消单个 worker 的后台任务。"""
+    if worker is None:
+        return
+    loop = None
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return
+    if loop is None or loop.is_closed():
+        return
+    for attr_name in ("_task", "_background_task", "_loop_task"):
+        task = getattr(worker, attr_name, None)
+        if task is not None and isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+
 # 专用 logger：只写文件，不传播到 root（不显示在 CLI）
 _diag_logger = logging.getLogger(__name__ + "._diag")
 _diag_logger.propagate = False
@@ -451,15 +497,33 @@ class _BaseLiteLLMAdapter:
                                 "name": "",
                                 "arguments": "",
                             }
+                            _stream_logger.debug(
+                                "[STREAM][TOOL_CALL] #%d new: id=%s",
+                                idx, tool_calls_map[idx]["id"],
+                            )
                         if tc.function:
                             if tc.function.name:
                                 tool_calls_map[idx]["name"] += (
                                     tc.function.name
                                 )
+                                _stream_logger.debug(
+                                    "[STREAM][TOOL_CALL] #%d name=%s",
+                                    idx, tool_calls_map[idx]["name"],
+                                )
                             if tc.function.arguments:
                                 tool_calls_map[idx]["arguments"] += (
                                     tc.function.arguments
                                 )
+                                _arg_len = len(
+                                    tool_calls_map[idx]["arguments"]
+                                )
+                                if _arg_len <= 50 or _arg_len % 500 == 0:
+                                    _stream_logger.debug(
+                                        "[STREAM][TOOL_CALL] #%d args +%d → %d chars",
+                                        idx,
+                                        len(tc.function.arguments),
+                                        _arg_len,
+                                    )
 
                     if on_chunk:
                         on_chunk({
@@ -603,7 +667,7 @@ class _AdaptiveSemaphore:
     - 连续超时 → 逐步降低
     - 持续成功 → 每 RECOVERY_INTERVAL 秒恢复 1 级
 
-    线程安全，可在多协程间共享。
+    asyncio.Event 延迟创建，避免绑定到旧事件循环。
     """
 
     RECOVERY_INTERVAL = 90.0  # 成功运行多久后提升 1 级并发
@@ -619,30 +683,57 @@ class _AdaptiveSemaphore:
         self._min = min_capacity
         self._max = max_capacity
         self._count = 0
-        self._changed = asyncio.Event()
-        self._changed.set()
+        # 延迟创建，避免绑定到创建时的事件循环
+        self._changed: asyncio.Event | None = None
 
         self._consecutive_successes = 0
         self._last_decrease_time: float = 0.0
+
+    def _get_event(self) -> asyncio.Event:
+        """获取当前事件循环的 Event，自动检测循环切换。
+
+        Python 3.10+ 的 asyncio.Event 继承 _LoopBoundMixin，
+        首次调用 set/clear/wait 时绑定到当时的 event loop。
+        如果后续 loop 变了（如 asyncio.run() 创建新循环），
+        再操作同一个 Event 会抛 "bound to a different event loop"。
+        通过检查 Event._loop 与当前 loop 是否一致来检测切换。
+        """
+        if self._changed is not None:
+            bound_loop = getattr(self._changed, "_loop", None)
+            if bound_loop is not None:
+                try:
+                    current = asyncio.get_running_loop()
+                except RuntimeError:
+                    current = None
+                if current is not bound_loop:
+                    self._changed = None
+        if self._changed is None:
+            self._changed = asyncio.Event()
+            self._changed.set()
+        return self._changed
 
     @property
     def capacity(self) -> int:
         return self._capacity
 
     async def acquire(self) -> None:
+        event = self._get_event()
         while self._count >= self._capacity:
-            self._changed.clear()
+            event.clear()
             if self._count >= self._capacity:
-                await self._changed.wait()
+                await event.wait()
+                # 循环可能已切换，重新获取
+                event = self._get_event()
             else:
                 break
         self._count += 1
         if self._count >= self._capacity:
-            self._changed.clear()
+            event.clear()
 
     def release(self) -> None:
         self._count = max(0, self._count - 1)
-        self._changed.set()
+        event = self._get_event()
+        event.set()
 
     def on_rate_limit(self) -> int:
         """限流信号：立即降到最低，返回新容量。"""
@@ -680,7 +771,7 @@ class _AdaptiveSemaphore:
             old = self._capacity
             self._capacity = min(self._max, self._capacity + 1)
             self._consecutive_successes = 0
-            self._changed.set()  # 唤醒等待者
+            self._get_event().set()  # 唤醒等待者
             logger.info(
                 "[AdaptiveConcurrency] 成功恢复: %d → %d", old, self._capacity,
             )

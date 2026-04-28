@@ -316,8 +316,8 @@ async def run_sub_conversation(
     async def _read_input(prompt: str) -> str:
         """通过 input_adapter 的队列读取输入。
 
-        使用 console.print 显示提示符（与 rich 输出兼容），
-        通过后台 stdin 线程 + 队列读取用户输入。
+        使用 run_in_executor 读取 stdin，保持事件循环响应。
+        管道输出由 CLI 的 _suppress_streaming 标志抑制。
         """
         console.print(prompt, end="")
         reader = input_adapter._get_stdin_reader()
@@ -349,6 +349,9 @@ async def run_sub_conversation(
             if user_input.strip().lower() in (
                 "/back", "/done", "/返回"
             ):
+                # 清空剩余待处理请求，防止主循环立即重入子对话
+                while notifier.get_next_pending() is not None:
+                    pass
                 console.print(
                     "[bold magenta]──────────────────────"
                     "────────────────────────────[/bold"
@@ -389,7 +392,18 @@ async def run_sub_conversation(
             next_pending = notifier.get_next_pending()
             if next_pending is None:
                 console.print(
-                    "[dim]子 Agent 不再有新的交互请求[/dim]"
+                    "[bold magenta]──────────────────────"
+                    "────────────────────────────[/bold"
+                    " magenta]"
+                )
+                console.print(
+                    "[bold magenta]  返回主 Agent 对话"
+                    "[/bold magenta]"
+                )
+                console.print(
+                    "[bold magenta]──────────────────────"
+                    "────────────────────────────[/bold"
+                    " magenta]\n"
                 )
                 break
 

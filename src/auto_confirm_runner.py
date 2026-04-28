@@ -134,10 +134,17 @@ def main():
     except Exception as exc:
         logger.warning("[AutoConfirm] 初始注入失败，依赖后台线程: %s", exc)
 
-    if args.message:
-        asyncio.run(app.run_single(args.message))
-    else:
-        asyncio.run(app.run())
+    try:
+        if args.message:
+            asyncio.run(app.run_single(args.message))
+        else:
+            asyncio.run(app.run())
+    finally:
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

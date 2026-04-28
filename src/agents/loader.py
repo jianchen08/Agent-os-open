@@ -196,6 +196,7 @@ class AgentConfigLoader:
             "main": AgentType.MAIN,
             "orchestrator": AgentType.SPECIALIZED,
             "specialized": AgentType.SPECIALIZED,
+            "atomic": AgentType.SPECIALIZED,
             "system": AgentType.SYSTEM,
         }
         return mapping.get(raw, AgentType.SPECIALIZED)

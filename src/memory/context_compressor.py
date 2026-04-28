@@ -236,10 +236,24 @@ class ContextCompressor:
 
         try:
             response = await self._call_llm(prompt)
+            if not response or not response.strip():
+                logger.warning("[ContextCompressor] LLM 返回空响应，跳过压缩")
+                return {"l1": "", "l2": "", "keywords": []}
+
             raw_json = self._extract_json(response)
+            if not raw_json or not raw_json.strip():
+                logger.warning("[ContextCompressor] JSON 提取结果为空，跳过压缩")
+                return {"l1": "", "l2": "", "keywords": []}
 
             import json
-            parsed = json.loads(raw_json)
+            try:
+                parsed = json.loads(raw_json)
+            except json.JSONDecodeError as je:
+                logger.warning(
+                    "[ContextCompressor] JSON 解析失败: %s | raw_json 前 200 字符: %s",
+                    je, raw_json[:200],
+                )
+                return {"l1": "", "l2": "", "keywords": []}
 
             l1_data = parsed.get("l1", {})
             l1_str = json.dumps(l1_data, ensure_ascii=False, indent=2) if l1_data else ""

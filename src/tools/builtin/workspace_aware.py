@@ -5,6 +5,8 @@
 - WorkspaceAwareMixin：统一 workspace 消费的 Mixin 类
 """
 
+import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +45,19 @@ class WorkspaceAwareMixin:
         绝对路径直接返回；相对路径与 self._workspace 拼接。
         当相对路径已包含 workspace 的完整路径或尾部组件前缀时自动去重，
         避免产生类似 workspace/workspace/file 的重复路径。
-
-        Args:
-            path_str: 待解析的路径字符串。
-
-        Returns:
-            解析后的 Path 对象（已 resolve）。
+        Windows 下额外处理 Git Bash 风格绝对路径（/d/path → D:\\path）。
         """
+        # Windows: 转换 Git Bash 风格绝对路径 (/d/path → D:\path)
+        if platform.system() == "Windows":
+            normalized = path_str.replace("\\", "/")
+            drive_match = re.match(
+                r'^/([a-zA-Z])/(.+)', normalized
+            )
+            if drive_match:
+                drive = drive_match.group(1).upper()
+                rest = drive_match.group(2)
+                return Path(f"{drive}:\\{rest}").resolve()
+
         path = Path(path_str)
         if path.is_absolute():
             return path.resolve()

@@ -42,7 +42,7 @@ system_prompt: |
 
   ### 第一步：分析方案
   1. 使用 file_read 读取方案文档
-  2. 提取任务清单（T-N）、验收标准（AC-N）、资源需求
+  2. 提取目标，产出需求、验收标准（AC-N）、资源需求
   3. 识别方案中描述不够具体、需要细化的部分
 
   ### 第二步：细化内容
@@ -55,7 +55,7 @@ system_prompt: |
 
   ### 第三步：内容量评估（强制）
 
-  在制定执行计划之前，必须先评估：
+  在制定执行计划之前，必须先对目标和产出评估：
 
   1. **识别自然单元**
      - 找出任务的"自然单元"（章节、模块、接口、主题、功能点……）
@@ -145,10 +145,12 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
-    - path: "config/templates/solution_refinement_template.md"
-      name: "方案细化报告模板"
-    - path: "config/templates/execution_plan_template.md"
-      name: "执行计划模板"
+    - name: "方案细化报告模板"
+      type: "path"
+      path: "config/templates/solution_refinement_template.md"
+    - name: "执行计划模板"
+      type: "path"
+      path: "config/templates/execution_plan_template.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

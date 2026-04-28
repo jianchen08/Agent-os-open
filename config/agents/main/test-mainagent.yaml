@@ -108,12 +108,6 @@ prompt_structure:
     - "retrieval"
     - "user_message"
 
-knowledge:
-  mode: "compressed"
-  max_tokens: 2000
-  top_k: 5
-  score_threshold: 0.7
-
 memory_injection:
   enable: true
   budget:

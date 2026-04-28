@@ -73,13 +73,6 @@ context_variables:
     agent_level: "L3"
     agent_category: "task"
 
-# 知识库配置
-knowledge:
-  mode: "compressed"
-  max_tokens: 1000
-  top_k: 3
-  score_threshold: 0.7
-
 # 可用工具（总工具数 ≤ 20，全部预加载）
 tool_ids:
   - "file_read"          # 文件读取

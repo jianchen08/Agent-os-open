@@ -7,14 +7,17 @@
 """
 
 import json
-import platform
-import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from tools.builtin.base import BuiltinTool
+from tools.builtin.binary_converter import (
+    REJECTED_EXTENSIONS,
+    convert_binary_to_markdown,
+    get_file_category,
+)
 from tools.builtin.shared import format_size
 from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
@@ -26,72 +29,56 @@ from tools.types import (
     create_success_result,
 )
 
-BINARY_EXTENSIONS = frozenset({
-    ".exe", ".dll", ".so", ".dylib", ".o", ".obj", ".a", ".lib",
-    ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif", ".svgz",
-    ".mp3", ".mp4", ".wav", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".m4a", ".aac", ".ogg", ".flac",
-    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".iso",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".pyc", ".pyd", ".pyo", ".class", ".jar", ".war",
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    ".node", ".wasm",
-})
-
 MAX_FILE_SIZE = 2 * 1024 * 1024
 BINARY_SNIFF_SIZE = 8192
 
 
 class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
-    """
-    文件读取工具
+    """文件读取工具
 
-    提供：
-    - 读取文件内容
-    - 列出目录结构
-
-    注意：文件搜索功能已移至 EnhancedSearchTool（search_type=filename）
+    提供读取文件内容功能。自动路由文本/二进制文件：
+    - 文本文件：直接读取内容（支持 fields/tail 参数）
+    - 文档文件（PDF/DOCX/XLSX/PPTX）：通过 markitdown 转 Markdown
+    - 图片文件（PNG/JPG 等）：通过 markitdown 转 Markdown 描述
     """
 
     def __init__(self, base_path: str | None = None):
-        """初始化文件读取工具"""
         self.base_path = Path(base_path) if base_path else Path.cwd()
 
     @staticmethod
     def get_tool_definition() -> Tool:
-        """获取工具定义"""
         from tools.types import ToolLevel
 
         return Tool(
             name="file_read",
-            description="读取文件内容、列出目录结构。"
-            "适用场景：需要读取文件内容、浏览目录结构。"
-            "不适用场景：需要写入文件（使用 file_write）、执行代码（使用 bash_execute）、搜索文件内容（使用 enhanced_search）、搜索文件名（使用 enhanced_search 的 filename 模式）。"
-            "注意：路径访问受 base_path 限制；大文件读取可能影响性能。"
-            "fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。例如：fields=['id', 'name'] 只返回这两个字段。",
+            description="读取文件内容。自动识别文本和二进制文件：文本文件直接读取，"
+            "PDF/DOCX/XLSX/PPTX/图片等通过 markitdown 转换为 Markdown。"
+            "适用场景：需要读取文件内容。"
+            "不适用场景：需要写入文件（使用 file_write）、列出目录（使用 list_directory）、"
+            "搜索文件内容（使用 enhanced_search）。"
+            "fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。"
+            "例如：fields=['id', 'name'] 只返回这两个字段。",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["read", "list"],
-                        "description": "操作类型：read(读取文件内容)、list(列出目录内容)",
-                    },
                     "path": {
                         "type": "string",
-                        "description": "文件或目录路径（相对路径或绝对路径）。action=read 时为文件路径；action=list 时为目录路径",
+                        "description": "文件路径（相对路径或绝对路径）",
                     },
                     "fields": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "要读取的字段列表（仅支持 YAML/JSON 文件）。例如：['id', 'name', 'expected_input']。支持嵌套字段，用点号分隔：['agent.tools', 'agent.config.timeout']。不指定则返回完整内容。",
+                        "description": "要读取的字段列表（仅支持 YAML/JSON 文件）。"
+                        "例如：['id', 'name']。支持嵌套字段，用点号分隔。"
+                        "不指定则返回完整内容。",
                     },
                     "tail": {
                         "type": "integer",
-                        "description": "仅读取文件最后 N 行（仅 action=read 时有效）。不指定则返回完整内容。",
+                        "description": "仅读取文件最后 N 行（仅文本文件有效）。"
+                        "不指定则返回完整内容。",
                     },
                 },
-                "required": ["action"],
+                "required": ["path"],
             },
             source=ToolSource.CODE,
             category=ToolCategory.FILE,
@@ -101,90 +88,11 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        """执行工具"""
         self._init_workspace(inputs)
         self.base_path = self._workspace
-
-        action = inputs.get("action")
-
-        if action == "read":
-            return await self._read_file(inputs)
-        elif action == "list":
-            return await self._list_directory(inputs)
-        else:
-            return create_failure_result(
-                error=f"不支持的操作: {action}。支持的操作：read(读取文件)、list(列出目录)。如需搜索文件，请使用 enhanced_search 工具。",
-                error_code="INVALID_ACTION",
-            )
-
-    def _resolve_path(self, path_str: str) -> Path:
-        """解析路径（路径边界检查由中间层统一控制）。
-
-        当 Agent 在 path 中重复包含了 workspace 前缀时，
-        自动去重避免路径嵌套（如 base/a/ + base/a/f → base/a/f）。
-
-        BUG-FIX-fix_20260419_path_dedup:
-        问题根因: 当 path 以 workspace 前缀开头时，直接用 Path(path) 仍是相对路径，
-                 .resolve() 会拼接到 CWD 下导致双重嵌套。
-        修复方案: 检测到前缀重复时，去掉重复前缀后重新拼接。
-
-        BUG-FIX-fix_20260420_workspace_fallback:
-        问题根因: workspace 模式下所有相对路径都拼接到 workspace 目录下，
-                 导致 agent 无法读取项目自身的文件（如 config/templates/xxx）。
-        修复方案: 如果 workspace 下找不到文件/目录，从 workspace 绝对路径中
-                 提取项目根目录，尝试在项目根下查找。
-
-        BUG-FIX-fix_20260424_unix_path_on_windows:
-        问题根因: Git Bash 生成的路径如 /d/Jianguoyun/... 在 Windows 上
-                 不被识别为绝对路径，导致被错误拼接到 base_path 下。
-        修复方案: 在路径解析前，先检测并转换 Git Bash 风格的绝对路径。
-        """
-        # Windows: 转换 Git Bash 风格绝对路径 (/d/path → D:\path)
-        if platform.system() == "Windows":
-            normalized = path_str.replace("\\", "/")
-            drive_match = re.match(r'^/([a-zA-Z])/(.+)', normalized)
-            if drive_match:
-                drive_letter = drive_match.group(1).upper()
-                rest_path = drive_match.group(2)
-                return Path(f"{drive_letter}:\\{rest_path}").resolve()
-
-        path = Path(path_str)
-        if not path.is_absolute():
-            path_str_normalized = str(path).replace("\\", "/")
-            base_str_normalized = str(self.base_path).replace("\\", "/")
-            if path_str_normalized == base_str_normalized:
-                return self.base_path.resolve()
-            if path_str_normalized.startswith(base_str_normalized + "/"):
-                relative_part = path_str_normalized[len(base_str_normalized) + 1:]
-                path = self.base_path / relative_part
-            else:
-                path = self.base_path / path
-            resolved = path.resolve()
-            if not resolved.exists():
-                project_root = self._extract_project_root()
-                if project_root is not None:
-                    fallback = (project_root / path_str).resolve()
-                    if fallback.exists():
-                        return fallback
-            return resolved
-        return path.resolve()
-
-    def _extract_project_root(self) -> Path | None:
-        """从 workspace 绝对路径中提取项目根目录。
-
-        workspace 格式: {project_root}/.ai_workspaces/{task_id}
-        通过定位 .ai_workspaces 段，返回其前面的部分作为项目根目录。
-        """
-        resolved = self.base_path.resolve()
-        normalized = str(resolved).replace("\\", "/")
-        marker = "/.ai_workspaces/"
-        idx = normalized.find(marker)
-        if idx >= 0:
-            return Path(normalized[:idx])
-        return None
+        return await self._read_file(inputs)
 
     async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:
-        """读取文件"""
         try:
             path_str = inputs.get("path")
             if not path_str:
@@ -208,7 +116,22 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="NOT_A_FILE",
                 )
 
-            filter_error = self._check_file_filter(path)
+            # 路由：根据文件类型选择读取策略
+            category = get_file_category(path)
+            if category in ("document", "image"):
+                return convert_binary_to_markdown(path)
+
+            if category == "rejected":
+                return create_failure_result(
+                    error=f"不支持读取此类型文件: {path.name}。"
+                    f"支持的二进制文件：PDF、DOCX、XLSX、PPTX、"
+                    f"PNG、JPG 等图片。"
+                    f"列出目录请使用 list_directory 工具。",
+                    error_code="BINARY_FILE_NOT_SUPPORTED",
+                )
+
+            # 文本文件：原有逻辑
+            filter_error = self._check_text_file_filter(path)
             if filter_error:
                 return filter_error
 
@@ -259,28 +182,18 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="READ_FAILED",
             )
 
-    def _check_file_filter(self, path: Path) -> ToolResult | None:
-        """检查文件是否应该被过滤（二进制文件/超大文件）。
+    def _check_text_file_filter(self, path: Path) -> ToolResult | None:
+        """检查文本文件是否应被过滤（超大文件/二进制内容嗅探）。
 
-        返回 None 表示通过检查，返回 ToolResult 表示被拒绝。
-        三层过滤策略：
-        1. 扩展名黑名单 — 已知的二进制扩展名直接拒绝
-        2. 文件大小限制 — 超过 MAX_FILE_SIZE 的文件拒绝
-        3. 二进制内容嗅探 — 检测文件头部的 null byte
+        仅对判定为 text 类型的文件调用。
         """
-        suffix = path.suffix.lower()
-        if suffix in BINARY_EXTENSIONS:
-            return create_failure_result(
-                error=f"不支持读取二进制文件 ({suffix}): {path.name}。"
-                f"支持读取文本文件（如 .py, .js, .yaml, .json, .md, .txt 等）。",
-                error_code="BINARY_FILE_REJECTED",
-            )
-
         file_size = path.stat().st_size
         if file_size > MAX_FILE_SIZE:
             return create_failure_result(
-                error=f"文件过大 ({format_size(file_size)})，超过限制 ({format_size(MAX_FILE_SIZE)}): {path.name}。"
-                f"请使用 fields 参数读取特定字段，或使用 bash_execute 分段读取。",
+                error=f"文件过大 ({format_size(file_size)})，"
+                f"超过限制 ({format_size(MAX_FILE_SIZE)}): {path.name}。"
+                f"请使用 fields 参数读取特定字段，"
+                f"或使用 bash_execute 分段读取。",
                 error_code="FILE_TOO_LARGE",
             )
 
@@ -290,7 +203,8 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             if b"\x00" in header:
                 return create_failure_result(
                     error=f"检测到二进制文件内容: {path.name}。"
-                    f"支持读取文本文件（如 .py, .js, .yaml, .json, .md, .txt 等）。",
+                    f"支持读取文本文件（如 .py, .js, .yaml, "
+                    f".json, .md, .txt 等）。",
                     error_code="BINARY_CONTENT_DETECTED",
                 )
         except Exception:
@@ -301,7 +215,6 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     def _extract_fields(
         self, content: str, path: Path, fields: list[str]
     ) -> ToolResult:
-        """从 YAML/JSON 文件中提取特定字段"""
         suffix = path.suffix.lower()
         data: dict[str, Any] = {}
 
@@ -312,7 +225,8 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 data = json.loads(content)
             else:
                 return create_failure_result(
-                    error=f"fields 参数仅支持 YAML/JSON 文件，当前文件类型: {suffix}",
+                    error=f"fields 参数仅支持 YAML/JSON 文件，"
+                    f"当前文件类型: {suffix}",
                     error_code="FIELDS_NOT_SUPPORTED",
                 )
         except (yaml.YAMLError, json.JSONDecodeError) as e:
@@ -339,7 +253,6 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         )
 
     def _get_nested_field(self, data: dict[str, Any], field: str) -> Any:
-        """获取嵌套字段的值"""
         keys = field.split(".")
         current = data
         for key in keys:
@@ -352,7 +265,6 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     def _set_nested_field(
         self, data: dict[str, Any], field: str, value: Any
     ) -> None:
-        """设置嵌套字段的值"""
         keys = field.split(".")
         current = data
         for key in keys[:-1]:
@@ -360,75 +272,3 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 current[key] = {}
             current = current[key]
         current[keys[-1]] = value
-
-    def _count_file_lines(self, path: Path, file_size: int) -> str:
-        """统计文本文件行数，二进制/大文件返回 '-'"""
-        suffix = path.suffix.lower()
-        if suffix in BINARY_EXTENSIONS or file_size > MAX_FILE_SIZE:
-            return "-"
-        try:
-            with open(path, 'rb') as f:
-                content = f.read()
-            if b'\x00' in content[:BINARY_SNIFF_SIZE]:
-                return "-"
-            return str(content.count(b'\n') + (1 if content and not content.endswith(b'\n') else 0))
-        except Exception:
-            return "-"
-
-    async def _list_directory(self, inputs: dict[str, Any]) -> ToolResult:
-        """列出目录内容"""
-        try:
-            path_str = inputs.get("path", str(self.base_path))
-            path = self.resolve_path(path_str)
-            display_path = self._format_output_path(path, path_str)
-
-            if not path.exists():
-                return create_failure_result(
-                    error=f"路径不存在: {display_path}",
-                    error_code="PATH_NOT_FOUND",
-                )
-
-            if not path.is_dir():
-                return create_failure_result(
-                    error=f"路径不是目录: {display_path}",
-                    error_code="NOT_A_DIRECTORY",
-                )
-
-            dirs = []
-            file_names = []
-            file_sizes = []
-            file_lines = []
-
-            for item in path.iterdir():
-                try:
-                    if item.is_dir():
-                        dirs.append(item.name)
-                    else:
-                        stat = item.stat()
-                        file_names.append(item.name)
-                        file_sizes.append(format_size(stat.st_size))
-                        file_lines.append(self._count_file_lines(item, stat.st_size))
-                except Exception:
-                    continue
-
-            dirs.sort()
-            if file_names:
-                sorted_data = sorted(zip(file_names, file_sizes, file_lines, strict=False), key=lambda x: x[0])
-                file_names = [p[0] for p in sorted_data]
-                file_sizes = [p[1] for p in sorted_data]
-                file_lines = [p[2] for p in sorted_data]
-
-            return create_success_result(
-                data={
-                    "h": ["dir", "file_name", "file_size", "lines"],
-                    "d": [[dirs[i] if i < len(dirs) else "", file_names[i] if i < len(file_names) else "", file_sizes[i] if i < len(file_sizes) else "", file_lines[i] if i < len(file_lines) else ""] for i in range(max(len(dirs), len(file_names)))],
-                    "c": len(dirs) + len(file_names),
-                },
-                metadata={"action": "list_directory"},
-            )
-
-        except Exception as e:
-            return create_failure_result(
-                error=f"列出目录失败: {str(e)}",
-                error_code="LIST_FAILED",
-            )

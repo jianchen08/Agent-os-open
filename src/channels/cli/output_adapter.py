@@ -27,7 +27,7 @@ from channels.output_adapter import IOutputAdapter
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_for_terminal(text: str) -> str:
+def sanitize_for_terminal(text: str) -> str:
     """清理文本中 Windows GBK 终端不兼容的字符。
 
     LLM 输出可能包含 emoji 等 Unicode 字符，在 Windows GBK 终端中
@@ -340,9 +340,7 @@ class CLIOutputAdapter(IOutputAdapter):
 
         # 正常结果输出：流式模式下不重复打印
         if streamed:
-            raw_result = state.get("raw_result", "")
-            if raw_result:
-                self._console.print("")  # 换行收尾
+            # 换行收尾已由 on_chunk 回调中的 _text_streaming_active 逻辑处理
             # 如有 raw_error，仍然输出
             raw_error = state.get("raw_error")
             if raw_error:
@@ -360,7 +358,7 @@ class CLIOutputAdapter(IOutputAdapter):
         raw_result = state.get("raw_result", "")
         if raw_result:
             # Windows GBK 兼容：替换 LLM 输出中的 emoji
-            safe_result = _sanitize_for_terminal(str(raw_result))
+            safe_result = sanitize_for_terminal(str(raw_result))
             self._console.print(safe_result)
 
     async def send_stream(self, chunk: dict[str, Any]) -> None:

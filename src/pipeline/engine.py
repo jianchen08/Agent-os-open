@@ -666,6 +666,18 @@ class PipelineEngine:
                 else:
                     logger.info("=== Pipeline iteration %d ===", iteration)
 
+                # 显示当前使用的模型信息
+                _llm_core_iter = self.plugin_registry.get_core("llm_call")
+                if _llm_core_iter and hasattr(_llm_core_iter, "_model"):
+                    _model_info = (
+                        f"{_llm_core_iter._model}"
+                        f" (provider={_llm_core_iter._provider}"
+                    )
+                    if getattr(_llm_core_iter, "_api_base", None):
+                        _model_info += f", api_base={_llm_core_iter._api_base}"
+                    _model_info += ")"
+                    logger.info("Model: %s", _model_info)
+
                 # 发射 iteration 事件供 CLI 状态栏实时更新
                 on_chunk_cb = state.get("on_chunk")
                 if on_chunk_cb:
@@ -1008,6 +1020,9 @@ class PipelineEngine:
                     self._suspended_state["user_input"] = (
                         f"{notif}\n\n{orig}".strip()
                     )
+                    self._suspended_state.setdefault("messages", []).append(
+                        {"role": "user", "content": notif}
+                    )
             logger.info(
                 "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: "
                 "pipeline=%s",
@@ -1057,6 +1072,10 @@ class PipelineEngine:
         if self._suspended_state is not None and user_input:
             orig = self._suspended_state.get("user_input", "")
             self._suspended_state["user_input"] = f"{user_input}\n\n{orig}".strip()
+            # 注入到 messages，确保 _build_messages() 能让 LLM 看到
+            self._suspended_state.setdefault("messages", []).append(
+                {"role": "user", "content": user_input}
+            )
             logger.info("[Engine] 消息已注入到挂起管道 state (%d 字符)", len(user_input))
         if self._wake_event is not None:
             self._wake_event.set()

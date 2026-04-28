@@ -42,7 +42,14 @@ def run_demo():
     print("=" * 50)
     app = CLIApplication()
     app.setup_pipeline()
-    asyncio.run(app.run())
+    try:
+        asyncio.run(app.run())
+    finally:
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
 
 
 def run_real(config_path: str | None = None):
@@ -55,7 +62,14 @@ def run_real(config_path: str | None = None):
     print("=" * 50)
     app = CLIApplication()
     app.setup_pipeline(config_path=config_path)
-    asyncio.run(app.run())
+    try:
+        asyncio.run(app.run())
+    finally:
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
 
 
 def run_e2e():

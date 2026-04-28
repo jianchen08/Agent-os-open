@@ -106,10 +106,12 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
-    - path: "config/templates/.agent_template_spec.yaml"
-      name: "Agent配置模板规范"
-    - path: "config/templates/_template_spec.md"
-      name: "产出物模板规范"
+    - name: "Agent配置模板规范"
+      type: "path"
+      path: "config/templates/.agent_template_spec.yaml"
+    - name: "产出物模板规范"
+      type: "path"
+      path: "config/templates/_template_spec.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

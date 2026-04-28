@@ -35,8 +35,9 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
-    - path: "config/templates/test_code_template.md"
-      name: "测试代码模板"
+    - name: "测试代码模板"
+      type: "path"
+      path: "config/templates/test_code_template.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

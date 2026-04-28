@@ -62,6 +62,11 @@ class ToolAutoLoader:
         # 检查是否已注册
         if self._registry.has(tool_name):
             logger.debug("[自动加载] 工具已注册: %s", tool_name)
+            # 已注册但未标记为动态工具时，补充标记
+            # 这样 tool_schema 才能将其 schema 注入给 LLM
+            if tool_name not in self._registry.get_dynamic_tool_names():
+                self._registry.mark_dynamic(tool_name)
+                logger.info("[自动加载] 已注册工具标记为动态: %s", tool_name)
             return self._registry.get(tool_name)
 
         # 防止循环加载

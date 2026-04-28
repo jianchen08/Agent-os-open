@@ -34,7 +34,7 @@ from typing import Any
 
 from channels.cli.cli_commands import CommandResult, SlashCommandRegistry
 from channels.cli.input_adapter import CLIInputAdapter
-from channels.cli.output_adapter import CLIOutputAdapter
+from channels.cli.output_adapter import CLIOutputAdapter, sanitize_for_terminal
 from pipeline.engine import PipelineEngine
 from pipeline.registry import PluginRegistry
 from pipeline.route import (
@@ -103,7 +103,8 @@ def setup_logging(
                 for _ns in (
                     "pipeline.", "httpcore", "httpx", "LiteLLM",
                     "isolation.", "infrastructure.",
-                    "tools.", "plugins.",
+                    "tools.", "plugins.", "llm.",
+                    "src.tools.", "src.plugins.", "src.llm.",
                     "evaluation", "tasks", "memory",
                     "human_interaction", "channels.cli.",
                     "__main__",
@@ -118,6 +119,7 @@ _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yam
 
 # Session directory for CLI session metadata
 _SESSION_DIR = Path("data/session")
+MAX_SESSION_MESSAGES = 100
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +171,10 @@ class CLIApplication:
         self._streaming = streaming
         self._agent_config: Any | None = None
         self._services: dict[str, Any] = {}
+
+        # 子对话期间的管道输出抑制
+        self._suppress_streaming: bool = False
+        self._streaming_buffer: list[str] = []
 
         # 交互状态
         self._interaction_mode: str = "normal"  # normal / auto / plan
@@ -751,12 +757,7 @@ class CLIApplication:
         # 12b. SessionService — 会话管理
         try:
             from infrastructure.session import SessionService
-            session_svc = SessionService(
-                checkpoint_manager=services.get("checkpoint_manager"),
-                session_dir=_SESSION_DIR,
-                task_service=services.get("task_service"),
-                exec_storage=services.get("execution_record_storage"),
-            )
+            session_svc = SessionService(session_dir=_SESSION_DIR)
             services["session_service"] = session_svc
             logger.info("Service created: session_service")
         except Exception as exc:
@@ -1041,6 +1042,13 @@ class CLIApplication:
         if tw and hasattr(tw, "stop"):
             await tw.stop()
 
+        # 清理 LiteLLM 内部 LoggingWorker 后台任务
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
+
     # -----------------------------------------------------------------------
     # Claude Code 风格 REPL 循环
     # -----------------------------------------------------------------------
@@ -1093,27 +1101,60 @@ class CLIApplication:
         # 确定 Agent ID（从已加载的 agent_config 获取）
         agent_id = self._agent_config.config_id if self._agent_config else "lingxi"
 
-        # 通过 SessionService 管理会话（创建或恢复）
+        # 通过 SessionService 管理会话（只管 session_id 和 pipeline_id）
         session_svc = self._services.get("session_service")
         if session_svc is None:
             from infrastructure.session import SessionService
-            session_svc = SessionService(
-                checkpoint_manager=self._services.get(
-                    "checkpoint_manager"
-                ),
-                session_dir=_SESSION_DIR,
-                task_service=self._services.get("task_service"),
-                exec_storage=self._services.get(
-                    "execution_record_storage"
-                ),
-            )
+            session_svc = SessionService(session_dir=_SESSION_DIR)
         session = await session_svc.create_or_restore(
             channel_type="cli",
         )
 
-        if session.conversation_history:
+        # 跨轮次对话历史：从执行记录恢复（绑定 pipeline_id）
+        conversation_history: list[dict[str, Any]] = []
+        restored = False
+
+        if session.active_pipeline_id:
+            exec_storage = self._services.get("execution_record_storage")
+            if exec_storage:
+                try:
+                    prev_records = exec_storage.list_by_pipeline(session.active_pipeline_id)
+                    if prev_records:
+                        conversation_history = []
+                        for r in prev_records:
+                            msg: dict[str, Any] = {"role": r.role, "content": r.content}
+                            if r.name:
+                                msg["name"] = r.name
+                            if r.tool_call_id:
+                                msg["tool_call_id"] = r.tool_call_id
+                            if r.tool_input:
+                                msg["tool_input"] = r.tool_input
+                            if r.tool_calls_json:
+                                try:
+                                    import json as _json
+                                    msg["tool_calls"] = _json.loads(r.tool_calls_json)
+                                except (_json.JSONDecodeError, TypeError):
+                                    pass
+                            conversation_history.append(msg)
+
+                        # 旧记录没有 tool_calls_json，需要从 tool 记录反向重建
+                        from infrastructure.task_worker import _reconstruct_tool_calls
+                        _reconstruct_tool_calls(conversation_history)
+
+                        restored = True
+                        logger.info(
+                            "Restored %d messages from pipeline records (pipeline=%s)",
+                            len(conversation_history), session.active_pipeline_id,
+                        )
+                except Exception as exc:
+                    logger.debug("Failed to restore from pipeline records: %s", exc)
+
+        if len(conversation_history) > MAX_SESSION_MESSAGES:
+            conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
+
+        if restored:
             console.print(
-                f"[dim]已恢复上次会话 ({len(session.conversation_history)} 条消息)，"
+                f"[dim]已恢复上次会话 ({len(conversation_history)} 条消息)，"
                 f"使用 /clear 开启新会话[/dim]"
             )
 
@@ -1143,9 +1184,20 @@ class CLIApplication:
                 continue
 
             # === 显示提示符并等待用户输入 ===
+            # 安全网：确保任何残留的流式输出状态被清理
+            _tsa2 = getattr(self, "_text_streaming_active", False)
+            logger.warning(
+                "[CURSOR-DEBUG] before prompt: "
+                "_text_streaming_active=%s", _tsa2,
+            )
+            if _tsa2:
+                _sys.stdout.write("\n")
+                _sys.stdout.flush()
+                self._text_streaming_active = False
             console.print(
                 self._input_adapter.prompt_text(), end=""
             )
+            _sys.stdout.flush()
             try:
                 initial_state = (
                     await self._input_adapter.receive()
@@ -1167,9 +1219,6 @@ class CLIApplication:
 
             # 退出信号
             if initial_state.get("should_stop"):
-                if session.conversation_history:
-                    await session_svc.save_on_exit(session)
-
                 if (
                     hasattr(self, "_task_worker")
                     and self._task_worker
@@ -1258,8 +1307,6 @@ class CLIApplication:
                 if slash_result.output:
                     console.print(slash_result.output)
                 if slash_result.should_exit:
-                    if session.conversation_history:
-                        await session_svc.save_on_exit(session)
                     console.print(
                         "[bold blue]Goodbye![/bold blue]"
                     )
@@ -1281,15 +1328,14 @@ class CLIApplication:
                 if cmd_result is None:
                     continue
                 if cmd_result.should_stop:
-                    if session.conversation_history:
-                        await session_svc.save_on_exit(session)
                     self._output_adapter.show_system_message(
                         "感谢使用 Agent OS，再见！",
                         "bold blue",
                     )
                     break
                 if cmd_result.should_clear_history:
-                    await session_svc.clear(session)
+                    conversation_history.clear()
+                    session_svc.clear(session)
                     self._turn_count = 0
                     self._output_adapter.update_status_bar(
                         turn_count=0, context_pct=0.0
@@ -1348,8 +1394,8 @@ class CLIApplication:
                     user_input=user_input,
                     agent_config=self._agent_config,
                     conversation_history=(
-                        session.conversation_history
-                        if session.conversation_history
+                        conversation_history
+                        if conversation_history
                         else None
                     ),
                     streaming=self._streaming,
@@ -1377,15 +1423,30 @@ class CLIApplication:
                         run_sub_conversation,
                     )
 
-                    await run_sub_conversation(
-                        console=console,
-                        input_adapter=(
-                            self._input_adapter
-                        ),
-                        notifier=cli_notifier,
-                        interaction_service=human_svc,
-                        idle_timeout=60,
-                    )
+                    # 抑制管道输出，防止穿插子对话
+                    self._suppress_streaming = True
+                    try:
+                        await run_sub_conversation(
+                            console=console,
+                            input_adapter=(
+                                self._input_adapter
+                            ),
+                            notifier=cli_notifier,
+                            interaction_service=human_svc,
+                            idle_timeout=60,
+                        )
+                    finally:
+                        self._suppress_streaming = False
+                        # 刷新缓冲的管道输出
+                        if self._streaming_buffer:
+                            for text in self._streaming_buffer:
+                                console.print(
+                                    text, end="",
+                                    highlight=False,
+                                )
+                            _sys.stdout.flush()
+                            self._streaming_buffer.clear()
+                            self._text_streaming_active = True
                     continue
 
                 # 等待管道完成或交互请求事件
@@ -1423,6 +1484,10 @@ class CLIApplication:
             try:
                 final_state = pipeline_task.result()
             except asyncio.CancelledError:
+                if getattr(self, "_text_streaming_active", False):
+                    _sys.stdout.write("\n")
+                    _sys.stdout.flush()
+                    self._text_streaming_active = False
                 console.print(
                     "\n[yellow]请求已取消[/yellow]"
                 )
@@ -1432,36 +1497,58 @@ class CLIApplication:
                 final_state = {"error": str(exc)}
 
             # 处理管道结果
-            await self._handle_pipeline_result(
-                final_state,
-                initial_state,
-                session,
-                console,
-            )
-            session_svc.update_after_run(
-                session, final_state,
-                initial_user_input=initial_state.get("user_input", ""),
+            conversation_history = (
+                await self._handle_pipeline_result(
+                    final_state,
+                    initial_state,
+                    conversation_history,
+                    session.session_id,
+                    console,
+                )
             )
             console.print("")
+
+        # 清理 LiteLLM 内部 LoggingWorker 后台任务，
+        # 避免 "Task was destroyed but it is pending!" 警告
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
 
     async def _handle_pipeline_result(
         self,
         final_state: dict[str, Any],
         initial_state: dict[str, Any],
-        session: Any,
+        conversation_history: list[dict[str, Any]],
+        session_id: str,
         console: Console,
-    ) -> None:
-        """处理管道执行结果：绑定任务、显示输出、刷新状态栏。
+    ) -> list[dict[str, Any]]:
+        """处理管道执行结果：更新历史、绑定任务、刷新状态栏。"""
+        # 流式输出收尾：如果文本流未结束，补一个换行
+        # 必须在所有路径之前执行，确保光标正确移到新行
+        _tsa = getattr(self, "_text_streaming_active", False)
+        logger.warning(
+            "[CURSOR-DEBUG] _handle_pipeline_result: "
+            "streaming=%s, _text_streaming_active=%s, "
+            "has_error=%s, has_result=%s",
+            self._streaming,
+            _tsa,
+            bool(final_state.get("error")),
+            bool(final_state.get("raw_result")),
+        )
+        if _tsa:
+            _sys.stdout.write("\n")
+            _sys.stdout.flush()
+            self._text_streaming_active = False
 
-        历史更新由 session_svc.update_after_run() 负责，不在此处理。
-        """
         # 错误结果直接显示
         if "error" in final_state and final_state.get("error"):
             await self._output_adapter.send(
                 {"error": final_state["error"]}
             )
             self._update_status_bar_idle()
-            return
+            return conversation_history
 
         # 回填 pipeline_run_id 到关联的任务
         pipeline_run_id = final_state.get("pipeline_id", "")
@@ -1517,10 +1604,30 @@ class CLIApplication:
         # 更新对话轮次
         self._turn_count += 1
 
+        # 更新对话历史
+        final_messages = final_state.get("messages", [])
+        if final_messages:
+            conversation_history = list(final_messages)
+        else:
+            user_input = initial_state.get("user_input", "")
+            raw_result = final_state.get("raw_result", "")
+            if user_input:
+                conversation_history.append(
+                    {"role": "user", "content": user_input}
+                )
+            if raw_result:
+                conversation_history.append(
+                    {"role": "assistant", "content": raw_result}
+                )
+
+        # Trim conversation history
+        if len(conversation_history) > MAX_SESSION_MESSAGES:
+            conversation_history = (
+                conversation_history[-MAX_SESSION_MESSAGES:]
+            )
+
         # 更新状态栏
-        ctx_pct = self._estimate_context_pct(
-            session.conversation_history
-        )
+        ctx_pct = self._estimate_context_pct(conversation_history)
         task_stats = self._get_task_stats()
         iteration = final_state.get("iteration", 0)
         max_iterations = final_state.get("max_iterations", 0)
@@ -1536,6 +1643,8 @@ class CLIApplication:
             completed_task_count=task_stats["completed"],
             failed_task_count=task_stats["failed"],
         )
+
+        return conversation_history
 
     def _update_status_bar_idle(self) -> None:
         """将状态栏更新为空闲状态。"""
@@ -1628,21 +1737,51 @@ class CLIApplication:
             on_chunk 回调函数
         """
         _displayed_tool_indices: set[int] = set()
+        self._text_streaming_active = False
+        _chunk_count = {"total": 0, "text": 0, "thinking": 0, "tool_call": 0,
+                        "tool_result": 0, "tool_start": 0, "iteration": 0}
 
         def on_chunk(chunk: dict[str, Any]) -> None:
             """流式回调：将管道事件实时输出到终端。"""
+            # 子对话期间抑制管道输出，缓冲到 _streaming_buffer
+            if self._suppress_streaming:
+                chunk_type = chunk.get("type", "text")
+                _content = chunk.get("content", "")
+                if chunk_type == "text" and _content:
+                    self._streaming_buffer.append(_content)
+                return
+
             chunk_type = chunk.get("type", "text")
             content = chunk.get("content", "")
+            _chunk_count["total"] += 1
+            if chunk_type in _chunk_count:
+                _chunk_count[chunk_type] += 1
 
             if chunk_type == "thinking":
                 if self._show_thinking and content:
-                    console.print(content, end="", highlight=False)
+                    safe = sanitize_for_terminal(content)
+                    console.print(safe, end="", highlight=False)
+                    _sys.stdout.flush()
+                    self._text_streaming_active = True
                 return
 
             if chunk_type == "text":
                 if content:
-                    console.print(content, end="", highlight=False)
+                    safe = sanitize_for_terminal(content)
+                    console.print(safe, end="", highlight=False)
+                    _sys.stdout.flush()
+                    self._text_streaming_active = True
                 return
+
+            # 非文本 chunk 到达时，结束之前的文本流（换行）
+            if self._text_streaming_active:
+                logger.warning(
+                    "[CURSOR-DEBUG] on_chunk: newline before %s "
+                    "(chunk_stats=%s)", chunk_type, _chunk_count,
+                )
+                _sys.stdout.write("\n")
+                _sys.stdout.flush()
+                self._text_streaming_active = False
 
             if chunk_type == "tool_call":
                 tool_calls_data = chunk.get("tool_calls", [])
@@ -1826,10 +1965,17 @@ def main() -> None:
     app._interaction_mode = args.mode
     app.setup_pipeline(config_path=args.config)
 
-    if args.message:
-        asyncio.run(app.run_single(args.message))
-    else:
-        asyncio.run(app.run())
+    try:
+        if args.message:
+            asyncio.run(app.run_single(args.message))
+        else:
+            asyncio.run(app.run())
+    finally:
+        try:
+            from llm.adapter import cleanup_litellm_logging
+            cleanup_litellm_logging()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

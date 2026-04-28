@@ -194,6 +194,12 @@
 > - 多个同类型包且总量在上下文范围内 → 合并后给一个 L2，让它自己内部分配
 > - L2 不存在时标记"需新建"，并说明其职责
 >
+> **资源创建规则（重要）**：
+> - 当任务的"资源状态"为"需新建"时，即需要为系统自身创建新的 Agent 或工具
+> - 所有资源创建和修改操作**必须**统一提交给 `resource_manager_agent`（config/agents/orchestrator/resource_manager_agent.yaml）
+> - `resource_manager_agent` 是唯一的资源管理入口，负责协调 research_agent、environment_setup_agent、tool_maker、agent_maker 完成资源的调研、创建和修改
+> - L1 主 Agent 在读取任务链后，发现缺失资源时，先提交 `resource_manager_agent` 创建所需资源，待资源就绪后再将对应子任务提交给新建的执行者
+>
 > **上下文环境拆分指引规则**：
 > - 包给已有 L2 → 不填，L2 自己决定内部如何拆分
 > - 包给已有 L3 → 不填，L3 知道自己领域的拆法

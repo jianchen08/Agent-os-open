@@ -1018,12 +1018,30 @@ class ResourceSearchTool:
             logger.warning("[resource_search] ToolAutoLoader 未初始化，无法注入动态工具")
             return
 
+        # 获取与 tool_schema 同一个 registry 实例，确保 mark_dynamic 生效
+        tool_registry = self._get_tool_registry()
+        logger.info(
+            "[resource_search] registry_id=%s auto_loader_registry_id=%s tool_names=%s",
+            id(tool_registry) if tool_registry else None,
+            id(auto_loader._registry) if auto_loader else None,
+            tool_names,
+        )
+
         for tool_name in tool_names:
             try:
                 tool = await auto_loader.auto_load_tool(tool_name)
                 if not tool:
                     logger.warning("[resource_search] 工具加载失败: %s", tool_name)
                     continue
+
+                # 直接在 registry 上标记为动态工具，确保 tool_schema 下一轮可见
+                if tool_registry and tool_name not in tool_registry.get_dynamic_tool_names():
+                    tool_registry.mark_dynamic(tool_name)
+                    logger.info(
+                        "[resource_search] 已标记动态工具: %s (dynamic_tools=%s)",
+                        tool_name, tool_registry.get_dynamic_tool_names(),
+                    )
+
                 logger.info("[resource_search] 动态工具加载成功: %s", tool_name)
             except Exception as e:
                 logger.error(

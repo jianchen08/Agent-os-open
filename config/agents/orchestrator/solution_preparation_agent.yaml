@@ -60,8 +60,9 @@ static_vars:
         ## 可扩展工具索引
         以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
         - human_interaction: 与用户交互（请求确认、展示方案等）
-    - path: "config/templates/solution_template.md"
-      name: "方案文档模板"
+    - name: "方案文档模板"
+      type: "path"
+      path: "config/templates/solution_template.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

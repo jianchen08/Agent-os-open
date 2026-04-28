@@ -24,6 +24,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RETRIES = 3
+_DEFAULT_EVAL_TIMEOUT = 300.0
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -220,15 +221,15 @@ class TaskEvaluateTool(BuiltinTool):
             )
 
         if action == "evaluate_single":
-            return self._evaluate_single(inputs, task_service, task)
+            return await self._evaluate_single(inputs, task_service, task)
         elif action == "auto_complete":
-            return self._auto_complete(inputs, task_service, task)
+            return await self._auto_complete(inputs, task_service, task)
         else:
             return create_failure_result(
                 error=f"不支持的操作: {action}", error_code="INVALID_ACTION"
             )
 
-    def _evaluate_single(
+    async def _evaluate_single(
         self,
         inputs: dict[str, Any],
         task_service: Any,
@@ -262,19 +263,37 @@ class TaskEvaluateTool(BuiltinTool):
             return self._auto_complete(inputs, task_service, task)
 
         try:
+            import asyncio
+            loop = asyncio.get_running_loop()
             executor = self._create_executor(task_service)
-            result = executor.run_evaluation(
-                task_id=task_id,
-                metric_ids=[metric_id],
+            timeout = self._get_eval_timeout(task)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: executor.run_evaluation(
+                        task_id=task_id,
+                        metric_ids=[metric_id],
+                    ),
+                ),
+                timeout=timeout,
             )
             return self._handle_evaluation_result(inputs, task_service, task, result)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TaskEvaluate] 单指标评估超时 | task_id=%s | metric_id=%s | timeout=%ss",
+                task_id, metric_id, timeout,
+            )
+            return create_failure_result(
+                error=f"评估超时（{timeout}s）: 指标 {metric_id} 执行时间过长",
+                error_code="EVAL_TIMEOUT",
+            )
         except Exception as e:
             logger.exception("[TaskEvaluate] 单指标评估失败: %s", e)
             return create_failure_result(
                 error=f"评估失败: {e}", error_code="EVAL_FAILED"
             )
 
-    def _auto_complete(
+    async def _auto_complete(
         self,
         inputs: dict[str, Any],
         task_service: Any,
@@ -315,14 +334,32 @@ class TaskEvaluateTool(BuiltinTool):
         )
 
         try:
+            import asyncio
+            loop = asyncio.get_running_loop()
             executor = self._create_executor(task_service)
-            result = executor.run_evaluation(
-                task_id=task.id,
-                metric_ids=metric_ids,
-                input_params=input_params,
-                skip_state_update=True,
+            timeout = self._get_eval_timeout(task)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: executor.run_evaluation(
+                        task_id=task.id,
+                        metric_ids=metric_ids,
+                        input_params=input_params,
+                        skip_state_update=True,
+                    ),
+                ),
+                timeout=timeout,
             )
             return self._handle_evaluation_result(inputs, task_service, task, result)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TaskEvaluate] 自动评估超时 | task_id=%s | metrics=%s | timeout=%ss",
+                task.id, metric_ids, timeout,
+            )
+            return create_failure_result(
+                error=f"评估超时（{timeout}s）: 指标 {metric_ids} 执行时间过长",
+                error_code="EVAL_TIMEOUT",
+            )
         except Exception as e:
             logger.exception("[TaskEvaluate] 自动完成评估失败: %s", e)
             return create_failure_result(
@@ -541,13 +578,30 @@ class TaskEvaluateTool(BuiltinTool):
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
+                logger.warning(
+                    "[TaskEvaluate] execution_record_storage 不可用，跳过评估管道注册"
+                )
                 return
+            registered = 0
+            skipped = 0
             for r in eval_result.results:
                 pid = getattr(r, "pipeline_run_id", None)
                 if pid:
                     exec_storage.register_pipeline(pid, root_id)
+                    registered += 1
+                elif hasattr(r, "pipeline_run_id"):
+                    skipped += 1
+            if registered or skipped:
+                logger.info(
+                    "[TaskEvaluate] 评估管道注册 | task=%s | root=%s | "
+                    "registered=%d | skipped=%d",
+                    task.id, root_id, registered, skipped,
+                )
         except Exception as exc:
-            logger.debug("[TaskEvaluate] 注册评估管道分组失败: %s", exc)
+            logger.warning(
+                "[TaskEvaluate] 注册评估管道分组失败 | task=%s | error=%s",
+                task.id, exc,
+            )
 
     @staticmethod
     def _append_eval_history(task: Any, eval_result: Any) -> None:
@@ -614,17 +668,25 @@ class TaskEvaluateTool(BuiltinTool):
         Returns:
             EvaluationExecutor 实例
         """
+        import asyncio
         from evaluation.executor import EvaluationExecutor
 
         pipeline_factory = self._get_pipeline_factory()
         agent_registry = self._get_agent_registry()
         tool_registry = self._get_tool_registry()
 
+        main_loop = None
+        try:
+            main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
         return EvaluationExecutor(
             task_service=task_service,
             pipeline_factory=pipeline_factory,
             agent_registry=agent_registry,
             tool_registry=tool_registry,
+            main_loop=main_loop,
         )
 
     @staticmethod
@@ -691,6 +753,22 @@ class TaskEvaluateTool(BuiltinTool):
             return get_global_tool_registry_sync()
         except Exception:
             return None
+
+    @staticmethod
+    def _get_eval_timeout(task: Any) -> float:
+        """根据任务元数据获取评估超时时间（秒）。
+
+        优先使用 task.metadata.eval_timeout（允许单个任务自定义），
+        默认 _DEFAULT_EVAL_TIMEOUT（300秒）。
+        """
+        metadata = task.metadata if task.metadata else {}
+        custom_timeout = metadata.get("eval_timeout")
+        if custom_timeout is not None:
+            try:
+                return float(custom_timeout)
+            except (TypeError, ValueError):
+                pass
+        return _DEFAULT_EVAL_TIMEOUT
 
     def _get_metric_ids(self, task: Any) -> list[str]:
         """从任务模型中提取评估指标 ID 列表。

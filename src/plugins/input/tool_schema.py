@@ -109,6 +109,10 @@ class ToolSchemaPlugin(IInputPlugin):
 
         # 合并动态加载的工具（由 resource_search 在运行时触发加载）
         dynamic_names = tool_registry.get_dynamic_tool_names()
+        logger.debug(
+            "[%s] registry_id=%s dynamic_names=%s",
+            self.name, id(tool_registry), dynamic_names,
+        )
         if dynamic_names:
             active_tool_ids = list(set(active_tool_ids) | dynamic_names)
 

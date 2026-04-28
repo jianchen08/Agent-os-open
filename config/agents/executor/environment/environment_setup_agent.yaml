@@ -72,8 +72,9 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
-    - path: "config/templates/environment_status_template.md"
-      name: "环境状态报告模板"
+    - name: "环境状态报告模板"
+      type: "path"
+      path: "config/templates/environment_status_template.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -90,13 +91,6 @@ context_variables:
     agent_name: "环境准备专家"
     agent_level: "L3"
     agent_category: "resource"
-
-# 知识库配置
-knowledge:
-  mode: "compressed"
-  max_tokens: 1000
-  top_k: 3
-  score_threshold: 0.7
 
 # 可用工具
 tool_ids:

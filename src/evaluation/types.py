@@ -93,6 +93,7 @@ class MetricDefinition:
     default_config: dict[str, Any] = field(default_factory=dict)
     expect: ExpectSpec = field(default_factory=ExpectSpec)
     input_schema: dict[str, Any] = field(default_factory=dict)
+    input_mapping: dict[str, Any] = field(default_factory=dict)
     is_red_line: bool = False
     default_weight: float = 1.0
     level: int = 1

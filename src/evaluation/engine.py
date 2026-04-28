@@ -62,6 +62,7 @@ class EvaluationEngine:
         tool_registry: Any | None = None,
         pipeline_factory: Callable[[], Any] | None = None,
         agent_registry: Any | None = None,
+        main_loop: Any | None = None,
     ) -> None:
         """初始化评估引擎。
 
@@ -71,16 +72,19 @@ class EvaluationEngine:
             tool_registry: 工具注册表，None 时工具型评估器 fallback 到 Mock
             pipeline_factory: 创建 PipelineEngine 实例的可调用对象
             agent_registry: AgentRegistry 实例，用于获取 evaluator_agent 配置
+            main_loop: 主事件循环引用，human_interaction 等需要与主循环
+                       交互的工具通过 run_coroutine_threadsafe 回调
         """
         self._loader = loader
         self._expect_evaluator = expect_evaluator or ExpectEvaluator()
         self._tool_registry = tool_registry
         self._pipeline_factory = pipeline_factory
         self._agent_registry = agent_registry
+        self._main_loop = main_loop
         self._evaluators: dict[MetricType, EvaluatorFunc] = {
             MetricType.TOOL: self._evaluate_tool,
             MetricType.AGENT: self._evaluate_agent,
-            MetricType.HUMAN: self._evaluate_human,
+            MetricType.HUMAN: self._evaluate_tool,
         }
 
     def register_evaluator(self, metric_type: MetricType, func: EvaluatorFunc) -> None:
@@ -228,6 +232,56 @@ class EvaluationEngine:
             task_id=task_id,
         )
 
+    @staticmethod
+    def _resolve_input_mapping(
+        metric_def: MetricDefinition,
+    ) -> dict[str, Any]:
+        """解析 input_mapping 模板，将指标上下文映射到工具输入参数。
+
+        支持 {{ metric.xxx }} 占位符，用 str.format 风格替换。
+        非字符串值（如 list、dict）直接透传。
+
+        Args:
+            metric_def: 指标定义（含 input_mapping 模板）
+
+        Returns:
+            解析后的参数字典
+        """
+        mapping = metric_def.input_mapping
+        if not mapping:
+            return {}
+
+        context = {
+            "metric": {
+                "id": metric_def.id,
+                "name": metric_def.name,
+                "description": metric_def.description,
+                "default_config": metric_def.default_config,
+            },
+        }
+
+        resolved: dict[str, Any] = {}
+        for key, value in mapping.items():
+            if isinstance(value, str):
+                resolved[key] = _resolve_template_typed(value, context)
+            elif isinstance(value, list):
+                resolved[key] = [
+                    (
+                        {_resolve_template(k, context): _resolve_template(v, context) for k, v in item.items()}
+                        if isinstance(item, dict)
+                        else _resolve_template(item, context) if isinstance(item, str) else item
+                    )
+                    for item in value
+                ]
+            elif isinstance(value, dict):
+                resolved[key] = {
+                    _resolve_template(k, context): _resolve_template(v, context)
+                    for k, v in value.items()
+                }
+            else:
+                resolved[key] = value
+        return resolved
+
     def _evaluate_metric(
         self,
         metric_def: MetricDefinition,
@@ -257,8 +311,13 @@ class EvaluationEngine:
             )
 
         try:
-            # 合并默认配置和输入参数
-            merged_params = {**metric_def.default_config, **input_params}
+            # 合并默认配置、input_mapping 解析结果和输入参数
+            mapped = self._resolve_input_mapping(metric_def)
+            merged_params = {
+                **metric_def.default_config,
+                **mapped,
+                **input_params,
+            }
 
             # 调用评估器获取输出
             output = evaluator(
@@ -351,17 +410,34 @@ class EvaluationEngine:
             try:
                 import asyncio
 
+                # human_interaction 工具需要 pipeline_id
+                if (evaluator_id == "human_interaction"
+                        and "pipeline_id" not in params):
+                    params["pipeline_id"] = task_id or "eval_session"
+
                 tool_result = handler(params)
                 if asyncio.iscoroutine(tool_result):
-                    import concurrent.futures
+                    if (
+                        evaluator_id == "human_interaction"
+                        and self._main_loop
+                        and self._main_loop.is_running()
+                    ):
+                        # human_interaction 必须在主事件循环上运行，
+                        # 否则 asyncio.Event 跨循环不互通导致死锁
+                        future = asyncio.run_coroutine_threadsafe(
+                            tool_result, self._main_loop
+                        )
+                        tool_result = future.result()
+                    else:
+                        import concurrent.futures
 
-                    def _run_async(coro):
-                        return asyncio.run(coro)
+                        def _run_async(coro):
+                            return asyncio.run(coro)
 
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        tool_result = pool.submit(
-                            _run_async, tool_result
-                        ).result()
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            tool_result = pool.submit(
+                                _run_async, tool_result
+                            ).result()
 
                 if hasattr(tool_result, "to_dict"):
                     result_dict = tool_result.to_dict()
@@ -423,6 +499,12 @@ class EvaluationEngine:
                 from tools.builtin.evaluators.resource_evaluator import ResourceEvaluator
                 inst = ResourceEvaluator()
                 return inst.execute
+            elif evaluator_id == "human_interaction":
+                from tools.builtin.human_interaction import (
+                    HumanInteractionTool,
+                )
+                inst = HumanInteractionTool()
+                return inst.execute
         except Exception as e:
             logger.debug("Failed to load builtin evaluator %s: %s", evaluator_id, e)
         return None
@@ -483,6 +565,9 @@ class EvaluationEngine:
 
         eval_prompt = self._build_agent_eval_prompt(metric_def, params)
 
+        # 在 pipeline 运行前捕获 engine ID，确保异常时也能注册管道记录
+        _captured_pid: list[str] = [""]
+
         try:
             import asyncio
             import json
@@ -490,16 +575,13 @@ class EvaluationEngine:
 
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
+                _captured_pid[0] = engine._pipeline_id
                 from pathlib import Path
-                # Use task workspace if available, fall back to
-                # project root
                 project_root = _resolve_eval_project_root(
                     task_id, params,
                 ) or str(
                     Path(__file__).resolve().parent.parent.parent
                 )
-                # 将 evaluation_mode 注入 plugin_configs，确保 TaskReminder
-                # 能检测到评估模式（不依赖共享 plugin_registry 的合并）
                 _plugin_configs = {
                     "task_reminder": {"evaluation_mode": True},
                 }
@@ -560,7 +642,7 @@ class EvaluationEngine:
                 return {
                     "passed": False,
                     "score": 0.0,
-                    "feedback": f"评估管道超时: {stop_reason}",
+                    "feedback": f"评估管道超时（指标: {metric_def.id}）: {stop_reason}",
                     "pipeline_run_id": _pipeline_run_id,
                 }
             if max_reminders > 0:
@@ -592,6 +674,7 @@ class EvaluationEngine:
                 "passed": False,
                 "score": 0.0,
                 "feedback": f"评估管道执行异常: {e}",
+                "pipeline_run_id": _captured_pid[0] or None,
             }
 
     @staticmethod
@@ -747,35 +830,77 @@ class EvaluationEngine:
 
         return "\n".join(parts)
 
-    def _evaluate_human(
-        self,
-        metric_def: MetricDefinition,
-        params: dict[str, Any],
-        task_id: str = "",
-    ) -> dict[str, Any]:
-        """人工审核型评估器（未实现）。
 
-        TODO: 通过 human_interaction 工具等待人工审核。
-        当前为占位实现，返回 passed=True 避免阻塞流程。
-        上层调用方应检查 evaluator_type != human 再使用。
+def _resolve_template(value: str, context: dict[str, Any]) -> str:
+    """解析 {{ a.b.c }} 风格的简单模板占位符（返回字符串）。"""
+    import re
 
-        Args:
-            metric_def: 指标定义
-            params: 合并后的输入参数
+    def _replacer(match: re.Match) -> str:
+        expr = match.group(1).strip()
+        parts = expr.split("|")
+        path = parts[0].strip()
+        default_val = ""
+        if len(parts) > 1:
+            default_expr = parts[1].strip()
+            if default_expr.startswith("default("):
+                default_val = default_expr[8:].rstrip(")").strip().strip("'\"")
 
-        Returns:
-            占位评估输出
-        """
-        logger.warning(
-            "Human evaluation NOT IMPLEMENTED: %s (evaluator_id=%s) "
-            "— returning placeholder passed result",
-            metric_def.id, metric_def.evaluator_id,
-        )
-        return {
-            "passed": True,
-            "score": 100.0,
-            "feedback": "人工审核尚未实现，返回占位结果",
-        }
+        current: Any = context
+        for key in path.split("."):
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = None
+                break
+
+        if current is None:
+            return default_val
+        return str(current)
+
+    return re.sub(r"\{\{\s*(.+?)\s*\}\}", _replacer, value)
+
+
+def _resolve_template_typed(
+    value: str,
+    context: dict[str, Any],
+) -> Any:
+    """解析模板，如果整个值是单个 {{ expr }}，保留原始类型（int/float/bool）。
+
+    避免数字字段（如 timeout_seconds）被转为字符串。
+    """
+    import re
+
+    stripped = value.strip()
+    m = re.fullmatch(r"\{\{\s*(.+?)\s*\}\}", stripped)
+    if m:
+        expr = m.group(1).strip()
+        parts = expr.split("|")
+        path = parts[0].strip()
+        current: Any = context
+        for key in path.split("."):
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = None
+                break
+        if current is not None:
+            return current
+        # 回退到 default
+        if len(parts) > 1:
+            default_expr = parts[1].strip()
+            if default_expr.startswith("default("):
+                raw = default_expr[8:].rstrip(")").strip().strip("'\"")
+                try:
+                    return int(raw)
+                except ValueError:
+                    try:
+                        return float(raw)
+                    except ValueError:
+                        return raw
+        return value
+
+    # 混合模板（含文本和占位符），返回字符串
+    return _resolve_template(value, context)
 
 
 def _resolve_eval_project_root(
