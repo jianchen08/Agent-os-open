@@ -26,23 +26,6 @@ from channels.input_adapter import IInputAdapter
 logger = logging.getLogger(__name__)
 
 
-def _dbg(fmt: str, *args: Any) -> None:
-    """写调试信息到 _paste_debug.log 文件（用于排查粘贴问题）。"""
-    import os
-    import time
-
-    try:
-        ts = time.strftime("%H:%M:%S")
-        msg = f"[{ts}] " + (fmt % args if args else fmt) + "\n"
-        path = os.path.join(
-            os.path.dirname(__file__), "_paste_debug.log"
-        )
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(msg)
-    except Exception:
-        pass
-
-
 class _StdinLineReader:
     """后台线程持续从 stdin 逐行读取，放入队列。
 
@@ -64,25 +47,21 @@ class _StdinLineReader:
             self._thread.start()
 
     def _read_loop(self) -> None:
-        _dbg("reader thread started")
         while True:
             try:
                 line = sys.stdin.readline()
                 if not line:  # EOF
                     self._eof = True
                     self._queue.put(None)
-                    _dbg("reader EOF")
                     break
                 if line.endswith("\n"):
                     line = line[:-1]
                 if line.endswith("\r"):
                     line = line[:-1]
                 self._queue.put(line)
-                _dbg("reader put: %r", line[:60])
-            except Exception as e:
+            except Exception:
                 self._eof = True
                 self._queue.put(None)
-                _dbg("reader error: %s", e)
                 break
 
     def read_line_blocking(self) -> str | None:
@@ -152,6 +131,10 @@ class CLIInputAdapter(IInputAdapter):
     def last_command_result(self) -> CommandResult | None:
         """获取最近一次斜杠命令的执行结果。"""
         return self._last_command_result
+
+    def prompt_text(self) -> str:
+        """返回当前提示符文本（含前导换行）。"""
+        return f"\n{self._prompt_str}"
 
     async def receive(self) -> dict[str, Any]:
         """从 stdin 读取用户输入，返回初始 state。
@@ -237,19 +220,16 @@ class CLIInputAdapter(IInputAdapter):
         return state
 
     def _read_line(self, prompt: str) -> str:
-        """读取一行输入。
+        """从队列读取一行输入（不显示提示符）。
 
-        使用后台 stdin 读取线程 + 队列，避免 Windows 上 input()
-        的 Console API 与 rich Console 输出冲突。
+        提示符由调用方在显示后再调用此方法。
 
         Args:
-            prompt: 输入提示符
+            prompt: 未使用，保留接口兼容
 
         Returns:
             用户输入的一行文本（不含换行符）
         """
-        sys.stdout.write(prompt)
-        sys.stdout.flush()
         reader = self._get_stdin_reader()
         line = reader.read_line_blocking()
         if line is None:
@@ -268,15 +248,12 @@ class CLIInputAdapter(IInputAdapter):
         """
         lines: list[str] = []
 
-        # 首行 — 使用 _read_line 避免 Windows input() 问题
-        sys.stderr.flush()
-        line = self._read_line(f"\n{self._prompt_str}")
+        # 首行（提示符已由主循环显示）
+        line = self._read_line("")
         lines.append(line)
-        _dbg("first line: %r", line[:60])
 
         # 多行粘贴检测：快速到达的额外行合并为同一条消息
         self._drain_paste_lines(lines)
-        _dbg("after drain: %d lines total", len(lines))
 
         # 续行检测：行尾有 \\ 表示续接
         while lines[-1].rstrip().endswith("\\"):
@@ -300,31 +277,21 @@ class CLIInputAdapter(IInputAdapter):
         手动输入因行间延迟较大，不会误合并。
         """
         is_tty = sys.stdin.isatty()
-        _dbg("drain start, isatty=%s", is_tty)
 
         if not is_tty:
-            _dbg("drain skip: not tty")
             return
 
         reader = self._get_stdin_reader()
-        _dbg(
-            "drain: reader started=%s, eof=%s, qsize=%d",
-            reader._started,
-            reader._eof,
-            reader._queue.qsize(),
-        )
 
         # 读取粘贴的额外行：粘贴数据在队列中立即可用
         extra = 0
         while True:
-            line = reader.read_line(timeout=0.1)
-            _dbg("drain read: %r", line[:60] if line else None)
+            line = reader.read_line(timeout=0.05)
             if line is None:
                 break
             lines.append(line)
             extra += 1
 
-        _dbg("drain done: %d extra lines", extra)
         if extra > 0:
             logger.info(
                 "粘贴检测: 合并 %d 行额外输入", extra

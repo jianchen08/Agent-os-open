@@ -29,7 +29,6 @@ import argparse
 import asyncio
 import logging
 import sys as _sys
-import uuid as _uuid
 from pathlib import Path
 from typing import Any
 
@@ -117,41 +116,8 @@ def setup_logging(
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
 
-# Maximum number of messages retained in a persisted session
-MAX_SESSION_MESSAGES = 100
-
-
-def _get_session_dir() -> Path:
-    """Get the directory used to store CLI session metadata."""
-    session_dir = Path("data/session")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir
-
-
-def _load_session_id(session_dir: Path) -> str | None:
-    """Load the previous session ID from disk.
-
-    Returns:
-        The stored session ID string, or None if not found.
-    """
-    id_file = session_dir / ".current_session_id"
-    if id_file.exists():
-        try:
-            return id_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    return None
-
-
-def _save_session_id(session_dir: Path, session_id: str) -> None:
-    """Persist the current session ID to disk.
-
-    Args:
-        session_dir: Path to the session metadata directory.
-        session_id: The session identifier to store.
-    """
-    id_file = session_dir / ".current_session_id"
-    id_file.write_text(session_id, encoding="utf-8")
+# Session directory for CLI session metadata
+_SESSION_DIR = Path("data/session")
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +176,6 @@ class CLIApplication:
         self._turn_count: int = 0
 
         # 并发执行状态
-        self._pipeline_task: asyncio.Task | None = None
-        self._input_task: asyncio.Task | None = None
 
         # 事件总线（用于接收子任务完成通知）
         from pipeline.event_bus import EventBus
@@ -784,7 +748,19 @@ class CLIApplication:
         except Exception as exc:
             logger.warning("Failed to create checkpoint services: %s", exc)
 
-        # 12. 注入 CLI 交互通知器 — 子 Agent 人类交互支持
+        # 12b. SessionService — 会话管理
+        try:
+            from infrastructure.session import SessionService
+            session_svc = SessionService(
+                checkpoint_manager=services.get("checkpoint_manager"),
+                session_dir=_SESSION_DIR,
+            )
+            services["session_service"] = session_svc
+            logger.info("Service created: session_service")
+        except Exception as exc:
+            logger.warning("Failed to create session_service: %s", exc)
+
+        # 13. 注入 CLI 交互通知器 — 子 Agent 人类交互支持
         try:
             from channels.cli.cli_interaction import CLIInteractionNotifier
             from human_interaction import get_human_interaction_service
@@ -804,6 +780,7 @@ class CLIApplication:
         for _sp_name in [
             "task_service", "execution_record_storage",
             "agent_registry", "event_bus",
+            "session_service",
         ]:
             _sp_inst = services.get(_sp_name)
             if _sp_inst is not None:
@@ -1114,64 +1091,27 @@ class CLIApplication:
         # 确定 Agent ID（从已加载的 agent_config 获取）
         agent_id = self._agent_config.config_id if self._agent_config else "lingxi"
 
-        # 跨轮次对话历史：累积所有轮次的 messages
-        conversation_history: list[dict[str, Any]] = []
+        # 通过 SessionService 管理会话（创建或恢复）
+        session_svc = self._services.get("session_service")
+        if session_svc is None:
+            from infrastructure.session import SessionService
+            session_svc = SessionService(
+                checkpoint_manager=self._services.get(
+                    "checkpoint_manager"
+                ),
+                session_dir=_SESSION_DIR,
+            )
+        session = await session_svc.create_or_restore(
+            channel_type="cli",
+        )
 
-        # 会话级 pipeline_run_id：同一会话共享，清空历史时重新生成
-        # Try to resume the previous session from a persisted checkpoint
-        session_dir = _get_session_dir()
-        checkpoint_mgr = self._services.get("checkpoint_manager")
-        restored = False
-
-        saved_session_id = _load_session_id(session_dir)
-        if saved_session_id is not None and checkpoint_mgr is not None:
-            try:
-                latest_checkpoint = await checkpoint_mgr.get_latest(saved_session_id)
-                if latest_checkpoint is not None:
-                    saved_messages = latest_checkpoint.get("state", {}).get("messages", [])
-                    if isinstance(saved_messages, list) and saved_messages:
-                        conversation_history = saved_messages
-                        session_pipeline_id = saved_session_id
-                        restored = True
-            except Exception as exc:
-                logger.debug("Failed to restore session checkpoint: %s", exc)
-
-        # BUG-FIX-fix_20260418_session_pipeline_id:
-        # 回退：当 session_pipeline_id 对应的检查点不存在时（如旧版本遗留的不匹配 ID），
-        # 尝试从全局最新检查点恢复对话历史，优先使用 session_end 阶段的检查点。
-        if not restored and checkpoint_mgr is not None:
-            try:
-                fallback_checkpoint = await checkpoint_mgr.get_latest_any(phase="session_end")
-                if fallback_checkpoint is None:
-                    fallback_checkpoint = await checkpoint_mgr.get_latest_any()
-                if fallback_checkpoint is not None:
-                    fb_messages = fallback_checkpoint.get("state", {}).get("messages", [])
-                    fb_pipeline_id = fallback_checkpoint.get("metadata", {}).get("pipeline_id")
-                    if isinstance(fb_messages, list) and fb_messages and fb_pipeline_id:
-                        conversation_history = fb_messages
-                        session_pipeline_id = fb_pipeline_id
-                        restored = True
-                        logger.info("Restored from fallback checkpoint: pipeline_id=%s", fb_pipeline_id)
-            except Exception as exc:
-                logger.debug("Fallback restoration failed: %s", exc)
-
-        if not restored:
-            session_pipeline_id = _uuid.uuid4().hex[:12]
-            _save_session_id(session_dir, session_pipeline_id)
-        else:
-            _save_session_id(session_dir, session_pipeline_id)
-
-        # Trim to MAX_SESSION_MESSAGES after restoration
-        if len(conversation_history) > MAX_SESSION_MESSAGES:
-            conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
-
-        if restored:
+        if session.conversation_history:
             console.print(
-                f"[dim]已恢复上次会话 ({len(conversation_history)} 条消息)，"
+                f"[dim]已恢复上次会话 ({len(session.conversation_history)} 条消息)，"
                 f"使用 /clear 开启新会话[/dim]"
             )
 
-        # REPL 主循环
+        # REPL 主循环（串行模式：输入 → 输出 → 输入）
         while True:
             # 渲染状态栏提示符
             status_text = self._output_adapter.status_bar.render_simple()
@@ -1180,8 +1120,13 @@ class CLIApplication:
             # 检查是否有子 Agent 待处理的交互请求
             cli_notifier = self._services.get("cli_notifier")
             if cli_notifier and cli_notifier.has_pending():
-                human_svc = self._services.get("human_interaction_service")
-                from channels.cli.cli_interaction import run_sub_conversation
+                human_svc = self._services.get(
+                    "human_interaction_service"
+                )
+                from channels.cli.cli_interaction import (
+                    run_sub_conversation,
+                )
+
                 await run_sub_conversation(
                     console=console,
                     input_adapter=self._input_adapter,
@@ -1191,122 +1136,99 @@ class CLIApplication:
                 )
                 continue
 
-            # === 并发执行：管道后台运行 + 输入始终可读 ===
-            # 确保输入任务始终活跃（不被 cancel，避免线程池竞争）
-            if self._input_task is None or self._input_task.done():
-                self._input_task = asyncio.create_task(
-                    self._input_adapter.receive()
+            # === 显示提示符并等待用户输入 ===
+            console.print(
+                self._input_adapter.prompt_text(), end=""
+            )
+            try:
+                initial_state = (
+                    await self._input_adapter.receive()
                 )
-
-            # 如果管道在运行，并发等待管道完成或用户新输入
-            if (
-                self._pipeline_task is not None
-                and not self._pipeline_task.done()
-            ):
-                done, _ = await asyncio.wait(
-                    {self._pipeline_task, self._input_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+            except (EOFError, KeyboardInterrupt):
+                self._output_adapter.show_system_message(
+                    "感谢使用 Agent OS，再见！",
+                    "bold blue",
                 )
-
-                if self._pipeline_task in done:
-                    # 管道完成 — 处理结果
-                    try:
-                        final_state = self._pipeline_task.result()
-                    except asyncio.CancelledError:
-                        self._pipeline_task = None
-                        console.print(
-                            "\n[yellow]管道已取消[/yellow]"
-                        )
-                        continue
-                    except Exception as exc:
-                        final_state = {"error": str(exc)}
-                    self._pipeline_task = None
-                    conversation_history = (
-                        await self._handle_pipeline_result(
-                            final_state, initial_state,
-                            conversation_history,
-                            session_pipeline_id, console,
-                        )
-                    )
-                    console.print("")
-                    continue
-                else:
-                    # 用户输入了新内容 — 先检查是否为无意义输入
-                    try:
-                        peek_state = self._input_task.result()
-                    except Exception:
-                        peek_state = {}
-
-                    # 空输入（如粘贴后的回车）不取消管道
-                    if peek_state.get("_is_empty"):
-                        self._input_task = None
-                        continue
-
-                    # 有实际内容 — 取消管道
-                    self._pipeline_task.cancel()
-                    try:
-                        await asyncio.wait_for(
-                            self._pipeline_task, timeout=3.0
-                        )
-                    except (
-                        asyncio.CancelledError,
-                        asyncio.TimeoutError,
-                    ):
-                        pass
-                    self._pipeline_task = None
-                    console.print(
-                        "\n[yellow]上一个请求已取消[/yellow]"
-                    )
-
-            # 读取用户输入（复用已完成的 _input_task）
-            initial_state = await self._input_task
-            self._input_task = None
+                break
 
             # 退出信号
             if initial_state.get("should_stop"):
-                # Persist conversation history before exiting
-                if conversation_history and checkpoint_mgr is not None:
-                    try:
-                        await checkpoint_mgr.save(
-                            session_pipeline_id,
-                            {"messages": conversation_history},
-                            phase="session_end",
-                        )
-                    except Exception as exc:
-                        logger.debug("Failed to save session on exit: %s", exc)
+                if session.conversation_history:
+                    await session_svc.save_on_exit(session)
 
-                # 停止任务执行器（会等待所有 pending 任务完成）
-                if hasattr(self, '_task_worker') and self._task_worker and hasattr(self._task_worker, 'stop'):
+                if (
+                    hasattr(self, "_task_worker")
+                    and self._task_worker
+                    and hasattr(self._task_worker, "stop")
+                ):
                     await self._task_worker.stop()
 
-                # 汇报所有已提交任务的最终状态
                 ts = self._services.get("task_service")
-                if ts and hasattr(ts, 'list_by_status'):
+                if ts and hasattr(ts, "list_by_status"):
                     try:
                         from tasks.types import TaskStatus
+
                         all_tasks = []
                         for st in TaskStatus:
-                            all_tasks.extend(ts.list_by_status(st))
+                            all_tasks.extend(
+                                ts.list_by_status(st)
+                            )
                         if all_tasks:
-                            console.print("\n[bold]任务状态汇总:[/bold]")
+                            console.print(
+                                "\n[bold]任务状态汇总:[/bold]"
+                            )
                             for t in all_tasks:
-                                tid = t.id if hasattr(t, 'id') else str(t.get('id', '?'))
-                                tstatus = t.status if hasattr(t, 'status') else t.get('status', '?')
-                                tstatus_str = tstatus.value if hasattr(tstatus, 'value') else str(tstatus)
-                                ttitle = t.title if hasattr(t, 'title') else t.get('title', '')
-                                icon = "✅" if tstatus_str == "completed" else "❌" if tstatus_str == "failed" else "🔄"
-                                console.print(f"  {icon} {tid[:12]} | {tstatus_str} | {ttitle}")
+                                tid = (
+                                    t.id
+                                    if hasattr(t, "id")
+                                    else str(t.get("id", "?"))
+                                )
+                                tstatus = (
+                                    t.status
+                                    if hasattr(t, "status")
+                                    else t.get("status", "?")
+                                )
+                                tstatus_str = (
+                                    tstatus.value
+                                    if hasattr(tstatus, "value")
+                                    else str(tstatus)
+                                )
+                                ttitle = (
+                                    t.title
+                                    if hasattr(t, "title")
+                                    else t.get("title", "")
+                                )
+                                icon = (
+                                    "✅"
+                                    if tstatus_str == "completed"
+                                    else "❌"
+                                    if tstatus_str == "failed"
+                                    else "🔄"
+                                )
+                                console.print(
+                                    f"  {icon} {tid[:12]} |"
+                                    f" {tstatus_str} | {ttitle}"
+                                )
                     except Exception as exc:
-                        logger.debug("任务状态汇总失败: %s", exc)
+                        logger.debug(
+                            "任务状态汇总失败: %s", exc
+                        )
 
-                self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
+                self._output_adapter.show_system_message(
+                    "感谢使用 Agent OS，再见！", "bold blue"
+                )
                 break
 
             # 空输入 — 检查是否有待处理的交互请求
             if initial_state.get("_is_empty"):
                 if cli_notifier and cli_notifier.has_pending():
-                    human_svc = self._services.get("human_interaction_service")
-                    from channels.cli.cli_interaction import run_sub_conversation
+                    human_svc = self._services.get(
+                        "human_interaction_service"
+                    )
+                    from channels.cli.cli_interaction import (
+                        run_sub_conversation,
+                    )
+
                     await run_sub_conversation(
                         console=console,
                         input_adapter=self._input_adapter,
@@ -1318,97 +1240,77 @@ class CLIApplication:
 
             # 斜杠命令处理
             slash_result = initial_state.get("slash_command")
-            if slash_result and hasattr(slash_result, 'output'):
+            if slash_result and hasattr(slash_result, "output"):
                 if slash_result.output:
                     console.print(slash_result.output)
                 if slash_result.should_exit:
-                    # Persist conversation history before exiting
-                    if conversation_history and checkpoint_mgr is not None:
-                        try:
-                            await checkpoint_mgr.save(
-                                session_pipeline_id,
-                                {"messages": conversation_history},
-                                phase="session_end",
-                            )
-                        except Exception as exc:
-                            logger.debug("Failed to save session on exit: %s", exc)
-                    console.print("[bold blue]Goodbye![/bold blue]")
+                    if session.conversation_history:
+                        await session_svc.save_on_exit(session)
+                    console.print(
+                        "[bold blue]Goodbye![/bold blue]"
+                    )
                     break
                 continue
 
-            # 退出处理
-            if initial_state.get("should_stop"):
-                # Persist conversation history before exiting
-                if conversation_history and checkpoint_mgr is not None:
-                    try:
-                        await checkpoint_mgr.save(
-                            session_pipeline_id,
-                            {"messages": conversation_history},
-                            phase="session_end",
-                        )
-                    except Exception as exc:
-                        logger.debug("Failed to save session on exit: %s", exc)
-                console.print("[bold blue]Goodbye![/bold blue]")
-                break
-
-            # 检查是否有 _handle_slash_command 方法（旧版兼容）
-            if hasattr(self._input_adapter, 'is_slash_command') and self._input_adapter.is_slash_command(initial_state):
-                cmd_result = await self._handle_slash_command(initial_state)
+            # 检查是否为斜杠命令（旧版兼容）
+            if (
+                hasattr(
+                    self._input_adapter, "is_slash_command"
+                )
+                and self._input_adapter.is_slash_command(
+                    initial_state
+                )
+            ):
+                cmd_result = await self._handle_slash_command(
+                    initial_state
+                )
                 if cmd_result is None:
                     continue
                 if cmd_result.should_stop:
-                    # Persist conversation history before exiting
-                    if conversation_history and checkpoint_mgr is not None:
-                        try:
-                            await checkpoint_mgr.save(
-                                session_pipeline_id,
-                                {"messages": conversation_history},
-                                phase="session_end",
-                            )
-                        except Exception as exc:
-                            logger.debug("Failed to save session on exit: %s", exc)
-                    self._output_adapter.show_system_message("感谢使用 Agent OS，再见！", "bold blue")
+                    if session.conversation_history:
+                        await session_svc.save_on_exit(session)
+                    self._output_adapter.show_system_message(
+                        "感谢使用 Agent OS，再见！",
+                        "bold blue",
+                    )
                     break
                 if cmd_result.should_clear_history:
-                    conversation_history.clear()
-                    session_pipeline_id = _uuid.uuid4().hex[:12]
+                    await session_svc.clear(session)
                     self._turn_count = 0
-                    self._output_adapter.update_status_bar(turn_count=0, context_pct=0.0)
-                    # Clean up persisted session checkpoints on disk
-                    if cmd_result.should_clear_session:
-                        old_session_id = _load_session_id(session_dir)
-                        if old_session_id and checkpoint_mgr is not None:
-                            try:
-                                await checkpoint_mgr.cleanup_old(old_session_id, keep_count=0)
-                            except Exception as exc:
-                                logger.debug("Failed to cleanup session checkpoints: %s", exc)
-                        _save_session_id(session_dir, session_pipeline_id)
-                # 应用命令产生的 state 更新
+                    self._output_adapter.update_status_bar(
+                        turn_count=0, context_pct=0.0
+                    )
                 if cmd_result.state_updates:
-                    self._apply_command_updates(cmd_result.state_updates)
+                    self._apply_command_updates(
+                        cmd_result.state_updates
+                    )
                 continue
 
             # Plan 模式：只显示规划，不实际执行
             if self._interaction_mode == "plan":
                 self._output_adapter.show_system_message(
-                    "[PLAN 模式] 不会执行任何操作，仅显示规划。使用 /mode normal 切换回正常模式。",
+                    "[PLAN 模式] 不会执行任何操作，仅显示规划。"
+                    "使用 /mode normal 切换回正常模式。",
                     "yellow",
                 )
-                # 将用户输入展示为"规划"反馈
                 user_input = initial_state.get("user_input", "")
-                console.print(f"\n[dim][规划模式] 收到输入: {user_input}[/dim]")
-                console.print("[dim]使用 /mode normal 或 /mode auto 切换模式后执行[/dim]\n")
+                console.print(
+                    f"\n[dim][规划模式] 收到输入:"
+                    f" {user_input}[/dim]"
+                )
+                console.print(
+                    "[dim]使用 /mode normal 或 /mode auto"
+                    " 切换模式后执行[/dim]\n"
+                )
                 continue
 
-            # 启动管道（后台执行，不阻塞 CLI）
+            # === 启动管道（后台运行 + 人类交互轮询） ===
             user_input = initial_state.get("user_input", "")
 
-            # 流式回调
             on_chunk = None
             if self._streaming:
                 on_chunk = self._build_on_chunk_callback(console)
 
-            # 更新状态栏：处理中
             task_stats = self._get_task_stats()
             self._output_adapter.update_status_bar(
                 is_processing=True,
@@ -1416,7 +1318,8 @@ class CLIApplication:
                 pipeline_iteration=0,
                 pipeline_max_iterations=(
                     self._engine.max_iterations
-                    if self._engine else 0
+                    if self._engine
+                    else 0
                 ),
                 running_task_count=task_stats["running"],
                 pending_task_count=task_stats["pending"],
@@ -1424,15 +1327,16 @@ class CLIApplication:
                 failed_task_count=task_stats["failed"],
             )
 
-            # BUG-FIX-fix_20260418_session_pipeline_id:
-            # 传入 session_pipeline_id 使引擎自动检查点与会话恢复使用同一 ID。
-            self._pipeline_task = asyncio.create_task(
+            pipeline_id = session_svc.prepare_run(session)
+
+            pipeline_task = asyncio.create_task(
                 self._engine.run(
                     user_input=user_input,
                     agent_config=self._agent_config,
                     conversation_history=(
-                        conversation_history
-                        if conversation_history else None
+                        session.conversation_history
+                        if session.conversation_history
+                        else None
                     ),
                     streaming=self._streaming,
                     on_chunk=on_chunk,
@@ -1440,27 +1344,84 @@ class CLIApplication:
                         self._interaction_mode == "auto"
                     ),
                     interaction_mode=self._interaction_mode,
-                    pipeline_id=session_pipeline_id,
+                    pipeline_id=pipeline_id,
                 )
             )
-            # 不 await — 直接回到循环顶部进入并发等待
+
+            # 等待管道完成，期间处理人类交互请求
+            final_state = None
+            while True:
+                # 检查是否有人类交互请求
+                if (
+                    cli_notifier
+                    and cli_notifier.has_pending()
+                ):
+                    human_svc = self._services.get(
+                        "human_interaction_service"
+                    )
+                    from channels.cli.cli_interaction import (
+                        run_sub_conversation,
+                    )
+
+                    await run_sub_conversation(
+                        console=console,
+                        input_adapter=self._input_adapter,
+                        notifier=cli_notifier,
+                        interaction_service=human_svc,
+                        idle_timeout=60,
+                    )
+                    continue
+
+                # 等待管道完成（带超时以轮询交互）
+                done, _ = await asyncio.wait(
+                    {pipeline_task}, timeout=0.5
+                )
+                if pipeline_task in done:
+                    break
+
+            # 获取管道结果
+            try:
+                final_state = pipeline_task.result()
+            except asyncio.CancelledError:
+                console.print(
+                    "\n[yellow]请求已取消[/yellow]"
+                )
+                self._update_status_bar_idle()
+                continue
+            except Exception as exc:
+                final_state = {"error": str(exc)}
+
+            # 处理管道结果
+            await self._handle_pipeline_result(
+                final_state,
+                initial_state,
+                session,
+                console,
+            )
+            session_svc.update_after_run(
+                session, final_state,
+                initial_user_input=initial_state.get("user_input", ""),
+            )
+            console.print("")
 
     async def _handle_pipeline_result(
         self,
         final_state: dict[str, Any],
         initial_state: dict[str, Any],
-        conversation_history: list[dict[str, Any]],
-        session_pipeline_id: str,
+        session: Any,
         console: Console,
-    ) -> list[dict[str, Any]]:
-        """处理管道执行结果：更新历史、绑定任务、刷新状态栏。"""
+    ) -> None:
+        """处理管道执行结果：绑定任务、显示输出、刷新状态栏。
+
+        历史更新由 session_svc.update_after_run() 负责，不在此处理。
+        """
         # 错误结果直接显示
         if "error" in final_state and final_state.get("error"):
             await self._output_adapter.send(
                 {"error": final_state["error"]}
             )
             self._update_status_bar_idle()
-            return conversation_history
+            return
 
         # 回填 pipeline_run_id 到关联的任务
         pipeline_run_id = final_state.get("pipeline_id", "")
@@ -1516,34 +1477,9 @@ class CLIApplication:
         # 更新对话轮次
         self._turn_count += 1
 
-        # 更新对话历史
-        final_messages = final_state.get("messages", [])
-        if final_messages:
-            conversation_history = list(final_messages)
-        else:
-            user_input = initial_state.get("user_input", "")
-            raw_result = final_state.get("raw_result", "")
-            if user_input:
-                conversation_history.append(
-                    {"role": "user", "content": user_input}
-                )
-            if raw_result:
-                conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "content": raw_result,
-                    }
-                )
-
-        # Trim conversation history
-        if len(conversation_history) > MAX_SESSION_MESSAGES:
-            conversation_history = (
-                conversation_history[-MAX_SESSION_MESSAGES:]
-            )
-
         # 更新状态栏
         ctx_pct = self._estimate_context_pct(
-            conversation_history
+            session.conversation_history
         )
         task_stats = self._get_task_stats()
         iteration = final_state.get("iteration", 0)
@@ -1560,8 +1496,6 @@ class CLIApplication:
             completed_task_count=task_stats["completed"],
             failed_task_count=task_stats["failed"],
         )
-
-        return conversation_history
 
     def _update_status_bar_idle(self) -> None:
         """将状态栏更新为空闲状态。"""

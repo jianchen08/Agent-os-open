@@ -296,27 +296,20 @@ async def run_sub_conversation(
     input_adapter._prompt_str = f"[{agent_name}] > "
 
     async def _read_input(prompt: str) -> str:
-        """在 executor 中读取输入，避免阻塞事件循环。
+        """通过 input_adapter 的队列读取输入。
 
-        使用 sys.stdout.write + sys.stdin.readline 代替 input()，
-        避免 Windows Console API 冲突。
+        使用 console.print 显示提示符（与 rich 输出兼容），
+        通过后台 stdin 线程 + 队列读取用户输入。
         """
-        import sys
-
-        sys.stderr.flush()
-
-        def _do_read():
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
-            line = sys.stdin.readline()
-            if line.endswith("\n"):
-                line = line[:-1]
-            if line.endswith("\r"):
-                line = line[:-1]
-            return line
-
+        console.print(prompt, end="")
+        reader = input_adapter._get_stdin_reader()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _do_read)
+        line = await loop.run_in_executor(
+            None, reader.read_line_blocking
+        )
+        if line is None:
+            raise EOFError
+        return line
 
     try:
         while True:
