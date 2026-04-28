@@ -114,6 +114,7 @@ class CLIInputAdapter(IInputAdapter):
         self._command_registry = command_registry or SlashCommandRegistry()
         self._last_command_result: CommandResult | None = None
         self._stdin_reader: _StdinLineReader | None = None
+        self._paste_line_count: int = 0
 
     def _get_stdin_reader(self) -> _StdinLineReader:
         """延迟初始化后台 stdin 读取线程。"""
@@ -246,6 +247,7 @@ class CLIInputAdapter(IInputAdapter):
         Returns:
             拼接后的完整输入文本
         """
+        self._paste_line_count = 0
         lines: list[str] = []
 
         # 首行（提示符已由主循环显示）
@@ -293,6 +295,7 @@ class CLIInputAdapter(IInputAdapter):
             extra += 1
 
         if extra > 0:
+            self._paste_line_count = extra
             logger.info(
                 "粘贴检测: 合并 %d 行额外输入", extra
             )
@@ -318,6 +321,22 @@ class CLIInputAdapter(IInputAdapter):
             是否为空输入
         """
         return state.get("_is_empty", False)
+
+    def was_paste(self) -> bool:
+        """最近一次输入是否为多行粘贴。
+
+        Returns:
+            是否检测到粘贴
+        """
+        return self._paste_line_count > 0
+
+    def paste_line_count(self) -> int:
+        """最近一次粘贴的额外行数。
+
+        Returns:
+            额外行数（不含首行）
+        """
+        return self._paste_line_count
 
     async def receive_with_timeout(self, timeout: int = 60) -> dict[str, Any] | None:
         """带超时的异步输入。超时返回 None。

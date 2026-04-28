@@ -1157,6 +1157,14 @@ class CLIApplication:
                 )
                 break
 
+            # 多行粘贴反馈：打印分隔线和行数提示
+            if self._input_adapter.was_paste():
+                total = self._input_adapter.paste_line_count() + 1
+                console.print(
+                    f"\n[dim green]  ▲ 已接收 {total} 行"
+                    "粘贴内容，正在处理...[/dim green]"
+                )
+
             # 退出信号
             if initial_state.get("should_stop"):
                 if session.conversation_history:
