@@ -754,6 +754,8 @@ class CLIApplication:
             session_svc = SessionService(
                 checkpoint_manager=services.get("checkpoint_manager"),
                 session_dir=_SESSION_DIR,
+                task_service=services.get("task_service"),
+                exec_storage=services.get("execution_record_storage"),
             )
             services["session_service"] = session_svc
             logger.info("Service created: session_service")
@@ -1100,6 +1102,10 @@ class CLIApplication:
                     "checkpoint_manager"
                 ),
                 session_dir=_SESSION_DIR,
+                task_service=self._services.get("task_service"),
+                exec_storage=self._services.get(
+                    "execution_record_storage"
+                ),
             )
         session = await session_svc.create_or_restore(
             channel_type="cli",
@@ -1365,17 +1371,43 @@ class CLIApplication:
 
                     await run_sub_conversation(
                         console=console,
-                        input_adapter=self._input_adapter,
+                        input_adapter=(
+                            self._input_adapter
+                        ),
                         notifier=cli_notifier,
                         interaction_service=human_svc,
                         idle_timeout=60,
                     )
                     continue
 
-                # 等待管道完成（带超时以轮询交互）
-                done, _ = await asyncio.wait(
-                    {pipeline_task}, timeout=0.5
+                # 等待管道完成或交互请求事件
+                wait_tasks: set[asyncio.Task] = {
+                    pipeline_task
+                }
+                request_waiter: asyncio.Task | None = (
+                    None
                 )
+                if cli_notifier:
+                    evt = cli_notifier._request_event
+
+                    async def _wait_req(
+                        e: asyncio.Event = evt,
+                    ) -> None:
+                        await e.wait()
+
+                    request_waiter = asyncio.create_task(
+                        _wait_req()
+                    )
+                    wait_tasks.add(request_waiter)
+
+                done, _ = await asyncio.wait(
+                    wait_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if request_waiter and not request_waiter.done():
+                    request_waiter.cancel()
+
                 if pipeline_task in done:
                     break
 

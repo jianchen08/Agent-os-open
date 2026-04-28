@@ -91,13 +91,13 @@ class CLIInteractionNotifier(IInteractionNotifier):
         """
         self._console = console
         self._pending_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._request_event: asyncio.Event = asyncio.Event()
 
     async def notify_request(self, request: Any) -> bool:
-        """接收交互请求并入队，不直接显示面板。
+        """接收交互请求并入队。
 
-        只打印一行简短提示，通知用户有 Agent 请求交互。
-        完整面板由 run_sub_conversation() 在进入子对话后显示，
-        避免在主循环阻塞于 input() 时打印面板导致需要额外按回车。
+        不打印任何提示，完整面板由 run_sub_conversation()
+        在主循环检测到 pending 后统一显示。
 
         Args:
             request: 交互请求对象（需有 .id 和 .message_data 属性）
@@ -110,22 +110,24 @@ class CLIInteractionNotifier(IInteractionNotifier):
             msg_data = request.get("message_data", {})
 
         mode = msg_data.get("interaction_mode", "choice")
-        title = msg_data.get("title", "子 Agent 请求")
-        agent_id = msg_data.get("agent_id", "unknown")
-
-        self._console.print(
-            f"[bold yellow]✨ {agent_id} 请求交互"
-            f" — {title} ({mode}) — 按 Enter 进入对话[/bold yellow]"
+        request_id = (
+            getattr(request, "id", None)
+            or (
+                request.get("id", "")
+                if isinstance(request, dict)
+                else ""
+            )
         )
 
-        request_id = getattr(request, "id", None) or (request.get("id", "") if isinstance(request, dict) else "")
         await self._pending_queue.put({
             "request_id": str(request_id),
             "message_data": msg_data,
         })
+        self._request_event.set()
 
         logger.info(
-            "[CLINotifier] 交互请求已入队 | request_id=%s | mode=%s",
+            "[CLINotifier] 交互请求已入队 | request_id=%s"
+            " | mode=%s",
             request_id, mode,
         )
 
@@ -183,11 +185,19 @@ class CLIInteractionNotifier(IInteractionNotifier):
         return not self._pending_queue.empty()
 
     def get_next_pending(self) -> dict[str, Any] | None:
-        """非阻塞取出下一个待处理请求。"""
+        """非阻塞取出下一个待处理请求。
+
+        取出后如果队列已空则清除事件标志，
+        避免主循环重复触发。
+        """
         try:
-            return self._pending_queue.get_nowait()
+            item = self._pending_queue.get_nowait()
         except asyncio.QueueEmpty:
+            self._request_event.clear()
             return None
+        if self._pending_queue.empty():
+            self._request_event.clear()
+        return item
 
     @staticmethod
     def _render_choice_content(description: str, msg_data: dict[str, Any]) -> str:
@@ -286,8 +296,16 @@ async def run_sub_conversation(
     options = msg_data.get("options") or []
 
     console.print(
-        f"\n[bold magenta]─── 进入 {agent_name} 对话 ───"
+        "\n[bold magenta]───────────────────────────────"
+        "─────────────────────────[/bold magenta]"
+    )
+    console.print(
+        f"[bold magenta]  {agent_name} 请求交互"
         f"（输入 /back 返回主对话）[/bold magenta]"
+    )
+    console.print(
+        "[bold magenta]───────────────────────────────"
+        "─────────────────────────[/bold magenta]"
     )
 
     _show_request_panel(console, title, agent_name, mode, msg_data)
@@ -328,10 +346,22 @@ async def run_sub_conversation(
                 f"\n{input_adapter._prompt_str}"
             )
 
-            if user_input.strip().lower() in ("/back", "/done", "/返回"):
+            if user_input.strip().lower() in (
+                "/back", "/done", "/返回"
+            ):
                 console.print(
-                    "[bold magenta]─── 返回主 Agent 对话"
-                    " ───[/bold magenta]\n"
+                    "[bold magenta]──────────────────────"
+                    "────────────────────────────[/bold"
+                    " magenta]"
+                )
+                console.print(
+                    "[bold magenta]  返回主 Agent 对话"
+                    "[/bold magenta]"
+                )
+                console.print(
+                    "[bold magenta]──────────────────────"
+                    "────────────────────────────[/bold"
+                    " magenta]\n"
                 )
                 break
 
