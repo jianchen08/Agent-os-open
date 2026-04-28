@@ -2,8 +2,8 @@
 Agent自创建完整流程测试
 
 测试目标：
-1. 模拟用户提交任务给 resource_generator_agent
-2. resource_generator_agent 调用 agent_maker
+1. 模拟用户提交任务给 resource_manager_agent
+2. resource_manager_agent 调用 agent_maker
 3. agent_maker 创建真正可用的Agent配置
 4. 验证创建的Agent包含所有必要字段
 
@@ -87,7 +87,7 @@ class TestAgentCreationValidation:
 
     def test_resource_generator_has_task_submit(self, agent_registry):
         """验证 resource_generator 有 task_submit"""
-        rg = agent_registry.get("resource_generator_agent")
+        rg = agent_registry.get("resource_manager_agent")
         assert rg is not None
         assert "task_submit" in rg.tool_ids
         print("✅ resource_generator 有 task_submit")

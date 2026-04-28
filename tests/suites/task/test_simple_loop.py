@@ -24,7 +24,7 @@ async def test():
 {
   "goal": {"title": "创建测试Agent", "description": "创建一个简单的测试Agent"},
   "target_type": "agent",
-  "target_id": "resource_generator_agent",
+  "target_id": "resource_manager_agent",
   "acceptance_criteria": {"file_check": {"pass_threshold": 100}},
   "priority": 5,
   "task_scope": "short_term"

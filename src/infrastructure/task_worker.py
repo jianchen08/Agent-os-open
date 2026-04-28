@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import os
-import time
+import uuid as _uuid
 from typing import Any
 
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
@@ -27,14 +27,96 @@ _TERMINAL_STATES = frozenset({"completed", "failed"})
 _CONTAINER_CHECK_MIN_INTERVAL = 30.0
 
 
+def _reconstruct_tool_calls(messages: list[dict[str, Any]]) -> None:
+    """从 tool 记录反向重建 assistant 消息的 tool_calls 字段。
+
+    旧版 ExecutionRecordData 不保存 tool_calls_json，导致恢复的对话历史中
+    assistant 消息缺少 tool_calls，而 tool 消息也缺少 tool_call_id。
+    Minimax API 校验时会拒绝这种不一致的消息结构。
+
+    重建策略：
+    1. 对于已有 tool_calls 的 assistant 消息 → 跳过（新格式已保存）
+    2. 对于没有 tool_calls 的 assistant 消息 → 查看后续是否紧跟 tool 消息
+    3. 如果是，从 tool 消息的 tool_input 重建 tool_calls
+    4. 生成合成 tool_call_id 并同时赋值给 tool 消息
+
+    Args:
+        messages: 恢复的对话历史消息列表（原地修改）
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        # 只处理没有 tool_calls 的 assistant 消息
+        if msg.get("role") != "assistant" or msg.get("tool_calls"):
+            i += 1
+            continue
+
+        # 收集紧跟其后的 tool 消息
+        tool_group_start = i + 1
+        tool_indices: list[int] = []
+        j = tool_group_start
+        while j < len(messages) and messages[j].get("role") == "tool":
+            tool_indices.append(j)
+            j += 1
+
+        if not tool_indices:
+            i += 1
+            continue
+
+        # 从 tool 消息重建 tool_calls
+        reconstructed: list[dict[str, Any]] = []
+        for tidx in tool_indices:
+            tool_msg = messages[tidx]
+            # 如果 tool 消息已有 tool_call_id，复用
+            tc_id = tool_msg.get("tool_call_id")
+            if not tc_id:
+                tc_id = f"call_{_uuid.uuid4().hex[:8]}"
+                tool_msg["tool_call_id"] = tc_id
+
+            # 从 tool_input 提取 name/args
+            tool_input = tool_msg.get("tool_input")
+            fn_name = ""
+            fn_args = "{}"
+            if isinstance(tool_input, dict):
+                fn_name = tool_input.get("name", "")
+                raw_args = tool_input.get("args", {})
+                try:
+                    fn_args = json.dumps(raw_args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    fn_args = str(raw_args)
+
+            reconstructed.append({
+                "id": tc_id,
+                "type": "function",
+                "function": {
+                    "name": fn_name,
+                    "arguments": fn_args,
+                },
+            })
+
+        if reconstructed:
+            msg["tool_calls"] = reconstructed
+            _log.debug(
+                "Reconstructed tool_calls for assistant msg[%d]: %d calls",
+                i, len(reconstructed),
+            )
+
+        i = j
+
+
 class TaskWorker:
     """后台任务执行器。
 
     监听 EventBus 上的 task.submitted 事件，当收到新任务时
     创建 PipelineEngine 实例执行子任务。
 
-    终态通知由 TaskService.on_state_change 回调自动触发，
-    TaskWorker 通过 asyncio.Event 等待终态，无需轮询。
+    子任务完成通知采用单一机制：_on_task_state_changed 收到终态事件后，
+    通过 _notify_suspended_pipelines 直接定位挂起的父管道并调用
+    inject_and_wake，同时 set _wake_events 唤醒 while 循环。
+    无双重订阅，无竞态风险。
 
     Attributes:
         _task_service: 任务服务实例
@@ -44,8 +126,10 @@ class TaskWorker:
         _services: 共享服务字典
         _event_bus: 事件总线
         _running: 是否正在运行
-        _task: 后台监听协程
+        _tasks: 后台协程集合
         _terminal_events: task_id → asyncio.Event 的映射
+        _suspended_engines: task_id → 挂起的 PipelineEngine
+        _wake_events: task_id → asyncio.Event，管道挂起等待唤醒信号
     """
 
     def __init__(
@@ -357,6 +441,19 @@ class TaskWorker:
                     return
                 except Exception as exc:
                     logger.warning("TaskWorker: inject_and_wake 失败: %s", exc)
+            else:
+                # 父管道尚未挂起（竞态：子任务在父管道 _suspend_and_wait 之前失败）
+                # 将通知入队，由 _suspend_and_wait 在挂起时消费
+                pending_key = f"__pending_notifications_{parent_pipeline_id}"
+                pending_list = self._services.get(pending_key, [])
+                pending_list.append(notification)
+                self._services[pending_key] = pending_list
+                logger.info(
+                    "TaskWorker: 父管道尚未挂起，通知已入队: "
+                    "pipeline=%s, task=%s, status=%s, queue_size=%d",
+                    parent_pipeline_id, task_id, new_status, len(pending_list),
+                )
+                return
 
         # 回退：扫描所有挂起管道（兼容旧任务无 parent_pipeline_id 的情况）
         for key, engine in list(self._services.items()):
@@ -710,7 +807,17 @@ class TaskWorker:
                                     msg["tool_call_id"] = r.tool_call_id
                                 if r.tool_input:
                                     msg["tool_input"] = r.tool_input
+                                # 从 tool_calls_json 恢复 tool_calls（新格式）
+                                if r.tool_calls_json:
+                                    try:
+                                        msg["tool_calls"] = json.loads(r.tool_calls_json)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
                                 conversation_history.append(msg)
+
+                            # 旧记录没有 tool_calls_json，需要从 tool 记录反向重建
+                            _reconstruct_tool_calls(conversation_history)
+
                             logger.info(
                                 "TaskWorker: restored %d messages from pipeline records "
                                 "for task %s (retry, pipeline=%s)",
@@ -894,18 +1001,53 @@ class TaskWorker:
                             evt.set()
                         return
                     else:
+                        # 从 pipeline state 中提取完整诊断信息
                         iteration_count = pipeline_state.get("iteration", "?") if pipeline_state else "?"
                         max_iter = pipeline_state.get("max_iterations", "?") if pipeline_state else "?"
                         ended = pipeline_state.get("ended", "?") if pipeline_state else "?"
-                        has_task_id = bool(pipeline_state.get("task_id")) if pipeline_state else False
+                        raw_error = pipeline_state.get("raw_error") if pipeline_state else None
+                        llm_error_info = pipeline_state.get("llm_error_info") if pipeline_state else None
+                        task_complete = pipeline_state.get("task_complete") if pipeline_state else None
+                        error_analysis = pipeline_state.get("error_analysis") if pipeline_state else None
+
+                        # 根据实际原因构建精确的错误信息
+                        parts: list[str] = []
+                        hit_max_iter = (
+                            isinstance(iteration_count, int)
+                            and isinstance(max_iter, int)
+                            and iteration_count >= max_iter
+                        )
+
+                        if raw_error:
+                            # 管道内有明确错误（LLM 调用失败、工具异常等）
+                            parts.append(f"管道异常退出: {raw_error}")
+                            if llm_error_info:
+                                etype = llm_error_info.get("error_type", "")
+                                if etype:
+                                    parts.append(f"错误类型={etype}")
+                        elif hit_max_iter:
+                            # 确实是迭代耗尽
+                            parts.append(f"管道迭代耗尽({iteration_count}/{max_iter})")
+                        else:
+                            # 其他原因（无 route signal 强制退出、连续核心错误等）
+                            parts.append(f"管道异常结束(iterations={iteration_count}/{max_iter})")
+
+                        if error_analysis:
+                            parts.append(f"错误分析: {error_analysis}")
+                        if task_complete is False:
+                            parts.append("Agent 标记任务未完成")
+
+                        error_msg = "，".join(parts) if parts else "管道异常退出，Agent 未完成评估"
+
                         logger.warning(
                             "TaskWorker: task %s still RUNNING after pipeline exit. "
-                            "iterations=%s/%s, ended=%s, has_task_id=%s, "
-                            "has_result=False → marking as failed",
-                            task_id, iteration_count, max_iter, ended, has_task_id,
+                            "iterations=%s/%s, ended=%s, raw_error=%s, "
+                            "has_result=False → %s",
+                            task_id, iteration_count, max_iter, ended,
+                            raw_error or "(none)", error_msg,
                         )
                         evt = self._terminal_events.pop(task_id, None)
-                        task_service.fail_task(task_id, "管道迭代耗尽，Agent 未完成评估")
+                        task_service.fail_task(task_id, error_msg)
                         if evt is not None:
                             evt.set()
                         return
@@ -970,9 +1112,9 @@ class TaskWorker:
     def _on_idle_timeout(self, task_id: str) -> None:
         """idle 计时器超时回调。
 
-        当任务长时间无活动时，TimerManager 触发此回调。
-        如果任务有活跃子任务，则唤醒管道并注入提醒消息（最多 3 次）；
-        如果没有活跃子任务或提醒次数已达上限，则标记为 failed。
+        idle 计时器仅在管道挂起（等待子任务）期间有意义：
+        - 管道活跃时：暂停计时器（重建但不计数），不干预执行
+        - 管道挂起时：唤醒并提醒（最多 idle_remind_limit 次），超限则标记 failed
 
         Args:
             task_id: 超时的任务ID
@@ -1000,30 +1142,20 @@ class TaskWorker:
         idle_remind_limit = 3
         remind_count = self._idle_remind_counts.get(task_id, 0)
 
-        # BUG-FIX-fix_20260424_active_pipeline_idle:
-        # 管道在执行工具（如 task_evaluate 触发评估器）时，引擎不处于 suspended 状态
-        # 但实际上仍在工作，不应因 idle 超时而被终止。
-        # 如果任务在 _active_tasks 中，重新创建计时器而不是失败。
+        # 活跃管道期间暂停 idle 计时器：重建但不计数、不失败
         if task_id in self._active_tasks:
-            logger.info(
-                "TaskWorker: idle 超时但管道仍在执行中，重建计时器: task_id=%s (remind #%d)",
-                task_id, remind_count + 1,
+            logger.debug(
+                "TaskWorker: idle 超时但管道活跃，暂停计时器: task_id=%s",
+                task_id,
             )
-            self._idle_remind_counts[task_id] = remind_count + 1
-            if remind_count + 1 >= idle_remind_limit * 3:
-                logger.warning(
-                    "TaskWorker: 管道活跃但提醒已达上限(%d)，强制失败: task_id=%s",
-                    idle_remind_limit * 3, task_id,
-                )
-            else:
-                timer_manager = self._services.get("timer_manager")
-                if timer_manager:
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
-                    except RuntimeError:
-                        pass
-                return
+            timer_manager = self._services.get("timer_manager")
+            if timer_manager:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
+                except RuntimeError:
+                    pass
+            return
 
         if task_id in self._suspended_engines and remind_count < idle_remind_limit:
             self._idle_remind_counts[task_id] = remind_count + 1
@@ -1065,23 +1197,6 @@ class TaskWorker:
             logger.error(
                 "TaskWorker: idle 超时处理失败: task_id=%s, error=%s", task_id, e,
             )
-
-    def _find_parent_task_id(self, data: dict[str, Any]) -> str | None:
-        """从状态变更事件数据中提取父任务 ID。
-
-        Args:
-            data: 事件数据
-
-        Returns:
-            父任务 ID，不存在时返回 None
-        """
-        task = data.get("task")
-        if task is None:
-            return None
-
-        if isinstance(task, dict):
-            return task.get("parent_task_id")
-        return getattr(task, "parent_task_id", None)
 
     async def _recreate_idle_timer_async(self, task_id: str, timer_manager: Any) -> None:
         """idle 超时提醒后异步重新创建计时器。

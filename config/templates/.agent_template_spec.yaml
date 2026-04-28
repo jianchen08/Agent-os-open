@@ -117,7 +117,7 @@ level: {level}
 #     4. **方案确认后，派发细化任务给 `solution_refinement_agent`**：由其将方案转化为可执行的任务链，输出标准化任务计划 Markdown 文件
 #     5. **收到任务链后**：
 #        - 搜索每个子任务的专门 agent
-#        - 如无合适 agent → 提交给 `resource_generator_agent` 创建/修改
+#        - 如无合适 agent → 提交给 `resource_manager_agent` 创建/修改
 #        - 分析依赖，并行提交无依赖任务
 #        - 按依赖顺序逐批提交
 #     6. **整合反馈**
@@ -652,7 +652,7 @@ output_schema:
 #       | 场景 | Agent | 说明 | 隔离级别 | 推荐指标 |
 #       |------|-------|------|----------|----------|
 #       | 调研/分析 | research_agent | ... | container | file_check, semantic_check(可选) |
-#       | Agent创建 | resource_generator_agent | ... | host | file_check, semantic_check |
+#       | Agent创建 | resource_manager_agent | ... | host | file_check, semantic_check |
 #       ### 隔离规则
 #       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
 #       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径

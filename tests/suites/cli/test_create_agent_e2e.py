@@ -2,12 +2,12 @@
 
 使用 CLIApplication 编程式启动系统，通过 engine.run() 提交自然语言请求
 让灵汐（L1 Agent）自行调度资源创建工具（register_resource / task_submit
-给 resource_generator_agent → agent_maker）完成 Agent 创建。
+给 resource_manager_agent → agent_maker）完成 Agent 创建。
 每 30 秒监控管道执行记录和任务状态，最终验证产出文件。
 
 完整闭环链路：
   用户自然语言请求 → 灵汐(L1) 搜索资源 → 无合适 agent →
-  task_submit 给 resource_generator_agent(L2) →
+  task_submit 给 resource_manager_agent(L2) →
   协调调研 + agent_maker(L3) → 产出 YAML 配置 → 评估 →
   验证产出文件存在、格式正确、可被 AgentRegistry 加载
 

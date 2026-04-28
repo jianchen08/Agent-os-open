@@ -12,6 +12,7 @@ description: |
 agent_type: atomic
 category: "code"
 level: "L3"
+model_tier: small
 
 plugins:
   disabled: []
@@ -173,11 +174,11 @@ system_prompt: |
 
   ### 代码搜索
   ```python
-  # 搜索代码模式
-  search_content(pattern: "class.*Agent", path: "src/")
+  # 搜索代码内容（支持正则）
+  enhanced_search(query: "class.*Agent", search_type: "text", use_regex: True, path: "src/")
 
-  # 查找文件
-  search_file(pattern: "*.py", target_directory: "src/")
+  # 查找文件名
+  enhanced_search(query: ".py", search_type: "filename", path: "src/")
   ```
 
   ### 代码执行
@@ -231,8 +232,7 @@ tool_ids:
   - read_file
   - write_to_file
   - replace_in_file
-  - search_content
-  - search_file
+  - enhanced_search
   - execute_command
   - task_evaluate
   - resource_search

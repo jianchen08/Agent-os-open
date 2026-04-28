@@ -243,19 +243,22 @@ class LLMCore(ICorePlugin):
                     "context_window": self._context_window,
                 }
 
-            # 思考内容过长检测：截断思考，注入指令直接输出
+            # 思考内容过长检测：截断思考，丢弃本次输出，注入提示重新触发
             if response.thinking_truncated:
+                retry_count = ctx.state.get("thinking_retry_count", 0) + 1
+                max_retries = 3
                 logger.warning(
-                    "[%s] 思考内容过长，截断并指示直接输出",
-                    self.name,
+                    "[%s] 思考内容过长已截断，丢弃本次输出，"
+                    "retry=%d/%d",
+                    self.name, retry_count, max_retries,
                 )
                 history = list(ctx.state.get("messages", []))
                 history.append({
                     "role": "system",
                     "content": (
                         "[ThinkingTruncationGuard] "
-                        "上一轮思考内容过长已截断。"
-                        "请不要思考太长，直接给出结论。"
+                        "上一轮思考内容过长已截断，本次输出已丢弃。"
+                        "请直接给出结论或工具调用，不要冗长思考。"
                     ),
                 })
                 return {
@@ -266,6 +269,8 @@ class LLMCore(ICorePlugin):
                     "messages": history,
                     "llm_usage": {},
                     "context_window": self._context_window,
+                    "thinking_retry_needed": retry_count <= max_retries,
+                    "thinking_retry_count": retry_count,
                 }
 
             llm_usage = None
@@ -280,6 +285,15 @@ class LLMCore(ICorePlugin):
                 "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d)",
                 self.name, streaming, bool(thinking_text),
                 (result_text or "")[:200], len(tool_calls or []),
+            )
+            # 完整响应记录到管道日志（DEBUG 级别）
+            logger.debug(
+                "[%s] LLM full response: text=%d chars, "
+                "thinking=%d chars, usage=%s",
+                self.name,
+                len(result_text or ""),
+                len(thinking_text or ""),
+                llm_usage,
             )
             if tool_calls:
                 for tc in tool_calls:
@@ -413,7 +427,12 @@ class LLMCore(ICorePlugin):
     ) -> list[dict[str, Any]]:
         """针对特定 LLM 提供商的消息格式修正。
 
-        MiniMax API 要求：
+        通用修正（所有 provider）：
+        1. assistant 消息中的 tool_calls 从内部 raw 格式转为 OpenAI API 格式
+           （执行记录恢复的消息可能使用内部格式，缺少 type 字段，
+           导致智谱AI等 API 报"工具类型不能为空"）
+
+        MiniMax 专有修正：
         1. system 消息只能在第一位，非首位 system 消息转为 user+name=system
         2. assistant(tool_calls) 后只能紧跟 tool 消息，中间插入的非 tool
            消息（如 TaskReminder 注入的 system/user）需移到 tool 消息组之后
@@ -424,8 +443,41 @@ class LLMCore(ICorePlugin):
         Returns:
             修正后的消息列表
         """
+        # 通用修正：确保 tool_calls 是 OpenAI API 格式
+        self._normalize_tool_calls_in_messages(messages)
+
         if self._provider != "minimax":
             return messages
+
+        # MiniMax 专有修正
+
+        # Phase 0: 清理孤立的 tool result 消息（安全网）
+        # 当对话历史从执行记录恢复时，assistant 消息的 tool_calls 可能丢失，
+        # 导致 tool result 消息的 tool_call_id 无法匹配。MiniMax 会拒绝这种请求。
+        valid_tool_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        valid_tool_ids.add(tc_id)
+        if valid_tool_ids:
+            cleaned: list[dict[str, Any]] = []
+            orphan_count = 0
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    tc_id = msg.get("tool_call_id")
+                    if tc_id and tc_id not in valid_tool_ids:
+                        orphan_count += 1
+                        continue
+                cleaned.append(msg)
+            if orphan_count:
+                logger.warning(
+                    "[%s] MiniMax Phase 0: removed %d orphaned tool results "
+                    "(tool_call_id not found in any assistant message)",
+                    self.name, orphan_count,
+                )
+                messages = cleaned
 
         converted_count = 0
         relocated_count = 0
@@ -524,6 +576,50 @@ class LLMCore(ICorePlugin):
             )
 
         return result
+
+    @staticmethod
+    def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
+        """确保 assistant 消息中的 tool_calls 使用 OpenAI API 格式。
+
+        执行记录存储的 tool_calls_json 是内部 raw 格式：
+            {"id": "...", "name": "...", "arguments": "..."}
+        OpenAI API 要求的格式：
+            {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
+
+        缺少 type 字段会导致智谱AI等 API 报"工具类型不能为空"。
+        此方法原地修正 messages 中所有 tool_calls 的格式。
+        """
+        for msg in messages:
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            raw_tcs = msg["tool_calls"]
+            if not isinstance(raw_tcs, list):
+                continue
+            needs_fix = False
+            for tc in raw_tcs:
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("type") != "function" or not isinstance(tc.get("function"), dict):
+                    needs_fix = True
+                    break
+            if not needs_fix:
+                continue
+            normalized = []
+            for tc in raw_tcs:
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
+                    normalized.append(tc)
+                    continue
+                normalized.append({
+                    "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("args", tc.get("arguments", "{}")),
+                    },
+                })
+            msg["tool_calls"] = normalized
 
     def _get_model_string(self) -> str:
         """获取 LiteLLM 格式的模型标识字符串。

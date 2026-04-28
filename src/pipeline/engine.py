@@ -396,9 +396,11 @@ class PipelineEngine:
                 )
 
     def _apply_agent_model_override(self, agent_config: Any | None) -> None:
-        """将 Agent 配置中的 model_name 覆盖到 llm_call 核心插件。
+        """将 Agent 配置中的 model_name/model_tier 覆盖到 llm_call 核心插件。
 
-        当 Agent YAML 声明了 model_name（如 minimax-m2.7）时：
+        优先级：model_name > model_tier > defaults.chat
+        - model_name: 直接使用指定的模型标识
+        - model_tier: 从 llm.yaml defaults.tiers 解析为 model_name
         - Router 模式：直接切换路由别名，不重建插件
         - 直连模式：从 llm.yaml 加载完整配置重建插件
 
@@ -409,6 +411,16 @@ class PipelineEngine:
             return
 
         model_id = agent_config.model_name
+
+        # model_tier 解析：当 model_name 未指定时，从 tiers 映射
+        if not model_id and hasattr(agent_config, "model_tier") and agent_config.model_tier:
+            model_id = self._resolve_tier(agent_config.model_tier)
+            if model_id:
+                logger.info(
+                    "[_apply_agent_model_override] model_tier=%s → model_name=%s",
+                    agent_config.model_tier, model_id,
+                )
+
         if not model_id:
             return
 
@@ -487,6 +499,32 @@ class PipelineEngine:
             logger.warning(
                 "[_apply_agent_model_override] 重建 llm_call 插件失败: %s", exc,
             )
+
+    def _resolve_tier(self, tier: str) -> str:
+        """从 llm.yaml defaults.tiers 解析 tier 为 model_id。
+
+        Args:
+            tier: 分级标识（large/medium/small）
+
+        Returns:
+            对应的模型标识字符串，未找到返回空字符串
+        """
+        services = getattr(self, "_services", {})
+        model_loader = services.get("model_loader") if services else None
+        if model_loader is None:
+            try:
+                from config.models import ModelConfigLoader
+                model_loader = ModelConfigLoader()
+            except Exception:
+                logger.warning("[_resolve_tier] ModelConfigLoader 不可用")
+                return ""
+
+        llm_data = model_loader._load_llm_data()
+        tiers = llm_data.get("defaults", {}).get("tiers", {})
+        model_id = tiers.get(tier, "")
+        if not model_id:
+            logger.warning("[_resolve_tier] tier=%r 未在 llm.yaml defaults.tiers 中定义", tier)
+        return model_id
 
     @staticmethod
     def _matches_disabled(plugin_name: str, disabled_names: list[str]) -> bool:
@@ -593,7 +631,7 @@ class PipelineEngine:
                     "plugins.core", "plugins.input", "plugins.output",
                     "infrastructure.task_worker", "tasks",
                     "tools.builtin", "evaluation",
-                    "llm.adapter",
+                    "llm.adapter", "llm.adapter._stream",
                 ]:
                     _lg = logging.getLogger(_ln)
                     if _lg.level == logging.NOTSET:
@@ -765,17 +803,60 @@ class PipelineEngine:
                             state[StateKeys.RAW_RESULT] = None
 
                             # 追踪连续核心错误，超过阈值强制结束管道
-                            self._consecutive_core_errors += 1
-                            if (
-                                self._consecutive_core_errors
-                                >= self._max_consecutive_core_errors
-                            ):
-                                logger.error(
-                                    "Pipeline force-ending:"
-                                    " %d consecutive core errors",
-                                    self._consecutive_core_errors,
+                            error_msg_lower = str(exc).lower()
+
+                            # 判断是否为可恢复错误（不计入连续错误）
+                            is_transient = any(
+                                kw in error_msg_lower
+                                for kw in (
+                                    "overloaded", "529", "rate_limit",
+                                    "rate limit", "timeout", "timed out",
+                                    "503", "502", "connection",
                                 )
-                                state[StateKeys.ENDED] = True
+                            )
+                            is_fixable = any(
+                                kw in error_msg_lower
+                                for kw in (
+                                    "context window exceeds",
+                                    "context_length_exceeded",
+                                    "context length",
+                                    "invalid function arguments",
+                                    "invalid params",
+                                )
+                            ) or (
+                                "max_tokens" in error_msg_lower
+                                and "exceed" in error_msg_lower
+                            ) or (
+                                "token" in error_msg_lower
+                                and "limit" in error_msg_lower
+                            )
+
+                            should_count = (
+                                core_type == "llm_call"
+                                and not is_transient
+                                and not is_fixable
+                            )
+
+                            if should_count:
+                                self._consecutive_core_errors += 1
+                                if (
+                                    self._consecutive_core_errors
+                                    >= self._max_consecutive_core_errors
+                                ):
+                                    logger.error(
+                                        "Pipeline force-ending:"
+                                        " %d consecutive core errors",
+                                        self._consecutive_core_errors,
+                                    )
+                                    state[StateKeys.ENDED] = True
+                            else:
+                                logger.info(
+                                    "[%s] error not counting as"
+                                    " consecutive (transient=%s,"
+                                    " fixable=%s): %s",
+                                    core_type, is_transient, is_fixable,
+                                    exc,
+                                )
 
                             if core_type == "llm_call":
                                 # 将错误信息存入 state，由 llm_error_recovery 插件处理
@@ -850,6 +931,15 @@ class PipelineEngine:
                     if core_type == "tool_execute":
                         logger.debug("No route signals after tool execution, defaulting to next_llm")
                         state[StateKeys.CORE_TYPE] = "llm_call"
+                    elif state.get("thinking_retry_needed"):
+                        # 思考截断重试：丢弃本次输出，重新触发 LLM 调用
+                        state.pop("thinking_retry_needed", None)
+                        state[StateKeys.CORE_TYPE] = "llm_call"
+                        retry_count = state.get("thinking_retry_count", 0)
+                        logger.info(
+                            "Thinking truncated, retrying LLM call "
+                            "(retry=%d)", retry_count,
+                        )
                     else:
                         logger.debug(
                             "No route signals after LLM response (iter=%d), "
@@ -907,6 +997,24 @@ class PipelineEngine:
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
         self._services[f"__suspended_engine_{pipeline_id}"] = self
+
+        # 消费子任务在父管道挂起前就已入队的通知（竞态修复）
+        pending_key = f"__pending_notifications_{pipeline_id}"
+        pending_notifications = self._services.pop(pending_key, [])
+        if pending_notifications:
+            for notif in pending_notifications:
+                if self._suspended_state is not None:
+                    orig = self._suspended_state.get("user_input", "")
+                    self._suspended_state["user_input"] = (
+                        f"{notif}\n\n{orig}".strip()
+                    )
+            logger.info(
+                "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: "
+                "pipeline=%s",
+                len(pending_notifications), pipeline_id,
+            )
+            self._wake_event.set()
+
         logger.info(
             "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
             pipeline_id, self._watching_task_ids,
@@ -914,11 +1022,11 @@ class PipelineEngine:
         try:
             try:
                 await asyncio.wait_for(
-                    self._wake_event.wait(), timeout=3000,
+                    self._wake_event.wait(), timeout=600,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
-                    "[Engine] 管道等待唤醒超时(3000s)，自动恢复"
+                    "[Engine] 管道等待唤醒超时(600s)，自动恢复"
                 )
         finally:
             self._services.pop(f"__suspended_engine_{pipeline_id}", None)

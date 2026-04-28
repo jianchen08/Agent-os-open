@@ -210,6 +210,55 @@ class TaskService:
         )
         return task
 
+    def recover_to_completed(
+        self, task_id: str, result: Any = None,
+    ) -> TaskModel:
+        """评估通过时恢复被错误标记为 failed 的任务。
+
+        仅用于评估通过覆盖 idle 超时等非业务原因导致的失败。
+        绕过状态机的 FAILED→COMPLETED 限制，但仍触发回调和持久化。
+
+        Args:
+            task_id: 任务 ID
+            result: 评估结果数据（可选）
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        if task.status != TaskStatus.FAILED:
+            raise ValueError(
+                f"recover_to_completed 仅用于 FAILED 状态，"
+                f"当前状态: {task.status.value}"
+            )
+        old_status = task.status
+        task.status = TaskStatus.COMPLETED
+        task.completed_at = datetime.now().isoformat()
+        task.error = None
+        if result is not None:
+            task.result = result
+        self._storage.save(task)
+
+        if self._on_state_change:
+            try:
+                self._on_state_change(
+                    task.id,
+                    old_status.value,
+                    TaskStatus.COMPLETED.value,
+                    task=task,
+                )
+            except Exception as e:
+                logger.warning(
+                    "State change callback failed: %s", e
+                )
+        logger.info(
+            "Task %s recovered: FAILED → COMPLETED", task_id,
+        )
+        return task
+
     def pause_task(self, task_id: str) -> TaskModel:
         """暂停任务（running → paused）。
 

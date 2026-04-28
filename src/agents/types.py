@@ -201,6 +201,9 @@ class AgentConfig:
         metadata: 元数据。
         plugins: 插件覆盖配置（disabled/enabled）。
         model_name: 指定 LLM 模型标识（如 minimax-m2.7、glm-4.7），覆盖 pipeline 默认模型。
+            优先级高于 model_tier。
+        model_tier: 模型分级标识（large/medium/small），从 llm.yaml defaults.tiers 解析为 model_name。
+            优先级低于 model_name。
     """
 
     config_id: str = ""
@@ -211,6 +214,7 @@ class AgentConfig:
     category: str = ""
     level: AgentLevel = AgentLevel.L3_ATOMIC
     model_name: str = ""
+    model_tier: str = ""
     system_prompt: str = ""
     tool_ids: list[str] = field(default_factory=list)
     static_vars: ContextConfig = field(default_factory=ContextConfig)

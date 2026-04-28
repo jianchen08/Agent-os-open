@@ -11,6 +11,7 @@ description: |
 agent_type: orchestrator
 category: task
 level: L2
+model_tier: large
 
 system_prompt: |
   # 你是方案准备助手

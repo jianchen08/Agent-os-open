@@ -466,3 +466,84 @@ class TestPipelineEngine:
         assert result[StateKeys.ITERATION] == 2
         # 第一轮 next_tool 后 core_type 应被设为 tool_execute
         assert result[StateKeys.CORE_TYPE] == "tool_execute"
+
+
+class TestSuspendAndWaitPendingNotifications:
+    """测试 _suspend_and_wait 消费竞态通知队列。"""
+
+    @pytest.mark.asyncio
+    async def test_pending_notifications_consumed_on_suspend(self):
+        """管道挂起时自动消费子任务在挂起前入队的通知。"""
+        from pipeline.engine import PipelineEngine
+
+        # 注意：空 dict 是 falsy，services or {} 会创建新 dict，
+        # 所以必须用非空 dict 确保 engine 使用同一个引用
+        services: dict[str, Any] = {"__test__": True}
+        engine = PipelineEngine(
+            input_route_table=MagicMock(),
+            output_route_table=MagicMock(),
+            plugin_registry=MagicMock(),
+            services=services,
+        )
+        pipeline_id = "test-pipe-123"
+
+        # 预设 pending notifications（模拟子任务在管道挂起前失败）
+        services[f"__pending_notifications_{pipeline_id}"] = [
+            "[系统通知] 子任务 'A' failed",
+            "[系统通知] 子任务 'B' completed",
+        ]
+
+        # 设置 _suspended_state（在 _run_loop 中由 target=="wait" 设置）
+        engine._suspended_state = {
+            StateKeys.PIPELINE_ID: pipeline_id,
+            "user_input": "原始输入",
+            "submitted_task_ids": ["child-a", "child-b"],
+        }
+
+        state = {
+            StateKeys.PIPELINE_ID: pipeline_id,
+            "submitted_task_ids": ["child-a", "child-b"],
+        }
+
+        # _suspend_and_wait 应立即唤醒（因为 pending notifications）
+        await engine._suspend_and_wait(state)
+
+        # 验证 pending notifications 已被消费
+        assert services.get(f"__pending_notifications_{pipeline_id}") is None
+        # 验证通知被注入到 _suspended_state
+        injected = engine._suspended_state.get("user_input", "")
+        assert "子任务 'A'" in injected
+        assert "子任务 'B'" in injected
+        assert "原始输入" in injected
+
+    @pytest.mark.asyncio
+    async def test_no_pending_notifications_normal_suspend(self):
+        """无 pending notifications 时正常挂起（手动唤醒）。"""
+        import asyncio
+
+        from pipeline.engine import PipelineEngine
+
+        services: dict[str, Any] = {"__test__": True}
+        engine = PipelineEngine(
+            input_route_table=MagicMock(),
+            output_route_table=MagicMock(),
+            plugin_registry=MagicMock(),
+            services=services,
+        )
+        pipeline_id = "test-pipe-456"
+        engine._suspended_state = {
+            StateKeys.PIPELINE_ID: pipeline_id,
+            "user_input": "原始输入",
+        }
+
+        state = {StateKeys.PIPELINE_ID: pipeline_id}
+
+        async def _wake_after_delay():
+            await asyncio.sleep(0.05)
+            engine._wake_event.set()
+
+        asyncio.create_task(_wake_after_delay())
+        await engine._suspend_and_wait(state)
+
+        # 引擎应被注册过（虽然已经被清理了）
+        assert services.get(f"__suspended_engine_{pipeline_id}") is None

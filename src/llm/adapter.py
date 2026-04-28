@@ -26,6 +26,22 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+# 专用 logger：只写文件，不传播到 root（不显示在 CLI）
+_diag_logger = logging.getLogger(__name__ + "._diag")
+_diag_logger.propagate = False
+_stream_logger = logging.getLogger(__name__ + "._stream")
+_stream_logger.propagate = False
+
+
+def _sync_diag_handlers() -> None:
+    """将父 logger 的 FileHandler 同步到 _diag_logger。"""
+    if _diag_logger.handlers:
+        return
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler):
+            _diag_logger.addHandler(h)
+            _diag_logger.setLevel(logging.DEBUG)
+
 _THINK_PATTERN = re.compile(
     r"<think[^>]*>(.*?)</think[^>]*>",
     re.DOTALL,
@@ -281,58 +297,76 @@ class _BaseLiteLLMAdapter:
         thinking_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
         stream_usage: dict[str, Any] | None = None
+        _stream_start: float = _time.monotonic()
 
-        # 流式 chunk 超时 — 用 asyncio.wait_for 真正中断等待
-        # 首个 chunk 超时：60s 内无数据 → 可能被限流
-        # 后续 chunk 超时：120s 内无数据 → 网络异常
+        # 流式超时：只检测首个 chunk（连接是否建立）
+        # 后续 chunk 不加超时，连接断了 HTTP 层会自动报错
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 120))
+        kwargs.pop("inter_chunk_timeout", None)  # 兼容旧调用
 
         stream_repetition = False
         thinking_truncated = False
         _max_thinking_chars = int(
-            kwargs.pop("max_thinking_chars", 30000)
+            kwargs.pop("max_thinking_chars", 180000)
         )
-        last_chunk_time: float | None = None
 
-        # 用 async iterator + wait_for 逐 chunk 等待，超时即中断
-        # try/finally 确保超时或异常时关闭 iterator，释放 HTTP 连接
         aiter = response.__aiter__()
         try:
-            while True:
-                current_timeout = (
-                    first_chunk_timeout
-                    if last_chunk_time is None
-                    else inter_chunk_timeout
+            # 首个 chunk：检测连接是否建立，超时说明被限流或网络异常
+            try:
+                chunk = await asyncio.wait_for(
+                    aiter.__anext__(), timeout=first_chunk_timeout
                 )
-                try:
-                    chunk = await asyncio.wait_for(
-                        aiter.__anext__(), timeout=current_timeout
-                    )
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    if last_chunk_time is None:
-                        raise litellm.Timeout(
-                            message=(
-                                "Stream first chunk timeout:"
-                                f" no data for {first_chunk_timeout:.0f}s"
-                            ),
-                            model=model,
-                            llm_provider="zai",
+            except StopAsyncIteration:
+                # 空流，直接返回
+                return LLMResponse()
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs)"
+                    " model=%s",
+                    type(self).__name__, first_chunk_timeout, model,
+                )
+                raise litellm.Timeout(
+                    message=(
+                        "Stream first chunk timeout:"
+                        f" no data for {first_chunk_timeout:.0f}s"
+                    ),
+                    model=model,
+                    llm_provider="zai",
+                )
+
+            # 边收边处理，保持真正的流式
+            # _process_chunk 内联处理每个 chunk
+            async def _process_chunk(chunk: Any) -> bool:
+                """处理单个 chunk，返回是否应该 break。"""
+                # 流式诊断：只写文件，不显示在 CLI
+                _chunk_idx = len(result_parts) + len(thinking_parts)
+                if _chunk_idx <= 1 or _chunk_idx % 200 == 0:
+                    _sync_diag_handlers()
+                    if _diag_logger.handlers:
+                        _delta = getattr(
+                            getattr(chunk, "choices", [None])[0],
+                            "delta", None,
                         )
-                    else:
-                        raise litellm.Timeout(
-                            message=(
-                                "Stream chunk timeout:"
-                                f" no data for {inter_chunk_timeout:.0f}s"
-                            ),
-                            model=model,
-                            llm_provider="zai",
-                        )
-                last_chunk_time = _time.monotonic()
+                        _tc = getattr(_delta, "tool_calls", None)
+                        _usage = getattr(chunk, "usage", None)
+                        if _chunk_idx <= 1 or _tc or _usage:
+                            _rc = getattr(_delta, "reasoning_content", None)
+                            _ct = getattr(_delta, "content", None)
+                            _diag_logger.debug(
+                                "[%s] chunk #%d:"
+                                " content=%s reasoning=%s"
+                                " tc=%s usage=%s",
+                                type(self).__name__,
+                                _chunk_idx,
+                                repr((_ct or "")[:40]),
+                                repr((_rc or "")[:40]) if _rc else "-",
+                                "Y" if _tc else "-",
+                                "Y" if _usage else "-",
+                            )
                 # 收集流式 usage（通常在最后一个 chunk）
                 if hasattr(chunk, "usage") and chunk.usage:
+                    nonlocal stream_usage
                     stream_usage = {
                         "prompt_tokens": getattr(
                             chunk.usage, "prompt_tokens", 0
@@ -346,7 +380,7 @@ class _BaseLiteLLMAdapter:
                     }
 
                 if not chunk.choices:
-                    continue
+                    return False
 
                 delta = chunk.choices[0].delta
 
@@ -354,6 +388,10 @@ class _BaseLiteLLMAdapter:
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     thinking_parts.append(reasoning)
+                    _stream_logger.debug(
+                        "[STREAM][THINKING] #%d +%d chars",
+                        len(thinking_parts), len(reasoning),
+                    )
                     if on_chunk:
                         on_chunk(
                             {"type": "thinking", "content": reasoning}
@@ -374,23 +412,29 @@ class _BaseLiteLLMAdapter:
                             thinking_len,
                             _max_thinking_chars,
                         )
-                        break
+                        return True
 
                 # 文本内容
                 if delta.content:
                     result_parts.append(delta.content)
+                    _stream_logger.debug(
+                        "[STREAM][TEXT] #%d +%d chars: %s",
+                        len(result_parts), len(delta.content),
+                        repr(delta.content[:80]),
+                    )
                     if on_chunk:
                         signal = on_chunk(
                             {"type": "text", "content": delta.content}
                         )
                         if signal == "stop":
+                            nonlocal stream_repetition
                             stream_repetition = True
                             logger.warning(
                                 "[%s] "
                                 "收到 stop 信号，截断流式输出",
                                 type(self).__name__,
                             )
-                            break
+                            return True
 
                 # 工具调用（流式增量）
                 if delta.tool_calls:
@@ -422,6 +466,15 @@ class _BaseLiteLLMAdapter:
                             "type": "tool_call",
                             "tool_calls": delta.tool_calls,
                         })
+                return False
+
+            # 处理首个 chunk
+            await _process_chunk(chunk)
+
+            # 后续 chunk：不加超时，由 HTTP 层处理连接断开
+            async for chunk in aiter:
+                if await _process_chunk(chunk):
+                    break
         finally:
             # 确保超时或异常时关闭 async iterator，释放 HTTP 连接
             if hasattr(response, "aclose"):
@@ -442,6 +495,20 @@ class _BaseLiteLLMAdapter:
                     type(self).__name__,
                     len(thinking_text), len(result_text or ""),
                 )
+
+        # 流式接收完成：记录速度统计
+        _stream_elapsed = _time.monotonic() - _stream_start
+        _comp_tokens = (stream_usage or {}).get("completion_tokens", 0)
+        _speed = (_comp_tokens / _stream_elapsed) if _stream_elapsed > 0 and _comp_tokens else 0
+        _stream_logger.debug(
+            "[STREAM][DONE] text=%d chars thinking=%d chars "
+            "chunks=%d tool_calls=%d "
+            "tokens=%d elapsed=%.2fs speed=%.1f tok/s",
+            len(result_text or ""), len(thinking_text or ""),
+            len(result_parts) + len(thinking_parts),
+            len(tool_calls),
+            _comp_tokens, _stream_elapsed, _speed,
+        )
 
         return LLMResponse(
             text=result_text,
@@ -672,7 +739,15 @@ class AdaptiveRouterAdapter(_BaseLiteLLMAdapter):
         sem = self._get_semaphore(model_name)
         await sem.acquire()
         try:
-            result = await self._router.acompletion(**kwargs)
+            # streaming 模式直接调用 litellm.acompletion，绕过 Router
+            # Router 的 _acompletion_streaming_iterator 会包装
+            # FallbackStreamWrapper，在流中途失败时盲目切换到
+            # fallback 模型（丢失上下文），这不符合预期行为。
+            # streaming 的重试和 fallback 由 engine 层统一管理。
+            if kwargs.get("stream"):
+                result = await self._direct_streaming_completion(**kwargs)
+            else:
+                result = await self._router.acompletion(**kwargs)
             sem.on_success()
             return result
         except litellm.RateLimitError:
@@ -685,6 +760,62 @@ class AdaptiveRouterAdapter(_BaseLiteLLMAdapter):
             raise
         finally:
             sem.release()
+
+    async def _direct_streaming_completion(self, **kwargs: Any) -> Any:
+        """绕过 Router 直接调用 litellm.acompletion 获取原始流。
+
+        Router 的 _acompletion_streaming_iterator 会用
+        FallbackStreamWrapper 包装原始流，在流中途失败时
+        盲目切换到 fallback 模型。这种行为有问题：
+        1. 网络抖动不应该直接 fallback 到另一个模型
+        2. 切换模型会丢失已有上下文
+        3. fallback 请求期间的等待对上层不可见（导致超时误判）
+
+        正确做法：streaming 重试/fallback 由 engine 层统一管理。
+
+        Args:
+            kwargs: litellm.acompletion 参数（含 stream=True）
+
+        Returns:
+            原始 CustomStreamWrapper（无 fallback 包装）
+        """
+        # 从 Router 获取 deployment 信息（api_key/api_base/model）
+        model = kwargs.get("model", "")
+        try:
+            deployment = await self._router.async_get_available_deployment(
+                model=model,
+                messages=kwargs.get("messages", []),
+            )
+        except Exception:
+            # deployment 查找失败，回退到 Router 路径
+            logger.warning(
+                "[AdaptiveRouterAdapter] deployment lookup failed,"
+                " falling back to Router streaming: %s",
+                model,
+            )
+            return await self._router.acompletion(**kwargs)
+
+        litellm_params = deployment["litellm_params"].copy()
+        model_client = self._router._get_async_openai_model_client(
+            deployment=deployment, kwargs=kwargs,
+        )
+
+        # litellm_params["model"] 含 provider 前缀（如 "zai/glm-5.1"），
+        # kwargs["model"] 是 Router 别名（如 "glm-5.1"）。
+        # 必须确保 litellm_params 的 model 不被 kwargs 覆盖，
+        # 否则 litellm 无法确定 provider，导致请求格式错误。
+        adjusted_kwargs = {k: v for k, v in kwargs.items() if k != "model"}
+        input_kwargs = {
+            **adjusted_kwargs,
+            **litellm_params,
+            "caching": self._router.cache_responses,
+            "client": model_client,
+        }
+        # 移除 Router 内部参数
+        for _k in ("original_function",):
+            input_kwargs.pop(_k, None)
+
+        return await litellm.acompletion(**input_kwargs)
 
 
 # ---------------------------------------------------------------------------

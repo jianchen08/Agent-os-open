@@ -273,9 +273,11 @@ class ToolCore(ICorePlugin):
             normalized = self._normalize_tool_result(raw_result)
 
             duration_ms = (time.monotonic() - start) * 1000
-            logger.debug(
-                "[%s] Tool executed: %s (%.1fms)",
+            _result_preview = str(normalized)[:200] if normalized else ""
+            logger.info(
+                "[%s] Tool executed: %s (%.1fms) → %s",
                 self.name, tool_name, duration_ms,
+                _result_preview,
             )
             result = {
                 "tool_name": tool_name,

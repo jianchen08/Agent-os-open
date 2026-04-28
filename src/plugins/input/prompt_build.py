@@ -29,6 +29,18 @@ from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
+# 语言指令映射 — 根据语言代码生成对应的思考和回复指令
+LANGUAGE_INSTRUCTIONS: dict[str, str] = {
+    "zh-CN": "请使用中文（简体）思考和回复，所有输出内容必须使用中文",
+    "zh-TW": "請使用繁體中文思考和回覆，所有輸出內容必須使用繁體中文",
+    "en": "Please think and respond in English, all output must be in English",
+    "ja": "日本語で思考し日本語で回答してください、すべての出力は日本語で行ってください",
+    "ko": "한국어로 생각하고 한국어로 답변하세요, 모든 출력은 한국어로 작성하세요",
+    "fr": "Pensez et répondez en français, toutes les sorties doivent être en français",
+    "de": "Denken und antworten Sie auf Deutsch, alle Ausgaben müssen auf Deutsch sein",
+    "es": "Piense y responda en español, toda la salida debe estar en español",
+}
+
 
 class PromptBuildPlugin(IInputPlugin):
     """提示词构建 Input 插件。
@@ -127,6 +139,14 @@ class PromptBuildPlugin(IInputPlugin):
         if system_prompt:
             parts.append(system_prompt)
 
+        # 1.5 语言指令（会话级不变，注入到系统消息）
+        lang = self._config.get("language", "")
+        if lang:
+            instruction = LANGUAGE_INSTRUCTIONS.get(lang)
+            if not instruction:
+                instruction = f"请使用{lang}思考和回复，所有输出内容必须使用{lang}"
+            parts.append(f"# 语言设置\n{instruction}")
+
         # 2. tools_description（仅当开关开启时拼入，默认走 function calling）
         if self._config.get("include_tools_description_in_prompt", False):
             tool_desc = ctx.state.get("prompt.tool_descriptions", "")
@@ -217,8 +237,12 @@ class PromptBuildPlugin(IInputPlugin):
                     except Exception as e:
                         logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
 
-            elif var_type in ("reference", "content"):
+            elif var_type in ("reference", "content", ""):
+                # "": 兜底 — YAML 中省略 type 但提供了 content 的情况
                 content = var_def.get("content", "") or var_def.get("value", "")
+                if not content and var_def.get("tags"):
+                    # 空 type + tags → 走检索
+                    content = await self._retrieve_by_tags(ctx, var_def)
 
             elif var_type == "timestamp":
                 now = datetime.now(UTC)
@@ -228,7 +252,7 @@ class PromptBuildPlugin(IInputPlugin):
             elif var_type == "session":
                 content = session_id
 
-            elif var_type == "retrieval" or (not var_type and var_def.get("tags")):
+            elif var_type == "retrieval":
                 content = await self._retrieve_by_tags(ctx, var_def)
 
             if not content:
@@ -421,7 +445,7 @@ class PromptBuildPlugin(IInputPlugin):
                 elif var_type == "model":
                     model_info = ctx.state.get("llm_model", "")
                     parts.append(f"- {var_name}: {model_info}")
-                elif var_type in ("reference", "content"):
+                elif var_type in ("reference", "content", "inline", ""):
                     content = var_def.get("content", "")
                     if content:
                         parts.append(f"- {var_name}: {content}")

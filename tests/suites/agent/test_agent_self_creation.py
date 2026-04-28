@@ -2,8 +2,8 @@
 Agent自创建端到端测试
 
 测试流程：
-1. 提交任务给 resource_generator_agent 创建新Agent
-2. resource_generator_agent 调用 agent_maker
+1. 提交任务给 resource_manager_agent 创建新Agent
+2. resource_manager_agent 调用 agent_maker
 3. agent_maker 调用 file_write 创建Agent配置文件
 4. 验证创建的配置文件格式是否正确
 
@@ -108,11 +108,11 @@ class TestAgentSelfCreation:
         print(f"✅ agent_maker 存在: {agent_maker.name}")
 
     def test_resource_generator_exists(self, agent_registry):
-        """验证 resource_generator_agent 存在"""
-        rg_agent = agent_registry.get("resource_generator_agent")
-        assert rg_agent is not None, "resource_generator_agent 应该存在"
-        assert rg_agent.level.value == "L2", "resource_generator_agent 应该是 L2"
-        print(f"✅ resource_generator_agent 存在: {rg_agent.name}")
+        """验证 resource_manager_agent 存在"""
+        rg_agent = agent_registry.get("resource_manager_agent")
+        assert rg_agent is not None, "resource_manager_agent 应该存在"
+        assert rg_agent.level.value == "L2", "resource_manager_agent 应该是 L2"
+        print(f"✅ resource_manager_agent 存在: {rg_agent.name}")
 
     def test_agent_config_schema(self, agent_registry):
         """验证Agent配置Schema正确"""
@@ -202,7 +202,7 @@ class TestAgentSelfCreation:
 
     def test_hierarchy_flow(self, agent_registry):
         """验证Agent层级流程"""
-        rg_agent = agent_registry.get("resource_generator_agent")
+        rg_agent = agent_registry.get("resource_manager_agent")
         agent_maker = agent_registry.get("agent_maker")
 
         assert rg_agent is not None
@@ -270,7 +270,7 @@ class TestAgentCreationIntegration:
 
         模拟：
         1. 用户提出需求：创建一个"代码审查Agent"
-        2. resource_generator_agent 接收任务
+        2. resource_manager_agent 接收任务
         3. 调用 agent_maker 生成配置
         4. agent_maker 使用 file_write 创建文件
         5. 验证创建成功

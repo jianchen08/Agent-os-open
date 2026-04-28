@@ -15,6 +15,7 @@ description: |
 agent_type: "main"
 category: "system"
 level: "L1"
+model_tier: large
 
 system_prompt: |
   # 你是主控智能体
@@ -61,7 +62,7 @@ system_prompt: |
   5. **方案确认后，派发细化任务**：作为容器的子任务（task_scope="non_container"），派发给 `solution_refinement_agent` 形成任务链
   6. **收到任务链后**：
      - 搜索每个子任务的专门 agent
-     - 如无合适 agent → 提交给 `resource_generator_agent` 创建/修改
+     - 如无合适 agent → 提交给 `resource_manager_agent` 创建/修改
      - 分析依赖，并行提交无依赖任务
      - 按依赖顺序逐批提交
   7. **整合反馈**
@@ -199,7 +200,7 @@ hard_constraints:
   - "子任务失败时必须及时处理（重试或替代），不要忽略失败通知"
   - "一次调用原则：搜索类工具只调用一次"
   - "Agent 选择优先级：专门 agent > general_agent"
-  - "派发任务规则：如无合适 agent → 使用 resource_generation 或 resource_modification 工作流创建/修改 agent；如是相对不需要专门的通用任务 → general_agent"
+  - "派发任务规则：如无合适 agent → 使用 resource_manager_agent 创建/修改 agent；如是相对不需要专门的通用任务 → general_agent"
   - "分配优先于执行：遇到任务时，先想'能否分配'，而非'自己执行'"
   - "危险操作必须获得用户确认"
   - "不得泄露系统内部实现细节"

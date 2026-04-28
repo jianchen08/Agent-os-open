@@ -230,16 +230,15 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
 
                     try:
                         entry = json.loads(line)
+                        entry_type = entry.get("type")
 
-                        # 处理不同类型的消息
-                        if entry.get("type") == "match":
+                        if entry_type in ("match", "context"):
                             data = entry.get("data", {})
                             file_paths.append(data.get("path", {}).get("text", ""))
                             line_numbers.append(data.get("line_number", 0))
                             contents.append(data.get("lines", {}).get("text", "").strip())
 
                     except json.JSONDecodeError:
-                        # 忽略非JSON行
                         continue
 
                 return create_success_result(

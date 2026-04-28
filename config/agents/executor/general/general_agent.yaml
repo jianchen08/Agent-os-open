@@ -12,6 +12,7 @@ description: |
 agent_type: "specialized"
 category: "task"
 level: "L3"
+model_tier: small
 
 system_prompt: |
   # 你是通用任务执行者

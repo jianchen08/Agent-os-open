@@ -35,7 +35,7 @@ async def test_full_loop():
     print("\n[OK] Engine created")
 
     # 构建提示词 - 让灵汐提交任务创建 Agent
-    prompt = """你是一个任务派发 Agent。请使用 task_submit 工具提交一个任务，让 resource_generator_agent 创建一个数据分析专家 Agent。
+    prompt = """你是一个任务派发 Agent。请使用 task_submit 工具提交一个任务，让 resource_manager_agent 创建一个数据分析专家 Agent。
 
 task_submit 参数：
 {
@@ -44,7 +44,7 @@ task_submit 参数：
     "description": "创建一个专门用于数据分析的 Agent，具备数据清洗、统计分析、可视化能力"
   },
   "target_type": "agent",
-  "target_id": "resource_generator_agent",
+  "target_id": "resource_manager_agent",
   "acceptance_criteria": {
     "file_check": {"pass_threshold": 100}
   },

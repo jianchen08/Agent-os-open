@@ -14,6 +14,7 @@ description: |
 agent_type: orchestrator
 category: task
 level: L2
+model_tier: large
 
 system_prompt: |
   # 你是触发协调专家

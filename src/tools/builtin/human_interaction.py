@@ -240,13 +240,33 @@ class HumanInteractionTool(BuiltinTool):
                 agent_id=pipeline_id,
             )
 
-            # BUG-FIX-fix_20260408_human_interaction_response:
-            # 等待用户到达对话页面后返回有意义的信息
-            result = await service.wait_for_conversation_arrival(
-                request_id, timeout=timeout_seconds
+            # 等待用户回复，返回实际消息内容（而非仅到达状态）
+            response = await service.wait_for_choice(request_id, timeout=timeout_seconds)
+
+            result = {"status": "completed", "response_type": response.get("response_type")}
+            if response.get("feedback"):
+                result["feedback"] = response["feedback"]
+            return create_success_result(data=result)
+
+        except InteractionTimeoutError as e:
+            logger.warning(f"[HumanInteractionTool] 对话超时 | request_id={e.request_id}")
+            return create_failure_result(
+                error=f"对话超时（等待了{e.timeout}秒），用户未在规定时间内响应。你可以根据当前任务上下文决定下一步操作。",
+                error_code="INTERACTION_TIMEOUT",
             )
 
-            return create_success_result(data=result)
+        except InteractionCancelledError as e:
+            logger.info(f"[HumanInteractionTool] 对话取消 | request_id={e.request_id}")
+            return create_failure_result(
+                error=f"对话已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。",
+                error_code="INTERACTION_CANCELLED",
+            )
+
+        except InteractionDeniedError as e:
+            logger.info(f"[HumanInteractionTool] 对话拒绝 | request_id={e.request_id}")
+            return create_success_result(
+                data={"status": "denied", "reason": e.reason or "用户拒绝"}
+            )
 
         except Exception as e:
             logger.error(f"[HumanInteractionTool] 对话模式执行失败 | error={e}", exc_info=True)

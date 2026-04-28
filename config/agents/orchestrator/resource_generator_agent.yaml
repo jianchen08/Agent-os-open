@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-# 资源生成 Agent - 负责生成缺失的工具和 Agent 资源
-# 支持单资源模式和团队套件模式
+# [已弃用] 已合并到 resource_manager_agent.yaml
+# 弃用日期：2026-04-28
+# 统一管理资源的创建和修改
 
 config_id: resource_generator_agent
 name: 资源生成专家
@@ -14,6 +15,7 @@ description: |
 agent_type: orchestrator
 category: generation
 level: L2
+model_tier: large
 
 system_prompt: |
   你是资源生成专家，负责协调完成资源生成任务。
@@ -418,8 +420,8 @@ recommended_metrics:
     default_params: {}
 
 version: "2.0.0"
-is_active: true
-status: "active"
+is_active: false
+status: "deprecated"
 max_iterations: 150
 max_reminders: 8
 timeout_seconds: 3600

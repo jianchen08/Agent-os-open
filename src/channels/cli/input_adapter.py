@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import sys
+import threading
 import uuid
 from typing import Any
 
@@ -21,6 +24,81 @@ from channels.cli.cli_commands import CommandResult, SlashCommandRegistry
 from channels.input_adapter import IInputAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _dbg(fmt: str, *args: Any) -> None:
+    """写调试信息到 _paste_debug.log 文件（用于排查粘贴问题）。"""
+    import os
+    import time
+
+    try:
+        ts = time.strftime("%H:%M:%S")
+        msg = f"[{ts}] " + (fmt % args if args else fmt) + "\n"
+        path = os.path.join(
+            os.path.dirname(__file__), "_paste_debug.log"
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(msg)
+    except Exception:
+        pass
+
+
+class _StdinLineReader:
+    """后台线程持续从 stdin 逐行读取，放入队列。
+
+    使所有平台（含 Windows）都能进行带超时的非阻塞 stdin 读取，
+    从而正确检测多行粘贴事件。
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._eof = False
+        self._thread = threading.Thread(
+            target=self._read_loop, daemon=True
+        )
+        self._started = False
+
+    def start(self) -> None:
+        if not self._started:
+            self._started = True
+            self._thread.start()
+
+    def _read_loop(self) -> None:
+        _dbg("reader thread started")
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    self._eof = True
+                    self._queue.put(None)
+                    _dbg("reader EOF")
+                    break
+                if line.endswith("\n"):
+                    line = line[:-1]
+                if line.endswith("\r"):
+                    line = line[:-1]
+                self._queue.put(line)
+                _dbg("reader put: %r", line[:60])
+            except Exception as e:
+                self._eof = True
+                self._queue.put(None)
+                _dbg("reader error: %s", e)
+                break
+
+    def read_line_blocking(self) -> str | None:
+        """阻塞读取一行。返回 None 表示 EOF。"""
+        if self._eof and self._queue.empty():
+            return None
+        return self._queue.get()
+
+    def read_line(self, timeout: float) -> str | None:
+        """带超时读取一行。超时或 EOF 返回 None。"""
+        if self._eof and self._queue.empty():
+            return None
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
 
 class CLIInputAdapter(IInputAdapter):
@@ -56,6 +134,14 @@ class CLIInputAdapter(IInputAdapter):
         self._continuation_prompt = "... "  # 多行续接提示符
         self._command_registry = command_registry or SlashCommandRegistry()
         self._last_command_result: CommandResult | None = None
+        self._stdin_reader: _StdinLineReader | None = None
+
+    def _get_stdin_reader(self) -> _StdinLineReader:
+        """延迟初始化后台 stdin 读取线程。"""
+        if self._stdin_reader is None:
+            self._stdin_reader = _StdinLineReader()
+            self._stdin_reader.start()
+        return self._stdin_reader
 
     @property
     def command_registry(self) -> SlashCommandRegistry:
@@ -153,9 +239,8 @@ class CLIInputAdapter(IInputAdapter):
     def _read_line(self, prompt: str) -> str:
         """读取一行输入。
 
-        Windows 上使用 sys.stdout.write + sys.stdin.readline 代替 input()，
-        避免线程池中 input() 的 Windows Console API 与 rich Console 输出冲突
-        导致提示符不显示或无法输入。
+        使用后台 stdin 读取线程 + 队列，避免 Windows 上 input()
+        的 Console API 与 rich Console 输出冲突。
 
         Args:
             prompt: 输入提示符
@@ -163,15 +248,12 @@ class CLIInputAdapter(IInputAdapter):
         Returns:
             用户输入的一行文本（不含换行符）
         """
-        import sys
-
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        line = sys.stdin.readline()
-        if line.endswith("\n"):
-            line = line[:-1]
-        if line.endswith("\r"):
-            line = line[:-1]
+        reader = self._get_stdin_reader()
+        line = reader.read_line_blocking()
+        if line is None:
+            raise EOFError
         return line
 
     def _read_multiline(self) -> str:
@@ -184,17 +266,17 @@ class CLIInputAdapter(IInputAdapter):
         Returns:
             拼接后的完整输入文本
         """
-        import sys
-
         lines: list[str] = []
 
         # 首行 — 使用 _read_line 避免 Windows input() 问题
         sys.stderr.flush()
         line = self._read_line(f"\n{self._prompt_str}")
         lines.append(line)
+        _dbg("first line: %r", line[:60])
 
         # 多行粘贴检测：快速到达的额外行合并为同一条消息
         self._drain_paste_lines(lines)
+        _dbg("after drain: %d lines total", len(lines))
 
         # 续行检测：行尾有 \\ 表示续接
         while lines[-1].rstrip().endswith("\\"):
@@ -213,69 +295,40 @@ class CLIInputAdapter(IInputAdapter):
     def _drain_paste_lines(self, lines: list[str]) -> None:
         """读取快速连续到达的额外行（多行粘贴检测）。
 
-        终端粘贴多行文本时，每行作为独立输入事件到达。
-        此方法检测快速到达的行并合并为同一条消息。
-        仅在交互式终端（TTY）下生效。
-
-        注意：Windows 上 msvcrt.kbhit() 会检测残留按键事件
-        （如 Enter 的 key-up），但 input() 需要完整行才能返回，
-        导致死锁。因此 Windows 上跳过粘贴检测。
+        使用后台 stdin 读取线程 + 队列，支持所有平台（含 Windows）。
+        粘贴的多行会立即出现在队列中，可通过短超时一次性收集；
+        手动输入因行间延迟较大，不会误合并。
         """
-        import sys
+        is_tty = sys.stdin.isatty()
+        _dbg("drain start, isatty=%s", is_tty)
 
-        if not sys.stdin.isatty():
+        if not is_tty:
+            _dbg("drain skip: not tty")
             return
 
-        # Windows 上 kbhit() 不可靠，会因残留按键事件导致 input() 死锁
-        if sys.platform == "win32":
-            return
+        reader = self._get_stdin_reader()
+        _dbg(
+            "drain: reader started=%s, eof=%s, qsize=%d",
+            reader._started,
+            reader._eof,
+            reader._queue.qsize(),
+        )
 
-        import time
-
-        # 等待粘贴数据到达
-        time.sleep(0.01)
-
-        if not self._has_pending_input():
-            return
-
-        # 读取第一条额外行
-        try:
-            first_extra = input()
-        except EOFError:
-            return
-
-        # 首条额外行为空则视为误触（如连按 Enter），跳过
-        if not first_extra.strip():
-            return
-
-        lines.append(first_extra)
-
-        # 继续读取快速到达的行
-        time.sleep(0.005)
-        while self._has_pending_input():
-            try:
-                line = input()
-                lines.append(line)
-                time.sleep(0.005)
-            except EOFError:
+        # 读取粘贴的额外行：粘贴数据在队列中立即可用
+        extra = 0
+        while True:
+            line = reader.read_line(timeout=0.1)
+            _dbg("drain read: %r", line[:60] if line else None)
+            if line is None:
                 break
+            lines.append(line)
+            extra += 1
 
-    @staticmethod
-    def _has_pending_input() -> bool:
-        """检查标准输入是否有待处理的数据（非阻塞）。"""
-        import sys
-
-        try:
-            if sys.platform == "win32":
-                import msvcrt
-
-                return msvcrt.kbhit()
-            else:
-                import select
-
-                return bool(select.select([sys.stdin], [], [], 0.0)[0])
-        except Exception:
-            return False
+        _dbg("drain done: %d extra lines", extra)
+        if extra > 0:
+            logger.info(
+                "粘贴检测: 合并 %d 行额外输入", extra
+            )
 
     def is_slash_command(self, state: dict[str, Any]) -> bool:
         """判断 state 是否来自斜杠命令输入。

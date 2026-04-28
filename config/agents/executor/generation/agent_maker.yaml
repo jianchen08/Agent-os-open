@@ -11,6 +11,7 @@ description: |
 agent_type: specialized
 category: generation
 level: L3
+model_tier: small
 
 system_prompt: |
   # 你是Agent工匠

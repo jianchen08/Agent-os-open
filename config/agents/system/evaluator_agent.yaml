@@ -8,6 +8,7 @@ description: |
   评估专家，负责根据验收标准客观评估执行结果、
   生成详细的评估报告、提供恢复建议。
 
+model_tier: large
 
 plugins:
   disabled: []

@@ -22,7 +22,7 @@ async def test_task_submit():
     # 运行管道
     prompt = """请使用 task_submit 工具提交一个任务：
 - 目标类型: agent
-- 目标ID: resource_generator_agent  
+- 目标ID: resource_manager_agent  
 - 任务标题: 创建数据分析专家 Agent
 - 任务描述: 创建一个专门用于数据分析的 Agent，具备数据清洗、统计分析、可视化能力
 - 优先级: 5

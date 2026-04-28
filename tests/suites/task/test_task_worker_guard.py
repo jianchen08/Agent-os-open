@@ -5,7 +5,6 @@
 2. 子任务终态时 resume 父任务管道
 3. idle 超时时有挂起管道的提醒逻辑（不直接 fail）
 4. idle 超时提醒次数限制
-5. _find_parent_task_id 辅助方法
 """
 
 from __future__ import annotations
@@ -29,40 +28,6 @@ def worker() -> TaskWorker:
         services={"task_service": task_service},
         event_bus=MagicMock(),
     )
-
-
-# ── _find_parent_task_id ──
-
-
-class TestFindParentTaskId:
-    """测试从事件数据中提取父任务 ID。"""
-
-    def test_dict_task_with_parent(self, worker):
-        """事件数据中 task 为字典，有 parent_task_id。"""
-        data = {"task": {"parent_task_id": "parent-001", "title": "子任务"}}
-        assert worker._find_parent_task_id(data) == "parent-001"
-
-    def test_dict_task_without_parent(self, worker):
-        """事件数据中 task 为字典，无 parent_task_id。"""
-        data = {"task": {"title": "根任务"}}
-        assert worker._find_parent_task_id(data) is None
-
-    def test_object_task_with_parent(self, worker):
-        """事件数据中 task 为对象，有 parent_task_id 属性。"""
-        task = MagicMock()
-        task.parent_task_id = "parent-002"
-        data = {"task": task}
-        assert worker._find_parent_task_id(data) == "parent-002"
-
-    def test_no_task_key(self, worker):
-        """事件数据中无 task 键。"""
-        data = {"task_id": "xxx", "new_status": "completed"}
-        assert worker._find_parent_task_id(data) is None
-
-    def test_task_is_none(self, worker):
-        """事件数据中 task 为 None。"""
-        data = {"task": None}
-        assert worker._find_parent_task_id(data) is None
 
 
 # ── _try_resume_engine ──
@@ -259,3 +224,101 @@ class TestOnTaskStateChanged:
         }
 
         await worker._on_task_state_changed(event)
+
+
+# ── 竞态修复：子任务在父管道挂起前失败 ──
+
+
+class TestRaceConditionNotificationQueue:
+    """测试子任务在父管道挂起前就失败时，通知入队和消费。"""
+
+    @pytest.mark.asyncio
+    async def test_notification_queued_when_parent_not_suspended(self, worker):
+        """父管道尚未挂起时，通知应入队等待。"""
+        child_task = MagicMock()
+        child_task.parent_pipeline_id = "pipe-parent"
+        child_task.parent_task_id = "parent-001"
+        child_task.title = "子任务A"
+        child_task.error = "工作空间初始化失败"
+        worker._task_service.get_task.return_value = child_task
+
+        data = {
+            "task_id": "child-001",
+            "new_status": "failed",
+            "task": {
+                "title": "子任务A",
+                "error": "工作空间初始化失败",
+                "parent_task_id": "parent-001",
+            },
+        }
+
+        await worker._notify_suspended_pipelines(
+            "child-001", "failed", data
+        )
+
+        pending = worker._services.get("__pending_notifications_pipe-parent")
+        assert pending is not None
+        assert len(pending) == 1
+        assert "子任务A" in pending[0]
+        assert "failed" in pending[0]
+
+    @pytest.mark.asyncio
+    async def test_notification_delivered_when_parent_already_suspended(
+        self, worker,
+    ):
+        """父管道已挂起时，通知应直接注入而非入队。"""
+        mock_engine = MagicMock()
+        mock_engine.inject_and_wake = MagicMock()
+        worker._services["__suspended_engine_pipe-parent"] = mock_engine
+
+        child_task = MagicMock()
+        child_task.parent_pipeline_id = "pipe-parent"
+        child_task.parent_task_id = "parent-001"
+        child_task.title = "子任务B"
+        child_task.error = ""
+        worker._task_service.get_task.return_value = child_task
+
+        data = {
+            "task_id": "child-002",
+            "new_status": "completed",
+            "task": {
+                "title": "子任务B",
+                "error": "",
+                "parent_task_id": "parent-001",
+            },
+        }
+
+        await worker._notify_suspended_pipelines(
+            "child-002", "completed", data
+        )
+
+        mock_engine.inject_and_wake.assert_called_once()
+        assert worker._services.get("__pending_notifications_pipe-parent") is None
+
+    @pytest.mark.asyncio
+    async def test_multiple_notifications_queued(self, worker):
+        """多个子任务在父管道挂起前失败，通知应累加入队。"""
+        child_task = MagicMock()
+        child_task.parent_pipeline_id = "pipe-parent"
+        child_task.parent_task_id = "parent-001"
+        child_task.title = "子任务"
+        child_task.error = ""
+        worker._task_service.get_task.return_value = child_task
+
+        for i in range(3):
+            data = {
+                "task_id": f"child-{i}",
+                "new_status": "failed",
+                "task": {
+                    "title": f"子任务{i}",
+                    "error": f"错误{i}",
+                    "parent_task_id": "parent-001",
+                },
+            }
+            await worker._notify_suspended_pipelines(
+                f"child-{i}", "failed", data
+            )
+
+        pending = worker._services.get("__pending_notifications_pipe-parent")
+        assert pending is not None
+        assert len(pending) == 3

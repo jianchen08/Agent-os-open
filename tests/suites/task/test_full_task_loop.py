@@ -1,8 +1,8 @@
 """完整任务闭环测试 - 验证任务提交→执行→评估→通知全流程
 
 测试场景：
-1. 灵汐 Agent 提交任务给 resource_generator_agent
-2. resource_generator_agent 执行并创建 Agent 配置
+1. 灵汐 Agent 提交任务给 resource_manager_agent
+2. resource_manager_agent 执行并创建 Agent 配置
 3. 任务评估（验收标准检查）
 4. 任务状态更新（completed/failed）
 5. 结果返回给调用方

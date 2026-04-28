@@ -440,11 +440,7 @@ class WorkspaceLifecycleManager:
             if project_size > threshold:
                 self._setup_sparse_worktree(ws_dir, container_path, branch)
             else:
-                rc, _, stderr = self._run_git(
-                    "worktree", "add", "-b", branch, str(ws_dir), cwd=container_path)
-                if rc != 0:
-                    raise RuntimeError(
-                        f"容器子任务 worktree 创建失败（不降级）: task_id={task_id}, error={stderr}")
+                self._worktree_add_with_repair(container_path, branch, ws_dir, task_id)
             self._ensure_git_user(ws_dir)
             meta = {"mode": "worktree", "path": str(ws_dir),
                     "branch": branch, "project_root": str(container_path)}
@@ -508,16 +504,52 @@ class WorkspaceLifecycleManager:
         if project_size > threshold:
             self._setup_sparse_worktree(ws_dir, root_path, branch)
         else:
-            rc, _, stderr = self._run_git(
-                "worktree", "add", "-b", branch, str(ws_dir), cwd=root_path)
-            if rc != 0:
-                raise RuntimeError(f"git worktree add 失败: task_id={task_id}, error={stderr}")
+            self._worktree_add_with_repair(root_path, branch, ws_dir, task_id)
         self._ensure_git_user(ws_dir)
         meta = {"mode": "worktree", "path": str(ws_dir),
                 "branch": branch, "project_root": str(root_path)}
 
         self._ws_meta_store[task_id] = meta
         return meta
+
+    # ── Worktree 创建（含自动修复）──────────────────────────────
+
+    def _worktree_add_with_repair(
+        self, repo_path: Path, branch: str, ws_dir: Path, task_id: str,
+    ) -> None:
+        """创建 worktree，失败时自动 prune 并重试一次。
+
+        常见失败原因：之前 worktree 清理不彻底，.git/worktrees 下残留引用，
+        导致 git 认为路径状态不一致。prune 可清除这些失效引用。
+        """
+        rc, _, stderr = self._run_git(
+            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        if rc == 0:
+            return
+
+        logger.warning(
+            "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: "
+            "task_id=%s, path=%s, error=%s",
+            task_id, repo_path, stderr,
+        )
+        # 清理无效的 worktree 引用和残留目录
+        self._run_git("worktree", "prune", cwd=repo_path)
+        # 如果目标目录已存在（残留），删除后重试
+        if ws_dir.exists():
+            def _remove_readonly(func, path, exc_info):
+                import stat
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            shutil.rmtree(str(ws_dir), onexc=_remove_readonly)
+        # 清理可能残留的分支
+        self._run_git("branch", "-D", branch, cwd=repo_path)
+
+        rc, _, stderr = self._run_git(
+            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        if rc != 0:
+            raise RuntimeError(
+                f"git worktree add 失败（prune 后重试仍失败）: "
+                f"task_id={task_id}, error={stderr}")
 
     # ── 3. Sparse Worktree 设置 ──────────────────────────────────
 

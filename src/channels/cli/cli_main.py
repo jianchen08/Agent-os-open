@@ -640,9 +640,7 @@ class CLIApplication:
             event_bus_ref = self._event_bus
 
             def _on_task_state_change(task_id, old_status, new_status, **kwargs):
-                """任务状态变更回调，桥接到 EventBus 通知提交者。"""
-                if event_bus_ref is None:
-                    return
+                """任务状态变更回调：终态时直接通知父管道，同时通过 EventBus 广播。"""
                 try:
                     task_obj = kwargs.get("task")
                     task_info = None
@@ -655,18 +653,95 @@ class CLIApplication:
                             "priority": getattr(task_obj, "priority", ""),
                             "agent_name": getattr(task_obj, "agent_name", ""),
                         }
-                    import asyncio
-                    event_data = {
-                        "task_id": task_id,
-                        "old_status": old_status,
-                        "new_status": new_status,
-                        "source": "task_service",
-                    }
-                    if task_info is not None:
-                        event_data["task"] = task_info
-                    asyncio.create_task(event_bus_ref.emit("task_state_changed", event_data))
-                except Exception:
-                    pass
+
+                    # 终态时直接通知父管道（不依赖异步事件链）
+                    if new_status in ("completed", "failed"):
+                        _direct_notify_parent(
+                            task_id, new_status, task_obj, services,
+                        )
+
+                    # 通过 EventBus 广播（供 TaskWorker 等订阅者处理）
+                    if event_bus_ref is not None:
+                        import asyncio
+                        event_data = {
+                            "task_id": task_id,
+                            "old_status": old_status,
+                            "new_status": new_status,
+                            "source": "task_service",
+                        }
+                        if task_info is not None:
+                            event_data["task"] = task_info
+                        asyncio.create_task(
+                            event_bus_ref.emit("task_state_changed", event_data),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Task state change callback error: %s", exc,
+                    )
+
+            def _direct_notify_parent(
+                task_id: str, new_status: str, task_obj: Any, svc: dict,
+            ) -> None:
+                """终态直接通知：读任务状态，找父管道，inject_and_wake。"""
+                if task_obj is None:
+                    return
+                parent_pipeline_id = getattr(
+                    task_obj, "parent_pipeline_id", None,
+                )
+                if not parent_pipeline_id:
+                    return
+                engine_key = f"__suspended_engine_{parent_pipeline_id}"
+                engine = svc.get(engine_key)
+                if engine is None or not hasattr(engine, "inject_and_wake"):
+                    # 父管道尚未挂起，入队等待
+                    pending_key = f"__pending_notifications_{parent_pipeline_id}"
+                    pending_list = svc.get(pending_key, [])
+                    title = getattr(task_obj, "title", task_id)
+                    error = getattr(task_obj, "error", "") or ""
+                    if new_status == "completed":
+                        msg = (
+                            f"[系统通知] 子任务 '{title}'"
+                            f" (ID: {task_id}) 已完成 ✅\n"
+                            "请继续执行后续流程，提交下一个子任务。"
+                        )
+                    else:
+                        err_hint = f": {error[:100]}" if error else ""
+                        msg = (
+                            f"[系统通知] 子任务 '{title}'"
+                            f" (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                            "请根据失败情况决定后续操作"
+                            "（重试/替代方案/标记失败）。"
+                        )
+                    pending_list.append(msg)
+                    svc[pending_key] = pending_list
+                    return
+                title = getattr(task_obj, "title", task_id)
+                error = getattr(task_obj, "error", "") or ""
+                if new_status == "completed":
+                    notification = (
+                        f"[系统通知] 子任务 '{title}'"
+                        f" (ID: {task_id}) 已完成 ✅\n"
+                        "请继续执行后续流程，提交下一个子任务。"
+                    )
+                else:
+                    err_hint = f": {error[:100]}" if error else ""
+                    notification = (
+                        f"[系统通知] 子任务 '{title}'"
+                        f" (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                        "请根据失败情况决定后续操作"
+                        "（重试/替代方案/标记失败）。"
+                    )
+                try:
+                    engine.inject_and_wake(notification)
+                    logger.info(
+                        "Callback: 直接通知父管道: "
+                        "pipeline=%s, task=%s, status=%s",
+                        parent_pipeline_id, task_id, new_status,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Callback: inject_and_wake 失败: %s", exc,
+                    )
 
             task_service = TaskService(on_state_change=_on_task_state_change)
             services["task_service"] = task_service
@@ -1156,7 +1231,18 @@ class CLIApplication:
                     console.print("")
                     continue
                 else:
-                    # 用户输入了新内容 — 取消管道
+                    # 用户输入了新内容 — 先检查是否为无意义输入
+                    try:
+                        peek_state = self._input_task.result()
+                    except Exception:
+                        peek_state = {}
+
+                    # 空输入（如粘贴后的回车）不取消管道
+                    if peek_state.get("_is_empty"):
+                        self._input_task = None
+                        continue
+
+                    # 有实际内容 — 取消管道
                     self._pipeline_task.cancel()
                     try:
                         await asyncio.wait_for(

@@ -67,7 +67,7 @@ async def main():
         f"请创建一个新的 L3 Agent，名称为 {TARGET_AGENT}，"
         "只需要 file_read 和 file_write 两个工具，"
         f"保存到 config/agents/executor/test/{TARGET_AGENT}.yaml。\n\n"
-        "请通过 task_submit 提交给 resource_generator_agent 完成。"
+        "请通过 task_submit 提交给 resource_manager_agent 完成。"
     )
     print(f"Task: {task_prompt[:80]}...", flush=True)
 

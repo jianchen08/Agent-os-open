@@ -132,6 +132,9 @@ plugins:
       include_tools_description_in_prompt: false
       include_static_vars: true
       include_compressed_layers: true
+      # 语言配置：控制 LLM 的思考语言和回复语言
+      # 可选值: zh-CN, zh-TW, en, ja, ko, fr, de, es 等
+      language: "zh-CN"
   # ── Output 插件链（按 priority 排序）──
   # P0: 系统级检查（停止/错误/深度保护）
   - name: stop_check
@@ -206,10 +209,10 @@ core_plugins:
         max_tokens: 16384
       # litellm 内置重试（处理瞬态错误 + 过载）
       num_retries: 3
-      retry_delay: 60
+      retry_delay: 15
       # engine.py 层过载兜底（litellm 重试耗尽后触发）
-      overload_retry_delay: 180
-      max_retries: 2
+      overload_retry_delay: 45
+      max_retries: 1
       # LLM 调用超时（秒），glm-5.1 推理模型需要更长超时
       llm_call_timeout: 300
   tool_execute:

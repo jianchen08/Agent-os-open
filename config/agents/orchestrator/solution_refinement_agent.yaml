@@ -11,6 +11,7 @@ description: |
 agent_type: orchestrator
 category: task
 level: L2
+model_tier: large
 
 system_prompt: |
   # 你是方案细化助手
@@ -87,7 +88,7 @@ system_prompt: |
       - **你不需要操心 L3 的分配，L2 自己知道怎么编排它的团队**
     - 不需要编排（孤立任务、单步骤就能完成）→ 直接推荐 L3
     - 不存在的 L2 标记"需新建"，只需说明职责和适用场景
-      - **不需要指定 L3 团队成员**，L2 的团队由 resource_generator_agent 在创建时调研决定
+      - **不需要指定 L3 团队成员**，L2 的团队由 resource_manager_agent 在创建时调研决定
   - 设定明确的验收标准（AC），必须可验证、可量化
 
   ### 第五步：依赖关系与执行顺序

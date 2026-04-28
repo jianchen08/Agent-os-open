@@ -26,7 +26,7 @@ test_cases:
       prompt: |
         请使用 task_submit 工具提交一个测试任务：
         - 目标类型: agent
-        - 目标ID: resource_generator_agent
+        - 目标ID: resource_manager_agent
         - 任务标题: E2E测试任务-正常提交
         - 任务描述: 用于验证任务提交功能的测试任务
         - 优先级: 5
@@ -156,7 +156,7 @@ test_cases:
       prompt: |
         请使用 task_submit 工具提交一个任务：
         - 目标类型: agent
-        - 目标ID: resource_generator_agent
+        - 目标ID: resource_manager_agent
         - 任务标题: E2E反馈测试
         - 任务描述: 验证成功反馈信息
         - 优先级: 4
@@ -190,7 +190,7 @@ test_cases:
       prompt: |
         请使用 task_submit 工具提交一个任务：
         - 目标类型: agent
-        - 目标ID: resource_generator_agent
+        - 目标ID: resource_manager_agent
         - 任务标题: E2E持久化测试
         - 任务描述: 验证任务数据持久化
         - 优先级: 3
@@ -224,7 +224,7 @@ test_cases:
       prompt: |
         请使用 task_submit 工具连续提交两个相同内容的任务：
         - 目标类型: agent
-        - 目标ID: resource_generator_agent
+        - 目标ID: resource_manager_agent
         - 任务标题: E2E重复测试
         - 任务描述: 测试重复提交
         - 优先级: 1

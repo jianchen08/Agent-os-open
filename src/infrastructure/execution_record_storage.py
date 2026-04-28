@@ -53,6 +53,7 @@ class ExecutionRecordData:
     tool_call_id: str | None = None
     tool_input: dict[str, Any] | None = None
     thinking_content: str | None = None
+    tool_calls_json: str | None = None
 
     error: str | None = None
 

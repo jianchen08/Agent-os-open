@@ -49,7 +49,7 @@ async def test():
 
     messages = [
         {"role": "system", "content": "你是一个任务调度助手。当用户需要创建任务时，你必须使用 task_submit 工具。不要只返回文本描述，必须调用工具。"},
-        {"role": "user", "content": "请使用 task_submit 工具提交一个任务：创建一个数据分析专家 Agent，目标 Agent 是 resource_generator_agent"}
+        {"role": "user", "content": "请使用 task_submit 工具提交一个任务：创建一个数据分析专家 Agent，目标 Agent 是 resource_manager_agent"}
     ]
 
     print("=" * 60)

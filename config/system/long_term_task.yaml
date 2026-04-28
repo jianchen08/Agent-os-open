@@ -4,7 +4,7 @@
 # 任务超时配置
 timeout:
   task_max_duration: 3600      # 单个任务最大执行时间（秒），1小时
-  idle_threshold: 600          # 无活动判定阈值（秒），10分钟
+  idle_threshold: 180          # 无活动判定阈值（秒），3分钟
   project_max_duration: 86400  # 总任务最大执行时间（秒），24小时
   activity_threshold: 300      # 活动判定阈值（秒），5分钟
 

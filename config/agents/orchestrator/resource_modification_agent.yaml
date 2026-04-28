@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-# 资源修改 Agent - 负责修改现有工具和 Agent 资源
-# 支持普通修改和团队变更模式
+# [已弃用] 已合并到 resource_manager_agent.yaml
+# 弃用日期：2026-04-28
+# 统一管理资源的创建和修改
 
 config_id: resource_modification_agent
 name: 资源修改专家
@@ -14,6 +15,7 @@ description: |
 agent_type: orchestrator
 category: modification
 level: L2
+model_tier: large
 
 system_prompt: |
   你是资源修改专家，负责协调完成资源修改任务。
@@ -362,8 +364,8 @@ recommended_metrics:
         reference_template: "config/templates/resource_modification_report_template.md"
 
 version: "2.0.0"
-is_active: true
-status: "active"
+is_active: false
+status: "deprecated"
 max_iterations: 120
 max_reminders: 5
 timeout_seconds: 3600

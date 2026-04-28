@@ -136,7 +136,13 @@ class TaskEvaluateTool(BuiltinTool):
         """获取工具定义"""
         return Tool(
             name="task_evaluate",
-            description="任务评估工具：用于评估任务的评估指标是否满足。支持两种模式：evaluate_single(评估单个指标，增量模式，需提供metric_id)、auto_complete(自动评估所有指标，推荐)。完成任务执行后使用，验证是否满足验收标准。注意：任务未完成时先执行任务；无验收标准的任务无法评估；指标重试超过上限后任务会被标记为失败。",
+            description=(
+                "任务评估工具：用于评估任务的评估指标是否满足。"
+                "支持两种模式：evaluate_single(评估单个指标，增量模式，需提供metric_id)、auto_complete(自动评估所有指标，推荐)。"
+                "【重要】调用前提：你必须已完成任务要求的全部工作步骤和产出物。"
+                "如果你还有未完成的步骤、未输出的产出物、或未处理的待办事项，禁止调用此工具——先完成它们。"
+                "任务未完成时先执行任务；无验收标准的任务无法评估；指标重试超过上限后任务会被标记为失败。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -430,7 +436,19 @@ class TaskEvaluateTool(BuiltinTool):
         Returns:
             工具执行结果
         """
-        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        if task.status == TaskStatus.COMPLETED:
+            logger.info("[TaskEvaluate] 任务 %s 已完成，跳过状态回写", task.id)
+        elif task.status == TaskStatus.FAILED:
+            # 评估通过但任务已被标记失败（如 idle 超时），恢复为完成
+            logger.warning(
+                "[TaskEvaluate] 任务 %s 已失败但评估通过，尝试恢复为完成", task.id,
+            )
+            try:
+                eval_data = self._build_result_data(eval_result)
+                task_service.recover_to_completed(task.id, result=eval_data)
+            except Exception as e:
+                logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
+        else:
             try:
                 eval_data = self._build_result_data(eval_result)
                 task_service.complete_evaluation(task.id, passed=True, result=eval_data)
@@ -440,8 +458,6 @@ class TaskEvaluateTool(BuiltinTool):
                     error=f"complete_evaluation(passed=True) 失败: {e}",
                     metadata={"eval_data": str(self._build_result_data(eval_result))[:200]},
                 )
-        else:
-            logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
 
         return create_success_result(
             data=self._build_result_data(eval_result),

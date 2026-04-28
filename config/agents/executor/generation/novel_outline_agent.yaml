@@ -16,6 +16,7 @@ description: |
 agent_type: specialized
 category: generation
 level: L3
+model_tier: small
 
 system_prompt: |
   # 你是网络小说大纲生成专家

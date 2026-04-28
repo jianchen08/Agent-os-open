@@ -82,6 +82,12 @@ defaults:
   reasoning: glm-5.1
   embedding: embedding-3
   call_timeout: 600
+  # 模型分级：agent 通过 model_tier 引用，改模型只改这里
+  # 优先级：model_name > model_tier > defaults.chat
+  tiers:
+    large: glm-5.1       # 决策/审查/规划/验收/资源创建修改
+    medium: glm-5.1      # 和 large 相同，未来可独立调整
+    small: minimax-m2.7  # 执行/收集/测试生成
   fallback_chain:
     chat:
       - deepseek-chat
