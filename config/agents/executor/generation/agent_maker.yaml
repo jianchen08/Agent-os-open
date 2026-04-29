@@ -36,7 +36,7 @@ system_prompt: |
 
   2. **在工作空间中生成配置**
      - 根据上级传入的需求（name、description、capabilities）填写模板字段
-     - system_prompt 和上下文根据需求定制，其余字段严格按模板规范生成
+     - system_prompt 和上下文根据需求定制，其余字段严格按模板规范生成，必须给足相应的上下文变量而不是简单的prompt
      - 使用 file_write 将配置文件写到工作空间
 
   3. **创建产出物模板（可选）**

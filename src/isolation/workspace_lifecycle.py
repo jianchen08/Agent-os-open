@@ -382,18 +382,16 @@ class WorkspaceLifecycleManager:
         子 agent 无法看到项目代码。
         """
         ws_root = task_data.get("workspace_root", ".ai_workspaces")
-        if workspace:
-            container_path = workspace
-        else:
-            container_path = str(Path(ws_root) / container_task_id)
-
+        container_path = str(Path(ws_root) / f"container_{container_task_id}")
         path = Path(container_path)
+
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
-            copied = self._copy_project_to_container(path)
+            if workspace:
+                copied = self._copy_project_to_container(path)
+                logger.info("[WorkspaceLifecycle] 容器空间已复制项目文件: task_id=%s, files=%d", container_task_id, copied)
             if not self._git_init_and_initial_commit(path, "chore: initial container project"):
                 raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-            logger.info("[WorkspaceLifecycle] 容器空间已复制项目文件: task_id=%s, files=%d", container_task_id, copied)
         elif not (path / ".git").exists():
             if not self._git_init_and_initial_commit(path, "chore: initial commit for container workspace"):
                 raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
