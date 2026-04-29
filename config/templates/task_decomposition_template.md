@@ -26,7 +26,7 @@
 
 【与其他模板的关系】
 - 上游：基于 solution_template.md 或用户需求创建
-- 下游：分解结果用于 execution_plan_template.md（执行计划）
+- 下游：分解结果用于 execution_plan_template.md（任务链）
 ============================================================
 -->
 

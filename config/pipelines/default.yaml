@@ -226,3 +226,4 @@ core_plugins:
         "3": 1800
       tool_timeouts:
         human_interaction: 1800
+        task_evaluate: 600

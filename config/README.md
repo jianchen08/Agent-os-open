@@ -12,7 +12,7 @@ config/
 │   │   ├── lingxi.yaml         # 灵汐主Agent (已优化)
 │   │   └── main_agent.yaml     # 主控Agent
 │   ├── orchestrator/           # L2 编排 Agent
-│   │   ├── task_preparation_agent.yaml    # 任务准备
+│   │   ├── solution_planning_agent.yaml   # 方案规划
 │   │   ├── resource_manager_agent.yaml   # 资源管理
 │   │   ├── ac_refine_agent.yaml          # AC细化
 │   │   ├── modification_planner_agent.yaml # 修改规划

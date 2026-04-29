@@ -180,5 +180,5 @@ class EvaluationConfig:
 
     metric_ids: list[str] = field(default_factory=list)
     input_params: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timeout: float = 120.0
+    timeout: float = 600.0
     fail_fast: bool = False

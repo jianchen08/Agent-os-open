@@ -51,7 +51,7 @@ system_prompt: |
 
   ### 第一步：全面盘点产出物
   1. 使用 file_read 读取方案文档（路径形如 `docs/{title}_solution.md`），提取所有需求点和验收标准
-  2. 使用 file_read 读取任务计划 `docs/{title}_task_plan.md` 或执行计划 `docs/{title}_execution_plan.md`（如存在）
+  2. 使用 file_read 读取任务链 `docs/{title}_task_chain.md`（如存在）
   3. 使用 file_list 或 file_read 扫描工作空间中所有产出文件
   4. 建立完整的验证清单：每个需求点 → 对应产出物 → 验证方式
 

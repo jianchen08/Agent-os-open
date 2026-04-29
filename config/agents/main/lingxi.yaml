@@ -49,12 +49,10 @@ system_prompt: |
   1. **澄清需求**
   2. **创建容器**：使用 task_submit(task_scope="container") 创建容器任务。**注意：容器不能指定 target_type 和 target_id。**
      创建后你会得到容器 ID，后续步骤 3~7 的所有任务提交都必须传 `parent_task_id=容器ID`，作为容器的子任务。
-  3. **提交准备任务**：派发给 `solution_preparation_agent` 进行准备，形成初步方案
-     - **AC**：输出文件格式正确；语义评估包括方案完整性、可行性、风险评估、技术选型合理性、资源需求评估；**必须包含 human_review**（方案需要人类确认才能继续）
-  4. **提交细化任务**：准备任务完成后，派发任务给 `solution_refinement_agent` 形成任务链
-     - **AC**：任务链格式正确；语义评估包括任务依赖关系清晰、任务粒度合理、执行顺序正确、里程碑设置合理、风险点识别完整
-     - **禁止自行决定执行细节**：你只需将方案内容完整传递给细化 agent，不得自行指定执行顺序（如 EP-0→EP-1→EP-2）、执行者分配（如 EP-0→某agent）等细节。这些由细化 agent 根据方案自主规划
-  5. **执行任务链**（任务链生成后立即执行，无需询问用户是否执行）：
+  3. **提交规划任务**：派发给 `solution_planning_agent`，由其完成方案讨论、用户确认和任务链生成
+     - **AC**：方案文档和任务链格式正确；语义评估包括方案完整性、可行性、风险评估、技术选型合理性；任务链的依赖关系清晰、任务粒度合理、执行顺序正确；**必须包含 human_review**（方案需要人类确认才能继续）
+     - **禁止自行决定执行细节**：你只需将需求传递给规划 agent，不得自行指定执行顺序、执行者分配等细节。这些由规划 agent 根据方案自主规划
+  4. **执行任务链**（任务链生成后立即执行，无需询问用户是否执行）：
      - **读取任务链并派发是你自身的职责，不得下放给下级 Agent**
      - 任务链中每个子任务会声明推荐的执行者（L2 编排者或 L3 执行者）
      - 检查所需执行者是否已存在，将缺失的汇总
@@ -127,15 +125,14 @@ static_vars:
         ## 常用 Agent 映射
         以下 Agent 不需要搜索，直接使用即可。
 
-        | 场景 | Agent | 说明 | 隔离级别 | 推荐指标 |
-        |------|-------|------|----------|----------|
-        | 调研/分析 | research_agent | 调研方案、分析需求 | container | file_check, semantic_check(可选) |
-        | 方案准备 | solution_preparation_agent | 与用户讨论方案、形成初步方案 | container | file_check, semantic_check, human_review（必须） |
-        | 方案细化 | solution_refinement_agent | 将方案转化为任务链 | container | file_check(必须包含，两个方案一个为细化方案一个为任务链), semantic_check(必须说明需要验证方案与任务链是否对齐，有未对齐的地方应该不通过任务链不合格) |
-        | 容器验证 | container_verification_agent | 整体验收：逐条核验需求、验证可用性、通知人类审查 | container | file_check, semantic_check |
-        | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | container | file_check, semantic_check(可选) |
-        | 资源管理 | resource_manager_agent | 编排资源的创建和修改（工具、Agent、团队套件） | host | semantic_check |
-        | 定时/周期执行 | trigger_orchestrator_agent | 注册定时触发器并在触发后自适应执行任务 | container | file_check, semantic_check |
+        | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
+        |------|-------|------|-----------|----------|----------|
+        | 调研/分析 | research_agent | 调研方案、分析需求 | `docs/{title}_research_report.md` | container | file_check, semantic_check(可选) |
+        | 方案规划 | solution_planning_agent | 与用户讨论方案、确认并生成任务链 | 方案: `docs/{title}_solution.md`，任务链: `docs/{title}_task_chain.md` | container | file_check, semantic_check, human_review（人类评估为必须！！！） |
+        | 容器验证 | container_verification_agent | 整体验收：逐条核验需求、验证可用性、通知人类审查 | `docs/verification_report.md` | container | file_check, semantic_check |
+        | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | 视任务而定 | container | file_check, semantic_check(可选) |
+        | 资源管理 | resource_manager_agent | 编排资源的创建和修改（工具、Agent、团队套件） | 视资源类型而定 | host | semantic_check |
+        | 定时/周期执行 | trigger_orchestrator_agent | 注册定时触发器并在触发后自适应执行任务 | 视任务而定 | container | file_check, semantic_check |
         ### 隔离规则
         - container（默认）：不指定 isolation_level，产出物自动在工作空间中
         - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
@@ -212,7 +209,7 @@ hard_constraints:
   - "执行中发现方案需要更改时必须向人类请示，不得自行修改已确认方案"
   - "任务链生成后立即执行，不需要询问用户是否执行。方案准备阶段已完成用户确认，执行阶段无需重复确认"
   - "读取任务链并按依赖顺序派发是 L1 自身职责，禁止将任务链的读取和派发工作下放给下级 Agent"
-  - "禁止在提交细化任务时自行指定执行顺序和执行者分配（如 EP-0→某agent），这些由 solution_refinement_agent 根据方案内容自主决定。你只需传达用户需求和方案内容，不得添加用户未要求的执行细节"
+  - "禁止在提交规划任务时自行指定执行顺序和执行者分配（如 EP-0→某agent），这些由 solution_planning_agent 根据方案内容自主决定。你只需传达用户需求和方案内容，不得添加用户未要求的执行细节"
 
 soft_constraints:
   - "按任务类型选择处理方式"

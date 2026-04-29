@@ -953,13 +953,25 @@ class PipelineEngine:
                             "(retry=%d)", retry_count,
                         )
                     else:
-                        logger.debug(
-                            "No route signals after LLM response (iter=%d), "
-                            "ending pipeline. output_plugins_count=%d, "
-                            "raw_tool_calls=%d, ended=%s",
-                            iteration, len(output_plugins) if output_plugins else 0,
-                            len(state.get("raw_tool_calls", [])),
-                            state.get(StateKeys.ENDED, False),
+                        # BUG-FIX: 无 route signals 时记录详细诊断信息
+                        # 便于排查管道异常退出原因
+                        _raw_tool_calls = state.get("raw_tool_calls", [])
+                        _raw_result = state.get("raw_result")
+                        _error_analysis = state.get("error_analysis")
+                        _ended = state.get(StateKeys.ENDED, False)
+                        logger.info(
+                            "No route signals after LLM response "
+                            "(iter=%d), ending pipeline. "
+                            "output_plugins_count=%d, "
+                            "raw_tool_calls=%d, ended=%s, "
+                            "has_result=%s, "
+                            "error_analysis=%s",
+                            iteration,
+                            len(output_plugins) if output_plugins else 0,
+                            len(_raw_tool_calls),
+                            _ended,
+                            _raw_result is not None,
+                            _error_analysis,
                         )
                         state[StateKeys.ENDED] = True
 
@@ -982,12 +994,26 @@ class PipelineEngine:
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled by CLI user")
             state[StateKeys.ENDED] = True
+        except Exception as exc:
+            # BUG-FIX: 管道未捕获异常保护
+            # 确保异常不会导致管道永远不结束，
+            # 造成任务卡在 running 状态
+            logger.error(
+                "Pipeline uncaught exception (iter=%d): %s",
+                state.get(StateKeys.ITERATION, 0), exc,
+            )
+            state[StateKeys.ENDED] = True
+            state[StateKeys.RAW_ERROR] = str(exc)
         finally:
             if _pipeline_log_handler:
                 _pipeline_log_handler.close()
                 for _lg in _pipeline_loggers:
                     _lg.removeHandler(_pipeline_log_handler)
             _current_pipeline_id.reset(_pipeline_id_token)
+            # NOTE: 不在此处关闭 litellm HTTP 客户端。
+            # 客户端生命周期由应用层（cli_main / auto_confirm_runner）
+            # 统一管理，每次 run 完就关闭会导致后续请求报
+            # "Cannot send a request, as the client has been closed"。
 
         return state
 

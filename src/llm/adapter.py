@@ -56,6 +56,37 @@ def cleanup_litellm_logging() -> None:
         pass
 
 
+async def cleanup_litellm_resources() -> None:
+    """清理 LiteLLM 所有资源：后台任务 + HTTP 会话。
+
+    在异步上下文中调用（事件循环仍活跃时）。
+    """
+    cleanup_litellm_logging()
+    try:
+        from litellm.llms.custom_httpx.async_client_cleanup import (
+            close_litellm_async_clients,
+        )
+        await close_litellm_async_clients()
+    except Exception:
+        pass
+
+
+def cleanup_litellm_resources_sync() -> None:
+    """同步版本，在事件循环关闭后调用（如 main() finally 块）。"""
+    cleanup_litellm_logging()
+    try:
+        from litellm.llms.custom_httpx.async_client_cleanup import (
+            close_litellm_async_clients,
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(close_litellm_async_clients())
+        finally:
+            loop.close()
+    except Exception:
+        pass
+
+
 def _cancel_worker_tasks(worker: Any) -> None:
     """取消单个 worker 的后台任务。"""
     if worker is None:
@@ -846,6 +877,14 @@ class AdaptiveRouterAdapter(_BaseLiteLLMAdapter):
             raise
         except litellm.Timeout:
             sem.on_timeout()
+            raise
+        except litellm.InternalServerError as exc:
+            # Connection error / 5xx 等服务端错误 → 降级并发，避免密集重试加剧问题
+            sem.on_rate_limit()
+            logger.warning(
+                "[AdaptiveRouterAdapter] InternalServerError → 并发降级 model=%s: %s",
+                model_name, exc,
+            )
             raise
         except Exception:
             raise

@@ -155,9 +155,11 @@ def build_router(model_loader: Any) -> litellm.Router:
         "model_list": model_list,
         # Router 自身不再管并发 — 由 AdaptiveRouterAdapter 管理
         "default_max_parallel_requests": 10,
-        "num_retries": 2,
+        "num_retries": 1,
         "allowed_fails": 2,
-        "cooldown_time": 90,
+        "cooldown_time": 120,
+        # 重试间隔：避免 OpenAI 客户端默认的 0.3-1s 短间隔导致密集重试
+        "retry_after": 5,
         # stream_timeout: Router 内置流式超时，作为最终兜底
         "stream_timeout": call_timeout,
         "timeout": call_timeout,

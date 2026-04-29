@@ -210,7 +210,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     },
                     "task_role": {
                         "type": "string",
-                        "enum": ["solution_preparation", "solution_refinement", "final_validation"],
+                        "enum": ["solution_planning", "final_validation"],
                         "description": (
                             "子任务角色标记（可选）。用于容器任务的子任务，"
                             "标记该子任务在容器中的角色。"
@@ -496,17 +496,17 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="EVENT_BUS_UNAVAILABLE",
             )
 
-        # BUG-FIX-C3：emit 前检查是否有订阅者，防止 TaskWorker 未启动时任务永远不被执行
+        # BUG-FIX-C3-revised：检查是否有订阅者。
+        # 原逻辑会在无订阅者时回滚（删除）任务，导致 TaskWorker 启动时序问题下任务丢失。
+        # 修复：无订阅者时仅记录警告，保留任务为 pending 状态。
+        # TaskWorker.start() → _recover_running_tasks() 会扫描 pending 任务并重新触发执行。
+        no_subscriber_warning = None
         if hasattr(event_bus, 'has_subscribers') and not event_bus.has_subscribers("task.submitted"):
-            logger.error("[TaskSubmit] 无订阅者: task.submitted, 回滚任务 %s", task.id)
-            try:
-                task_service._storage.delete(task.id)
-            except Exception as del_e:
-                logger.error("[TaskSubmit] 回滚失败: %s", del_e)
-            return create_failure_result(
-                error="任务提交失败：后台执行器(TaskWorker)未启动，无法处理任务",
-                error_code="NO_SUBSCRIBER",
+            logger.warning(
+                "[TaskSubmit] 无订阅者: task.submitted, 任务 %s 将保持 pending 状态等待 TaskWorker 恢复",
+                task.id,
             )
+            no_subscriber_warning = "后台执行器(TaskWorker)暂未就绪，任务已创建并等待自动执行"
 
         try:
             # Determine is_root: container sub-tasks (parent is container) get own workspace,
@@ -535,34 +535,35 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             })
             logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
         except Exception as e:
-            logger.error("[TaskSubmit] EventBus emit 失败，回滚任务 %s: %s", task.id, e)
-            try:
-                task_service._storage.delete(task.id)
-            except Exception as del_e:
-                logger.error("[TaskSubmit] 回滚失败（_storage.delete）: %s", del_e)
-            return create_failure_result(
-                error=f"任务提交失败：事件发布异常 - {e}",
-                error_code="EVENT_BUS_ERROR",
+            # emit 异常时不回滚任务：任务已持久化为 pending，TaskWorker 恢复机制可补偿
+            logger.warning(
+                "[TaskSubmit] EventBus emit 失败, 任务 %s 保持 pending 等待恢复: %s",
+                task.id, e,
             )
+            no_subscriber_warning = f"事件发布异常，任务已创建等待自动恢复: {e}"
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
+        result_data = {
+            "task_id": task.id,
+            "title": task.title,
+            "status": task.status.value,
+            "target_type": target_type,
+            "target_id": target_id,
+            "submit_status": "submitted",
+            # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
+            "message": (
+                f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
+                "该任务需要一定时间完成。"
+                "子任务完成后系统会自动通知你并恢复执行。"
+                "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
+            ),
+        }
+        if no_subscriber_warning:
+            result_data["warning"] = no_subscriber_warning
+
         return create_success_result(
-            data={
-                "task_id": task.id,
-                "title": task.title,
-                "status": task.status.value,
-                "target_type": target_type,
-                "target_id": target_id,
-                "submit_status": "submitted",
-                # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
-                "message": (
-                    f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
-                    "该任务需要一定时间完成。"
-                    "子任务完成后系统会自动通知你并恢复执行。"
-                    "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
-                ),
-            },
+            data=result_data,
             metadata={
                 "action": "task_submit",
                 "task_scope": task_scope,
@@ -675,12 +676,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 # 问题根因: 容器任务返回消息说"请先继续处理其他工作"和"在收到系统提醒前，不要查询任务状态"，
                 #           导致 LLM 误以为不需要继续操作，直接结束对话，未提交子任务。
                 # 修复方案: 容器任务只是组织框架，LLM 必须在同一轮对话中立即提交准备子任务。
-                #           返回消息明确引导 LLM 继续提交 solution_preparation_agent 子任务。
+                #           返回消息明确引导 LLM 继续提交 solution_planning_agent 子任务。
                 "message": (
                     f"容器任务 [{task.title}]（ID: {task.id}）已提交。"
                     "容器只是组织框架，不直接执行。你现在必须立即继续操作："
                     f"下一步——使用 task_submit(parent_task_id='{task.id}', target_type='agent', "
-                    "target_id='solution_preparation_agent') 提交方案准备子任务。"
+                    "target_id='solution_planning_agent') 提交方案规划子任务。"
                     "请在同一轮对话中立即调用，不要等待。"
                 ),
             },
@@ -797,7 +798,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["target_id"] = inputs["target_id"]
 
         # 存储任务角色标记（用于容器完成条件判断）
-        # 可选值：solution_preparation、solution_refinement、final_validation
+        # 可选值：solution_planning、final_validation
         if inputs.get("task_role"):
             metadata["task_role"] = inputs["task_role"]
 

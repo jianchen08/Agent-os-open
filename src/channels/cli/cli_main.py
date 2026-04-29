@@ -96,21 +96,26 @@ def setup_logging(
     )
 
     if not debug:
-        _console_handler = logging.getLogger().handlers[0]
-        _console_handler.addFilter(
-            lambda record: not any(
-                record.name.startswith(_ns)
-                for _ns in (
-                    "pipeline.", "httpcore", "httpx", "LiteLLM",
-                    "isolation.", "infrastructure.",
-                    "tools.", "plugins.", "llm.",
-                    "src.tools.", "src.plugins.", "src.llm.",
-                    "evaluation", "tasks", "memory",
-                    "human_interaction", "channels.cli.",
-                    "__main__",
-                )
-            ) or record.levelno >= logging.ERROR
+        _SUPPRESSED_NS = (
+            "pipeline.", "httpcore", "httpx", "LiteLLM",
+            "isolation.", "infrastructure.",
+            "tools.", "plugins.", "llm.",
+            "src.tools.", "src.plugins.", "src.llm.",
+            "evaluation", "tasks", "memory",
+            "human_interaction", "channels.cli.",
+            "__main__", "asyncio",
         )
+
+        def _console_filter(record: logging.LogRecord) -> bool:
+            # 外部库（非内部命名空间）→ 全部放行
+            if not any(record.name.startswith(_ns) for _ns in _SUPPRESSED_NS):
+                return True
+            # 内部命名空间：错误已通过 output adapter 结构化显示，
+            # 不再重复输出到终端，避免长 traceback 泄露
+            return False
+
+        _console_handler = logging.getLogger().handlers[0]
+        _console_handler.addFilter(_console_filter)
 
 # 默认管道配置路径（相对于包目录）
 # 默认管道配置路径 -- 优先项目根目录的 config/，回退到 src/config/
@@ -181,7 +186,12 @@ class CLIApplication:
         self._show_thinking: bool = False
         self._turn_count: int = 0
 
+        # 后台管道状态
+        self._pipeline_task: asyncio.Task | None = None
+        self._pipeline_initial_state: dict[str, Any] | None = None
+
         # 并发执行状态
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # 事件总线（用于接收子任务完成通知）
         from pipeline.event_bus import EventBus
@@ -641,9 +651,11 @@ class CLIApplication:
                         }
                         if task_info is not None:
                             event_data["task"] = task_info
-                        asyncio.create_task(
+                        _t = asyncio.create_task(
                             event_bus_ref.emit("task_state_changed", event_data),
                         )
+                        self._bg_tasks.add(_t)
+                        _t.add_done_callback(self._bg_tasks.discard)
                 except Exception as exc:
                     logger.warning(
                         "Task state change callback error: %s", exc,
@@ -1042,10 +1054,10 @@ class CLIApplication:
         if tw and hasattr(tw, "stop"):
             await tw.stop()
 
-        # 清理 LiteLLM 内部 LoggingWorker 后台任务
+        # 清理 LiteLLM 资源（后台任务 + HTTP 会话）
         try:
-            from llm.adapter import cleanup_litellm_logging
-            cleanup_litellm_logging()
+            from llm.adapter import cleanup_litellm_resources
+            await cleanup_litellm_resources()
         except Exception:
             pass
 
@@ -1158,13 +1170,48 @@ class CLIApplication:
                 f"使用 /clear 开启新会话[/dim]"
             )
 
-        # REPL 主循环（串行模式：输入 → 输出 → 输入）
+        # REPL 主循环（事件驱动：后台管道 + 即时提示符）
         while True:
+            # --- 后台管道完成检查 ---
+            if (
+                self._pipeline_task is not None
+                and self._pipeline_task.done()
+            ):
+                try:
+                    final_state = self._pipeline_task.result()
+                except Exception as exc:
+                    logger.warning("Pipeline task failed: %s", exc)
+                    final_state = {"error": str(exc)}
+
+                initial_state = self._pipeline_initial_state or {}
+                self._pipeline_task = None
+                self._pipeline_initial_state = None
+
+                # 结束残留的文本行（用 sys.stdout 避免 rich markup 干扰）
+                if getattr(self, "_last_was_text", False):
+                    _sys.stdout.write("\n")
+                    _sys.stdout.flush()
+                    self._last_was_text = False
+
+                try:
+                    conversation_history = await self._handle_pipeline_result(
+                        final_state, initial_state,
+                        conversation_history, console,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Error handling pipeline result, "
+                        "continuing REPL loop"
+                    )
+
+                # → 继续循环，下一轮显示提示符等待新输入
+                continue
+
             # 渲染状态栏提示符
             status_text = self._output_adapter.status_bar.render_simple()
             self._input_adapter._prompt_str = f"{status_text} > "
 
-            # 检查是否有子 Agent 待处理的交互请求
+            # --- 子 Agent 交互请求处理（管道运行中或空闲时） ---
             cli_notifier = self._services.get("cli_notifier")
             if cli_notifier and cli_notifier.has_pending():
                 human_svc = self._services.get(
@@ -1174,33 +1221,125 @@ class CLIApplication:
                     run_sub_conversation,
                 )
 
-                await run_sub_conversation(
-                    console=console,
-                    input_adapter=self._input_adapter,
-                    notifier=cli_notifier,
-                    interaction_service=human_svc,
-                    idle_timeout=60,
-                )
+                # 子对话期间抑制管道流式输出
+                self._suppress_streaming = True
+                try:
+                    await run_sub_conversation(
+                        console=console,
+                        input_adapter=self._input_adapter,
+                        notifier=cli_notifier,
+                        interaction_service=human_svc,
+                        idle_timeout=60,
+                    )
+                finally:
+                    self._suppress_streaming = False
+                    if self._streaming_buffer:
+                        safe = sanitize_for_terminal(
+                            "".join(self._streaming_buffer)
+                        )
+                        console.print(safe, end="", highlight=False)
+                        self._last_was_text = True
+                        self._streaming_buffer.clear()
+                self._input_adapter.drain_stdin()
                 continue
 
-            # === 显示提示符并等待用户输入 ===
-            # 安全网：确保任何残留的流式输出状态被清理
-            _tsa2 = getattr(self, "_text_streaming_active", False)
-            logger.warning(
-                "[CURSOR-DEBUG] before prompt: "
-                "_text_streaming_active=%s", _tsa2,
+            # === 管道运行中：等待完成或交互请求 ===
+            pipeline_running = (
+                self._pipeline_task is not None
+                and not self._pipeline_task.done()
             )
-            if _tsa2:
+
+            if pipeline_running:
+                interaction_task = None
+                if cli_notifier is not None:
+                    async def _poll():
+                        while not cli_notifier.has_pending():
+                            await asyncio.sleep(0.3)
+                    interaction_task = asyncio.create_task(_poll())
+
+                # 周期性等待：管道完成时立即返回，
+                # 超时时检查是否需要结束文本行或显示进度
+                _progress_dots = 0
+                while True:
+                    wait_set: set[asyncio.Task] = {self._pipeline_task}
+                    if interaction_task is not None and not interaction_task.done():
+                        wait_set.add(interaction_task)
+
+                    done, pending = await asyncio.wait(
+                        wait_set,
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=3.0,
+                    )
+
+                    if done:
+                        break
+
+                    # 超时：检查文本流是否已结束但光标还停在行末
+                    if getattr(self, "_last_was_text", False):
+                        _sys.stdout.write("\n")
+                        _sys.stdout.flush()
+                        self._last_was_text = False
+
+                    # 显示进度点，让用户知道系统还在工作
+                    if _progress_dots == 0:
+                        _sys.stdout.write("  ..")
+                    else:
+                        _sys.stdout.write(".")
+                    _sys.stdout.flush()
+                    _progress_dots += 1
+
+                # 结束进度行
+                if _progress_dots > 0:
+                    _sys.stdout.write("\n")
+                    _sys.stdout.flush()
+
+                for t in pending:
+                    t.cancel()
+
+                # 如果是交互请求先到达 → 处理子对话，然后继续等待管道
+                if interaction_task is not None and interaction_task in done:
+                    self._suppress_streaming = True
+                    try:
+                        human_svc = self._services.get(
+                            "human_interaction_service"
+                        )
+                        from channels.cli.cli_interaction import (
+                            run_sub_conversation,
+                        )
+                        await run_sub_conversation(
+                            console=console,
+                            input_adapter=self._input_adapter,
+                            notifier=cli_notifier,
+                            interaction_service=human_svc,
+                            idle_timeout=60,
+                        )
+                    finally:
+                        self._suppress_streaming = False
+                        if self._streaming_buffer:
+                            safe = sanitize_for_terminal(
+                                "".join(self._streaming_buffer)
+                            )
+                            console.print(safe, end="", highlight=False)
+                            self._last_was_text = True
+                            self._streaming_buffer.clear()
+                    self._input_adapter.drain_stdin()
+
+                # 循环回去，pipeline_done 检查会处理结果
+                continue
+
+            # === 空闲状态：显示提示符等待用户输入 ===
+            if getattr(self, "_last_was_text", False):
                 _sys.stdout.write("\n")
                 _sys.stdout.flush()
-                self._text_streaming_active = False
-            console.print(
-                self._input_adapter.prompt_text(), end=""
-            )
+                self._last_was_text = False
+            # 直接写 stdout，绕开 rich markup 解析 [NORMAL] 被吞的问题
+            _sys.stdout.write(self._input_adapter.prompt_text())
             _sys.stdout.flush()
             try:
                 initial_state = (
-                    await self._input_adapter.receive()
+                    await self._wait_input_or_interaction(
+                        cli_notifier, console
+                    )
                 )
             except (EOFError, KeyboardInterrupt):
                 self._output_adapter.show_system_message(
@@ -1208,6 +1347,10 @@ class CLIApplication:
                     "bold blue",
                 )
                 break
+
+            # 交互请求中断了输入等待
+            if initial_state is None:
+                continue
 
             # 多行粘贴反馈：打印分隔线和行数提示
             if self._input_adapter.was_paste():
@@ -1299,6 +1442,7 @@ class CLIApplication:
                         interaction_service=human_svc,
                         idle_timeout=60,
                     )
+                    self._input_adapter.drain_stdin()
                 continue
 
             # 斜杠命令处理
@@ -1364,7 +1508,19 @@ class CLIApplication:
                 )
                 continue
 
-            # === 启动管道（后台运行 + 人类交互轮询） ===
+            # === 启动管道（后台运行，不阻塞提示符） ===
+
+            # 如果已有管道在运行，拒绝新输入并提示
+            if (
+                self._pipeline_task is not None
+                and not self._pipeline_task.done()
+            ):
+                console.print(
+                    "[yellow]管道正在运行中，请等待完成后再输入。"
+                    "（可按 Ctrl+C 中断）[/yellow]"
+                )
+                continue
+
             user_input = initial_state.get("user_input", "")
 
             on_chunk = None
@@ -1389,7 +1545,7 @@ class CLIApplication:
 
             pipeline_id = session_svc.prepare_run(session)
 
-            pipeline_task = asyncio.create_task(
+            self._pipeline_task = asyncio.create_task(
                 self._engine.run(
                     user_input=user_input,
                     agent_config=self._agent_config,
@@ -1407,112 +1563,22 @@ class CLIApplication:
                     pipeline_id=pipeline_id,
                 )
             )
+            self._pipeline_initial_state = initial_state
+            # 管道在后台运行 → 立即回到提示符
+            continue
 
-            # 等待管道完成，期间处理人类交互请求
-            final_state = None
-            while True:
-                # 检查是否有人类交互请求
-                if (
-                    cli_notifier
-                    and cli_notifier.has_pending()
-                ):
-                    human_svc = self._services.get(
-                        "human_interaction_service"
-                    )
-                    from channels.cli.cli_interaction import (
-                        run_sub_conversation,
-                    )
+        # 清理后台任务
+        for _t in list(self._bg_tasks):
+            if not _t.done():
+                _t.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            self._bg_tasks.clear()
 
-                    # 抑制管道输出，防止穿插子对话
-                    self._suppress_streaming = True
-                    try:
-                        await run_sub_conversation(
-                            console=console,
-                            input_adapter=(
-                                self._input_adapter
-                            ),
-                            notifier=cli_notifier,
-                            interaction_service=human_svc,
-                            idle_timeout=60,
-                        )
-                    finally:
-                        self._suppress_streaming = False
-                        # 刷新缓冲的管道输出
-                        if self._streaming_buffer:
-                            for text in self._streaming_buffer:
-                                console.print(
-                                    text, end="",
-                                    highlight=False,
-                                )
-                            _sys.stdout.flush()
-                            self._streaming_buffer.clear()
-                            self._text_streaming_active = True
-                    continue
-
-                # 等待管道完成或交互请求事件
-                wait_tasks: set[asyncio.Task] = {
-                    pipeline_task
-                }
-                request_waiter: asyncio.Task | None = (
-                    None
-                )
-                if cli_notifier:
-                    evt = cli_notifier._request_event
-
-                    async def _wait_req(
-                        e: asyncio.Event = evt,
-                    ) -> None:
-                        await e.wait()
-
-                    request_waiter = asyncio.create_task(
-                        _wait_req()
-                    )
-                    wait_tasks.add(request_waiter)
-
-                done, _ = await asyncio.wait(
-                    wait_tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                if request_waiter and not request_waiter.done():
-                    request_waiter.cancel()
-
-                if pipeline_task in done:
-                    break
-
-            # 获取管道结果
-            try:
-                final_state = pipeline_task.result()
-            except asyncio.CancelledError:
-                if getattr(self, "_text_streaming_active", False):
-                    _sys.stdout.write("\n")
-                    _sys.stdout.flush()
-                    self._text_streaming_active = False
-                console.print(
-                    "\n[yellow]请求已取消[/yellow]"
-                )
-                self._update_status_bar_idle()
-                continue
-            except Exception as exc:
-                final_state = {"error": str(exc)}
-
-            # 处理管道结果
-            conversation_history = (
-                await self._handle_pipeline_result(
-                    final_state,
-                    initial_state,
-                    conversation_history,
-                    session.session_id,
-                    console,
-                )
-            )
-            console.print("")
-
-        # 清理 LiteLLM 内部 LoggingWorker 后台任务，
-        # 避免 "Task was destroyed but it is pending!" 警告
+        # 清理 LiteLLM 资源（后台任务 + HTTP 会话）
         try:
-            from llm.adapter import cleanup_litellm_logging
-            cleanup_litellm_logging()
+            from llm.adapter import cleanup_litellm_resources
+            await cleanup_litellm_resources()
         except Exception:
             pass
 
@@ -1521,27 +1587,9 @@ class CLIApplication:
         final_state: dict[str, Any],
         initial_state: dict[str, Any],
         conversation_history: list[dict[str, Any]],
-        session_id: str,
         console: Console,
     ) -> list[dict[str, Any]]:
         """处理管道执行结果：更新历史、绑定任务、刷新状态栏。"""
-        # 流式输出收尾：如果文本流未结束，补一个换行
-        # 必须在所有路径之前执行，确保光标正确移到新行
-        _tsa = getattr(self, "_text_streaming_active", False)
-        logger.warning(
-            "[CURSOR-DEBUG] _handle_pipeline_result: "
-            "streaming=%s, _text_streaming_active=%s, "
-            "has_error=%s, has_result=%s",
-            self._streaming,
-            _tsa,
-            bool(final_state.get("error")),
-            bool(final_state.get("raw_result")),
-        )
-        if _tsa:
-            _sys.stdout.write("\n")
-            _sys.stdout.flush()
-            self._text_streaming_active = False
-
         # 错误结果直接显示
         if "error" in final_state and final_state.get("error"):
             await self._output_adapter.send(
@@ -1658,6 +1706,77 @@ class CLIApplication:
             failed_task_count=task_stats["failed"],
         )
 
+    async def _wait_input_or_interaction(
+        self,
+        cli_notifier: Any,
+        console: Console,
+    ) -> dict[str, Any] | None:
+        """等待用户输入或交互请求，先到先处理。
+
+        Returns:
+            用户输入的 state 字典，或 None 表示交互已处理。
+        """
+        receive_task = asyncio.create_task(
+            self._input_adapter.receive()
+        )
+
+        if cli_notifier is None:
+            return await receive_task
+
+        async def _poll_interaction() -> None:
+            while not cli_notifier.has_pending():
+                await asyncio.sleep(0.3)
+
+        interaction_task = asyncio.create_task(_poll_interaction())
+
+        done, pending = await asyncio.wait(
+            {receive_task, interaction_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        for t in pending:
+            t.cancel()
+
+        if receive_task in done:
+            return receive_task.result()
+
+        # 交互请求到达 → 中断 stdin 读取
+        self._input_adapter.interrupt_stdin()
+        try:
+            await receive_task
+        except Exception:
+            pass
+
+        # 子对话期间抑制管道流式输出
+        self._suppress_streaming = True
+        try:
+            human_svc = self._services.get(
+                "human_interaction_service"
+            )
+            from channels.cli.cli_interaction import (
+                run_sub_conversation,
+            )
+            await run_sub_conversation(
+                console=console,
+                input_adapter=self._input_adapter,
+                notifier=cli_notifier,
+                interaction_service=human_svc,
+                idle_timeout=60,
+            )
+        finally:
+            self._suppress_streaming = False
+            # 回放缓冲的管道输出
+            if self._streaming_buffer:
+                safe = sanitize_for_terminal(
+                    "".join(self._streaming_buffer)
+                )
+                console.print(safe, end="", highlight=False)
+                self._last_was_text = True
+                self._streaming_buffer.clear()
+
+        self._input_adapter.drain_stdin()
+        return None
+
     async def _handle_slash_command(self, state: dict[str, Any]) -> CommandResult | None:
         """处理斜杠命令。
 
@@ -1737,9 +1856,7 @@ class CLIApplication:
             on_chunk 回调函数
         """
         _displayed_tool_indices: set[int] = set()
-        self._text_streaming_active = False
-        _chunk_count = {"total": 0, "text": 0, "thinking": 0, "tool_call": 0,
-                        "tool_result": 0, "tool_start": 0, "iteration": 0}
+        self._last_was_text = False
 
         def on_chunk(chunk: dict[str, Any]) -> None:
             """流式回调：将管道事件实时输出到终端。"""
@@ -1753,35 +1870,25 @@ class CLIApplication:
 
             chunk_type = chunk.get("type", "text")
             content = chunk.get("content", "")
-            _chunk_count["total"] += 1
-            if chunk_type in _chunk_count:
-                _chunk_count[chunk_type] += 1
 
             if chunk_type == "thinking":
                 if self._show_thinking and content:
                     safe = sanitize_for_terminal(content)
                     console.print(safe, end="", highlight=False)
-                    _sys.stdout.flush()
-                    self._text_streaming_active = True
+                    self._last_was_text = True
                 return
 
             if chunk_type == "text":
                 if content:
                     safe = sanitize_for_terminal(content)
                     console.print(safe, end="", highlight=False)
-                    _sys.stdout.flush()
-                    self._text_streaming_active = True
+                    self._last_was_text = True
                 return
 
-            # 非文本 chunk 到达时，结束之前的文本流（换行）
-            if self._text_streaming_active:
-                logger.warning(
-                    "[CURSOR-DEBUG] on_chunk: newline before %s "
-                    "(chunk_stats=%s)", chunk_type, _chunk_count,
-                )
-                _sys.stdout.write("\n")
-                _sys.stdout.flush()
-                self._text_streaming_active = False
+            # 非文本 chunk：先结束之前的文本行
+            if self._last_was_text:
+                print()
+                self._last_was_text = False
 
             if chunk_type == "tool_call":
                 tool_calls_data = chunk.get("tool_calls", [])
@@ -1972,8 +2079,8 @@ def main() -> None:
             asyncio.run(app.run())
     finally:
         try:
-            from llm.adapter import cleanup_litellm_logging
-            cleanup_litellm_logging()
+            from llm.adapter import cleanup_litellm_resources_sync
+            cleanup_litellm_resources_sync()
         except Exception:
             pass
 

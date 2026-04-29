@@ -62,6 +62,7 @@ class ToolCore(ICorePlugin):
         self._tools: dict[str, Callable[..., Any]] = {}
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
+        self._tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
         self._isolation_executor: IsolationExecutor | None = None
 
     @property
@@ -385,32 +386,50 @@ class ToolCore(ICorePlugin):
                 try:
                     tool_args = json.loads(tool_args)
                 except (json.JSONDecodeError, TypeError):
-                    args_parse_failed = True
-                    logger.warning(
-                        "[%s] 工具 %s 的 arguments JSON 解析失败（可能过长被截断），"
-                        "长度=%d，前200字符: %s",
-                        self.name, tool_name, len(tool_args), tool_args[:200],
-                    )
-                    result = {
-                        "tool_name": tool_name,
-                        "success": False,
-                        "error": (
-                            f"工具 {tool_name} 的调用参数 JSON 格式无效（可能参数内容过长导致被截断）。"
-                            f"请将操作拆分为多个小步骤：\n"
-                            f"1. 如果是 file_write：请分多次写入，每次写入一个章节或部分内容\n"
-                            f"2. 如果是其他工具：请减少参数中的文本量\n"
-                            f"3. 不要一次性传入大量文本作为参数"
-                        ),
-                    }
-                    results.append(result)
-                    last_result_text = f"Error: {result['error']}"
-                    continue
+                    # 尝试容错修复 JSON（MiniMax 等模型返回格式不稳定）
+                    from plugins.core.llm_core import _repair_json_string
+                    repaired = _repair_json_string(tool_args)
+                    if repaired is not None:
+                        logger.info(
+                            "[%s] 工具 %s 的 arguments JSON 修复成功: %s -> %s",
+                            self.name, tool_name,
+                            tool_args[:200], repaired[:200],
+                        )
+                        try:
+                            tool_args = json.loads(repaired)
+                        except (json.JSONDecodeError, TypeError):
+                            args_parse_failed = True
+                    else:
+                        args_parse_failed = True
+
+                    if args_parse_failed:
+                        logger.warning(
+                            "[%s] 工具 %s 的 arguments JSON 解析失败（可能过长被截断），"
+                            "长度=%d，前200字符: %s",
+                            self.name, tool_name, len(tool_args), tool_args[:200],
+                        )
+                        result = {
+                            "tool_name": tool_name,
+                            "success": False,
+                            "error": (
+                                f"工具 {tool_name} 的调用参数 JSON 格式无效（可能参数内容过长导致被截断）。"
+                                f"请将操作拆分为多个小步骤：\n"
+                                f"1. 如果是 file_write：请分多次写入，每次写入一个章节或部分内容\n"
+                                f"2. 如果是其他工具：请减少参数中的文本量\n"
+                                f"3. 不要一次性传入大量文本作为参数"
+                            ),
+                        }
+                        results.append(result)
+                        last_result_text = f"Error: {result['error']}"
+                        continue
 
             if not isinstance(tool_args, dict):
                 tool_args = {}
 
             # 允许工具通过 timeout_seconds 参数覆盖默认超时
             timeout = self._default_timeout
+            if tool_name in self._tool_timeouts:
+                timeout = self._tool_timeouts[tool_name]
             if isinstance(tool_args, dict) and "timeout_seconds" in tool_args:
                 try:
                     requested = float(tool_args["timeout_seconds"])
@@ -418,7 +437,7 @@ class ToolCore(ICorePlugin):
                         timeout = requested
                 except (ValueError, TypeError):
                     pass
-            elif self._tool_registry is not None:
+            elif tool_name not in self._tool_timeouts and self._tool_registry is not None:
                 schema_default = self._get_schema_timeout_default(tool_name)
                 if schema_default is not None:
                     timeout = schema_default

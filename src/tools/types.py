@@ -56,6 +56,7 @@ class ToolCategory(str, Enum):
     """工具功能分类"""
 
     FILE = "file"  # 文件操作
+    FILE_SYSTEM = "file_system"  # 文件系统操作（目录、复制、移动等）
     SEARCH = "search"  # 搜索
     WEB = "web"  # Web 操作
     MEMORY = "memory"  # 记忆检索

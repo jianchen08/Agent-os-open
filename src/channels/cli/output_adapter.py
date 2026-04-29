@@ -28,28 +28,29 @@ logger = logging.getLogger(__name__)
 
 
 def sanitize_for_terminal(text: str) -> str:
-    """清理文本中 Windows GBK 终端不兼容的字符。
+    """清理文本中终端不兼容的字符。
 
-    LLM 输出可能包含 emoji 等 Unicode 字符，在 Windows GBK 终端中
-    会导致 UnicodeEncodeError。此函数将不兼容字符替换为 ASCII 替代。
-
-    Args:
-        text: 输入文本
-
-    Returns:
-        清理后的文本，仅包含 GBK 可编码的字符
+    根据 stdout 实际编码检测是否需要替换 Unicode 字符。
+    如果终端编码为 UTF-8，直接通过所有字符（包括 emoji）。
+    如果终端编码为 GBK 等有限编码，替换不兼容字符为 ?。
     """
+    import sys
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    # UTF-8 终端可以直接输出所有 Unicode（包括 emoji）
+    if encoding.lower().replace("-", "").replace("_", "") in ("utf8", "utf_8"):
+        return text
+
     try:
-        text.encode("gbk")
-        return text  # 全部兼容，直接返回
-    except UnicodeEncodeError:
-        # 逐字符替换不兼容字符
+        text.encode(encoding)
+        return text
+    except (UnicodeEncodeError, LookupError):
         result = []
         for ch in text:
             try:
-                ch.encode("gbk")
+                ch.encode(encoding)
                 result.append(ch)
-            except UnicodeEncodeError:
+            except (UnicodeEncodeError, LookupError):
                 result.append("?")
         return "".join(result)
 
@@ -284,7 +285,9 @@ class CLIOutputAdapter(IOutputAdapter):
         Args:
             console: rich Console 实例；默认创建新实例。
         """
-        self._console = console or Console(force_terminal=True)
+        self._console = console or Console(
+            force_terminal=True, legacy_windows=False,
+        )
         self._status_bar = StatusBarRenderer()
         self._show_thinking: bool = False
 

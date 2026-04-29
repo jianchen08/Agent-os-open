@@ -24,7 +24,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RETRIES = 3
-_DEFAULT_EVAL_TIMEOUT = 300.0
+_DEFAULT_EVAL_TIMEOUT = 600.0
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -260,7 +260,7 @@ class TaskEvaluateTool(BuiltinTool):
                 "task_id=%s | metric_count=%d",
                 task_id, len(metric_ids),
             )
-            return self._auto_complete(inputs, task_service, task)
+            return await self._auto_complete(inputs, task_service, task)
 
         try:
             import asyncio
@@ -569,17 +569,27 @@ class TaskEvaluateTool(BuiltinTool):
     def _register_eval_pipelines(
         task_service: Any, task: Any, eval_result: Any,
     ) -> None:
-        """将 Agent 型评估产生的子管道注册到根任务子目录。"""
+        """将 Agent 型评估产生的子管道注册到根任务子目录。
+
+        作为 _pre_register_eval_pipeline 的兜底：如果 engine.py
+        的早期注册因 ServiceProvider 不可用等原因被跳过，
+        此处会在评估完成后再次尝试。
+        """
         try:
             root_id = task_service.get_root_task_id(task.id)
             if not root_id:
+                logger.debug(
+                    "[TaskEvaluate] 无 root_id，跳过评估管道注册 | "
+                    "task=%s", task.id,
+                )
                 return
             from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
                 logger.warning(
-                    "[TaskEvaluate] execution_record_storage 不可用，跳过评估管道注册"
+                    "[TaskEvaluate] execution_record_storage 不可用，"
+                    "跳过评估管道注册"
                 )
                 return
             registered = 0

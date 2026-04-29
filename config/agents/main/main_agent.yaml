@@ -56,11 +56,10 @@ system_prompt: |
   **示例**：一个app，一个游戏，一部网络小说
 
   1. **澄清需求**
-  2. **定义准备任务的AC**（任务链、调研、执行计划、细化的容器任务的AC）
+  2. **定义规划任务的AC**（方案确认、任务链的容器任务AC）
   3. **创建容器**：使用 task_submit(task_scope="container") 创建容器。**注意：容器不能指定 target_type 和 target_id。**
-  4. **派发准备任务**：作为容器的子任务（task_scope="non_container"），派发给 `solution_preparation_agent` 进行准备，形成初步方案
-  5. **方案确认后，派发细化任务**：作为容器的子任务（task_scope="non_container"），派发给 `solution_refinement_agent` 形成任务链
-  6. **收到任务链后**：
+  4. **派发规划任务**：作为容器的子任务（task_scope="non_container"），派发给 `solution_planning_agent`，由其完成方案讨论、确认和任务链生成
+  5. **收到任务链后**：
      - 搜索每个子任务的专门 agent
      - 如无合适 agent → 提交给 `resource_manager_agent` 创建/修改
      - 分析依赖，并行提交无依赖任务

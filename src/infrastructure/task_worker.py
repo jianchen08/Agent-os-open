@@ -498,6 +498,7 @@ class TaskWorker:
         task_id = task_data.get("task_id", "unknown")
         target_id = task_data.get("target_id", "")
         task_service = self._task_service
+        _cleanup_done = False  # 防止多次清理
 
         # ── 0. 跳过容器任务 ──
         if task_service:
@@ -852,11 +853,16 @@ class TaskWorker:
                 evt = self._terminal_events.pop(task_id, None)
                 if evt is not None:
                     evt.set()
+                # BUG-FIX: pipeline hard timeout 必须清理 _active_tasks 和 idle 计时器
+                # 防止 idle 计时器在任务已失败后仍不断重新创建（超时风暴）
+                self._active_tasks.discard(task_id)
+                self._idle_remind_counts.pop(task_id, None)
                 if idle_timer_registered and timer_manager:
                     try:
                         await timer_manager.cancel_timer(task_id)
                     except Exception:
                         pass
+                _cleanup_done = True
                 return
 
             # ── 5.1 管道挂起处理：有子任务时 child_task_guard 会触发 wait 挂起 ──
@@ -999,6 +1005,16 @@ class TaskWorker:
                                 )
                         if evt is not None:
                             evt.set()
+                        # BUG-FIX: 进入 evaluating 后清理 idle 计时器
+                        # 防止 evaluating 状态的任务仍触发 idle 超时
+                        self._active_tasks.discard(task_id)
+                        self._idle_remind_counts.pop(task_id, None)
+                        if idle_timer_registered and timer_manager:
+                            try:
+                                await timer_manager.cancel_timer(task_id)
+                            except Exception:
+                                pass
+                        _cleanup_done = True
                         return
                     else:
                         # 从 pipeline state 中提取完整诊断信息
@@ -1027,29 +1043,62 @@ class TaskWorker:
                                     parts.append(f"错误类型={etype}")
                         elif hit_max_iter:
                             # 确实是迭代耗尽
-                            parts.append(f"管道迭代耗尽({iteration_count}/{max_iter})")
+                            parts.append(
+                                f"管道迭代耗尽"
+                                f"({iteration_count}/{max_iter})"
+                            )
                         else:
-                            # 其他原因（无 route signal 强制退出、连续核心错误等）
-                            parts.append(f"管道异常结束(iterations={iteration_count}/{max_iter})")
+                            # 其他原因（无 route signal 强制退出等）
+                            parts.append(
+                                f"管道异常结束(iterations="
+                                f"{iteration_count}/{max_iter})"
+                            )
 
                         if error_analysis:
                             parts.append(f"错误分析: {error_analysis}")
                         if task_complete is False:
                             parts.append("Agent 标记任务未完成")
 
-                        error_msg = "，".join(parts) if parts else "管道异常退出，Agent 未完成评估"
+                        error_msg = (
+                            "，".join(parts)
+                            if parts
+                            else "管道异常退出，Agent 未完成评估"
+                        )
 
                         logger.warning(
-                            "TaskWorker: task %s still RUNNING after pipeline exit. "
-                            "iterations=%s/%s, ended=%s, raw_error=%s, "
+                            "TaskWorker: task %s still RUNNING "
+                            "after pipeline exit. "
+                            "iterations=%s/%s, ended=%s, "
+                            "raw_error=%s, "
                             "has_result=False → %s",
-                            task_id, iteration_count, max_iter, ended,
-                            raw_error or "(none)", error_msg,
+                            task_id, iteration_count,
+                            max_iter, ended,
+                            raw_error or "(none)",
+                            error_msg,
                         )
-                        evt = self._terminal_events.pop(task_id, None)
-                        task_service.fail_task(task_id, error_msg)
+                        evt = self._terminal_events.pop(
+                            task_id, None,
+                        )
+                        task_service.fail_task(
+                            task_id, error_msg,
+                        )
                         if evt is not None:
                             evt.set()
+                        # BUG-FIX: fail_task 后清理 idle 计时器
+                        # 防止任务已标记 failed 但 idle 计时器
+                        # 仍在 _active_tasks 检测中不断重建
+                        self._active_tasks.discard(task_id)
+                        self._idle_remind_counts.pop(
+                            task_id, None,
+                        )
+                        if idle_timer_registered and timer_manager:
+                            try:
+                                await timer_manager.cancel_timer(
+                                    task_id,
+                                )
+                            except Exception:
+                                pass
+                        _cleanup_done = True
                         return
 
         # ── 6. 等待终态 Event ──
@@ -1122,21 +1171,34 @@ class TaskWorker:
         task_service = self._task_service
         if not task_service:
             logger.warning(
-                "TaskWorker: idle 超时但无 task_service，无法处理: task_id=%s",
+                "TaskWorker: idle 超时但无 task_service，"
+                "无法处理: task_id=%s",
                 task_id,
             )
             return
 
         task = task_service.get_task(task_id)
         if task is None:
+            # 任务已不存在，取消残留计时器
+            self._cancel_idle_timer_async(task_id)
             return
 
-        status_str = task.status if isinstance(task.status, str) else task.status.value
+        status_str = (
+            task.status
+            if isinstance(task.status, str)
+            else task.status.value
+        )
         if status_str != "running":
             logger.debug(
-                "TaskWorker: idle 超时但任务已不在 running 状态: task_id=%s, status=%s",
+                "TaskWorker: idle 超时但任务已不在 running"
+                " 状态: task_id=%s, status=%s",
                 task_id, status_str,
             )
+            # BUG-FIX: 任务已非 running 状态，
+            # 必须取消残留计时器防止超时风暴
+            self._active_tasks.discard(task_id)
+            self._idle_remind_counts.pop(task_id, None)
+            self._cancel_idle_timer_async(task_id)
             return
 
         idle_remind_limit = 3
@@ -1145,14 +1207,19 @@ class TaskWorker:
         # 活跃管道期间暂停 idle 计时器：重建但不计数、不失败
         if task_id in self._active_tasks:
             logger.debug(
-                "TaskWorker: idle 超时但管道活跃，暂停计时器: task_id=%s",
+                "TaskWorker: idle 超时但管道活跃，"
+                "暂停计时器: task_id=%s",
                 task_id,
             )
             timer_manager = self._services.get("timer_manager")
             if timer_manager:
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
+                    loop.create_task(
+                        self._recreate_idle_timer_async(
+                            task_id, timer_manager,
+                        ),
+                    )
                 except RuntimeError:
                     pass
             return
@@ -1160,54 +1227,130 @@ class TaskWorker:
         if task_id in self._suspended_engines and remind_count < idle_remind_limit:
             self._idle_remind_counts[task_id] = remind_count + 1
             logger.info(
-                "TaskWorker: idle 超时但有挂起管道，提醒 #%d: task_id=%s",
+                "TaskWorker: idle 超时但有挂起管道，"
+                "提醒 #%d: task_id=%s",
                 remind_count + 1, task_id,
             )
             self._try_resume_engine(task_id)
 
-            # BUG-FIX-fix_20260422_idle_timer_reset: 提醒后重新创建计时器
-            # 问题根因: ChildTaskGuard 不再重置计时器，提醒后无新计时器触发下次超时
-            # 修复方案: 异步重新创建 idle 计时器用于下一个超时周期
+            # BUG-FIX-fix_20260422_idle_timer_reset:
+            # 提醒后重新创建计时器
             timer_manager = self._services.get("timer_manager")
             if timer_manager:
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(self._recreate_idle_timer_async(task_id, timer_manager))
+                    loop.create_task(
+                        self._recreate_idle_timer_async(
+                            task_id, timer_manager,
+                        ),
+                    )
                 except RuntimeError:
                     logger.warning(
-                        "TaskWorker: no event loop to recreate idle timer: task_id=%s",
+                        "TaskWorker: no event loop to "
+                        "recreate idle timer: task_id=%s",
                         task_id,
                     )
             return
 
         try:
             timer_mgr = self._services.get("timer_manager")
-            threshold = getattr(timer_mgr, "idle_threshold", "?") if timer_mgr else "?"
+            threshold = (
+                getattr(timer_mgr, "idle_threshold", "?")
+                if timer_mgr else "?"
+            )
             task_service.fail_task(
                 task_id,
                 f"idle 超时({threshold}s无活动)",
             )
             logger.warning(
-                "TaskWorker: 任务 idle 超时，已标记 failed: task_id=%s", task_id,
+                "TaskWorker: 任务 idle 超时，已标记 failed: "
+                "task_id=%s", task_id,
             )
+            self._active_tasks.discard(task_id)
+            self._idle_remind_counts.pop(task_id, None)
             evt = self._terminal_events.pop(task_id, None)
             if evt is not None:
                 evt.set()
         except Exception as e:
             logger.error(
-                "TaskWorker: idle 超时处理失败: task_id=%s, error=%s", task_id, e,
+                "TaskWorker: idle 超时处理失败: "
+                "task_id=%s, error=%s", task_id, e,
             )
 
-    async def _recreate_idle_timer_async(self, task_id: str, timer_manager: Any) -> None:
-        """idle 超时提醒后异步重新创建计时器。
+    def _cancel_idle_timer_async(self, task_id: str) -> None:
+        """异步取消残留的 idle 计时器（从同步回调调用）。
 
-        在 _on_idle_timeout 发送提醒后调用，为下一个超时周期创建新计时器。
+        当 _on_idle_timeout 发现任务已不在 running 状态时，
+        通过此方法调度异步计时器取消，防止计时器残留触发风暴。
+
+        Args:
+            task_id: 任务 ID
+        """
+        timer_manager = self._services.get("timer_manager")
+        if not timer_manager:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._do_cancel_timer(task_id, timer_manager))
+        except RuntimeError:
+            pass
+
+    async def _do_cancel_timer(
+        self, task_id: str, timer_manager: Any,
+    ) -> None:
+        """实际执行计时器取消。
 
         Args:
             task_id: 任务 ID
             timer_manager: 计时器管理器实例
         """
         try:
+            await timer_manager.cancel_timer(task_id)
+            logger.debug(
+                "TaskWorker: 残留 idle 计时器已取消: "
+                "task_id=%s", task_id,
+            )
+        except Exception:
+            pass
+
+    async def _recreate_idle_timer_async(
+        self, task_id: str, timer_manager: Any,
+    ) -> None:
+        """idle 超时提醒后异步重新创建计时器。
+
+        在 _on_idle_timeout 发送提醒后调用，
+        为下一个超时周期创建新计时器。
+        重建前先检查任务状态，避免在任务已终态后
+        无意义地重建计时器（防止超时风暴）。
+
+        Args:
+            task_id: 任务 ID
+            timer_manager: 计时器管理器实例
+        """
+        try:
+            # BUG-FIX: 重建前先检查任务是否仍在 running
+            # 防止在任务已终态（failed/completed/evaluating）
+            # 后无意义地重建计时器
+            if self._task_service:
+                task = self._task_service.get_task(task_id)
+                if task is not None:
+                    status = (
+                        task.status
+                        if isinstance(task.status, str)
+                        else task.status.value
+                    )
+                    if status != "running":
+                        logger.debug(
+                            "TaskWorker: 跳过 idle 计时器重建，"
+                            "任务已非 running: task_id=%s, "
+                            "status=%s",
+                            task_id, status,
+                        )
+                        self._active_tasks.discard(task_id)
+                        self._idle_remind_counts.pop(
+                            task_id, None,
+                        )
+                        return
             try:
                 await timer_manager.cancel_timer(task_id)
             except Exception:
@@ -1217,10 +1360,14 @@ class TaskWorker:
                 timeout=float(timer_manager.idle_threshold),
                 callback=lambda tid=task_id: self._on_idle_timeout(tid),
             )
-            logger.info("TaskWorker: idle timer recreated after remind for task %s", task_id)
+            logger.info(
+                "TaskWorker: idle timer recreated after "
+                "remind for task %s", task_id,
+            )
         except Exception as e:
             logger.warning(
-                "TaskWorker: recreate idle timer failed: task_id=%s, error=%s",
+                "TaskWorker: recreate idle timer failed: "
+                "task_id=%s, error=%s",
                 task_id, e,
             )
 

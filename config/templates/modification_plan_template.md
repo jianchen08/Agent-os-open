@@ -1,10 +1,10 @@
-# 修改执行计划模板
+# 修改任务链模板
 #
 # 【是什么】代码/配置修改前的"施工蓝图"，定义要改什么、怎么改、顺序、风险点和检查点。
 # 【作用】过程可控、风险前置、检查把关、可回滚。
 # 【配套模板】rollback_strategy_template.md（回滚策略）、testing_plan_template.md（测试计划）、modification_summary_template.md（修改记录）。
 
-# 修改执行计划
+# 修改任务链
 
 ---
 

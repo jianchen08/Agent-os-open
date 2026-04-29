@@ -33,9 +33,12 @@ class _StdinLineReader:
     从而正确检测多行粘贴事件。
     """
 
+    _INTERRUPT = object()
+
     def __init__(self) -> None:
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue[Any] = queue.Queue()
         self._eof = False
+        self._interrupt_event = threading.Event()
         self._thread = threading.Thread(
             target=self._read_loop, daemon=True
         )
@@ -65,10 +68,40 @@ class _StdinLineReader:
                 break
 
     def read_line_blocking(self) -> str | None:
-        """阻塞读取一行。返回 None 表示 EOF。"""
+        """阻塞读取一行。返回 None 表示 EOF。
+
+        通过轮询队列（0.5s 超时）实现可中断读取。
+        """
         if self._eof and self._queue.empty():
             return None
-        return self._queue.get()
+        while True:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._interrupt_event.is_set():
+                    self._interrupt_event.clear()
+                    return None
+                continue
+            if item is self._INTERRUPT:
+                return None
+            return item
+
+    def drain(self) -> list[str]:
+        """清空队列中所有未消费的行。"""
+        lines: list[str] = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+                if item is not None and item is not self._INTERRUPT:
+                    lines.append(item)
+            except queue.Empty:
+                break
+        return lines
+
+    def interrupt(self) -> None:
+        """中断当前阻塞的读取操作。"""
+        self._queue.put(self._INTERRUPT)
+        self._interrupt_event.set()
 
     def read_line(self, timeout: float) -> str | None:
         """带超时读取一行。超时或 EOF 返回 None。"""
@@ -122,6 +155,17 @@ class CLIInputAdapter(IInputAdapter):
             self._stdin_reader = _StdinLineReader()
             self._stdin_reader.start()
         return self._stdin_reader
+
+    def drain_stdin(self) -> list[str]:
+        """清空 stdin 缓冲区中的未消费输入。"""
+        if self._stdin_reader is not None:
+            return self._stdin_reader.drain()
+        return []
+
+    def interrupt_stdin(self) -> None:
+        """中断当前阻塞的 stdin 读取。"""
+        if self._stdin_reader is not None:
+            self._stdin_reader.interrupt()
 
     @property
     def command_registry(self) -> SlashCommandRegistry:

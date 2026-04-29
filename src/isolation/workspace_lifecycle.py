@@ -25,10 +25,15 @@ _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作
 
 
 def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 15) -> str:
-    """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限"""
-    safe = project_name.replace(" ", "_")
+    """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限。"""
+    import re
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', project_name)
+    safe = safe.replace(" ", "_")
+    safe = re.sub(r'_+', '_', safe).strip('._')
+    if not safe:
+        safe = "ws"
     if len(safe) > name_limit:
-        safe = safe[:name_limit]
+        safe = safe[:name_limit].rstrip('._')
     return f"{safe}__wt_{task_id[:8]}"
 
 
@@ -345,12 +350,36 @@ class WorkspaceLifecycleManager:
         self._ws_meta_store[task_id] = meta
         return meta
 
+    def _copy_project_to_container(self, container_path: Path) -> int:
+        """从主项目复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
+        src = self._base_path
+        if not src.exists():
+            return 0
+        count = 0
+        for item in src.rglob("*"):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(src)
+            if any(p in _SKIP_DIRS for p in rel.parts):
+                continue
+            if item.suffix in _SKIP_EXTENSIONS:
+                continue
+            target = container_path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(item), str(target))
+            count += 1
+        return count
+
     def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
         """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
 
         BUG-FIX-fix_20260425_container_workspace_init:
         容器任务必须先初始化工作空间（mkdir + git init），
         否则后续子任务找不到容器空间，各自创建空目录。
+
+        BUG-FIX-fix_20260429_container_project_files:
+        容器空间初始化时从主项目复制文件，否则子任务 worktree 只有 .gitignore，
+        子 agent 无法看到项目代码。
         """
         ws_root = task_data.get("workspace_root", ".ai_workspaces")
         if workspace:
@@ -361,8 +390,10 @@ class WorkspaceLifecycleManager:
         path = Path(container_path)
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
+            copied = self._copy_project_to_container(path)
             if not self._git_init_and_initial_commit(path, "chore: initial container project"):
                 raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
+            logger.info("[WorkspaceLifecycle] 容器空间已复制项目文件: task_id=%s, files=%d", container_task_id, copied)
         elif not (path / ".git").exists():
             if not self._git_init_and_initial_commit(path, "chore: initial commit for container workspace"):
                 raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
@@ -658,7 +689,10 @@ class WorkspaceLifecycleManager:
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")
         if project_root.exists():
-            self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
+            try:
+                self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
+            except Exception as e:
+                logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
             if branch:
                 # 合并成功时打 tag 保留记录，方便 git revert 回退
                 if tag_task_id:

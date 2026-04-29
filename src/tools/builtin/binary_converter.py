@@ -86,7 +86,20 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:
         成功：包含 file、content、format、size 的 success result
         失败：包含 error_code 的 failure result
     """
-    # 文件大小检查
+    if not path.exists():
+        return create_failure_result(
+            error=f"文件不存在: {path}",
+            error_code="FILE_NOT_FOUND",
+        )
+
+    category = get_file_category(path)
+    if category not in ("document", "image"):
+        return create_failure_result(
+            error=f"不支持转换此类型文件: {path.name}。"
+            f"支持：PDF、DOCX、XLSX、PPTX、PNG、JPG 等图片。",
+            error_code="BINARY_FILE_NOT_SUPPORTED",
+        )
+
     file_size = path.stat().st_size
     if file_size > MAX_BINARY_FILE_SIZE:
         return create_failure_result(
@@ -105,7 +118,6 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:
         )
 
     # 执行转换
-    category = get_file_category(path)
     try:
         md = MarkItDown()
         result = md.convert(str(path))

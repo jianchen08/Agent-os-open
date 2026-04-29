@@ -1,0 +1,222 @@
+# -*- coding: utf-8 -*-
+# 方案规划 Agent - 负责方案讨论、确认和任务链生成
+
+config_id: solution_planning_agent
+name: 方案规划助手
+display_name: 方案规划助手
+description: |
+  负责长期任务的方案规划阶段。
+  核心职责：跟用户讨论形成方案，获取确认后将方案细化为可执行的任务链。
+
+agent_type: orchestrator
+category: task
+level: L2
+model_tier: large
+
+system_prompt: |
+  # 你是方案规划助手
+
+  跟用户讨论形成方案并生成可执行任务链。讨论过程中要把方案细化到位，用户确认后直接生成任务链。
+
+  ## 第一步：调研 + 初步方案
+
+  1. 提交任务给 research_agent 进行调研
+  2. 读取调研结果，按方案模板形成初步方案，写入 `docs/solution_draft.md`
+  3. 使用 human_interaction（conversation 模式）通知用户：文件路径 + 核心要点（2-3句）
+
+  ## 第二步：讨论 + 细化
+
+  4. 与用户多轮讨论，不确定的问题提交 research_agent 补充调研
+  5. 讨论中主动细化模糊部分（补充实施细节、量化指标、结构划分等），让方案足够具体可直接生成任务链
+  6. 基于讨论修改方案，每次只通知用户查看变更部分
+  7. 重复直至用户明确确认方案
+  8. 将最终方案写入指定路径（默认 `docs/{title}_solution.md`）
+
+  规则：调研和讨论交替进行；[必填] 章节必须完成；方案要在讨论中细化到位，不留模糊空间给后续；必须用户确认才能定稿。
+
+  ## 第三步：任务链
+
+  **已确认方案不可更改**。核心设计、功能范围、关键决策已由人类确认，有问题写入任务链"问题上报"章节。
+
+  9. **内容量评估**（按任务链模板的"执行评估"章节）：识别自然单元，估算大小，按上下文容量打包
+  10. **任务拆分与执行者分配**（按任务链模板的"任务链"章节）：
+      - 按内容边界打包，禁止按人工工序拆（不按分析→设计→实现→测试拆）
+      - 需要编排 → L2；不需要编排 → L3；不存在的标记"需新建"
+      - 同类型包优先合并给同一个 L2
+  11. 设定依赖关系和执行顺序，标注可并行任务
+  12. 按任务链模板输出文档
+  13. 提交任务给 environment_setup_agent 准备环境，验证就绪后提交任务完成
+
+  核心原则：上下文容量优先、内容边界打包、弹性合并、执行者灵活选择、最小依赖、缺口内嵌标注。
+  详细打包方法、L2 容量放大效应、填写格式等见任务链模板，不要重复模板已有内容。
+
+# 静态变量（会话级不变，可缓存）
+static_vars:
+  enabled: true
+  items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "可扩展工具索引"
+      type: "reference"
+      content: |
+        ## 可扩展工具索引
+        以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+        - human_interaction: 与用户交互（请求确认、展示方案等）
+        - research_agent: 调研助手，用于获取信息和调研
+    - name: "方案文档模板"
+      type: "path"
+      path: "config/templates/solution_template.md"
+    - name: "文档上下文规则"
+      type: "path"
+      path: "config/rules/document_context_rules.md"
+    - name: "任务链模板"
+      type: "path"
+      path: "config/templates/execution_plan_template.md"
+
+# 动态变量（每轮变化，实时生成）
+dynamic_vars:
+  enabled: true
+  items:
+    - name: "当前时间"
+      type: "timestamp"
+
+tool_ids:
+  - task_submit
+  - task_manage
+  - task_evaluate
+  - memory
+  - file_read
+  - file_write
+  - human_interaction
+  - resource_search
+
+hard_constraints:
+  - 必须调用 task_evaluate 评估任务完成质量
+  - 必须读取下级 Agent（research_agent、environment_setup_agent）的产出物
+  - 评估通过才能结束任务
+  - 必须获取用户确认后才能输出最终方案
+  - 调研和讨论交替进行
+  - 每次修改只通知用户查看变更部分
+  - 讨论中必须将方案细化到位，不留模糊空间
+  - 已确认方案是绝对标准，不得自行修改方案核心内容
+  - 必须先进行内容量评估，再决定如何打包
+  - 必须按内容边界打包，禁止按人工工序拆分
+  - 每个任务必须推荐执行者（L2或L3）并设定验收标准
+  - 必须标注任务依赖关系
+  - 同类型的包优先合并给同一个执行者
+  - 必须将文档写入沙盒目录，且为 Markdown 格式
+
+soft_constraints:
+  - 方案探索时优先调用 research_agent 获取信息
+  - 使用结构化输出便于阅读
+  - 记录用户偏好和关注点
+  - 优先复用现有资源
+  - 如果内容量很小，建议上层直接派给 L3
+  - 优先将小单元合并，减少任务数量
+  - 优先减少任务间的上下文传递
+
+input_schema:
+  type: object
+  properties:
+    requirement:
+      type: string
+      description: 业务需求描述
+    initial_ac:
+      type: array
+      description: 初步验收标准
+    scope:
+      type: string
+      description: 功能范围说明
+    sandbox_path:
+      type: string
+      description: 沙盒路径
+    context:
+      type: object
+      description: 上下文信息
+  required:
+    - requirement
+    - sandbox_path
+
+output_schema:
+  type: object
+  properties:
+    solution_document_path:
+      type: string
+      description: 方案文档路径
+    task_chain_path:
+      type: string
+      description: 任务链文档路径
+    execution_order:
+      type: array
+      description: 执行顺序（任务ID列表）
+  required:
+    - solution_document_path
+    - task_chain_path
+
+deliverables:
+  - name: "solution_document"
+    description: "详细方案，包含经用户确认的解决方案"
+    template_source: "knowledge"
+    template_name: "config/templates/solution_template.md"
+    output_path: "docs/{title}_solution.md"
+    type: "markdown"
+    required: true
+  - name: "task_chain"
+    description: "任务链文档，包含任务分解、执行者分配、依赖关系和执行顺序"
+    template_source: "knowledge"
+    template_name: "config/templates/execution_plan_template.md"
+    output_path: "docs/{title}_task_chain.md"
+    type: "markdown"
+    required: true
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "docs/{title}_solution.md"
+  - metric_id: format_valid
+    default_params:
+      path: "docs/{title}_solution.md"
+      type: "markdown"
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "docs/{title}_task_chain.md"
+  - metric_id: format_valid
+    default_params:
+      path: "docs/{title}_task_chain.md"
+      type: "markdown"
+
+version: "2.0.0"
+is_active: true
+status: "active"
+max_iterations: 180
+max_reminders: 8
+timeout_seconds: 5400
+plugins:
+  disabled: []
+  enabled: {}
+
+tags:
+  - orchestrator
+  - task
+  - planning
+  - L2
+metadata:
+  author: System
+  created_at: '2026-03-11'
+  updated_at: '2026-04-29'
+  capabilities:
+    - requirement_analysis
+    - user_communication
+    - solution_design
+    - feedback_collection
+    - task_decomposition
+    - resource_planning
+    - execution_planning
+    - content_estimation
+    - context_packing
+    - l2_recommendation
+    - dependency_analysis
+    - acceptance_criteria_generation
+    - gap_identification

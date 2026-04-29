@@ -374,6 +374,40 @@ class EvaluationEngine:
                 evaluator_input=input_params,
             )
 
+    @staticmethod
+    def _pre_register_eval_pipeline(
+        pipeline_id: str, task_id: str,
+    ) -> None:
+        """在评估子管道运行前立即注册到根任务子目录。
+
+        与 task_worker.py 对主管道的 early binding 逻辑对称，
+        确保评估管道记录从一开始就写入正确的子目录，
+        避免后续 _register_eval_pipelines 因异常静默失败导致记录留在扁平位置。
+        """
+        if not task_id or not pipeline_id:
+            return
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            exec_storage = provider.get("execution_record_storage")
+            if not exec_storage:
+                return
+            from tasks.service import TaskService
+            ts = provider.get("task_service")
+            if ts is None:
+                ts = TaskService()
+            root_id = ts.get_root_task_id(task_id)
+            if root_id:
+                exec_storage.register_pipeline(pipeline_id, root_id)
+                logger.debug(
+                    "Eval pipeline pre-registered: %s -> root=%s",
+                    pipeline_id, root_id,
+                )
+        except Exception as exc:
+            logger.debug(
+                "Eval pipeline pre-registration skipped (non-critical): %s", exc,
+            )
+
     # ── 默认评估器实现（Mock） ────────────────────────────
 
     def _evaluate_tool(
@@ -585,6 +619,12 @@ class EvaluationEngine:
                 _plugin_configs = {
                     "task_reminder": {"evaluation_mode": True},
                 }
+
+                # 评估管道创建后立即注册到根任务子目录
+                # 确保即使管道运行异常，记录文件也会分组（与 task_worker 对主管道的做法一致）
+                EvaluationEngine._pre_register_eval_pipeline(
+                    engine._pipeline_id, task_id,
+                )
 
                 state = await engine.run(
                     user_input=eval_prompt,

@@ -141,8 +141,8 @@ def main():
             asyncio.run(app.run())
     finally:
         try:
-            from llm.adapter import cleanup_litellm_logging
-            cleanup_litellm_logging()
+            from llm.adapter import cleanup_litellm_resources_sync
+            cleanup_litellm_resources_sync()
         except Exception:
             pass
 

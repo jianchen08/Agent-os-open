@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Any, Callable
 
@@ -28,6 +29,132 @@ from pipeline.types import ErrorPolicy, StateKeys
 from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
+
+
+def _repair_json_string(s: str) -> str | None:
+    """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
+
+    处理的常见问题：
+    1. 尾部逗号 (trailing comma)
+    2. 单引号代替双引号
+    3. 未加引号的键名
+    4. 截断的 JSON（尝试补全括号）
+    5. 多余的换行或空白
+    6. JSON 前后有额外字符（如 markdown code block）
+
+    Args:
+        s: 待修复的 JSON 字符串
+
+    Returns:
+        修复后的 JSON 字符串，无法修复时返回 None
+    """
+    if not s or not isinstance(s, str):
+        return None
+
+    s = s.strip()
+
+    # 尝试 0: 去掉可能的 markdown code block 包裹
+    if s.startswith("```"):
+        lines = s.split("\n")
+        # 去掉首行 (```json 或 ```)
+        start = 1 if lines else 0
+        # 去掉尾行 (```)
+        end = len(lines)
+        if lines and lines[-1].strip() == "```":
+            end -= 1
+        s = "\n".join(lines[start:end]).strip()
+
+    # 尝试 1: 直接解析
+    try:
+        json.loads(s)
+        return s
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 尝试 2: 提取第一个完整的 JSON 对象 {...}
+    first_brace = s.find("{")
+    if first_brace >= 0:
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(first_brace, len(s)):
+            c = s[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == "\\":
+                escape_next = True
+                continue
+            if c == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = s[first_brace:i + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate
+                    except (json.JSONDecodeError, TypeError):
+                        break
+
+    # 尝试 3: 去掉尾部逗号（对象和数组中的）
+    fixed = re.sub(r",\s*([}\]])", r"\1", s)
+    try:
+        json.loads(fixed)
+        return fixed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 尝试 4: 单引号 → 双引号（简单替换，非完美但能处理常见情况）
+    # 只在单引号数量和双引号数量差异明显时尝试
+    if s.count("'") > s.count('"'):
+        fixed = s.replace("'", '"')
+        try:
+            json.loads(fixed)
+            return fixed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 尝试 5: 截断修复 — 补全缺失的右括号
+    open_curly = s.count("{") - s.count("}")
+    open_bracket = s.count("[") - s.count("]")
+    if open_curly > 0 or open_bracket > 0:
+        candidate = s + "]" * max(0, open_bracket) + "}" * max(0, open_curly)
+        try:
+            json.loads(candidate)
+            return candidate
+        except (json.JSONDecodeError, TypeError):
+            # 截断可能导致 value 不完整，尝试去掉最后一个不完整的 key:value
+            # 例如 {"key1": "value1", "key2": "val → {"key1": "value1"}
+            last_comma = candidate.rfind(",")
+            if last_comma > 0:
+                candidate2 = candidate[:last_comma]
+                open_c2 = candidate2.count("{") - candidate2.count("}")
+                open_b2 = candidate2.count("[") - candidate2.count("]")
+                candidate2 += "]" * max(0, open_b2) + "}" * max(0, open_c2)
+                try:
+                    json.loads(candidate2)
+                    return candidate2
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    # 尝试 6: 去掉注释 (// 和 /* */)
+    fixed = re.sub(r"//.*?$", "", s, flags=re.MULTILINE)
+    fixed = re.sub(r"/\*.*?\*/", "", fixed, flags=re.DOTALL)
+    fixed = fixed.strip()
+    if fixed != s:
+        try:
+            json.loads(fixed)
+            return fixed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -454,33 +581,39 @@ class LLMCore(ICorePlugin):
 
         # MiniMax 专有修正
 
-        # Phase 0: 清理孤立的 tool result 消息（安全网）
+        # Phase 0: 清理真正孤立的 tool result 消息（安全网）
         # 当对话历史从执行记录恢复时，assistant 消息的 tool_calls 可能丢失，
-        # 导致 tool result 消息的 tool_call_id 无法匹配。MiniMax 会拒绝这种请求。
-        valid_tool_ids: set[str] = set()
+        # 导致 tool result 消息前面没有对应的 assistant(tool_calls) 消息。
+        # MiniMax 会拒绝这种请求。
+        #
+        # 改进：不再按 tool_call_id 精确匹配来清理（这会误杀 MiniMax M2.7 等
+        # 模型返回的 ID 不一致但顺序正确的 tool result），改为只移除那些前面
+        # 没有任何 assistant(tool_calls) 消息的 tool result。ID 不匹配的问题
+        # 由 Phase 3 的位置匹配逻辑处理。
+        cleaned_phase0: list[dict[str, Any]] = []
+        orphan_count = 0
+        has_preceding_tool_calls = False
         for msg in messages:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    tc_id = tc.get("id")
-                    if tc_id:
-                        valid_tool_ids.add(tc_id)
-        if valid_tool_ids:
-            cleaned: list[dict[str, Any]] = []
-            orphan_count = 0
-            for msg in messages:
-                if msg.get("role") == "tool":
-                    tc_id = msg.get("tool_call_id")
-                    if tc_id and tc_id not in valid_tool_ids:
-                        orphan_count += 1
-                        continue
-                cleaned.append(msg)
-            if orphan_count:
-                logger.warning(
-                    "[%s] MiniMax Phase 0: removed %d orphaned tool results "
-                    "(tool_call_id not found in any assistant message)",
-                    self.name, orphan_count,
-                )
-                messages = cleaned
+                has_preceding_tool_calls = True
+                cleaned_phase0.append(msg)
+            elif msg.get("role") == "tool":
+                if not has_preceding_tool_calls:
+                    orphan_count += 1
+                else:
+                    cleaned_phase0.append(msg)
+            else:
+                # 非 tool 消息（user/system）重置标记
+                if msg.get("role") != "tool":
+                    has_preceding_tool_calls = False
+                cleaned_phase0.append(msg)
+        if orphan_count:
+            logger.warning(
+                "[%s] MiniMax Phase 0: removed %d truly orphaned tool results "
+                "(no preceding assistant with tool_calls)",
+                self.name, orphan_count,
+            )
+            messages = cleaned_phase0
 
         converted_count = 0
         relocated_count = 0
@@ -529,11 +662,21 @@ class LLMCore(ICorePlugin):
                         try:
                             json.loads(args_val)
                         except (json.JSONDecodeError, TypeError):
-                            logger.warning(
-                                "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments 不是合法 JSON，重置为 {{}}: %s",
-                                self.name, idx, fn.get("name", "?"), args_val[:500],
-                            )
-                            fn["arguments"] = "{}"
+                            # 尝试修复 JSON 格式问题（MiniMax 返回格式不稳定）
+                            repaired = _repair_json_string(args_val)
+                            if repaired is not None:
+                                logger.info(
+                                    "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments JSON 修复成功: %s -> %s",
+                                    self.name, idx, fn.get("name", "?"),
+                                    args_val[:200], repaired[:200],
+                                )
+                                fn["arguments"] = repaired
+                            else:
+                                logger.warning(
+                                    "[%s] MiniMax: assistant MSG-%d tool_call[%s] arguments JSON 修复失败，重置为 {{}}: %s",
+                                    self.name, idx, fn.get("name", "?"), args_val[:500],
+                                )
+                                fn["arguments"] = "{}"
 
         # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
         result: list[dict[str, Any]] = []
@@ -594,9 +737,16 @@ class LLMCore(ICorePlugin):
         # assistant(tool_calls) 与 tool 之间的插入消息。这里兜底处理：
         # tool result 出现在非 assistant(tool_calls) 之后的情况（如上下文截断、
         # 执行记录恢复丢失 assistant 消息等）。
+        #
+        # 改进：当 tool_call_id 精确匹配失败时，按位置顺序尝试匹配。
+        # MiniMax M2.7 等模型的 tool_call_id 格式不稳定，可能返回与期望不同的 ID，
+        # 但 tool result 的顺序通常与 tool_calls 一致。
         validated: list[dict[str, Any]] = []
         expecting_tool_ids: set[str] = set()
+        # 保留有序列表用于位置匹配 fallback
+        expecting_tool_ids_ordered: list[str] = []
         dropped_count = 0
+        positional_match_count = 0
         for msg in result:
             if msg.get("role") == "assistant":
                 if msg.get("tool_calls"):
@@ -605,22 +755,50 @@ class LLMCore(ICorePlugin):
                         for tc in msg["tool_calls"]
                         if tc.get("id")
                     }
+                    expecting_tool_ids_ordered = [
+                        tc.get("id")
+                        for tc in msg["tool_calls"]
+                        if tc.get("id")
+                    ]
                 else:
                     expecting_tool_ids = set()
+                    expecting_tool_ids_ordered = []
                 validated.append(msg)
             elif msg.get("role") == "tool":
                 if expecting_tool_ids:
                     tc_id = msg.get("tool_call_id")
                     if tc_id in expecting_tool_ids:
                         expecting_tool_ids.discard(tc_id)
+                        # 同步更新有序列表
+                        if tc_id in expecting_tool_ids_ordered:
+                            expecting_tool_ids_ordered.remove(tc_id)
                         validated.append(msg)
                     else:
-                        dropped_count += 1
-                        logger.warning(
-                            "[%s] MiniMax Phase 3: dropping tool result with "
-                            "unexpected tool_call_id=%s (expected %s)",
-                            self.name, tc_id, expecting_tool_ids,
-                        )
+                        # 精确匹配失败，尝试位置匹配
+                        # 如果 tool result 的数量不超过 expecting 数量，
+                        # 且此 tool result 的 tool_call_id 也不在任何其他
+                        # assistant 消息的 tool_calls 中，按位置分配。
+                        if expecting_tool_ids_ordered:
+                            matched_id = expecting_tool_ids_ordered.pop(0)
+                            expecting_tool_ids.discard(matched_id)
+                            positional_match_count += 1
+                            logger.info(
+                                "[%s] MiniMax Phase 3: positional match — "
+                                "tool_call_id %s → %s (expected one of %s)",
+                                self.name, tc_id, matched_id,
+                                list(expecting_tool_ids) if expecting_tool_ids else "none left",
+                            )
+                            # 重写 tool 消息的 tool_call_id 为正确的 ID
+                            patched_msg = dict(msg)
+                            patched_msg["tool_call_id"] = matched_id
+                            validated.append(patched_msg)
+                        else:
+                            dropped_count += 1
+                            logger.warning(
+                                "[%s] MiniMax Phase 3: dropping tool result with "
+                                "unexpected tool_call_id=%s (expected %s)",
+                                self.name, tc_id, expecting_tool_ids,
+                            )
                 else:
                     dropped_count += 1
                     logger.warning(
@@ -630,11 +808,18 @@ class LLMCore(ICorePlugin):
                     )
             else:
                 expecting_tool_ids = set()
+                expecting_tool_ids_ordered = []
                 validated.append(msg)
         if dropped_count:
             logger.warning(
                 "[%s] MiniMax Phase 3: dropped %d invalid tool results",
                 self.name, dropped_count,
+            )
+        if positional_match_count:
+            logger.info(
+                "[%s] MiniMax Phase 3: positionally matched %d tool results "
+                "(tool_call_id mismatch but order preserved)",
+                self.name, positional_match_count,
             )
         result = validated
 

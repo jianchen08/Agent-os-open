@@ -778,7 +778,7 @@ class ToolExecutor(IToolExecutor):
             raise ToolExecutionError(tool_name, str(e), cause=e) from e
 
     # BUG-FIX-fix_20260422_context_overflow: 工具输出截断阈值，防止巨大输出撑爆 LLM 上下文窗口
-    MAX_TOOL_OUTPUT_LENGTH = 50000  # 50K 字符
+    MAX_TOOL_OUTPUT_LENGTH = 100000  # 100K 字符
 
     def _finalize_result(
         self,
