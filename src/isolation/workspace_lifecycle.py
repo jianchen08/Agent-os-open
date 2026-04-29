@@ -653,6 +653,8 @@ class WorkspaceLifecycleManager:
         mode = (ws_meta or {}).get("mode", "")
         if mode == "plain":
             return {"success": True, "commit_hash": None, "has_changes": True}
+        if mode == "shared":
+            return {"success": True, "commit_hash": None, "has_changes": True}
         self._ensure_git_user(ws_path)
         commit_hash = self._git_add_commit_if_dirty(ws_path, "checkpoint: before evaluate")
         rc, status, _ = self._run_git("status", "--porcelain", cwd=ws_path)
@@ -716,6 +718,9 @@ class WorkspaceLifecycleManager:
         if mode == "plain":
             logger.info("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
             return {"success": True, "action": "none"}
+        if mode == "shared":
+            logger.info("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
+            return {"success": True, "action": "none"}
         reject_count = ws_meta.get("reject_count", 0) + 1
         max_retries = ws_meta.get("max_retries", self._config.get("max_retries", 3))
         ws_meta["reject_count"] = reject_count
@@ -737,16 +742,17 @@ class WorkspaceLifecycleManager:
         if mode == "plain":
             logger.info("[WorkspaceLifecycle] plain 模式，跳过回滚: %s", workspace)
             return {"success": True, "action": "none"}
+        if mode == "shared":
+            logger.info("[WorkspaceLifecycle] shared 模式，跳过回滚: %s", workspace)
+            return {"success": True, "action": "none"}
         if mode == "worktree":
             self._run_git("checkout", "--", ".", cwd=ws_path)
             self._run_git("clean", "-fd", cwd=ws_path)
             self._cleanup_worktree(workspace, ws_meta)
             logger.info("[WorkspaceLifecycle] worktree 回滚并清理: %s", workspace)
             return {"success": True, "action": "rollback_worktree"}
-        self._run_git("checkout", "--", ".", cwd=ws_path)
-        self._run_git("clean", "-fd", cwd=ws_path)
-        logger.info("[WorkspaceLifecycle] 已回滚工作空间: %s", workspace)
-        return {"success": True, "action": "rollback"}
+        logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，拒绝执行破坏性操作: %s", mode, workspace)
+        return {"success": False, "error": f"未知工作模式: {mode}"}
 
     # ── 9. 安全合并 ──────────────────────────────────────────────
 
