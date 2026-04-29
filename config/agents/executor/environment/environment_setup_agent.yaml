@@ -12,7 +12,7 @@ description: |
 agent_type: "specialized"
 category: "resource"
 level: "L3"
-model_tier: small
+model_tier: large
 
 system_prompt: |
   # 你是环境准备专家

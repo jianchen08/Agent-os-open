@@ -12,7 +12,7 @@ description: |
 agent_type: atomic
 category: "code"
 level: "L3"
-model_tier: small
+model_tier: large
 
 plugins:
   disabled: []
