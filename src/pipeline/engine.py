@@ -1036,6 +1036,15 @@ class PipelineEngine:
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
         self._services[f"__suspended_engine_{pipeline_id}"] = self
 
+        # 同步注册到 ServiceProvider，供 TaskTool 等跨管道工具查找挂起引擎
+        try:
+            from infrastructure.service_provider import get_service_provider
+            get_service_provider().register(
+                f"__suspended_engine_{pipeline_id}", self,
+            )
+        except Exception:
+            pass
+
         # 消费子任务在父管道挂起前就已入队的通知（竞态修复）
         pending_key = f"__pending_notifications_{pipeline_id}"
         pending_notifications = self._services.pop(pending_key, [])
@@ -1071,6 +1080,13 @@ class PipelineEngine:
                 )
         finally:
             self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+            try:
+                from infrastructure.service_provider import get_service_provider
+                get_service_provider()._services.pop(
+                    f"__suspended_engine_{pipeline_id}", None,
+                )
+            except Exception:
+                pass
             self._wake_event = None
             self._watching_task_ids = []
         logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)

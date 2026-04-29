@@ -1182,14 +1182,37 @@ class TaskTool(BuiltinTool):
                 task_id, target_pipeline_id, message[:50],
             )
 
+            # BUG-FIX: 挂起管道的 message_inject 插件不会运行，
+            # 消息入队后无人消费。额外检查目标管道是否处于挂起状态，
+            # 若挂起则直接调用 inject_and_wake() 注入并唤醒。
+            inject_result = {
+                "task_id": task_id,
+                "injected": True,
+                "message_id": msg.id,
+                "target_pipeline_id": target_pipeline_id,
+                "message_preview": message[:100],
+            }
+            try:
+                from infrastructure.service_provider import get_service_provider
+                _provider = get_service_provider()
+                _engine_key = f"__suspended_engine_{target_pipeline_id}"
+                _engine = _provider.get(_engine_key)
+                if _engine is not None and hasattr(_engine, "inject_and_wake"):
+                    _engine.inject_and_wake(message)
+                    inject_result["woke_suspended_engine"] = True
+                    logger.info(
+                        "[TaskTool] 挂起管道已被唤醒 | pipeline_id=%s",
+                        target_pipeline_id,
+                    )
+            except Exception as _wake_err:
+                # 唤醒失败不影响主流程（MessageQueue 已入队，管道恢复后仍可消费）
+                logger.warning(
+                    "[TaskTool] 尝试唤醒挂起管道失败（不影响消息队列投递）: %s",
+                    _wake_err,
+                )
+
             return create_success_result(
-                data={
-                    "task_id": task_id,
-                    "injected": True,
-                    "message_id": msg.id,
-                    "target_pipeline_id": target_pipeline_id,
-                    "message_preview": message[:100],
-                },
+                data=inject_result,
                 metadata={"action": "inject_task"},
             )
 

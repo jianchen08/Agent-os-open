@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import logging
 import sys as _sys
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -1242,157 +1243,46 @@ class CLIApplication:
                 self._input_adapter.drain_stdin()
                 # 不 continue，直接落到下方显示提示符
 
-            # === 管道运行中：等待完成或交互请求 ===
-            pipeline_running = (
+            # === 等待输出结束 ===
+            # 只要有活跃输出、或管道刚启动还没出东西，就等待
+            # 不显示提示符，避免输出覆盖提示符后光标位置错乱
+            _pipeline_was_running = (
                 self._pipeline_task is not None
                 and not self._pipeline_task.done()
             )
-
-            # 已显示过文本输出 → 跳过等待循环，直接显示提示符
-            # 管道完成会在下一轮迭代中处理
-            if pipeline_running and getattr(
-                self, "_text_output_received", False
-            ):
-                if getattr(self, "_last_was_text", False):
-                    _sys.stdout.write("\n")
-                    _sys.stdout.flush()
-                    self._last_was_text = False
-                # 跳过等待循环，直接落到提示符显示
-            elif pipeline_running:
-                interaction_task = None
-                if cli_notifier is not None:
-                    async def _poll():
-                        while not cli_notifier.has_pending():
-                            await asyncio.sleep(0.3)
-                    interaction_task = asyncio.create_task(_poll())
-
-                # 周期性等待：管道完成时立即返回，
-                # 超时时检查是否需要结束文本行或显示进度
-                _progress_dots = 0
-                _text_done_break = False
+            if _pipeline_was_running:
                 while True:
-                    wait_set: set[asyncio.Task] = {self._pipeline_task}
-                    if interaction_task is not None and not interaction_task.done():
-                        wait_set.add(interaction_task)
-
-                    done, pending = await asyncio.wait(
-                        wait_set,
-                        return_when=asyncio.FIRST_COMPLETED,
-                        timeout=0.5,
-                    )
-
-                    if done:
-                        break
-
-                    # 超时：检查文本流是否已结束但光标还停在行末
-                    if getattr(self, "_last_was_text", False):
-                        _sys.stdout.write("\n")
-                        _sys.stdout.flush()
-                        self._last_was_text = False
-                        # 文本输出已结束（LLM 只输出了文本没调工具）
-                        # 立即跳出等待循环，不再显示进度点
-                        if getattr(
-                            self, "_text_output_received", False
-                        ):
-                            _text_done_break = True
-                            break
-
-                    # 只有没收到文本输出时才显示进度点
-                    if not getattr(
-                        self, "_text_output_received", False
+                    # 管道已完成 → 退出等待，回到循环顶部处理结果
+                    if (
+                        self._pipeline_task is None
+                        or self._pipeline_task.done()
                     ):
-                        if _progress_dots == 0:
-                            _sys.stdout.write("  ..")
-                        else:
-                            _sys.stdout.write(".")
-                        _sys.stdout.flush()
-                        _progress_dots += 1
-
-                # 结束进度行
-                if _progress_dots > 0:
-                    _sys.stdout.write("\n")
-                    _sys.stdout.flush()
-
-                # 文本输出已结束跳出 → 取消 pending 的交互任务，直接落到提示符
-                if _text_done_break:
-                    if interaction_task is not None and not interaction_task.done():
-                        interaction_task.cancel()
-                    # 下一轮循环检查管道完成
-                else:
-                    for t in pending:
-                        t.cancel()
-
-                    # 如果是交互请求先到达 → 处理子对话
-                    if interaction_task is not None and interaction_task in done:
-                        self._suppress_streaming = True
-                        try:
-                            human_svc = self._services.get(
-                                "human_interaction_service"
-                            )
-                            from channels.cli.cli_interaction import (
-                                run_sub_conversation,
-                            )
-                            await run_sub_conversation(
-                                console=console,
-                                input_adapter=self._input_adapter,
-                                notifier=cli_notifier,
-                                interaction_service=human_svc,
-                                idle_timeout=60,
-                            )
-                        finally:
-                            self._suppress_streaming = False
-                            if self._streaming_buffer:
-                                safe = sanitize_for_terminal(
-                                    "".join(self._streaming_buffer)
-                                )
-                                console.print(safe, end="", highlight=False)
-                                self._last_was_text = True
-                                self._streaming_buffer.clear()
-                        self._input_adapter.drain_stdin()
-
-                    # 管道已完成 → 处理结果并落到提示符
-                    # 只有交互请求到达且管道仍在运行时才 continue
-                    if not self._pipeline_task.done():
-                        continue
-
-                    # 管道也完成了，处理结果
-                    try:
-                        final_state = self._pipeline_task.result()
-                    except Exception as exc:
-                        logger.warning("Pipeline task failed: %s", exc)
-                        final_state = {"error": str(exc)}
-
-                    initial_state = self._pipeline_initial_state or {}
-                    self._pipeline_task = None
-                    self._pipeline_initial_state = None
-
-                    if getattr(self, "_last_was_text", False):
-                        _sys.stdout.write("\n")
-                        _sys.stdout.flush()
-                        self._last_was_text = False
-
-                    try:
-                        conversation_history = (
-                            await self._handle_pipeline_result(
-                                final_state, initial_state,
-                                conversation_history, console,
-                            )
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Error handling pipeline result, "
-                            "continuing REPL loop"
-                        )
-
-                    # 更新提示符文本后落到下方显示
-                    status_text = (
-                        self._output_adapter.status_bar.render_simple()
-                    )
-                    self._input_adapter._prompt_str = (
-                        f"{status_text} > "
+                        break
+                    # 管道挂起 → 退出等待，显示提示符
+                    if (
+                        self._engine is not None
+                        and self._engine.is_suspended
+                    ):
+                        break
+                    # 输出已停止 300ms → 退出等待，显示提示符
+                    _last_t = getattr(self, "_last_chunk_time", 0)
+                    if _last_t > 0 and (_time.monotonic() - _last_t) >= 0.3:
+                        break
+                    # 还在输出或刚启动 → 等待 0.3s 后重新检查
+                    await asyncio.wait(
+                        {self._pipeline_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=0.3,
                     )
 
-            # === 空闲状态：显示提示符等待用户输入 ===
+                # 管道在等待期间完成了 → 回到循环顶部处理结果
+                if (
+                    self._pipeline_task is not None
+                    and self._pipeline_task.done()
+                ):
+                    continue
+
+            # === 显示提示符（输出结束/管道挂起/空闲） ===
             if getattr(self, "_last_was_text", False):
                 _sys.stdout.write("\n")
                 _sys.stdout.flush()
@@ -1400,9 +1290,11 @@ class CLIApplication:
             # 直接写 stdout，绕开 rich markup 解析 [NORMAL] 被吞的问题
             _sys.stdout.write(self._input_adapter.prompt_text())
             _sys.stdout.flush()
+
+            # === 等待事件：用户输入 / 交互请求 / 管道完成 ===
             try:
-                initial_state = (
-                    await self._wait_input_or_interaction(
+                initial_state, pipeline_done = (
+                    await self._wait_for_next_event(
                         cli_notifier, console
                     )
                 )
@@ -1412,6 +1304,10 @@ class CLIApplication:
                     "bold blue",
                 )
                 break
+
+            # 管道完成了 → 回到循环顶部处理结果
+            if pipeline_done:
+                continue
 
             # 交互请求中断了输入等待
             if initial_state is None:
@@ -1575,11 +1471,27 @@ class CLIApplication:
 
             # === 启动管道（后台运行，不阻塞提示符） ===
 
-            # 如果已有管道在运行，拒绝新输入并提示
+            # 如果已有管道在运行
             if (
                 self._pipeline_task is not None
                 and not self._pipeline_task.done()
             ):
+                # 管道挂起 → 注入用户输入并唤醒管道
+                if (
+                    self._engine is not None
+                    and self._engine.is_suspended
+                ):
+                    user_input = initial_state.get("user_input", "")
+                    if user_input:
+                        self._engine.inject_and_wake(user_input)
+                        console.print(
+                            "[dim cyan]→ 已将输入注入挂起的管道"
+                            "并唤醒[/dim cyan]"
+                        )
+                    else:
+                        self._engine.wake()
+                    continue
+                # 管道真正在运行 → 拒绝新输入
                 console.print(
                     "[yellow]管道正在运行中，请等待完成后再输入。"
                     "（可按 Ctrl+C 中断）[/yellow]"
@@ -1842,6 +1754,109 @@ class CLIApplication:
         self._input_adapter.drain_stdin()
         return None
 
+    async def _wait_for_next_event(
+        self,
+        cli_notifier: Any,
+        console: Console,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """等待下一个事件：用户输入、交互请求或管道完成。
+
+        提示符已显示，在此等待任一事件发生。
+
+        Returns:
+            (initial_state, pipeline_done)
+            - initial_state: 用户输入的 state，或 None（交互已处理）
+            - pipeline_done: 管道是否已完成（需要回到循环顶部处理）
+        """
+        receive_task = asyncio.create_task(
+            self._input_adapter.receive()
+        )
+
+        tasks: dict[asyncio.Task, str] = {receive_task: "input"}
+
+        if cli_notifier is not None:
+            async def _poll_interaction() -> None:
+                while not cli_notifier.has_pending():
+                    await asyncio.sleep(0.3)
+            interaction_task = asyncio.create_task(
+                _poll_interaction()
+            )
+            tasks[interaction_task] = "interaction"
+
+        if (
+            self._pipeline_task is not None
+            and not self._pipeline_task.done()
+        ):
+            tasks[self._pipeline_task] = "pipeline"
+
+        done, pending = await asyncio.wait(
+            set(tasks.keys()),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # 取消非管道的 pending 任务
+        for t in pending:
+            if t != self._pipeline_task:
+                t.cancel()
+
+        # 判断哪个事件先完成（优先级：input > pipeline > interaction）
+        for t in done:
+            tag = tasks.get(t)
+            if tag == "input":
+                try:
+                    return t.result(), False
+                except Exception:
+                    return {"should_stop": True}, False
+            elif tag == "pipeline":
+                # 管道完成 → 中断 stdin，回到循环顶部处理
+                if receive_task not in done:
+                    self._input_adapter.interrupt_stdin()
+                    try:
+                        await receive_task
+                    except Exception:
+                        pass
+                    self._input_adapter.drain_stdin()
+                return None, True
+            elif tag == "interaction":
+                # 交互请求 → 中断 stdin，处理子对话
+                self._input_adapter.interrupt_stdin()
+                try:
+                    await receive_task
+                except Exception:
+                    pass
+
+                self._suppress_streaming = True
+                try:
+                    human_svc = self._services.get(
+                        "human_interaction_service"
+                    )
+                    from channels.cli.cli_interaction import (
+                        run_sub_conversation,
+                    )
+                    await run_sub_conversation(
+                        console=console,
+                        input_adapter=self._input_adapter,
+                        notifier=cli_notifier,
+                        interaction_service=human_svc,
+                        idle_timeout=60,
+                    )
+                finally:
+                    self._suppress_streaming = False
+                    if self._streaming_buffer:
+                        safe = sanitize_for_terminal(
+                            "".join(self._streaming_buffer)
+                        )
+                        console.print(
+                            safe, end="", highlight=False
+                        )
+                        self._last_was_text = True
+                        self._streaming_buffer.clear()
+                self._input_adapter.drain_stdin()
+                return None, False
+
+        # 兜底（不应到达）
+        return None, False
+
     async def _handle_slash_command(self, state: dict[str, Any]) -> CommandResult | None:
         """处理斜杠命令。
 
@@ -1923,6 +1938,7 @@ class CLIApplication:
         _displayed_tool_indices: set[int] = set()
         self._last_was_text = False
         self._text_output_received = False
+        self._last_chunk_time = 0
 
         def on_chunk(chunk: dict[str, Any]) -> None:
             """流式回调：将管道事件实时输出到终端。"""
@@ -1936,6 +1952,7 @@ class CLIApplication:
 
             chunk_type = chunk.get("type", "text")
             content = chunk.get("content", "")
+            self._last_chunk_time = _time.monotonic()
 
             if chunk_type == "thinking":
                 if self._show_thinking and content:
