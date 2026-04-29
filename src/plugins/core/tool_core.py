@@ -20,6 +20,7 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
+from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -241,6 +242,10 @@ class ToolCore(ICorePlugin):
 
         func = self._get_tool(tool_name)
         if func is None:
+            # 尝试自动加载：从文件或数据库加载未注册的工具
+            func = await self._try_auto_load_tool(tool_name)
+
+        if func is None:
             logger.warning("[%s] Tool not found: %s", self.name, tool_name)
             result = {
                 "tool_name": tool_name,
@@ -345,6 +350,38 @@ class ToolCore(ICorePlugin):
                     "duration_ms": round(duration_ms, 1),
                 })
             return result
+
+    async def _try_auto_load_tool(self, tool_name: str) -> Callable[..., Any] | None:
+        """尝试自动加载未注册的工具。
+
+        通过 ToolAutoLoader 从数据库或 Python 文件加载工具，
+        成功后缓存到本地注册表供后续调用。
+        """
+        try:
+            from tools.auto_loader import get_tool_auto_loader
+
+            auto_loader = get_tool_auto_loader()
+            if auto_loader is None:
+                logger.debug("[%s] ToolAutoLoader 不可用，无法自动加载: %s", self.name, tool_name)
+                return None
+
+            tool = await auto_loader.auto_load_tool(tool_name)
+            if tool is None:
+                return None
+
+            # 从全局注册表获取 handler
+            if self._tool_registry and self._tool_registry.has(tool_name):
+                handler = self._tool_registry.get_handler(tool_name)
+                if handler:
+                    self._tools[tool_name] = handler
+                    logger.info("[%s] 自动加载工具成功: %s", self.name, tool_name)
+                    return handler
+
+            return None
+
+        except Exception as e:
+            logger.warning("[%s] 自动加载工具失败: %s — %s", self.name, tool_name, e)
+            return None
 
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:
         """执行工具调用。
@@ -518,7 +555,7 @@ class ToolCore(ICorePlugin):
             tc_id = tc_ids[i] if i < len(tc_ids) else f"call_{uuid.uuid4().hex[:8]}"
             result_data = result.get("data", result.get("error", ""))
             try:
-                content_str = json.dumps(result_data, ensure_ascii=False, default=str)
+                content_str = get_format_manager().serialize(result_data)
             except (TypeError, ValueError):
                 content_str = str(result_data)
             tool_msg = {

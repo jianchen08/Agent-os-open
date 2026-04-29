@@ -256,6 +256,8 @@ tool_ids:
   - resource_search
   - resource_merge
   - file_read
+  - create_directory   # 创建目录（创建资源目录）
+  - list_directory     # 列出目录内容（查看已有资源）
   - memory
 
 hard_constraints:

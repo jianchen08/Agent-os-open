@@ -60,6 +60,7 @@ dynamic_vars:
 tool_ids:
 - file_read
 - file_write
+- list_directory    # 列出目录内容（查看项目结构）
 - enhanced_search
 - task_evaluate
 - resource_search

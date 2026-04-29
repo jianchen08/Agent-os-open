@@ -145,7 +145,10 @@ dynamic_vars:
 tool_ids:
   - file_read
   - file_write
-  - bash
+  - copy_file          # 文件/目录复制（复制模板文件）
+  - create_directory   # 创建目录（创建工具目录）
+  - list_directory     # 列出目录内容（查看已有工具）
+  - bash_execute
   - fetch
   - enhanced_search
   - resource_search

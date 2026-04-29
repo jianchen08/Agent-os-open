@@ -125,7 +125,7 @@ _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yam
 
 # Session directory for CLI session metadata
 _SESSION_DIR = Path("data/session")
-MAX_SESSION_MESSAGES = 100
+# No hard limit on session messages — context compression handles overflow
 
 
 # ---------------------------------------------------------------------------
@@ -1162,9 +1162,6 @@ class CLIApplication:
                 except Exception as exc:
                     logger.debug("Failed to restore from pipeline records: %s", exc)
 
-        if len(conversation_history) > MAX_SESSION_MESSAGES:
-            conversation_history = conversation_history[-MAX_SESSION_MESSAGES:]
-
         if restored:
             console.print(
                 f"[dim]已恢复上次会话 ({len(conversation_history)} 条消息)，"
@@ -1644,12 +1641,6 @@ class CLIApplication:
                 conversation_history.append(
                     {"role": "assistant", "content": raw_result}
                 )
-
-        # Trim conversation history
-        if len(conversation_history) > MAX_SESSION_MESSAGES:
-            conversation_history = (
-                conversation_history[-MAX_SESSION_MESSAGES:]
-            )
 
         # 更新状态栏
         ctx_pct = self._estimate_context_pct(conversation_history)

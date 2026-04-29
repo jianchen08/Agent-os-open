@@ -710,6 +710,12 @@ class ResourceSearchTool:
                 query, category, level, limit, detailed, exact
             )
 
+        # 兜底：从 builtin_tools_config.yaml 搜索（覆盖未加载到内存的内置工具）
+        if not names:
+            names, descriptions, schemas_list = self._search_tools_from_yaml(
+                query_lower, category, level, limit, exact
+            )
+
         return names, descriptions, schemas_list
 
     def _match_tool_single(
@@ -814,6 +820,65 @@ class ResourceSearchTool:
 
         except Exception as e:
             logger.warning(f"[resource_search] 数据库搜索工具失败: {e}")
+            return [], [], []
+
+    def _search_tools_from_yaml(
+        self,
+        query_lower: str,
+        category: str | None,
+        level: str,
+        limit: int,
+        exact: bool,
+    ) -> tuple[list[str], list[str], list[dict]]:
+        """从 builtin_tools_config.yaml 搜索工具（兜底：覆盖未加载的内置工具）"""
+        try:
+            import yaml
+            from pathlib import Path
+
+            config_path = Path("config/tools/builtin_tools_config.yaml")
+            if not config_path.exists():
+                return [], [], []
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+
+            if not config or "tools" not in config:
+                return [], [], []
+
+            names = []
+            descriptions = []
+            schemas_list = []
+
+            for tool_info in config["tools"]:
+                name = tool_info.get("name", "")
+                desc = tool_info.get("description", "")
+                tags = tool_info.get("tags", [])
+                tool_category = tool_info.get("category")
+                tool_level = tool_info.get("level", "user")
+
+                if level != "all" and tool_level != level:
+                    continue
+
+                if category and tool_category != category:
+                    continue
+
+                if self._match_query(query_lower, name, desc, tags, exact):
+                    names.append(name)
+                    descriptions.append(desc)
+                    schemas_list.append({})
+
+                    if len(names) >= limit:
+                        break
+
+            if names:
+                logger.info(
+                    f"[resource_search] 从 YAML 配置搜索到 {len(names)} 个工具"
+                )
+
+            return names, descriptions, schemas_list
+
+        except Exception as e:
+            logger.debug(f"[resource_search] YAML 配置搜索工具失败: {e}")
             return [], [], []
 
     async def _search_workflows(

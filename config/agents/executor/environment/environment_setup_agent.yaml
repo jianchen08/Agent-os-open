@@ -96,6 +96,11 @@ context_variables:
 tool_ids:
   - "file_read"        # 文件读取
   - "file_write"       # 文件写入
+  - "copy_file"        # 文件/目录复制
+  - "move_file"        # 文件/目录移动/重命名
+  - "delete_file"      # 文件/目录删除
+  - "create_directory" # 创建目录
+  - "list_directory"   # 列出目录内容
   - "bash_execute"     # Shell命令执行
   - "fetch"            # HTTP请求/网页抓取
   - "task_evaluate"    # 任务评估

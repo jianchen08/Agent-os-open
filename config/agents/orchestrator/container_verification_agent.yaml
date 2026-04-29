@@ -132,6 +132,7 @@ system_prompt: |
 tool_ids:
   - file_read
   - file_write
+  - list_directory    # 列出目录内容（扫描工作空间产出物）
   - bash_execute
   - enhanced_search
   - task_submit

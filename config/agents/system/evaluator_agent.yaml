@@ -212,6 +212,7 @@ system_prompt: |
 tool_ids:
   - file_read
   - file_write
+  - list_directory    # 列出目录内容（查找产出物）
   - enhanced_search
 
 # 约束配置

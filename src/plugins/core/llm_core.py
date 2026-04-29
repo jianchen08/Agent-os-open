@@ -529,27 +529,6 @@ class LLMCore(ICorePlugin):
                 "content": wrapped,
             })
 
-        logger.info(
-            "[%s] _build_messages assembled %d messages | "
-            "system=%s | history=%d | dynamic=%s",
-            self.name, len(messages),
-            bool(system_msg), len(history), bool(dynamic_vars),
-        )
-
-        for idx, msg in enumerate(messages):
-            role = msg.get("role", "?")
-            content = msg.get("content", "")
-            name = msg.get("name", "")
-            tc_list = msg.get("tool_calls", [])
-            prefix = f"[{self.name}] MSG-{idx} role={role}"
-            if name:
-                prefix += f" name={name}"
-            if tc_list:
-                logger.info("%s tool_calls=%s", prefix,
-                            json.dumps(tc_list, ensure_ascii=False) if tc_list else "[]")
-            else:
-                logger.info("%s content=%s", prefix, str(content) or "")
-
         return messages
 
     def _normalize_messages_for_provider(
@@ -957,6 +936,32 @@ class LLMCore(ICorePlugin):
             统一的 LLMResponse 响应结构
         """
         normalized_messages = self._normalize_messages_for_provider(messages)
+
+        logger.info(
+            "[%s] Sending %d messages to LLM",
+            self.name, len(normalized_messages),
+        )
+
+        for idx, msg in enumerate(normalized_messages):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            name = msg.get("name", "")
+            tc_list = msg.get("tool_calls", [])
+            prefix = f"[{self.name}] MSG-{idx} role={role}"
+            if name:
+                prefix += f" name={name}"
+            if tc_list:
+                logger.info(
+                    "%s tool_calls=%s", prefix,
+                    json.dumps(
+                        tc_list, ensure_ascii=False
+                    ) if tc_list else "[]",
+                )
+            else:
+                logger.info(
+                    "%s content=%s", prefix,
+                    str(content) or "",
+                )
 
         if self._use_router:
             # Router 路径：model 用路由别名，凭证和重试由 Router 管理

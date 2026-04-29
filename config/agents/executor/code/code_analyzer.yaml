@@ -387,6 +387,7 @@ system_prompt: |
 tool_ids:
   - file_read         # 文件读取
   - file_write        # 文件写入（输出分析报告）
+  - list_directory    # 列出目录内容（探索项目结构）
   - enhanced_search   # 文件内容/文件名搜索
   - bash_execute      # Shell命令执行
   - evaluate          # Schema验证/格式检查

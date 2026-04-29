@@ -175,6 +175,7 @@ tool_ids:
   - task_evaluate
   - resource_search
   - file_read
+  - list_directory    # 列出目录内容（查看项目结构）
 
 hard_constraints:
   - 任务执行完成后必须调用 task_evaluate 工具进行评估

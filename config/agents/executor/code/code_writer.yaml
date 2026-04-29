@@ -163,13 +163,31 @@ system_prompt: |
   ### 文件操作
   ```python
   # 读取现有代码
-  read_file(filePath: "src/module/file.py")
+  file_read(path: "src/module/file.py")
 
   # 写入新代码
-  write_to_file(filePath: "src/module/new_file.py", content: "...")
+  file_write(path: "src/module/new_file.py", action: "write", content: "...")
 
-  # 修改现有代码
-  replace_in_file(filePath: "src/module/file.py", old_str: "...", new_str: "...")
+  # 搜索替换（修改现有代码）
+  file_write(path: "src/module/file.py", action: "search_replace", old_text: "...", new_text: "...")
+  ```
+
+  ### 文件管理
+  ```python
+  # 复制文件
+  copy_file(source: "src/module/old.py", destination: "src/module/new.py")
+
+  # 移动/重命名文件
+  move_file(source: "src/module/old.py", destination: "src/module/renamed.py")
+
+  # 删除文件
+  delete_file(path: "src/module/unused.py")
+
+  # 创建目录
+  create_directory(path: "src/new_module/")
+
+  # 列出目录内容
+  list_directory(path: "src/module/")
   ```
 
   ### 代码搜索
@@ -184,10 +202,10 @@ system_prompt: |
   ### 代码执行
   ```python
   # 运行测试
-  execute_command(command: "pytest tests/test_module.py -v")
+  bash_execute(command: "pytest tests/test_module.py -v")
 
   # 类型检查
-  execute_command(command: "mypy src/module/")
+  bash_execute(command: "mypy src/module/")
   ```
 
   ## 产出物规范
@@ -229,11 +247,15 @@ system_prompt: |
   - ✅ 性能满足要求
 
 tool_ids:
-  - read_file
-  - write_to_file
-  - replace_in_file
+  - file_read
+  - file_write
+  - copy_file          # 文件/目录复制
+  - move_file          # 文件/目录移动/重命名
+  - delete_file        # 文件/目录删除
+  - create_directory   # 创建目录
+  - list_directory     # 列出目录内容
   - enhanced_search
-  - execute_command
+  - bash_execute
   - task_evaluate
   - resource_search
 
