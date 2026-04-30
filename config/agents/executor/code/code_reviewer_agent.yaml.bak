@@ -72,9 +72,6 @@ static_vars:
     - name: "设计系统约束（前端任务）"
       type: "path"
       path: "config/rules/per_agent/design_system_constraints.md"
-    - name: "代码质量检查技能"
-      type: "path"
-      path: "skills/code_quality_skill.md"
 
 # 动态变量
 dynamic_vars:
