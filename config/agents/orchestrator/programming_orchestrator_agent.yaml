@@ -182,6 +182,9 @@ static_vars:
         | 审查 | code_reviewer_agent | 代码审查专家 | {{workspace}}/review_report.md | container | file_check, semantic_check |
         | 环境 | environment_setup_agent | 环境准备专家 | {{workspace}}/reports/*_environment_status.md | host | file_check, format_valid |
         | API测试 | api_tester_agent | API测试专家 | {{workspace}}/api_test_report.md | container | api_test_check |
+    - name: "工具输出优化技能"
+      type: "path"
+      path: "skills/skill-tool-output-optimize/SKILL.md"
     - name: "可扩展工具索引"
       content: |
         ## 可扩展工具索引

@@ -63,6 +63,12 @@ static_vars:
   items:
     - name: "行为约束"
       type: "rules"
+    - name: "前端E2E测试技能"
+      type: "path"
+      path: "skills/frontend_test_skill.md"
+    - name: "工具输出优化技能"
+      type: "path"
+      path: "skills/skill-tool-output-optimize/SKILL.md"
 
 dynamic_vars:
   enabled: true

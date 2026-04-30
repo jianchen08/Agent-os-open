@@ -49,6 +49,15 @@ static_vars:
     - name: "状态机测试设计规则"
       type: "path"
       path: "config/rules/per_agent/state_machine_test_design.md"
+    - name: "代码质量检查技能"
+      type: "path"
+      path: "skills/code_quality_skill.md"
+    - name: "代码实现辅助技能"
+      type: "path"
+      path: "skills/skill-code-impl/SKILL.md"
+    - name: "工具输出优化技能"
+      type: "path"
+      path: "skills/skill-tool-output-optimize/SKILL.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

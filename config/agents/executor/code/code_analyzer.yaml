@@ -35,6 +35,12 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
+    - name: "代码质量检查技能"
+      type: "path"
+      path: "skills/code_quality_skill.md"
+    - name: "工具输出优化技能"
+      type: "path"
+      path: "skills/skill-tool-output-optimize/SKILL.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
