@@ -160,7 +160,6 @@ static_vars:
 
         | 工具名 | 功能 | 搜索命令 |
         |--------|------|----------|
-        | file_read | 读取文件内容 | resource_search(resource_type="tool", query="file_read") |
         | file_write | 创建/编辑文件 | resource_search(resource_type="tool", query="file_write") |
         | bash_execute | 执行Shell命令 | resource_search(resource_type="tool", query="bash_execute") |
         | enhanced_search | 搜索文本/代码 | resource_search(resource_type="tool", query="enhanced_search") |
@@ -187,7 +186,7 @@ dynamic_vars:
         每轮决策检查：
         1. 需求明确？→ 不明确就先澄清，不要猜
         2. 分析任务边界：简单问答直接回答 / 短期任务派发执行 / 容器任务走容器流程
-        3. 你只负责澄清和派发，不要自己去读文件、查资料、写代码，这些全部交给下级
+        3. 你只负责澄清和派发，对于你不需要知道的信息不要去读取或者查询，对于你需要知道的信息比如用户需要和你讨论一个文档你就要自己去读，这些全部交给下级
         4. 读取任务链并按依赖派发是你自己的职责，不得下放给下级 Agent；下级只负责执行你派发的单个子任务
 # 可用工具
 tool_ids:
@@ -197,7 +196,8 @@ tool_ids:
   - "resource_search" # 资源搜索（Agent/工具/）
   - "human_interaction" # 向用户提问/确认
   - "trigger_setup" # 触发器设置（定时提醒/检查）
-
+  - "file_read"
+  - "enhanced_search"
 # 约束
 hard_constraints:
   # === 角色边界 ===
