@@ -4,12 +4,12 @@
  * 提供消息的编辑、删除、重试等功能的封装
  */
 
+import { useCallback } from 'react'
+import { toast } from 'sonner'
 import { messageApi } from '@/services/api/messages'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { RetryScope } from '@/types/models'
-import { useCallback } from 'react'
-import { toast } from 'sonner'
 
 /**
  * 消息操作 Hook
@@ -26,11 +26,7 @@ export const useMessageActions = (sessionId?: string) => {
         throw new Error('sessionId is required for editing message')
       }
       try {
-        const result = await messageApi.editMessage(
-          sessionId,
-          messageId,
-          newContent
-        )
+        const result = await messageApi.editMessage(sessionId, messageId, newContent)
         toast.success('消息已更新')
         return result
       } catch (error) {
@@ -42,13 +38,13 @@ export const useMessageActions = (sessionId?: string) => {
             componentName: 'useMessageActions',
             operation: 'editMessage',
             messageId,
-          }
+          },
         )
         toast.error('编辑消息失败')
         throw error
       }
     },
-    [sessionId]
+    [sessionId],
   )
 
   /**
@@ -76,13 +72,13 @@ export const useMessageActions = (sessionId?: string) => {
             componentName: 'useMessageActions',
             operation: 'deleteMessage',
             messageId,
-          }
+          },
         )
         toast.error('删除消息失败')
         throw error
       }
     },
-    [sessionId, sessionStore]
+    [sessionId, sessionStore],
   )
 
   /**
@@ -93,33 +89,21 @@ export const useMessageActions = (sessionId?: string) => {
    * @param targetToolId 目标工具ID（scope='specific_tool' 时必需）
    */
   const retryMessageWithScope = useCallback(
-    async (
-      messageId: string,
-      scope: RetryScope = 'all',
-      targetToolId?: string
-    ) => {
+    async (messageId: string, scope: RetryScope = 'all', targetToolId?: string) => {
       if (!sessionId) {
         throw new Error('sessionId is required for retrying message')
       }
 
       // 临时消息不能重试
       if (messageId.startsWith('temp-')) {
-        console.warn(
-          '[useMessageActions] 临时消息不能重试 | messageId:',
-          messageId
-        )
+        console.warn('[useMessageActions] 临时消息不能重试 | messageId:', messageId)
         toast.error('消息正在保存中,请稍后重试')
         return
       }
 
       try {
         // 使用 sessionStore 的重试方法
-        await sessionStore.retryMessage(
-          sessionId,
-          messageId,
-          scope,
-          targetToolId
-        )
+        await sessionStore.retryMessage(sessionId, messageId, scope, targetToolId)
 
         // 根据重试范围显示不同的提示
         const scopeText = {
@@ -129,9 +113,9 @@ export const useMessageActions = (sessionId?: string) => {
         }[scope]
 
         toast.success(`开始重新生成${scopeText}`)
-      } catch (error: any) {
-        const errorMessage = error?.message || String(error)
-        const errorCode = error?.code
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        const errorCode = (error as { code?: number })?.code
 
         // 404 错误或消息不存在，静默处理（可能是临时消息）
         const isNotFoundError =
@@ -141,10 +125,7 @@ export const useMessageActions = (sessionId?: string) => {
           errorMessage.includes('不存在')
 
         if (isNotFoundError) {
-          console.warn(
-            '[useMessageActions] 重试失败（消息不存在）| messageId:',
-            messageId
-          )
+          console.warn('[useMessageActions] 重试失败（消息不存在）| messageId:', messageId)
           toast.error('消息不存在，无法重试')
           throw error
         }
@@ -161,7 +142,7 @@ export const useMessageActions = (sessionId?: string) => {
         throw error
       }
     },
-    [sessionId, sessionStore]
+    [sessionId, sessionStore],
   )
 
   /**
@@ -189,13 +170,13 @@ export const useMessageActions = (sessionId?: string) => {
             componentName: 'useMessageActions',
             operation: 'createMessageVersion',
             messageId,
-          }
+          },
         )
         toast.error('创建版本失败')
         throw error
       }
     },
-    [sessionId, sessionStore]
+    [sessionId, sessionStore],
   )
 
   /**
@@ -223,13 +204,13 @@ export const useMessageActions = (sessionId?: string) => {
             operation: 'restoreMessageVersion',
             messageId,
             version,
-          }
+          },
         )
         toast.error('恢复版本失败')
         throw error
       }
     },
-    [sessionId, sessionStore]
+    [sessionId, sessionStore],
   )
 
   /**
@@ -248,15 +229,17 @@ export const useMessageActions = (sessionId?: string) => {
 
       try {
         // 从后端 API 获取版本列表
-        const response = await messageApi.getMessageVersions(
-          sessionId,
-          messageId
-        )
+        const response = await messageApi.getMessageVersions(sessionId, messageId)
         return response.versions
-      } catch (error: any) {
-        const errorCode = error?.response?.status || error?.code
+      } catch (error: unknown) {
+        const axiosError = error as {
+          response?: { status?: number; data?: { detail?: string } }
+          code?: number
+        }
+        const errorCode = axiosError.response?.status || axiosError.code
         const errorMessage =
-          error?.response?.data?.detail || error?.message || String(error)
+          axiosError.response?.data?.detail ||
+          (error instanceof Error ? error.message : String(error))
 
         // 404 错误或消息不存在错误，静默处理
         const isNotFoundError =
@@ -270,7 +253,7 @@ export const useMessageActions = (sessionId?: string) => {
             '[useMessageActions] 消息不存在，跳过版本加载 | messageId:',
             messageId,
             'error:',
-            errorMessage
+            errorMessage,
           )
           return []
         }
@@ -287,7 +270,7 @@ export const useMessageActions = (sessionId?: string) => {
             '[useMessageActions] 网络错误，跳过版本加载 | messageId:',
             messageId,
             'error:',
-            errorMessage
+            errorMessage,
           )
           return []
         }
@@ -303,7 +286,7 @@ export const useMessageActions = (sessionId?: string) => {
         throw error
       }
     },
-    [sessionId]
+    [sessionId],
   )
 
   return {

@@ -1,5 +1,4 @@
 import * as React from 'react'
-
 import { cn } from '@/lib/utils'
 
 /**
@@ -34,10 +33,7 @@ interface TabsProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const Tabs = React.forwardRef<HTMLDivElement, TabsProps>(
-  (
-    { className, value, defaultValue, onValueChange, children, ...props },
-    ref
-  ) => {
+  ({ className, value, defaultValue, onValueChange, children, ...props }, ref) => {
     const [internalValue, setInternalValue] = React.useState(defaultValue ?? '')
 
     const currentValue = value ?? internalValue
@@ -48,40 +44,37 @@ const Tabs = React.forwardRef<HTMLDivElement, TabsProps>(
         }
         onValueChange?.(newValue)
       },
-      [value, onValueChange]
+      [value, onValueChange],
     )
 
     return (
-      <TabsContext.Provider
-        value={{ value: currentValue, onValueChange: handleValueChange }}
-      >
+      <TabsContext.Provider value={{ value: currentValue, onValueChange: handleValueChange }}>
         <div ref={ref} className={cn('w-full', className)} {...props}>
           {children}
         </div>
       </TabsContext.Provider>
     )
-  }
+  },
 )
 Tabs.displayName = 'Tabs'
 
-const TabsList = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    role="tablist"
-    className={cn(
-      'inline-flex h-9 items-center justify-center p-1 text-muted-foreground',
-      className
-    )}
-    style={{
-      borderRadius: 'var(--tabs-radius, 0.5rem)',
-      backgroundColor: 'var(--tabs-list-bg, rgba(255, 255, 255, 0.05))',
-    }}
-    {...props}
-  />
-))
+const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div
+      ref={ref}
+      role="tablist"
+      className={cn(
+        'text-muted-foreground inline-flex h-9 items-center justify-center p-1',
+        className,
+      )}
+      style={{
+        borderRadius: 'var(--tabs-radius, 0.5rem)',
+        backgroundColor: 'var(--tabs-list-bg, rgba(255, 255, 255, 0.05))',
+      }}
+      {...props}
+    />
+  ),
+)
 TabsList.displayName = 'TabsList'
 
 interface TabsTriggerProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -101,14 +94,12 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
         aria-selected={isSelected}
         data-state={isSelected ? 'active' : 'inactive'}
         className={cn(
-          'inline-flex items-center justify-center whitespace-nowrap px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
-          className
+          'ring-offset-background focus-visible:ring-ring inline-flex items-center justify-center px-3 py-1 text-sm font-medium whitespace-nowrap transition-all focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50',
+          className,
         )}
         style={{
           borderRadius: 'var(--tabs-radius, 0.5rem)',
-          backgroundColor: isSelected
-            ? 'var(--tabs-active-bg, #1e293b)'
-            : 'transparent',
+          backgroundColor: isSelected ? 'var(--tabs-active-bg, #1e293b)' : 'transparent',
           color: isSelected
             ? 'var(--tabs-active-text, #f8fafc)'
             : 'var(--tabs-inactive-text, #94a3b8)',
@@ -118,7 +109,7 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
         {...props}
       />
     )
-  }
+  },
 )
 TabsTrigger.displayName = 'TabsTrigger'
 
@@ -141,13 +132,13 @@ const TabsContent = React.forwardRef<HTMLDivElement, TabsContentProps>(
         role="tabpanel"
         data-state={isSelected ? 'active' : 'inactive'}
         className={cn(
-          'mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-          className
+          'ring-offset-background focus-visible:ring-ring mt-2 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none',
+          className,
         )}
         {...props}
       />
     )
-  }
+  },
 )
 TabsContent.displayName = 'TabsContent'
 

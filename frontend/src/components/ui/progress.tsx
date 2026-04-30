@@ -1,5 +1,4 @@
 import * as React from 'react'
-
 import { cn } from '@/lib/utils'
 
 /**
@@ -20,9 +19,7 @@ export interface ProgressProps extends React.HTMLAttributes<HTMLDivElement> {
 const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
   ({ className, value, max = 100, variant = 'default', ...props }, ref) => {
     const percentage =
-      value !== undefined
-        ? Math.min(100, Math.max(0, (value / max) * 100))
-        : undefined
+      value !== undefined ? Math.min(100, Math.max(0, (value / max) * 100)) : undefined
     const isIndeterminate = percentage === undefined
 
     const variantStyles: Record<string, string> = {
@@ -39,13 +36,8 @@ const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
         aria-valuemin={0}
         aria-valuemax={max}
         aria-valuenow={value}
-        aria-valuetext={
-          percentage !== undefined ? `${Math.round(percentage)}%` : '加载中'
-        }
-        className={cn(
-          'relative h-2 w-full overflow-hidden',
-          className
-        )}
+        aria-valuetext={percentage !== undefined ? `${Math.round(percentage)}%` : '加载中'}
+        className={cn('relative h-2 w-full overflow-hidden', className)}
         style={{
           borderRadius: 'var(--progress-radius, 9999px)',
           backgroundColor: 'var(--progress-track-bg, rgba(59, 130, 246, 0.2))',
@@ -55,7 +47,7 @@ const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
         <div
           className={cn(
             'h-full transition-all duration-300 ease-in-out',
-            isIndeterminate && 'animate-progress-indeterminate'
+            isIndeterminate && 'animate-progress-indeterminate',
           )}
           style={{
             width: isIndeterminate ? '40%' : `${percentage}%`,
@@ -65,7 +57,7 @@ const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
         />
       </div>
     )
-  }
+  },
 )
 Progress.displayName = 'Progress'
 

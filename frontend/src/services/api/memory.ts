@@ -19,12 +19,10 @@
  * - MemoryStats - 记忆统计类型
  */
 
-import {
-  API_ENDPOINTS,
-} from '@/constants/api'
-import type { RetryOptions } from '@/utils/retry'
-import { requestWithRetry } from '@/utils/retry'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
+import { requestWithRetry } from '@/utils/retry'
+import type { RetryOptions } from '@/utils/retry'
 
 /**
  * 记忆项类型
@@ -139,49 +137,40 @@ export interface MemoryStats {
 export async function getEpisodes(
   page: number = 1,
   pageSize: number = 20,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<EpisodesListResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<EpisodesListResponse>(
-      API_ENDPOINTS.MEMORY.EPISODES,
-      {
-        params: { page, page_size: pageSize },
-      }
-    )
+    const response = await apiClient.get<EpisodesListResponse>(API_ENDPOINTS.MEMORY.EPISODES, {
+      params: { page, page_size: pageSize },
+    })
     return response.data
   }, options)
 }
 
-export async function getEpisode(
-  id: string,
-  options: RetryOptions = {}
-): Promise<Episode> {
+export async function getEpisode(id: string, options: RetryOptions = {}): Promise<Episode> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<Episode>(
-      API_ENDPOINTS.MEMORY.EPISODE(id)
-    )
+    const response = await apiClient.get<Episode>(API_ENDPOINTS.MEMORY.EPISODE(id))
     return response.data
   }, options)
 }
 
 export async function searchMemory(
   query: string | MemorySearchRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<MemorySearchResponse> {
   return requestWithRetry(async () => {
-    const requestData =
-      typeof query === 'string' ? { query, top_k: 10, min_score: 0.5 } : query
+    const requestData = typeof query === 'string' ? { query, top_k: 10, min_score: 0.5 } : query
 
     const response = await apiClient.post<MemorySearchResponse>(
       API_ENDPOINTS.MEMORY.SEARCH,
-      requestData
+      requestData,
     )
     return response.data
   }, options)
 }
 
 export async function getSemanticMemory(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<{ items: SemanticKnowledge[]; total: number }> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<{
@@ -193,7 +182,7 @@ export async function getSemanticMemory(
 }
 
 export async function consolidateMemory(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<{ success: boolean; message: string; consolidated_count?: number }> {
   return requestWithRetry(async () => {
     const response = await apiClient.post<{
@@ -205,13 +194,9 @@ export async function consolidateMemory(
   }, options)
 }
 
-export async function getMemoryStats(
-  options: RetryOptions = {}
-): Promise<MemoryStats> {
+export async function getMemoryStats(options: RetryOptions = {}): Promise<MemoryStats> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<MemoryStats>(
-      API_ENDPOINTS.MEMORY.STATS
-    )
+    const response = await apiClient.get<MemoryStats>(API_ENDPOINTS.MEMORY.STATS)
     return response.data
   }, options)
 }

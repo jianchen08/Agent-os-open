@@ -6,11 +6,8 @@
 
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { getModelCapabilities } from '@/services/api/files'
-import type {
-  ModelCapabilities,
-  InputCapabilities,
-} from '@/types/capabilities'
 import { DEFAULT_INPUT_CAPABILITIES } from '@/types/capabilities'
+import type { ModelCapabilities, InputCapabilities } from '@/types/capabilities'
 
 /** 能力缓存，避免重复请求 */
 const capabilitiesCache = new Map<string, ModelCapabilities>()
@@ -43,9 +40,7 @@ function transformCapabilities(data: Record<string, unknown>): ModelCapabilities
 /**
  * 计算 InputCapabilities
  */
-function computeInputCapabilities(
-  capabilities: ModelCapabilities | null
-): InputCapabilities {
+function computeInputCapabilities(capabilities: ModelCapabilities | null): InputCapabilities {
   if (!capabilities) {
     return DEFAULT_INPUT_CAPABILITIES
   }
@@ -62,8 +57,7 @@ function computeInputCapabilities(
   } = capabilities
 
   // 计算是否显示附件按钮
-  const showAttachmentButton =
-    supportsImage || supportsAudio || supportsVideo || supportsDocument
+  const showAttachmentButton = supportsImage || supportsAudio || supportsVideo || supportsDocument
 
   // 计算支持的文件类型
   const acceptedTypes: string[] = []
@@ -99,9 +93,7 @@ function computeInputCapabilities(
  * @returns 模型能力和输入能力配置
  */
 export function useModelCapabilities(modelName: string | undefined) {
-  const [capabilities, setCapabilities] = useState<ModelCapabilities | null>(
-    null
-  )
+  const [capabilities, setCapabilities] = useState<ModelCapabilities | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<Error | null>(null)
 
@@ -140,17 +132,13 @@ export function useModelCapabilities(modelName: string | undefined) {
 
     getModelCapabilities(modelName)
       .then((response) => {
-        const transformed = transformCapabilities(
-          response as unknown as Record<string, unknown>
-        )
+        const transformed = transformCapabilities(response as unknown as Record<string, unknown>)
         // 更新缓存
         capabilitiesCache.set(modelName, transformed)
         setCapabilities(transformed)
       })
-      .catch((err) => {
-        console.error('[useModelCapabilities] 获取模型能力失败:', err)
-        setError(err)
-        // 失败时使用默认配置
+      .catch(() => {
+        // Silently fall back to default capabilities - endpoint may not exist
         setCapabilities(null)
       })
       .finally(() => {

@@ -6,15 +6,11 @@
  * 注意：createSession 函数已删除，会话只能通过主agent创建
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import MockAdapter from 'axios-mock-adapter'
-import apiClient from '@/services/api/client'
-import {
-  getSessions,
-  deleteSession,
-  getMessages,
-} from '@/services/api/session'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { API_ENDPOINTS } from '@/services/api/../../constants/api'
+import apiClient from '@/services/api/client'
+import { getSessions, deleteSession, getMessages } from '@/services/api/session'
 import type { Message } from '@/services/api/../../types/models'
 
 // 创建axios mock适配器

@@ -216,6 +216,13 @@ class IsolationExecutor:
                 "data": result,
                 "duration_ms": round(duration_ms, 1),
             }
+        except asyncio.CancelledError:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                "[IsolationExecutor] Host 执行被取消 | tool=%s (%.1fms)",
+                tool_name, duration_ms,
+            )
+            raise
         except asyncio.TimeoutError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.warning(

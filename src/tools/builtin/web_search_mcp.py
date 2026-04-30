@@ -28,6 +28,8 @@ from tools.types import (
     create_success_result,
 )
 
+_DEFAULT_SEARXNG_URL = "http://localhost:8080"
+
 
 def _get_webgate_command() -> tuple[str, list[str]]:
     """获取 mcp-webgate 启动命令，优先 uvx，回退 pip 安装的模块"""
@@ -55,7 +57,7 @@ class WebSearchMCPConfig:
 
     searxng_url: str = field(
         default_factory=lambda: os.environ.get(
-            "WEBGATE_SEARXNG_URL", "http://localhost:8080"
+            "WEBGATE_SEARXNG_URL", _DEFAULT_SEARXNG_URL
         )
     )
 

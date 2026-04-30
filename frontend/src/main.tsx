@@ -7,8 +7,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { initializeTheme } from './stores/themeStore'
 import { useAuthStore } from './stores/authStore'
+import { initializeTheme } from './stores/themeStore'
 import './index.css'
 
 /**
@@ -36,7 +36,7 @@ async function bootstrap() {
   createRoot(root).render(
     <StrictMode>
       <App />
-    </StrictMode>
+    </StrictMode>,
   )
 }
 

@@ -37,7 +37,9 @@ function saveTabsToStorage(sessionId: string, tabs: AgentTab[], activeTabId: str
 /**
  * 从 localStorage 加载标签状态
  */
-function loadTabsFromStorage(sessionId: string): { tabs: AgentTab[]; activeTabId: string | null } | null {
+function loadTabsFromStorage(
+  sessionId: string,
+): { tabs: AgentTab[]; activeTabId: string | null } | null {
   try {
     const raw = localStorage.getItem(getStorageKey(sessionId))
     if (!raw) return null
@@ -132,10 +134,10 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 初始化/切换会话标签（从 localStorage 恢复）
    */
-  initSessionTabs: sessionId => {
+  initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     if (saved) {
-      const mainTab = saved.tabs.find(t => t.agentLevel === 1)
+      const mainTab = saved.tabs.find((t) => t.agentLevel === 1)
       set({
         currentSessionId: sessionId,
         tabs: saved.tabs,
@@ -167,15 +169,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 添加 Agent Tab
    */
-  addTab: tabData => {
-    set(state => {
-      const existingTab = state.tabs.find(t => t.id === tabData.id)
+  addTab: (tabData) => {
+    set((state) => {
+      const existingTab = state.tabs.find((t) => t.id === tabData.id)
 
       if (existingTab) {
         return {
-          tabs: state.tabs.map(t =>
-            t.id === tabData.id ? { ...t, ...tabData } : t
-          ),
+          tabs: state.tabs.map((t) => (t.id === tabData.id ? { ...t, ...tabData } : t)),
         }
       }
 
@@ -202,9 +202,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 移除 Agent Tab
    */
-  removeTab: tabId => {
-    set(state => {
-      const newTabs = state.tabs.filter(t => t.id !== tabId)
+  removeTab: (tabId) => {
+    set((state) => {
+      const newTabs = state.tabs.filter((t) => t.id !== tabId)
       const newTabMessages = { ...state.tabMessages }
       const newUnreadCounts = { ...state.unreadCounts }
 
@@ -213,7 +213,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
       let newActiveTabId = state.activeTabId
       if (state.activeTabId === tabId) {
-        const mainTab = newTabs.find(t => t.agentLevel === 1)
+        const mainTab = newTabs.find((t) => t.agentLevel === 1)
         newActiveTabId = mainTab?.id || newTabs[0]?.id || null
       }
 
@@ -230,7 +230,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 设置活跃 Tab
    */
-  setActiveTab: tabId => {
+  setActiveTab: (tabId) => {
     set({
       activeTabId: tabId,
     })
@@ -243,8 +243,8 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
    * 更新 Tab 状态
    */
   updateTabStatus: (tabId, status) => {
-    set(state => ({
-      tabs: state.tabs.map(t => (t.id === tabId ? { ...t, status } : t)),
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
     }))
   },
 
@@ -252,12 +252,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
    * 更新 Tab 未读状态
    */
   updateTabUnread: (tabId, hasUnread) => {
-    set(state => {
+    set((state) => {
       const currentCount = state.unreadCounts[tabId] || 0
       const newCount = hasUnread ? currentCount + 1 : 0
 
       return {
-        tabs: state.tabs.map(t => (t.id === tabId ? { ...t, hasUnread } : t)),
+        tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, hasUnread } : t)),
         unreadCounts: {
           ...state.unreadCounts,
           [tabId]: newCount,
@@ -270,9 +270,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
    * 添加消息到指定 Tab
    */
   addMessageToTab: (tabId, message) => {
-    set(state => {
+    set((state) => {
       const tabMessages = state.tabMessages[tabId] || []
-      const existingIndex = tabMessages.findIndex(m => m.id === message.id)
+      const existingIndex = tabMessages.findIndex((m) => m.id === message.id)
       let updatedMessages
 
       if (existingIndex >= 0) {
@@ -292,9 +292,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
               ...state.unreadCounts,
               [tabId]: currentCount + 1,
             },
-            tabs: state.tabs.map(t =>
-              t.id === tabId ? { ...t, hasUnread: true } : t
-            ),
+            tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, hasUnread: true } : t)),
           }
         }
       }
@@ -322,21 +320,19 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
    */
   getActiveTab: () => {
     const { tabs, activeTabId } = get()
-    return tabs.find(t => t.id === activeTabId) || null
+    return tabs.find((t) => t.id === activeTabId) || null
   },
 
   /**
    * 清除 Tab 未读计数
    */
-  clearTabUnread: tabId => {
+  clearTabUnread: (tabId) => {
     set({
       unreadCounts: {
         ...get().unreadCounts,
         [tabId]: 0,
       },
-      tabs: get().tabs.map(t =>
-        t.id === tabId ? { ...t, hasUnread: false } : t
-      ),
+      tabs: get().tabs.map((t) => (t.id === tabId ? { ...t, hasUnread: false } : t)),
     })
   },
 
@@ -355,15 +351,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 打开子 Tab
    */
-  openSubTab: tabData => {
-    set(state => {
-      const existingTab = state.tabs.find(t => t.id === tabData.id)
+  openSubTab: (tabData) => {
+    set((state) => {
+      const existingTab = state.tabs.find((t) => t.id === tabData.id)
 
       if (existingTab) {
         return {
-          tabs: state.tabs.map(t =>
-            t.id === tabData.id ? { ...t, ...tabData } : t
-          ),
+          tabs: state.tabs.map((t) => (t.id === tabData.id ? { ...t, ...tabData } : t)),
         }
       }
 
@@ -390,9 +384,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 关闭 Tab（增强版，支持主 Tab 保护）
    */
-  closeTab: tabId => {
-    set(state => {
-      const tab = state.tabs.find(t => t.id === tabId)
+  closeTab: (tabId) => {
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === tabId)
       if (!tab) {
         console.warn(`[AgentTabStore] Tab not found: ${tabId}`)
         return state
@@ -403,7 +397,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         return state
       }
 
-      const newTabs = state.tabs.filter(t => t.id !== tabId)
+      const newTabs = state.tabs.filter((t) => t.id !== tabId)
       const newTabMessages = { ...state.tabMessages }
       const newUnreadCounts = { ...state.unreadCounts }
 
@@ -412,7 +406,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
       let newActiveTabId = state.activeTabId
       if (state.activeTabId === tabId) {
-        const mainTab = newTabs.find(t => t.agentLevel === 1)
+        const mainTab = newTabs.find((t) => t.agentLevel === 1)
         newActiveTabId = mainTab?.id || newTabs[0]?.id || null
       }
 
@@ -429,9 +423,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 切换到 Tab（增强版，自动清除未读）
    */
-  switchToTab: tabId => {
+  switchToTab: (tabId) => {
     const { tabs } = get()
-    const tab = tabs.find(t => t.id === tabId)
+    const tab = tabs.find((t) => t.id === tabId)
 
     if (!tab) {
       console.warn(`[AgentTabStore] Tab not found: ${tabId}`)
@@ -445,26 +439,22 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 标记 Tab 完成
    */
-  markTabComplete: tabId => {
-    set(state => ({
-      tabs: state.tabs.map(t =>
-        t.id === tabId ? { ...t, status: 'completed' } : t
-      ),
+  markTabComplete: (tabId) => {
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status: 'completed' } : t)),
     }))
   },
 
   /**
    * 合并到主 Tab（子 Tab 完成后）
    */
-  mergeToMainTab: subTabId => {
-    set(state => {
-      const subTab = state.tabs.find(t => t.id === subTabId)
-      const mainTab = state.tabs.find(t => t.agentLevel === 1)
+  mergeToMainTab: (subTabId) => {
+    set((state) => {
+      const subTab = state.tabs.find((t) => t.id === subTabId)
+      const mainTab = state.tabs.find((t) => t.agentLevel === 1)
 
       if (!subTab || !mainTab) {
-        console.warn(
-          `[AgentTabStore] Cannot merge: subTab or mainTab not found`
-        )
+        console.warn(`[AgentTabStore] Cannot merge: subTab or mainTab not found`)
         return state
       }
 
@@ -473,7 +463,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
       const mergedMessages = [
         ...mainMessages,
-        ...subMessages.map(msg => ({
+        ...subMessages.map((msg) => ({
           ...msg,
           metadata: {
             ...msg.metadata,
@@ -483,7 +473,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         })),
       ]
 
-      const newTabs = state.tabs.filter(t => t.id !== subTabId)
+      const newTabs = state.tabs.filter((t) => t.id !== subTabId)
       const newTabMessages = { ...state.tabMessages }
       const newUnreadCounts = { ...state.unreadCounts }
 
@@ -510,7 +500,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /**
    * 清除未读（别名）
    */
-  clearUnread: tabId => {
+  clearUnread: (tabId) => {
     get().clearTabUnread(tabId)
   },
 
@@ -518,28 +508,34 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
    * 更新 Tab 状态（别名）
    */
   updateTab: (tabId, updates) => {
-    set(state => ({
-      tabs: state.tabs.map(t => (t.id === tabId ? { ...t, ...updates } : t)),
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, ...updates } : t)),
     }))
   },
 
   /**
    * 打开子 Agent Tab（统一接口）
    */
-  openSubAgentTab: params => {
-    const { agentId, agentName, parentRecordId, agentLevel = 2, taskId, status = 'running', setActive = true } = params
+  openSubAgentTab: (params) => {
+    const {
+      agentId,
+      agentName,
+      parentRecordId,
+      agentLevel = 2,
+      taskId,
+      status = 'running',
+      setActive = true,
+    } = params
 
-    set(state => {
+    set((state) => {
       const tabId = `sub-${parentRecordId}`
       const path = ['主Agent', agentName]
 
-      const existingTab = state.tabs.find(t => t.id === tabId)
+      const existingTab = state.tabs.find((t) => t.id === tabId)
 
       if (existingTab) {
         return {
-          tabs: state.tabs.map(t =>
-            t.id === tabId ? { ...t, status } : t
-          ),
+          tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
           ...(setActive ? { activeTabId: tabId } : {}),
         }
       }

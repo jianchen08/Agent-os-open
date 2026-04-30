@@ -103,8 +103,11 @@ def _background_inject():
                 svc.set_notifier(notifier)
                 logger.info("[AutoConfirm] 后台注入成功 (attempt %d)", attempt + 1)
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "[AutoConfirm] 后台注入尝试 %d 失败: %s",
+                attempt + 1, exc,
+            )
         time.sleep(0.5)
 
 
@@ -143,8 +146,8 @@ def main():
         try:
             from llm.adapter import cleanup_litellm_resources_sync
             cleanup_litellm_resources_sync()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("cleanup_litellm_resources_sync 失败: %s", exc)
 
 
 if __name__ == "__main__":

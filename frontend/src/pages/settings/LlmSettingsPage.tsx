@@ -1,0 +1,614 @@
+/**
+ * LLM 模型配置页面
+ *
+ * 配置大语言模型参数：默认模型选择、Temperature、Max Tokens、Fallback 模型、模型列表管理
+ */
+
+import { useState, useEffect, useCallback } from 'react'
+import { Loader2, RefreshCw } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import {
+  getLLMConfig,
+  getDefaults,
+  saveLLMDefaults,
+  addModel,
+  deleteModel,
+  updateProviderConfig,
+  type LLMConfigResponse,
+  type ModelConfig,
+  type ProviderConfig,
+  type LLMDefaults,
+} from '@/services/api/config'
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+/** 模型参数（可编辑的默认参数） */
+interface ModelParams {
+  temperature: number
+  max_tokens: number
+  top_p: number
+  frequency_penalty: number
+  presence_penalty: number
+}
+
+const DEFAULT_PARAMS: ModelParams = {
+  temperature: 0.7,
+  max_tokens: 4096,
+  top_p: 1.0,
+  frequency_penalty: 0,
+  presence_penalty: 0,
+}
+
+/**
+ * LLM 配置页面组件
+ */
+export function LlmSettingsPage() {
+  const [config, setConfig] = useState<LLMConfigResponse | null>(null)
+  const [defaults, setDefaults] = useState<LLMDefaults | null>(null)
+  const [params, setParams] = useState<ModelParams>(DEFAULT_PARAMS)
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [activeTab, setActiveTab] = useState('defaults')
+
+  // 新模型表单
+  const [newModelId, setNewModelId] = useState('')
+  const [newModelConfig, setNewModelConfig] = useState<ModelConfig>({
+    provider: '',
+    model_name: '',
+    display_name: '',
+  })
+
+  // 加载配置
+  // NOTE: apiClient uses baseURL='http://localhost:8888' (absolute URL) which bypasses the
+  // Vite dev server proxy (configured at vite.config.ts to proxy /api -> localhost:8888).
+  // In dev this works because CORS is typically permissive on localhost, but in production
+  // the API and frontend must be served from the same origin, or CORS headers must be set.
+  // If you see "无法连接服务器" errors in the browser, check the browser console for
+  // CORS errors (e.g. "blocked by CORS policy") and verify the backend sets proper
+  // Access-Control-Allow-Origin headers.
+  const loadConfig = useCallback(() => {
+    let cancelled = false
+    setIsLoading(true)
+    setLoadError(null)
+
+    Promise.all([getLLMConfig(), getDefaults()])
+      .then(([llmConfig, defaultsData]) => {
+        if (cancelled) return
+        setConfig(llmConfig)
+        setDefaults(defaultsData)
+
+        // 从第一个模型提取默认参数
+        const firstModel = Object.values(llmConfig.models)[0]
+        if (firstModel?.default_params) {
+          setParams({
+            temperature: firstModel.default_params.temperature ?? DEFAULT_PARAMS.temperature,
+            max_tokens: firstModel.default_params.max_tokens ?? DEFAULT_PARAMS.max_tokens,
+            top_p: firstModel.default_params.top_p ?? DEFAULT_PARAMS.top_p,
+            frequency_penalty:
+              firstModel.default_params.frequency_penalty ?? DEFAULT_PARAMS.frequency_penalty,
+            presence_penalty:
+              firstModel.default_params.presence_penalty ?? DEFAULT_PARAMS.presence_penalty,
+          })
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('[LlmSettingsPage] Failed to load LLM config:', err)
+          setLoadError('无法连接服务器，请检查网络后重试')
+          setDefaults({ chat: '', reasoning: '', embedding: '' })
+          setConfig({
+            models: {},
+            providers: {},
+            defaults: { chat: '', reasoning: '', embedding: '' },
+          })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    const cleanup = loadConfig()
+    return cleanup
+  }, [loadConfig])
+
+  const modelIds = config ? Object.keys(config.models) : []
+  const providerIds = config ? Object.keys(config.providers) : []
+
+  // 保存默认模型选择
+  const handleSaveDefaults = useCallback(async () => {
+    if (!defaults) return
+    setSaveState('saving')
+    try {
+      const saved = await saveLLMDefaults(defaults)
+      setDefaults(saved)
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2000)
+    } catch {
+      setSaveState('error')
+    }
+  }, [defaults])
+
+  // 添加新模型
+  const handleAddModel = useCallback(async () => {
+    if (!newModelId.trim()) return
+    try {
+      const models = await addModel(newModelId.trim(), newModelConfig)
+      setConfig((prev) => (prev ? { ...prev, models } : prev))
+      setNewModelId('')
+      setNewModelConfig({ provider: '', model_name: '', display_name: '' })
+    } catch {
+      // 静默处理
+    }
+  }, [newModelId, newModelConfig])
+
+  // 删除模型
+  const handleDeleteModel = useCallback(async (modelId: string) => {
+    try {
+      const models = await deleteModel(modelId)
+      setConfig((prev) => (prev ? { ...prev, models } : prev))
+    } catch {
+      // 静默处理
+    }
+  }, [])
+
+  // 更新提供商 API Key
+  const handleUpdateApiKey = useCallback(async (providerId: string, apiKey: string) => {
+    try {
+      const providers = await updateProviderConfig(providerId, { api_key: apiKey })
+      setConfig((prev) => (prev ? { ...prev, providers } : prev))
+    } catch {
+      // 静默处理
+    }
+  }, [])
+
+  if (isLoading) {
+    return (
+      <PageShell title="LLM 模型配置" description="配置大语言模型参数">
+        <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
+          <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
+          加载配置...
+        </div>
+      </PageShell>
+    )
+  }
+
+  return (
+    <PageShell title="LLM 模型配置" description="配置大语言模型参数">
+      {loadError && (
+        <div className="mb-4 flex items-center justify-between rounded-lg bg-red-500/10 px-4 py-3">
+          <div>
+            <p className="text-sm font-medium text-red-600">{loadError}</p>
+            <p className="mt-0.5 text-xs text-red-500/80">
+              模型列表为空，下拉选项将无可用内容。请重试或检查后端服务是否正常运行。
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={loadConfig}
+            className="ml-4 shrink-0 border-red-300 text-red-600 hover:bg-red-50"
+          >
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            重试
+          </Button>
+        </div>
+      )}
+
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList>
+          <TabsTrigger value="defaults">默认模型</TabsTrigger>
+          <TabsTrigger value="params">模型参数</TabsTrigger>
+          <TabsTrigger value="models">模型管理</TabsTrigger>
+          <TabsTrigger value="providers">提供商</TabsTrigger>
+        </TabsList>
+
+        {/* 默认模型选择 */}
+        <TabsContent value="defaults">
+          <div className="mt-4 space-y-4">
+            <FieldRow label="聊天模型" htmlFor="default-chat">
+              <Select
+                value={defaults?.chat ?? ''}
+                onValueChange={(v) => setDefaults((prev) => (prev ? { ...prev, chat: v } : prev))}
+              >
+                <SelectTrigger id="default-chat">
+                  <SelectValue placeholder="选择聊天模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelIds.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+
+            <FieldRow label="推理模型" htmlFor="default-reasoning">
+              <Select
+                value={defaults?.reasoning ?? ''}
+                onValueChange={(v) =>
+                  setDefaults((prev) => (prev ? { ...prev, reasoning: v } : prev))
+                }
+              >
+                <SelectTrigger id="default-reasoning">
+                  <SelectValue placeholder="选择推理模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelIds.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+
+            <FieldRow label="嵌入模型" htmlFor="default-embedding">
+              <Select
+                value={defaults?.embedding ?? ''}
+                onValueChange={(v) =>
+                  setDefaults((prev) => (prev ? { ...prev, embedding: v } : prev))
+                }
+              >
+                <SelectTrigger id="default-embedding">
+                  <SelectValue placeholder="选择嵌入模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelIds.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+
+            <div className="flex items-center gap-3 pt-2">
+              <Button onClick={handleSaveDefaults} disabled={saveState === 'saving'}>
+                {saveState === 'saving' ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    保存中...
+                  </>
+                ) : (
+                  '保存默认配置'
+                )}
+              </Button>
+              {saveState === 'saved' && <span className="text-xs text-green-500" role="status">已保存</span>}
+              {saveState === 'error' && <span className="text-xs text-red-500" role="alert">保存失败</span>}
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* 模型参数 */}
+        <TabsContent value="params">
+          <div className="mt-4 space-y-4">
+            <FieldRow label="Temperature" htmlFor="param-temp">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  id="param-temp"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={params.temperature}
+                  onChange={(e) =>
+                    setParams((prev) => ({ ...prev, temperature: Number(e.target.value) }))
+                  }
+                  className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
+                />
+                <span className="text-foreground min-w-[40px] text-right text-sm">
+                  {params.temperature}
+                </span>
+              </div>
+            </FieldRow>
+
+            <FieldRow label="Max Tokens" htmlFor="param-tokens">
+              <Input
+                id="param-tokens"
+                type="number"
+                min={1}
+                max={128000}
+                value={params.max_tokens}
+                onChange={(e) =>
+                  setParams((prev) => ({ ...prev, max_tokens: Number(e.target.value) }))
+                }
+              />
+            </FieldRow>
+
+            <FieldRow label="Top P" htmlFor="param-topp">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  id="param-topp"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={params.top_p}
+                  onChange={(e) =>
+                    setParams((prev) => ({ ...prev, top_p: Number(e.target.value) }))
+                  }
+                  className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
+                />
+                <span className="text-foreground min-w-[40px] text-right text-sm">
+                  {params.top_p}
+                </span>
+              </div>
+            </FieldRow>
+
+            <FieldRow label="Frequency Penalty" htmlFor="param-fp">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  id="param-fp"
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  value={params.frequency_penalty}
+                  onChange={(e) =>
+                    setParams((prev) => ({ ...prev, frequency_penalty: Number(e.target.value) }))
+                  }
+                  className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
+                />
+                <span className="text-foreground min-w-[40px] text-right text-sm">
+                  {params.frequency_penalty}
+                </span>
+              </div>
+            </FieldRow>
+
+            <FieldRow label="Presence Penalty" htmlFor="param-pp">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  id="param-pp"
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  value={params.presence_penalty}
+                  onChange={(e) =>
+                    setParams((prev) => ({ ...prev, presence_penalty: Number(e.target.value) }))
+                  }
+                  className="bg-border accent-primary h-2 flex-1 appearance-none rounded-full"
+                />
+                <span className="text-foreground min-w-[40px] text-right text-sm">
+                  {params.presence_penalty}
+                </span>
+              </div>
+            </FieldRow>
+          </div>
+        </TabsContent>
+
+        {/* 模型管理 */}
+        <TabsContent value="models">
+          <div className="mt-4 space-y-4">
+            <h3 className="text-sm font-semibold">已注册模型 ({modelIds.length})</h3>
+            {modelIds.length === 0 ? (
+              <div className="text-muted-foreground py-4 text-center text-sm">暂无模型</div>
+            ) : (
+              <div className="space-y-2">
+                {modelIds.map((id) => {
+                  const model = config!.models[id]
+                  return (
+                    <div
+                      key={id}
+                      className="bg-card flex items-center gap-3 rounded-lg border px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">
+                          {model.display_name || id}
+                        </div>
+                        <div className="text-muted-foreground text-xs">
+                          {model.provider} / {model.model_name}
+                        </div>
+                      </div>
+                      <Button variant="destructive" size="xs" onClick={() => handleDeleteModel(id)}>
+                        删除
+                      </Button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            <div className="mt-4 border-t pt-4">
+              <h3 className="mb-3 text-sm font-semibold">添加模型</h3>
+              <div className="space-y-2">
+                <FieldRow label="模型 ID" htmlFor="new-model-id">
+                  <Input
+                    id="new-model-id"
+                    value={newModelId}
+                    onChange={(e) => setNewModelId(e.target.value)}
+                    placeholder="如: gpt-4o"
+                  />
+                </FieldRow>
+                <FieldRow label="提供商" htmlFor="new-model-provider">
+                  <Input
+                    id="new-model-provider"
+                    value={newModelConfig.provider}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({ ...prev, provider: e.target.value }))
+                    }
+                    placeholder="如: openai"
+                  />
+                </FieldRow>
+                <FieldRow label="模型名称" htmlFor="new-model-name">
+                  <Input
+                    id="new-model-name"
+                    value={newModelConfig.model_name}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({ ...prev, model_name: e.target.value }))
+                    }
+                    placeholder="如: gpt-4o-2024-08-06"
+                  />
+                </FieldRow>
+                <FieldRow label="显示名称" htmlFor="new-model-display">
+                  <Input
+                    id="new-model-display"
+                    value={newModelConfig.display_name}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({ ...prev, display_name: e.target.value }))
+                    }
+                    placeholder="如: GPT-4o"
+                  />
+                </FieldRow>
+                <Button size="sm" onClick={handleAddModel} disabled={!newModelId.trim()}>
+                  添加模型
+                </Button>
+              </div>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* 提供商管理 */}
+        <TabsContent value="providers">
+          <div className="mt-4 space-y-4">
+            <h3 className="text-sm font-semibold">已配置提供商 ({providerIds.length})</h3>
+            {providerIds.length === 0 ? (
+              <div className="text-muted-foreground py-4 text-center text-sm">暂无提供商</div>
+            ) : (
+              <div className="space-y-3">
+                {providerIds.map((id) => {
+                  const provider = config!.providers[id]
+                  return (
+                    <ProviderCard
+                      key={id}
+                      providerId={id}
+                      provider={provider}
+                      onUpdateKey={handleUpdateApiKey}
+                    />
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
+    </PageShell>
+  )
+}
+
+/** 提供商卡片 */
+function ProviderCard({
+  providerId,
+  provider,
+  onUpdateKey,
+}: {
+  providerId: string
+  provider: ProviderConfig
+  onUpdateKey: (id: string, key: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+
+  const maskedKey = provider.api_key
+    ? `${provider.api_key.slice(0, 4)}${'*'.repeat(12)}${provider.api_key.slice(-4)}`
+    : '未设置'
+
+  return (
+    <div className="bg-card space-y-2 rounded-lg border px-4 py-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold">{providerId}</span>
+        <span
+          className={`rounded px-2 py-0.5 text-xs ${provider.api_key ? 'bg-green-500/10 text-green-600' : 'bg-red-500/10 text-red-500'}`}
+        >
+          {provider.api_key ? '已配置' : '未配置'}
+        </span>
+      </div>
+      {provider.api_base && (
+        <div className="text-muted-foreground text-xs">Base URL: {provider.api_base}</div>
+      )}
+      <div className="text-muted-foreground font-mono text-xs">Key: {editing ? '' : maskedKey}</div>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <Input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="输入新的 API Key"
+            className="text-xs"
+          />
+          <Button
+            size="xs"
+            onClick={() => {
+              onUpdateKey(providerId, apiKey)
+              setEditing(false)
+            }}
+          >
+            保存
+          </Button>
+          <Button size="xs" variant="outline" onClick={() => setEditing(false)}>
+            取消
+          </Button>
+        </div>
+      ) : (
+        <Button size="xs" variant="outline" onClick={() => setEditing(true)}>
+          更新 Key
+        </Button>
+      )}
+    </div>
+  )
+}
+
+/* ============================================ */
+/* 共享子组件 (与 ApiSettingsPage 相同模式)       */
+/* ============================================ */
+
+function PageShell({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/settings" className="text-muted-foreground hover:text-foreground text-sm">
+          &larr; 设置
+        </a>
+        <h1 className="ml-4 text-base font-semibold">{title}</h1>
+        <span className="text-muted-foreground ml-2 text-xs">{description}</span>
+      </header>
+      <main className="max-w-3xl flex-1 overflow-y-auto p-6" role="form" aria-label="LLM模型配置表单">{children}</main>
+    </div>
+  )
+}
+
+function FieldRow({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string
+  htmlFor: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex items-start gap-4">
+      <label
+        htmlFor={htmlFor}
+        className="text-muted-foreground min-w-[120px] shrink-0 pt-2 text-right text-sm"
+      >
+        {label}
+      </label>
+      <div className="flex-1">{children}</div>
+    </div>
+  )
+}

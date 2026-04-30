@@ -10,8 +10,8 @@
  * - deleteUser(userId): 删除用户
  */
 
-import apiClient from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 import { reportError } from '@/services/errorReporting'
 
 export interface User {
@@ -36,10 +36,7 @@ export interface CreateUserRequest {
   role?: 'admin' | 'user'
 }
 
-export async function getUsers(
-  skip: number = 0,
-  limit: number = 100
-): Promise<User[]> {
+export async function getUsers(skip: number = 0, limit: number = 100): Promise<User[]> {
   try {
     const response = await apiClient.get<User[]>(API_ENDPOINTS.USERS.LIST, {
       params: { skip, limit },
@@ -67,17 +64,13 @@ export async function getUserStats(): Promise<UserStats> {
 
 export async function createUser(data: CreateUserRequest): Promise<User> {
   try {
-    const response = await apiClient.post<User>(
-      API_ENDPOINTS.USERS.CREATE,
-      null,
-      {
-        params: {
-          username: data.username,
-          password: data.password,
-          role: data.role || 'user',
-        },
-      }
-    )
+    const response = await apiClient.post<User>(API_ENDPOINTS.USERS.CREATE, null, {
+      params: {
+        username: data.username,
+        password: data.password,
+        role: data.role || 'user',
+      },
+    })
     return response.data
   } catch (error) {
     reportError('创建用户失败', 'validation', 'error', {
@@ -87,18 +80,11 @@ export async function createUser(data: CreateUserRequest): Promise<User> {
   }
 }
 
-export async function updateUserRole(
-  userId: string,
-  role: 'admin' | 'user'
-): Promise<User> {
+export async function updateUserRole(userId: string, role: 'admin' | 'user'): Promise<User> {
   try {
-    const response = await apiClient.put<User>(
-      API_ENDPOINTS.USERS.UPDATE_ROLE(userId),
-      null,
-      {
-        params: { role },
-      }
-    )
+    const response = await apiClient.put<User>(API_ENDPOINTS.USERS.UPDATE_ROLE(userId), null, {
+      params: { role },
+    })
     return response.data
   } catch (error) {
     reportError('更新用户角色失败', 'validation', 'error', {
@@ -108,18 +94,11 @@ export async function updateUserRole(
   }
 }
 
-export async function updateUserActiveStatus(
-  userId: string,
-  isActive: boolean
-): Promise<User> {
+export async function updateUserActiveStatus(userId: string, isActive: boolean): Promise<User> {
   try {
-    const response = await apiClient.put<User>(
-      API_ENDPOINTS.USERS.UPDATE_ACTIVE(userId),
-      null,
-      {
-        params: { is_active: isActive },
-      }
-    )
+    const response = await apiClient.put<User>(API_ENDPOINTS.USERS.UPDATE_ACTIVE(userId), null, {
+      params: { is_active: isActive },
+    })
     return response.data
   } catch (error) {
     reportError('更新用户状态失败', 'validation', 'error', {
@@ -131,9 +110,7 @@ export async function updateUserActiveStatus(
 
 export async function deleteUser(userId: string): Promise<{ message: string }> {
   try {
-    const response = await apiClient.delete<{ message: string }>(
-      API_ENDPOINTS.USERS.DELETE(userId)
-    )
+    const response = await apiClient.delete<{ message: string }>(API_ENDPOINTS.USERS.DELETE(userId))
     return response.data
   } catch (error) {
     reportError('删除用户失败', 'validation', 'error', {

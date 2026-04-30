@@ -4,8 +4,8 @@
  * 显示 Agent 的可靠性评分 (0-100)
  */
 
-import { cn } from '@/lib/utils'
 import { Minus, Star, TrendingDown, TrendingUp } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 export interface ReliabilityBadgeProps {
   /** 可靠性评分 (0-100) */
@@ -38,12 +38,9 @@ export function ReliabilityBadge({
 }: ReliabilityBadgeProps) {
   /** 根据评分确定颜色 */
   const getScoreColor = () => {
-    if (score >= 90)
-      return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30'
-    if (score >= 70)
-      return 'bg-status-success/20 text-status-success border-status-success/30'
-    if (score >= 50)
-      return 'bg-status-waiting/20 text-status-waiting border-status-waiting/30'
+    if (score >= 90) return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30'
+    if (score >= 70) return 'bg-status-success/20 text-status-success border-status-success/30'
+    if (score >= 50) return 'bg-status-waiting/20 text-status-waiting border-status-waiting/30'
     return 'bg-status-error/20 text-status-error border-status-error/30'
   }
 
@@ -53,25 +50,24 @@ export function ReliabilityBadge({
     lg: 'text-base px-3 py-1.5 gap-2',
   }
 
-  const TrendIcon =
-    trend === 'up' ? TrendingUp : trend === 'down' ? TrendingDown : Minus
+  const TrendIcon = trend === 'up' ? TrendingUp : trend === 'down' ? TrendingDown : Minus
 
   return (
     <div
       className={cn(
-        'inline-flex items-center rounded-full border font-code',
+        'font-code inline-flex items-center rounded-full border',
         getScoreColor(),
         sizeStyles[size],
-        className
+        className,
       )}
     >
       {score >= 90 && (
         <Star
           className={cn(
             'fill-current',
-            size === 'sm' && 'w-3 h-3',
-            size === 'md' && 'w-3.5 h-3.5',
-            size === 'lg' && 'w-4 h-4'
+            size === 'sm' && 'h-3 w-3',
+            size === 'md' && 'h-3.5 w-3.5',
+            size === 'lg' && 'h-4 w-4',
           )}
         />
       )}
@@ -81,12 +77,12 @@ export function ReliabilityBadge({
       {showTrend && trend && (
         <TrendIcon
           className={cn(
-            size === 'sm' && 'w-3 h-3',
-            size === 'md' && 'w-3.5 h-3.5',
-            size === 'lg' && 'w-4 h-4',
+            size === 'sm' && 'h-3 w-3',
+            size === 'md' && 'h-3.5 w-3.5',
+            size === 'lg' && 'h-4 w-4',
             trend === 'up' && 'text-status-success',
             trend === 'down' && 'text-status-error',
-            trend === 'stable' && 'text-text-muted'
+            trend === 'stable' && 'text-text-muted',
           )}
         />
       )}
@@ -121,7 +117,7 @@ export function ReliabilityDetail({
   lastUpdated,
 }: ReliabilityDetailProps) {
   return (
-    <div className="glass-panel rounded-lg p-4 space-y-3">
+    <div className="glass-panel space-y-3 rounded-lg p-4">
       <div className="flex items-center justify-between">
         <span className="text-text-secondary">可靠性评分</span>
         <ReliabilityBadge score={score} size="lg" />
@@ -134,15 +130,11 @@ export function ReliabilityDetail({
         </div>
         <div className="flex justify-between">
           <span className="text-text-muted">成功率</span>
-          <span className="text-text-primary font-code">
-            {(successRate * 100).toFixed(1)}%
-          </span>
+          <span className="text-text-primary font-code">{(successRate * 100).toFixed(1)}%</span>
         </div>
         <div className="flex justify-between">
           <span className="text-text-muted">平均重试</span>
-          <span className="text-text-primary font-code">
-            {avgRetries.toFixed(1)}
-          </span>
+          <span className="text-text-primary font-code">{avgRetries.toFixed(1)}</span>
         </div>
         {lastUpdated && (
           <div className="flex justify-between">

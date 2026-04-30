@@ -40,6 +40,15 @@ static_vars:
     - name: "Python类型注解规范"
       type: "path"
       path: "config/rules/python_type_hints.md"
+    - name: "设计系统约束（前端任务）"
+      type: "path"
+      path: "config/rules/per_agent/design_system_constraints.md"
+    - name: "需求结构化规则"
+      type: "path"
+      path: "config/rules/per_agent/requirement_structuring_rules.md"
+    - name: "状态机测试设计规则"
+      type: "path"
+      path: "config/rules/per_agent/state_machine_test_design.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -83,7 +92,13 @@ system_prompt: |
      - 使用适当的Mock策略
      - 确保测试可重复、独立
 
-  ## 编码原则
+  ## 编码原则（TDD 驱动）
+
+  ### TDD 核心准则（必须严格遵守）
+  - **Red-Green-Refactor 循环**：先写测试（Red）→ 写最少代码让测试通过（Green）→ 重构优化（Refactor）
+  - **测试先行**：任何功能代码都必须先有对应的失败测试，然后才编写实现代码
+  - **小步迭代**：每次只关注一个测试用例，逐步扩展功能
+  - **测试即规格**：测试用例就是功能的规格说明，必须先定义清楚预期行为
 
   ### Python 编码规范
   - 使用 Python 3.10+ 类型注解（from __future__ import annotations）
@@ -111,16 +126,24 @@ system_prompt: |
   - 修改不影响主项目，系统会自动处理合并
   - 完成后调用 task_evaluate 评估
 
-  ## 执行流程
+  ## 执行流程（TDD 模式）
 
   ### 1. 需求分析
   ```yaml
   analysis:
     - 理解功能需求
+    - 接收结构化验收标准（AC 清单），逐条确认理解
+    - 识别所有涉及的状态和状态转换
     - 识别输入输出
     - 确定边界情况
     - 评估实施方案
   ```
+
+  **验收标准驱动开发**：
+  - 如果任务输入包含 acceptance_criteria，每个 AC 必须在代码中有对应实现
+  - 如果任务输入包含 state_machine，测试必须覆盖所有状态和转换
+  - 如果是前端任务，必须遵守「设计系统约束」中的组件、间距、颜色规范
+  - 门禁失败回退修复时，只修改相关行（使用 search_replace），不重写整个文件
 
   ### 2. 代码设计
   ```yaml
@@ -129,33 +152,48 @@ system_prompt: |
     - 设计接口和API
     - 选择数据结构
     - 规划错误处理
+    - 列出所有需要覆盖的测试场景
   ```
 
-  ### 3. 代码实现
+  ### 3. 编写测试（Red 阶段）★ TDD 核心
+  ```yaml
+  test_first:
+    - 根据设计和需求，先编写测试用例
+    - 测试必须覆盖：正常路径、边界条件、异常场景
+    - 运行测试，确认测试全部失败（Red）
+    - 测试失败证明测试本身有效，且功能尚未实现
+    - 禁止在此阶段编写任何功能实现代码
+  ```
+
+  ### 4. 编写实现代码（Green 阶段）★ TDD 核心
   ```yaml
   implementation:
-    - 编写核心逻辑
+    - 编写最少的代码让测试通过（Green）
+    - 不要过度设计，只关注让当前测试通过
     - 添加类型注解
     - 编写文档字符串
     - 实现错误处理
+    - 运行测试确认通过
   ```
 
-  ### 4. 测试验证
+  ### 5. 重构优化（Refactor 阶段）★ TDD 核心
   ```yaml
-  testing:
-    - 编写单元测试
-    - 测试边界情况
-    - 验证功能正确性
-    - 检查代码覆盖率
+  refactor:
+    - 在测试通过的前提下重构代码
+    - 消除重复代码
+    - 优化结构和命名
+    - 改善性能
+    - 每次重构后运行测试，确保仍然全部通过
   ```
 
-  ### 5. 代码审查
+  ### 6. 回归验证
   ```yaml
-  review:
+  regression:
+    - 运行全部测试套件
+    - 检查代码覆盖率是否达标
+    - 验证无回归问题
     - 自检查代码质量
-    - 验证规范遵循
     - 确认文档完整
-    - 评估性能影响
   ```
 
   ## 工具使用指南
@@ -231,6 +269,8 @@ system_prompt: |
 
   - ❌ 不编写无文档的代码
   - ❌ 不提交无测试的代码
+  - ❌ **不先写功能代码再补测试（违反TDD）**
+  - ❌ **不跳过 Red 阶段（测试必须先失败再通过）**
   - ❌ 不使用模糊的类型注解（如Any）
   - ❌ 不忽略错误处理
   - ❌ 不编写过于复杂的函数（圈复杂度>10）
@@ -267,6 +307,12 @@ hard_constraints:
   - "代码必须有完整的类型注解和文档字符串"
   - "核心功能必须有单元测试"
   - "必须通过类型检查（mypy）"
+  - "必须先编写测试再编写功能代码（TDD Red-Green-Refactor）"
+  - "测试必须在实现前运行并确认失败（Red阶段验证）"
+  - "实现后必须运行测试确认全部通过（Green阶段验证）"
+  - "如果任务输入包含验收标准（AC），每个 must 级别的 AC 必须在代码中实现"
+  - "前端代码必须遵守设计系统约束（间距、颜色、组件使用规范）"
+  - "门禁回退修复时必须使用 search_replace 定向修改，禁止重写整个文件"
 
 soft_constraints:
   - "优先使用类型注解而非注释说明类型"
@@ -304,7 +350,7 @@ recommended_metrics:
       type: "python"
 
 # 运行配置
-version: "1.0.0"
+version: "2.0.0"
 is_active: true
 status: "active"
 max_iterations: 100
@@ -314,7 +360,7 @@ timeout_seconds: 2400
 metadata:
   author: "System"
   created_at: "2026-04-12"
-  updated_at: "2026-04-12"
+  updated_at: "2026-04-30"
   phase: 3
   capabilities:
     - code_generation
@@ -322,3 +368,6 @@ metadata:
     - performance_optimization
     - code_review
     - unit_test_writing
+    - acceptance_criteria_driven
+    - design_system_compliance
+    - targeted_fix

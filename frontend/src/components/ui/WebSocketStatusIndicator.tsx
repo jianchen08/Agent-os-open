@@ -6,7 +6,6 @@
  * @docs docs/tasks/task-execution-loop-system.md
  */
 
-
 import { useWebSocket } from '../../hooks/useWebSocket'
 import './WebSocketStatusIndicator.css'
 

@@ -9,15 +9,15 @@
  * @module executionCardStore
  */
 
-import type {
-    ExecutionCardData,
-    ExecutionDoneEvent,
-    ExecutionEvent,
-    ExecutionProgressEvent,
-    ExecutionStartEvent,
-} from '@/types/execution'
-import { mergeExecutionEvent } from '@/types/execution'
 import { create } from 'zustand'
+import { mergeExecutionEvent } from '@/types/execution'
+import type {
+  ExecutionCardData,
+  ExecutionDoneEvent,
+  ExecutionEvent,
+  ExecutionProgressEvent,
+  ExecutionStartEvent,
+} from '@/types/execution'
 
 /**
  * 执行卡片 Store 状态接口
@@ -113,16 +113,12 @@ export const useExecutionCardStore = create<ExecutionCardState>()((set, get) => 
 
   getSessionCards: (sessionId: string) => {
     const cards = get().cards
-    return Array.from(cards.values()).filter(
-      (card) => card.metadata?.sessionId === sessionId
-    )
+    return Array.from(cards.values()).filter((card) => card.metadata?.sessionId === sessionId)
   },
 
   getRunningCards: () => {
     const cards = get().cards
-    return Array.from(cards.values()).filter(
-      (card) => card.status === 'running'
-    )
+    return Array.from(cards.values()).filter((card) => card.status === 'running')
   },
 
   clearSessionCards: (sessionId: string) => {

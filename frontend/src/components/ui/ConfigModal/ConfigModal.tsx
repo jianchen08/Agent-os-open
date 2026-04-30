@@ -4,9 +4,9 @@
  * 统一的配置模态框组件，支持多种字段类型、验证和暂存功能
  */
 
+import { X, Save, RotateCcw, AlertCircle } from 'lucide-react'
 import { useCallback, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Save, RotateCcw, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -17,13 +17,13 @@ import type { ConfigModalProps, ConfigField } from './types'
  * 最大宽度映射（使用固定像素值确保不会撑满页面）
  */
 const maxWidthStyles: Record<string, React.CSSProperties> = {
-  sm: { maxWidth: '384px' },      // 24rem
-  md: { maxWidth: '448px' },      // 28rem
-  lg: { maxWidth: '512px' },      // 32rem
-  xl: { maxWidth: '576px' },      // 36rem
-  '2xl': { maxWidth: '672px' },   // 42rem
-  '3xl': { maxWidth: '768px' },   // 48rem
-  '4xl': { maxWidth: '896px' },   // 56rem
+  sm: { maxWidth: '384px' }, // 24rem
+  md: { maxWidth: '448px' }, // 28rem
+  lg: { maxWidth: '512px' }, // 32rem
+  xl: { maxWidth: '576px' }, // 36rem
+  '2xl': { maxWidth: '672px' }, // 42rem
+  '3xl': { maxWidth: '768px' }, // 48rem
+  '4xl': { maxWidth: '896px' }, // 56rem
   full: { maxWidth: '95vw' },
 }
 
@@ -34,26 +34,39 @@ function renderField<T extends object>(
   field: ConfigField<T>,
   value: unknown,
   error: string | undefined,
-  onChange: (key: keyof T, value: unknown) => void
+  onChange: (key: keyof T, value: unknown) => void,
 ) {
-  const { key, label, type, placeholder, required, options, min, max, step, description, disabled, rows = 4 } = field
+  const {
+    key,
+    label,
+    type,
+    placeholder,
+    required,
+    options,
+    min,
+    max,
+    step,
+    description,
+    disabled,
+    rows = 4,
+  } = field
 
   // 通用字段包装器 - 添加文本换行支持
   const FieldWrapper = ({ children }: { children: React.ReactNode }) => (
-    <div className="space-y-1.5 min-w-0">
-      <label className="text-sm font-medium text-foreground flex items-center gap-1 flex-wrap">
+    <div className="min-w-0 space-y-1.5">
+      <label className="text-foreground flex flex-wrap items-center gap-1 text-sm font-medium">
         <span className="break-words">{label}</span>
         {required && <span className="text-destructive flex-shrink-0">*</span>}
       </label>
       {children}
       {description && (
-        <p className="text-xs text-muted-foreground break-words whitespace-normal overflow-wrap-anywhere">
+        <p className="text-muted-foreground overflow-wrap-anywhere text-xs break-words whitespace-normal">
           {description}
         </p>
       )}
       {error && (
-        <p className="text-xs text-destructive flex items-start gap-1 break-words">
-          <AlertCircle className="h-3 w-3 flex-shrink-0 mt-0.5" />
+        <p className="text-destructive flex items-start gap-1 text-xs break-words">
+          <AlertCircle className="mt-0.5 h-3 w-3 flex-shrink-0" />
           <span className="break-words">{error}</span>
         </p>
       )}
@@ -69,7 +82,7 @@ function renderField<T extends object>(
           <Input
             type={type}
             value={(value as string) || ''}
-            onChange={e => onChange(key, e.target.value)}
+            onChange={(e) => onChange(key, e.target.value)}
             placeholder={placeholder}
             disabled={disabled}
             className={cn(error && 'border-destructive')}
@@ -83,7 +96,7 @@ function renderField<T extends object>(
           <Input
             type="number"
             value={(value as number) ?? ''}
-            onChange={e => onChange(key, e.target.value ? Number(e.target.value) : undefined)}
+            onChange={(e) => onChange(key, e.target.value ? Number(e.target.value) : undefined)}
             placeholder={placeholder}
             disabled={disabled}
             min={min}
@@ -99,16 +112,16 @@ function renderField<T extends object>(
         <FieldWrapper key={String(key)}>
           <textarea
             value={(value as string) || ''}
-            onChange={e => onChange(key, e.target.value)}
+            onChange={(e) => onChange(key, e.target.value)}
             placeholder={placeholder}
             disabled={disabled}
             rows={rows}
             className={cn(
-              'w-full rounded-xl border-2 border-input bg-background px-3 py-2 text-sm resize-none',
-              'focus-visible:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20',
+              'border-input bg-background w-full resize-none rounded-xl border-2 px-3 py-2 text-sm',
+              'focus-visible:border-primary focus-visible:ring-primary/20 focus-visible:ring-2 focus-visible:outline-none',
               'disabled:cursor-not-allowed disabled:opacity-50',
-              'whitespace-pre-wrap break-words',
-              error && 'border-destructive'
+              'break-words whitespace-pre-wrap',
+              error && 'border-destructive',
             )}
           />
         </FieldWrapper>
@@ -119,16 +132,16 @@ function renderField<T extends object>(
         <FieldWrapper key={String(key)}>
           <textarea
             value={(value as string) || ''}
-            onChange={e => onChange(key, e.target.value)}
+            onChange={(e) => onChange(key, e.target.value)}
             placeholder={placeholder || '{"key": "value"}'}
             disabled={disabled}
             rows={rows}
             className={cn(
-              'w-full rounded-xl border-2 border-input bg-background px-3 py-2 text-sm font-mono resize-none',
-              'focus-visible:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20',
+              'border-input bg-background w-full resize-none rounded-xl border-2 px-3 py-2 font-mono text-sm',
+              'focus-visible:border-primary focus-visible:ring-primary/20 focus-visible:ring-2 focus-visible:outline-none',
               'disabled:cursor-not-allowed disabled:opacity-50',
-              'whitespace-pre-wrap break-all',
-              error && 'border-destructive'
+              'break-all whitespace-pre-wrap',
+              error && 'border-destructive',
             )}
           />
         </FieldWrapper>
@@ -139,13 +152,13 @@ function renderField<T extends object>(
         <FieldWrapper key={String(key)}>
           <select
             value={(value as string) || ''}
-            onChange={e => onChange(key, e.target.value)}
+            onChange={(e) => onChange(key, e.target.value)}
             disabled={disabled}
             className={cn(
-              'w-full h-9 rounded-xl border-2 border-input bg-background px-3 text-sm truncate',
-              'focus-visible:outline-none focus-visible:border-primary',
+              'border-input bg-background h-9 w-full truncate rounded-xl border-2 px-3 text-sm',
+              'focus-visible:border-primary focus-visible:outline-none',
               'disabled:cursor-not-allowed disabled:opacity-50',
-              error && 'border-destructive'
+              error && 'border-destructive',
             )}
           >
             {placeholder && (
@@ -153,7 +166,7 @@ function renderField<T extends object>(
                 {placeholder}
               </option>
             )}
-            {options?.map(opt => (
+            {options?.map((opt) => (
               <option key={opt.value} value={opt.value}>
                 {opt.label}
               </option>
@@ -165,13 +178,13 @@ function renderField<T extends object>(
     case 'checkbox':
       return (
         <FieldWrapper key={String(key)}>
-          <label className="flex items-start gap-2 cursor-pointer">
+          <label className="flex cursor-pointer items-start gap-2">
             <input
               type="checkbox"
               checked={Boolean(value)}
-              onChange={e => onChange(key, e.target.checked)}
+              onChange={(e) => onChange(key, e.target.checked)}
               disabled={disabled}
-              className="h-4 w-4 rounded border-input flex-shrink-0 mt-0.5"
+              className="border-input mt-0.5 h-4 w-4 flex-shrink-0 rounded"
             />
             <span className="text-sm break-words">{placeholder || label}</span>
           </label>
@@ -311,11 +324,11 @@ export function ConfigModal<T extends object>({
       {/* 模态框内容 - 添加固定宽度和文本换行 */}
       <div
         className={cn(
-          'relative bg-card text-card-foreground rounded-2xl shadow-2xl',
-          'max-h-[90vh] flex flex-col',
+          'bg-card text-card-foreground relative rounded-2xl shadow-2xl',
+          'flex max-h-[90vh] flex-col',
           'animate-in fade-in-0 zoom-in-95 duration-200',
           'w-full',
-          className
+          className,
         )}
         style={{
           position: 'relative',
@@ -324,16 +337,16 @@ export function ConfigModal<T extends object>({
           color: 'hsl(var(--foreground))',
           ...maxWidthStyles[maxWidth],
         }}
-        onClick={e => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* 标题栏 - 支持文本换行 */}
-        <div className="flex items-center justify-between p-6 border-b flex-shrink-0 min-w-0 gap-2">
-          <h2 className="text-lg font-semibold break-words whitespace-normal overflow-wrap-anywhere flex-1 min-w-0">
+        <div className="flex min-w-0 flex-shrink-0 items-center justify-between gap-2 border-b p-6">
+          <h2 className="overflow-wrap-anywhere min-w-0 flex-1 text-lg font-semibold break-words whitespace-normal">
             {title}
           </h2>
           <button
             onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors rounded-full p-1 hover:bg-muted flex-shrink-0"
+            className="text-muted-foreground hover:text-foreground hover:bg-muted flex-shrink-0 rounded-full p-1 transition-colors"
             aria-label="关闭"
           >
             <X className="h-5 w-5" />
@@ -341,13 +354,13 @@ export function ConfigModal<T extends object>({
         </div>
 
         {/* 内容区 - 可滚动，支持文本换行 */}
-        <div className="flex-1 overflow-y-auto p-6 min-w-0">
+        <div className="min-w-0 flex-1 overflow-y-auto p-6">
           {children ? (
             children
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0">
-              {fields.map(field =>
-                renderField(field, data[field.key], errors[field.key], updateField)
+            <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+              {fields.map((field) =>
+                renderField(field, data[field.key], errors[field.key], updateField),
               )}
             </div>
           )}
@@ -357,7 +370,7 @@ export function ConfigModal<T extends object>({
         {footer !== undefined ? (
           footer
         ) : (
-          <div className="flex items-center justify-end gap-2 p-6 border-t bg-card flex-shrink-0 rounded-b-2xl flex-wrap">
+          <div className="bg-card flex flex-shrink-0 flex-wrap items-center justify-end gap-2 rounded-b-2xl border-t p-6">
             {showReset && (
               <Button
                 variant="ghost"
@@ -368,11 +381,7 @@ export function ConfigModal<T extends object>({
                 重置
               </Button>
             )}
-            <Button
-              variant="outline"
-              onClick={onClose}
-              disabled={isSubmitting || loading}
-            >
+            <Button variant="outline" onClick={onClose} disabled={isSubmitting || loading}>
               取消
             </Button>
             <Button

@@ -16,17 +16,12 @@
  * - UpdateSessionOptions - 更新会话选项
  */
 
-import {
-    API_ENDPOINTS,
-} from '@/constants/api'
-import type { Message, Session } from '@/types/models'
-import {
-    mapThreadToSession,
-    type ThreadStateResponse,
-} from '@/utils/mappers'
-import type { RetryOptions } from '@/utils/retry'
-import { requestWithRetry } from '@/utils/retry'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
+import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
+import { requestWithRetry } from '@/utils/retry'
+import type { Message, Session } from '@/types/models'
+import type { RetryOptions } from '@/utils/retry'
 // 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
 
 /**
@@ -130,7 +125,7 @@ function validateSessionId(sessionId: string): void {
 
 function mapBackendMessageToMessage(
   backendMessage: BackendMessageResponse,
-  sessionId: string
+  sessionId: string,
 ): Message {
   if (backendMessage.role === 'tool') {
     return {
@@ -155,10 +150,13 @@ function mapBackendMessageToMessage(
 
   let toolCalls: Message['toolCalls']
   if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
-    toolCalls = backendMessage.toolCalls.map(tc => ({
+    toolCalls = backendMessage.toolCalls.map((tc) => ({
       call_id: (tc.call_id || tc.callId || tc.tool_call_id || '') as string,
       tool_name: (tc.tool_name || tc.toolName || tc.name || '') as string,
-      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<string, unknown>,
+      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<
+        string,
+        unknown
+      >,
       status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
       result: tc.result,
       error: tc.error as string | undefined,
@@ -174,7 +172,9 @@ function mapBackendMessageToMessage(
   let thinking: Message['thinking'] = undefined
   const metadata = backendMessage.metadata
   if (metadata) {
-    const thinkingStr = (metadata.thinkingContent || metadata.thinking_content) as string | undefined
+    const thinkingStr = (metadata.thinkingContent || metadata.thinking_content) as
+      | string
+      | undefined
     if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
       thinking = {
         content: thinkingStr,
@@ -201,13 +201,9 @@ function mapBackendMessageToMessage(
   }
 }
 
-export async function getSessions(
-  options: RetryOptions = {}
-): Promise<Session[]> {
+export async function getSessions(options: RetryOptions = {}): Promise<Session[]> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ThreadStateResponse[]>(
-      API_ENDPOINTS.THREADS.LIST
-    )
+    const response = await apiClient.get<ThreadStateResponse[]>(API_ENDPOINTS.THREADS.LIST)
 
     const threads = Array.isArray(response.data) ? response.data : []
     return threads.map(mapThreadToSession)
@@ -226,7 +222,7 @@ export interface CreateSessionOptions {
 
 export async function createSession(
   options: CreateSessionOptions = {},
-  retryOptions: RetryOptions = {}
+  retryOptions: RetryOptions = {},
 ): Promise<Session> {
   return requestWithRetry(async () => {
     const requestData: ThreadCreateRequest = {}
@@ -247,7 +243,7 @@ export async function createSession(
         headers: {
           'X-Main-Agent-Request': 'true',
         },
-      }
+      },
     )
 
     // 将创建响应转换为ThreadStateResponse格式，然后映射为Session
@@ -264,12 +260,7 @@ export async function createSession(
   }, retryOptions)
 }
 
-
-
-export async function deleteSession(
-  sessionId: string,
-  options: RetryOptions = {}
-): Promise<void> {
+export async function deleteSession(sessionId: string, options: RetryOptions = {}): Promise<void> {
   // 参数验证
   validateSessionId(sessionId)
 
@@ -288,7 +279,7 @@ export async function getMessages(
     skip?: number
     limit?: number
   },
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Message[]> {
   // 参数验证
   validateSessionId(sessionId)
@@ -305,13 +296,12 @@ export async function getMessages(
       if (filters.limit !== undefined) params.limit = filters.limit
     }
 
-    const response = await apiClient.get<any>(
-      API_ENDPOINTS.MESSAGES.LIST(sessionId),
-      { params }
-    )
+    const response = await apiClient.get<any>(API_ENDPOINTS.MESSAGES.LIST(sessionId), { params })
 
-    const rawMessages = Array.isArray(response.data) ? response.data : (response.data.messages || [])
-    return rawMessages.map((msg: BackendMessageResponse) => mapBackendMessageToMessage(msg, sessionId))
+    const rawMessages = Array.isArray(response.data) ? response.data : response.data.messages || []
+    return rawMessages.map((msg: BackendMessageResponse) =>
+      mapBackendMessageToMessage(msg, sessionId),
+    )
   }, options)
 }
 
@@ -348,7 +338,7 @@ interface ThreadUpdateResponse {
 export async function updateSessionAgent(
   sessionId: string,
   agentId: string | null,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Session> {
   // 参数验证
   validateSessionId(sessionId)
@@ -362,7 +352,7 @@ export async function updateSessionAgent(
 
     // 获取更新后的会话详情
     const detailResponse = await apiClient.get<ThreadUpdateResponse>(
-      API_ENDPOINTS.THREADS.GET(sessionId)
+      API_ENDPOINTS.THREADS.GET(sessionId),
     )
 
     // 将更新响应转换为ThreadStateResponse格式，然后映射为Session
@@ -391,7 +381,7 @@ interface UpdateSessionOptions extends RetryOptions {
 
 export async function updateSession(
   sessionId: string,
-  options: UpdateSessionOptions = {}
+  options: UpdateSessionOptions = {},
 ): Promise<Session> {
   const { title, agentId, ...retryOptions } = options
 
@@ -410,7 +400,7 @@ export async function updateSession(
 
     const response = await apiClient.put<ThreadUpdateResponse>(
       API_ENDPOINTS.THREADS.UPDATE(sessionId),
-      requestData
+      requestData,
     )
 
     // 将更新响应转换为ThreadStateResponse格式，然后映射为Session

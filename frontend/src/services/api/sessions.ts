@@ -47,17 +47,17 @@ export interface ContextTokenUsageResponse {
 }
 
 export async function getSessionTotalTokenUsage(
-  sessionId: string
+  sessionId: string,
 ): Promise<SessionTokenUsageResponse> {
   const response = await apiClient.get<SessionTokenUsageResponse>(
-    `/api/v1/sessions/${sessionId}/total-token-usage`
+    `/api/v1/sessions/${sessionId}/total-token-usage`,
   )
   return response.data
 }
 
 export async function getContextTokenUsage(
   sessionId: string,
-  parentExecutionRecordId?: string
+  parentExecutionRecordId?: string,
 ): Promise<ContextTokenUsageResponse> {
   const response = await apiClient.get<ContextTokenUsageResponse>(
     `/api/v1/sessions/${sessionId}/context-token-usage`,
@@ -67,7 +67,7 @@ export async function getContextTokenUsage(
             parent_execution_record_id: parentExecutionRecordId,
           }
         : undefined,
-    }
+    },
   )
   return response.data
 }

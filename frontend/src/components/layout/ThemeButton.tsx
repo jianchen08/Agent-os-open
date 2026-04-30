@@ -5,9 +5,9 @@
  * 长按或右键可打开完整主题面板
  */
 
+import { Moon, Sun, Palette } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
-import { Moon, Sun, Palette } from 'lucide-react'
 
 interface ThemeButtonProps {
   /** 点击回调（打开主题面板） */
@@ -41,28 +41,24 @@ export function ThemeButton({ onClick }: ThemeButtonProps) {
       <button
         onClick={handleQuickToggle}
         className={cn(
-          'h-8 w-8 rounded-lg flex items-center justify-center',
+          'flex h-8 w-8 items-center justify-center rounded-lg',
           'transition-all duration-200',
           'hover:bg-muted/80 active:scale-95',
-          'text-foreground'
+          'text-foreground',
         )}
         title={`切换到${resolvedTheme === 'dark' ? '浅色' : '深色'}模式`}
       >
-        {resolvedTheme === 'dark' ? (
-          <Moon className="h-4 w-4" />
-        ) : (
-          <Sun className="h-4 w-4" />
-        )}
+        {resolvedTheme === 'dark' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
       </button>
 
       {/* 更多主题选项按钮 */}
       <button
         onClick={onClick}
         className={cn(
-          'h-8 w-8 rounded-lg flex items-center justify-center',
+          'flex h-8 w-8 items-center justify-center rounded-lg',
           'transition-all duration-200',
           'hover:bg-muted/80 active:scale-95',
-          'text-muted-foreground hover:text-foreground'
+          'text-muted-foreground hover:text-foreground',
         )}
         title="更多主题选项"
       >

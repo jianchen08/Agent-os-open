@@ -9,6 +9,8 @@
 - 管道状态事件：pipeline_start / pipeline_end / iteration_start / iteration_end
 - 错误事件：plugin_error / pipeline_error
 - 控制事件：stop_generation / resume_action / connection_confirmation
+- ACK 事件：message_ack（前端确认收到关键消息）
+- 重连事件：request_missed / missed_messages（断线重连后获取遗漏消息）
 """
 
 from __future__ import annotations
@@ -18,6 +20,91 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+
+# ---- 协议版本 ----
+
+PROTOCOL_VERSION = "2.0.0"
+"""当前协议版本号。"""
+
+MIN_SUPPORTED_VERSION = "1.0.0"
+"""最小兼容协议版本号。"""
+
+
+def parse_version(version: str) -> tuple[int, int, int]:
+    """将语义版本字符串解析为整数元组。
+
+    Args:
+        version: 语义版本字符串，格式为 "major.minor.patch"。
+
+    Returns:
+        (major, minor, patch) 整数元组。
+    """
+    parts = version.split(".")
+    return (int(parts[0]), int(parts[1]), int(parts[2]))
+
+
+def is_version_compatible(client_version: str) -> bool:
+    """检查客户端协议版本是否与服务器兼容。
+
+    当客户端 major 版本号 >= 服务端 MIN_SUPPORTED_VERSION 的 major，
+    且 <= 当前 PROTOCOL_VERSION 的 major 时视为兼容。
+
+    Args:
+        client_version: 客户端协议版本字符串。
+
+    Returns:
+        版本是否兼容。
+    """
+    try:
+        client = parse_version(client_version)
+        min_ver = parse_version(MIN_SUPPORTED_VERSION)
+        current = parse_version(PROTOCOL_VERSION)
+        return min_ver[0] <= client[0] <= current[0]
+    except (ValueError, IndexError):
+        return False
+
+
+def negotiate_version(client_version: str) -> str:
+    """协商最终使用的协议版本。
+
+    如果客户端版本与当前服务端版本一致，使用当前版本；
+    否则使用两者中较低的那个（但不得低于 MIN_SUPPORTED_VERSION）。
+
+    Args:
+        client_version: 客户端协议版本字符串。
+
+    Returns:
+        协商后的协议版本字符串。
+    """
+    if client_version == PROTOCOL_VERSION:
+        return PROTOCOL_VERSION
+    if is_version_compatible(client_version):
+        client = parse_version(client_version)
+        current = parse_version(PROTOCOL_VERSION)
+        if client <= current:
+            return client_version
+        return PROTOCOL_VERSION
+    return PROTOCOL_VERSION
+
+
+# ---- ACK 默认超时 ----
+
+ACK_TIMEOUT_SECONDS: float = 10.0
+"""ACK 确认超时时间（秒）。"""
+
+ACK_MAX_RETRIES: int = 3
+"""ACK 确认最大重试次数。"""
+
+
+# ---- 需要 ACK 确认的事件集合 ----
+
+ACK_REQUIRED_EVENTS: set[str] = {
+    "interaction_request",
+    "approval_required",
+    "approval_request",
+}
+"""需要前端 ACK 确认的关键事件类型集合。"""
 
 
 class EventType(str, Enum):
@@ -57,6 +144,13 @@ class EventType(str, Enum):
     STOP_GENERATION = "stop_generation"
     RESUME_ACTION = "resume_action"
 
+    # --- ACK 事件（前端 → 后端）---
+    MESSAGE_ACK = "message_ack"
+
+    # --- 重连事件（双向）---
+    REQUEST_MISSED = "request_missed"
+    MISSED_MESSAGES = "missed_messages"
+
 
 class ControlCommand(str, Enum):
     """控制命令枚举。
@@ -79,32 +173,47 @@ class EventEnvelope:
         data: 事件数据
         timestamp: ISO 8601 时间戳
         request_id: 请求唯一标识，用于关联请求/响应
+        version: 协议版本号（可选，用于版本协商）
+        requires_ack: 是否需要前端 ACK 确认（可选）
     """
 
     type: str
     data: dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+    )
+    request_id: str = field(
+        default_factory=lambda: str(uuid.uuid4()),
+    )
+    version: str = ""
+    requires_ack: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """将信封序列化为字典。
 
         Returns:
-            符合协议格式的字典，可直接 JSON 序列化后通过 WebSocket 发送。
+            符合协议格式的字典，可直接 JSON 序列化后
+            通过 WebSocket 发送。
         """
-        return {
+        result: dict[str, Any] = {
             "type": self.type,
             "data": self.data,
             "timestamp": self.timestamp,
             "request_id": self.request_id,
         }
+        if self.version:
+            result["version"] = self.version
+        if self.requires_ack:
+            result["requires_ack"] = True
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EventEnvelope:
         """从字典反序列化信封。
 
         Args:
-            data: 包含 type/data/timestamp/request_id 的字典。
+            data: 包含 type/data/timestamp/request_id
+                  的字典。
 
         Returns:
             EventEnvelope 实例。
@@ -117,8 +226,15 @@ class EventEnvelope:
         return cls(
             type=data["type"],
             data=data.get("data", {}),
-            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            request_id=data.get("request_id", str(uuid.uuid4())),
+            timestamp=data.get(
+                "timestamp",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+            request_id=data.get(
+                "request_id", str(uuid.uuid4()),
+            ),
+            version=data.get("version", ""),
+            requires_ack=data.get("requires_ack", False),
         )
 
 
@@ -364,11 +480,13 @@ class ConnectionConfirmationData:
         session_id: 会话唯一标识
         thread_id: 线程 ID（前端传入，用于恢复会话）
         status: 连接状态
+        version: 服务端协商后的协议版本
     """
 
     session_id: str
     thread_id: str = ""
     status: str = "connected"
+    version: str = PROTOCOL_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典。"""
@@ -376,6 +494,79 @@ class ConnectionConfirmationData:
             "session_id": self.session_id,
             "thread_id": self.thread_id,
             "status": self.status,
+            "version": self.version,
+        }
+
+
+@dataclass
+class MessageAckData:
+    """message_ack 事件数据（前端 → 后端）。
+
+    前端收到 requires_ack=True 的消息后，发送 ACK 确认。
+
+    Attributes:
+        request_id: 被确认的消息的 request_id
+        received_at: 前端确认收到的时间戳
+    """
+
+    request_id: str
+    received_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "request_id": self.request_id,
+            "received_at": self.received_at,
+        }
+
+
+@dataclass
+class RequestMissedData:
+    """request_missed 事件数据（前端 → 后端）。
+
+    重连后前端请求获取断线期间遗漏的消息。
+
+    Attributes:
+        last_received_request_id: 前端最后收到的
+            消息 request_id（空字符串表示从连接
+            建立开始获取）
+    """
+
+    last_received_request_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "last_received_request_id": (
+                self.last_received_request_id
+            ),
+        }
+
+
+@dataclass
+class MissedMessagesData:
+    """missed_messages 事件数据（后端 → 前端）。
+
+    后端响应 request_missed，返回遗漏的消息列表。
+
+    Attributes:
+        messages: 遗漏的消息列表（EventEnvelope 序列化）
+        total: 总遗漏消息数量
+        has_more: 是否还有更多未发送的消息
+    """
+
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    total: int = 0
+    has_more: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "messages": self.messages,
+            "total": self.total,
+            "has_more": self.has_more,
         }
 
 
@@ -383,6 +574,8 @@ def create_event(
     event_type: EventType,
     data: dict[str, Any] | None = None,
     request_id: str | None = None,
+    version: str = "",
+    requires_ack: bool = False,
 ) -> EventEnvelope:
     """创建事件信封的便捷工厂函数。
 
@@ -390,6 +583,8 @@ def create_event(
         event_type: 事件类型
         data: 事件数据字典
         request_id: 请求 ID（可选，不传则自动生成）
+        version: 协议版本号（可选）
+        requires_ack: 是否需要 ACK 确认
 
     Returns:
         封装好的 EventEnvelope 实例。
@@ -398,4 +593,6 @@ def create_event(
         type=event_type.value,
         data=data or {},
         request_id=request_id or str(uuid.uuid4()),
+        version=version,
+        requires_ack=requires_ack,
     )

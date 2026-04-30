@@ -6,14 +6,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-    checkThinkingModeSupport,
-    getThinkingModeInfo,
-    switchThinkingMode,
+  checkThinkingModeSupport,
+  getThinkingModeInfo,
+  switchThinkingMode,
 } from '@/services/api/thinkingMode'
 import { reportError } from '@/services/errorReporting'
-import type { ThinkingModeState, ThinkingModeType } from '@/types/thinkingMode'
 import { loggers } from '@/utils/logger'
 import { uiStorage } from '@/utils/storage'
+import type { ThinkingModeState, ThinkingModeType } from '@/types/thinkingMode'
 
 export interface UseThinkingModeOptions {
   /** 当前模型名称 */
@@ -60,7 +60,10 @@ export function useThinkingMode({
    */
   const getInitialEnabled = () => {
     loggers.thinkingMode.debug('===== getInitialEnabled 被调用 =====')
-    loggers.thinkingMode.verbose('localStorage 原始值:', localStorage.getItem('thinking_mode_enabled'))
+    loggers.thinkingMode.verbose(
+      'localStorage 原始值:',
+      localStorage.getItem('thinking_mode_enabled'),
+    )
     loggers.thinkingMode.verbose('localStorage 解析后:', uiStorage.getThinkingModeEnabled())
 
     // 优先级1：从 localStorage 恢复上次的显示状态
@@ -101,34 +104,31 @@ export function useThinkingMode({
   /**
    * 检查模型是否支持思考模式（带缓存）
    */
-  const checkSupport = useCallback(
-    async (modelName: string): Promise<boolean> => {
-      // 防护：跳过无效的模型名
-      if (!modelName || modelName === 'unknown' || modelName.trim() === '') {
-        return false
-      }
+  const checkSupport = useCallback(async (modelName: string): Promise<boolean> => {
+    // 防护：跳过无效的模型名
+    if (!modelName || modelName === 'unknown' || modelName.trim() === '') {
+      return false
+    }
 
-      // 检查缓存
-      const cached = supportCache.get(modelName)
-      if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-        return cached.result
-      }
+    // 检查缓存
+    const cached = supportCache.get(modelName)
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      return cached.result
+    }
 
-      try {
-        const result = await checkThinkingModeSupport(modelName)
-        const supports = result.supports_thinking
+    try {
+      const result = await checkThinkingModeSupport(modelName)
+      const supports = result.supports_thinking
 
-        // 更新缓存
-        supportCache.set(modelName, { result: supports, timestamp: Date.now() })
+      // 更新缓存
+      supportCache.set(modelName, { result: supports, timestamp: Date.now() })
 
-        return supports
-      } catch (error) {
-        loggers.thinkingMode.error('检查思考模式支持失败:', error)
-        return false
-      }
-    },
-    []
-  )
+      return supports
+    } catch (error) {
+      loggers.thinkingMode.error('检查思考模式支持失败:', error)
+      return false
+    }
+  }, [])
 
   /**
    * 获取模型信息（带缓存和防竞态）
@@ -139,7 +139,7 @@ export function useThinkingMode({
       // 防护：跳过无效的模型名
       if (!modelName || modelName === 'unknown' || modelName.trim() === '') {
         loggers.thinkingMode.debug('模型名无效，保持 enabled 状态不变')
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           currentModel: modelName,
           thinkingType: undefined,
@@ -165,7 +165,7 @@ export function useThinkingMode({
         const cachedInfo = modelInfoCache.get(modelName)
         if (cachedInfo && Date.now() - cachedInfo.timestamp < CACHE_DURATION) {
           loggers.thinkingMode.debug('使用缓存的模型信息')
-          setThinkingMode(prev => ({
+          setThinkingMode((prev) => ({
             ...prev,
             currentModel: modelName,
             thinkingType: cachedInfo.info.thinking_type as ThinkingModeType,
@@ -183,7 +183,7 @@ export function useThinkingMode({
           loggers.thinkingMode.debug('模型不支持思考模式，但保持 enabled 状态')
           // 模型不支持思考模式，但不强制关闭用户的选择
           // 只是更新状态，让 UI 显示不支持
-          setThinkingMode(prev => ({
+          setThinkingMode((prev) => ({
             ...prev,
             currentModel: modelName,
             thinkingType: undefined,
@@ -203,7 +203,7 @@ export function useThinkingMode({
           timestamp: Date.now(),
         })
 
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           currentModel: modelName,
           thinkingType: modelInfo.thinking_type as ThinkingModeType,
@@ -215,12 +215,15 @@ export function useThinkingMode({
         const errorMessage =
           error instanceof Error
             ? error.message
-            : typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string'
+            : typeof error === 'object' &&
+                error !== null &&
+                'message' in error &&
+                typeof (error as any).message === 'string'
               ? (error as any).message
               : '获取模型信息失败'
         loggers.thinkingMode.error('获取思考模式信息失败:', errorMessage, error)
 
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           currentModel: modelName,
           error: errorMessage,
@@ -236,7 +239,7 @@ export function useThinkingMode({
         processingModelRef.current = null
       }
     },
-    [checkSupport]
+    [checkSupport],
   )
 
   /**
@@ -251,15 +254,11 @@ export function useThinkingMode({
   const toggleThinkingMode = useCallback(
     async (enabled: boolean) => {
       // 防护：检查模型名是否有效
-      if (
-        !currentModel ||
-        currentModel === 'unknown' ||
-        currentModel.trim() === ''
-      ) {
+      if (!currentModel || currentModel === 'unknown' || currentModel.trim() === '') {
         const errorMessage = '当前模型无效，无法切换思考模式'
         loggers.thinkingMode.error('切换思考模式失败:', errorMessage)
 
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           switching: false,
           error: errorMessage,
@@ -273,7 +272,7 @@ export function useThinkingMode({
 
       // 立即更新显示状态（乐观更新）
       let previousEnabled = false
-      setThinkingMode(prev => {
+      setThinkingMode((prev) => {
         previousEnabled = prev.enabled
         return {
           ...prev,
@@ -290,7 +289,7 @@ export function useThinkingMode({
         const result = await switchThinkingMode(currentModel, enabled)
 
         // 成功：更新 thinkingType 并结束切换状态
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           switching: false,
           thinkingType: result.switch_type as ThinkingModeType,
@@ -310,13 +309,16 @@ export function useThinkingMode({
         const errorMessage =
           error instanceof Error
             ? error.message
-            : typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string'
+            : typeof error === 'object' &&
+                error !== null &&
+                'message' in error &&
+                typeof (error as any).message === 'string'
               ? (error as any).message
               : '切换思考模式失败'
         loggers.thinkingMode.error('切换思考模式失败:', errorMessage, error)
 
         // 失败时回滚状态到之前的值
-        setThinkingMode(prev => ({
+        setThinkingMode((prev) => ({
           ...prev,
           enabled: previousEnabled,
           switching: false,
@@ -338,7 +340,7 @@ export function useThinkingMode({
 
         // 5秒后自动清除错误状态，让按钮恢复正常显示
         setTimeout(() => {
-          setThinkingMode(prev => {
+          setThinkingMode((prev) => {
             if (prev.error === errorMessage) {
               return { ...prev, error: undefined }
             }
@@ -347,14 +349,14 @@ export function useThinkingMode({
         }, 5000)
       }
     },
-    [currentModel]
+    [currentModel],
   )
 
   /**
    * 清除错误状态
    */
   const clearError = useCallback(() => {
-    setThinkingMode(prev => ({
+    setThinkingMode((prev) => ({
       ...prev,
       error: undefined,
     }))
@@ -375,18 +377,14 @@ export function useThinkingMode({
   // 当模型变化时，仅更新 currentModel 状态，不主动检测思考模式支持
   useEffect(() => {
     // 防护：只处理有效的模型名
-    if (
-      currentModel &&
-      currentModel !== 'unknown' &&
-      currentModel.trim() !== ''
-    ) {
-      setThinkingMode(prev => ({
+    if (currentModel && currentModel !== 'unknown' && currentModel.trim() !== '') {
+      setThinkingMode((prev) => ({
         ...prev,
         currentModel,
       }))
       lastProcessedModelRef.current = null
     } else {
-      setThinkingMode(prev => ({
+      setThinkingMode((prev) => ({
         ...prev,
         currentModel,
         thinkingType: undefined,

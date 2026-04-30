@@ -52,8 +52,8 @@ def cleanup_litellm_logging() -> None:
                     _cancel_worker_tasks(worker)
             else:
                 _cancel_worker_tasks(obj)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("cleanup_litellm_logging 部分步骤失败（可忽略）: %s", exc)
 
 
 async def cleanup_litellm_resources() -> None:
@@ -67,8 +67,8 @@ async def cleanup_litellm_resources() -> None:
             close_litellm_async_clients,
         )
         await close_litellm_async_clients()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("close_litellm_async_clients 失败（可忽略）: %s", exc)
 
 
 def cleanup_litellm_resources_sync() -> None:
@@ -83,8 +83,8 @@ def cleanup_litellm_resources_sync() -> None:
             loop.run_until_complete(close_litellm_async_clients())
         finally:
             loop.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("cleanup_litellm_resources_sync 部分步骤失败（可忽略）: %s", exc)
 
 
 def _cancel_worker_tasks(worker: Any) -> None:

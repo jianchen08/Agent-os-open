@@ -58,7 +58,7 @@ class ErrorMetrics:
     def __init__(self):
         self._metrics: dict[str, list] = {}
 
-    def record(self, metric_name: str, value: float, tags: dict[str, str]):
+    def record(self, metric_name: str, value: float, tags: dict[str, str]) -> None:
         """记录指标"""
         key = f"{metric_name}:{sorted(tags.items())}"
         if key not in self._metrics:
@@ -190,7 +190,7 @@ class ErrorReporter:
         metric_name: str,
         value: float,
         tags: dict[str, str],
-    ):
+    ) -> None:
         """记录指标"""
         ErrorReporter._metrics.record(metric_name, value, tags)
 
@@ -216,7 +216,7 @@ class ErrorReporter:
         return ErrorReporter._error_counts.get(error_code, 0)
 
     @staticmethod
-    def reset_metrics():
+    def reset_metrics() -> None:
         """重置所有指标(主要用于测试)"""
         ErrorReporter._metrics = ErrorMetrics()
         ErrorReporter._error_counts = {}
@@ -233,6 +233,6 @@ def report_error(
     return ErrorReporter.report(error_code, message, context, severity, exception)
 
 
-def record_metric(metric_name: str, value: float, tags: dict[str, str]):
+def record_metric(metric_name: str, value: float, tags: dict[str, str]) -> None:
     """便捷函数：记录指标"""
     ErrorReporter.record_metric(metric_name, value, tags)

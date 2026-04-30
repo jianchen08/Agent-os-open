@@ -99,9 +99,7 @@ describe('认证API', () => {
       vi.mocked(apiClient.post).mockRejectedValueOnce(networkError)
 
       // 验证抛出错误
-      await expect(login('testuser', 'password1')).rejects.toThrow(
-        'Network Error'
-      )
+      await expect(login('testuser', 'password1')).rejects.toThrow('Network Error')
     })
 
     it('应该验证必需参数', async () => {
@@ -161,26 +159,18 @@ describe('认证API', () => {
 
       vi.mocked(apiClient.post).mockRejectedValueOnce(mockError)
 
-      await expect(
-        register('existinguser', 'password1', 'test@example.com')
-      ).rejects.toThrow()
+      await expect(register('existinguser', 'password1', 'test@example.com')).rejects.toThrow()
     })
 
     it('应该验证必需参数', async () => {
       // 测试空用户名
-      await expect(
-        register('', 'password1', 'test@example.com')
-      ).rejects.toThrow()
+      await expect(register('', 'password1', 'test@example.com')).rejects.toThrow()
 
       // 测试空密码
-      await expect(
-        register('username', '', 'test@example.com')
-      ).rejects.toThrow()
+      await expect(register('username', '', 'test@example.com')).rejects.toThrow()
 
       // 测试无效邮箱
-      await expect(
-        register('username', 'password1', 'invalid-email')
-      ).rejects.toThrow()
+      await expect(register('username', 'password1', 'invalid-email')).rejects.toThrow()
     })
   })
 
@@ -387,9 +377,9 @@ describe('认证API', () => {
       vi.mocked(apiClient.post).mockRejectedValue(new Error('Network Error'))
 
       // 验证最终抛出错误
-      await expect(
-        login('testuser', 'password1', { retry: true, maxRetries: 2 })
-      ).rejects.toThrow('Network Error')
+      await expect(login('testuser', 'password1', { retry: true, maxRetries: 2 })).rejects.toThrow(
+        'Network Error',
+      )
 
       // 验证调用了2次（初始 + 1次重试）
       expect(apiClient.post).toHaveBeenCalledTimes(2)
@@ -440,7 +430,7 @@ describe('认证API', () => {
       })
 
       await expect(
-        login('testuser', 'wrongpass1', { retry: true, maxRetries: 3 })
+        login('testuser', 'wrongpass1', { retry: true, maxRetries: 3 }),
       ).rejects.toThrow()
 
       // 验证只调用了1次，没有重试
@@ -459,19 +449,13 @@ describe('认证API', () => {
 
     it('应该验证注册参数格式', async () => {
       // 用户名太短
-      await expect(
-        register('ab', 'password1', 'test@example.com')
-      ).rejects.toThrow()
+      await expect(register('ab', 'password1', 'test@example.com')).rejects.toThrow()
 
       // 密码太短（现在要求至少8个字符）
-      await expect(
-        register('username', '1234567', 'test@example.com')
-      ).rejects.toThrow()
+      await expect(register('username', '1234567', 'test@example.com')).rejects.toThrow()
 
       // 邮箱格式错误
-      await expect(
-        register('username', 'password1', 'invalid-email')
-      ).rejects.toThrow()
+      await expect(register('username', 'password1', 'invalid-email')).rejects.toThrow()
     })
 
     it('应该验证refresh token格式', async () => {

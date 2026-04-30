@@ -25,7 +25,7 @@ const DEFAULT_OPTIONS: Required<LayoutOptions> = {
 export function applyLayeredLayout(
   nodes: Node[],
   edges: Edge[],
-  options: LayoutOptions = {}
+  options: LayoutOptions = {},
 ): { nodes: Node[]; edges: Edge[] } {
   const opts = { ...DEFAULT_OPTIONS, ...options }
 
@@ -45,11 +45,11 @@ export function applyLayeredLayout(
 function buildLayers(nodes: Node[], edges: Edge[]): Node[][] {
   const layers: Node[][] = []
   const visited = new Set<string>()
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
 
   // 找到根节点（没有入边的节点）
   const rootNodeIds = new Set(
-    nodes.map(n => n.id).filter(id => !edges.some(e => e.target === id))
+    nodes.map((n) => n.id).filter((id) => !edges.some((e) => e.target === id)),
   )
 
   // 从根节点开始 BFS 分层
@@ -69,8 +69,8 @@ function buildLayers(nodes: Node[], edges: Edge[]): Node[][] {
 
     for (const node of currentLayer) {
       const children = edges
-        .filter(e => e.source === node.id)
-        .map(e => nodeMap.get(e.target))
+        .filter((e) => e.source === node.id)
+        .map((e) => nodeMap.get(e.target))
         .filter((n): n is Node => n !== undefined && !visited.has(n.id))
 
       for (const child of children) {
@@ -85,7 +85,7 @@ function buildLayers(nodes: Node[], edges: Edge[]): Node[][] {
   }
 
   // 添加未访问的节点（孤立节点）
-  const unvisitedNodes = nodes.filter(n => !visited.has(n.id))
+  const unvisitedNodes = nodes.filter((n) => !visited.has(n.id))
   if (unvisitedNodes.length > 0) {
     layers.push(unvisitedNodes)
   }
@@ -96,16 +96,12 @@ function buildLayers(nodes: Node[], edges: Edge[]): Node[][] {
 /**
  * 为节点计算位置
  */
-function positionNodes(
-  layers: Node[][],
-  options: Required<LayoutOptions>
-): Node[] {
+function positionNodes(layers: Node[][], options: Required<LayoutOptions>): Node[] {
   const [spacingX, spacingY] = options.spacing
   const positionedNodes: Node[] = []
 
   layers.forEach((layer, layerIndex) => {
-    const layerWidth =
-      layer.length * options.nodeWidth + (layer.length - 1) * spacingX
+    const layerWidth = layer.length * options.nodeWidth + (layer.length - 1) * spacingX
     const startX = -layerWidth / 2
 
     layer.forEach((node, nodeIndex) => {

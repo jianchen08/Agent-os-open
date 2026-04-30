@@ -34,9 +34,7 @@
  * - ConcurrencyConfigResponse - 并发配置响应类型
  */
 
-import {
-  API_ENDPOINTS,
-} from '@/constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
 import type { RetryOptions } from '@/utils/retry'
@@ -107,13 +105,9 @@ export interface ContextWindowConfig {
   summary_threshold: number
 }
 
-export async function getLLMConfig(
-  options: RetryOptions = {}
-): Promise<LLMConfigResponse> {
+export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfigResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<LLMConfigResponse>(
-      API_ENDPOINTS.CONFIG.LLM_GET
-    )
+    const response = await apiClient.get<LLMConfigResponse>(API_ENDPOINTS.CONFIG.LLM_GET)
     return response.data
   }, options)
 }
@@ -134,7 +128,7 @@ export async function getProviders(options: RetryOptions = {}): Promise<{
 }
 
 export async function getModels(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<{ models: Record<string, ModelConfig> }> {
   return requestWithRetry(async () => {
     const response = await apiClient.get(API_ENDPOINTS.CONFIG.LLM_MODELS)
@@ -142,23 +136,19 @@ export async function getModels(
   }, options)
 }
 
-export async function getDefaults(
-  options: RetryOptions = {}
-): Promise<LLMDefaults> {
+export async function getDefaults(options: RetryOptions = {}): Promise<LLMDefaults> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<LLMDefaults>(
-      API_ENDPOINTS.CONFIG.LLM_DEFAULTS
-    )
+    const response = await apiClient.get<LLMDefaults>(API_ENDPOINTS.CONFIG.LLM_DEFAULTS)
     return response.data
   }, options)
 }
 
 export async function getContextWindowConfig(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ContextWindowConfig> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<ContextWindowConfig>(
-      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_GET
+      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_GET,
     )
     return response.data
   }, options)
@@ -166,23 +156,23 @@ export async function getContextWindowConfig(
 
 export async function updateContextWindowConfig(
   data: Partial<ContextWindowConfig>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ContextWindowConfig> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<ContextWindowConfig>(
       API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_UPDATE,
-      data
+      data,
     )
     return response.data
   }, options)
 }
 
 export async function resetContextWindowConfig(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ContextWindowConfig> {
   return requestWithRetry(async () => {
     const response = await apiClient.post<ContextWindowConfig>(
-      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_RESET
+      API_ENDPOINTS.CONFIG.CONTEXT_WINDOW_RESET,
     )
     return response.data
   }, options)
@@ -190,13 +180,10 @@ export async function resetContextWindowConfig(
 
 export async function saveLLMDefaults(
   defaults: LLMDefaults,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<LLMDefaults> {
   return requestWithRetry(async () => {
-    const response = await apiClient.put<LLMDefaults>(
-      API_ENDPOINTS.CONFIG.LLM_DEFAULTS,
-      defaults
-    )
+    const response = await apiClient.put<LLMDefaults>(API_ENDPOINTS.CONFIG.LLM_DEFAULTS, defaults)
     return response.data
   }, options)
 }
@@ -204,12 +191,12 @@ export async function saveLLMDefaults(
 export async function addModel(
   modelId: string,
   config: ModelConfig,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Record<string, ModelConfig>> {
   return requestWithRetry(async () => {
     const response = await apiClient.post<Record<string, ModelConfig>>(
       API_ENDPOINTS.CONFIG.LLM_MODELS,
-      { [modelId]: config }
+      { [modelId]: config },
     )
     return response.data
   }, options)
@@ -218,12 +205,12 @@ export async function addModel(
 export async function updateModel(
   modelId: string,
   config: Partial<ModelConfig>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Record<string, ModelConfig>> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<Record<string, ModelConfig>>(
       `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`,
-      config
+      config,
     )
     return response.data
   }, options)
@@ -231,11 +218,11 @@ export async function updateModel(
 
 export async function deleteModel(
   modelId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Record<string, ModelConfig>> {
   return requestWithRetry(async () => {
     const response = await apiClient.delete<Record<string, ModelConfig>>(
-      `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`
+      `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`,
     )
     return response.data
   }, options)
@@ -244,12 +231,12 @@ export async function deleteModel(
 export async function updateProviderConfig(
   providerId: string,
   config: Partial<ProviderConfig>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<Record<string, ProviderConfig>> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<Record<string, ProviderConfig>>(
       `${API_ENDPOINTS.CONFIG.LLM_PROVIDERS}/${providerId}`,
-      config
+      config,
     )
     return response.data
   }, options)
@@ -293,26 +280,19 @@ export interface APIConfig {
   cors_origins: string[]
 }
 
-export async function getAPIConfig(
-  options: RetryOptions = {}
-): Promise<APIConfig> {
+export async function getAPIConfig(options: RetryOptions = {}): Promise<APIConfig> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<APIConfig>(
-      API_ENDPOINTS.CONFIG.API_GET
-    )
+    const response = await apiClient.get<APIConfig>(API_ENDPOINTS.CONFIG.API_GET)
     return response.data
   }, options)
 }
 
 export async function saveAPIConfig(
   config: APIConfig,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<APIConfig> {
   return requestWithRetry(async () => {
-    const response = await apiClient.put<APIConfig>(
-      API_ENDPOINTS.CONFIG.API_UPDATE,
-      config
-    )
+    const response = await apiClient.put<APIConfig>(API_ENDPOINTS.CONFIG.API_UPDATE, config)
     return response.data
   }, options)
 }
@@ -378,11 +358,11 @@ export interface ConcurrencyConfigResponse {
 }
 
 export async function getConcurrencyConfig(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ConcurrencyConfigResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<ConcurrencyConfigResponse>(
-      API_ENDPOINTS.CONFIG.CONCURRENCY_GET
+      API_ENDPOINTS.CONFIG.CONCURRENCY_GET,
     )
     return response.data
   }, options)
@@ -415,11 +395,11 @@ export interface CostControlConfigResponse {
 }
 
 export async function getCostControlConfig(
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<CostControlConfigResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<CostControlConfigResponse>(
-      API_ENDPOINTS.CONFIG.COST_CONTROL_GET
+      API_ENDPOINTS.CONFIG.COST_CONTROL_GET,
     )
     return response.data
   }, options)
@@ -427,12 +407,12 @@ export async function getCostControlConfig(
 
 export async function saveCostControlConfig(
   config: CostControlConfigResponse,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<CostControlConfigResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<CostControlConfigResponse>(
       API_ENDPOINTS.CONFIG.COST_CONTROL_UPDATE,
-      config
+      config,
     )
     return response.data
   }, options)

@@ -41,20 +41,25 @@ interface ModuleConfigRendererProps {
  * @param props - 渲染器属性，包含 schema、values、onChange、readOnly
  * @returns 动态渲染的配置表单
  */
-export function ModuleConfigRenderer({ schema, values, onChange, readOnly }: ModuleConfigRendererProps) {
+export function ModuleConfigRenderer({
+  schema,
+  values,
+  onChange,
+  readOnly,
+}: ModuleConfigRendererProps) {
   const configPanel = (schema as Record<string, unknown>).config_panel as ConfigField[] | undefined
 
   if (!configPanel || configPanel.length === 0) {
-    return <div className="text-sm text-muted-foreground">此模块无可配置项</div>
+    return <div className="text-muted-foreground text-sm">此模块无可配置项</div>
   }
 
   return (
     <div className="space-y-4">
-      {configPanel.map(field => (
+      {configPanel.map((field) => (
         <div key={field.key} className="space-y-1">
           <label className="text-sm font-medium">{field.label}</label>
           {field.description && (
-            <p className="text-xs text-muted-foreground">{field.description}</p>
+            <p className="text-muted-foreground text-xs">{field.description}</p>
           )}
           {renderField(field, values[field.key] ?? field.default, onChange, readOnly)}
         </div>
@@ -76,7 +81,7 @@ function renderField(
   field: ConfigField,
   value: unknown,
   onChange: (key: string, value: unknown) => void,
-  readOnly?: boolean
+  readOnly?: boolean,
 ) {
   const disabled = readOnly
 
@@ -84,13 +89,15 @@ function renderField(
     case 'select':
       return (
         <select
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+          className="bg-background w-full rounded-md border px-3 py-2 text-sm"
           value={String(value ?? '')}
-          onChange={e => onChange(field.key, e.target.value)}
+          onChange={(e) => onChange(field.key, e.target.value)}
           disabled={disabled}
         >
-          {field.options?.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          {field.options?.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
           ))}
         </select>
       )
@@ -105,7 +112,9 @@ function renderField(
           onClick={() => onChange(field.key, !value)}
           disabled={disabled}
         >
-          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${value ? 'translate-x-6' : 'translate-x-1'}`} />
+          <span
+            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${value ? 'translate-x-6' : 'translate-x-1'}`}
+          />
         </button>
       )
 
@@ -113,9 +122,9 @@ function renderField(
       return (
         <input
           type="number"
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+          className="bg-background w-full rounded-md border px-3 py-2 text-sm"
           value={Number(value ?? 0)}
-          onChange={e => onChange(field.key, Number(e.target.value))}
+          onChange={(e) => onChange(field.key, Number(e.target.value))}
           disabled={disabled}
         />
       )
@@ -126,7 +135,7 @@ function renderField(
           type="color"
           className="h-10 w-20 rounded-md border"
           value={String(value ?? '#000000')}
-          onChange={e => onChange(field.key, e.target.value)}
+          onChange={(e) => onChange(field.key, e.target.value)}
           disabled={disabled}
         />
       )
@@ -136,9 +145,9 @@ function renderField(
       return (
         <input
           type="text"
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+          className="bg-background w-full rounded-md border px-3 py-2 text-sm"
           value={String(value ?? '')}
-          onChange={e => onChange(field.key, e.target.value)}
+          onChange={(e) => onChange(field.key, e.target.value)}
           disabled={disabled}
         />
       )

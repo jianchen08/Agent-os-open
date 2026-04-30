@@ -97,7 +97,7 @@ class WebSocketInputAdapter(IInputAdapter):
 
         event_type = message.get("type", "")
         data = message.get("data", {})
-        session_id = message.get("session_id", str(uuid.uuid4()))
+        session_id = message.get("session_id", uuid.uuid4().hex[:12])
 
         if event_type == EventType.STOP_GENERATION.value:
             return {

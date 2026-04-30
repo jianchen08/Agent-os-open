@@ -8,9 +8,9 @@
  */
 
 import { cn } from '@/lib/utils'
-import type { Components } from 'react-markdown'
 import { CodeBlock } from './CodeBlock'
 import { MermaidDiagram } from './MermaidDiagram'
+import type { Components } from 'react-markdown'
 
 /**
  * 预处理 Markdown 内容
@@ -99,22 +99,12 @@ export function createMarkdownComponents(isStreaming: boolean = false): Componen
       return <>{children}</>
     },
 
-    h1: ({ className, ...props }) => (
-      <h1 className={cn('md-h1', className)} {...props} />
-    ),
-    h2: ({ className, ...props }) => (
-      <h2 className={cn('md-h2', className)} {...props} />
-    ),
-    h3: ({ className, ...props }) => (
-      <h3 className={cn('md-h3', className)} {...props} />
-    ),
-    h4: ({ className, ...props }) => (
-      <h4 className={cn('md-h4', className)} {...props} />
-    ),
+    h1: ({ className, ...props }) => <h1 className={cn('md-h1', className)} {...props} />,
+    h2: ({ className, ...props }) => <h2 className={cn('md-h2', className)} {...props} />,
+    h3: ({ className, ...props }) => <h3 className={cn('md-h3', className)} {...props} />,
+    h4: ({ className, ...props }) => <h4 className={cn('md-h4', className)} {...props} />,
 
-    p: ({ className, ...props }) => (
-      <p className={cn('md-p', className)} {...props} />
-    ),
+    p: ({ className, ...props }) => <p className={cn('md-p', className)} {...props} />,
 
     a: ({ className, ...props }) => (
       <a
@@ -129,60 +119,33 @@ export function createMarkdownComponents(isStreaming: boolean = false): Componen
       <blockquote className={cn('md-blockquote', className)} {...props} />
     ),
 
-    ul: ({ className, ...props }) => (
-      <ul className={cn('md-ul', className)} {...props} />
-    ),
+    ul: ({ className, ...props }) => <ul className={cn('md-ul', className)} {...props} />,
 
-    ol: ({ className, ...props }) => (
-      <ol className={cn('md-ol', className)} {...props} />
-    ),
+    ol: ({ className, ...props }) => <ol className={cn('md-ol', className)} {...props} />,
 
-    li: ({ className, ...props }) => (
-      <li className={cn('md-li', className)} {...props} />
-    ),
+    li: ({ className, ...props }) => <li className={cn('md-li', className)} {...props} />,
 
-    hr: ({ className, ...props }) => (
-      <hr className={cn('md-hr', className)} {...props} />
-    ),
+    hr: ({ className, ...props }) => <hr className={cn('md-hr', className)} {...props} />,
 
     table: ({ className, ...props }) => (
       <div className="md-table-wrapper">
         <table className={cn('md-table', className)} {...props} />
       </div>
     ),
-    thead: ({ className, ...props }) => (
-      <thead className={cn('md-thead', className)} {...props} />
-    ),
-    tbody: ({ className, ...props }) => (
-      <tbody className={cn('md-tbody', className)} {...props} />
-    ),
-    tr: ({ className, ...props }) => (
-      <tr className={cn('md-tr', className)} {...props} />
-    ),
-    th: ({ className, ...props }) => (
-      <th className={cn('md-th', className)} {...props} />
-    ),
-    td: ({ className, ...props }) => (
-      <td className={cn('md-td', className)} {...props} />
-    ),
+    thead: ({ className, ...props }) => <thead className={cn('md-thead', className)} {...props} />,
+    tbody: ({ className, ...props }) => <tbody className={cn('md-tbody', className)} {...props} />,
+    tr: ({ className, ...props }) => <tr className={cn('md-tr', className)} {...props} />,
+    th: ({ className, ...props }) => <th className={cn('md-th', className)} {...props} />,
+    td: ({ className, ...props }) => <td className={cn('md-td', className)} {...props} />,
 
     strong: ({ className, ...props }) => (
       <strong className={cn('md-strong', className)} {...props} />
     ),
-    em: ({ className, ...props }) => (
-      <em className={cn('md-em', className)} {...props} />
-    ),
-    del: ({ className, ...props }) => (
-      <del className={cn('md-del', className)} {...props} />
-    ),
+    em: ({ className, ...props }) => <em className={cn('md-em', className)} {...props} />,
+    del: ({ className, ...props }) => <del className={cn('md-del', className)} {...props} />,
 
     img: ({ className, alt, ...props }) => (
-      <img
-        className={cn('md-img', className)}
-        alt={alt}
-        loading="lazy"
-        {...props}
-      />
+      <img className={cn('md-img', className)} alt={alt} loading="lazy" {...props} />
     ),
   }
 }
@@ -192,7 +155,7 @@ export function createMarkdownComponents(isStreaming: boolean = false): Componen
  */
 export function markdownMemoComparator(
   prev: { content: string; isStreaming?: boolean; className?: string },
-  next: { content: string; isStreaming?: boolean; className?: string }
+  next: { content: string; isStreaming?: boolean; className?: string },
 ): boolean {
   if (next.isStreaming) {
     return false

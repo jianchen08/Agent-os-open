@@ -5,13 +5,17 @@
 - 会话 ID 与 WebSocket 的映射
 - 消息发送（单播 / 广播）
 - 会话恢复（断线重连时通过 session_id 恢复）
+- 消息缓冲（支持重连后重放遗漏消息）
+- ACK 追踪（追踪需要确认的关键消息）
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -46,6 +50,8 @@ class SessionInfo:
         connected_at: 连接时间戳
         last_active_at: 最后活跃时间戳
         metadata: 附加元数据
+        message_buffer: 消息缓冲区（用于重连后重放）
+        pending_acks: 等待 ACK 确认的消息 request_id 集合
     """
 
     session_id: str
@@ -54,10 +60,47 @@ class SessionInfo:
     connected_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    message_buffer: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=200),
+    )
+    pending_acks: dict[str, float] = field(default_factory=dict)
 
     def touch(self) -> None:
         """更新最后活跃时间戳。"""
         self.last_active_at = time.time()
+
+    def buffer_message(self, envelope_dict: dict[str, Any]) -> None:
+        """将已发送的消息存入缓冲区。
+
+        Args:
+            envelope_dict: 序列化后的事件信封字典。
+        """
+        self.message_buffer.append(envelope_dict)
+
+    def get_missed_messages(
+        self,
+        last_request_id: str,
+    ) -> list[dict[str, Any]]:
+        """获取指定 request_id 之后的消息列表。
+
+        Args:
+            last_request_id: 前端最后收到的消息
+                request_id。空字符串表示返回全部缓冲。
+
+        Returns:
+            遗漏的消息列表。
+        """
+        if not last_request_id:
+            return list(self.message_buffer)
+
+        found = False
+        result: list[dict[str, Any]] = []
+        for msg in self.message_buffer:
+            if found:
+                result.append(msg)
+            elif msg.get("request_id") == last_request_id:
+                found = True
+        return result
 
 
 class SessionManager:
@@ -108,7 +151,7 @@ class SessionManager:
         Returns:
             新生成的 session_id
         """
-        session_id = str(uuid.uuid4())
+        session_id = uuid.uuid4().hex[:12]
 
         # 重连恢复：如果 thread_id 已有会话，注销旧会话
         if thread_id and thread_id in self._thread_to_session:
@@ -158,17 +201,28 @@ class SessionManager:
             return
 
         # 清理 thread_id 映射
-        if session.thread_id and self._thread_to_session.get(session.thread_id) == session_id:
-            del self._thread_to_session[session.thread_id]
+        if session.thread_id:
+            mapped = self._thread_to_session.get(
+                session.thread_id,
+            )
+            if mapped == session_id:
+                del self._thread_to_session[session.thread_id]
 
         logger.info("Session unregistered: session_id=%s", session_id)
 
-    async def send_to(self, session_id: str, message: str) -> bool:
+    async def send_to(
+        self,
+        session_id: str,
+        message: str,
+        buffer: bool = True,
+    ) -> bool:
         """向指定会话发送文本消息。
 
         Args:
             session_id: 目标会话 ID
             message: 要发送的文本消息（通常为 JSON 字符串）
+            buffer: 是否将消息存入缓冲区（默认 True），
+                用于重连后重放。
 
         Returns:
             发送成功返回 True，会话不存在或连接已关闭返回 False
@@ -180,15 +234,31 @@ class SessionManager:
 
         try:
             if session.ws.closed:
-                logger.warning("WebSocket closed for session: %s", session_id)
+                logger.warning(
+                    "WebSocket closed for session: %s",
+                    session_id,
+                )
                 await self._force_unregister(session_id)
                 return False
 
             await session.ws.send_str(message)
             session.touch()
+
+            # 缓冲已发送的消息，用于重连后重放
+            if buffer:
+                try:
+                    import json
+                    envelope = json.loads(message)
+                    session.buffer_message(envelope)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
             return True
         except Exception as exc:
-            logger.error("Failed to send to session %s: %s", session_id, exc)
+            logger.error(
+                "Failed to send to session %s: %s",
+                session_id, exc,
+            )
             await self._force_unregister(session_id)
             return False
 
@@ -236,6 +306,80 @@ class SessionManager:
         if session_id is None:
             return None
         return self._sessions.get(session_id)
+
+    def acknowledge(self, session_id: str, request_id: str) -> bool:
+        """确认收到指定消息（ACK）。
+
+        Args:
+            session_id: 会话 ID
+            request_id: 被确认的消息 request_id
+
+        Returns:
+            成功确认返回 True，会话或消息不存在返回 False
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+
+        if request_id in session.pending_acks:
+            del session.pending_acks[request_id]
+            logger.info(
+                "ACK received: session=%s, request_id=%s",
+                session_id, request_id,
+            )
+            return True
+        return False
+
+    def track_pending_ack(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> bool:
+        """将消息标记为等待 ACK 确认。
+
+        Args:
+            session_id: 会话 ID
+            request_id: 需要确认的消息 request_id
+
+        Returns:
+            成功追踪返回 True，会话不存在返回 False
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+
+        session.pending_acks[request_id] = time.time()
+        return True
+
+    def get_missed_messages(
+        self,
+        session_id: str,
+        last_request_id: str,
+    ) -> list[dict[str, Any]]:
+        """获取会话中指定 request_id 之后的消息。
+
+        用于重连后前端请求遗漏消息。
+
+        Args:
+            session_id: 会话 ID
+            last_request_id: 前端最后收到的 request_id
+
+        Returns:
+            遗漏的消息列表。
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return []
+
+        messages = session.get_missed_messages(
+            last_request_id,
+        )
+        logger.info(
+            "Missed messages requested: session=%s, "
+            "last_request_id=%s, count=%d",
+            session_id, last_request_id, len(messages),
+        )
+        return messages
 
     @property
     def active_count(self) -> int:

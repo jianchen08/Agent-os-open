@@ -86,8 +86,7 @@ export class ReconnectManager {
       maxRetries: config?.maxRetries ?? WS_RECONNECT_CONFIG.MAX_RETRIES,
       initialDelay: config?.initialDelay ?? WS_RECONNECT_CONFIG.INITIAL_DELAY,
       maxDelay: config?.maxDelay ?? WS_RECONNECT_CONFIG.MAX_DELAY,
-      backoffFactor:
-        config?.backoffFactor ?? WS_RECONNECT_CONFIG.BACKOFF_FACTOR,
+      backoffFactor: config?.backoffFactor ?? WS_RECONNECT_CONFIG.BACKOFF_FACTOR,
     }
   }
 
@@ -109,8 +108,7 @@ export class ReconnectManager {
    * @returns 延迟时间（毫秒）
    */
   calculateDelay(attempt: number): number {
-    const delay =
-      this.config.initialDelay * Math.pow(this.config.backoffFactor, attempt)
+    const delay = this.config.initialDelay * Math.pow(this.config.backoffFactor, attempt)
     return Math.min(delay, this.config.maxDelay)
   }
 
@@ -165,13 +163,11 @@ export class ReconnectManager {
     const delay = this.calculateDelay(this.attempts)
     this.state = 'waiting'
 
-    console.log(
-      `[Reconnect] 将在 ${delay}ms 后进行第 ${this.attempts + 1} 次重连`
-    )
+    console.log(`[Reconnect] 将在 ${delay}ms 后进行第 ${this.attempts + 1} 次重连`)
 
     this.callbacks.onReconnectStart?.(this.attempts + 1, delay)
 
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       this.timer = setTimeout(async () => {
         if (this.cancelled) {
           resolve(false)
@@ -197,7 +193,7 @@ export class ReconnectManager {
         } catch (error) {
           this.callbacks.onReconnectFailed?.(
             this.attempts,
-            error instanceof Error ? error : new Error(String(error))
+            error instanceof Error ? error : new Error(String(error)),
           )
           // 继续尝试重连
           const result = await this.scheduleReconnect(connectFn)
@@ -243,7 +239,7 @@ export class ReconnectManager {
     } catch (error) {
       this.callbacks.onReconnectFailed?.(
         this.attempts,
-        error instanceof Error ? error : new Error(String(error))
+        error instanceof Error ? error : new Error(String(error)),
       )
       return false
     }
@@ -333,9 +329,7 @@ export class ReconnectManager {
  * @param config 重连配置（可选）
  * @returns 重连管理器实例
  */
-export function createReconnectManager(
-  config?: Partial<ReconnectConfig>
-): ReconnectManager {
+export function createReconnectManager(config?: Partial<ReconnectConfig>): ReconnectManager {
   return new ReconnectManager(config)
 }
 
@@ -346,14 +340,10 @@ export function createReconnectManager(
  * @param config 配置（可选）
  * @returns 延迟时间（毫秒）
  */
-export function calculateBackoffDelay(
-  attempt: number,
-  config?: Partial<ReconnectConfig>
-): number {
+export function calculateBackoffDelay(attempt: number, config?: Partial<ReconnectConfig>): number {
   const initialDelay = config?.initialDelay ?? WS_RECONNECT_CONFIG.INITIAL_DELAY
   const maxDelay = config?.maxDelay ?? WS_RECONNECT_CONFIG.MAX_DELAY
-  const backoffFactor =
-    config?.backoffFactor ?? WS_RECONNECT_CONFIG.BACKOFF_FACTOR
+  const backoffFactor = config?.backoffFactor ?? WS_RECONNECT_CONFIG.BACKOFF_FACTOR
 
   const delay = initialDelay * Math.pow(backoffFactor, attempt)
   return Math.min(delay, maxDelay)

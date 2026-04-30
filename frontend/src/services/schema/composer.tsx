@@ -25,7 +25,10 @@ export interface LayoutNode {
 }
 
 /** 组件渲染器函数类型 */
-export type ComponentRenderer = (componentName: string, props: Record<string, unknown>) => React.ReactNode
+export type ComponentRenderer = (
+  componentName: string,
+  props: Record<string, unknown>,
+) => React.ReactNode
 
 /** 组件注册表条目 */
 interface WidgetEntry {
@@ -129,7 +132,10 @@ export const widgetRegistry = new WidgetRegistryClass()
  * @param renderComponent - 组件渲染器回调
  * @returns 渲染结果
  */
-export function renderLayoutNode(node: LayoutNode, renderComponent: ComponentRenderer): React.ReactNode {
+export function renderLayoutNode(
+  node: LayoutNode,
+  renderComponent: ComponentRenderer,
+): React.ReactNode {
   if (node.children && node.children.length > 0) {
     switch (node.layout) {
       case 'split-horizontal':
@@ -155,7 +161,7 @@ export function renderLayoutNode(node: LayoutNode, renderComponent: ComponentRen
     })
   }
 
-  return <div className="text-sm text-muted-foreground p-4">空节点</div>
+  return <div className="text-muted-foreground p-4 text-sm">空节点</div>
 }
 
 /**
@@ -167,7 +173,10 @@ export function renderLayoutNode(node: LayoutNode, renderComponent: ComponentRen
  * @param renderComponent - 组件渲染器回调
  * @returns 水平分割布局 JSX
  */
-function renderSplitHorizontal(node: LayoutNode, renderComponent: ComponentRenderer): React.ReactNode {
+function renderSplitHorizontal(
+  node: LayoutNode,
+  renderComponent: ComponentRenderer,
+): React.ReactNode {
   const children = node.children ?? []
   const ratio = node.ratio ?? children.map(() => 1 / children.length)
 
@@ -191,12 +200,15 @@ function renderSplitHorizontal(node: LayoutNode, renderComponent: ComponentRende
  * @param renderComponent - 组件渲染器回调
  * @returns 垂直分割布局 JSX
  */
-function renderSplitVertical(node: LayoutNode, renderComponent: ComponentRenderer): React.ReactNode {
+function renderSplitVertical(
+  node: LayoutNode,
+  renderComponent: ComponentRenderer,
+): React.ReactNode {
   const children = node.children ?? []
   const ratio = node.ratio ?? children.map(() => 1 / children.length)
 
   return (
-    <div className="flex flex-col h-full w-full" style={{ gap: 1 }}>
+    <div className="flex h-full w-full flex-col" style={{ gap: 1 }}>
       {children.map((child, i) => (
         <div key={i} style={{ flex: ratio[i] ?? 1, overflow: 'auto' }}>
           {renderLayoutNode(child, renderComponent)}
@@ -220,13 +232,15 @@ function renderTabs(node: LayoutNode, renderComponent: ComponentRenderer): React
   const defaultTab = node.default_tab ?? 0
 
   return (
-    <div className="h-full w-full flex flex-col">
-      <div className="flex border-b border-border">
+    <div className="flex h-full w-full flex-col">
+      <div className="border-border flex border-b">
         {children.map((child, i) => (
           <div
             key={i}
-            className={`px-3 py-2 text-sm cursor-pointer border-b-2 ${
-              i === defaultTab ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground'
+            className={`cursor-pointer border-b-2 px-3 py-2 text-sm ${
+              i === defaultTab
+                ? 'border-primary text-foreground'
+                : 'text-muted-foreground border-transparent'
             }`}
           >
             {child.icon && <span className="mr-1">{child.icon}</span>}
@@ -255,7 +269,10 @@ function renderGrid(node: LayoutNode, renderComponent: ComponentRenderer): React
   const children = node.children ?? []
 
   return (
-    <div className="grid h-full w-full" style={{ gridTemplateColumns: `repeat(${columns}, 1fr)`, gap: 1 }}>
+    <div
+      className="grid h-full w-full"
+      style={{ gridTemplateColumns: `repeat(${columns}, 1fr)`, gap: 1 }}
+    >
       {children.map((child, i) => (
         <div key={i} className="overflow-auto">
           {renderLayoutNode(child, renderComponent)}
@@ -278,7 +295,7 @@ function renderStack(node: LayoutNode, renderComponent: ComponentRenderer): Reac
   const children = node.children ?? []
 
   return (
-    <div className="flex flex-col h-full w-full" style={{ gap: 1 }}>
+    <div className="flex h-full w-full flex-col" style={{ gap: 1 }}>
       {children.map((child, i) => (
         <div key={i} className="flex-1 overflow-auto">
           {renderLayoutNode(child, renderComponent)}

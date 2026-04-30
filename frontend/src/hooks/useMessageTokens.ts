@@ -65,7 +65,7 @@ export function useMessageTokens(options: UseMessageTokensOptions = {}) {
           abortControllerRef.current = new AbortController()
 
           // 转换消息格式
-          const messagesPayload = messages.map(msg => ({
+          const messagesPayload = messages.map((msg) => ({
             role: msg.role,
             content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
           }))
@@ -91,7 +91,7 @@ export function useMessageTokens(options: UseMessageTokensOptions = {}) {
         }
       }, debounceMs)
     },
-    [debounceMs, enabled, model]
+    [debounceMs, enabled, model],
   )
 
   // 清理定时器和请求

@@ -284,7 +284,7 @@ async def run_sub_conversation(
         idle_timeout: 未使用，保留接口兼容
     """
 
-    pending = notifier.get_next_pending()
+    pending = await _get_valid_pending(notifier, interaction_service)
     if not pending:
         return
 
@@ -389,7 +389,9 @@ async def run_sub_conversation(
 
             # 提交后短暂等待，检查队列是否有后续请求
             await asyncio.sleep(0.5)
-            next_pending = notifier.get_next_pending()
+            next_pending = await _get_valid_pending(
+                notifier, interaction_service,
+            )
             if next_pending is None:
                 console.print(
                     "[bold magenta]──────────────────────"
@@ -418,6 +420,12 @@ async def run_sub_conversation(
             _show_request_panel(
                 console, title, agent_name, mode, msg_data
             )
+
+    except (EOFError, asyncio.CancelledError):
+        console.print(
+            "\n[dim yellow]stdin 已关闭，退出子对话"
+            "[/dim yellow]"
+        )
 
     finally:
         input_adapter._prompt_str = original_prompt
@@ -492,3 +500,44 @@ def _resolve_choice(user_input: str, options: list[dict]) -> str | None:
             return options[index].get("id")
 
     return None
+
+
+async def _get_valid_pending(
+    notifier: CLIInteractionNotifier,
+    interaction_service: Any,
+) -> dict[str, Any] | None:
+    """从通知器队列中取出下一个仍然有效的请求。
+
+    跳过已被取消、超时或已完成的请求（管道取消时
+    工具会调用 cancel_request 清理，但通知器队列中
+    残留的条目不会被自动移除）。
+
+    Args:
+        notifier: CLI 交互通知器
+        interaction_service: 交互服务实例
+
+    Returns:
+        第一个仍然有效的请求，或 None
+    """
+    while True:
+        pending = notifier.get_next_pending()
+        if pending is None:
+            return None
+        request_id = pending.get("request_id", "")
+        if interaction_service and request_id:
+            try:
+                record = await interaction_service.get_request(
+                    request_id,
+                )
+                if record and record.get("status") == "pending":
+                    return pending
+                logger.debug(
+                    "[CLINotifier] 跳过已失效请求 | "
+                    "request_id=%s | status=%s",
+                    request_id,
+                    record.get("status", "?") if record else "gone",
+                )
+            except Exception:
+                return pending
+        else:
+            return pending

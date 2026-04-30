@@ -123,13 +123,8 @@ export interface ContextTokensResponse {
  * @param request - Token 计算请求
  * @returns Token 计算响应
  */
-export async function countTokens(
-  request: TokenCountRequest
-): Promise<TokenCountResponse> {
-  const response = await apiClient.post<TokenCountResponse>(
-    '/api/v1/tokens/count',
-    request
-  )
+export async function countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
+  const response = await apiClient.post<TokenCountResponse>('/api/v1/tokens/count', request)
   return response.data
 }
 
@@ -140,11 +135,11 @@ export async function countTokens(
  * @returns 批量 Token 计算响应
  */
 export async function countTokensBatch(
-  request: BatchTokenCountRequest
+  request: BatchTokenCountRequest,
 ): Promise<BatchTokenCountResponse> {
   const response = await apiClient.post<BatchTokenCountResponse>(
     '/api/v1/tokens/count/batch',
-    request
+    request,
   )
   return response.data
 }
@@ -156,11 +151,11 @@ export async function countTokensBatch(
  * @returns 消息 Token 计算响应
  */
 export async function countMessagesTokens(
-  request: MessagesTokenCountRequest
+  request: MessagesTokenCountRequest,
 ): Promise<MessagesTokenCountResponse> {
   const response = await apiClient.post<MessagesTokenCountResponse>(
     '/api/v1/tokens/count/messages',
-    request
+    request,
   )
   return response.data
 }
@@ -180,12 +175,9 @@ export async function countMessagesTokens(
  * @param threadId - 线程ID
  * @returns 上下文Token统计响应
  */
-export async function getContextTokens(
-  threadId: string
-): Promise<ContextTokensResponse> {
+export async function getContextTokens(threadId: string): Promise<ContextTokensResponse> {
   const response = await apiClient.get<ContextTokensResponse>(
-    `/api/v1/threads/${threadId}/context-tokens`
+    `/api/v1/threads/${threadId}/context-tokens`,
   )
   return response.data
 }
-

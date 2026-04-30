@@ -7,19 +7,9 @@
  * @module toolCardRegistry
  */
 
-import type {
-  ActivityAction,
-  ActivityData,
-  ActivityDetailBlock,
-} from '@/types/activity'
+import { Copy, FileText, Globe, Terminal, Trash2 } from 'lucide-react'
+import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
-import {
-  Copy,
-  FileText,
-  Globe,
-  Terminal,
-  Trash2,
-} from 'lucide-react'
 import type { ReactNode } from 'react'
 
 /**
@@ -66,7 +56,7 @@ export function getToolCardConfig(toolName: string): ToolCardConfig | undefined 
  */
 export function enhanceActivityWithToolConfig(
   activity: ActivityData,
-  toolCall: MessageToolCall
+  toolCall: MessageToolCall,
 ): ActivityData {
   if (activity.type !== 'tool_call' || !activity.toolName) {
     return activity
@@ -142,7 +132,7 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   const actions: ActivityAction[] = [
     {
       id: 'copy_args',
-      icon: <Copy className="w-3.5 h-3.5" />,
+      icon: <Copy className="h-3.5 w-3.5" />,
       label: '复制参数',
       type: 'copy',
       onClick: () => {
@@ -154,14 +144,14 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
   if (toolCall.result !== undefined) {
     actions.push({
       id: 'copy_result',
-      icon: <Copy className="w-3.5 h-3.5" />,
+      icon: <Copy className="h-3.5 w-3.5" />,
       label: '复制结果',
       type: 'copy',
       onClick: () => {
         navigator.clipboard.writeText(
           typeof toolCall.result === 'string'
             ? toolCall.result
-            : JSON.stringify(toolCall.result, null, 2)
+            : JSON.stringify(toolCall.result, null, 2),
         )
       },
     })
@@ -190,7 +180,7 @@ function extractUrl(toolCall: MessageToolCall): string {
 
 registerToolCard({
   name: 'file_read',
-  icon: <FileText className="w-4 h-4" />,
+  icon: <FileText className="h-4 w-4" />,
   formatTitle: (tc) => {
     const path = extractFilePath(tc)
     const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
@@ -211,7 +201,8 @@ registerToolCard({
     }
 
     if (tc.result !== undefined && tc.result !== null) {
-      const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+      const resultStr =
+        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
       details.push({
         id: 'result',
         label: '文件内容',
@@ -230,11 +221,12 @@ registerToolCard({
     if (tc.result !== undefined) {
       actions.push({
         id: 'copy_content',
-        icon: <Copy className="w-3.5 h-3.5" />,
+        icon: <Copy className="h-3.5 w-3.5" />,
         label: '复制内容',
         type: 'copy',
         onClick: () => {
-          const content = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+          const content =
+            typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
           navigator.clipboard.writeText(content)
         },
       })
@@ -246,7 +238,7 @@ registerToolCard({
 
 registerToolCard({
   name: 'file_write',
-  icon: <Trash2 className="w-4 h-4" />,
+  icon: <Trash2 className="h-4 w-4" />,
   formatTitle: (tc) => {
     const path = extractFilePath(tc)
     const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
@@ -268,7 +260,8 @@ registerToolCard({
 
     const args = tc.tool_args as Record<string, unknown> | null
     if (args?.content) {
-      const contentStr = typeof args.content === 'string' ? args.content : JSON.stringify(args.content, null, 2)
+      const contentStr =
+        typeof args.content === 'string' ? args.content : JSON.stringify(args.content, null, 2)
       details.push({
         id: 'content',
         label: '写入内容',
@@ -286,7 +279,7 @@ registerToolCard({
 
 registerToolCard({
   name: 'bash_execute',
-  icon: <Terminal className="w-4 h-4" />,
+  icon: <Terminal className="h-4 w-4" />,
   formatTitle: (tc) => {
     const cmd = extractCommand(tc)
     if (cmd) {
@@ -312,7 +305,8 @@ registerToolCard({
     }
 
     if (tc.result !== undefined && tc.result !== null) {
-      const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+      const resultStr =
+        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
       details.push({
         id: 'result',
         label: '输出',
@@ -344,7 +338,7 @@ registerToolCard({
     if (cmd) {
       actions.push({
         id: 'copy_cmd',
-        icon: <Copy className="w-3.5 h-3.5" />,
+        icon: <Copy className="h-3.5 w-3.5" />,
         label: '复制命令',
         type: 'copy',
         onClick: () => navigator.clipboard.writeText(cmd),
@@ -354,11 +348,12 @@ registerToolCard({
     if (tc.result !== undefined) {
       actions.push({
         id: 'copy_output',
-        icon: <Copy className="w-3.5 h-3.5" />,
+        icon: <Copy className="h-3.5 w-3.5" />,
         label: '复制输出',
         type: 'copy',
         onClick: () => {
-          const content = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+          const content =
+            typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
           navigator.clipboard.writeText(content)
         },
       })
@@ -370,7 +365,7 @@ registerToolCard({
 
 registerToolCard({
   name: 'web_search',
-  icon: <Globe className="w-4 h-4" />,
+  icon: <Globe className="h-4 w-4" />,
   formatTitle: (tc) => {
     const query = extractUrl(tc)
     if (query) {
@@ -393,7 +388,8 @@ registerToolCard({
     }
 
     if (tc.result !== undefined && tc.result !== null) {
-      const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+      const resultStr =
+        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
       details.push({
         id: 'result',
         label: '搜索结果',
@@ -411,7 +407,7 @@ registerToolCard({
 
 registerToolCard({
   name: 'fetch',
-  icon: <Globe className="w-4 h-4" />,
+  icon: <Globe className="h-4 w-4" />,
   formatTitle: (tc) => {
     const url = extractUrl(tc)
     if (url) {
@@ -439,7 +435,8 @@ registerToolCard({
     }
 
     if (tc.result !== undefined && tc.result !== null) {
-      const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+      const resultStr =
+        typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
       const isLong = resultStr.length > 500
       details.push({
         id: 'result',

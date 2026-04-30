@@ -1,7 +1,7 @@
-import { ErrorType, reportError } from '@/services/errorReporting'
-import type { Agent } from '@/types/models'
 import { create } from 'zustand'
+import { ErrorType, reportError } from '@/services/errorReporting'
 import { tokenManager } from './tokenManager'
+import type { Agent } from '@/types/models'
 
 /**
  * Agent Store 状态管理
@@ -33,7 +33,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL
   ? `${import.meta.env.VITE_API_BASE_URL}/api/v1`
   : 'http://localhost:8888/api/v1'
 
-export const useAgentStore = create<AgentState>(set => ({
+export const useAgentStore = create<AgentState>((set) => ({
   agents: [],
   currentAgentId: null,
   isLoading: false,
@@ -53,7 +53,7 @@ export const useAgentStore = create<AgentState>(set => ({
     try {
       // 使用 tokenManager 获取 token
       const token = tokenManager.getToken()
-      
+
       // 检查 token 是否存在
       if (!token) {
         const errorMsg = '未找到认证令牌，请先登录'
@@ -84,7 +84,7 @@ export const useAgentStore = create<AgentState>(set => ({
 
         const errorMsg = `${errorDetail} (HTTP ${response.status})`
         set({ isLoading: false, error: errorMsg })
-        
+
         // 根据状态码确定错误类型
         let errorType: ErrorType = ErrorType.SERVER
         if (response.status === 401) {
@@ -103,7 +103,7 @@ export const useAgentStore = create<AgentState>(set => ({
           status: response.status,
           statusText: response.statusText,
         })
-        
+
         throw new Error(errorMsg)
       }
 
@@ -130,14 +130,13 @@ export const useAgentStore = create<AgentState>(set => ({
         createdAt: agent.created_at,
         updatedAt: agent.updated_at,
       }))
-      
+
       set({
         agents: mappedAgents,
         isLoading: false,
       })
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : '获取 Agent 列表失败'
+      const errorMessage = error instanceof Error ? error.message : '获取 Agent 列表失败'
       set({ isLoading: false, error: errorMessage })
       throw error
     }
@@ -179,7 +178,7 @@ export const useAgentStore = create<AgentState>(set => ({
         {
           componentName: 'AgentStore',
           operation: 'fetchDefaultAgent',
-        }
+        },
       )
       return null
     }

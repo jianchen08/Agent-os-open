@@ -11,7 +11,7 @@
  * - ServerEventDataMap - 服务端事件数据类型映射
  */
 
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { type WS_SERVER_EVENTS } from '@/constants/websocket'
 
 /**
  * 事件处理器类型
@@ -171,6 +171,11 @@ export interface ServerEventDataMap {
     message: string
     thread_id?: string
   }
+  [WS_SERVER_EVENTS.MISSED_MESSAGES]: {
+    messages: Array<Record<string, unknown>>
+    total: number
+    has_more: boolean
+  }
 }
 
 /**
@@ -187,7 +192,7 @@ export class EventHandlerManager {
    */
   subscribe<K extends keyof ServerEventDataMap>(
     event: K,
-    handler: EventHandler<ServerEventDataMap[K]>
+    handler: EventHandler<ServerEventDataMap[K]>,
   ): void
 
   /**
@@ -243,10 +248,7 @@ export class EventHandlerManager {
   /**
    * 触发类型安全的事件
    */
-  emit<K extends keyof ServerEventDataMap>(
-    event: K,
-    data: ServerEventDataMap[K]
-  ): void
+  emit<K extends keyof ServerEventDataMap>(event: K, data: ServerEventDataMap[K]): void
 
   /**
    * 触发通用事件
@@ -262,7 +264,7 @@ export class EventHandlerManager {
   emit(event: string, data: unknown): void {
     const handlers = this.handlers.get(event)
     if (handlers) {
-      handlers.forEach(handler => {
+      handlers.forEach((handler) => {
         try {
           handler(data)
         } catch (error) {

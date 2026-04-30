@@ -5,25 +5,19 @@
  * 渲染顺序：thinking -> text -> toolCalls[]
  */
 
-import { cn } from '@/lib/utils'
-import { ErrorType, reportError } from '@/services/errorReporting'
-import { useAgentStore } from '@/stores/agentStore'
-import { useSessionStore } from '@/stores/sessionStore'
-import { formatTimestamp } from '@/utils/format'
-import {
-    Bell,
-    Bot,
-    Check,
-    Loader2,
-    Sparkles,
-    User,
-} from 'lucide-react'
+import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { ErrorType, reportError } from '@/services/errorReporting'
+import { useAgentStore } from '@/stores/agentStore'
+import { useInteractionStore } from '@/stores/interactionStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { formatTimestamp } from '@/utils/format'
+import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
-import useMessageRender from './hooks/useMessageRender'
 import type { MessageItemProps } from './types'
 
 /**
@@ -36,12 +30,7 @@ interface MessageEditorProps {
   disabled?: boolean
 }
 
-const MessageEditor = ({
-  content,
-  onSave,
-  onCancel,
-  disabled = false,
-}: MessageEditorProps) => {
+const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageEditorProps) => {
   const [value, setValue] = useState(content)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -50,7 +39,7 @@ const MessageEditor = ({
       textareaRef.current.focus()
       textareaRef.current.setSelectionRange(
         textareaRef.current.value.length,
-        textareaRef.current.value.length
+        textareaRef.current.value.length,
       )
       textareaRef.current.style.height = 'auto'
       textareaRef.current.style.height = `${Math.max(100, textareaRef.current.scrollHeight)}px`
@@ -82,39 +71,31 @@ const MessageEditor = ({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-2 w-full">
+    <form onSubmit={handleSubmit} className="flex w-full flex-col gap-2">
       <textarea
         ref={textareaRef}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         disabled={disabled}
-        className="w-full min-h-[100px] p-3 rounded-md border border-input bg-background text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+        className="border-input bg-background focus:ring-ring min-h-[100px] w-full resize-none rounded-md border p-3 text-sm focus:ring-2 focus:outline-none"
         placeholder="编辑消息内容..."
       />
       <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground">
-          Ctrl+Enter 保存，Esc 取消
-        </span>
+        <span className="text-muted-foreground text-xs">Ctrl+Enter 保存，Esc 取消</span>
         <div className="flex gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            disabled={disabled}
-          >
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={disabled}>
             取消
           </Button>
           <Button type="submit" size="sm" disabled={disabled || !value.trim()}>
             {disabled ? (
               <>
-                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
                 保存中...
               </>
             ) : (
               <>
-                <Check className="w-4 h-4 mr-1" />
+                <Check className="mr-1 h-4 w-4" />
                 保存
               </>
             )}
@@ -137,6 +118,7 @@ export const MessageItem = ({
   onDelete: _onDelete,
   modelName,
   className = '',
+  searchQuery,
 }: MessageItemProps) => {
   const [isEditing, setIsEditing] = useState(false)
   const [_isRetrying, _setIsRetrying] = useState(false)
@@ -146,17 +128,25 @@ export const MessageItem = ({
   const isAssistant = message.role === 'assistant'
   const isTool = message.role === 'tool'
 
-  const isSystemMessage = message.metadata?.record_type === 'system' ||
-                          message.metadata?.type === 'system' ||
-                          message.metadata?.sender_type === 'system'
+  const isSystemMessage =
+    message.metadata?.record_type === 'system' ||
+    message.metadata?.type === 'system' ||
+    message.metadata?.sender_type === 'system'
 
   const { activeSessionId } = useSessionStore()
   const isMessageStreaming = message.status === 'streaming'
 
   const { agents } = useAgentStore()
-  const agent = message.agentId
-    ? agents.find(a => a.id === message.agentId)
-    : null
+  const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
+
+  const hasPendingInteraction = useInteractionStore(
+    (s) =>
+      s.pendingInteractions.some(
+        (i) =>
+          (i.threadId === message.sessionId || i.threadId === activeSessionId) &&
+          i.status === 'pending',
+      ),
+  )
 
   const handleContentUpdate = (newContent: string) => {
     setVersionContent(newContent)
@@ -209,38 +199,40 @@ export const MessageItem = ({
 
     return (
       <div
-        className={cn(
-          'flex gap-3 px-4 py-2 group transition-colors hover:bg-muted/30',
-          className
-        )}
+        className={cn('group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors', className)}
         data-testid="message-item"
         data-role="tool"
       >
-        <div className="flex-1 min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-sm">
-            <span className="font-medium text-muted-foreground">{toolName}</span>
-            <span className={cn(
-              'px-2 py-0.5 rounded-full text-xs',
-              toolStatus === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-              toolStatus === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
-              toolStatus === 'running' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
-              'bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400'
-            )}>
-              {toolStatus === 'completed' ? '已完成' :
-               toolStatus === 'failed' ? '失败' :
-               toolStatus === 'running' ? '执行中' : toolStatus}
+            <span className="text-muted-foreground font-medium">{toolName}</span>
+            <span
+              className={cn(
+                'rounded-full px-2 py-0.5 text-xs',
+                toolStatus === 'completed'
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                  : toolStatus === 'failed'
+                    ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                    : toolStatus === 'running'
+                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                      : 'bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400',
+              )}
+            >
+              {toolStatus === 'completed'
+                ? '已完成'
+                : toolStatus === 'failed'
+                  ? '失败'
+                  : toolStatus === 'running'
+                    ? '执行中'
+                    : toolStatus}
             </span>
-            {durationMs && (
-              <span className="text-xs text-muted-foreground">{durationMs}ms</span>
-            )}
+            {durationMs && <span className="text-muted-foreground text-xs">{durationMs}ms</span>}
           </div>
           {toolError && (
-            <div className="mt-1 text-sm text-red-600 dark:text-red-400">
-              {toolError}
-            </div>
+            <div className="mt-1 text-sm text-red-600 dark:text-red-400">{toolError}</div>
           )}
           {toolResult && (
-            <div className="mt-1 text-sm text-muted-foreground truncate">
+            <div className="text-muted-foreground mt-1 truncate text-sm">
               {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
             </div>
           )}
@@ -252,61 +244,55 @@ export const MessageItem = ({
   return (
     <div
       className={cn(
-        'flex gap-3 px-4 py-3 group transition-colors',
+        'group flex gap-3 px-4 py-3 transition-colors',
         isUser ? 'flex-row-reverse' : '',
         'hover:bg-muted/30',
-        className
+        className,
       )}
       data-testid="message-item"
       data-role={message.role}
     >
       <Avatar
         className={cn(
-          'flex-shrink-0 w-8 h-8 rounded-xl shadow-sm',
+          'h-8 w-8 flex-shrink-0 rounded-xl shadow-sm',
           isUser
             ? 'bg-primary text-primary-foreground'
             : isSystemMessage
-              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
-              : 'bg-secondary text-secondary-foreground'
+              ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400'
+              : 'bg-secondary text-secondary-foreground',
         )}
       >
         <AvatarFallback className="rounded-xl text-sm font-medium">
           {isUser ? (
-            <User className="w-4 h-4" />
+            <User className="h-4 w-4" />
           ) : isSystemMessage ? (
-            <Bell className="w-4 h-4" />
+            <Bell className="h-4 w-4" />
           ) : (
-            <Bot className="w-4 h-4" />
+            <Bot className="h-4 w-4" />
           )}
         </AvatarFallback>
       </Avatar>
 
       <div
         className={cn(
-          'flex flex-col min-w-0',
+          'flex min-w-0 flex-col',
           isUser ? 'items-end' : 'items-start',
-          isUser ? 'max-w-[80%] sm:max-w-[75%]' : 'flex-1 max-w-[calc(100%-44px)]'
+          isUser ? 'max-w-[80%] sm:max-w-[75%]' : 'max-w-[calc(100%-44px)] flex-1',
         )}
       >
         {isEditing ? (
           <div
-            className="p-3 w-full max-w-full"
+            className="w-full max-w-full p-3"
             style={{
-              backgroundColor: isUser
-                ? 'var(--bubble-user-bg)'
-                : 'var(--bubble-ai-bg)',
-              color: isUser
-                ? 'var(--bubble-user-text)'
-                : 'var(--bubble-ai-text)',
+              backgroundColor: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
+              color: isUser ? 'var(--bubble-user-text)' : 'var(--bubble-ai-text)',
               borderRadius: isUser
                 ? 'var(--bubble-user-radius, 1.5rem)'
                 : 'var(--bubble-ai-radius, 1rem)',
               boxShadow: isUser
                 ? 'var(--bubble-user-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))'
                 : 'var(--bubble-ai-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))',
-              border: isUser
-                ? 'var(--bubble-user-border, none)'
-                : 'var(--bubble-ai-border, none)',
+              border: isUser ? 'var(--bubble-user-border, none)' : 'var(--bubble-ai-border, none)',
               padding: isUser
                 ? 'var(--bubble-user-padding, 0.75rem 1rem)'
                 : 'var(--bubble-ai-padding, 0.75rem 1rem)',
@@ -322,26 +308,20 @@ export const MessageItem = ({
         ) : (
           <>
             {isAssistant && modelName && (
-              <div className="text-xs text-muted-foreground mb-1 px-1">
-                {modelName}
-              </div>
+              <div className="text-muted-foreground mb-1 px-1 text-xs">{modelName}</div>
             )}
             <div
               className={cn(
-              'overflow-hidden',
-              isSystemMessage
-                ? 'w-full border-l-4 border-amber-400'
-                : isUser
-                  ? 'max-w-full'
-                  : 'w-full'
-            )}
+                'overflow-hidden',
+                isSystemMessage
+                  ? 'w-full border-l-4 border-amber-400'
+                  : isUser
+                    ? 'max-w-full'
+                    : 'w-full',
+              )}
               style={{
-                backgroundColor: isUser
-                  ? 'var(--bubble-user-bg)'
-                  : 'var(--bubble-ai-bg)',
-                color: isUser
-                  ? 'var(--bubble-user-text)'
-                  : 'var(--bubble-ai-text)',
+                backgroundColor: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
+                color: isUser ? 'var(--bubble-user-text)' : 'var(--bubble-ai-text)',
                 borderRadius: isSystemMessage
                   ? 'var(--bubble-ai-radius, 1rem)'
                   : isUser
@@ -364,33 +344,48 @@ export const MessageItem = ({
                     : 'var(--bubble-ai-padding, 0.75rem 1rem)',
               }}
             >
-              <MessageContentRenderer
-                fragments={renderContext.fragments}
-                isStreaming={isMessageStreaming}
-              />
+              {isAssistant && isMessageStreaming && renderContext.fragments.length === 0 ? (
+                <div className="flex items-center gap-2">
+                  {hasPendingInteraction ? (
+                    <>
+                      <MessageSquare className="h-4 w-4 text-blue-500" />
+                      <span className="text-sm text-blue-600 dark:text-blue-400">等待用户响应...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-sm">思考中...</span>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <MessageContentRenderer
+                  fragments={renderContext.fragments}
+                  isStreaming={isMessageStreaming}
+                  searchQuery={searchQuery}
+                />
+              )}
             </div>
           </>
         )}
 
         <div
           className={cn(
-            'flex items-center gap-3 mt-1.5 text-xs text-muted-foreground',
-            isUser ? 'flex-row-reverse' : ''
+            'text-muted-foreground mt-1.5 flex items-center gap-3 text-xs',
+            isUser ? 'flex-row-reverse' : '',
           )}
         >
           {isAssistant && agent && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400 text-xs">
-              <Sparkles className="w-3 h-3" />
+            <span className="inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900/20 dark:text-blue-400">
+              <Sparkles className="h-3 w-3" />
               <span className="font-medium">{agent.name}</span>
             </span>
           )}
 
-          <span className="text-muted-foreground/70">
-            {formatTimestamp(message.timestamp)}
-          </span>
+          <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
 
           {activeSessionId && (
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+            <div className="opacity-0 transition-opacity duration-200 group-hover:opacity-100">
               <MessageActions
                 message={message}
                 sessionId={message.sessionId || activeSessionId}

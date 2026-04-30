@@ -5,16 +5,16 @@
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
-import type {
-    AcceptanceCriterion,
-    GetPhaseOutputResponse,
-    GetProjectsResponse,
-    GetTaskACsResponse,
-    GetTaskPhaseResponse,
-    Project,
-    TaskPhase,
-} from '@/types/task'
 import apiClient from '@/services/api/client'
+import type {
+  AcceptanceCriterion,
+  GetPhaseOutputResponse,
+  GetProjectsResponse,
+  GetTaskACsResponse,
+  GetTaskPhaseResponse,
+  Project,
+  TaskPhase,
+} from '@/types/task'
 
 /**
  * 任务信息类型
@@ -117,10 +117,7 @@ export async function getTasks(params?: {
   root_only?: boolean
   include_subtasks?: boolean
 }): Promise<TaskInfo[]> {
-  const response = await apiClient.get<TaskInfo[]>(
-    API_ENDPOINTS.TASKS.LIST,
-    { params }
-  )
+  const response = await apiClient.get<TaskInfo[]>(API_ENDPOINTS.TASKS.LIST, { params })
   return response.data
 }
 
@@ -131,9 +128,7 @@ export async function getTasks(params?: {
  * @returns 任务详情
  */
 export async function getTask(id: string): Promise<TaskInfo> {
-  const response = await apiClient.get<TaskInfo>(
-    API_ENDPOINTS.TASKS.GET(id)
-  )
+  const response = await apiClient.get<TaskInfo>(API_ENDPOINTS.TASKS.GET(id))
   return response.data
 }
 
@@ -165,10 +160,7 @@ export async function getTasksDebug(params?: {
   sort_order?: 'asc' | 'desc'
   status?: string
 }): Promise<TaskDebugListResponse> {
-  const response = await apiClient.get<TaskDebugListResponse>(
-    '/api/v1/tasks/debug/all',
-    { params }
-  )
+  const response = await apiClient.get<TaskDebugListResponse>('/api/v1/tasks/debug/all', { params })
   return response.data
 }
 
@@ -187,10 +179,7 @@ export async function fetchProjects(params?: {
   limit?: number
   status?: string
 }): Promise<GetProjectsResponse> {
-  const response = await apiClient.get<GetProjectsResponse>(
-    API_ENDPOINTS.PROJECTS.LIST,
-    { params }
-  )
+  const response = await apiClient.get<GetProjectsResponse>(API_ENDPOINTS.PROJECTS.LIST, { params })
   return response.data
 }
 
@@ -201,9 +190,7 @@ export async function fetchProjects(params?: {
  * @returns 项目详情
  */
 export async function fetchProject(projectId: string): Promise<Project> {
-  const response = await apiClient.get<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.GET(projectId)
-  )
+  const response = await apiClient.get<{ project: Project }>(API_ENDPOINTS.PROJECTS.GET(projectId))
   return response.data.project
 }
 
@@ -221,17 +208,14 @@ export async function createProject(
   options?: {
     autoExecute?: boolean
     metadata?: Record<string, unknown>
-  }
+  },
 ): Promise<Project> {
-  const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.CREATE,
-    {
-      goal,
-      session_id: sessionId,
-      auto_execute: options?.autoExecute,
-      metadata: options?.metadata,
-    }
-  )
+  const response = await apiClient.post<{ project: Project }>(API_ENDPOINTS.PROJECTS.CREATE, {
+    goal,
+    session_id: sessionId,
+    auto_execute: options?.autoExecute,
+    metadata: options?.metadata,
+  })
   return response.data.project
 }
 
@@ -254,11 +238,11 @@ export async function deleteProject(projectId: string): Promise<void> {
  */
 export async function toggleProjectAutoExecute(
   projectId: string,
-  enabled: boolean
+  enabled: boolean,
 ): Promise<Project> {
   const response = await apiClient.post<{ project: Project }>(
     API_ENDPOINTS.PROJECTS.TOGGLE_AUTO_EXECUTE(projectId),
-    { enabled }
+    { enabled },
   )
   return response.data.project
 }
@@ -271,7 +255,7 @@ export async function toggleProjectAutoExecute(
  */
 export async function pauseProject(projectId: string): Promise<Project> {
   const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.PAUSE(projectId)
+    API_ENDPOINTS.PROJECTS.PAUSE(projectId),
   )
   return response.data.project
 }
@@ -284,7 +268,7 @@ export async function pauseProject(projectId: string): Promise<Project> {
  */
 export async function resumeProject(projectId: string): Promise<Project> {
   const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.RESUME(projectId)
+    API_ENDPOINTS.PROJECTS.RESUME(projectId),
   )
   return response.data.project
 }
@@ -301,7 +285,7 @@ export async function resumeProject(projectId: string): Promise<Project> {
  */
 export async function fetchTaskPhase(taskId: string): Promise<GetTaskPhaseResponse> {
   const response = await apiClient.get<GetTaskPhaseResponse>(
-    API_ENDPOINTS.TASK_PHASES.GET_STATUS(taskId)
+    API_ENDPOINTS.TASK_PHASES.GET_STATUS(taskId),
   )
   return response.data
 }
@@ -315,15 +299,12 @@ export async function fetchTaskPhase(taskId: string): Promise<GetTaskPhaseRespon
  */
 export async function completePreparePhase(
   taskId: string,
-  output?: Record<string, unknown>
+  output?: Record<string, unknown>,
 ): Promise<{ taskId: string; currentPhase: TaskPhase }> {
   const response = await apiClient.post<{
     task_id: string
     current_phase: TaskPhase
-  }>(
-    API_ENDPOINTS.TASK_PHASES.COMPLETE_PREPARE(taskId),
-    { output }
-  )
+  }>(API_ENDPOINTS.TASK_PHASES.COMPLETE_PREPARE(taskId), { output })
   return {
     taskId: response.data.task_id,
     currentPhase: response.data.current_phase,
@@ -339,15 +320,12 @@ export async function completePreparePhase(
  */
 export async function completeExecutePhase(
   taskId: string,
-  output?: Record<string, unknown>
+  output?: Record<string, unknown>,
 ): Promise<{ taskId: string; currentPhase: TaskPhase }> {
   const response = await apiClient.post<{
     task_id: string
     current_phase: TaskPhase
-  }>(
-    API_ENDPOINTS.TASK_PHASES.COMPLETE_EXECUTE(taskId),
-    output ? { output } : {}
-  )
+  }>(API_ENDPOINTS.TASK_PHASES.COMPLETE_EXECUTE(taskId), output ? { output } : {})
   return {
     taskId: response.data.task_id,
     currentPhase: response.data.current_phase,
@@ -363,10 +341,10 @@ export async function completeExecutePhase(
  */
 export async function fetchPhaseOutput(
   taskId: string,
-  phase: TaskPhase
+  phase: TaskPhase,
 ): Promise<GetPhaseOutputResponse> {
   const response = await apiClient.get<GetPhaseOutputResponse>(
-    API_ENDPOINTS.TASK_PHASES.GET_OUTPUT(taskId, phase)
+    API_ENDPOINTS.TASK_PHASES.GET_OUTPUT(taskId, phase),
   )
   return response.data
 }
@@ -383,7 +361,7 @@ export async function fetchPhaseOutput(
  */
 export async function fetchTaskACs(taskId: string): Promise<GetTaskACsResponse> {
   const response = await apiClient.get<GetTaskACsResponse>(
-    API_ENDPOINTS.TASK_EVALUATION.LIST(taskId)
+    API_ENDPOINTS.TASK_EVALUATION.LIST(taskId),
   )
   return response.data
 }
@@ -399,11 +377,11 @@ export async function fetchTaskACs(taskId: string): Promise<GetTaskACsResponse> 
 export async function evaluateAC(
   taskId: string,
   acId: string,
-  evidence?: Record<string, unknown>
+  evidence?: Record<string, unknown>,
 ): Promise<AcceptanceCriterion> {
   const response = await apiClient.post<{ acceptance_criterion: AcceptanceCriterion }>(
     API_ENDPOINTS.TASK_EVALUATION.EVALUATE(taskId, acId),
-    evidence ? { evidence } : {}
+    evidence ? { evidence } : {},
   )
   return response.data.acceptance_criterion
 }
@@ -417,12 +395,12 @@ export async function evaluateAC(
  */
 export async function evaluateAllACs(
   taskId: string,
-  parallel: boolean = true
+  parallel: boolean = true,
 ): Promise<AcceptanceCriterion[]> {
   const response = await apiClient.post<GetTaskACsResponse>(
     API_ENDPOINTS.TASK_EVALUATION.EVALUATE_ALL(taskId),
     null,
-    { params: { parallel } }
+    { params: { parallel } },
   )
   return response.data.acceptanceCriteria
 }
@@ -434,12 +412,9 @@ export async function evaluateAllACs(
  * @param acId AC ID
  * @returns 验收标准信息
  */
-export async function fetchACResult(
-  taskId: string,
-  acId: string
-): Promise<AcceptanceCriterion> {
+export async function fetchACResult(taskId: string, acId: string): Promise<AcceptanceCriterion> {
   const response = await apiClient.get<{ acceptance_criterion: AcceptanceCriterion }>(
-    API_ENDPOINTS.TASK_EVALUATION.GET_RESULT(taskId, acId)
+    API_ENDPOINTS.TASK_EVALUATION.GET_RESULT(taskId, acId),
   )
   return response.data.acceptance_criterion
 }
@@ -466,9 +441,7 @@ export interface TaskPauseResumeResponse {
  * @returns 操作结果
  */
 export async function pauseTask(taskId: string): Promise<TaskPauseResumeResponse> {
-  const response = await apiClient.post<TaskPauseResumeResponse>(
-    API_ENDPOINTS.TASKS.PAUSE(taskId)
-  )
+  const response = await apiClient.post<TaskPauseResumeResponse>(API_ENDPOINTS.TASKS.PAUSE(taskId))
   return response.data
 }
 
@@ -479,8 +452,6 @@ export async function pauseTask(taskId: string): Promise<TaskPauseResumeResponse
  * @returns 操作结果
  */
 export async function resumeTask(taskId: string): Promise<TaskPauseResumeResponse> {
-  const response = await apiClient.post<TaskPauseResumeResponse>(
-    API_ENDPOINTS.TASKS.RESUME(taskId)
-  )
+  const response = await apiClient.post<TaskPauseResumeResponse>(API_ENDPOINTS.TASKS.RESUME(taskId))
   return response.data
 }

@@ -7,13 +7,7 @@ export { ROUTES } from './routes'
 export type { RoutePath } from './routes'
 
 // 导出API常量
-export {
-  API_BASE_URL,
-  API_ENDPOINTS,
-  API_TIMEOUT,
-  API_RETRY_COUNT,
-  API_RETRY_DELAY,
-} from './api'
+export { API_BASE_URL, API_ENDPOINTS, API_TIMEOUT, API_RETRY_COUNT, API_RETRY_DELAY } from './api'
 
 // 导出WebSocket常量
 export {

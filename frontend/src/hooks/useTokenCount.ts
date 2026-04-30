@@ -64,7 +64,7 @@ export function useTokenCount(options: UseTokenCountOptions = {}) {
         }
       }, debounceMs)
     },
-    [debounceMs, enabled]
+    [debounceMs, enabled],
   )
 
   /**
@@ -92,7 +92,7 @@ export function useTokenCount(options: UseTokenCountOptions = {}) {
         setIsLoading(false)
       }
     },
-    [enabled]
+    [enabled],
   )
 
   // 清理定时器

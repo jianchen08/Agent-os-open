@@ -4,11 +4,11 @@
  * 根据执行记录 ID 查询数据并渲染活动卡片
  */
 
+import { AlertCircle } from 'lucide-react'
 import { useExecutionRecord } from '@/hooks/useExecutionRecord'
 import { cn } from '@/lib/utils'
-import { AlertCircle } from 'lucide-react'
-import type { FC } from 'react'
 import ActivityCard from './ActivityCard'
+import type { FC } from 'react'
 
 /**
  * 组件属性
@@ -28,15 +28,15 @@ interface ExecutionCardLoaderProps {
 const LoadingSkeleton: FC<{ className?: string }> = ({ className }) => (
   <div
     className={cn(
-      'mt-2 rounded-xl border border-border/50 bg-muted/20 p-3 animate-pulse',
-      className
+      'border-border/50 bg-muted/20 mt-2 animate-pulse rounded-xl border p-3',
+      className,
     )}
   >
     <div className="flex items-center gap-2">
-      <div className="w-7 h-7 rounded-lg bg-muted" />
+      <div className="bg-muted h-7 w-7 rounded-lg" />
       <div className="flex-1 space-y-2">
-        <div className="h-4 bg-muted rounded w-1/3" />
-        <div className="h-3 bg-muted rounded w-1/4" />
+        <div className="bg-muted h-4 w-1/3 rounded" />
+        <div className="bg-muted h-3 w-1/4 rounded" />
       </div>
     </div>
   </div>
@@ -45,19 +45,16 @@ const LoadingSkeleton: FC<{ className?: string }> = ({ className }) => (
 /**
  * 错误显示
  */
-const ErrorDisplay: FC<{ message: string; className?: string }> = ({
-  message,
-  className,
-}) => (
+const ErrorDisplay: FC<{ message: string; className?: string }> = ({ message, className }) => (
   <div
     className={cn(
       'mt-2 rounded-xl border border-red-200/50 bg-red-50/50',
       'dark:border-red-800/30 dark:bg-red-900/10',
-      'p-3 flex items-center gap-2 text-sm text-red-600 dark:text-red-400',
-      className
+      'flex items-center gap-2 p-3 text-sm text-red-600 dark:text-red-400',
+      className,
     )}
   >
-    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+    <AlertCircle className="h-4 w-4 flex-shrink-0" />
     <span>{message}</span>
   </div>
 )
@@ -90,11 +87,7 @@ const ExecutionCardLoader: FC<ExecutionCardLoaderProps> = ({
   }
 
   return (
-    <ActivityCard
-      activity={activity}
-      defaultExpanded={defaultExpanded}
-      className={className}
-    />
+    <ActivityCard activity={activity} defaultExpanded={defaultExpanded} className={className} />
   )
 }
 

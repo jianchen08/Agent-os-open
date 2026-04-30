@@ -94,26 +94,19 @@ export interface SupportedTypesResponse {
 /**
  * 上传文件
  */
-export async function uploadFile(
-  file: File,
-  modelName?: string
-): Promise<FileUploadResponse> {
+export async function uploadFile(file: File, modelName?: string): Promise<FileUploadResponse> {
   const formData = new FormData()
   formData.append('file', file)
   if (modelName) {
     formData.append('model_name', modelName)
   }
 
-  const response = await apiClient.post<FileUploadResponse>(
-    '/api/v1/files/upload',
-    formData,
-    {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-      timeout: 60000,
-    }
-  )
+  const response = await apiClient.post<FileUploadResponse>('/api/v1/files/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+    timeout: 60000,
+  })
 
   return response.data
 }
@@ -121,13 +114,10 @@ export async function uploadFile(
 /**
  * 获取模型文件能力
  */
-export async function getModelCapabilities(
-  modelName: string
-): Promise<FileCapabilityResponse> {
-  const response = await apiClient.get<FileCapabilityResponse>(
-    `/api/v1/files/capabilities`,
-    { params: { model_name: modelName } }
-  )
+export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
+  const response = await apiClient.get<FileCapabilityResponse>(`/api/v1/files/capabilities`, {
+    params: { model_name: modelName },
+  })
   return response.data
 }
 
@@ -135,9 +125,7 @@ export async function getModelCapabilities(
  * 获取支持的文件类型
  */
 export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
-  const response = await apiClient.get<SupportedTypesResponse>(
-    '/files/supported-types'
-  )
+  const response = await apiClient.get<SupportedTypesResponse>('/files/supported-types')
   return response.data
 }
 
@@ -146,15 +134,10 @@ export async function getSupportedTypes(): Promise<SupportedTypesResponse> {
  */
 export function validateFile(
   file: File,
-  capabilities?: FileCapabilityResponse
+  capabilities?: FileCapabilityResponse,
 ): { valid: boolean; error?: string } {
   const imageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-  const documentTypes = [
-    'application/pdf',
-    'text/plain',
-    'text/markdown',
-    'text/csv',
-  ]
+  const documentTypes = ['application/pdf', 'text/plain', 'text/markdown', 'text/csv']
   const audioTypes = [
     'audio/webm',
     'audio/webm;codecs=opus',
@@ -166,7 +149,7 @@ export function validateFile(
 
   const isImage = imageTypes.includes(file.type)
   const isDocument = documentTypes.includes(file.type)
-  const isAudio = audioTypes.some(type => file.type === type || file.type.startsWith('audio/'))
+  const isAudio = audioTypes.some((type) => file.type === type || file.type.startsWith('audio/'))
 
   if (!isImage && !isDocument && !isAudio) {
     return {
@@ -206,26 +189,13 @@ export function validateFile(
 /**
  * 获取文件类型分类
  */
-export function getFileCategory(
-  mimeType: string
-): 'image' | 'document' | 'audio' | 'unknown' {
+export function getFileCategory(mimeType: string): 'image' | 'document' | 'audio' | 'unknown' {
   const imageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-  const documentTypes = [
-    'application/pdf',
-    'text/plain',
-    'text/markdown',
-    'text/csv',
-  ]
-  const audioTypes = [
-    'audio/webm',
-    'audio/mp4',
-    'audio/mpeg',
-    'audio/wav',
-    'audio/ogg',
-  ]
+  const documentTypes = ['application/pdf', 'text/plain', 'text/markdown', 'text/csv']
+  const audioTypes = ['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/ogg']
 
   if (imageTypes.includes(mimeType)) return 'image'
   if (documentTypes.includes(mimeType)) return 'document'
-  if (audioTypes.some(type => mimeType === type || mimeType.startsWith('audio/'))) return 'audio'
+  if (audioTypes.some((type) => mimeType === type || mimeType.startsWith('audio/'))) return 'audio'
   return 'unknown'
 }

@@ -453,7 +453,7 @@ export function createStandardMessage<T extends StandardMessage>(
   options?: {
     messageId?: string
     timestamp?: string
-  }
+  },
 ): T {
   return {
     type,
@@ -467,7 +467,7 @@ export function createStandardMessage<T extends StandardMessage>(
 /**
  * 验证消息格式是否符合标准
  */
-export function isStandardMessage(message: any): message is StandardMessage {
+export function isStandardMessage(message: unknown): message is StandardMessage {
   return (
     typeof message === 'object' &&
     message !== null &&

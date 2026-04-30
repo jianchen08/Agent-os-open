@@ -5,15 +5,15 @@
  * 合并事件数据为统一的卡片状态
  */
 
-import type {
-    ExecutionCardData,
-    ExecutionDoneEvent,
-    ExecutionEvent,
-    ExecutionProgressEvent,
-    ExecutionStartEvent,
-} from '@/types/execution'
-import { mergeExecutionEvent } from '@/types/execution'
 import { useCallback, useMemo, useState } from 'react'
+import { mergeExecutionEvent } from '@/types/execution'
+import type {
+  ExecutionCardData,
+  ExecutionDoneEvent,
+  ExecutionEvent,
+  ExecutionProgressEvent,
+  ExecutionStartEvent,
+} from '@/types/execution'
 
 /**
  * Hook 返回值类型
@@ -102,7 +102,7 @@ export function useExecutionCards(): UseExecutionCardsReturn {
           break
       }
     },
-    [handleStart, handleProgress, handleDone]
+    [handleStart, handleProgress, handleDone],
   )
 
   /**
@@ -112,7 +112,7 @@ export function useExecutionCards(): UseExecutionCardsReturn {
     (id: string) => {
       return cards.get(id)
     },
-    [cards]
+    [cards],
   )
 
   /**
@@ -120,11 +120,9 @@ export function useExecutionCards(): UseExecutionCardsReturn {
    */
   const getChildCards = useCallback(
     (parentId: string) => {
-      return Array.from(cards.values()).filter(
-        (card) => card.parentId === parentId
-      )
+      return Array.from(cards.values()).filter((card) => card.parentId === parentId)
     },
-    [cards]
+    [cards],
   )
 
   /**
@@ -160,9 +158,7 @@ export function useExecutionCards(): UseExecutionCardsReturn {
    * 正在执行的卡片数量
    */
   const runningCount = useMemo(() => {
-    return Array.from(cards.values()).filter(
-      (card) => card.status === 'running'
-    ).length
+    return Array.from(cards.values()).filter((card) => card.status === 'running').length
   }, [cards])
 
   return {

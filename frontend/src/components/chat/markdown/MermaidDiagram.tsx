@@ -6,9 +6,9 @@
  * 注意：需要安装依赖 mermaid
  */
 
-import { cn } from '@/lib/utils'
 import mermaid from 'mermaid'
 import { memo, useEffect, useId, useRef, useState, type FC } from 'react'
+import { cn } from '@/lib/utils'
 
 /** 标记是否已初始化 */
 let isInitialized = false
@@ -23,8 +23,7 @@ function initMermaid() {
     startOnLoad: false,
     theme: 'neutral',
     securityLevel: 'loose',
-    fontFamily:
-      'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
+    fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
     flowchart: {
       useMaxWidth: true,
       htmlLabels: true,
@@ -69,13 +68,11 @@ export interface MermaidDiagramProps {
  * 清理 Mermaid 代码
  */
 function cleanMermaidCode(code: string): string {
-  return (
-    code
-      .trim()
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-  )
+  return code
+    .trim()
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
 }
 
 /**
@@ -86,10 +83,13 @@ function isCompleteMermaidCode(code: string): boolean {
 
   if (!trimmed) return false
 
-  const hasGraphType = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|requirementDiagram|gitgraph|C4Context|mindmap|timeline|sankey|xychart|block-beta|packet-beta|architecture-beta|kanban)/i.test(trimmed)
+  const hasGraphType =
+    /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|requirementDiagram|gitgraph|C4Context|mindmap|timeline|sankey|xychart|block-beta|packet-beta|architecture-beta|kanban)/i.test(
+      trimmed,
+    )
   if (!hasGraphType) return false
 
-  const lines = trimmed.split('\n').filter(line => line.trim())
+  const lines = trimmed.split('\n').filter((line) => line.trim())
   if (lines.length === 0) return false
 
   let braceCount = 0
@@ -138,150 +138,147 @@ function isCompleteMermaidCode(code: string): boolean {
 /**
  * Mermaid 图表渲染组件
  */
-export const MermaidDiagram: FC<MermaidDiagramProps> = memo(
-  ({ code, className }) => {
-    const containerRef = useRef<HTMLDivElement>(null)
-    const [error, setError] = useState<string | null>(null)
-    const [isRendering, setIsRendering] = useState(true)
-    const uniqueId = useId().replace(/:/g, '-')
+export const MermaidDiagram: FC<MermaidDiagramProps> = memo(({ code, className }) => {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [isRendering, setIsRendering] = useState(true)
+  const uniqueId = useId().replace(/:/g, '-')
 
-    useEffect(() => {
-      initMermaid()
+  useEffect(() => {
+    initMermaid()
 
-      const renderDiagram = async () => {
-        if (!containerRef.current) return
+    const renderDiagram = async () => {
+      if (!containerRef.current) return
 
-        const cleanedCode = cleanMermaidCode(code)
-        if (!cleanedCode) {
-          setError('图表代码为空')
-          setIsRendering(false)
-          return
-        }
-
-        if (!isCompleteMermaidCode(cleanedCode)) {
-          setIsRendering(true)
-          return
-        }
-
-        setIsRendering(true)
-        setError(null)
-
-        try {
-          containerRef.current.innerHTML = ''
-
-          const id = `mermaid-diagram-${uniqueId}-${Date.now()}`
-
-          const { svg, bindFunctions } = await mermaid.render(id, cleanedCode)
-
-          if (containerRef.current) {
-            const parser = new DOMParser()
-            const doc = parser.parseFromString(svg, 'image/svg+xml')
-            const svgElement = doc.querySelector('svg')
-
-            if (svgElement) {
-              svgElement.removeAttribute('width')
-              svgElement.removeAttribute('height')
-
-              svgElement.style.width = '100%'
-              svgElement.style.height = 'auto'
-              svgElement.style.maxWidth = '100%'
-              svgElement.style.display = 'block'
-              svgElement.style.verticalAlign = 'bottom'
-              svgElement.style.margin = '0'
-              svgElement.style.padding = '0'
-            }
-
-            containerRef.current.innerHTML = doc.documentElement.outerHTML
-
-            requestAnimationFrame(() => {
-              const renderedSvg = containerRef.current?.querySelector('svg')
-              if (renderedSvg && containerRef.current) {
-                try {
-                  const bbox = renderedSvg.getBBox()
-                  renderedSvg.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`)
-                  renderedSvg.style.height = `${bbox.height}px`
-                  const totalHeight = bbox.height + 32
-                  containerRef.current.style.height = `${totalHeight}px`
-                  containerRef.current.style.minHeight = `${totalHeight}px`
-                  containerRef.current.style.maxHeight = `${totalHeight}px`
-                } catch (e) {
-                  console.warn('获取 SVG bbox 失败:', e)
-                }
-              }
-            })
-
-            bindFunctions?.(containerRef.current)
-          }
-        } catch (err) {
-          console.warn('Mermaid 渲染失败:', err)
-          let errorMsg = '图表语法错误'
-          if (err instanceof Error) {
-            const match = err.message.match(/Parse error on line (\d+)/)
-            if (match) {
-              errorMsg = `第 ${match[1]} 行语法错误`
-            } else if (err.message.includes('Syntax error')) {
-              errorMsg = '图表语法错误，请检查格式'
-            } else {
-              errorMsg = err.message.slice(0, 100)
-            }
-          }
-          setError(errorMsg)
-        } finally {
-          setIsRendering(false)
-        }
+      const cleanedCode = cleanMermaidCode(code)
+      if (!cleanedCode) {
+        setError('图表代码为空')
+        setIsRendering(false)
+        return
       }
 
-      renderDiagram()
-    }, [code, uniqueId])
+      if (!isCompleteMermaidCode(cleanedCode)) {
+        setIsRendering(true)
+        return
+      }
 
-    if (error) {
-      return (
-        <div
-          className={cn(
-            'my-4 p-4 rounded-lg',
-            'bg-destructive/10 border border-destructive/30',
-            className
-          )}
-        >
-          <div className="text-sm text-destructive font-medium mb-2">
-            {error}
-          </div>
-          <details className="mt-2">
-            <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-              查看源代码
-            </summary>
-            <pre className="mt-2 p-3 text-xs bg-muted rounded-md overflow-x-auto font-mono">
-              {code}
-            </pre>
-          </details>
-        </div>
-      )
+      setIsRendering(true)
+      setError(null)
+
+      try {
+        containerRef.current.innerHTML = ''
+
+        const id = `mermaid-diagram-${uniqueId}-${Date.now()}`
+
+        const { svg, bindFunctions } = await mermaid.render(id, cleanedCode)
+
+        if (containerRef.current) {
+          const parser = new DOMParser()
+          const doc = parser.parseFromString(svg, 'image/svg+xml')
+          const svgElement = doc.querySelector('svg')
+
+          if (svgElement) {
+            svgElement.removeAttribute('width')
+            svgElement.removeAttribute('height')
+
+            svgElement.style.width = '100%'
+            svgElement.style.height = 'auto'
+            svgElement.style.maxWidth = '100%'
+            svgElement.style.display = 'block'
+            svgElement.style.verticalAlign = 'bottom'
+            svgElement.style.margin = '0'
+            svgElement.style.padding = '0'
+          }
+
+          containerRef.current.innerHTML = doc.documentElement.outerHTML
+
+          requestAnimationFrame(() => {
+            const renderedSvg = containerRef.current?.querySelector('svg')
+            if (renderedSvg && containerRef.current) {
+              try {
+                const bbox = renderedSvg.getBBox()
+                renderedSvg.setAttribute(
+                  'viewBox',
+                  `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`,
+                )
+                renderedSvg.style.height = `${bbox.height}px`
+                const totalHeight = bbox.height + 32
+                containerRef.current.style.height = `${totalHeight}px`
+                containerRef.current.style.minHeight = `${totalHeight}px`
+                containerRef.current.style.maxHeight = `${totalHeight}px`
+              } catch (e) {
+                console.warn('获取 SVG bbox 失败:', e)
+              }
+            }
+          })
+
+          bindFunctions?.(containerRef.current)
+        }
+      } catch (err) {
+        console.warn('Mermaid 渲染失败:', err)
+        let errorMsg = '图表语法错误'
+        if (err instanceof Error) {
+          const match = err.message.match(/Parse error on line (\d+)/)
+          if (match) {
+            errorMsg = `第 ${match[1]} 行语法错误`
+          } else if (err.message.includes('Syntax error')) {
+            errorMsg = '图表语法错误，请检查格式'
+          } else {
+            errorMsg = err.message.slice(0, 100)
+          }
+        }
+        setError(errorMsg)
+      } finally {
+        setIsRendering(false)
+      }
     }
 
+    renderDiagram()
+  }, [code, uniqueId])
+
+  if (error) {
     return (
-      <div className="my-4">
-        <div
-          className={cn(
-            'rounded-lg overflow-hidden relative',
-            'bg-muted/30 border border-border',
-            className
-          )}
-        >
-          {isRendering && (
-            <div className="text-sm text-muted-foreground text-center py-8">
-              正在渲染图表...
-            </div>
-          )}
-          <div
-            ref={containerRef}
-            className={cn(isRendering && 'hidden')}
-            data-testid="mermaid-container"
-            style={{ padding: '1rem' }}
-          />
-        </div>
+      <div
+        className={cn(
+          'my-4 rounded-lg p-4',
+          'bg-destructive/10 border-destructive/30 border',
+          className,
+        )}
+      >
+        <div className="text-destructive mb-2 text-sm font-medium">{error}</div>
+        <details className="mt-2">
+          <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-xs">
+            查看源代码
+          </summary>
+          <pre className="bg-muted mt-2 overflow-x-auto rounded-md p-3 font-mono text-xs">
+            {code}
+          </pre>
+        </details>
       </div>
     )
   }
-)
+
+  return (
+    <div className="my-4">
+      <div
+        className={cn(
+          'relative overflow-hidden rounded-lg',
+          'bg-muted/30 border-border border',
+          className,
+        )}
+      >
+        {isRendering && (
+          <div className="text-muted-foreground py-8 text-center text-sm">正在渲染图表...</div>
+        )}
+        <div
+          ref={containerRef}
+          className={cn(isRendering && 'hidden')}
+          data-testid="mermaid-container"
+          style={{ padding: '1rem' }}
+        />
+      </div>
+    </div>
+  )
+})
 
 MermaidDiagram.displayName = 'MermaidDiagram'

@@ -49,7 +49,7 @@ export const registerFormSchema = z
     password: passwordSchema,
     confirmPassword: z.string().min(1, '请确认密码'),
   })
-  .refine(data => data.password === data.confirmPassword, {
+  .refine((data) => data.password === data.confirmPassword, {
     message: '两次输入的密码不一致',
     path: ['confirmPassword'],
   })
@@ -66,9 +66,7 @@ export const sessionTitleSchema = z
   .min(1, '会话标题不能为空')
   .max(100, '会话标题不能超过100个字符')
 
-export function validatePasswordStrength(
-  password: string
-): 'weak' | 'medium' | 'strong' {
+export function validatePasswordStrength(password: string): 'weak' | 'medium' | 'strong' {
   let strength = 0
 
   // 长度检查

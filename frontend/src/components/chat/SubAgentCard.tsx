@@ -5,16 +5,11 @@
  * 支持三种显示模式：collapsed / summary / full
  */
 
-import { cn } from '@/lib/utils'
+import { ChevronDown, ChevronRight, ExternalLink, MessageSquare } from 'lucide-react'
+import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  ChevronDown,
-  ChevronRight,
-  ExternalLink,
-  MessageSquare,
-} from 'lucide-react'
-import { useState } from 'react'
+import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
 
 /**
@@ -25,11 +20,7 @@ export type SubAgentDisplayMode = 'collapsed' | 'summary' | 'full'
 /**
  * SubAgent 状态
  */
-export type SubAgentStatus =
-  | 'running'
-  | 'waiting_input'
-  | 'completed'
-  | 'failed'
+export type SubAgentStatus = 'running' | 'waiting_input' | 'completed' | 'failed'
 
 /**
  * SubAgent 数据
@@ -111,7 +102,7 @@ const getLevelBadge = (level: AgentLevel) => {
   const { label, variant } = config[level]
 
   return (
-    <Badge variant={variant} className="text-xs px-1.5 py-0 h-4">
+    <Badge variant={variant} className="h-4 px-1.5 py-0 text-xs">
       {label}
     </Badge>
   )
@@ -145,12 +136,12 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
     return (
       <div
         className={cn(
-          'inline-flex items-center gap-1.5 px-2 py-1 rounded-md',
-          'bg-muted/50 border border-border/50',
-          'text-xs text-muted-foreground',
+          'inline-flex items-center gap-1.5 rounded-md px-2 py-1',
+          'bg-muted/50 border-border/50 border',
+          'text-muted-foreground text-xs',
           'hover:bg-muted hover:border-border',
           'transition-all duration-200',
-          className
+          className,
         )}
         title={`${data.name} - ${data.status}`}
       >
@@ -167,54 +158,35 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
   if (mode === 'full') {
     return (
       <div
-        className={cn(
-          'p-4 rounded-lg border bg-card',
-          'transition-all duration-200',
-          className
-        )}
+        className={cn('bg-card rounded-lg border p-4', 'transition-all duration-200', className)}
       >
-        <div className="flex items-center justify-between mb-3">
+        <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             {getLevelBadge(data.agentLevel)}
             <span className="font-medium">{data.name}</span>
             {data.path && data.path.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {data.path.join(' \u2192 ')}
-              </span>
+              <span className="text-muted-foreground text-xs">{data.path.join(' \u2192 ')}</span>
             )}
           </div>
           <div className="flex items-center gap-1.5">
             <span className={cn('text-sm', getStatusColor(data.status))}>
               {getStatusIcon(data.status)}
             </span>
-            <span className="text-xs text-muted-foreground capitalize">
+            <span className="text-muted-foreground text-xs capitalize">
               {data.status.replace('_', ' ')}
             </span>
           </div>
         </div>
 
-        {data.summary && (
-          <div className="text-sm text-muted-foreground mb-3">
-            {data.summary}
-          </div>
-        )}
+        {data.summary && <div className="text-muted-foreground mb-3 text-sm">{data.summary}</div>}
 
         <div className="flex items-center justify-between">
-          <div className="text-xs text-muted-foreground">
-            {data.updatedAt && (
-              <span>
-                更新于 {new Date(data.updatedAt).toLocaleTimeString()}
-              </span>
-            )}
+          <div className="text-muted-foreground text-xs">
+            {data.updatedAt && <span>更新于 {new Date(data.updatedAt).toLocaleTimeString()}</span>}
           </div>
           {onOpenDetail && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleOpenDetail}
-              className="h-7 text-xs"
-            >
-              <MessageSquare className="w-3 h-3 mr-1" />
+            <Button variant="ghost" size="sm" onClick={handleOpenDetail} className="h-7 text-xs">
+              <MessageSquare className="mr-1 h-3 w-3" />
               查看对话
             </Button>
           )}
@@ -227,29 +199,27 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
   return (
     <div
       className={cn(
-        'p-3 rounded-lg border bg-card',
+        'bg-card rounded-lg border p-3',
         'hover:bg-accent/50 hover:border-border',
-        'transition-all duration-200 cursor-pointer',
-        className
+        'cursor-pointer transition-all duration-200',
+        className,
       )}
       onClick={handleToggleExpand}
     >
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {expandable && (
-            <span className="flex-shrink-0 text-muted-foreground">
+            <span className="text-muted-foreground flex-shrink-0">
               {isExpanded ? (
-                <ChevronDown className="w-4 h-4" />
+                <ChevronDown className="h-4 w-4" />
               ) : (
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="h-4 w-4" />
               )}
             </span>
           )}
           {getLevelBadge(data.agentLevel)}
-          <span className="font-medium text-sm truncate">{data.name}</span>
-          <span
-            className={cn('text-xs flex-shrink-0', getStatusColor(data.status))}
-          >
+          <span className="truncate text-sm font-medium">{data.name}</span>
+          <span className={cn('flex-shrink-0 text-xs', getStatusColor(data.status))}>
             {getStatusIcon(data.status)}
           </span>
         </div>
@@ -258,37 +228,33 @@ export const SubAgentCard: React.FC<SubAgentCardProps> = ({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2 flex-shrink-0"
-            onClick={e => {
+            className="h-7 flex-shrink-0 px-2"
+            onClick={(e) => {
               e.stopPropagation()
               handleOpenDetail()
             }}
           >
-            <ExternalLink className="w-3 h-3" />
+            <ExternalLink className="h-3 w-3" />
             <span className="ml-1 text-xs">详情</span>
           </Button>
         )}
       </div>
 
       {isExpanded && (
-        <div className="mt-2 pt-2 border-t border-border">
+        <div className="border-border mt-2 border-t pt-2">
           {data.path && data.path.length > 0 && (
-            <div className="text-xs text-muted-foreground mb-1.5">
+            <div className="text-muted-foreground mb-1.5 text-xs">
               路径: {data.path.join(' \u2192 ')}
             </div>
           )}
-          {data.summary && (
-            <div className="text-sm text-muted-foreground">{data.summary}</div>
-          )}
+          {data.summary && <div className="text-muted-foreground text-sm">{data.summary}</div>}
           {data.updatedAt && (
-            <div className="text-xs text-muted-foreground mt-1.5">
+            <div className="text-muted-foreground mt-1.5 text-xs">
               更新于 {new Date(data.updatedAt).toLocaleString()}
             </div>
           )}
           {data.taskId && (
-            <div className="text-xs text-muted-foreground mt-1">
-              任务 ID: {data.taskId}
-            </div>
+            <div className="text-muted-foreground mt-1 text-xs">任务 ID: {data.taskId}</div>
           )}
         </div>
       )}

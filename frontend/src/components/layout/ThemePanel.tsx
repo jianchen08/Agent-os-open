@@ -4,12 +4,12 @@
  * 紧凑的主题选择面板，使用网格布局显示所有主题
  */
 
-import { cn } from '@/lib/utils'
-import { useThemeStore } from '@/stores/themeStore'
-import type { ThemeInfo } from '@/types/theme'
 import { Check, Settings } from 'lucide-react'
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { cn } from '@/lib/utils'
+import { useThemeStore } from '@/stores/themeStore'
+import type { ThemeInfo } from '@/types/theme'
 
 interface ThemePanelProps {
   /** 是否打开面板 */
@@ -59,33 +59,24 @@ function ThemeCard({
     <button
       onClick={onSelect}
       className={cn(
-        'relative p-2 rounded-lg border transition-all duration-200',
+        'relative rounded-lg border p-2 transition-all duration-200',
         'hover:border-primary/50 hover:shadow-md',
-        isSelected
-          ? 'border-primary ring-2 ring-primary/20'
-          : 'border-border/50'
+        isSelected ? 'border-primary ring-primary/20 ring-2' : 'border-border/50',
       )}
       title={theme.description || theme.name}
     >
       {/* 预览色块 */}
       <div
-        className="w-full h-8 rounded mb-1.5 flex items-center justify-center"
+        className="mb-1.5 flex h-8 w-full items-center justify-center rounded"
         style={{ backgroundColor: colors.bg }}
       >
-        <div
-          className="w-4 h-4 rounded-full"
-          style={{ backgroundColor: colors.primary }}
-        />
+        <div className="h-4 w-4 rounded-full" style={{ backgroundColor: colors.primary }} />
       </div>
 
       {/* 主题名称 */}
       <div className="flex items-center justify-between gap-1">
-        <span className="text-xs font-medium truncate flex-1">
-          {theme.name}
-        </span>
-        {isSelected && (
-          <Check className="w-3 h-3 text-primary flex-shrink-0" />
-        )}
+        <span className="flex-1 truncate text-xs font-medium">{theme.name}</span>
+        {isSelected && <Check className="text-primary h-3 w-3 flex-shrink-0" />}
       </div>
     </button>
   )
@@ -98,8 +89,7 @@ function ThemeCard({
  */
 export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
   const navigate = useNavigate()
-  const { currentThemeId, availableThemes, setTheme, refreshThemes } =
-    useThemeStore()
+  const { currentThemeId, availableThemes, setTheme, refreshThemes } = useThemeStore()
 
   // 面板打开时刷新主题列表
   useEffect(() => {
@@ -129,24 +119,22 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
   const themes = availableThemes.length > 0 ? availableThemes : defaultThemes
 
   // 分组：基础主题和扩展主题
-  const basicThemes = themes.filter(t => t.id === 'dark' || t.id === 'light')
-  const extendedThemes = themes.filter(
-    t => t.id !== 'dark' && t.id !== 'light'
-  )
+  const basicThemes = themes.filter((t) => t.id === 'dark' || t.id === 'light')
+  const extendedThemes = themes.filter((t) => t.id !== 'dark' && t.id !== 'light')
 
   return (
     <div
-      className="absolute right-0 top-full mt-2 w-72 bg-card text-card-foreground border rounded-lg shadow-xl z-50"
+      className="bg-card text-card-foreground absolute top-full right-0 z-50 mt-2 w-72 rounded-lg border shadow-xl"
       style={{
         backgroundColor: 'var(--modal-bg, hsl(var(--card)))',
         boxShadow: '0 20px 40px -12px rgba(0, 0, 0, 0.3)',
       }}
     >
       {/* 基础主题 - 浅色/深色快速切换 */}
-      <div className="p-3 border-b border-border/50">
-        <div className="text-xs text-muted-foreground mb-2">快速切换</div>
+      <div className="border-border/50 border-b p-3">
+        <div className="text-muted-foreground mb-2 text-xs">快速切换</div>
         <div className="grid grid-cols-2 gap-2">
-          {basicThemes.map(theme => (
+          {basicThemes.map((theme) => (
             <ThemeCard
               key={theme.id}
               theme={theme}
@@ -160,11 +148,11 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
       {/* 扩展主题 - 网格布局 */}
       {extendedThemes.length > 0 && (
         <div className="p-3">
-          <div className="text-xs text-muted-foreground mb-2">
+          <div className="text-muted-foreground mb-2 text-xs">
             更多主题 ({extendedThemes.length})
           </div>
-          <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
-            {extendedThemes.map(theme => (
+          <div className="grid max-h-48 grid-cols-3 gap-2 overflow-y-auto">
+            {extendedThemes.map((theme) => (
               <ThemeCard
                 key={theme.id}
                 theme={theme}
@@ -177,19 +165,19 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
       )}
 
       {/* 底部操作 */}
-      <div className="p-2 border-t border-border/50">
+      <div className="border-border/50 border-t p-2">
         <button
           onClick={() => {
             navigate('/settings')
             onClose?.()
           }}
           className={cn(
-            'w-full flex items-center justify-center gap-2 py-2 rounded',
-            'text-xs text-muted-foreground hover:text-foreground',
-            'hover:bg-muted/50 transition-colors'
+            'flex w-full items-center justify-center gap-2 rounded py-2',
+            'text-muted-foreground hover:text-foreground text-xs',
+            'hover:bg-muted/50 transition-colors',
           )}
         >
-          <Settings className="w-3 h-3" />
+          <Settings className="h-3 w-3" />
           自定义主题设置
         </button>
       </div>

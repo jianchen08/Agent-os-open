@@ -87,9 +87,7 @@ export interface ConfigModalProps<T = object> {
 /**
  * 表单错误信息
  */
-export type FormErrors<T = object> = Partial<
-  Record<keyof T, string>
->
+export type FormErrors<T = object> = Partial<Record<keyof T, string>>
 
 /**
  * 表单状态

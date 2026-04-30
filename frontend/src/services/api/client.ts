@@ -7,15 +7,14 @@
  * Requirements: 2.2, 2.3, 2.4
  */
 
-import axios, { AxiosError } from 'axios'
-import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios'
+import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { API_BASE_URL, API_TIMEOUT, API_ENDPOINTS } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
-import type { ApiError, RefreshResponse } from '../../types/api'
-import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
-import { isRetryableError } from '../../utils/retry'
-import { tokenManager } from '../../stores/tokenManager'
 import { useAuthStore } from '../../stores/authStore'
+import { tokenManager } from '../../stores/tokenManager'
+import { isRetryableError } from '../../utils/retry'
+import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
+import type { ApiError, RefreshResponse } from '../../types/api'
 
 /**
  * 令牌刷新状态管理
@@ -35,7 +34,7 @@ function subscribeTokenRefresh(callback: (token: string) => void): void {
  * 通知所有订阅者令牌已刷新
  */
 function onTokenRefreshed(token: string): void {
-  refreshSubscribers.forEach(callback => callback(token))
+  refreshSubscribers.forEach((callback) => callback(token))
   refreshSubscribers = []
 }
 
@@ -64,20 +63,12 @@ function clearAuthAndRedirect(): void {
   })
 
   // 报告认证错误
-  reportError(
-    '认证已过期，请重新登录',
-    ErrorType.AUTHENTICATION,
-    ErrorSeverity.WARNING,
-    {
-      code: '401',
-    }
-  )
+  reportError('认证已过期，请重新登录', ErrorType.AUTHENTICATION, ErrorSeverity.WARNING, {
+    code: '401',
+  })
 
   // 重定向到登录页（如果不在登录页）
-  if (
-    typeof window !== 'undefined' &&
-    !window.location.pathname.includes('/login')
-  ) {
+  if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
     window.location.href = '/login'
   }
 }
@@ -112,7 +103,7 @@ apiClient.interceptors.request.use(
   (error: AxiosError) => {
     // 请求错误处理
     return Promise.reject(error)
-  }
+  },
 )
 
 /**
@@ -122,7 +113,7 @@ apiClient.interceptors.request.use(
  * Requirements: 2.2, 2.3, 2.4
  */
 apiClient.interceptors.response.use(
-  response => {
+  (response) => {
     // 成功响应直接返回
     return response
   },
@@ -152,20 +143,20 @@ apiClient.interceptors.response.use(
       // 修复方案: 对 /auth/refresh 端点的 401 错误进行特殊处理，静默处理而不报告错误
       // 影响范围: 前端认证模块、用户体验
       // 修复日期: 2026-04-01
-      
+
       // 检查是否是 refresh_token 刷新失败
       const isRefreshTokenRequest = originalRequest.url?.includes('/auth/refresh')
-      
+
       if (isRefreshTokenRequest) {
         // refresh_token 已失效，这是正常的认证过期场景
         // 静默处理，不报告错误，直接清除认证状态并重定向
         clearAuthAndRedirect()
         return Promise.reject(error)
       }
-      
+
       // 如果正在刷新令牌，等待刷新完成
       if (isRefreshing) {
-        return new Promise(resolve => {
+        return new Promise((resolve) => {
           subscribeTokenRefresh((token: string) => {
             if (originalRequest.headers) {
               originalRequest.headers.Authorization = `Bearer ${token}`
@@ -191,7 +182,7 @@ apiClient.interceptors.response.use(
               headers: {
                 'Content-Type': 'application/json',
               },
-            }
+            },
           )
 
           const { access_token, refresh_token } = response.data
@@ -265,17 +256,13 @@ apiClient.interceptors.response.use(
     }
 
     // 判断是否应该自动重试
-    const shouldRetry =
-      isRetryableError(error) && originalRequest._retryCount < 2
+    const shouldRetry = isRetryableError(error) && originalRequest._retryCount < 2
 
     if (shouldRetry) {
       originalRequest._retryCount++
 
       // 计算延迟时间（指数退避）
-      const delayTime = Math.min(
-        1000 * Math.pow(2, originalRequest._retryCount - 1),
-        5000
-      )
+      const delayTime = Math.min(1000 * Math.pow(2, originalRequest._retryCount - 1), 5000)
 
       // 报告重试信息（不显示Toast，只记录到控制台）
       reportError(
@@ -285,11 +272,11 @@ apiClient.interceptors.response.use(
         {
           showToast: false,
           code: apiError.code,
-        }
+        },
       )
 
       // 等待后重试
-      await new Promise(resolve => setTimeout(resolve, delayTime))
+      await new Promise((resolve) => setTimeout(resolve, delayTime))
       return apiClient(originalRequest)
     }
 
@@ -322,17 +309,15 @@ apiClient.interceptors.response.use(
     reportError(
       apiError.message,
       errorType,
-      errorType === ErrorType.AUTHENTICATION
-        ? ErrorSeverity.WARNING
-        : ErrorSeverity.ERROR,
+      errorType === ErrorType.AUTHENTICATION ? ErrorSeverity.WARNING : ErrorSeverity.ERROR,
       {
         code: apiError.code,
         details: apiError.details,
-      }
+      },
     )
 
     return Promise.reject(apiError)
-  }
+  },
 )
 
 export default apiClient

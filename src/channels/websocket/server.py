@@ -5,6 +5,9 @@
 - 消息接收与分发
 - 生命周期管理（启动 / 停止）
 - 与 SessionManager 集成
+- ACK 确认处理
+- 断线重连消息补发
+- 协议版本协商
 
 不引入 Django/Flask 等重框架，仅依赖 aiohttp。
 """
@@ -19,11 +22,19 @@ from typing import Any, Callable, Coroutine
 from aiohttp import web
 
 from channels.websocket.protocol import (
+    ACK_REQUIRED_EVENTS,
+    ACK_TIMEOUT_SECONDS,
     ConnectionConfirmationData,
     ControlCommand,
     EventEnvelope,
     EventType,
+    MessageAckData,
+    MissedMessagesData,
+    PROTOCOL_VERSION,
+    RequestMissedData,
     create_event,
+    is_version_compatible,
+    negotiate_version,
 )
 from channels.websocket.session_manager import SessionManager
 
@@ -147,10 +158,16 @@ class WebSocketServer:
         self._runner = None
         self._site = None
 
-    async def send_event(self, session_id: str, event: EventEnvelope) -> bool:
+    async def send_event(
+        self,
+        session_id: str,
+        event: EventEnvelope,
+    ) -> bool:
         """向指定会话发送事件。
 
         将事件信封序列化为 JSON 字符串后通过 WebSocket 发送。
+        如果事件类型在 ACK_REQUIRED_EVENTS 集合中，
+        自动标记 requires_ack 并追踪 ACK。
 
         Args:
             session_id: 目标会话 ID
@@ -159,8 +176,20 @@ class WebSocketServer:
         Returns:
             发送成功返回 True，失败返回 False
         """
-        message = json.dumps(event.to_dict(), ensure_ascii=False)
-        return await self.session_manager.send_to(session_id, message)
+        # 对关键消息自动启用 ACK
+        if event.type in ACK_REQUIRED_EVENTS:
+            event.requires_ack = True
+            self.session_manager.track_pending_ack(
+                session_id, event.request_id,
+            )
+
+        event.version = PROTOCOL_VERSION
+        message = json.dumps(
+            event.to_dict(), ensure_ascii=False,
+        )
+        return await self.session_manager.send_to(
+            session_id, message,
+        )
 
     async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         """处理 WebSocket 连接请求。
@@ -201,18 +230,38 @@ class WebSocketServer:
         # 提取 thread_id（用于重连恢复）
         thread_id = request.match_info.get("thread_id", "")
 
+        # 提取客户端协议版本（用于版本协商）
+        client_version = request.query.get(
+            "version", "",
+        )
+        if client_version:
+            negotiated = negotiate_version(client_version)
+            if not is_version_compatible(client_version):
+                logger.warning(
+                    "Client version %s incompatible, "
+                    "negotiated to %s",
+                    client_version, negotiated,
+                )
+        else:
+            negotiated = PROTOCOL_VERSION
+
         # 注册会话
         session_id = await self.session_manager.register(
             ws=ws,
             thread_id=thread_id,
+            metadata={
+                "client_version": client_version,
+                "negotiated_version": negotiated,
+            },
         )
 
-        # 发送连接确认
+        # 发送连接确认（包含协商后的协议版本）
         confirmation = create_event(
             EventType.CONNECTION_CONFIRMATION,
             ConnectionConfirmationData(
                 session_id=session_id,
                 thread_id=thread_id,
+                version=negotiated,
             ).to_dict(),
         )
         await self.send_event(session_id, confirmation)
@@ -244,10 +293,13 @@ class WebSocketServer:
 
         return ws
 
-    async def _process_text_message(self, session_id: str, raw_data: str) -> None:
+    async def _process_text_message(
+        self, session_id: str, raw_data: str,
+    ) -> None:
         """处理接收到的文本消息。
 
         解析 JSON 消息，提取事件类型，分发给对应的处理器。
+        支持 ACK 确认和请求遗漏消息。
 
         Args:
             session_id: 发送方的会话 ID
@@ -256,29 +308,95 @@ class WebSocketServer:
         try:
             parsed = json.loads(raw_data)
         except json.JSONDecodeError as exc:
-            logger.warning("Invalid JSON from session %s: %s", session_id, exc)
+            logger.warning(
+                "Invalid JSON from session %s: %s",
+                session_id, exc,
+            )
             return
 
         # 尝试解析为事件信封
         try:
             envelope = EventEnvelope.from_dict(parsed)
         except ValueError as exc:
-            logger.warning("Invalid event envelope from session %s: %s", session_id, exc)
+            logger.warning(
+                "Invalid event envelope from session %s: %s",
+                session_id, exc,
+            )
             return
 
         # 处理控制命令
         event_type = envelope.type
         if event_type == ControlCommand.STOP_GENERATION.value:
-            logger.info("Stop generation requested: session=%s", session_id)
+            logger.info(
+                "Stop generation requested: session=%s",
+                session_id,
+            )
         elif event_type == ControlCommand.RESUME_ACTION.value:
-            logger.info("Resume action received: session=%s", session_id)
+            logger.info(
+                "Resume action received: session=%s",
+                session_id,
+            )
+
+        # 处理 ACK 确认
+        elif event_type == EventType.MESSAGE_ACK.value:
+            ack_request_id = envelope.data.get(
+                "request_id", "",
+            )
+            if ack_request_id:
+                self.session_manager.acknowledge(
+                    session_id, ack_request_id,
+                )
+            return
+
+        # 处理请求遗漏消息
+        elif event_type == EventType.REQUEST_MISSED.value:
+            await self._handle_request_missed(
+                session_id, envelope,
+            )
+            return
 
         # 调用消息处理器
         if self._on_message_handler is not None:
             try:
-                await self._on_message_handler(session_id, envelope.to_dict())
+                await self._on_message_handler(
+                    session_id, envelope.to_dict(),
+                )
             except Exception as exc:
-                logger.error("Message handler error: %s", exc)
+                logger.error(
+                    "Message handler error: %s", exc,
+                )
+
+    async def _handle_request_missed(
+        self,
+        session_id: str,
+        envelope: EventEnvelope,
+    ) -> None:
+        """处理前端请求遗漏消息。
+
+        重连后前端发送 request_missed，后端从缓冲区
+        中提取遗漏消息并发送。
+
+        Args:
+            session_id: 会话 ID
+            envelope: request_missed 事件信封
+        """
+        last_request_id = envelope.data.get(
+            "last_received_request_id", "",
+        )
+
+        missed = self.session_manager.get_missed_messages(
+            session_id, last_request_id,
+        )
+
+        missed_event = create_event(
+            EventType.MISSED_MESSAGES,
+            MissedMessagesData(
+                messages=missed,
+                total=len(missed),
+                has_more=False,
+            ).to_dict(),
+        )
+        await self.send_event(session_id, missed_event)
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         """健康检查端点。

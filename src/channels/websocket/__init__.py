@@ -7,6 +7,9 @@
 - WebSocketServer: 基于 aiohttp 的 WebSocket 服务器
 - SessionManager: WebSocket 会话管理器
 - 事件类型和数据格式定义（protocol 模块）
+- ACK 确认机制
+- 协议版本协商
+- 断线重连消息恢复
 """
 
 from channels.websocket.adapter import (
@@ -15,6 +18,11 @@ from channels.websocket.adapter import (
     WebSocketOutputAdapter,
 )
 from channels.websocket.protocol import (
+    ACK_MAX_RETRIES,
+    ACK_REQUIRED_EVENTS,
+    ACK_TIMEOUT_SECONDS,
+    MIN_SUPPORTED_VERSION,
+    PROTOCOL_VERSION,
     ConnectionConfirmationData,
     ControlCommand,
     ErrorData,
@@ -23,12 +31,18 @@ from channels.websocket.protocol import (
     ExecutionDoneData,
     ExecutionProgressData,
     ExecutionStartData,
+    MessageAckData,
+    MissedMessagesData,
     PipelineEndData,
     PipelineStartData,
+    RequestMissedData,
     StreamChunkData,
     StreamEndData,
     StreamStartData,
     create_event,
+    is_version_compatible,
+    negotiate_version,
+    parse_version,
 )
 from channels.websocket.server import WebSocketServer
 from channels.websocket.session_manager import SessionManager
@@ -57,4 +71,18 @@ __all__ = [
     "PipelineEndData",
     "ErrorData",
     "ConnectionConfirmationData",
+    # ACK
+    "MessageAckData",
+    "ACK_REQUIRED_EVENTS",
+    "ACK_TIMEOUT_SECONDS",
+    "ACK_MAX_RETRIES",
+    # 重连
+    "RequestMissedData",
+    "MissedMessagesData",
+    # 版本协商
+    "PROTOCOL_VERSION",
+    "MIN_SUPPORTED_VERSION",
+    "parse_version",
+    "is_version_compatible",
+    "negotiate_version",
 ]

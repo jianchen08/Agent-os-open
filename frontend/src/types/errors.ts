@@ -12,16 +12,7 @@ export type ErrorSeverity = 'info' | 'warning' | 'error'
 /**
  * 错误类别
  */
-export type ErrorCategory =
-  | 'WS'
-  | 'API'
-  | 'TOOL'
-  | 'DB'
-  | 'MEM'
-  | 'AUTH'
-  | 'VAL'
-  | 'SYS'
-  | 'LLM'
+export type ErrorCategory = 'WS' | 'API' | 'TOOL' | 'DB' | 'MEM' | 'AUTH' | 'VAL' | 'SYS' | 'LLM'
 
 /**
  * 统一错误码定义
@@ -335,7 +326,7 @@ export function extractErrorCode(error: unknown): string | null {
 export function createStandardError(
   errorCode: string,
   traceId?: string,
-  details?: Record<string, unknown>
+  details?: Record<string, unknown>,
 ): StandardError {
   const code = errorCode || ErrorCode.SYS_ERR_8003
 

@@ -5,10 +5,10 @@
  * 实现自生长闭环的核心入口
  */
 
-import { schemaRegistry } from '@/services/schema/registry'
 import { getModuleUISchemas } from '@/services/api/modules'
-import type { ModuleUISchema, ModuleRegistration } from '@/types/schema'
+import { schemaRegistry } from '@/services/schema/registry'
 import { loggers } from '@/utils/logger'
+import type { ModuleUISchema, ModuleRegistration } from '@/types/schema'
 
 class ModuleManager {
   private initialized = false
@@ -81,7 +81,11 @@ class ModuleManager {
   /**
    * 处理 Schema 更新推送（WebSocket 推送触发）
    */
-  handleSchemaUpdate(event: { module_id: string; schema_version: string; changes: string[] }): void {
+  handleSchemaUpdate(event: {
+    module_id: string
+    schema_version: string
+    changes: string[]
+  }): void {
     loggers.websocket.info(`模块 ${event.module_id} Schema 更新: v${event.schema_version}`)
     this.fetchAndRegister().catch(() => {})
   }

@@ -6,10 +6,4 @@
 
 export { ConfigModal, useConfigForm } from './ConfigModal'
 export { clearDraft } from './useConfigForm'
-export type {
-  ConfigFieldType,
-  ConfigField,
-  ConfigModalProps,
-  FormErrors,
-  FormState,
-} from './types'
+export type { ConfigFieldType, ConfigField, ConfigModalProps, FormErrors, FormState } from './types'

@@ -4,22 +4,16 @@
  * 提供语音输入的交互界面
  */
 
-import { cn } from '@/lib/utils'
-import type { VoiceInputButtonProps, VoiceInputError } from '@/types/voiceInput'
 import { Loader2, Mic, MicOff } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import type { VoiceInputButtonProps, VoiceInputError } from '@/types/voiceInput'
 
 /**
  * 错误提示组件
  */
-const ErrorTooltip = ({
-  error,
-  visible,
-}: {
-  error: VoiceInputError | null
-  visible: boolean
-}) => {
+const ErrorTooltip = ({ error, visible }: { error: VoiceInputError | null; visible: boolean }) => {
   const [show, setShow] = useState(false)
 
   useEffect(() => {
@@ -34,9 +28,9 @@ const ErrorTooltip = ({
   if (!show || !error) return null
 
   return (
-    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 bg-destructive text-destructive-foreground text-xs rounded-lg whitespace-nowrap animate-in fade-in-0 zoom-in-95 z-50">
+    <div className="bg-destructive text-destructive-foreground animate-in fade-in-0 zoom-in-95 absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 rounded-lg px-3 py-1.5 text-xs whitespace-nowrap">
       {error.message}
-      <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-destructive" />
+      <div className="border-t-destructive absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent" />
     </div>
   )
 }
@@ -45,9 +39,9 @@ const ErrorTooltip = ({
  * 录音状态指示器
  */
 const RecordingIndicator = () => (
-  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-    <span className="absolute inset-0 rounded-full animate-ping bg-red-500/50" />
-    <span className="absolute inset-0 rounded-full animate-pulse bg-red-500/30" />
+  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+    <span className="absolute inset-0 animate-ping rounded-full bg-red-500/50" />
+    <span className="absolute inset-0 animate-pulse rounded-full bg-red-500/30" />
   </div>
 )
 
@@ -80,10 +74,10 @@ export const VoiceInputButton = ({
         variant="ghost"
         size="icon"
         className={cn(
-          'h-8 w-8 rounded-lg transition-all duration-200 relative overflow-hidden',
+          'relative h-8 w-8 overflow-hidden rounded-lg transition-all duration-200',
           isTranscribing && 'text-muted-foreground cursor-wait',
           error?.type === 'permission_denied' && 'text-destructive hover:text-destructive',
-          className
+          className,
         )}
         style={isRecording ? { backgroundColor: 'rgb(239 68 68)' } : undefined}
         onMouseEnter={(e) => {
@@ -104,13 +98,13 @@ export const VoiceInputButton = ({
         {isRecording && <RecordingIndicator />}
 
         {isTranscribing ? (
-          <Loader2 className="w-4 h-4 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : isRecording ? (
-          <Mic className="w-4 h-4 relative z-10" style={{ color: 'white' }} fill="white" />
+          <Mic className="relative z-10 h-4 w-4" style={{ color: 'white' }} fill="white" />
         ) : error?.type === 'permission_denied' ? (
-          <MicOff className="w-4 h-4" />
+          <MicOff className="h-4 w-4" />
         ) : (
-          <Mic className="w-4 h-4" />
+          <Mic className="h-4 w-4" />
         )}
       </Button>
     </div>

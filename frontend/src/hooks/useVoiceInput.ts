@@ -7,17 +7,17 @@
  * - 根据模型能力决定返回文字还是音频 Blob
  */
 
-import type {
-    SpeechRecognitionConstructor,
-    SpeechRecognitionErrorEvent,
-    SpeechRecognitionEvent,
-    SpeechRecognitionInstance,
-    UseVoiceInputOptions,
-    UseVoiceInputReturn,
-    VoiceInputError,
-    VoiceInputState,
-} from '@/types/voiceInput'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type {
+  SpeechRecognitionConstructor,
+  SpeechRecognitionErrorEvent,
+  SpeechRecognitionEvent,
+  SpeechRecognitionInstance,
+  UseVoiceInputOptions,
+  UseVoiceInputReturn,
+  VoiceInputError,
+  VoiceInputState,
+} from '@/types/voiceInput'
 
 /**
  * 获取 SpeechRecognition 构造函数
@@ -27,11 +27,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 function getSpeechRecognition(): SpeechRecognitionConstructor | null {
   if (typeof window === 'undefined') return null
 
-  return (
-    window.SpeechRecognition ||
-    window.webkitSpeechRecognition ||
-    null
-  )
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null
 }
 
 /**
@@ -68,9 +64,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     typeof MediaRecorder !== 'undefined' &&
     MediaRecorder.isTypeSupported('audio/webm')
 
-  const isSupported = supportsAudio
-    ? isMediaRecorderSupported
-    : isSpeechRecognitionSupported
+  const isSupported = supportsAudio ? isMediaRecorderSupported : isSpeechRecognitionSupported
 
   /**
    * 清理所有资源
@@ -98,7 +92,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     }
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop())
+      streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
     }
 
@@ -116,7 +110,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
       cleanup()
       onError?.(errorInfo)
     },
-    [cleanup, onError]
+    [cleanup, onError],
   )
 
   /**
@@ -147,7 +141,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
         }
       }
 
-      setTranscript(prev => {
+      setTranscript((prev) => {
         const newText = finalTranscript || interimTranscript
         return newText || prev
       })

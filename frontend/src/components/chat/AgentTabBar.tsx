@@ -46,14 +46,14 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
     (tabId: string) => {
       onTabClose?.(tabId)
     },
-    [onTabClose]
+    [onTabClose],
   )
 
   return (
-    <div className="flex items-center gap-2 px-3 py-2 flex-1 min-w-0">
+    <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2">
       {/* Tab 列表 */}
-      <div className="flex items-center gap-1.5 flex-1 overflow-x-auto scrollbar-hide">
-        {tabs.map(tab => (
+      <div className="scrollbar-hide flex flex-1 items-center gap-1.5 overflow-x-auto">
+        {tabs.map((tab) => (
           <AgentTabItem
             key={tab.id}
             tab={tab}
@@ -67,10 +67,10 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
       {onNewChat && (
         <button
           onClick={onNewChat}
-          className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-accent transition-colors flex-shrink-0 text-muted-foreground hover:text-foreground"
+          className="hover:bg-accent text-muted-foreground hover:text-foreground flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-colors"
           title="新建对话"
         >
-          <Plus className="w-4 h-4" />
+          <Plus className="h-4 w-4" />
         </button>
       )}
     </div>

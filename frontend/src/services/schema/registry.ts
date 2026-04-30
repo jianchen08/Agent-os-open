@@ -5,8 +5,8 @@
  * 替代旧版的 toolCardRegistry
  */
 
-import type { ModuleUISchema, ModuleRegistration, ChatInteractionType } from '@/types/schema'
 import { parseSchema, validateSchema, type ParsedSchema } from './parser'
+import type { ModuleUISchema, ModuleRegistration, ChatInteractionType } from '@/types/schema'
 
 class SchemaRegistry {
   private modules: Map<string, ModuleRegistration> = new Map()
@@ -42,7 +42,7 @@ class SchemaRegistry {
    * @param source - 注册来源
    */
   registerAll(schemas: ModuleUISchema[], source: ModuleRegistration['source'] = 'api'): void {
-    schemas.forEach(s => this.register(s, source))
+    schemas.forEach((s) => this.register(s, source))
   }
 
   /**
@@ -70,7 +70,7 @@ class SchemaRegistry {
    * @returns 已启用的模块注册信息数组
    */
   getEnabled(): ModuleRegistration[] {
-    return this.getAll().filter(m => m.enabled)
+    return this.getAll().filter((m) => m.enabled)
   }
 
   /**
@@ -80,7 +80,7 @@ class SchemaRegistry {
    * @returns 匹配分类的模块注册信息数组
    */
   getByCategory(category: string): ModuleRegistration[] {
-    return this.getAll().filter(m => m.schema.identity.category === category)
+    return this.getAll().filter((m) => m.schema.identity.category === category)
   }
 
   /**
@@ -112,8 +112,8 @@ class SchemaRegistry {
    */
   getChatWidgets(): ChatInteractionType[] {
     const types = new Set<ChatInteractionType>()
-    this.getEnabled().forEach(m => {
-      m.schema.rendering.chat.forEach(c => types.add(c.type))
+    this.getEnabled().forEach((m) => {
+      m.schema.rendering.chat.forEach((c) => types.add(c.type))
     })
     return Array.from(types)
   }
@@ -141,8 +141,12 @@ class SchemaRegistry {
    * 通知所有监听器
    */
   private notifyListeners(): void {
-    this.listeners.forEach(l => {
-      try { l() } catch { /* 忽略监听器错误 */ }
+    this.listeners.forEach((l) => {
+      try {
+        l()
+      } catch {
+        /* 忽略监听器错误 */
+      }
     })
   }
 }

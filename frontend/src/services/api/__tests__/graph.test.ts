@@ -5,10 +5,10 @@
 import MockAdapter from 'axios-mock-adapter'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { API_ENDPOINTS } from '@/services/api/../../constants/api'
-import type { GraphData } from '@/services/api/../../types/graph'
-import type { ThreadDetailResponse } from '@/services/api/../../utils/mappers'
 import apiClient from '@/services/api/client'
 import { getGraph } from '@/services/api/graph'
+import type { GraphData } from '@/services/api/../../types/graph'
+import type { ThreadDetailResponse } from '@/services/api/../../utils/mappers'
 
 describe('执行图API服务', () => {
   let mock: MockAdapter
@@ -59,7 +59,7 @@ describe('执行图API服务', () => {
     }
 
     // 期望的前端 GraphData 格式（经过 mapThreadDetailToGraph 转换）
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     const _unusedGraphData: GraphData = {
       nodes: [
         {
@@ -94,9 +94,7 @@ describe('执行图API服务', () => {
 
     it('应该成功获取执行图数据', async () => {
       // 模拟API响应（线程详情端点）
-      mock
-        .onGet(API_ENDPOINTS.THREADS.GET(sessionId))
-        .reply(200, mockThreadDetail)
+      mock.onGet(API_ENDPOINTS.THREADS.GET(sessionId)).reply(200, mockThreadDetail)
 
       // 调用API
       const result = await getGraph(sessionId)
@@ -155,9 +153,7 @@ describe('执行图API服务', () => {
         },
       }
 
-      mock
-        .onGet(API_ENDPOINTS.THREADS.GET(sessionId))
-        .reply(200, emptyThreadDetail)
+      mock.onGet(API_ENDPOINTS.THREADS.GET(sessionId)).reply(200, emptyThreadDetail)
 
       const result = await getGraph(sessionId)
 
@@ -186,18 +182,12 @@ describe('执行图API服务', () => {
         },
       }
 
-      mock
-        .onGet(API_ENDPOINTS.THREADS.GET(sessionId))
-        .reply(200, complexThreadDetail)
+      mock.onGet(API_ENDPOINTS.THREADS.GET(sessionId)).reply(200, complexThreadDetail)
 
       const result = await getGraph(sessionId)
 
       expect(result.nodes).toHaveLength(3)
-      expect(result.nodes.map(n => n.type)).toEqual([
-        'task',
-        'tool',
-        'decision',
-      ])
+      expect(result.nodes.map((n) => n.type)).toEqual(['task', 'tool', 'decision'])
     })
 
     it('应该正确处理包含详细节点数据的执行图', async () => {
@@ -220,9 +210,7 @@ describe('执行图API服务', () => {
         },
       }
 
-      mock
-        .onGet(API_ENDPOINTS.THREADS.GET(sessionId))
-        .reply(200, detailedThreadDetail)
+      mock.onGet(API_ENDPOINTS.THREADS.GET(sessionId)).reply(200, detailedThreadDetail)
 
       const result = await getGraph(sessionId)
 
@@ -242,9 +230,7 @@ describe('执行图API服务', () => {
         // 没有 execution_graph 字段
       }
 
-      mock
-        .onGet(API_ENDPOINTS.THREADS.GET(sessionId))
-        .reply(200, noGraphThreadDetail)
+      mock.onGet(API_ENDPOINTS.THREADS.GET(sessionId)).reply(200, noGraphThreadDetail)
 
       const result = await getGraph(sessionId)
 

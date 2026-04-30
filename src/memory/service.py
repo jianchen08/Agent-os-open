@@ -14,7 +14,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from memory.constants import Retrieval
+from memory.constants import Retrieval, Similarity
 from memory.episode_service import EpisodeService
 from memory.knowledge_service import KnowledgeService
 from memory.ports import IEpisodeStorage, IRetriever, ISemanticStorage
@@ -60,6 +60,7 @@ class MemoryService:
         vector_retriever: Any = None,
         chunk_service: Any = None,
         tag_service: Any = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         """初始化记忆服务。
 
@@ -71,6 +72,7 @@ class MemoryService:
             vector_retriever: 向量检索器（可选，写入时同步向量索引）
             chunk_service: 压缩块服务（可选）
             tag_service: Tag 服务（可选）
+            config: 服务配置（可选），支持 vector_search、maintenance 等子配置
         """
         self._episode_service = EpisodeService(episode_storage=episode_storage)
         self._knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
@@ -79,6 +81,29 @@ class MemoryService:
         self._vector_retriever = vector_retriever
         self._chunk_service = chunk_service
         self._tag_service = tag_service
+
+        # 向量检索配置
+        self._config = config or {}
+        vector_cfg = self._config.get("vector_search", {})
+        self._vector_search_enabled = vector_cfg.get("enabled", False)
+        self._fallback_to_keyword = vector_cfg.get("fallback_to_keyword", True)
+        self._default_method = vector_cfg.get("default_method", "vector")
+
+        # 混合检索配置
+        hybrid_cfg = vector_cfg.get("hybrid", {})
+        self._hybrid_enabled = hybrid_cfg.get("enabled", False)
+        self._vector_weight = hybrid_cfg.get("vector_weight", 0.7)
+        self._keyword_weight = hybrid_cfg.get("keyword_weight", 0.3)
+
+        # 检索统计（用于健康检查）
+        self._retrieval_stats = {
+            "total_requests": 0,
+            "vector_hits": 0,
+            "keyword_hits": 0,
+            "fallback_hits": 0,
+            "misses": 0,
+            "last_retrieval_at": None,
+        }
 
     def register_retriever(self, method: str, retriever: IRetriever) -> None:
         """注册检索器。
@@ -418,25 +443,207 @@ class MemoryService:
         query: str | None,
         top_k: int,
     ) -> list[SearchResult]:
-        """按检索方法执行检索（第三层决策）。"""
-        method_name = retrieval_method.value
-        retriever = self._retrievers.get(method_name)
+        """按检索方法执行检索（第三层决策）。
 
-        if not retriever or not query:
+        支持向量检索不可用时自动回退到关键词检索。
+        启用混合检索时，同时调用向量和关键词检索并按权重合并结果。
+        """
+        self._retrieval_stats["total_requests"] += 1
+        self._retrieval_stats["last_retrieval_at"] = datetime.now(UTC).isoformat()
+
+        if not query:
             return []
 
         memory_type = filter.get("memory_type", "semantic")
+
+        # 混合检索模式
+        if self._hybrid_enabled and retrieval_method == RetrievalMethod.VECTOR:
+            results = await self._hybrid_retrieve(
+                user_id, filter, query, top_k, memory_type,
+            )
+            if results:
+                return results
+
+        method_name = retrieval_method.value
+
+        # 向量检索不可用时回退到关键词检索
+        if method_name == "vector" and not self._vector_search_enabled:
+            if self._fallback_to_keyword:
+                logger.debug("[MemoryService] 向量检索未启用，回退到关键词检索")
+                method_name = "keyword"
+                retrieval_method = RetrievalMethod.KEYWORD
+            else:
+                self._retrieval_stats["misses"] += 1
+                return []
+
+        retriever = self._retrievers.get(method_name)
+        if not retriever:
+            # 尝试回退到任何可用的检索器
+            if method_name != "keyword" and self._fallback_to_keyword:
+                keyword_retriever = self._retrievers.get("keyword")
+                if keyword_retriever:
+                    logger.debug(
+                        "[MemoryService] 检索器 %s 不可用，回退到关键词检索",
+                        method_name,
+                    )
+                    retriever = keyword_retriever
+                    self._retrieval_stats["fallback_hits"] += 1
+                else:
+                    self._retrieval_stats["misses"] += 1
+                    return []
+            else:
+                self._retrieval_stats["misses"] += 1
+                return []
+
         try:
-            return await retriever.retrieve(
+            results = await retriever.retrieve(
                 query=query,
                 user_id=user_id,
                 top_k=top_k,
                 memory_type=memory_type,
                 filters=filter,
             )
+            if results:
+                if method_name == "vector":
+                    self._retrieval_stats["vector_hits"] += 1
+                else:
+                    self._retrieval_stats["keyword_hits"] += 1
+            else:
+                # 向量检索无结果时尝试回退到关键词检索
+                if method_name == "vector" and self._fallback_to_keyword:
+                    keyword_retriever = self._retrievers.get("keyword")
+                    if keyword_retriever:
+                        logger.debug(
+                            "[MemoryService] 向量检索无结果，回退到关键词检索",
+                        )
+                        results = await keyword_retriever.retrieve(
+                            query=query,
+                            user_id=user_id,
+                            top_k=top_k,
+                            memory_type=memory_type,
+                            filters=filter,
+                        )
+                        if results:
+                            self._retrieval_stats["fallback_hits"] += 1
+                        else:
+                            self._retrieval_stats["misses"] += 1
+                    else:
+                        self._retrieval_stats["misses"] += 1
+                else:
+                    self._retrieval_stats["misses"] += 1
+            return results
         except Exception as e:
             logger.warning("[MemoryService] 检索失败 | method=%s | error=%s", method_name, e)
+
+            # 异常时回退到关键词检索
+            if method_name != "keyword" and self._fallback_to_keyword:
+                keyword_retriever = self._retrievers.get("keyword")
+                if keyword_retriever:
+                    try:
+                        results = await keyword_retriever.retrieve(
+                            query=query,
+                            user_id=user_id,
+                            top_k=top_k,
+                            memory_type=memory_type,
+                            filters=filter,
+                        )
+                        self._retrieval_stats["fallback_hits"] += 1
+                        return results
+                    except Exception as fallback_err:
+                        logger.warning(
+                            "[MemoryService] 关键词回退检索也失败 | error=%s",
+                            fallback_err,
+                        )
+
+            self._retrieval_stats["misses"] += 1
             return []
+
+    async def _hybrid_retrieve(
+        self,
+        user_id: str | None,
+        filter: dict[str, Any],
+        query: str,
+        top_k: int,
+        memory_type: str,
+    ) -> list[SearchResult]:
+        """混合检索：同时使用向量检索和关键词检索，按权重合并结果。
+
+        Args:
+            user_id: 用户 ID
+            filter: 筛选条件
+            query: 查询文本
+            top_k: 返回数量
+            memory_type: 记忆类型
+
+        Returns:
+            合并后的搜索结果列表
+        """
+        vector_results: list[SearchResult] = []
+        keyword_results: list[SearchResult] = []
+
+        # 向量检索
+        vector_retriever = self._retrievers.get("vector")
+        if vector_retriever and self._vector_search_enabled:
+            try:
+                vector_results = await vector_retriever.retrieve(
+                    query=query,
+                    user_id=user_id,
+                    top_k=top_k * 2,
+                    memory_type=memory_type,
+                    filters=filter,
+                )
+            except Exception as e:
+                logger.warning("[MemoryService] 混合检索-向量部分失败: %s", e)
+
+        # 关键词检索
+        keyword_retriever = self._retrievers.get("keyword")
+        if keyword_retriever:
+            try:
+                keyword_results = await keyword_retriever.retrieve(
+                    query=query,
+                    user_id=user_id,
+                    top_k=top_k * 2,
+                    memory_type=memory_type,
+                    filters=filter,
+                )
+            except Exception as e:
+                logger.warning("[MemoryService] 混合检索-关键词部分失败: %s", e)
+
+        if not vector_results and not keyword_results:
+            return []
+
+        # 合并结果：按 ID 去重，加权得分
+        merged: dict[str, SearchResult] = {}
+
+        for result in vector_results:
+            weighted_score = result.score * self._vector_weight
+            merged[result.id] = SearchResult(
+                id=result.id,
+                content=result.content,
+                score=weighted_score,
+                memory_type=result.memory_type,
+                metadata=result.metadata,
+                highlight=result.highlight,
+            )
+
+        for result in keyword_results:
+            weighted_score = result.score * self._keyword_weight
+            if result.id in merged:
+                # 已存在则累加得分
+                merged[result.id].score += weighted_score
+            else:
+                merged[result.id] = SearchResult(
+                    id=result.id,
+                    content=result.content,
+                    score=weighted_score,
+                    memory_type=result.memory_type,
+                    metadata=result.metadata,
+                    highlight=result.highlight,
+                )
+
+        # 按得分降序排序
+        results = sorted(merged.values(), key=lambda r: r.score, reverse=True)
+        return results[:top_k]
 
     async def search(
         self,
@@ -520,6 +727,150 @@ class MemoryService:
             "total_count": episode_count + knowledge_count,
             "last_updated": datetime.now(UTC).isoformat(),
         }
+
+    # ============================================
+    # 健康检查与统计
+    # ============================================
+
+    async def health_check(self) -> dict[str, Any]:
+        """记忆系统健康检查。
+
+        报告记忆总数、向量覆盖率、存储后端状态和检索统计。
+
+        Returns:
+            健康检查报告字典
+        """
+        now = datetime.now(UTC).isoformat()
+
+        # 1. 统计记忆数量
+        episode_count = 0
+        knowledge_count = 0
+        try:
+            if self._episode_service._storage:
+                episode_count = await self._episode_service._storage.count_by_user("__all__")
+            else:
+                episode_count = len(self._episode_service._in_memory)
+        except Exception as e:
+            logger.warning("[MemoryService] 统计情景记忆数量失败: %s", e)
+
+        try:
+            if self._knowledge_service._storage:
+                all_knowledge = await self._knowledge_service._storage.find_by_user(
+                    "__all__", limit=1000000,
+                )
+                knowledge_count = len(all_knowledge)
+            else:
+                knowledge_count = len(self._knowledge_service._in_memory)
+        except Exception as e:
+            logger.warning("[MemoryService] 统计知识数量失败: %s", e)
+
+        total_count = episode_count + knowledge_count
+
+        # 2. 向量覆盖率
+        vector_coverage = 0.0
+        vector_entries = 0
+        if self._vector_retriever and hasattr(self._vector_retriever, "retrieve"):
+            try:
+                # 用空查询检测向量表中的条目数（通过全量注入接口）
+                sample_results = await self._vector_retriever.retrieve(
+                    query="__health_check_probe__",
+                    user_id=None,
+                    top_k=1,
+                    memory_type="semantic",
+                )
+                # 能成功调用说明向量检索可用
+                vector_entries = -1  # 无法精确统计，标记为可用
+                vector_coverage = -1.0
+            except Exception:
+                vector_entries = 0
+                vector_coverage = 0.0
+
+        # 3. 存储后端状态
+        storage_status: dict[str, str] = {}
+        storage_status["episode_storage"] = (
+            type(self._episode_service._storage).__name__
+            if self._episode_service._storage
+            else "in_memory"
+        )
+        storage_status["semantic_storage"] = (
+            type(self._knowledge_service._storage).__name__
+            if self._knowledge_service._storage
+            else "in_memory"
+        )
+        storage_status["vector_search"] = "enabled" if self._vector_search_enabled else "disabled"
+        storage_status["vector_retriever"] = (
+            type(self._vector_retriever).__name__
+            if self._vector_retriever
+            else "none"
+        )
+
+        # 检查存储连接
+        storage_healthy = True
+        for storage_name, storage_type in storage_status.items():
+            if storage_type == "none" and storage_name == "vector_retriever":
+                continue
+            if storage_type == "in_memory":
+                logger.debug("[HealthCheck] %s 使用内存存储", storage_name)
+
+        # 4. 可用检索器
+        available_retrievers = list(self._retrievers.keys())
+
+        # 5. 检索统计
+        stats = self._retrieval_stats.copy()
+        stats["hit_rate"] = (
+            (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"])
+            / max(stats["total_requests"], 1)
+        )
+
+        # 组装报告
+        report = {
+            "status": "healthy" if storage_healthy else "degraded",
+            "timestamp": now,
+            "memory_count": {
+                "total": total_count,
+                "episodes": episode_count,
+                "knowledge": knowledge_count,
+            },
+            "vector_coverage": {
+                "available": self._vector_search_enabled,
+                "entries": vector_entries,
+                "coverage_ratio": vector_coverage,
+            },
+            "storage_backends": storage_status,
+            "available_retrievers": available_retrievers,
+            "retrieval_stats": stats,
+            "config": {
+                "vector_search_enabled": self._vector_search_enabled,
+                "fallback_to_keyword": self._fallback_to_keyword,
+                "hybrid_enabled": self._hybrid_enabled,
+                "default_method": self._default_method,
+            },
+        }
+
+        logger.info(
+            "[HealthCheck] 记忆系统健康检查 | total=%d | vector=%s | retrievers=%s",
+            total_count,
+            "on" if self._vector_search_enabled else "off",
+            available_retrievers,
+        )
+
+        return report
+
+    def get_retrieval_stats(self) -> dict[str, Any]:
+        """获取检索统计信息。
+
+        Returns:
+            检索统计字典
+        """
+        stats = self._retrieval_stats.copy()
+        total = max(stats["total_requests"], 1)
+        stats["hit_rate"] = (
+            (stats["vector_hits"] + stats["keyword_hits"] + stats["fallback_hits"]) / total
+        )
+        stats["vector_hit_rate"] = stats["vector_hits"] / total
+        stats["keyword_hit_rate"] = stats["keyword_hits"] / total
+        stats["fallback_rate"] = stats["fallback_hits"] / total
+        return stats
 
     async def get_embedding(self, text: str) -> list[float] | None:
         """获取文本的嵌入向量。

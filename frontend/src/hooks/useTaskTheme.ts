@@ -140,46 +140,27 @@ export function useTaskTheme(): TaskTheme {
 
     return {
       task: {
-        pending:
-          themeConfig.colors.task?.pending || DEFAULT_COLORS.task.pending,
-        in_progress:
-          themeConfig.colors.task?.in_progress ||
-          DEFAULT_COLORS.task.in_progress,
-        completed:
-          themeConfig.colors.task?.completed || DEFAULT_COLORS.task.completed,
+        pending: themeConfig.colors.task?.pending || DEFAULT_COLORS.task.pending,
+        in_progress: themeConfig.colors.task?.in_progress || DEFAULT_COLORS.task.in_progress,
+        completed: themeConfig.colors.task?.completed || DEFAULT_COLORS.task.completed,
         failed: themeConfig.colors.task?.failed || DEFAULT_COLORS.task.failed,
-        blocked:
-          themeConfig.colors.task?.blocked || DEFAULT_COLORS.task.blocked,
+        blocked: themeConfig.colors.task?.blocked || DEFAULT_COLORS.task.blocked,
       },
       phase: {
-        prepare:
-          themeConfig.colors.phase?.prepare || DEFAULT_COLORS.phase.prepare,
-        execute:
-          themeConfig.colors.phase?.execute || DEFAULT_COLORS.phase.execute,
-        evaluate:
-          themeConfig.colors.phase?.evaluate || DEFAULT_COLORS.phase.evaluate,
+        prepare: themeConfig.colors.phase?.prepare || DEFAULT_COLORS.phase.prepare,
+        execute: themeConfig.colors.phase?.execute || DEFAULT_COLORS.phase.execute,
+        evaluate: themeConfig.colors.phase?.evaluate || DEFAULT_COLORS.phase.evaluate,
       },
       acceptance: {
-        pending:
-          themeConfig.colors.acceptance?.pending ||
-          DEFAULT_COLORS.acceptance.pending,
+        pending: themeConfig.colors.acceptance?.pending || DEFAULT_COLORS.acceptance.pending,
         evaluating:
-          themeConfig.colors.acceptance?.evaluating ||
-          DEFAULT_COLORS.acceptance.evaluating,
-        passed:
-          themeConfig.colors.acceptance?.passed ||
-          DEFAULT_COLORS.acceptance.passed,
-        failed:
-          themeConfig.colors.acceptance?.failed ||
-          DEFAULT_COLORS.acceptance.failed,
+          themeConfig.colors.acceptance?.evaluating || DEFAULT_COLORS.acceptance.evaluating,
+        passed: themeConfig.colors.acceptance?.passed || DEFAULT_COLORS.acceptance.passed,
+        failed: themeConfig.colors.acceptance?.failed || DEFAULT_COLORS.acceptance.failed,
       },
       task_type: {
-        planning:
-          themeConfig.colors.task_type?.planning ||
-          DEFAULT_COLORS.task_type.planning,
-        execution:
-          themeConfig.colors.task_type?.execution ||
-          DEFAULT_COLORS.task_type.execution,
+        planning: themeConfig.colors.task_type?.planning || DEFAULT_COLORS.task_type.planning,
+        execution: themeConfig.colors.task_type?.execution || DEFAULT_COLORS.task_type.execution,
         final_evaluation:
           themeConfig.colors.task_type?.final_evaluation ||
           DEFAULT_COLORS.task_type.final_evaluation,
@@ -214,7 +195,7 @@ export function useTaskTheme(): TaskTheme {
       agentLevelL2: `var(--agent-level-l2, ${colors.agent_level.l2})`,
       agentLevelL3: `var(--agent-level-l3, ${colors.agent_level.l3})`,
     }),
-    [colors]
+    [colors],
   )
 
   // 任务状态颜色
@@ -236,10 +217,7 @@ export function useTaskTheme(): TaskTheme {
   }
 
   const getTaskStatusBgColor = (status: TaskStatus): string => {
-    return getBgColor(
-      getTaskStatusColor(status),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getTaskStatusColor(status), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   const getTaskStatusTextColor = (status: TaskStatus): string => {
@@ -276,10 +254,7 @@ export function useTaskTheme(): TaskTheme {
   }
 
   const getPhaseStatusBgColor = (status: PhaseStatusType): string => {
-    return getBgColor(
-      getPhaseStatusColor(status),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getPhaseStatusColor(status), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   const getPhaseStatusTextColor = (status: PhaseStatusType): string => {
@@ -303,10 +278,7 @@ export function useTaskTheme(): TaskTheme {
   }
 
   const getACStatusBgColor = (status: ACStatus): string => {
-    return getBgColor(
-      getACStatusColor(status),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getACStatusColor(status), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   const getACStatusTextColor = (status: ACStatus): string => {
@@ -328,10 +300,7 @@ export function useTaskTheme(): TaskTheme {
   }
 
   const getTaskTypeBgColor = (type: TaskType): string => {
-    return getBgColor(
-      getTaskTypeColor(type),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getTaskTypeColor(type), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   const getTaskTypeTextColor = (type: TaskType): string => {
@@ -353,10 +322,7 @@ export function useTaskTheme(): TaskTheme {
   }
 
   const getAgentLevelBgColor = (level: AgentLevel): string => {
-    return getBgColor(
-      getAgentLevelColor(level),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getAgentLevelColor(level), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   const getAgentLevelTextColor = (level: AgentLevel): string => {
@@ -382,10 +348,7 @@ export function useTaskTheme(): TaskTheme {
 
   // AC 进度背景色
   const getACProgressBgColor = (passed: number, total: number): string => {
-    return getBgColor(
-      getACProgressColor(passed, total),
-      resolvedTheme === 'dark' ? 0.2 : 0.1
-    )
+    return getBgColor(getACProgressColor(passed, total), resolvedTheme === 'dark' ? 0.2 : 0.1)
   }
 
   // AC 进度文字色

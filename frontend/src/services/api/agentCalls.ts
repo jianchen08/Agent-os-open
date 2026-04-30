@@ -41,8 +41,7 @@ export interface AgentCallRecordResponse {
   duration?: number
 }
 
-export interface AgentCallRecordDetailResponse
-  extends AgentCallRecordResponse {
+export interface AgentCallRecordDetailResponse extends AgentCallRecordResponse {
   /** 完整指令 */
   instruction: string
   /** 上下文 */
@@ -116,30 +115,29 @@ export interface GetAgentCallStatisticsParams {
 }
 
 export async function listAgentCalls(
-  params?: ListAgentCallsParams
+  params?: ListAgentCallsParams,
 ): Promise<AgentCallListResponse> {
-  const response = await apiClient.get<AgentCallListResponse>(
-    API_ENDPOINTS.AGENT_CALLS.LIST,
-    { params }
-  )
+  const response = await apiClient.get<AgentCallListResponse>(API_ENDPOINTS.AGENT_CALLS.LIST, {
+    params,
+  })
   return response.data
 }
 
 export async function getAgentCallStatistics(
-  params?: GetAgentCallStatisticsParams
+  params?: GetAgentCallStatisticsParams,
 ): Promise<AgentCallStatisticsResponse> {
   const response = await apiClient.get<AgentCallStatisticsResponse>(
     API_ENDPOINTS.AGENT_CALLS.STATISTICS,
-    { params }
+    { params },
   )
   return response.data
 }
 
 export async function getAgentCallDetail(
-  executionId: string
+  executionId: string,
 ): Promise<AgentCallRecordDetailResponse> {
   const response = await apiClient.get<AgentCallRecordDetailResponse>(
-    API_ENDPOINTS.AGENT_CALLS.GET(executionId)
+    API_ENDPOINTS.AGENT_CALLS.GET(executionId),
   )
   return response.data
 }

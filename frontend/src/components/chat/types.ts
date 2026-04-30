@@ -2,12 +2,7 @@
  * 消息系统组件类型定义
  */
 
-import type {
-  Message,
-  MessageRole,
-  MessageToolCall,
-  ThinkingContent,
-} from '@/types/models'
+import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
  * 消息内容类型
@@ -132,6 +127,8 @@ export interface MessageListProps {
   onLoadMore?: () => void
   /** 会话ID */
   sessionId?: string
+  /** 搜索查询（用于高亮显示） */
+  searchQuery?: string
 }
 
 /**
@@ -154,6 +151,8 @@ export interface MessageItemProps {
   modelName?: string
   /** 自定义类名 */
   className?: string
+  /** 搜索查询（用于高亮显示） */
+  searchQuery?: string
 }
 
 /**

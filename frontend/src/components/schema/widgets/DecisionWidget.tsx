@@ -20,13 +20,11 @@ interface DecisionWidgetProps {
  */
 export function DecisionWidget({ props }: DecisionWidgetProps) {
   return (
-    <div className="rounded-lg border p-4 space-y-2">
-      <div className="text-sm font-medium text-muted-foreground">[Decision Widget]</div>
-      <div className="text-xs text-muted-foreground">
-        决策选择组件 - 待后续 Phase 完善
-      </div>
+    <div className="space-y-2 rounded-lg border p-4">
+      <div className="text-muted-foreground text-sm font-medium">[Decision Widget]</div>
+      <div className="text-muted-foreground text-xs">决策选择组件 - 待后续 Phase 完善</div>
       {props && (
-        <pre className="text-xs bg-muted/50 rounded p-2 overflow-auto">
+        <pre className="bg-muted/50 overflow-auto rounded p-2 text-xs">
           {JSON.stringify(props, null, 2)}
         </pre>
       )}

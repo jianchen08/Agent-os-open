@@ -5,8 +5,8 @@
  * Requirements: 1.1, 2.1, 2.5, 2.6
  */
 
-import type { User, Session, Message } from './models'
 import type { GraphData } from './graph'
+import type { User, Session, Message } from './models'
 
 /**
  * 线程（会话）类型
@@ -19,7 +19,7 @@ export interface Thread {
   updated_at: string
   message_count?: number
   status?: string
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
   agent_id?: string | null
 }
 
@@ -217,13 +217,13 @@ export interface ApiError {
   /** 错误消息 */
   message: string
   /** 错误详情（可选） */
-  details?: any
+  details?: Record<string, unknown>
 }
 
 /**
  * 通用API响应包装
  */
-export interface ApiResponse<T = any> {
+export interface ApiResponse<T = unknown> {
   /** 是否成功 */
   success: boolean
   /** 响应数据 */

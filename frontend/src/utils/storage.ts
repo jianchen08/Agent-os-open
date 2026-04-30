@@ -2,11 +2,7 @@
  * 本地存储工具函数（localStorage封装）
  */
 
-import {
-    MAX_FAVORITE_AGENTS,
-    STORAGE_KEYS,
-    type AgentPreferences,
-} from '../constants/storage'
+import { MAX_FAVORITE_AGENTS, STORAGE_KEYS, type AgentPreferences } from '../constants/storage'
 
 export { MAX_FAVORITE_AGENTS, STORAGE_KEYS, type AgentPreferences }
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
@@ -324,9 +320,7 @@ export const agentStorage = {
    * @returns Agent 偏好设置或默认值
    */
   getPreferences(): AgentPreferences {
-    const stored = storage.getItem<AgentPreferences>(
-      STORAGE_KEYS.AGENT_PREFERENCES
-    )
+    const stored = storage.getItem<AgentPreferences>(STORAGE_KEYS.AGENT_PREFERENCES)
     if (stored === null) {
       return {
         defaultAgentId: null,
@@ -344,10 +338,7 @@ export const agentStorage = {
     // 确保常用 Agent 列表不超过最大数量
     const limitedPreferences: AgentPreferences = {
       ...preferences,
-      favoriteAgentIds: preferences.favoriteAgentIds.slice(
-        0,
-        MAX_FAVORITE_AGENTS
-      ),
+      favoriteAgentIds: preferences.favoriteAgentIds.slice(0, MAX_FAVORITE_AGENTS),
     }
     storage.setItem(STORAGE_KEYS.AGENT_PREFERENCES, limitedPreferences)
   },
@@ -414,9 +405,7 @@ export const agentStorage = {
     const preferences = this.getPreferences()
     this.setPreferences({
       ...preferences,
-      favoriteAgentIds: preferences.favoriteAgentIds.filter(
-        id => id !== agentId
-      ),
+      favoriteAgentIds: preferences.favoriteAgentIds.filter((id) => id !== agentId),
     })
   },
 

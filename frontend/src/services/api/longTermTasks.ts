@@ -7,8 +7,8 @@
  * 注意：长期任务创建功能已移除，只能通过 task_submit 工具创建
  */
 
-import type { Task, TaskStatus } from '@/types/task'
 import { apiClient } from '@/services/api/client'
+import type { Task, TaskStatus } from '@/types/task'
 
 /**
  * 长期任务列表响应
@@ -47,9 +47,7 @@ export async function fetchLongTermTasks(params?: {
   const response = await apiClient.get<Task[]>(`/api/v1/tasks?${queryParams}`)
 
   // 过滤出长期任务（带有 long-term 标签）
-  const longTermTasks = response.data.filter(task =>
-    task.tags?.includes('long-term')
-  )
+  const longTermTasks = response.data.filter((task) => task.tags?.includes('long-term'))
 
   return {
     items: longTermTasks,
@@ -60,10 +58,7 @@ export async function fetchLongTermTasks(params?: {
 /**
  * 切换自动执行开关
  */
-export async function toggleAutoExecute(
-  taskId: string,
-  enabled: boolean
-): Promise<Task> {
+export async function toggleAutoExecute(taskId: string, enabled: boolean): Promise<Task> {
   // 先获取当前任务
   const response = await apiClient.get<Task>(`/api/v1/tasks/${taskId}`)
   const task = response.data
@@ -71,8 +66,8 @@ export async function toggleAutoExecute(
   // 更新标签
   const tags = task.tags || []
   const newTags = enabled
-    ? [...tags.filter(t => t !== 'auto-execute'), 'auto-execute']
-    : tags.filter(t => t !== 'auto-execute')
+    ? [...tags.filter((t) => t !== 'auto-execute'), 'auto-execute']
+    : tags.filter((t) => t !== 'auto-execute')
 
   const updateResponse = await apiClient.put<Task>(`/api/v1/tasks/${taskId}`, {
     tags: newTags,

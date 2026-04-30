@@ -5,7 +5,6 @@
  * 主题配置完全由前端管理，无后端依赖
  */
 
-import type { ThemeConfig } from '@/types/theme'
 import {
   darkTheme,
   lightTheme,
@@ -16,6 +15,7 @@ import {
   highContrastTheme,
 } from '@/config/themes'
 import { mergeTheme as mergeUserTheme } from '@/services/themeStorage'
+import type { ThemeConfig } from '@/types/theme'
 
 /**
  * 获取预设主题配置
@@ -379,10 +379,10 @@ export function applyTheme(config: ThemeConfig, debug = false): void {
 
   // 编译并应用 CSS 变量 - 使用 setProperty 而不是覆盖 cssText
   const cssVars = compileThemeVariables(config)
-  const varEntries = cssVars.split(';').filter(v => v.trim())
+  const varEntries = cssVars.split(';').filter((v) => v.trim())
 
-  varEntries.forEach(entry => {
-    const [key, value] = entry.split(':').map(s => s.trim())
+  varEntries.forEach((entry) => {
+    const [key, value] = entry.split(':').map((s) => s.trim())
     if (key && value) {
       root.style.setProperty(key, value)
     }
@@ -425,10 +425,7 @@ export function clearTheme(): void {
  * @param custom - 用户自定义配置
  * @returns 合并后的主题配置
  */
-export function mergeTheme(
-  base: ThemeConfig,
-  custom: Partial<ThemeConfig>
-): ThemeConfig {
+export function mergeTheme(base: ThemeConfig, custom: Partial<ThemeConfig>): ThemeConfig {
   return mergeUserTheme(base, custom)
 }
 

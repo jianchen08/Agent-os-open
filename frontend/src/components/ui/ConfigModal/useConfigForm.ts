@@ -15,9 +15,7 @@ const getDraftKey = (configType: string) => `config_draft_${configType}`
 /**
  * 从 localStorage 加载暂存数据
  */
-const loadDraft = <T extends object>(
-  configType: string
-): T | null => {
+const loadDraft = <T extends object>(configType: string): T | null => {
   try {
     const key = getDraftKey(configType)
     const draft = localStorage.getItem(key)
@@ -33,10 +31,7 @@ const loadDraft = <T extends object>(
 /**
  * 保存数据到 localStorage
  */
-const saveDraft = <T extends object>(
-  configType: string,
-  data: T
-) => {
+const saveDraft = <T extends object>(configType: string, data: T) => {
   try {
     const key = getDraftKey(configType)
     localStorage.setItem(key, JSON.stringify(data))
@@ -63,7 +58,7 @@ export const clearDraft = (configType: string) => {
 const validateField = <T extends object>(
   field: ConfigField<T>,
   value: unknown,
-  formData: T
+  formData: T,
 ): string | null => {
   // 必填验证
   if (field.required) {
@@ -112,10 +107,7 @@ const validateField = <T extends object>(
 /**
  * 验证所有字段
  */
-const validateForm = <T extends object>(
-  fields: ConfigField<T>[],
-  formData: T
-): FormErrors<T> => {
+const validateForm = <T extends object>(fields: ConfigField<T>[], formData: T): FormErrors<T> => {
   const errors: FormErrors<T> = {}
 
   for (const field of fields) {
@@ -137,7 +129,7 @@ const validateForm = <T extends object>(
 export function useConfigForm<T extends object>(
   fields: ConfigField<T>[],
   initialData: T,
-  configType?: string
+  configType?: string,
 ) {
   const [state, setState] = useState<FormState<T>>({
     data: initialData,
@@ -151,7 +143,7 @@ export function useConfigForm<T extends object>(
     if (configType) {
       const draft = loadDraft<T>(configType)
       if (draft) {
-        setState(prev => ({
+        setState((prev) => ({
           ...prev,
           data: draft,
           isDirty: true,
@@ -165,13 +157,13 @@ export function useConfigForm<T extends object>(
     if (configType) {
       const draft = loadDraft<T>(configType)
       if (!draft) {
-        setState(prev => ({
+        setState((prev) => ({
           ...prev,
           data: initialData,
         }))
       }
     } else {
-      setState(prev => ({
+      setState((prev) => ({
         ...prev,
         data: initialData,
       }))
@@ -183,7 +175,7 @@ export function useConfigForm<T extends object>(
    */
   const updateField = useCallback(
     (key: keyof T, value: unknown) => {
-      setState(prev => {
+      setState((prev) => {
         const newData = { ...prev.data, [key]: value } as T
 
         // 保存暂存
@@ -192,7 +184,7 @@ export function useConfigForm<T extends object>(
         }
 
         // 实时验证该字段
-        const field = fields.find(f => f.key === key)
+        const field = fields.find((f) => f.key === key)
         const errors = { ...prev.errors }
         if (field) {
           const error = validateField(field, value, newData)
@@ -211,7 +203,7 @@ export function useConfigForm<T extends object>(
         }
       })
     },
-    [fields, configType]
+    [fields, configType],
   )
 
   /**
@@ -219,7 +211,7 @@ export function useConfigForm<T extends object>(
    */
   const updateFields = useCallback(
     (updates: Partial<T>) => {
-      setState(prev => {
+      setState((prev) => {
         const newData = { ...prev.data, ...updates } as T
 
         // 保存暂存
@@ -234,7 +226,7 @@ export function useConfigForm<T extends object>(
         }
       })
     },
-    [configType]
+    [configType],
   )
 
   /**
@@ -259,7 +251,7 @@ export function useConfigForm<T extends object>(
    */
   const validate = useCallback((): boolean => {
     const errors = validateForm(fields, state.data)
-    setState(prev => ({ ...prev, errors }))
+    setState((prev) => ({ ...prev, errors }))
     return Object.keys(errors).length === 0
   }, [fields, state.data])
 
@@ -267,7 +259,7 @@ export function useConfigForm<T extends object>(
    * 设置提交状态
    */
   const setSubmitting = useCallback((isSubmitting: boolean) => {
-    setState(prev => ({ ...prev, isSubmitting }))
+    setState((prev) => ({ ...prev, isSubmitting }))
   }, [])
 
   /**

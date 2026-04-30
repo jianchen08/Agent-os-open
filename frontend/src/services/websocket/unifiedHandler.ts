@@ -5,6 +5,7 @@
  * 支持新的统一事件格式
  */
 
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { webSocketService } from './WebSocketService'
 import type {
   Attachment,
@@ -14,7 +15,6 @@ import type {
   UnifiedEventSubscriber,
   UnifiedEventHandlerOptions,
 } from './messageTypes'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
 
 /**
  * 统一事件处理器接口
@@ -28,10 +28,7 @@ export interface IUnifiedEventHandler {
    * @param eventType 事件类型
    * @param handler 事件处理器函数
    */
-  subscribe<T extends UnifiedEventType>(
-    eventType: T,
-    handler: UnifiedEventSubscriber<T>
-  ): void
+  subscribe<T extends UnifiedEventType>(eventType: T, handler: UnifiedEventSubscriber<T>): void
 
   /**
    * 取消订阅统一事件
@@ -39,10 +36,7 @@ export interface IUnifiedEventHandler {
    * @param eventType 事件类型
    * @param handler 事件处理器函数
    */
-  unsubscribe<T extends UnifiedEventType>(
-    eventType: T,
-    handler: UnifiedEventSubscriber<T>
-  ): void
+  unsubscribe<T extends UnifiedEventType>(eventType: T, handler: UnifiedEventSubscriber<T>): void
 
   /**
    * 取消订阅某事件类型的所有处理器
@@ -63,7 +57,7 @@ export interface IUnifiedEventHandler {
     options?: {
       enableThinking?: boolean
       attachments?: Attachment[]
-    }
+    },
   ): Promise<string>
 
   /**
@@ -125,64 +119,40 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
     this.log('初始化统一事件处理器...')
 
     // 订阅流式输出片段事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.STREAM_CHUNK,
-      this.handleStreamChunk.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_CHUNK, this.handleStreamChunk.bind(this))
 
     // 订阅流式输出结束事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.STREAM_END,
-      this.handleStreamEnd.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_END, this.handleStreamEnd.bind(this))
 
     // 订阅思考开始事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.THINKING_START,
-      this.handleThinkingStart.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_START, this.handleThinkingStart.bind(this))
 
     // 订阅思考片段事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.THINKING_CHUNK,
-      this.handleThinkingChunk.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_CHUNK, this.handleThinkingChunk.bind(this))
 
     // 订阅思考结束事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.THINKING_END,
-      this.handleThinkingEnd.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_END, this.handleThinkingEnd.bind(this))
 
     // 订阅执行开始事件
     webSocketService.subscribe(
       WS_SERVER_EVENTS.EXECUTION_START,
-      this.handleExecutionStart.bind(this)
+      this.handleExecutionStart.bind(this),
     )
 
     // 订阅执行进度事件
     webSocketService.subscribe(
       WS_SERVER_EVENTS.EXECUTION_PROGRESS,
-      this.handleExecutionProgress.bind(this)
+      this.handleExecutionProgress.bind(this),
     )
 
     // 订阅执行完成事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.EXECUTION_DONE,
-      this.handleExecutionDone.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, this.handleExecutionDone.bind(this))
 
     // 订阅错误事件
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.ERROR,
-      this.handleError.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.ERROR, this.handleError.bind(this))
 
     // 订阅新消息事件（用于获取消息ID）
-    webSocketService.subscribe(
-      WS_SERVER_EVENTS.NEW_MESSAGE,
-      this.handleNewMessage.bind(this)
-    )
+    webSocketService.subscribe(WS_SERVER_EVENTS.NEW_MESSAGE, this.handleNewMessage.bind(this))
 
     this.initialized = true
     this.log('统一事件处理器初始化完成')
@@ -194,10 +164,7 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
    * @param eventType 事件类型
    * @param handler 事件处理器函数
    */
-  subscribe<T extends UnifiedEventType>(
-    eventType: T,
-    handler: UnifiedEventSubscriber<T>
-  ): void {
+  subscribe<T extends UnifiedEventType>(eventType: T, handler: UnifiedEventSubscriber<T>): void {
     if (!this.subscribers.has(eventType)) {
       this.subscribers.set(eventType, new Set())
     }
@@ -211,10 +178,7 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
    * @param eventType 事件类型
    * @param handler 事件处理器函数
    */
-  unsubscribe<T extends UnifiedEventType>(
-    eventType: T,
-    handler: UnifiedEventSubscriber<T>
-  ): void {
+  unsubscribe<T extends UnifiedEventType>(eventType: T, handler: UnifiedEventSubscriber<T>): void {
     const handlers = this.subscribers.get(eventType)
     if (handlers) {
       handlers.delete(handler as UnifiedEventSubscriber<UnifiedEventType>)
@@ -248,14 +212,14 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
     options?: {
       enableThinking?: boolean
       attachments?: Attachment[]
-    }
+    },
   ): Promise<string> {
     this.log('发送用户输入:', content.substring(0, 50) + (content.length > 50 ? '...' : ''))
 
     const result = await webSocketService.sendUserInput(
       content,
       options?.attachments,
-      options?.enableThinking
+      options?.enableThinking,
     )
 
     return result ?? ''
@@ -276,7 +240,7 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
   clearAll(): void {
     const totalSubscribers = Array.from(this.subscribers.values()).reduce(
       (sum, handlers) => sum + handlers.size,
-      0
+      0,
     )
     this.subscribers.clear()
     this.log(`清除所有订阅 (${totalSubscribers}个订阅者)`)
@@ -300,7 +264,7 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
   private emit(event: UnifiedStreamEvent): void {
     const handlers = this.subscribers.get(event.event_type)
     if (handlers) {
-      handlers.forEach(handler => {
+      handlers.forEach((handler) => {
         try {
           handler(event)
         } catch (error) {
@@ -329,10 +293,19 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
    * @param data 原始事件数据
    */
   private handleStreamEnd(data: unknown): void {
-    const endData = data as { messageId: string; threadId: string; metadata?: Record<string, unknown> }
-    const event = this.createUnifiedEvent('stream.end', data, {
-      final_content: '',
-    }, endData.metadata)
+    const endData = data as {
+      messageId: string
+      threadId: string
+      metadata?: Record<string, unknown>
+    }
+    const event = this.createUnifiedEvent(
+      'stream.end',
+      data,
+      {
+        final_content: '',
+      },
+      endData.metadata,
+    )
     this.emit(event)
   }
 
@@ -366,9 +339,14 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
    */
   private handleThinkingEnd(data: unknown): void {
     const endData = data as { messageId: string; threadId: string; durationMs?: number }
-    const event = this.createUnifiedEvent('thinking.end', data, {}, {
-      duration_ms: endData.durationMs,
-    })
+    const event = this.createUnifiedEvent(
+      'thinking.end',
+      data,
+      {},
+      {
+        duration_ms: endData.durationMs,
+      },
+    )
     this.emit(event)
   }
 
@@ -474,10 +452,15 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
     eventType: UnifiedEventType,
     data: unknown,
     payload: Partial<UnifiedEventPayload>,
-    additionalMetadata?: Record<string, unknown>
+    additionalMetadata?: Record<string, unknown>,
   ): UnifiedStreamEvent {
     // 从数据中提取必需字段
-    const baseData = data as { messageId?: string; message_id?: string; threadId?: string; thread_id?: string }
+    const baseData = data as {
+      messageId?: string
+      message_id?: string
+      threadId?: string
+      thread_id?: string
+    }
 
     const messageId = baseData.messageId || baseData.message_id || ''
     const threadId = baseData.threadId || baseData.thread_id || ''
@@ -517,7 +500,7 @@ export class UnifiedEventHandler implements IUnifiedEventHandler {
  * @returns 统一事件处理器实例
  */
 export function createUnifiedEventHandler(
-  options?: UnifiedEventHandlerOptions
+  options?: UnifiedEventHandlerOptions,
 ): UnifiedEventHandler {
   return new UnifiedEventHandler(options)
 }

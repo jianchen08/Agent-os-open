@@ -3,7 +3,7 @@
 提供配置热重载、Schema 校验和模型配置加载功能。
 """
 
-from .models import ModelConfigLoader
+from .models import ModelConfigLoader, get_model_config_loader, invalidate_model_config_cache
 from .reload import ConfigReloadHandler, ConfigReloader
 from .schema import ConfigSchemaValidator
 
@@ -12,4 +12,6 @@ __all__ = [
     "ConfigReloadHandler",
     "ConfigSchemaValidator",
     "ModelConfigLoader",
+    "get_model_config_loader",
+    "invalidate_model_config_cache",
 ]

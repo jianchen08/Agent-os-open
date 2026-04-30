@@ -24,28 +24,33 @@ interface WorkspacePanelProps {
  *
  * 显示 Tab 栏和对应的 Tab 内容区域
  */
-export function WorkspacePanel({ tabs, onTabChange, onTabClose, renderTabContent }: WorkspacePanelProps) {
-  const activeTab = tabs.find(t => t.isActive)
+export function WorkspacePanel({
+  tabs,
+  onTabChange,
+  onTabClose,
+  renderTabContent,
+}: WorkspacePanelProps) {
+  const activeTab = tabs.find((t) => t.isActive)
 
   if (tabs.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
         工作区为空 — 模块激活后自动出现
       </div>
     )
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full flex-col">
       {/* Tab 栏 */}
-      <div className="flex-shrink-0 flex items-center border-b border-border overflow-x-auto">
-        {tabs.map(tab => (
+      <div className="border-border flex flex-shrink-0 items-center overflow-x-auto border-b">
+        {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`flex items-center gap-1.5 px-3 py-2 text-sm cursor-pointer border-b-2 transition-colors whitespace-nowrap ${
+            className={`flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap transition-colors ${
               tab.isActive
                 ? 'border-primary text-foreground font-medium'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
+                : 'text-muted-foreground hover:text-foreground border-transparent'
             }`}
             onClick={() => onTabChange(tab.id)}
           >
@@ -53,8 +58,11 @@ export function WorkspacePanel({ tabs, onTabChange, onTabClose, renderTabContent
             <span>{tab.title}</span>
             {!tab.isPinned && (
               <button
-                className="ml-1 w-4 h-4 flex items-center justify-center rounded hover:bg-accent text-muted-foreground text-xs"
-                onClick={e => { e.stopPropagation(); onTabClose(tab.id) }}
+                className="hover:bg-accent text-muted-foreground ml-1 flex h-4 w-4 items-center justify-center rounded text-xs"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTabClose(tab.id)
+                }}
               >
                 ×
               </button>
@@ -65,8 +73,10 @@ export function WorkspacePanel({ tabs, onTabChange, onTabClose, renderTabContent
 
       {/* Tab 内容 */}
       <div className="flex-1 overflow-auto">
-        {activeTab ? renderTabContent(activeTab) : (
-          <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+        {activeTab ? (
+          renderTabContent(activeTab)
+        ) : (
+          <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
             选择一个标签页
           </div>
         )}

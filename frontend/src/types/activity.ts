@@ -87,13 +87,7 @@ export interface ActivityAction {
   /** 确认提示（可选） */
   confirmMessage?: string
   /** 操作按钮样式（可选） */
-  variant?:
-    | 'default'
-    | 'destructive'
-    | 'ghost'
-    | 'outline'
-    | 'secondary'
-    | 'link'
+  variant?: 'default' | 'destructive' | 'ghost' | 'outline' | 'secondary' | 'link'
 }
 
 /**
@@ -219,9 +213,7 @@ export function formatDuration(ms: number): string {
   }
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = seconds % 60
-  return remainingSeconds > 0
-    ? `${minutes}m ${remainingSeconds}s`
-    : `${minutes}m`
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
 }
 
 /**

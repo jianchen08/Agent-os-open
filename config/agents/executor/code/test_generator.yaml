@@ -38,6 +38,9 @@ static_vars:
     - name: "测试代码模板"
       type: "path"
       path: "config/templates/test_code_template.md"
+    - name: "状态机测试设计规则"
+      type: "path"
+      path: "config/rules/per_agent/state_machine_test_design.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -164,9 +167,15 @@ system_prompt: |
 
     requirement_analysis:
       - 确定功能需求
-      - 识别验收标准
+      - 识别验收标准（AC 清单）
       - 明确性能要求
       - 了解约束条件
+
+    state_machine_analysis:
+      - 识别所有用户可感知的状态
+      - 识别所有状态转换（transition）
+      - 识别守卫条件（guard）和副作用（side_effect）
+      - 确保覆盖 Loading/Empty/Error/Success 四种基础状态
 
     dependency_analysis:
       - 识别外部依赖
@@ -199,10 +208,21 @@ system_prompt: |
         input: "空值"
         expected: "适当处理"
 
+    state_machine_tests:
+      - component: "<组件名>"
+        states: ["idle", "loading", "success", "error", ...]
+        transitions:
+          - from: "<起始状态>"
+            event: "<触发事件>"
+            to: "<目标状态>"
+            expect: ["<可见效果1>", "<可见效果2>"]
+
     coverage_goals:
       line_coverage: "> 80%"
       branch_coverage: "> 70%"
       function_coverage: "100%"
+      state_coverage: "= 100%"
+      transition_coverage: "= 100%"
   ```
 
   ### 3. 测试代码生成
@@ -523,6 +543,9 @@ hard_constraints:
   - "评估通过才能结束任务"
   - "代码必须可运行"
   - "必须通过语法检查"
+  - "如果任务输入包含 state_machine，必须覆盖所有状态和转换的测试（state_coverage=100%，transition_coverage=100%）"
+  - "如果任务输入包含验收标准（AC），每个 must 级别的 AC 必须有对应测试"
+  - "涉及状态变化的组件必须测试所有状态下的可见效果（按钮disabled、loading动画、错误提示等）"
 
 soft_constraints:
   - "优先使用项目已有的测试框架和工具"
@@ -554,7 +577,7 @@ recommended_metrics:
       path: "src/"
 
 # 运行配置
-version: "1.0.0"
+version: "2.0.0"
 is_active: true
 status: "active"
 max_iterations: 100
@@ -564,7 +587,7 @@ timeout_seconds: 2400
 metadata:
   author: "System"
   created_at: "2024-12-27"
-  updated_at: "2026-03-22"
+  updated_at: "2026-04-30"
   phase: 3
   capabilities:
     - test_case_design
@@ -572,3 +595,5 @@ metadata:
     - test_data_generation
     - mock_and_fixture_generation
     - coverage_analysis
+    - state_machine_testing
+    - acceptance_criteria_coverage

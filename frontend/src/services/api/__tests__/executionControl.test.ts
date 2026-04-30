@@ -41,19 +41,14 @@ describe('执行控制 API', () => {
       const result = await controlExecution('exec-1', 'pause')
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/execution/exec-1/control',
-        {
-          action: 'pause',
-          params: undefined,
-        }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/execution/exec-1/control', {
+        action: 'pause',
+        params: undefined,
+      })
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
-      await expect(controlExecution('', 'pause')).rejects.toThrow(
-        '执行 ID 不能为空'
-      )
+      await expect(controlExecution('', 'pause')).rejects.toThrow('执行 ID 不能为空')
     })
   })
 
@@ -87,9 +82,7 @@ describe('执行控制 API', () => {
       const result = await cancelExecution('exec-1')
 
       expect(result.status).toBe('cancelled')
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/execution/exec-1/cancel'
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/execution/exec-1/cancel')
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
@@ -116,24 +109,19 @@ describe('执行控制 API', () => {
       const result = await injectAgentMessage('exec-1', { content: '测试消息' })
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/execution/exec-1/inject',
-        {
-          content: '测试消息',
-        }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/execution/exec-1/inject', {
+        content: '测试消息',
+      })
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
-      await expect(injectAgentMessage('', { content: 'test' })).rejects.toThrow(
-        '执行 ID 不能为空'
-      )
+      await expect(injectAgentMessage('', { content: 'test' })).rejects.toThrow('执行 ID 不能为空')
     })
 
     it('应该在消息内容为空时抛出错误', async () => {
-      await expect(
-        injectAgentMessage('exec-1', { content: '' })
-      ).rejects.toThrow('消息内容不能为空')
+      await expect(injectAgentMessage('exec-1', { content: '' })).rejects.toThrow(
+        '消息内容不能为空',
+      )
     })
   })
 
@@ -170,9 +158,7 @@ describe('执行控制 API', () => {
       const result = await getExecutionSteps('exec-1')
 
       expect(result).toEqual(mockSteps)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/api/v1/execution/exec-1/steps'
-      )
+      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/execution/exec-1/steps')
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
@@ -188,12 +174,9 @@ describe('执行控制 API', () => {
       const result = await approveExecution('exec-1', { action: 'approve' })
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/execution/exec-1/approve',
-        {
-          action: 'approve',
-        }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/execution/exec-1/approve', {
+        action: 'approve',
+      })
     })
 
     it('应该成功拒绝执行', async () => {
@@ -209,9 +192,7 @@ describe('执行控制 API', () => {
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
-      await expect(approveExecution('', { action: 'approve' })).rejects.toThrow(
-        '执行 ID 不能为空'
-      )
+      await expect(approveExecution('', { action: 'approve' })).rejects.toThrow('执行 ID 不能为空')
     })
   })
 })

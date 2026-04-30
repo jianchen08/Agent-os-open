@@ -99,7 +99,7 @@ export function showInteractiveToast(
       label: string
       onClick: () => void
     }
-  }
+  },
 ) {
   return sonnerToast.info(title, {
     description: options.description,
@@ -144,7 +144,7 @@ export const toast = {
       loading: string
       success: string
       error: string
-    }
+    },
   ) => {
     return sonnerToast.promise(promise, options)
   },

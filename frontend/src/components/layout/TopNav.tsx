@@ -12,14 +12,25 @@
  * 新增：移动端响应式支持，汉堡菜单和折叠导航
  */
 
-import { Activity, Bot, Brain, Bug, Home, Menu, MessageSquare, Settings, Wrench, X } from 'lucide-react'
+import {
+  Activity,
+  Bot,
+  Brain,
+  Bug,
+  Home,
+  Menu,
+  MessageSquare,
+  Settings,
+  Wrench,
+  X,
+} from 'lucide-react'
 import React, { memo, useCallback, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { Button } from '@/components/ui/button'
 import { ROUTES } from '@/constants/routes'
+import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { useUIStore } from '@/stores/uiStore'
-import { cn } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
 import { ThemeButton } from './ThemeButton'
 import { ThemePanel } from './ThemePanel'
 
@@ -57,10 +68,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * @param itemPath 导航项路径
  * @returns 是否激活
  */
-export const isNavItemActive = (
-  currentPath: string,
-  itemPath: string
-): boolean => {
+export const isNavItemActive = (currentPath: string, itemPath: string): boolean => {
   // 精确匹配
   if (currentPath === itemPath) {
     return true
@@ -86,7 +94,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuthStore()
-  const toggleSidebar = useUIStore(state => state.toggleSidebar)
+  const toggleSidebar = useUIStore((state) => state.toggleSidebar)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showThemePanel, setShowThemePanel] = useState(false)
   const [showMobileNav, setShowMobileNav] = useState(false)
@@ -95,7 +103,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
    * 打开主题面板
    */
   const handleThemeButtonClick = useCallback(() => {
-    setShowThemePanel(prev => !prev)
+    setShowThemePanel((prev) => !prev)
     // 关闭用户菜单
     setShowUserMenu(false)
   }, [])
@@ -120,7 +128,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
       // 尝试通过后端 API 启动桌面悬浮窗
       const response = await fetch('/api/v1/floating-chat/launch', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
       })
 
       if (response.ok) {
@@ -142,7 +150,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
     const floatingWindow = window.open(
       targetUrl,
       'floating-chat',
-      'width=400,height=500,resizable=yes,scrollbars=no,status=no,menubar=no,toolbar=no,location=no,directories=no,top=100,left=100'
+      'width=400,height=500,resizable=yes,scrollbars=no,status=no,menubar=no,toolbar=no,location=no,directories=no,top=100,left=100',
     )
 
     if (floatingWindow) {
@@ -161,42 +169,37 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
         setShowMobileNav(false)
       }
     },
-    [navigate, isMobile]
+    [navigate, isMobile],
   )
 
   /**
    * 切换移动端导航菜单
    */
   const toggleMobileNav = useCallback(() => {
-    setShowMobileNav(prev => !prev)
+    setShowMobileNav((prev) => !prev)
   }, [])
 
   return (
     <header
       data-testid="top-nav"
-      className="flex h-10 items-center justify-between border-b border-border/50 bg-background/95 backdrop-blur-sm px-4"
+      className="border-border/50 bg-background/95 flex h-10 items-center justify-between border-b px-4 backdrop-blur-sm"
       style={{ height: 'var(--topnav-height, 40px)' }}
     >
       {/* 左侧区域：侧边栏切换按钮 + 系统标题 */}
-      <div
-        className="flex items-center"
-        style={{ gap: 'var(--spacing-3, 12px)' }}
-      >
+      <div className="flex items-center" style={{ gap: 'var(--spacing-3, 12px)' }}>
         {/* 侧边栏切换按钮 */}
         <Button
           variant="ghost"
           size="sm"
           onClick={toggleSidebar}
-          className="rounded-xl transition-all duration-200 hover:bg-muted/80 px-2"
+          className="hover:bg-muted/80 rounded-xl px-2 transition-all duration-200"
           title="切换侧边栏"
         >
           <Menu className="h-4 w-4" />
         </Button>
 
         {/* 系统标题 - 1280px 以下隐藏 */}
-        <h1 className="text-lg font-semibold text-foreground hidden xl:block">
-          智能体工作流系统
-        </h1>
+        <h1 className="text-foreground hidden text-lg font-semibold xl:block">智能体工作流系统</h1>
       </div>
 
       {/* 中间区域：导航菜单 - 桌面端显示完整菜单，小桌面显示简化菜单 */}
@@ -207,7 +210,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
           role="navigation"
           aria-label="主导航"
         >
-          {NAV_ITEMS.map(item => {
+          {NAV_ITEMS.map((item) => {
             const isActive = isNavItemActive(location.pathname, item.path)
             const Icon = item.icon
             return (
@@ -219,23 +222,16 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
                 aria-current={isActive ? 'page' : undefined}
                 variant={isActive ? 'default' : 'ghost'}
                 size="sm"
-                className={`
-                  rounded-xl transition-all duration-200
-                  ${
-                    isActive
-                      ? 'shadow-sm'
-                      : 'hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                  }
-                  /* 大屏幕：显示完整按钮 */
-                  min-w-[72px] gap-1.5
-                  /* 1280px 以下：只显示图标，减小间距 */
-                  lg:min-w-[72px] lg:gap-1.5
-                `}
+                className={`rounded-xl transition-all duration-200 ${
+                  isActive
+                    ? 'shadow-sm'
+                    : 'hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                } /* 大屏幕：显示完整按钮 */ /* 1280px 以下：只显示图标，减小间距 */ min-w-[72px] gap-1.5 lg:min-w-[72px] lg:gap-1.5`}
                 title={item.label}
               >
                 {Icon && <Icon className="h-4 w-4" />}
                 {/* 1280px 以下隐藏文字，只显示图标 */}
-                <span className="text-sm hidden xl:inline">{item.label}</span>
+                <span className="hidden text-sm xl:inline">{item.label}</span>
               </Button>
             )
           })}
@@ -250,17 +246,13 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
           onClick={toggleMobileNav}
           className={cn(
             'rounded-xl transition-all duration-200',
-            showMobileNav ? 'bg-primary/20 text-primary' : 'hover:bg-muted/80'
+            showMobileNav ? 'bg-primary/20 text-primary' : 'hover:bg-muted/80',
           )}
           aria-label={showMobileNav ? '关闭导航菜单' : '打开导航菜单'}
           aria-expanded={showMobileNav}
         >
-          {showMobileNav ? (
-            <X className="h-4 w-4" />
-          ) : (
-            <Menu className="h-4 w-4" />
-          )}
-          <span className="text-sm ml-1">菜单</span>
+          {showMobileNav ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+          <span className="ml-1 text-sm">菜单</span>
         </Button>
       )}
 
@@ -271,7 +263,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
           onClick={handleOpenFloatingChat}
           variant="ghost"
           size="icon"
-          className="h-8 w-8 rounded-lg transition-all duration-200 hover:bg-muted/80"
+          className="hover:bg-muted/80 h-8 w-8 rounded-lg transition-all duration-200"
           title="打开悬浮聊天窗口"
           aria-label="打开悬浮助手"
         >
@@ -292,7 +284,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
               <button
                 data-testid="user-menu-button"
                 onClick={() => setShowUserMenu(!showUserMenu)}
-                className="flex items-center justify-center h-8 w-8 rounded-lg transition-all duration-200 hover:bg-muted/80 outline-none"
+                className="hover:bg-muted/80 flex h-8 w-8 items-center justify-center rounded-lg transition-all duration-200 outline-none"
                 style={{
                   border: 'none',
                   background: 'transparent',
@@ -302,7 +294,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
               >
                 {/* 用户头像 */}
                 <div
-                  className="h-7 w-7 flex items-center justify-center flex-shrink-0 text-sm font-semibold rounded-full"
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-sm font-semibold"
                   style={{
                     backgroundColor: 'hsl(var(--primary))',
                     color: 'hsl(var(--primary-foreground))',
@@ -324,7 +316,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
               {showUserMenu && (
                 <div
                   data-testid="user-menu-dropdown"
-                  className="absolute mt-2 rounded-xl border border-border/50 shadow-lg z-[100] overflow-hidden animate-in fade-in-0 zoom-in-95 duration-200"
+                  className="border-border/50 animate-in fade-in-0 zoom-in-95 absolute z-[100] mt-2 overflow-hidden rounded-xl border shadow-lg duration-200"
                   style={{
                     minWidth: '200px',
                     backgroundColor: 'hsl(var(--popover))',
@@ -333,15 +325,9 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
                   }}
                 >
                   {/* 用户信息 */}
-                  <div className="border-b border-border/50 px-4 py-3">
-                    <p className="text-sm font-medium text-popover-foreground">
-                      {user.username}
-                    </p>
-                    {user.email && (
-                      <p className="text-xs text-muted-foreground">
-                        {user.email}
-                      </p>
-                    )}
+                  <div className="border-border/50 border-b px-4 py-3">
+                    <p className="text-popover-foreground text-sm font-medium">{user.username}</p>
+                    {user.email && <p className="text-muted-foreground text-xs">{user.email}</p>}
                   </div>
 
                   {/* 菜单项 */}
@@ -350,7 +336,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
                     <button
                       data-testid="logout-button"
                       onClick={handleLogout}
-                      className="flex w-full items-center text-sm text-destructive transition-colors hover:bg-destructive/10 rounded-lg mx-1"
+                      className="text-destructive hover:bg-destructive/10 mx-1 flex w-full items-center rounded-lg text-sm transition-colors"
                       style={{
                         height: 'var(--user-menu-item-height, 36px)',
                         paddingLeft: 'var(--user-menu-item-padding-x, 12px)',
@@ -396,19 +382,19 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
           {/* 遮罩层 */}
           <div
             data-testid="mobile-nav-overlay"
-            className="fixed inset-0 bg-black/30 z-40 animate-in fade-in duration-200"
+            className="animate-in fade-in fixed inset-0 z-40 bg-black/30 duration-200"
             onClick={() => setShowMobileNav(false)}
             aria-hidden="true"
           />
           {/* 导航菜单 */}
           <nav
             data-testid="mobile-nav-menu"
-            className="absolute left-0 right-0 top-full bg-background/95 backdrop-blur-sm border-b border-border/50 shadow-lg z-50 animate-in slide-in-from-top-2 duration-200"
+            className="bg-background/95 border-border/50 animate-in slide-in-from-top-2 absolute top-full right-0 left-0 z-50 border-b shadow-lg backdrop-blur-sm duration-200"
             role="navigation"
             aria-label="移动端主导航"
           >
-            <div className="px-4 py-2 space-y-1">
-              {NAV_ITEMS.map(item => {
+            <div className="space-y-1 px-4 py-2">
+              {NAV_ITEMS.map((item) => {
                 const isActive = isNavItemActive(location.pathname, item.path)
                 const Icon = item.icon
                 return (
@@ -424,7 +410,7 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
                       'w-full justify-start gap-3 rounded-xl transition-all duration-200',
                       isActive
                         ? 'shadow-sm'
-                        : 'hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                        : 'hover:bg-muted/80 text-muted-foreground hover:text-foreground',
                     )}
                   >
                     {Icon && <Icon className="h-4 w-4" />}

@@ -3,8 +3,8 @@
  *
  * 支持拖拽调整宽度、折叠展开
  */
-import { useState, useRef, useCallback } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { useState, useRef, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 
 export interface SplitPaneProps {
@@ -66,10 +66,7 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
         const containerWidth = containerRef.current.offsetWidth
         const deltaX = moveEvent.clientX - startX
         const deltaPercent = (deltaX / containerWidth) * 100
-        const newWidth = Math.max(
-          minLeftWidth,
-          Math.min(maxLeftWidth, startWidth + deltaPercent)
-        )
+        const newWidth = Math.max(minLeftWidth, Math.min(maxLeftWidth, startWidth + deltaPercent))
 
         setLeftWidth(newWidth)
         onWidthChange?.(newWidth)
@@ -84,7 +81,7 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
     },
-    [leftWidth, minLeftWidth, maxLeftWidth, onWidthChange]
+    [leftWidth, minLeftWidth, maxLeftWidth, onWidthChange],
   )
 
   /**
@@ -107,12 +104,12 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
   }, [isRightCollapsed, leftWidth, lastExpandedWidth, onCollapseChange])
 
   return (
-    <div ref={containerRef} className="flex w-full h-full overflow-hidden">
+    <div ref={containerRef} className="flex h-full w-full overflow-hidden">
       {/* 左侧面板 */}
       <div
         className={cn(
-          'transition-all duration-300 ease-in-out overflow-hidden',
-          isRightCollapsed && 'flex-1'
+          'overflow-hidden transition-all duration-300 ease-in-out',
+          isRightCollapsed && 'flex-1',
         )}
         style={{
           width: isRightCollapsed ? '100%' : `${leftWidth}%`,
@@ -124,10 +121,10 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
       {/* 拖拽条 */}
       <div
         className={cn(
-          'relative group flex-shrink-0',
-          'w-1 border-r border-border/50',
-          'transition-colors cursor-col-resize',
-          isDragging && 'bg-status-running'
+          'group relative flex-shrink-0',
+          'border-border/50 w-1 border-r',
+          'cursor-col-resize transition-colors',
+          isDragging && 'bg-status-running',
         )}
         onMouseDown={handleMouseDown}
       >
@@ -135,18 +132,18 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
         <button
           onClick={toggleCollapse}
           className={cn(
-            'absolute top-1/2 -translate-y-1/2 -translate-x-1/2',
-            'w-8 h-8 rounded-lg glass-panel',
+            'absolute top-1/2 -translate-x-1/2 -translate-y-1/2',
+            'glass-panel h-8 w-8 rounded-lg',
             'flex items-center justify-center',
-            'opacity-0 group-hover:opacity-100 transition-opacity',
-            'hover:bg-surface/80'
+            'opacity-0 transition-opacity group-hover:opacity-100',
+            'hover:bg-surface/80',
           )}
           title={isRightCollapsed ? '展开执行图' : '折叠执行图'}
         >
           {isRightCollapsed ? (
-            <ChevronLeft className="w-4 h-4" />
+            <ChevronLeft className="h-4 w-4" />
           ) : (
-            <ChevronRight className="w-4 h-4" />
+            <ChevronRight className="h-4 w-4" />
           )}
         </button>
       </div>
@@ -154,8 +151,8 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
       {/* 右侧面板 */}
       <div
         className={cn(
-          'transition-all duration-300 ease-in-out relative flex-shrink-0',
-          isRightCollapsed ? 'w-10' : 'flex-1'
+          'relative flex-shrink-0 transition-all duration-300 ease-in-out',
+          isRightCollapsed ? 'w-10' : 'flex-1',
         )}
       >
         {rightContent}

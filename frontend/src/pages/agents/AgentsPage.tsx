@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { Bot, RefreshCw, Search } from 'lucide-react'
 import { getAgents } from '@/services/api/agents'
 import type { AgentResponse } from '@/services/api/agents'
 
@@ -29,8 +30,9 @@ export function AgentsPage() {
       const res = await getAgents({ search: search || undefined, pageSize: 100 })
       setAgents(res.items)
       setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取 Agent 列表失败')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '获取 Agent 列表失败'
+      setError(message)
     } finally {
       setIsLoading(false)
     }
@@ -69,79 +71,120 @@ export function AgentsPage() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">智能体管理</h1>
-        <span className="ml-auto text-xs text-muted-foreground">共 {total} 个智能体</span>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-muted-foreground text-xs">共 {total} 个智能体</span>
+          <button
+            onClick={fetchAgents}
+            disabled={isLoading}
+            className="hover:bg-accent/50 rounded-lg border px-2 py-1 text-xs disabled:opacity-50"
+            aria-label="刷新智能体列表"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </header>
-      <main className="flex-1 overflow-y-auto p-6 space-y-4">
+      <main className="flex-1 space-y-4 overflow-y-auto p-6">
         {/* 搜索 */}
         <input
           type="text"
           placeholder="搜索 Agent..."
           value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="w-full max-w-md px-3 py-1.5 text-sm border rounded-lg bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+          onChange={(e) => setSearch(e.target.value)}
+          aria-label="搜索智能体"
+          className="bg-background focus:ring-primary w-full max-w-md rounded-lg border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none"
         />
 
-        {/* 加载状态 */}
+        {/* 加载状态 - 骨架屏 */}
         {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="ml-2 text-sm text-muted-foreground">加载中...</span>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="animate-pulse rounded-lg border p-4">
+                <div className="mb-2 flex items-start justify-between">
+                  <div className="bg-muted h-4 w-2/3 rounded" />
+                  <div className="bg-muted h-5 w-12 rounded-full" />
+                </div>
+                <div className="bg-muted mb-3 h-3 w-full rounded" />
+                <div className="bg-muted mb-1.5 h-3 w-4/5 rounded" />
+                <div className="flex gap-1.5">
+                  <div className="bg-muted h-5 w-10 rounded" />
+                  <div className="bg-muted h-5 w-16 rounded" />
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
         {/* 错误状态 */}
         {error && (
-          <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
+          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
         )}
 
         {/* 空状态 */}
         {!isLoading && !error && agents.length === 0 && (
-          <div className="text-center py-12 text-muted-foreground">暂无数据</div>
+          <div className="flex flex-col items-center justify-center py-16">
+            <Bot className="text-muted-foreground/40 mb-3 h-12 w-12" />
+            <p className="text-muted-foreground text-sm">
+              {search ? '没有找到匹配的智能体' : '暂无智能体'}
+            </p>
+            {!search && (
+              <p className="text-muted-foreground/60 mt-1 text-xs">
+                请在 config/agents/ 目录下添加 Agent 配置文件
+              </p>
+            )}
+          </div>
         )}
 
         {/* Agent 卡片列表 */}
         {!isLoading && !error && agents.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {agents.map(agent => (
+          <div
+            className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
+            role="list"
+            aria-live="polite"
+            aria-label="智能体列表"
+          >
+            {agents.map((agent) => (
               <div
                 key={agent.id}
-                className="border rounded-lg p-4 cursor-pointer hover:bg-accent/30 transition-colors"
+                className="hover:bg-accent/30 cursor-pointer rounded-lg border p-4 transition-colors"
                 onClick={() => setExpandedId(expandedId === agent.id ? null : agent.id)}
+                role="listitem"
               >
-                <div className="flex items-start justify-between mb-2">
-                  <h3 className="text-sm font-semibold truncate flex-1 mr-2">{agent.name}</h3>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${getStatusStyle(agent.status)}`}>
+                <div className="mb-2 flex items-start justify-between">
+                  <h3 className="mr-2 flex-1 truncate text-sm font-semibold">{agent.name}</h3>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs ${getStatusStyle(agent.status)}`}
+                  >
                     {agent.status}
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground line-clamp-2 mb-3">
+                <p className="text-muted-foreground mb-3 line-clamp-2 text-xs">
                   {agent.description || '暂无描述'}
                 </p>
                 <div className="flex flex-wrap gap-1.5 text-xs">
-                  <span className={`px-1.5 py-0.5 rounded ${getTypeBadge(agent.agent_type)}`}>
+                  <span className={`rounded px-1.5 py-0.5 ${getTypeBadge(agent.agent_type)}`}>
                     {agent.agent_type}
                   </span>
                   {agent.level && (
-                    <span className="px-1.5 py-0.5 bg-accent/30 rounded">{agent.level}</span>
+                    <span className="bg-accent/30 rounded px-1.5 py-0.5">{agent.level}</span>
                   )}
-                  <span className="px-1.5 py-0.5 bg-accent/30 rounded truncate max-w-[120px]">
+                  <span className="bg-accent/30 max-w-[120px] truncate rounded px-1.5 py-0.5">
                     {agent.model}
                   </span>
                 </div>
 
                 {/* 展开详情 */}
                 {expandedId === agent.id && (
-                  <div className="mt-3 pt-3 border-t text-xs space-y-1.5">
+                  <div className="mt-3 space-y-1.5 border-t pt-3 text-xs">
                     {agent.system_prompt && (
                       <div>
                         <span className="text-muted-foreground">系统提示词：</span>
-                        <p className="mt-0.5 p-2 bg-accent/20 rounded text-muted-foreground line-clamp-4">
+                        <p className="bg-accent/20 text-muted-foreground mt-0.5 line-clamp-4 rounded p-2">
                           {agent.system_prompt}
                         </p>
                       </div>
@@ -149,23 +192,36 @@ export function AgentsPage() {
                     {agent.tool_names && agent.tool_names.length > 0 && (
                       <div>
                         <span className="text-muted-foreground">绑定工具：</span>
-                        <div className="flex flex-wrap gap-1 mt-0.5">
-                          {agent.tool_names.map(t => (
-                            <span key={t} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded">{t}</span>
+                        <div className="mt-0.5 flex flex-wrap gap-1">
+                          {agent.tool_names.map((t) => (
+                            <span
+                              key={t}
+                              className="bg-primary/10 text-primary rounded px-1.5 py-0.5"
+                            >
+                              {t}
+                            </span>
                           ))}
                         </div>
                       </div>
                     )}
                     {agent.max_iterations && (
-                      <div><span className="text-muted-foreground">最大迭代：</span>{agent.max_iterations}</div>
+                      <div>
+                        <span className="text-muted-foreground">最大迭代：</span>
+                        {agent.max_iterations}
+                      </div>
                     )}
                     {agent.timeout && (
-                      <div><span className="text-muted-foreground">超时：</span>{agent.timeout}s</div>
+                      <div>
+                        <span className="text-muted-foreground">超时：</span>
+                        {agent.timeout}s
+                      </div>
                     )}
                     {agent.tags && agent.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {agent.tags.map(tag => (
-                          <span key={tag} className="px-1.5 py-0.5 bg-accent/30 rounded">{tag}</span>
+                        {agent.tags.map((tag) => (
+                          <span key={tag} className="bg-accent/30 rounded px-1.5 py-0.5">
+                            {tag}
+                          </span>
                         ))}
                       </div>
                     )}

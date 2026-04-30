@@ -7,7 +7,6 @@ from core.exceptions import (
     DomainException,
     MCPConfigError,
     MCPConnectionError,
-    ReasoningRequiredError,
     ToolAlreadyExistsError,
     ToolNotFoundError,
 )
@@ -17,7 +16,6 @@ __all__ = [
     "DomainException",
     "MCPConfigError",
     "MCPConnectionError",
-    "ReasoningRequiredError",
     "ToolAlreadyExistsError",
     "ToolNotFoundError",
     "ErrorCode",

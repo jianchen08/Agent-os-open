@@ -125,85 +125,70 @@ export interface ListTriggersParams {
   trigger_type?: string
 }
 
-export async function listTriggers(
-  params?: ListTriggersParams
-): Promise<TriggerListResponse> {
-  const response = await apiClient.get<TriggerListResponse>(
-    API_ENDPOINTS.TRIGGERS.LIST,
-    { params }
-  )
+export async function listTriggers(params?: ListTriggersParams): Promise<TriggerListResponse> {
+  const response = await apiClient.get<TriggerListResponse>(API_ENDPOINTS.TRIGGERS.LIST, { params })
   return response.data
 }
 
 export async function getTriggerStats(): Promise<TriggerStatsResponse> {
-  const response = await apiClient.get<TriggerStatsResponse>(
-    API_ENDPOINTS.TRIGGERS.STATS
-  )
+  const response = await apiClient.get<TriggerStatsResponse>(API_ENDPOINTS.TRIGGERS.STATS)
   return response.data
 }
 
 export async function getTrigger(triggerId: string): Promise<TriggerResponse> {
-  const response = await apiClient.get<TriggerResponse>(
-    API_ENDPOINTS.TRIGGERS.GET(triggerId)
-  )
+  const response = await apiClient.get<TriggerResponse>(API_ENDPOINTS.TRIGGERS.GET(triggerId))
   return response.data
 }
 
 export async function createTrigger(
-  request: TriggerCreateRequest
+  request: TriggerCreateRequest,
 ): Promise<TriggerOperationResult> {
   const response = await apiClient.post<TriggerOperationResult>(
     API_ENDPOINTS.TRIGGERS.CREATE,
-    request
+    request,
   )
   return response.data
 }
 
 export async function updateTrigger(
   triggerId: string,
-  request: TriggerUpdateRequest
+  request: TriggerUpdateRequest,
 ): Promise<TriggerOperationResult> {
   const response = await apiClient.put<TriggerOperationResult>(
     API_ENDPOINTS.TRIGGERS.UPDATE(triggerId),
-    request
+    request,
   )
   return response.data
 }
 
-export async function deleteTrigger(
-  triggerId: string
-): Promise<TriggerOperationResult> {
+export async function deleteTrigger(triggerId: string): Promise<TriggerOperationResult> {
   const response = await apiClient.delete<TriggerOperationResult>(
-    API_ENDPOINTS.TRIGGERS.DELETE(triggerId)
+    API_ENDPOINTS.TRIGGERS.DELETE(triggerId),
   )
   return response.data
 }
 
-export async function enableTrigger(
-  triggerId: string
-): Promise<TriggerOperationResult> {
+export async function enableTrigger(triggerId: string): Promise<TriggerOperationResult> {
   const response = await apiClient.post<TriggerOperationResult>(
-    API_ENDPOINTS.TRIGGERS.ENABLE(triggerId)
+    API_ENDPOINTS.TRIGGERS.ENABLE(triggerId),
   )
   return response.data
 }
 
-export async function disableTrigger(
-  triggerId: string
-): Promise<TriggerOperationResult> {
+export async function disableTrigger(triggerId: string): Promise<TriggerOperationResult> {
   const response = await apiClient.post<TriggerOperationResult>(
-    API_ENDPOINTS.TRIGGERS.DISABLE(triggerId)
+    API_ENDPOINTS.TRIGGERS.DISABLE(triggerId),
   )
   return response.data
 }
 
 export async function manualTrigger(
   triggerId: string,
-  request?: ManualTriggerRequest
+  request?: ManualTriggerRequest,
 ): Promise<ManualTriggerResult> {
   const response = await apiClient.post<ManualTriggerResult>(
     API_ENDPOINTS.TRIGGERS.TRIGGER(triggerId),
-    request
+    request,
   )
   return response.data
 }

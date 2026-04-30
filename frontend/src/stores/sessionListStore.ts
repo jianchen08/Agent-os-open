@@ -9,10 +9,10 @@ import {
   getSessions,
   updateSessionAgent as updateSessionAgentApi,
 } from '@/services/api/session'
-import type { Session } from '@/types/models'
 import { loggers } from '@/utils/logger'
 import { useAgentStore } from './agentStore'
 import { useSessionStore } from './sessionStore'
+import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
 
@@ -22,18 +22,12 @@ interface CreateSessionOptions {
 
 interface SessionListState {
   fetchSessions: (options?: { background?: boolean }) => Promise<void>
-  createSession: (
-    title?: string,
-    options?: CreateSessionOptions
-  ) => Promise<Session>
+  createSession: (title?: string, options?: CreateSessionOptions) => Promise<Session>
   deleteSession: (id: string) => Promise<void>
   setActiveSession: (id: string, fetchData?: boolean) => Promise<void>
   updateSession: (sessionId: string, updates: Partial<Session>) => void
   toggleSessionPin: (sessionId: string) => void
-  updateSessionAgent: (
-    sessionId: string,
-    agentId: string | null
-  ) => Promise<void>
+  updateSessionAgent: (sessionId: string, agentId: string | null) => Promise<void>
   toggleSessionStar: (sessionId: string) => void
   renameSession: (sessionId: string, newTitle: string) => void
   searchSessions: (keyword: string) => Session[]
@@ -65,16 +59,14 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     try {
       const sessions = await getSessions()
-      const validSessionIds = new Set(sessions.map(s => s.id))
+      const validSessionIds = new Set(sessions.map((s) => s.id))
 
-      useSessionStore.setState(state => {
+      useSessionStore.setState((state) => {
         const activeSessionExistsInBackend = state.activeSessionId
           ? validSessionIds.has(state.activeSessionId)
           : false
 
-        const newActiveSessionId = activeSessionExistsInBackend
-          ? state.activeSessionId
-          : null
+        const newActiveSessionId = activeSessionExistsInBackend ? state.activeSessionId : null
 
         return {
           sessions: sessions,
@@ -94,15 +86,14 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     useSessionStore.setState({ isLoading: true, error: null })
 
     try {
-      const sessionTitle =
-        title || generateSessionTitle()
+      const sessionTitle = title || generateSessionTitle()
 
       const newSession = await createSessionApi({
         title: sessionTitle,
         agentId: options?.agentId,
       })
 
-      useSessionStore.setState(state => ({
+      useSessionStore.setState((state) => ({
         sessions: [...state.sessions, newSession],
         activeSessionId: newSession.id,
         isLoading: false,
@@ -118,7 +109,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
   },
 
   deleteSession: async (id: string) => {
-    useSessionStore.setState(state => ({
+    useSessionStore.setState((state) => ({
       deletingSessionIds: new Set(state.deletingSessionIds).add(id),
       error: null,
     }))
@@ -126,7 +117,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     try {
       await deleteSessionApi(id)
 
-      useSessionStore.setState(state => {
+      useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
 
@@ -134,9 +125,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         const { [id]: _removedPagination, ...restPagination } = state.messagePagination
 
         return {
-          sessions: state.sessions.filter(session => session.id !== id),
-          activeSessionId:
-            state.activeSessionId === id ? null : state.activeSessionId,
+          sessions: state.sessions.filter((session) => session.id !== id),
+          activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
           deletingSessionIds: newDeletingIds,
           messages: restMessages,
           messagePagination: restPagination,
@@ -145,7 +135,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       })
     } catch (error: any) {
       const errorMessage = error.message || '删除会话失败'
-      useSessionStore.setState(state => {
+      useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
         return { deletingSessionIds: newDeletingIds, error: errorMessage }
@@ -160,18 +150,18 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }
 
     const sessions = useSessionStore.getState().sessions
-    const sessionExists = sessions.some(s => s.id === id)
+    const sessionExists = sessions.some((s) => s.id === id)
     if (!sessionExists) {
       return
     }
 
     useSessionStore.setState({ activeSessionId: id })
 
-    const session = sessions.find(s => s.id === id)
+    const session = sessions.find((s) => s.id === id)
     if (session?.agentId) {
       const agents = useAgentStore.getState().agents
       const matchedAgent = agents.find(
-        a => a.id === session.agentId || a.configId === session.agentId
+        (a) => a.id === session.agentId || a.configId === session.agentId,
       )
       if (matchedAgent) {
         useAgentStore.getState().setCurrentAgentId(matchedAgent.id)
@@ -188,11 +178,11 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
   },
 
   updateSession: (sessionId: string, updates: Partial<Session>) => {
-    useSessionStore.setState(state => ({
-      sessions: state.sessions.map(session =>
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? { ...session, ...updates, updatedAt: new Date().toISOString() }
-          : session
+          : session,
       ),
     }))
   },
@@ -201,20 +191,17 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     useSessionStore.setState({ isLoading: true, error: null })
 
     try {
-      const updatedSession = await updateSessionAgentApi(
-        sessionId,
-        agentId
-      )
+      const updatedSession = await updateSessionAgentApi(sessionId, agentId)
 
-      useSessionStore.setState(state => ({
-        sessions: state.sessions.map(session =>
+      useSessionStore.setState((state) => ({
+        sessions: state.sessions.map((session) =>
           session.id === sessionId
             ? {
                 ...session,
                 agentId: updatedSession.agentId,
                 updatedAt: updatedSession.updatedAt,
               }
-            : session
+            : session,
         ),
         isLoading: false,
         error: null,
@@ -227,28 +214,28 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
   },
 
   toggleSessionStar: (sessionId: string) => {
-    useSessionStore.setState(state => ({
-      sessions: state.sessions.map(session =>
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
               starred: !session.starred,
               updatedAt: new Date().toISOString(),
             }
-          : session
+          : session,
       ),
     }))
   },
 
   toggleSessionPin: (sessionId: string) => {
-    useSessionStore.setState(state => ({
-      sessions: state.sessions.map(session =>
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
               pinned: !session.pinned,
             }
-          : session
+          : session,
       ),
     }))
   },
@@ -257,15 +244,15 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     if (!newTitle.trim()) {
       return
     }
-    useSessionStore.setState(state => ({
-      sessions: state.sessions.map(session =>
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
               title: newTitle.trim(),
               updatedAt: new Date().toISOString(),
             }
-          : session
+          : session,
       ),
     }))
   },
@@ -279,20 +266,20 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     const lowerKeyword = keyword.toLowerCase()
     return sessions
-      .filter(session =>
-        session.title.toLowerCase().includes(lowerKeyword)
-      )
+      .filter((session) => session.title.toLowerCase().includes(lowerKeyword))
       .sort((a, b) => {
         if (a.pinned !== b.pinned) {
           return a.pinned ? -1 : 1
         }
-        return new Date(b.updatedAt || b.createdAt).getTime() -
+        return (
+          new Date(b.updatedAt || b.createdAt).getTime() -
           new Date(a.updatedAt || a.createdAt).getTime()
+        )
       })
   },
 
   copySession: async (sessionId: string) => {
-    const session = useSessionStore.getState().sessions.find(s => s.id === sessionId)
+    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
     if (!session) {
       throw new Error('会话不存在')
     }

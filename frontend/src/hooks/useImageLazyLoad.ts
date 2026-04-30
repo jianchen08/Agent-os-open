@@ -34,7 +34,7 @@ export interface UseImageLazyLoadResult {
  */
 export function useImageLazyLoad(
   src: string,
-  options: UseImageLazyLoadOptions = {}
+  options: UseImageLazyLoadOptions = {},
 ): UseImageLazyLoadResult {
   const { rootMargin = '100px', once = true } = options
 
@@ -56,8 +56,8 @@ export function useImageLazyLoad(
 
     // 创建 Intersection Observer
     const observer = new IntersectionObserver(
-      entries => {
-        entries.forEach(entry => {
+      (entries) => {
+        entries.forEach((entry) => {
           // 当图片进入视口时
           if (entry.isIntersecting) {
             setImageSrc(src)
@@ -73,7 +73,7 @@ export function useImageLazyLoad(
       {
         rootMargin,
         threshold: 0.01,
-      }
+      },
     )
 
     // 开始观察图片
@@ -123,12 +123,9 @@ export function useImageLazyLoad(
  * @param options - 配置选项
  * @returns 图片 ref 数组、加载状态和图片源数组
  */
-export function useBatchImageLazyLoad(
-  urls: string[],
-  options: UseImageLazyLoadOptions = {}
-) {
+export function useBatchImageLazyLoad(urls: string[], options: UseImageLazyLoadOptions = {}) {
   const [imageSrcs, setImageSrcs] = useState<(string | undefined)[]>(
-    new Array(urls.length).fill(undefined)
+    new Array(urls.length).fill(undefined),
   )
   const refs = useRef<(HTMLImageElement | null)[]>([])
 
@@ -143,11 +140,11 @@ export function useBatchImageLazyLoad(
 
     // 创建 Intersection Observer
     const observer = new IntersectionObserver(
-      entries => {
-        entries.forEach(entry => {
+      (entries) => {
+        entries.forEach((entry) => {
           if (entry.isIntersecting) {
             const index = Number((entry.target as HTMLImageElement).dataset.index)
-            setImageSrcs(prev => {
+            setImageSrcs((prev) => {
               const newSrcs = [...prev]
               newSrcs[index] = urls[index]
               return newSrcs
@@ -162,7 +159,7 @@ export function useBatchImageLazyLoad(
       {
         rootMargin,
         threshold: 0.01,
-      }
+      },
     )
 
     // 观察所有图片元素
@@ -191,10 +188,7 @@ export function useBatchImageLazyLoad(
  * @param options - 配置选项
  * @returns 包含 ref 和 style 的对象
  */
-export function useBackgroundImageLazyLoad(
-  src: string,
-  options: UseImageLazyLoadOptions = {}
-) {
+export function useBackgroundImageLazyLoad(src: string, options: UseImageLazyLoadOptions = {}) {
   const [backgroundImage, setBackgroundImage] = useState<string>()
   const elementRef = useRef<HTMLDivElement>(null)
   const { rootMargin = '100px', once = true } = options
@@ -209,8 +203,8 @@ export function useBackgroundImageLazyLoad(
     if (!element) return
 
     const observer = new IntersectionObserver(
-      entries => {
-        entries.forEach(entry => {
+      (entries) => {
+        entries.forEach((entry) => {
           if (entry.isIntersecting) {
             setBackgroundImage(`url(${src})`)
 
@@ -223,7 +217,7 @@ export function useBackgroundImageLazyLoad(
       {
         rootMargin,
         threshold: 0.01,
-      }
+      },
     )
 
     observer.observe(element)

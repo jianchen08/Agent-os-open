@@ -4,9 +4,9 @@
  * 使用 Portal 渲染到 body，避免被父容器的 overflow 裁剪
  */
 
+import { X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export interface ModalProps {
@@ -107,11 +107,11 @@ export function Modal({
       {/* 模态框内容 */}
       <div
         className={cn(
-          'relative bg-card text-card-foreground rounded-lg shadow-xl',
+          'bg-card text-card-foreground relative rounded-lg shadow-xl',
           'max-h-[90vh] overflow-auto',
           'animate-in fade-in-0 zoom-in-95 duration-200',
           maxWidthClasses[maxWidth],
-          className
+          className,
         )}
         style={{
           position: 'relative',
@@ -120,11 +120,11 @@ export function Modal({
           color: 'hsl(var(--foreground))',
           opacity: 1,
         }}
-        onClick={e => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* 标题栏 */}
         {title && (
-          <div className="flex items-center justify-between p-6 border-b">
+          <div className="flex items-center justify-between border-b p-6">
             <h2 className="text-lg font-semibold">{title}</h2>
             {showClose && (
               <button
@@ -139,15 +139,13 @@ export function Modal({
         )}
 
         {/* 内容区 */}
-        <div className={cn('p-6', !title && showClose && 'pt-6')}>
-          {children}
-        </div>
+        <div className={cn('p-6', !title && showClose && 'pt-6')}>{children}</div>
 
         {/* 无标题时的关闭按钮 */}
         {!title && showClose && (
           <button
             onClick={onClose}
-            className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition-colors"
+            className="text-muted-foreground hover:text-foreground absolute top-4 right-4 transition-colors"
             aria-label="关闭"
           >
             <X className="h-5 w-5" />

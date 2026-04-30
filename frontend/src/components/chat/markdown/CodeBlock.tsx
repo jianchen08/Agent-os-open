@@ -5,11 +5,11 @@
  * 流式输出时不做语法高亮，避免性能抖动
  */
 
-import { cn } from '@/lib/utils'
 import { Check, Copy, Loader2 } from 'lucide-react'
 import { type FC, memo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { cn } from '@/lib/utils'
 
 export interface CodeBlockProps {
   /** 代码内容 */
@@ -46,14 +46,14 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
   }
 
   return (
-    <div className="flex items-center justify-between px-4 py-2 bg-muted border-b border-border rounded-t-lg">
-      <span className="text-xs text-muted-foreground font-mono lowercase">
+    <div className="bg-muted border-border flex items-center justify-between rounded-t-lg border-b px-4 py-2">
+      <span className="text-muted-foreground font-mono text-xs lowercase">
         {language || 'text'}
       </span>
       <div className="flex items-center gap-2">
         {isStreaming && (
-          <span className="flex items-center gap-1 text-xs text-muted-foreground">
-            <Loader2 className="w-3 h-3 animate-spin" />
+          <span className="text-muted-foreground flex items-center gap-1 text-xs">
+            <Loader2 className="h-3 w-3 animate-spin" />
             输出中...
           </span>
         )}
@@ -61,18 +61,18 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
           onClick={handleCopy}
           className={cn(
             'flex items-center gap-1.5 text-xs transition-colors',
-            'text-muted-foreground hover:text-foreground'
+            'text-muted-foreground hover:text-foreground',
           )}
           title="复制代码"
         >
           {copied ? (
             <>
-              <Check className="w-3.5 h-3.5 text-green-500" />
+              <Check className="h-3.5 w-3.5 text-green-500" />
               <span className="text-green-500">已复制</span>
             </>
           ) : (
             <>
-              <Copy className="w-3.5 h-3.5" />
+              <Copy className="h-3.5 w-3.5" />
               <span>复制</span>
             </>
           )}
@@ -96,15 +96,15 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
     return (
       <div
         className={cn(
-          'my-4 rounded-lg overflow-hidden border border-border',
+          'border-border my-4 overflow-hidden rounded-lg border',
           'max-w-full',
-          className
+          className,
         )}
       >
         <CodeHeader language={normalizedLanguage} code={code} isStreaming={isStreaming} />
         {isStreaming ? (
           <pre
-            className="p-4 overflow-x-auto text-sm"
+            className="overflow-x-auto p-4 text-sm"
             style={{
               background: '#1e1e1e',
               color: '#d4d4d4',
@@ -130,8 +130,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
             }}
             codeTagProps={{
               style: {
-                fontFamily:
-                  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
               },
             }}
           >
@@ -140,7 +139,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
         )}
       </div>
     )
-  }
+  },
 )
 
 CodeBlock.displayName = 'CodeBlock'

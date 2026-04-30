@@ -7,13 +7,13 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-    deleteTool,
-    generateTool,
-    getCodeEntry,
-    getTool,
-    getTools,
-    rollbackTool,
-    searchCode,
+  deleteTool,
+  generateTool,
+  getCodeEntry,
+  getTool,
+  getTools,
+  rollbackTool,
+  searchCode,
 } from '@/services/api/tools'
 
 // Mock axios
@@ -113,16 +113,13 @@ describe('工具 API', () => {
       const result = await generateTool(generateData)
 
       expect(result).toEqual(mockResponse)
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/tools/generate',
-        generateData
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/tools/generate', generateData)
     })
 
     it('应该在名称为空时抛出错误', async () => {
-      await expect(
-        generateTool({ name: '', description: 'test' })
-      ).rejects.toThrow('工具名称不能为空')
+      await expect(generateTool({ name: '', description: 'test' })).rejects.toThrow(
+        '工具名称不能为空',
+      )
     })
   })
 
@@ -191,10 +188,9 @@ describe('工具 API', () => {
       const result = await rollbackTool('custom_tool', 1)
 
       expect(result).toEqual(mockTool)
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/tools/custom_tool/rollback',
-        { version: 1 }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/tools/custom_tool/rollback', {
+        version: 1,
+      })
     })
 
     it('应该在 ID 为空时抛出错误', async () => {

@@ -5,7 +5,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-
 import { getContextTokenUsage } from '@/services/api/sessions'
 
 interface UseContextTokensOptions {
@@ -120,7 +119,7 @@ export function useContextTokens(options: UseContextTokensOptions = {}) {
         }
       }, debounceMs)
     },
-    [debounceMs, enabled]
+    [debounceMs, enabled],
   )
 
   // 清理定时器和请求

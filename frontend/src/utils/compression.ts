@@ -171,10 +171,7 @@ export class MessageCompressor {
       enabled: false, // 强制禁用压缩
     }
 
-    console.log(
-      '[MessageCompressor] 配置已更新（压缩功能已禁用）:',
-      this.config
-    )
+    console.log('[MessageCompressor] 配置已更新（压缩功能已禁用）:', this.config)
   }
 
   /**
@@ -217,9 +214,7 @@ export function getMessageCompressor(): MessageCompressor {
  *
  * @param config 压缩配置
  */
-export function initMessageCompressor(
-  config?: Partial<CompressionConfig>
-): MessageCompressor {
+export function initMessageCompressor(config?: Partial<CompressionConfig>): MessageCompressor {
   globalCompressor = new MessageCompressor(config)
   return globalCompressor
 }

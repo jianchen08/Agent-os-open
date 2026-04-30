@@ -140,7 +140,7 @@ describe('Token 刷新机制', () => {
         '测试错误',
         ErrorType.AUTHENTICATION,
         ErrorSeverity.WARNING,
-        { showToast: true }
+        { showToast: true },
       )
     })
 

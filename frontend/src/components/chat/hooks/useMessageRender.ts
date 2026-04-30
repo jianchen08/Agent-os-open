@@ -8,10 +8,10 @@
  * 渲染顺序由 contentBlocks 决定，保持数据库 sequence 顺序
  */
 
+import { useMemo } from 'react'
+import { toolCallToActivity } from '@/utils/activityConverter'
 import type { ActivityData } from '@/types/activity'
 import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
-import { toolCallToActivity } from '@/utils/activityConverter'
-import { useMemo } from 'react'
 
 /**
  * 渲染片段类型
@@ -56,12 +56,9 @@ export interface MessageRenderContext {
 /**
  * 从 contentBlocks 构建渲染片段
  */
-function buildFragments(
-  contentBlocks: ContentBlock[],
-  messageId: string
-): RenderFragment[] {
+function buildFragments(contentBlocks: ContentBlock[], messageId: string): RenderFragment[] {
   const fragments: RenderFragment[] = []
-  const toolCallCount = contentBlocks.filter(b => b.type === 'tool_call').length
+  const toolCallCount = contentBlocks.filter((b) => b.type === 'tool_call').length
   let toolCallIndex = 0
 
   for (const block of contentBlocks) {
@@ -107,7 +104,7 @@ function buildFragments(
   }
 
   if (fragments.length > 0) {
-    const lastTextIndex = [...fragments].reverse().findIndex(f => f.type === 'text')
+    const lastTextIndex = [...fragments].reverse().findIndex((f) => f.type === 'text')
     if (lastTextIndex !== -1) {
       const idx = fragments.length - 1 - lastTextIndex
       ;(fragments[idx] as { type: 'text'; isLast: boolean }).isLast = true
@@ -124,7 +121,7 @@ function buildContentBlocksFromMessage(
   content: string,
   toolCalls: MessageToolCall[] | undefined,
   thinking: Message['thinking'],
-  messageId: string
+  messageId: string,
 ): ContentBlock[] {
   const blocks: ContentBlock[] = []
 
@@ -176,9 +173,15 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
   const displayContent = versionContent ?? message.content
 
   const fragments = useMemo(() => {
-    const blocks = message.contentBlocks && message.contentBlocks.length > 0
-      ? message.contentBlocks
-      : buildContentBlocksFromMessage(displayContent, message.toolCalls, message.thinking, message.id)
+    const blocks =
+      message.contentBlocks && message.contentBlocks.length > 0
+        ? message.contentBlocks
+        : buildContentBlocksFromMessage(
+            displayContent,
+            message.toolCalls,
+            message.thinking,
+            message.id,
+          )
 
     return buildFragments(blocks, message.id)
   }, [message, displayContent])

@@ -135,9 +135,7 @@ describe('记忆 API', () => {
   describe('getSemanticMemory - 获取语义记忆', () => {
     it('应该成功获取语义记忆列表', async () => {
       const mockResponse = {
-        items: [
-          { id: '1', content: 'Python 最佳实践', source_type: 'document' },
-        ],
+        items: [{ id: '1', content: 'Python 最佳实践', source_type: 'document' }],
         total: 1,
       }
       vi.mocked(apiClient.get).mockResolvedValueOnce({ data: mockResponse })

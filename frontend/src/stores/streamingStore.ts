@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import type { Message, MessageToolCall, ThinkingStep } from '@/types/models'
 import { loggers } from '@/utils/logger'
 import { useSessionStore } from './sessionStore'
+import type { Message, MessageToolCall, ThinkingStep } from '@/types/models'
 
 const logger = loggers.sessionStore
 
@@ -13,32 +13,20 @@ interface StreamingState {
   setRefreshingMessageId: (messageId: string | null) => void
   stopStreaming: () => void
   startThinking: (sessionId: string, messageId: string) => void
-  updateThinkingContent: (
-    sessionId: string,
-    messageId: string,
-    appendContent: string
-  ) => void
-  endThinking: (
-    sessionId: string,
-    messageId: string,
-    durationMs?: number
-  ) => void
-  updateThinkingStep: (
-    sessionId: string,
-    messageId: string,
-    step: ThinkingStep
-  ) => void
+  updateThinkingContent: (sessionId: string, messageId: string, appendContent: string) => void
+  endThinking: (sessionId: string, messageId: string, durationMs?: number) => void
+  updateThinkingStep: (sessionId: string, messageId: string, step: ThinkingStep) => void
   addToolCallToMessage: (
     sessionId: string,
     messageId: string,
     toolCall: MessageToolCall,
-    parentId?: string
+    parentId?: string,
   ) => void
   updateToolCallInMessage: (
     sessionId: string,
     messageId: string,
     callId: string,
-    updates: Partial<MessageToolCall>
+    updates: Partial<MessageToolCall>,
   ) => void
   updateToolCallProgress: (
     sessionId: string,
@@ -46,13 +34,13 @@ interface StreamingState {
     toolCallId: string,
     progress: number,
     currentStep?: string,
-    estimatedRemainingMs?: number
+    estimatedRemainingMs?: number,
   ) => void
   appendToolCallOutput: (
     sessionId: string,
     messageId: string,
     toolCallId: string,
-    output: string
+    output: string,
   ) => void
 }
 
@@ -79,11 +67,11 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     if (activeSessionId) {
       const sessionMessages = sessionStore.messages[activeSessionId] || []
       const needsUpdate = sessionMessages.some(
-        m => m.status === 'streaming' || m.thinking?.isThinking
+        (m) => m.status === 'streaming' || m.thinking?.isThinking,
       )
 
       if (needsUpdate) {
-        const clearedMessages = sessionMessages.map(message => {
+        const clearedMessages = sessionMessages.map((message) => {
           const updates: Partial<Message> = {}
 
           if (message.status === 'streaming') {
@@ -115,9 +103,9 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
   },
 
   startThinking: (sessionId: string, messageId: string) => {
-    useSessionStore.setState(state => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       const updatedMessages = [...sessionMessages]
 
@@ -153,14 +141,10 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     })
   },
 
-  updateThinkingContent: (
-    sessionId: string,
-    messageId: string,
-    appendContent: string
-  ) => {
-    useSessionStore.setState(state => {
+  updateThinkingContent: (sessionId: string, messageId: string, appendContent: string) => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       const updatedMessages = [...sessionMessages]
 
@@ -204,7 +188,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
               '| 累积长度:',
               appendContent.length,
               '| 新增长度:',
-              newPart.length
+              newPart.length,
             )
             newContent = appendContent
           } else {
@@ -230,7 +214,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
             '| 当前长度:',
             currentContent.length,
             '| 追加长度:',
-            appendContent.length
+            appendContent.length,
           )
         }
 
@@ -252,14 +236,10 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     })
   },
 
-  endThinking: (
-    sessionId: string,
-    messageId: string,
-    durationMs?: number
-  ) => {
-    useSessionStore.setState(state => {
+  endThinking: (sessionId: string, messageId: string, durationMs?: number) => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
@@ -289,14 +269,10 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     })
   },
 
-  updateThinkingStep: (
-    sessionId: string,
-    messageId: string,
-    step: ThinkingStep
-  ) => {
-    useSessionStore.setState(state => {
+  updateThinkingStep: (sessionId: string, messageId: string, step: ThinkingStep) => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
@@ -309,7 +285,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       }
       const steps = thinking.steps || []
 
-      const stepIndex = steps.findIndex(s => s.id === step.id)
+      const stepIndex = steps.findIndex((s) => s.id === step.id)
       let updatedSteps: ThinkingStep[]
 
       if (stepIndex >= 0) {
@@ -342,14 +318,19 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     sessionId: string,
     messageId: string,
     toolCall: MessageToolCall,
-    parentId?: string
+    parentId?: string,
   ) => {
-    useSessionStore.setState(state => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
-        logger.warn('消息不存在，创建消息占位 | messageId:', messageId, 'toolCall:', toolCall.call_id)
+        logger.warn(
+          '消息不存在，创建消息占位 | messageId:',
+          messageId,
+          'toolCall:',
+          toolCall.call_id,
+        )
         const newMessage: Message = {
           id: messageId,
           sessionId: sessionId,
@@ -371,7 +352,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       const message = sessionMessages[messageIndex]
       const existingToolCalls = message.toolCalls || []
 
-      if (existingToolCalls.some(tc => tc.call_id === toolCall.call_id)) {
+      if (existingToolCalls.some((tc) => tc.call_id === toolCall.call_id)) {
         return state
       }
 
@@ -396,11 +377,11 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     sessionId: string,
     messageId: string,
     callId: string,
-    updates: Partial<MessageToolCall>
+    updates: Partial<MessageToolCall>,
   ) => {
-    useSessionStore.setState(state => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
@@ -408,14 +389,17 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
 
       const message = sessionMessages[messageIndex]
       const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex(tc => tc.call_id === callId)
+      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === callId)
 
       if (toolCallIndex < 0) {
         const newToolCall: import('@/types/models').MessageToolCall = {
           call_id: callId,
-          tool_name: (updates as Record<string, unknown>).tool_name as string || callId,
-          tool_args: (updates as Record<string, unknown>).tool_args as Record<string, unknown> || {},
-          status: (updates as Record<string, unknown>).status as import('@/types/models').ToolCallStatus || 'completed',
+          tool_name: ((updates as Record<string, unknown>).tool_name as string) || callId,
+          tool_args:
+            ((updates as Record<string, unknown>).tool_args as Record<string, unknown>) || {},
+          status:
+            ((updates as Record<string, unknown>)
+              .status as import('@/types/models').ToolCallStatus) || 'completed',
           result: (updates as Record<string, unknown>).result,
           error: (updates as Record<string, unknown>).error as string | undefined,
           duration_ms: (updates as Record<string, unknown>).duration_ms as number | undefined,
@@ -461,11 +445,11 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     toolCallId: string,
     progress: number,
     currentStep?: string,
-    estimatedRemainingMs?: number
+    estimatedRemainingMs?: number,
   ) => {
-    useSessionStore.setState(state => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
@@ -473,7 +457,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
 
       const message = sessionMessages[messageIndex]
       const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex(tc => tc.call_id === toolCallId)
+      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
 
       if (toolCallIndex < 0) {
         return state
@@ -506,11 +490,11 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     sessionId: string,
     messageId: string,
     toolCallId: string,
-    output: string
+    output: string,
   ) => {
-    useSessionStore.setState(state => {
+    useSessionStore.setState((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex(m => m.id === messageId)
+      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
@@ -518,15 +502,14 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
 
       const message = sessionMessages[messageIndex]
       const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex(tc => tc.call_id === toolCallId)
+      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
 
       if (toolCallIndex < 0) {
         return state
       }
 
       const updatedToolCalls = [...toolCalls]
-      const existingPartialOutput =
-        updatedToolCalls[toolCallIndex].partialOutput || []
+      const existingPartialOutput = updatedToolCalls[toolCallIndex].partialOutput || []
       updatedToolCalls[toolCallIndex] = {
         ...updatedToolCalls[toolCallIndex],
         partialOutput: [...existingPartialOutput, output],

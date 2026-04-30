@@ -7,6 +7,8 @@
 - HumanInteractionTool：HumanInteractionTool类
 """
 
+import asyncio
+from asyncio import CancelledError
 import logging
 from typing import Any
 
@@ -122,6 +124,17 @@ class HumanInteractionTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行人类交互工具"""
+        # DIAG: check if pipeline task is already being cancelled
+        _current_task = asyncio.current_task()
+        if _current_task:
+            _cancelling = _current_task.cancelling()
+            if _cancelling > 0:
+                logger.warning(
+                    "[HumanInteractionTool] Task already cancelling! "
+                    "cancelling=%d — tool execution will fail",
+                    _cancelling,
+                )
+
         mode = inputs.get("mode")
 
         pipeline_id = self.pipeline_id or inputs.get("pipeline_id")
@@ -156,6 +169,7 @@ class HumanInteractionTool(BuiltinTool):
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
+        request_id: str | None = None
         try:
             request_id = await service.create_choice_request(
                 session_id=pipeline_id,
@@ -171,11 +185,14 @@ class HumanInteractionTool(BuiltinTool):
                 agent_id=pipeline_id,
             )
 
-            response = await service.wait_for_choice(request_id, timeout=timeout_seconds)
+            response = await service.wait_for_choice(
+                request_id, timeout=timeout_seconds,
+            )
 
-            # BUG-FIX-fix_20260408_human_interaction_response:
-            # 精简返回值，只返回有意义的信息，移除 null 字段
-            result = {"status": "completed", "response_type": response.get("response_type")}
+            result = {
+                "status": "completed",
+                "response_type": response.get("response_type"),
+            }
             if response.get("selected_option"):
                 result["selected_option"] = response["selected_option"]
             if response.get("answers"):
@@ -185,21 +202,37 @@ class HumanInteractionTool(BuiltinTool):
             return create_success_result(data=result)
 
         except InteractionTimeoutError as e:
-            logger.warning(f"[HumanInteractionTool] 交互超时 | request_id={e.request_id}")
+            logger.warning(
+                "[HumanInteractionTool] 交互超时 | "
+                "request_id=%s", e.request_id,
+            )
             return create_failure_result(
-                error=f"人类交互超时（等待了{e.timeout}秒），用户未在规定时间内响应。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"人类交互超时（等待了{e.timeout}秒），"
+                    "用户未在规定时间内响应。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_TIMEOUT",
             )
 
         except InteractionCancelledError as e:
-            logger.info(f"[HumanInteractionTool] 交互取消 | request_id={e.request_id}")
+            logger.info(
+                "[HumanInteractionTool] 交互取消 | "
+                "request_id=%s", e.request_id,
+            )
             return create_failure_result(
-                error=f"人类交互已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"人类交互已取消: {e.reason or '用户取消'}。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_CANCELLED",
             )
 
         except InteractionDeniedError as e:
-            logger.info(f"[HumanInteractionTool] 交互拒绝 | request_id={e.request_id}")
+            logger.info(
+                "[HumanInteractionTool] 交互拒绝 | "
+                "request_id=%s", e.request_id,
+            )
             return create_success_result(
                 data={
                     "status": "denied",
@@ -207,10 +240,32 @@ class HumanInteractionTool(BuiltinTool):
                 }
             )
 
+        except CancelledError:
+            logger.info(
+                "[HumanInteractionTool] 管道被取消 | "
+                "request_id=%s",
+                request_id,
+            )
+            # 清理残留请求，防止堆积
+            if request_id:
+                try:
+                    await service.cancel_request(
+                        request_id, reason="pipeline_cancelled",
+                    )
+                except Exception:
+                    pass
+            raise
+
         except Exception as e:
-            logger.error(f"[HumanInteractionTool] 选择模式执行失败 | error={e}", exc_info=True)
+            logger.error(
+                "[HumanInteractionTool] 选择模式执行失败 | "
+                "error=%s", e, exc_info=True,
+            )
             return create_failure_result(
-                error=f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"人类交互执行失败: {str(e)}。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_FAILED",
             )
 
@@ -227,6 +282,7 @@ class HumanInteractionTool(BuiltinTool):
         suggestions = inputs.get("suggestions")
         timeout_seconds = inputs.get("timeout_seconds", 86400)
 
+        request_id: str | None = None
         try:
             request_id = await service.create_conversation_request(
                 session_id=pipeline_id,
@@ -240,38 +296,83 @@ class HumanInteractionTool(BuiltinTool):
                 agent_id=pipeline_id,
             )
 
-            # 等待用户回复，返回实际消息内容（而非仅到达状态）
-            response = await service.wait_for_choice(request_id, timeout=timeout_seconds)
+            response = await service.wait_for_choice(
+                request_id, timeout=timeout_seconds,
+            )
 
-            result = {"status": "completed", "response_type": response.get("response_type")}
+            result = {
+                "status": "completed",
+                "response_type": response.get("response_type"),
+            }
             if response.get("feedback"):
                 result["feedback"] = response["feedback"]
             return create_success_result(data=result)
 
         except InteractionTimeoutError as e:
-            logger.warning(f"[HumanInteractionTool] 对话超时 | request_id={e.request_id}")
+            logger.warning(
+                "[HumanInteractionTool] 对话超时 | "
+                "request_id=%s", e.request_id,
+            )
             return create_failure_result(
-                error=f"对话超时（等待了{e.timeout}秒），用户未在规定时间内响应。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"对话超时（等待了{e.timeout}秒），"
+                    "用户未在规定时间内响应。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_TIMEOUT",
             )
 
         except InteractionCancelledError as e:
-            logger.info(f"[HumanInteractionTool] 对话取消 | request_id={e.request_id}")
+            logger.info(
+                "[HumanInteractionTool] 对话取消 | "
+                "request_id=%s", e.request_id,
+            )
             return create_failure_result(
-                error=f"对话已取消: {e.reason or '用户取消'}。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"对话已取消: {e.reason or '用户取消'}。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_CANCELLED",
             )
 
         except InteractionDeniedError as e:
-            logger.info(f"[HumanInteractionTool] 对话拒绝 | request_id={e.request_id}")
+            logger.info(
+                "[HumanInteractionTool] 对话拒绝 | "
+                "request_id=%s", e.request_id,
+            )
             return create_success_result(
-                data={"status": "denied", "reason": e.reason or "用户拒绝"}
+                data={
+                    "status": "denied",
+                    "reason": e.reason or "用户拒绝",
+                }
             )
 
+        except CancelledError:
+            logger.info(
+                "[HumanInteractionTool] 管道被取消 | "
+                "request_id=%s",
+                request_id,
+            )
+            # 清理残留请求，防止堆积
+            if request_id:
+                try:
+                    await service.cancel_request(
+                        request_id, reason="pipeline_cancelled",
+                    )
+                except Exception:
+                    pass
+            raise
+
         except Exception as e:
-            logger.error(f"[HumanInteractionTool] 对话模式执行失败 | error={e}", exc_info=True)
+            logger.error(
+                "[HumanInteractionTool] 对话模式执行失败 | "
+                "error=%s", e, exc_info=True,
+            )
             return create_failure_result(
-                error=f"人类交互执行失败: {str(e)}。你可以根据当前任务上下文决定下一步操作。",
+                error=(
+                    f"人类交互执行失败: {str(e)}。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
                 error_code="INTERACTION_FAILED",
             )
 

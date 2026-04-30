@@ -13,11 +13,7 @@ export type { AgentTab, AgentTabBarProps } from './AgentTabBar'
 
 // 分层 Agent 系统组件
 export { AgentTabItem } from './AgentTabItem'
-export type {
-  AgentTabItemProps,
-  AgentTabItemData,
-  AgentTabStatus,
-} from './AgentTabItem'
+export type { AgentTabItemProps, AgentTabItemData, AgentTabStatus } from './AgentTabItem'
 
 export { SubAgentCard } from './SubAgentCard'
 export type {

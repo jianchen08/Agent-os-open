@@ -51,24 +51,24 @@ const DEBUG_CARDS: DebugCard[] = [
  */
 export function DebugPage() {
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">调试中心</h1>
       </header>
       <main className="flex-1 overflow-y-auto p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {DEBUG_CARDS.map(card => (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {DEBUG_CARDS.map((card) => (
             <a
               key={card.href}
               href={card.href}
-              className="block p-5 rounded-lg border bg-card hover:bg-accent/50 transition-colors"
+              className="bg-card hover:bg-accent/50 block rounded-lg border p-5 transition-colors"
             >
-              <div className="text-2xl mb-2">{card.icon}</div>
-              <h3 className="text-sm font-semibold mb-1">{card.title}</h3>
-              <p className="text-xs text-muted-foreground">{card.description}</p>
+              <div className="mb-2 text-2xl">{card.icon}</div>
+              <h3 className="mb-1 text-sm font-semibold">{card.title}</h3>
+              <p className="text-muted-foreground text-xs">{card.description}</p>
             </a>
           ))}
         </div>

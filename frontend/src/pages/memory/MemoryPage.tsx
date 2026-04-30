@@ -5,12 +5,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import {
-  getEpisodes,
-  searchMemory,
-  getMemoryStats,
-  getSemanticMemory,
-} from '@/services/api/memory'
+import { Brain, Inbox, Search } from 'lucide-react'
+import { getEpisodes, searchMemory, getMemoryStats, getSemanticMemory } from '@/services/api/memory'
 import type { Episode, SemanticKnowledge, MemoryStats, MemoryItem } from '@/services/api/memory'
 
 /** Tab 类型 */
@@ -59,8 +55,9 @@ export function MemoryPage() {
       const res = await getEpisodes(page, 10)
       setEpisodes(res.items)
       setEpisodesTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取情景记忆失败')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '获取情景记忆失败'
+      setError(message)
     }
   }, [])
 
@@ -71,8 +68,9 @@ export function MemoryPage() {
     try {
       const res = await getSemanticMemory()
       setSemantics(res.items || [])
-    } catch (err: any) {
-      setError(err.message || '获取语义记忆失败')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '获取语义记忆失败'
+      setError(message)
     }
   }, [])
 
@@ -87,8 +85,9 @@ export function MemoryPage() {
       const res = await searchMemory(searchQuery)
       setSearchResults(res.items)
       setSearchTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '搜索失败')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '搜索失败'
+      setError(message)
     } finally {
       setIsSearching(false)
     }
@@ -111,27 +110,27 @@ export function MemoryPage() {
   }, [activeTab, semantics.length, fetchSemantics])
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">记忆管理</h1>
       </header>
-      <main className="flex-1 overflow-y-auto p-6 space-y-6">
+      <main className="flex-1 space-y-6 overflow-y-auto p-6">
         {/* 统计卡片 */}
         {stats && (
           <div className="grid grid-cols-3 gap-4">
-            <div className="p-4 border rounded-lg">
-              <div className="text-xs text-muted-foreground mb-1">情景记忆</div>
+            <div className="rounded-lg border p-4">
+              <div className="text-muted-foreground mb-1 text-xs">情景记忆</div>
               <div className="text-xl font-semibold">{stats.episode_count}</div>
             </div>
-            <div className="p-4 border rounded-lg">
-              <div className="text-xs text-muted-foreground mb-1">语义知识</div>
+            <div className="rounded-lg border p-4">
+              <div className="text-muted-foreground mb-1 text-xs">语义知识</div>
               <div className="text-xl font-semibold">{stats.knowledge_count}</div>
             </div>
-            <div className="p-4 border rounded-lg">
-              <div className="text-xs text-muted-foreground mb-1">总记忆数</div>
+            <div className="rounded-lg border p-4">
+              <div className="text-muted-foreground mb-1 text-xs">总记忆数</div>
               <div className="text-xl font-semibold">{stats.total_count}</div>
             </div>
           </div>
@@ -139,13 +138,13 @@ export function MemoryPage() {
 
         {/* Tab 切换 */}
         <div className="flex gap-1 border-b">
-          {(['episodes', 'semantic', 'search'] as TabType[]).map(tab => (
+          {(['episodes', 'semantic', 'search'] as TabType[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={`px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
-                  ? 'border-b-2 border-primary text-foreground font-medium'
+                  ? 'border-primary text-foreground border-b-2 font-medium'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -156,14 +155,14 @@ export function MemoryPage() {
 
         {/* 错误提示 */}
         {error && (
-          <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
+          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
         )}
 
         {/* 加载状态 */}
         {isLoading && (
           <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="ml-2 text-sm text-muted-foreground">加载中...</span>
+            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
+            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
           </div>
         )}
 
@@ -171,27 +170,37 @@ export function MemoryPage() {
         {!isLoading && activeTab === 'episodes' && (
           <div className="space-y-3">
             {episodes.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">暂无数据</div>
+              <div className="flex flex-col items-center justify-center py-12">
+                <Brain className="text-muted-foreground/40 mb-3 h-10 w-10" />
+                <p className="text-muted-foreground text-sm">暂无情景记忆</p>
+                <p className="text-muted-foreground/60 mt-1 text-xs">
+                  与 Agent 对话后，交互记录将自动保存为情景记忆
+                </p>
+              </div>
             ) : (
-              episodes.map(ep => (
-                <div key={ep.id} className="border rounded-lg p-4">
-                  <div className="flex items-start justify-between mb-2">
-                    <h3 className="text-sm font-semibold flex-1 mr-2">{ep.intent_text}</h3>
+              episodes.map((ep) => (
+                <div key={ep.id} className="rounded-lg border p-4">
+                  <div className="mb-2 flex items-start justify-between">
+                    <h3 className="mr-2 flex-1 text-sm font-semibold">{ep.intent_text}</h3>
                     {ep.final_score !== undefined && (
-                      <span className="text-xs px-2 py-0.5 bg-primary/10 text-primary rounded-full">
+                      <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-xs">
                         {ep.final_score.toFixed(2)}
                       </span>
                     )}
                   </div>
                   {ep.execution_summary && (
-                    <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{ep.execution_summary}</p>
+                    <p className="text-muted-foreground mb-2 line-clamp-2 text-xs">
+                      {ep.execution_summary}
+                    </p>
                   )}
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="text-muted-foreground flex items-center gap-2 text-xs">
                     <span>{new Date(ep.created_at).toLocaleString()}</span>
                     {ep.tags.length > 0 && (
                       <div className="flex gap-1">
-                        {ep.tags.map(tag => (
-                          <span key={tag} className="px-1.5 py-0.5 bg-accent/30 rounded">{tag}</span>
+                        {ep.tags.map((tag) => (
+                          <span key={tag} className="bg-accent/30 rounded px-1.5 py-0.5">
+                            {tag}
+                          </span>
                         ))}
                       </div>
                     )}
@@ -202,19 +211,25 @@ export function MemoryPage() {
             {episodesTotal > 10 && (
               <div className="flex items-center justify-center gap-2">
                 <button
-                  onClick={() => { setEpisodesPage(p => p - 1); fetchEpisodes(episodesPage - 1) }}
+                  onClick={() => {
+                    setEpisodesPage((p) => p - 1)
+                    fetchEpisodes(episodesPage - 1)
+                  }}
                   disabled={episodesPage <= 1}
-                  className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-50 hover:bg-accent/50"
+                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
-                <span className="text-sm text-muted-foreground">
+                <span className="text-muted-foreground text-sm">
                   {episodesPage} / {Math.ceil(episodesTotal / 10)}
                 </span>
                 <button
-                  onClick={() => { setEpisodesPage(p => p + 1); fetchEpisodes(episodesPage + 1) }}
+                  onClick={() => {
+                    setEpisodesPage((p) => p + 1)
+                    fetchEpisodes(episodesPage + 1)
+                  }}
                   disabled={episodesPage >= Math.ceil(episodesTotal / 10)}
-                  className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-50 hover:bg-accent/50"
+                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>
@@ -227,13 +242,19 @@ export function MemoryPage() {
         {!isLoading && activeTab === 'semantic' && (
           <div className="space-y-3">
             {semantics.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">暂无数据</div>
+              <div className="flex flex-col items-center justify-center py-12">
+                <Inbox className="text-muted-foreground/40 mb-3 h-10 w-10" />
+                <p className="text-muted-foreground text-sm">暂无语义记忆</p>
+                <p className="text-muted-foreground/60 mt-1 text-xs">
+                  系统会自动从交互中提取语义知识并存储
+                </p>
+              </div>
             ) : (
-              semantics.map(sm => (
-                <div key={sm.id} className="border rounded-lg p-4">
-                  <p className="text-sm mb-2">{sm.content}</p>
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="px-1.5 py-0.5 bg-accent/30 rounded">{sm.source_type}</span>
+              semantics.map((sm) => (
+                <div key={sm.id} className="rounded-lg border p-4">
+                  <p className="mb-2 text-sm">{sm.content}</p>
+                  <div className="text-muted-foreground flex items-center gap-2 text-xs">
+                    <span className="bg-accent/30 rounded px-1.5 py-0.5">{sm.source_type}</span>
                     <span>{new Date(sm.created_at).toLocaleString()}</span>
                   </div>
                 </div>
@@ -250,31 +271,38 @@ export function MemoryPage() {
                 type="text"
                 placeholder="搜索记忆..."
                 value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSearch()}
-                className="flex-1 max-w-md px-3 py-1.5 text-sm border rounded-lg bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                aria-label="搜索记忆"
+                className="bg-background focus:ring-primary max-w-md flex-1 rounded-lg border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none"
               />
               <button
                 onClick={handleSearch}
                 disabled={isSearching}
-                className="px-4 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50"
+                className="bg-primary text-primary-foreground rounded-lg px-4 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
               >
                 {isSearching ? '搜索中...' : '搜索'}
               </button>
             </div>
             {searchResults.length > 0 && (
-              <div className="text-xs text-muted-foreground mb-2">找到 {searchTotal} 条结果</div>
+              <div className="text-muted-foreground mb-2 text-xs">找到 {searchTotal} 条结果</div>
             )}
             {searchResults.length === 0 && searchQuery && !isSearching && (
-              <div className="text-center py-8 text-muted-foreground">无搜索结果</div>
+              <div className="flex flex-col items-center justify-center py-12">
+                <Search className="text-muted-foreground/40 mb-3 h-10 w-10" />
+                <p className="text-muted-foreground text-sm">无搜索结果</p>
+                <p className="text-muted-foreground/60 mt-1 text-xs">
+                  尝试使用不同的关键词搜索
+                </p>
+              </div>
             )}
-            {searchResults.map(item => (
-              <div key={item.id} className="border rounded-lg p-4">
-                <p className="text-sm mb-2">{item.content}</p>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="px-1.5 py-0.5 bg-accent/30 rounded">{item.memory_type}</span>
+            {searchResults.map((item) => (
+              <div key={item.id} className="rounded-lg border p-4">
+                <p className="mb-2 text-sm">{item.content}</p>
+                <div className="text-muted-foreground flex items-center gap-2 text-xs">
+                  <span className="bg-accent/30 rounded px-1.5 py-0.5">{item.memory_type}</span>
                   {item.score > 0 && (
-                    <span className="px-1.5 py-0.5 bg-primary/10 text-primary rounded">
+                    <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5">
                       相关度: {item.score.toFixed(2)}
                     </span>
                   )}

@@ -39,11 +39,11 @@ export const MessageList = ({
   hasMore = false,
   isLoadingMore = false,
   onLoadMore,
+  searchQuery,
 }: ExtendedMessageListProps) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const isUserScrolling = useRef(false)
   const lastMessageCount = useRef(messages.length)
-  const lastContentLength = useRef(0)
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
@@ -53,18 +53,15 @@ export const MessageList = ({
   /**
    * 滚动到底部
    */
-  const scrollToBottom = useCallback(
-    (behavior: 'smooth' | 'auto' = 'smooth') => {
-      if (virtuosoRef.current) {
-        virtuosoRef.current.scrollToIndex({
-          index: 'LAST',
-          behavior,
-          align: 'end',
-        })
-      }
-    },
-    []
-  )
+  const scrollToBottom = useCallback((behavior: 'smooth' | 'auto' = 'smooth') => {
+    if (virtuosoRef.current) {
+      virtuosoRef.current.scrollToIndex({
+        index: 'LAST',
+        behavior,
+        align: 'end',
+      })
+    }
+  }, [])
 
   /**
    * 处理用户滚动
@@ -88,7 +85,7 @@ export const MessageList = ({
         onLoadMore()
       }
     },
-    [hasMore, isLoadingMore, onLoadMore]
+    [hasMore, isLoadingMore, onLoadMore],
   )
 
   /**
@@ -108,26 +105,7 @@ export const MessageList = ({
   }, [messages.length, scrollToBottom])
 
   /**
-   * 处理最后一条消息内容变化（流式输出场景）
-   */
-  const lastMessageContent = useMemo(() => {
-    return messages.length > 0 ? messages[messages.length - 1]?.content : null
-  }, [messages])
-
-  useEffect(() => {
-    if (!lastMessageContent || !isGenerating || isUserScrolling.current) {
-      return
-    }
-
-    const currentLength = lastMessageContent.length
-    if (currentLength > lastContentLength.current) {
-      lastContentLength.current = currentLength
-      scrollToBottom('auto')
-    }
-  }, [lastMessageContent, isGenerating, scrollToBottom])
-
-  /**
-   * 使用 ResizeObserver 监听内容高度变化
+   * 流式输出时使用 ResizeObserver 监听内容高度变化自动跟随
    */
   useEffect(() => {
     if (!isGenerating || !containerRef.current) {
@@ -183,11 +161,12 @@ export const MessageList = ({
             onEdit={onEdit}
             onDelete={onDelete}
             modelName={modelName}
+            searchQuery={searchQuery}
           />
         </div>
       )
     },
-    [messages, isGenerating, onRegenerate, onEdit, onDelete, modelName]
+    [messages, isGenerating, onRegenerate, onEdit, onDelete, modelName, searchQuery],
   )
 
   /**
@@ -227,14 +206,12 @@ export const MessageList = ({
     return (
       <div className="flex items-center justify-center py-4">
         {isLoadingMore ? (
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin" />
+          <div className="text-muted-foreground flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
             <span className="text-sm">加载历史消息...</span>
           </div>
         ) : (
-          <div className="text-sm text-muted-foreground">
-            向上滚动加载更多
-          </div>
+          <div className="text-muted-foreground text-sm">向上滚动加载更多</div>
         )}
       </div>
     )
@@ -254,30 +231,26 @@ export const MessageList = ({
   if (messages.length === 0) {
     return (
       <div
-        className={`flex-1 flex items-center justify-center ${className}`}
+        className={`flex flex-1 items-center justify-center ${className}`}
         data-testid="message-list-empty"
       >
-        <div className="text-center text-muted-foreground">
-          <div className="text-4xl mb-4">{'\uD83D\uDCAC'}</div>
+        <div className="text-muted-foreground text-center">
+          <div className="mb-4 text-4xl">{'\uD83D\uDCAC'}</div>
           <p>开始新的对话</p>
-          <p className="text-sm mt-1">发送消息开始与 AI 助手交流</p>
+          <p className="mt-1 text-sm">发送消息开始与 AI 助手交流</p>
         </div>
       </div>
     )
   }
 
   return (
-    <div
-      ref={containerRef}
-      className={`flex-1 ${className}`}
-      data-testid="message-list"
-    >
+    <div ref={containerRef} className={`flex-1 ${className}`} data-testid="message-list">
       <Virtuoso
         ref={virtuosoRef}
         style={{ height: '100%' }}
         data={messages}
         itemContent={renderItem}
-        onScroll={e => {
+        onScroll={(e) => {
           const target = e.target as HTMLElement
           handleScroll(target.scrollTop, true)
         }}
@@ -289,15 +262,16 @@ export const MessageList = ({
           Header: HeaderComponent,
           Footer: () => (
             <>
-              {isGenerating &&
-                messages[messages.length - 1]?.role === 'user' && (
-                  <div className="flex items-center gap-2 px-4 py-3 text-muted-foreground">
-                    <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-secondary">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    </div>
-                    <span className="text-sm">AI 正在思考...</span>
+              {isGenerating && messages[messages.length - 1]?.role === 'user' && (
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
+                    <Loader2 className="text-primary h-4 w-4 animate-spin" />
                   </div>
-                )}
+                  <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
+                    <span className="text-muted-foreground text-sm">思考中...</span>
+                  </div>
+                </div>
+              )}
               <div className="h-4" />
             </>
           ),

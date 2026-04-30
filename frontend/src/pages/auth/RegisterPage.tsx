@@ -10,10 +10,10 @@
 
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { useAuthStore } from '../../stores/authStore'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { ROUTES } from '../../constants/routes'
+import { useAuthStore } from '../../stores/authStore'
 
 /**
  * 表单错误类型
@@ -30,8 +30,7 @@ interface FormErrors {
  */
 export function RegisterPage() {
   const navigate = useNavigate()
-  const { register, isLoading, error, isAuthenticated, clearError } =
-    useAuthStore()
+  const { register, isLoading, error, isAuthenticated, clearError } = useAuthStore()
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -54,34 +53,60 @@ export function RegisterPage() {
   }, [clearError])
 
   /**
+   * 验证单个字段
+   */
+  const validateField = (field: keyof FormErrors): string | undefined => {
+    switch (field) {
+      case 'username':
+        if (!username.trim()) return '用户名不能为空'
+        if (username.length < 3) return '用户名至少3个字符'
+        return undefined
+      case 'email':
+        if (!email.trim()) return '邮箱不能为空'
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return '请输入有效的邮箱地址'
+        return undefined
+      case 'password':
+        if (!password) return '密码不能为空'
+        if (password.length < 6) return '密码至少6个字符'
+        return undefined
+      case 'confirmPassword':
+        if (!confirmPassword) return '请确认密码'
+        if (password !== confirmPassword) return '两次输入的密码不一致'
+        return undefined
+      default:
+        return undefined
+    }
+  }
+
+  /**
+   * 处理字段失焦验证
+   */
+  const handleBlur = (field: keyof FormErrors) => {
+    const error = validateField(field)
+    setFormErrors((prev) => {
+      const next = { ...prev }
+      if (error) {
+        next[field] = error
+      } else {
+        delete next[field]
+      }
+      return next
+    })
+  }
+
+  /**
    * 验证表单
    */
   const validateForm = (): boolean => {
     const errors: FormErrors = {}
-
-    if (!username.trim()) {
-      errors.username = '用户名不能为空'
-    } else if (username.length < 3) {
-      errors.username = '用户名至少3个字符'
-    }
-
-    if (!email.trim()) {
-      errors.email = '邮箱不能为空'
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      errors.email = '请输入有效的邮箱地址'
-    }
-
-    if (!password) {
-      errors.password = '密码不能为空'
-    } else if (password.length < 6) {
-      errors.password = '密码至少6个字符'
-    }
-
-    if (!confirmPassword) {
-      errors.confirmPassword = '请确认密码'
-    } else if (password !== confirmPassword) {
-      errors.confirmPassword = '两次输入的密码不一致'
-    }
+    const usernameError = validateField('username')
+    if (usernameError) errors.username = usernameError
+    const emailError = validateField('email')
+    if (emailError) errors.email = emailError
+    const passwordError = validateField('password')
+    if (passwordError) errors.password = passwordError
+    const confirmError = validateField('confirmPassword')
+    if (confirmError) errors.confirmPassword = confirmError
 
     setFormErrors(errors)
     return Object.keys(errors).length === 0
@@ -108,26 +133,22 @@ export function RegisterPage() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center bg-background px-4 py-12"
+      className="bg-background flex min-h-screen items-center justify-center px-4 py-12"
       data-testid="register-page"
     >
       <div className="w-full max-w-md space-y-6">
         {/* 标题 */}
-        <div className="text-center space-y-2">
-          <h1 className="text-3xl font-bold text-foreground">注册</h1>
+        <div className="space-y-2 text-center">
+          <h1 className="text-foreground text-3xl font-bold">注册</h1>
           <p className="text-muted-foreground">创建您的账号，开始使用</p>
         </div>
 
         {/* 注册表单 */}
-        <form
-          onSubmit={handleSubmit}
-          className="space-y-5"
-          data-testid="register-form"
-        >
+        <form onSubmit={handleSubmit} className="space-y-5" data-testid="register-form" role="form" aria-label="注册表单">
           {/* 全局错误提示 */}
           {error && (
             <div
-              className="p-3 rounded-lg bg-destructive/10 text-destructive text-sm"
+              className="bg-destructive/10 text-destructive rounded-lg p-3 text-sm"
               data-testid="register-error"
             >
               {error}
@@ -136,30 +157,26 @@ export function RegisterPage() {
 
           {/* 用户名输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="username"
-              className="text-sm font-medium text-foreground block"
-            >
-              用户名
+            <label htmlFor="username" className="text-foreground block text-sm font-medium">
+              用户名 <span className="text-destructive">*</span>
             </label>
             <Input
               id="username"
               type="text"
               value={username}
-              onChange={e => setUsername(e.target.value)}
+              onChange={(e) => setUsername(e.target.value)}
+              onBlur={() => handleBlur('username')}
               placeholder="请输入用户名"
               disabled={isLoading}
               aria-invalid={!!formErrors.username}
-              aria-describedby={
-                formErrors.username ? 'username-error' : undefined
-              }
+              aria-describedby={formErrors.username ? 'username-error' : undefined}
               data-testid="register-username-input"
-              className="h-10 min-h-[40px]"
+              className={`h-10 min-h-[40px] ${formErrors.username ? 'border-destructive' : ''}`}
             />
             {formErrors.username && (
               <p
                 id="username-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="register-username-error"
               >
                 {formErrors.username}
@@ -169,28 +186,26 @@ export function RegisterPage() {
 
           {/* 邮箱输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="email"
-              className="text-sm font-medium text-foreground block"
-            >
-              邮箱
+            <label htmlFor="email" className="text-foreground block text-sm font-medium">
+              邮箱 <span className="text-destructive">*</span>
             </label>
             <Input
               id="email"
               type="email"
               value={email}
-              onChange={e => setEmail(e.target.value)}
+              onChange={(e) => setEmail(e.target.value)}
+              onBlur={() => handleBlur('email')}
               placeholder="请输入邮箱"
               disabled={isLoading}
               aria-invalid={!!formErrors.email}
               aria-describedby={formErrors.email ? 'email-error' : undefined}
               data-testid="email-input"
-              className="h-10 min-h-[40px]"
+              className={`h-10 min-h-[40px] ${formErrors.email ? 'border-destructive' : ''}`}
             />
             {formErrors.email && (
               <p
                 id="email-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="email-error"
               >
                 {formErrors.email}
@@ -200,29 +215,26 @@ export function RegisterPage() {
 
           {/* 密码输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="password"
-              className="text-sm font-medium text-foreground block"
-            >
-              密码
+            <label htmlFor="password" className="text-foreground block text-sm font-medium">
+              密码 <span className="text-destructive">*</span>
             </label>
             <Input
               id="password"
               type="password"
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={(e) => setPassword(e.target.value)}
+              onBlur={() => handleBlur('password')}
               placeholder="请输入密码"
               disabled={isLoading}
               aria-invalid={!!formErrors.password}
-              aria-describedby={
-                formErrors.password ? 'password-error' : undefined
-              }
+              aria-describedby={formErrors.password ? 'password-error' : undefined}
               data-testid="register-password-input"
-              className="h-10 min-h-[40px]" />
+              className={`h-10 min-h-[40px] ${formErrors.password ? 'border-destructive' : ''}`}
+            />
             {formErrors.password && (
               <p
                 id="password-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="register-password-error"
               >
                 {formErrors.password}
@@ -232,30 +244,26 @@ export function RegisterPage() {
 
           {/* 确认密码输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="confirmPassword"
-              className="text-sm font-medium text-foreground block"
-            >
-              确认密码
+            <label htmlFor="confirmPassword" className="text-foreground block text-sm font-medium">
+              确认密码 <span className="text-destructive">*</span>
             </label>
             <Input
               id="confirmPassword"
               type="password"
               value={confirmPassword}
-              onChange={e => setConfirmPassword(e.target.value)}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              onBlur={() => handleBlur('confirmPassword')}
               placeholder="请再次输入密码"
               disabled={isLoading}
               aria-invalid={!!formErrors.confirmPassword}
-              aria-describedby={
-                formErrors.confirmPassword ? 'confirmPassword-error' : undefined
-              }
+              aria-describedby={formErrors.confirmPassword ? 'confirmPassword-error' : undefined}
               data-testid="confirm-password-input"
-              className="h-10 min-h-[40px]"
+              className={`h-10 min-h-[40px] ${formErrors.confirmPassword ? 'border-destructive' : ''}`}
             />
             {formErrors.confirmPassword && (
               <p
                 id="confirmPassword-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="confirm-password-error"
               >
                 {formErrors.confirmPassword}
@@ -266,7 +274,7 @@ export function RegisterPage() {
           {/* 注册按钮 */}
           <Button
             type="submit"
-            className="w-full h-10 mt-2"
+            className="mt-2 h-10 w-full"
             disabled={isLoading}
             data-testid="register-submit-button"
           >
@@ -275,11 +283,11 @@ export function RegisterPage() {
         </form>
 
         {/* 登录链接 */}
-        <p className="text-center text-sm text-muted-foreground pt-2">
+        <p className="text-muted-foreground pt-2 text-center text-sm">
           已有账号？{' '}
           <Link
             to={ROUTES.LOGIN}
-            className="font-medium text-primary hover:underline"
+            className="text-primary font-medium hover:underline"
             data-testid="login-link"
           >
             登录

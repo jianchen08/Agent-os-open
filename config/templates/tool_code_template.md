@@ -88,8 +88,9 @@
 import logging
 from typing import Any
 
-from src.core.results import ToolExecutionResult
-from src.tools.types import (
+from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
+from tools.types import (
     Tool,
     ToolCategory,
     ToolSource,
@@ -101,7 +102,7 @@ from src.tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class {ClassName}:
+class {ClassName}(BuiltinTool):
     """{工具名称}工具"""
 
     @staticmethod
@@ -208,8 +209,9 @@ src/tools/builtin/{tool_id}/
 import logging
 from typing import Any
 
-from src.core.results import ToolExecutionResult
-from src.tools.types import (
+from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
+from tools.types import (
     Tool,
     ToolCategory,
     ToolSource,
@@ -220,7 +222,7 @@ from src.tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class {ClassName}:
+class {ClassName}(BuiltinTool):
     """{工具名称}工具"""
 
     @staticmethod
@@ -291,8 +293,9 @@ class {ClassName}:
 import logging
 from typing import Any
 
-from src.core.results import ToolExecutionResult
-from src.tools.types import (
+from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
+from tools.types import (
     Tool,
     ToolCategory,
     ToolSource,
@@ -303,7 +306,7 @@ from src.tools.types import (
 logger = logging.getLogger(__name__)
 
 
-class {ClassName}:
+class {ClassName}(BuiltinTool):
     """{工具名称}工具"""
 
     def __init__(self, session: Any):

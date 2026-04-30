@@ -4,15 +4,14 @@
  * 集中管理所有预设主题配置
  */
 
-import type { ThemeConfig } from '@/types/theme'
-import type { ThemeInfo } from '@/types/theme'
 import { darkTheme } from './presets/dark'
-import { lightTheme } from './presets/light'
 import { deepSpaceTheme } from './presets/deep-space'
-import { oceanBreezeTheme } from './presets/ocean-breeze'
+import { highContrastTheme } from './presets/high-contrast'
+import { lightTheme } from './presets/light'
 import { modernDarkTheme } from './presets/modern-dark'
 import { modernLightTheme } from './presets/modern-light'
-import { highContrastTheme } from './presets/high-contrast'
+import { oceanBreezeTheme } from './presets/ocean-breeze'
+import type { ThemeInfo, ThemeConfig } from '@/types/theme'
 
 // 重新导出主题对象，方便直接导入
 export { darkTheme } from './presets/dark'

@@ -200,7 +200,7 @@ export class MessageFormatDetector {
  * 统一事件处理器订阅器类型
  */
 export type UnifiedEventSubscriber<T extends UnifiedEventType> = (
-  event: UnifiedStreamEvent & { event_type: T }
+  event: UnifiedStreamEvent & { event_type: T },
 ) => void
 
 /**

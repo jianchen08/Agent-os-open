@@ -160,34 +160,34 @@ export interface ThemeColors {
   primary: string
   secondary: string
   accent: string
-  
+
   /** 背景色 */
   background: BackgroundColors
-  
+
   /** 文字色 */
   text: TextColors
-  
+
   /** 边框色 */
   border: BorderColors
-  
+
   /** 状态色 */
   status: StatusColors
-  
+
   /** 消息气泡 */
   bubble: BubbleColors
-  
+
   /** 任务状态颜色（可选） */
   task?: TaskColors
-  
+
   /** 阶段颜色（可选） */
   phase?: PhaseColors
-  
+
   /** 验收标准状态颜色（可选） */
   acceptance?: AcceptanceColors
-  
+
   /** 任务类型颜色（可选） */
   task_type?: TaskTypeColors
-  
+
   /** Agent 层级颜色（可选） */
   agent_level?: AgentLevelColors
 }
@@ -419,13 +419,13 @@ export interface ComponentsConfig {
 export interface EffectsConfig {
   /** 毛玻璃效果 */
   glassmorphism: boolean
-  
+
   /** 动画 */
   animations: boolean
-  
+
   /** 过渡时长 (ms) */
   transitionDuration: number
-  
+
   /** 过渡曲线 */
   transitionEasing: string
 }
@@ -502,28 +502,28 @@ export interface ScanlinesConfig {
 export interface BackgroundsConfig {
   /** 主背景 */
   main: BackgroundConfig
-  
+
   /** 背景图片（可选） */
   image?: BackgroundImageConfig
-  
+
   /** 纹理图案（可选） */
   texture?: TextureConfig
-  
+
   /** 侧边栏背景（可选） */
   sidebar?: AreaBackgroundConfig
-  
+
   /** 聊天区域背景（可选） */
   chat?: BackgroundConfig
-  
+
   /** 粒子效果（可选） */
   particles?: ParticlesConfig
-  
+
   /** 波浪效果（可选） */
   waves?: WavesConfig
-  
+
   /** 星空效果（可选） */
   stars?: StarsConfig
-  
+
   /** 扫描线效果（可选） */
   scanlines?: ScanlinesConfig
 }
@@ -532,7 +532,7 @@ export interface BackgroundsConfig {
 export interface AccessibilityConfig {
   /** 对比度比例 */
   contrastRatio: string
-  
+
   /** 焦点指示器 */
   focusIndicator: {
     enabled: boolean
@@ -540,16 +540,16 @@ export interface AccessibilityConfig {
     width: string
     style: string
   }
-  
+
   /** 屏幕阅读器优化 */
   screenReader: {
     optimized: boolean
     announcements: boolean
   }
-  
+
   /** 减少动画 */
   reducedMotion: boolean
-  
+
   /** 大字体支持 */
   largeText: boolean
 }
@@ -558,28 +558,28 @@ export interface AccessibilityConfig {
 export interface ThemeConfig {
   /** 主题 ID */
   id: string
-  
+
   /** 显示名称 */
   name: string
-  
+
   /** 描述 */
   description?: string
-  
+
   /** 主题类别 */
   category?: ThemeCategory
-  
+
   /** 作者 */
   author?: string
-  
+
   /** 版本 */
   version?: string
-  
+
   /** 继承的主题 ID */
   extends?: string
-  
+
   /** 是否为无障碍主题 */
   accessibility?: boolean
-  
+
   /** 预览色彩 */
   preview?: {
     primary: string
@@ -588,19 +588,19 @@ export interface ThemeConfig {
     text: string
     accent: string
   }
-  
+
   /** 颜色配置 */
   colors: ThemeColors
-  
+
   /** 组件样式配置 */
   components: ComponentsConfig
-  
+
   /** 视觉效果配置 */
   effects: EffectsConfig
-  
+
   /** 背景配置 */
   backgrounds: BackgroundsConfig
-  
+
   /** 无障碍配置（可选） */
   accessibility_config?: AccessibilityConfig
 }

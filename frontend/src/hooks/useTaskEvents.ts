@@ -6,8 +6,8 @@
  */
 
 import { useEffect } from 'react'
-import { useWebSocket } from '@/hooks/useWebSocket'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { useWebSocket } from '@/hooks/useWebSocket'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 
 /**
@@ -32,8 +32,8 @@ export interface UseTaskEventsOptions {
 export function useTaskEvents(options: UseTaskEventsOptions = {}) {
   const { enabled = true } = options
   const { subscribe } = useWebSocket()
-  const updateTask = useLongTermTaskStore(state => state.updateTask)
-  const fetchTasks = useLongTermTaskStore(state => state.fetchTasks)
+  const updateTask = useLongTermTaskStore((state) => state.updateTask)
+  const fetchTasks = useLongTermTaskStore((state) => state.fetchTasks)
 
   useEffect(() => {
     if (!enabled) {
@@ -78,15 +78,11 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       fetchTasks().catch(() => {})
     }
 
-    unsubscribers.push(
-      subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart)
-    )
-    unsubscribers.push(
-      subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone)
-    )
+    unsubscribers.push(subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart))
+    unsubscribers.push(subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone))
 
     return () => {
-      unsubscribers.forEach(unsub => unsub())
+      unsubscribers.forEach((unsub) => unsub())
     }
   }, [enabled, subscribe, updateTask, fetchTasks])
 }
@@ -101,7 +97,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 export function useProjectEvents(options: { enabled?: boolean } = {}) {
   const { enabled = true } = options
   const { subscribe } = useWebSocket()
-  const updateTask = useLongTermTaskStore(state => state.updateTask)
+  const updateTask = useLongTermTaskStore((state) => state.updateTask)
 
   useEffect(() => {
     if (!enabled) {
@@ -132,15 +128,11 @@ export function useProjectEvents(options: { enabled?: boolean } = {}) {
       }
     }
 
-    unsubscribers.push(
-      subscribe(WS_SERVER_EVENTS.TASK_COMPLETED, handleTaskCompleted)
-    )
-    unsubscribers.push(
-      subscribe(WS_SERVER_EVENTS.TASK_CANCELLED, handleTaskFailed)
-    )
+    unsubscribers.push(subscribe(WS_SERVER_EVENTS.TASK_COMPLETED, handleTaskCompleted))
+    unsubscribers.push(subscribe(WS_SERVER_EVENTS.TASK_CANCELLED, handleTaskFailed))
 
     return () => {
-      unsubscribers.forEach(unsub => unsub())
+      unsubscribers.forEach((unsub) => unsub())
     }
   }, [enabled, subscribe, updateTask])
 }

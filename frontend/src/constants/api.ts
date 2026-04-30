@@ -8,8 +8,7 @@
 /**
  * API基础URL（从环境变量读取，默认为本地开发地址）
  */
-export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8888'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8888'
 
 /**
  * API端点路径
@@ -158,8 +157,7 @@ export const API_ENDPOINTS = {
     /** 获取默认评估配置 */
     DEFAULT_PROFILE: '/api/v1/evaluation/profiles/default',
     /** 设置默认评估配置 */
-    SET_DEFAULT: (id: string) =>
-      `/api/v1/evaluation/profiles/${id}/set-default`,
+    SET_DEFAULT: (id: string) => `/api/v1/evaluation/profiles/${id}/set-default`,
     /** 获取评估报告 */
     REPORT: (id: string) => `/api/v1/evaluation/reports/${id}`,
     /** 获取评估报告列表 */
@@ -254,27 +252,22 @@ export const API_ENDPOINTS = {
     /** 获取任务阶段状态 */
     GET_STATUS: (taskId: string) => `/api/v1/tasks/${taskId}/phase`,
     /** 完成准备阶段 */
-    COMPLETE_PREPARE: (taskId: string) =>
-      `/api/v1/tasks/${taskId}/phase/prepare/complete`,
+    COMPLETE_PREPARE: (taskId: string) => `/api/v1/tasks/${taskId}/phase/prepare/complete`,
     /** 完成执行阶段 */
-    COMPLETE_EXECUTE: (taskId: string) =>
-      `/api/v1/tasks/${taskId}/phase/execute/complete`,
+    COMPLETE_EXECUTE: (taskId: string) => `/api/v1/tasks/${taskId}/phase/execute/complete`,
     /** 获取阶段产物 */
-    GET_OUTPUT: (taskId: string, phase: string) =>
-      `/api/v1/tasks/${taskId}/phase/${phase}/output`,
+    GET_OUTPUT: (taskId: string, phase: string) => `/api/v1/tasks/${taskId}/phase/${phase}/output`,
   },
   /** 任务评估相关 - 对应后端 /api/v1/tasks/{id}/ac/* */
   TASK_EVALUATION: {
     /** 获取任务所有验收标准 */
     LIST: (taskId: string) => `/api/v1/tasks/${taskId}/ac`,
     /** 评估单个验收标准 */
-    EVALUATE: (taskId: string, acId: string) =>
-      `/api/v1/tasks/${taskId}/ac/${acId}/evaluate`,
+    EVALUATE: (taskId: string, acId: string) => `/api/v1/tasks/${taskId}/ac/${acId}/evaluate`,
     /** 评估所有验收标准 */
     EVALUATE_ALL: (taskId: string) => `/api/v1/tasks/${taskId}/ac/evaluate-all`,
     /** 获取验收标准评估结果 */
-    GET_RESULT: (taskId: string, acId: string) =>
-      `/api/v1/tasks/${taskId}/ac/${acId}/result`,
+    GET_RESULT: (taskId: string, acId: string) => `/api/v1/tasks/${taskId}/ac/${acId}/result`,
   },
   /** 思考模式相关 - 对应后端 /api/v1/thinking-mode/* */
   THINKING_MODE: {
@@ -283,8 +276,7 @@ export const API_ENDPOINTS = {
     /** 获取所有支持思考模式的模型 */
     MODELS: '/api/v1/thinking-mode/models',
     /** 获取指定模型的思考模式信息 */
-    MODEL_INFO: (modelName: string) =>
-      `/api/v1/thinking-mode/models/${modelName}`,
+    MODEL_INFO: (modelName: string) => `/api/v1/thinking-mode/models/${modelName}`,
     /** 使用思考模式生成响应 */
     GENERATE: '/api/v1/thinking-mode/generate',
     /** 切换思考模式 */
@@ -292,8 +284,7 @@ export const API_ENDPOINTS = {
     /** 获取思考模式推荐 */
     RECOMMENDATIONS: '/api/v1/thinking-mode/recommendations',
     /** 检查模型是否支持思考模式 */
-    CHECK_SUPPORT: (modelName: string) =>
-      `/api/v1/thinking-mode/check/${modelName}`,
+    CHECK_SUPPORT: (modelName: string) => `/api/v1/thinking-mode/check/${modelName}`,
     /** 思考模式服务健康检查 */
     HEALTH: '/api/v1/thinking-mode/health',
   },

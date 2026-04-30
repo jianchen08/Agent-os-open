@@ -11,7 +11,6 @@ from infrastructure.error_policy import apply_error_policy
 from infrastructure.execution_record_storage import (
     ExecutionRecordData,
     ExecutionRecordStorage,
-    summarize_text,
 )
 from infrastructure.message_queue import Message, MessageQueue, create_message_id
 from infrastructure.resource import ResourceManager, ResourceQuota
@@ -44,5 +43,4 @@ __all__ = [
     "StatsCollector",
     "apply_error_policy",
     "create_message_id",
-    "summarize_text",
 ]

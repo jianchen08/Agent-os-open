@@ -128,7 +128,7 @@ describe('Agent API', () => {
 
     it('应该在名称为空时抛出错误', async () => {
       await expect(
-        createAgent({ name: '', model: 'gpt-4', system_prompt: 'test' })
+        createAgent({ name: '', model: 'gpt-4', system_prompt: 'test' }),
       ).rejects.toThrow('Agent 名称不能为空')
     })
   })
@@ -151,9 +151,7 @@ describe('Agent API', () => {
     })
 
     it('应该在 ID 为空时抛出错误', async () => {
-      await expect(updateAgent('', { name: 'Test' })).rejects.toThrow(
-        'Agent ID 不能为空'
-      )
+      await expect(updateAgent('', { name: 'Test' })).rejects.toThrow('Agent ID 不能为空')
     })
   })
 
@@ -225,9 +223,7 @@ describe('Agent API', () => {
     it('应该在 4xx 错误时不重试', async () => {
       vi.mocked(apiClient.get).mockRejectedValue({ response: { status: 404 } })
 
-      await expect(
-        getAgent('1', { retry: true, maxRetries: 3 })
-      ).rejects.toThrow()
+      await expect(getAgent('1', { retry: true, maxRetries: 3 })).rejects.toThrow()
       expect(apiClient.get).toHaveBeenCalledTimes(1)
     })
   })

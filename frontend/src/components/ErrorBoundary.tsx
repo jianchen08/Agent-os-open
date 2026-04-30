@@ -67,9 +67,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           }}
         >
           <h2 style={{ color: '#856404' }}>⚠️ 出错了</h2>
-          <p style={{ color: '#856404' }}>
-            应用程序遇到了一个错误。请刷新页面重试。
-          </p>
+          <p style={{ color: '#856404' }}>应用程序遇到了一个错误。请刷新页面重试。</p>
           {this.state.error && (
             <details style={{ marginTop: '20px' }}>
               <summary style={{ cursor: 'pointer', marginBottom: '10px' }}>

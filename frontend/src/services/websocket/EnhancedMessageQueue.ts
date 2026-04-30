@@ -78,8 +78,7 @@ export const MessagePriority = {
   URGENT: 3,
 } as const
 
-export type MessagePriorityType =
-  (typeof MessagePriority)[keyof typeof MessagePriority]
+export type MessagePriorityType = (typeof MessagePriority)[keyof typeof MessagePriority]
 
 /**
  * 消息队列配置
@@ -177,7 +176,7 @@ export class EnhancedMessageQueue {
    */
   constructor(
     sender?: (content: string) => Promise<boolean>,
-    config?: Partial<MessageQueueConfig>
+    config?: Partial<MessageQueueConfig>,
   ) {
     this.config = {
       ...DEFAULT_CONFIG,
@@ -220,9 +219,7 @@ export class EnhancedMessageQueue {
    * @returns 延迟时间（毫秒）
    */
   private calculateBackoffDelay(retries: number): number {
-    const delay =
-      this.config.baseRetryDelay *
-      Math.pow(this.config.retryBackoffFactor, retries)
+    const delay = this.config.baseRetryDelay * Math.pow(this.config.retryBackoffFactor, retries)
     return Math.min(delay, this.config.maxRetryDelay)
   }
 
@@ -329,17 +326,17 @@ export class EnhancedMessageQueue {
     const message = await this.db.messages
       .where('status')
       .equals(MessageStatus.PENDING)
-      .and(msg => !msg.nextRetryTime || msg.nextRetryTime <= now)
+      .and((msg) => !msg.nextRetryTime || msg.nextRetryTime <= now)
       .sortBy('priority')
       .then(
-        msgs =>
+        (msgs) =>
           msgs.sort((a, b) => {
             // 优先级相同按时间排序（FIFO）
             if (a.priority === b.priority) {
               return a.timestamp - b.timestamp
             }
             return b.priority - a.priority // 高优先级在前
-          })[0]
+          })[0],
       )
 
     if (!message) {
@@ -355,9 +352,7 @@ export class EnhancedMessageQueue {
       message.status = MessageStatus.SENDING
       await this.db.messages.put(message)
 
-      console.log(
-        `[MessageQueue] 发送消息: ${message.id}, 重试次数: ${message.retries}`
-      )
+      console.log(`[MessageQueue] 发送消息: ${message.id}, 重试次数: ${message.retries}`)
 
       // 调用发送函数
       const success = await this.sender(message.content)
@@ -411,15 +406,12 @@ export class EnhancedMessageQueue {
    * @param message 发送失败的消息
    * @param error 错误信息
    */
-  private async handleSendFailure(
-    message: QueuedMessage,
-    error: Error
-  ): Promise<void> {
+  private async handleSendFailure(message: QueuedMessage, error: Error): Promise<void> {
     message.retries++
 
     console.warn(
       `[MessageQueue] 消息发送失败: ${message.id}, ` +
-        `重试次数: ${message.retries}/${message.maxRetries}`
+        `重试次数: ${message.retries}/${message.maxRetries}`,
     )
 
     if (message.retries >= message.maxRetries) {
@@ -475,7 +467,7 @@ export class EnhancedMessageQueue {
 
     // 设置新的定时器，并添加错误处理
     this.processTimer = setTimeout(() => {
-      this.processNextMessage().catch(error => {
+      this.processNextMessage().catch((error) => {
         console.error('[MessageQueue] 处理消息时出错:', error)
       })
     }, delay)
@@ -579,7 +571,7 @@ export class EnhancedMessageQueue {
     const count = await this.db.messages
       .where('status')
       .equals(MessageStatus.SENT)
-      .and(msg => msg.timestamp < cutoffTime)
+      .and((msg) => msg.timestamp < cutoffTime)
       .delete()
 
     if (count > 0) {

@@ -4,6 +4,11 @@
 
 提供管道与外部系统之间的输入/输出适配层，将外部请求转换为管道 state，将管道结果转换为外部响应格式。
 
+支持三种通道：
+1. **CLI 通道**：交互式命令行界面（M1 交付）
+2. **API 通道**：RESTful HTTP API（M9 WebSocket 交付后扩展）
+3. **WebSocket 通道**：实时双向通信（M9 交付）
+
 ## 逻辑
 
 ### 适配器架构
@@ -17,58 +22,84 @@
 
 ### CLI 通道
 
-CLI 通道是 M1 阶段唯一实现的通道，提供交互式命令行演示：
+CLI 通道提供交互式命令行界面，支持：
+- 多轮对话（用户输入 → 管道执行 → 输出 → 等待下次输入）
+- 命令模式（斜杠命令）
+- 流式输出（rich Console 彩色实时显示）
+- 自动确认模式（auto_confirm_runner）
 
-```
-CLIInputAdapter → PipelineEngine → CLIOutputAdapter
-        ↑                                  ↓
-     stdin读取                        rich Console 输出
-```
+### API 通道
 
-**CLI Demo 插件**：
+RESTful HTTP API 通道，支持：
+- 线程管理（创建/查询/列表）
+- 认证鉴权（JWT Token）
+- 异步执行与结果轮询
 
-| 插件 | 类型 | priority | 功能 |
-|------|------|----------|------|
-| `DemoLLMCore` | Core | 50 | Echo 回显用户输入 |
-| `DemoStopPlugin` | Output | 1 | 检测 should_stop，返回 END 信号 |
-| `DemoDefaultRoute` | Output | 99 | 默认返回 END 信号（单轮对话） |
+### WebSocket 通道
 
-**CLI 路由配置**：
-
-- 输入路由：`should_stop == True` → end（优先级 1）；`True` → core（优先级 10）
-- 输出路由：`end` + `should_stop == True`（优先级 1）；`end` + `True`（优先级 99，兜底）
+实时双向通信通道，支持：
+- 流式消息推送（LLM 输出实时传输）
+- 管道状态事件通知
+- 多会话并发管理
 
 ## 结构
 
-### 文件清单
+### 通道层文件
 
 | 文件 | 核心符号 | 说明 |
 |------|---------|------|
-| `input_adapter.py` | `IInputAdapter` | 输入适配器基类（ABC） |
-| `output_adapter.py` | `IOutputAdapter` | 输出适配器基类（ABC）+ `send_stream` |
-| `__init__.py` | 重导出 `IInputAdapter`, `IOutputAdapter` | 模块入口 |
-| `cli/input_adapter.py` | `CLIInputAdapter` | CLI 输入适配器（stdin + quit/exit 检测） |
-| `cli/output_adapter.py` | `CLIOutputAdapter` | CLI 输出适配器（rich Console 彩色输出） |
-| `cli/cli_main.py` | `DemoLLMCore`, `DemoStopPlugin`, `DemoDefaultRoute`, `CLIApplication`, `main` | CLI 入口 + Demo 插件 |
-| `cli/__init__.py` | 重导出 `CLIInputAdapter`, `CLIOutputAdapter` | CLI 子模块入口 |
+| `__init__.py` | — | 模块入口 |
+
+### CLI 通道（`cli/`）
+
+| 文件 | 核心符号 | 说明 |
+|------|---------|------|
+| `cli/__init__.py` | — | CLI 子模块入口 |
+| `cli/cli_main.py` | `CLIApplication`, `main` | CLI 入口（应用初始化 + 主循环） |
+| `cli/cli_interaction.py` | — | CLI 交互逻辑（输入处理/输出格式化） |
+| `cli/cli_commands.py` | — | CLI 命令处理（斜杠命令） |
+| `cli/input_adapter.py` | `CLIInputAdapter` | CLI 输入适配器（stdin 读取） |
+| `cli/output_adapter.py` | `CLIOutputAdapter` | CLI 输出适配器（rich Console 输出） |
+
+### API 通道（`api/`）
+
+| 文件 | 核心符号 | 说明 |
+|------|---------|------|
+| `api/__init__.py` | — | API 子模块入口 |
+| `api/app.py` | `app` | FastAPI 应用实例 |
+| `api/auth.py` | — | 认证中间件 |
+| `api/models.py` | — | API 数据模型 |
+| `api/routes_auth.py` | — | 认证路由 |
+| `api/routes_threads.py` | — | 线程管理路由 |
+
+### WebSocket 通道（`websocket/`）
+
+| 文件 | 核心符号 | 说明 |
+|------|---------|------|
+| `websocket/__init__.py` | — | WebSocket 子模块入口 |
+| `websocket/adapter.py` | — | WebSocket 适配器 |
+| `websocket/protocol.py` | — | 通信协议定义 |
+| `websocket/server.py` | — | WebSocket 服务器 |
+| `websocket/session_manager.py` | `SessionManager` | 会话管理器 |
 
 ### 类继承关系
 
 ```
 IInputAdapter (ABC)
-└── CLIInputAdapter
+├── CLIInputAdapter
 
 IOutputAdapter (ABC)
-└── CLIOutputAdapter
-
-IPlugin (ABC)
-├── ICorePlugin ← DemoLLMCore
-└── IOutputPlugin ← DemoStopPlugin, DemoDefaultRoute
+├── CLIOutputAdapter
 ```
 
 ### 运行方式
 
 ```bash
+# CLI 通道
 $env:PYTHONPATH="src"
 python -m channels.cli.cli_main
+
+# API 通道（FastAPI）
+$env:PYTHONPATH="src"
+python -m channels.api.app
 ```

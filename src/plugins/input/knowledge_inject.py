@@ -78,6 +78,9 @@ class KnowledgeInjectPlugin(IInputPlugin):
         通过 ctx.get_service("semantic_storage") 获取语义存储实例，
         无 semantic_storage 服务时降级为无知识对话。
 
+        优先使用 KnowledgeService.search() 进行相关性检索（结合关键词
+        匹配和语义相似度），search 不可用时回退到 list + 客户端过滤。
+
         Args:
             ctx: 插件执行上下文
 
@@ -101,22 +104,46 @@ class KnowledgeInjectPlugin(IInputPlugin):
                 return PluginResult(state_updates={"knowledge.context": ""})
 
             if self._knowledge_service is None:
-                self._knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
-            knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
+                # 尝试获取 embedding_fn 以支持语义检索
+                embedding_fn = None
+                try:
+                    embedding_service = ctx.get_service("embedding_service")
+                    if hasattr(embedding_service, "embed_text"):
+                        embedding_fn = embedding_service.embed_text
+                    elif hasattr(embedding_service, "embed"):
+                        embedding_fn = embedding_service.embed
+                except KeyError:
+                    pass
 
-            # TODO: KnowledgeService.list_semantic_memory 当前仅按 user_id 列出全部知识，
-            # 不支持基于 query 的相关性检索。待知识服务 API 支持 query 参数后，
-            # 应替换为 knowledge_service.search(user_id, query, top_k) 以提升检索精度。
-            # 当前临时方案：列出全部知识后在客户端按 query 关键词做基础过滤。
-            result = await knowledge_service.list_semantic_memory(user_id)
-            items = result.get("items", [])
+                self._knowledge_service = KnowledgeService(
+                    semantic_storage=semantic_storage,
+                    embedding_fn=embedding_fn,
+                )
+            knowledge_service = self._knowledge_service
+
+            # 优先使用相关性搜索（关键词 + 语义）
+            items: list[dict[str, Any]] = []
+            try:
+                search_results = await knowledge_service.search(
+                    user_id=user_id,
+                    query=query,
+                    top_k=self._top_k,
+                )
+                items = [r.to_dict() for r in search_results]
+            except Exception as search_err:
+                # 搜索失败时回退到 list + 客户端过滤
+                logger.debug(
+                    "[%s] 相关性搜索失败，回退到列表模式: %s",
+                    self.name, search_err,
+                )
+                result = await knowledge_service.list_semantic_memory(user_id)
+                items = result.get("items", [])
+
+                if items and query:
+                    items = self._filter_by_relevance(items, query)
 
             if not items:
                 return PluginResult(state_updates={"knowledge.context": ""})
-
-            # 客户端侧基础相关性过滤：按 query 中的关键词对 items 进行排序和筛选
-            if query:
-                items = self._filter_by_relevance(items, query)
 
             # 根据模式格式化
             if self._mode == "full":

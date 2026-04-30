@@ -5,14 +5,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import {
-  getExecutionRecords,
-  getExecutionRecordsSessions,
-} from '@/services/api/executionRecords'
-import type {
-  ExecutionRecord,
-  SessionInfo,
-} from '@/services/api/executionRecords'
+import { getExecutionRecords, getExecutionRecordsSessions } from '@/services/api/executionRecords'
+import type { ExecutionRecord, SessionInfo } from '@/services/api/executionRecords'
 
 /**
  * 获取记录状态样式
@@ -87,23 +81,23 @@ export function DebugExecutionRecordsPage() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/debug" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/debug" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">执行记录</h1>
-        <span className="ml-auto text-xs text-muted-foreground">共 {total} 条</span>
+        <span className="text-muted-foreground ml-auto text-xs">共 {total} 条</span>
       </header>
-      <main className="flex-1 overflow-y-auto p-6 space-y-4">
+      <main className="flex-1 space-y-4 overflow-y-auto p-6">
         {/* 会话过滤 */}
         <select
           value={selectedSession}
-          onChange={e => handleSessionChange(e.target.value)}
-          className="px-3 py-1.5 text-sm border rounded-lg bg-background"
+          onChange={(e) => handleSessionChange(e.target.value)}
+          className="bg-background rounded-lg border px-3 py-1.5 text-sm"
         >
           <option value="">全部会话</option>
-          {sessions.map(s => (
+          {sessions.map((s) => (
             <option key={s.id} value={s.id}>
               {s.title || s.id} ({s.record_count} 条)
             </option>
@@ -113,46 +107,60 @@ export function DebugExecutionRecordsPage() {
         {/* 加载状态 */}
         {isLoading && (
           <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="ml-2 text-sm text-muted-foreground">加载中...</span>
+            <div className="border-primary h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
+            <span className="text-muted-foreground ml-2 text-sm">加载中...</span>
           </div>
         )}
 
         {/* 错误提示 */}
         {error && (
-          <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
+          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
         )}
 
         {/* 空状态 */}
         {!isLoading && !error && records.length === 0 && (
-          <div className="text-center py-12 text-muted-foreground">暂无数据</div>
+          <div className="text-muted-foreground py-12 text-center">暂无数据</div>
         )}
 
         {/* 记录列表 */}
         {!isLoading && !error && records.length > 0 && (
-          <div className="border rounded-lg overflow-hidden">
+          <div className="overflow-hidden rounded-lg border">
             <table className="w-full text-sm">
               <thead className="bg-accent/30">
                 <tr>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">ID</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">类型</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">状态</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">深度</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">创建时间</th>
+                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                    ID
+                  </th>
+                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                    类型
+                  </th>
+                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                    状态
+                  </th>
+                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                    深度
+                  </th>
+                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                    创建时间
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {records.map(record => (
-                  <tr key={record.id} className="border-t hover:bg-accent/20">
-                    <td className="px-4 py-2 text-xs font-mono truncate max-w-[200px]">{record.id}</td>
+                {records.map((record) => (
+                  <tr key={record.id} className="hover:bg-accent/20 border-t">
+                    <td className="max-w-[200px] truncate px-4 py-2 font-mono text-xs">
+                      {record.id}
+                    </td>
                     <td className="px-4 py-2 text-xs">{record.record_type || '--'}</td>
                     <td className="px-4 py-2">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${getRecordStatusStyle(record.status)}`}>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
+                      >
                         {record.status || '--'}
                       </span>
                     </td>
                     <td className="px-4 py-2 text-xs">{record.depth ?? '--'}</td>
-                    <td className="px-4 py-2 text-xs text-muted-foreground">
+                    <td className="text-muted-foreground px-4 py-2 text-xs">
                       {new Date(record.created_at).toLocaleString()}
                     </td>
                   </tr>

@@ -6,8 +6,8 @@
  */
 
 import React, { useState, useEffect } from 'react'
-import { schemaRegistry } from '@/services/schema/registry'
 import { ModuleConfigRenderer } from '@/components/schema/ModuleConfigRenderer'
+import { schemaRegistry } from '@/services/schema/registry'
 import type { ModuleRegistration } from '@/types/schema'
 
 /**
@@ -25,19 +25,19 @@ export function ModulesSettingsPage() {
     return unsubscribe
   }, [])
 
-  const activeReg = modules.find(m => m.schema.identity.id === activeModule)
+  const activeReg = modules.find((m) => m.schema.identity.id === activeModule)
 
   return (
-    <div className="h-full flex overflow-hidden">
+    <div className="flex h-full overflow-hidden">
       {/* 模块列表 */}
-      <div className="w-64 border-r border-border overflow-y-auto">
-        <div className="p-4 text-sm font-medium text-foreground border-b border-border">
+      <div className="border-border w-64 overflow-y-auto border-r">
+        <div className="text-foreground border-border border-b p-4 text-sm font-medium">
           已安装模块 ({modules.length})
         </div>
-        {modules.map(mod => (
+        {modules.map((mod) => (
           <button
             key={mod.schema.identity.id}
-            className={`w-full text-left px-4 py-3 text-sm border-b border-border/50 transition-colors ${
+            className={`border-border/50 w-full border-b px-4 py-3 text-left text-sm transition-colors ${
               activeModule === mod.schema.identity.id
                 ? 'bg-accent text-accent-foreground'
                 : 'text-foreground hover:bg-accent/50'
@@ -48,7 +48,7 @@ export function ModulesSettingsPage() {
               {mod.schema.identity.icon && <span>{mod.schema.identity.icon}</span>}
               <span className="font-medium">{mod.schema.identity.name}</span>
             </div>
-            <div className="text-xs text-muted-foreground mt-0.5">
+            <div className="text-muted-foreground mt-0.5 text-xs">
               v{mod.schema.identity.version} · {mod.schema.identity.category}
             </div>
           </button>
@@ -59,15 +59,15 @@ export function ModulesSettingsPage() {
       <div className="flex-1 overflow-y-auto p-6">
         {activeReg ? (
           <div>
-            <div className="flex items-center gap-3 mb-6">
+            <div className="mb-6 flex items-center gap-3">
               {activeReg.schema.identity.icon && (
                 <span className="text-2xl">{activeReg.schema.identity.icon}</span>
               )}
               <div>
-                <h2 className="text-lg font-semibold text-foreground">
+                <h2 className="text-foreground text-lg font-semibold">
                   {activeReg.schema.identity.name}
                 </h2>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-muted-foreground text-sm">
                   {activeReg.schema.identity.description ?? '无描述'}
                 </p>
               </div>
@@ -76,7 +76,7 @@ export function ModulesSettingsPage() {
               schema={activeReg.schema}
               values={configValues[activeModule!] ?? {}}
               onChange={(key, value) => {
-                setConfigValues(prev => ({
+                setConfigValues((prev) => ({
                   ...prev,
                   [activeModule!]: {
                     ...(prev[activeModule!] ?? {}),
@@ -87,7 +87,7 @@ export function ModulesSettingsPage() {
             />
           </div>
         ) : (
-          <div className="flex items-center justify-center h-full text-muted-foreground">
+          <div className="text-muted-foreground flex h-full items-center justify-center">
             选择左侧模块查看配置
           </div>
         )}

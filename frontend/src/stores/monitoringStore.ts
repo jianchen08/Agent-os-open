@@ -4,16 +4,12 @@
  * 使用真实后端 API 加载监控数据，支持自动刷新
  */
 
-import { ErrorType, reportError } from '@/services/errorReporting'
-import { getSessionTotalTokenUsage } from '@/services/api/sessions'
 import { create } from 'zustand'
 import * as monitoringApi from '@/services/api/monitoring'
-import type {
-  SystemMetrics,
-  TaskInfo,
-  TaskStatistics,
-} from '@/types/monitoring'
+import { getSessionTotalTokenUsage } from '@/services/api/sessions'
+import { ErrorType, reportError } from '@/services/errorReporting'
 import type { SessionTokenUsageResponse } from '@/services/api/sessions'
+import type { SystemMetrics, TaskInfo, TaskStatistics } from '@/types/monitoring'
 
 /**
  * 监控状态接口
@@ -90,7 +86,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
     try {
       const tokenUsage = await getSessionTotalTokenUsage(sessionId)
       set({ tokenUsage, isLoadingTokenUsage: false })
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('[MonitoringStore] 获取 Token 用量失败:', error)
       set({ isLoadingTokenUsage: false })
     }
@@ -120,8 +116,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         error: null,
         lastUpdated: getCurrentTimestamp(),
       })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取监控数据失败'
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取监控数据失败'
       reportError(errorMessage, ErrorType.SERVER, undefined, {
         componentName: 'MonitoringStore',
         operation: 'fetchMonitoringData',

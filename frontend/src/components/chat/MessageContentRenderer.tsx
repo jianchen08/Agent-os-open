@@ -4,14 +4,14 @@
  * 统一的消息内容渲染入口，根据片段类型分发到对应的渲染器
  */
 
+import { memo } from 'react'
 import ActivityCard from '@/components/chat/ActivityCard'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
-import { ThinkingDisplay } from '@/components/chat/ThinkingDisplay'
-import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
+import { ThinkingDisplay } from '@/components/chat/ThinkingDisplay'
 import { cn } from '@/lib/utils'
+import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { ReactNode } from 'react'
-import { memo } from 'react'
 
 /**
  * 是否使用 LobeChat Markdown 组件
@@ -33,44 +33,39 @@ export interface MessageContentRendererProps {
   renderText?: (content: string, isStreaming: boolean) => ReactNode
   /** 自定义工具调用渲染器 */
   renderToolCall?: (fragment: Extract<RenderFragment, { type: 'tool_call' }>) => ReactNode
+  /** 搜索查询（用于高亮） */
+  searchQuery?: string
 }
 
 /**
  * 默认文本渲染器
  */
 function DefaultTextRenderer(content: string, isStreaming: boolean): ReactNode {
-  return (
-    <MarkdownRenderer
-      content={content}
-      isStreaming={isStreaming}
-    />
-  )
+  return <MarkdownRenderer content={content} isStreaming={isStreaming} />
 }
 
 /**
  * LobeChat 文本渲染器
  */
 function LobeChatTextRenderer(content: string, isStreaming: boolean): ReactNode {
-  return (
-    <LobeChatMarkdown content={content} isStreaming={isStreaming} />
-  )
+  return <LobeChatMarkdown content={content} isStreaming={isStreaming} />
 }
 
 /**
  * 默认工具调用渲染器
  */
 function DefaultToolCallRenderer(
-  fragment: Extract<RenderFragment, { type: 'tool_call' }>
+  fragment: Extract<RenderFragment, { type: 'tool_call' }>,
 ): ReactNode {
   return (
     <div key={fragment.key} className="relative">
       {fragment.total > 1 && (
         <div
           className={cn(
-            'absolute left-[14px] w-0.5 bg-border/50',
+            'bg-border/50 absolute left-[14px] w-0.5',
             fragment.index === 0 && 'top-1/2 bottom-0',
             fragment.index > 0 && fragment.index < fragment.total - 1 && 'top-0 bottom-0',
-            fragment.index === fragment.total - 1 && fragment.index > 0 && 'top-0 bottom-1/2'
+            fragment.index === fragment.total - 1 && fragment.index > 0 && 'top-0 bottom-1/2',
           )}
         />
       )}
@@ -86,7 +81,8 @@ function renderFragment(
   fragment: RenderFragment,
   isStreaming: boolean,
   renderText?: (content: string, isStreaming: boolean) => ReactNode,
-  renderToolCall?: (fragment: Extract<RenderFragment, { type: 'tool_call' }>) => ReactNode
+  renderToolCall?: (fragment: Extract<RenderFragment, { type: 'tool_call' }>) => ReactNode,
+  searchQuery?: string,
 ): ReactNode {
   switch (fragment.type) {
     case 'thinking':
@@ -98,23 +94,41 @@ function renderFragment(
 
     case 'text': {
       const isLastStreaming = isStreaming && fragment.isLast
+      let content = fragment.content
+
+      // 应用搜索高亮
+      if (searchQuery && searchQuery.trim()) {
+        content = highlightText(content, searchQuery)
+      }
+
       if (renderText) {
-        return <div key={fragment.key}>{renderText(fragment.content, isLastStreaming)}</div>
+        return <div key={fragment.key}>{renderText(content, isLastStreaming)}</div>
       }
       if (USE_LOBECHAT_MARKDOWN) {
-        return <div key={fragment.key}>{LobeChatTextRenderer(fragment.content, isLastStreaming)}</div>
+        return <div key={fragment.key}>{LobeChatTextRenderer(content, isLastStreaming)}</div>
       }
-      return <div key={fragment.key}>{DefaultTextRenderer(fragment.content, isLastStreaming)}</div>
+      return <div key={fragment.key}>{DefaultTextRenderer(content, isLastStreaming)}</div>
     }
 
     case 'tool_call':
-      return renderToolCall
-        ? renderToolCall(fragment)
-        : DefaultToolCallRenderer(fragment)
+      return renderToolCall ? renderToolCall(fragment) : DefaultToolCallRenderer(fragment)
 
     default:
       return null
   }
+}
+
+/**
+ * 高亮文本中的搜索关键词
+ */
+function highlightText(text: string, query: string): string {
+  if (!query.trim()) {
+    return text
+  }
+
+  // 对于 Markdown 内容，我们不直接修改，因为会破坏格式
+  // 这里返回原始文本，实际的高亮应该在 Markdown 渲染器中实现
+  return text
 }
 
 /**
@@ -126,6 +140,7 @@ function MessageContentRendererBase({
   className,
   renderText,
   renderToolCall,
+  searchQuery,
 }: MessageContentRendererProps): ReactNode {
   if (fragments.length === 0) {
     return null
@@ -133,8 +148,8 @@ function MessageContentRendererBase({
 
   return (
     <div className={cn('message-content-renderer', className)}>
-      {fragments.map(fragment =>
-        renderFragment(fragment, isStreaming, renderText, renderToolCall)
+      {fragments.map((fragment) =>
+        renderFragment(fragment, isStreaming, renderText, renderToolCall, searchQuery),
       )}
     </div>
   )

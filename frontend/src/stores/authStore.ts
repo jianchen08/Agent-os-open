@@ -6,14 +6,10 @@
  */
 
 import { create } from 'zustand'
-import type { User } from '../types/models'
-import * as authApi from '../services/api/auth'
 import { STORAGE_KEYS } from '../constants/storage'
-import type {
-  LoginResponse,
-  RefreshResponse,
-  UserInfoResponse,
-} from '../types/api'
+import * as authApi from '../services/api/auth'
+import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
+import type { User } from '../types/models'
 
 /**
  * 认证状态接口
@@ -106,10 +102,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Requirements: 2.2
       localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
       localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, response.refresh_token)
-      localStorage.setItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY,
-        expiryTime.toString()
-      )
+      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
 
       // 更新状态（先设置token，以便后续API调用可以使用）
       set({
@@ -139,8 +132,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(basicUser))
         set({ user: basicUser })
       }
-    } catch (error: any) {
-      const errorMessage = error.message || '登录失败'
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '登录失败'
       set({ isLoading: false, error: errorMessage })
       throw new Error(errorMessage)
     }
@@ -177,10 +170,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // 持久化到localStorage（使用 STORAGE_KEYS 常量）
       localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
       localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, response.refresh_token)
-      localStorage.setItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY,
-        expiryTime.toString()
-      )
+      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
 
       // 更新状态（先设置token，以便后续API调用可以使用）
       set({
@@ -210,8 +200,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(basicUser))
         set({ user: basicUser })
       }
-    } catch (error: any) {
-      const errorMessage = error.message || '注册失败'
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '注册失败'
       set({ isLoading: false, error: errorMessage })
       throw new Error(errorMessage)
     }
@@ -226,8 +216,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
    */
   logout: async () => {
     const refreshTokenValue =
-      get().refreshTokenValue ||
-      localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+      get().refreshTokenValue || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
 
     try {
       // 调用后端登出API
@@ -264,8 +253,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
    */
   refreshToken: async () => {
     const currentRefreshToken =
-      get().refreshTokenValue ||
-      localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+      get().refreshTokenValue || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
 
     if (!currentRefreshToken) {
       throw new Error('没有可刷新的令牌')
@@ -273,18 +261,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       // 调用真实API刷新令牌
-      const response: RefreshResponse =
-        await authApi.refreshToken(currentRefreshToken)
+      const response: RefreshResponse = await authApi.refreshToken(currentRefreshToken)
 
       // 计算新的token过期时间
       const expiryTime = Date.now() + response.expires_in * 1000
 
       // 持久化到localStorage（使用 STORAGE_KEYS 常量）
       localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
-      localStorage.setItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY,
-        expiryTime.toString()
-      )
+      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
 
       // 如果返回了新的refresh_token，也更新它
       if (response.refresh_token) {
@@ -296,7 +280,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         token: response.access_token,
         refreshTokenValue: response.refresh_token || currentRefreshToken,
       })
-    } catch (_error: any) {
+    } catch (_error: unknown) {
       // 刷新失败，清除认证状态
       await get().logout()
       throw new Error('令牌刷新失败，请重新登录')
@@ -311,13 +295,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   initializeAuth: async () => {
     try {
       const storedToken = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
-      const storedRefreshToken = localStorage.getItem(
-        STORAGE_KEYS.REFRESH_TOKEN
-      )
+      const storedRefreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
       const storedUser = localStorage.getItem(STORAGE_KEYS.AUTH_USER)
-      const storedExpiry = localStorage.getItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY
-      )
+      const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
 
       if (storedToken && storedExpiry) {
         // 检查token是否过期
@@ -399,9 +379,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
    */
   checkTokenExpiration: () => {
     try {
-      const storedExpiry = localStorage.getItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY
-      )
+      const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
 
       if (!storedExpiry) {
         // 没有过期时间记录，视为已过期
@@ -437,7 +415,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
 
       set({ user })
-    } catch (error: any) {
+    } catch (error: unknown) {
       throw error
     }
   },

@@ -21,14 +21,43 @@ function deriveWsUrl(apiUrl: string): string {
 /**
  * WebSocket服务器URL（从 API_BASE_URL 派生，或从环境变量读取）
  */
-export const WS_BASE_URL =
-  import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL)
+export const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL)
+
+// ---- 协议版本 ----
+
+/**
+ * 客户端协议版本号
+ *
+ * 与后端 PROTOCOL_VERSION 保持一致，用于版本协商。
+ */
+export const PROTOCOL_VERSION = '2.0.0'
+
+// ---- ACK 配置 ----
+
+/**
+ * ACK 确认超时时间（毫秒）
+ */
+export const WS_ACK_TIMEOUT = 10_000
+
+/**
+ * ACK 确认最大重试次数
+ */
+export const WS_ACK_MAX_RETRIES = 3
+
+/**
+ * 需要 ACK 确认的服务端事件类型集合
+ */
+export const WS_ACK_REQUIRED_EVENTS: ReadonlySet<string> = new Set([
+  'interaction_request',
+  'approval_required',
+  'approval_request',
+])
 
 /**
  * WebSocket端点生成函数
  *
- * 生成带有thread_id和token参数的WebSocket连接URL。
- * 对应后端端点：/ws/workflow/{thread_id}?token={token}
+ * 生成带有thread_id、token和version参数的WebSocket连接URL。
+ * 对应后端端点：/ws/chat/{thread_id}?token={token}&version={version}
  *
  * @param threadId - 线程ID
  * @param token - JWT访问令牌
@@ -37,7 +66,7 @@ export const WS_BASE_URL =
  * Requirements: 4.1, 4.2
  */
 export const WS_ENDPOINT = (threadId: string, token: string): string =>
-  `/ws/chat/${threadId}?token=${encodeURIComponent(token)}`
+  `/ws/chat/${threadId}?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
 
 /**
  * 构建完整的WebSocket URL
@@ -95,6 +124,10 @@ export const WS_SERVER_EVENTS = {
   THINKING_CHUNK: 'thinking_chunk',
   /** 思考结束 */
   THINKING_END: 'thinking_end',
+  /** 工具调用开始（管道流式事件） */
+  TOOL_START: 'tool_start',
+  /** 工具调用结果（管道流式事件） */
+  TOOL_RESULT: 'tool_result',
   /** 工作流步骤更新 - 需求 3.2 */
   WORKFLOW_STEP_UPDATE: 'workflow_step_update',
   /** 执行开始（统一工具/Agent/工作流执行） */
@@ -135,6 +168,8 @@ export const WS_SERVER_EVENTS = {
   ITERATION_START: 'iteration_start',
   /** 迭代结束 */
   ITERATION_END: 'iteration_end',
+  /** 遗漏消息响应（重连后服务端发送） */
+  MISSED_MESSAGES: 'missed_messages',
 } as const
 
 /**
@@ -155,6 +190,10 @@ export const WS_CLIENT_MESSAGES = {
   USER_INPUT_RESPONSE: 'user_input_response',
   /** 执行控制（暂停/恢复/取消）- 需求 5.1, 5.2, 5.3 */
   EXECUTION_CONTROL: 'execution_control',
+  /** 消息 ACK 确认（确认收到关键消息） */
+  MESSAGE_ACK: 'message_ack',
+  /** 请求遗漏消息（重连后请求断线期间的消息） */
+  REQUEST_MISSED: 'request_missed',
 } as const
 
 /**
@@ -172,14 +211,12 @@ export const APPROVAL_DECISIONS = {
 /**
  * WebSocket事件类型
  */
-export type WebSocketServerEventType =
-  (typeof WS_SERVER_EVENTS)[keyof typeof WS_SERVER_EVENTS]
+export type WebSocketServerEventType = (typeof WS_SERVER_EVENTS)[keyof typeof WS_SERVER_EVENTS]
 
 export type WebSocketClientMessageType =
   (typeof WS_CLIENT_MESSAGES)[keyof typeof WS_CLIENT_MESSAGES]
 
-export type ApprovalDecisionType =
-  (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
+export type ApprovalDecisionType = (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
 
 /**
  * WebSocket重连配置
@@ -348,6 +385,22 @@ export interface ExecutionControlMessage {
   reason?: string
 }
 
+/** 消息 ACK 确认（前端确认收到关键消息） */
+export interface MessageAckMessage {
+  type: typeof WS_CLIENT_MESSAGES.MESSAGE_ACK
+  /** 被确认的消息 request_id */
+  request_id: string
+  /** 前端确认收到的时间戳 */
+  received_at: string
+}
+
+/** 请求遗漏消息（重连后请求断线期间的消息） */
+export interface RequestMissedMessage {
+  type: typeof WS_CLIENT_MESSAGES.REQUEST_MISSED
+  /** 前端最后收到的消息 request_id */
+  last_received_request_id: string
+}
+
 /** 客户端消息联合类型 */
 export type WebSocketClientMessage =
   | UserInputMessage
@@ -356,6 +409,8 @@ export type WebSocketClientMessage =
   | CancelMessage
   | UserInputResponseMessage
   | ExecutionControlMessage
+  | MessageAckMessage
+  | RequestMissedMessage
 
 /** 状态变更事件 */
 export interface StateChangeEvent {
@@ -400,6 +455,8 @@ export interface ConnectionConfirmationEvent {
   type: typeof WS_SERVER_EVENTS.CONNECTION_CONFIRMATION
   connection_id: string
   thread_id: string
+  /** 服务端协商后的协议版本 */
+  version?: string
 }
 
 /** 工作流步骤更新事件 - 需求 3.2 */
@@ -561,6 +618,17 @@ export interface IterationEndEvent {
   thread_id?: string
 }
 
+/** 遗漏消息响应事件（重连后服务端发送断线期间的消息） */
+export interface MissedMessagesEvent {
+  type: typeof WS_SERVER_EVENTS.MISSED_MESSAGES
+  /** 遗漏的消息列表 */
+  messages: Array<Record<string, unknown>>
+  /** 总遗漏消息数量 */
+  total: number
+  /** 是否还有更多未发送的消息 */
+  has_more: boolean
+}
+
 /** 服务端事件联合类型 */
 export type WebSocketServerEvent =
   | StateChangeEvent
@@ -580,6 +648,7 @@ export type WebSocketServerEvent =
   | SchemaUpdatedEvent
   | IterationStartEvent
   | IterationEndEvent
+  | MissedMessagesEvent
   | SubAgentCreatedEvent
   | SubAgentWaitingInputEvent
   | SubAgentCompletedEvent

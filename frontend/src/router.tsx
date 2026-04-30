@@ -5,64 +5,93 @@
  * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
  */
 
-import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
 import { lazy, Suspense, useEffect, useState, useCallback, useMemo } from 'react'
-import type { ReactNode } from 'react'
+import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
+import { LayoutGrid } from 'lucide-react'
+import { ChatContainer } from './components/chat/ChatContainer'
 import { ROUTES } from './constants/routes'
 import { WS_SERVER_EVENTS } from './constants/websocket'
+import { useMessageActions } from './hooks/useMessageActions'
+import { useConnectionStatus } from './hooks/useConnectionStatus'
+import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
-import { ChatContainer } from './components/chat/ChatContainer'
-import { useAuthStore } from './stores/authStore'
-import { useSessionStore } from './stores/sessionStore'
-import { useSessionListStore } from './stores/sessionListStore'
-import { useStreamingStore } from './stores/streamingStore'
 import { webSocketService } from './services/websocket/WebSocketService'
-import type { Message } from './types/models'
+import { useAuthStore } from './stores/authStore'
+import { useLayoutModeStore } from './stores/layoutModeStore'
+import { useSessionListStore } from './stores/sessionListStore'
+import { useSessionStore } from './stores/sessionStore'
+import { useStreamingStore } from './stores/streamingStore'
+import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
 import type { SendMessageParams } from './components/chat/types'
+import type { Message } from './types/models'
+import type { ReactNode } from 'react'
 
 const ModulesSettingsPage = lazy(() =>
-  import('@/pages/settings/ModulesSettingsPage').then(m => ({ default: m.ModulesSettingsPage }))
+  import('@/pages/settings/ModulesSettingsPage').then((m) => ({ default: m.ModulesSettingsPage })),
 )
 const SettingsPage = lazy(() =>
-  import('@/pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage }))
+  import('@/pages/settings/SettingsPage').then((m) => ({ default: m.SettingsPage })),
+)
+const ApiSettingsPage = lazy(() =>
+  import('@/pages/settings/ApiSettingsPage').then((m) => ({ default: m.ApiSettingsPage })),
+)
+const LlmSettingsPage = lazy(() =>
+  import('@/pages/settings/LlmSettingsPage').then((m) => ({ default: m.LlmSettingsPage })),
+)
+const ContextWindowSettingsPage = lazy(() =>
+  import('@/pages/settings/ContextWindowSettingsPage').then((m) => ({
+    default: m.ContextWindowSettingsPage,
+  })),
+)
+const ConcurrencySettingsPage = lazy(() =>
+  import('@/pages/settings/ConcurrencySettingsPage').then((m) => ({
+    default: m.ConcurrencySettingsPage,
+  })),
+)
+const CostSettingsPage = lazy(() =>
+  import('@/pages/settings/CostSettingsPage').then((m) => ({ default: m.CostSettingsPage })),
 )
 const ToolsPage = lazy(() =>
-  import('@/pages/tools/ToolsPage').then(m => ({ default: m.ToolsPage }))
+  import('@/pages/tools/ToolsPage').then((m) => ({ default: m.ToolsPage })),
 )
 const AgentsPage = lazy(() =>
-  import('@/pages/agents/AgentsPage').then(m => ({ default: m.AgentsPage }))
+  import('@/pages/agents/AgentsPage').then((m) => ({ default: m.AgentsPage })),
 )
 const MonitoringPage = lazy(() =>
-  import('@/pages/monitoring/MonitoringPage').then(m => ({ default: m.MonitoringPage }))
+  import('@/pages/monitoring/MonitoringPage').then((m) => ({ default: m.MonitoringPage })),
 )
 const AdminPage = lazy(() =>
-  import('@/pages/admin/AdminPage').then(m => ({ default: m.AdminPage }))
+  import('@/pages/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
 )
 const MemoryPage = lazy(() =>
-  import('@/pages/memory/MemoryPage').then(m => ({ default: m.MemoryPage }))
+  import('@/pages/memory/MemoryPage').then((m) => ({ default: m.MemoryPage })),
 )
 const DebugPage = lazy(() =>
-  import('@/pages/debug/DebugPage').then(m => ({ default: m.DebugPage }))
+  import('@/pages/debug/DebugPage').then((m) => ({ default: m.DebugPage })),
 )
 const DebugExecutionRecordsPage = lazy(() =>
-  import('@/pages/debug/DebugExecutionRecordsPage').then(m => ({ default: m.DebugExecutionRecordsPage }))
+  import('@/pages/debug/DebugExecutionRecordsPage').then((m) => ({
+    default: m.DebugExecutionRecordsPage,
+  })),
 )
 const DebugSessionsPage = lazy(() =>
-  import('@/pages/debug/DebugSessionsPage').then(m => ({ default: m.DebugSessionsPage }))
+  import('@/pages/debug/DebugSessionsPage').then((m) => ({ default: m.DebugSessionsPage })),
 )
 const DebugTasksPage = lazy(() =>
-  import('@/pages/debug/DebugTasksPage').then(m => ({ default: m.DebugTasksPage }))
+  import('@/pages/debug/DebugTasksPage').then((m) => ({ default: m.DebugTasksPage })),
 )
 const DebugEvaluationMetricsPage = lazy(() =>
-  import('@/pages/debug/DebugEvaluationMetricsPage').then(m => ({ default: m.DebugEvaluationMetricsPage }))
+  import('@/pages/debug/DebugEvaluationMetricsPage').then((m) => ({
+    default: m.DebugEvaluationMetricsPage,
+  })),
 )
 const DebugUsersPage = lazy(() =>
-  import('@/pages/debug/DebugUsersPage').then(m => ({ default: m.DebugUsersPage }))
+  import('@/pages/debug/DebugUsersPage').then((m) => ({ default: m.DebugUsersPage })),
 )
 
 /** 懒加载 fallback */
-const LazyFallback = <div className="p-4 text-muted-foreground">加载中...</div>
+const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
 
 // ============================================
 // 路由守卫
@@ -81,9 +110,9 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
 
   if (isInitializing) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center space-y-2">
-          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+      <div className="bg-background flex min-h-screen items-center justify-center">
+        <div className="space-y-2 text-center">
+          <div className="border-primary mx-auto h-8 w-8 animate-spin rounded-full border-2 border-t-transparent" />
           <p className="text-muted-foreground text-sm">加载中...</p>
         </div>
       </div>
@@ -118,6 +147,15 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
 function HomePage(): ReactNode {
   const navigate = useNavigate()
   const { user, token, logout } = useAuthStore()
+
+  // Phase 1 hooks: connection status and real-time events
+  useConnectionStatus()
+  useRealtimeEvents()
+
+  // Layout mode toggle
+  const layoutMode = useLayoutModeStore((s) => s.mode)
+  const toggleLayoutMode = useLayoutModeStore((s) => s.toggleMode)
+
   const {
     sessions,
     activeSessionId,
@@ -129,19 +167,36 @@ function HomePage(): ReactNode {
     getActiveSessionMessages,
     addMessage,
     updateMessageContent,
+    updateMessageFields,
     getMessagePagination,
     loadMoreMessages,
   } = useSessionStore()
   const { fetchSessions, createSession, setActiveSession, deleteSession } = useSessionListStore()
   const { isStreaming, setStreaming, stopStreaming } = useStreamingStore()
 
+  /** 消息操作 hooks */
+  const messageActions = useMessageActions(activeSessionId ?? undefined)
+
   /** 侧边栏是否折叠 */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+
+  /** 默认模型名 */
+  const [modelName, setModelName] = useState('glm-5.1')
+
+  // 加载默认模型配置
+  useEffect(() => {
+    fetch('/api/v1/config/llm/defaults')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.chat) setModelName(data.chat)
+      })
+      .catch(() => {})
+  }, [])
 
   /** 当前活跃会话的消息列表（响应式） */
   const activeMessages = useMemo(
     () => (activeSessionId ? messages[activeSessionId] || [] : []),
-    [activeSessionId, messages]
+    [activeSessionId, messages],
   )
 
   /** 当前活跃会话的分页状态 */
@@ -225,13 +280,125 @@ function HomePage(): ReactNode {
     webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
     webSocketService.subscribe(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
 
+    // --- Thinking 事件 ---
+    const handleThinkingStart = (eventData: any) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      const messageId = eventData.message_id || eventData.data?.message_id
+      if (!messageId) return
+      updateMessageFields(sid, messageId, {
+        thinking: { content: '', isThinking: true },
+      })
+    }
+
+    const handleThinkingChunk = (eventData: any) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      const messageId = eventData.message_id || eventData.data?.message_id
+      const chunk = eventData.content || eventData.data?.content || ''
+      if (!messageId || !chunk) return
+
+      const msgs = useSessionStore.getState().messages[sid] || []
+      const msg = msgs.find((m) => m.id === messageId)
+      const prevContent = msg?.thinking?.content || ''
+      updateMessageFields(sid, messageId, {
+        thinking: { content: prevContent + chunk, isThinking: true },
+      })
+    }
+
+    const handleThinkingEnd = (eventData: any) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      const messageId = eventData.message_id || eventData.data?.message_id
+      if (!messageId) return
+      const msgs = useSessionStore.getState().messages[sid] || []
+      const msg = msgs.find((m) => m.id === messageId)
+      updateMessageFields(sid, messageId, {
+        thinking: { content: msg?.thinking?.content || '', isThinking: false },
+      })
+    }
+
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_START, handleThinkingStart)
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_CHUNK, handleThinkingChunk)
+    webSocketService.subscribe(WS_SERVER_EVENTS.THINKING_END, handleThinkingEnd)
+
+    // --- Tool 事件 ---
+    const handleToolStart = (eventData: any) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      const messageId = eventData.message_id || eventData.data?.message_id
+      const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
+      if (!messageId) return
+
+      const msgs = useSessionStore.getState().messages[sid] || []
+      const msg = msgs.find((m) => m.id === messageId)
+      const existing = msg?.toolCalls || []
+      const callId = eventData.call_id || eventData.data?.call_id || `call_${Date.now()}`
+      updateMessageFields(sid, messageId, {
+        toolCalls: [...existing, {
+          call_id: callId,
+          tool_name: toolName,
+          tool_args: eventData.args || eventData.data?.args || {},
+          status: 'running' as const,
+          started_at: new Date().toISOString(),
+        }],
+      } as any)
+    }
+
+    const handleToolResult = (eventData: any) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      const messageId = eventData.message_id || eventData.data?.message_id
+      const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
+      if (!messageId) return
+
+      const msgs = useSessionStore.getState().messages[sid] || []
+      const msg = msgs.find((m) => m.id === messageId)
+      const existing = msg?.toolCalls || []
+      const callId = eventData.call_id || eventData.data?.call_id
+
+      const updated = existing.map((tc) => {
+        if (tc.tool_name === toolName && tc.status === 'running') {
+          return {
+            ...tc,
+            status: (eventData.success ?? eventData.data?.success ?? true) ? 'completed' as const : 'failed' as const,
+            result: eventData.result ?? eventData.data?.result,
+            completed_at: new Date().toISOString(),
+            duration_ms: eventData.duration_ms ?? eventData.data?.duration_ms,
+          }
+        }
+        return tc
+      })
+      // If no matching running tool found, add a new completed entry
+      if (!updated.some((tc) => tc.tool_name === toolName && tc.status !== 'running')) {
+        updated.push({
+          call_id: callId || `call_${Date.now()}`,
+          tool_name: toolName,
+          tool_args: {},
+          status: (eventData.success ?? eventData.data?.success ?? true) ? 'completed' as const : 'failed' as const,
+          result: eventData.result ?? eventData.data?.result,
+          completed_at: new Date().toISOString(),
+          duration_ms: eventData.duration_ms ?? eventData.data?.duration_ms,
+        })
+      }
+      updateMessageFields(sid, messageId, { toolCalls: updated } as any)
+    }
+
+    webSocketService.subscribe(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
+    webSocketService.subscribe(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
+
     return () => {
       webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart)
       webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk)
       webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
       webSocketService.unsubscribe(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
+      webSocketService.unsubscribe(WS_SERVER_EVENTS.THINKING_START, handleThinkingStart)
+      webSocketService.unsubscribe(WS_SERVER_EVENTS.THINKING_CHUNK, handleThinkingChunk)
+      webSocketService.unsubscribe(WS_SERVER_EVENTS.THINKING_END, handleThinkingEnd)
+      webSocketService.unsubscribe(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
+      webSocketService.unsubscribe(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
     }
-  }, [addMessage, updateMessageContent, setStreaming])
+  }, [addMessage, updateMessageContent, updateMessageFields, setStreaming])
 
   // ------------------------------------------
   // 组件卸载时断开 WebSocket
@@ -256,7 +423,7 @@ function HomePage(): ReactNode {
         connectWebSocket(sessionId, currentToken)
       }
     },
-    [setActiveSession, connectWebSocket]
+    [setActiveSession, connectWebSocket],
   )
 
   /**
@@ -301,10 +468,10 @@ function HomePage(): ReactNode {
         params.content,
         undefined,
         params.enableThinking,
-        undefined
+        undefined,
       )
     },
-    [addMessage]
+    [addMessage],
   )
 
   /**
@@ -314,6 +481,42 @@ function HomePage(): ReactNode {
     webSocketService.sendCancel()
     stopStreaming()
   }, [stopStreaming])
+
+  /**
+   * 编辑消息
+   */
+  const handleEditMessage = useCallback(
+    async (messageId: string, newContent: string) => {
+      if (!activeSessionId) return
+      await messageActions.editMessage(messageId, newContent)
+      // 重新加载消息以获取更新后的内容
+      const { fetchMessages } = useSessionStore.getState()
+      await fetchMessages(activeSessionId)
+    },
+    [activeSessionId, messageActions],
+  )
+
+  /**
+   * 重新生成消息
+   */
+  const handleRegenerateMessage = useCallback(
+    async (messageId: string) => {
+      if (!activeSessionId) return
+      await messageActions.retryMessageWithScope(messageId, 'all')
+    },
+    [activeSessionId, messageActions],
+  )
+
+  /**
+   * 删除消息
+   */
+  const handleDeleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!activeSessionId) return
+      await messageActions.deleteMessage(messageId)
+    },
+    [activeSessionId, messageActions],
+  )
 
   /**
    * 登出并跳转到登录页
@@ -327,22 +530,138 @@ function HomePage(): ReactNode {
   /** WebSocket 连接状态 */
   const isWsConnected = wsStatus === 'connected'
 
+  // ---- Render sidebar content (shared between layouts) ----
+  const sidebarContent = (
+    <>
+      <div className="shrink-0 border-b p-2.5">
+        <button
+          onClick={handleCreateSession}
+          className="bg-primary text-primary-foreground w-full rounded-lg px-3 py-2 text-sm font-medium transition-opacity hover:opacity-90"
+        >
+          + 新会话
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {sessions.length === 0 ? (
+          <div className="text-muted-foreground p-4 text-center text-sm">
+            暂无会话
+            <br />
+            <span className="text-xs">点击上方按钮创建</span>
+          </div>
+        ) : (
+          sessions.map((session) => (
+            <div
+              key={session.id}
+              onClick={() => handleSelectSession(session.id)}
+              className={`cursor-pointer truncate px-3 py-2.5 text-sm transition-colors ${
+                activeSessionId === session.id
+                  ? 'bg-accent text-accent-foreground font-medium'
+                  : 'hover:bg-accent/50 text-foreground/80'
+              }`}
+              title={session.title}
+            >
+              {session.title}
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  )
+
+  // ---- Render chat content (shared between layouts) ----
+  const chatContent = activeSessionId ? (
+    <ChatContainer
+      sessionId={activeSessionId}
+      messages={activeMessages}
+      isLoading={isSessionLoading}
+      isGenerating={isStreaming}
+      modelName={modelName}
+      onSendMessage={handleSendMessage}
+      onStopGenerate={handleStopGenerate}
+      onEdit={handleEditMessage}
+      onRegenerate={handleRegenerateMessage}
+      onDelete={handleDeleteMessage}
+      hasMoreMessages={pagination?.hasMore ?? false}
+      isLoadingMoreMessages={pagination?.isLoadingMore ?? false}
+      onLoadMoreMessages={() => {
+        if (activeSessionId) loadMoreMessages(activeSessionId)
+      }}
+      className="flex-1"
+    />
+  ) : (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8">
+      <div className="flex flex-col items-center gap-3">
+        <div className="bg-primary/10 text-primary flex h-16 w-16 items-center justify-center rounded-2xl text-3xl">
+          <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+          </svg>
+        </div>
+        <h2 className="text-3xl font-bold tracking-tight">欢迎使用超级终端</h2>
+        <p className="text-muted-foreground max-w-sm text-center text-base">
+          选择左侧已有会话，或创建新会话开始对话
+        </p>
+      </div>
+      <div className="flex flex-wrap justify-center gap-2">
+        <button
+          onClick={handleCreateSession}
+          className="bg-primary text-primary-foreground rounded-lg px-5 py-2.5 text-sm font-medium transition-opacity hover:opacity-90"
+        >
+          + 新会话
+        </button>
+        <a
+          href={ROUTES.AGENTS}
+          className="border-border hover:bg-accent rounded-lg border px-5 py-2.5 text-sm transition-colors"
+        >
+          浏览智能体
+        </a>
+      </div>
+    </div>
+  )
+
+  // ---- Five-space layout mode ----
+  if (layoutMode === 'five-space') {
+    return (
+      <FiveSpaceLayout
+        chatContent={chatContent}
+        sidebarContent={sidebarContent}
+        topNavContent={
+          <nav className="flex min-w-0 items-center gap-1 overflow-x-auto">
+            {[
+              { path: ROUTES.TOOLS, label: '工具' },
+              { path: ROUTES.AGENTS, label: '智能体' },
+              { path: ROUTES.MONITORING, label: '监控' },
+              { path: ROUTES.MEMORY, label: '记忆' },
+              { path: ROUTES.SETTINGS, label: '设置' },
+              { path: ROUTES.DEBUG.ROOT, label: '调试' },
+            ].map((item) => (
+              <a
+                key={item.path}
+                href={item.path}
+                className="text-muted-foreground hover:text-foreground hover:bg-accent shrink-0 rounded px-2 py-1 text-xs whitespace-nowrap transition-colors"
+              >
+                {item.label}
+              </a>
+            ))}
+          </nav>
+        }
+        onToggleMode={toggleLayoutMode}
+      />
+    )
+  }
+
+  // ---- Classic layout mode (original) ----
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col">
       {/* 顶部导航栏 */}
-      <header className="h-10 border-b flex items-center justify-between px-3 shrink-0">
+      <header className="flex h-10 shrink-0 items-center justify-between border-b px-3">
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setSidebarCollapsed(prev => !prev)}
-            className="p-1 hover:bg-accent rounded transition-colors"
+            onClick={() => setSidebarCollapsed((prev) => !prev)}
+            className="hover:bg-accent rounded p-1 transition-colors"
             title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -353,14 +672,12 @@ function HomePage(): ReactNode {
           </button>
           <h1 className="text-base font-semibold">超级终端</h1>
           <span
-            className={`w-2 h-2 rounded-full ${
-              isWsConnected ? 'bg-green-500' : 'bg-gray-400'
-            }`}
+            className={`h-2 w-2 rounded-full ${isWsConnected ? 'bg-green-500' : 'bg-gray-400'}`}
             title={isWsConnected ? 'WebSocket 已连接' : 'WebSocket 未连接'}
           />
         </div>
         <div className="flex items-center gap-3">
-          <nav className="flex items-center gap-1 mr-2 overflow-x-auto shrink min-w-0">
+          <nav className="mr-2 flex min-w-0 shrink items-center gap-1 overflow-x-auto">
             {[
               { path: ROUTES.TOOLS, label: '工具' },
               { path: ROUTES.AGENTS, label: '智能体' },
@@ -368,96 +685,48 @@ function HomePage(): ReactNode {
               { path: ROUTES.MEMORY, label: '记忆' },
               { path: ROUTES.SETTINGS, label: '设置' },
               { path: ROUTES.DEBUG.ROOT, label: '调试' },
-            ].map(item => (
+            ].map((item) => (
               <a
                 key={item.path}
                 href={item.path}
-                className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-colors whitespace-nowrap shrink-0"
+                className="text-muted-foreground hover:text-foreground hover:bg-accent shrink-0 rounded px-2 py-1 text-xs whitespace-nowrap transition-colors"
               >
                 {item.label}
               </a>
             ))}
           </nav>
-          <span className="text-sm text-muted-foreground">{user?.username}</span>
+          {/* Layout toggle button */}
+          <button
+            onClick={toggleLayoutMode}
+            className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
+            title="Switch to five-space layout"
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Five-space</span>
+          </button>
+          <span className="text-muted-foreground text-sm">{user?.username}</span>
           <button
             onClick={handleLogout}
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            className="text-muted-foreground hover:text-foreground text-sm transition-colors"
           >
             登出
           </button>
         </div>
       </header>
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex min-h-0 flex-1">
         {/* 左侧会话列表面板 */}
         <aside
           className={`${
             sidebarCollapsed ? 'w-0' : 'w-56'
-          } border-r flex flex-col shrink-0 transition-all duration-200 overflow-hidden`}
+          } flex shrink-0 flex-col overflow-hidden border-r transition-all duration-200`}
         >
-          {/* 新建会话按钮 */}
-          <div className="p-2.5 border-b shrink-0">
-            <button
-              onClick={handleCreateSession}
-              className="w-full px-3 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
-            >
-              + 新会话
-            </button>
-          </div>
-
-          {/* 会话列表 */}
-          <div className="flex-1 overflow-y-auto">
-            {sessions.length === 0 ? (
-              <div className="p-4 text-center text-sm text-muted-foreground">
-                暂无会话
-              </div>
-            ) : (
-              sessions.map(session => (
-                <div
-                  key={session.id}
-                  onClick={() => handleSelectSession(session.id)}
-                  className={`px-3 py-2 cursor-pointer text-sm truncate transition-colors ${
-                    activeSessionId === session.id
-                      ? 'bg-accent text-accent-foreground'
-                      : 'hover:bg-accent/50'
-                  }`}
-                  title={session.title}
-                >
-                  {session.title}
-                </div>
-              ))
-            )}
-          </div>
+          {sidebarContent}
         </aside>
 
         {/* 右侧聊天区域 */}
-        <main className="flex-1 flex flex-col min-h-0">
-          {activeSessionId ? (
-            <ChatContainer
-              sessionId={activeSessionId}
-              messages={activeMessages}
-              isLoading={isSessionLoading}
-              isGenerating={isStreaming}
-              onSendMessage={handleSendMessage}
-              onStopGenerate={handleStopGenerate}
-              hasMoreMessages={pagination?.hasMore ?? false}
-              isLoadingMoreMessages={pagination?.isLoadingMore ?? false}
-              onLoadMoreMessages={() => {
-                if (activeSessionId) loadMoreMessages(activeSessionId)
-              }}
-              className="flex-1"
-            />
-          ) : (
-            /* 无活跃会话时显示欢迎页 */
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center space-y-4">
-                <h2 className="text-2xl font-semibold">欢迎使用超级终端</h2>
-                <p className="text-muted-foreground">
-                  点击左侧「新会话」开始对话
-                </p>
-              </div>
-            </div>
-          )}
+        <main className="flex min-h-0 flex-1 flex-col">
+          {chatContent}
         </main>
       </div>
     </div>
@@ -475,6 +744,11 @@ function HomePage(): ReactNode {
  * - / : 受保护的聊天主页（需登录）
  * - /settings : 设置中心（懒加载）
  * - /settings/modules : 模块设置页（懒加载）
+ * - /settings/api : API 配置页（懒加载）
+ * - /settings/llm : LLM 模型配置页（懒加载）
+ * - /settings/context : 上下文窗口配置页（懒加载）
+ * - /settings/concurrency : 并发控制配置页（懒加载）
+ * - /settings/cost : 成本控制配置页（懒加载）
  * - /tools : 工具管理（懒加载）
  * - /agents : 智能体管理（懒加载）
  * - /monitoring : 系统监控（懒加载）
@@ -516,6 +790,56 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <ModulesSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_API,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ApiSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_LLM,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <LlmSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_CONTEXT,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ContextWindowSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_CONCURRENCY,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <ConcurrencySettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.SETTINGS_COST,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <CostSettingsPage />
           </Suspense>
         </ProtectedRoute>
       ),

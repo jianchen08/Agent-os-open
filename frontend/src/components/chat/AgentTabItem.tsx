@@ -5,19 +5,15 @@
  * 支持主 Tab（L1，不可关闭）和子 Tab（L2/L3，可关闭）
  */
 
-import { cn } from '@/lib/utils'
-import { Badge } from '@/components/ui/badge'
 import { X } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
 
 /**
  * Agent Tab 状态
  */
-export type AgentTabStatus =
-  | 'running'
-  | 'waiting_input'
-  | 'completed'
-  | 'failed'
+export type AgentTabStatus = 'running' | 'waiting_input' | 'completed' | 'failed'
 
 /**
  * Agent Tab 数据接口
@@ -81,7 +77,7 @@ const getAgentLevelBadge = (level: AgentLevel | undefined) => {
   const config = levelConfig[level]
 
   return (
-    <Badge variant={config.variant} className="text-xs px-1.5 py-0 h-4">
+    <Badge variant={config.variant} className="h-4 px-1.5 py-0 text-xs">
       {config.label}
     </Badge>
   )
@@ -90,12 +86,7 @@ const getAgentLevelBadge = (level: AgentLevel | undefined) => {
 /**
  * AgentTabItem 组件
  */
-export const AgentTabItem: React.FC<AgentTabItemProps> = ({
-  tab,
-  onClick,
-  onClose,
-  className,
-}) => {
+export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClose, className }) => {
   const isMainTab = tab.agentLevel === 1
 
   return (
@@ -103,21 +94,21 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({
       role="button"
       tabIndex={0}
       onClick={onClick}
-      onKeyDown={e => {
+      onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           onClick()
         }
       }}
       className={cn(
-        'group relative px-3 py-2 rounded-lg font-medium',
+        'group relative rounded-lg px-3 py-2 font-medium',
         'transition-all duration-200',
-        'flex items-center gap-2 min-w-0 max-w-[200px]',
-        isMainTab && 'bg-primary/5 border border-primary/20',
+        'flex max-w-[200px] min-w-0 items-center gap-2',
+        isMainTab && 'bg-primary/5 border-primary/20 border',
         tab.isActive
-          ? 'bg-primary/15 text-primary border border-primary/30 shadow-sm'
+          ? 'bg-primary/15 text-primary border-primary/30 border shadow-sm'
           : 'hover:bg-accent text-muted-foreground hover:text-foreground border border-transparent',
-        className
+        className,
       )}
       title={tab.path?.join(' \u2192 ') || tab.name}
     >
@@ -125,11 +116,11 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({
 
       <span
         className={cn(
-          'text-xs flex-shrink-0',
+          'flex-shrink-0 text-xs',
           tab.status === 'running' && 'text-primary animate-pulse',
           tab.status === 'waiting_input' && 'text-warning animate-pulse',
           tab.status === 'completed' && 'text-success',
-          tab.status === 'failed' && 'text-destructive'
+          tab.status === 'failed' && 'text-destructive',
         )}
       >
         {getStatusIcon(tab.status)}
@@ -138,32 +129,32 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({
       <span className="truncate text-sm font-medium">{tab.name}</span>
 
       {tab.unreadCount && tab.unreadCount > 0 && (
-        <span className="px-1.5 py-0.5 rounded-full bg-warning text-warning-foreground text-xs font-medium flex-shrink-0">
+        <span className="bg-warning text-warning-foreground flex-shrink-0 rounded-full px-1.5 py-0.5 text-xs font-medium">
           {tab.unreadCount > 9 ? '9+' : tab.unreadCount}
         </span>
       )}
 
-      <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">
+      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
         {tab.canClose && onClose && (
           <button
-            onClick={e => {
+            onClick={(e) => {
               e.stopPropagation()
               onClose()
             }}
             className={cn(
-              'w-4 h-4 rounded flex items-center justify-center',
-              'opacity-0 group-hover:opacity-100 transition-opacity',
-              'hover:bg-destructive/20 text-muted-foreground hover:text-destructive'
+              'flex h-4 w-4 items-center justify-center rounded',
+              'opacity-0 transition-opacity group-hover:opacity-100',
+              'hover:bg-destructive/20 text-muted-foreground hover:text-destructive',
             )}
             title="关闭 Tab"
           >
-            <X className="w-3 h-3" />
+            <X className="h-3 w-3" />
           </button>
         )}
       </span>
 
       {tab.isActive && (
-        <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+        <span className="bg-primary absolute right-0 bottom-0 left-0 h-0.5 rounded-full" />
       )}
     </div>
   )

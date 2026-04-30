@@ -269,7 +269,7 @@ export interface Message {
     /** 验收标准是否通过 */
     acPassed?: boolean
     /** 任务结果 */
-    result?: any
+    result?: unknown
     /** 错误信息 */
     error?: string
   }
@@ -394,7 +394,7 @@ export interface ApprovalRequest {
     riskLevel: RiskLevel
   }
   /** 审批数据 */
-  data: any
+  data: Record<string, unknown>
   /** 创建时间 */
   createdAt: string
 }

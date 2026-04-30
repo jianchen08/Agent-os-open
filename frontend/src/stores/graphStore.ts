@@ -8,16 +8,12 @@
  */
 
 import { create } from 'zustand'
-import type { GraphData, Node, NodeStatus } from '@/types/graph'
-import * as graphApi from '@/services/api/graph'
-import { webSocketService } from '@/services/websocket/WebSocketService'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-import {
-  mapNodeStatus,
-  mapBackendGraphToGraphData,
-  type BackendGraphData,
-} from '@/utils/mappers'
+import * as graphApi from '@/services/api/graph'
 import { reportError, ErrorType } from '@/services/errorReporting'
+import { webSocketService } from '@/services/websocket/WebSocketService'
+import { mapNodeStatus, mapBackendGraphToGraphData, type BackendGraphData } from '@/utils/mappers'
+import type { GraphData, Node, NodeStatus } from '@/types/graph'
 
 /**
  * 状态变更事件数据
@@ -122,17 +118,9 @@ interface GraphState {
   /** 获取所有执行图列表 */
   getAllExecutionGraphs: () => ExecutionGraphState[]
   /** 更新节点状态 */
-  updateNodeStatus: (
-    nodeId: string,
-    status: NodeStatus,
-    executionId?: string
-  ) => void
+  updateNodeStatus: (nodeId: string, status: NodeStatus, executionId?: string) => void
   /** 更新节点数据 */
-  updateNodeData: (
-    nodeId: string,
-    data: Partial<Node['data']>,
-    executionId?: string
-  ) => void
+  updateNodeData: (nodeId: string, data: Partial<Node['data']>, executionId?: string) => void
   /** 选择节点 */
   selectNode: (nodeId: string) => void
   /** 清除选中的节点 */
@@ -241,8 +229,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
 
     // 如果是当前激活的执行，同步更新 graphData
-    const newGraphData =
-      activeExecutionId === executionId ? data : get().graphData
+    const newGraphData = activeExecutionId === executionId ? data : get().graphData
 
     set({
       graphsByExecution: newGraphsByExecution,
@@ -258,9 +245,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   setActiveExecution: (executionId: string | null) => {
     const { graphsByExecution } = get()
 
-    const graphData = executionId
-      ? graphsByExecution[executionId]?.graphData || null
-      : null
+    const graphData = executionId ? graphsByExecution[executionId]?.graphData || null : null
 
     set({
       activeExecutionId: executionId,
@@ -283,9 +268,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
    */
   getAllExecutionGraphs: () => {
     const { graphsByExecution } = get()
-    return Object.values(graphsByExecution).sort(
-      (a, b) => b.createdAt - a.createdAt
-    )
+    return Object.values(graphsByExecution).sort((a, b) => b.createdAt - a.createdAt)
   },
 
   /**
@@ -296,18 +279,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
    *
    * Requirements: 5.2
    */
-  updateNodeStatus: (
-    nodeId: string,
-    status: NodeStatus,
-    executionId?: string
-  ) => {
-    const { graphData, selectedNode, graphsByExecution, activeExecutionId } =
-      get()
+  updateNodeStatus: (nodeId: string, status: NodeStatus, executionId?: string) => {
+    const { graphData, selectedNode, graphsByExecution, activeExecutionId } = get()
 
     // 如果指定了 executionId，更新对应执行图
     if (executionId && graphsByExecution[executionId]) {
       const execState = graphsByExecution[executionId]
-      const updatedNodes = execState.graphData.nodes.map(node => {
+      const updatedNodes = execState.graphData.nodes.map((node) => {
         if (node.id === nodeId) {
           return { ...node, data: { ...node.data, status } }
         }
@@ -321,11 +299,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       // 如果是当前激活的执行，同步更新 graphData
-      const syncGraphData =
-        activeExecutionId === executionId ? newGraphData : graphData
+      const syncGraphData = activeExecutionId === executionId ? newGraphData : graphData
       const newSelectedNode =
         selectedNode?.id === nodeId
-          ? updatedNodes.find(node => node.id === nodeId) || null
+          ? updatedNodes.find((node) => node.id === nodeId) || null
           : selectedNode
 
       set({
@@ -341,7 +318,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       return
     }
 
-    const updatedNodes = graphData.nodes.map(node => {
+    const updatedNodes = graphData.nodes.map((node) => {
       if (node.id === nodeId) {
         return { ...node, data: { ...node.data, status } }
       }
@@ -351,7 +328,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const newGraphData = { ...graphData, nodes: updatedNodes }
     const newSelectedNode =
       selectedNode?.id === nodeId
-        ? updatedNodes.find(node => node.id === nodeId) || null
+        ? updatedNodes.find((node) => node.id === nodeId) || null
         : selectedNode
 
     set({
@@ -365,18 +342,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
    *
    * 支持指定 executionId 更新特定执行图。
    */
-  updateNodeData: (
-    nodeId: string,
-    data: Partial<Node['data']>,
-    executionId?: string
-  ) => {
-    const { graphData, selectedNode, graphsByExecution, activeExecutionId } =
-      get()
+  updateNodeData: (nodeId: string, data: Partial<Node['data']>, executionId?: string) => {
+    const { graphData, selectedNode, graphsByExecution, activeExecutionId } = get()
 
     // 如果指定了 executionId，更新对应执行图
     if (executionId && graphsByExecution[executionId]) {
       const execState = graphsByExecution[executionId]
-      const updatedNodes = execState.graphData.nodes.map(node => {
+      const updatedNodes = execState.graphData.nodes.map((node) => {
         if (node.id === nodeId) {
           return { ...node, data: { ...node.data, ...data } }
         }
@@ -389,11 +361,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         [executionId]: { ...execState, graphData: newGraphData },
       }
 
-      const syncGraphData =
-        activeExecutionId === executionId ? newGraphData : graphData
+      const syncGraphData = activeExecutionId === executionId ? newGraphData : graphData
       const newSelectedNode =
         selectedNode?.id === nodeId
-          ? updatedNodes.find(node => node.id === nodeId) || null
+          ? updatedNodes.find((node) => node.id === nodeId) || null
           : selectedNode
 
       set({
@@ -409,7 +380,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       return
     }
 
-    const updatedNodes = graphData.nodes.map(node => {
+    const updatedNodes = graphData.nodes.map((node) => {
       if (node.id === nodeId) {
         return { ...node, data: { ...node.data, ...data } }
       }
@@ -419,7 +390,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const newGraphData = { ...graphData, nodes: updatedNodes }
     const newSelectedNode =
       selectedNode?.id === nodeId
-        ? updatedNodes.find(node => node.id === nodeId) || null
+        ? updatedNodes.find((node) => node.id === nodeId) || null
         : selectedNode
 
     set({
@@ -438,7 +409,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       return
     }
 
-    const node = graphData.nodes.find(n => n.id === nodeId)
+    const node = graphData.nodes.find((n) => n.id === nodeId)
 
     if (node) {
       set({ selectedNode: node })
@@ -460,28 +431,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
    * Requirements: 5.2
    */
   initWebSocketListeners: () => {
-    const { handleStateChange, handleTaskCompleted, handleWorkflowStepUpdate } =
-      get()
+    const { handleStateChange, handleTaskCompleted, handleWorkflowStepUpdate } = get()
 
     // 订阅状态变更事件
     // Requirements: 4.3, 5.2
     webSocketService.subscribe(
       WS_SERVER_EVENTS.STATE_CHANGE,
-      handleStateChange as (data: unknown) => void
+      handleStateChange as (data: unknown) => void,
     )
 
     // 订阅任务完成事件
     // Requirements: 4.5
     webSocketService.subscribe(
       WS_SERVER_EVENTS.TASK_COMPLETED,
-      handleTaskCompleted as (data: unknown) => void
+      handleTaskCompleted as (data: unknown) => void,
     )
 
     // 订阅工作流步骤更新事件
     // Requirements: 3.2
     webSocketService.subscribe(
       WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
-      handleWorkflowStepUpdate as (data: unknown) => void
+      handleWorkflowStepUpdate as (data: unknown) => void,
     )
   },
 
@@ -489,20 +459,19 @@ export const useGraphStore = create<GraphState>((set, get) => ({
    * 清理WebSocket事件监听
    */
   cleanupWebSocketListeners: () => {
-    const { handleStateChange, handleTaskCompleted, handleWorkflowStepUpdate } =
-      get()
+    const { handleStateChange, handleTaskCompleted, handleWorkflowStepUpdate } = get()
 
     webSocketService.unsubscribe(
       WS_SERVER_EVENTS.STATE_CHANGE,
-      handleStateChange as (data: unknown) => void
+      handleStateChange as (data: unknown) => void,
     )
     webSocketService.unsubscribe(
       WS_SERVER_EVENTS.TASK_COMPLETED,
-      handleTaskCompleted as (data: unknown) => void
+      handleTaskCompleted as (data: unknown) => void,
     )
     webSocketService.unsubscribe(
       WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
-      handleWorkflowStepUpdate as (data: unknown) => void
+      handleWorkflowStepUpdate as (data: unknown) => void,
     )
   },
 
@@ -601,8 +570,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const nodeStatus = mapNodeStatus(status)
 
     // 检测是否为 Agent 调用（call_agent 工具）
-    const isAgentCall =
-      stepName === 'call_agent' || stepName.startsWith('call_agent:')
+    const isAgentCall = stepName === 'call_agent' || stepName.startsWith('call_agent:')
     // 检测是否为复合 Agent 的内部步骤（有 parent_agent_id 或 agent_type 为 composite）
     const isCompositeInternalStep = !!parentAgentId || agentType === 'composite'
     // 从步骤名称中提取子 Agent 名称（如果有）
@@ -616,21 +584,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // 辅助函数：创建或更新图数据
     const processGraphUpdate = (
       existingGraphData: GraphData,
-      execId?: string
+      execId?: string,
     ): GraphData | null => {
-      const existingNode = existingGraphData.nodes.find(n => n.id === stepId)
+      const existingNode = existingGraphData.nodes.find((n) => n.id === stepId)
 
       if (existingNode) {
         // 更新现有节点状态
-        const updatedNodes = existingGraphData.nodes.map(node => {
+        const updatedNodes = existingGraphData.nodes.map((node) => {
           if (node.id === stepId) {
             return {
               ...node,
               data: {
                 ...node.data,
                 status: nodeStatus,
-                output:
-                  data.output !== undefined ? data.output : node.data.output,
+                output: data.output !== undefined ? data.output : node.data.output,
               },
             }
           }
@@ -642,19 +609,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           (isAgentCall || isCompositeInternalStep) &&
           (nodeStatus === 'completed' || nodeStatus === 'failed')
         ) {
-          const mainAgentNode = updatedNodes.find(n => n.data.isMainAgent)
+          const mainAgentNode = updatedNodes.find((n) => n.data.isMainAgent)
           if (mainAgentNode) {
             const allChildrenDone = updatedNodes
-              .filter(
-                n => !n.data.isMainAgent && n.data.parentId === mainAgentNode.id
-              )
-              .every(
-                n => n.data.status === 'completed' || n.data.status === 'failed'
-              )
+              .filter((n) => !n.data.isMainAgent && n.data.parentId === mainAgentNode.id)
+              .every((n) => n.data.status === 'completed' || n.data.status === 'failed')
             if (allChildrenDone) {
-              const mainIdx = updatedNodes.findIndex(
-                n => n.id === mainAgentNode.id
-              )
+              const mainIdx = updatedNodes.findIndex((n) => n.id === mainAgentNode.id)
               if (mainIdx >= 0) {
                 updatedNodes[mainIdx] = {
                   ...updatedNodes[mainIdx],
@@ -692,7 +653,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
 
       // 查找主 Agent 节点
-      const mainAgentNode = currentNodes.find(n => n.data.isMainAgent)
+      const mainAgentNode = currentNodes.find((n) => n.data.isMainAgent)
 
       // 跳过 workflow_start 和 workflow_complete 等元事件，只更新主节点状态
       if (
@@ -707,7 +668,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               : stepName === 'workflow_failed'
                 ? 'failed'
                 : 'running'
-          const mainIdx = currentNodes.findIndex(n => n.id === mainAgentNode.id)
+          const mainIdx = currentNodes.findIndex((n) => n.id === mainAgentNode.id)
           if (mainIdx >= 0) {
             currentNodes[mainIdx] = {
               ...currentNodes[mainIdx],
@@ -730,7 +691,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         // 复合 Agent 内部步骤，有数据流依赖
         // 找到同一复合 Agent 下的上一个步骤
         const siblingSteps = currentNodes.filter(
-          n => n.data.parentId === parentAgentId && n.id !== stepId
+          (n) => n.data.parentId === parentAgentId && n.id !== stepId,
         )
         if (siblingSteps.length > 0) {
           // 连接到上一个步骤（串联，表示依赖关系）
@@ -840,8 +801,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     delete newGraphsByExecution[executionId]
 
     // 如果清除的是当前激活的执行，重置激活状态
-    const newActiveExecutionId =
-      activeExecutionId === executionId ? null : activeExecutionId
+    const newActiveExecutionId = activeExecutionId === executionId ? null : activeExecutionId
     const newGraphData = newActiveExecutionId
       ? newGraphsByExecution[newActiveExecutionId]?.graphData || null
       : null

@@ -13,8 +13,8 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { apiClient } from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
+import { apiClient } from '@/services/api/client'
 import type {
   Project,
   CreateProjectRequest,
@@ -90,9 +90,7 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         set({ isLoading: true, error: null })
 
         try {
-          const response = await apiClient.get<GetProjectsResponse>(
-            API_ENDPOINTS.PROJECTS.LIST
-          )
+          const response = await apiClient.get<GetProjectsResponse>(API_ENDPOINTS.PROJECTS.LIST)
 
           // 后端返回的是 { items: [...], total, limit, offset }
           // 需要从 items 中提取项目列表
@@ -100,11 +98,9 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
             projects: response.data.items || [],
             isLoading: false,
           })
-        } catch (error: any) {
+        } catch (error: unknown) {
           const errorMessage =
-            error.response?.data?.message ||
-            error.message ||
-            '获取长期任务列表失败'
+            (error instanceof Error ? error.message : null) || '获取长期任务列表失败'
           set({
             isLoading: false,
             error: errorMessage,
@@ -133,21 +129,20 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
           const response = await apiClient.post<{ project: Project }>(
             API_ENDPOINTS.PROJECTS.CREATE,
-            request
+            request,
           )
 
           const newProject = response.data.project
 
-          set(state => ({
+          set((state) => ({
             projects: [...state.projects, newProject],
             activeProjectId: newProject.id,
             isLoading: false,
           }))
 
           return newProject
-        } catch (error: any) {
-          const errorMessage =
-            error.response?.data?.message || error.message || '创建长期任务失败'
+        } catch (error: unknown) {
+          const errorMessage = (error instanceof Error ? error.message : null) || '创建长期任务失败'
           set({
             isLoading: false,
             error: errorMessage,
@@ -168,19 +163,18 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
         try {
           const response = await apiClient.patch<ToggleAutoExecuteResponse>(
             API_ENDPOINTS.PROJECTS.TOGGLE_AUTO_EXECUTE(projectId),
-            { enabled }
+            { enabled },
           )
 
           const updatedProject = response.data.project
 
-          set(state => ({
-            projects: state.projects.map(project =>
-              project.id === projectId ? updatedProject : project
+          set((state) => ({
+            projects: state.projects.map((project) =>
+              project.id === projectId ? updatedProject : project,
             ),
           }))
-        } catch (error: any) {
-          const errorMessage =
-            error.response?.data?.message || error.message || '切换自动执行失败'
+        } catch (error: unknown) {
+          const errorMessage = (error instanceof Error ? error.message : null) || '切换自动执行失败'
           set({ error: errorMessage })
           throw new Error(errorMessage)
         }
@@ -196,19 +190,18 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
         try {
           const response = await apiClient.post<PauseProjectResponse>(
-            API_ENDPOINTS.PROJECTS.PAUSE(projectId)
+            API_ENDPOINTS.PROJECTS.PAUSE(projectId),
           )
 
           const updatedProject = response.data.project
 
-          set(state => ({
-            projects: state.projects.map(project =>
-              project.id === projectId ? updatedProject : project
+          set((state) => ({
+            projects: state.projects.map((project) =>
+              project.id === projectId ? updatedProject : project,
             ),
           }))
-        } catch (error: any) {
-          const errorMessage =
-            error.response?.data?.message || error.message || '暂停长期任务失败'
+        } catch (error: unknown) {
+          const errorMessage = (error instanceof Error ? error.message : null) || '暂停长期任务失败'
           set({ error: errorMessage })
           throw new Error(errorMessage)
         }
@@ -224,19 +217,18 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
 
         try {
           const response = await apiClient.post<ResumeProjectResponse>(
-            API_ENDPOINTS.PROJECTS.RESUME(projectId)
+            API_ENDPOINTS.PROJECTS.RESUME(projectId),
           )
 
           const updatedProject = response.data.project
 
-          set(state => ({
-            projects: state.projects.map(project =>
-              project.id === projectId ? updatedProject : project
+          set((state) => ({
+            projects: state.projects.map((project) =>
+              project.id === projectId ? updatedProject : project,
             ),
           }))
-        } catch (error: any) {
-          const errorMessage =
-            error.response?.data?.message || error.message || '恢复长期任务失败'
+        } catch (error: unknown) {
+          const errorMessage = (error instanceof Error ? error.message : null) || '恢复长期任务失败'
           set({ error: errorMessage })
           throw new Error(errorMessage)
         }
@@ -258,9 +250,9 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
        * @param updates 更新内容
        */
       updateProject: (projectId: string, updates: Partial<Project>) => {
-        set(state => ({
-          projects: state.projects.map(project =>
-            project.id === projectId ? { ...project, ...updates } : project
+        set((state) => ({
+          projects: state.projects.map((project) =>
+            project.id === projectId ? { ...project, ...updates } : project,
           ),
         }))
       },
@@ -271,10 +263,9 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
        * @param projectId 项目 ID
        */
       deleteProject: (projectId: string) => {
-        set(state => ({
-          projects: state.projects.filter(project => project.id !== projectId),
-          activeProjectId:
-            state.activeProjectId === projectId ? null : state.activeProjectId,
+        set((state) => ({
+          projects: state.projects.filter((project) => project.id !== projectId),
+          activeProjectId: state.activeProjectId === projectId ? null : state.activeProjectId,
         }))
       },
 
@@ -288,10 +279,10 @@ export const useProjectStore = create<ProjectState & ProjectActions>()(
     {
       name: 'project-storage',
       // 只持久化项目和活跃项目 ID，不持久化加载状态和错误
-      partialize: state => ({
+      partialize: (state) => ({
         projects: state.projects,
         activeProjectId: state.activeProjectId,
       }),
-    }
-  )
+    },
+  ),
 )

@@ -366,7 +366,8 @@ class ExecutionRecordStorage:
         return total
 
 
-def summarize_text(text: Any, max_len: int = _DEFAULT_SUMMARY_MAX_LEN) -> str:
+def summarize_text(text: Any, max_len: int = 500) -> str:
+    """截断长文本用于摘要显示。"""
     if text is None:
         return ""
     s = str(text)

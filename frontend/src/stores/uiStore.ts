@@ -6,9 +6,8 @@
  */
 
 import { create } from 'zustand'
-
-import type { ApprovalRequest } from '@/types/models'
 import { uiStorage } from '@/utils/storage'
+import type { ApprovalRequest } from '@/types/models'
 
 /**
  * 主题类型
@@ -53,7 +52,7 @@ interface UIActions {
 /**
  * UI Store
  */
-export const useUIStore = create<UIState & UIActions>(set => ({
+export const useUIStore = create<UIState & UIActions>((set) => ({
   sidebarCollapsed: false,
   approvalDialog: null,
   executionGraphCollapsed: false,
@@ -63,7 +62,7 @@ export const useUIStore = create<UIState & UIActions>(set => ({
    * 切换侧边栏折叠状态
    */
   toggleSidebar: () => {
-    set(state => {
+    set((state) => {
       const newCollapsed = !state.sidebarCollapsed
       uiStorage.setSidebarCollapsed(newCollapsed)
       return { sidebarCollapsed: newCollapsed }
@@ -101,8 +100,7 @@ export const useUIStore = create<UIState & UIActions>(set => ({
       if (storedSidebarCollapsed !== null) {
         set({ sidebarCollapsed: storedSidebarCollapsed })
       }
-      const storedExecutionGraphCollapsed =
-        uiStorage.getExecutionGraphCollapsed()
+      const storedExecutionGraphCollapsed = uiStorage.getExecutionGraphCollapsed()
       if (storedExecutionGraphCollapsed !== null) {
         set({ executionGraphCollapsed: storedExecutionGraphCollapsed })
       }
@@ -118,7 +116,7 @@ export const useUIStore = create<UIState & UIActions>(set => ({
    * 切换执行图面板折叠状态
    */
   toggleExecutionGraph: () => {
-    set(state => {
+    set((state) => {
       const newCollapsed = !state.executionGraphCollapsed
       uiStorage.setExecutionGraphCollapsed(newCollapsed)
       return { executionGraphCollapsed: newCollapsed }
@@ -135,7 +133,7 @@ export const useUIStore = create<UIState & UIActions>(set => ({
    * 切换任务状态面板折叠状态
    */
   toggleTaskPanel: () => {
-    set(state => {
+    set((state) => {
       const newCollapsed = !state.taskPanelCollapsed
       uiStorage.setTaskPanelCollapsed(newCollapsed)
       return { taskPanelCollapsed: newCollapsed }

@@ -1,14 +1,14 @@
 /**
  * 长期任务状态管理 Store
- * 
+ *
  * 基于 Task API 实现，替代废弃的 projectStore
  * 使用标签 'long-term' 标识长期任务
  */
 
-import * as longTermTaskApi from '@/services/api/longTermTasks'
-import type { Task } from '@/types/task'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import * as longTermTaskApi from '@/services/api/longTermTasks'
+import type { Task } from '@/types/task'
 
 /**
  * API 错误响应类型
@@ -94,7 +94,7 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
 
         try {
           const response = await longTermTaskApi.fetchLongTermTasks()
-          
+
           set({
             tasks: response.items,
             isLoading: false,
@@ -119,10 +119,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         try {
           const updatedTask = await longTermTaskApi.toggleAutoExecute(taskId, enabled)
 
-          set(state => ({
-            tasks: state.tasks.map(task =>
-              task.id === taskId ? updatedTask : task
-            ),
+          set((state) => ({
+            tasks: state.tasks.map((task) => (task.id === taskId ? updatedTask : task)),
           }))
         } catch (error) {
           const errorMessage = getErrorMessage(error, '切换自动执行失败')
@@ -140,10 +138,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         try {
           const updatedTask = await longTermTaskApi.pauseLongTermTask(taskId)
 
-          set(state => ({
-            tasks: state.tasks.map(task =>
-              task.id === taskId ? updatedTask : task
-            ),
+          set((state) => ({
+            tasks: state.tasks.map((task) => (task.id === taskId ? updatedTask : task)),
           }))
         } catch (error) {
           const errorMessage = getErrorMessage(error, '暂停长期任务失败')
@@ -161,10 +157,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
         try {
           const updatedTask = await longTermTaskApi.resumeLongTermTask(taskId)
 
-          set(state => ({
-            tasks: state.tasks.map(task =>
-              task.id === taskId ? updatedTask : task
-            ),
+          set((state) => ({
+            tasks: state.tasks.map((task) => (task.id === taskId ? updatedTask : task)),
           }))
         } catch (error) {
           const errorMessage = getErrorMessage(error, '恢复长期任务失败')
@@ -184,10 +178,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
        * 更新任务状态（用于 WebSocket 事件更新）
        */
       updateTask: (taskId: string, updates: Partial<Task>) => {
-        set(state => ({
-          tasks: state.tasks.map(task =>
-            task.id === taskId ? { ...task, ...updates } : task
-          ),
+        set((state) => ({
+          tasks: state.tasks.map((task) => (task.id === taskId ? { ...task, ...updates } : task)),
         }))
       },
 
@@ -195,10 +187,9 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
        * 删除任务
        */
       deleteTask: (taskId: string) => {
-        set(state => ({
-          tasks: state.tasks.filter(task => task.id !== taskId),
-          activeTaskId:
-            state.activeTaskId === taskId ? null : state.activeTaskId,
+        set((state) => ({
+          tasks: state.tasks.filter((task) => task.id !== taskId),
+          activeTaskId: state.activeTaskId === taskId ? null : state.activeTaskId,
         }))
       },
 
@@ -211,10 +202,10 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
     }),
     {
       name: 'long-term-task-storage',
-      partialize: state => ({
+      partialize: (state) => ({
         tasks: state.tasks,
         activeTaskId: state.activeTaskId,
       }),
-    }
-  )
+    },
+  ),
 )

@@ -6,17 +6,17 @@
  * @module activityConverter
  */
 
+import { Copy, RefreshCw } from 'lucide-react'
+import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type {
-    ActivityAction,
-    ActivityData,
-    ActivityDetailBlock,
-    ActivityStatus,
-    ActivityType,
+  ActivityAction,
+  ActivityData,
+  ActivityDetailBlock,
+  ActivityStatus,
+  ActivityType,
 } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
-import { Copy, RefreshCw } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 
 /**
  * 转换选项
@@ -39,7 +39,7 @@ export interface ConversionOptions {
  */
 export function toolCallToActivity(
   toolCall: MessageToolCall,
-  options?: ConversionOptions
+  options?: ConversionOptions,
 ): ActivityData {
   const details: ActivityDetailBlock[] = []
 
@@ -82,13 +82,11 @@ export function toolCallToActivity(
   const defaultActions: ActivityAction[] = [
     {
       id: 'copy_args',
-      icon: <Copy className="w-3.5 h-3.5" />,
+      icon: <Copy className="h-3.5 w-3.5" />,
       label: '复制参数',
       type: 'copy',
       onClick: () => {
-        navigator.clipboard.writeText(
-          JSON.stringify(toolCall.tool_args, null, 2)
-        )
+        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
       },
     },
   ]
@@ -96,14 +94,14 @@ export function toolCallToActivity(
   if (toolCall.result !== undefined) {
     defaultActions.push({
       id: 'copy_result',
-      icon: <Copy className="w-3.5 h-3.5" />,
+      icon: <Copy className="h-3.5 w-3.5" />,
       label: '复制结果',
       type: 'copy',
       onClick: () => {
         navigator.clipboard.writeText(
           typeof toolCall.result === 'string'
             ? toolCall.result
-            : JSON.stringify(toolCall.result, null, 2)
+            : JSON.stringify(toolCall.result, null, 2),
         )
       },
     })
@@ -150,7 +148,7 @@ export function taskToActivity(
     }>
   },
   messageType: 'task_created' | 'task_phase' | 'task_completed' | 'task_failed',
-  options?: ConversionOptions
+  options?: ConversionOptions,
 ): ActivityData {
   const details: ActivityDetailBlock[] = []
 
@@ -179,16 +177,13 @@ export function taskToActivity(
 
     // 验收标准
     if (task.acceptanceCriteria && task.acceptanceCriteria.length > 0) {
-      const passed = task.acceptanceCriteria.filter(
-        ac => ac.status === 'passed'
-      ).length
+      const passed = task.acceptanceCriteria.filter((ac) => ac.status === 'passed').length
       details.push({
         id: 'ac',
         label: `验收标准 (${passed}/${task.acceptanceCriteria.length} 通过)`,
         content: task.acceptanceCriteria
-          .map(ac => {
-            const icon =
-              ac.status === 'passed' ? '✓' : ac.status === 'failed' ? '✗' : '○'
+          .map((ac) => {
+            const icon = ac.status === 'passed' ? '✓' : ac.status === 'failed' ? '✗' : '○'
             return `${icon} ${ac.description}`
           })
           .join('\n'),
@@ -217,7 +212,7 @@ export function taskToActivity(
   if (task.status === 'failed') {
     defaultActions.push({
       id: 'retry',
-      icon: <RefreshCw className="w-3.5 h-3.5" />,
+      icon: <RefreshCw className="h-3.5 w-3.5" />,
       label: '重试',
       type: 'retry',
       onClick: () => {
@@ -249,10 +244,7 @@ export class ActivityConverter {
   /**
    * 从 MessageToolCall 转换
    */
-  static fromToolCall(
-    toolCall: MessageToolCall,
-    options?: ConversionOptions
-  ): ActivityData {
+  static fromToolCall(toolCall: MessageToolCall, options?: ConversionOptions): ActivityData {
     return toolCallToActivity(toolCall, options)
   }
 
@@ -274,12 +266,8 @@ export class ActivityConverter {
         status: string
       }>
     },
-    messageType:
-      | 'task_created'
-      | 'task_phase'
-      | 'task_completed'
-      | 'task_failed',
-    options?: ConversionOptions
+    messageType: 'task_created' | 'task_phase' | 'task_completed' | 'task_failed',
+    options?: ConversionOptions,
   ): ActivityData {
     return taskToActivity(task, messageType, options)
   }
@@ -289,9 +277,9 @@ export class ActivityConverter {
    */
   static batchConvertToolCalls(
     toolCalls: MessageToolCall[],
-    options?: ConversionOptions
+    options?: ConversionOptions,
   ): ActivityData[] {
-    return toolCalls.map(tc => this.fromToolCall(tc, options))
+    return toolCalls.map((tc) => this.fromToolCall(tc, options))
   }
 
   /**
@@ -338,7 +326,7 @@ export class ActivityConverter {
     label: string,
     type: ActivityAction['type'],
     onClick: () => void | Promise<void>,
-    options?: Partial<ActivityAction>
+    options?: Partial<ActivityAction>,
   ): ActivityAction {
     return {
       id,

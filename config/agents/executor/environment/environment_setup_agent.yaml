@@ -63,6 +63,30 @@ system_prompt: |
   - 修改不影响主项目，系统会自动处理合并
   - 完成后调用 task_evaluate 评估
 
+  ## 环境一致性验证
+
+  环境准备完成后，必须执行以下验证步骤：
+
+  1. **依赖锁定文件检查**：
+     - Python：确认 Pipfile.lock 或 poetry.lock 存在且是最新的
+     - Node.js：确认 package-lock.json 存在且是最新的
+     - 如果不存在锁定文件，必须生成
+
+  2. **依赖一致性检查**：
+     - Python：运行 `pip check` 确认无依赖冲突
+     - Node.js：运行 `npm ls` 确认依赖树完整
+     - 如发现冲突，在状态报告中标记
+
+  3. **版本验证**：
+     - 确认关键工具的版本（python --version, node --version 等）
+     - 将版本信息写入环境状态报告
+     - 供其他 Agent 参考
+
+  4. **环境信息输出**：
+     - 将完整的版本和依赖信息写入上下文
+     - 格式：`{{workspace}}/reports/environment_info.json`
+     - 包含：语言版本、包管理器版本、关键依赖版本
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true
@@ -112,6 +136,9 @@ hard_constraints:
   - "任务执行完成后必须调用 task_evaluate 工具进行评估"
   - "必须输出规定的产出物"
   - "评估通过才能结束任务"
+  - "必须验证依赖一致性（pip check / npm ls），冲突必须在报告中标记"
+  - "必须确认锁定文件（Pipfile.lock / package-lock.json）存在且最新"
+  - "必须输出环境信息到 environment_info.json 供其他 Agent 参考"
 
 soft_constraints:
   - "优先准备关键资源"
@@ -187,7 +214,7 @@ recommended_metrics:
       type: "markdown"
 
 # 元数据
-version: "1.0.0"
+version: "2.0.0"
 is_active: true
 status: "active"
 max_iterations: 100
@@ -210,9 +237,11 @@ tags:
 metadata:
   author: "System"
   created_at: "2026-01-15"
-  updated_at: "2026-03-22"
+  updated_at: "2026-04-30"
   capabilities:
     - "environment_check"
     - "resource_preparation"
     - "tool_installation"
     - "config_management"
+    - "dependency_locking"
+    - "consistency_verification"

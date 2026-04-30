@@ -4,8 +4,8 @@
  * 提供评估指标的管理接口
  */
 
-import apiClient from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 
 /**
  * 评估指标类型
@@ -85,7 +85,7 @@ export async function getEvaluationMetrics(params?: {
 }): Promise<EvaluationMetricsListResponse> {
   const response = await apiClient.get<EvaluationMetricsListResponse>(
     API_ENDPOINTS.EVALUATION.METRICS,
-    { params }
+    { params },
   )
   return response.data
 }
@@ -97,9 +97,7 @@ export async function getEvaluationMetrics(params?: {
  * @returns 评估指标详情
  */
 export async function getEvaluationMetric(id: string): Promise<EvaluationMetric> {
-  const response = await apiClient.get<EvaluationMetric>(
-    API_ENDPOINTS.EVALUATION.METRIC(id)
-  )
+  const response = await apiClient.get<EvaluationMetric>(API_ENDPOINTS.EVALUATION.METRIC(id))
   return response.data
 }
 

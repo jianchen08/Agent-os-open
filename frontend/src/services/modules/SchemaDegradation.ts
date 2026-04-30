@@ -62,12 +62,12 @@ const MOBILE_STRATEGIES: DegradationStrategy[] = [
  */
 export function applyDegradation(
   schema: ModuleUISchema,
-  availableSpaces: string[]
+  availableSpaces: string[],
 ): ModuleUISchema {
-  const degradedSpaces = schema.rendering.spaces.map(space => {
+  const degradedSpaces = schema.rendering.spaces.map((space) => {
     if (availableSpaces.includes(space.space)) return space
 
-    const strategy = MOBILE_STRATEGIES.find(s => s.from === space.space)
+    const strategy = MOBILE_STRATEGIES.find((s) => s.from === space.space)
     if (strategy) return strategy.transform(space)
 
     return {

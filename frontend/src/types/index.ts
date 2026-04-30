@@ -14,15 +14,7 @@ export type {
 } from './models'
 
 // 导出图类型
-export type {
-  Edge,
-  GraphData,
-  Node,
-  NodeData,
-  NodePosition,
-  NodeStatus,
-  NodeType,
-} from './graph'
+export type { Edge, GraphData, Node, NodeData, NodePosition, NodeStatus, NodeType } from './graph'
 
 // 导出API类型
 export type {

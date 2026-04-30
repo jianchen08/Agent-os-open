@@ -43,6 +43,7 @@ class _StdinLineReader:
             target=self._read_loop, daemon=True
         )
         self._started = False
+        self._was_interrupted = False
 
     def start(self) -> None:
         if not self._started:
@@ -80,14 +81,17 @@ class _StdinLineReader:
             except queue.Empty:
                 if self._interrupt_event.is_set():
                     self._interrupt_event.clear()
+                    self._was_interrupted = True
                     return None
                 continue
             if item is self._INTERRUPT:
+                self._was_interrupted = True
                 return None
             return item
 
     def drain(self) -> list[str]:
         """清空队列中所有未消费的行。"""
+        self._was_interrupted = False
         lines: list[str] = []
         while True:
             try:
@@ -96,12 +100,22 @@ class _StdinLineReader:
                     lines.append(item)
             except queue.Empty:
                 break
+        self._interrupt_event.clear()
         return lines
 
     def interrupt(self) -> None:
         """中断当前阻塞的读取操作。"""
         self._queue.put(self._INTERRUPT)
         self._interrupt_event.set()
+
+    @property
+    def was_interrupted(self) -> bool:
+        """上一次 read_line_blocking 返回 None 是因为 interrupt 而非真实 EOF。"""
+        return self._was_interrupted
+
+    def clear_interrupt_flag(self) -> None:
+        """清除 interrupt 标记。"""
+        self._was_interrupted = False
 
     def read_line(self, timeout: float) -> str | None:
         """带超时读取一行。超时或 EOF 返回 None。"""
@@ -205,12 +219,38 @@ class CLIInputAdapter(IInputAdapter):
             loop = asyncio.get_running_loop()
             user_input = await loop.run_in_executor(None, self._read_multiline)
         except (EOFError, KeyboardInterrupt):
+            reader = self._stdin_reader
+            if reader and reader.was_interrupted:
+                reader.clear_interrupt_flag()
+                return {
+                    "user_input": "",
+                    "core_type": "llm_call",
+                    "session_id": uuid.uuid4().hex[:12],
+                    "should_stop": False,
+                    "iteration": 1,
+                    "_is_empty": True,
+                    "_interrupted": True,
+                }
             return {
                 "user_input": "",
                 "core_type": "llm_call",
-                "session_id": str(uuid.uuid4()),
+                "session_id": uuid.uuid4().hex[:12],
                 "should_stop": True,
                 "iteration": 1,
+            }
+        except Exception as _read_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "[InputAdapter] receive() unexpected error: %s",
+                _read_exc, exc_info=True,
+            )
+            return {
+                "user_input": "",
+                "core_type": "llm_call",
+                "session_id": uuid.uuid4().hex[:12],
+                "should_stop": False,
+                "iteration": 1,
+                "_is_empty": True,
             }
 
         stripped = user_input.strip()
@@ -220,7 +260,7 @@ class CLIInputAdapter(IInputAdapter):
             return {
                 "user_input": "",
                 "core_type": "llm_call",
-                "session_id": str(uuid.uuid4()),
+                "session_id": uuid.uuid4().hex[:12],
                 "should_stop": False,
                 "iteration": 1,
                 "_is_empty": True,
@@ -231,7 +271,7 @@ class CLIInputAdapter(IInputAdapter):
             return {
                 "user_input": stripped,
                 "core_type": "llm_call",
-                "session_id": str(uuid.uuid4()),
+                "session_id": uuid.uuid4().hex[:12],
                 "should_stop": True,
                 "iteration": 1,
             }
@@ -241,7 +281,7 @@ class CLIInputAdapter(IInputAdapter):
             return {
                 "user_input": stripped,
                 "core_type": "llm_call",
-                "session_id": str(uuid.uuid4()),
+                "session_id": uuid.uuid4().hex[:12],
                 "should_stop": False,
                 "iteration": 1,
                 "_is_slash_command": True,
@@ -254,7 +294,7 @@ class CLIInputAdapter(IInputAdapter):
         state: dict[str, Any] = {
             "user_input": processed_text,
             "core_type": "llm_call",
-            "session_id": str(uuid.uuid4()),
+            "session_id": uuid.uuid4().hex[:12],
             "should_stop": False,
             "iteration": 1,
         }

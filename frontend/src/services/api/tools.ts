@@ -5,18 +5,11 @@
  * 与后端 /api/v1/tools/* 端点对齐
  */
 
-import {
-    API_ENDPOINTS,
-} from '@/constants/api'
-import { requestWithRetry } from '@/utils/retry'
-import type { RetryOptions } from '@/utils/retry'
-import type {
-    ToolCategory,
-    ToolExample,
-    ToolSource,
-    ToolStatus
-} from '@/types/tool'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
+import { requestWithRetry } from '@/utils/retry'
+import type { ToolCategory, ToolExample, ToolSource, ToolStatus } from '@/types/tool'
+import type { RetryOptions } from '@/utils/retry'
 
 /**
  * 工具响应类型（与后端 Tool 类对齐）
@@ -162,22 +155,19 @@ export interface GetToolsParams {
  */
 export async function getTools(
   params: GetToolsParams = {},
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ToolListResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ToolListResponse>(
-      API_ENDPOINTS.TOOLS.LIST,
-      {
-        params: {
-          page: params.page || 1,
-          page_size: params.pageSize || 20,
-          category: params.category,
-          source: params.source,
-          status: params.status,
-          search: params.search,
-        },
-      }
-    )
+    const response = await apiClient.get<ToolListResponse>(API_ENDPOINTS.TOOLS.LIST, {
+      params: {
+        page: params.page || 1,
+        page_size: params.pageSize || 20,
+        category: params.category,
+        source: params.source,
+        status: params.status,
+        search: params.search,
+      },
+    })
     return response.data
   }, options)
 }
@@ -189,18 +179,13 @@ export async function getTools(
  * @param options 重试选项
  * @returns 工具详情
  */
-export async function getTool(
-  toolId: string,
-  options: RetryOptions = {}
-): Promise<ToolResponse> {
+export async function getTool(toolId: string, options: RetryOptions = {}): Promise<ToolResponse> {
   if (!toolId || toolId.trim().length === 0) {
     throw new Error('工具 ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ToolResponse>(
-      API_ENDPOINTS.TOOLS.GET(toolId)
-    )
+    const response = await apiClient.get<ToolResponse>(API_ENDPOINTS.TOOLS.GET(toolId))
     return response.data
   }, options)
 }
@@ -214,17 +199,14 @@ export async function getTool(
  */
 export async function generateTool(
   data: ToolGenerateRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ToolResponse> {
   if (!data.name || data.name.trim().length === 0) {
     throw new Error('工具名称不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.post<ToolResponse>(
-      API_ENDPOINTS.TOOLS.GENERATE,
-      data
-    )
+    const response = await apiClient.post<ToolResponse>(API_ENDPOINTS.TOOLS.GENERATE, data)
     return response.data
   }, options)
 }
@@ -235,10 +217,7 @@ export async function generateTool(
  * @param toolId 工具名称/ID
  * @param options 重试选项
  */
-export async function deleteTool(
-  toolId: string,
-  options: RetryOptions = {}
-): Promise<void> {
+export async function deleteTool(toolId: string, options: RetryOptions = {}): Promise<void> {
   if (!toolId || toolId.trim().length === 0) {
     throw new Error('工具 ID 不能为空')
   }
@@ -259,17 +238,14 @@ export async function deleteTool(
 export async function updateTool(
   toolId: string,
   data: ToolUpdateRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ToolResponse> {
   if (!toolId || toolId.trim().length === 0) {
     throw new Error('工具 ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.patch<ToolResponse>(
-      API_ENDPOINTS.TOOLS.UPDATE(toolId),
-      data
-    )
+    const response = await apiClient.patch<ToolResponse>(API_ENDPOINTS.TOOLS.UPDATE(toolId), data)
     return response.data
   }, options)
 }
@@ -283,16 +259,14 @@ export async function updateTool(
  */
 export async function getCodeEntry(
   entryId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<CodeEntryResponse> {
   if (!entryId || entryId.trim().length === 0) {
     throw new Error('条目 ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<CodeEntryResponse>(
-      API_ENDPOINTS.TOOLS.CODE(entryId)
-    )
+    const response = await apiClient.get<CodeEntryResponse>(API_ENDPOINTS.TOOLS.CODE(entryId))
     return response.data
   }, options)
 }
@@ -306,17 +280,16 @@ export async function getCodeEntry(
  */
 export async function searchCode(
   query: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<CodeSearchResult> {
   if (!query || query.trim().length === 0) {
     throw new Error('搜索关键词不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<CodeSearchResult>(
-      API_ENDPOINTS.TOOLS.CODE_SEARCH,
-      { params: { query } }
-    )
+    const response = await apiClient.get<CodeSearchResult>(API_ENDPOINTS.TOOLS.CODE_SEARCH, {
+      params: { query },
+    })
     return response.data
   }, options)
 }
@@ -332,17 +305,16 @@ export async function searchCode(
 export async function rollbackTool(
   toolId: string,
   version?: number,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ToolResponse> {
   if (!toolId || toolId.trim().length === 0) {
     throw new Error('工具 ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.post<ToolResponse>(
-      API_ENDPOINTS.TOOLS.ROLLBACK(toolId),
-      { version }
-    )
+    const response = await apiClient.post<ToolResponse>(API_ENDPOINTS.TOOLS.ROLLBACK(toolId), {
+      version,
+    })
     return response.data
   }, options)
 }

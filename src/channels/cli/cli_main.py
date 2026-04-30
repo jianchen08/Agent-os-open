@@ -125,6 +125,8 @@ _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yam
 
 # Session directory for CLI session metadata
 _SESSION_DIR = Path("data/session")
+
+_DEFAULT_OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 # No hard limit on session messages — context compression handles overflow
 
 
@@ -212,7 +214,7 @@ class CLIApplication:
             config_path: 管道配置 YAML 文件路径。
                 默认使用 ``config/pipelines/default.yaml``。
         """
-        from config.models import ModelConfigLoader
+        from config.models import get_model_config_loader
         from pipeline.config import build_plugin_registry, load_pipeline_config
 
         # 确定配置路径
@@ -231,8 +233,8 @@ class CLIApplication:
 
         logger.info("Loading pipeline config from: %s", config_path)
 
-        # 创建 ModelConfigLoader 用于环境变量回退
-        model_loader = ModelConfigLoader()
+        # 创建 ModelConfigLoader 用于环境变量回退（使用缓存单例避免重复解析 YAML）
+        model_loader = get_model_config_loader()
 
         # 加载管道配置
         try:
@@ -540,9 +542,9 @@ class CLIApplication:
 
         # 5.5.1 MemoryContextService — 上下文压缩共享服务
         try:
-            from config.models import ModelConfigLoader as _MCL
+            from config.models import get_model_config_loader as _get_loader
 
-            _loader = _MCL()
+            _loader = _get_loader()
             _llm_data = _loader._load_llm_data()
             _defaults = _llm_data.get("defaults", {})
             _model_id = _defaults.get("chat", "")
@@ -815,8 +817,8 @@ class CLIApplication:
             异步嵌入函数 (str -> list[float])
         """
         try:
-            from config.models import ModelConfigLoader
-            loader = ModelConfigLoader()
+            from config.models import get_model_config_loader
+            loader = get_model_config_loader()
             embedding_cfg = loader._load_embedding_data()
 
             embeddings = embedding_cfg.get("embeddings", {})
@@ -839,7 +841,7 @@ class CLIApplication:
                         """调用 OpenAI 兼容 API 生成嵌入向量。"""
                         try:
                             import httpx
-                            url = f"{base_url}/embeddings" if base_url else "https://api.openai.com/v1/embeddings"
+                            url = f"{base_url}/embeddings" if base_url else _DEFAULT_OPENAI_EMBEDDINGS_URL
                             async with httpx.AsyncClient() as client:
                                 resp = await client.post(
                                     url,
@@ -958,109 +960,108 @@ class CLIApplication:
             logger.info("TaskWorker started (single-message mode)")
 
         try:
-            result = await self._engine.run(
-                user_input=message,
-                agent_config=self._agent_config,
-                conversation_history=None,
-                streaming=False,
-                auto_approve=True,
-                interaction_mode="auto",
-            )
-        except Exception as exc:
-            console.print(f"\n[red]Engine error: {exc}[/red]")
+            try:
+                result = await self._engine.run(
+                    user_input=message,
+                    agent_config=self._agent_config,
+                    conversation_history=None,
+                    streaming=False,
+                    auto_approve=True,
+                    interaction_mode="auto",
+                )
+            except Exception as exc:
+                console.print(f"\n[red]Engine error: {exc}[/red]")
+                return
+
+            elapsed_l1 = _time.time() - t0
+            iters = result.get("iteration", 0)
+            pipeline_id = result.get("pipeline_id", "")
+            raw = result.get("raw_result", "")
+
+            ts = self._services.get("task_service")
+            task_ids = []
+            if ts:
+                try:
+                    storage = getattr(ts, "_storage", None)
+                    if storage is not None:
+                        all_tasks = getattr(storage, "_tasks", {})
+                        running_tasks = [
+                            (tid, t) for tid, t in all_tasks.items()
+                            if hasattr(t, "status") and t.status.value in ("running", "pending")
+                        ]
+                        if running_tasks:
+                            running_tasks.sort(key=lambda x: getattr(x[1], "created_at", ""), reverse=True)
+                            task_ids = [tid for tid, _ in running_tasks]
+                except Exception:
+                    pass
+
+            console.print(f"\n[dim]L1 done: {elapsed_l1:.1f}s, {iters} iterations, pipeline={pipeline_id}[/dim]")
+            if task_ids:
+                console.print(f"[dim]Tasks submitted: {task_ids}, waiting for completion...[/dim]\n")
+
+                final_statuses = {}
+                for _ in range(120):
+                    await asyncio.sleep(5)
+                    if ts:
+                        try:
+                            remaining = []
+                            for tid in task_ids:
+                                task = ts.get_task(tid)
+                                if task:
+                                    status = task.status if hasattr(task, "status") else task.get("status", "?")
+                                    status_val = status.value if hasattr(status, "value") else str(status)
+                                    if status_val in ("completed", "failed", "cancelled"):
+                                        final_statuses[tid] = status_val
+                                    else:
+                                        remaining.append(tid)
+                            if not remaining:
+                                break
+                        except Exception:
+                            pass
+
+                if final_statuses and self._engine:
+                    try:
+                        summary_lines = []
+                        for tid, st in final_statuses.items():
+                            task_obj = ts.get_task(tid) if ts else None
+                            title = getattr(task_obj, "title", tid) if task_obj else tid
+                            summary_lines.append(f"- 任务 [{title}](id={tid}): {st}")
+                        summary_text = "\n".join(summary_lines)
+                        followup = (
+                            f"[系统通知] 以下子任务已到达终态，请向用户汇报最终结果：\n{summary_text}\n\n"
+                            "请用简洁的方式向用户汇报任务执行结果。"
+                        )
+                        followup_result = await self._engine.run(
+                            user_input=followup,
+                            agent_config=self._agent_config,
+                            conversation_history=None,
+                            streaming=False,
+                            auto_approve=True,
+                            interaction_mode="auto",
+                        )
+                        followup_raw = followup_result.get("raw_result", "")
+                        if followup_raw:
+                            console.print(f"\n[bold green]Agent:[/bold green] {followup_raw}")
+                    except Exception as exc:
+                        logger.warning("run_single followup failed: %s", exc)
+
+                elapsed_total = _time.time() - t0
+                for tid in task_ids:
+                    status = final_statuses.get(tid, "timeout")
+                    console.print(f"\n[bold]Task {tid}: {status}[/bold]")
+                console.print(f"[dim]Total: {elapsed_total:.1f}s[/dim]")
+            else:
+                console.print(f"\n[dim]No task submitted. Response: {str(raw)[:300]}[/dim]")
+
+        finally:
+            # 确保 TaskWorker 和 LiteLLM 资源始终被清理
             if tw and hasattr(tw, "stop"):
                 await tw.stop()
-            return
-
-        elapsed_l1 = _time.time() - t0
-        iters = result.get("iteration", 0)
-        pipeline_id = result.get("pipeline_id", "")
-        raw = result.get("raw_result", "")
-
-        ts = self._services.get("task_service")
-        task_ids = []
-        if ts:
             try:
-                storage = getattr(ts, "_storage", None)
-                if storage is not None:
-                    all_tasks = getattr(storage, "_tasks", {})
-                    running_tasks = [
-                        (tid, t) for tid, t in all_tasks.items()
-                        if hasattr(t, "status") and t.status.value in ("running", "pending")
-                    ]
-                    if running_tasks:
-                        running_tasks.sort(key=lambda x: getattr(x[1], "created_at", ""), reverse=True)
-                        task_ids = [tid for tid, _ in running_tasks]
+                from llm.adapter import cleanup_litellm_resources
+                await cleanup_litellm_resources()
             except Exception:
                 pass
-
-        console.print(f"\n[dim]L1 done: {elapsed_l1:.1f}s, {iters} iterations, pipeline={pipeline_id}[/dim]")
-        if task_ids:
-            console.print(f"[dim]Tasks submitted: {task_ids}, waiting for completion...[/dim]\n")
-
-            final_statuses = {}
-            for _ in range(120):
-                await asyncio.sleep(5)
-                if ts:
-                    try:
-                        remaining = []
-                        for tid in task_ids:
-                            task = ts.get_task(tid)
-                            if task:
-                                status = task.status if hasattr(task, "status") else task.get("status", "?")
-                                status_val = status.value if hasattr(status, "value") else str(status)
-                                if status_val in ("completed", "failed", "cancelled"):
-                                    final_statuses[tid] = status_val
-                                else:
-                                    remaining.append(tid)
-                        if not remaining:
-                            break
-                    except Exception:
-                        pass
-
-            if final_statuses and self._engine:
-                try:
-                    summary_lines = []
-                    for tid, st in final_statuses.items():
-                        task_obj = ts.get_task(tid) if ts else None
-                        title = getattr(task_obj, "title", tid) if task_obj else tid
-                        summary_lines.append(f"- 任务 [{title}](id={tid}): {st}")
-                    summary_text = "\n".join(summary_lines)
-                    followup = (
-                        f"[系统通知] 以下子任务已到达终态，请向用户汇报最终结果：\n{summary_text}\n\n"
-                        "请用简洁的方式向用户汇报任务执行结果。"
-                    )
-                    followup_result = await self._engine.run(
-                        user_input=followup,
-                        agent_config=self._agent_config,
-                        conversation_history=None,
-                        streaming=False,
-                        auto_approve=True,
-                        interaction_mode="auto",
-                    )
-                    followup_raw = followup_result.get("raw_result", "")
-                    if followup_raw:
-                        console.print(f"\n[bold green]Agent:[/bold green] {followup_raw}")
-                except Exception as exc:
-                    logger.warning("run_single followup failed: %s", exc)
-
-            elapsed_total = _time.time() - t0
-            for tid in task_ids:
-                status = final_statuses.get(tid, "timeout")
-                console.print(f"\n[bold]Task {tid}: {status}[/bold]")
-            console.print(f"[dim]Total: {elapsed_total:.1f}s[/dim]")
-        else:
-            console.print(f"\n[dim]No task submitted. Response: {str(raw)[:300]}[/dim]")
-
-        if tw and hasattr(tw, "stop"):
-            await tw.stop()
-
-        # 清理 LiteLLM 资源（后台任务 + HTTP 会话）
-        try:
-            from llm.adapter import cleanup_litellm_resources
-            await cleanup_litellm_resources()
-        except Exception:
-            pass
 
     # -----------------------------------------------------------------------
     # Claude Code 风格 REPL 循环
@@ -1169,7 +1170,10 @@ class CLIApplication:
             )
 
         # REPL 主循环（事件驱动：后台管道 + 即时提示符）
+        _repl_iteration = 0
+        _exit_reason = ""
         while True:
+            _repl_iteration += 1
             # --- 后台管道完成检查 ---
             if (
                 self._pipeline_task is not None
@@ -1177,6 +1181,14 @@ class CLIApplication:
             ):
                 try:
                     final_state = self._pipeline_task.result()
+                except asyncio.CancelledError:
+                    logger.info(
+                        "Pipeline task cancelled (user Ctrl+C"
+                        " or external cancel)"
+                    )
+                    final_state = {
+                        "error": "Pipeline cancelled",
+                    }
                 except Exception as exc:
                     logger.warning("Pipeline task failed: %s", exc)
                     final_state = {"error": str(exc)}
@@ -1228,6 +1240,11 @@ class CLIApplication:
                         interaction_service=human_svc,
                         idle_timeout=60,
                     )
+                except Exception as _sub_conv_exc:
+                    logger.warning(
+                        "[REPL] run_sub_conversation (top) error: %s",
+                        _sub_conv_exc, exc_info=True,
+                    )
                 finally:
                     self._suppress_streaming = False
                     if self._streaming_buffer:
@@ -1271,6 +1288,10 @@ class CLIApplication:
                         return_when=asyncio.FIRST_COMPLETED,
                         timeout=0.3,
                     )
+                    # 检查是否有待处理的交互请求（管道可能正在
+                    # 执行 human_interaction 工具）
+                    if cli_notifier and cli_notifier.has_pending():
+                        break
 
                 # 管道在等待期间完成了 → 回到循环顶部处理结果
                 if (
@@ -1296,11 +1317,41 @@ class CLIApplication:
                     )
                 )
             except (EOFError, KeyboardInterrupt):
+                logger.warning(
+                    "[REPL] EOF/KeyboardInterrupt at iter=%d, "
+                    "pipeline_running=%s — exiting REPL",
+                    _repl_iteration,
+                    self._pipeline_task is not None
+                    and not self._pipeline_task.done(),
+                )
                 self._output_adapter.show_system_message(
                     "感谢使用 Agent OS，再见！",
                     "bold blue",
                 )
+                _exit_reason = "EOF/KeyboardInterrupt"
                 break
+            except asyncio.CancelledError:
+                # CancelledError 不是 Exception 的子类，
+                # 必须显式捕获，否则会穿透导致 app.run() 退出
+                logger.warning(
+                    "[REPL] CancelledError at iter=%d — "
+                    "suppressing, continuing loop",
+                    _repl_iteration,
+                )
+                continue
+            except Exception as _wait_exc:
+                # 保护：_wait_for_next_event 不应抛出异常，
+                # 但如果发生了，记录日志并继续循环（而非退出）。
+                logger.warning(
+                    "[REPL] _wait_for_next_event unexpected error "
+                    "(iter=%d, pipeline_running=%s): %s",
+                    _repl_iteration,
+                    self._pipeline_task is not None
+                    and not self._pipeline_task.done(),
+                    _wait_exc,
+                    exc_info=True,
+                )
+                continue
 
             # 管道完成了 → 回到循环顶部处理结果
             if pipeline_done:
@@ -1318,8 +1369,21 @@ class CLIApplication:
                     "粘贴内容，正在处理...[/dim green]"
                 )
 
-            # 退出信号
+            # 退出信号 — 但如果管道仍在运行，阻止退出。
+            # 输入适配器的意外异常（如 stdin pipe 问题）不应导致
+            # 管道被取消。只有用户主动的 Ctrl+C 才能中断运行中的管道。
             if initial_state.get("should_stop"):
+                _pipeline_still_running = (
+                    self._pipeline_task is not None
+                    and not self._pipeline_task.done()
+                )
+                if _pipeline_still_running:
+                    logger.warning(
+                        "[REPL] should_stop while pipeline running "
+                        "(iter=%d) — ignoring, pipeline continues",
+                        _repl_iteration,
+                    )
+                    continue
                 if (
                     hasattr(self, "_task_worker")
                     and self._task_worker
@@ -1381,6 +1445,7 @@ class CLIApplication:
                 self._output_adapter.show_system_message(
                     "感谢使用 Agent OS，再见！", "bold blue"
                 )
+                _exit_reason = "should_stop (no pipeline)"
                 break
 
             # 空输入 — 检查是否有待处理的交互请求
@@ -1393,13 +1458,19 @@ class CLIApplication:
                         run_sub_conversation,
                     )
 
-                    await run_sub_conversation(
-                        console=console,
-                        input_adapter=self._input_adapter,
-                        notifier=cli_notifier,
-                        interaction_service=human_svc,
-                        idle_timeout=60,
-                    )
+                    try:
+                        await run_sub_conversation(
+                            console=console,
+                            input_adapter=self._input_adapter,
+                            notifier=cli_notifier,
+                            interaction_service=human_svc,
+                            idle_timeout=60,
+                        )
+                    except Exception as _sub_exc:
+                        logger.warning(
+                            "[REPL] run_sub_conversation (empty) "
+                            "error: %s", _sub_exc, exc_info=True,
+                        )
                     self._input_adapter.drain_stdin()
                 continue
 
@@ -1412,6 +1483,7 @@ class CLIApplication:
                     console.print(
                         "[bold blue]Goodbye![/bold blue]"
                     )
+                    _exit_reason = "slash_result.should_exit"
                     break
                 continue
 
@@ -1434,6 +1506,7 @@ class CLIApplication:
                         "感谢使用 Agent OS，再见！",
                         "bold blue",
                     )
+                    _exit_reason = "cmd_result.should_stop"
                     break
                 if cmd_result.should_clear_history:
                     conversation_history.clear()
@@ -1488,11 +1561,66 @@ class CLIApplication:
                     else:
                         self._engine.wake()
                     continue
-                # 管道真正在运行 → 拒绝新输入
-                console.print(
-                    "[yellow]管道正在运行中，请等待完成后再输入。"
-                    "（可按 Ctrl+C 中断）[/yellow]"
-                )
+                # 管道真正在运行 → 检查是否有待处理的交互请求
+                if cli_notifier and cli_notifier.has_pending():
+                    human_svc = self._services.get(
+                        "human_interaction_service"
+                    )
+                    from channels.cli.cli_interaction import (
+                        run_sub_conversation,
+                    )
+                    self._suppress_streaming = True
+                    try:
+                        await run_sub_conversation(
+                            console=console,
+                            input_adapter=self._input_adapter,
+                            notifier=cli_notifier,
+                            interaction_service=human_svc,
+                            idle_timeout=60,
+                        )
+                    except Exception as _busy_exc:
+                        logger.warning(
+                            "[REPL] run_sub_conversation (busy) "
+                            "error: %s", _busy_exc, exc_info=True,
+                        )
+                    finally:
+                        self._suppress_streaming = False
+                        if self._streaming_buffer:
+                            safe = sanitize_for_terminal(
+                                "".join(self._streaming_buffer)
+                            )
+                            console.print(
+                                safe, end="", highlight=False,
+                            )
+                            self._last_was_text = True
+                            self._streaming_buffer.clear()
+                    self._input_adapter.drain_stdin()
+                    continue
+                # 管道仍在运行但没有挂起也没有交互请求
+                # → 将用户输入推入消息队列，管道下一轮迭代会读取
+                user_input = initial_state.get("user_input", "")
+                if user_input.strip():
+                    msg_queue = self._services.get("message_queue")
+                    _pid = (
+                        session.active_pipeline_id or ""
+                    )
+                    if msg_queue and _pid:
+                        from infrastructure.message_queue import (
+                            MessageQueue,
+                            Message,
+                            create_message_id,
+                        )
+                        if isinstance(msg_queue, MessageQueue):
+                            await msg_queue.push(Message(
+                                id=create_message_id(),
+                                pipeline_id=_pid,
+                                target_id="",
+                                content=user_input,
+                            ))
+                            console.print(
+                                "[dim cyan]→ 消息已发送给运行中的管道"
+                                "[/dim cyan]"
+                            )
                 continue
 
             user_input = initial_state.get("user_input", "")
@@ -1519,6 +1647,9 @@ class CLIApplication:
 
             pipeline_id = session_svc.prepare_run(session)
 
+            # 将引擎自己生成的 pipeline_id 同步到 session
+            session.active_pipeline_id = self._engine.pipeline_id
+
             self._pipeline_task = asyncio.create_task(
                 self._engine.run(
                     user_input=user_input,
@@ -1534,12 +1665,22 @@ class CLIApplication:
                         self._interaction_mode == "auto"
                     ),
                     interaction_mode=self._interaction_mode,
-                    pipeline_id=pipeline_id,
                 )
             )
+
             self._pipeline_initial_state = initial_state
             # 管道在后台运行 → 立即回到提示符
             continue
+
+        # while 循环已退出（正常 break）
+        logger.warning(
+            "[REPL] Loop exited! reason=%s | "
+            "pipeline_running=%s | _repl_iteration=%d",
+            _exit_reason or "UNKNOWN (exception?)",
+            self._pipeline_task is not None
+            and not self._pipeline_task.done(),
+            _repl_iteration,
+        )
 
         # 清理后台任务
         for _t in list(self._bg_tasks):
@@ -1689,7 +1830,17 @@ class CLIApplication:
         )
 
         if cli_notifier is None:
-            return await receive_task
+            try:
+                return await receive_task, False
+            except (EOFError, KeyboardInterrupt):
+                return {"should_stop": True}, False
+            except Exception as _recv_exc:
+                logger.warning(
+                    "[_wait_for_next_event] receive error "
+                    "(no cli_notifier): %s",
+                    _recv_exc, exc_info=True,
+                )
+                return None, False
 
         async def _poll_interaction() -> None:
             while not cli_notifier.has_pending():
@@ -1712,8 +1863,9 @@ class CLIApplication:
         self._input_adapter.interrupt_stdin()
         try:
             await receive_task
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             pass
+        self._input_adapter.drain_stdin()
 
         # 子对话期间抑制管道流式输出
         self._suppress_streaming = True
@@ -1785,6 +1937,13 @@ class CLIApplication:
             return_when=asyncio.FIRST_COMPLETED,
         )
 
+        done_tags = [tasks.get(t) for t in done]
+        pending_tags = [tasks.get(t) for t in pending]
+        logger.info(
+            "[_wait_for_next_event] done=%s pending=%s",
+            done_tags, pending_tags,
+        )
+
         # 取消非管道的 pending 任务
         for t in pending:
             if t != self._pipeline_task:
@@ -1795,16 +1954,35 @@ class CLIApplication:
             tag = tasks.get(t)
             if tag == "input":
                 try:
-                    return t.result(), False
-                except Exception:
+                    result = t.result()
+                    logger.info(
+                        "[_wait_for_next_event] input result: "
+                        "stop=%s empty=%s interrupted=%s",
+                        result.get("should_stop"),
+                        result.get("_is_empty"),
+                        result.get("_interrupted"),
+                    )
+                    return result, False
+                except (EOFError, KeyboardInterrupt):
+                    logger.warning(
+                        "[_wait_for_next_event] input EOFError"
+                    )
                     return {"should_stop": True}, False
+                except Exception as _input_exc:
+                    # 输入适配器异常不应导致 CLI 退出。
+                    # 记录日志并返回 None 让主循环继续。
+                    logger.warning(
+                        "[_wait_for_next_event] Input adapter error: %s",
+                        _input_exc, exc_info=True,
+                    )
+                    return None, False
             elif tag == "pipeline":
                 # 管道完成 → 中断 stdin，回到循环顶部处理
                 if receive_task not in done:
                     self._input_adapter.interrupt_stdin()
                     try:
                         await receive_task
-                    except Exception:
+                    except (asyncio.CancelledError, Exception):
                         pass
                     self._input_adapter.drain_stdin()
                 return None, True
@@ -1813,8 +1991,12 @@ class CLIApplication:
                 self._input_adapter.interrupt_stdin()
                 try:
                     await receive_task
-                except Exception:
+                except (asyncio.CancelledError, Exception):
                     pass
+                # 清除残留的 interrupt 信号，防止
+                # run_sub_conversation 中的 stdin 读取
+                # 立即返回 None（假 EOF）
+                self._input_adapter.drain_stdin()
 
                 self._suppress_streaming = True
                 try:
@@ -1830,6 +2012,11 @@ class CLIApplication:
                         notifier=cli_notifier,
                         interaction_service=human_svc,
                         idle_timeout=60,
+                    )
+                except Exception as _sub_conv_exc:
+                    logger.warning(
+                        "[_wait_for_next_event] run_sub_conversation "
+                        "error: %s", _sub_conv_exc, exc_info=True,
                     )
                 finally:
                     self._suppress_streaming = False

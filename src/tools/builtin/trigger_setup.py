@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
     ToolCategory,
@@ -34,7 +35,7 @@ from triggers.types import (
 logger = logging.getLogger(__name__)
 
 
-class TriggerSetupTool:
+class TriggerSetupTool(BuiltinTool):
     """
     触发器设置工具
 
@@ -94,13 +95,27 @@ class TriggerSetupTool:
         return Tool(
             name="trigger_setup",
             description=(
-                "设置触发器，在指定条件满足时向当前会话注入消息并唤醒管道。"
+                "设置或取消触发器，在指定条件满足时向当前会话注入消息并唤醒管道。"
                 "触发器只能触发自己所在的会话。"
                 "支持延迟触发、定时触发、周期触发、事件触发和条件触发五种类型。"
+                "支持通过 action=cancel 取消已设置的触发器。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["setup", "cancel"],
+                        "description": (
+                            "操作类型: "
+                            "setup=设置触发器(默认), "
+                            "cancel=取消指定触发器"
+                        ),
+                    },
+                    "trigger_id": {
+                        "type": "string",
+                        "description": "要取消的触发器 ID（action=cancel 时必填）",
+                    },
                     "trigger_type": {
                         "type": "string",
                         "enum": ["delay", "schedule", "interval", "event", "condition"],
@@ -187,7 +202,13 @@ class TriggerSetupTool:
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """执行触发器设置"""
+        """执行触发器设置或取消"""
+        action = inputs.get("action", "setup")
+        session_id = inputs.get("session_id")
+
+        if action == "cancel":
+            return await self._cancel_trigger(inputs, session_id)
+
         trigger_type = inputs.get("trigger_type")
         message = inputs.get("message")
         session_id = inputs.get("session_id")
@@ -258,6 +279,55 @@ class TriggerSetupTool:
                 error=f"设置触发器失败: {str(e)}",
                 error_code="TRIGGER_SETUP_FAILED",
             )
+
+    async def _cancel_trigger(
+        self,
+        inputs: dict[str, Any],
+        session_id: str | None,
+    ) -> ToolExecutionResult:
+        """取消触发器"""
+        trigger_id = inputs.get("trigger_id")
+
+        if not trigger_id:
+            return create_failure_result(
+                error="缺少必需参数: trigger_id",
+                error_code="MISSING_TRIGGER_ID",
+            )
+
+        trigger = self._manager._triggers.get(trigger_id)
+        if trigger is None:
+            return create_failure_result(
+                error=f"触发器不存在: {trigger_id}",
+                error_code="TRIGGER_NOT_FOUND",
+            )
+
+        if session_id and trigger.session_id != session_id:
+            return create_failure_result(
+                error="只能取消当前会话的触发器",
+                error_code="TRIGGER_SESSION_MISMATCH",
+            )
+
+        success = self._manager.cancel(trigger_id)
+        if not success:
+            return create_failure_result(
+                error=f"触发器无法取消（可能已触发或已取消）: {trigger_id}",
+                error_code="TRIGGER_CANCEL_FAILED",
+            )
+
+        logger.info(
+            f"[TriggerSetupTool] 触发器已取消 | "
+            f"trigger_id={trigger_id} | "
+            f"session_id={session_id}"
+        )
+
+        return create_success_result(
+            data={
+                "success": True,
+                "trigger_id": trigger_id,
+                "action": "cancel",
+                "message": f"触发器 {trigger_id} 已取消",
+            },
+        )
 
     def _parse_max_time(self, max_time_str: str | None) -> float:
         """解析 max_time 参数为秒数。

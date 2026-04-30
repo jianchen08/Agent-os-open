@@ -7,12 +7,10 @@
  * 注意：需要安装依赖 streamdown
  */
 
-import { cn } from '@/lib/utils'
 import { memo, type FC } from 'react'
 import { Streamdown } from 'streamdown'
-import {
-    markdownMemoComparator,
-} from './shared'
+import { cn } from '@/lib/utils'
+import { markdownMemoComparator } from './shared'
 
 export interface MarkdownRendererProps {
   /** Markdown 内容 */
@@ -31,23 +29,15 @@ export interface MarkdownRendererProps {
 export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
   ({ content, isStreaming = false, className }) => {
     return (
-      <div
-        className={cn(
-          'markdown-content',
-          className
-        )}
-      >
-        <Streamdown
-          mode="static"
-          parseIncompleteMarkdown={true}
-        >
+      <div className={cn('markdown-content', className)}>
+        <Streamdown mode="static" parseIncompleteMarkdown={true}>
           {content}
         </Streamdown>
         {isStreaming && <span className="md-cursor" />}
       </div>
     )
   },
-  markdownMemoComparator
+  markdownMemoComparator,
 )
 
 MarkdownRenderer.displayName = 'MarkdownRenderer'

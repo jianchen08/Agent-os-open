@@ -26,19 +26,12 @@ export interface LaunchResult {
 }
 
 export async function getFloatingChatStatus(): Promise<FloatingChatStatus> {
-  const response = await apiClient.get<FloatingChatStatus>(
-    API_ENDPOINTS.FLOATING_CHAT.STATUS
-  )
+  const response = await apiClient.get<FloatingChatStatus>(API_ENDPOINTS.FLOATING_CHAT.STATUS)
   return response.data
 }
 
-export async function launchFloatingChat(
-  request?: LaunchRequest
-): Promise<LaunchResult> {
-  const response = await apiClient.post<LaunchResult>(
-    API_ENDPOINTS.FLOATING_CHAT.LAUNCH,
-    request
-  )
+export async function launchFloatingChat(request?: LaunchRequest): Promise<LaunchResult> {
+  const response = await apiClient.post<LaunchResult>(API_ENDPOINTS.FLOATING_CHAT.LAUNCH, request)
   return response.data
 }
 

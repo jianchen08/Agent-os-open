@@ -52,7 +52,7 @@ export function getOptimizedImageUrl(
   url: string,
   width: number,
   quality: number = 80,
-  format?: 'webp' | 'jpeg' | 'png'
+  format?: 'webp' | 'jpeg' | 'png',
 ): string {
   // 如果是 data URL 或 blob URL，直接返回
   if (url.startsWith('data:') || url.startsWith('blob:')) {
@@ -109,13 +109,9 @@ export function getDPROptimizedSize(baseSize: number): number {
  * // => '/image.jpg?w=320&q=80 320w, /image.jpg?w=640&q=80 640w, ...'
  * ```
  */
-export function generateSrcSet(
-  url: string,
-  sizes: number[],
-  quality: number = 80
-): string {
+export function generateSrcSet(url: string, sizes: number[], quality: number = 80): string {
   return sizes
-    .map(size => {
+    .map((size) => {
       const optimizedUrl = getOptimizedImageUrl(url, size, quality)
       return `${optimizedUrl} ${size}w`
     })
@@ -189,10 +185,7 @@ export function preloadImage(url: string): Promise<void> {
  * @param concurrency - 并发加载数量
  * @returns Promise，当所有图片加载完成时 resolve
  */
-export async function preloadImages(
-  urls: string[],
-  concurrency: number = 3
-): Promise<void> {
+export async function preloadImages(urls: string[], concurrency: number = 3): Promise<void> {
   const batches: string[][] = []
 
   // 分批
@@ -202,7 +195,7 @@ export async function preloadImages(
 
   // 顺序加载每批
   for (const batch of batches) {
-    await Promise.all(batch.map(url => preloadImage(url)))
+    await Promise.all(batch.map((url) => preloadImage(url)))
   }
 }
 
@@ -224,9 +217,6 @@ export function getAspectRatio(width: number, height: number): string {
  * @param aspectRatio - 长宽比 (width / height)
  * @returns 计算后的高度
  */
-export function calculateHeight(
-  containerWidth: number,
-  aspectRatio: number
-): number {
+export function calculateHeight(containerWidth: number, aspectRatio: number): number {
   return containerWidth / aspectRatio
 }

@@ -3,19 +3,14 @@
  */
 
 /** 执行状态 */
-export type ExecutionStatus =
-  | 'pending'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'paused'
+export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused'
 
 /** 执行记录类型 */
 export type ExecutionRecordType =
-  | 'user_message'      // 用户消息
-  | 'agent_response'    // Agent 回复（content 可包含 [[exec:ID]] 标记）
-  | 'tool_call'         // 工具调用（元数据）
-  | 'task_execution'    // 任务执行（元数据，包含 todos）
+  | 'user_message' // 用户消息
+  | 'agent_response' // Agent 回复（content 可包含 [[exec:ID]] 标记）
+  | 'tool_call' // 工具调用（元数据）
+  | 'task_execution' // 任务执行（元数据，包含 todos）
 
 /** 执行记录 */
 export interface ExecutionRecord {

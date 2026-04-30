@@ -24,19 +24,17 @@
 
 import {
   DEFAULT_RETRY_POLICY,
+  WS_ACK_MAX_RETRIES,
+  WS_ACK_REQUIRED_EVENTS,
+  WS_ACK_TIMEOUT,
   WS_CLIENT_MESSAGES,
   WS_HEARTBEAT_CONFIG,
   WS_RECONNECT_CONFIG,
   WS_SERVER_EVENTS,
   buildWebSocketUrl,
 } from '@/constants/websocket'
-import type {
-  ApprovalDecisionType,
-  ApprovalMessage,
-  UserInputResponseMessage,
-  WebSocketClientMessage,
-} from '@/constants/websocket'
 import { getWebSocketMonitor } from '@/lib/monitoring'
+import apiClient from '@/services/api/client'
 import { tokenManager } from '@/stores/tokenManager'
 import {
   MESSAGE_CONFIG,
@@ -44,25 +42,22 @@ import {
   MessageTypes,
   createStandardMessage,
 } from '@/types/websocket'
-import type {
-  HeartbeatMessage,
-  StandardMessage,
-  UserInputMessage,
-} from '@/types/websocket'
 import { loggers } from '@/utils/logger'
-import apiClient from '@/services/api/client'
-import {
-  EnhancedMessageQueue,
-  MessagePriority,
-} from './EnhancedMessageQueue'
-import type { MessagePriorityType } from './EnhancedMessageQueue'
+import { EnhancedMessageQueue, MessagePriority } from './EnhancedMessageQueue'
+import { type WebSocketErrorHandler, createWebSocketErrorHandler } from './errorHandler'
 import { HeartbeatManager } from './HeartbeatManager'
-import type { HeartbeatCallbacks } from './HeartbeatManager'
-import {
-  WebSocketErrorHandler,
-  createWebSocketErrorHandler,
-} from './errorHandler'
+import type { MessagePriorityType } from './EnhancedMessageQueue'
 import type { EventHandler } from './eventHandlers'
+import type { HeartbeatCallbacks } from './HeartbeatManager'
+import type {
+  ApprovalDecisionType,
+  ApprovalMessage,
+  MessageAckMessage,
+  RequestMissedMessage,
+  UserInputResponseMessage,
+  WebSocketClientMessage,
+} from '@/constants/websocket'
+import type { HeartbeatMessage, StandardMessage, UserInputMessage } from '@/types/websocket'
 
 /**
  * 内部事件常量（用于连接生命周期事件）
@@ -152,6 +147,18 @@ export class WebSocketService {
   /** 心跳管理器 */
   private heartbeatManager: HeartbeatManager
 
+  /** 最后收到的消息 request_id（用于重连后请求遗漏消息） */
+  private lastReceivedRequestId: string = ''
+
+  /** 协议版本（从服务端 connection_confirmation 获取） */
+  private negotiatedVersion: string = ''
+
+  /** 等待 ACK 的消息追踪 Map: request_id -> { timer, retries } */
+  private pendingAckTimers: Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; retries: number }
+  > = new Map()
+
   constructor() {
     // 初始化消息队列（IndexedDB 持久化 + 指数退避重试）
     this.messageQueue = new EnhancedMessageQueue(undefined, {
@@ -214,7 +221,7 @@ export class WebSocketService {
 
       this.ws.onopen = this.handleOpen.bind(this)
       this.ws.onmessage = (event: MessageEvent) => {
-        this.handleMessage(event).catch(error => {
+        this.handleMessage(event).catch((error) => {
           loggers.websocket.error('处理消息时发生错误:', error)
         })
       }
@@ -271,6 +278,9 @@ export class WebSocketService {
   disconnect(): void {
     this.manualDisconnect = true
     this.clearTimers()
+
+    // 清除所有 ACK 待确认定时器
+    this.clearAckTimers()
 
     // 停止心跳管理器
     this.heartbeatManager.stop()
@@ -334,9 +344,7 @@ export class WebSocketService {
    *
    * @param message 客户端消息对象或已序列化的字符串
    */
-  private async sendMessageDirect(
-    message: WebSocketClientMessage | string
-  ): Promise<void> {
+  private async sendMessageDirect(message: WebSocketClientMessage | string): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       const errorMsg = 'WebSocket 连接未建立'
       loggers.websocket.error(errorMsg, {
@@ -349,12 +357,12 @@ export class WebSocketService {
 
     try {
       const messageStr = typeof message === 'string' ? message : JSON.stringify(message)
-      const messageType = typeof message === 'string' ? 'unknown' : (message.type || 'unknown')
+      const messageType = typeof message === 'string' ? 'unknown' : message.type || 'unknown'
 
       this.monitor.recordMessageSent(messageType, messageStr.length)
       loggers.websocket.debug(
         '发送消息 |',
-        messageStr.substring(0, 200) + (messageStr.length > 200 ? '...' : '')
+        messageStr.substring(0, 200) + (messageStr.length > 200 ? '...' : ''),
       )
       this.ws.send(messageStr)
     } catch (error) {
@@ -395,7 +403,7 @@ export class WebSocketService {
     options?: {
       messageId?: string
       timestamp?: string
-    }
+    },
   ): Promise<boolean> {
     if (!this.threadId) {
       loggers.websocket.error('无法发送消息：缺少线程 ID')
@@ -413,7 +421,7 @@ export class WebSocketService {
           onSent: () => {
             loggers.messageQueue.debug('标准消息发送成功:', type)
           },
-          onFailed: error => {
+          onFailed: (error) => {
             loggers.messageQueue.error('标准消息发送失败:', type, error)
           },
         })
@@ -440,7 +448,7 @@ export class WebSocketService {
           onSent: () => {
             loggers.messageQueue.debug('队列消息发送成功:', type)
           },
-          onFailed: error => {
+          onFailed: (error) => {
             loggers.messageQueue.error('队列消息发送失败:', type, error)
           },
         })
@@ -460,7 +468,7 @@ export class WebSocketService {
    */
   private async sendMessage(
     message: WebSocketClientMessage,
-    priority: MessagePriorityType = MessagePriority.NORMAL
+    priority: MessagePriorityType = MessagePriority.NORMAL,
   ): Promise<boolean> {
     try {
       await this.messageQueue.enqueue(JSON.stringify(message), {
@@ -468,7 +476,7 @@ export class WebSocketService {
         onSent: () => {
           loggers.messageQueue.debug('消息发送成功:', message.type)
         },
-        onFailed: error => {
+        onFailed: (error) => {
           loggers.messageQueue.error('消息发送失败:', message.type, error)
         },
       })
@@ -496,7 +504,7 @@ export class WebSocketService {
       name: string
     }>,
     enableThinking?: boolean,
-    parentRecordId?: string
+    parentRecordId?: string,
   ): Promise<{ messageId: string } | null> {
     const messageId = crypto.randomUUID()
 
@@ -517,7 +525,7 @@ export class WebSocketService {
         ...(enableThinking !== undefined && { enable_thinking: enableThinking }),
         ...(parentRecordId && { parent_record_id: parentRecordId }),
       },
-      { messageId }
+      { messageId },
     )
 
     return success ? { messageId } : null
@@ -534,7 +542,7 @@ export class WebSocketService {
   async sendApproval(
     decision: ApprovalDecisionType,
     reason?: string,
-    modifications?: Record<string, unknown>
+    modifications?: Record<string, unknown>,
   ): Promise<boolean> {
     const message: ApprovalMessage = {
       type: WS_CLIENT_MESSAGES.APPROVAL,
@@ -573,7 +581,7 @@ export class WebSocketService {
       const heartbeatMessage = createStandardMessage<HeartbeatMessage>(
         MessageTypes.HEARTBEAT,
         this.threadId,
-        { client_timestamp: new Date().toISOString() }
+        { client_timestamp: new Date().toISOString() },
       )
       await this.sendMessageDirect(heartbeatMessage as unknown as WebSocketClientMessage)
       return true
@@ -623,10 +631,7 @@ export class WebSocketService {
    * @param input 用户输入内容
    * @returns 是否发送成功
    */
-  async sendUserInputResponse(
-    executionId: string,
-    input: string
-  ): Promise<boolean> {
+  async sendUserInputResponse(executionId: string, input: string): Promise<boolean> {
     const message: UserInputResponseMessage = {
       type: WS_CLIENT_MESSAGES.USER_INPUT_RESPONSE,
       execution_id: executionId,
@@ -636,9 +641,44 @@ export class WebSocketService {
     loggers.websocket.info(
       '发送用户输入响应:',
       executionId,
-      input.substring(0, 50) + (input.length > 50 ? '...' : '')
+      input.substring(0, 50) + (input.length > 50 ? '...' : ''),
     )
     return await this.sendMessage(message, MessagePriority.HIGH)
+  }
+
+  /**
+   * 发送交互响应消息（响应 human_interaction 工具的请求）
+   *
+   * @param params 响应参数
+   * @returns 是否发送成功
+   */
+  async sendInteractionResponse(params: {
+    requestId: string
+    responseType: 'approved' | 'denied' | 'answered'
+    selectedOption?: string
+    answers?: string[]
+    feedback?: string
+  }): Promise<boolean> {
+    const message = {
+      type: 'interaction_response',
+      data: {
+        request_id: params.requestId,
+        response_type: params.responseType,
+        selected_option: params.selectedOption,
+        answers: params.answers,
+        feedback: params.feedback,
+      },
+    }
+
+    loggers.websocket.info(
+      '发送交互响应:',
+      params.requestId,
+      params.responseType,
+    )
+    return await this.sendMessage(
+      message as unknown as WebSocketClientMessage,
+      MessagePriority.HIGH,
+    )
   }
 
   /**
@@ -657,9 +697,16 @@ export class WebSocketService {
 
   /**
    * 处理连接建立
+   *
+   * 连接建立后：
+   * 1. 更新连接状态
+   * 2. 恢复消息队列
+   * 3. 启动心跳
+   * 4. 如果是重连，请求遗漏消息（恢复状态）
    */
   private handleOpen(): void {
-    loggers.websocket.info('连接已建立')
+    const wasReconnecting = this.reconnectAttempts > 0
+    loggers.websocket.info('连接已建立', wasReconnecting ? '(重连)' : '(首次)')
     this.status = WebSocketStatus.CONNECTED
     this.reconnectAttempts = 0
 
@@ -672,6 +719,20 @@ export class WebSocketService {
 
     // 启动心跳
     this.startHeartbeat()
+
+    // 重连后请求遗漏的消息
+    if (wasReconnecting && this.lastReceivedRequestId) {
+      loggers.websocket.info(
+        '重连恢复：请求遗漏消息, last_request_id:',
+        this.lastReceivedRequestId,
+      )
+      // 稍微延迟请求，等待 connection_confirmation 处理完成
+      setTimeout(() => {
+        this.requestMissedMessages().catch((err) => {
+          loggers.websocket.error('重连后请求遗漏消息失败:', err)
+        })
+      }, 500)
+    }
 
     // 触发连接事件
     this.emit(INTERNAL_EVENTS.CONNECT, {})
@@ -707,14 +768,35 @@ export class WebSocketService {
 
       const { type, ...data } = rawMessage as Record<string, unknown>
 
+      // 跟踪最后收到的 request_id（用于重连后请求遗漏消息）
+      const requestId = rawMessage.request_id as string | undefined
+      if (requestId) {
+        this.lastReceivedRequestId = requestId
+      }
+
       // 记录消息接收监控数据（心跳消息除外）
       if (type !== WS_SERVER_EVENTS.HEARTBEAT) {
         this.monitor.recordMessageReceived(type, messageData.length)
         loggers.websocket.debug(`收到消息: ${type}`, data)
       }
 
+      // 如果消息要求 ACK 确认，自动发送 ACK
+      if (rawMessage.requires_ack === true && requestId) {
+        this.sendAck(requestId).catch((err) => {
+          loggers.websocket.error('发送 ACK 失败:', err)
+        })
+      }
+
       // 统一的消息路由
       switch (type) {
+        case WS_SERVER_EVENTS.CONNECTION_CONFIRMATION:
+          // 存储协商后的协议版本
+          if (data.version) {
+            this.negotiatedVersion = data.version as string
+          }
+          this.emit(WS_SERVER_EVENTS.CONNECTION_CONFIRMATION, data)
+          break
+
         case WS_SERVER_EVENTS.NEW_MESSAGE:
           this.emit(WS_SERVER_EVENTS.NEW_MESSAGE, data)
           break
@@ -741,6 +823,14 @@ export class WebSocketService {
 
         case WS_SERVER_EVENTS.THINKING_END:
           this.emit(WS_SERVER_EVENTS.THINKING_END, data)
+          break
+
+        case WS_SERVER_EVENTS.TOOL_START:
+          this.emit(WS_SERVER_EVENTS.TOOL_START, data)
+          break
+
+        case WS_SERVER_EVENTS.TOOL_RESULT:
+          this.emit(WS_SERVER_EVENTS.TOOL_RESULT, data)
           break
 
         case WS_SERVER_EVENTS.EXECUTION_START:
@@ -821,6 +911,10 @@ export class WebSocketService {
 
         case WS_SERVER_EVENTS.ITERATION_END:
           this.emit(WS_SERVER_EVENTS.ITERATION_END, data)
+          break
+
+        case WS_SERVER_EVENTS.MISSED_MESSAGES:
+          this.handleMissedMessages(data)
           break
 
         default:
@@ -929,9 +1023,7 @@ export class WebSocketService {
    * @param delay 重连延迟（毫秒）
    */
   private handleReconnectWithDelay(delay: number): void {
-    loggers.reconnect.info(
-      `将在 ${delay}ms 后进行第 ${this.reconnectAttempts + 1} 次重连`
-    )
+    loggers.reconnect.info(`将在 ${delay}ms 后进行第 ${this.reconnectAttempts + 1} 次重连`)
 
     this.reconnectAttempts++
 
@@ -995,7 +1087,7 @@ export class WebSocketService {
     const delay = Math.min(
       WS_RECONNECT_CONFIG.INITIAL_DELAY *
         Math.pow(WS_RECONNECT_CONFIG.BACKOFF_FACTOR, this.reconnectAttempts),
-      WS_RECONNECT_CONFIG.MAX_DELAY
+      WS_RECONNECT_CONFIG.MAX_DELAY,
     )
 
     this.handleReconnectWithDelay(delay)
@@ -1046,6 +1138,16 @@ export class WebSocketService {
   }
 
   /**
+   * 清除所有 ACK 待确认定时器
+   */
+  private clearAckTimers(): void {
+    for (const [, pending] of this.pendingAckTimers) {
+      clearTimeout(pending.timer)
+    }
+    this.pendingAckTimers.clear()
+  }
+
+  /**
    * 清除重连定时器
    */
   private clearReconnectTimer(): void {
@@ -1083,7 +1185,7 @@ export class WebSocketService {
   private emit(event: string, data: unknown): void {
     const handlers = this.eventHandlers.get(event)
     if (handlers) {
-      handlers.forEach(handler => {
+      handlers.forEach((handler) => {
         try {
           handler(data)
         } catch (error) {
@@ -1137,6 +1239,125 @@ export class WebSocketService {
   async clearQueue(): Promise<void> {
     await this.messageQueue.clear()
     loggers.messageQueue.info('消息队列已清空')
+  }
+
+  // ============================================
+  // ACK 确认机制
+  // ============================================
+
+  /**
+   * 发送 ACK 确认消息
+   *
+   * 当收到 requires_ack=true 的服务端消息时，
+   * 自动发送 ACK 以确认前端已收到该消息。
+   *
+   * @param requestId 被确认的消息 request_id
+   */
+  async sendAck(requestId: string): Promise<boolean> {
+    const ackMessage: MessageAckMessage = {
+      type: WS_CLIENT_MESSAGES.MESSAGE_ACK,
+      request_id: requestId,
+      received_at: new Date().toISOString(),
+    }
+
+    try {
+      await this.sendMessageDirect(
+        ackMessage as unknown as WebSocketClientMessage,
+      )
+      // 清除该消息的 ACK 重试定时器（如果存在）
+      const pending = this.pendingAckTimers.get(requestId)
+      if (pending) {
+        clearTimeout(pending.timer)
+        this.pendingAckTimers.delete(requestId)
+      }
+      return true
+    } catch (error) {
+      loggers.websocket.error('ACK 发送失败:', error)
+      return false
+    }
+  }
+
+  // ============================================
+  // 重连优化：遗漏消息恢复
+  // ============================================
+
+  /**
+   * 请求遗漏消息
+   *
+   * 重连后向前端发送 request_missed 消息，
+   * 携带最后收到的 request_id，请求服务端
+   * 补发断线期间遗漏的消息。
+   */
+  async requestMissedMessages(): Promise<boolean> {
+    const requestMessage: RequestMissedMessage = {
+      type: WS_CLIENT_MESSAGES.REQUEST_MISSED,
+      last_received_request_id: this.lastReceivedRequestId,
+    }
+
+    try {
+      await this.sendMessageDirect(
+        requestMessage as unknown as WebSocketClientMessage,
+      )
+      loggers.websocket.info(
+        '已请求遗漏消息, last_request_id:',
+        this.lastReceivedRequestId,
+      )
+      return true
+    } catch (error) {
+      loggers.websocket.error('请求遗漏消息失败:', error)
+      return false
+    }
+  }
+
+  /**
+   * 处理遗漏消息响应
+   *
+   * 服务端返回 missed_messages 事件后，
+   * 按顺序重放遗漏的消息。
+   *
+   * @param data missed_messages 事件数据
+   */
+  private handleMissedMessages(data: unknown): void {
+    const missedData = data as {
+      messages: Array<Record<string, unknown>>
+      total: number
+      has_more: boolean
+    }
+
+    loggers.websocket.info(
+      `收到遗漏消息: ${missedData.total} 条`,
+    )
+
+    // 重放遗漏的消息
+    for (const msg of missedData.messages) {
+      const msgType = msg.type as string
+      if (msgType && msg.type !== WS_SERVER_EVENTS.HEARTBEAT) {
+        this.emit(msgType, msg)
+      }
+    }
+
+    // 更新最后收到的 request_id
+    if (missedData.messages.length > 0) {
+      const lastMsg = missedData.messages[missedData.messages.length - 1]
+      const lastRid = lastMsg.request_id as string | undefined
+      if (lastRid) {
+        this.lastReceivedRequestId = lastRid
+      }
+    }
+
+    // 如果还有更多消息，继续请求
+    if (missedData.has_more) {
+      this.requestMissedMessages().catch((err) => {
+        loggers.websocket.error('继续请求遗漏消息失败:', err)
+      })
+    }
+  }
+
+  /**
+   * 获取协商后的协议版本
+   */
+  getNegotiatedVersion(): string {
+    return this.negotiatedVersion
   }
 
   // ============================================

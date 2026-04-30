@@ -24,18 +24,9 @@ export interface AgentIconProps {
 /**
  * Agent 图标组件
  */
-export function AgentIcon({
-  type = 'system',
-  size = 'md',
-  icon,
-  className,
-}: AgentIconProps) {
+export function AgentIcon({ type = 'system', size = 'md', icon, className }: AgentIconProps) {
   if (icon) {
-    return (
-      <span className={cn('flex items-center justify-center', className)}>
-        {icon}
-      </span>
-    )
+    return <span className={cn('flex items-center justify-center', className)}>{icon}</span>
   }
 
   const config = getAgentIconConfig(type)
@@ -52,7 +43,7 @@ export function AgentIcon({
         'flex items-center justify-center rounded-lg font-bold text-white',
         sizeClasses[size],
         config.gradient,
-        className
+        className,
       )}
       title={config.label}
     >
@@ -65,10 +56,7 @@ export function AgentIcon({
  * 根据 Agent 类型获取图标配置
  */
 function getAgentIconConfig(type?: string) {
-  const configs: Record<
-    string,
-    { icon: string; label: string; gradient: string }
-  > = {
+  const configs: Record<string, { icon: string; label: string; gradient: string }> = {
     system: {
       icon: '\u2728',
       label: '系统助手',
@@ -118,11 +106,7 @@ export interface AgentSmallIconProps {
   className?: string
 }
 
-export function AgentSmallIcon({
-  type,
-  icon,
-  className = '',
-}: AgentSmallIconProps) {
+export function AgentSmallIcon({ type, icon, className = '' }: AgentSmallIconProps) {
   if (icon) {
     return <span className={className || ''}>{icon}</span>
   }

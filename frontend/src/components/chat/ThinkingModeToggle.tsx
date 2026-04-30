@@ -5,11 +5,11 @@
  * 支持两种思考模式类型：参数切换型和模型切换型
  */
 
-import { cn } from '@/lib/utils'
 import { AlertCircle, Brain, Loader2 } from 'lucide-react'
 import { useState } from 'react'
-import type { ThinkingModeState } from '@/types/thinkingMode'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import type { ThinkingModeState } from '@/types/thinkingMode'
 
 export interface ThinkingModeToggleProps {
   /** 当前模型名称 */
@@ -92,11 +92,11 @@ export const ThinkingModeToggle = ({
       variant={getButtonVariant()}
       size="sm"
       className={cn(
-        'h-8 px-3 gap-2 transition-all duration-200',
+        'h-8 gap-2 px-3 transition-all duration-200',
         'hover:shadow-sm',
         thinkingMode.enabled && 'bg-primary hover:bg-primary/90',
-        isInvalidModel && 'opacity-50 cursor-not-allowed',
-        className
+        isInvalidModel && 'cursor-not-allowed opacity-50',
+        className,
       )}
       onClick={handleToggle}
       disabled={disabled || isProcessing || isInvalidModel}
@@ -104,16 +104,11 @@ export const ThinkingModeToggle = ({
       aria-label={getTitle()}
     >
       {isProcessing ? (
-        <Loader2 className="w-4 h-4 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : thinkingMode.error ? (
-        <AlertCircle className="w-4 h-4" />
+        <AlertCircle className="h-4 w-4" />
       ) : (
-        <Brain
-          className={cn(
-            'w-4 h-4 transition-colors duration-200',
-            getIconColor()
-          )}
-        />
+        <Brain className={cn('h-4 w-4 transition-colors duration-200', getIconColor())} />
       )}
 
       <span className="text-sm font-medium">

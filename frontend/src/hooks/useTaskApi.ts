@@ -55,11 +55,7 @@ interface ApiRequestState<T> {
  * @param params 查询参数
  * @returns 长期任务列表和状态
  */
-export function useProjects(params?: {
-  page?: number
-  limit?: number
-  status?: ProjectStatus
-}) {
+export function useProjects(params?: { page?: number; limit?: number; status?: ProjectStatus }) {
   const [state, setState] = useState<ApiRequestState<GetProjectsResponse>>({
     data: null,
     isLoading: true,
@@ -79,14 +75,14 @@ export function useProjects(params?: {
    * 获取长期任务列表
    */
   const fetch = useCallback(async () => {
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchProjects(paramsRef.current)
       setState({ data, isLoading: false, error: null, isMutating: false })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取长期任务列表失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取长期任务列表失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [])
 
@@ -127,7 +123,7 @@ export function useProject(projectId: string) {
    */
   const fetch = useCallback(async () => {
     if (!projectId) {
-      setState(prev => ({
+      setState((prev) => ({
         ...prev,
         isLoading: false,
         error: '项目 ID 不能为空',
@@ -135,14 +131,14 @@ export function useProject(projectId: string) {
       return
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchProject(projectId)
       setState({ data, isLoading: false, error: null, isMutating: false })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取长期任务详情失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取长期任务详情失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [projectId])
 
@@ -182,20 +178,17 @@ export function useToggleProjectAutoExecute() {
       setError(null)
 
       try {
-        const project = await taskApi.toggleProjectAutoExecute(
-          projectId,
-          enabled
-        )
+        const project = await taskApi.toggleProjectAutoExecute(projectId, enabled)
         setIsMutating(false)
         return project
-      } catch (error: any) {
-        const errorMessage = error.message || '切换自动执行失败'
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : '切换自动执行失败'
         setError(errorMessage)
         setIsMutating(false)
         throw new Error(errorMessage)
       }
     },
-    []
+    [],
   )
 
   return {
@@ -217,24 +210,21 @@ export function usePauseProject() {
   /**
    * 暂停长期任务
    */
-  const pauseProject = useCallback(
-    async (projectId: string): Promise<Project> => {
-      setIsMutating(true)
-      setError(null)
+  const pauseProject = useCallback(async (projectId: string): Promise<Project> => {
+    setIsMutating(true)
+    setError(null)
 
-      try {
-        const project = await taskApi.pauseProject(projectId)
-        setIsMutating(false)
-        return project
-      } catch (error: any) {
-        const errorMessage = error.message || '暂停长期任务失败'
-        setError(errorMessage)
-        setIsMutating(false)
-        throw new Error(errorMessage)
-      }
-    },
-    []
-  )
+    try {
+      const project = await taskApi.pauseProject(projectId)
+      setIsMutating(false)
+      return project
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '暂停长期任务失败'
+      setError(errorMessage)
+      setIsMutating(false)
+      throw new Error(errorMessage)
+    }
+  }, [])
 
   return {
     pauseProject,
@@ -255,24 +245,21 @@ export function useResumeProject() {
   /**
    * 恢复长期任务
    */
-  const resumeProject = useCallback(
-    async (projectId: string): Promise<Project> => {
-      setIsMutating(true)
-      setError(null)
+  const resumeProject = useCallback(async (projectId: string): Promise<Project> => {
+    setIsMutating(true)
+    setError(null)
 
-      try {
-        const project = await taskApi.resumeProject(projectId)
-        setIsMutating(false)
-        return project
-      } catch (error: any) {
-        const errorMessage = error.message || '恢复长期任务失败'
-        setError(errorMessage)
-        setIsMutating(false)
-        throw new Error(errorMessage)
-      }
-    },
-    []
-  )
+    try {
+      const project = await taskApi.resumeProject(projectId)
+      setIsMutating(false)
+      return project
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '恢复长期任务失败'
+      setError(errorMessage)
+      setIsMutating(false)
+      throw new Error(errorMessage)
+    }
+  }, [])
 
   return {
     resumeProject,
@@ -293,23 +280,20 @@ export function useDeleteProject() {
   /**
    * 删除长期任务
    */
-  const deleteProject = useCallback(
-    async (projectId: string): Promise<void> => {
-      setIsMutating(true)
-      setError(null)
+  const deleteProject = useCallback(async (projectId: string): Promise<void> => {
+    setIsMutating(true)
+    setError(null)
 
-      try {
-        await taskApi.deleteProject(projectId)
-        setIsMutating(false)
-      } catch (error: any) {
-        const errorMessage = error.message || '删除长期任务失败'
-        setError(errorMessage)
-        setIsMutating(false)
-        throw new Error(errorMessage)
-      }
-    },
-    []
-  )
+    try {
+      await taskApi.deleteProject(projectId)
+      setIsMutating(false)
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '删除长期任务失败'
+      setError(errorMessage)
+      setIsMutating(false)
+      throw new Error(errorMessage)
+    }
+  }, [])
 
   return {
     deleteProject,
@@ -345,14 +329,14 @@ export function useTaskPhase(taskId: string, refreshInterval: number = 5000) {
       return
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchTaskPhase(taskId)
-      setState(prev => ({ ...prev, data, isLoading: false, error: null }))
-    } catch (error: any) {
-      const errorMessage = error.message || '获取任务阶段状态失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+      setState((prev) => ({ ...prev, data, isLoading: false, error: null }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取任务阶段状态失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [taskId])
 
@@ -402,10 +386,7 @@ export function useCompletePreparePhase() {
    * 完成准备阶段
    */
   const completePreparePhase = useCallback(
-    async (
-      taskId: string,
-      output?: any
-    ): Promise<{ taskId: string; currentPhase: TaskPhase }> => {
+    async (taskId: string, output?: any): Promise<{ taskId: string; currentPhase: TaskPhase }> => {
       setIsMutating(true)
       setError(null)
 
@@ -413,14 +394,14 @@ export function useCompletePreparePhase() {
         const result = await taskApi.completePreparePhase(taskId, output)
         setIsMutating(false)
         return result
-      } catch (error: any) {
-        const errorMessage = error.message || '完成准备阶段失败'
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : '完成准备阶段失败'
         setError(errorMessage)
         setIsMutating(false)
         throw new Error(errorMessage)
       }
     },
-    []
+    [],
   )
 
   return {
@@ -443,10 +424,7 @@ export function useCompleteExecutePhase() {
    * 完成执行阶段
    */
   const completeExecutePhase = useCallback(
-    async (
-      taskId: string,
-      output?: any
-    ): Promise<{ taskId: string; currentPhase: TaskPhase }> => {
+    async (taskId: string, output?: any): Promise<{ taskId: string; currentPhase: TaskPhase }> => {
       setIsMutating(true)
       setError(null)
 
@@ -454,14 +432,14 @@ export function useCompleteExecutePhase() {
         const result = await taskApi.completeExecutePhase(taskId, output)
         setIsMutating(false)
         return result
-      } catch (error: any) {
-        const errorMessage = error.message || '完成执行阶段失败'
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : '完成执行阶段失败'
         setError(errorMessage)
         setIsMutating(false)
         throw new Error(errorMessage)
       }
     },
-    []
+    [],
   )
 
   return {
@@ -494,14 +472,14 @@ export function usePhaseOutput(taskId: string, phase: TaskPhase) {
       return
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchPhaseOutput(taskId, phase)
       setState({ data, isLoading: false, error: null, isMutating: false })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取阶段产物失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取阶段产物失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [taskId, phase])
 
@@ -550,14 +528,14 @@ export function useTaskACs(taskId: string, refreshInterval: number = 3000) {
       return
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchTaskACs(taskId)
-      setState(prev => ({ ...prev, data, isLoading: false, error: null }))
-    } catch (error: any) {
-      const errorMessage = error.message || '获取验收标准列表失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+      setState((prev) => ({ ...prev, data, isLoading: false, error: null }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取验收标准列表失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [taskId])
 
@@ -607,11 +585,7 @@ export function useEvaluateAC() {
    * 评估单个验收标准
    */
   const evaluateAC = useCallback(
-    async (
-      taskId: string,
-      acId: string,
-      evidence?: any
-    ): Promise<AcceptanceCriterion> => {
+    async (taskId: string, acId: string, evidence?: any): Promise<AcceptanceCriterion> => {
       setIsMutating(true)
       setError(null)
 
@@ -619,14 +593,14 @@ export function useEvaluateAC() {
         const result = await taskApi.evaluateAC(taskId, acId, evidence)
         setIsMutating(false)
         return result
-      } catch (error: any) {
-        const errorMessage = error.message || '评估验收标准失败'
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : '评估验收标准失败'
         setError(errorMessage)
         setIsMutating(false)
         throw new Error(errorMessage)
       }
     },
-    []
+    [],
   )
 
   return {
@@ -648,24 +622,21 @@ export function useEvaluateAllACs() {
   /**
    * 评估所有验收标准
    */
-  const evaluateAllACs = useCallback(
-    async (taskId: string): Promise<AcceptanceCriterion[]> => {
-      setIsMutating(true)
-      setError(null)
+  const evaluateAllACs = useCallback(async (taskId: string): Promise<AcceptanceCriterion[]> => {
+    setIsMutating(true)
+    setError(null)
 
-      try {
-        const results = await taskApi.evaluateAllACs(taskId)
-        setIsMutating(false)
-        return results
-      } catch (error: any) {
-        const errorMessage = error.message || '评估所有验收标准失败'
-        setError(errorMessage)
-        setIsMutating(false)
-        throw new Error(errorMessage)
-      }
-    },
-    []
-  )
+    try {
+      const results = await taskApi.evaluateAllACs(taskId)
+      setIsMutating(false)
+      return results
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '评估所有验收标准失败'
+      setError(errorMessage)
+      setIsMutating(false)
+      throw new Error(errorMessage)
+    }
+  }, [])
 
   return {
     evaluateAllACs,
@@ -697,14 +668,14 @@ export function useACResult(taskId: string, acId: string) {
       return
     }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }))
+    setState((prev) => ({ ...prev, isLoading: true, error: null }))
 
     try {
       const data = await taskApi.fetchACResult(taskId, acId)
       setState({ data, isLoading: false, error: null, isMutating: false })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取验收标准评估结果失败'
-      setState(prev => ({ ...prev, isLoading: false, error: errorMessage }))
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : '获取验收标准评估结果失败'
+      setState((prev) => ({ ...prev, isLoading: false, error: errorMessage }))
     }
   }, [taskId, acId])
 

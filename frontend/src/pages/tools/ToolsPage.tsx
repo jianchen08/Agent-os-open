@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { Wrench } from 'lucide-react'
 import { getTools } from '@/services/api/tools'
 import type { ToolResponse, GetToolsParams } from '@/services/api/tools'
 
@@ -41,8 +42,9 @@ export function ToolsPage() {
       const res = await getTools(params)
       setTools(res.items)
       setTotal(res.total)
-    } catch (err: any) {
-      setError(err.message || '获取工具列表失败')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '获取工具列表失败'
+      setError(message)
     } finally {
       setIsLoading(false)
     }
@@ -69,28 +71,36 @@ export function ToolsPage() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">工具管理</h1>
-        <span className="ml-auto text-xs text-muted-foreground">共 {total} 个工具</span>
+        <span className="text-muted-foreground ml-auto text-xs">共 {total} 个工具</span>
       </header>
-      <main className="flex-1 overflow-y-auto p-6 space-y-4">
+      <main className="flex-1 space-y-4 overflow-y-auto p-6">
         {/* 搜索和过滤 */}
         <div className="flex flex-wrap gap-3">
           <input
             type="text"
             placeholder="搜索工具..."
             value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1) }}
-            className="px-3 py-1.5 text-sm border rounded-lg bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+            onChange={(e) => {
+              setSearch(e.target.value)
+              setPage(1)
+            }}
+            aria-label="搜索工具"
+            className="bg-background focus:ring-primary rounded-lg border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none"
           />
           <select
             value={filterCategory}
-            onChange={e => { setFilterCategory(e.target.value); setPage(1) }}
-            className="px-3 py-1.5 text-sm border rounded-lg bg-background"
+            onChange={(e) => {
+              setFilterCategory(e.target.value)
+              setPage(1)
+            }}
+            aria-label="按分类筛选"
+            className="bg-background rounded-lg border px-3 py-1.5 text-sm"
           >
             <option value="">全部分类</option>
             <option value="file">文件</option>
@@ -104,8 +114,12 @@ export function ToolsPage() {
           </select>
           <select
             value={filterSource}
-            onChange={e => { setFilterSource(e.target.value); setPage(1) }}
-            className="px-3 py-1.5 text-sm border rounded-lg bg-background"
+            onChange={(e) => {
+              setFilterSource(e.target.value)
+              setPage(1)
+            }}
+            aria-label="按来源筛选"
+            className="bg-background rounded-lg border px-3 py-1.5 text-sm"
           >
             <option value="">全部来源</option>
             <option value="builtin">内置</option>
@@ -115,67 +129,112 @@ export function ToolsPage() {
           </select>
         </div>
 
-        {/* 加载状态 */}
+        {/* 加载状态 - 骨架屏 */}
         {isLoading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="ml-2 text-sm text-muted-foreground">加载中...</span>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="animate-pulse rounded-lg border p-4">
+                <div className="mb-2 flex items-start justify-between">
+                  <div className="bg-muted h-4 w-2/3 rounded" />
+                  <div className="bg-muted h-5 w-12 rounded-full" />
+                </div>
+                <div className="bg-muted mb-2 h-3 w-full rounded" />
+                <div className="bg-muted h-3 w-4/5 rounded" />
+                <div className="mt-2 flex gap-2">
+                  <div className="bg-muted h-5 w-10 rounded" />
+                  <div className="bg-muted h-5 w-10 rounded" />
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
         {/* 错误状态 */}
         {error && (
-          <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">
-            {error}
-          </div>
+          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
         )}
 
         {/* 工具列表 */}
         {!isLoading && !error && tools.length === 0 && (
-          <div className="text-center py-12 text-muted-foreground">暂无数据</div>
+          <div className="flex flex-col items-center justify-center py-16">
+            <Wrench className="text-muted-foreground/40 mb-3 h-12 w-12" />
+            <p className="text-muted-foreground text-sm">
+              {search || filterCategory || filterSource ? '没有找到匹配的工具' : '暂无工具'}
+            </p>
+            {!search && !filterCategory && !filterSource && (
+              <p className="text-muted-foreground/60 mt-1 text-xs">
+                请在 config/tools/ 目录下添加工具配置文件
+              </p>
+            )}
+          </div>
         )}
 
         {!isLoading && !error && tools.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {tools.map(tool => (
+          <div
+            className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
+            aria-live="polite"
+            aria-label="工具列表"
+          >
+            {tools.map((tool) => (
               <div
                 key={tool.name}
-                className="border rounded-lg p-4 cursor-pointer hover:bg-accent/30 transition-colors"
+                className="hover:bg-accent/30 cursor-pointer rounded-lg border p-4 transition-colors"
                 onClick={() => setExpandedId(expandedId === tool.name ? null : tool.name)}
               >
-                <div className="flex items-start justify-between mb-2">
-                  <h3 className="text-sm font-semibold truncate flex-1 mr-2">{tool.name}</h3>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${getStatusStyle(tool.status)}`}>
+                <div className="mb-2 flex items-start justify-between">
+                  <h3 className="mr-2 flex-1 truncate text-sm font-semibold">{tool.name}</h3>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs ${getStatusStyle(tool.status)}`}
+                  >
                     {tool.status}
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{tool.description}</p>
-                <div className="flex gap-2 text-xs text-muted-foreground">
-                  {tool.category && <span className="px-1.5 py-0.5 bg-accent/30 rounded">{tool.category}</span>}
-                  <span className="px-1.5 py-0.5 bg-accent/30 rounded">{tool.source}</span>
+                <p className="text-muted-foreground mb-2 line-clamp-2 text-xs">
+                  {tool.description}
+                </p>
+                <div className="text-muted-foreground flex gap-2 text-xs">
+                  {tool.category && (
+                    <span className="bg-accent/30 rounded px-1.5 py-0.5">{tool.category}</span>
+                  )}
+                  <span className="bg-accent/30 rounded px-1.5 py-0.5">{tool.source}</span>
                 </div>
 
                 {/* 展开详情 */}
                 {expandedId === tool.name && (
-                  <div className="mt-3 pt-3 border-t text-xs space-y-2">
+                  <div className="mt-3 space-y-2 border-t pt-3 text-xs">
                     {tool.when_to_use && tool.when_to_use.length > 0 && (
                       <div>
                         <span className="text-muted-foreground">适用场景：</span>
-                        <ul className="list-disc list-inside mt-1">
-                          {tool.when_to_use.map((w, i) => <li key={i}>{w}</li>)}
+                        <ul className="mt-1 list-inside list-disc">
+                          {tool.when_to_use.map((w, i) => (
+                            <li key={i}>{w}</li>
+                          ))}
                         </ul>
                       </div>
                     )}
                     {tool.tags && tool.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {tool.tags.map(tag => (
-                          <span key={tag} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-xs">{tag}</span>
+                        {tool.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="bg-primary/10 text-primary rounded px-1.5 py-0.5 text-xs"
+                          >
+                            {tag}
+                          </span>
                         ))}
                       </div>
                     )}
-                    {tool.version && <div><span className="text-muted-foreground">版本：</span>{tool.version}</div>}
+                    {tool.version && (
+                      <div>
+                        <span className="text-muted-foreground">版本：</span>
+                        {tool.version}
+                      </div>
+                    )}
                     {tool.requires_approval !== undefined && (
-                      <div><span className="text-muted-foreground">需要审批：</span>{tool.requires_approval ? '是' : '否'}</div>
+                      <div>
+                        <span className="text-muted-foreground">需要审批：</span>
+                        {tool.requires_approval ? '是' : '否'}
+                      </div>
                     )}
                   </div>
                 )}
@@ -188,19 +247,21 @@ export function ToolsPage() {
         {totalPages > 1 && (
           <div className="flex items-center justify-center gap-2 pt-4">
             <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page <= 1}
-              className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-50 hover:bg-accent/50"
+              className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+              aria-label="上一页"
             >
               上一页
             </button>
-            <span className="text-sm text-muted-foreground">
+            <span className="text-muted-foreground text-sm">
               {page} / {totalPages}
             </span>
             <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={page >= totalPages}
-              className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-50 hover:bg-accent/50"
+              className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+              aria-label="下一页"
             >
               下一页
             </button>

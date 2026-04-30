@@ -27,16 +27,16 @@ export const deepSpaceTheme: ThemeConfig = {
     },
 
     text: {
-      primary: '#f8fafc',      // 保持高对比度
-      secondary: '#22d3ee',    // 从 #00f0ff 调暗，提高可读性
-      muted: '#a5f3fc',        // 从 #94a3b8 提亮，对比度 >= 4.5:1
-      disabled: '#64748b',     // 从 #475569 提亮，对比度 >= 3:1
+      primary: '#f8fafc', // 保持高对比度
+      secondary: '#22d3ee', // 从 #00f0ff 调暗，提高可读性
+      muted: '#a5f3fc', // 从 #94a3b8 提亮，对比度 >= 4.5:1
+      disabled: '#64748b', // 从 #475569 提亮，对比度 >= 3:1
     },
 
     border: {
-      default: 'rgba(0, 240, 255, 0.25)',  // 从 0.2 增加
-      hover: 'rgba(0, 240, 255, 0.45)',    // 从 0.4 增加
-      active: 'rgba(0, 240, 255, 0.65)',   // 从 0.6 增加
+      default: 'rgba(0, 240, 255, 0.25)', // 从 0.2 增加
+      hover: 'rgba(0, 240, 255, 0.45)', // 从 0.4 增加
+      active: 'rgba(0, 240, 255, 0.65)', // 从 0.6 增加
     },
 
     status: {

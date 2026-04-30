@@ -4,9 +4,9 @@
  * 用于查询单个或多个执行记录，支持缓存和批量查询
  */
 
-import { apiClient } from '@/services/api'
-import type { ActivityData } from '@/types/activity'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ActivityData } from '@/types/activity'
+import { apiClient } from '@/services/api'
 
 /**
  * 执行记录数据（后端返回格式）
@@ -39,9 +39,7 @@ const recordCache = new Map<string, ExecutionRecord>()
 /**
  * 将执行记录转换为活动卡片数据
  */
-export function executionRecordToActivity(
-  record: ExecutionRecord
-): ActivityData {
+export function executionRecordToActivity(record: ExecutionRecord): ActivityData {
   // 构建详情区块
   const details: ActivityData['details'] = []
 
@@ -116,7 +114,8 @@ export function executionRecordToActivity(
   return {
     type: typeMap[record.record_type] || 'custom',
     id: record.id,
-    title: record.record_type === 'agent_thinking' ? '思考过程' : (record.executor_name || '执行记录'),
+    title:
+      record.record_type === 'agent_thinking' ? '思考过程' : record.executor_name || '执行记录',
     status: statusMap[record.status] || 'pending',
     durationMs: record.duration_ms,
     timestamp: record.started_at,
@@ -128,18 +127,14 @@ export function executionRecordToActivity(
 /**
  * 查询单个执行记录
  */
-async function fetchExecutionRecord(
-  recordId: string
-): Promise<ExecutionRecord | null> {
+async function fetchExecutionRecord(recordId: string): Promise<ExecutionRecord | null> {
   // 先检查缓存
   if (recordCache.has(recordId)) {
     return recordCache.get(recordId)!
   }
 
   try {
-    const response = await apiClient.get<ExecutionRecord>(
-      `/execution/records/${recordId}`
-    )
+    const response = await apiClient.get<ExecutionRecord>(`/execution/records/${recordId}`)
     if (response.data) {
       // 缓存结果
       recordCache.set(recordId, response.data)
@@ -156,7 +151,7 @@ async function fetchExecutionRecord(
  * 批量查询执行记录
  */
 export async function fetchExecutionRecords(
-  recordIds: string[]
+  recordIds: string[],
 ): Promise<Map<string, ExecutionRecord>> {
   const results = new Map<string, ExecutionRecord>()
   const uncachedIds: string[] = []
@@ -173,7 +168,7 @@ export async function fetchExecutionRecords(
   // 查询未缓存的记录
   if (uncachedIds.length > 0) {
     // 并行查询
-    const promises = uncachedIds.map(id => fetchExecutionRecord(id))
+    const promises = uncachedIds.map((id) => fetchExecutionRecord(id))
     const records = await Promise.all(promises)
 
     records.forEach((record, index) => {
@@ -278,12 +273,8 @@ export function useExecutionRecord(recordId: string | null) {
  * 多个执行记录查询 Hook
  */
 export function useExecutionRecords(recordIds: string[]) {
-  const [records, setRecords] = useState<Map<string, ExecutionRecord>>(
-    new Map()
-  )
-  const [activities, setActivities] = useState<Map<string, ActivityData>>(
-    new Map()
-  )
+  const [records, setRecords] = useState<Map<string, ExecutionRecord>>(new Map())
+  const [activities, setActivities] = useState<Map<string, ActivityData>>(new Map())
   const [loading, setLoading] = useState(false)
 
   // 使用 useMemo 缓存 recordIds 的字符串表示

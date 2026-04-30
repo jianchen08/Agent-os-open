@@ -6,13 +6,13 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import type {
-    L3SubtaskCompletedEvent,
-    L3SubtaskProgressEvent,
-    L3SubtaskStartedEvent,
-    L3SubtaskType,
-} from '@/types/task'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import type {
+  L3SubtaskCompletedEvent,
+  L3SubtaskProgressEvent,
+  L3SubtaskStartedEvent,
+  L3SubtaskType,
+} from '@/types/task'
 
 /**
  * L3 子任务状态
@@ -65,15 +65,13 @@ export interface UseL3SubtaskEventsReturn {
  * @returns L3 子任务状态和统计信息
  */
 export function useL3SubtaskEvents(
-  options: UseL3SubtaskEventsOptions = {}
+  options: UseL3SubtaskEventsOptions = {},
 ): UseL3SubtaskEventsReturn {
   const { enabled = true, taskId } = options
   const { subscribe } = useWebSocket()
 
   // L3 子任务状态映射
-  const [subtasksMap, setSubtasksMap] = useState<Map<string, L3SubtaskState>>(
-    new Map()
-  )
+  const [subtasksMap, setSubtasksMap] = useState<Map<string, L3SubtaskState>>(new Map())
 
   /**
    * 处理子任务开始事件
@@ -87,7 +85,7 @@ export function useL3SubtaskEvents(
         return
       }
 
-      setSubtasksMap(prev => {
+      setSubtasksMap((prev) => {
         const newMap = new Map(prev)
         newMap.set(event.subtaskId, {
           subtaskId: event.subtaskId,
@@ -103,7 +101,7 @@ export function useL3SubtaskEvents(
 
       console.log('[L3SubtaskEvents] 子任务开始:', event.subtaskId, event.name)
     },
-    [taskId]
+    [taskId],
   )
 
   /**
@@ -118,7 +116,7 @@ export function useL3SubtaskEvents(
         return
       }
 
-      setSubtasksMap(prev => {
+      setSubtasksMap((prev) => {
         const existing = prev.get(event.subtaskId)
         if (!existing) {
           return prev
@@ -133,7 +131,7 @@ export function useL3SubtaskEvents(
         return newMap
       })
     },
-    [taskId]
+    [taskId],
   )
 
   /**
@@ -148,7 +146,7 @@ export function useL3SubtaskEvents(
         return
       }
 
-      setSubtasksMap(prev => {
+      setSubtasksMap((prev) => {
         const existing = prev.get(event.subtaskId)
         if (!existing) {
           return prev
@@ -166,13 +164,9 @@ export function useL3SubtaskEvents(
         return newMap
       })
 
-      console.log(
-        '[L3SubtaskEvents] 子任务完成:',
-        event.subtaskId,
-        event.success ? '成功' : '失败'
-      )
+      console.log('[L3SubtaskEvents] 子任务完成:', event.subtaskId, event.success ? '成功' : '失败')
     },
-    [taskId]
+    [taskId],
   )
 
   /**
@@ -188,37 +182,22 @@ export function useL3SubtaskEvents(
     }
 
     // 订阅 L3 子任务事件
-    const unsubscribeStarted = subscribe(
-      'l3_subtask_started',
-      handleSubtaskStarted
-    )
-    const unsubscribeProgress = subscribe(
-      'l3_subtask_progress',
-      handleSubtaskProgress
-    )
-    const unsubscribeCompleted = subscribe(
-      'l3_subtask_completed',
-      handleSubtaskCompleted
-    )
+    const unsubscribeStarted = subscribe('l3_subtask_started', handleSubtaskStarted)
+    const unsubscribeProgress = subscribe('l3_subtask_progress', handleSubtaskProgress)
+    const unsubscribeCompleted = subscribe('l3_subtask_completed', handleSubtaskCompleted)
 
     return () => {
       unsubscribeStarted()
       unsubscribeProgress()
       unsubscribeCompleted()
     }
-  }, [
-    enabled,
-    subscribe,
-    handleSubtaskStarted,
-    handleSubtaskProgress,
-    handleSubtaskCompleted,
-  ])
+  }, [enabled, subscribe, handleSubtaskStarted, handleSubtaskProgress, handleSubtaskCompleted])
 
   // 计算统计信息
   const subtasks = Array.from(subtasksMap.values())
-  const runningCount = subtasks.filter(s => s.status === 'running').length
-  const completedCount = subtasks.filter(s => s.status === 'completed').length
-  const failedCount = subtasks.filter(s => s.status === 'failed').length
+  const runningCount = subtasks.filter((s) => s.status === 'running').length
+  const completedCount = subtasks.filter((s) => s.status === 'completed').length
+  const failedCount = subtasks.filter((s) => s.status === 'failed').length
 
   return {
     subtasks,

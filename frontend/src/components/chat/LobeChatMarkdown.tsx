@@ -34,16 +34,9 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
 }) => {
   return (
     <ConfigProvider motion={motion}>
-      <div
-        className="lobe-chat-isolated"
-        onDoubleClick={onDoubleClick}
-      >
+      <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
         {children ?? (
-          <Markdown
-            variant="chat"
-            enableStream={isStreaming}
-            streamSmoothingPreset="balanced"
-          >
+          <Markdown variant="chat" enableStream={isStreaming} streamSmoothingPreset="balanced">
             {content}
           </Markdown>
         )}

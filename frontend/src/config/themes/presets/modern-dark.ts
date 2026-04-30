@@ -27,16 +27,16 @@ export const modernDarkTheme: ThemeConfig = {
     },
 
     text: {
-      primary: '#f8fafc',      // 保持高对比度
-      secondary: '#cbd5e1',    // 从 #94a3b8 提亮，对比度 7.2:1
-      muted: '#94a3b8',        // 从 #64748b 提亮，对比度 5.4:1
-      disabled: '#64748b',     // 从 #475569 提亮，对比度 3.2:1
+      primary: '#f8fafc', // 保持高对比度
+      secondary: '#cbd5e1', // 从 #94a3b8 提亮，对比度 7.2:1
+      muted: '#94a3b8', // 从 #64748b 提亮，对比度 5.4:1
+      disabled: '#64748b', // 从 #475569 提亮，对比度 3.2:1
     },
 
     border: {
-      default: 'rgba(255, 255, 255, 0.12)',  // 从 0.08 增加
-      hover: 'rgba(255, 255, 255, 0.20)',    // 从 0.15 增加
-      active: 'rgba(59, 130, 246, 0.5)',     // 从 0.4 增加
+      default: 'rgba(255, 255, 255, 0.12)', // 从 0.08 增加
+      hover: 'rgba(255, 255, 255, 0.20)', // 从 0.15 增加
+      active: 'rgba(59, 130, 246, 0.5)', // 从 0.4 增加
     },
 
     status: {

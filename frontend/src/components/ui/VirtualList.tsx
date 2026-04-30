@@ -46,13 +46,10 @@ export function VirtualList<T>({
   const containerRef = useRef<HTMLDivElement>(null)
 
   // 计算可见范围
-  const visibleStart = Math.max(
-    0,
-    Math.floor(scrollTop / itemHeight) - overscan
-  )
+  const visibleStart = Math.max(0, Math.floor(scrollTop / itemHeight) - overscan)
   const visibleEnd = Math.min(
     items.length,
-    Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan
+    Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan,
   )
 
   const visibleItems = items.slice(visibleStart, visibleEnd)
@@ -66,12 +63,11 @@ export function VirtualList<T>({
 
   // 默认的key生成函数
   const defaultGetKey = useCallback(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     (_item: T, index: number) => {
       return visibleStart + index
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [visibleStart]
+
+    [visibleStart],
   )
 
   const getKey = getItemKey || defaultGetKey
@@ -184,7 +180,7 @@ export function VirtualListDynamic<T>({
 
   // 测量项目高度
   const measureItem = useCallback((index: number, height: number) => {
-    setHeights(prev => {
+    setHeights((prev) => {
       if (prev[index] !== height) {
         return { ...prev, [index]: height }
       }
@@ -217,7 +213,7 @@ export function VirtualListDynamic<T>({
               <div
                 key={getKey(item, actualIndex)}
                 data-index={actualIndex}
-                ref={el => {
+                ref={(el) => {
                   if (el) {
                     const height = el.getBoundingClientRect().height
                     if (height !== heights[actualIndex]) {

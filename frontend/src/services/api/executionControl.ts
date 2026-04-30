@@ -93,12 +93,7 @@ export interface ExecutionStep {
 /**
  * 执行控制动作类型
  */
-export type ExecutionAction =
-  | 'pause'
-  | 'resume'
-  | 'cancel'
-  | 'retry'
-  | 'rollback'
+export type ExecutionAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'rollback'
 
 /**
  * 执行控制请求类型
@@ -150,7 +145,7 @@ export async function controlExecution(
   executionId: string,
   action: ExecutionAction,
   params?: Record<string, unknown>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
@@ -159,7 +154,7 @@ export async function controlExecution(
   return requestWithRetry(async () => {
     const response = await apiClient.post<ExecutionResponse>(
       EXECUTION_ENDPOINTS.CONTROL(executionId),
-      { action, params }
+      { action, params },
     )
     return response.data
   }, options)
@@ -167,21 +162,21 @@ export async function controlExecution(
 
 export async function pauseExecution(
   executionId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   return controlExecution(executionId, 'pause', undefined, options)
 }
 
 export async function resumeExecution(
   executionId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   return controlExecution(executionId, 'resume', undefined, options)
 }
 
 export async function cancelExecution(
   executionId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
@@ -189,7 +184,7 @@ export async function cancelExecution(
 
   return requestWithRetry(async () => {
     const response = await apiClient.post<ExecutionResponse>(
-      EXECUTION_ENDPOINTS.CANCEL(executionId)
+      EXECUTION_ENDPOINTS.CANCEL(executionId),
     )
     return response.data
   }, options)
@@ -198,7 +193,7 @@ export async function cancelExecution(
 export async function rollbackExecution(
   executionId: string,
   stepId?: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   return controlExecution(executionId, 'rollback', { step_id: stepId }, options)
 }
@@ -206,7 +201,7 @@ export async function rollbackExecution(
 export async function injectAgentMessage(
   executionId: string,
   data: InjectMessageRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
@@ -218,7 +213,7 @@ export async function injectAgentMessage(
   return requestWithRetry(async () => {
     const response = await apiClient.post<ExecutionResponse>(
       EXECUTION_ENDPOINTS.INJECT(executionId),
-      data
+      data,
     )
     return response.data
   }, options)
@@ -226,23 +221,21 @@ export async function injectAgentMessage(
 
 export async function getExecutionStatus(
   executionId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ExecutionResponse>(
-      EXECUTION_ENDPOINTS.GET(executionId)
-    )
+    const response = await apiClient.get<ExecutionResponse>(EXECUTION_ENDPOINTS.GET(executionId))
     return response.data
   }, options)
 }
 
 export async function getExecutionSteps(
   executionId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionStep[]> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
@@ -250,7 +243,7 @@ export async function getExecutionSteps(
 
   return requestWithRetry(async () => {
     const response = await apiClient.get<{ steps: ExecutionStep[] }>(
-      EXECUTION_ENDPOINTS.STEPS(executionId)
+      EXECUTION_ENDPOINTS.STEPS(executionId),
     )
     return response.data.steps || []
   }, options)
@@ -259,7 +252,7 @@ export async function getExecutionSteps(
 export async function approveExecution(
   executionId: string,
   data: ApprovalRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ExecutionResponse> {
   if (!executionId || executionId.trim().length === 0) {
     throw new Error('执行 ID 不能为空')
@@ -268,7 +261,7 @@ export async function approveExecution(
   return requestWithRetry(async () => {
     const response = await apiClient.post<ExecutionResponse>(
       EXECUTION_ENDPOINTS.APPROVE(executionId),
-      data
+      data,
     )
     return response.data
   }, options)

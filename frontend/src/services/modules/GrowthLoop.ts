@@ -5,11 +5,11 @@
  * 实现完整的自生长闭环：Schema 变更时 WebSocket 推送 → 前端自动更新渲染
  */
 
-import { moduleManager } from './ModuleManager'
-import { registerCapabilities } from './ClientCapabilities'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { schemaRegistry } from '@/services/schema/registry'
 import { loggers } from '@/utils/logger'
+import { registerCapabilities } from './ClientCapabilities'
+import { moduleManager } from './ModuleManager'
 
 /**
  * 初始化自生长闭环
@@ -45,7 +45,11 @@ export async function initializeGrowthLoop(): Promise<void> {
 /**
  * 处理 WebSocket 推送的 Schema 更新事件
  */
-export function handleSchemaUpdate(event: { module_id: string; schema_version: string; changes: string[] }): void {
+export function handleSchemaUpdate(event: {
+  module_id: string
+  schema_version: string
+  changes: string[]
+}): void {
   moduleManager.handleSchemaUpdate(event)
 }
 

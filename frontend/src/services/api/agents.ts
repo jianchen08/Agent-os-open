@@ -17,12 +17,10 @@
  * - GetAgentsParams - 获取 Agent 列表查询参数
  */
 
-import {
-  API_ENDPOINTS,
-} from '@/constants/api'
+import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
 import type { RetryOptions } from '@/utils/retry'
-import apiClient from '@/services/api/client'
 
 /**
  * Agent 响应类型（与后端 AgentResponse 对齐）
@@ -164,54 +162,46 @@ export interface GetAgentsParams {
 
 export async function getAgents(
   params: GetAgentsParams = {},
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<AgentListResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentListResponse>(
-      API_ENDPOINTS.AGENTS.LIST,
-      {
-        params: {
-          page: params.page || 1,
-          page_size: params.pageSize || 20,
-          status: params.status,
-          agent_type: params.type,
-          search: params.search,
-        },
-      }
-    )
+    const response = await apiClient.get<AgentListResponse>(API_ENDPOINTS.AGENTS.LIST, {
+      params: {
+        page: params.page || 1,
+        page_size: params.pageSize || 20,
+        status: params.status,
+        agent_type: params.type,
+        search: params.search,
+      },
+    })
     return response.data
   }, options)
 }
 
 export async function getAgent(
   agentId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<AgentResponse> {
   if (!agentId || agentId.trim().length === 0) {
     throw new Error('Agent ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentResponse>(
-      API_ENDPOINTS.AGENTS.GET(agentId)
-    )
+    const response = await apiClient.get<AgentResponse>(API_ENDPOINTS.AGENTS.GET(agentId))
     return response.data
   }, options)
 }
 
 export async function createAgent(
   data: AgentCreateRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<AgentResponse> {
   if (!data.name || data.name.trim().length === 0) {
     throw new Error('Agent 名称不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.post<AgentResponse>(
-      API_ENDPOINTS.AGENTS.CREATE,
-      data
-    )
+    const response = await apiClient.post<AgentResponse>(API_ENDPOINTS.AGENTS.CREATE, data)
     return response.data
   }, options)
 }
@@ -219,25 +209,19 @@ export async function createAgent(
 export async function updateAgent(
   agentId: string,
   data: AgentUpdateRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<AgentResponse> {
   if (!agentId || agentId.trim().length === 0) {
     throw new Error('Agent ID 不能为空')
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.put<AgentResponse>(
-      API_ENDPOINTS.AGENTS.UPDATE(agentId),
-      data
-    )
+    const response = await apiClient.put<AgentResponse>(API_ENDPOINTS.AGENTS.UPDATE(agentId), data)
     return response.data
   }, options)
 }
 
-export async function deleteAgent(
-  agentId: string,
-  options: RetryOptions = {}
-): Promise<void> {
+export async function deleteAgent(agentId: string, options: RetryOptions = {}): Promise<void> {
   if (!agentId || agentId.trim().length === 0) {
     throw new Error('Agent ID 不能为空')
   }
@@ -247,13 +231,9 @@ export async function deleteAgent(
   }, options)
 }
 
-export async function getDefaultAgent(
-  options: RetryOptions = {}
-): Promise<AgentResponse> {
+export async function getDefaultAgent(options: RetryOptions = {}): Promise<AgentResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<AgentResponse>(
-      API_ENDPOINTS.AGENTS.DEFAULT
-    )
+    const response = await apiClient.get<AgentResponse>(API_ENDPOINTS.AGENTS.DEFAULT)
     return response.data
   }, options)
 }

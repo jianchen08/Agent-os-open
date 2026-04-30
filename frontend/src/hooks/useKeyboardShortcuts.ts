@@ -7,8 +7,8 @@
  * - Escape: 关闭所有面板
  */
 
-import { useUIStore } from '@/stores/uiStore'
 import { useEffect } from 'react'
+import { useUIStore } from '@/stores/uiStore'
 
 /**
  * 键盘快捷键配置
@@ -25,9 +25,7 @@ interface ShortcutConfig {
 /**
  * 使用键盘快捷键
  */
-export const useKeyboardShortcuts = (
-  shortcuts: Record<string, ShortcutConfig>
-) => {
+export const useKeyboardShortcuts = (shortcuts: Record<string, ShortcutConfig>) => {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       // 检查是否在输入框中

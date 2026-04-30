@@ -40,10 +40,7 @@ const THRESHOLDS = {
 /**
  * 获取指标评级
  */
-function getRating(
-  name: string,
-  value: number
-): 'good' | 'needs-improvement' | 'poor' {
+function getRating(name: string, value: number): 'good' | 'needs-improvement' | 'poor' {
   const threshold = (THRESHOLDS as any)[name]
   if (!threshold) return 'good'
 
@@ -69,7 +66,7 @@ function logToConsole(metric: PerformanceMetric) {
 
   console.log(
     `${emoji[metric.rating]} [Performance] ${metric.name}:`,
-    `${metric.value.toFixed(2)} ${metric.rating}`
+    `${metric.value.toFixed(2)} ${metric.rating}`,
   )
 }
 
@@ -112,7 +109,7 @@ export class PerformanceMonitor {
     this.metrics.set(metric.name, performanceMetric)
 
     // 调用所有日志处理器
-    this.logHandlers.forEach(handler => handler(performanceMetric))
+    this.logHandlers.forEach((handler) => handler(performanceMetric))
   }
 
   /**
@@ -120,16 +117,16 @@ export class PerformanceMonitor {
    */
   start() {
     // CLS - 布局偏移
-    onCLS(metric => this.handleMetric(metric))
+    onCLS((metric) => this.handleMetric(metric))
 
     // FCP - 首次内容绘制
-    onFCP(metric => this.handleMetric(metric))
+    onFCP((metric) => this.handleMetric(metric))
 
     // LCP - 最大内容绘制
-    onLCP(metric => this.handleMetric(metric))
+    onLCP((metric) => this.handleMetric(metric))
 
     // TTFB - 首字节时间
-    onTTFB(metric => this.handleMetric(metric))
+    onTTFB((metric) => this.handleMetric(metric))
   }
 
   /**
@@ -157,7 +154,7 @@ export class PerformanceMonitor {
 
     let report = '\n📊 性能报告\n'
 
-    metrics.forEach(metric => {
+    metrics.forEach((metric) => {
       const emoji = {
         good: '✅',
         'needs-improvement': '⚠️',
@@ -168,7 +165,7 @@ export class PerformanceMonitor {
     })
 
     // 计算总体评分
-    const goodCount = metrics.filter(m => m.rating === 'good').length
+    const goodCount = metrics.filter((m) => m.rating === 'good').length
     const totalCount = metrics.length
     const score = Math.round((goodCount / totalCount) * 100)
 
@@ -331,10 +328,7 @@ export function getFPSMonitor(): FPSMonitor | null {
 /**
  * 测量函数执行时间
  */
-export function measureAsync<T>(
-  name: string,
-  fn: () => Promise<T>
-): Promise<T> {
+export function measureAsync<T>(name: string, fn: () => Promise<T>): Promise<T> {
   const start = performance.now()
 
   return fn().finally(() => {
@@ -367,11 +361,7 @@ export function mark(name: string) {
 /**
  * 测量两个标记之间的时间
  */
-export function measureBetween(
-  name: string,
-  startMark: string,
-  endMark: string
-) {
+export function measureBetween(name: string, startMark: string, endMark: string) {
   if (typeof window === 'undefined') return
 
   try {

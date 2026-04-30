@@ -61,31 +61,19 @@ export const TokenUsageBar = ({
 
   return (
     <div
-      className={`
-        flex items-center gap-2 px-3 py-1.5
-        text-xs rounded-lg border
-        ${colors.bg} ${colors.border} ${colors.text}
-        transition-colors duration-200
-      `}
+      className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${colors.bg} ${colors.border} ${colors.text} transition-colors duration-200`}
       data-testid="token-usage-bar"
       data-usage-percent={usagePercent.toFixed(1)}
     >
       {showWarning && (
-        <AlertTriangle
-          className="w-3.5 h-3.5 flex-shrink-0"
-          aria-label="Token 使用量警告"
-        />
+        <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" aria-label="Token 使用量警告" />
       )}
 
       <span className="whitespace-nowrap">
         Tokens: {formatNumber(currentUsage)} / {formatNumber(maxTokens)}
       </span>
 
-      {showDetails && (
-        <span className="text-xs opacity-75 ml-1">
-          ({usagePercent.toFixed(1)}%)
-        </span>
-      )}
+      {showDetails && <span className="ml-1 text-xs opacity-75">({usagePercent.toFixed(1)}%)</span>}
     </div>
   )
 }

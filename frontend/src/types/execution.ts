@@ -154,10 +154,7 @@ export type ExecutionEvent =
 /**
  * 思考事件联合类型
  */
-export type ThinkingEvent =
-  | ThinkingStartEvent
-  | ThinkingChunkEvent
-  | ThinkingEndEvent
+export type ThinkingEvent = ThinkingStartEvent | ThinkingChunkEvent | ThinkingEndEvent
 
 /**
  * 系统警告事件联合类型
@@ -251,7 +248,7 @@ export const EXECUTION_STATUS_TEXT_MAP: Record<ExecutionStatus, string> = {
  */
 export function mergeExecutionEvent(
   existing: ExecutionCardData | undefined,
-  event: ExecutionEvent
+  event: ExecutionEvent,
 ): ExecutionCardData {
   switch (event.type) {
     case 'execution_start':
@@ -339,9 +336,7 @@ export function mergeExecutionEvent(
  *
  * 用于与现有 ActivityCard 组件兼容
  */
-export function toActivityData(
-  execution: ExecutionCardData
-): import('./activity').ActivityData {
+export function toActivityData(execution: ExecutionCardData): import('./activity').ActivityData {
   return {
     type: 'custom',
     id: execution.id,
@@ -370,7 +365,7 @@ export function toActivityData(
  * 构建执行详情区块
  */
 function buildExecutionDetails(
-  execution: ExecutionCardData
+  execution: ExecutionCardData,
 ): import('./activity').ActivityDetailBlock[] {
   const details: import('./activity').ActivityDetailBlock[] = []
 

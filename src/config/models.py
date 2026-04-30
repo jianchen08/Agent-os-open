@@ -14,9 +14,9 @@
 
 典型用法::
 
-    from config import ModelConfigLoader
+    from config.models import get_model_config_loader
 
-    loader = ModelConfigLoader()
+    loader = get_model_config_loader()
     config = loader.get_llm_core_config("minimax-m2.7")
     # {"provider": "minimax", "model_name": "MiniMax-M2.7",
     #  "api_base": "...", "api_key": "...", "default_params": {...}}
@@ -303,3 +303,27 @@ class ModelConfigLoader:
                 if fallback:
                     return fallback
         return resolved if isinstance(resolved, str) else str(resolved)
+
+
+# ---------------------------------------------------------------------------
+# 模块级缓存 — 避免重复实例化导致 YAML 重复解析
+# ---------------------------------------------------------------------------
+
+_loader_cache: dict[str, ModelConfigLoader] = {}
+
+
+def get_model_config_loader(config_dir: str | Path | None = None) -> ModelConfigLoader:
+    """获取缓存的 ModelConfigLoader 单例。
+
+    相同 config_dir 复用同一实例，避免重复解析 YAML 文件。
+    """
+    cache_key = str(config_dir or _DEFAULT_CONFIG_DIR)
+    if cache_key not in _loader_cache:
+        _loader_cache[cache_key] = ModelConfigLoader(config_dir)
+    return _loader_cache[cache_key]
+
+
+def invalidate_model_config_cache(config_dir: str | Path | None = None) -> None:
+    """清除缓存，下次 get_model_config_loader 会重新加载。"""
+    cache_key = str(config_dir or _DEFAULT_CONFIG_DIR)
+    _loader_cache.pop(cache_key, None)

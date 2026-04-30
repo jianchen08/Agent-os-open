@@ -13,21 +13,21 @@
  * - 新增: 移动端响应式支持
  */
 
-import { reportError } from '@/services/errorReporting'
 import { Loader2, Plus, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { reportError } from '@/services/errorReporting'
 import { useAgentStore } from '@/stores/agentStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { Session } from '@/types'
 import { NewSessionModal } from '@/components/session/NewSessionModal'
 import { SessionEditModal } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
-import { Button } from '@/components/ui/button'
 
 interface SidebarProps {
   /** 是否为移动端 */
@@ -64,9 +64,9 @@ const SIDEBAR_STYLES = {
   itemHeight: 40,
   // 侧边栏宽度
   width: {
-    desktop: 220,      // 大屏幕默认宽度
+    desktop: 220, // 大屏幕默认宽度
     smallDesktop: 200, // 小桌面宽度 (1280px以下)
-    mobile: 280,       // 移动端宽度
+    mobile: 280, // 移动端宽度
   },
 } as const
 
@@ -85,38 +85,38 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const [isNewSessionModalOpen, setIsNewSessionModalOpen] = useState(false)
   const [isCreatingSession, setIsCreatingSession] = useState(false)
 
-  const sessions = useSessionStore(state => state.sessions)
-  const activeSessionId = useSessionStore(state => state.activeSessionId)
-  const deletingSessionIds = useSessionStore(state => state.deletingSessionIds)
-  const isLoading = useSessionStore(state => state.isLoading)
-  const createSession = useSessionListStore(state => state.createSession)
-  const setActiveSession = useSessionListStore(state => state.setActiveSession)
-  const deleteSession = useSessionListStore(state => state.deleteSession)
-  const copySession = useSessionListStore(state => state.copySession)
-  const toggleSessionStar = useSessionListStore(state => state.toggleSessionStar)
-  const renameSession = useSessionListStore(state => state.renameSession)
-  const updateSessionAgent = useSessionListStore(state => state.updateSessionAgent)
-  const searchSessions = useSessionListStore(state => state.searchSessions)
-  const fetchSessions = useSessionListStore(state => state.fetchSessions)
-  const sidebarCollapsed = useUIStore(state => state.sidebarCollapsed)
-  const setSidebarCollapsed = useUIStore(state => state.setSidebarCollapsed)
+  const sessions = useSessionStore((state) => state.sessions)
+  const activeSessionId = useSessionStore((state) => state.activeSessionId)
+  const deletingSessionIds = useSessionStore((state) => state.deletingSessionIds)
+  const isLoading = useSessionStore((state) => state.isLoading)
+  const createSession = useSessionListStore((state) => state.createSession)
+  const setActiveSession = useSessionListStore((state) => state.setActiveSession)
+  const deleteSession = useSessionListStore((state) => state.deleteSession)
+  const copySession = useSessionListStore((state) => state.copySession)
+  const toggleSessionStar = useSessionListStore((state) => state.toggleSessionStar)
+  const renameSession = useSessionListStore((state) => state.renameSession)
+  const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
+  const searchSessions = useSessionListStore((state) => state.searchSessions)
+  const fetchSessions = useSessionListStore((state) => state.fetchSessions)
+  const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
+  const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
 
   // Agent 数据统一在这里加载
-  const fetchAgents = useAgentStore(state => state.fetchAgents)
+  const fetchAgents = useAgentStore((state) => state.fetchAgents)
 
   // 编辑会话模态框状态
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
 
   // 组件挂载时加载数据（会话列表和 Agent 列表）
   useEffect(() => {
-    fetchSessions().catch(error => {
+    fetchSessions().catch((error) => {
       reportError(error instanceof Error ? error.message : String(error), {
         type: 'server',
         componentName: 'Sidebar',
         operation: 'fetchSessions',
       })
     })
-    fetchAgents().catch(error => {
+    fetchAgents().catch((error) => {
       reportError(error instanceof Error ? error.message : String(error), {
         type: 'server',
         componentName: 'Sidebar',
@@ -135,7 +135,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   // 根据搜索关键词过滤会话 - 使用 useMemo 缓存计算结果
   const filteredSessions = useMemo(
     () => (searchKeyword ? searchSessions(searchKeyword) : sessions),
-    [searchKeyword, searchSessions, sessions]
+    [searchKeyword, searchSessions, sessions],
   )
 
   /**
@@ -148,7 +148,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       // 直接导航到会话页面，而不是主页
       navigate(`/session/${sessionId}`)
     },
-    [setActiveSession, navigate]
+    [setActiveSession, navigate],
   )
 
   /**
@@ -191,7 +191,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         setIsCreatingSession(false)
       }
     },
-    [createSession, navigate]
+    [createSession, navigate],
   )
 
   /**
@@ -224,7 +224,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         })
       }
     },
-    [copySession]
+    [copySession],
   )
 
   /**
@@ -234,7 +234,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     (sessionId: string) => {
       toggleSessionStar(sessionId)
     },
-    [toggleSessionStar]
+    [toggleSessionStar],
   )
 
   /**
@@ -257,14 +257,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         })
       }
     },
-    [renameSession, updateSessionAgent]
+    [renameSession, updateSessionAgent],
   )
 
   /**
    * 获取正在编辑的会话
    */
   const editingSession = editingSessionId
-    ? sessions.find(s => s.id === editingSessionId) || null
+    ? sessions.find((s) => s.id === editingSessionId) || null
     : null
 
   /**
@@ -286,7 +286,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         setSidebarCollapsed(true)
       }
     },
-    [handleSessionClick, isMobile, setSidebarCollapsed]
+    [handleSessionClick, isMobile, setSidebarCollapsed],
   )
 
   return (
@@ -295,7 +295,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       {isMobile && !sidebarCollapsed && (
         <div
           data-testid="sidebar-overlay"
-          className="fixed inset-0 bg-black/50 z-40 animate-in fade-in duration-200"
+          className="animate-in fade-in fixed inset-0 z-40 bg-black/50 duration-200"
           onClick={handleCloseSidebar}
           aria-hidden="true"
         />
@@ -304,16 +304,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       <aside
         data-testid="sidebar"
         className={cn(
-          'flex flex-col border-r border-border/50 transition-all duration-300',
+          'border-border/50 flex flex-col border-r transition-all duration-300',
           // 优化：侧边栏增加淡底色，与主对话区视觉分离
           'bg-[var(--sidebar-bg-light)] dark:bg-[var(--sidebar-bg-dark)]',
           // 移动端样式：固定定位，从左侧滑入
-          isMobile && 'fixed left-0 top-0 h-full z-50 shadow-2xl',
+          isMobile && 'fixed top-0 left-0 z-50 h-full shadow-2xl',
           sidebarCollapsed
-            ? 'w-0 !w-0 opacity-0'
+            ? '!w-0 w-0 opacity-0'
             : isMobile
               ? 'w-[280px] opacity-100'
-              : 'w-[200px] xl:w-[220px]'
+              : 'w-[200px] xl:w-[220px]',
         )}
         style={
           sidebarCollapsed
@@ -329,13 +329,13 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         {/* 侧边栏头部 - Requirements: 9.1, 9.2, 9.3 */}
         <div
           className={cn(
-            'flex items-center justify-between border-b border-border',
+            'border-border flex items-center justify-between border-b',
             SIDEBAR_STYLES.headerHeight, // 56px 高度
-            SIDEBAR_STYLES.paddingX // 12px 水平内边距
+            SIDEBAR_STYLES.paddingX, // 12px 水平内边距
           )}
           data-testid="sidebar-header"
         >
-          <h2 className="text-base font-semibold text-foreground">会话</h2>
+          <h2 className="text-foreground text-base font-semibold">会话</h2>
           <div className="flex items-center gap-1">
             {/* 移动端关闭按钮 */}
             {isMobile && (
@@ -366,61 +366,58 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           </div>
         </div>
 
-      {/* 新建会话模态框 - Requirements: 13.3 */}
-      <NewSessionModal
-        isOpen={isNewSessionModalOpen}
-        onClose={handleCloseNewSessionModal}
-        onConfirm={handleConfirmCreateSession}
-        isCreating={isCreatingSession}
-      />
-
-      {/* 编辑会话模态框 */}
-      <SessionEditModal
-        isOpen={!!editingSessionId}
-        session={editingSession}
-        onClose={handleCloseEditModal}
-        onSave={handleSaveEdit}
-      />
-
-      {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
-      <div
-        className={cn(
-          'border-b border-border/50 overflow-hidden',
-          SIDEBAR_STYLES.padding
-        )}
-        data-testid="sidebar-search-section"
-      >
-        <SessionSearch
-          onSearchChange={setSearchKeyword}
-          resultCount={filteredSessions.length}
-          totalCount={sessions.length}
-          className="sidebar-search"
-          inputClassName={SIDEBAR_STYLES.searchHeight} // 32px 搜索框高度
+        {/* 新建会话模态框 - Requirements: 13.3 */}
+        <NewSessionModal
+          isOpen={isNewSessionModalOpen}
+          onClose={handleCloseNewSessionModal}
+          onConfirm={handleConfirmCreateSession}
+          isCreating={isCreatingSession}
         />
-      </div>
 
-      {/* 会话列表 - Requirements: 9.3, 9.4 */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin min-h-0">
+        {/* 编辑会话模态框 */}
+        <SessionEditModal
+          isOpen={!!editingSessionId}
+          session={editingSession}
+          onClose={handleCloseEditModal}
+          onSave={handleSaveEdit}
+        />
+
+        {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
+        <div
+          className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
+          data-testid="sidebar-search-section"
+        >
+          <SessionSearch
+            onSearchChange={setSearchKeyword}
+            resultCount={filteredSessions.length}
+            totalCount={sessions.length}
+            className="sidebar-search"
+            inputClassName={SIDEBAR_STYLES.searchHeight} // 32px 搜索框高度
+          />
+        </div>
+
+        {/* 会话列表 - Requirements: 9.3, 9.4 */}
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
           {isLoading ? (
             <div
               className={cn(
                 'flex flex-col items-center justify-center text-center',
                 SIDEBAR_STYLES.padding,
-                'py-8'
+                'py-8',
               )}
             >
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground mb-2" />
-              <p className="text-sm text-muted-foreground">加载中...</p>
+              <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
+              <p className="text-muted-foreground text-sm">加载中...</p>
             </div>
           ) : filteredSessions.length === 0 ? (
             <div
               className={cn(
                 'flex flex-col items-center justify-center text-center',
                 SIDEBAR_STYLES.padding,
-                'py-8'
+                'py-8',
               )}
             >
-              <p className="text-sm text-muted-foreground">
+              <p className="text-muted-foreground text-sm">
                 {searchKeyword ? '未找到匹配的会话' : '暂无会话'}
               </p>
             </div>

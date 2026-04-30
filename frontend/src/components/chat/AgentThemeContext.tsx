@@ -80,11 +80,11 @@ export interface AgentThemeProviderProps {
  * Agent 主题提供者
  */
 export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProps) {
-  const agents = useAgentStore(state => state.agents)
+  const agents = useAgentStore((state) => state.agents)
 
   const agentTheme = useMemo((): ExtendedAgentTheme | null => {
     if (!agentId) return null
-    const agent = agents.find(a => a.id === agentId)
+    const agent = agents.find((a) => a.id === agentId)
     if (!agent) return null
 
     const isMainAgent = agent.configId === 'lingxi' || agent.type === 'system'
@@ -106,7 +106,7 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
 
   const getDisplayName = () => {
     if (!agentId) return ''
-    const agent = agents.find(a => a.id === agentId)
+    const agent = agents.find((a) => a.id === agentId)
     return agentTheme?.displayName || agent?.name || ''
   }
 
@@ -136,11 +136,12 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
       '--agent-background',
       '--agent-background-opacity',
     ]
-    agentVars.forEach(v => root.style.removeProperty(v))
+    agentVars.forEach((v) => root.style.removeProperty(v))
 
     if (agentTheme.messageBubble) {
       const bubble = agentTheme.messageBubble
-      if (bubble.backgroundColor) root.style.setProperty('--agent-bubble-bg', bubble.backgroundColor)
+      if (bubble.backgroundColor)
+        root.style.setProperty('--agent-bubble-bg', bubble.backgroundColor)
       if (bubble.textColor) root.style.setProperty('--agent-bubble-text', bubble.textColor)
       if (bubble.borderColor) root.style.setProperty('--agent-bubble-border', bubble.borderColor)
       if (bubble.borderRadius) root.style.setProperty('--agent-bubble-radius', bubble.borderRadius)
@@ -150,8 +151,10 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
 
     if (agentTheme.layout) {
       const layout = agentTheme.layout
-      if (layout.messageSpacing) root.style.setProperty('--agent-message-spacing', layout.messageSpacing)
-      if (layout.bubbleMaxWidth) root.style.setProperty('--agent-bubble-max-width', layout.bubbleMaxWidth)
+      if (layout.messageSpacing)
+        root.style.setProperty('--agent-message-spacing', layout.messageSpacing)
+      if (layout.bubbleMaxWidth)
+        root.style.setProperty('--agent-bubble-max-width', layout.bubbleMaxWidth)
       if (layout.avatarSize) root.style.setProperty('--agent-avatar-size', layout.avatarSize)
     }
 
@@ -165,7 +168,8 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
     if (agentTheme.background) {
       const bg = agentTheme.background
       if (bg.value) root.style.setProperty('--agent-background', bg.value)
-      if (bg.opacity !== undefined) root.style.setProperty('--agent-background-opacity', String(bg.opacity))
+      if (bg.opacity !== undefined)
+        root.style.setProperty('--agent-background-opacity', String(bg.opacity))
     }
   }
 
@@ -176,14 +180,10 @@ export function AgentThemeProvider({ agentId, children }: AgentThemeProviderProp
       getDisplayName,
       getAvatarConfig,
     }),
-    [agentTheme, agents, agentId]
+    [agentTheme, agents, agentId],
   )
 
-  return (
-    <AgentThemeContext.Provider value={contextValue}>
-      {children}
-    </AgentThemeContext.Provider>
-  )
+  return <AgentThemeContext.Provider value={contextValue}>{children}</AgentThemeContext.Provider>
 }
 
 /**

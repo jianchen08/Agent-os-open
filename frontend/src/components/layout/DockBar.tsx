@@ -24,16 +24,18 @@ interface DockBarProps {
  */
 export function DockBar({ items, iconSize = 20, iconGap = 6 }: DockBarProps) {
   if (items.length === 0) {
-    return <div className="text-xs text-muted-foreground">Dock 栏为空</div>
+    return <div className="text-muted-foreground text-xs">Dock 栏为空</div>
   }
 
   return (
     <div className="flex items-center" style={{ gap: iconGap }}>
-      {items.map(item => (
+      {items.map((item) => (
         <button
           key={item.id}
           className={`relative flex items-center justify-center rounded-md transition-colors ${
-            item.isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 text-muted-foreground'
+            item.isActive
+              ? 'bg-accent text-accent-foreground'
+              : 'hover:bg-accent/50 text-muted-foreground'
           }`}
           style={{ width: iconSize + 12, height: iconSize + 12 }}
           onClick={item.onClick}
@@ -53,7 +55,7 @@ export function DockBar({ items, iconSize = 20, iconGap = 6 }: DockBarProps) {
             />
           )}
           {item.indicator === 'badge' && item.badgeCount !== undefined && item.badgeCount > 0 && (
-            <span className="absolute -top-1 -right-1 bg-destructive text-destructive-foreground text-[10px] rounded-full min-w-[16px] h-4 flex items-center justify-center px-1">
+            <span className="bg-destructive text-destructive-foreground absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px]">
               {item.badgeCount > 99 ? '99+' : item.badgeCount}
             </span>
           )}

@@ -61,7 +61,7 @@ class ErrorReportingService {
    */
   setupGlobalErrorHandlers(): void {
     // 捕获未处理的 JavaScript 错误
-    window.addEventListener('error', event => {
+    window.addEventListener('error', (event) => {
       this.logError({
         message: event.message,
         stack: event.error?.stack,
@@ -74,7 +74,7 @@ class ErrorReportingService {
     })
 
     // 捕获未处理的 Promise 拒绝
-    window.addEventListener('unhandledrejection', event => {
+    window.addEventListener('unhandledrejection', (event) => {
       this.logError({
         message: 'Unhandled Promise Rejection',
         stack: event.reason?.stack,
@@ -93,11 +93,7 @@ class ErrorReportingService {
   /**
    * 记录错误
    */
-  logError(error: {
-    message: string
-    stack?: string
-    context?: ErrorContext
-  }): void {
+  logError(error: { message: string; stack?: string; context?: ErrorContext }): void {
     const errorLog: ErrorLog = {
       ...error,
       timestamp: new Date(),
@@ -148,11 +144,9 @@ class ErrorReportingService {
    */
   reportError(
     message: string | ApiError,
-    typeOrContext?:
-      | ErrorType
-      | (ErrorContext & { type?: ErrorType; severity?: ErrorSeverity }),
+    typeOrContext?: ErrorType | (ErrorContext & { type?: ErrorType; severity?: ErrorSeverity }),
     severity?: ErrorSeverity,
-    context?: ErrorContext
+    context?: ErrorContext,
   ): void {
     let errorMessage: string
     let errorType: ErrorType = ErrorType.UNKNOWN
@@ -183,9 +177,7 @@ class ErrorReportingService {
 
     // 确保 errorType 是有效的枚举值（防止传入无效值）
     const validErrorTypes = Object.values(ErrorType)
-    const finalErrorType = validErrorTypes.includes(errorType)
-      ? errorType
-      : ErrorType.UNKNOWN
+    const finalErrorType = validErrorTypes.includes(errorType) ? errorType : ErrorType.UNKNOWN
 
     this.logError({
       message: `[${finalErrorType.toUpperCase()}] ${errorMessage}`,
@@ -203,7 +195,7 @@ class ErrorReportingService {
   captureMessage(
     message: string,
     level: 'info' | 'warning' = 'info',
-    context?: ErrorContext
+    context?: ErrorContext,
   ): void {
     const log = {
       message,
@@ -241,10 +233,7 @@ class ErrorReportingService {
     // TODO: 实现发送到错误跟踪服务（如 Sentry）
     // 这里可以添加 API 调用或其他错误跟踪服务
     if (import.meta.env.DEV) {
-      console.log(
-        '[ErrorReporting] 错误已记录，生产环境将发送到跟踪服务',
-        errorLog
-      )
+      console.log('[ErrorReporting] 错误已记录，生产环境将发送到跟踪服务', errorLog)
     }
   }
 
@@ -260,8 +249,7 @@ class ErrorReportingService {
    */
   downloadErrorLogs(): void {
     const dataStr = this.exportErrorLogs()
-    const dataUri =
-      'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr)
+    const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr)
 
     const exportFileDefaultName = `error-logs-${Date.now()}.json`
 
@@ -295,7 +283,7 @@ export function captureException(error: Error, context?: ErrorContext): void {
 export function captureMessage(
   message: string,
   level?: 'info' | 'warning',
-  context?: ErrorContext
+  context?: ErrorContext,
 ): void {
   errorReportingService.captureMessage(message, level, context)
 }
@@ -309,11 +297,9 @@ export function captureMessage(
  */
 export function reportError(
   message: string | ApiError,
-  typeOrContext?:
-    | ErrorType
-    | (ErrorContext & { type?: ErrorType; severity?: ErrorSeverity }),
+  typeOrContext?: ErrorType | (ErrorContext & { type?: ErrorType; severity?: ErrorSeverity }),
   severity?: ErrorSeverity,
-  context?: ErrorContext
+  context?: ErrorContext,
 ): void {
   errorReportingService.reportError(message, typeOrContext, severity, context)
 }

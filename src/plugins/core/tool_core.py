@@ -115,6 +115,8 @@ class ToolCore(ICorePlugin):
         Args:
             executor: IsolationExecutor 实例
         """
+        self._isolation_executor = executor
+        logger.info("[%s] IsolationExecutor 已注入", self.name)
 
     def _get_schema_timeout_default(self, tool_name: str) -> float | None:
         """从工具 schema 中获取 timeout_seconds 的默认值。
@@ -143,8 +145,6 @@ class ToolCore(ICorePlugin):
         if default is not None and float(default) > 0:
             return float(default)
         return None
-        self._isolation_executor = executor
-        logger.info("[%s] IsolationExecutor 已注入", self.name)
 
     def _get_tool(self, name: str) -> Callable[..., Any] | None:
         """获取工具函数。
@@ -264,6 +264,16 @@ class ToolCore(ICorePlugin):
             return result
 
         start = time.monotonic()
+
+        # DIAG: check if pipeline task is already being cancelled
+        _cur_task = asyncio.current_task()
+        if _cur_task and _cur_task.cancelling() > 0:
+            logger.warning(
+                "[%s] Task already cancelling before tool '%s'! "
+                "cancelling=%d",
+                self.name, tool_name, _cur_task.cancelling(),
+            )
+
         try:
             if inspect.iscoroutinefunction(func):
                 raw_result = await asyncio.wait_for(
@@ -306,13 +316,39 @@ class ToolCore(ICorePlugin):
                     "duration_ms": round(duration_ms, 1),
                 })
             return result
+        except asyncio.CancelledError:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                "[%s] Tool cancelled: %s (%.1fms)",
+                self.name, tool_name, duration_ms,
+            )
+            result = {
+                "tool_name": tool_name,
+                "success": False,
+                "error": (
+                    f"Tool '{tool_name}' cancelled "
+                    "(pipeline stopped)"
+                ),
+                "duration_ms": round(duration_ms, 1),
+            }
+            if on_chunk:
+                on_chunk({
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "result": "cancelled",
+                    "success": False,
+                    "duration_ms": round(duration_ms, 1),
+                })
+            raise
         except asyncio.TimeoutError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.warning(
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
                 self.name, tool_name, duration_ms, timeout,
             )
-            error_msg = f"Tool '{tool_name}' timed out after {timeout}s"
+            error_msg = (
+                f"Tool '{tool_name}' timed out after {timeout}s"
+            )
             result = {
                 "tool_name": tool_name,
                 "success": False,

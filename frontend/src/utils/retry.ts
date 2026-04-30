@@ -41,7 +41,7 @@ export function isRetryableError(error: any): boolean {
  * 延迟函数
  */
 export function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
@@ -53,13 +53,9 @@ export async function retry<T>(
     maxAttempts?: number
     delayMs?: number
     shouldRetry?: (error: any) => boolean
-  } = {}
+  } = {},
 ): Promise<T> {
-  const {
-    maxAttempts = 3,
-    delayMs = 1000,
-    shouldRetry = isRetryableError,
-  } = options
+  const { maxAttempts = 3, delayMs = 1000, shouldRetry = isRetryableError } = options
 
   let lastError: any
 
@@ -86,7 +82,7 @@ export async function retry<T>(
  */
 export async function requestWithRetry<T>(
   requestFn: () => Promise<T>,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<T> {
   const { retry: enableRetry = false, maxRetries = 3, retryDelay = 1000 } = options
 

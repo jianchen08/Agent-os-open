@@ -41,9 +41,7 @@ interface Subscription {
  * WebSocket 连接管理 Hook
  */
 export function useWebSocket(): UseWebSocketReturn {
-  const [status, setStatus] = useState<WebSocketStatusType>(
-    WebSocketStatus.DISCONNECTED
-  )
+  const [status, setStatus] = useState<WebSocketStatusType>(WebSocketStatus.DISCONNECTED)
   const subscriptionsRef = useRef<Set<Subscription>>(new Set())
 
   // 更新连接状态
@@ -88,7 +86,7 @@ export function useWebSocket(): UseWebSocketReturn {
   const unsubscribe = useCallback((event: string, handler: EventHandler) => {
     webSocketService.unsubscribe(event, handler)
     // 从订阅集合中移除
-    subscriptionsRef.current.forEach(sub => {
+    subscriptionsRef.current.forEach((sub) => {
       if (sub.event === event && sub.handler === handler) {
         subscriptionsRef.current.delete(sub)
       }

@@ -14,6 +14,12 @@ export const ROUTES = {
   REGISTER: '/register',
   /** 设置页面 */
   SETTINGS: '/settings',
+  /** 设置子页面 */
+  SETTINGS_API: '/settings/api',
+  SETTINGS_LLM: '/settings/llm',
+  SETTINGS_CONTEXT: '/settings/context',
+  SETTINGS_CONCURRENCY: '/settings/concurrency',
+  SETTINGS_COST: '/settings/cost',
   /** 工具页面 */
   TOOLS: '/tools',
   /** 智能体页面 */

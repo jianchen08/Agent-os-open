@@ -4,10 +4,7 @@
  * 提供错误分类、重试策略和用户提示功能
  */
 
-import {
-  DEFAULT_RETRY_POLICY,
-  WebSocketErrorCode,
-} from '@/constants/websocket'
+import { DEFAULT_RETRY_POLICY, WebSocketErrorCode } from '@/constants/websocket'
 import type { RetryPolicy } from '@/constants/websocket'
 
 /**
@@ -49,11 +46,7 @@ export interface ErrorReporter {
   /** 上报错误信息 */
   reportError(errorInfo: ErrorInfo): Promise<void>
   /** 上报指标数据 */
-  reportMetric(
-    name: string,
-    value: number,
-    tags?: Record<string, string>
-  ): Promise<void>
+  reportMetric(name: string, value: number, tags?: Record<string, string>): Promise<void>
 }
 
 /**
@@ -76,11 +69,7 @@ class ConsoleErrorReporter implements ErrorReporter {
    * @param value 指标值
    * @param tags 标签
    */
-  async reportMetric(
-    name: string,
-    value: number,
-    tags?: Record<string, string>
-  ): Promise<void> {
+  async reportMetric(name: string, value: number, tags?: Record<string, string>): Promise<void> {
     console.log('[WebSocket指标上报]', { name, value, tags })
   }
 }
@@ -103,10 +92,7 @@ export class WebSocketErrorHandler {
    * @param retryPolicy 重试策略
    * @param errorReporter 错误上报器
    */
-  constructor(
-    retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
-    errorReporter?: ErrorReporter
-  ) {
+  constructor(retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY, errorReporter?: ErrorReporter) {
     this.retryPolicy = retryPolicy
     this.errorReporter = errorReporter || new ConsoleErrorReporter()
   }
@@ -122,7 +108,7 @@ export class WebSocketErrorHandler {
   async handleError(
     error: Error | Event | CloseEvent,
     context?: Record<string, unknown>,
-    retryCount: number = 0
+    retryCount: number = 0,
   ): Promise<ErrorHandlerResult> {
     const errorInfo = this.classifyError(error, context)
 
@@ -154,7 +140,7 @@ export class WebSocketErrorHandler {
    */
   private classifyError(
     error: Error | Event | CloseEvent,
-    context?: Record<string, unknown>
+    context?: Record<string, unknown>,
   ): ErrorInfo {
     let code: WebSocketErrorCode
     let message: string
@@ -234,9 +220,8 @@ export class WebSocketErrorHandler {
    */
   private calculateRetryDelay(retryCount: number): number {
     const delay = Math.min(
-      this.retryPolicy.initialDelay *
-        Math.pow(this.retryPolicy.backoffFactor, retryCount),
-      this.retryPolicy.maxDelay
+      this.retryPolicy.initialDelay * Math.pow(this.retryPolicy.backoffFactor, retryCount),
+      this.retryPolicy.maxDelay,
     )
 
     const jitter = delay * 0.1 * Math.random()
@@ -333,11 +318,7 @@ export class WebSocketErrorHandler {
    * @param value 指标值
    * @param tags 标签
    */
-  async reportMetric(
-    name: string,
-    value: number,
-    tags?: Record<string, string>
-  ): Promise<void> {
+  async reportMetric(name: string, value: number, tags?: Record<string, string>): Promise<void> {
     await this.errorReporter.reportMetric(name, value, tags)
   }
 }
@@ -351,11 +332,9 @@ export class WebSocketErrorHandler {
  */
 export function createWebSocketErrorHandler(
   retryPolicy?: Partial<RetryPolicy>,
-  _enableSentry?: boolean
+  _enableSentry?: boolean,
 ): WebSocketErrorHandler {
-  const policy = retryPolicy
-    ? { ...DEFAULT_RETRY_POLICY, ...retryPolicy }
-    : DEFAULT_RETRY_POLICY
+  const policy = retryPolicy ? { ...DEFAULT_RETRY_POLICY, ...retryPolicy } : DEFAULT_RETRY_POLICY
   const reporter = new ConsoleErrorReporter()
 
   return new WebSocketErrorHandler(policy, reporter)

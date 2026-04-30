@@ -2,10 +2,9 @@
  * 数据映射工具函数
  */
 
-import type { Session } from '../types/models'
 import type { Thread } from '../types/api'
-
 import type { Node, Edge, GraphData, NodeStatus } from '../types/graph'
+import type { Session } from '../types/models'
 
 /**
  * 图数据相关类型
@@ -102,9 +101,7 @@ export function mapBackendEdgeToEdge(backendEdge: BackendEdgeData): Edge {
  * 将后端图数据映射为前端图数据格式
  * 完整的类型转换，确保类型安全
  */
-export function mapBackendGraphToGraphData(
-  backendData: BackendGraphData
-): GraphData {
+export function mapBackendGraphToGraphData(backendData: BackendGraphData): GraphData {
   return {
     nodes: backendData.nodes.map(mapBackendNodeToNode),
     edges: backendData.edges.map(mapBackendEdgeToEdge),
@@ -133,9 +130,7 @@ export interface ThreadStateResponse {
 /**
  * 将 API 的 Thread 映射为 Session
  */
-export function mapThreadToSession(
-  thread: Thread | ThreadStateResponse
-): Session {
+export function mapThreadToSession(thread: Thread | ThreadStateResponse): Session {
   return {
     id: thread.thread_id,
     title: thread.intent || '未命名会话',
@@ -203,9 +198,7 @@ export interface ThreadDetailResponse {
  * 将线程详情映射为执行图数据
  * 从线程详情中提取执行图数据并映射为前端格式
  */
-export function mapThreadDetailToGraph(
-  threadDetail: ThreadDetailResponse
-): GraphData {
+export function mapThreadDetailToGraph(threadDetail: ThreadDetailResponse): GraphData {
   const graphData = threadDetail.execution_graph || { nodes: [], edges: [] }
 
   // 使用完整的类型转换函数

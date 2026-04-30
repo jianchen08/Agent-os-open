@@ -6,10 +6,9 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-
+import { themeList } from '@/config/themes'
 import { getPresetTheme, applyTheme as applyThemeToDOM } from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
-import { themeList } from '@/config/themes'
 import type { ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
 
 export type { ThemeMode } from '@/types/theme'
@@ -53,9 +52,7 @@ export interface ThemeActions {
  */
 function getSystemTheme(): 'light' | 'dark' {
   if (typeof window === 'undefined') return 'dark'
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
-    ? 'dark'
-    : 'light'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
 /**
@@ -72,19 +69,13 @@ function resolveThemeMode(mode: ThemeMode): 'light' | 'dark' {
  * 判断主题是否为浅色主题
  */
 function isLightTheme(config: ThemeConfig): boolean {
-  return (
-    config.category === 'light' ||
-    config.id === 'light' ||
-    config.id.includes('light')
-  )
+  return config.category === 'light' || config.id === 'light' || config.id.includes('light')
 }
 
 /**
  * 生成纹理 CSS
  */
-function generateTextureCSS(
-  texture: ThemeConfig['backgrounds']['texture']
-): string {
+function generateTextureCSS(texture: ThemeConfig['backgrounds']['texture']): string {
   if (!texture || texture.type === 'none') return 'none'
 
   const { type, color = 'rgba(255,255,255,0.03)', size = '24px' } = texture
@@ -115,7 +106,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       isLoading: false,
 
       // 设置主题模式
-      setMode: mode => {
+      setMode: (mode) => {
         const resolvedTheme = resolveThemeMode(mode)
         const newThemeId = mode === 'system' ? resolvedTheme : mode
         set({ mode, resolvedTheme })
@@ -128,13 +119,13 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       },
 
       // 切换到指定主题
-      setTheme: async themeId => {
+      setTheme: async (themeId) => {
         set({ currentThemeId: themeId, mode: themeId as ThemeMode })
         await get().loadTheme(themeId)
       },
 
       // 加载主题配置
-      loadTheme: async themeId => {
+      loadTheme: async (themeId) => {
         set({ isLoading: true })
         try {
           let config: ThemeConfig | null = null
@@ -209,7 +200,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         // 合并预设主题和用户主题
         const allThemes: ThemeInfo[] = [
           ...themeList,
-          ...userThemes.map(theme => ({
+          ...userThemes.map((theme) => ({
             id: theme.id,
             name: theme.name,
             description: `基于 ${theme.basedOn} 的自定义主题`,
@@ -275,12 +266,12 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
     }),
     {
       name: 'theme-storage',
-      partialize: state => ({
+      partialize: (state) => ({
         mode: state.mode,
         currentThemeId: state.currentThemeId,
       }),
-    }
-  )
+    },
+  ),
 )
 
 /**

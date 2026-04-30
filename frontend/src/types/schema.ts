@@ -69,12 +69,7 @@ export interface ChatInteractionConfig {
 }
 
 /** 渲染空间类型 */
-export type RenderingSpaceType =
-  | 'chat'
-  | 'workspace'
-  | 'floating'
-  | 'dock'
-  | 'fullscreen'
+export type RenderingSpaceType = 'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen'
 
 /** 渲染空间配置 */
 export interface RenderingSpaceConfig {

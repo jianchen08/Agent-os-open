@@ -27,13 +27,28 @@ function detectCapabilities(): ClientCapabilityConfig {
   const mobileSpaces = ['chat', 'floating']
 
   const desktopWidgets = [
-    'form', 'chart', 'gallery', 'table', 'progress',
-    'code_block', 'status_card', 'decision',
-    'kanban', 'editor', 'terminal', 'file_tree',
+    'form',
+    'chart',
+    'gallery',
+    'table',
+    'progress',
+    'code_block',
+    'status_card',
+    'decision',
+    'kanban',
+    'editor',
+    'terminal',
+    'file_tree',
   ]
   const mobileWidgets = [
-    'form', 'chart', 'gallery', 'table', 'progress',
-    'code_block', 'status_card', 'decision',
+    'form',
+    'chart',
+    'gallery',
+    'table',
+    'progress',
+    'code_block',
+    'status_card',
+    'decision',
   ]
 
   return {

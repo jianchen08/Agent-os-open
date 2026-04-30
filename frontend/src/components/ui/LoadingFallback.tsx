@@ -39,13 +39,11 @@ export function LoadingFallback({
       <div className="text-center">
         <div
           className={cn(
-            'inline-block animate-spin rounded-full border-2 border-primary border-t-transparent',
-            sizeClasses[size]
+            'border-primary inline-block animate-spin rounded-full border-2 border-t-transparent',
+            sizeClasses[size],
           )}
         />
-        {message && (
-          <p className="mt-2 text-sm text-text-secondary">{message}</p>
-        )}
+        {message && <p className="text-text-secondary mt-2 text-sm">{message}</p>}
       </div>
     </div>
   )
@@ -71,8 +69,8 @@ export function SkeletonLoader({ count = 3, className }: SkeletonLoaderProps) {
     <div className={cn('space-y-3', className)}>
       {Array.from({ length: count }).map((_, i) => (
         <div key={i} className="animate-pulse">
-          <div className="h-4 bg-bg-tertiary rounded w-3/4 mb-2" />
-          <div className="h-3 bg-bg-tertiary rounded w-1/2" />
+          <div className="bg-bg-tertiary mb-2 h-4 w-3/4 rounded" />
+          <div className="bg-bg-tertiary h-3 w-1/2 rounded" />
         </div>
       ))}
     </div>
@@ -88,17 +86,17 @@ export function CardSkeleton({ count = 3 }: { count?: number }) {
   return (
     <div className="space-y-4">
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="animate-pulse rounded-lg border bg-card p-4">
+        <div key={i} className="bg-card animate-pulse rounded-lg border p-4">
           <div className="flex items-start gap-3">
-            <div className="h-5 w-5 rounded bg-bg-tertiary" />
+            <div className="bg-bg-tertiary h-5 w-5 rounded" />
             <div className="flex-1 space-y-2">
-              <div className="h-4 bg-bg-tertiary rounded w-3/4" />
-              <div className="h-3 bg-bg-tertiary rounded w-1/2" />
+              <div className="bg-bg-tertiary h-4 w-3/4 rounded" />
+              <div className="bg-bg-tertiary h-3 w-1/2 rounded" />
             </div>
           </div>
           <div className="mt-4 space-y-2">
-            <div className="h-2 bg-bg-tertiary rounded w-full" />
-            <div className="h-2 bg-bg-tertiary rounded w-2/3" />
+            <div className="bg-bg-tertiary h-2 w-full rounded" />
+            <div className="bg-bg-tertiary h-2 w-2/3 rounded" />
           </div>
         </div>
       ))}
@@ -117,12 +115,12 @@ export function ListSkeleton({ count = 5 }: { count?: number }) {
       {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
-          className="animate-pulse flex items-center gap-3 p-3 rounded-lg bg-bg-secondary"
+          className="bg-bg-secondary flex animate-pulse items-center gap-3 rounded-lg p-3"
         >
-          <div className="h-4 w-4 rounded bg-bg-tertiary" />
+          <div className="bg-bg-tertiary h-4 w-4 rounded" />
           <div className="flex-1 space-y-1">
-            <div className="h-3 bg-bg-tertiary rounded w-1/3" />
-            <div className="h-2 bg-bg-tertiary rounded w-1/4" />
+            <div className="bg-bg-tertiary h-3 w-1/3 rounded" />
+            <div className="bg-bg-tertiary h-2 w-1/4 rounded" />
           </div>
         </div>
       ))}

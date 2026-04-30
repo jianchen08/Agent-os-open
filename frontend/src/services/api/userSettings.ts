@@ -8,36 +8,27 @@
  * - updateUserSettings(data, options): UserSettingsResponse - 更新用户设置
  */
 
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
-import {
-  API_ENDPOINTS,
-} from '@/constants/api'
 import { requestWithRetry } from '@/utils/retry'
+import type { UserSettingsResponse, UserSettingsUpdateRequest } from '@/types/api'
 import type { RetryOptions } from '@/utils/retry'
-import type {
-  UserSettingsResponse,
-  UserSettingsUpdateRequest,
-} from '@/types/api'
 
-export async function getUserSettings(
-  options: RetryOptions = {}
-): Promise<UserSettingsResponse> {
+export async function getUserSettings(options: RetryOptions = {}): Promise<UserSettingsResponse> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<UserSettingsResponse>(
-      API_ENDPOINTS.USER_SETTINGS.GET
-    )
+    const response = await apiClient.get<UserSettingsResponse>(API_ENDPOINTS.USER_SETTINGS.GET)
     return response.data
   }, options)
 }
 
 export async function updateUserSettings(
   data: UserSettingsUpdateRequest,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<UserSettingsResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<UserSettingsResponse>(
       API_ENDPOINTS.USER_SETTINGS.UPDATE,
-      data
+      data,
     )
     return response.data
   }, options)

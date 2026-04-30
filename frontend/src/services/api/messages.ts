@@ -93,12 +93,14 @@ export interface MessageResponse {
 
 export function toMessage(
   raw: Record<string, unknown>,
-  defaults?: { sessionId?: string; sequence?: number }
+  defaults?: { sessionId?: string; sequence?: number },
 ): import('@/types/models').Message {
   // 支持多种字段命名
   const id = (raw.message_id || raw.id) as string
   const sessionId = ((raw.thread_id || raw.sessionId || defaults?.sessionId) as string) || ''
-  const parentId = (raw.parent_message_id || raw.parentId || raw.parent_message_id) as string | undefined
+  const parentId = (raw.parent_message_id || raw.parentId || raw.parent_message_id) as
+    | string
+    | undefined
   const sequence = (raw.sequence as number) ?? defaults?.sequence ?? 0
   const role = (raw.role || 'assistant') as 'user' | 'assistant' | 'system' | 'tool'
   const content = (raw.content as string) || ''
@@ -136,22 +138,34 @@ export function toMessage(
       // 工具消息特有字段（字段名与数据库一致）
       toolCallId: (raw.toolCallId || raw.tool_call_id) as string | undefined,
       toolName: (raw.toolName || raw.tool_name || metadata?.name) as string | undefined,
-      toolArgs: (raw.toolArgs || raw.tool_args || metadata?.input || metadata?.args) as Record<string, unknown> | undefined,
-      toolResult: (raw.toolResult || raw.tool_result || metadata?.output || metadata?.result) as unknown,
+      toolArgs: (raw.toolArgs || raw.tool_args || metadata?.input || metadata?.args) as
+        | Record<string, unknown>
+        | undefined,
+      toolResult: (raw.toolResult ||
+        raw.tool_result ||
+        metadata?.output ||
+        metadata?.result) as unknown,
       toolError: (raw.toolError || raw.tool_error || metadata?.error) as string | undefined,
-      durationMs: (raw.durationMs || raw.duration_ms || metadata?.duration_ms) as number | undefined,
+      durationMs: (raw.durationMs || raw.duration_ms || metadata?.duration_ms) as
+        | number
+        | undefined,
       metadata: metadata,
     } as any
   }
 
   // toolCalls 转换：统一字段命名
   let toolCalls: import('@/types/models').MessageToolCall[] | undefined
-  const rawToolCalls = (raw.toolCalls || metadata?.toolCalls) as Array<Record<string, unknown>> | undefined
+  const rawToolCalls = (raw.toolCalls || metadata?.toolCalls) as
+    | Array<Record<string, unknown>>
+    | undefined
   if (rawToolCalls && Array.isArray(rawToolCalls)) {
-    toolCalls = rawToolCalls.map(tc => ({
+    toolCalls = rawToolCalls.map((tc) => ({
       call_id: (tc.call_id || tc.callId || tc.tool_call_id) as string,
       tool_name: (tc.tool_name || tc.toolName || tc.name) as string,
-      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<string, unknown>,
+      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<
+        string,
+        unknown
+      >,
       status: (tc.status || 'pending') as 'pending' | 'running' | 'completed' | 'failed',
       result: tc.result,
       error: tc.error as string | undefined,
@@ -247,11 +261,11 @@ export class MessageApiService {
   async deleteMessage(
     sessionId: string,
     messageId: string,
-    includeTarget: boolean = true
+    includeTarget: boolean = true,
   ): Promise<DeleteMessageResult> {
     const response = await apiClient.delete<DeleteMessageResult>(
       `/api/v1/threads/${sessionId}/messages/${messageId}`,
-      { params: { include_target: includeTarget } }
+      { params: { include_target: includeTarget } },
     )
     return response.data
   }
@@ -259,11 +273,11 @@ export class MessageApiService {
   async editMessage(
     sessionId: string,
     messageId: string,
-    content: string
+    content: string,
   ): Promise<MessageResponse> {
     const response = await apiClient.put<MessageResponse>(
       `/api/v1/threads/${sessionId}/messages/${messageId}`,
-      { content }
+      { content },
     )
     return response.data
   }
@@ -272,20 +286,20 @@ export class MessageApiService {
     sessionId: string,
     messageId: string,
     request?: MessageRetryRequest,
-    _createBranch: boolean = true
+    _createBranch: boolean = true,
   ): Promise<RetryMessageResult> {
     // 重试操作需要等待 AI 完整生成，使用更长的超时时间（2分钟）
     const response = await apiClient.post<RetryMessageResult>(
       `/api/v1/threads/${sessionId}/messages/${messageId}/retry`,
       request,
-      { timeout: 120000 }
+      { timeout: 120000 },
     )
     return response.data
   }
 
   async getMessageVersions(
     sessionId: string,
-    messageId: string
+    messageId: string,
   ): Promise<{
     versions: MessageVersion[]
     total: number

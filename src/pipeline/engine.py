@@ -20,6 +20,7 @@ import asyncio
 import contextvars
 import copy
 import logging
+import traceback as _traceback
 import uuid as _uuid
 from pathlib import Path
 
@@ -146,12 +147,8 @@ class PipelineEngine:
         Returns:
             管道最终状态字典
         """
-        # 同步引擎实例级 pipeline_id：CLI 重启时通过 extra_state 传入会话恢复的 pipeline_id，
-        # 需同步到 self._pipeline_id 以确保内部路径（检查点、日志等）使用一致 ID。
-        if "pipeline_id" in extra_state:
-            self._pipeline_id = extra_state["pipeline_id"]
-        else:
-            extra_state["pipeline_id"] = self._pipeline_id
+        # pipeline_id 由引擎构造时确定，外部不可覆盖。
+        extra_state["pipeline_id"] = self._pipeline_id
 
         if initial_state is not None and user_input is None:
             state: dict[str, Any] = {
@@ -453,8 +450,8 @@ class PipelineEngine:
 
         if model_loader is None:
             try:
-                from config.models import ModelConfigLoader
-                model_loader = ModelConfigLoader()
+                from config.models import get_model_config_loader
+                model_loader = get_model_config_loader()
             except Exception:
                 logger.warning(
                     "[_apply_agent_model_override] ModelConfigLoader 不可用，跳过模型覆盖"
@@ -513,8 +510,8 @@ class PipelineEngine:
         model_loader = services.get("model_loader") if services else None
         if model_loader is None:
             try:
-                from config.models import ModelConfigLoader
-                model_loader = ModelConfigLoader()
+                from config.models import get_model_config_loader
+                model_loader = get_model_config_loader()
             except Exception:
                 logger.warning("[_resolve_tier] ModelConfigLoader 不可用")
                 return ""
@@ -992,7 +989,16 @@ class PipelineEngine:
                         logger.debug("Post-end output chain failed (non-critical): %s", exc)
 
         except asyncio.CancelledError:
-            logger.info("Pipeline cancelled by CLI user")
+            _task = asyncio.current_task()
+            _must_cancel = getattr(_task, '_must_cancel', None) if _task else None
+            logger.warning(
+                "Pipeline cancelled | "
+                "iteration=%d | _must_cancel=%s | "
+                "stack:\n%s",
+                state.get(StateKeys.ITERATION, 0),
+                _must_cancel,
+                ''.join(_traceback.format_stack()),
+            )
             state[StateKeys.ENDED] = True
         except Exception as exc:
             # BUG-FIX: 管道未捕获异常保护
@@ -1016,6 +1022,11 @@ class PipelineEngine:
             # "Cannot send a request, as the client has been closed"。
 
         return state
+
+    @property
+    def pipeline_id(self) -> str:
+        """只读：引擎自己管理的管道 ID，外部只能读取不能修改。"""
+        return self._pipeline_id
 
     @property
     def is_suspended(self) -> bool:

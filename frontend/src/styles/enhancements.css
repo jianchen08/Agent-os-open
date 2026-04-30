@@ -27,8 +27,13 @@
 
 /* 选择文本样式 */
 ::selection {
-  background-color: hsl(var(--primary) / 0.3);
-  color: hsl(var(--primary-foreground));
+  background-color: rgba(59, 130, 246, 0.35);
+  color: #ffffff;
+}
+
+::-moz-selection {
+  background-color: rgba(59, 130, 246, 0.35);
+  color: #ffffff;
 }
 
 /* 焦点样式 */

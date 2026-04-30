@@ -4,21 +4,14 @@
  * 提供消息的重试、编辑、删除、版本切换等功能
  */
 
-import { Button } from '@/components/ui/button'
-import { useMessageActions } from '@/hooks/useMessageActions'
-import type { MessageVersion as ApiMessageVersion } from '@/services/api/messages'
-import type { Message } from '@/types/models'
-import { loggers } from '@/utils/logger'
-import {
-    ChevronLeft,
-    ChevronRight,
-    Copy,
-    Edit2,
-    RefreshCw,
-    Trash2,
-} from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy, Edit2, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useState, type FC } from 'react'
 import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { useMessageActions } from '@/hooks/useMessageActions'
+import { loggers } from '@/utils/logger'
+import type { MessageVersion as ApiMessageVersion } from '@/services/api/messages'
+import type { Message } from '@/types/models'
 
 /**
  * 消息操作组件属性
@@ -55,74 +48,30 @@ export const MessageActions: FC<MessageActionsProps> = ({
   onEdit,
   onContentUpdate,
 }) => {
-  const { retryMessageWithScope, getMessageVersions, deleteMessage } =
-    useMessageActions(sessionId)
+  const { retryMessageWithScope, getMessageVersions, deleteMessage } = useMessageActions(sessionId)
   const [versions, setVersions] = useState<ApiMessageVersion[]>([])
   const [currentVersionIndex, setCurrentVersionIndex] = useState(0)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  /** 组件加载时获取版本列表 */
-  useEffect(() => {
-    const loadVersions = async () => {
-      if (!sessionId) {
-        loggers.messageActions.warn(
-          'sessionId 为空，跳过版本加载'
-        )
-        return
-      }
-
-      // 跳过临时消息（temp- 前缀）
-      if (!message.id || message.id.startsWith('temp-')) {
-        loggers.messageActions.debug(
-          '跳过临时消息的版本查询 | messageId:',
-          message.id
-        )
-        return
-      }
-
-      // 只有 assistant 消息才有版本
-      if (message.role !== 'assistant') {
-        return
-      }
-
-      // 跳过空内容消息
-      if (!message.content || message.content.trim() === '') {
-        return
-      }
-
-      try {
-        await new Promise(resolve => setTimeout(resolve, 100))
-
-        const versionList = await getMessageVersions(message.id)
-        setVersions(versionList as ApiMessageVersion[])
-
-        let currentIndex = versionList.findIndex(v => v.is_current)
-
-        if (currentIndex === -1 && versionList.length > 0) {
-          for (let i = versionList.length - 1; i >= 0; i--) {
-            if (versionList[i].content && versionList[i].content.trim().length > 0) {
-              currentIndex = i
-              break
-            }
-          }
-          if (currentIndex === -1) {
-            currentIndex = versionList.length - 1
-          }
-        }
-
-        setCurrentVersionIndex(currentIndex >= 0 ? currentIndex : 0)
-      } catch (error) {
-        const errorObj = error as { code?: string; message?: string }
-        if (errorObj.code !== '404') {
-          console.error('[MessageActions] 获取版本失败:', error)
-        }
-        setVersions([])
-      }
-    }
-
-    const timeoutId = setTimeout(loadVersions, 50)
-    return () => clearTimeout(timeoutId)
-  }, [message.id, sessionId, getMessageVersions, message.role, message.content])
+  // 消息版本功能暂未启用（后端未实现版本存储），跳过版本加载
+  // 启用后取消下方注释：
+  // useEffect(() => {
+  //   const loadVersions = async () => {
+  //     if (!sessionId || !message.id || message.id.startsWith('temp-')) return
+  //     if (message.role !== 'assistant' || !message.content?.trim()) return
+  //
+  //     try {
+  //       const versionList = await getMessageVersions(message.id)
+  //       setVersions(versionList as ApiMessageVersion[])
+  //       const idx = versionList.findIndex((v) => v.is_current)
+  //       setCurrentVersionIndex(idx >= 0 ? idx : 0)
+  //     } catch {
+  //       setVersions([])
+  //     }
+  //   }
+  //   const tid = setTimeout(loadVersions, 50)
+  //   return () => clearTimeout(tid)
+  // }, [message.id, sessionId, getMessageVersions, message.role, message.content])
 
   const totalVersions = versions.length
   const hasMultipleVersions = totalVersions > 1
@@ -144,8 +93,8 @@ export const MessageActions: FC<MessageActionsProps> = ({
         try {
           const versionList = await getMessageVersions(message.id)
           if (versionList.length > 0) {
-            const validVersions = versionList.filter(v =>
-              v.content && v.content.trim().length > 0
+            const validVersions = versionList.filter(
+              (v) => v.content && v.content.trim().length > 0,
             )
 
             if (validVersions.length > 0) {
@@ -168,9 +117,7 @@ export const MessageActions: FC<MessageActionsProps> = ({
    * 处理删除操作
    */
   const handleDelete = async () => {
-    const confirmed = window.confirm(
-      '确定要删除这条消息吗？该消息之后的所有消息也会被删除。'
-    )
+    const confirmed = window.confirm('确定要删除这条消息吗？该消息之后的所有消息也会被删除。')
 
     if (!confirmed) return
 
@@ -193,9 +140,10 @@ export const MessageActions: FC<MessageActionsProps> = ({
       setCurrentVersionIndex(newIndex)
       const prevVersion = versions[newIndex]
       if (onContentUpdate && prevVersion) {
-        const content = prevVersion.content && prevVersion.content.trim().length > 0
-          ? prevVersion.content
-          : '(此版本内容为空)'
+        const content =
+          prevVersion.content && prevVersion.content.trim().length > 0
+            ? prevVersion.content
+            : '(此版本内容为空)'
         onContentUpdate(content)
       }
     }
@@ -210,9 +158,10 @@ export const MessageActions: FC<MessageActionsProps> = ({
       setCurrentVersionIndex(newIndex)
       const nextVersion = versions[newIndex]
       if (onContentUpdate && nextVersion) {
-        const content = nextVersion.content && nextVersion.content.trim().length > 0
-          ? nextVersion.content
-          : '(此版本内容为空)'
+        const content =
+          nextVersion.content && nextVersion.content.trim().length > 0
+            ? nextVersion.content
+            : '(此版本内容为空)'
         onContentUpdate(content)
       }
     }
@@ -237,14 +186,14 @@ export const MessageActions: FC<MessageActionsProps> = ({
     if (onEdit) {
       onEdit()
     } else {
-      toast.info('编辑功能待实现')
+      toast.info('编辑功能暂不可用')
     }
   }
 
   // 用户消息显示复制、编辑和删除按钮
   if (isUserMessage) {
     return (
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
         <Button
           variant="ghost"
           size="sm"
@@ -253,7 +202,7 @@ export const MessageActions: FC<MessageActionsProps> = ({
           disabled={disabled}
           title="复制"
         >
-          <Copy className="w-3 h-3" />
+          <Copy className="h-3 w-3" />
         </Button>
         <Button
           variant="ghost"
@@ -263,17 +212,17 @@ export const MessageActions: FC<MessageActionsProps> = ({
           disabled={disabled}
           title="编辑"
         >
-          <Edit2 className="w-3 h-3" />
+          <Edit2 className="h-3 w-3" />
         </Button>
         <Button
           variant="ghost"
           size="sm"
-          className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+          className="text-destructive hover:text-destructive h-6 w-6 p-0"
           onClick={handleDelete}
           disabled={disabled || isDeleting}
           title="删除"
         >
-          <Trash2 className="w-3 h-3" />
+          <Trash2 className="h-3 w-3" />
         </Button>
       </div>
     )
@@ -281,7 +230,7 @@ export const MessageActions: FC<MessageActionsProps> = ({
 
   // AI 消息显示完整操作按钮
   return (
-    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+    <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
       <Button
         variant="ghost"
         size="sm"
@@ -290,11 +239,11 @@ export const MessageActions: FC<MessageActionsProps> = ({
         disabled={disabled}
         title="复制"
       >
-        <Copy className="w-3 h-3" />
+        <Copy className="h-3 w-3" />
       </Button>
 
       {hasMultipleVersions && (
-        <div className="flex items-center gap-0.5 bg-muted rounded-md px-1.5 py-0.5 mx-0.5">
+        <div className="bg-muted mx-0.5 flex items-center gap-0.5 rounded-md px-1.5 py-0.5">
           <Button
             variant="ghost"
             size="sm"
@@ -303,10 +252,10 @@ export const MessageActions: FC<MessageActionsProps> = ({
             disabled={disabled || currentVersionIndex === 0}
             title="上一个版本"
           >
-            <ChevronLeft className="w-3 h-3" />
+            <ChevronLeft className="h-3 w-3" />
           </Button>
 
-          <span className="text-xs text-muted-foreground min-w-[32px] text-center">
+          <span className="text-muted-foreground min-w-[32px] text-center text-xs">
             {currentVersionIndex + 1}/{totalVersions}
           </span>
 
@@ -318,7 +267,7 @@ export const MessageActions: FC<MessageActionsProps> = ({
             disabled={disabled || currentVersionIndex === totalVersions - 1}
             title="下一个版本"
           >
-            <ChevronRight className="w-3 h-3" />
+            <ChevronRight className="h-3 w-3" />
           </Button>
         </div>
       )}
@@ -332,19 +281,19 @@ export const MessageActions: FC<MessageActionsProps> = ({
           disabled={disabled}
           title="重新生成"
         >
-          <RefreshCw className="w-3 h-3" />
+          <RefreshCw className="h-3 w-3" />
         </Button>
       )}
 
       <Button
         variant="ghost"
         size="sm"
-        className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+        className="text-destructive hover:text-destructive h-6 w-6 p-0"
         onClick={handleDelete}
         disabled={disabled}
         title="删除"
       >
-        <Trash2 className="w-3 h-3" />
+        <Trash2 className="h-3 w-3" />
       </Button>
     </div>
   )

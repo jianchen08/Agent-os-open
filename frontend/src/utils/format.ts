@@ -12,11 +12,11 @@ export function parseUTCTimestamp(timestamp: string): Date {
   if (!timestamp) {
     return new Date()
   }
-  
+
   if (timestamp.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(timestamp)) {
     return new Date(timestamp)
   }
-  
+
   return new Date(timestamp + 'Z')
 }
 
@@ -67,7 +67,7 @@ function formatDateString(date: Date): string {
  */
 export function formatDate(
   dateString: string,
-  format: 'full' | 'date' | 'time' | 'relative' = 'full'
+  format: 'full' | 'date' | 'time' | 'relative' = 'full',
 ): string {
   const date = parseUTCTimestamp(dateString)
 
@@ -111,11 +111,7 @@ export function formatDate(
  * @param ellipsis - 省略符号
  * @returns 截断后的文本
  */
-export function truncateText(
-  text: string,
-  maxLength: number,
-  ellipsis: string = '...'
-): string {
+export function truncateText(text: string, maxLength: number, ellipsis: string = '...'): string {
   if (text.length <= maxLength) {
     return text
   }

@@ -180,12 +180,10 @@ export interface BudgetStatusParams {
  * @param params 查询参数
  * @returns 预算状态
  */
-export async function getBudgetStatus(
-  params?: BudgetStatusParams
-): Promise<BudgetStatusResponse> {
+export async function getBudgetStatus(params?: BudgetStatusParams): Promise<BudgetStatusResponse> {
   const response = await apiClient.get<BudgetStatusResponse>(
     API_ENDPOINTS.COST_CONTROL.BUDGET_STATUS,
-    { params }
+    { params },
   )
   return response.data
 }
@@ -197,7 +195,7 @@ export async function getBudgetStatus(
  */
 export async function getUsageStatistics(): Promise<UsageStatisticsResponse> {
   const response = await apiClient.get<UsageStatisticsResponse>(
-    API_ENDPOINTS.COST_CONTROL.USAGE_STATISTICS
+    API_ENDPOINTS.COST_CONTROL.USAGE_STATISTICS,
   )
   return response.data
 }
@@ -208,9 +206,7 @@ export async function getUsageStatistics(): Promise<UsageStatisticsResponse> {
  * @returns 成本配置
  */
 export async function getCostConfig(): Promise<CostConfigResponse> {
-  const response = await apiClient.get<CostConfigResponse>(
-    API_ENDPOINTS.COST_CONTROL.CONFIG
-  )
+  const response = await apiClient.get<CostConfigResponse>(API_ENDPOINTS.COST_CONTROL.CONFIG)
   return response.data
 }
 
@@ -228,13 +224,10 @@ export interface CostReportParams {
  * @param params 查询参数
  * @returns 成本报表
  */
-export async function getCostReport(
-  params?: CostReportParams
-): Promise<CostReportResponse> {
-  const response = await apiClient.get<CostReportResponse>(
-    API_ENDPOINTS.COST_CONTROL.REPORT,
-    { params }
-  )
+export async function getCostReport(params?: CostReportParams): Promise<CostReportResponse> {
+  const response = await apiClient.get<CostReportResponse>(API_ENDPOINTS.COST_CONTROL.REPORT, {
+    params,
+  })
   return response.data
 }
 
@@ -244,13 +237,11 @@ export async function getCostReport(
  * @param params 重置参数
  * @returns 重置结果
  */
-export async function resetBudget(
-  params?: BudgetStatusParams
-): Promise<BudgetResetResponse> {
+export async function resetBudget(params?: BudgetStatusParams): Promise<BudgetResetResponse> {
   const response = await apiClient.post<BudgetResetResponse>(
     API_ENDPOINTS.COST_CONTROL.BUDGET_RESET,
     null,
-    { params }
+    { params },
   )
   return response.data
 }

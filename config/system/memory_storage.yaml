@@ -112,6 +112,59 @@ performance:
     enabled: false
     max_items: 100
 
+# ========== 向量检索配置 ==========
+vector_search:
+  # 是否启用向量检索（需要 pgvector 后端）
+  enabled: false
+
+  # 向量检索不可用时是否回退到关键词检索
+  fallback_to_keyword: true
+
+  # 默认检索方法：vector / keyword / tagwave
+  default_method: vector
+
+  # 混合检索配置（同时使用向量+关键词，按权重合并结果）
+  hybrid:
+    enabled: false
+    # 向量检索权重
+    vector_weight: 0.7
+    # 关键词检索权重
+    keyword_weight: 0.3
+
+  # 嵌入向量维度
+  embedding_dim: 1536
+
+# ========== 健康检查配置 ==========
+health_check:
+  # 是否启用健康检查
+  enabled: true
+
+  # 检查间隔（秒）
+  check_interval: 300
+
+# ========== 记忆维护配置 ==========
+maintenance:
+  # 是否启用自动维护
+  enabled: false
+
+  # 过期记忆清理间隔（秒），默认 1 小时
+  cleanup_interval: 3600
+
+  # 相似记忆合并间隔（秒），默认 24 小时
+  merge_interval: 86400
+
+  # 孤立 Tag 清理间隔（秒），默认 6 小时
+  tag_cleanup_interval: 21600
+
+  # 索引重建间隔（秒），默认 7 天
+  rebuild_index_interval: 604800
+
+  # 相似记忆合并阈值（余弦相似度）
+  merge_similarity_threshold: 0.95
+
+  # Tag 频率低于此值视为孤立 Tag
+  orphan_tag_threshold: 0
+
 # ========== 监控配置 ==========
 monitoring:
   # 是否启用性能监控

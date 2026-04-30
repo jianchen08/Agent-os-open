@@ -10,11 +10,8 @@
  */
 
 import apiClient from './client'
-import {
-  API_ENDPOINTS,
-} from '../../constants/api'
+import { API_ENDPOINTS } from '../../constants/api'
 import { requestWithRetry } from '../../utils/retry'
-import type { RetryOptions } from '../../utils/retry'
 import type {
   LoginResponse,
   RegisterResponse,
@@ -26,6 +23,7 @@ import type {
   RefreshRequest,
   LogoutRequest,
 } from '../../types/api'
+import type { RetryOptions } from '../../utils/retry'
 
 class ValidationError extends Error {
   constructor(message: string) {
@@ -71,7 +69,7 @@ function validateRefreshToken(token: string): void {
 export async function login(
   username: string,
   password: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<LoginResponse> {
   // 参数验证
   validateUsername(username)
@@ -85,10 +83,7 @@ export async function login(
 
   // 发送请求（带重试）
   return requestWithRetry(async () => {
-    const response = await apiClient.post<LoginResponse>(
-      API_ENDPOINTS.AUTH.LOGIN,
-      requestData
-    )
+    const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.LOGIN, requestData)
     return response.data
   }, options)
 }
@@ -97,7 +92,7 @@ export async function register(
   username: string,
   password: string,
   email: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<RegisterResponse> {
   // 参数验证
   validateUsername(username)
@@ -115,7 +110,7 @@ export async function register(
   return requestWithRetry(async () => {
     const response = await apiClient.post<RegisterResponse>(
       API_ENDPOINTS.AUTH.REGISTER,
-      requestData
+      requestData,
     )
     return response.data
   }, options)
@@ -123,7 +118,7 @@ export async function register(
 
 export async function refreshToken(
   token: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<RefreshResponse> {
   // 参数验证
   validateRefreshToken(token)
@@ -137,7 +132,7 @@ export async function refreshToken(
   return requestWithRetry(async () => {
     const response = await apiClient.post<RefreshResponse>(
       API_ENDPOINTS.AUTH.REFRESH_TOKEN,
-      requestData
+      requestData,
     )
     return response.data
   }, options)
@@ -146,7 +141,7 @@ export async function refreshToken(
 export async function logout(
   refreshTokenValue?: string,
   logoutAll: boolean = false,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<LogoutResponse> {
   // 构造请求数据
   const requestData: LogoutRequest = {
@@ -156,22 +151,15 @@ export async function logout(
 
   // 发送请求（带重试）
   return requestWithRetry(async () => {
-    const response = await apiClient.post<LogoutResponse>(
-      API_ENDPOINTS.AUTH.LOGOUT,
-      requestData
-    )
+    const response = await apiClient.post<LogoutResponse>(API_ENDPOINTS.AUTH.LOGOUT, requestData)
     return response.data
   }, options)
 }
 
-export async function getCurrentUser(
-  options: RetryOptions = {}
-): Promise<UserInfoResponse> {
+export async function getCurrentUser(options: RetryOptions = {}): Promise<UserInfoResponse> {
   // 发送请求（带重试）
   return requestWithRetry(async () => {
-    const response = await apiClient.get<UserInfoResponse>(
-      API_ENDPOINTS.AUTH.ME
-    )
+    const response = await apiClient.get<UserInfoResponse>(API_ENDPOINTS.AUTH.ME)
     return response.data
   }, options)
 }

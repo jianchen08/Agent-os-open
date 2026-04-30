@@ -50,8 +50,9 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
         if self.ripgrep_available:
             logger.info("[Ripgrep] 检测到ripgrep，已启用高性能模式")
         else:
-            print(
-                "[Search] ripgrep未安装，使用Python模式（建议安装ripgrep以获得更好性能）"
+            logger.warning(
+                "[Search] ripgrep未安装，使用Python模式"
+                "（建议安装ripgrep以获得更好性能）"
             )
 
     def _check_ripgrep(self) -> bool:

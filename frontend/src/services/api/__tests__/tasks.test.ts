@@ -10,11 +10,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type {
-    ProjectStatus,
-    TaskPhase
-} from '@/services/api/../../types/task'
 import * as taskApi from '@/services/api/tasks'
+import type { ProjectStatus, TaskPhase } from '@/services/api/../../types/task'
 
 // Mock axios
 vi.mock('../client', () => ({
@@ -95,9 +92,7 @@ describe('任务管理 API', () => {
       expect(result.total).toBe(2)
 
       // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/api/v1/projects?page=1&limit=20'
-      )
+      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects?page=1&limit=20')
       expect(apiClient.get).toHaveBeenCalledTimes(1)
     })
 
@@ -132,9 +127,7 @@ describe('任务管理 API', () => {
       await taskApi.fetchProjects({ status: 'running' })
 
       // 验证 API 调用包含状态过滤
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/api/v1/projects?status=running'
-      )
+      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects?status=running')
     })
 
     it('应该在请求失败时抛出错误', async () => {
@@ -255,12 +248,9 @@ describe('任务管理 API', () => {
       expect(result.autoExecute).toBe(true)
 
       // 验证 API 调用
-      expect(apiClient.patch).toHaveBeenCalledWith(
-        '/api/v1/projects/project-1/auto-execute',
-        {
-          enabled: true,
-        }
-      )
+      expect(apiClient.patch).toHaveBeenCalledWith('/api/v1/projects/project-1/auto-execute', {
+        enabled: true,
+      })
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/projects/project-1')
     })
   })
@@ -342,15 +332,12 @@ describe('任务管理 API', () => {
       expect(result.currentPhase).toBe('execute')
 
       // 验证 API 调用
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/tasks/task-1/phase/prepare/complete',
-        {
-          output: {
-            plan: '执行计划',
-            research: '调研报告',
-          },
-        }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/tasks/task-1/phase/prepare/complete', {
+        output: {
+          plan: '执行计划',
+          research: '调研报告',
+        },
+      })
     })
   })
 
@@ -389,9 +376,7 @@ describe('任务管理 API', () => {
       expect(result.error).toBeUndefined()
 
       // 验证 API 调用
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/api/v1/tasks/task-1/phase/prepare/output'
-      )
+      expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/phase/prepare/output')
     })
   })
 
@@ -462,9 +447,7 @@ describe('任务管理 API', () => {
       expect(result.taskId).toBe('task-1')
       expect(result.acceptanceCriteria).toHaveLength(3)
       expect(result.acceptanceCriteria[0].id).toBe('ac-1')
-      expect(result.acceptanceCriteria[0].description).toBe(
-        '支持用户名密码登录'
-      )
+      expect(result.acceptanceCriteria[0].description).toBe('支持用户名密码登录')
       expect(result.acceptanceCriteria[0].status).toBe('passed')
       expect(result.acceptanceCriteria[0].isRedLine).toBe(true)
 
@@ -542,14 +525,11 @@ describe('任务管理 API', () => {
       expect(result.result?.passed).toBe(true)
 
       // 验证 API 调用
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/tasks/task-1/ac/ac-2/evaluate',
-        {
-          evidence: {
-            test_results: '测试数据',
-          },
-        }
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/tasks/task-1/ac/ac-2/evaluate', {
+        evidence: {
+          test_results: '测试数据',
+        },
+      })
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/ac')
     })
   })
@@ -616,12 +596,10 @@ describe('任务管理 API', () => {
 
       // 验证结果
       expect(results).toHaveLength(3)
-      expect(results.every(ac => ac.status === 'passed')).toBe(true)
+      expect(results.every((ac) => ac.status === 'passed')).toBe(true)
 
       // 验证 API 调用
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/api/v1/tasks/task-1/ac/evaluate-all'
-      )
+      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/tasks/task-1/ac/evaluate-all')
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/tasks/task-1/ac')
     })
   })

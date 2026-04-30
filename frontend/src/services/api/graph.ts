@@ -10,17 +10,12 @@
  * - getThreadDetail(threadId, options): ThreadDetailResponse - 获取线程详情
  */
 
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
-import {
-  API_ENDPOINTS,
-} from '@/constants/api'
-import {
-  mapThreadDetailToGraph,
-  type ThreadDetailResponse,
-} from '@/utils/mappers'
+import { mapThreadDetailToGraph, type ThreadDetailResponse } from '@/utils/mappers'
 import { requestWithRetry } from '@/utils/retry'
-import type { RetryOptions } from '@/utils/retry'
 import type { GraphData } from '@/types/graph'
+import type { RetryOptions } from '@/utils/retry'
 
 /**
  * 参数验证错误
@@ -41,18 +36,13 @@ function validateSessionId(sessionId: string): void {
   }
 }
 
-export async function getGraph(
-  sessionId: string,
-  options: RetryOptions = {}
-): Promise<GraphData> {
+export async function getGraph(sessionId: string, options: RetryOptions = {}): Promise<GraphData> {
   // 参数验证
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
     // 调用线程详情端点获取完整线程信息（包含执行图）
-    const response = await apiClient.get<ThreadDetailResponse>(
-      API_ENDPOINTS.THREADS.GET(sessionId)
-    )
+    const response = await apiClient.get<ThreadDetailResponse>(API_ENDPOINTS.THREADS.GET(sessionId))
 
     // 使用数据映射函数将线程详情中的执行图转换为前端GraphData模型
     return mapThreadDetailToGraph(response.data)
@@ -61,15 +51,13 @@ export async function getGraph(
 
 export async function getThreadDetail(
   threadId: string,
-  options: RetryOptions = {}
+  options: RetryOptions = {},
 ): Promise<ThreadDetailResponse> {
   // 参数验证
   validateSessionId(threadId)
 
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ThreadDetailResponse>(
-      API_ENDPOINTS.THREADS.GET(threadId)
-    )
+    const response = await apiClient.get<ThreadDetailResponse>(API_ENDPOINTS.THREADS.GET(threadId))
     return response.data
   }, options)
 }

@@ -16,7 +16,6 @@
 - ExternalServiceException：ExternalServiceException类
 - ConfigurationException：ConfigurationException类
 - TimeoutException：TimeoutException类
-- EmbeddingError：EmbeddingError类
 """
 
 import logging
@@ -249,24 +248,6 @@ class TimeoutException(SystemException):
         self.operation = operation
 
 
-class EmbeddingError(SystemException):
-    DEFAULT_CODE = ErrorCode.LLM_EXEC_9002
-
-    def __init__(
-        self,
-        message: str | None = None,
-        model_name: str | None = None,
-        details: dict[str, Any] | None = None,
-        cause: Exception | None = None,
-        code: str | None = None,
-    ):
-        error_details = details.copy() if details else {}
-        if model_name:
-            error_details["model_name"] = model_name
-        super().__init__(message=message, code=code, details=error_details, cause=cause)
-        self.model_name = model_name
-
-
 class MCPConfigError(ConfigurationException):
     DEFAULT_CODE = ErrorCode.API_VAL_2003.value
 
@@ -284,13 +265,6 @@ class MCPConnectionError(ExternalServiceException):
         cause: Exception | None = None,
     ):
         super().__init__(message=message, service_name="mcp", details=details, cause=cause)
-
-
-class ReasoningRequiredError(BusinessRuleException):
-    DEFAULT_CODE = ErrorCode.VAL_REQ_7001
-
-    def __init__(self, message: str | None = None, details: dict[str, Any] | None = None):
-        super().__init__(message=message, rule="reasoning_required", details=details)
 
 
 class ToolAlreadyExistsError(ConflictException):

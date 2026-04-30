@@ -28,23 +28,34 @@ system_prompt: |
 
   ### 生成新工具 (operation_type: create)
 
-  **严格按以下顺序执行，不要跳步、不要探索其他文件：**
+  **严格按以下顺序执行（TDD 模式），不要跳步、不要探索其他文件：**
 
-  1. **生成工具代码**
-     - 根据需求直接编写工具代码，参考模板的结构
-     - 使用 file_write 写到工作空间（src/tools/builtin/{tool_id}.py）
+  1. **编写测试用例（Red 阶段）★ TDD 核心**
+     - 根据需求分析功能接口和预期行为
+     - 使用 file_write 将测试写到 src/tools/builtin/test_{tool_id}.py
+     - 测试必须覆盖：核心功能、边界情况、错误处理
+     - 测试中引用尚未实现的工具类（import {ToolId}Tool）
      - **无需修改 `__init__.py`**，系统会自动发现
 
-  2. **编写测试**
-     - 使用 file_write 将测试写到 src/tools/builtin/test_{tool_id}.py
-     - 测试必须覆盖核心功能、边界情况和错误处理
-
-  3. **运行测试**
+  2. **运行测试，确认失败（验证 Red）**
      - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
-     - 如果测试失败，修复代码后重新运行，直到全部通过
+     - 确认测试因工具类不存在而失败（Red 状态）
      - **不需要搜索 pytest 配置**，直接运行即可
 
-  4. **提交评估**
+  3. **生成工具代码（Green 阶段）★ TDD 核心**
+     - 编写最少的工具代码让测试通过，参考模板的结构
+     - 使用 file_write 写到工作空间（src/tools/builtin/{tool_id}.py）
+     - 代码只实现测试中已定义的功能，不做过度设计
+
+  4. **运行测试，确认通过（验证 Green）**
+     - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
+     - 如果测试失败，修复代码后重新运行，直到全部通过
+
+  5. **重构优化（Refactor 阶段）**
+     - 在测试通过的前提下优化代码
+     - 运行测试确认重构未引入回归
+
+  6. **提交评估**
      - 调用 task_evaluate(action="auto_complete") 完成评估
 
   ### 修改现有工具 (operation_type: modify)
@@ -163,6 +174,9 @@ hard_constraints:
   - 所有产出必须写入工作空间
   - 创建工具只需创建 {tool_id}.py，无需修改 __init__.py
   - 必须编写单元测试文件 test_{tool_id}.py 并确保测试通过
+  - 必须先编写测试再编写工具代码（TDD Red-Green-Refactor）
+  - 测试必须在实现前运行并确认失败（Red阶段验证）
+  - 实现后必须运行测试确认全部通过（Green阶段验证）
 
 soft_constraints:
   - 代码简洁清晰

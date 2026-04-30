@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import { Activity } from 'lucide-react'
 import { useMonitoringStore } from '@/stores/monitoringStore'
 
 /**
@@ -79,23 +80,23 @@ export function MonitoringPage() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header className="h-12 border-b flex items-center px-4 shrink-0">
-        <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+    <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center border-b px-4">
+        <a href="/" className="text-muted-foreground hover:text-foreground text-sm">
           &larr; 返回
         </a>
         <h1 className="ml-4 text-base font-semibold">系统监控</h1>
         <div className="ml-auto flex items-center gap-3">
           {lastUpdated && (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-muted-foreground text-xs">
               更新于 {new Date(lastUpdated).toLocaleTimeString()}
             </span>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+          <label className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-xs">
             <input
               type="checkbox"
               checked={autoRefresh}
-              onChange={e => setAutoRefresh(e.target.checked)}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
               className="rounded"
             />
             自动刷新
@@ -103,51 +104,78 @@ export function MonitoringPage() {
           <button
             onClick={handleRefresh}
             disabled={isLoading || localRefreshing}
-            className="px-3 py-1 text-xs border rounded-lg hover:bg-accent/50 disabled:opacity-50"
+            className="hover:bg-accent/50 flex items-center gap-1 rounded-lg border px-3 py-1 text-xs disabled:opacity-50"
+            aria-label="刷新监控数据"
           >
-            {(isLoading || localRefreshing) ? '刷新中...' : '刷新'}
+            {isLoading || localRefreshing ? '刷新中...' : '刷新'}
           </button>
         </div>
       </header>
-      <main className="p-6 space-y-6">
+      <main className="space-y-6 p-6">
         {/* 错误提示 */}
         {error && (
-          <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
+          <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
         )}
 
-        {/* 加载状态 */}
+        {/* 加载状态 - 骨架屏 */}
         {isLoading && !metrics && !statistics && (
-          <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="ml-2 text-sm text-muted-foreground">加载中...</span>
-          </div>
+          <>
+            {/* 系统指标骨架 */}
+            <section>
+              <h2 className="mb-3 text-sm font-semibold">系统指标</h2>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="animate-pulse rounded-lg border p-4">
+                    <div className="bg-muted mb-1 h-3 w-20 rounded" />
+                    <div className="bg-muted h-6 w-16 rounded" />
+                  </div>
+                ))}
+              </div>
+            </section>
+            {/* 任务统计骨架 */}
+            <section>
+              <h2 className="mb-3 text-sm font-semibold">任务统计</h2>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="animate-pulse rounded-lg border p-4">
+                    <div className="bg-muted mb-1 h-3 w-16 rounded" />
+                    <div className="bg-muted h-6 w-12 rounded" />
+                  </div>
+                ))}
+              </div>
+            </section>
+          </>
         )}
 
         {/* 系统指标 */}
         {metrics && (
           <section>
-            <h2 className="text-sm font-semibold mb-3">系统指标</h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">CPU 使用率</div>
+            <h2 className="mb-3 text-sm font-semibold">系统指标</h2>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">CPU 使用率</div>
                 <div className="text-xl font-semibold">{metrics.cpu_usage.toFixed(1)}%</div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">内存使用</div>
-                <div className="text-xl font-semibold">{metrics.memory.usage_percent.toFixed(1)}%</div>
-                <div className="text-xs text-muted-foreground mt-1">
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">内存使用</div>
+                <div className="text-xl font-semibold">
+                  {metrics.memory.usage_percent.toFixed(1)}%
+                </div>
+                <div className="text-muted-foreground mt-1 text-xs">
                   {formatBytes(metrics.memory.used)} / {formatBytes(metrics.memory.total)}
                 </div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">磁盘使用</div>
-                <div className="text-xl font-semibold">{metrics.disk.usage_percent.toFixed(1)}%</div>
-                <div className="text-xs text-muted-foreground mt-1">
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">磁盘使用</div>
+                <div className="text-xl font-semibold">
+                  {metrics.disk.usage_percent.toFixed(1)}%
+                </div>
+                <div className="text-muted-foreground mt-1 text-xs">
                   {formatBytes(metrics.disk.used)} / {formatBytes(metrics.disk.total)}
                 </div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">运行时间</div>
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">运行时间</div>
                 <div className="text-xl font-semibold">
                   {metrics.uptime ? formatUptime(metrics.uptime) : '--'}
                 </div>
@@ -159,26 +187,26 @@ export function MonitoringPage() {
         {/* 任务统计 */}
         {statistics && (
           <section>
-            <h2 className="text-sm font-semibold mb-3">任务统计</h2>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">总任务数</div>
+            <h2 className="mb-3 text-sm font-semibold">任务统计</h2>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">总任务数</div>
                 <div className="text-xl font-semibold">{statistics.total}</div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">已完成</div>
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">已完成</div>
                 <div className="text-xl font-semibold text-green-500">{statistics.succeeded}</div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">失败</div>
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">失败</div>
                 <div className="text-xl font-semibold text-red-500">{statistics.failed}</div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">运行中</div>
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">运行中</div>
                 <div className="text-xl font-semibold text-blue-500">{statistics.running}</div>
               </div>
-              <div className="p-4 border rounded-lg">
-                <div className="text-xs text-muted-foreground mb-1">成功率</div>
+              <div className="rounded-lg border p-4">
+                <div className="text-muted-foreground mb-1 text-xs">成功率</div>
                 <div className="text-xl font-semibold">{statistics.success_rate.toFixed(1)}%</div>
               </div>
             </div>
@@ -187,35 +215,49 @@ export function MonitoringPage() {
 
         {/* 最近任务 */}
         <section>
-          <h2 className="text-sm font-semibold mb-3">最近任务</h2>
+          <h2 className="mb-3 text-sm font-semibold">最近任务</h2>
           {recentTasks.length === 0 ? (
-            <div className="text-center py-8 text-sm text-muted-foreground">暂无数据</div>
+            <div className="flex flex-col items-center justify-center py-12">
+              <Activity className="text-muted-foreground/40 mb-3 h-10 w-10" />
+              <p className="text-muted-foreground text-sm">暂无任务记录</p>
+              <p className="text-muted-foreground/60 mt-1 text-xs">当有任务执行时，这里会显示最近的任务</p>
+            </div>
           ) : (
-            <div className="border rounded-lg overflow-hidden">
+            <div className="overflow-hidden rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">任务</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">状态</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">创建时间</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground">耗时</th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      任务
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      状态
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      创建时间
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      耗时
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {recentTasks.map(task => (
-                    <tr key={task.id} className="border-t hover:bg-accent/20">
-                      <td className="px-4 py-2 truncate max-w-[200px]">
+                  {recentTasks.map((task) => (
+                    <tr key={task.id} className="hover:bg-accent/20 border-t">
+                      <td className="max-w-[200px] truncate px-4 py-2">
                         {task.intent || task.name || task.id}
                       </td>
                       <td className="px-4 py-2">
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${getTaskStatusStyle(task.status)}`}>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
+                        >
                           {task.status}
                         </span>
                       </td>
-                      <td className="px-4 py-2 text-xs text-muted-foreground">
+                      <td className="text-muted-foreground px-4 py-2 text-xs">
                         {new Date(task.created_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-2 text-xs text-muted-foreground">
+                      <td className="text-muted-foreground px-4 py-2 text-xs">
                         {task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}
                       </td>
                     </tr>

@@ -15,6 +15,7 @@
 - memory_context_service: 记忆上下文服务
 - history_buffer: 对话历史缓冲区
 - variable_priority: 变量优先级
+- maintenance: 记忆维护服务（过期清理、相似合并等）
 - storage: 存储后端（JSON / pgvector）
 - plugins: 管道插件
 """
@@ -65,6 +66,7 @@ from memory.history_buffer import (
     MessageEntry,
 )
 from memory.variable_priority import VariablePriority
+from memory.maintenance import MemoryMaintenanceService
 
 __all__ = [
     # types
@@ -97,6 +99,8 @@ __all__ = [
     "EpisodeService",
     "KnowledgeService",
     "MemoryContextService",
+    # maintenance
+    "MemoryMaintenanceService",
     # tag network
     "TagNetworkConfig",
     "TagCooccurrenceMatrix",

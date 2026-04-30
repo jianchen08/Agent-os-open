@@ -139,6 +139,29 @@ export type StandardMessage =
   | HeartbeatAckMessage
   | CancelMessage
   | ConnectionEstablishedMessage
+  | MessageAckMessage
+  | RequestMissedMessage
+
+/**
+ * 消息 ACK 确认消息
+ */
+export interface MessageAckMessage extends StandardWebSocketMessage {
+  type: 'message_ack'
+  data: {
+    request_id: string // 被确认的消息 request_id
+    received_at: string // 前端确认收到的时间戳
+  }
+}
+
+/**
+ * 请求遗漏消息
+ */
+export interface RequestMissedMessage extends StandardWebSocketMessage {
+  type: 'request_missed'
+  data: {
+    last_received_request_id: string // 最后收到的消息 request_id
+  }
+}
 
 /**
  * 消息类型枚举
@@ -156,6 +179,8 @@ export const MessageTypes = {
   THINKING_START: 'thinking_start',
   THINKING_CHUNK: 'thinking_chunk',
   THINKING_END: 'thinking_end',
+  MESSAGE_ACK: 'message_ack',
+  REQUEST_MISSED: 'request_missed',
 } as const
 
 /**
@@ -168,7 +193,7 @@ export function createStandardMessage<T extends StandardMessage>(
   options?: {
     messageId?: string
     timestamp?: string
-  }
+  },
 ): T {
   return {
     type,
@@ -182,7 +207,7 @@ export function createStandardMessage<T extends StandardMessage>(
 /**
  * 验证消息格式是否符合标准
  */
-export function isStandardMessage(message: any): message is StandardMessage {
+export function isStandardMessage(message: unknown): message is StandardMessage {
   return (
     typeof message === 'object' &&
     message !== null &&
@@ -264,5 +289,17 @@ export const MESSAGE_CONFIG: Record<string, MessageSendConfig> = {
   connection_established: {
     strategy: MessageSendStrategy.QUEUED,
     priority: 1,
+  },
+
+  // ACK 确认 - 直接发送，最高优先级
+  message_ack: {
+    strategy: MessageSendStrategy.DIRECT,
+    priority: 0,
+  },
+
+  // 请求遗漏消息 - 直接发送，最高优先级
+  request_missed: {
+    strategy: MessageSendStrategy.DIRECT,
+    priority: 0,
   },
 }

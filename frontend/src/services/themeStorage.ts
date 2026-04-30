@@ -4,8 +4,8 @@
  * 管理用户自定义主题的 localStorage 存储
  */
 
-import type { ThemeConfig } from '@/types/theme'
 import { storage } from '@/utils/storage'
+import type { ThemeConfig } from '@/types/theme'
 
 /**
  * localStorage 键名常量
@@ -88,7 +88,7 @@ export class ThemeStorageService {
    */
   static getUserTheme(id: string): UserThemeConfig | null {
     const themes = this.getUserThemes()
-    return themes.find(theme => theme.id === id) || null
+    return themes.find((theme) => theme.id === id) || null
   }
 
   /**
@@ -96,7 +96,7 @@ export class ThemeStorageService {
    */
   static saveUserTheme(theme: UserThemeConfig): void {
     const themes = this.getUserThemes()
-    const index = themes.findIndex(t => t.id === theme.id)
+    const index = themes.findIndex((t) => t.id === theme.id)
 
     // 更新时间
     theme.updatedAt = new Date().toISOString()
@@ -120,7 +120,7 @@ export class ThemeStorageService {
    */
   static deleteUserTheme(themeId: string): boolean {
     const themes = this.getUserThemes()
-    const filtered = themes.filter(t => t.id !== themeId)
+    const filtered = themes.filter((t) => t.id !== themeId)
 
     if (filtered.length === themes.length) {
       return false // 没有找到要删除的主题
@@ -231,7 +231,7 @@ export class ThemeStorageService {
  */
 export function mergeTheme(
   base: ThemeConfig,
-  custom: UserThemeConfig['customizations']
+  custom: UserThemeConfig['customizations'],
 ): ThemeConfig {
   // @ts-ignore - 复杂的类型合并问题，暂时忽略
   return {

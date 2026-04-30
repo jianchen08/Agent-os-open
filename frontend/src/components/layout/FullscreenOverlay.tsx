@@ -27,12 +27,12 @@ export function FullscreenOverlay({ isActive, title, onExit, children }: Fullscr
   if (!isActive) return null
 
   return (
-    <div className="fixed inset-0 bg-background z-[100] flex flex-col">
+    <div className="bg-background fixed inset-0 z-[100] flex flex-col">
       {/* 顶部工具栏 */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-        <span className="text-sm font-medium text-foreground">{title ?? '全屏模式'}</span>
+      <div className="border-border flex items-center justify-between border-b px-4 py-2">
+        <span className="text-foreground text-sm font-medium">{title ?? '全屏模式'}</span>
         <button
-          className="px-3 py-1 text-sm rounded-md hover:bg-accent text-muted-foreground"
+          className="hover:bg-accent text-muted-foreground rounded-md px-3 py-1 text-sm"
           onClick={onExit}
         >
           退出全屏 (Esc)
@@ -40,9 +40,7 @@ export function FullscreenOverlay({ isActive, title, onExit, children }: Fullscr
       </div>
 
       {/* 全屏内容 */}
-      <div className="flex-1 overflow-auto">
-        {children}
-      </div>
+      <div className="flex-1 overflow-auto">{children}</div>
     </div>
   )
 }

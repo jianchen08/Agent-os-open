@@ -55,45 +55,41 @@ export interface ThinkingModeRecommendation {
 }
 
 export async function getThinkingModels(): Promise<ThinkingModelInfo[]> {
-  const response = await apiClient.get<ThinkingModelInfo[]>(
-    API_ENDPOINTS.THINKING_MODE.MODELS
-  )
+  const response = await apiClient.get<ThinkingModelInfo[]>(API_ENDPOINTS.THINKING_MODE.MODELS)
   return response.data
 }
 
-export async function getThinkingModeInfo(
-  modelName: string
-): Promise<ThinkingModeInfo> {
+export async function getThinkingModeInfo(modelName: string): Promise<ThinkingModeInfo> {
   const response = await apiClient.get<ThinkingModeInfo>(
-    API_ENDPOINTS.THINKING_MODE.MODEL_INFO(modelName)
+    API_ENDPOINTS.THINKING_MODE.MODEL_INFO(modelName),
   )
   return response.data
 }
 
 export async function switchThinkingMode(
   currentModel: string,
-  enableThinking: boolean
+  enableThinking: boolean,
 ): Promise<ThinkingModeSwitchResponse> {
   const response = await apiClient.post<ThinkingModeSwitchResponse>(
     API_ENDPOINTS.THINKING_MODE.SWITCH,
     {
       current_model: currentModel,
       enable_thinking: enableThinking,
-    }
+    },
   )
   return response.data
 }
 
 export async function getThinkingModeRecommendations(
   taskType: string = 'general',
-  complexity: string = 'medium'
+  complexity: string = 'medium',
 ): Promise<ThinkingModeRecommendation[]> {
   const response = await apiClient.post<ThinkingModeRecommendation[]>(
     API_ENDPOINTS.THINKING_MODE.RECOMMENDATIONS,
     {
       task_type: taskType,
       complexity: complexity,
-    }
+    },
   )
   return response.data
 }
@@ -105,9 +101,7 @@ export async function checkThinkingModeSupport(modelName: string): Promise<{
   display_name?: string
   switch_description?: string
 }> {
-  const response = await apiClient.get(
-    API_ENDPOINTS.THINKING_MODE.CHECK_SUPPORT(modelName)
-  )
+  const response = await apiClient.get(API_ENDPOINTS.THINKING_MODE.CHECK_SUPPORT(modelName))
   return response.data
 }
 

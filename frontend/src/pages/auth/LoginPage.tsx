@@ -10,10 +10,10 @@
 
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { useAuthStore } from '../../stores/authStore'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { ROUTES } from '../../constants/routes'
+import { useAuthStore } from '../../stores/authStore'
 
 /**
  * 表单错误类型
@@ -28,8 +28,7 @@ interface FormErrors {
  */
 export function LoginPage() {
   const navigate = useNavigate()
-  const { login, isLoading, error, isAuthenticated, clearError } =
-    useAuthStore()
+  const { login, isLoading, error, isAuthenticated, clearError } = useAuthStore()
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -50,18 +49,44 @@ export function LoginPage() {
   }, [clearError])
 
   /**
+   * 验证单个字段
+   */
+  const validateField = (field: keyof FormErrors): string | undefined => {
+    switch (field) {
+      case 'username':
+        return !username.trim() ? '用户名不能为空' : undefined
+      case 'password':
+        return !password ? '密码不能为空' : undefined
+      default:
+        return undefined
+    }
+  }
+
+  /**
+   * 处理字段失焦验证
+   */
+  const handleBlur = (field: keyof FormErrors) => {
+    const error = validateField(field)
+    setFormErrors((prev) => {
+      const next = { ...prev }
+      if (error) {
+        next[field] = error
+      } else {
+        delete next[field]
+      }
+      return next
+    })
+  }
+
+  /**
    * 验证表单
    */
   const validateForm = (): boolean => {
     const errors: FormErrors = {}
-
-    if (!username.trim()) {
-      errors.username = '用户名不能为空'
-    }
-
-    if (!password) {
-      errors.password = '密码不能为空'
-    }
+    const usernameError = validateField('username')
+    if (usernameError) errors.username = usernameError
+    const passwordError = validateField('password')
+    if (passwordError) errors.password = passwordError
 
     setFormErrors(errors)
     return Object.keys(errors).length === 0
@@ -87,26 +112,22 @@ export function LoginPage() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center bg-background px-4 py-12"
+      className="bg-background flex min-h-screen items-center justify-center px-4 py-12"
       data-testid="login-page"
     >
       <div className="w-full max-w-md space-y-6">
         {/* 标题 */}
-        <div className="text-center space-y-2">
-          <h1 className="text-3xl font-bold text-foreground">登录</h1>
+        <div className="space-y-2 text-center">
+          <h1 className="text-foreground text-3xl font-bold">登录</h1>
           <p className="text-muted-foreground">欢迎回来，请登录您的账号</p>
         </div>
 
         {/* 登录表单 */}
-        <form
-          onSubmit={handleSubmit}
-          className="space-y-5"
-          data-testid="login-form"
-        >
+        <form onSubmit={handleSubmit} className="space-y-5" data-testid="login-form" role="form" aria-label="登录表单">
           {/* 全局错误提示 */}
           {error && (
             <div
-              className="p-3 rounded-lg bg-destructive/10 text-destructive text-sm"
+              className="bg-destructive/10 text-destructive rounded-lg p-3 text-sm"
               data-testid="login-error"
             >
               {error}
@@ -115,30 +136,26 @@ export function LoginPage() {
 
           {/* 用户名输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="username"
-              className="text-sm font-medium text-foreground block"
-            >
-              用户名
+            <label htmlFor="username" className="text-foreground block text-sm font-medium">
+              用户名 <span className="text-destructive">*</span>
             </label>
             <Input
               id="username"
               type="text"
               value={username}
-              onChange={e => setUsername(e.target.value)}
+              onChange={(e) => setUsername(e.target.value)}
+              onBlur={() => handleBlur('username')}
               placeholder="请输入用户名"
               disabled={isLoading}
               aria-invalid={!!formErrors.username}
-              aria-describedby={
-                formErrors.username ? 'username-error' : undefined
-              }
+              aria-describedby={formErrors.username ? 'username-error' : undefined}
               data-testid="login-username-input"
-              className="h-10 min-h-[40px]"
+              className={`h-10 min-h-[40px] ${formErrors.username ? 'border-destructive' : ''}`}
             />
             {formErrors.username && (
               <p
                 id="username-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="username-error"
               >
                 {formErrors.username}
@@ -148,30 +165,26 @@ export function LoginPage() {
 
           {/* 密码输入 */}
           <div className="space-y-2">
-            <label
-              htmlFor="password"
-              className="text-sm font-medium text-foreground block"
-            >
-              密码
+            <label htmlFor="password" className="text-foreground block text-sm font-medium">
+              密码 <span className="text-destructive">*</span>
             </label>
             <Input
               id="password"
               type="password"
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={(e) => setPassword(e.target.value)}
+              onBlur={() => handleBlur('password')}
               placeholder="请输入密码"
               disabled={isLoading}
               aria-invalid={!!formErrors.password}
-              aria-describedby={
-                formErrors.password ? 'password-error' : undefined
-              }
+              aria-describedby={formErrors.password ? 'password-error' : undefined}
               data-testid="login-password-input"
-              className="h-10 min-h-[40px]"
+              className={`h-10 min-h-[40px] ${formErrors.password ? 'border-destructive' : ''}`}
             />
             {formErrors.password && (
               <p
                 id="password-error"
-                className="text-sm text-destructive min-h-[20px]"
+                className="text-destructive min-h-[20px] text-sm"
                 data-testid="password-error"
               >
                 {formErrors.password}
@@ -182,7 +195,7 @@ export function LoginPage() {
           {/* 登录按钮 */}
           <Button
             type="submit"
-            className="w-full h-10 mt-2"
+            className="mt-2 h-10 w-full"
             disabled={isLoading}
             data-testid="login-submit-button"
           >
@@ -191,11 +204,11 @@ export function LoginPage() {
         </form>
 
         {/* 注册链接 */}
-        <p className="text-center text-sm text-muted-foreground pt-2">
+        <p className="text-muted-foreground pt-2 text-center text-sm">
           没有账号？{' '}
           <Link
             to={ROUTES.REGISTER}
-            className="font-medium text-primary hover:underline"
+            className="text-primary font-medium hover:underline"
             data-testid="register-link"
           >
             注册

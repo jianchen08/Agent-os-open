@@ -10,15 +10,60 @@ import type { LayoutConfig, ResolvedLayout } from '@/types/layout'
 /** 默认布局配置 */
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
   breakpoints: { mobile: 768, tablet: 1024, desktop: 1280, widescreen: 1920 },
-  sidebar: { minWidth: 180, maxWidth: 320, defaultWidth: 220, resizable: true, collapseDuration: 300 },
+  sidebar: {
+    minWidth: 180,
+    maxWidth: 320,
+    defaultWidth: 220,
+    resizable: true,
+    collapseDuration: 300,
+  },
   chatPanel: { minWidth: 320, maxWidth: Infinity, defaultWidth: 480, resizable: false },
   workspacePanel: { minWidth: 400, maxWidth: Infinity, defaultWidth: 560, resizable: true },
-  floatingWindow: { defaultWidth: 480, defaultHeight: 360, minWidth: 280, minHeight: 200, draggable: true, resizable: true, cascadeOffset: 24, closeButtonPosition: 'top-right' },
-  dockBar: { height: 48, iconSize: 20, iconGap: 6, position: 'bottom', showLabels: false, indicatorSize: 6 },
-  panelSplit: { chatRatio: 0.45, workspaceRatio: 0.55, adjustable: true, divider: { width: 1, color: 'var(--border-default)', hoverColor: 'var(--primary)', activeColor: 'var(--primary)' } },
+  floatingWindow: {
+    defaultWidth: 480,
+    defaultHeight: 360,
+    minWidth: 280,
+    minHeight: 200,
+    draggable: true,
+    resizable: true,
+    cascadeOffset: 24,
+    closeButtonPosition: 'top-right',
+  },
+  dockBar: {
+    height: 48,
+    iconSize: 20,
+    iconGap: 6,
+    position: 'bottom',
+    showLabels: false,
+    indicatorSize: 6,
+  },
+  panelSplit: {
+    chatRatio: 0.45,
+    workspaceRatio: 0.55,
+    adjustable: true,
+    divider: {
+      width: 1,
+      color: 'var(--border-default)',
+      hoverColor: 'var(--primary)',
+      activeColor: 'var(--primary)',
+    },
+  },
   gaps: { betweenSpaces: 0, spacePadding: 8 },
-  transitions: { panelDuration: 300, floatingDuration: 200, dockDuration: 200, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' },
-  zIndex: { sidebar: 10, chatPanel: 1, workspacePanel: 1, floatingWindow: 50, dockBar: 40, fullscreen: 100, overlay: 90 },
+  transitions: {
+    panelDuration: 300,
+    floatingDuration: 200,
+    dockDuration: 200,
+    easing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+  },
+  zIndex: {
+    sidebar: 10,
+    chatPanel: 1,
+    workspacePanel: 1,
+    floatingWindow: 50,
+    dockBar: 40,
+    fullscreen: 100,
+    overlay: 90,
+  },
 }
 
 /**
@@ -56,7 +101,8 @@ export function safeLoadLayout(themeLayout: LayoutConfig | undefined): LayoutCon
  */
 export function resolveLayout(config: LayoutConfig, viewportWidth: number): ResolvedLayout {
   const dockWidth = config.dockBar.position !== 'bottom' ? config.dockBar.height : 0
-  const availableWidth = viewportWidth - config.sidebar.defaultWidth - dockWidth - config.gaps.betweenSpaces * 2
+  const availableWidth =
+    viewportWidth - config.sidebar.defaultWidth - dockWidth - config.gaps.betweenSpaces * 2
 
   const desiredChat = availableWidth * config.panelSplit.chatRatio
   const desiredWorkspace = availableWidth * config.panelSplit.workspaceRatio
