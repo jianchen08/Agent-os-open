@@ -243,18 +243,14 @@ class CLIApplication:
             logger.error("Failed to load pipeline config: %s", exc)
             raise
 
-        # 构建 litellm.Router（内置并发控制和 fallback）
-        router = None
-        try:
-            from llm.router_factory import build_router
-            router = build_router(model_loader)
-        except Exception as exc:
-            logger.warning("Router 构建失败，回退到直连模式: %s", exc)
-
-        # 构建插件注册表（传入 model_loader + router）
+        # 构建插件注册表（通过 model_loader 自动创建共享 Router）
         self._plugin_registry = build_plugin_registry(
-            pipeline_config, model_loader=model_loader, router=router,
+            pipeline_config, model_loader=model_loader, router=None,
         )
+
+        # 获取由 build_plugin_registry → get_or_create_adapter 创建的共享 Router
+        from llm.router_factory import get_or_create_router
+        router = get_or_create_router(model_loader)
 
         # 使用配置中的路由表
         self._input_route_table = pipeline_config.input_route_table

@@ -861,15 +861,7 @@ class AdaptiveRouterAdapter(_BaseLiteLLMAdapter):
         sem = self._get_semaphore(model_name)
         await sem.acquire()
         try:
-            # streaming 模式直接调用 litellm.acompletion，绕过 Router
-            # Router 的 _acompletion_streaming_iterator 会包装
-            # FallbackStreamWrapper，在流中途失败时盲目切换到
-            # fallback 模型（丢失上下文），这不符合预期行为。
-            # streaming 的重试和 fallback 由 engine 层统一管理。
-            if kwargs.get("stream"):
-                result = await self._direct_streaming_completion(**kwargs)
-            else:
-                result = await self._router.acompletion(**kwargs)
+            result = await self._direct_call(**kwargs)
             sem.on_success()
             return result
         except litellm.RateLimitError:
@@ -891,59 +883,214 @@ class AdaptiveRouterAdapter(_BaseLiteLLMAdapter):
         finally:
             sem.release()
 
-    async def _direct_streaming_completion(self, **kwargs: Any) -> Any:
-        """绕过 Router 直接调用 litellm.acompletion 获取原始流。
-
-        Router 的 _acompletion_streaming_iterator 会用
-        FallbackStreamWrapper 包装原始流，在流中途失败时
-        盲目切换到 fallback 模型。这种行为有问题：
-        1. 网络抖动不应该直接 fallback 到另一个模型
-        2. 切换模型会丢失已有上下文
-        3. fallback 请求期间的等待对上层不可见（导致超时误判）
-
-        正确做法：streaming 重试/fallback 由 engine 层统一管理。
-
-        Args:
-            kwargs: litellm.acompletion 参数（含 stream=True）
-
-        Returns:
-            原始 CustomStreamWrapper（无 fallback 包装）
-        """
-        # 从 Router 获取 deployment 信息（api_key/api_base/model）
+    async def _direct_call(self, **kwargs: Any) -> Any:
+        """直接用 deployment 的凭证调用 litellm.acompletion。"""
         model = kwargs.get("model", "")
-        try:
-            deployment = await self._router.async_get_available_deployment(
-                model=model,
-                messages=kwargs.get("messages", []),
-            )
-        except Exception:
-            # deployment 查找失败，回退到 Router 路径
-            logger.warning(
-                "[AdaptiveRouterAdapter] deployment lookup failed,"
-                " falling back to Router streaming: %s",
-                model,
-            )
-            return await self._router.acompletion(**kwargs)
+        deployment = await self._get_deployment(model, kwargs.get("messages", []))
 
         litellm_params = deployment["litellm_params"].copy()
-        model_client = self._router._get_async_openai_model_client(
-            deployment=deployment, kwargs=kwargs,
-        )
 
-        # litellm_params["model"] 含 provider 前缀（如 "zai/glm-5.1"），
-        # kwargs["model"] 是 Router 别名（如 "glm-5.1"）。
-        # 必须确保 litellm_params 的 model 不被 kwargs 覆盖，
-        # 否则 litellm 无法确定 provider，导致请求格式错误。
-        adjusted_kwargs = {k: v for k, v in kwargs.items() if k != "model"}
+        # 从 kwargs 移除可能冲突的字段，确保 litellm_params 的凭证优先
+        adjusted_kwargs = {k: v for k, v in kwargs.items() if k not in (
+            "model", "api_key", "api_base", "original_function", "on_chunk",
+        )}
         input_kwargs = {
             **adjusted_kwargs,
             **litellm_params,
-            "caching": self._router.cache_responses,
-            "client": model_client,
+            "num_retries": 0,
         }
-        # 移除 Router 内部参数
-        for _k in ("original_function",):
-            input_kwargs.pop(_k, None)
+
+        return await litellm.acompletion(**input_kwargs)
+
+    async def _get_deployment(self, model: str, messages: list) -> dict:
+        """从 Router 获取一个可用的 deployment。"""
+        try:
+            return await self._router.async_get_available_deployment(
+                model=model,
+                messages=messages,
+                request_kwargs={},
+            )
+        except Exception:
+            # 兜底：直接从 model_list 取第一个匹配的
+            for dep in self._router.model_list:
+                if dep.get("model_name") == model:
+                    return dep
+            raise
+
+    async def _direct_streaming_completion(self, **kwargs: Any) -> Any:
+        """已弃用 — 由 _direct_call 统一处理。"""
+        return await self._direct_call(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# KeyPool 适配器 — 基于 KeyPool 的多 key 聚合 + RPM 限流
+# ---------------------------------------------------------------------------
+
+class KeyPoolAdapter(_BaseLiteLLMAdapter):
+    """基于 KeyPool 的 LLM 调用适配器。
+
+    与 AdaptiveRouterAdapter 的区别：
+    - AdaptiveRouterAdapter: 按模型名做并发控制（一个模型一个信号量）
+    - KeyPoolAdapter: 按 API key 做并发控制（一个 key 一个信号量 + RPM + 配额）
+
+    多 key 场景下：
+    - 请求前从 KeyPool 选一个最优 key（余量最多）
+    - 通过该 key 的信号量控制并发
+    - 成功后记录 usage，429 后冷却该 key
+    - 所有 key 共享同一个 litellm.Router 的 fallback 能力
+
+    无 KeyPool 的 provider 回退到 Router 默认行为（不限流）。
+    """
+
+    def __init__(
+        self,
+        router: Any,
+        *,
+        default_max_concurrent: int = 2,
+    ) -> None:
+        self._router = router
+        self._default_max_concurrent = default_max_concurrent
+
+    def _resolve_provider(self, model: str) -> str:
+        """从 model_id 查找 provider 名称。
+
+        优先用 router_factory 的映射表（model_id → provider），
+        兜底用 litellm 前缀反查。
+        """
+        from llm.router_factory import (
+            get_key_pool,
+            get_provider_for_model,
+        )
+
+        # 去掉 litellm 前缀（"zai/glm-5.1" → "glm-5.1"）
+        model_id = model.split("/", 1)[1] if "/" in model else model
+
+        # 直接查映射表
+        provider = get_provider_for_model(model_id)
+        if provider and get_key_pool(provider):
+            return provider
+        return ""
+
+    def _extract_model_name(self, kwargs: dict[str, Any]) -> str:
+        """从 kwargs 中提取 model_name（去掉 provider 前缀）。"""
+        model = kwargs.get("model", "")
+        if "/" in model:
+            return model.split("/", 1)[1]
+        return model
+
+    async def _do_completion(self, **kwargs: Any) -> Any:
+        from llm.router_factory import get_key_pool
+        from llm.key_pool import KeySlot
+
+        model_str = kwargs.get("model", "")
+        provider_name = self._resolve_provider(model_str)
+        pool = get_key_pool(provider_name) if provider_name else None
+
+        if pool is None:
+            # 无 KeyPool，直接走 Router
+            return await self._route_call(**kwargs)
+
+        # 尝试每个可用 key，失败后自动换下一个重试
+        max_retries = len(pool.slots)
+        last_exc: Exception | None = None
+
+        for attempt in range(max_retries):
+            slot: KeySlot = await pool.acquire_slot()
+            try:
+                key_kwargs = dict(kwargs)
+                key_kwargs["api_key"] = slot.api_key
+                if slot.api_base:
+                    key_kwargs.setdefault("api_base", slot.api_base)
+
+                if key_kwargs.get("stream"):
+                    result = await self._direct_call_with_slot(
+                        slot=slot, **key_kwargs
+                    )
+                else:
+                    result = await self._direct_call_with_slot(
+                        slot=slot, **key_kwargs
+                    )
+
+                slot.on_success()
+                return result
+            except litellm.AuthenticationError as exc:
+                # 认证失败：冷却该 key，用其他 key 重试
+                slot.on_rate_limit(retry_after=300)
+                logger.error(
+                    "[KeyPoolAdapter] 认证失败 → key=%s 冷却 300s"
+                    "，尝试其他 key (attempt %d/%d): %s",
+                    slot.key_id, attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
+                # 不要 raise，继续循环尝试下一个 key
+            except litellm.RateLimitError as exc:
+                retry_after = None
+                if hasattr(exc, "headers") and exc.headers:
+                    retry_after = float(
+                        exc.headers.get("retry-after", 0)
+                    )
+                slot.on_rate_limit(retry_after)
+                last_exc = exc
+                # 限流：冷却该 key，尝试其他 key
+            except litellm.Timeout as exc:
+                last_exc = exc
+                # 超时：不冷却 key，但不重试
+                raise
+            except litellm.InternalServerError as exc:
+                slot.on_rate_limit()
+                logger.warning(
+                    "[KeyPoolAdapter] InternalServerError"
+                    " → key=%s 冷却: %s",
+                    slot.key_id, exc,
+                )
+                last_exc = exc
+            except Exception:
+                raise
+            finally:
+                slot.release()
+
+        # 所有 key 都试过了
+        logger.error(
+            "[KeyPoolAdapter] 所有 key 均失败"
+            " provider=%s model=%s",
+            provider_name, model_str,
+        )
+        raise last_exc  # type: ignore[misc]
+
+    async def _route_call(self, **kwargs: Any) -> Any:
+        """无 KeyPool 时的回退路径，直接走 Router。"""
+        return await self._router.acompletion(**kwargs)
+
+    async def _direct_call_with_slot(
+        self, slot: Any, **kwargs: Any
+    ) -> Any:
+        """用指定 slot 的 key 直接调用 litellm.acompletion。
+
+        不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
+        """
+        from llm.router_factory import (
+            _PROVIDER_MAP,
+            get_provider_for_model,
+        )
+
+        model_id = kwargs.get("model", "")
+        # 去掉 litellm 前缀（"zai/glm-5.1" → "glm-5.1"）
+        bare_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
+
+        # 查 provider → 构建 litellm 模型字符串
+        provider = get_provider_for_model(bare_model)
+        prefix = _PROVIDER_MAP.get(provider, provider) if provider else ""
+        litellm_model = f"{prefix}/{bare_model}" if prefix else bare_model
+
+        # 构建 kwargs：用 slot 的凭证，去掉 model 让 litellm_params 里的生效
+        input_kwargs = {k: v for k, v in kwargs.items() if k not in ("model",)}
+        input_kwargs["model"] = litellm_model
+        input_kwargs["api_key"] = slot.api_key
+        if slot.api_base:
+            input_kwargs["api_base"] = slot.api_base
+
+        # 禁用 litellm 内部重试：由 KeyPoolAdapter 自己用不同 key 重试
+        input_kwargs["num_retries"] = 0
 
         return await litellm.acompletion(**input_kwargs)
 

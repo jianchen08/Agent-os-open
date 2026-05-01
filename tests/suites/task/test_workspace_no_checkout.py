@@ -481,4 +481,109 @@ class TestContainerHierarchy:
         assert container_cur == "main"
 
 
-# ─── Test 7: resolve_path 绝对路径重定向 ───────────────────────
+# ─── Test 7: on_eval_passed 合并验证后才清理 ───────────────────
+
+class TestEvalPassedMergeGuard:
+    """验证 on_eval_passed 在合并失败/验证失败时跳过清理"""
+
+    def test_merge_fail_keeps_worktree(self, tmp_path):
+        """_safe_merge 返回失败时 worktree 不被删除"""
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+
+        ws = tmp_path / "ws_fail"
+        ws.mkdir()
+        (ws / "important.txt").write_text("must not lose")
+
+        mgr = _make_manager(tmp_path)
+        ws_meta = {"mode": "worktree", "project_root": "", "branch": ""}
+
+        result = mgr.on_eval_passed("fail_task", str(ws), ws_meta)
+
+        assert result["success"] is False
+        assert (ws / "important.txt").exists()
+
+    def test_merge_success_with_git_merge_cleans_up(self, tmp_path):
+        """git merge 成功且验证通过时正常清理"""
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+
+        # 创建 worktree 分支并提交变更
+        _run_cmd("git", "checkout", "-b", "task/t1", cwd=repo)
+        (repo / "feature.py").write_text("feature code")
+        _run_cmd("git", "add", "-A", cwd=repo)
+        _run_cmd("git", "commit", "-m", "feature", cwd=repo)
+        _run_cmd("git", "checkout", "main", cwd=repo)
+
+        # 创建真实 worktree
+        wt = tmp_path / "wt_repo__wt_t1abcd12"
+        _run_cmd("git", "worktree", "add", str(wt), "task/t1", cwd=repo)
+        (wt / "extra.txt").write_text("extra work")
+        _run_cmd("git", "add", "-A", cwd=wt)
+        _run_cmd("git", "config", "user.email", "test@test.local", cwd=wt)
+        _run_cmd("git", "config", "user.name", "Test", cwd=wt)
+        _run_cmd("git", "commit", "-m", "extra", cwd=wt)
+
+        mgr = _make_manager(tmp_path)
+        ws_meta = {"mode": "worktree", "project_root": str(repo), "branch": "task/t1"}
+
+        result = mgr.on_eval_passed("t1abcd1234", str(wt), ws_meta)
+
+        assert result["success"] is True
+        assert not wt.exists()
+
+    def test_copy_merge_success_cleans_up(self, tmp_path):
+        """copy_merge 成功时正常清理（无 branch 验证）"""
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+
+        ws = tmp_path / "wt_repo__wt_cabcd12"
+        ws.mkdir()
+        (ws / "output.txt").write_text("result")
+        _init_git_repo(ws)
+
+        mgr = _make_manager(tmp_path)
+        ws_meta = {"mode": "worktree", "project_root": str(repo), "branch": ""}
+
+        result = mgr.on_eval_passed("cabcd1234", str(ws), ws_meta)
+
+        assert result["success"] is True
+        assert not ws.exists()
+
+    def test_verify_merge_fail_keeps_worktree(self, tmp_path):
+        """git merge 成功但验证失败时保留 worktree（不调用 cleanup）"""
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+
+        # 创建分支，不 merge 到 main
+        _run_cmd("git", "checkout", "-b", "task/v1", cwd=repo)
+        (repo / "new.py").write_text("new code")
+        _run_cmd("git", "add", "-A", cwd=repo)
+        _run_cmd("git", "commit", "-m", "task work", cwd=repo)
+        _run_cmd("git", "checkout", "main", cwd=repo)
+
+        wt = tmp_path / "wt_repo__wt_v1abcd12"
+        _run_cmd("git", "worktree", "add", str(wt), "task/v1", cwd=repo)
+
+        mgr = _make_manager(tmp_path)
+        ws_meta = {"mode": "worktree", "project_root": str(repo), "branch": "task/v1"}
+
+        # Mock _safe_merge to return success via git_merge
+        original_safe_merge = mgr._safe_merge
+        call_count = {"n": 0}
+
+        def _mock_safe_merge(workspace, meta):
+            call_count["n"] += 1
+            return {"success": True, "action": "merged", "method": "git_merge"}
+
+        mgr._safe_merge = _mock_safe_merge
+
+        result = mgr.on_eval_passed("v1abcd1234", str(wt), ws_meta)
+
+        assert result["success"] is True
+        assert call_count["n"] == 1
+        # _verify_merge_in_main 应返回 False（分支未合入 main），所以 worktree 不应被删
+        assert wt.exists()
+
+
+# ─── Test 8: resolve_path 绝对路径重定向 ───────────────────────

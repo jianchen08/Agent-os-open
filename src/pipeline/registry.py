@@ -164,7 +164,17 @@ class PluginRegistry:
             new_instance = plugin
             if hasattr(plugin, "_config"):
                 try:
-                    new_instance = type(plugin)(copy.deepcopy(plugin._config))
+                    # 保留关键属性（adapter、router 等），避免 fork 后丢失
+                    kwargs: dict[str, Any] = {"config": copy.deepcopy(plugin._config)}
+                    if hasattr(plugin, "_adapter"):
+                        kwargs["adapter"] = plugin._adapter
+                    elif hasattr(plugin, "_router"):
+                        kwargs["router"] = plugin._router
+                    new_instance = type(plugin)(**kwargs)
+                    # 恢复 fork 无法传递的运行时状态
+                    for attr in ("_tools", "_tool_registry"):
+                        if hasattr(plugin, attr):
+                            setattr(new_instance, attr, getattr(plugin, attr))
                 except Exception:
                     logger.debug(
                         "PluginRegistry.fork: 无法重建插件 %s, 复用原实例", name

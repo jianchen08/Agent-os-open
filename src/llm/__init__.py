@@ -1,26 +1,32 @@
-"""LLM Adapter 中间层模块。
-
-提供统一的 LLM 调用抽象，支持多模型 fallback 和 litellm.Router 并发控制。
-"""
-
 from llm.adapter import (
     AdaptiveRouterAdapter,
     FallbackAdapter,
+    KeyPoolAdapter,
     LiteLLMAdapter,
     LLMAdapter,
     LLMResponse,
     RouterAdapter,
 )
-from llm.router_factory import build_router, get_or_create_router, reset_router
+from llm.key_pool import KeyPool, KeySlot
+from llm.router_factory import (
+    build_router,
+    get_key_pool,
+    get_or_create_router,
+    reset_router,
+)
 
 __all__ = [
     "AdaptiveRouterAdapter",
     "FallbackAdapter",
+    "KeyPoolAdapter",
     "LiteLLMAdapter",
     "LLMAdapter",
     "LLMResponse",
     "RouterAdapter",
+    "KeyPool",
+    "KeySlot",
     "build_router",
+    "get_key_pool",
     "get_or_create_router",
     "reset_router",
 ]

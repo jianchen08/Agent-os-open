@@ -672,6 +672,22 @@ class WorkspaceLifecycleManager:
         with lock:
             if mode == "worktree":
                 result = self._safe_merge(workspace, ws_meta)
+                if not result.get("success"):
+                    logger.warning(
+                        "[WorkspaceLifecycle] 合并失败，跳过清理以保留文件: "
+                        "task_id=%s, workspace=%s, error=%s",
+                        task_id, workspace, result.get("error", "unknown"))
+                    return result
+                # 验证合并是否真正完成
+                branch = ws_meta.get("branch", "")
+                if branch and result.get("method") == "git_merge":
+                    proj_path = Path(project_root)
+                    if proj_path.exists() and not self._verify_merge_in_main(branch, cwd=proj_path):
+                        logger.warning(
+                            "[WorkspaceLifecycle] 合并验证失败，跳过清理: "
+                            "task_id=%s, branch=%s",
+                            task_id, branch)
+                        return result
                 self._cleanup_worktree(workspace, ws_meta, tag_task_id=task_id)
                 return result
             if mode == "shared":
@@ -746,6 +762,11 @@ class WorkspaceLifecycleManager:
         if mode == "worktree":
             self._run_git("checkout", "--", ".", cwd=ws_path)
             self._run_git("clean", "-fd", cwd=ws_path)
+            if not ws_path.exists():
+                logger.warning(
+                    "[WorkspaceLifecycle] worktree 目录在回滚过程中已不存在，跳过清理: %s",
+                    workspace)
+                return {"success": True, "action": "rollback_worktree"}
             self._cleanup_worktree(workspace, ws_meta)
             logger.info("[WorkspaceLifecycle] worktree 回滚并清理: %s", workspace)
             return {"success": True, "action": "rollback_worktree"}

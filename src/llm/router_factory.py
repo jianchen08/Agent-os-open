@@ -1,7 +1,7 @@
 """litellm.Router 工厂 — 从 llm.yaml 构建共享 Router 实例。
 
-从 ModelConfigLoader 读取所有模型定义，构建 litellm.Router，
-配合 AdaptiveRouterAdapter 提供自适应并发控制和 fallback 能力。
+多 key 场景下，为同一 model_name 注册多个 deployment（每个 key 一个），
+litellm Router 自动负载均衡、冷却和 failover。
 """
 
 from __future__ import annotations
@@ -11,9 +11,11 @@ from typing import Any
 
 import litellm
 
+from llm.key_pool import KeyPool, KeySlot
+
 logger = logging.getLogger(__name__)
 
-# provider 名称 → litellm 前缀（与 llm_core.py 保持一致）
+# provider 名称 → litellm 前缀
 _PROVIDER_MAP: dict[str, str] = {
     "openai": "openai",
     "minimax": "minimax",
@@ -26,30 +28,95 @@ _PROVIDER_MAP: dict[str, str] = {
 # 模块级单例缓存
 _router_instance: litellm.Router | None = None
 _adapter_instance: Any = None
+_key_pools: dict[str, KeyPool] = {}
 
 
 def _get_litellm_model_string(provider: str, model_name: str) -> str:
-    """计算 litellm 格式的模型标识字符串。
-
-    Args:
-        provider: 提供商名称（如 zhipu_coding）
-        model_name: 模型名称（如 glm-5.1）
-
-    Returns:
-        litellm 模型字符串（如 "zai/glm-5.1"）
-    """
+    """计算 litellm 格式的模型标识字符串。"""
     prefix = _PROVIDER_MAP.get(provider, provider)
     return f"{prefix}/{model_name}"
 
 
-def build_model_list(model_loader: Any) -> list[dict[str, Any]]:
-    """从 llm.yaml 构建 Router model_list。
+def _parse_provider_keys(
+    llm_data: dict[str, Any],
+) -> dict[str, list[KeySlot]]:
+    """从 llm.yaml 的 providers 段解析所有 key。
 
-    Args:
-        model_loader: ModelConfigLoader 实例
+    支持两种配置格式：
+
+    多 key（新）::
+
+        providers:
+          zhipu_coding:
+            api_base: https://...
+            keys:
+              - id: key1
+                api_key: xxxx
+                rpm: 60
+              - id: key2
+                api_key: yyyy
+                rpm: 60
+
+    单 key（旧）::
+
+        providers:
+          zhipu_coding:
+            api_key: xxxx
+            api_base: https://...
 
     Returns:
-        litellm.Router model_list 格式的列表
+        provider_name → [KeySlot, ...] 的映射
+    """
+    providers_section = llm_data.get("providers", {})
+
+    result: dict[str, list[KeySlot]] = {}
+
+    for provider_name, provider_conf in providers_section.items():
+        if not isinstance(provider_conf, dict):
+            continue
+
+        api_base = provider_conf.get("api_base", "")
+        keys_conf = provider_conf.get("keys", [])
+        slots: list[KeySlot] = []
+
+        if keys_conf and isinstance(keys_conf, list):
+            for i, key_conf in enumerate(keys_conf):
+                if not isinstance(key_conf, dict):
+                    continue
+                slots.append(KeySlot(
+                    key_id=key_conf.get("id", f"{provider_name}_{i}"),
+                    api_key=key_conf.get("api_key", ""),
+                    api_base=key_conf.get("api_base", "") or api_base,
+                    rpm_limit=key_conf.get("rpm", 0),
+                    token_quota=key_conf.get("token_quota", 0),
+                ))
+        else:
+            api_key = provider_conf.get("api_key", "")
+            if api_key:
+                slots.append(KeySlot(
+                    key_id=f"{provider_name}_default",
+                    api_key=api_key,
+                    api_base=api_base,
+                ))
+
+        if slots:
+            result[provider_name] = slots
+            logger.info(
+                "[Router] provider %s: %d key(s)",
+                provider_name, len(slots),
+            )
+
+    return result
+
+
+def build_model_list(
+    model_loader: Any,
+    provider_keys: dict[str, list[KeySlot]],
+) -> list[dict[str, Any]]:
+    """从 llm.yaml 构建 Router model_list。
+
+    多 key provider: 为每个 key 注册一个 deployment（同一 model_name）。
+    litellm Router 自动负载均衡和 failover。
     """
     llm_data = model_loader._load_llm_data()
     models_section = llm_data.get("models", {})
@@ -57,138 +124,126 @@ def build_model_list(model_loader: Any) -> list[dict[str, Any]]:
     model_list: list[dict[str, Any]] = []
 
     for model_id, model_conf in models_section.items():
+        # 跳过 embedding 模型：litellm Router 不支持自定义前缀的 embedding
+        if model_conf.get("dimension") or "embedding" in model_id:
+            continue
+
         provider = model_conf.get("provider", "")
         model_name = model_conf.get("model_name", model_id)
 
-        litellm_params: dict[str, Any] = {
-            "model": _get_litellm_model_string(provider, model_name),
-        }
+        litellm_model = _get_litellm_model_string(provider, model_name)
+        slots = provider_keys.get(provider)
 
-        # api_key / api_base：先从模型配置取，再从提供商配置回退
-        provider_conf = model_loader.get_provider_config(provider) or {}
-        api_key = model_conf.get("api_key", "") or provider_conf.get("api_key", "")
-        api_base = model_conf.get("api_base", "") or provider_conf.get("api_base", "")
-        if api_key:
-            litellm_params["api_key"] = api_key
-        if api_base:
-            litellm_params["api_base"] = api_base
+        # 模型级凭证覆盖（如 deepseek-chat 有自己的 api_key）
+        model_api_key = model_conf.get("api_key", "")
+        model_api_base = model_conf.get("api_base", "")
 
-        # 不在 model_list 设 max_parallel_requests — 由 AdaptiveRouterAdapter 管理
+        if slots and not model_api_key:
+            # 多 key：每个 slot 注册一个 deployment
+            for slot in slots:
+                lp: dict[str, Any] = {"model": litellm_model}
+                lp["api_key"] = slot.api_key
+                lp["api_base"] = model_api_base or slot.api_base or ""
+                if not lp["api_base"]:
+                    del lp["api_base"]
 
-        model_list.append({
-            "model_name": model_id,
-            "litellm_params": litellm_params,
-        })
+                model_list.append({
+                    "model_name": model_id,
+                    "litellm_params": lp,
+                })
+                logger.info(
+                    "[Router] deployment: %s → %s (key=%s)",
+                    model_id, litellm_model, slot.key_id,
+                )
+        else:
+            # 单 key：直接用模型级或 provider 级的凭证
+            lp: dict[str, Any] = {"model": litellm_model}
+            if model_api_key:
+                lp["api_key"] = model_api_key
+            if model_api_base:
+                lp["api_base"] = model_api_base
+            elif slots and slots[0].api_base:
+                lp["api_base"] = slots[0].api_base
 
-        logger.info(
-            "[Router] 注册模型: %s → %s",
-            model_id, litellm_params["model"],
-        )
+            model_list.append({
+                "model_name": model_id,
+                "litellm_params": lp,
+            })
+            logger.info(
+                "[Router] deployment: %s → %s",
+                model_id, litellm_model,
+            )
 
     return model_list
 
 
 def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
-    """从 llm.yaml 的 defaults.fallback_chain 构建 Router fallbacks。
-
-    llm.yaml 格式::
-
-        defaults:
-          fallback_chain:
-            chat: [deepseek-chat, glm-4.7]
-
-    Router 格式::
-
-        fallbacks=[{"glm-5.1": ["deepseek-chat", "glm-4.7"]}]
-
-    Args:
-        model_loader: ModelConfigLoader 实例
-
-    Returns:
-        Router fallbacks 列表
-    """
+    """从 llm.yaml 的 defaults.fallback_chain 构建 Router fallbacks。"""
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
     fallback_chain = defaults.get("fallback_chain", {})
 
-    # 从 fallback_chain 的 key 推导出默认模型 ID
-    # chat → defaults.chat, reasoning → defaults.reasoning
-    # 合并同 primary 的 fallback 链（去重）
     merged: dict[str, list[str]] = {}
     for model_type, fallback_ids in fallback_chain.items():
         primary_id = defaults.get(model_type, "")
         if primary_id and fallback_ids:
-            existing = merged.get(primary_id, [])
+            existing = merged.setdefault(primary_id, [])
             for fid in fallback_ids:
                 if fid not in existing:
                     existing.append(fid)
-            merged[primary_id] = existing
 
     fallbacks: list[dict[str, Any]] = []
     for primary_id, fb_ids in merged.items():
         fallbacks.append({primary_id: fb_ids})
-        logger.info(
-            "[Router] fallback 链: %s → %s", primary_id, fb_ids,
-        )
+        logger.info("[Router] fallback: %s → %s", primary_id, fb_ids)
 
     return fallbacks
 
 
 def build_router(model_loader: Any) -> litellm.Router:
-    """构建 litellm.Router 实例。
+    """构建 litellm.Router 实例。"""
+    global _key_pools
 
-    Args:
-        model_loader: ModelConfigLoader 实例
-
-    Returns:
-        配置好的 litellm.Router
-    """
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
+    call_timeout = defaults.get("call_timeout", 600)
 
-    model_list = build_model_list(model_loader)
+    provider_keys = _parse_provider_keys(llm_data)
+    model_list = build_model_list(model_loader, provider_keys)
     fallbacks = build_fallbacks(model_loader)
 
-    call_timeout = defaults.get("call_timeout", 600)
+    # 构建 KeyPools（仅用于统计展示）
+    for prov_name, slots in provider_keys.items():
+        _key_pools[prov_name] = KeyPool(slots, pool_id=prov_name)
 
     router_kwargs: dict[str, Any] = {
         "model_list": model_list,
-        # Router 自身不再管并发 — 由 AdaptiveRouterAdapter 管理
-        "default_max_parallel_requests": 10,
         "num_retries": 1,
         "allowed_fails": 2,
         "cooldown_time": 120,
-        # 重试间隔：避免 OpenAI 客户端默认的 0.3-1s 短间隔导致密集重试
         "retry_after": 5,
-        # stream_timeout: Router 内置流式超时，作为最终兜底
         "stream_timeout": call_timeout,
         "timeout": call_timeout,
     }
-
     if fallbacks:
         router_kwargs["fallbacks"] = fallbacks
 
     router = litellm.Router(**router_kwargs)
 
     logger.info(
-        "[Router] 创建完成: %d 个模型, fallbacks=%d, stream_timeout=%ds",
-        len(model_list), len(fallbacks), call_timeout,
+        "[Router] 创建完成: %d deployments, fallbacks=%d",
+        len(model_list), len(fallbacks),
     )
-
     return router
 
 
+def get_key_pool(provider_name: str) -> KeyPool | None:
+    """获取指定 provider 的 KeyPool（仅统计用）。"""
+    return _key_pools.get(provider_name)
+
+
 def build_adapter(model_loader: Any) -> Any:
-    """构建带自适应并发的 AdaptiveRouterAdapter。
-
-    从 llm.yaml concurrency 段读取 min/max/default 配置。
-
-    Args:
-        model_loader: ModelConfigLoader 实例
-
-    Returns:
-        AdaptiveRouterAdapter 实例
-    """
+    """构建 AdaptiveRouterAdapter — 多 key 由 litellm Router 管理。"""
     from llm.adapter import AdaptiveRouterAdapter
 
     llm_data = model_loader._load_llm_data()
@@ -208,22 +263,14 @@ def build_adapter(model_loader: Any) -> Any:
     )
 
     logger.info(
-        "[Router] AdaptiveRouterAdapter: concurrency %d (min=%d, max=%d)",
-        default_cap, min_cap, max_cap,
+        "[Router] AdaptiveRouterAdapter: concurrency %d (min=%d, max=%d), key_pools=%s",
+        default_cap, min_cap, max_cap, list(_key_pools.keys()),
     )
-
     return adapter
 
 
 def get_or_create_router(model_loader: Any) -> litellm.Router:
-    """获取或创建共享的 Router 单例。
-
-    Args:
-        model_loader: ModelConfigLoader 实例
-
-    Returns:
-        共享的 litellm.Router 实例
-    """
+    """获取或创建共享的 Router 单例。"""
     global _router_instance
     if _router_instance is None:
         _router_instance = build_router(model_loader)
@@ -231,14 +278,7 @@ def get_or_create_router(model_loader: Any) -> litellm.Router:
 
 
 def get_or_create_adapter(model_loader: Any) -> Any:
-    """获取或创建共享的 AdaptiveRouterAdapter 单例。
-
-    Args:
-        model_loader: ModelConfigLoader 实例
-
-    Returns:
-        AdaptiveRouterAdapter 实例
-    """
+    """获取或创建共享的 Adapter 单例。"""
     global _adapter_instance
     if _adapter_instance is None:
         _adapter_instance = build_adapter(model_loader)
@@ -246,7 +286,8 @@ def get_or_create_adapter(model_loader: Any) -> Any:
 
 
 def reset_router() -> None:
-    """重置 Router 单例（仅用于测试）。"""
-    global _router_instance, _adapter_instance
+    """重置所有单例（仅用于测试）。"""
+    global _router_instance, _adapter_instance, _key_pools
     _router_instance = None
     _adapter_instance = None
+    _key_pools = {}

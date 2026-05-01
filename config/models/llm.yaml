@@ -92,19 +92,45 @@ defaults:
     - glm-5-turbo
 providers:
   zhipu_coding:
-    api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    keys:
+      - id: zhipu_coding_main
+        api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
+        max_concurrent: 5
+        rpm: 60
+        token_quota: 0
+      - id: zhipu_coding_2
+        api_key: 55fda454331e4507a2b77bfb01bac114.mlcfDPZIKdelyEUC
+        max_concurrent: 2
+        rpm: 60
+        token_quota: 0
   zhipu:
-    api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
     api_base: https://open.bigmodel.cn/api/paas/v4/
+    keys:
+      - id: zhipu_main
+        api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
+        max_concurrent: 2
+        rpm: 60
+        token_quota: 0
   deepseek:
-    api_key: [REDACTED]
     api_base: https://api.deepseek.com/v1
+    keys:
+      - id: deepseek_main
+        api_key: [REDACTED]
+        max_concurrent: 2
+        rpm: 30
+        token_quota: 0
   minimax:
-    api_key: [REDACTED]
     api_base: https://api.minimaxi.com/v1
+    keys:
+      - id: minimax_main
+        api_key: [REDACTED]
+        max_concurrent: 2
+        rpm: 30
+        token_quota: 0
 embeddings: {}
 concurrency:
-  min_concurrency: 1
-  max_concurrency: 4
-  default_concurrency: 3
+  # pipeline 最大并发管道数
+  max_concurrent_pipelines: 5
+  # 每个 key 的默认最大并发（可被 key 级配置覆盖）
+  max_concurrency: 2
