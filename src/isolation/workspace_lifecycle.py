@@ -87,6 +87,12 @@ class WorkspaceLifecycleManager:
         self._global_lock = threading.Lock()
         # 项目大小计算缓存 {project_root: (mtime, size)}
         self._size_cache: dict[str, tuple[float, int]] = {}
+        # 记录项目根目录的主分支，用于守卫 auto-save 不写入错误分支
+        self._main_branch: str = ""
+        try:
+            self._record_main_branch()
+        except Exception:
+            pass
 
     # ── 内部工具方法 ──────────────────────────────────────────────
 
@@ -171,6 +177,38 @@ class WorkspaceLifecycleManager:
             "不允许 checkout 切换分支: cwd=%s",
             expected, current.strip() if rc == 0 else "(unknown)", cwd)
         return False
+
+    def _record_main_branch(self):
+        """记录项目根目录的主分支，用于检测外部分支切换。"""
+        try:
+            rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=self._base_path)
+            if rc == 0 and out.strip():
+                self._main_branch = out.strip()
+                logger.debug("[WorkspaceLifecycle] 记录主分支: %s", self._main_branch)
+        except Exception:
+            pass
+
+    def _guard_root_branch(self, cwd: Path) -> bool:
+        """守卫：如果 cwd 是项目根目录，验证分支未被外部切换。
+
+        workspace_lifecycle 只允许对项目根目录做 commit 和 merge，
+        不允许 checkout 切换分支。如果检测到分支变更则拒绝操作。
+        """
+        try:
+            if not self._main_branch:
+                return True
+            if cwd.resolve() != self._base_path.resolve():
+                return True
+            rc, current, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+            if rc == 0 and current.strip() == self._main_branch:
+                return True
+            logger.warning(
+                "[WorkspaceLifecycle] BRANCH GUARD: 项目根目录分支已变更! "
+                "expected=%s, actual=%s — 跳过操作避免写入错误分支",
+                self._main_branch, current.strip() if rc == 0 else "(unknown)")
+            return False
+        except Exception:
+            return True
 
     def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
         """Initialize a new git repo and make the initial commit with all files.
@@ -309,6 +347,7 @@ class WorkspaceLifecycleManager:
 
     def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """任务启动时的生命周期钩子，根据 is_root 分发到子任务或根任务处理"""
+        self._record_main_branch()
         self.restore_ws_meta(task_id)
         existing = self._ws_meta_store.get(task_id)
         if existing and existing.get("mode"):
@@ -458,7 +497,10 @@ class WorkspaceLifecycleManager:
                 if not self._git_init_and_initial_commit(container_path, "chore: init container repo"):
                     raise RuntimeError(f"容器空间 git 初始化失败: {container_path}")
             self._ensure_git_user(container_path)
-            self._git_add_commit_if_dirty(container_path, f"chore: auto-save before subtask {task_id}")
+            if self._guard_root_branch(container_path):
+                self._git_add_commit_if_dirty(container_path, f"chore: auto-save before subtask {task_id}")
+            else:
+                logger.warning("[WorkspaceLifecycle] 跳过容器空间 auto-save: 分支守卫检测到变更")
 
             branch = f"task/{task_id}"
             ws_dir = container_path.parent / _safe_ws_name(
@@ -519,14 +561,18 @@ class WorkspaceLifecycleManager:
                 raise RuntimeError(f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")
         else:
             self._ensure_git_user(root_path)
-            self._git_add_commit_if_dirty(
-                root_path,
-                f"chore: auto-save before worktree for task {task_id}")
+            if self._guard_root_branch(root_path):
+                self._git_add_commit_if_dirty(
+                    root_path,
+                    f"chore: auto-save before worktree for task {task_id}")
+            else:
+                logger.warning(
+                    "[WorkspaceLifecycle] 跳过项目根目录 auto-save: 分支守卫检测到变更, task_id=%s",
+                    task_id)
 
         branch = f"task/{task_id}"
-        ws_dir = Path(
-            task_data.get("workspace_root", ".ai_workspaces")
-        ) / _safe_ws_name(root_path.name, task_id)
+        ws_root = task_data.get("workspace_root", ".ai_workspaces")
+        ws_dir = root_path / ws_root / _safe_ws_name(root_path.name, task_id)
         project_size = self._calc_project_size(str(root_path), task_id)
         threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
 

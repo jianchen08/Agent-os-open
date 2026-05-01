@@ -7,6 +7,7 @@ display_name: 编程协调专家
 description: |
   编程任务的统一入口 L2 编排 Agent，采用 Supervisor 模式协调固定团队：
   - code_writer_agent（代码编写）
+  - bug_fixer_agent（Bug调试修复）
   - code_analyzer_agent（代码分析）
   - test_generator_agent（测试生成）
   - code_reviewer_agent（代码审查）
@@ -24,6 +25,7 @@ model_tier: large
 # 固定团队成员
 team:
   - code_writer_agent
+  - bug_fixer_agent
   - code_analyzer_agent
   - test_generator_agent
   - code_reviewer_agent
@@ -48,6 +50,7 @@ system_prompt: |
   | Agent | 职责 | 调用时机 |
   |-------|------|----------|
   | code_writer_agent | 代码编写、重构、优化 | 需要生成新代码或修改现有代码时 |
+  | bug_fixer_agent | Bug诊断与修复 | 需要修复bug、排查错误、诊断问题时 |
   | code_analyzer_agent | 代码结构分析、质量评估 | 需要分析代码或评估质量时 |
   | test_generator_agent | 测试用例生成、测试策略 | 需要生成单元测试或集成测试时 |
   | code_reviewer_agent | 代码审查、bug 发现 | 需要审查代码质量时 |
@@ -64,6 +67,7 @@ system_prompt: |
   | 后端 | API/数据库/服务/逻辑 | code_writer_agent + environment_setup_agent + api_tester_agent |
   | 全栈 | 前后端集成 | code_writer_agent 全流程 + code_reviewer_agent + api_tester_agent |
   | 混合 | 多服务/微服务/跨领域 | 全部 L3 协同，并行调度 |
+  | Bug修复 | 报错/异常/运行时错误 | bug_fixer_agent（4阶段调试工作流） |
 
   ## 执行步骤
 
@@ -97,16 +101,12 @@ system_prompt: |
   1. 提交审查任务给 code_reviewer_agent（附带验收标准 AC 清单）
   2. 等待审查完成（code_reviewer 必须逐项核对细节审查清单）
   3. 执行**门禁2：审查通过检查**
-     - 使用 task_evaluate 评估 semantic_check + code_check
-     - 通过标准：Critical = 0 且 细节清单通过率 ≥ 80%
-     - **未通过**：附带审查报告（含具体未通过项），要求 code_writer_agent 定向修复
 
   ### 步骤四：测试
   1. 将结构化状态机作为测试设计输入，提交给 test_generator_agent
   2. 等待测试完成
   3. 如果是后端/全栈任务，同时提交 api_tester_agent 进行 API 测试
   4. 执行**门禁3：测试达标检查**
-     - 使用 task_evaluate 评估 test_check + bash_check
      - 额外检查：state_coverage ≥ 100%、transition_coverage ≥ 100%
      - 如果有 API 测试：api_test_check（2xx、4xx、5xx + schema 校验）
      - 通过标准：通过率 ≥ 80% 且 state_coverage = 100%
@@ -177,6 +177,7 @@ static_vars:
         | 阶段 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
         |------|-------|------|-----------|----------|----------|
         | 编码 | code_writer_agent | 代码编写专家 | src/**/*.py | container | file_check, format_valid |
+        | 调试 | bug_fixer_agent | Bug调试专家 | src/**/*.py + tests/ | container | test_check, bash_check |
         | 分析 | code_analyzer_agent | 代码分析专家 | docs/*_analysis.md | container | file_check, semantic_check |
         | 测试 | test_generator_agent | 测试生成专家 | tests/**/*.py | container | test_check, bash_check |
         | 审查 | code_reviewer_agent | 代码审查专家 | {{workspace}}/review_report.md | container | file_check, semantic_check |
@@ -218,7 +219,7 @@ hard_constraints:
   - 必须执行三级质量门禁（编码质量→审查通过→测试达标）
   - 门禁未通过必须回退修复，最多重试 3 次
   - 同一细节连续失败 2 次时，自动升级给人类确认
-  - 只能调用固定团队成员（code_writer_agent、code_analyzer_agent、test_generator_agent、code_reviewer_agent、environment_setup_agent、api_tester_agent）
+  - 只能调用固定团队成员（code_writer_agent、bug_fixer_agent、code_analyzer_agent、test_generator_agent、code_reviewer_agent、environment_setup_agent、api_tester_agent）
   - 派发任务后必须读取下级 Agent 的产出物
   - 编码质量门禁标准：file_check + format_valid 100% 通过
   - 审查通过门禁标准：semantic_check + code_check Critical=0 且 细节清单通过率≥80%
@@ -378,7 +379,7 @@ tags:
 metadata:
   author: System
   created_at: "2026-04-29"
-  updated_at: "2026-04-30"
+  updated_at: "2026-05-01"
   capabilities:
     - requirement_structuring
     - task_type_analysis
@@ -387,5 +388,6 @@ metadata:
     - parallel_scheduling
     - code_review_orchestration
     - api_test_coordination
+    - bug_fix_routing
     - detail_checklist_enforcement
     - auto_format_and_targeted_fix

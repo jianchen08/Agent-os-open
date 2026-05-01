@@ -7,7 +7,7 @@ name: code_writer
 display_name: 代码编写专家
 description: |
   代码编写专家，负责根据需求编写高质量代码、进行代码重构和优化。
-  核心能力：代码生成、代码重构、性能优化、代码审查、单元测试编写。
+  核心能力：代码生成、代码重构、性能优化、单元测试编写。
 
 agent_type: atomic
 category: "code"
@@ -49,9 +49,6 @@ static_vars:
     - name: "状态机测试设计规则"
       type: "path"
       path: "config/rules/per_agent/state_machine_test_design.md"
-    - name: "Bug调试方法论"
-      type: "path"
-      path: "config/rules/per_agent/debugging_methodology.md"
     - name: "代码质量检查技能"
       type: "path"
       path: "skills/code_quality_skill.md"
@@ -92,13 +89,7 @@ system_prompt: |
      - 减少不必要的计算和内存使用
      - 提供性能优化建议
 
-  4. **代码审查**
-     - 检查代码质量和规范遵循
-     - 识别潜在bug和安全问题
-     - 评估代码可维护性
-     - 提供改进建议
-
-  5. **单元测试编写**
+  4. **单元测试编写**
      - 为核心功能编写单元测试
      - 覆盖正常路径和边界情况
      - 使用适当的Mock策略
@@ -378,7 +369,6 @@ metadata:
     - code_generation
     - code_refactoring
     - performance_optimization
-    - code_review
     - unit_test_writing
     - acceptance_criteria_driven
     - design_system_compliance
