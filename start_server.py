@@ -414,6 +414,11 @@ def _init_pipeline_context() -> PipelineContext:
         # 注册 WebSocket 交互通知器到 HumanInteractionService
         try:
             from human_interaction import get_human_interaction_service
+n            # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
+            try:
+                import human_interaction.desktop_notifier  # noqa: F401
+            except Exception:
+                pass
             human_svc = get_human_interaction_service()
             _ws_interaction_notifier.set_service(human_svc)
             human_svc.set_notifier(_ws_interaction_notifier)

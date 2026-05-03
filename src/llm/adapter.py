@@ -493,6 +493,9 @@ class _BaseLiteLLMAdapter:
 
                 # 文本内容
                 if delta.content:
+                    # thinking→text 过渡：发送 thinking_end 确保思考完整关闭后再输出文本
+                    if on_chunk and thinking_parts:
+                        on_chunk({"type": "thinking_end", "content": ""})
                     result_parts.append(delta.content)
                     _stream_logger.debug(
                         "[STREAM][TEXT] #%d +%d chars: %s",
@@ -515,6 +518,9 @@ class _BaseLiteLLMAdapter:
 
                 # 工具调用（流式增量）
                 if delta.tool_calls:
+                    # thinking→tool_calls 过渡：发送 thinking_end 确保思考完整关闭后再输出工具卡片
+                    if on_chunk and thinking_parts:
+                        on_chunk({"type": "thinking_end", "content": ""})
                     for tc in delta.tool_calls:
                         idx = (
                             tc.index if hasattr(tc, "index") else 0
