@@ -226,3 +226,4 @@ core_plugins:
       tool_timeouts:
         human_interaction: 1800
         task_evaluate: 1200
+        bash_execute: 300

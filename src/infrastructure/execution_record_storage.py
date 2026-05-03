@@ -19,13 +19,14 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SUMMARY_MAX_LEN = 500
+_MAX_RECORDS_PER_FILE = 500
 
 
 @dataclass
@@ -116,6 +117,8 @@ class ExecutionRecordStorage:
         self._map_file = self._data_dir / "_pipeline_root_map.json" if self._data_dir else None
         if self._map_file:
             self._load_root_map()
+        # pipeline_run_id -> current part number
+        self._active_part: dict[str, int] = {}
 
     def _load_all(self) -> None:
         if not self._data_dir:
@@ -131,14 +134,31 @@ class ExecutionRecordStorage:
                 self._load_pipeline_file(yaml_file)
 
     def _ensure_loaded(self, pipeline_run_id: str) -> None:
-        """按需加载指定 pipeline 的数据文件（懒加载）。"""
+        """按需加载指定 pipeline 的所有分片文件（懒加载）。"""
         if pipeline_run_id in self._loaded_pipelines or not self._data_dir:
             return
-        # 找到对应的文件
-        yaml_file = self._get_pipeline_file(pipeline_run_id)
-        if yaml_file and yaml_file.exists():
-            self._load_pipeline_file(yaml_file)
+        part_files = self._get_part_files(pipeline_run_id)
+        for pf in part_files:
+            self._load_pipeline_file(pf)
+        # 记录活跃分片编号
+        if part_files:
+            self._detect_active_part(pipeline_run_id, part_files)
         self._loaded_pipelines.add(pipeline_run_id)
+
+    def _detect_active_part(
+        self, pipeline_run_id: str, part_files: list[Path]
+    ) -> None:
+        """从文件列表推断活跃分片编号。"""
+        last = part_files[-1]
+        name = last.name
+        if "_" in name and name.endswith(".yaml"):
+            suffix = name.rsplit("_", 1)[-1].replace(".yaml", "")
+            try:
+                self._active_part[pipeline_run_id] = int(suffix)
+                return
+            except ValueError:
+                pass
+        self._active_part[pipeline_run_id] = 1
 
     def _load_root_map(self) -> None:
         if not self._map_file or not self._map_file.exists():
@@ -169,46 +189,117 @@ class ExecutionRecordStorage:
         except Exception:
             logger.warning("管道文件损坏，跳过: %s", yaml_file.name)
 
-    def _get_pipeline_file(self, pipeline_run_id: str) -> Path | None:
+    def _get_pipeline_file(
+        self, pipeline_run_id: str, part: int | None = None
+    ) -> Path | None:
         if not self._data_dir:
             return None
         root_id = self._pipeline_root_map.get(pipeline_run_id)
-        if root_id:
-            return self._data_dir / root_id / f"{pipeline_run_id}.yaml"
-        # 向后兼容：检查扁平位置
-        flat_path = self._data_dir / f"{pipeline_run_id}.yaml"
-        if flat_path.exists():
-            return flat_path
-        return flat_path
+        base_dir = (
+            self._data_dir / root_id if root_id else self._data_dir
+        )
+        if part is None:
+            part = self._active_part.get(pipeline_run_id, 1)
+        if part <= 1:
+            return base_dir / f"{pipeline_run_id}.yaml"
+        return base_dir / f"{pipeline_run_id}_{part:03d}.yaml"
+
+    def _get_part_files(self, pipeline_run_id: str) -> list[Path]:
+        """返回该 pipeline 所有分片文件，按编号升序。"""
+        if not self._data_dir:
+            return []
+        root_id = self._pipeline_root_map.get(pipeline_run_id)
+        base_dir = (
+            self._data_dir / root_id if root_id else self._data_dir
+        )
+        if not base_dir.exists():
+            return []
+        files = [base_dir / f"{pipeline_run_id}.yaml"]
+        files.extend(
+            sorted(base_dir.glob(f"{pipeline_run_id}_*.yaml"))
+        )
+        return [f for f in files if f.exists()]
 
     def _persist_pipeline(self, pipeline_run_id: str) -> None:
         if not self._data_dir:
             return
-        file_path = self._get_pipeline_file(pipeline_run_id)
-        if file_path is None:
-            return
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        summary = self._summaries.get(pipeline_run_id)
         records = [
             r for r in self._records.values()
             if r.pipeline_run_id == pipeline_run_id
         ]
         records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-        # 同步 summary 的 total_records，避免管道重试/恢复后
-        # summary 显示旧的记录数
+
+        summary = self._summaries.get(pipeline_run_id)
         if summary and records:
             summary.total_records = len(records)
             summary.total_iterations = max(r.iteration for r in records)
-        data: dict[str, Any] = {}
-        if summary:
-            data["summary"] = self._summary_to_dict(summary)
+
+        # 检查是否需要拆分
+        if len(records) > _MAX_RECORDS_PER_FILE:
+            self._persist_split(pipeline_run_id, records, summary)
         else:
-            data["summary"] = None
+            file_path = self._get_pipeline_file(pipeline_run_id, part=1)
+            if file_path is None:
+                return
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            self._active_part[pipeline_run_id] = 1
+            self._write_pipeline_file(file_path, summary, records)
+            # 清理旧的分片文件（记录减少时，如 delete）
+            self._cleanup_old_parts(pipeline_run_id, max_part=1)
+
+    def _persist_split(
+        self,
+        pipeline_run_id: str,
+        records: list[ExecutionRecordData],
+        summary: PipelineRunSummary | None,
+    ) -> None:
+        """将记录按 _MAX_RECORDS_PER_FILE 拆分为多个文件写入。"""
+        total = len(records)
+        num_parts = (
+            (total + _MAX_RECORDS_PER_FILE - 1) // _MAX_RECORDS_PER_FILE
+        )
+
+        # summary 只写在最后一个文件里
+        for part_idx in range(num_parts):
+            part_num = part_idx + 1
+            start = part_idx * _MAX_RECORDS_PER_FILE
+            end = min(start + _MAX_RECORDS_PER_FILE, total)
+            part_records = records[start:end]
+            part_summary = summary if part_idx == num_parts - 1 else None
+
+            file_path = self._get_pipeline_file(pipeline_run_id, part=part_num)
+            if file_path is None:
+                continue
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_pipeline_file(file_path, part_summary, part_records)
+
+        self._active_part[pipeline_run_id] = num_parts
+        self._cleanup_old_parts(pipeline_run_id, max_part=num_parts)
+
+    def _write_pipeline_file(
+        self,
+        file_path: Path,
+        summary: PipelineRunSummary | None,
+        records: list[ExecutionRecordData],
+    ) -> None:
+        """写入单个 YAML 文件。"""
+        data: dict[str, Any] = {}
+        data["summary"] = self._summary_to_dict(summary) if summary else None
         data["records"] = [self._record_to_dict(r) for r in records]
         file_path.write_text(
             yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2),
             encoding="utf-8",
         )
+
+    def _cleanup_old_parts(self, pipeline_run_id: str, max_part: int) -> None:
+        """删除超出当前需要的分片文件。"""
+        part = max_part + 1
+        while True:
+            file_path = self._get_pipeline_file(pipeline_run_id, part=part)
+            if file_path is None or not file_path.exists():
+                break
+            file_path.unlink()
+            part += 1
 
     @staticmethod
     def _record_to_dict(record: ExecutionRecordData) -> dict[str, Any]:
@@ -300,20 +391,22 @@ class ExecutionRecordStorage:
             del self._records[rid]
         if session_id in self._summaries:
             del self._summaries[session_id]
+        self._active_part.pop(session_id, None)
         if to_delete and self._data_dir:
-            file_path = self._get_pipeline_file(session_id)
-            if file_path and file_path.exists():
+            for file_path in self._get_part_files(session_id):
                 file_path.unlink()
-                # 清理空目录
-                if file_path.parent != self._data_dir:
-                    try:
-                        if not any(file_path.parent.iterdir()):
-                            file_path.parent.rmdir()
-                    except OSError:
-                        pass
-                # 清理映射
-                self._pipeline_root_map.pop(session_id, None)
-                self._persist_root_map()
+            # 清理空目录
+            root_id = self._pipeline_root_map.get(session_id)
+            if root_id:
+                parent_dir = self._data_dir / root_id
+                try:
+                    if parent_dir.exists() and not any(parent_dir.iterdir()):
+                        parent_dir.rmdir()
+                except OSError:
+                    pass
+            # 清理映射
+            self._pipeline_root_map.pop(session_id, None)
+            self._persist_root_map()
         logger.debug("删除会话 %s 的执行记录: %d 条", session_id, len(to_delete))
         return len(to_delete)
 
@@ -328,6 +421,139 @@ class ExecutionRecordStorage:
         records.sort(key=lambda r: (r.sequence, r.created_at or ""))
         return records
 
+    def reconstruct_messages(
+        self,
+        pipeline_run_id: str,
+        budget: int | None = None,
+        token_fn: Callable[..., int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """从 L0 持久化记录回读近期消息（从后往前，按预算截取）。
+
+        惰性加载：只读取当前活跃分片文件，预算不够时才往前读更早的分片。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+            budget: token 预算限制（None 表示无限制）
+            token_fn: token 估算函数，默认 len(text)//2
+
+        Returns:
+            消息字典列表（按时间顺序，旧的在前）
+        """
+        if token_fn is None:
+            def _default_token_fn(text: str) -> int:
+                return max(1, len(text) // 2) if text else 0
+            token_fn = _default_token_fn
+
+        # 内存回退：无 data_dir 时直接从缓存读取
+        all_records = [
+            r for r in self._records.values()
+            if r.pipeline_run_id == pipeline_run_id
+        ]
+        all_records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+
+        if not all_records:
+            # 磁盘回读：从分片文件倒序加载
+            for pf in reversed(self._get_part_files(pipeline_run_id)):
+                part_records = self._load_part_records(pf)
+                all_records.extend(part_records)
+                if budget is not None:
+                    # 按预算判断是否需要继续读更早的分片
+                    total = sum(token_fn(r.content or "") for r in all_records)
+                    if total >= budget:
+                        break
+            all_records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+
+        if not all_records:
+            return []
+
+        return self._select_within_budget(all_records, budget, token_fn)
+
+    def _select_within_budget(
+        self,
+        records: list[ExecutionRecordData],
+        budget: int | None,
+        token_fn: Callable[..., int],
+    ) -> list[dict[str, Any]]:
+        """从已排序的记录中，从后往前按预算截取消息。"""
+        selected: list[ExecutionRecordData] = []
+        used_tokens = 0
+        pending_tools: list[ExecutionRecordData] = []
+
+        for record in reversed(records):
+            if record.type == "compression_marker":
+                continue
+
+            if record.type == "tool":
+                pending_tools.append(record)
+                continue
+
+            rec_tokens = token_fn(record.content or "")
+            if record.type == "ai" and record.tool_calls_json:
+                rec_tokens += token_fn(record.tool_calls_json)
+
+            tool_tokens = sum(
+                token_fn(r.content or "") for r in pending_tools
+            )
+            total_tokens = rec_tokens + tool_tokens
+
+            if budget is not None and used_tokens + total_tokens > budget:
+                pending_tools.clear()
+                break
+
+            if pending_tools:
+                selected.extend(pending_tools)
+                used_tokens += tool_tokens
+                pending_tools.clear()
+            selected.append(record)
+            used_tokens += rec_tokens
+
+        pending_tools.clear()
+        selected.reverse()
+        return [self._record_to_message(r) for r in selected]
+
+    def _load_part_records(self, file_path: Path) -> list[ExecutionRecordData]:
+        """加载单个分片文件的记录（不更新全局缓存）。"""
+        try:
+            text = file_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(text)
+            if not isinstance(data, dict):
+                return []
+            records_list = data.get("records", [])
+            if not records_list or not isinstance(records_list, list):
+                return []
+            return [
+                self._dict_to_record(d)
+                for d in records_list
+                if isinstance(d, dict)
+            ]
+        except Exception as exc:
+            logger.warning("分片文件损坏，跳过加载: %s - %s", file_path.name, exc)
+            return []
+
+    @staticmethod
+    def _record_to_message(record: ExecutionRecordData) -> dict[str, Any]:
+        """将 ExecutionRecordData 转换为 message dict 格式。"""
+        role = record.role or "user"
+        msg: dict[str, Any] = {
+            "role": role,
+            "content": record.content or "",
+        }
+
+        # 恢复 tool_calls
+        if record.type == "ai" and record.tool_calls_json:
+            try:
+                tool_calls = json.loads(record.tool_calls_json)
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 恢复 tool_call_id
+        if record.type == "tool" and record.tool_call_id:
+            msg["tool_call_id"] = record.tool_call_id
+
+        return msg
+
     def save_summary(self, summary: PipelineRunSummary) -> str:
         if not summary.run_id:
             summary.run_id = uuid.uuid4().hex[:12]
@@ -340,7 +566,9 @@ class ExecutionRecordStorage:
                       summary.run_id, summary.total_iterations, summary.status)
         return summary.run_id
 
-    def register_pipeline(self, pipeline_run_id: str, root_task_id: str) -> None:
+    def register_pipeline(
+        self, pipeline_run_id: str, root_task_id: str,
+    ) -> None:
         old_root = self._pipeline_root_map.get(pipeline_run_id)
         if old_root == root_task_id:
             return
@@ -355,6 +583,13 @@ class ExecutionRecordStorage:
                 target_path = target_dir / f"{pipeline_run_id}.yaml"
                 flat_path.rename(target_path)
                 logger.info("迁移管道文件: %s -> %s", flat_path.name, root_task_id)
+            # 也迁移分片文件
+            for flat_part in self._data_dir.glob(f"{pipeline_run_id}_*.yaml"):
+                target_dir = self._data_dir / root_task_id
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / flat_part.name
+                flat_part.rename(target_path)
+            self._active_part.pop(pipeline_run_id, None)
 
     def _persist_root_map(self) -> None:
         if not self._data_dir or not self._map_file:

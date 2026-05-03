@@ -1375,6 +1375,7 @@ class CLIApplication:
                 and not self._pipeline_task.done()
             )
             if _pipeline_was_running:
+                _output_wait_start = _time.monotonic()
                 while True:
                     # 管道已完成 → 退出等待，回到循环顶部处理结果
                     if (
@@ -1391,6 +1392,10 @@ class CLIApplication:
                     # 输出已停止 300ms → 退出等待，显示提示符
                     _last_t = getattr(self, "_last_chunk_time", 0)
                     if _last_t > 0 and (_time.monotonic() - _last_t) >= 0.3:
+                        break
+                    # 兜底：最多等 2 秒后显示提示符，避免 LLM 首响应
+                    # 慢或无 chunk 时 CLI 假死
+                    if (_time.monotonic() - _output_wait_start) >= 2.0:
                         break
                     # 还在输出或刚启动 → 等待 0.3s 后重新检查
                     await asyncio.wait(

@@ -168,6 +168,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 "[%s] 压缩完成: %d -> %d 条消息",
                 self.name, len(messages), len(compressed),
             )
+            # 从 L0 持久化回读近期原始消息（而非压缩后的摘要）
+            recent_from_l0 = self._read_recent_from_l0(ctx, context_window)
+            if recent_from_l0 is not None:
+                return PluginResult(state_updates={"messages": recent_from_l0})
             return PluginResult(state_updates={"messages": compressed})
 
         # 窗口变更但不需要压缩时，返回清理后的 messages
@@ -243,6 +247,40 @@ class ContextWindowGuardPlugin(IInputPlugin):
             len(messages) - len(cleaned),
         )
         return cleaned
+
+    def _read_recent_from_l0(
+        self, ctx: PluginContext, context_window: int,
+    ) -> list[dict[str, Any]] | None:
+        """从 ExecutionRecordStorage（L0）回读近期原始消息。
+
+        按预算从后往前截取，预算之外的旧消息由 ChunkService 的 L1/L2 摘要覆盖。
+
+        Returns:
+            消息列表，失败返回 None（回退到压缩后的消息）
+        """
+        try:
+            storage = ctx.get_service("execution_record_storage")
+        except (KeyError, AttributeError):
+            return None
+
+        from pipeline.types import StateKeys
+
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
+            return None
+
+        # recent 预算 = context_window * 30%（与 compress_messages 的 recent_ratio 一致）
+        recent_budget = int(context_window * 0.3)
+
+        try:
+            return storage.reconstruct_messages(
+                pipeline_run_id, budget=recent_budget,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] L0 回读失败，回退到压缩消息: %s", self.name, exc,
+            )
+            return None
 
     def _get_memory_service(self, ctx: PluginContext):
         """获取 MemoryContextService 实例。"""

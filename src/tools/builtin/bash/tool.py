@@ -138,6 +138,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
     # 默认超时时间（秒）
     DEFAULT_TIMEOUT: ClassVar[int] = 30
 
+    # 最大允许超时（秒），不得超过 ToolCore 外层超时 300 秒
+    MAX_TIMEOUT: ClassVar[int] = 290
+
     # 回调触发阈值（秒）
     CALLBACK_THRESHOLD: ClassVar[int] = 30
 
@@ -210,7 +213,8 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
             description="执行 Shell 命令，支持长时间运行进程（30秒超时+回调机制）、交互式输入（确认/密码）。"
             "适用场景：执行系统命令（ls/cat/grep/pip/npm等）、运行脚本、查看系统信息、安装依赖、编译构建项目。"
             "不适用场景：仅需读取文件（使用file_read）、仅需搜索文件（使用code_search）、危险操作（rm -rf/format/dd等）、长期运行服务。"
-            "注意事项：命令执行默认30秒超时，超时后触发回调机制；危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；"
+            "注意事项：命令执行默认30秒超时，超时后触发回调机制；timeout参数最大值为290秒，不可超过此限制；"
+            "危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；"
             "需要审批才能执行；长时间运行命令会保存日志到logs/bash/目录；敏感输入会被自动掩码处理。",
             input_schema={
                 "type": "object",
@@ -231,8 +235,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "命令执行的超时时间（秒），默认30秒。超过后会触发回调机制",
+                        "description": "命令执行的超时时间（秒），默认30秒。最大值290秒，超过会被截断为290",
                         "default": 30,
+                        "maximum": 290,
                     },
                     "working_dir": {
                         "type": "string",
@@ -321,7 +326,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         # 如果需要警告，记录但不阻止
         warning = message if needs_warning else None
 
-        timeout = inputs.get("timeout", self.timeout)
+        timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
         wd = self.get_working_dir(inputs)
         working_dir = str(wd) if wd else None
 
