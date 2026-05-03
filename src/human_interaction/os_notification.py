@@ -193,3 +193,49 @@ async def _run_cmd(*args: Any) -> bool:
 def _quote(s: str) -> str:
     """转义 shell 引号内的特殊字符。"""
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# ---------------------------------------------------------------------------
+# 独立提示音播放（不依赖桌面通知）
+# ---------------------------------------------------------------------------
+
+
+async def play_alert_sound() -> bool:
+    """
+    播放系统提示音。
+
+    使用平台原生方式播放提示音，与桌面通知解耦：
+      - Windows: PowerShell [Console]::Beep(800, 300)
+      - macOS:   afplay /System/Library/Sounds/Ping.aiff
+      - Linux:   paplay /usr/share/sounds/freedesktop/stereo/bell.oga
+                 回退到 printf '\a' (终端 BEL)
+
+    Returns:
+        True 播放成功，False 播放失败。
+    """
+    if not is_supported():
+        return False
+
+    try:
+        if _PLATFORM == "win32":
+            return await _run_powershell("[Console]::Beep(800, 300)")
+        if _PLATFORM == "darwin":
+            ok = await _run_cmd(
+                "afplay", "/System/Library/Sounds/Ping.aiff"
+            )
+            if ok:
+                return True
+            # 回退到终端 BEL
+            return await _run_cmd("printf", "\a")
+        if _PLATFORM == "linux":
+            ok = await _run_cmd(
+                "paplay",
+                "/usr/share/sounds/freedesktop/stereo/bell.oga",
+            )
+            if ok:
+                return True
+            # 回退到终端 BEL
+            return await _run_cmd("printf", "\a")
+    except Exception:
+        logger.debug("Alert sound playback failed", exc_info=True)
+    return False

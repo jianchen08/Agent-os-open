@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from human_interaction.interfaces import IInteractionNotifier
-from human_interaction.os_notification import send_notification
+from human_interaction.os_notification import play_alert_sound, send_notification
 
 logger = logging.getLogger(__name__)
 
