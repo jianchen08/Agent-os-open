@@ -587,3 +587,310 @@ class TestEvalPassedMergeGuard:
 
 
 # ─── Test 8: resolve_path 绝对路径重定向 ───────────────────────
+
+
+# ─── Test 9: ws_dir 绝对路径解析 ───────────────────────────────
+
+class TestWsDirAbsolutePath:
+    """验证 ws_dir 在 worktree 创建时始终为绝对路径。
+
+    BUG-FIX: 当 workspace 指向子目录时，ws_dir 曾被构建为相对路径
+    .ai_workspaces/ws_name，导致后续 _ensure_git_user(ws_dir) 的 subprocess
+    cwd 解析相对于进程 cwd 而非子目录，触发 WinError 267。
+    修复: ws_dir = root_path / ws_root / _safe_ws_name(...)
+    """
+
+    def test_ws_dir_is_absolute_when_workspace_is_subdirectory(self, tmp_path):
+        """workspace 指向子目录时 ws_dir 应为绝对路径"""
+        project = tmp_path / "my_project"
+        project.mkdir()
+        (project / "code.py").write_text("print('hello')")
+        # 子目录作为 workspace
+        sub = project / "docs"
+        sub.mkdir()
+        (sub / "readme.md").write_text("# docs")
+
+        mgr = _make_manager(tmp_path)
+        task_data = {
+            "task_id": "sub12345",
+            "_has_explicit_workspace": True,
+            "workspace_root": ".ai_workspaces",
+        }
+
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        meta = mgr._start_root_task("sub12345", str(sub), task_data)
+
+        ws_dir = Path(meta["path"])
+        assert ws_dir.is_absolute(), (
+            f"ws_dir should be absolute, got: {meta['path']}"
+        )
+
+        # 清理 worktree
+        if meta.get("project_root"):
+            _run_cmd("git", "worktree", "prune", cwd=Path(meta["project_root"]))
+
+    def test_ws_dir_is_absolute_when_workspace_is_project_root(self, tmp_path):
+        """workspace 指向项目根时 ws_dir 也应为绝对路径"""
+        project = tmp_path / "root_project"
+        _init_git_repo(project)
+
+        mgr = _make_manager(tmp_path)
+        task_data = {
+            "task_id": "root12345",
+            "_has_explicit_workspace": True,
+            "workspace_root": ".ai_workspaces",
+        }
+
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        meta = mgr._start_root_task("root12345", str(project), task_data)
+
+        ws_dir = Path(meta["path"])
+        assert ws_dir.is_absolute(), (
+            f"ws_dir should be absolute, got: {meta['path']}"
+        )
+
+        # 清理 worktree
+        if meta.get("project_root"):
+            _run_cmd("git", "worktree", "prune", cwd=Path(meta["project_root"]))
+
+    def test_worktree_created_at_correct_location(self, tmp_path):
+        """worktree 目录应存在于 root_path/.ai_workspaces/ws_name/"""
+        project = tmp_path / "located_project"
+        project.mkdir()
+        (project / "main.py").write_text("pass")
+
+        mgr = _make_manager(tmp_path)
+        task_data = {
+            "task_id": "loc12345",
+            "_has_explicit_workspace": True,
+            "workspace_root": ".ai_workspaces",
+        }
+
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        meta = mgr._start_root_task("loc12345", str(project), task_data)
+
+        ws_dir = Path(meta["path"])
+        assert ws_dir.exists(), f"worktree directory should exist: {ws_dir}"
+        # 目录里应有 .git（worktree 的 git link）
+        assert (ws_dir / ".git").exists(), (
+            f"worktree should have .git link: {ws_dir}"
+        )
+        # 应包含项目文件（通过 worktree checkout）
+        assert (ws_dir / "main.py").exists(), (
+            f"worktree should contain project files: {ws_dir}"
+        )
+
+        # 清理
+        proj_root = Path(meta["project_root"])
+        _run_cmd("git", "worktree", "remove", str(ws_dir), "--force", cwd=proj_root)
+        _run_cmd("git", "worktree", "prune", cwd=proj_root)
+
+    def test_ensure_git_user_succeeds_in_worktree(self, tmp_path):
+        """_ensure_git_user(ws_dir) 在 worktree 中不应报错（WinError 267 回归）"""
+        project = tmp_path / "gituser_project"
+        project.mkdir()
+        (project / "app.py").write_text("import os")
+
+        mgr = _make_manager(tmp_path)
+        task_data = {
+            "task_id": "git12345",
+            "_has_explicit_workspace": True,
+            "workspace_root": ".ai_workspaces",
+        }
+
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        meta = mgr._start_root_task("git12345", str(project), task_data)
+
+        ws_dir = Path(meta["path"])
+        # 关键操作：_ensure_git_user 用 ws_dir 作为 subprocess cwd
+        # 如果 ws_dir 是相对路径且解析错误，这里会抛出异常
+        mgr._ensure_git_user(ws_dir)
+
+        # 验证 git config 设置成功
+        _, email, _ = _run_cmd("git", "config", "user.email", cwd=ws_dir)
+        assert email == "agent@agent-os.local"
+        _, name, _ = _run_cmd("git", "config", "user.name", cwd=ws_dir)
+        assert name == "Agent OS"
+
+        # 清理
+        proj_root = Path(meta["project_root"])
+        _run_cmd("git", "worktree", "remove", str(ws_dir), "--force", cwd=proj_root)
+        _run_cmd("git", "worktree", "prune", cwd=proj_root)
+
+
+# ─── Test 10: Branch Guard ─────────────────────────────────────
+
+class TestBranchGuard:
+    """验证 _record_main_branch / _guard_root_branch 分支守卫。
+
+    防止 auto-save 在用户手动切换分支后写入错误分支。
+    - _record_main_branch: 记录 _base_path 当前分支
+    - _guard_root_branch(cwd): 当 cwd == _base_path 且分支变更时返回 False
+    """
+
+    def test_record_main_branch_on_init(self, tmp_path):
+        """初始化时 _main_branch 应被设为当前分支"""
+        repo = tmp_path / "guard_repo"
+        _init_git_repo(repo, branch_name="main")
+
+        mgr = _make_manager(repo)
+
+        assert mgr._main_branch == "main", (
+            f"Expected _main_branch='main', got '{mgr._main_branch}'"
+        )
+
+    def test_record_main_branch_on_init_master(self, tmp_path):
+        """初始化时如果默认分支是 master，也应正确记录"""
+        repo = tmp_path / "master_repo"
+        _init_git_repo(repo, branch_name="master")
+
+        mgr = _make_manager(repo)
+
+        assert mgr._main_branch == "master", (
+            f"Expected _main_branch='master', got '{mgr._main_branch}'"
+        )
+
+    def test_guard_allows_same_branch(self, tmp_path):
+        """cwd 是 base_path 且分支未变时，_guard_root_branch 返回 True"""
+        repo = tmp_path / "same_branch"
+        _init_git_repo(repo)
+
+        mgr = _make_manager(repo)
+        # _main_branch 已在 __init__ 中设为 "main"
+
+        result = mgr._guard_root_branch(repo)
+        assert result is True, "Guard should allow when branch unchanged"
+
+    def test_guard_rejects_changed_branch(self, tmp_path):
+        """cwd 是 base_path 但分支已切换时，_guard_root_branch 返回 False"""
+        repo = tmp_path / "changed_branch"
+        _init_git_repo(repo)
+
+        mgr = _make_manager(repo)
+        assert mgr._main_branch == "main"
+
+        # 模拟外部切换分支
+        _run_cmd("git", "checkout", "-b", "develop", cwd=repo)
+
+        result = mgr._guard_root_branch(repo)
+        assert result is False, (
+            "Guard should reject when branch has changed from main to develop"
+        )
+
+    def test_guard_allows_non_root_paths(self, tmp_path):
+        """cwd 不是 base_path 时，_guard_root_branch 始终返回 True"""
+        repo = tmp_path / "root_repo"
+        _init_git_repo(repo)
+
+        mgr = _make_manager(repo)
+        assert mgr._main_branch == "main"
+
+        # 一个完全不同的路径（模拟 worktree 路径）
+        other_path = tmp_path / "some_worktree"
+        other_path.mkdir()
+
+        result = mgr._guard_root_branch(other_path)
+        assert result is True, (
+            "Guard should allow non-root paths regardless of branch state"
+        )
+
+    def test_guard_allows_when_main_branch_empty(self, tmp_path):
+        """_main_branch 为空字符串时，_guard_root_branch 始终返回 True"""
+        repo = tmp_path / "empty_branch"
+        _init_git_repo(repo)
+
+        mgr = _make_manager(repo)
+        mgr._main_branch = ""  # 强制清空
+
+        result = mgr._guard_root_branch(repo)
+        assert result is True, "Guard should allow when _main_branch is empty"
+
+    def test_auto_save_skipped_when_branch_changed(self, tmp_path):
+        """分支变更后调用 _start_root_task 应跳过 auto-save"""
+        repo = tmp_path / "autosave_repo"
+        _init_git_repo(repo)
+        (repo / "initial.txt").write_text("initial")
+        _run_cmd("git", "add", "-A", cwd=repo)
+        _run_cmd("git", "commit", "-m", "initial commit", cwd=repo)
+
+        # 记录 auto-save 前的 commit 数
+        _, log_before, _ = _run_cmd("git", "log", "--oneline", cwd=repo)
+        commits_before = len(log_before.strip().splitlines())
+
+        # 模拟外部切换分支
+        _run_cmd("git", "checkout", "-b", "feature-x", cwd=repo)
+
+        mgr = _make_manager(repo)
+        # _main_branch 在 __init__ 时被记录，但分支已经变了
+        # 需要让 _main_branch 仍然是 "main" 来触发 guard
+        mgr._main_branch = "main"
+
+        task_data = {
+            "task_id": "guard1234",
+            "_has_explicit_workspace": True,
+            "workspace_root": ".ai_workspaces",
+        }
+
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        meta = mgr._start_root_task("guard1234", str(repo), task_data)
+
+        # auto-save 应被跳过（没有新的 commit）
+        _, log_after, _ = _run_cmd("git", "log", "--oneline", cwd=repo)
+        commits_after = len(log_after.strip().splitlines())
+        assert commits_after == commits_before, (
+            f"Auto-save should be skipped when branch changed. "
+            f"Before: {commits_before}, After: {commits_after}"
+        )
+
+        # worktree 仍然应该被创建
+        assert meta["mode"] == "worktree"
+        assert Path(meta["path"]).exists()
+
+        # 清理
+        ws_dir = Path(meta["path"])
+        _run_cmd("git", "worktree", "remove", str(ws_dir), "--force", cwd=repo)
+        _run_cmd("git", "worktree", "prune", cwd=repo)
+
+    def test_record_main_branch_refreshed_on_task_start(self, tmp_path):
+        """on_task_start 应刷新 _main_branch"""
+        repo = tmp_path / "refresh_repo"
+        _init_git_repo(repo)
+
+        mgr = _make_manager(repo)
+        assert mgr._main_branch == "main"
+
+        # 切换到新分支
+        _run_cmd("git", "checkout", "-b", "updated-branch", cwd=repo)
+
+        # on_task_start 应该调用 _record_main_branch 刷新
+        mock_task = MagicMock()
+        mock_task.parent_task_id = None
+        mgr._task_tree.get_task.return_value = mock_task
+
+        task_data = {
+            "task_id": "refresh1",
+            "_has_explicit_workspace": False,
+            "workspace_root": str(tmp_path / "ws"),
+        }
+
+        mgr.on_task_start("refresh1", "", task_data)
+
+        # _main_branch 应被刷新为 "updated-branch"
+        assert mgr._main_branch == "updated-branch", (
+            f"Expected _main_branch='updated-branch', got '{mgr._main_branch}'"
+        )

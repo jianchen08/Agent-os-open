@@ -119,6 +119,8 @@ class PipelineEngine:
         self._watching_task_ids: list[str] = []
         self._consecutive_core_errors: int = 0
         self._max_consecutive_core_errors: int = 3
+        # 外部通知队列（线程安全）：终态通知在此排队，_run_loop 每轮迭代检查
+        self._pending_notifications: list[str] = []
 
     async def run(
         self,
@@ -476,7 +478,7 @@ class PipelineEngine:
         merged_config["model_name"] = llm_conf.get("model_name", model_id)
 
         try:
-            # 复用已有的 AdaptiveRouterAdapter（自适应并发）
+            # 复用已有的 KeyPoolAdapter（按 key 粒度并发控制）
             existing_adapter = getattr(llm_call, "_adapter", None)
             if existing_adapter is not None:
                 new_plugin = type(llm_call)(config=merged_config, adapter=existing_adapter)
@@ -608,6 +610,9 @@ class PipelineEngine:
         _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
         # 重置连续错误计数器
         self._consecutive_core_errors = 0
+        # 注册运行中的引擎引用，供外部通知直接注入
+        _engine_reg_key = f"__running_engine_{pipeline_run_id}"
+        self._services[_engine_reg_key] = self
         try:
             try:
                 _log_dir = Path.cwd() / "logs"
@@ -950,6 +955,46 @@ class PipelineEngine:
                             "(retry=%d)", retry_count,
                         )
                     else:
+                        # ── 外部通知消费 ──
+                        # 子任务终态通知可能在管道结束前就已入队，
+                        # 检查队列，有通知则注入 state 继续循环，不急着结束。
+                        notif_sources: list[str] = []
+
+                        # 来源1: inject_notification() 主动触发的消息
+                        if self._pending_notifications:
+                            notif_sources.extend(self._pending_notifications[:])
+                            self._pending_notifications.clear()
+
+                        # 来源2: MessageQueue 兜底消息（inject 时引擎可能刚好在迭代间）
+                        try:
+                            _mq = self._services.get("message_queue")
+                            if _mq is not None:
+                                _pid = state.get(StateKeys.PIPELINE_ID, "")
+                                if _pid:
+                                    while True:
+                                        _mq_msg = await _mq.pop(_pid)
+                                        if _mq_msg is None:
+                                            break
+                                        notif_sources.append(_mq_msg.content)
+                        except Exception as _mq_err:
+                            logger.debug("[Engine] MessageQueue 兜底检查跳过: %s", _mq_err)
+
+                        if notif_sources:
+                            combined = "\n\n".join(notif_sources)
+                            state["user_input"] = combined
+                            state.setdefault("messages", []).append(
+                                {"role": "user", "content": combined}
+                            )
+                            state[StateKeys.CORE_TYPE] = "llm_call"
+                            state.pop("raw_result", None)
+                            state.pop("error_analysis", None)
+                            logger.info(
+                                "[Engine] 管道即将结束但发现 %d 条待处理消息，"
+                                "注入 state 继续循环",
+                                len(notif_sources),
+                            )
+                            continue
+
                         # BUG-FIX: 无 route signals 时记录详细诊断信息
                         # 便于排查管道异常退出原因
                         _raw_tool_calls = state.get("raw_tool_calls", [])
@@ -1016,6 +1061,8 @@ class PipelineEngine:
                 for _lg in _pipeline_loggers:
                     _lg.removeHandler(_pipeline_log_handler)
             _current_pipeline_id.reset(_pipeline_id_token)
+            # 清理运行中引擎注册
+            self._services.pop(_engine_reg_key, None)
             # NOTE: 不在此处关闭 litellm HTTP 客户端。
             # 客户端生命周期由应用层（cli_main / auto_confirm_runner）
             # 统一管理，每次 run 完就关闭会导致后续请求报
@@ -1039,26 +1086,24 @@ class PipelineEngine:
         管道挂起后不退出 _run_loop，而是 await 内部 _wake_event。
         任何外部系统都可以通过 inject_and_wake() 注入消息并唤醒管道。
 
+        超时（600s）时检查是否有新通知：
+        - 有新通知：唤醒管道继续执行
+        - 无新通知：重新挂起等待，避免无意义的 LLM 调用循环
+
         挂起时记录 submitted_task_ids，供外部判断该管道等待哪些任务。
         这是管道基础设施的通用机制，不依赖任何业务系统。
         """
-        self._wake_event = asyncio.Event()
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
-        self._services[f"__suspended_engine_{pipeline_id}"] = self
-
-        # 同步注册到 ServiceProvider，供 TaskTool 等跨管道工具查找挂起引擎
-        try:
-            from infrastructure.service_provider import get_service_provider
-            get_service_provider().register(
-                f"__suspended_engine_{pipeline_id}", self,
-            )
-        except Exception:
-            pass
+        pending_key = f"__pending_notifications_{pipeline_id}"
 
         # 消费子任务在父管道挂起前就已入队的通知（竞态修复）
-        pending_key = f"__pending_notifications_{pipeline_id}"
+        # 合并两个来源：services 字典（_direct_notify_parent 兜底）和
+        # 实例变量（inject_notification，管道运行时注入但未在 _run_loop 消费）
         pending_notifications = self._services.pop(pending_key, [])
+        if self._pending_notifications:
+            pending_notifications.extend(self._pending_notifications[:])
+            self._pending_notifications.clear()
         if pending_notifications:
             for notif in pending_notifications:
                 if self._suspended_state is not None:
@@ -1074,32 +1119,88 @@ class PipelineEngine:
                 "pipeline=%s",
                 len(pending_notifications), pipeline_id,
             )
-            self._wake_event.set()
+            logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)
+            return
 
         logger.info(
             "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
             pipeline_id, self._watching_task_ids,
         )
-        try:
+
+        max_wait_rounds = 50
+        for wait_round in range(max_wait_rounds):
+            self._wake_event = asyncio.Event()
+            self._services[f"__suspended_engine_{pipeline_id}"] = self
+
+            try:
+                from infrastructure.service_provider import get_service_provider
+                get_service_provider().register(
+                    f"__suspended_engine_{pipeline_id}", self,
+                )
+            except Exception:
+                pass
+
             try:
                 await asyncio.wait_for(
                     self._wake_event.wait(), timeout=600,
                 )
+                # 被外部主动唤醒（inject_and_wake / wake / resume）
+                break
             except asyncio.TimeoutError:
-                logger.warning(
-                    "[Engine] 管道等待唤醒超时(600s)，自动恢复"
+                # 清理本轮注册
+                self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+                try:
+                    from infrastructure.service_provider import get_service_provider
+                    get_service_provider()._services.pop(
+                        f"__suspended_engine_{pipeline_id}", None,
+                    )
+                except Exception:
+                    pass
+
+                # 检查超时期间是否有新通知入队（两个来源合并）
+                pending_notifications = self._services.pop(pending_key, [])
+                if self._pending_notifications:
+                    pending_notifications.extend(self._pending_notifications[:])
+                    self._pending_notifications.clear()
+                if pending_notifications:
+                    for notif in pending_notifications:
+                        if self._suspended_state is not None:
+                            orig = self._suspended_state.get("user_input", "")
+                            self._suspended_state["user_input"] = (
+                                f"{notif}\n\n{orig}".strip()
+                            )
+                            self._suspended_state.setdefault("messages", []).append(
+                                {"role": "user", "content": notif}
+                            )
+                    logger.info(
+                        "[Engine] 管道超时后发现 %d 条通知，唤醒: pipeline=%s",
+                        len(pending_notifications), pipeline_id,
+                    )
+                    break
+
+                # 无新数据：重新挂起，不返回给调用方触发无意义 LLM 调用
+                logger.info(
+                    "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
+                    "(round=%d/%d): pipeline=%s",
+                    wait_round + 1, max_wait_rounds, pipeline_id,
                 )
-        finally:
-            self._services.pop(f"__suspended_engine_{pipeline_id}", None)
-            try:
-                from infrastructure.service_provider import get_service_provider
-                get_service_provider()._services.pop(
-                    f"__suspended_engine_{pipeline_id}", None,
-                )
-            except Exception:
-                pass
-            self._wake_event = None
-            self._watching_task_ids = []
+        else:
+            logger.warning(
+                "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
+                max_wait_rounds, pipeline_id,
+            )
+
+        # 最终清理
+        self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+        try:
+            from infrastructure.service_provider import get_service_provider
+            get_service_provider()._services.pop(
+                f"__suspended_engine_{pipeline_id}", None,
+            )
+        except Exception:
+            pass
+        self._wake_event = None
+        self._watching_task_ids = []
         logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)
 
     def wake(self) -> None:
@@ -1130,6 +1231,27 @@ class PipelineEngine:
                 {"role": "user", "content": user_input}
             )
             logger.info("[Engine] 消息已注入到挂起管道 state (%d 字符)", len(user_input))
+        if self._wake_event is not None:
+            self._wake_event.set()
+
+    def inject_notification(self, msg: str) -> None:
+        """向运行中的管道注入外部通知（线程安全）。
+
+        不依赖管道挂起状态，直接入队。_run_loop 每轮迭代
+        会检查 _pending_notifications，在管道结束前将通知
+        注入 state 让 LLM 处理。
+
+        Args:
+            msg: 通知消息文本
+        """
+        if not msg:
+            return
+        self._pending_notifications.append(msg)
+        logger.info(
+            "[Engine] 外部通知已入队 (queue=%d): %.80s",
+            len(self._pending_notifications), msg,
+        )
+        # 若管道在挂起中，顺便唤醒
         if self._wake_event is not None:
             self._wake_event.set()
 

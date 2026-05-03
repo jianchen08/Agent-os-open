@@ -66,13 +66,28 @@ system_prompt: |
 
   ## 工作流程
 
-  1. 接收调研目标和上下文
-  2. 使用 `resource_search` 搜索现有资源
-  3. 使用 `web_search` 搜索网络资料
-  4. 使用 `fetch` 获取详细内容
-  5. 使用 `memory` 检索历史经验
-  6. 整理分析并输出结构化报告
-  8. 使用 `task_evaluate` 自评调研质量
+  ### 步骤零：方向校准（必选）
+
+  1. 接收调研目标和 research_questions（上级传入的具体问题列表）
+  2. **拆解调研方向**：将 research_goal 拆解为 3-5 个具体调研子方向
+  3. 每个子方向标注：具体问题、期望的答案类型（事实/对比/方案/数据/最佳实践）、优先级（must/should/nice_to_have）
+  4. 写入 `{{workspace}}/research_questions.md` 作为后续调研的检查清单
+  5. 后续每收集一批信息后，对照此清单确认覆盖进度
+
+  ### 步骤一：执行调研
+
+  6. 使用 `resource_search` 搜索现有资源
+  7. 使用 `web_search` 搜索网络资料
+  8. 使用 `fetch` 获取详细内容
+  9. 使用 `memory` 检索历史经验
+
+  ### 步骤二：闭环校验
+
+  10. 整理分析并输出结构化报告
+  11. **逐条检查 research_questions 中的每个问题是否已有回答**
+  12. 未回答的必须补充调研或在报告中标注"未能回答及原因"
+  13. 将覆盖情况写入报告附录
+  14. 使用 `task_evaluate` 自评调研质量
 
   ## 信源评估体系
 
@@ -108,7 +123,7 @@ system_prompt: |
 
   具体规则：
   1. **每收集 5-10 次后，必须 file_write 产出内容**（哪怕只是初稿/骨架），不允许一直收集不输出
-  2. **每次 file_write 后必须自查**：任务要求的每个调研点是否都已覆盖？是否还有遗漏的关键信息？根据自查结果决定是继续收集还是完善报告
+  2. **每次 file_write 后必须自查**：research_questions 中的每个问题是否已有回答？任务要求的每个调研点是否都已覆盖？是否还有遗漏的关键信息？根据自查结果决定是继续收集还是完善报告
   3. **自查发现遗漏时可以继续收集**，收集完后必须紧接着 file_write 补充到报告中
   4. **先搜索后读取**：先用 `resource_search` 或 `web_search` 定位关键资源，再有针对性地 `file_read` 或 `fetch`，不要盲目逐个扫文件/网页
   5. **禁止连续 10 次迭代只调用信息获取工具而没有任何 file_write**
@@ -170,7 +185,8 @@ hard_constraints:
   - "必须输出规定的产出物"
   - "评估通过才能结束任务"
   - "禁止连续 10 次迭代只调用信息获取工具而不 file_write，必须保持收集-写入循环"
-  - "每次 file_write 后必须自查任务要求覆盖情况，确保所有调研点都已涉及"
+  - "每次 file_write 后必须自查 research_questions 覆盖情况，确保所有调研问题都已涉及"
+  - "调研报告完成前必须逐条检查 research_questions 中的每个问题是否已回答，未回答的必须补充调研或标注原因"
 
 soft_constraints:
   - "优先搜索现有资源再搜索网络"
@@ -190,11 +206,26 @@ input_schema:
       enum: ["technology", "resource", "market", "solution", "general", "auto"]
       description: "调研类型，auto表示自动识别"
       default: "auto"
-    key_questions:
+    research_questions:
       type: "array"
-      description: "需要回答的关键问题列表"
+      description: "调研问题列表（3-5个具体问题，由上层拆解后传递，required）"
       items:
-        type: "string"
+        type: "object"
+        properties:
+          question:
+            type: "string"
+            description: "具体调研问题"
+          expected_answer_type:
+            type: "string"
+            enum: ["fact", "comparison", "solution", "data", "best_practice"]
+            description: "期望的答案类型"
+          priority:
+            type: "string"
+            enum: ["must", "should", "nice_to_have"]
+            description: "优先级"
+        required:
+          - "question"
+      minItems: 1
     scope:
       type: "object"
       description: "调研范围约束"
@@ -222,6 +253,7 @@ input_schema:
       default: "full"
   required:
     - "research_goal"
+    - "research_questions"
 
 output_schema:
   type: "object"

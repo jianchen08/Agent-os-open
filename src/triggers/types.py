@@ -149,7 +149,6 @@ class TriggerConfig:
         fire_count: 已触发次数。
         source_agent: 来源 Agent ID。
         message: 触发时注入的消息内容。
-        session_id: 所属会话 ID。
         pipeline_id: 所属管道 ID（用于唤醒）。
         metadata: 附加元数据。
     """
@@ -184,6 +183,5 @@ class TriggerConfig:
     # 来源
     source_agent: str = ""
     message: str = ""
-    session_id: str = ""
     pipeline_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)

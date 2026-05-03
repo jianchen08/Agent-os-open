@@ -111,9 +111,9 @@ class ContextBuildPlugin(IInputPlugin):
         updates["context.agent_name"] = self._agent_name
         updates["context.agent_level"] = self._agent_level
 
-        # 从 state 同步层级字段到框架字段
-        if StateKeys.AGENT_LEVEL not in ctx.state or not ctx.state[StateKeys.AGENT_LEVEL]:
-            updates[StateKeys.AGENT_LEVEL] = self._agent_level
+        # 始终用实际 Agent 层级覆盖 state 中的 AGENT_LEVEL，
+        # 防止子管道继承父管道的层级（如 L2 agent 错误继承 L1）。
+        updates[StateKeys.AGENT_LEVEL] = self._agent_level
 
         # 3. 会话元数据
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")

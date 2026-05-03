@@ -1,0 +1,162 @@
+# ================================================================
+# 能力适配器后端配置
+# ================================================================
+#
+# 快速启用步骤：
+#   1. 把目标后端的 available 改为 true
+#   2. 确认 server.command/args 指向正确的 MCP 服务
+#   3. 如需环境变量，在 server.env 中配置（支持 ${VAR} 插值）
+#   4. 无需重启，下次调用自动加载最新配置
+#
+# tool_mapping 说明：
+#   左侧是适配器的操作名（固定），右侧是 MCP Server 暴露的工具名。
+#   安装 MCP Server 后，可用 tools/list 查看实际工具名并更新映射。
+#
+# 回退机制：
+#   同一适配器下多个后端按 priority 排序，第一个 available=true 的后端优先。
+#   主后端调用失败时自动回退到下一个。
+# ================================================================
+
+adapters:
+  # ============================================================
+  # UI 代码生成：从文字描述/截图 → 前端代码
+  # ============================================================
+  design_generate:
+    default_backend: screenshot_to_code
+    backends:
+      # --- screenshot-to-code（免费开源，截图→代码）---
+      # 安装：npm install -g screenshot-to-code-mcp
+      - name: screenshot_to_code
+        priority: 1
+        server:
+          command: "npx"
+          args: ["-y", "screenshot-to-code-mcp@latest"]
+        tool_mapping:
+          generate: "generate_code"      # ← 安装后用 tools/list 确认实际工具名
+        timeout: 120.0
+        overall_timeout: 180.0
+        available: false
+
+      # --- Google Stitch（免费，需 Google Cloud 认证）---
+      # 环境变量：需设置 GOOGLE_CLOUD_PROJECT + gcloud auth application-default login
+      - name: stitch
+        priority: 2
+        server:
+          command: "npx"
+          args: ["-y", "stitch-mcp@latest"]
+          env:
+            GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT}"
+        tool_mapping:
+          generate: "stitch_generate"
+        timeout: 120.0
+        overall_timeout: 180.0
+        available: false
+
+      # --- 21st.dev Magic（Beta 免费组件生成）---
+      # 需要 API Key：https://21st.dev/magic 获取
+      - name: magic
+        priority: 3
+        server:
+          command: "npx"
+          args: ["-y", "@21st-dev/magic@latest"]
+          env:
+            API_KEY: "${MAGIC_API_KEY}"
+        tool_mapping:
+          generate: "magic_generate"
+        timeout: 120.0
+        overall_timeout: 180.0
+        available: false
+
+  # ============================================================
+  # 浏览器测试：渲染页面 → 执行操作 → 收集验证数据
+  # ============================================================
+  browser_test:
+    default_backend: playwright_devtools
+    backends:
+      # --- playwright-devtools-mcp（推荐：混合 DevTools + Playwright）---
+      # 安装：npm install playwright-devtools-mcp
+      - name: playwright_devtools
+        priority: 1
+        server:
+          command: "npx"
+          args: ["playwright-devtools-mcp"]
+        tool_mapping:
+          navigate: "browser_launch"
+          interact: "browser_click"
+          screenshot: "browser_screenshot"
+          console: "console_get_logs"
+          performance: "performance_get_core_vitals"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false
+
+      # --- Microsoft Playwright MCP（250K+ 周下载）---
+      # 安装：npx @playwright/mcp@latest
+      - name: playwright
+        priority: 2
+        server:
+          command: "npx"
+          args: ["-y", "@playwright/mcp@latest"]
+        tool_mapping:
+          navigate: "browser_navigate"
+          interact: "browser_click"
+          screenshot: "browser_take_screenshot"
+          console: "browser_console_messages"
+          performance: "browser_network_requests"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false
+
+      # --- Google Chrome DevTools MCP（--slim 模式仅 3 个工具）---
+      # 安装：npx chrome-devtools-mcp@latest
+      - name: chrome_devtools
+        priority: 3
+        server:
+          command: "npx"
+          args: ["-y", "chrome-devtools-mcp@latest", "--slim"]
+        tool_mapping:
+          navigate: "chrome_navigate"
+          interact: "chrome_interact"
+          screenshot: "chrome_screenshot"
+          console: "chrome_console"
+          performance: "chrome_performance"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false
+
+  # ============================================================
+  # 设计审查：对比设计参考 vs 实现，识别视觉问题
+  # ============================================================
+  design_review:
+    default_backend: playwright_screenshot
+    backends:
+      # --- Playwright + Vision（截图语义分析）---
+      # 安装：npx @playwright/mcp@latest
+      # 需要 --caps=vision 开启截图能力
+      - name: playwright_screenshot
+        priority: 1
+        server:
+          command: "npx"
+          args: ["-y", "@playwright/mcp@latest", "--caps=vision"]
+        tool_mapping:
+          screenshot: "browser_take_screenshot"
+          compare: "visual_compare"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false
+
+      # --- Figma MCP（需 Figma Access Token）---
+      # 环境变量：FIGMA_ACCESS_TOKEN 从 Figma Settings 获取
+      - name: figma_compare
+        priority: 2
+        server:
+          command: "npx"
+          args: ["-y", "figma-developer-mcp@latest"]
+          env:
+            FIGMA_ACCESS_TOKEN: "${FIGMA_ACCESS_TOKEN}"
+        tool_mapping:
+          screenshot: "get_figma_data"
+          compare: "visual_compare"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: false

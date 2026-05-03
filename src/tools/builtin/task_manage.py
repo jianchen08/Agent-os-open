@@ -8,6 +8,7 @@
 - resume: 恢复任务（paused → running）
 - cancel: 取消任务（→ failed）
 - retry: 重试失败任务（failed → running）
+- reactivate: 重新激活已完成任务（completed → running），携带追加需求
 - inject: 向任务会话注入消息
 - complete_container: 容器完成（仅限 L1 主 Agent）
 - fail_container: 容器失败（仅限 L1 主 Agent）
@@ -122,19 +123,29 @@ task_manage_schema: dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "inject", "complete_container", "fail_container"],
+            "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "reactivate", "inject", "complete_container", "fail_container"],
             "description": (
                 "操作类型。"
-                "retry: 重试失败任务，按以下策略处理，禁止跳步："
-                "①查看失败原因→②retry(瞬态错误)→③retry+message(补充修正信息)→"
-                "④task_submit重新提交同步骤新任务(不能跳步)→⑤多次失败后通知人类。"
+                "retry: 重试失败任务。判断原则——方向对用retry（保留工作空间+对话历史，agent继续改旧代码），"
+                "方向错用新task_submit（全新agent重新来）。按以下策略处理，禁止跳步："
+                "①查看失败原因，判断是方向问题还是执行问题→"
+                "②方向对+瞬态错误：retry（工作空间和代码不变，重新跑）→"
+                "③方向对+需纠正：retry+message（传递修正方向，agent能看到之前的代码和错误）→"
+                "④方向对+验收过严：retry+drop_metrics→"
+                "⑤方向错或多次retry仍失败：task_submit重新提交（全新agent，无历史包袱）。"
+                "需要项目上下文（如修改现有项目）加 inherit_workspace_from='失败任务ID'；"
+                "简单任务或新建项目不加，用空工作空间即可→"
+                "⑥多次失败后通知人类。"
+                "drop_metrics 可移除过于严格或不适用的评估指标，降低重试难度。"
+                "reactivate: 重新激活已完成任务（保留原工作空间），携带追加需求在同一任务上下文中继续。"
+                "与 retry 的区别：retry 针对失败任务重新执行，reactivate 针对成功任务追加工作。"
                 "inject: 向运行中的任务注入消息。"
                 "complete_container/fail_container: 容器操作，仅主Agent可用。"
             ),
         },
         "task_id": {
             "type": "string",
-            "description": "任务 ID（get/status/pause/resume/cancel/retry/inject 操作必填）",
+            "description": "任务 ID（get/status/pause/resume/cancel/retry/reactivate/inject 操作必填）",
         },
         "status_filter": {
             "type": "string",
@@ -151,7 +162,33 @@ task_manage_schema: dict[str, Any] = {
                 "消息内容。"
                 "inject 操作必填。"
                 "retry 操作可选：携带补充信息，新管道首次迭代时自动注入，用于纠正失败原因。"
+                "reactivate 操作推荐填写：追加需求描述，新管道首轮自动注入，Agent 可立即看到新要求。"
             ),
+        },
+        "drop_metrics": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "重试时要移除的评估指标 ID 列表（retry 操作可选）。"
+                "移除后的指标不再参与评估，降低重试难度。"
+                "适用于：某些指标过于严格、不适用于当前修复方案、"
+                "或多次重试仍然失败需要降级验收标准的场景。"
+                "示例：['semantic_check', 'performance_check']"
+            ),
+        },
+        "include_details": {
+            "type": "boolean",
+            "default": False,
+            "description": ("get 操作时是否包含详情"
+                            "（description、result、metadata）。"
+                            "默认 false 只返回摘要字段。"),
+        },
+        "include_agent_calls": {
+            "type": "boolean",
+            "default": False,
+            "description": ("get 操作时是否包含 agent 调用记录"
+                            "（metadata 中的 pipeline_history 等）。"
+                            "需要 include_details=true 才生效。"),
         },
         "container_reason": {
             "type": "string",
@@ -162,7 +199,8 @@ task_manage_schema: dict[str, Any] = {
 }
 
 TASK_MANAGE_DESCRIPTION = (
-    "任务管理工具。支持获取、列表、暂停、恢复、取消、重试、消息注入等操作。"
+    "任务管理工具。支持获取、列表、暂停、恢复、取消、重试、重新激活、消息注入等操作。"
+    "reactivate 用于重新激活已完成任务并追加新需求。"
     "还支持容器完成和容器失败操作（仅限主 Agent）。"
     "普通任务完成请使用 task_evaluate 工具。"
 )
@@ -207,6 +245,7 @@ def task_manage_func(params: dict[str, Any]) -> dict[str, Any]:
         "resume": _action_resume,
         "cancel": _action_cancel,
         "retry": _action_retry,
+        "reactivate": _action_reactivate,
         "inject": _action_inject,
         "complete_container": lambda svc, p: _action_container_op(svc, p, "complete"),
         "fail_container": lambda svc, p: _action_container_op(svc, p, "fail"),
@@ -249,10 +288,20 @@ def _action_get(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "TASK_NOT_FOUND",
         }
 
-    return {
+    result = {
         "success": True,
-        "task": _task_to_dict(task),
+        "task": _task_to_dict(
+            task,
+            include_details=params.get("include_details", False),
+            include_agent_calls=params.get("include_agent_calls", False),
+        ),
     }
+    # 始终附带工作空间信息，方便 agent 在重试策略步骤⑤使用 inherit_workspace_from
+    ws_meta = task.metadata.get("ws_meta") if task.metadata else None
+    if ws_meta and isinstance(ws_meta, dict):
+        result["workspace_path"] = ws_meta.get("path", "")
+        result["project_root"] = ws_meta.get("project_root", "")
+    return result
 
 
 def _action_list(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -411,6 +460,34 @@ def _action_resume(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _cancel_running_pipeline(task_id: str) -> None:
+    """取消任务关联的运行中管道（best-effort）。
+
+    BUG-FIX: cancel 操作只修改任务状态但没有停止 PipelineEngine，
+    导致管道继续执行、LLM 调用浪费资源。通过 TaskWorker.cancel_pipeline
+    强制取消 asyncio.Task，触发 PipelineEngine 的 CancelledError。
+    """
+    import sys
+
+    task_worker = getattr(sys, "_agent_os_task_worker", None)
+    if task_worker is None:
+        logger.debug("[task_manage] cancel: TaskWorker 不可用，跳过管道取消")
+        return
+
+    try:
+        cancelled = task_worker.cancel_pipeline(task_id)
+        if cancelled:
+            logger.info(
+                "[task_manage] cancel: 运行中管道已取消: task_id=%s",
+                task_id,
+            )
+    except Exception as e:
+        logger.warning(
+            "[task_manage] cancel: 管道取消失败: task_id=%s, error=%s",
+            task_id, e,
+        )
+
+
 def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """取消任务（→ failed）。
 
@@ -437,6 +514,7 @@ def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         task = task_service.fail_task(task_id, error=reason)
+        _cancel_running_pipeline(task_id)
         logger.info("[task_manage] 任务已取消: %s — %s", task_id, reason)
         return {
             "success": True,
@@ -458,6 +536,105 @@ def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _validate_and_get_task(
+    task_service: Any,
+    params: dict[str, Any],
+    action_name: str,
+) -> tuple[str, Any, None] | tuple[None, None, dict[str, Any]]:
+    """验证 task_id 并获取任务，失败时返回 (None, None, error_dict)。"""
+    task_id = params.get("task_id")
+    if not task_id:
+        return None, None, {
+            "success": False,
+            "error": f"{action_name} 操作必须提供 task_id",
+            "error_code": "MISSING_TASK_ID",
+        }
+
+    task = task_service.get_task(task_id)
+    if task is None:
+        return None, None, {
+            "success": False,
+            "error": f"任务不存在: {task_id}",
+            "error_code": "TASK_NOT_FOUND",
+        }
+    return task_id, task, None
+
+
+def _apply_drop_metrics(task: Any, params: dict[str, Any]) -> list[str]:
+    """从任务的评估指标中移除指定指标。
+
+    Args:
+        task: TaskModel 实例
+        params: 工具参数，可含 drop_metrics 列表
+
+    Returns:
+        实际移除的指标 ID 列表
+    """
+    drop_metrics = params.get("drop_metrics")
+    if not drop_metrics or not isinstance(drop_metrics, list):
+        return []
+
+    metadata = task.metadata if task.metadata else {}
+    metric_ids = metadata.get("evaluation_metric_ids", [])
+    ac = metadata.get("acceptance_criteria", {})
+    retry_counts = metadata.get("eval_retry_count", {})
+
+    dropped: list[str] = []
+    for mid in drop_metrics:
+        if mid in metric_ids:
+            metric_ids.remove(mid)
+            dropped.append(mid)
+        if isinstance(ac, dict):
+            ac.pop(mid, None)
+        if isinstance(retry_counts, dict):
+            retry_counts.pop(mid, None)
+
+    metadata["evaluation_metric_ids"] = metric_ids
+    metadata["acceptance_criteria"] = ac
+    metadata["eval_retry_count"] = retry_counts
+    task.metadata = metadata
+
+    if dropped:
+        logger.info(
+            "[task_manage] 移除评估指标 | task_id=%s | dropped=%s",
+            task.id, dropped,
+        )
+    return dropped
+
+
+def _start_task_and_emit(
+    task_service: Any,
+    task: Any,
+    task_id: str,
+    fallback_running: bool = False,
+) -> Any:
+    """启动任务并发布 task.submitted 事件。
+
+    BUG-FIX-P7：重试后发布 task.submitted 事件，触发 TaskWorker 重新执行。
+
+    Args:
+        task_service: TaskService 实例
+        task: TaskModel 实例
+        task_id: 任务 ID
+        fallback_running: start_task 失败时是否直接设为 RUNNING
+
+    Returns:
+        更新后的 task（可能来自 start_task 或原 task）
+    """
+    updated_task = task
+    try:
+        updated_task = task_service.start_task(task_id)
+    except Exception:
+        if fallback_running:
+            from tasks.types import TaskStatus
+            from datetime import datetime
+            task.status = TaskStatus.RUNNING
+            task.started_at = datetime.now().isoformat()
+            task_service._storage.save(task)
+    _retry_emit_event(task_id)
+    return updated_task
+
+
 def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """重试失败任务（failed → running）。
 
@@ -467,29 +644,18 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     可选参数 message：重试时携带补充信息。消息会在新管道启动后
     由 MessageInjectPlugin 自动注入到会话中，Agent 第一轮即可看到。
+    可选参数 drop_metrics：移除指定评估指标，降低重试难度。
 
     Args:
         task_service: TaskService 实例
-        params: 工具参数，需含 task_id，可选含 message
+        params: 工具参数，需含 task_id，可选含 message、drop_metrics
 
     Returns:
         操作结果字典
     """
-    task_id = params.get("task_id")
-    if not task_id:
-        return {
-            "success": False,
-            "error": "retry 操作必须提供 task_id",
-            "error_code": "MISSING_TASK_ID",
-        }
-
-    task = task_service.get_task(task_id)
-    if task is None:
-        return {
-            "success": False,
-            "error": f"任务不存在: {task_id}",
-            "error_code": "TASK_NOT_FOUND",
-        }
+    task_id, task, err = _validate_and_get_task(task_service, params, "retry")
+    if err:
+        return err
 
     from tasks.types import TaskStatus
 
@@ -500,9 +666,8 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "INVALID_STATUS",
         }
 
-    # 如果提供了 message，先推入 MessageQueue
-    # TaskWorker retry 时复用同一 pipeline_run_id，新管道启动后
-    # MessageInjectPlugin 会自动消费这条消息
+    dropped_names = _apply_drop_metrics(task, params)
+
     message_content = params.get("message")
     message_injected = False
     if message_content and task.pipeline_run_id:
@@ -510,33 +675,85 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             task_id, task.pipeline_run_id, message_content, params,
         )
 
-    # 通过 TaskStorage 直接更新（绕过状态机终态限制）
     task.status = TaskStatus.PENDING
     task.error = None
     task_service._storage.save(task)
 
     try:
-        task = task_service.start_task(task_id)
+        task = _start_task_and_emit(task_service, task, task_id)
         logger.info("[task_manage] 任务重试成功: %s", task_id)
 
-        # BUG-FIX-P7：重试后发布 task.submitted 事件，触发 TaskWorker 重新执行
-        _retry_emit_event(task_id)
-
-        result = {
-            "success": True,
-            "task_id": task.id,
-            "status": task.status.value,
-            "message": f"任务 {task_id} 已重新启动",
-        }
+        msg = f"任务 {task_id} 已重新启动"
+        if dropped_names:
+            msg += f"，已移除指标: {', '.join(dropped_names)}"
         if message_injected:
-            result["message"] += "，并已注入补充信息"
+            msg += "，并已注入补充信息"
+        result = {"success": True, "task_id": task_id, "status": task.status.value, "message": msg}
+        # 附带工作空间信息，供 agent 在步骤⑤使用 inherit_workspace_from 时参考
+        ws_meta = task.metadata.get("ws_meta") if task.metadata else None
+        if ws_meta and isinstance(ws_meta, dict):
+            result["workspace_path"] = ws_meta.get("path", "")
+            result["project_root"] = ws_meta.get("project_root", "")
         return result
     except Exception as exc:
+        return {"success": False, "error": f"重试失败: {exc}", "error_code": "RETRY_FAILED"}
+
+
+def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """重新激活已完成任务（completed → running），携带追加需求。
+
+    与 retry 的区别：
+    - retry: 失败任务重新执行，从失败点继续
+    - reactivate: 成功任务追加工作，在同一任务上下文中继续
+
+    使用场景：任务已完成但需要追加修改、补充需求、修复遗漏等。
+    原管道上下文（pipeline_history）保留在 metadata 中供追溯。
+    也支持 drop_metrics 移除不适用的评估指标。
+
+    Args:
+        task_service: TaskService 实例
+        params: 工具参数，需含 task_id，可选含 message、drop_metrics
+
+    Returns:
+        操作结果字典
+    """
+    from tasks.state_machine import InvalidTransitionError
+    from tasks.types import TaskStatus
+
+    task_id, task, err = _validate_and_get_task(task_service, params, "reactivate")
+    if err:
+        return err
+
+    message_content = params.get("message")
+
+    if task.status != TaskStatus.COMPLETED:
         return {
             "success": False,
-            "error": f"重试失败: {exc}",
-            "error_code": "RETRY_FAILED",
+            "error": f"只能重新激活已完成的任务，当前状态: {task.status.value}。"
+                     f"失败任务请使用 retry，运行中任务请使用 inject。",
+            "error_code": "INVALID_STATUS",
         }
+
+    try:
+        task = task_service.reactivate_task(task_id, message=message_content or "")
+    except (KeyError, InvalidTransitionError) as exc:
+        return {"success": False, "error": f"重新激活失败: {exc}", "error_code": "REACTIVATE_FAILED"}
+
+    dropped_names = _apply_drop_metrics(task, params)
+
+    if message_content:
+        _push_retry_message(
+            task_id, task.pipeline_run_id or "", message_content, params,
+        )
+
+    task = _start_task_and_emit(task_service, task, task_id, fallback_running=True)
+
+    msg = f"任务 {task_id} 已重新激活，新管道即将启动"
+    if message_content:
+        msg += f"，追加需求: {message_content[:100]}"
+    if dropped_names:
+        msg += f"，已移除指标: {', '.join(dropped_names)}"
+    return {"success": True, "task_id": task_id, "status": task.status.value, "message": msg}
 
 
 def _push_retry_message(
@@ -803,20 +1020,112 @@ def _action_container_op(task_service: Any, params: dict[str, Any], op: str) -> 
             "error_code": "OPERATION_FAILED",
         }
 
+_MAX_HISTORY_ITEMS = 5
+_MAX_TOOL_RESULT_LEN = 200
 
-def _task_to_dict(task: Any) -> dict[str, Any]:
+
+def _summarize_history(history: Any) -> Any:
+    """将 pipeline_history / agent_calls 压缩为摘要。
+
+    只保留最近几轮，截断大字段，避免返回值膨胀。
+
+    Args:
+        history: 原始历史记录（list / dict / 其他）
+
+    Returns:
+        摘要后的数据
+    """
+    if not history:
+        return history
+    if isinstance(history, list):
+        total = len(history)
+        items = history[-_MAX_HISTORY_ITEMS:]
+        return {
+            "total": total,
+            "showing": len(items),
+            "items": [_trim_item(i) for i in items],
+        }
+    if isinstance(history, dict):
+        return {
+            "total_entries": len(history),
+            "keys": list(history.keys())[:_MAX_HISTORY_ITEMS],
+        }
+    return history
+
+
+def _trim_item(item: Any) -> Any:
+    """截断单条记录中的大文本字段。"""
+    if not isinstance(item, dict):
+        return item
+    out: dict[str, Any] = {}
+    for k, v in item.items():
+        if isinstance(v, str) and len(v) > _MAX_TOOL_RESULT_LEN:
+            out[k] = v[:_MAX_TOOL_RESULT_LEN] + "...<truncated>"
+        elif isinstance(v, list) and len(v) > 3:
+            out[k] = v[:3]
+            out[k].append(f"...<+{len(v) - 3} more>")
+        else:
+            out[k] = v
+    return out
+
+
+def _task_to_dict(
+    task: Any,
+    include_details: bool = False,
+    include_agent_calls: bool = False,
+) -> dict[str, Any]:
     """将 TaskModel 转换为可序列化字典。
+
+    默认只返回摘要字段（id、title、status 等核心信息），
+    避免将 metadata 中的 pipeline_history 等大体量字段
+    无条件序列化。
 
     Args:
         task: TaskModel 实例
+        include_details: 是否包含 description、result、
+            metadata（不含 pipeline_history）
+        include_agent_calls: 是否在 metadata 中保留
+            pipeline_history 等调用记录。
+            需要 include_details=True 才生效。
 
     Returns:
         可 JSON 序列化的字典
     """
-    from dataclasses import asdict
+    d: dict[str, Any] = {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status.value,
+        "priority": task.priority.value,
+        "agent_level": task.agent_level.value,
+        "agent_name": task.agent_name,
+        "parent_task_id": task.parent_task_id,
+        "pipeline_run_id": task.pipeline_run_id,
+        "error": task.error,
+        "reject_count": task.reject_count,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
 
-    d = asdict(task)
-    d["status"] = task.status.value
-    d["priority"] = task.priority.value
-    d["agent_level"] = task.agent_level.value
+    if include_details:
+        d["description"] = task.description
+        d["result"] = task.result
+        d["target_type"] = task.target_type
+        d["execution_record_id"] = task.execution_record_id
+        d["dependencies"] = task.dependencies
+
+        meta = dict(task.metadata) if task.metadata else {}
+        if include_agent_calls:
+            meta["pipeline_history"] = _summarize_history(
+                meta.get("pipeline_history"),
+            )
+            meta["agent_calls"] = _summarize_history(
+                meta.get("agent_calls"),
+            )
+        else:
+            for key in ("pipeline_history", "agent_calls"):
+                meta.pop(key, None)
+        d["metadata"] = meta
+
     return d

@@ -98,7 +98,7 @@ def setup_logging(
 
     if not debug:
         _SUPPRESSED_NS = (
-            "pipeline.", "httpcore", "httpx", "LiteLLM",
+            "pipeline.", "httpcore", "httpx", "LiteLLM", "openai",
             "isolation.", "infrastructure.",
             "tools.", "plugins.", "llm.",
             "src.tools.", "src.plugins.", "src.llm.",
@@ -123,8 +123,8 @@ def setup_logging(
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_PIPELINE_CONFIG = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
 
-# Session directory for CLI session metadata
-_SESSION_DIR = Path("data/session")
+# Session directory for CLI session metadata (absolute path)
+_SESSION_DIR = _PROJECT_ROOT / "data" / "session"
 
 _DEFAULT_OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 # No hard limit on session messages — context compression handles overflow
@@ -244,9 +244,11 @@ class CLIApplication:
             raise
 
         # 构建插件注册表（通过 model_loader 自动创建共享 Router）
+        _t0 = _time.monotonic()
         self._plugin_registry = build_plugin_registry(
             pipeline_config, model_loader=model_loader, router=None,
         )
+        logger.info("[STARTUP] build_plugin_registry: %.2fs", _time.monotonic() - _t0)
 
         # 获取由 build_plugin_registry → get_or_create_adapter 创建的共享 Router
         from llm.router_factory import get_or_create_router
@@ -264,7 +266,9 @@ class CLIApplication:
             agent_registry.load_directory(agent_config_dir)
 
         # 创建共享服务 → 注入 PipelineEngine（agent_registry 需要在 _build_services 前创建）
+        _t1 = _time.monotonic()
         self._services = self._build_services(agent_registry=agent_registry)
+        logger.info("[STARTUP] _build_services: %.2fs", _time.monotonic() - _t1)
 
         # 注入 model_loader 和 router 到 services（供 engine 模型覆盖使用）
         self._services["model_loader"] = model_loader
@@ -310,6 +314,7 @@ class CLIApplication:
             logger.info("No agent config loaded, using raw LLM without system prompt")
 
         # 创建管道引擎（直接调用，不需要 Worker 中间层）
+        _t2 = _time.monotonic()
         checkpoint_mgr = self._services.get("checkpoint_manager")
         self._engine = PipelineEngine(
             input_route_table=self._input_route_table,
@@ -318,7 +323,7 @@ class CLIApplication:
             services=self._services,
             checkpoint_manager=checkpoint_mgr,
         )
-        logger.info("PipelineEngine created (direct call, no Worker)")
+        logger.info("PipelineEngine created (direct call, no Worker) %.2fs", _time.monotonic() - _t2)
 
         # Register llm_core as a service for context_window_guard
         llm_core_plugin = self._plugin_registry.get_core("llm_call")
@@ -425,6 +430,7 @@ class CLIApplication:
             服务名称到实例的映射字典
         """
         services: dict[str, Any] = {}
+        _bs_t0 = _time.monotonic()
 
         # 1. ToolRegistry — 工具注册表（基础工具直接注册，其余按需加载）
         try:
@@ -442,6 +448,8 @@ class CLIApplication:
             logger.info("ToolAutoLoader initialized with service registry")
         except Exception as exc:
             logger.warning("Failed to create tool_registry service: %s", exc)
+        logger.info("[STARTUP-BS] 1.ToolRegistry: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
 
         # 2. 始终创建 JsonMemoryStore 作为内容存储
         json_store: Any = None
@@ -486,8 +494,8 @@ class CLIApplication:
                 logger.info("Service created: PgVectorRetriever (vector retriever)")
         except Exception as exc:
             logger.info("PgVectorRetriever not available, falling back to keyword only: %s", exc)
-
-        # 4. 构建 retrievers 字典
+        logger.info("[STARTUP-BS] 3.PgVector: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
         retrievers: dict[str, Any] = {}
         if json_store is not None:
             retrievers["keyword"] = json_store
@@ -521,6 +529,8 @@ class CLIApplication:
             logger.info("Service created: tag_service")
         except Exception as exc:
             logger.warning("Failed to create tag_service: %s", exc)
+        logger.info("[STARTUP-BS] 5.TagService: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
 
         try:
             from memory.chunk_service import ChunkService
@@ -535,8 +545,8 @@ class CLIApplication:
             logger.info("Service created: chunk_service")
         except Exception as exc:
             logger.warning("Failed to create chunk_service: %s", exc)
-
-        # 5.5.1 MemoryContextService — 上下文压缩共享服务
+        logger.info("[STARTUP-BS] 5.5.ChunkService: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
         try:
             from config.models import get_model_config_loader as _get_loader
 
@@ -561,6 +571,8 @@ class CLIApplication:
             )
         except Exception as exc:
             logger.warning("Failed to create context_service: %s", exc)
+        logger.info("[STARTUP-BS] 5.5.1.ContextService: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
 
         # 5.6 TagNetworkRetriever — 三阶段检索（同步创建，异步初始化在 run() 中）
         try:
@@ -571,8 +583,8 @@ class CLIApplication:
             logger.info("Service created: tag_network_retriever (pending async init)")
         except Exception as exc:
             logger.warning("Failed to create tag_network_retriever: %s", exc)
-
-        # 6. MemoryService — 记忆服务门面
+        logger.info("[STARTUP-BS] 5.6.TagNetwork: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
         try:
             from memory.service import MemoryService
 
@@ -588,6 +600,8 @@ class CLIApplication:
             logger.info("Service created: memory_service (retrievers=%s)", list(retrievers.keys()))
         except Exception as exc:
             logger.warning("Failed to create memory_service: %s", exc)
+        logger.info("[STARTUP-BS] 6.MemoryService: %.2fs", _time.monotonic() - _bs_t0)
+        _bs_t0 = _time.monotonic()
 
         # 7. MessageQueue — 管道间消息传递
         try:
@@ -650,11 +664,15 @@ class CLIApplication:
                         }
                         if task_info is not None:
                             event_data["task"] = task_info
-                        _t = asyncio.create_task(
-                            event_bus_ref.emit("task_state_changed", event_data),
-                        )
-                        self._bg_tasks.add(_t)
-                        _t.add_done_callback(self._bg_tasks.discard)
+                        try:
+                            loop = asyncio.get_running_loop()
+                            _t = loop.create_task(
+                                event_bus_ref.emit("task_state_changed", event_data),
+                            )
+                            self._bg_tasks.add(_t)
+                            _t.add_done_callback(self._bg_tasks.discard)
+                        except RuntimeError:
+                            pass
                 except Exception as exc:
                     logger.warning(
                         "Task state change callback error: %s", exc,
@@ -663,38 +681,16 @@ class CLIApplication:
             def _direct_notify_parent(
                 task_id: str, new_status: str, task_obj: Any, svc: dict,
             ) -> None:
-                """终态直接通知：读任务状态，找父管道，inject_and_wake。"""
+                """终态直接通知：找父管道引擎，注入通知。
+
+                优先级：运行中引擎 > 挂起引擎 > pending 队列兜底。
+                """
                 if task_obj is None:
                     return
                 parent_pipeline_id = getattr(
                     task_obj, "parent_pipeline_id", None,
                 )
                 if not parent_pipeline_id:
-                    return
-                engine_key = f"__suspended_engine_{parent_pipeline_id}"
-                engine = svc.get(engine_key)
-                if engine is None or not hasattr(engine, "inject_and_wake"):
-                    # 父管道尚未挂起，入队等待
-                    pending_key = f"__pending_notifications_{parent_pipeline_id}"
-                    pending_list = svc.get(pending_key, [])
-                    title = getattr(task_obj, "title", task_id)
-                    error = getattr(task_obj, "error", "") or ""
-                    if new_status == "completed":
-                        msg = (
-                            f"[系统通知] 子任务 '{title}'"
-                            f" (ID: {task_id}) 已完成 ✅\n"
-                            "请继续执行后续流程，提交下一个子任务。"
-                        )
-                    else:
-                        err_hint = f": {error[:100]}" if error else ""
-                        msg = (
-                            f"[系统通知] 子任务 '{title}'"
-                            f" (ID: {task_id}) {new_status} ❌{err_hint}\n"
-                            "请根据失败情况决定后续操作"
-                            "（重试/替代方案/标记失败）。"
-                        )
-                    pending_list.append(msg)
-                    svc[pending_key] = pending_list
                     return
                 title = getattr(task_obj, "title", task_id)
                 error = getattr(task_obj, "error", "") or ""
@@ -712,16 +708,110 @@ class CLIApplication:
                         "请根据失败情况决定后续操作"
                         "（重试/替代方案/标记失败）。"
                     )
-                try:
-                    engine.inject_and_wake(notification)
-                    logger.info(
-                        "Callback: 直接通知父管道: "
-                        "pipeline=%s, task=%s, status=%s",
-                        parent_pipeline_id, task_id, new_status,
+
+                # 1. 运行中引擎：直接 inject_notification，_run_loop 会消费
+                running_key = f"__running_engine_{parent_pipeline_id}"
+                running_engine = svc.get(running_key)
+                if running_engine and hasattr(running_engine, "inject_notification"):
+                    try:
+                        running_engine.inject_notification(notification)
+                        logger.info(
+                            "Callback: 通知运行中管道: "
+                            "pipeline=%s, task=%s, status=%s",
+                            parent_pipeline_id, task_id, new_status,
+                        )
+                        return
+                    except Exception as exc:
+                        logger.warning(
+                            "Callback: inject_notification 失败: %s", exc,
+                        )
+
+                # 2. 挂起引擎：inject_and_wake 唤醒
+                engine_key = f"__suspended_engine_{parent_pipeline_id}"
+                engine = svc.get(engine_key)
+                if engine and hasattr(engine, "inject_and_wake"):
+                    try:
+                        engine.inject_and_wake(notification)
+                        logger.info(
+                            "Callback: 直接通知挂起管道: "
+                            "pipeline=%s, task=%s, status=%s",
+                            parent_pipeline_id, task_id, new_status,
+                        )
+                        return
+                    except Exception as exc:
+                        logger.warning(
+                            "Callback: inject_and_wake 失败: %s", exc,
+                        )
+
+                # 3. 兜底：入队等待（引擎尚未创建或已结束）
+                pending_key = (
+                    f"__pending_notifications_{parent_pipeline_id}"
+                )
+                pending_list = svc.get(pending_key, [])
+                pending_list.append(notification)
+                svc[pending_key] = pending_list
+                logger.info(
+                    "Callback: 管道未找到，通知入队: "
+                    "pipeline=%s, task=%s, status=%s, queue=%d",
+                    parent_pipeline_id, task_id, new_status,
+                    len(pending_list),
+                )
+
+                # 子任务失败且父管道不可达 → 级联失败
+                if new_status == "failed":
+                    _cascade_fail_parent(
+                        task_id, task_obj, svc,
                     )
+
+            def _cascade_fail_parent(
+                child_task_id: str,
+                child_task_obj: Any,
+                svc: dict,
+            ) -> None:
+                """子任务失败且父管道不可达时，级联失败到父任务。"""
+                parent_tid = getattr(
+                    child_task_obj, "parent_task_id", None,
+                )
+                if not parent_tid:
+                    return
+                ts = svc.get("task_service")
+                if not ts:
+                    return
+                try:
+                    parent = ts.get_task(parent_tid)
+                except Exception:
+                    return
+                if parent is None:
+                    return
+                ps = parent.status
+                ps_str = ps if isinstance(ps, str) else ps.value
+                if ps_str != "running":
+                    logger.debug(
+                        "Callback: 级联跳过: parent=%s "
+                        "已终态(%s), child=%s",
+                        parent_tid, ps_str, child_task_id,
+                    )
+                    return
+                ct = getattr(child_task_obj, "title", child_task_id)
+                ce = getattr(child_task_obj, "error", "") or ""
+                err = (
+                    f"子任务 '{ct}' ({child_task_id}) "
+                    f"失败且管道不可达，级联终止"
+                )
+                if ce:
+                    err += f": {ce[:200]}"
+                logger.warning(
+                    "Callback: 级联失败: parent=%s, "
+                    "child=%s, reason=%s",
+                    parent_tid, child_task_id, err,
+                )
+                try:
+                    ts.fail_task(parent_tid, err)
                 except Exception as exc:
                     logger.warning(
-                        "Callback: inject_and_wake 失败: %s", exc,
+                        "Callback: 级联失败异常: "
+                        "parent=%s, %s",
+                        parent_tid, exc,
                     )
 
             task_service = TaskService(on_state_change=_on_task_state_change)
@@ -773,6 +863,11 @@ class CLIApplication:
             logger.info("Service created: session_service")
         except Exception as exc:
             logger.warning("Failed to create session_service: %s", exc)
+        logger.info("[STARTUP-BS] 7-12.rest: %.2fs", _time.monotonic() - _bs_t0)
+        try:
+            import human_interaction.desktop_notifier  # noqa: F401
+        except Exception:
+            pass
 
         # 13. 注入 CLI 交互通知器 — 子 Agent 人类交互支持
         try:
@@ -1076,6 +1171,7 @@ class CLIApplication:
         """
         from rich.console import Console
 
+        _run_t0 = _time.monotonic()
         console = self._output_adapter.console
         agent_name = self._agent_config.display_name if self._agent_config else "Agent OS"
         model_name = self._get_model_name()
@@ -1084,6 +1180,7 @@ class CLIApplication:
         self._output_adapter.show_startup_banner(agent_name, self._interaction_mode)
 
         # 异步初始化 TagNetworkRetriever（从 PG 加载 Tag 向量和共现关系）
+        _run_t1 = _time.monotonic()
         tag_network_retriever = self._services.get("tag_network_retriever")
         vector_retriever = self._services.get("vector_retriever")
         if tag_network_retriever is not None and vector_retriever is not None:
@@ -1091,12 +1188,15 @@ class CLIApplication:
                 await tag_network_retriever.init_from_pg(vector_retriever)
             except Exception as exc:
                 logger.warning("TagNetworkRetriever async init failed: %s", exc)
+        logger.info("[STARTUP] TagNetworkRetriever init: %.2fs", _time.monotonic() - _run_t1)
 
         # 启动任务执行器（如果可用）
+        _run_t2 = _time.monotonic()
         if hasattr(self, '_task_worker') and self._task_worker:
             if hasattr(self._task_worker, 'start'):
                 await self._task_worker.start()
                 logger.info("Task worker started")
+        logger.info("[STARTUP] TaskWorker start: %.2fs", _time.monotonic() - _run_t2)
 
         # 初始化状态栏
         self._output_adapter.update_status_bar(
@@ -1112,6 +1212,7 @@ class CLIApplication:
         agent_id = self._agent_config.config_id if self._agent_config else "lingxi"
 
         # 通过 SessionService 管理会话（只管 session_id 和 pipeline_id）
+        _run_t3 = _time.monotonic()
         session_svc = self._services.get("session_service")
         if session_svc is None:
             from infrastructure.session import SessionService
@@ -1119,8 +1220,19 @@ class CLIApplication:
         session = await session_svc.create_or_restore(
             channel_type="cli",
         )
+        logger.info("[STARTUP] session restore: %.2fs", _time.monotonic() - _run_t3)
+
+        # 引擎 pipeline_id 跟随 session：如果 session 有已保存的 active_pipeline_id，
+        # 用它覆盖引擎的随机 ID，保证跨 CLI 重启管道 ID 不变
+        if session.active_pipeline_id and self._engine is not None:
+            logger.info(
+                "Syncing engine pipeline_id to session: %s → %s",
+                self._engine.pipeline_id, session.active_pipeline_id,
+            )
+            self._engine._pipeline_id = session.active_pipeline_id
 
         # 跨轮次对话历史：从执行记录恢复（绑定 pipeline_id）
+        _run_t4 = _time.monotonic()
         conversation_history: list[dict[str, Any]] = []
         restored = False
 
@@ -1158,6 +1270,8 @@ class CLIApplication:
                         )
                 except Exception as exc:
                     logger.debug("Failed to restore from pipeline records: %s", exc)
+        logger.info("[STARTUP] conversation restore (%d msgs): %.2fs", len(conversation_history), _time.monotonic() - _run_t4)
+        logger.info("[STARTUP] === run() total: %.2fs ===", _time.monotonic() - _run_t0)
 
         if restored:
             console.print(
@@ -1643,8 +1757,13 @@ class CLIApplication:
 
             pipeline_id = session_svc.prepare_run(session)
 
-            # 将引擎自己生成的 pipeline_id 同步到 session
-            session.active_pipeline_id = self._engine.pipeline_id
+            # 引擎 pipeline_id 跟随 session（session 是权威来源）
+            if pipeline_id != self._engine.pipeline_id:
+                logger.info(
+                    "Syncing engine pipeline_id to session on run: %s → %s",
+                    self._engine.pipeline_id, pipeline_id,
+                )
+                self._engine._pipeline_id = pipeline_id
 
             self._pipeline_task = asyncio.create_task(
                 self._engine.run(

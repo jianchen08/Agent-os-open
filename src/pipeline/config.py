@@ -339,7 +339,7 @@ def build_plugin_registry(
     Args:
         config: 管道配置实例
         model_loader: 可选的 ModelConfigLoader 实例，用于加载默认模型配置
-        router: 可选的 litellm.Router 实例，传入后 LLMCore 使用 RouterAdapter
+        router: 可选的 litellm.Router 实例
 
     Returns:
         已注册所有插件的 PluginRegistry 实例
@@ -413,9 +413,19 @@ def build_plugin_registry(
                         "使用 core_plugins 中的原有配置"
                     )
 
+            # 校验：llm_call 必须有 context_window，否则上下文守卫无法工作
+            if core_type == "llm_call" and not plugin_config.get("context_window"):
+                logger.error(
+                    "[build_plugin_registry] llm_call 缺少 context_window！"
+                    "上下文守卫将完全失效，可能导致模型调用溢出。"
+                    "请在 llm.yaml 的模型配置中添加 context_window 字段。"
+                    "model_name=%s",
+                    plugin_config.get("model_name", "unknown"),
+                )
+
         try:
             plugin_cls = _import_class(class_path)
-            # llm_call: 优先使用 AdaptiveRouterAdapter（自适应并发控制）
+            # llm_call: 优先使用 KeyPoolAdapter（按 key 粒度并发控制）
             if core_type == "llm_call" and model_loader is not None:
                 from llm.router_factory import get_or_create_adapter
                 _adapter = get_or_create_adapter(model_loader)

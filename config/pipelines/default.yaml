@@ -105,6 +105,8 @@ plugins:
   - name: context_window_guard
     config:
       enabled: true
+      trigger_ratio: 0.6
+      compression_model: minimax-m2.7
   - name: task_event_receiver
     config:
       enabled: true
@@ -183,10 +185,7 @@ plugins:
       max_result_length: 2000
       include_tool_name: true
       result_format: "yaml"
-  - name: context_compress
-    config:
-      context_window: 128000
-      compress_trigger_ratio: 0.5
+
   # P4: 任务管理
   - name: child_task_guard
     config:
@@ -226,4 +225,4 @@ core_plugins:
         "3": 1800
       tool_timeouts:
         human_interaction: 1800
-        task_evaluate: 600
+        task_evaluate: 1200

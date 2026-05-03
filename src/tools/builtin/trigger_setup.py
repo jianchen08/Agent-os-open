@@ -175,7 +175,7 @@ class TriggerSetupTool(BuiltinTool):
                 },
                 "required": ["trigger_type", "message"],
             },
-            injected_params=["session_id", "execution_id", "pipeline_id"],
+            injected_params=["execution_id", "pipeline_id"],
             source=ToolSource.CODE,
             category=ToolCategory.SYSTEM,
             level=ToolLevel.SYSTEM,
@@ -189,14 +189,14 @@ class TriggerSetupTool(BuiltinTool):
             ],
             when_not_to_use=[
                 "需要立即执行任务时（直接执行即可）",
-                "需要触发其他会话时（触发器只能触发自己）",
+                "需要触发其他管道时（触发器只能触发自己所在的管道）",
             ],
             caveats=[
-                "触发器只能触发自己所在的会话",
+                "触发器只能触发自己所在的管道",
                 "延迟时间最大为24小时",
                 "定时触发时间不能超过7天",
                 "周期间隔最小10秒，最大30天",
-                "单会话最多设置10个触发器",
+                "单管道最多设置10个触发器",
                 "设置 max_count 或 max_time 后，到达条件时触发器自动停止",
             ],
         )
@@ -204,14 +204,13 @@ class TriggerSetupTool(BuiltinTool):
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行触发器设置或取消"""
         action = inputs.get("action", "setup")
-        session_id = inputs.get("session_id")
+        pipeline_id = inputs.get("pipeline_id")
 
         if action == "cancel":
-            return await self._cancel_trigger(inputs, session_id)
+            return await self._cancel_trigger(inputs, pipeline_id)
 
         trigger_type = inputs.get("trigger_type")
         message = inputs.get("message")
-        session_id = inputs.get("session_id")
         execution_id = inputs.get("execution_id")
         pipeline_id = inputs.get("pipeline_id")
 
@@ -227,10 +226,10 @@ class TriggerSetupTool(BuiltinTool):
                 error_code="MISSING_MESSAGE",
             )
 
-        if not session_id:
+        if not pipeline_id:
             return create_failure_result(
-                error="缺少注入参数: session_id",
-                error_code="MISSING_SESSION_ID",
+                error="缺少注入参数: pipeline_id",
+                error_code="MISSING_PIPELINE_ID",
             )
 
         if not execution_id:
@@ -238,7 +237,7 @@ class TriggerSetupTool(BuiltinTool):
 
         active_count = sum(
             1 for t in self._manager._triggers.values()
-            if t.session_id == session_id and t.status.value in ("active", "pending")
+            if t.pipeline_id == pipeline_id and t.status.value in ("active", "pending")
         )
         if active_count >= self.MAX_TRIGGERS_PER_SESSION:
             return create_failure_result(
@@ -249,23 +248,23 @@ class TriggerSetupTool(BuiltinTool):
         try:
             if trigger_type == "delay":
                 return await self._setup_delay_trigger(
-                    inputs, session_id, execution_id, pipeline_id, message
+                    inputs, execution_id, pipeline_id, message
                 )
             elif trigger_type == "schedule":
                 return await self._setup_schedule_trigger(
-                    inputs, session_id, execution_id, pipeline_id, message
+                    inputs, execution_id, pipeline_id, message
                 )
             elif trigger_type == "interval":
                 return await self._setup_interval_trigger(
-                    inputs, session_id, execution_id, pipeline_id, message
+                    inputs, execution_id, pipeline_id, message
                 )
             elif trigger_type == "event":
                 return await self._setup_event_trigger(
-                    inputs, session_id, execution_id, pipeline_id, message
+                    inputs, execution_id, pipeline_id, message
                 )
             elif trigger_type == "condition":
                 return await self._setup_condition_trigger(
-                    inputs, session_id, execution_id, pipeline_id, message
+                    inputs, execution_id, pipeline_id, message
                 )
             else:
                 return create_failure_result(
@@ -283,7 +282,7 @@ class TriggerSetupTool(BuiltinTool):
     async def _cancel_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str | None,
+        pipeline_id: str | None,
     ) -> ToolExecutionResult:
         """取消触发器"""
         trigger_id = inputs.get("trigger_id")
@@ -301,10 +300,10 @@ class TriggerSetupTool(BuiltinTool):
                 error_code="TRIGGER_NOT_FOUND",
             )
 
-        if session_id and trigger.session_id != session_id:
+        if pipeline_id and trigger.pipeline_id != pipeline_id:
             return create_failure_result(
-                error="只能取消当前会话的触发器",
-                error_code="TRIGGER_SESSION_MISMATCH",
+                error="只能取消当前管道的触发器",
+                error_code="TRIGGER_PIPELINE_MISMATCH",
             )
 
         success = self._manager.cancel(trigger_id)
@@ -317,7 +316,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 触发器已取消 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id}"
+            f"pipeline_id={pipeline_id}"
         )
 
         return create_success_result(
@@ -361,7 +360,6 @@ class TriggerSetupTool(BuiltinTool):
     async def _setup_delay_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str,
         execution_id: str,
         pipeline_id: str | None,
         message: str,
@@ -396,8 +394,7 @@ class TriggerSetupTool(BuiltinTool):
             delay_seconds=float(delay_seconds),
             max_fires=1,
             message=message,
-            session_id=session_id,
-            pipeline_id=pipeline_id or "",
+            pipeline_id=pipeline_id,
             metadata={
                 "execution_id": execution_id,
             },
@@ -408,7 +405,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 延迟触发器已设置 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id} | "
+            f"pipeline_id={pipeline_id} | "
             f"delay_seconds={delay_seconds}"
         )
 
@@ -424,7 +421,6 @@ class TriggerSetupTool(BuiltinTool):
     async def _setup_schedule_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str,
         execution_id: str,
         pipeline_id: str | None,
         message: str,
@@ -469,7 +465,6 @@ class TriggerSetupTool(BuiltinTool):
             scheduled_at=schedule_time,
             max_fires=1,
             message=message,
-            session_id=session_id,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -482,7 +477,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 定时触发器已设置 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id} | "
+            f"pipeline_id={pipeline_id} | "
             f"schedule_time={schedule_time_str}"
         )
 
@@ -498,7 +493,6 @@ class TriggerSetupTool(BuiltinTool):
     async def _setup_interval_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str,
         execution_id: str,
         pipeline_id: str | None,
         message: str,
@@ -548,7 +542,6 @@ class TriggerSetupTool(BuiltinTool):
             max_fires=max_count,
             max_time_seconds=max_time_seconds,
             message=message,
-            session_id=session_id,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -568,7 +561,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 周期触发器已设置 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id} | "
+            f"pipeline_id={pipeline_id} | "
             f"interval={interval_str}({interval_seconds}s) | "
             f"max_count={max_count} | max_time={max_time_seconds}s"
         )
@@ -589,7 +582,6 @@ class TriggerSetupTool(BuiltinTool):
     async def _setup_event_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str,
         execution_id: str,
         pipeline_id: str | None,
         message: str,
@@ -616,7 +608,6 @@ class TriggerSetupTool(BuiltinTool):
             event_name=event_type,
             max_fires=max_count,
             message=message,
-            session_id=session_id,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -629,7 +620,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 事件触发器已设置 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id} | "
+            f"pipeline_id={pipeline_id} | "
             f"event_type={event_type}"
         )
 
@@ -645,7 +636,6 @@ class TriggerSetupTool(BuiltinTool):
     async def _setup_condition_trigger(
         self,
         inputs: dict[str, Any],
-        session_id: str,
         execution_id: str,
         pipeline_id: str | None,
         message: str,
@@ -672,7 +662,6 @@ class TriggerSetupTool(BuiltinTool):
             condition_expression=condition,
             max_fires=max_count,
             message=message,
-            session_id=session_id,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -685,7 +674,7 @@ class TriggerSetupTool(BuiltinTool):
         logger.info(
             f"[TriggerSetupTool] 条件触发器已设置 | "
             f"trigger_id={trigger_id} | "
-            f"session_id={session_id} | "
+            f"pipeline_id={pipeline_id} | "
             f"condition={condition}"
         )
 

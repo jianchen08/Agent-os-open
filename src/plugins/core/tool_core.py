@@ -601,6 +601,74 @@ class ToolCore(ICorePlugin):
             }
             current_messages.append(tool_msg)
 
+        # === 多模态图片处理（双保险） ===
+        # 收集工具返回的图片数据，根据模型能力选择注入方式
+        pending_images: list[dict] = []
+        for _r in results:
+            _data = _r.get("data", {})
+            if not isinstance(_data, dict):
+                continue
+            if _data.get("base64_data") and _data.get("mime_type"):
+                pending_images.append({
+                    "base64": _data["base64_data"],
+                    "mime_type": _data["mime_type"],
+                    "path": _data.get("path", ""),
+                })
+            for _img in _data.get("images", []):
+                if isinstance(_img, dict) and _img.get("base64"):
+                    pending_images.append(_img)
+
+        if pending_images:
+            from multimodal.capabilities import ModelCapabilityRegistry
+            _model_name = ctx.state.get("llm_model", "")
+            _supports_vision = ModelCapabilityRegistry.is_multimodal_supported(
+                _model_name
+            )
+
+            if _supports_vision:
+                # 路径 A：模型支持视觉 → 注入多模态 user 消息
+                _content_blocks: list[dict] = [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"[工具截图] 共 {len(pending_images)} 张图片，"
+                            "请分析截图内容："
+                        ),
+                    }
+                ]
+                for _img in pending_images:
+                    _data_url = (
+                        f"data:{_img['mime_type']};base64,"
+                        f"{_img['base64']}"
+                    )
+                    _content_blocks.append({
+                        "type": "image_url",
+                        "image_url": {"url": _data_url},
+                    })
+                current_messages.append({
+                    "role": "user",
+                    "name": "tool_images",
+                    "content": _content_blocks,
+                })
+            else:
+                # 路径 B：模型不支持视觉 → 提示 agent 调 MCP 分析
+                _paths = [
+                    _i.get("path", "")
+                    for _i in pending_images
+                    if _i.get("path")
+                ]
+                _paths_str = ", ".join(_paths) if _paths else "见工具返回"
+                current_messages.append({
+                    "role": "user",
+                    "name": "tool_images",
+                    "content": (
+                        f"[工具截图] 已保存 {len(pending_images)} 张截图"
+                        f"（{_paths_str}）。当前模型不支持图片分析，"
+                        "请使用 mcp__4_5v_mcp__analyze_image 工具分析"
+                        "截图内容，获取文本描述后继续验证。"
+                    ),
+                })
+
         # BUG-FIX-fix_20260418_all_tools_failed
         # 问题根因: 工具全部失败时 raw_error 始终为 None，导致 error_check 插件
         #           无法识别，Output 插件链无 route_signal，管道异常退出

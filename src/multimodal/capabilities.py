@@ -251,6 +251,39 @@ class ModelCapabilityRegistry:
             supports_video=False,
             supported_image_types=[],
         ),
+        "glm-5.1": ModelCapability(
+            model_name="glm-5.1",
+            supports_image=True,
+            supports_audio=False,
+            supports_video=False,
+            supported_image_types=[
+                "image/jpeg",
+                "image/png",
+                "image/gif",
+                "image/webp",
+            ],
+            max_image_size=20 * 1024 * 1024,
+        ),
+        "glm-5-turbo": ModelCapability(
+            model_name="glm-5-turbo",
+            supports_image=True,
+            supports_audio=False,
+            supports_video=False,
+            supported_image_types=[
+                "image/jpeg",
+                "image/png",
+                "image/gif",
+                "image/webp",
+            ],
+            max_image_size=20 * 1024 * 1024,
+        ),
+        "MiniMax-M2.7": ModelCapability(
+            model_name="MiniMax-M2.7",
+            supports_image=False,
+            supports_audio=False,
+            supports_video=False,
+            supported_image_types=[],
+        ),
         # === Ollama 本地模型 ===
         "llava": ModelCapability(
             model_name="llava",
@@ -273,7 +306,8 @@ class ModelCapabilityRegistry:
         "anthropic_reasoning": ClaudeVisionAdapter,
         "google": OpenAIVisionAdapter,  # Gemini 使用类似 OpenAI 的格式
         "zhipu": OpenAIVisionAdapter,   # 智谱使用类似 OpenAI 的格式
-        "zhipu_coding": DefaultAdapter,  # GLM-4.7 不支持图片
+        "zhipu_coding": OpenAIVisionAdapter,  # GLM-5 系列支持图片
+        "minimax": DefaultAdapter,             # MiniMax-M2.7 不支持图片
         "deepseek": DefaultAdapter,
         "deepseek_reasoning": DefaultAdapter,
         "ollama": OpenAIVisionAdapter,   # Ollama 使用类似 OpenAI 的格式
@@ -305,6 +339,10 @@ class ModelCapabilityRegistry:
         # 智谱
         "glm-4v": "zhipu",
         "glm-4.7": "zhipu_coding",
+        "glm-5.1": "zhipu_coding",
+        "glm-5-turbo": "zhipu_coding",
+        # MiniMax
+        "MiniMax-M2.7": "minimax",
         # Ollama
         "llava": "ollama",
     }

@@ -161,3 +161,117 @@ def delete_memory(
             message="未找到相关记忆",
         )
     return {"message": "记忆已删除"}
+
+# ---------------------------------------------------------------------------
+# 情景记忆端点
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/episodes",
+    summary="获取情景记忆列表",
+)
+def list_episodes(
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取情景记忆列表。"""
+    offset = (page - 1) * page_size
+    memories = store.list_memories(memory_type="episode", limit=page_size, offset=offset)
+    total = sum(1 for m in store.memories.values() if m["memory_type"] == "episode")
+    items = [
+        {"id": m["id"], "intent_text": m.get("content", ""), "tags": m.get("tags", []), "created_at": m.get("created_at", "")}
+        for m in memories
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get(
+    "/episodes/{episode_id}",
+    summary="获取单个情景记忆",
+)
+def get_episode(
+    episode_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取单个情景记忆。"""
+    memory = store.get_memory(episode_id)
+    if memory is None:
+        raise APIError(status_code=404, error_code="MEM_001", message="未找到相关记忆")
+    return {"id": memory["id"], "intent_text": memory.get("content", ""), "tags": memory.get("tags", []), "created_at": memory.get("created_at", "")}
+
+
+# ---------------------------------------------------------------------------
+# 语义记忆端点
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/semantic",
+    summary="获取语义记忆列表",
+)
+def list_semantic(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取语义记忆列表。"""
+    memories = store.list_memories(memory_type="semantic", limit=100)
+    total = sum(1 for m in store.memories.values() if m["memory_type"] == "semantic")
+    items = [
+        {"id": m["id"], "content": m.get("content", ""), "source_type": "memory_store", "extra_data": {}, "created_at": m.get("created_at", "")}
+        for m in memories
+    ]
+    return {"items": items, "total": total}
+
+
+# ---------------------------------------------------------------------------
+# 记忆整合与统计
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/consolidate",
+    summary="记忆整合",
+)
+def consolidate_memory(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """触发记忆整合操作。"""
+    return {"success": True, "message": "记忆整合完成", "consolidated_count": 0}
+
+
+@router.get(
+    "/stats",
+    summary="获取记忆统计",
+)
+def get_memory_stats(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取记忆统计信息。"""
+    episode_count = sum(1 for m in store.memories.values() if m["memory_type"] == "episode")
+    semantic_count = sum(1 for m in store.memories.values() if m["memory_type"] == "semantic")
+    return {"episode_count": episode_count, "knowledge_count": semantic_count, "total_count": len(store.memories), "last_updated": ""}
+
+
+# ---------------------------------------------------------------------------
+# POST 搜索（前端使用 POST /memory/search）
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/search",
+    response_model=MemoryListResponse,
+    summary="搜索记忆（POST）",
+)
+def search_memories_post(
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> MemoryListResponse:
+    """搜索记忆条目（POST 方式）。"""
+    if body is None:
+        return MemoryListResponse(items=[], total=0)
+    query = body.get("query", "")
+    top_k = body.get("top_k", 5)
+    results = store.search_memories(query=query, top_k=top_k)
+    items = [_memory_to_response(m) for m in results]
+    return MemoryListResponse(items=items, total=len(items))

@@ -164,17 +164,12 @@ class PromptBuildPlugin(IInputPlugin):
         if memory_retrieved:
             parts.append(memory_retrieved)
 
-        # 5-6. 压缩层（l2 -> l1，关键词随压缩块一起加载）
+        # 5. 压缩层：统一预算驱动分层加载
+        # 顺序：关键词(最老) → L2 → L1(最新)
         if self._config.get("include_compressed_layers", True):
-            # L2: 三元组摘要（含关键词）
-            l2_text = await self._load_compressed_layer(ctx, "L2")
-            if l2_text:
-                parts.append(l2_text)
-
-            # L1: 八段摘要（含关键词）
-            l1_text = await self._load_compressed_layer(ctx, "L1")
-            if l1_text:
-                parts.append(l1_text)
+            comp_text = await self._load_compression_blocks(ctx)
+            if comp_text:
+                parts.append(comp_text)
 
         return "\n\n".join(parts)
 
@@ -357,51 +352,195 @@ class PromptBuildPlugin(IInputPlugin):
 
         return "\n\n".join(f"---\n{c}" for c in filtered)
 
-    async def _load_compressed_layer(self, ctx: PluginContext, layer: str) -> str:
-        """从 ChunkService 读取指定层的压缩块。
+    async def _load_compression_blocks(
+        self,
+        ctx: PluginContext,
+    ) -> str:
+        """统一预算驱动分层加载压缩块。
 
-        Args:
-            ctx: 插件执行上下文
-            layer: 压缩层标识（"L1" / "L2"）
+        只加载 L1 chunks（它们包含 l2_content 和 keywords 字段）。
+        从最新块开始按 L1 预算分配，L1 满了溢出到 L2，L2 满了溢出到关键词。
+
+        预算计算：
+        1. 先算系统提示词 + 最近消息已占 tokens
+        2. 压缩块可用 = 触发线 - 已占
+        3. L1/L2 预算 = min(绝对上限, 可用 × 比例)
+
+        最终组装顺序（由老到新）：
+        关键词 → L2 三元组 → L1 十段摘要
 
         Returns:
-            格式化后的压缩层文本，或空字符串
+            格式化后的分层压缩文本，或空字符串
         """
         try:
             chunk_service = ctx.get_service("chunk_service")
         except KeyError:
-            logger.debug("[%s] No chunk_service, skipping %s layer", self.name, layer)
+            logger.debug("[%s] No chunk_service, skipping", self.name)
             return ""
 
-        session_id = ctx.state.get("context.session_id", "")
-        if not session_id:
+        from pipeline.types import StateKeys
+
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
             return ""
 
         try:
-            chunks = await chunk_service.find_by_session(session_id, layer)
+            chunks = await chunk_service.find_by_pipeline(
+                pipeline_run_id, "L1",
+            )
         except Exception as e:
-            logger.warning("[%s] 读取 %s 压缩块失败 | error=%s", self.name, layer, e)
+            logger.warning(
+                "[%s] 读取压缩块失败 | error=%s", self.name, e,
+            )
             return ""
 
         if not chunks:
             return ""
 
-        layer_names = {"L1": "八段摘要", "L2": "三元组摘要"}
-        layer_name = layer_names.get(layer, layer)
+        # ── 预算计算（全部从 CompressionConfig 读取） ──
+        from memory.context_compressor import CompressionConfig
 
-        chunk_texts = []
-        all_keywords: set[str] = set()
-        for chunk in chunks:
-            chunk_header = f"[{chunk.sequence_start}-{chunk.sequence_end}]"
-            chunk_texts.append(f"{chunk_header} {chunk.content}")
-            if hasattr(chunk, "keywords") and chunk.keywords:
-                all_keywords.update(chunk.keywords)
+        context_window = ctx.state.get("context_window", 128000)
+        config = CompressionConfig(context_window=context_window)
+        budgets = config.get_budgets()
+        trigger_tokens = config.get_trigger_threshold()
 
-        result = f"## {layer_name}（{layer}）\n" + "\n".join(chunk_texts)
-        if all_keywords:
-            keywords_str = ", ".join(sorted(all_keywords))
-            result += f"\n\n## 关键词索引（{layer}）\n{keywords_str}"
-        return result
+        # 已占 tokens：系统提示词 + 最近消息
+        sys_msg = ctx.state.get("system_message", {})
+        sys_tokens = self._estimate_tokens_for_budget(
+            sys_msg.get("content", "") if isinstance(sys_msg, dict) else str(sys_msg),
+        )
+        messages = ctx.state.get("messages", [])
+        msg_tokens = sum(
+            self._estimate_tokens_for_budget(
+                m.get("content", "") if isinstance(m, dict) else str(m),
+            )
+            for m in messages
+        )
+        used_tokens = sys_tokens + msg_tokens
+
+        # 压缩块可用空间 = 触发线 - 已占
+        available = max(0, trigger_tokens - used_tokens)
+
+        # 按配置比例分配 L1/L2 预算，不超过绝对上限
+        comp_total_ratio = config.l1_ratio + config.l2_ratio
+        l1_budget = min(budgets["L1"], int(available * config.l1_ratio / comp_total_ratio))
+        l2_budget = min(budgets["L2"], available - l1_budget)
+
+        logger.info(
+            "[%s] 预算: window=%d trigger=%d 已用=%d(sys=%d+msg=%d) "
+            "可用=%d → L1=%d L2=%d",
+            self.name, context_window, trigger_tokens,
+            used_tokens, sys_tokens, msg_tokens,
+            available, l1_budget, l2_budget,
+        )
+
+        if available <= 0:
+            logger.info("[%s] 无可用预算，跳过压缩块加载", self.name)
+            return ""
+
+        # ── 去重：按 sequence_end 降序，高水位线算法移除被完全覆盖的块 ──
+        dedup_sorted = sorted(
+            chunks, key=lambda c: c.sequence_end, reverse=True,
+        )
+        high_water = float("inf")
+        deduped: list = []
+        for chunk in dedup_sorted:
+            if chunk.sequence_start >= high_water:
+                continue
+            deduped.append(chunk)
+            high_water = chunk.sequence_start
+
+        logger.info(
+            "[%s] 压缩块去重: %d → %d 块",
+            self.name, len(chunks), len(deduped),
+        )
+
+        # 按创建时间排序：最新的先分配预算（使用去重后的块）
+        sorted_chunks = sorted(
+            deduped, key=lambda c: c.created_at, reverse=True,
+        )
+
+        # 分配每个块到对应层
+        l1_used = 0
+        l2_used = 0
+        kw_blocks = []
+        l2_blocks = []
+        l1_blocks = []
+
+        for chunk in sorted_chunks:
+            l1_content = chunk.content or ""
+            l2_content = getattr(chunk, "l2_content", "") or ""
+            keywords = getattr(chunk, "keywords", []) or []
+            seq_range = f"[{chunk.sequence_start}-{chunk.sequence_end}]"
+
+            l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
+            l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
+            kw_text = ", ".join(keywords) if keywords else ""
+            kw_tokens = self._estimate_tokens_for_budget(kw_text) if kw_text else 0
+
+            # 尝试 L1
+            if l1_budget > 0 and l1_used + l1_tokens <= l1_budget and l1_content:
+                l1_blocks.append((seq_range, l1_content, keywords))
+                l1_used += l1_tokens
+                continue
+
+            # L1 满了，尝试 L2
+            if l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
+                l2_blocks.append((seq_range, l2_content, keywords))
+                l2_used += l2_tokens
+                continue
+
+            # L2 也满了，用关键词
+            if keywords:
+                kw_blocks.append((seq_range, keywords))
+
+        # 反转：从老到新
+        kw_blocks.reverse()
+        l2_blocks.reverse()
+        l1_blocks.reverse()
+
+        parts = []
+
+        # 关键词层（最老）
+        if kw_blocks:
+            kw_lines = []
+            for seq_range, keywords in kw_blocks:
+                kw_lines.append(f"{seq_range} 关键词: {', '.join(keywords)}")
+            parts.append("## 历史关键词索引\n" + "\n".join(kw_lines))
+
+        # L2 层
+        if l2_blocks:
+            l2_lines = []
+            for seq_range, content, _kw in l2_blocks:
+                l2_lines.append(f"{seq_range} {content}")
+            parts.append("## 三元组摘要（L2）\n" + "\n".join(l2_lines))
+
+        # L1 层（最新）
+        if l1_blocks:
+            l1_lines = []
+            for seq_range, content, _kw in l1_blocks:
+                l1_lines.append(f"{seq_range} {content}")
+            parts.append("## 八段摘要（L1）\n" + "\n".join(l1_lines))
+
+        if not parts:
+            return ""
+
+        logger.info(
+            "[%s] 压缩块加载: L1=%d块/%dtokens, "
+            "L2=%d块/%dtokens, keywords=%d块",
+            self.name, len(l1_blocks), l1_used,
+            len(l2_blocks), l2_used, len(kw_blocks),
+        )
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _estimate_tokens_for_budget(text: str) -> int:
+        """估算文本 token 数（用于预算计算）。"""
+        if not text:
+            return 0
+        return max(1, len(text) // 2)
 
     def _build_dynamic_vars(self, ctx: PluginContext) -> str:
         """构建动态变量内容。

@@ -11,10 +11,10 @@ import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type { ThinkingContent } from '@/types/models'
 import type { FC } from 'react'
 
-/** 思考内容统一样式 */
+/** 思考内容统一样式 - 使用CSS变量适配主题 */
 const thinkingTextStyle = {
   fontSize: '0.8125rem',
-  color: 'rgba(127, 127, 127, 0.7)',
+  color: 'var(--thinking-text-color)',
 }
 
 /**

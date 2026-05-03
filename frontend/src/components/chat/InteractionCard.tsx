@@ -53,12 +53,12 @@ export function InteractionCard({
       }`}
     >
       {/* 标题区 */}
-      <div className="border-b border-inherit px-4 py-3">
+      <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-blue-500" />
+          <MessageSquare className="h-4 w-4 text-blue-500 dark:text-blue-400" />
           <span className="text-sm font-semibold">{interaction.title || '交互请求'}</span>
           {isDone && (
-            <span className="ml-auto flex items-center gap-1 text-xs text-green-600">
+            <span className="ml-auto flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
               <Check className="h-3 w-3" />
               {interaction.status === 'navigated' ? '已跳转' : '已完成'}
             </span>
@@ -124,7 +124,7 @@ export function InteractionCard({
                 size="sm"
                 disabled={isSubmitting}
                 onClick={onNavigateToTab}
-                className="text-sm text-blue-500 hover:text-blue-600"
+                className="text-sm text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
               >
                 <ArrowRight className="mr-1 h-3.5 w-3.5" />
                 进入对话
@@ -140,7 +140,7 @@ export function InteractionCard({
                 disabled={isSubmitting}
                 placeholder="输入回复..."
                 rows={1}
-                className="bg-background border-border flex-1 resize-none rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400"
               />
               <Button
                 size="sm"
@@ -167,7 +167,7 @@ export function InteractionCard({
               disabled={isSubmitting}
               placeholder="输入回复..."
               rows={1}
-              className="bg-background border-border flex-1 resize-none rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400"
             />
             <Button
               size="sm"

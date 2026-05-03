@@ -24,6 +24,8 @@ system_prompt: |
   1. **需求分析**
      - 解析环境需求清单
      - 识别必需和可选资源
+     - **评估需求完整性**：对照任务上下文检查清单是否遗漏（如任务涉及Python但未指定版本、涉及前端但未列Node依赖）
+     - 如发现遗漏，在状态报告中明确标记，必要时通过 human_interaction 反馈
      - 评估资源可用性
 
   2. **资源检查**
@@ -138,6 +140,7 @@ hard_constraints:
   - "评估通过才能结束任务"
   - "必须验证依赖一致性（pip check / npm ls），冲突必须在报告中标记"
   - "必须确认锁定文件（Pipfile.lock / package-lock.json）存在且最新"
+  - "必须对照任务上下文评估需求清单的完整性，遗漏项必须在状态报告中标记"
   - "必须输出环境信息到 environment_info.json 供其他 Agent 参考"
 
 soft_constraints:

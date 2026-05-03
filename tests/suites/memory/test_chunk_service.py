@@ -39,18 +39,13 @@ def chunk_svc(temp_dir: str) -> ChunkService:
 
 
 def _make_chunk(**overrides) -> ChunkData:
-    """创建测试用 ChunkData。
-
-    注意：ChunkData dataclass 没有 user_id/session_id 字段，
-    但 ChunkService.save/find_by_session/find_by_user 中访问了这些属性。
-    源码中通过动态属性访问（__getattr__ 不存在时会报 AttributeError）。
-    这里将非 ChunkData 字段的参数通过动态属性设置。
-    """
+    """创建测试用 ChunkData。"""
     # ChunkData 实际字段
     chunk_fields = {
-        "id", "pipeline_run_id", "layer", "content", "token_count",
-        "message_count", "sequence_start", "sequence_end", "keywords",
-        "graduated", "episode_id", "created_at",
+        "id", "pipeline_run_id", "session_id", "layer", "content",
+        "l2_content", "token_count", "message_count", "sequence_start",
+        "sequence_end", "keywords", "graduated", "episode_id",
+        "created_at",
     }
     # 分离 ChunkData 字段和动态属性
     chunk_kwargs = {k: v for k, v in overrides.items() if k in chunk_fields}
@@ -262,44 +257,44 @@ class TestChunkServiceDelete:
 
 
 # ============================================================
-# 5. find_by_session 测试
+# 5. find_by_pipeline 测试
 # ============================================================
 
 
-class TestFindBySession:
-    """测试按会话查找。"""
+class TestFindByPipeline:
+    """测试按管道运行 ID 查找。"""
 
     @pytest.mark.asyncio
-    async def test_按session_id查找(self, chunk_svc: ChunkService) -> None:
-        """应返回指定会话的压缩块。"""
-        await chunk_svc.save(_make_chunk(id="c1", session_id="s1", layer="L1"))
-        await chunk_svc.save(_make_chunk(id="c2", session_id="s1", layer="L2"))
-        await chunk_svc.save(_make_chunk(id="c3", session_id="s2", layer="L1"))
-        results = await chunk_svc.find_by_session("s1")
+    async def test_按pipeline_run_id查找(self, chunk_svc: ChunkService) -> None:
+        """应返回指定管道的压缩块。"""
+        await chunk_svc.save(_make_chunk(id="c1", pipeline_run_id="p1", layer="L1"))
+        await chunk_svc.save(_make_chunk(id="c2", pipeline_run_id="p1", layer="L2"))
+        await chunk_svc.save(_make_chunk(id="c3", pipeline_run_id="p2", layer="L1"))
+        results = await chunk_svc.find_by_pipeline("p1")
         assert len(results) == 2
 
     @pytest.mark.asyncio
-    async def test_按session_id和layer过滤(self, chunk_svc: ChunkService) -> None:
+    async def test_按pipeline_run_id和layer过滤(self, chunk_svc: ChunkService) -> None:
         """应支持 layer 过滤。"""
-        await chunk_svc.save(_make_chunk(id="c1", session_id="s1", layer="L1"))
-        await chunk_svc.save(_make_chunk(id="c2", session_id="s1", layer="L2"))
-        results = await chunk_svc.find_by_session("s1", layer="L1")
+        await chunk_svc.save(_make_chunk(id="c1", pipeline_run_id="p1", layer="L1"))
+        await chunk_svc.save(_make_chunk(id="c2", pipeline_run_id="p1", layer="L2"))
+        results = await chunk_svc.find_by_pipeline("p1", layer="L1")
         assert len(results) == 1
         assert results[0].layer == "L1"
 
     @pytest.mark.asyncio
-    async def test_无匹配session返回空(self, chunk_svc: ChunkService) -> None:
-        """无匹配会话应返回空列表。"""
-        await chunk_svc.save(_make_chunk(session_id="s1"))
-        results = await chunk_svc.find_by_session("nonexistent")
+    async def test_无匹配pipeline返回空(self, chunk_svc: ChunkService) -> None:
+        """无匹配管道应返回空列表。"""
+        await chunk_svc.save(_make_chunk(pipeline_run_id="p1"))
+        results = await chunk_svc.find_by_pipeline("nonexistent")
         assert results == []
 
     @pytest.mark.asyncio
     async def test_按created_at排序(self, chunk_svc: ChunkService) -> None:
         """结果应按 created_at 升序排列。"""
-        await chunk_svc.save(_make_chunk(id="c2", session_id="s1", created_at=datetime(2024, 2, 1, tzinfo=UTC)))
-        await chunk_svc.save(_make_chunk(id="c1", session_id="s1", created_at=datetime(2024, 1, 1, tzinfo=UTC)))
-        results = await chunk_svc.find_by_session("s1")
+        await chunk_svc.save(_make_chunk(id="c2", pipeline_run_id="p1", created_at=datetime(2024, 2, 1, tzinfo=UTC)))
+        await chunk_svc.save(_make_chunk(id="c1", pipeline_run_id="p1", created_at=datetime(2024, 1, 1, tzinfo=UTC)))
+        results = await chunk_svc.find_by_pipeline("p1")
         assert results[0].id == "c1"
         assert results[1].id == "c2"
 

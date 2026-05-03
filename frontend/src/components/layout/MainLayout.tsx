@@ -12,7 +12,20 @@ import type { ResolvedLayout, ViewportBreakpoint } from '@/types/layout'
 
 /** 主布局组件属性 */
 interface MainLayoutProps {
-  children?: React.ReactNode
+  /** 侧边栏内容 */
+  sidebarContent?: React.ReactNode
+  /** 顶部导航内容 */
+  topNavContent?: React.ReactNode
+  /** 聊天面板内容 */
+  chatContent?: React.ReactNode
+  /** 工作区面板内容 */
+  workspaceContent?: React.ReactNode
+  /** Dock 栏内容 */
+  dockContent?: React.ReactNode
+  /** 悬浮窗内容 */
+  floatingContent?: React.ReactNode
+  /** 全屏覆盖层内容 */
+  fullscreenContent?: React.ReactNode
 }
 
 /**
@@ -35,7 +48,15 @@ function getBreakpoint(
  *
  * 管理侧边栏、聊天面板、工作区面板、Dock 栏、悬浮窗容器和全屏覆盖层的排列
  */
-export function MainLayout({ children }: MainLayoutProps) {
+export function MainLayout({
+  sidebarContent,
+  topNavContent,
+  chatContent,
+  workspaceContent,
+  dockContent,
+  floatingContent,
+  fullscreenContent,
+}: MainLayoutProps) {
   const themeConfig = useThemeStore((s) => s.currentTheme)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [viewportWidth, setViewportWidth] = useState(
@@ -65,74 +86,77 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   return (
     <div
-      className="bg-background flex h-screen w-screen overflow-hidden"
+      className="bg-background flex h-screen w-screen flex-col overflow-hidden"
       style={{ fontFamily: 'var(--font-family)' }}
     >
-      {/* 侧边栏 */}
-      <aside
-        className="border-border flex-shrink-0 overflow-hidden border-r transition-all duration-300"
-        style={{
-          width: sidebarCollapsed ? 0 : resolved.sidebar.width,
-          minWidth: sidebarCollapsed ? 0 : resolved.sidebar.minWidth,
-          zIndex: layoutConfig.zIndex.sidebar,
-        }}
-      >
-        {!sidebarCollapsed && (
-          <div className="flex h-full flex-col">
-            <div className="text-foreground p-4 text-sm font-medium">导航</div>
-            <div className="flex-1 overflow-y-auto p-2">
-              <slot name="sidebar" />
-            </div>
-          </div>
-        )}
-      </aside>
-
-      {/* 主内容区 */}
-      <main className="flex min-w-0 flex-1 flex-col">
-        {/* 顶部导航 */}
-        <header
-          className="border-border flex flex-shrink-0 items-center border-b px-4"
-          style={{ height: 48 }}
+      {/* 水平区域：侧边栏 + 主内容 */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* 侧边栏 */}
+        <aside
+          className="border-border flex-shrink-0 overflow-hidden border-r transition-all duration-300"
+          style={{
+            width: sidebarCollapsed ? 0 : resolved.sidebar.width,
+            minWidth: sidebarCollapsed ? 0 : resolved.sidebar.minWidth,
+            zIndex: layoutConfig.zIndex.sidebar,
+          }}
         >
-          <button
-            onClick={toggleSidebar}
-            className="hover:bg-accent text-foreground rounded-md p-2"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <rect y="2" width="16" height="1.5" rx="0.75" />
-              <rect y="7" width="16" height="1.5" rx="0.75" />
-              <rect y="12" width="16" height="1.5" rx="0.75" />
-            </svg>
-          </button>
-          <div className="text-foreground ml-4 text-sm font-medium">超级终端</div>
-          <div className="flex-1" />
-          <slot name="topnav" />
-        </header>
-
-        {/* 聊天 + 工作区面板 */}
-        <div className="flex min-h-0 flex-1">
-          {/* 聊天面板 */}
-          <section
-            className="border-border flex-shrink-0 overflow-hidden border-r"
-            style={{
-              width: resolved.chatPanel.width,
-              minWidth: resolved.chatPanel.minWidth,
-            }}
-          >
-            <slot name="chat" />
-          </section>
-
-          {/* 工作区面板 */}
-          {showWorkspace && (
-            <section
-              className="min-w-0 flex-1 overflow-hidden"
-              style={{ minWidth: resolved.workspacePanel.minWidth }}
-            >
-              <slot name="workspace" />
-            </section>
+          {!sidebarCollapsed && (
+            <div className="flex h-full flex-col">
+              <div className="text-foreground p-4 text-sm font-medium">导航</div>
+              <div className="flex-1 overflow-y-auto p-2">
+                {sidebarContent}
+              </div>
+            </div>
           )}
-        </div>
-      </main>
+        </aside>
+
+        {/* 主内容区 */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          {/* 顶部导航 */}
+          <header
+            className="border-border flex flex-shrink-0 items-center border-b px-4"
+            style={{ height: 48 }}
+          >
+            <button
+              onClick={toggleSidebar}
+              className="hover:bg-accent text-foreground rounded-md p-2"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <rect y="2" width="16" height="1.5" rx="0.75" />
+                <rect y="7" width="16" height="1.5" rx="0.75" />
+                <rect y="12" width="16" height="1.5" rx="0.75" />
+              </svg>
+            </button>
+            <div className="text-foreground ml-4 text-sm font-medium">超级终端</div>
+            <div className="flex-1" />
+            {topNavContent}
+          </header>
+
+          {/* 聊天 + 工作区面板 */}
+          <div className="flex min-h-0 flex-1">
+            {/* 聊天面板 */}
+            <section
+              className="border-border flex-shrink-0 overflow-hidden border-r"
+              style={{
+                width: resolved.chatPanel.width,
+                minWidth: resolved.chatPanel.minWidth,
+              }}
+            >
+              {chatContent}
+            </section>
+
+            {/* 工作区面板 */}
+            {showWorkspace && (
+              <section
+                className="min-w-0 flex-1 overflow-hidden"
+                style={{ minWidth: resolved.workspacePanel.minWidth }}
+              >
+                {workspaceContent}
+              </section>
+            )}
+          </div>
+        </main>
+      </div>
 
       {/* Dock 栏 */}
       <div
@@ -142,7 +166,7 @@ export function MainLayout({ children }: MainLayoutProps) {
           zIndex: layoutConfig.zIndex.dockBar,
         }}
       >
-        <slot name="dock" />
+        {dockContent}
       </div>
 
       {/* 悬浮窗容器 */}
@@ -151,7 +175,7 @@ export function MainLayout({ children }: MainLayoutProps) {
         className="pointer-events-none fixed inset-0"
         style={{ zIndex: layoutConfig.zIndex.floatingWindow }}
       >
-        <slot name="floating" />
+        {floatingContent}
       </div>
 
       {/* 全屏覆盖层 */}
@@ -160,7 +184,7 @@ export function MainLayout({ children }: MainLayoutProps) {
         className="fixed inset-0 hidden"
         style={{ zIndex: layoutConfig.zIndex.fullscreen }}
       >
-        <slot name="fullscreen" />
+        {fullscreenContent}
       </div>
     </div>
   )

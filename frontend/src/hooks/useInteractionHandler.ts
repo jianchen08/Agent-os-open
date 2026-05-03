@@ -8,9 +8,11 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { webSocketService } from '@/services/websocket/WebSocketService'
+import { useAuthStore } from '@/stores/authStore'
 import { useInteractionStore } from '@/stores/interactionStore'
-import { useSessionListStore } from '@/stores/sessionListStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { PendingInteraction } from '@/stores/interactionStore'
+import { playNotificationSound } from '@/utils/audioNotification'
 
 /**
  * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
@@ -48,7 +50,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const markNavigated = useInteractionStore((s) => s.markNavigated)
   const dismissInteraction = useInteractionStore((s) => s.dismissInteraction)
   const pendingInteractions = useInteractionStore((s) => s.pendingInteractions)
-  const setActiveSession = useSessionListStore((s) => s.setActiveSession)
 
   // 追踪已调度清理的 requestId，防止重复调度
   const scheduledDismissals = useRef<Set<string>>(new Set())
@@ -96,6 +97,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
       const parsed = parseInteractionEvent(data)
       if (parsed) {
         addInteraction(parsed)
+        // 播放交互提示音（异步，不阻塞主线程）
+        playNotificationSound().catch(() => {
+          // 静默处理播放失败
+        })
       }
     }
 
@@ -180,12 +185,26 @@ export function useInteractionHandler(sessionId: string | undefined) {
         feedback: 'user_navigated_to_tab',
       })
       markNavigated(requestId)
-      // 切换到目标会话 — 加载历史记录 + WebSocket 连接
-      if (threadId) {
-        await setActiveSession(threadId)
+
+      if (!threadId) return
+
+      // 直接设置 activeSessionId（子任务 threadId 可能不在 sessions 列表中）
+      useSessionStore.setState({ activeSessionId: threadId })
+
+      // 加载子任务的历史消息
+      try {
+        await useSessionStore.getState().fetchMessages(threadId)
+      } catch (error) {
+        console.error('[navigateToTab] 加载子任务消息失败:', error)
+      }
+
+      // 切换 WebSocket 连接到子任务频道
+      const currentToken = useAuthStore.getState().token
+      if (currentToken) {
+        useSessionStore.getState().connectWebSocket(threadId, currentToken)
       }
     },
-    [markNavigated, setActiveSession],
+    [markNavigated],
   )
 
   return {

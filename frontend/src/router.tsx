@@ -253,6 +253,17 @@ function HomePage(): ReactNode {
       const content = eventData.content || eventData.data?.content || ''
       if (!messageId) return
 
+      // FIX: 如果消息处于 thinking 状态，内容应路由到 thinking 字段而非 content
+      const msgs = useSessionStore.getState().messages[sid] || []
+      const msg = msgs.find((m) => m.id === messageId)
+      if (msg?.thinking?.isThinking) {
+        const prevContent = msg.thinking.content || ''
+        updateMessageFields(sid, messageId, {
+          thinking: { content: prevContent + content, isThinking: true },
+        })
+        return
+      }
+
       updateMessageContent(sid, messageId, content, { mode: 'append' })
     }
 

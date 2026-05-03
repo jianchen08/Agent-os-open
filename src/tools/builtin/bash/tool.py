@@ -141,6 +141,50 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
     # 回调触发阈值（秒）
     CALLBACK_THRESHOLD: ClassVar[int] = 30
 
+    # summary 生效的输出行数阈值，短于此值不生成 summary
+    SUMMARY_LINE_THRESHOLD: ClassVar[int] = 10
+
+    @staticmethod
+    def _compact_result_data(
+        pid: int,
+        output: str | None,
+        summary_obj: dict[str, Any],
+        exit_code: int,
+    ) -> dict[str, Any]:
+        """精简 result_data，去掉 LLM 不需要的字段以节省 token。
+
+        保留策略：
+        - pid: LLM 需要 pid 才能调用 continue/terminate/input
+        - output: 核心输出
+        - exit_code: 仅非 0 时保留
+        - summary: 仅长输出（>10行）时保留，短输出直接看 output
+        - warnings/errors: 仅非空时保留
+        - status: 仅非 completed 时保留（LLM 可从消息格式推断成功）
+        """
+        data: dict[str, Any] = {
+            "pid": pid,
+            "output": output,
+        }
+
+        if exit_code != 0:
+            data["exit_code"] = exit_code
+
+        warnings = summary_obj.get("warnings", [])
+        errors = summary_obj.get("errors", [])
+        if warnings:
+            data["warnings"] = warnings
+        if errors:
+            data["errors"] = errors
+
+        # 短输出不生成 summary（比 output 本身还长就失去意义）
+        output_lines = (output or "").count("\n") + 1 if output else 0
+        if output_lines > BashTool.SUMMARY_LINE_THRESHOLD:
+            summary_lines = summary_obj.get("summary", [])
+            if summary_lines:
+                data["summary"] = summary_lines
+
+        return data
+
     def __init__(
         self,
         timeout: int = DEFAULT_TIMEOUT,
@@ -372,11 +416,9 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                         return create_success_result(
                             data={
                                 "status": "running",
-                                "process_id": str(pid),  # 统一为字符串
-                                "pid": pid,  # 向后兼容
+                                "pid": pid,
                                 "elapsed": round(time.time() - proc_info.start_time, 1),
                                 "summary": summary.get("summary", []),
-                                "isolated": False,
                             },
                             metadata={
                                 "action": "execute",
@@ -396,18 +438,12 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
 
             if summary:
                 exit_code = summary.get("exit_code", 0)
-                result_data = {
-                    "status": "completed",
-                    "process_id": str(pid),
-                    "pid": pid,
-                    "elapsed": summary.get("elapsed_seconds", 0),
-                    "output": output,
-                    "summary": summary.get("summary", []),
-                    "exit_code": exit_code,
-                    "warnings": summary.get("warnings", []),
-                    "errors": summary.get("errors", []),
-                    "isolated": False,
-                }
+                result_data = self._compact_result_data(
+                    pid=pid,
+                    output=output,
+                    summary_obj=summary,
+                    exit_code=exit_code,
+                )
 
                 if exit_code != 0:
                     error_msg = output[-500:] if output and len(output) > 500 else (output or f"命令执行失败，退出码: {exit_code}")

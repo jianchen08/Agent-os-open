@@ -37,14 +37,19 @@ class SessionService:
         channel_ref: str = "",
         session_id: str | None = None,
     ) -> SessionModel:
-        """创建新会话。"""
+        """创建新会话，立即生成 active_pipeline_id 并持久化。"""
         session = SessionModel(
             session_id=session_id or uuid.uuid4().hex[:12],
             channel_type=channel_type,
             channel_ref=channel_ref,
         )
+        # 立即生成 pipeline_id，保证持久化后永远有值
+        session.generate_pipeline_id()
         self._persist_session_state(session)
-        logger.info("Session created: id=%s", session.session_id)
+        logger.info(
+            "Session created: id=%s, pipeline=%s",
+            session.session_id, session.active_pipeline_id,
+        )
         return session
 
     async def create_or_restore(
@@ -55,6 +60,7 @@ class SessionService:
         """创建新会话或恢复 session_id。
 
         只恢复 session_id，对话历史由 cli_main 通过检查点恢复。
+        恢复后保证 active_pipeline_id 非空。
         """
         saved = self._load_session_state()
         if saved:
@@ -64,8 +70,19 @@ class SessionService:
                 channel_type=channel_type,
                 channel_ref=channel_ref,
             )
+            # 兜底：状态文件中 active_pipeline_id 为空时立即补生成
+            if not session.active_pipeline_id:
+                session.generate_pipeline_id()
+                logger.info(
+                    "Session restored with new pipeline (was empty): "
+                    "id=%s, pipeline=%s",
+                    session.session_id, session.active_pipeline_id,
+                )
             self._persist_session_state(session)
-            logger.info("Session restored: id=%s, active_pipeline=%s", session.session_id, session.active_pipeline_id)
+            logger.info(
+                "Session restored: id=%s, active_pipeline=%s",
+                session.session_id, session.active_pipeline_id,
+            )
             return session
         return self.create(channel_type=channel_type, channel_ref=channel_ref)
 

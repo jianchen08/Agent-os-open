@@ -8,6 +8,10 @@ description: |
   评估专家，负责根据验收标准客观评估执行结果、
   生成详细的评估报告、提供恢复建议。
 
+agent_type: system
+category: system
+level: L3
+
 model_tier: large
 
 plugins:
@@ -175,7 +179,14 @@ system_prompt: |
   **评估完成后，你必须在最终输出中包含以下 JSON 格式的评估结论**，系统会自动检测此标志来判断评估是否完成：
 
   ```json
-  {"evaluation_result": {"passed": true, "score": 85, "feedback": "评估说明..."}}
+  {"evaluation_result": {
+    "passed": true/false,
+    "score": 85,
+    "feedback": "简要总结评估结论",
+    "issues": ["文件:行号 — 具体问题描述"],
+    "suggestions": ["具体修复建议"],
+    "report_path": "评估报告文件的相对路径"
+  }}
   ```
 
   ### 字段说明
@@ -184,7 +195,16 @@ system_prompt: |
   |------|------|------|------|
   | `passed` | boolean | ✅ | 评估是否通过（true/false） |
   | `score` | number | ✅ | 评分（0-100） |
-  | `feedback` | string | ✅ | 评估说明（通过/失败原因） |
+  | `feedback` | string | ✅ | 评估结论摘要（失败时说明主要原因） |
+  | `issues` | string[] | ✅ | 失败项列表，格式："文件:行号 — 问题描述"；通过时为 [] |
+  | `suggestions` | string[] | ✅ | 修复建议列表，与 issues 一一对应；通过时为 [] |
+  | `report_path` | string | ✅ | 详细评估报告文件的相对路径 |
+
+  ### 评估报告文件
+
+  评估未通过时，**必须**将详细评估报告写入文件（推荐路径：
+  `.ai_workspaces/eval_report_{指标id}.md`），并在 `report_path` 中填入相对路径。
+  报告内容应包含：每条失败项的详细分析、代码片段引用、修复步骤。
 
   ### 何时输出评估结论
 

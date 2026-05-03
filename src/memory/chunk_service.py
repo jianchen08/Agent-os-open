@@ -154,23 +154,23 @@ class ChunkService:
 
         return True
 
-    async def find_by_session(
+    async def find_by_pipeline(
         self,
-        session_id: str,
+        pipeline_run_id: str,
         layer: str | None = None,
     ) -> list[ChunkData]:
-        """按会话 ID 查找压缩块。
+        """按管道运行 ID 查找压缩块。
 
         Args:
-            session_id: 会话 ID
+            pipeline_run_id: 管道运行 ID
             layer: 分层标识过滤（可选）
 
         Returns:
-            压缩块列表
+            压缩块列表（按创建时间升序）
         """
         results = [
             chunk for chunk in self._cache.values()
-            if chunk.session_id == session_id
+            if chunk.pipeline_run_id == pipeline_run_id
         ]
         if layer:
             results = [c for c in results if c.layer == layer]

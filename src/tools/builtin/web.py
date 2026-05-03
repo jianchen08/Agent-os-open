@@ -267,8 +267,26 @@ class WebTool(BuiltinTool):
                 try:
                     data = response.json()
                 except Exception:
-                    # 如果不是 JSON，返回文本
-                    data = content.decode("utf-8", errors="ignore")
+                    # 非 JSON：检测 HTML 并提取文本，节省 LLM token
+                    text = content.decode("utf-8", errors="ignore")
+                    if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
+                        try:
+                            import trafilatura
+                            extracted = trafilatura.extract(
+                                text,
+                                include_tables=True,
+                                include_links=False,
+                                include_formatting=False,
+                                favor_precision=True,
+                            )
+                            if extracted:
+                                data = extracted
+                            else:
+                                data = text[:2000]
+                        except Exception:
+                            data = text[:2000]
+                    else:
+                        data = text
 
                 if response.status_code >= 400:
                     hint = self._http_recovery_hint(response.status_code)
@@ -340,8 +358,26 @@ class WebTool(BuiltinTool):
                 try:
                     data = response.json()
                 except Exception:
-                    # 如果不是 JSON，返回文本
-                    data = content.decode("utf-8", errors="ignore")
+                    # 非 JSON：检测 HTML 并提取文本，节省 LLM token
+                    text = content.decode("utf-8", errors="ignore")
+                    if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
+                        try:
+                            import trafilatura
+                            extracted = trafilatura.extract(
+                                text,
+                                include_tables=True,
+                                include_links=False,
+                                include_formatting=False,
+                                favor_precision=True,
+                            )
+                            if extracted:
+                                data = extracted
+                            else:
+                                data = text[:2000]
+                        except Exception:
+                            data = text[:2000]
+                    else:
+                        data = text
 
                 if response.status_code >= 400:
                     hint = self._http_recovery_hint(response.status_code)

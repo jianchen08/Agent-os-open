@@ -19,18 +19,36 @@ class ConcurrencyController:
 
     def __init__(self, max_concurrent: int = 5) -> None:
         self._max_concurrent = max_concurrent
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._semaphore: asyncio.Semaphore | None = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        return self._semaphore
 
     @asynccontextmanager
     async def acquire(self) -> AsyncGenerator[None, None]:
         """获取一个管道执行槽位。"""
-        async with self._semaphore:
+        sem = self._get_semaphore()
+        try:
+            await sem.acquire()
+        except RuntimeError as e:
+            if "bound to a different event loop" in str(e).lower():
+                self._semaphore = None
+                sem = self._get_semaphore()
+                await sem.acquire()
+            else:
+                raise
+        try:
             yield
+        finally:
+            sem.release()
 
     @property
     def available(self) -> int:
         """当前可用槽位数。"""
-        return self._semaphore._value
+        sem = self._semaphore
+        return sem._value if sem is not None else self._max_concurrent
 
     @property
     def max_concurrent(self) -> int:

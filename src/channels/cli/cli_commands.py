@@ -221,15 +221,22 @@ class SlashCommandRegistry:
 
     async def _cmd_compact(self, args: str, ctx: dict[str, Any]) -> CommandResult:
         """压缩上下文。"""
-        # 尝试调用 context_compress 插件
         services = ctx.get("services", {})
-        memory_service = services.get("memory_service")
+        memory_service = services.get("context_service")
 
-        if memory_service is not None and hasattr(memory_service, "compress_context"):
+        if memory_service is not None and hasattr(memory_service, "compress_messages"):
             try:
-                result = await memory_service.compress_context()
-                self._console.print("[green][OK] 上下文已压缩[/green]")
-                return CommandResult(state_updates={"context_compressed": True})
+                messages = ctx.get("messages", [])
+                context_window = ctx.get("context_window", 128000)
+                result = await memory_service.compress_messages(
+                    messages=messages,
+                    context_window=context_window,
+                )
+                if result:
+                    self._console.print("[green][OK] 上下文已压缩[/green]")
+                    return CommandResult(state_updates={"context_compressed": True, "messages": result})
+                self._console.print("[yellow][~] 上下文无需压缩[/yellow]")
+                return CommandResult()
             except Exception as exc:
                 self._console.print(f"[red]压缩失败: {exc}[/red]")
                 return CommandResult()

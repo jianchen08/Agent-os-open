@@ -108,10 +108,10 @@ class ExecutionRecordStorage:
     def __init__(self, data_dir: str | Path | None = None) -> None:
         self._records: dict[str, ExecutionRecordData] = {}
         self._summaries: dict[str, PipelineRunSummary] = {}
+        self._loaded_pipelines: set[str] = set()
         self._data_dir = Path(data_dir) if data_dir else None
         if self._data_dir:
             self._data_dir.mkdir(parents=True, exist_ok=True)
-            self._load_all()
         self._pipeline_root_map: dict[str, str] = {}
         self._map_file = self._data_dir / "_pipeline_root_map.json" if self._data_dir else None
         if self._map_file:
@@ -129,6 +129,16 @@ class ExecutionRecordStorage:
                 continue
             for yaml_file in sorted(subdir.glob("*.yaml")):
                 self._load_pipeline_file(yaml_file)
+
+    def _ensure_loaded(self, pipeline_run_id: str) -> None:
+        """按需加载指定 pipeline 的数据文件（懒加载）。"""
+        if pipeline_run_id in self._loaded_pipelines or not self._data_dir:
+            return
+        # 找到对应的文件
+        yaml_file = self._get_pipeline_file(pipeline_run_id)
+        if yaml_file and yaml_file.exists():
+            self._load_pipeline_file(yaml_file)
+        self._loaded_pipelines.add(pipeline_run_id)
 
     def _load_root_map(self) -> None:
         if not self._map_file or not self._map_file.exists():
@@ -184,6 +194,11 @@ class ExecutionRecordStorage:
             if r.pipeline_run_id == pipeline_run_id
         ]
         records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+        # 同步 summary 的 total_records，避免管道重试/恢复后
+        # summary 显示旧的记录数
+        if summary and records:
+            summary.total_records = len(records)
+            summary.total_iterations = max(r.iteration for r in records)
         data: dict[str, Any] = {}
         if summary:
             data["summary"] = self._summary_to_dict(summary)
@@ -251,6 +266,7 @@ class ExecutionRecordStorage:
             record.created_at = datetime.now().isoformat()
         self._records[record.record_id] = record
         if record.pipeline_run_id:
+            self._loaded_pipelines.add(record.pipeline_run_id)
             self._persist_pipeline(record.pipeline_run_id)
         logger.debug("保存执行记录: %s (pipeline=%s, iteration=%d)",
                       record.record_id, record.pipeline_run_id, record.iteration)
@@ -262,6 +278,7 @@ class ExecutionRecordStorage:
     def list_by_session(
         self, session_id: str, limit: int = 50
     ) -> list[ExecutionRecordData]:
+        self._ensure_loaded(session_id)
         records = [
             r for r in self._records.values() if r.pipeline_run_id == session_id
         ]
@@ -269,6 +286,7 @@ class ExecutionRecordStorage:
         return records[:limit]
 
     def count_by_session(self, session_id: str) -> int:
+        self._ensure_loaded(session_id)
         return sum(
             1 for r in self._records.values() if r.pipeline_run_id == session_id
         )
@@ -302,6 +320,7 @@ class ExecutionRecordStorage:
     def list_by_pipeline(
         self, pipeline_run_id: str
     ) -> list[ExecutionRecordData]:
+        self._ensure_loaded(pipeline_run_id)
         records = [
             r for r in self._records.values()
             if r.pipeline_run_id == pipeline_run_id
@@ -315,6 +334,7 @@ class ExecutionRecordStorage:
         if not summary.created_at:
             summary.created_at = datetime.now().isoformat()
         self._summaries[summary.run_id] = summary
+        self._loaded_pipelines.add(summary.run_id)
         self._persist_pipeline(summary.run_id)
         logger.debug("保存管道摘要: %s (iterations=%d, status=%s)",
                       summary.run_id, summary.total_iterations, summary.status)
@@ -346,11 +366,15 @@ class ExecutionRecordStorage:
         )
 
     def get_summary(self, run_id: str) -> PipelineRunSummary | None:
+        self._ensure_loaded(run_id)
         return self._summaries.get(run_id)
 
     def list_summaries(
         self, limit: int = 50
     ) -> list[PipelineRunSummary]:
+        # summaries 需要全量扫描，触发一次性加载
+        if self._data_dir and not self._loaded_pipelines:
+            self._load_all()
         summaries = sorted(
             self._summaries.values(),
             key=lambda s: s.created_at,
@@ -359,6 +383,8 @@ class ExecutionRecordStorage:
         return summaries[:limit]
 
     def get_total_tokens(self) -> dict[str, int]:
+        if self._data_dir and not self._loaded_pipelines:
+            self._load_all()
         total: dict[str, int] = {}
         for summary in self._summaries.values():
             for key, value in summary.total_tokens.items():

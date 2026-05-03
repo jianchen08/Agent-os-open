@@ -182,24 +182,56 @@ class TestPromptBuildLayerOrder:
         assert memory_pos > knowledge_pos
 
     @pytest.mark.asyncio
-    async def test_compressed_layers_order_l3_l2_l1(self) -> None:
-        """压缩层按 L3 → L2 → L1 顺序排列。"""
+    async def test_compressed_layers_order_keywords_l2_l1(self) -> None:
+        """压缩层按 关键词 → L2 → L1 顺序排列（预算溢出降级）。"""
         plugin = PromptBuildPlugin(config={"include_static_vars": False})
         state = make_base_state()
+        state["pipeline_id"] = "test-pipeline-001"
+        # 小窗口 → L1预算=6, L2预算=2
+        state["context_window"] = 40
+
+        from datetime import datetime, UTC
+        # 4 个 L1 chunks: 最新 1 个 fit L1，1 个 fit L2，1 个 fit L2，
+        # 最老的溢出到关键词
+        chunks_l1 = [
+            ChunkData(
+                content="L1最新", l2_content="L2",
+                keywords=["kw4"], created_at=datetime(2024, 4, 1, tzinfo=UTC),
+                sequence_start=301, sequence_end=400,
+            ),
+            ChunkData(
+                content="L" * 20, l2_content="y",
+                keywords=["kw3"], created_at=datetime(2024, 3, 1, tzinfo=UTC),
+                sequence_start=201, sequence_end=300,
+            ),
+            ChunkData(
+                content="L" * 20, l2_content="z",
+                keywords=["kw2"], created_at=datetime(2024, 2, 1, tzinfo=UTC),
+                sequence_start=101, sequence_end=200,
+            ),
+            ChunkData(
+                content="L" * 20, l2_content="w",
+                keywords=["kw1_old"], created_at=datetime(2024, 1, 1, tzinfo=UTC),
+                sequence_start=1, sequence_end=100,
+            ),
+        ]
 
         chunk_service = MagicMock()
-        chunk_service.find_by_session = AsyncMock(side_effect=lambda sid, layer: [
-            ChunkData(content=f"{layer}摘要内容", keywords=[f"{layer}_kw1", f"{layer}_kw2"])
-        ])
+        async def mock_find(pid, layer):
+            if layer == "L1":
+                return chunks_l1
+            return []
+        chunk_service.find_by_pipeline = AsyncMock(side_effect=mock_find)
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        l3_pos = content.index("关键词索引")
+        # 验证三层都存在且顺序正确：关键词 → L2 → L1
+        kw_pos = content.index("历史关键词索引")
         l2_pos = content.index("三元组摘要")
         l1_pos = content.index("八段摘要")
-        assert l3_pos < l2_pos < l1_pos
+        assert kw_pos < l2_pos < l1_pos
 
 
 # ══════════════════════════════════════════════════
@@ -560,14 +592,21 @@ class TestFullAssemblyPipeline:
         llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
 
         state = make_base_state()
+        state["pipeline_id"] = "test-pipeline-001"
         state["context.static_vars"] = [
             {"type": "content", "name": "项目名", "value": "Agent OS"}
         ]
 
         chunk_service = MagicMock()
-        chunk_service.find_by_session = AsyncMock(side_effect=lambda sid, layer: [
-            ChunkData(content=f"{layer}内容", keywords=[f"kw_{layer}"])
-        ])
+        async def mock_find(pid, layer):
+            if layer == "L1":
+                return [ChunkData(
+                    content="L1摘要内容",
+                    l2_content="L2摘要内容",
+                    keywords=["kw_test"],
+                )]
+            return []
+        chunk_service.find_by_pipeline = AsyncMock(side_effect=mock_find)
 
         ctx = make_ctx(state, chunk_service=chunk_service)
         prompt_result = await prompt_plugin.execute(ctx)
@@ -577,8 +616,6 @@ class TestFullAssemblyPipeline:
         system_content = final_messages[0]["content"]
 
         assert "Agent OS" in system_content
-        assert "关键词索引" in system_content
-        assert "三元组摘要" in system_content
         assert "八段摘要" in system_content
 
     @pytest.mark.asyncio
@@ -657,22 +694,50 @@ class TestFullAssemblyPipeline:
 
     @pytest.mark.asyncio
     async def test_layer_order_matches_old_code(self) -> None:
-        """验证 layer_order 与旧代码完全一致。"""
+        """验证 layer_order: 关键词 → L2 → L1 按预算溢出降级。"""
+        from datetime import datetime, UTC
+
         prompt_plugin = PromptBuildPlugin(config={
             "include_tools_description_in_prompt": True,
             "include_static_vars": True,
             "include_compressed_layers": True,
         })
         state = make_base_state()
+        state["pipeline_id"] = "test-pipeline-001"
+        state["context_window"] = 500
         state["prompt.tool_descriptions"] = "## 工具\n- search: 搜索"
         state["context.static_vars"] = [{"type": "content", "name": "项目", "value": "AgentOS"}]
         state["knowledge.context"] = "知识内容"
         state["memory.retrieved"] = "记忆内容"
 
         chunk_service = MagicMock()
-        chunk_service.find_by_session = AsyncMock(side_effect=lambda sid, layer: [
-            ChunkData(content=f"{layer}摘要", keywords=[f"kw_{layer}"])
-        ])
+        async def mock_find(pid, layer):
+            if layer != "L1":
+                return []
+            return [
+                ChunkData(
+                    content="最新L1摘要",
+                    l2_content="最新L2摘要",
+                    keywords=["kw_new"],
+                    created_at=datetime(2024, 3, 1, tzinfo=UTC),
+                    sequence_start=200, sequence_end=300,
+                ),
+                ChunkData(
+                    content="中间L1摘要",
+                    l2_content="中间L2摘要",
+                    keywords=["kw_mid"],
+                    created_at=datetime(2024, 2, 1, tzinfo=UTC),
+                    sequence_start=100, sequence_end=200,
+                ),
+                ChunkData(
+                    content="最老L1摘要",
+                    l2_content="最老L2摘要",
+                    keywords=["old_kw"],
+                    created_at=datetime(2024, 1, 1, tzinfo=UTC),
+                    sequence_start=1, sequence_end=100,
+                ),
+            ]
+        chunk_service.find_by_pipeline = AsyncMock(side_effect=mock_find)
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await prompt_plugin.execute(ctx)
@@ -684,12 +749,12 @@ class TestFullAssemblyPipeline:
             "static_vars": content.index("静态变量"),
             "knowledge": content.index("知识内容"),
             "memory": content.index("记忆内容"),
-            "l3": content.index("关键词索引"),
+            "keywords": content.index("历史关键词索引"),
             "l2": content.index("三元组摘要"),
             "l1": content.index("八段摘要"),
         }
 
         order = list(positions.values())
         assert order == sorted(order), (
-            f"layer_order 不一致: {list(positions.keys())} -> {[positions[k] for k in positions]}"
+            f"layer_order 不一致: {list(positions.keys())}"
         )

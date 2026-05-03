@@ -13,7 +13,7 @@
  * - 新增: 移动端响应式支持
  */
 
-import { Loader2, Plus, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -100,6 +100,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const fetchSessions = useSessionListStore((state) => state.fetchSessions)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
+  const toggleSidebar = useUIStore((state) => state.toggleSidebar)
 
   // Agent 数据统一在这里加载
   const fetchAgents = useAgentStore((state) => state.fetchAgents)
@@ -304,138 +305,201 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       <aside
         data-testid="sidebar"
         className={cn(
-          'border-border/50 flex flex-col border-r transition-all duration-300',
-          // 优化：侧边栏增加淡底色，与主对话区视觉分离
+          'border-border/50 flex flex-col border-r transition-all duration-300 ease-in-out',
+          // 侧边栏淡底色，与主对话区视觉分离
           'bg-[var(--sidebar-bg-light)] dark:bg-[var(--sidebar-bg-dark)]',
           // 移动端样式：固定定位，从左侧滑入
-          isMobile && 'fixed top-0 left-0 z-50 h-full shadow-2xl',
-          sidebarCollapsed
-            ? '!w-0 w-0 opacity-0'
-            : isMobile
-              ? 'w-[280px] opacity-100'
-              : 'w-[200px] xl:w-[220px]',
+          isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 h-full shadow-2xl',
         )}
         style={
-          sidebarCollapsed
-            ? { minWidth: 0, maxWidth: 0, overflow: 'hidden' }
-            : {
-                width: isMobile ? '280px' : '200px',
-                minWidth: isMobile ? '280px' : '200px',
-                maxWidth: isMobile ? '280px' : '220px',
-                flexShrink: 0,
-              }
+          sidebarCollapsed && !isMobile
+            ? { width: '48px', minWidth: '48px', maxWidth: '48px', flexShrink: 0 }
+            : isMobile
+              ? { width: '280px', minWidth: '280px', maxWidth: '280px', flexShrink: 0 }
+              : { width: '200px', minWidth: '200px', maxWidth: '220px', flexShrink: 0 }
         }
       >
-        {/* 侧边栏头部 - Requirements: 9.1, 9.2, 9.3 */}
-        <div
-          className={cn(
-            'border-border flex items-center justify-between border-b',
-            SIDEBAR_STYLES.headerHeight, // 56px 高度
-            SIDEBAR_STYLES.paddingX, // 12px 水平内边距
-          )}
-          data-testid="sidebar-header"
-        >
-          <h2 className="text-foreground text-base font-semibold">会话</h2>
-          <div className="flex items-center gap-1">
-            {/* 移动端关闭按钮 */}
-            {isMobile && (
-              <Button
-                size={SIDEBAR_STYLES.buttonSize}
-                variant="ghost"
-                onClick={handleCloseSidebar}
-                aria-label="关闭侧边栏"
-                title="关闭侧边栏"
-                data-testid="close-sidebar-button"
-                className="h-7 w-7 p-0"
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            )}
-            {/* 新建按钮 28px */}
-            <Button
-              size={SIDEBAR_STYLES.buttonSize}
-              variant="default"
+        {/* ---- 折叠状态：仅显示图标栏（48px） ---- */}
+        {sidebarCollapsed && !isMobile ? (
+          <div className="flex h-full flex-col items-center py-3">
+            {/* 展开按钮 */}
+            <button
+              onClick={toggleSidebar}
+              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
+              aria-label="展开侧边栏"
+              title="展开侧边栏"
+              data-testid="sidebar-expand-button"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+
+            {/* 新建会话图标 */}
+            <button
               onClick={handleOpenNewSessionModal}
+              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
               aria-label="新建会话"
               title="新建会话"
-              data-testid="new-session-button"
-              className="h-7 w-7 p-0" // 确保 28px 正方形
             >
-              <Plus className="h-3.5 w-3.5" />
-            </Button>
+              <Plus className="h-4 w-4" />
+            </button>
+
+            {/* 搜索图标（点击展开） */}
+            <button
+              onClick={toggleSidebar}
+              className="hover:bg-accent text-muted-foreground hover:text-foreground mb-3 flex h-8 w-8 items-center justify-center rounded-md transition-colors"
+              aria-label="搜索会话"
+              title="搜索会话"
+            >
+              <Search className="h-4 w-4" />
+            </button>
+
+            {/* 会话图标列表（最多显示 8 个） */}
+            <div className="flex-1 overflow-y-auto">
+              {sessions.slice(0, 8).map((session) => (
+                <button
+                  key={session.id}
+                  onClick={() => handleSessionClick(session.id)}
+                  className={cn(
+                    'hover:bg-accent mb-1 flex h-8 w-8 items-center justify-center rounded-md transition-colors',
+                    activeSessionId === session.id
+                      ? 'bg-accent text-accent-foreground'
+                      : 'text-muted-foreground',
+                  )}
+                  title={session.title}
+                  aria-label={`切换到会话: ${session.title}`}
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-
-        {/* 新建会话模态框 - Requirements: 13.3 */}
-        <NewSessionModal
-          isOpen={isNewSessionModalOpen}
-          onClose={handleCloseNewSessionModal}
-          onConfirm={handleConfirmCreateSession}
-          isCreating={isCreatingSession}
-        />
-
-        {/* 编辑会话模态框 */}
-        <SessionEditModal
-          isOpen={!!editingSessionId}
-          session={editingSession}
-          onClose={handleCloseEditModal}
-          onSave={handleSaveEdit}
-        />
-
-        {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
-        <div
-          className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
-          data-testid="sidebar-search-section"
-        >
-          <SessionSearch
-            onSearchChange={setSearchKeyword}
-            resultCount={filteredSessions.length}
-            totalCount={sessions.length}
-            className="sidebar-search"
-            inputClassName={SIDEBAR_STYLES.searchHeight} // 32px 搜索框高度
-          />
-        </div>
-
-        {/* 会话列表 - Requirements: 9.3, 9.4 */}
-        <div className="scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
-          {isLoading ? (
+        ) : (
+          /* ---- 展开状态：显示完整内容 ---- */
+          <>
+            {/* 侧边栏头部 - Requirements: 9.1, 9.2, 9.3 */}
             <div
               className={cn(
-                'flex flex-col items-center justify-center text-center',
-                SIDEBAR_STYLES.padding,
-                'py-8',
+                'border-border flex items-center justify-between border-b',
+                SIDEBAR_STYLES.headerHeight,
+                SIDEBAR_STYLES.paddingX,
               )}
+              data-testid="sidebar-header"
             >
-              <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
-              <p className="text-muted-foreground text-sm">加载中...</p>
+              <h2 className="text-foreground text-base font-semibold">会话</h2>
+              <div className="flex items-center gap-1">
+                {/* 移动端关闭按钮 */}
+                {isMobile && (
+                  <Button
+                    size={SIDEBAR_STYLES.buttonSize}
+                    variant="ghost"
+                    onClick={handleCloseSidebar}
+                    aria-label="关闭侧边栏"
+                    title="关闭侧边栏"
+                    data-testid="close-sidebar-button"
+                    className="h-7 w-7 p-0"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {/* 折叠按钮 */}
+                {!isMobile && (
+                  <button
+                    onClick={toggleSidebar}
+                    className="hover:bg-accent text-muted-foreground hover:text-foreground flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                    aria-label="折叠侧边栏"
+                    title="折叠侧边栏"
+                    data-testid="sidebar-collapse-button"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {/* 新建按钮 28px */}
+                <Button
+                  size={SIDEBAR_STYLES.buttonSize}
+                  variant="default"
+                  onClick={handleOpenNewSessionModal}
+                  aria-label="新建会话"
+                  title="新建会话"
+                  data-testid="new-session-button"
+                  className="h-7 w-7 p-0"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </div>
-          ) : filteredSessions.length === 0 ? (
-            <div
-              className={cn(
-                'flex flex-col items-center justify-center text-center',
-                SIDEBAR_STYLES.padding,
-                'py-8',
-              )}
-            >
-              <p className="text-muted-foreground text-sm">
-                {searchKeyword ? '未找到匹配的会话' : '暂无会话'}
-              </p>
-            </div>
-          ) : (
-            <SessionList
-              sessions={filteredSessions}
-              activeSessionId={activeSessionId}
-              deletingSessionIds={deletingSessionIds}
-              onSessionClick={handleSessionClickMobile}
-              onDeleteSession={deleteSession}
-              onEditSession={handleEditSession}
-              onCopySession={handleCopySession}
-              onStarSession={handleStarSession}
-              className="px-2" // 统一左右内边距
-              itemHeight={SIDEBAR_STYLES.itemHeight} // 48px 列表项高度 - Requirements: 9.4
+
+            {/* 新建会话模态框 - Requirements: 13.3 */}
+            <NewSessionModal
+              isOpen={isNewSessionModalOpen}
+              onClose={handleCloseNewSessionModal}
+              onConfirm={handleConfirmCreateSession}
+              isCreating={isCreatingSession}
             />
-          )}
-        </div>
+
+            {/* 编辑会话模态框 */}
+            <SessionEditModal
+              isOpen={!!editingSessionId}
+              session={editingSession}
+              onClose={handleCloseEditModal}
+              onSave={handleSaveEdit}
+            />
+
+            {/* 搜索框区域 - Requirements: 9.3, 9.5 */}
+            <div
+              className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
+              data-testid="sidebar-search-section"
+            >
+              <SessionSearch
+                onSearchChange={setSearchKeyword}
+                resultCount={filteredSessions.length}
+                totalCount={sessions.length}
+                className="sidebar-search"
+                inputClassName={SIDEBAR_STYLES.searchHeight}
+              />
+            </div>
+
+            {/* 会话列表 - Requirements: 9.3, 9.4 */}
+            <div className="scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+              {isLoading ? (
+                <div
+                  className={cn(
+                    'flex flex-col items-center justify-center text-center',
+                    SIDEBAR_STYLES.padding,
+                    'py-8',
+                  )}
+                >
+                  <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
+                  <p className="text-muted-foreground text-sm">加载中...</p>
+                </div>
+              ) : filteredSessions.length === 0 ? (
+                <div
+                  className={cn(
+                    'flex flex-col items-center justify-center text-center',
+                    SIDEBAR_STYLES.padding,
+                    'py-8',
+                  )}
+                >
+                  <p className="text-muted-foreground text-sm">
+                    {searchKeyword ? '未找到匹配的会话' : '暂无会话'}
+                  </p>
+                </div>
+              ) : (
+                <SessionList
+                  sessions={filteredSessions}
+                  activeSessionId={activeSessionId}
+                  deletingSessionIds={deletingSessionIds}
+                  onSessionClick={handleSessionClickMobile}
+                  onDeleteSession={deleteSession}
+                  onEditSession={handleEditSession}
+                  onCopySession={handleCopySession}
+                  onStarSession={handleStarSession}
+                  className="px-2"
+                  itemHeight={SIDEBAR_STYLES.itemHeight}
+                />
+              )}
+            </div>
+          </>
+        )}
       </aside>
     </>
   )

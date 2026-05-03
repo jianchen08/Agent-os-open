@@ -1,14 +1,14 @@
 """上下文窗口守卫 Input 插件。
 
-在每次 LLM 调用前检查上下文大小，超阈值时通过记忆系统的
-ContextCompressor 进行分层递进压缩（L0→L1→L2），
-将旧消息压缩为摘要，保留最近消息，避免 context overflow。
+在每次 LLM 调用前检查上下文大小，超阈值时委托给
+MemoryContextService.compress_messages 进行预算驱动的分层压缩。
 
-BUG-FIX-fix_20260426_context_guard:
-问题根因: 1) context_window_guard 未被加入 input_routes，永远不执行
-          2) 自写的 _compress_messages 只是简单截断丢弃旧消息，信息丢失严重
-修复方案: 使用记忆系统 ContextCompressor 分层压缩，旧消息压缩为结构化摘要
-影响范围: 所有 LLM 调用的上下文管理
+压缩算法由 MemoryContextService 实现：
+- 预算驱动切分（recent_ratio=0.3）
+- 单块替换 + 超预算降级（L1→L2→keywords）
+- 多轮验证（最多 2 轮）
+
+本插件只负责：检查阈值 → 获取服务 → 调用压缩 → 更新 state。
 
 State 命名空间:
     - messages : 压缩后替换的消息列表
@@ -24,23 +24,11 @@ from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
 
-_COMPRESSION_NOTICE = (
-    "[系统提示] 由于对话历史过长，较早的上下文已被记忆系统分层压缩。"
-    "压缩摘要包含在上方消息中，请基于压缩摘要和当前剩余上下文继续完成任务。"
-)
-
 
 class ContextWindowGuardPlugin(IInputPlugin):
     """上下文窗口守卫 Input 插件。
 
-    在管道输入阶段检查 messages 的估算 token 数，
-    超过 context_window 的 trigger_ratio 时触发记忆系统压缩。
-
-    压缩流程：
-    1. 将旧消息分离出来
-    2. 通过 ContextCompressor 进行 L0→L1→L2 分层压缩
-    3. 压缩摘要作为 system 消息保留
-    4. 保留最近的 N 条消息
+    检查 messages 的估算 token 数，超阈值时委托 MemoryContextService 压缩。
 
     优先级：5（在 prompt_build 的 10 之前执行）
     错误策略：SKIP（压缩失败不阻塞管线）
@@ -48,7 +36,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
     Attributes:
         _config: 插件配置字典
         _trigger_ratio: 触发压缩的阈值比例（默认 0.5）
-        _recent_keep_count: 保留最近消息条数（默认 20）
     """
 
     error_policy = ErrorPolicy.SKIP
@@ -60,11 +47,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
             config: 插件配置字典，支持以下键：
                 - enabled: 是否启用（默认 True）
                 - trigger_ratio: 触发压缩的阈值比例（默认 0.5）
-                - recent_keep_count: 保留最近消息条数（默认 20）
         """
         self._config = config or {}
         self._trigger_ratio = self._config.get("trigger_ratio", 0.5)
-        self._recent_keep_count = self._config.get("recent_keep_count", 20)
+        self._compression_model: str | None = self._config.get("compression_model")
 
     @property
     def name(self) -> str:
@@ -75,6 +61,42 @@ class ContextWindowGuardPlugin(IInputPlugin):
     def priority(self) -> int:
         """插件执行优先级，在 prompt_build 之前执行。"""
         return self._config.get("priority", 5)
+
+    def _estimate_tokens(
+        self, messages: list[dict[str, Any]], ctx: PluginContext,
+    ) -> int:
+        """估算当前 messages 的 token 数。
+
+        始终基于当前 messages 做字符估算，再用上次实际用量做校准：
+        取 max(字符估算, 上次实际用量 * 1.15)。
+
+        这样既捕获了新增消息的增长，也保留了上次调用中
+        工具 schema、消息格式化等字符估算遗漏的开销。
+        """
+        cjk = 0
+        other = 0
+        for m in messages:
+            content = str(m.get("content", ""))
+            for c in content:
+                if "一" <= c <= "鿿" or "぀" <= c <= "ヿ":
+                    cjk += 1
+                else:
+                    other += 1
+            for tc in m.get("tool_calls", []):
+                args = tc.get("function", {}).get("arguments", "")
+                if args:
+                    other += len(args)
+        char_estimate = int(cjk * 1.5 + other * 0.25)
+
+        llm_usage = ctx.state.get("llm_usage", {})
+        if isinstance(llm_usage, dict):
+            prev_input = llm_usage.get("input_tokens", 0)
+            if prev_input > 0:
+                return max(char_estimate, round(prev_input * 1.15))
+
+        return char_estimate
+
+    _warned_no_context_window = False
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """检查上下文大小并在超阈值时触发记忆系统压缩。
@@ -87,14 +109,26 @@ class ContextWindowGuardPlugin(IInputPlugin):
         """
         context_window = ctx.state.get("context_window")
         if not context_window:
+            if not self._warned_no_context_window:
+                self._warned_no_context_window = True
+                logger.error(
+                    "[%s] context_window 未设置，上下文守卫无法工作！"
+                    " 请检查模型配置（llm.yaml）是否包含 context_window，"
+                    "以及 core_plugins 是否正确合并了模型配置。",
+                    self.name,
+                )
             return PluginResult()
 
         messages = ctx.state.get("messages", [])
         if not messages:
             return PluginResult()
 
-        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
-        estimated_tokens = total_chars // 2
+        # 窗口变更检测：清理旧压缩摘要，交由 prompt_build 从 chunk_service 重加载
+        cleaned = await self._clean_if_window_changed(ctx, context_window, messages)
+        if cleaned is not None:
+            messages = cleaned
+
+        estimated_tokens = self._estimate_tokens(messages, ctx)
 
         trigger_tokens = int(context_window * self._trigger_ratio)
         if estimated_tokens < trigger_tokens:
@@ -107,295 +141,261 @@ class ContextWindowGuardPlugin(IInputPlugin):
             context_window, self._trigger_ratio, len(messages),
         )
 
-        compressed = await self._compress_with_memory_system(ctx, messages, context_window)
+        service = self._get_memory_service(ctx)
+        if not service:
+            return PluginResult()
+
+        llm_call_fn = self._get_llm_call_fn(ctx)
+        if not llm_call_fn:
+            logger.warning("[%s] 无法获取 LLM 调用函数，跳过压缩", self.name)
+            return PluginResult()
+
+        service.set_llm_call_fn(llm_call_fn)
+
+        previous_l1 = await self._load_previous_l1(ctx)
+        save_fn = await self._make_save_chunk_fn(ctx)
+
+        compressed = await service.compress_messages(
+            messages=messages,
+            context_window=context_window,
+            trigger_ratio=self._trigger_ratio,
+            previous_l1=previous_l1,
+            save_chunk_fn=save_fn,
+        )
+
         if compressed and len(compressed) < len(messages):
             logger.info(
-                "[%s] 记忆系统压缩完成: %d -> %d 条消息",
+                "[%s] 压缩完成: %d -> %d 条消息",
                 self.name, len(messages), len(compressed),
             )
             return PluginResult(state_updates={"messages": compressed})
 
+        # 窗口变更但不需要压缩时，返回清理后的 messages
+        if cleaned is not None:
+            return PluginResult(state_updates={"messages": messages})
+
         return PluginResult()
 
-    async def _compress_with_memory_system(
+    async def _clean_if_window_changed(
         self,
         ctx: PluginContext,
-        messages: list[dict[str, Any]],
         context_window: int,
+        messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]] | None:
-        """使用记忆系统 ContextCompressor 进行分层压缩。
+        """检测 context_window 是否变化，变化时清理 messages 中的旧压缩摘要。
 
-        将旧消息通过 L0→L1→L2 递进压缩为结构化摘要，
-        保留 system 消息和最近 N 条消息。
-
-        Args:
-            ctx: 插件执行上下文
-            messages: 原始消息列表
-            context_window: 模型上下文窗口大小
+        压缩摘要由 prompt_build 从 chunk_service 按新预算重新加载，
+        无需保留在 messages 列表中。
 
         Returns:
-            压缩后的消息列表，压缩失败返回 None
-        """
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        other_msgs = [m for m in messages if m.get("role") != "system"]
-
-        if not other_msgs:
-            return None
-
-        keep_count = min(self._recent_keep_count, len(other_msgs))
-        if len(other_msgs) <= keep_count:
-            return None
-
-        split_idx = len(other_msgs) - keep_count
-        old_msgs, recent_msgs = self._split_preserving_tool_pairs(
-            other_msgs, split_idx,
-        )
-
-        summary = await self._build_compression_summary(ctx, old_msgs, context_window)
-        if not summary:
-            return None
-
-        notice_msg = {"role": "system", "content": _COMPRESSION_NOTICE}
-        summary_msg = {"role": "system", "content": f"## 历史对话压缩摘要\n\n{summary}"}
-
-        result = system_msgs + [notice_msg, summary_msg] + recent_msgs
-
-        logger.info(
-            "[%s] 压缩详情: 压缩 %d 条旧消息为摘要, "
-            "保留 %d system + 2 摘要 + %d 最近消息",
-            self.name, len(old_msgs), len(system_msgs), len(recent_msgs),
-        )
-
-        return result
-
-    @staticmethod
-    def _split_preserving_tool_pairs(
-        messages: list[dict[str, Any]],
-        split_idx: int,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """按 split_idx 分割消息列表，保证 tool call/result 配对完整。
-
-        如果 recent 段包含 tool result 但对应的 assistant(tool_calls)
-        落在了 old 段，则将那个 assistant 消息也移入 recent 段。
-
-        Args:
-            messages: 非系统消息列表
-            split_idx: 初步分割位置
-
-        Returns:
-            (old_msgs, recent_msgs) 保证工具调用配对完整
-        """
-        old_msgs = list(messages[:split_idx])
-        recent_msgs = list(messages[split_idx:])
-
-        # 收集 recent 段中所有 tool result 的 tool_call_id
-        recent_tool_ids: set[str] = set()
-        for msg in recent_msgs:
-            if msg.get("role") == "tool":
-                tc_id = msg.get("tool_call_id")
-                if tc_id:
-                    recent_tool_ids.add(tc_id)
-
-        if not recent_tool_ids:
-            return old_msgs, recent_msgs
-
-        # 从 old 段末尾向前扫描，找到包含这些 tool_call_id 的 assistant 消息
-        # 将它们（以及可能连续的 tool result）移入 recent 段
-        move_count = 0
-        for i in range(len(old_msgs) - 1, -1, -1):
-            msg = old_msgs[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                call_ids = {tc.get("id") for tc in msg["tool_calls"] if tc.get("id")}
-                if call_ids & recent_tool_ids:
-                    move_count = len(old_msgs) - i
-                    break
-
-        if move_count > 0:
-            migrated = old_msgs[-move_count:]
-            old_msgs = old_msgs[:-move_count]
-            recent_msgs = migrated + recent_msgs
-
-        return old_msgs, recent_msgs
-
-    async def _build_compression_summary(
-        self,
-        ctx: PluginContext,
-        old_msgs: list[dict[str, Any]],
-        context_window: int,
-    ) -> str | None:
-        """通过记忆系统 ContextCompressor 一次性压缩旧消息，并保存到 ChunkService。
-
-        Args:
-            ctx: 插件执行上下文
-            old_msgs: 需要压缩的旧消息列表
-            context_window: 模型上下文窗口大小
-
-        Returns:
-            压缩摘要文本（L1，或 L2 如果 L1 超预算），失败返回 None
+            清理后的 messages 列表，或 None（窗口未变，无需处理）
         """
         try:
-            from memory.context_compressor import CompressionConfig, ContextCompressor
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            return None
 
-            llm_call_fn = self._get_llm_call_fn(ctx)
-            if not llm_call_fn:
-                logger.warning("[%s] 无法获取 LLM 调用函数，跳过记忆系统压缩", self.name)
-                return None
+        from pipeline.types import StateKeys
 
-            config = CompressionConfig(context_window=context_window)
-            compressor = ContextCompressor(
-                llm_call_fn=llm_call_fn,
-                config=config,
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
+            return None
+
+        try:
+            chunks = await chunk_service.find_by_pipeline(
+                pipeline_run_id, "L1",
             )
+        except Exception:
+            return None
 
-            result = await compressor.compress_all(
-                old_msgs,
-                previous_l1=await self._load_previous_l1(ctx),
-            )
-            l1_summary = result.get("l1", "")
-            l2_summary = result.get("l2", "")
-            keywords = result.get("keywords", [])
+        if not chunks:
+            return None
 
-            if not l1_summary:
-                return None
+        latest_chunk = max(chunks, key=lambda c: c.sequence_end)
+        chunk_window = latest_chunk.context_window
 
-            # 保存到 ChunkService
-            await self._save_chunks(ctx, old_msgs, l1_summary, l2_summary, keywords)
+        # 窗口未变 → 不处理
+        if not chunk_window or chunk_window == context_window:
+            return None
 
-            l1_tokens = len(l1_summary) // 2
-            l1_budget = config.get_budgets().get("L1", 1000)
-            if l1_tokens > l1_budget and l2_summary:
-                logger.info(
-                    "[%s] L1 超预算，使用 L2: %d -> %d 字符",
-                    self.name, len(l1_summary), len(l2_summary),
+        # 窗口变了 → 清理旧压缩摘要 system msg
+        compression_notice = (
+            "[系统提示] 由于对话历史过长，较早的上下文已被记忆系统分层压缩。"
+            "压缩摘要包含在上方消息中，请基于压缩摘要和当前剩余上下文继续完成任务。"
+        )
+        cleaned = [
+            m for m in messages
+            if not (
+                m.get("role") == "system"
+                and (
+                    str(m.get("content", "")).startswith("## 历史对话压缩摘要")
+                    or str(m.get("content", "")) == compression_notice
                 )
-                return l2_summary
-
-            logger.info(
-                "[%s] 一次性压缩完成: %d 条消息 -> L1≈%d字符 L2≈%d字符",
-                self.name, len(old_msgs), len(l1_summary), len(l2_summary),
             )
-            return l1_summary
+        ]
 
-        except Exception as exc:
-            logger.warning("[%s] 记忆系统压缩失败: %s", self.name, exc)
+        if len(cleaned) == len(messages):
+            return None
+
+        logger.info(
+            "[%s] context_window 变更: %d → %d, 清理 %d 条旧压缩摘要",
+            self.name, chunk_window, context_window,
+            len(messages) - len(cleaned),
+        )
+        return cleaned
+
+    def _get_memory_service(self, ctx: PluginContext):
+        """获取 MemoryContextService 实例。"""
+        try:
+            return ctx.get_service("context_service")
+        except (KeyError, AttributeError):
+            pass
+
+        from memory.memory_context_service import MemoryContextService
+
+        try:
+            context_window = ctx.state.get("context_window", 128000)
+            return MemoryContextService(
+                config={"context_window": context_window, "compress_trigger_ratio": 0.5},
+            )
+        except Exception:
             return None
 
     async def _load_previous_l1(self, ctx: PluginContext) -> str:
-        """从 ChunkService 加载该会话所有历史压缩的 L1 内容作为背景。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            所有历史 L1 内容拼接，无则返回空字符串
-        """
+        """从 ChunkService 加载历史 L1 内容作为增量压缩背景。"""
         try:
             chunk_service = ctx.get_service("chunk_service")
         except (KeyError, AttributeError):
             return ""
 
-        session_id = ctx.state.get("context.session_id", "")
-        if not session_id:
+        from pipeline.types import StateKeys
+
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
             return ""
 
         try:
-            chunks = await chunk_service.find_by_session(session_id, "L1")
+            chunks = await chunk_service.find_by_pipeline(
+                pipeline_run_id, "L1",
+            )
             if chunks:
-                return "\n\n---\n\n".join(chunk.content for chunk in chunks if chunk.content)
+                return chunks[-1].content if chunks[-1].content else ""
         except Exception:
             pass
 
         return ""
 
-    async def _save_chunks(
-        self,
-        ctx: PluginContext,
-        old_msgs: list[dict[str, Any]],
-        l1_summary: str,
-        l2_summary: str,
-        keywords: list[str],
-    ) -> None:
-        """将压缩结果保存到 ChunkService。
-
-        Args:
-            ctx: 插件执行上下文
-            old_msgs: 被压缩的旧消息列表
-            l1_summary: L1 摘要 JSON
-            l2_summary: L2 摘要 JSON
-            keywords: 关键词列表
-        """
+    async def _make_save_chunk_fn(self, ctx: PluginContext):
+        """构建压缩块持久化回调。"""
         try:
             chunk_service = ctx.get_service("chunk_service")
         except (KeyError, AttributeError):
-            logger.debug("[%s] 无 chunk_service，跳过持久化", self.name)
-            return
+            logger.debug("[%s] chunk_service 不可用，跳过持久化", self.name)
+            return None
 
         from memory.types import ChunkData
         from pipeline.types import StateKeys
 
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-        if not pipeline_run_id:
-            return
+        session_id = ctx.state.get("context.session_id", "")
+        context_window = ctx.state.get("context_window", 0)
 
-        msg_count = len(old_msgs)
+        async def save_fn(old_msgs, comp_result):
+            """保存压缩块到 ChunkService。
 
-        try:
+            保存两个 chunk：L1 和 L2（各自独立可检索）。
+
+            Args:
+                old_msgs: 被压缩的原始消息列表
+                comp_result: {"l1": str, "l2": str, "keywords": list}
+            """
+            if isinstance(comp_result, str):
+                comp_result = {"l1": comp_result, "l2": "", "keywords": []}
+
+            l1_content = comp_result.get("l1", "")
+            l2_content = comp_result.get("l2", "")
+            keywords = comp_result.get("keywords", [])
+            msg_count = len(old_msgs)
+
+            # 从已有块计算正确的序列范围
+            sequence_start = 1
+            try:
+                existing = await chunk_service.find_by_pipeline(
+                    pipeline_run_id, "L1",
+                )
+                if existing:
+                    max_end = max(c.sequence_end for c in existing if c.sequence_end)
+                    sequence_start = max_end + 1
+            except Exception:
+                pass
+            sequence_end = sequence_start + msg_count - 1
+
+            # L1 chunk
             l1_chunk = ChunkData(
                 pipeline_run_id=pipeline_run_id,
+                session_id=session_id,
                 layer="L1",
-                content=l1_summary,
-                token_count=len(l1_summary) // 2,
+                content=l1_content,
+                l2_content=l2_content,
+                token_count=max(1, len(l1_content) // 2),
                 message_count=msg_count,
-                sequence_start=1,
-                sequence_end=msg_count,
+                sequence_start=sequence_start,
+                sequence_end=sequence_end,
                 keywords=keywords,
+                context_window=context_window,
             )
-            await chunk_service.save(l1_chunk)
+            l1_id = await chunk_service.save(l1_chunk)
 
-            if l2_summary:
+            # L2 chunk（独立保存，供 prompt_build 按 layer="L2" 检索）
+            if l2_content:
                 l2_chunk = ChunkData(
                     pipeline_run_id=pipeline_run_id,
+                    session_id=session_id,
                     layer="L2",
-                    content=l2_summary,
-                    token_count=len(l2_summary) // 2,
+                    content=l2_content,
+                    token_count=max(1, len(l2_content) // 2),
                     message_count=msg_count,
-                    sequence_start=1,
-                    sequence_end=msg_count,
+                    sequence_start=sequence_start,
+                    sequence_end=sequence_end,
                     keywords=keywords,
+                    context_window=context_window,
                 )
                 await chunk_service.save(l2_chunk)
 
             logger.info(
-                "[%s] 压缩块已保存 | L1≈%d字符 L2≈%d字符 keywords=%d",
-                self.name, len(l1_summary), len(l2_summary), len(keywords),
+                "[%s] 压缩块已保存: L1_id=%s (%d字符), "
+                "L2≈%d字符, keywords=%d",
+                self.name, l1_id, len(l1_content),
+                len(l2_content), len(keywords),
             )
-        except Exception as exc:
-            logger.warning("[%s] 保存压缩块失败: %s", self.name, exc)
+
+        return save_fn
 
     def _get_llm_call_fn(self, ctx: PluginContext):
-        """从上下文中获取 LLM 调用函数。
+        """从上下文中获取 LLM 调用函数，优先使用专用压缩模型。"""
+        # 如果配置了 compression_model，用它构建独立调用函数
+        if self._compression_model:
+            fn = self._build_compression_model_fn(ctx, self._compression_model)
+            if fn:
+                return fn
 
-        优先从 services 中获取已注册的 LLMCore 实例，
-        其次通过 LiteLLMAdapter 构建轻量调用函数。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            异步 LLM 调用函数，或 None
-        """
+        # 回退：用主模型的 adapter
         llm_core = ctx.get_service("llm_core")
-        if llm_core and hasattr(llm_core, "_adapter") and hasattr(llm_core, "_get_model_string"):
+        if llm_core and hasattr(llm_core, "_adapter") and hasattr(llm_core, "_model"):
+            _use_router = hasattr(llm_core._adapter, '_router')
+            _model_str = llm_core._model if _use_router else llm_core._get_model_string()
+
             async def _call_via_core(prompt: str) -> str:
                 kwargs: dict[str, Any] = {
-                    "model": llm_core._get_model_string(),
+                    "model": _model_str,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                 }
-                if getattr(llm_core, "_api_base", None):
-                    kwargs["api_base"] = llm_core._api_base
-                if getattr(llm_core, "_api_key", None):
-                    kwargs["api_key"] = llm_core._api_key
+                if not _use_router:
+                    if getattr(llm_core, "_api_base", None):
+                        kwargs["api_base"] = llm_core._api_base
+                    if getattr(llm_core, "_api_key", None):
+                        kwargs["api_key"] = llm_core._api_key
                 response = await llm_core._adapter.completion(**kwargs)
                 return response.text or ""
             return _call_via_core
@@ -425,3 +425,53 @@ class ContextWindowGuardPlugin(IInputPlugin):
             logger.debug("[%s] LiteLLMAdapter 创建失败: %s", self.name, exc)
 
         return None
+
+    def _build_compression_model_fn(self, ctx: PluginContext, model_id: str):
+        """用指定的压缩模型构建 LLM 调用函数。
+
+        从 model_loader 获取模型配置（api_base、api_key 等），
+        构建独立的 LiteLLMAdapter 调用函数。
+        """
+        try:
+            from config.models import get_model_config_loader
+            from llm.adapter import LiteLLMAdapter
+
+            loader = get_model_config_loader()
+            conf = loader.get_llm_core_config(model_id)
+            if not conf:
+                logger.warning(
+                    "[%s] 压缩模型 %r 未在 llm.yaml 中找到，回退到主模型",
+                    self.name, model_id,
+                )
+                return None
+
+            adapter = LiteLLMAdapter()
+            api_base = conf.get("api_base")
+            api_key = conf.get("api_key")
+            provider = conf.get("provider", "")
+            bare_name = conf.get("model_name", model_id)
+
+            from llm.router_factory import _get_litellm_model_string
+            litellm_model = _get_litellm_model_string(provider, bare_name)
+
+            async def _call_compression_model(prompt: str) -> str:
+                response = await adapter.completion(
+                    model=litellm_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False,
+                    api_base=api_base,
+                    api_key=api_key,
+                )
+                return response.text or ""
+
+            logger.info(
+                "[%s] 压缩使用独立模型: %s (provider=%s)",
+                self.name, model_id, provider,
+            )
+            return _call_compression_model
+        except Exception as exc:
+            logger.warning(
+                "[%s] 构建压缩模型调用函数失败: %s，回退到主模型",
+                self.name, exc,
+            )
+            return None

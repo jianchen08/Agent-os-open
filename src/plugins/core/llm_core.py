@@ -18,11 +18,9 @@ import uuid
 from typing import Any, Callable
 
 from llm.adapter import (
-    FallbackAdapter,
     LiteLLMAdapter,
     LLMAdapter,
     LLMResponse,
-    RouterAdapter,
 )
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
@@ -237,9 +235,7 @@ class LLMCore(ICorePlugin):
                 - default_params: 默认调用参数（temperature、max_tokens 等）
                 - max_retries: 最大重试次数（覆盖类属性）
                 - retry_delay: 首次重试延迟秒数（覆盖类属性）
-                - fallback_models: 备用模型配置列表（用于构建 FallbackAdapter）
-            adapter: 可选的外部注入适配器实例，若提供则忽略 router 和 config 中的 fallback 配置
-            router: 可选的 litellm.Router 实例，若提供则创建 RouterAdapter（优先于 config 构建）
+            adapter: 外部注入的适配器实例（如 KeyPoolAdapter），若未提供则创建 LiteLLMAdapter
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
@@ -247,12 +243,16 @@ class LLMCore(ICorePlugin):
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
         self._context_window: int | None = self._config.get("context_window")
+        if not self._context_window:
+            logger.warning(
+                "[%s] context_window 未配置！上下文守卫将无法工作。"
+                " 请在模型配置（llm.yaml）或 core_plugins 中设置 context_window。"
+                " model=%s, provider=%s",
+                self.name, self._model, self._provider,
+            )
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
-        # LLM 调用超时（秒）
-        self._call_timeout: int = self._config.get("call_timeout", 300)
-
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
             self.max_retries = self._config["max_retries"]
@@ -265,40 +265,13 @@ class LLMCore(ICorePlugin):
         self._num_retries: int = self._config.get("num_retries", 3)
         self._retry_delay: float = self._config.get("retry_delay", 60.0)
 
-        # 构建适配器：adapter > router > config
+        # 构建适配器
         if adapter is not None:
             self._adapter = adapter
-            self._use_router = isinstance(adapter, (RouterAdapter,)) or hasattr(adapter, '_router')
-        elif router is not None:
-            self._adapter = RouterAdapter(router)
-            self._use_router = True
-            logger.info(
-                "[%s] 使用 RouterAdapter (model=%s)", self.name, self._model,
-            )
+            self._use_router = hasattr(adapter, '_router')
         else:
-            self._adapter = self._build_adapter()
+            self._adapter = LiteLLMAdapter()
             self._use_router = False
-
-    def _build_adapter(self) -> LLMAdapter:
-        """根据配置构建 LLM 适配器。
-
-        如果配置中包含 fallback_models，则创建 FallbackAdapter，
-        否则创建 LiteLLMAdapter。
-
-        Returns:
-            构建好的 LLMAdapter 实例
-        """
-        fallback_models = self._config.get("fallback_models")
-        if fallback_models and isinstance(fallback_models, list):
-            primary = LiteLLMAdapter()
-            fallbacks: list[LLMAdapter] = [LiteLLMAdapter() for _ in fallback_models]
-            logger.info(
-                "[%s] 构建 FallbackAdapter，primary + %d 个 fallback",
-                self.name, len(fallbacks),
-            )
-            return FallbackAdapter(primary=primary, fallbacks=fallbacks)
-
-        return LiteLLMAdapter()
 
     @property
     def name(self) -> str:
@@ -991,15 +964,12 @@ class LLMCore(ICorePlugin):
                         self.name, len(tool_schemas),
                         ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas))
 
-        timeout = ctx.state.get("llm_call_timeout", self._call_timeout)
-        kwargs["timeout"] = timeout
-
         # 调用前记录模型/API 信息
         model_str = self._model
         api_base = kwargs.get("api_base") or self._api_base or "default"
         logger.info(
-            "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s, timeout=%ss",
-            self.name, model_str, self._provider, api_base, stream, timeout,
+            "[%s] Calling LLM: model=%s, provider=%s, api_base=%s, streaming=%s",
+            self.name, model_str, self._provider, api_base, stream,
         )
 
         try:
@@ -1013,8 +983,8 @@ class LLMCore(ICorePlugin):
             )
         except asyncio.TimeoutError:
             logger.error(
-                "[%s] LLM call timed out after %ds (model=%s)",
-                self.name, timeout,
+                "[%s] LLM call timed out (model=%s)",
+                self.name,
                 self._model if self._use_router else self._get_model_string(),
             )
             raise

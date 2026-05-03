@@ -95,9 +95,9 @@ class TestBashToolExecuteSuccess:
         result = await tool.execute({"action": "execute", "command": "echo hello"})
 
         assert result.success is True
-        assert result.output["status"] == "completed"
-        assert result.output["exit_code"] == 0
         assert result.output["output"] == "hello world"
+        assert result.output["pid"] is not None
+        # status 和 exit_code=0 已精简掉（节省 token）
         # 验证 start_process 被正确调用
         tool.process_manager.start_process.assert_called_once_with(
             command="echo hello", working_dir=None
@@ -219,7 +219,7 @@ class TestBashToolTimeout:
 
         assert result.success is True
         assert result.output["status"] == "running"
-        assert "process_id" in result.output
+        assert result.output["pid"] == 12345
 
 
 class TestBashToolDefaultAction:

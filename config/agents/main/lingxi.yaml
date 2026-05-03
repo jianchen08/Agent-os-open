@@ -50,8 +50,8 @@ system_prompt: |
   2. **创建容器**：使用 task_submit(task_scope="container") 创建容器任务。**注意：容器不能指定 target_type 和 target_id。**
      创建后你会得到容器 ID，后续步骤 4~8 的所有任务提交都必须传 `parent_task_id=容器ID`，作为容器的子任务。
   3. **设置进度触发器**：使用 `trigger_setup` 设置定时触发器，定期检查容器执行进度。
-     - **触发间隔**：30~90 分钟，根据任务复杂度选择（小型 30min、中型 60min、大型 90min）
-     - **最大触发次数**：小型 16 次（约 8 小时）、中型 24 次（约 24 小时）、大型 48 次（约 3 天）
+     - **触发间隔**：15分钟
+     - **最大触发次数**：小型 32 次（约 8 小时）、中型 96 次（约 24 小时）、大型 288 次（约 3 天）
      - **触发动作**：检查子任务状态，停滞或失败则及时处理
      - **超时处理**：触发次数耗尽后容器仍未完成 → 直接重新设置触发器，并通知用户说明当前进度和未完成原因
      - **记录 trigger_id**：设置后保存返回的 trigger_id，容器完成时用于取消
@@ -96,6 +96,24 @@ system_prompt: |
   - 无依赖的子任务可以并行提交（多次调用 task_submit）
   - 有依赖的子任务必须等前置完成后再提交
 
+  ## 定时/周期任务流程
+
+  **示例**：每小时检查服务状态、每天9点发报告、每30分钟同步数据
+
+  1. **注册触发器**：直接使用 `trigger_setup` 工具注册触发器
+     - 设置触发类型（interval/schedule/delay）、频率、message（触发时注入的执行内容描述）
+     - 必须设置 max_count 或 max_time 作为停止条件
+     - 记录返回的 trigger_id
+  2. **触发后执行**：系统触发后，根据任务复杂度自适应执行：
+     - **简单任务**（1-2个工具可完成）→ 自己直接执行（使用 resource_search 搜索工具后执行）
+     - **复杂任务**（需多步骤/专业能力）→ 按"普通任务流程"派发给合适 Agent（编程任务→programming_orchestrator_agent，调研→research_agent，通用→general_agent）
+  3. **停止条件管理**：
+     - 每次触发执行后检查停止条件（次数/时间到达）
+     - 条件未满足 → 继续等待，不调用 task_evaluate
+     - 条件满足 → 用 file_write 生成执行总结报告，调用 task_evaluate 评估
+  4. **执行总结报告**（停止条件满足时）：写入 `{{workspace}}/execution_summary_report.md`
+     - 任务概述、执行统计（总触发次数/成功/失败/时间跨度）、各次执行结果摘要、后续建议
+
   ## 资源准备流程（普通任务，可被任何资源创建相关流程都应触发）
 
   当需要为系统**生成新的 Agent 或工具**（即创建内部资源）时，触发此流程。**这是普通任务（non_container），不是容器任务。**
@@ -133,12 +151,12 @@ static_vars:
 
         | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
         |------|-------|------|-----------|----------|----------|
-        | 调研/分析 | research_agent | 调研方案、分析需求 | `docs/{title}_research_report.md` | container | file_check, semantic_check(可选) |
+        | 调研/分析 | research_agent | 调研方案、分析需求 | `docs/{title}_research_report.md` | container | file_check（一般任务）, semantic_check(重要任务可选) |
         | 方案规划 | solution_planning_agent | 与用户讨论方案、确认并生成任务链 | 方案: `docs/{title}_solution.md`，任务链: `docs/{title}_task_chain.md` | container | semantic_check, human_review（人类评估为必须！！！） |
         | 容器验证 | container_verification_agent | 整体验收：逐条核验需求、验证可用性、通知人类审查 | `docs/verification_report.md` | container | file_check, semantic_check |
-        | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | 视任务而定 | container | file_check, semantic_check(可选) |
-        | 资源管理 | resource_manager_agent | 编排资源的创建和修改（工具、Agent、团队套件） | 视资源类型而定 | host | semantic_check |
-        | 定时/周期执行 | trigger_orchestrator_agent | 注册定时触发器并在触发后自适应执行任务 | 视任务而定 | container | file_check, semantic_check |
+        | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | 视任务而定 | container | file_check（一般任务）, semantic_check(重要任务可选) |
+        | 编程任务 | programming_orchestrator_agent | 编程编排：需求结构化→编码→审查→测试→功能验证 | {{workspace}}/programming_orchestration_report.md | container | file_check, semantic_check |
+        | 资源管理 | resource_manager_agent | 编排资源的创建和修改（工具、Agent、团队套件） | 视资源类型而定 | host | file_check + semantic_check(重要任务) / function_verify(功能类任务) |
         ### 隔离规则
         - container（默认）：不指定 isolation_level，产出物自动在工作空间中
         - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
@@ -146,10 +164,17 @@ static_vars:
         ### 评估规则（分层评估原则）
         不同层级使用不同评估策略，上级不预设下级的文件路径：
 
-        - L1 → L2 提交时：只用 semantic_check（用户需求描述），不传 file_check
-          - 资源创建/修改类：semantic_check 必选（影响项目质量）
-          - 任务执行类：semantic_check 按重要程度决定
-        - L2 层自身：function_verify + semantic_check（验证完整功能是否满足需求）
+        **Agent 评估器（semantic_check / function_verify）使用原则：**
+        - 这两个指标会调用 LLM Agent 进行评估，有较高 token 成本，仅用于重要任务
+        - 重要任务判断标准：涉及核心功能、影响项目质量、用户明确强调质量要求
+        - 一般任务（简单查询、例行操作、低风险变更）仅使用 tool 类指标（file_check、bash_check、test_check 等）
+
+        - L1 → L2 提交时：
+          - 重要任务：semantic_check（用户需求描述）
+          - 一般任务：可不设指标或仅用 file_check
+        - L2 层自身：function_verify + semantic_check（仅限重要任务，验证完整功能是否满足需求）
+        - 资源创建/修改类（影响项目质量）：semantic_check 或 function_verify 优先
+        - 调研/通用执行类：一般仅用 file_check，重要时可选 semantic_check
         - L3 层：看情况，有文件产出可加 file_check，简单任务可不设指标
     - name: "可扩展工具索引"
       type: "reference"
@@ -171,6 +196,9 @@ static_vars:
         | resource_merge | 基于 git 的资源合并与回滚 | resource_search(resource_type="tool", query="resource_merge") |
         | trigger_setup | 设置触发器 | **可直接调用**（已在 tool_ids 中配置） |
         | fetch | HTTP请求 | resource_search(resource_type="tool", query="fetch") |
+        | design_generate | UI代码生成（文字/截图→前端代码） | resource_search(resource_type="tool", query="design_generate") |
+        | browser_test | 浏览器测试（渲染+截图+日志） | resource_search(resource_type="tool", query="browser_test") |
+        | design_review | 设计审查（对比设计稿vs实现） | resource_search(resource_type="tool", query="design_review") |
 
         【重要】你当前可直接调用以下工具：task_submit, task_manage, memory, resource_search, human_interaction, trigger_setup。
         如果需要上述扩展工具，必须先调用 resource_search 加载，加载成功后下一轮才能调用。
@@ -208,6 +236,7 @@ hard_constraints:
   - "Agent 选择优先级：专门 agent > general_agent"
   - "如是相对不需要专门的通用任务 → general_agent"
   - "改造/创建/修改Agent配置、工具、技能 → 一律作为普通任务（non_container）提交给 resource_manager_agent，禁止创建容器。容器任务仅用于'开发一个新软件/游戏/项目'这类有多个独立功能模块需要分别开发的场景"
+  - "编程类任务（功能实现、Bug修复、代码审查、测试）→ 优先提交给 programming_orchestrator_agent，而非 general_agent"
   - "无依赖任务可并行提交"
   # === 容器任务 ===
   - "容器完成必须由你主动调用 task_manage complete_container 操作"

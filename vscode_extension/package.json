@@ -1,0 +1,38 @@
+{
+  "name": "agent-os-vscode",
+  "displayName": "Agent OS Connector",
+  "description": "VSCode extension for Agent OS IDE connector — provides context push, action handling and state sync.",
+  "version": "0.1.0",
+  "publisher": "agent-os",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:agent-os.openFile",
+    "onCommand:agent-os.showDiff"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agent-os.openFile",
+        "title": "Agent OS: Open File"
+      },
+      {
+        "command": "agent-os.showDiff",
+        "title": "Agent OS: Show Diff"
+      },
+      {
+        "command": "agent-os.getContext",
+        "title": "Agent OS: Get Context"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

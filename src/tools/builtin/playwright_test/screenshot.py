@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from typing import Any
@@ -49,10 +50,16 @@ class ScreenshotManager:
             
             # 截图
             page.screenshot(path=output_path, full_page=True)
-            
+
+            # 编码为 base64 用于多模态传输
+            with open(output_path, "rb") as f:
+                b64_data = base64.b64encode(f.read()).decode("utf-8")
+
             return {
                 "success": True,
                 "path": output_path,
+                "base64_data": b64_data,
+                "mime_type": "image/png",
                 "message": "全页面截图已保存",
             }
         except Exception as e:
@@ -97,10 +104,16 @@ class ScreenshotManager:
             
             # 元素截图
             element.screenshot(path=output_path)
-            
+
+            # 编码为 base64 用于多模态传输
+            with open(output_path, "rb") as f:
+                b64_data = base64.b64encode(f.read()).decode("utf-8")
+
             return {
                 "success": True,
                 "path": output_path,
+                "base64_data": b64_data,
+                "mime_type": "image/png",
                 "message": "元素截图已保存",
             }
         except Exception as e:

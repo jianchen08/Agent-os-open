@@ -60,10 +60,10 @@
   margin-top: 0.5rem;
   padding: 0.75rem;
   border-radius: 0.5rem;
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--thinking-bg);
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.875rem;
-  color: #4ade80;
+  color: var(--thinking-text-color);
   overflow-x: auto;
   border: 1px solid var(--border-default);
 }
@@ -89,14 +89,11 @@
 
 /* ========================================
  * 思考内容样式（仅内容区域，标题栏保持不变）
+ * 使用主题变量控制颜色，适配 light/dark 模式
  * ======================================== */
 .thinking-text-content {
-  color: rgba(127, 127, 127, 0.7) !important;
+  color: var(--thinking-text-color) !important;
   font-size: 0.8125rem !important;
-}
-
-.dark .thinking-text-content {
-  color: rgba(200, 200, 200, 0.55) !important;
 }
 
 .thinking-text-content .prose {

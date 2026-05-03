@@ -1,0 +1,81 @@
+# =============================================================================
+# Docker 忽略文件
+# 排除不需要进入 Docker 镜像的文件和目录
+# =============================================================================
+
+# 版本控制
+.git
+.gitignore
+.gitattributes
+
+# Python 缓存和编译文件
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+*.egg-info
+*.egg
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+.env
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试和覆盖率
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Docker 相关（避免递归）
+Dockerfile
+docker-compose*.yml
+.dockerignore
+docker-entrypoint.sh
+
+# 文档和报告
+docs/
+*.md
+!README.md
+reports/
+
+# 前端构建产物（如需前端单独构建）
+frontend/node_modules/
+frontend/dist/
+frontend/.nuxt/
+
+# 临时和日志文件
+logs/
+*.log
+tmp/
+temp/
+
+# 脚本和工具（非运行时需要）
+scripts/
+verify_*.py
+start_web.bat
+start_web.sh
+stop_web.bat
+stop_web.sh
+cli.bat
+
+# 其他非运行时文件
+skills/
+mcp-servers/
+future/
+vscode_extension/
+.bash.exe.stackdump

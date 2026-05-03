@@ -195,10 +195,10 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "enum": ["non_container", "container"],
                         "default": "non_container",
                         "description": (
-                            "任务范围：container（容器任务，用于组织复杂长期任务的子任务链，"
-                            "不能指定 target_type 和 target_id）或 "
-                            "non_container（非容器任务，实际执行的任务，"
-                            "必须指定 target_type 和 target_id）"
+                            "任务范围：non_container（非容器任务，实际执行的任务，"
+                            "必须指定 target_type 和 target_id）。"
+                            "container 仅限 L1 Agent 使用（用于组织复杂长期任务的子任务链），"
+                            "L2 Agent 禁止使用 container"
                         ),
                     },
                     "parent_task_id": {
@@ -225,6 +225,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 设置为已存在的项目目录（绝对路径）：系统创建隔离副本进行修改（改造现有项目）。
 改造 Agent OS 自身时，使用 {{project_root}} 变量。子任务不需要设置此参数，自动继承父任务的工作空间。
 """.strip(),
+                    },
+                    "inherit_workspace_from": {
+                        "type": "string",
+                        "description": (
+                            "继承之前任务的工作空间（可选）。传入旧任务 ID，"
+                            "新任务直接复用旧任务的工作空间路径（不复制、不初始化），"
+                            "新 Agent 能看到旧任务的所有文件。"
+                            "用于重试策略步骤⑤重新提交时，让新任务在旧工作空间中继续工作。"
+                            "如果旧工作空间已不存在，继承不生效，走正常空工作空间创建。"
+                        ),
                     },
                 },
                 "required": ["goal"],
@@ -333,8 +343,23 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="MISSING_GOAL",
             )
 
-        # 容器任务走独立分支
+        # 容器任务走独立分支（_execute_long_term 内部也有层级校验，
+        # 此处提前拦截避免进入容器创建流程）
         if task_scope == "container":
+            if parent_agent_level >= 2:
+                logger.warning(
+                    "[TaskSubmit] L%d Agent 试图创建容器任务，已拦截",
+                    parent_agent_level,
+                )
+                return create_failure_result(
+                    error=(
+                        "L2/L3 Agent 不能创建 container 任务。"
+                        "你已在 non_container 任务中，"
+                        "直接使用 task_submit(task_scope='non_container') "
+                        "创建子任务即可"
+                    ),
+                    error_code="L2_CANNOT_SUBMIT_CONTAINER",
+                )
             return await self._execute_long_term(inputs)
 
         target_type = inputs.get("target_type")
@@ -382,6 +407,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                             discarded, target_id,
                         )
                     acceptance_criteria = auto_criteria
+
+        # ── L2/L3 层级校验：禁止显式指定 parent_task_id ──
+        if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is not None:
+            logger.warning(
+                "[TaskSubmit] L%d Agent 显式指定 parent_task_id=%s，已拦截",
+                parent_agent_level, parent_task_id,
+            )
+            return create_failure_result(
+                error=f"L{parent_agent_level} Agent 不能显式指定 parent_task_id"
+                     "（系统自动注入当前任务 ID）",
+                error_code="L2_CANNOT_SPECIFY_PARENT_TASK_ID",
+            )
+
         injected_task_id = inputs.get("task_id")
         if parent_task_id is None and injected_task_id:
             parent_task_id = injected_task_id
@@ -389,7 +427,81 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "[TaskSubmit] 自动注入 parent_task_id=%s (来自管道所属任务)",
                 parent_task_id,
             )
+
+        # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
+        if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
+            logger.warning(
+                "[TaskSubmit] L%d Agent 无可注入的 parent_task_id，拒绝创建根任务",
+                parent_agent_level,
+            )
+            return create_failure_result(
+                error=f"L{parent_agent_level} Agent 必须在任务上下文中提交子任务，"
+                     "无法创建根任务",
+                error_code="L2_REQUIRES_PARENT_TASK",
+            )
+
         workspace = inputs.get("workspace", "")
+
+        # ── inherit_workspace_from 解析 ──
+        # 直接复用旧任务的 ws_meta.path，不复制、不初始化。
+        # 旧工作空间不存在则报错返回，让 agent 重新提交。
+        inherit_from = inputs.get("inherit_workspace_from")
+        _inherit_resolved = False
+        old_ws_meta = None
+        # inherit_workspace_from 显式指定时，覆盖 param_inject 注入的 workspace
+        if inherit_from:
+            task_service = self._get_task_service()
+            if not task_service:
+                return create_failure_result(
+                    error=(
+                        f"无法查找任务 {inherit_from}：任务服务不可用。"
+                        "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                    ),
+                )
+            try:
+                old_task = task_service.get_task(inherit_from)
+                if not old_task or not old_task.metadata:
+                    return create_failure_result(
+                        error=(
+                            f"任务 {inherit_from} 不存在或无元数据。"
+                            "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                        ),
+                    )
+                old_ws_meta = old_task.metadata.get("ws_meta")
+                if not isinstance(old_ws_meta, dict):
+                    return create_failure_result(
+                        error=(
+                            f"任务 {inherit_from} 没有工作空间信息。"
+                            "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                        ),
+                    )
+                from pathlib import Path
+                old_ws_path = old_ws_meta.get("path", "")
+                if not old_ws_path or not Path(old_ws_path).exists():
+                    return create_failure_result(
+                        error=(
+                            f"任务 {inherit_from} 的工作空间已不存在: {old_ws_path or '(空)'}。"
+                            "无法继承，请去掉 inherit_workspace_from 参数重新提交，"
+                            "使用空工作空间开始。"
+                        ),
+                    )
+                workspace = old_ws_path
+                _inherit_resolved = True
+                logger.info(
+                    "[TaskSubmit] inherit_workspace_from: "
+                    "task_id=%s, ws_path=%s",
+                    inherit_from, old_ws_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[TaskSubmit] inherit_workspace_from 解析失败: %s", e,
+                )
+                return create_failure_result(
+                    error=f"继承工作空间时出错: {e}。请去掉 inherit_workspace_from 参数重新提交。",
+                )
+        # 继承成功时回写 inputs，确保 _build_metadata 存储到任务元数据
+        if _inherit_resolved:
+            inputs["workspace"] = workspace
 
         logger.info(
             "[TaskSubmit] 非容器任务 | target_type=%s | target_id=%s",
@@ -522,6 +634,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 except Exception:
                     pass
 
+            # 继承工作空间时强制 is_root=True：
+            # 继承的任务需要自己的独立工作空间，不能共享父任务空间
+            if _inherit_resolved:
+                is_root = True
+
             await event_bus.emit("task.submitted", {
                 "task_id": task.id,
                 "target_type": target_type,
@@ -532,6 +649,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "workspace": workspace,
                 "priority": inputs.get("priority", 5),
                 "is_root": is_root,
+                "_has_explicit_workspace": bool(workspace),
+                "_inherit_workspace_resolved": _inherit_resolved,
+                "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
             })
             logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
         except Exception as e:
@@ -713,6 +833,14 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 logger.error("[TaskSubmit] parent_task_id 不存在: %s", parent_task_id)
                 return False
 
+        # L2/L3 non-container: parent_task_id 必须已由自动注入填充
+        if parent_agent_level >= 2 and parent_task_id is None:
+            logger.warning(
+                "[TaskSubmit] L%d Agent 无 parent_task_id（纵深防御拦截）",
+                parent_agent_level,
+            )
+            return False
+
         return True
 
     def _check_dependencies_exist(self, dependencies: list[str]) -> list[str]:
@@ -784,7 +912,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         # 存储执行相关参数
         # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
         # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套
-        if inputs.get("workspace") and not inputs.get("parent_task_id"):
+        # 例外：inherit_workspace_from 解析的 workspace 必须存储，因为这是显式指定的
+        if inputs.get("workspace") and (not inputs.get("parent_task_id") or inputs.get("inherit_workspace_from")):
             metadata["workspace"] = inputs["workspace"]
         if inputs.get("max_retries"):
             metadata["max_retries"] = inputs["max_retries"]

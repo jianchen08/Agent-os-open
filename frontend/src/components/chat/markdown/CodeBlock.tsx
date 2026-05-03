@@ -106,8 +106,8 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
           <pre
             className="overflow-x-auto p-4 text-sm"
             style={{
-              background: '#1e1e1e',
-              color: '#d4d4d4',
+              background: 'var(--code-bg)',
+              color: 'var(--code-text)',
               margin: 0,
               fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
             }}
@@ -124,7 +124,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
               margin: 0,
               borderRadius: '0 0 0.5rem 0.5rem',
               fontSize: '0.875rem',
-              background: '#1e1e1e',
+              background: 'var(--code-bg)',
               maxWidth: '100%',
               overflowX: 'auto',
             }}

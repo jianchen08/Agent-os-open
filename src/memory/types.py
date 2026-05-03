@@ -510,14 +510,17 @@ class ChunkData:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     pipeline_run_id: str = ""
+    session_id: str = ""
     layer: str = "L1"
     content: str = ""
+    l2_content: str = ""
     token_count: int = 0
     message_count: int = 0
     sequence_start: int = 0
     sequence_end: int = 0
     keywords: list[str] = field(default_factory=list)
     graduated: bool = False
+    context_window: int = 0
     episode_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -526,8 +529,10 @@ class ChunkData:
         return {
             "id": self.id,
             "pipeline_run_id": self.pipeline_run_id,
+            "session_id": self.session_id,
             "layer": self.layer,
             "content": self.content,
+            "l2_content": self.l2_content,
             "token_count": self.token_count,
             "message_count": self.message_count,
             "sequence_start": self.sequence_start,
@@ -535,10 +540,14 @@ class ChunkData:
             "keywords": self.keywords,
             "graduated": self.graduated,
             "episode_id": self.episode_id,
+            "context_window": self.context_window,
             "created_at": self.created_at.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ChunkData:
         """从字典创建实例。"""
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if "created_at" in filtered and isinstance(filtered["created_at"], str):
+            filtered["created_at"] = datetime.fromisoformat(filtered["created_at"])
+        return cls(**filtered)

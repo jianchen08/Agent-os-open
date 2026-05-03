@@ -1025,7 +1025,18 @@ class TaskTool(BuiltinTool):
                 )
 
             reason = inputs.get("reason", "用户请求重试")
+            message = inputs.get("message", "")
             old_status = task.status.value
+
+            # 将纠正信息存入 metadata，供 _execute_background_task 读取拼入 full_input
+            if message:
+                if not task.metadata:
+                    task.metadata = {}
+                task.metadata["retry_message"] = message
+                logger.info(
+                    "[TaskTool] retry 携带纠正信息 | task_id=%s | preview=%s",
+                    task_id, message[:80],
+                )
 
             # 利用状态机从 failed -> pending
             service.force_transition(task.id, TaskStatus.PENDING)
@@ -1147,68 +1158,99 @@ class TaskTool(BuiltinTool):
                     error_code="MISSING_PIPELINE_ID",
                 )
 
-            from infrastructure.message_queue import Message, create_message_id
-
-            queue = self._get_message_queue()
-            if not queue:
-                return create_failure_result(
-                    error="消息队列服务不可用，无法注入",
-                    error_code="QUEUE_UNAVAILABLE",
-                )
-
-            msg = Message(
-                id=create_message_id(),
-                pipeline_id=target_pipeline_id,
-                target_id=task_id,
-                content=message,
-                priority=100,
-                metadata={
-                    "source": "task_inject",
-                    "injected_by": f"L{parent_agent_level}",
-                    "task_id": task_id,
-                },
-            )
-
-            success = await queue.push(msg)
-            if not success:
-                return create_failure_result(
-                    error="消息队列已满，注入失败",
-                    error_code="QUEUE_FULL",
-                )
-
-            logger.info(
-                "[TaskTool] 指令注入成功 | task_id=%s | pipeline_id=%s | "
-                "message_preview=%s...",
-                task_id, target_pipeline_id, message[:50],
-            )
-
-            # BUG-FIX: 挂起管道的 message_inject 插件不会运行，
-            # 消息入队后无人消费。额外检查目标管道是否处于挂起状态，
-            # 若挂起则直接调用 inject_and_wake() 注入并唤醒。
+            # ── 主动触发注入 ──
+            # 注入消息不是被动队列，而是触发器：
+            # 只要管道空闲（不在执行 LLM 或工具），就立即触发新一轮 LLM 调用。
+            # 优先级：运行中引擎 > 挂起引擎 > MessageQueue 兜底
             inject_result = {
                 "task_id": task_id,
                 "injected": True,
-                "message_id": msg.id,
                 "target_pipeline_id": target_pipeline_id,
                 "message_preview": message[:100],
             }
+
             try:
                 from infrastructure.service_provider import get_service_provider
                 _provider = get_service_provider()
-                _engine_key = f"__suspended_engine_{target_pipeline_id}"
-                _engine = _provider.get(_engine_key)
-                if _engine is not None and hasattr(_engine, "inject_and_wake"):
-                    _engine.inject_and_wake(message)
-                    inject_result["woke_suspended_engine"] = True
+
+                # 1. 运行中引擎：双通道注入
+                #    - MessageQueue：MessageInjectPlugin 下轮迭代立即消费（主通道）
+                #    - inject_notification：_pending_notifications 安全兜底
+                _running_key = f"__running_engine_{target_pipeline_id}"
+                _running_engine = _provider.get(_running_key)
+                if _running_engine is not None and hasattr(_running_engine, "inject_notification"):
+                    # 主通道：推入 MessageQueue，MessageInjectPlugin 下轮立即取走
+                    from infrastructure.message_queue import Message, create_message_id
+                    queue = self._get_message_queue()
+                    if queue:
+                        msg = Message(
+                            id=create_message_id(),
+                            pipeline_id=target_pipeline_id,
+                            target_id=task_id,
+                            content=message,
+                            priority=100,
+                            metadata={
+                                "source": "task_inject",
+                                "injected_by": f"L{parent_agent_level}",
+                                "task_id": task_id,
+                            },
+                        )
+                        await queue.push(msg)
+                        inject_result["message_id"] = msg.id
+                    # 兜底通道：inject_notification → _pending_notifications
+                    if hasattr(_running_engine, "inject_notification"):
+                        _running_engine.inject_notification(message)
+                    inject_result["trigger"] = "inject_notification+message_queue"
                     logger.info(
-                        "[TaskTool] 挂起管道已被唤醒 | pipeline_id=%s",
-                        target_pipeline_id,
+                        "[TaskTool] 消息已双通道注入运行中管道 | pipeline_id=%s | preview=%s",
+                        target_pipeline_id, message[:80],
                     )
+
+                # 2. 挂起引擎：inject_and_wake() 注入并唤醒
+                else:
+                    _suspended_key = f"__suspended_engine_{target_pipeline_id}"
+                    _suspended_engine = _provider.get(_suspended_key)
+                    if _suspended_engine is not None and hasattr(_suspended_engine, "inject_and_wake"):
+                        _suspended_engine.inject_and_wake(message)
+                        inject_result["trigger"] = "inject_and_wake"
+                        logger.info(
+                            "[TaskTool] 挂起管道已被唤醒 | pipeline_id=%s",
+                            target_pipeline_id,
+                        )
+
+                    # 3. 引擎未找到：推入 MessageQueue 兜底
+                    #    （管道尚未启动或已结束，等管道恢复后 MessageInjectPlugin 消费）
+                    else:
+                        from infrastructure.message_queue import Message, create_message_id
+                        queue = self._get_message_queue()
+                        if queue:
+                            msg = Message(
+                                id=create_message_id(),
+                                pipeline_id=target_pipeline_id,
+                                target_id=task_id,
+                                content=message,
+                                priority=100,
+                                metadata={
+                                    "source": "task_inject",
+                                    "injected_by": f"L{parent_agent_level}",
+                                    "task_id": task_id,
+                                },
+                            )
+                            await queue.push(msg)
+                            inject_result["trigger"] = "message_queue"
+                            inject_result["message_id"] = msg.id
+                            logger.info(
+                                "[TaskTool] 引擎未找到，消息已入队兜底 | pipeline_id=%s",
+                                target_pipeline_id,
+                            )
+                        else:
+                            return create_failure_result(
+                                error="目标管道未运行且消息队列不可用，无法注入",
+                                error_code="ENGINE_NOT_FOUND_NO_QUEUE",
+                            )
             except Exception as _wake_err:
-                # 唤醒失败不影响主流程（MessageQueue 已入队，管道恢复后仍可消费）
                 logger.warning(
-                    "[TaskTool] 尝试唤醒挂起管道失败（不影响消息队列投递）: %s",
-                    _wake_err,
+                    "[TaskTool] 主动触发注入失败: %s", _wake_err,
                 )
 
             return create_success_result(

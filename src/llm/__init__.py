@@ -1,11 +1,8 @@
 from llm.adapter import (
-    AdaptiveRouterAdapter,
-    FallbackAdapter,
     KeyPoolAdapter,
     LiteLLMAdapter,
     LLMAdapter,
     LLMResponse,
-    RouterAdapter,
 )
 from llm.key_pool import KeyPool, KeySlot
 from llm.router_factory import (
@@ -16,13 +13,10 @@ from llm.router_factory import (
 )
 
 __all__ = [
-    "AdaptiveRouterAdapter",
-    "FallbackAdapter",
     "KeyPoolAdapter",
     "LiteLLMAdapter",
     "LLMAdapter",
     "LLMResponse",
-    "RouterAdapter",
     "KeyPool",
     "KeySlot",
     "build_router",

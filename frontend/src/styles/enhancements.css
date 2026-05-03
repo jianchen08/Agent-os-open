@@ -25,15 +25,15 @@
   background: hsl(var(--muted-foreground) / 0.5);
 }
 
-/* 选择文本样式 */
+/* 选择文本样式 - 使用主题变量 */
 ::selection {
-  background-color: rgba(59, 130, 246, 0.35);
-  color: #ffffff;
+  background-color: var(--selection-bg);
+  color: var(--selection-text);
 }
 
 ::-moz-selection {
-  background-color: rgba(59, 130, 246, 0.35);
-  color: #ffffff;
+  background-color: var(--selection-bg);
+  color: var(--selection-text);
 }
 
 /* 焦点样式 */

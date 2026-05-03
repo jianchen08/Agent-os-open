@@ -23,7 +23,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleRespondChoice = useCallback(
     async (requestId: string, optionId: string) => {
-      if (submittingId) return
+      if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       try {
         await respondChoice(requestId, optionId)
@@ -36,7 +36,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleRespondText = useCallback(
     async (requestId: string, text: string) => {
-      if (submittingId) return
+      if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       try {
         await respondConversation(requestId, text)
@@ -49,7 +49,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleNavigateToTab = useCallback(
     async (requestId: string, threadId: string) => {
-      if (submittingId) return
+      if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       try {
         await navigateToTab(requestId, threadId)

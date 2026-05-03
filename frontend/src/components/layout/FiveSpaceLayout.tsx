@@ -21,6 +21,7 @@ import { LayoutGrid, PanelLeftClose, PanelLeftOpen, Maximize2 } from 'lucide-rea
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { useThemeStore } from '@/stores/themeStore'
+import { useUIStore } from '@/stores/uiStore'
 import { cn } from '@/lib/utils'
 import { FloatingWindowManager } from './FloatingWindowManager'
 import { WorkspacePanel } from './WorkspacePanel'
@@ -74,7 +75,8 @@ export function FiveSpaceLayout({
   onToggleMode,
 }: FiveSpaceLayoutProps) {
   const themeConfig = useThemeStore((s) => s.currentTheme)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false)
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
@@ -116,7 +118,6 @@ export function FiveSpaceLayout({
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  const toggleSidebar = useCallback(() => setSidebarCollapsed((prev) => !prev), [])
   const toggleWorkspace = useCallback(() => setWorkspaceCollapsed((prev) => !prev), [])
 
   // Build dynamic dock items with execution status
@@ -132,7 +133,7 @@ export function FiveSpaceLayout({
           icon: execution.type === 'tool' ? '🔧' : execution.type === 'agent' ? '🤖' : '⚡',
           label: execution.name,
           indicator: 'dot' as const,
-          indicatorColor: '#f59e0b',
+          indicatorColor: 'var(--accent-waiting, #f59e0b)',
           isActive: true,
           onClick: () => {
             // Could open execution details in workspace panel
@@ -257,12 +258,16 @@ export function FiveSpaceLayout({
       {/* ---- Main Content Area ---- */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
-        {sidebarContent && !sidebarCollapsed && (
+        {sidebarContent && (
           <aside
             className={cn(
               'border-border flex shrink-0 flex-col overflow-hidden border-r transition-all duration-300',
-              isMobile ? 'w-0' : 'w-56',
             )}
+            style={{
+              width: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem', /* 14rem = w-56 */
+              minWidth: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem',
+              maxWidth: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem',
+            }}
           >
             {sidebarContent}
           </aside>
@@ -342,8 +347,8 @@ export function FiveSpaceLayout({
                 >
                   <div className="bg-muted h-1 w-12 overflow-hidden rounded-full">
                     <div
-                      className="h-full rounded-full bg-blue-400 transition-all duration-500"
-                      style={{ width: `${execution.progress}%` }}
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{ width: `${execution.progress}%`, backgroundColor: 'var(--status-running-color, #0ea5e9)' }}
                     />
                   </div>
                   <span className="text-muted-foreground text-[10px]">

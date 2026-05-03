@@ -8,7 +8,6 @@
 
 import fnmatch
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -108,8 +107,6 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
 
             return create_success_result(
                 data={
-                    "directory": display_path,
-                    "item_count": len(items),
                     "items": items,
                 },
                 metadata={"action": "list_directory"},
@@ -205,25 +202,19 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
         return items
 
     def _get_item_info(self, path: Path) -> dict[str, Any]:
-        """获取目录项信息"""
+        """获取目录项信息（精简版，节省 LLM token）"""
         try:
             stat = path.stat()
             return {
                 "name": path.name,
                 "type": "directory" if path.is_dir() else "file",
-                "size": stat.st_size,
-                "size_formatted": self._format_size(stat.st_size),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "path": str(path),
+                "size": self._format_size(stat.st_size),
             }
         except Exception:
             return {
                 "name": path.name,
                 "type": "directory" if path.is_dir() else "file",
-                "size": 0,
-                "size_formatted": "0B",
-                "modified": None,
-                "path": str(path),
+                "size": "0B",
             }
 
     @staticmethod

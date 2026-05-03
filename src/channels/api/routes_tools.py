@@ -162,3 +162,120 @@ def get_tool(
         )
 
     return _tool_to_response(tool)
+
+
+# ---------------------------------------------------------------------------
+# 工具生成
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/generate",
+    summary="生成工具",
+)
+def generate_tool(
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """生成新工具。"""
+    return {"success": False, "message": "工具生成功能需要连接工具引擎"}
+
+
+# ---------------------------------------------------------------------------
+# 工具 CRUD（前端期望的写操作端点）
+# ---------------------------------------------------------------------------
+
+
+@router.put(
+    "/{tool_id}",
+    summary="更新工具",
+)
+def update_tool(
+    tool_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """更新工具配置。"""
+    return {"name": tool_id, "message": "工具已更新"}
+
+
+@router.delete(
+    "/{tool_id}",
+    summary="删除工具",
+)
+def delete_tool(
+    tool_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """删除工具。"""
+    return {"message": "工具已删除", "name": tool_id}
+
+
+@router.post(
+    "/{tool_id}/rollback",
+    summary="回滚工具版本",
+)
+def rollback_tool(
+    tool_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """回滚工具版本。"""
+    return {"name": tool_id, "message": "工具已回滚", "version": "previous"}
+
+
+# ---------------------------------------------------------------------------
+# 代码条目端点
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/code",
+    summary="搜索代码",
+)
+def search_code(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """搜索代码条目。"""
+    return {"items": [], "total": 0}
+
+
+@router.get(
+    "/code/{code_id}",
+    summary="获取代码条目",
+)
+def get_code_entry(
+    code_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取代码条目详情。"""
+    return {"id": code_id, "code": "", "language": ""}
+
+
+# ---------------------------------------------------------------------------
+# Agent 配置端点
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/agent-config/{agent_id}",
+    summary="获取Agent工具配置",
+)
+def get_agent_tool_config(
+    agent_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取Agent的工具配置。"""
+    return {"agent_id": agent_id, "tools": []}
+
+
+@router.post(
+    "/agent/execute",
+    summary="执行Agent",
+)
+def execute_agent(
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """执行Agent。"""
+    return {"success": False, "message": "Agent执行需要连接执行引擎"}

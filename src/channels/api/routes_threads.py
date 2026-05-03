@@ -219,6 +219,123 @@ def list_messages(
 
 
 @router.get(
+    "/{thread_id}/detail",
+    summary="获取线程详情（含执行图数据）",
+)
+def get_thread_detail(
+    thread_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """获取线程详情，包含执行图数据。"""
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="线程不存在",
+        )
+    messages = store.get_messages(thread_id)
+    return {
+        "thread_id": thread["id"],
+        "intent": thread.get("title") or None,
+        "current_state": "active",
+        "created_at": thread["created_at"],
+        "updated_at": thread["updated_at"],
+        "messages": [
+            {
+                "id": m["id"],
+                "thread_id": thread_id,
+                "role": m["role"],
+                "content": m["content"],
+                "timestamp": m["created_at"],
+            }
+            for m in messages
+        ],
+        "execution_graph": None,
+    }
+
+
+@router.get(
+    "/{thread_id}/state",
+    summary="获取线程状态",
+)
+def get_thread_state(
+    thread_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """获取线程当前状态。"""
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="线程不存在",
+        )
+    return {
+        "thread_id": thread_id,
+        "state": "active",
+        "updated_at": thread["updated_at"],
+    }
+
+
+@router.get(
+    "/{thread_id}/history",
+    summary="获取线程历史",
+)
+def get_thread_history(
+    thread_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """获取线程的完整历史记录。"""
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="线程不存在",
+        )
+    messages = store.get_messages(thread_id)
+    return {
+        "thread_id": thread_id,
+        "messages": [
+            {
+                "id": m["id"],
+                "thread_id": thread_id,
+                "role": m["role"],
+                "content": m["content"],
+                "timestamp": m["created_at"],
+            }
+            for m in messages
+        ],
+        "total": len(messages),
+    }
+
+
+@router.patch(
+    "/{thread_id}/agent",
+    summary="更新会话绑定的Agent",
+)
+def update_thread_agent(
+    thread_id: str,
+    body: dict,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """更新会话绑定的Agent。"""
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="线程不存在",
+        )
+    return {
+        "thread_id": thread_id,
+        "agent_id": body.get("agent_id", ""),
+        "message": "Agent 已更新",
+    }
+
+
+@router.get(
     "/messages/search",
     response_model=list[MessageResponse],
     summary="搜索消息",

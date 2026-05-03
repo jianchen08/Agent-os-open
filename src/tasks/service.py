@@ -34,7 +34,7 @@ class SimpleStateMachine:
         TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EVALUATING, TaskStatus.PAUSED],
         TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.RUNNING],
         TaskStatus.FAILED: [TaskStatus.PENDING],
-        TaskStatus.COMPLETED: [],
+        TaskStatus.COMPLETED: [TaskStatus.PENDING],
         TaskStatus.PAUSED: [TaskStatus.PENDING, TaskStatus.RUNNING],
     }
 
@@ -293,6 +293,58 @@ class TaskService:
         task = self._get_or_raise(task_id)
         self._transition_with_callback(task, TaskStatus.RUNNING)
         logger.info("Task resumed: %s", task_id)
+        return task
+
+    def reactivate_task(self, task_id: str, message: str = "") -> TaskModel:
+        """重新激活已完成任务（completed → pending → running）。
+
+        用于任务完成后需要追加修改的场景：保持同一任务上下文，
+        生成新管道继续执行。新需求通过 message 参数注入。
+
+        Args:
+            task_id: 任务 ID
+            message: 追加需求描述（注入到新管道首轮）
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 任务不是 completed 状态
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.PENDING)
+
+        # 清除上次运行的终态字段
+        task.completed_at = ""
+        task.error = ""
+        task.reject_count = 0
+
+        # 保留旧 pipeline_run_id 到元数据供追溯
+        if task.metadata is None:
+            task.metadata = {}
+        prev_pipeline = task.pipeline_run_id
+        if prev_pipeline:
+            history = task.metadata.get("pipeline_history", [])
+            if not isinstance(history, list):
+                history = []
+            history.append(prev_pipeline)
+            task.metadata["pipeline_history"] = history
+        task.pipeline_run_id = ""
+
+        # 追加需求记录到元数据
+        if message:
+            reqs = task.metadata.get("reactivate_requirements", [])
+            if not isinstance(reqs, list):
+                reqs = []
+            reqs.append({
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+            })
+            task.metadata["reactivate_requirements"] = reqs
+
+        self._storage.save(task)
+        logger.info("Task reactivated: %s (was completed)", task_id)
         return task
 
     def reset_to_pending(self, task_id: str) -> TaskModel:
@@ -561,7 +613,7 @@ class TaskService:
         return task
 
     def delete_task(self, task_id: str) -> bool:
-        """删除任务。
+        """删除任务，并清理关联的 worktree。
 
         Args:
             task_id: 任务 ID
@@ -572,6 +624,7 @@ class TaskService:
         task = self.get_task(task_id)
         if task is None:
             return False
+        self._cleanup_workspace(task_id)
         self._storage.delete(task_id)
         return True
 
@@ -582,6 +635,27 @@ class TaskService:
             task: 任务模型
         """
         self._storage.save(task)
+
+    # ── 清理 ─────────────────────────────────────────────
+
+    def _cleanup_workspace(self, task_id: str) -> None:
+        """尝试清理任务关联的 worktree（best-effort）。"""
+        try:
+            from infrastructure.service_provider import (
+                get_service_provider,
+            )
+            provider = get_service_provider()
+            lifecycle = provider.get(
+                "workspace_lifecycle_manager")
+            if lifecycle:
+                lifecycle.cleanup_workspace(task_id)
+                logger.info(
+                    "Task %s workspace cleaned up", task_id)
+        except Exception as e:
+            logger.warning(
+                "Task %s workspace cleanup failed "
+                "(non-fatal): %s", task_id, e,
+            )
 
     # ── 进度 ─────────────────────────────────────────────
 

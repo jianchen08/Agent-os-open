@@ -89,6 +89,7 @@ class ProcessManager:
 
     def _append_to_log(self, log_file: Path, content: str):
         """追加内容到日志"""
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:
             f.write(content)
 

@@ -93,13 +93,13 @@ class TaskStateMachine:
         "evaluating": ["running", "completed", "failed", "blocked", "pending"],
         "suspended": ["running", "cancelled"],
         "blocked": ["running", "completed", "cancelled"],
-        "completed": [],
+        "completed": ["pending"],
         "failed": ["pending", "cancelled"],
         "cancelled": [],
         "timeout": ["pending", "cancelled"],
     }
 
-    TERMINAL_STATES = {"completed", "cancelled", "timeout"}
+    TERMINAL_STATES = {"cancelled", "timeout"}
 
     def can_transition(self, from_status: str, to_status: str) -> bool:
         """检查状态转换是否合法"""

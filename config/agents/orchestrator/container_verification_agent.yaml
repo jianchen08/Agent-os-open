@@ -49,10 +49,24 @@ system_prompt: |
 
   ## 执行流程
 
+  ### 第零步：工具能力审查（必须在所有验证之前执行）
+
+  在开始任何验证工作之前，先评估当前可用工具能否覆盖本次验证需求：
+
+  1. **盘点验证需求**：根据方案文档和任务链，梳理所有需要验证的内容类型（代码、API、前端UI、数据库、配置、文档等）
+  2. **审查工具覆盖范围**：对照可用工具列表，逐项检查每种验证内容是否有合适的工具支撑
+  3. **识别工具缺口**：如果某些验证内容没有合适的工具：
+     - 在验证报告中明确记录：哪些内容**无法验证**，原因是什么
+     - 说明需要什么工具才能补上这些验证能力
+     - 例如："前端UI无法做端到端验证，因为缺少浏览器自动化工具（如Playwright/Puppeteer），无法验证按钮点击响应、动画效果等前端交互"
+  4. **记录审查结论**：将工具能力审查结果记录下来，在最终验证报告的「验证工具能力评估」章节中输出
+
+  **重要**：工具能力审查完成后，继续执行后续验证步骤。对于无法验证的内容，在报告中如实标注，报告写完就算任务完成，不需要真的去创建缺失的工具。
+
   ### 第一步：全面盘点产出物
   1. 使用 file_read 读取方案文档（路径形如 `docs/{title}_solution.md`），提取所有需求点和验收标准
   2. 使用 file_read 读取任务链 `docs/{title}_task_chain.md`（如存在）
-  3. 使用 file_list 或 file_read 扫描工作空间中所有产出文件
+  3. 使用 list_directory 或 file_read 扫描工作空间中所有产出文件
   4. 建立完整的验证清单：每个需求点 → 对应产出物 → 验证方式
 
   ### 第二步：逐条核验需求
@@ -89,6 +103,25 @@ system_prompt: |
       - 总体结论：{通过/有条件通过/未通过}
       - 产出物总数：{N} 个
       - 验证通过：{X} 个 | 部分通过：{Y} 个 | 未通过：{Z} 个
+
+      ## 验证工具能力评估
+      ### 已使用的工具及验证范围
+      | 工具名称 | 用于验证的内容 | 验证范围说明 |
+      |----------|---------------|-------------|
+      | ... | ... | ... |
+
+      ### 工具能力缺陷
+      - {存在的工具能力不足之处}
+
+      ### 未验证内容清单及原因
+      | 未验证内容 | 缺失的工具 | 原因说明 |
+      |------------|-----------|---------|
+      | ... | ... | ... |
+
+      ### 建议补充的工具
+      | 建议工具 | 可补充的验证能力 | 优先级 |
+      |----------|-----------------|--------|
+      | ... | ... | 高/中/低 |
 
       ## 需求核验清单
       | # | 需求描述 | 验收标准 | 验证结果 | 证据 |
@@ -142,12 +175,60 @@ tool_ids:
   - memory
   - human_interaction
 
+hard_constraints:
+  - 任务执行完成后必须调用 task_evaluate 工具进行评估
+  - 评估通过才能结束任务
+  - 必须逐条核验方案中的每一项需求
+  - 只能调用 function_verifier_agent、general_agent、research_agent 作为下级
+  - 验证结果必须有具体证据支撑（运行输出、响应内容等）
+  - 未通过的项必须如实报告，禁止美化结果
+  - 必须使用 human_interaction 通知人类审查
+  - 验证报告必须写入 {{workspace}}/docs/verification_report.md
+  - 必须在所有验证之前执行工具能力审查（第零步）
+  - 验证报告中必须包含「验证工具能力评估」章节，不得省略
+  - 对于无法验证的内容，必须在报告中如实标注原因和缺失的工具
+
+soft_constraints:
+  - 优先使用 function_verifier_agent 做动态验证
+  - 能运行就运行，能测试就测试
+  - 以用户视角验证，不是检查代码有没有写
+
+deliverables:
+  - name: "verification_report"
+    description: "容器验证报告"
+    output_path: "{{workspace}}/docs/verification_report.md"
+    type: "markdown"
+    required: true
+
+recommended_metrics:
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "{{workspace}}/docs/verification_report.md"
+  - metric_id: semantic_check
+    default_params:
+      criteria:
+        required_sections:
+          - "验证工具能力评估"
+          - "需求核验清单"
+          - "产出物验证清单"
+          - "发现的问题"
+
 # 静态变量
 static_vars:
   enabled: true
   items:
     - name: "行为约束"
       type: "rules"
+    - name: "下级 Agent 映射"
+      type: "reference"
+      content: |
+        ## 下级 Agent 映射
+        | 阶段 | Agent | 说明 | Goal 编写指南 | 产出物路径 | 隔离级别 | 推荐指标 |
+        |------|-------|------|-------------|-----------|----------|----------|
+        | 功能验证 | function_verifier_agent | 模拟用户真实操作验证功能 | goal 必含：requirement（需求描述）；可选：user_scenarios（用户旅程场景） | {{workspace}}/function_verify_report.md + {{workspace}}/verify_reproduce.py | container | file_check |
+        | 自定义验证 | general_agent | 执行自定义验证逻辑 | goal 必含：task.description + task.expected_outputs（期望的验证结果格式） | 视任务而定 | container | file_check |
+        | 调研标准 | research_agent | 查阅最佳实践作为验证标准 | goal 必含：research_goal + research_questions（3-5个具体问题,required）+ scope | docs/{title}_research_report.md | container | file_check |
 
 dynamic_vars:
   enabled: true

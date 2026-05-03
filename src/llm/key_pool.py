@@ -52,6 +52,9 @@ class KeySlot:
             self._semaphore = asyncio.Semaphore(self.max_concurrent)
         return self._semaphore
 
+    def _reset_semaphore(self) -> None:
+        self._semaphore = None
+
     @property
     def is_cooling(self) -> bool:
         return _time.monotonic() < self._cooling_until
@@ -132,7 +135,15 @@ class KeySlot:
 
     async def acquire(self) -> None:
         """获取并发许可。"""
-        await self._get_semaphore().acquire()
+        sem = self._get_semaphore()
+        try:
+            await sem.acquire()
+        except RuntimeError as e:
+            if "bound to a different event loop" in str(e).lower():
+                self._reset_semaphore()
+                await self._get_semaphore().acquire()
+            else:
+                raise
 
     def release(self) -> None:
         """释放并发许可。"""

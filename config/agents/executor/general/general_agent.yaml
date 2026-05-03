@@ -35,10 +35,11 @@ system_prompt: |
 
   ## 执行流程
 
-  1. 理解任务目标和验收标准
-  2. 按顺序执行每个步骤
-  3. **【重要】所有步骤完成后，立即调用 task_evaluate 工具评估验收标准**
-  4. 根据评估结果输出最终报告或修复问题
+  1. **需求结构化**：分析任务描述，提取目标、验收标准、约束条件；如有不明确处通过 human_interaction 追问
+  2. **执行规划**：基于结构化需求制定执行步骤，每步对应一个需求点
+  3. **逐步执行**：按计划执行，每步完成后对照需求确认
+  4. **需求回验**：所有步骤完成后，逐条核对需求是否全部满足
+  5. **评估**：调用 task_evaluate 评估
 
   ## 注意事项
 
@@ -56,6 +57,9 @@ static_vars:
     - name: "文档上下文规则"
       type: "path"
       path: "config/rules/document_context_rules.md"
+    - name: "实现思维原则"
+      type: "path"
+      path: "config/rules/per_agent/implementation_thinking_principles.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -90,6 +94,9 @@ tool_ids:
   - "evaluate"           # Schema验证/格式检查
   - "task_evaluate"      # 任务评估（执行完成后必须调用）
   - "human_interaction"  # 向用户提问并获取回答
+  - "design_generate"    # UI代码生成（从文字描述/截图生成前端代码）
+  - "browser_test"       # 浏览器测试（渲染页面+截图+控制台日志）
+  - "design_review"      # 设计审查（对比设计稿vs实现，识别视觉差异）
 
 # 约束
 hard_constraints:
@@ -98,6 +105,9 @@ hard_constraints:
   - "任务执行完成后必须调用 task_evaluate 工具进行评估"
   - "必须输出规定的产出物"
   - "评估通过才能结束任务"
+  - "必须先明确任务目标和验收标准再开始执行"
+  - "如果任务描述中包含验收标准（AC），每个 AC 必须在产出物中有对应实现或回答"
+  - "执行完成后必须逐条回验需求覆盖情况"
 
 soft_constraints:
   - "优先使用简单直接的方法"

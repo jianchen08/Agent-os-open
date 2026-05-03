@@ -1,0 +1,91 @@
+# =============================================================================
+# Agent OS — Docker Compose 生产配置
+# 使用方式: docker compose up -d
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Agent OS 主服务
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-os
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - APP_ENV=${APP_ENV:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - API_PORT=8000
+      - API_HOST=0.0.0.0
+      - API_SECRET_KEY=${API_SECRET_KEY:-change-me-in-production}
+      - API_TOKEN_EXPIRE_HOURS=${API_TOKEN_EXPIRE_HOURS:-24}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - MEMORY_BACKEND=${MEMORY_BACKEND:-memory}
+      - DATA_DIR=/app/data
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5188,http://localhost:5189}
+    volumes:
+      - ./config:/app/config:ro
+      - agent-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Redis — 缓存与会话存储
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: agent-os-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+# =============================================================================
+# 数据卷
+# =============================================================================
+volumes:
+  agent-data:
+    driver: local
+  redis-data:
+    driver: local
+
+# =============================================================================
+# 网络
+# =============================================================================
+networks:
+  agent-network:
+    driver: bridge

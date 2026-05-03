@@ -32,4 +32,4 @@ pipeline:
   # 评估者特定的迭代限制
   config:
     max_iterations: 10                 # 评估不需要太多迭代
-    timeout: 600                       # 评估超时时间（秒）
+    timeout: 1200                      # 评估超时时间（秒，最长 20 分钟）

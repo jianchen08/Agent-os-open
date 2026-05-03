@@ -89,6 +89,23 @@ def create_app() -> FastAPI:
             uptime_seconds=round(time.time() - _start_time, 1),
         )
 
+    # ---- 健康检查子路由 ----
+    @app.get(
+        "/health/live",
+        tags=["健康检查"],
+        summary="存活检查",
+    )
+    def liveness_check() -> dict[str, str]:
+        return {"status": "alive"}
+
+    @app.get(
+        "/health/ready",
+        tags=["健康检查"],
+        summary="就绪检查",
+    )
+    def readiness_check() -> dict[str, str]:
+        return {"status": "ready"}
+
     return app
 
 
@@ -174,3 +191,34 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(plugins_router)
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
+
+    # ---- 补全缺失路由（前端期望但之前未注册） ----
+    from channels.api.routes_missing import (
+        projects_router,
+        users_router,
+        monitoring_router,
+        triggers_router,
+        interaction_router,
+        agent_calls_router,
+        execution_router,
+        sessions_router,
+        knowledge_base_router,
+        floating_chat_router,
+        cost_control_router,
+        evaluation_router,
+        eval_metrics_alias_router,
+    )
+
+    app.include_router(projects_router)
+    app.include_router(users_router)
+    app.include_router(monitoring_router)
+    app.include_router(triggers_router)
+    app.include_router(interaction_router)
+    app.include_router(agent_calls_router)
+    app.include_router(execution_router)
+    app.include_router(sessions_router)
+    app.include_router(knowledge_base_router)
+    app.include_router(floating_chat_router)
+    app.include_router(cost_control_router)
+    app.include_router(evaluation_router)
+    app.include_router(eval_metrics_alias_router)

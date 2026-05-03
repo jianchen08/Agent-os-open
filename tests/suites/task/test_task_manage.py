@@ -357,6 +357,106 @@ class TestActionInject:
         assert result["error_code"] == "MISSING_SESSION_ID"
 
 
+# ── action=reactivate ──────────────────────────────────
+
+
+class TestActionReactivate:
+    """reactivate 操作测试。"""
+
+    @patch("tools.builtin.task_manage._retry_emit_event")
+    @patch("tools.builtin.task_manage._get_task_service")
+    def test_reactivate_completed_task(self, mock_get_svc: MagicMock, mock_emit: MagicMock) -> None:
+        """重新激活已完成的任务。"""
+        _reset_task_service_singleton()
+        completed_task = _make_task(
+            status=TaskStatus.COMPLETED,
+            pipeline_run_id="pipe_old_001",
+        )
+        running_task = _make_task(status=TaskStatus.RUNNING)
+
+        tasks = {"task_001": completed_task}
+        mock_svc = _mock_task_service(tasks)
+        mock_svc.start_task.return_value = running_task
+        mock_get_svc.return_value = mock_svc
+
+        result = task_manage_func({
+            "action": "reactivate",
+            "task_id": "task_001",
+            "message": "追加修复：dark mode 颜色不对",
+        })
+        assert result["success"] is True
+        assert result["status"] == "running"
+        assert "追加修复" in result["message"]
+        mock_emit.assert_called_once_with("task_001")
+
+    @patch("tools.builtin.task_manage._get_task_service")
+    def test_reactivate_non_completed_task(self, mock_get_svc: MagicMock) -> None:
+        """不能重新激活非完成任务。"""
+        _reset_task_service_singleton()
+        running_task = _make_task(status=TaskStatus.RUNNING)
+        mock_svc = _mock_task_service({"task_001": running_task})
+        mock_get_svc.return_value = mock_svc
+
+        result = task_manage_func({"action": "reactivate", "task_id": "task_001"})
+        assert result["success"] is False
+        assert result["error_code"] == "INVALID_STATUS"
+
+    @patch("tools.builtin.task_manage._retry_emit_event")
+    @patch("tools.builtin.task_manage._get_task_service")
+    def test_reactivate_preserves_pipeline_history(self, mock_get_svc: MagicMock, mock_emit: MagicMock) -> None:
+        """reactivate 保留旧 pipeline_run_id 到 history。"""
+        _reset_task_service_singleton()
+        completed_task = _make_task(
+            status=TaskStatus.COMPLETED,
+            pipeline_run_id="pipe_old_002",
+        )
+        running_task = _make_task(status=TaskStatus.RUNNING)
+
+        tasks = {"task_001": completed_task}
+        mock_svc = _mock_task_service(tasks)
+        mock_svc.start_task.return_value = running_task
+        mock_get_svc.return_value = mock_svc
+
+        result = task_manage_func({"action": "reactivate", "task_id": "task_001"})
+        assert result["success"] is True
+        # 验证 reactivate_task 被调用
+        mock_svc.reactivate_task.assert_called_once()
+
+    @patch("tools.builtin.task_manage._retry_emit_event")
+    @patch("tools.builtin.task_manage._get_task_service")
+    def test_reactivate_without_message(self, mock_get_svc: MagicMock, mock_emit: MagicMock) -> None:
+        """不带 message 也能 reactivate。"""
+        _reset_task_service_singleton()
+        completed_task = _make_task(status=TaskStatus.COMPLETED)
+        running_task = _make_task(status=TaskStatus.RUNNING)
+
+        tasks = {"task_001": completed_task}
+        mock_svc = _mock_task_service(tasks)
+        mock_svc.start_task.return_value = running_task
+        mock_get_svc.return_value = mock_svc
+
+        result = task_manage_func({"action": "reactivate", "task_id": "task_001"})
+        assert result["success"] is True
+        assert "重新激活" in result["message"]
+
+    def test_reactivate_missing_task_id(self) -> None:
+        """缺少 task_id。"""
+        result = task_manage_func({"action": "reactivate"})
+        assert result["success"] is False
+        assert result["error_code"] == "MISSING_TASK_ID"
+
+    @patch("tools.builtin.task_manage._get_task_service")
+    def test_reactivate_not_found(self, mock_get_svc: MagicMock) -> None:
+        """任务不存在。"""
+        _reset_task_service_singleton()
+        mock_svc = _mock_task_service()
+        mock_get_svc.return_value = mock_svc
+
+        result = task_manage_func({"action": "reactivate", "task_id": "nonexistent"})
+        assert result["success"] is False
+        assert result["error_code"] == "TASK_NOT_FOUND"
+
+
 # ── 参数校验 ──────────────────────────────────────────
 
 

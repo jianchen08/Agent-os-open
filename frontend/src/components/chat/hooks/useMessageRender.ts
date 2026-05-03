@@ -125,7 +125,7 @@ function buildContentBlocksFromMessage(
 ): ContentBlock[] {
   const blocks: ContentBlock[] = []
 
-  if (thinking && thinking.content.trim()) {
+  if (thinking && (thinking.content.trim() || thinking.isThinking)) {
     blocks.push({
       type: 'thinking',
       thinking,

@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import uuid as _uuid
 from typing import Any
 
@@ -159,12 +160,16 @@ class TaskWorker:
         self._wake_events: dict[str, asyncio.Event] = {}
         self._last_container_check: float = 0.0
         self._active_tasks: set[str] = set()  # 管道正在执行中的任务（含运行工具/评估器）
+        self._task_id_to_bg_task: dict[str, asyncio.Task] = {}  # task_id → asyncio.Task（cancel 支持）
 
     async def start(self) -> None:
         """启动后台任务监听，并恢复残留的 running 任务。"""
         if self._running:
             return
         self._running = True
+
+        # 存储全局引用，供 task_manage cancel 调用
+        sys._agent_os_task_worker = self
 
         self._init_lifecycle()
 
@@ -173,6 +178,7 @@ class TaskWorker:
             self._event_bus.subscribe("task_state_changed", self._on_task_state_changed)
 
         await self._recover_running_tasks()
+        await self._recover_evaluating_tasks()
 
         logger.info("TaskWorker started (event-driven background task processor)")
 
@@ -285,6 +291,254 @@ class TaskWorker:
         if recovered:
             logger.info("TaskWorker: 恢复了 %d 个任务", recovered)
 
+    async def _recover_evaluating_tasks(self) -> None:
+        """恢复 evaluating 状态的任务：保持评估状态，重新激活评估管道。
+
+        系统重启时，处于 EVALUATING 的任务不会被 _recover_running_tasks
+        处理（它只管 RUNNING → PENDING）。这些任务需要直接重新触发
+        EvaluationExecutor，对剩余未通过的指标重新评估。
+        """
+        if not self._task_service:
+            return
+
+        from tasks.types import TaskStatus
+
+        evaluating_tasks = self._task_service.list_by_status(
+            TaskStatus.EVALUATING,
+        )
+        if not evaluating_tasks:
+            return
+
+        logger.info(
+            "TaskWorker: 发现 %d 个 evaluating 任务，"
+            "准备重新激活评估管道",
+            len(evaluating_tasks),
+        )
+
+        for task in evaluating_tasks:
+            task_scope = task.metadata.get(
+                "task_scope", "non_container",
+            ) if task.metadata else "non_container"
+            if task_scope == "container":
+                logger.debug(
+                    "TaskWorker: 跳过容器任务评估恢复: task_id=%s",
+                    task.id,
+                )
+                continue
+
+            try:
+                await self._rerun_evaluation(task)
+            except Exception as e:
+                logger.error(
+                    "TaskWorker: 恢复 evaluating 任务失败: "
+                    "task_id=%s, error=%s",
+                    task.id, e,
+                )
+                try:
+                    self._task_service.fail_task(
+                        task.id, f"评估恢复失败: {e}",
+                    )
+                except Exception:
+                    pass
+
+    async def _rerun_evaluation(self, task: Any) -> None:
+        """为 evaluating 状态的任务重新运行评估。
+
+        保持任务在 evaluating 状态，直接创建 EvaluationExecutor
+        对剩余未通过的指标执行评估，完成后转换为终态。
+        """
+        import asyncio as _asyncio
+        from evaluation.executor import EvaluationExecutor
+
+        task_id = task.id
+        metadata = task.metadata or {}
+
+        # 1. 提取评估指标 ID
+        metric_ids: list[str] = metadata.get(
+            "evaluation_metric_ids", [],
+        )
+        if not metric_ids:
+            ac = metadata.get("acceptance_criteria", {})
+            if isinstance(ac, dict):
+                metric_ids = list(ac.keys())
+
+        if not metric_ids:
+            logger.info(
+                "TaskWorker: 任务 %s 无评估指标，直接标记完成",
+                task_id,
+            )
+            self._task_service.complete_evaluation(task_id, passed=True)
+            return
+
+        # 2. 从 evaluation_history 收集已通过指标
+        history = metadata.get("evaluation_history", [])
+        latest: dict[str, bool] = {}
+        if isinstance(history, list):
+            for entry in history:
+                metrics = entry.get("metrics", [])
+                for m in metrics:
+                    mid = m.get("metric_id")
+                    if mid:
+                        latest[mid] = m.get("passed", False)
+
+        remaining = [mid for mid in metric_ids if not latest.get(mid, False)]
+
+        if not remaining:
+            logger.info(
+                "TaskWorker: 任务 %s 所有指标已通过，直接标记完成",
+                task_id,
+            )
+            self._task_service.complete_evaluation(task_id, passed=True)
+            return
+
+        # 3. 构建 input_params
+        input_params = self._build_recovery_input_params(task, metric_ids)
+
+        # 4. 创建 EvaluationExecutor
+        pipeline_factory = self._services.get("pipeline_factory")
+        agent_registry = self._services.get("agent_registry")
+        tool_registry = self._services.get("tool_registry")
+
+        loop = _asyncio.get_running_loop()
+        executor = EvaluationExecutor(
+            task_service=self._task_service,
+            pipeline_factory=pipeline_factory,
+            agent_registry=agent_registry,
+            tool_registry=tool_registry,
+            main_loop=loop,
+        )
+
+        # 5. 运行评估
+        timeout = float(metadata.get("eval_timeout", 600))
+        logger.info(
+            "TaskWorker: 重新激活评估管道: task_id=%s, "
+            "remaining=%s, timeout=%ss",
+            task_id, remaining, timeout,
+        )
+
+        result = await _asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: executor.run_evaluation(
+                    task_id=task_id,
+                    metric_ids=remaining,
+                    input_params=input_params,
+                    skip_state_update=True,
+                ),
+            ),
+            timeout=timeout,
+        )
+
+        # 6. 处理评估结果
+        if result.overall_passed:
+            logger.info(
+                "TaskWorker: 评估恢复完成（通过）: task_id=%s",
+                task_id,
+            )
+            self._task_service.complete_evaluation(
+                task_id, passed=True, result={
+                    "overall_passed": True,
+                    "summary": result.summary,
+                    "recovered": True,
+                    "metrics": [
+                        {
+                            "metric_id": r.metric_id,
+                            "passed": r.passed,
+                            "score": r.score,
+                            "message": r.message,
+                        }
+                        for r in result.results
+                    ],
+                },
+            )
+        else:
+            failed_metrics = [
+                r.metric_id for r in result.results if not r.passed
+            ]
+            logger.warning(
+                "TaskWorker: 评估恢复完成（未通过）: task_id=%s, "
+                "failed=%s",
+                task_id, failed_metrics,
+            )
+            self._task_service.complete_evaluation(
+                task_id, passed=False, result={
+                    "overall_passed": False,
+                    "summary": result.summary,
+                    "recovered": True,
+                    "metrics": [
+                        {
+                            "metric_id": r.metric_id,
+                            "passed": r.passed,
+                            "score": r.score,
+                            "message": r.message,
+                            "error": r.error,
+                        }
+                        for r in result.results
+                    ],
+                },
+            )
+
+    def _build_recovery_input_params(
+        self, task: Any, metric_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """为评估恢复构建 input_params。
+
+        从 task.metadata.acceptance_criteria 提取参数，
+        并注入 workspace 路径确保评估工具能正确访问文件。
+        """
+        from pathlib import Path
+
+        metadata = task.metadata or {}
+        params: dict[str, dict[str, Any]] = {}
+
+        ac = metadata.get("acceptance_criteria", {})
+        if isinstance(ac, dict):
+            _non_param_keys = {
+                "expected_output", "pass_threshold", "description",
+            }
+            for metric_id, config in ac.items():
+                if isinstance(config, dict) and metric_id in metric_ids:
+                    if "input_params" in config:
+                        params[metric_id] = config["input_params"]
+                    else:
+                        params[metric_id] = {
+                            k: v for k, v in config.items()
+                            if k not in _non_param_keys
+                        }
+
+        # 解析 workspace
+        workspace_abs: str | None = None
+        ws_meta = metadata.get("ws_meta")
+        if ws_meta and isinstance(ws_meta, dict):
+            ws_path = ws_meta.get("path")
+            if ws_path:
+                p = Path(ws_path)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                workspace_abs = str(p)
+
+        if not workspace_abs:
+            task_workspace = metadata.get("workspace")
+            if task_workspace:
+                workspace_abs = str(Path.cwd() / task_workspace)
+
+        # 注入 workspace 和 criteria
+        task_desc = ""
+        if hasattr(task, "description") and task.description:
+            task_desc = task.description
+        elif hasattr(task, "title") and task.title:
+            task_desc = task.title
+
+        for metric_id in metric_ids:
+            p = params.get(metric_id, {})
+            if not p.get("criteria") and task_desc:
+                p.setdefault("criteria", task_desc)
+            if workspace_abs and "workspace" not in p:
+                p["workspace"] = workspace_abs
+            params[metric_id] = p
+
+        return params
+
     async def stop(self) -> None:
         """停止后台任务监听，等待所有 pending 任务完成。"""
         self._running = False
@@ -335,6 +589,7 @@ class TaskWorker:
                 logger.warning("TaskWorker.stop: failed to cleanup tasks: %s", e)
         self._terminal_events.clear()
         self._wake_events.clear()
+        self._task_id_to_bg_task.clear()
 
         logger.info("TaskWorker stopped")
 
@@ -352,6 +607,9 @@ class TaskWorker:
         bg_task = asyncio.create_task(self._execute_background_task(task_data))
         self._tasks.add(bg_task)
         bg_task.add_done_callback(self._tasks.discard)
+        if task_id != "unknown":
+            self._task_id_to_bg_task[task_id] = bg_task
+            bg_task.add_done_callback(lambda t, tid=task_id: self._task_id_to_bg_task.pop(tid, None))
 
     async def _on_task_state_changed(self, event: Any) -> None:
         """处理任务状态变更事件，触发对应的 asyncio.Event。
@@ -379,9 +637,50 @@ class TaskWorker:
                     task_id, new_status,
                 )
 
+            # ── 终态 lifecycle 钩子：合并/清理 worktree ──
+            await self._handle_terminal_lifecycle(task_id, new_status)
+
             await self._check_stale_containers()
 
             await self._notify_suspended_pipelines(task_id, new_status, data)
+
+    async def _handle_terminal_lifecycle(self, task_id: str, new_status: str) -> None:
+        """终态时触发 worktree 合并/清理（仅 worktree 模式）。"""
+        lifecycle = self._services.get("workspace_lifecycle_manager")
+        if not lifecycle:
+            return
+
+        lifecycle.restore_ws_meta(task_id)
+        ws_meta = lifecycle._ws_meta_store.get(task_id)
+        if not ws_meta:
+            return
+
+        # 仅 worktree 模式需要合并+清理，plain/shared 模式无 worktree
+        if ws_meta.get("mode") != "worktree":
+            return
+
+        workspace = ws_meta.get("path", "")
+        if not workspace:
+            return
+
+        try:
+            if new_status == "completed":
+                result = lifecycle.on_eval_passed(task_id, workspace, ws_meta)
+                if result.get("success"):
+                    logger.info("TaskWorker: worktree 合并+清理成功: task_id=%s", task_id)
+                else:
+                    logger.warning(
+                        "TaskWorker: worktree 合并失败: task_id=%s, error=%s",
+                        task_id, result.get("error", "unknown"),
+                    )
+            elif new_status == "failed":
+                lifecycle.on_eval_failed(task_id, workspace, ws_meta)
+                logger.info("TaskWorker: worktree 评估失败处理完成: task_id=%s", task_id)
+        except Exception as e:
+            logger.warning(
+                "TaskWorker: _handle_terminal_lifecycle failed: task_id=%s, error=%s",
+                task_id, e,
+            )
 
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
         """任务系统通知挂起的管道：子任务到达终态。
@@ -422,6 +721,22 @@ class TaskWorker:
                 pass
 
         if parent_pipeline_id:
+            # 1. 运行中引擎：直接 inject_notification
+            running_key = f"__running_engine_{parent_pipeline_id}"
+            running_engine = self._services.get(running_key)
+            if running_engine and hasattr(running_engine, "inject_notification"):
+                try:
+                    running_engine.inject_notification(notification)
+                    logger.info(
+                        "TaskWorker: 通知运行中管道: "
+                        "pipeline=%s, task=%s, status=%s",
+                        parent_pipeline_id, task_id, new_status,
+                    )
+                    return
+                except Exception as exc:
+                    logger.warning("TaskWorker: inject_notification 失败: %s", exc)
+
+            # 2. 挂起引擎：inject_and_wake
             engine_key = f"__suspended_engine_{parent_pipeline_id}"
             engine = self._services.get(engine_key)
             if engine and hasattr(engine, "inject_and_wake"):
@@ -442,17 +757,21 @@ class TaskWorker:
                 except Exception as exc:
                     logger.warning("TaskWorker: inject_and_wake 失败: %s", exc)
             else:
-                # 父管道尚未挂起（竞态：子任务在父管道 _suspend_and_wait 之前失败）
-                # 将通知入队，由 _suspend_and_wait 在挂起时消费
+                # 父管道不存在：可能已退出或尚未创建
                 pending_key = f"__pending_notifications_{parent_pipeline_id}"
                 pending_list = self._services.get(pending_key, [])
                 pending_list.append(notification)
                 self._services[pending_key] = pending_list
                 logger.info(
-                    "TaskWorker: 父管道尚未挂起，通知已入队: "
+                    "TaskWorker: 父管道未找到，通知已入队: "
                     "pipeline=%s, task=%s, status=%s, queue_size=%d",
                     parent_pipeline_id, task_id, new_status, len(pending_list),
                 )
+
+                # 子任务失败且父管道不可达 → 级联失败到父任务
+                if new_status == "failed":
+                    self._cascade_fail_parent(task_id, task_obj)
+
                 return
 
         # 回退：扫描所有挂起管道（兼容旧任务无 parent_pipeline_id 的情况）
@@ -483,6 +802,125 @@ class TaskWorker:
                         break
             except Exception as exc:
                 logger.warning("TaskWorker: 通知挂起管道失败: %s", exc)
+
+    def _cascade_fail_parent(
+        self, child_task_id: str, child_task_obj: Any,
+    ) -> None:
+        """子任务失败且父管道不可达时，级联失败到父任务。
+
+        检查 parent_task_id 对应的父任务状态：
+        - running → 标记 failed（触发递归向上传播）
+        - 终态 → 无需处理
+        - 不存在 → 无需处理
+        """
+        parent_task_id = getattr(
+            child_task_obj, "parent_task_id", None,
+        )
+        if not parent_task_id:
+            return
+
+        task_service = self._task_service
+        if not task_service:
+            return
+
+        try:
+            parent_task = task_service.get_task(parent_task_id)
+        except Exception:
+            return
+
+        if parent_task is None:
+            return
+
+        parent_status = parent_task.status
+        parent_status_str = (
+            parent_status if isinstance(parent_status, str)
+            else parent_status.value
+        )
+
+        if parent_status_str != "running":
+            logger.debug(
+                "TaskWorker: 级联跳过: parent_task=%s "
+                "已终态(%s), child_task=%s",
+                parent_task_id, parent_status_str, child_task_id,
+            )
+            return
+
+        child_title = getattr(child_task_obj, "title", child_task_id)
+        child_error = getattr(child_task_obj, "error", "") or ""
+        cascade_error = (
+            f"子任务 '{child_title}' ({child_task_id}) "
+            f"失败且管道不可达，级联终止"
+        )
+        if child_error:
+            cascade_error += f": {child_error[:200]}"
+
+        logger.warning(
+            "TaskWorker: 级联失败: parent_task=%s, "
+            "child_task=%s, reason=%s",
+            parent_task_id, child_task_id, cascade_error,
+        )
+        try:
+            task_service.fail_task(parent_task_id, cascade_error)
+        except Exception as exc:
+            logger.warning(
+                "TaskWorker: 级联失败异常: parent_task=%s, %s",
+                parent_task_id, exc,
+            )
+
+    def cancel_pipeline(self, task_id: str) -> bool:
+        """取消任务关联的运行中管道。
+
+        由 task_manage cancel 操作调用，强制停止 PipelineEngine。
+        清理所有相关资源（挂起引擎、计时器、事件）后取消 asyncio.Task。
+
+        Args:
+            task_id: 要取消的任务 ID
+
+        Returns:
+            是否成功发起取消（无运行中管道时返回 False）
+        """
+        bg_task = self._task_id_to_bg_task.get(task_id)
+        if bg_task is None or bg_task.done():
+            logger.debug(
+                "TaskWorker.cancel_pipeline: no running pipeline for task %s",
+                task_id,
+            )
+            return False
+
+        # 获取 pipeline_id 用于清理 services 中的引擎引用
+        pipeline_id = None
+        if self._task_service:
+            try:
+                task = self._task_service.get_task(task_id)
+                if task:
+                    pipeline_id = getattr(task, "pipeline_run_id", None)
+            except Exception:
+                pass
+
+        if pipeline_id:
+            self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+            self._services.pop(f"__running_engine_{pipeline_id}", None)
+            self._services.pop(f"__pending_notifications_{pipeline_id}", None)
+
+        self._suspended_engines.pop(task_id, None)
+        wake_evt = self._wake_events.pop(task_id, None)
+        if wake_evt is not None:
+            wake_evt.set()
+
+        self._active_tasks.discard(task_id)
+        self._idle_remind_counts.pop(task_id, None)
+        self._cancel_idle_timer_async(task_id)
+
+        evt = self._terminal_events.pop(task_id, None)
+        if evt is not None:
+            evt.set()
+
+        bg_task.cancel()
+        logger.info(
+            "TaskWorker.cancel_pipeline: cancelled pipeline for task %s",
+            task_id,
+        )
+        return True
 
     async def _execute_background_task(self, task_data: dict[str, Any]) -> None:
         """执行后台任务的完整生命周期。
@@ -659,9 +1097,22 @@ class TaskWorker:
 
         is_default_workspace = not explicit_workspace
 
+        # 读取 retry_message（由 TaskTool._retry_task 存入 metadata）
+        retry_message = None
+        if task_service:
+            _task_for_retry_msg = task_service.get_task(task_id)
+            if _task_for_retry_msg and _task_for_retry_msg.metadata:
+                retry_message = _task_for_retry_msg.metadata.get("retry_message")
+                if retry_message:
+                    # 读取后清除，避免重试后再读到旧消息
+                    _task_for_retry_msg.metadata.pop("retry_message", None)
+                    task_service.save_task(_task_for_retry_msg)
+
         full_input = user_input
         if description:
             full_input += f"\n\n详细描述：{description}"
+        if retry_message:
+            full_input += f"\n\n[重试纠正信息]：{retry_message}"
         if goal_context:
             full_input += f"\n\n上下文信息：{json.dumps(goal_context, ensure_ascii=False, indent=2) if isinstance(goal_context, dict) else str(goal_context)}"
         if acceptance_criteria:
@@ -688,6 +1139,14 @@ class TaskWorker:
             _scene_hint = _SCENE_PROMPTS.get(ws_meta.get("mode", ""))
             if _scene_hint:
                 full_input += f"\n\n工作空间模式提示：{_scene_hint}"
+
+        # ── 3.x 注入待办事项工作流提示 ──
+        full_input += (
+            "\n\n执行流程（必须遵守）："
+            "\n1. 先分析任务，列出所有待办事项（用 - [ ] 格式）"
+            "\n2. 按顺序逐项执行，完成一项后在输出中标记为 - [x] ✅"
+            "\n3. 全部完成后调用 task_evaluate 提交评估"
+        )
 
         # ── 3.5 追加 Agent 特定的执行提示 ──
         # Agent 的工作流已在 system_prompt 中定义，无需额外注入执行提示
@@ -951,6 +1410,8 @@ class TaskWorker:
             evt = self._terminal_events.pop(task_id, None)
             if evt is not None:
                 evt.set()
+            # BUG-FIX: engine.run 异常后清理活跃任务集合，防止 idle 计时器误判
+            self._active_tasks.discard(task_id)
             # BUG-FIX: engine.run 异常后清理 idle_timer，防止计时器泄漏
             if idle_timer_registered and timer_manager:
                 try:
@@ -1025,6 +1486,7 @@ class TaskWorker:
                         llm_error_info = pipeline_state.get("llm_error_info") if pipeline_state else None
                         task_complete = pipeline_state.get("task_complete") if pipeline_state else None
                         error_analysis = pipeline_state.get("error_analysis") if pipeline_state else None
+                        stop_reason = pipeline_state.get("router.stop_reason", "") if pipeline_state else ""
 
                         # 根据实际原因构建精确的错误信息
                         parts: list[str] = []
@@ -1041,6 +1503,8 @@ class TaskWorker:
                                 etype = llm_error_info.get("error_type", "")
                                 if etype:
                                     parts.append(f"错误类型={etype}")
+                        elif stop_reason == "timeout":
+                            parts.append("执行超时")
                         elif hit_max_iter:
                             # 确实是迭代耗尽
                             parts.append(
@@ -1106,36 +1570,7 @@ class TaskWorker:
         try:
             await asyncio.wait_for(terminal_evt.wait(), timeout=terminal_wait_timeout)
             logger.info("TaskWorker: task %s reached terminal state", task_id)
-            # ── 生命周期钩子：终态处理 ──
-            if lifecycle and ws_meta and task_service:
-                try:
-                    _t = task_service.get_task(task_id)
-                    if _t:
-                        _s = _t.status if isinstance(_t.status, str) else _t.status.value
-                        if _s == "completed":
-                            lifecycle.on_eval_passed(task_id, workspace, ws_meta)
-                            logger.info("TaskWorker: lifecycle on_eval_passed, task_id=%s", task_id)
-                        elif _s == "failed":
-                            lifecycle.on_eval_failed(task_id, workspace, ws_meta)
-                            logger.info("TaskWorker: lifecycle on_eval_failed, task_id=%s", task_id)
-                except Exception as hook_exc:
-                    logger.warning(
-                        "TaskWorker: lifecycle terminal hook failed: task_id=%s, error=%s, retrying once",
-                        task_id, hook_exc,
-                    )
-                    try:
-                        lifecycle.restore_ws_meta(task_id)
-                        ws_meta_retry = lifecycle._ws_meta_store.get(task_id, ws_meta)
-                        if _s == "completed":
-                            lifecycle.on_eval_passed(task_id, workspace, ws_meta_retry)
-                        elif _s == "failed":
-                            lifecycle.on_eval_failed(task_id, workspace, ws_meta_retry)
-                        logger.info("TaskWorker: lifecycle hook retry succeeded: task_id=%s", task_id)
-                    except Exception as retry_exc:
-                        logger.error(
-                            "TaskWorker: lifecycle hook retry also failed: task_id=%s, error=%s",
-                            task_id, retry_exc,
-                        )
+            # lifecycle 钩子已移至 _on_task_state_changed → _handle_terminal_lifecycle
         except asyncio.TimeoutError:
             logger.warning("TaskWorker: task %s timed out waiting for terminal state", task_id)
             if task_service:
@@ -1204,11 +1639,13 @@ class TaskWorker:
         idle_remind_limit = 3
         remind_count = self._idle_remind_counts.get(task_id, 0)
 
-        # 活跃管道期间暂停 idle 计时器：重建但不计数、不失败
+        # 活跃管道期间直接取消 idle 计时器（不重建）：
+        # 活跃管道本身不是"空闲"，不需要 idle 检测。
+        # 计时器会在管道挂起（等待子任务）时重新注册。
         if task_id in self._active_tasks:
             logger.debug(
                 "TaskWorker: idle 超时但管道活跃，"
-                "暂停计时器: task_id=%s",
+                "取消计时器（不重建）: task_id=%s",
                 task_id,
             )
             timer_manager = self._services.get("timer_manager")
@@ -1216,9 +1653,7 @@ class TaskWorker:
                 try:
                     loop = asyncio.get_running_loop()
                     loop.create_task(
-                        self._recreate_idle_timer_async(
-                            task_id, timer_manager,
-                        ),
+                        timer_manager.cancel_timer(task_id),
                     )
                 except RuntimeError:
                     pass

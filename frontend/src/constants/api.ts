@@ -40,7 +40,7 @@ export const API_ENDPOINTS = {
     /** 创建线程 */
     CREATE: '/api/v1/threads',
     /** 获取线程详情（包含执行图数据） */
-    GET: (id: string) => `/api/v1/threads/${id}/detail`,
+    GET: (id: string) => `/api/v1/threads/${id}`,
     /** 获取线程状态 */
     STATE: (id: string) => `/api/v1/threads/${id}/state`,
     /** 获取线程历史 */
@@ -62,7 +62,7 @@ export const API_ENDPOINTS = {
   /** 执行图相关 - 使用线程详情端点获取执行图数据 */
   GRAPH: {
     /** 获取执行图（通过线程详情端点） */
-    GET: (threadId: string) => `/api/v1/threads/${threadId}/detail`,
+    GET: (threadId: string) => `/api/v1/threads/${threadId}`,
   },
   /** 记忆管理相关 - 对应后端 /api/v1/memory/* */
   MEMORY: {

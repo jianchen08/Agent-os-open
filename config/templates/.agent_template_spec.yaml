@@ -677,16 +677,17 @@ output_schema:
 #       ## 常用 Agent 映射
 #       | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
 #       |------|-------|------|-----------|----------|----------|
-#       | 调研/分析 | research_agent | ... | `docs/{title}_research_report.md` | container | file_check, semantic_check(可选) |
-#       | Agent创建 | resource_manager_agent | ... | 视资源类型而定 | host | file_check, semantic_check |
+#       | 调研/分析 | research_agent | ... | `docs/{title}_research_report.md` | container | file_check, semantic_check(重要任务可选) |
+#       | Agent创建 | resource_manager_agent | ... | 视资源类型而定 | host | file_check, semantic_check(重要任务) |
 #       ### 隔离规则
 #       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
 #       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
 #       ### 评估规则
-#       - file_check：必选，检查文件是否存在（低成本）
-#       - semantic_check：可选，检查内容质量（调用 LLM，有成本）
-#       - 项目修改类：semantic_check 必选
-#       - 任务执行类：semantic_check 按任务重要程度决定
+#       - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本
+#       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check 或 function_verify
+#       - 一般任务（例行操作、低风险变更、简单执行）→ 仅用 tool 类指标（file_check、bash_check、test_check 等）
+#       - 资源创建/修改类：优先考虑 semantic_check 或 function_verify
+#       - 调研/通用执行类：一般仅用 file_check，重要时可选 semantic_check
 
 deliverables:
   - name: "{deliverable_name}"
@@ -745,10 +746,11 @@ recommended_metrics:
 #   | "coverage_check" | 检查测试覆盖率 | path: 代码路径, threshold: 覆盖率阈值 | 验证测试覆盖率 |
 #   | "schema_validation" | 验证输出是否符合 Schema | schema: JSON Schema | 验证结构化输出 |
 # - 评估规则:
-#   - file_check：必选，检查文件是否存在（低成本）
-#   - semantic_check：可选，检查内容质量（调用 LLM，有成本）
-#   - 项目修改类（Agent/工具创建修改）：semantic_check 必选（影响项目质量）
-#   - 任务执行类（调研、方案、通用）：semantic_check 按任务重要程度决定
+#   - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本，仅用于重要任务
+#   - 重要任务判断：涉及核心功能、影响项目质量、用户明确强调质量要求
+#   - 一般任务（例行操作、低风险变更、简单执行）仅用 tool 类指标（file_check、bash_check 等）
+#   - 资源创建/修改类：优先考虑 semantic_check 或 function_verify
+#   - 调研/通用执行类：一般仅用 file_check，重要时可选 semantic_check
 # - 示例:
 #   recommended_metrics:
 #     - metric_id: file_check

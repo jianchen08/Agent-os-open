@@ -29,6 +29,8 @@ _PROVIDER_MAP: dict[str, str] = {
 _router_instance: litellm.Router | None = None
 _adapter_instance: Any = None
 _key_pools: dict[str, KeyPool] = {}
+# model_id → provider 映射（由 build_router 填充）
+_model_to_provider: dict[str, str] = {}
 
 
 def _get_litellm_model_string(provider: str, model_name: str) -> str:
@@ -87,6 +89,7 @@ def _parse_provider_keys(
                     key_id=key_conf.get("id", f"{provider_name}_{i}"),
                     api_key=key_conf.get("api_key", ""),
                     api_base=key_conf.get("api_base", "") or api_base,
+                    max_concurrent=key_conf.get("max_concurrent", 2),
                     rpm_limit=key_conf.get("rpm", 0),
                     token_quota=key_conf.get("token_quota", 0),
                 ))
@@ -202,7 +205,7 @@ def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
 
 def build_router(model_loader: Any) -> litellm.Router:
     """构建 litellm.Router 实例。"""
-    global _key_pools
+    global _key_pools, _model_to_provider
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
@@ -211,6 +214,13 @@ def build_router(model_loader: Any) -> litellm.Router:
     provider_keys = _parse_provider_keys(llm_data)
     model_list = build_model_list(model_loader, provider_keys)
     fallbacks = build_fallbacks(model_loader)
+
+    # 构建 model_id → provider 映射
+    _model_to_provider.clear()
+    for model_id, model_conf in llm_data.get("models", {}).items():
+        provider = model_conf.get("provider", "")
+        if provider:
+            _model_to_provider[model_id] = provider
 
     # 构建 KeyPools（仅用于统计展示）
     for prov_name, slots in provider_keys.items():
@@ -242,29 +252,29 @@ def get_key_pool(provider_name: str) -> KeyPool | None:
     return _key_pools.get(provider_name)
 
 
+def get_provider_for_model(model_id: str) -> str:
+    """根据 model_id 查找 provider 名称（如 glm-5.1 → zhipu_coding）。"""
+    return _model_to_provider.get(model_id, "")
+
+
 def build_adapter(model_loader: Any) -> Any:
-    """构建 AdaptiveRouterAdapter — 多 key 由 litellm Router 管理。"""
-    from llm.adapter import AdaptiveRouterAdapter
+    """构建 KeyPoolAdapter — 按 key 粒度并发控制 + RPM 限流 + 配额追踪。"""
+    from llm.adapter import KeyPoolAdapter
 
     llm_data = model_loader._load_llm_data()
     concurrency_section = llm_data.get("concurrency", {})
-
-    min_cap = concurrency_section.get("min_concurrency", 1)
-    max_cap = concurrency_section.get("max_concurrency", 3)
-    default_cap = concurrency_section.get("default_concurrency", 2)
+    default_max_concurrent = concurrency_section.get("default_max_concurrent", 2)
 
     router = get_or_create_router(model_loader)
 
-    adapter = AdaptiveRouterAdapter(
+    adapter = KeyPoolAdapter(
         router,
-        min_capacity=min_cap,
-        max_capacity=max_cap,
-        default_capacity=default_cap,
+        default_max_concurrent=default_max_concurrent,
     )
 
     logger.info(
-        "[Router] AdaptiveRouterAdapter: concurrency %d (min=%d, max=%d), key_pools=%s",
-        default_cap, min_cap, max_cap, list(_key_pools.keys()),
+        "[Router] KeyPoolAdapter: default_max_concurrent=%d, key_pools=%s",
+        default_max_concurrent, list(_key_pools.keys()),
     )
     return adapter
 
@@ -287,7 +297,8 @@ def get_or_create_adapter(model_loader: Any) -> Any:
 
 def reset_router() -> None:
     """重置所有单例（仅用于测试）。"""
-    global _router_instance, _adapter_instance, _key_pools
+    global _router_instance, _adapter_instance, _key_pools, _model_to_provider
     _router_instance = None
     _adapter_instance = None
+    _model_to_provider = {}
     _key_pools = {}

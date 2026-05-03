@@ -24,7 +24,7 @@ from tools.types import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RETRIES = 3
-_DEFAULT_EVAL_TIMEOUT = 600.0
+_DEFAULT_EVAL_TIMEOUT = 1200.0
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -138,11 +138,15 @@ class TaskEvaluateTool(BuiltinTool):
         return Tool(
             name="task_evaluate",
             description=(
-                "任务评估工具：用于评估任务的评估指标是否满足。"
-                "支持两种模式：evaluate_single(评估单个指标，增量模式，需提供metric_id)、auto_complete(自动评估所有指标，推荐)。"
-                "【重要】调用前提：你必须已完成任务要求的全部工作步骤和产出物。"
+                "任务评估工具：用于评估任务的验收指标是否满足，评估通过则自动完成任务。"
+                "\n\n两种评估模式（均可完成任务）："
+                "\n1. evaluate_single（单指标评估）：逐个评估指标，每次只评估一个 metric_id。"
+                "当所有指标都通过后，任务自动完成。适合需要分步验证或针对性修复的场景。"
+                "\n2. auto_complete（完全评估）：一次性评估所有指标。"
+                "已通过的指标会自动跳过，只评估未通过的。适合首次评估或最终验证。"
+                "\n\n【重要】调用前提：你必须已完成任务要求的全部工作步骤和产出物。"
                 "如果你还有未完成的步骤、未输出的产出物、或未处理的待办事项，禁止调用此工具——先完成它们。"
-                "任务未完成时先执行任务；无验收标准的任务无法评估；指标重试超过上限后任务会被标记为失败。"
+                "无验收标准的任务会自动通过；指标重试超过上限后任务会被标记为失败。"
             ),
             input_schema={
                 "type": "object",
@@ -150,7 +154,12 @@ class TaskEvaluateTool(BuiltinTool):
                     "action": {
                         "type": "string",
                         "enum": ["evaluate_single", "auto_complete"],
-                        "description": "评估类型：evaluate_single-评估单个指标(增量模式，需要提供metric_id)，auto_complete-自动评估所有指标(推荐，一次性完成评估)，默认为auto_complete",
+                        "description": (
+                            "评估模式："
+                            "evaluate_single-评估单个指标(需提供metric_id)，"
+                            "所有指标逐一通过后任务自动完成；"
+                            "auto_complete-评估所有未通过的指标(已通过的自动跳过)，默认"
+                        ),
                         "default": "auto_complete",
                     },
                     "metric_id": {
@@ -237,7 +246,9 @@ class TaskEvaluateTool(BuiltinTool):
     ) -> ToolExecutionResult:
         """评估单个指标（增量模式）。
 
-        如果任务只有一个指标，自动转为完全评估。
+        逐个评估指标，每次只评估指定的 metric_id。
+        评估后汇总历史记录：如果所有声明的指标都已通过，自动完成任务；
+        否则返回当前结果，Agent 可继续评估其他指标或改进后重试。
 
         Args:
             inputs: 工具输入参数
@@ -277,7 +288,15 @@ class TaskEvaluateTool(BuiltinTool):
                 ),
                 timeout=timeout,
             )
-            return self._handle_evaluation_result(inputs, task_service, task, result)
+        except litellm.RateLimitError as exc:
+            logger.warning(
+                "[TaskEvaluate] 评估期间 API 限速 | task_id=%s | metric_id=%s: %s",
+                task_id, metric_id, exc,
+            )
+            return create_failure_result(
+                error=f"评估期间 API 限速: {exc}",
+                error_code="RATE_LIMITED",
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 "[TaskEvaluate] 单指标评估超时 | task_id=%s | metric_id=%s | timeout=%ss",
@@ -293,6 +312,45 @@ class TaskEvaluateTool(BuiltinTool):
                 error=f"评估失败: {e}", error_code="EVAL_FAILED"
             )
 
+        # 注册评估子管道 + 追加历史记录
+        self._register_eval_pipelines(task_service, task, result)
+        self._append_eval_history(task, result)
+        self._save_task(task_service, task)
+
+        # 当前指标未通过 → 返回结果，Agent 继续改进
+        if not result.overall_passed:
+            return create_success_result(
+                data=self._build_result_data(result),
+                metadata={
+                    "action": "evaluate_single",
+                    "result": "retry",
+                    "message": f"指标 {metric_id} 未通过，请根据反馈继续改进",
+                },
+            )
+
+        # 当前指标通过，检查所有声明指标是否都已通过
+        if self._all_metrics_passed(task, metric_ids):
+            logger.info(
+                "[TaskEvaluate] 所有指标已通过，完成任务 | task_id=%s",
+                task_id,
+            )
+            return self._complete_task(task_service, task, result)
+
+        # 还有指标未评估，返回进度
+        evaluated, remaining = self._get_eval_progress(task, metric_ids)
+        return create_success_result(
+            data=self._build_result_data(result),
+            metadata={
+                "action": "evaluate_single",
+                "result": "partial_pass",
+                "message": (
+                    f"指标 {metric_id} 已通过。"
+                    f"进度：{evaluated}/{len(metric_ids)}，"
+                    f"剩余：{', '.join(remaining)}"
+                ),
+            },
+        )
+
     async def _auto_complete(
         self,
         inputs: dict[str, Any],
@@ -303,6 +361,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         从 task.metadata 中提取 evaluation_metric_ids 和 acceptance_criteria，
         只评估任务提交时声明的指标，不自动注入无关指标。
+        已通过的指标会自动跳过，只评估未通过的指标。
 
         Args:
             inputs: 工具输入参数
@@ -328,9 +387,33 @@ class TaskEvaluateTool(BuiltinTool):
                 })(),
             )
 
+        # 跳过已通过的指标，只评估未通过的
+        already_passed, remaining_ids = self._get_eval_progress(
+            task, metric_ids,
+        )
+        if not remaining_ids:
+            logger.info(
+                "[TaskEvaluate] 所有指标已通过，直接完成任务 | "
+                "task_id=%s | passed=%d/%d",
+                task.id, already_passed, len(metric_ids),
+            )
+            return self._complete_task(
+                task_service, task,
+                type("EvalResult", (), {
+                    "task_id": task.id,
+                    "overall_passed": True,
+                    "summary": (
+                        f"所有 {len(metric_ids)} 个指标均已通过"
+                        f"（来自历史评估记录）"
+                    ),
+                    "results": [],
+                })(),
+            )
+
         logger.info(
-            "[TaskEvaluate] 自动评估 | task_id=%s | metrics=%s",
-            task.id, metric_ids,
+            "[TaskEvaluate] 自动评估 | task_id=%s | total=%d | "
+            "already_passed=%d | to_eval=%s",
+            task.id, len(metric_ids), already_passed, remaining_ids,
         )
 
         try:
@@ -343,7 +426,7 @@ class TaskEvaluateTool(BuiltinTool):
                     None,
                     lambda: executor.run_evaluation(
                         task_id=task.id,
-                        metric_ids=metric_ids,
+                        metric_ids=remaining_ids,
                         input_params=input_params,
                         skip_state_update=True,
                     ),
@@ -353,8 +436,9 @@ class TaskEvaluateTool(BuiltinTool):
             return self._handle_evaluation_result(inputs, task_service, task, result)
         except asyncio.TimeoutError:
             logger.warning(
-                "[TaskEvaluate] 自动评估超时 | task_id=%s | metrics=%s | timeout=%ss",
-                task.id, metric_ids, timeout,
+                "[TaskEvaluate] 自动评估超时 | task_id=%s | "
+                "metrics=%s | timeout=%ss",
+                task.id, remaining_ids, timeout,
             )
             return create_failure_result(
                 error=f"评估超时（{timeout}s）: 指标 {metric_ids} 执行时间过长",
@@ -765,6 +849,65 @@ class TaskEvaluateTool(BuiltinTool):
             return None
 
     @staticmethod
+    def _all_metrics_passed(task: Any, metric_ids: list[str]) -> bool:
+        """检查所有声明指标是否都在历史记录中通过了。
+
+        从 task.metadata.evaluation_history 中收集每个指标最近一次评估结果，
+        判断是否所有指标都已通过。
+
+        Args:
+            task: TaskModel 实例
+            metric_ids: 所有声明的指标 ID 列表
+
+        Returns:
+            所有指标是否都已通过
+        """
+        metadata = task.metadata if task.metadata else {}
+        history = metadata.get("evaluation_history", [])
+        if not isinstance(history, list):
+            return False
+
+        # 收集每个指标最近一次评估结果
+        latest: dict[str, bool] = {}
+        for entry in history:
+            metrics = entry.get("metrics", [])
+            for m in metrics:
+                mid = m.get("metric_id")
+                if mid:
+                    latest[mid] = m.get("passed", False)
+
+        return all(latest.get(mid, False) for mid in metric_ids)
+
+    @staticmethod
+    def _get_eval_progress(
+        task: Any, metric_ids: list[str],
+    ) -> tuple[int, list[str]]:
+        """获取评估进度：已通过数量和剩余未通过的指标 ID。
+
+        Args:
+            task: TaskModel 实例
+            metric_ids: 所有声明的指标 ID 列表
+
+        Returns:
+            (已通过数量, 未通过的指标 ID 列表)
+        """
+        metadata = task.metadata if task.metadata else {}
+        history = metadata.get("evaluation_history", [])
+
+        latest: dict[str, bool] = {}
+        if isinstance(history, list):
+            for entry in history:
+                metrics = entry.get("metrics", [])
+                for m in metrics:
+                    mid = m.get("metric_id")
+                    if mid:
+                        latest[mid] = m.get("passed", False)
+
+        passed_count = sum(1 for mid in metric_ids if latest.get(mid, False))
+        remaining = [mid for mid in metric_ids if not latest.get(mid, False)]
+        return passed_count, remaining
+
+    @staticmethod
     def _get_eval_timeout(task: Any) -> float:
         """根据任务元数据获取评估超时时间（秒）。
 
@@ -981,8 +1124,8 @@ class TaskEvaluateTool(BuiltinTool):
     def _build_result_data(self, result: Any) -> dict[str, Any]:
         """将评估结果构建为工具返回数据。
 
-        包含评估器输入/输出和 Agent 评估的管道 ID，
-        便于回溯评估过程和追踪子管道执行记录。
+        包含评估器输入/输出、Agent 评估的结构化反馈（issues/suggestions/
+        report_path）和管道 ID，便于 LLM 直接定位问题并修复。
 
         Args:
             result: EvaluationResult 实例
@@ -1005,6 +1148,20 @@ class TaskEvaluateTool(BuiltinTool):
                     "message": r.message,
                     "error": r.error,
                 }
+                # Agent 评估的结构化反馈
+                if r.evaluator_output:
+                    eo = r.evaluator_output
+                    if eo.get("issues"):
+                        m["issues"] = eo["issues"]
+                    if eo.get("suggestions"):
+                        m["suggestions"] = eo["suggestions"]
+                    if eo.get("report_path"):
+                        m["report_path"] = eo["report_path"]
+                # 期望条件失败的详细信息
+                if r.details and isinstance(r.details, dict):
+                    failed = r.details.get("failed_conditions")
+                    if failed:
+                        m["failed_conditions"] = failed
                 if r.evaluator_input:
                     m["evaluator_input"] = r.evaluator_input
                 if r.evaluator_output:

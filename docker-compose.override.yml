@@ -1,0 +1,47 @@
+# =============================================================================
+# Agent OS — Docker Compose 开发覆盖配置
+# 此文件会被 docker compose 自动合并到 docker-compose.yml
+# 仅用于开发环境，实现源码热重载和调试端口暴露
+#
+# 使用方式: docker compose up（自动合并 override）
+# 禁用方式: docker compose -f docker-compose.yml up
+# =============================================================================
+
+services:
+  agent:
+    build:
+      # 开发环境使用相同的 Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-os-dev
+    # 开发环境挂载源码目录实现热重载
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./tests:/app/tests:ro
+      - agent-data:/app/data
+    environment:
+      - APP_ENV=development
+      - LOG_LEVEL=DEBUG
+      - UVICORN_LOG_LEVEL=debug
+      - PLUGIN_AUTO_RELOAD=true
+    ports:
+      # API 服务端口
+      - "${API_PORT:-8000}:8000"
+      # 调试器端口（用于 remote debug）
+      - "5678:5678"
+    # 开发环境使用带热重载的启动命令
+    command:
+      - python
+      - -m
+      - uvicorn
+      - channels.api.app:create_app().run
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/src
+    # 开发环境不需要 restart policy
+    restart: "no"

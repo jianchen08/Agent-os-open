@@ -1,0 +1,45 @@
+# 媒体 Provider 配置
+# YAML 驱动切换，修改配置行即可切换 Provider，不改代码
+
+media:
+  # === TTS（文本转语音） ===
+  tts:
+    default_provider: edge_tts
+    providers:
+      edge_tts:
+        class: EdgeTTSProvider
+        enabled: true
+        priority: 1
+        config:
+          voice: zh-CN-XiaoxiaoNeural
+          rate: "+0%"
+      # 示例备用 Provider（可按需启用）
+      # azure_tts:
+      #   class: AzureTTSProvider
+      #   enabled: false
+      #   priority: 2
+      #   config:
+      #     api_key: ""
+      #     region: eastasia
+
+  # === 图像生成 ===
+  image:
+    default_provider: comfyui
+    providers:
+      comfyui:
+        class: ComfyUIProvider
+        enabled: true
+        priority: 1
+        config:
+          api_url: "http://127.0.0.1:8188"
+          workflow: default
+
+  # === 视频生成 ===
+  video:
+    default_provider: comfyui
+    providers: {}
+
+  # === 音乐生成 ===
+  music:
+    default_provider: suno
+    providers: {}

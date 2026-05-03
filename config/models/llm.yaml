@@ -42,27 +42,31 @@ models:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 128000
     dimension: 1024
-  deepseek-chat:
+  deepseek-v4-flash:
     provider: deepseek
-    model_name: deepseek-chat
-    display_name: DeepSeek Chat
+    model_name: deepseek-v4-flash
+    display_name: DeepSeek V4 Flash
     api_base: https://api.deepseek.com/v1
     api_key: [REDACTED]
-    context_window: 6000
+    context_window: 1000000
     default_params:
       temperature: 0.7
-      max_tokens: 4096
-  deepseek-reasoner:
+      max_tokens: 100000
+  deepseek-v4-pro:
     provider: deepseek
-    model_name: deepseek-reasoner
-    display_name: DeepSeek R1 思考模型
+    model_name: deepseek-v4-pro
+    display_name: DeepSeek V4 Pro
     api_base: https://api.deepseek.com/v1
     api_key: [REDACTED]
-    context_window: 64000
+    context_window: 1000000
     reasoning_model: true
     default_params:
       temperature: 0.7
-      max_tokens: 4096
+      max_tokens: 100000
+      thinking:
+        type: enabled
+      reasoning_effort: max
+
   minimax-m2.7:
     provider: minimax
     model_name: MiniMax-M2.7
@@ -78,17 +82,17 @@ defaults:
   chat: glm-5.1
   reasoning: glm-5.1
   embedding: embedding-3
-  call_timeout: 600
+  call_timeout: 120
   tiers:
     large: glm-5.1
     medium: glm-5.1
     small: minimax-m2.7
   fallback_chain:
     chat:
-    - deepseek-chat
+    - deepseek-v4-flash
     - glm-4.7
     reasoning:
-    - deepseek-reasoner
+    - deepseek-v4-pro
     - glm-5-turbo
 providers:
   zhipu_coding:
@@ -96,28 +100,30 @@ providers:
     keys:
       - id: zhipu_coding_main
         api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
-        max_concurrent: 5
-        rpm: 60
+        max_concurrent: 7
+        rpm: 120
         token_quota: 0
       - id: zhipu_coding_2
         api_key: 55fda454331e4507a2b77bfb01bac114.mlcfDPZIKdelyEUC
-        max_concurrent: 2
-        rpm: 60
+        max_concurrent: 3
+        rpm: 20
         token_quota: 0
   zhipu:
     api_base: https://open.bigmodel.cn/api/paas/v4/
     keys:
       - id: zhipu_main
         api_key: 91357bf2d11743138a8f2670f411a2d1.OAoHqNzFvE0mBUr7
-        max_concurrent: 2
-        rpm: 60
+        rpm: 120
+        token_quota: 0
+      - id: zhipu_2
+        api_key: 55fda454331e4507a2b77bfb01bac114.mlcfDPZIKdelyEUC
+        rpm: 20
         token_quota: 0
   deepseek:
     api_base: https://api.deepseek.com/v1
     keys:
       - id: deepseek_main
         api_key: [REDACTED]
-        max_concurrent: 2
         rpm: 30
         token_quota: 0
   minimax:
@@ -125,7 +131,6 @@ providers:
     keys:
       - id: minimax_main
         api_key: [REDACTED]
-        max_concurrent: 2
         rpm: 30
         token_quota: 0
 embeddings: {}
@@ -133,4 +138,4 @@ concurrency:
   # pipeline 最大并发管道数
   max_concurrent_pipelines: 5
   # 每个 key 的默认最大并发（可被 key 级配置覆盖）
-  max_concurrency: 2
+  default_max_concurrent: 2

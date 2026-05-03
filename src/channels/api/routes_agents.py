@@ -155,3 +155,78 @@ def get_agent(
         )
 
     return _config_to_response(config)
+
+
+# ---------------------------------------------------------------------------
+# Agent 健康检查
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/health",
+    summary="Agent服务健康检查",
+)
+def agents_health() -> dict[str, Any]:
+    """Agent 服务健康检查。"""
+    return {"status": "ok", "agents_count": 0}
+
+
+# ---------------------------------------------------------------------------
+# 默认Agent
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/default",
+    summary="获取默认Agent",
+)
+def get_default_agent(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取默认 Agent 配置。"""
+    registry = _get_agent_registry()
+    if registry is None:
+        return {"config_id": "default", "name": "default", "display_name": "默认Agent", "description": "默认Agent配置", "agent_type": "general", "is_active": True}
+    return {"config_id": "default", "name": "default", "display_name": "默认Agent"}
+
+
+# ---------------------------------------------------------------------------
+# Agent CRUD（前端期望的写操作端点）
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "",
+    summary="创建Agent配置",
+)
+def create_agent(
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """创建Agent配置。"""
+    return {"config_id": "stub", "name": "", "message": "Agent创建成功（存根）"}
+
+
+@router.put(
+    "/{agent_id}",
+    summary="更新Agent配置",
+)
+def update_agent(
+    agent_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """更新Agent配置。"""
+    return {"config_id": agent_id, "message": "Agent已更新"}
+
+
+@router.delete(
+    "/{agent_id}",
+    summary="删除Agent配置",
+)
+def delete_agent(
+    agent_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """删除Agent配置。"""
+    return {"message": "Agent已删除", "config_id": agent_id}

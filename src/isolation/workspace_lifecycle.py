@@ -389,17 +389,24 @@ class WorkspaceLifecycleManager:
         self._ws_meta_store[task_id] = meta
         return meta
 
+    def _effective_skip_dirs(self) -> frozenset[str]:
+        """合并硬编码排除目录和配置文件中的 worktree_exclude_patterns。"""
+        ws_cfg = self._config.get("workspace", {})
+        extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
+        return _SKIP_DIRS | extra
+
     def _copy_project_to_container(self, container_path: Path) -> int:
         """从主项目复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
         src = self._base_path
         if not src.exists():
             return 0
+        skip = self._effective_skip_dirs()
         count = 0
         for item in src.rglob("*"):
             if not item.is_file():
                 continue
             rel = item.relative_to(src)
-            if any(p in _SKIP_DIRS for p in rel.parts):
+            if any(p in skip for p in rel.parts):
                 continue
             if item.suffix in _SKIP_EXTENSIONS:
                 continue
@@ -488,9 +495,66 @@ class WorkspaceLifecycleManager:
         修复方案: 使用 _git_init_and_initial_commit 统一处理 init/add/commit，
                  自动清理 index.lock 和空的 .git 目录。
         """
+        # ── inherit_workspace_from：直接复用旧任务的工作空间 ──
+        # 继承原任务的 ws_meta（mode/branch/project_root），保持 worktree 生命周期
+        if task_data.get("_inherit_workspace_resolved"):
+            source_ws_meta = task_data.get("_source_ws_meta") or {}
+            source_mode = source_ws_meta.get("mode", "shared")
+            meta = {
+                "mode": source_mode,
+                "path": workspace,
+                "branch": source_ws_meta.get("branch", ""),
+                "project_root": source_ws_meta.get("project_root", ""),
+            }
+            logger.info(
+                "[WorkspaceLifecycle] inherit: 复用旧工作空间 "
+                "task_id=%s, workspace=%s, mode=%s, branch=%s",
+                task_id, workspace, source_mode, meta.get("branch"),
+            )
+            self._ws_meta_store[task_id] = meta
+            return meta
+        # ── inherit_workspace_from：直接复制源目录文件到新目录 ──
+        # 跳过 git init / worktree add 等所有初始化步骤
+        if task_data.get("_inherit_workspace_resolved"):
+            ws_root = task_data.get("workspace_root", ".ai_workspaces")
+            target_dir = Path(ws_root) / task_id
+            source_dir = Path(workspace)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if source_dir.exists() and source_dir.is_dir():
+                skip = self._effective_skip_dirs()
+                copied = 0
+                for item in source_dir.rglob("*"):
+                    if not item.is_file():
+                        continue
+                    rel = item.relative_to(source_dir)
+                    if any(p in skip for p in rel.parts):
+                        continue
+                    if item.suffix in _SKIP_EXTENSIONS:
+                        continue
+                    target = target_dir / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(item), str(target))
+                    copied += 1
+                logger.info(
+                    "[WorkspaceLifecycle] inherit: 复制完成 task_id=%s, "
+                    "source=%s, target=%s, files=%d",
+                    task_id, source_dir, target_dir, copied,
+                )
+            else:
+                logger.warning(
+                    "[WorkspaceLifecycle] inherit: 源目录不存在，创建空目录 "
+                    "task_id=%s, source=%s",
+                    task_id, source_dir,
+                )
+            meta = {"mode": "plain", "path": str(target_dir)}
+            self._ws_meta_store[task_id] = meta
+            return meta
         # BUG-FIX-fix_20260425_container_workspace_init:
         # 容器子任务优先查找容器空间，基于容器空间做 worktree/copy
-        container_ws = self._find_container_workspace(task_id)
+        # 但当 _inherit_workspace_resolved 时跳过容器查找，使用继承的工作空间
+        container_ws = None
+        if not task_data.get("_inherit_workspace_resolved"):
+            container_ws = self._find_container_workspace(task_id)
         if container_ws:
             container_path = Path(container_ws).resolve()
             if not (container_path / ".git").exists():
@@ -519,20 +583,22 @@ class WorkspaceLifecycleManager:
             return meta
 
         # 检测到父任务是容器但找不到工作空间时，报错而非静默降级
-        try:
-            task = self._task_tree.get_task(task_id)
-            if task and task.parent_task_id:
-                parent_task = self._task_tree.get_task(task.parent_task_id)
-                if parent_task and parent_task.metadata.get("task_scope") == "container":
-                    raise RuntimeError(
-                        f"父任务 {task.parent_task_id} 是容器任务，"
-                        f"但未找到容器工作空间（可能初始化失败）。"
-                        f"子任务 {task_id} 无法创建工作空间。"
-                    )
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+        # 但 inherit_workspace_from 场景跳过此检查——继承的任务有自己指定的工作空间
+        if not task_data.get("_inherit_workspace_resolved"):
+            try:
+                task = self._task_tree.get_task(task_id)
+                if task and task.parent_task_id:
+                    parent_task = self._task_tree.get_task(task.parent_task_id)
+                    if parent_task and parent_task.metadata.get("task_scope") == "container":
+                        raise RuntimeError(
+                            f"父任务 {task.parent_task_id} 是容器任务，"
+                            f"但未找到容器工作空间（可能初始化失败）。"
+                            f"子任务 {task_id} 无法创建工作空间。"
+                        )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
 
         # 无显式 workspace 且无容器 → plain 模式：只创建目录，不做 git 操作
         has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
@@ -655,6 +721,7 @@ class WorkspaceLifecycleManager:
     def _calc_project_size(self, project_root: str, task_id: str) -> int:
         """计算项目工作文件总大小（不含 .git），两轮扫描策略 + 增量缓存"""
         root = Path(project_root)
+        skip = self._effective_skip_dirs()
         # 检查缓存
         if project_root in self._size_cache:
             cached_mtime, cached_size = self._size_cache[project_root]
@@ -664,7 +731,7 @@ class WorkspaceLifecycleManager:
                 return cached_size
         total = 0
         for item in root.iterdir():
-            if item.name in _SKIP_DIRS:
+            if item.name in skip:
                 continue
             if item.is_file():
                 try:
@@ -675,7 +742,7 @@ class WorkspaceLifecycleManager:
                 for f in item.rglob("*"):
                     if not f.is_file():
                         continue
-                    if any(p in _SKIP_DIRS for p in f.relative_to(root).parts):
+                    if any(p in skip for p in f.relative_to(root).parts):
                         continue
                     try:
                         total += f.stat().st_size
@@ -863,12 +930,13 @@ class WorkspaceLifecycleManager:
     def _copy_merge(self, workspace: str, target_dir: str) -> dict:
         """通过文件复制方式合并变更（冲突降级策略），跳过排除目录"""
         src, dst = Path(workspace), Path(target_dir)
+        skip = self._effective_skip_dirs()
         merged: list[str] = []
         for item in src.rglob("*"):
             if not item.is_file():
                 continue
             rel = item.relative_to(src)
-            if any(p in _SKIP_DIRS for p in rel.parts):
+            if any(p in skip for p in rel.parts):
                 continue
             if item.suffix in _SKIP_EXTENSIONS:
                 continue

@@ -140,6 +140,7 @@ tool_ids:
   - file_write
 
 hard_constraints:
+- 禁止创建 container 任务（task_scope='container'），你已经在 non_container 任务中执行，直接用 task_submit(task_scope='non_container') 创建子任务即可
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 评估通过才能结束任务
 - 任务完成的唯一标志是停止条件满足，注册触发器不代表任务完成

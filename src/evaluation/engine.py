@@ -351,6 +351,11 @@ class EvaluationEngine:
             elif "passed" in output and isinstance(output["passed"], bool):
                 result.score = 100.0 if output["passed"] else 0.0
 
+            # Agent 评估返回了动态 feedback → 覆盖静态 fail_message
+            agent_feedback = output.get("feedback")
+            if agent_feedback and isinstance(agent_feedback, str) and agent_feedback.strip():
+                result.message = agent_feedback
+
             # 记录评估器输入/输出
             result.evaluator_input = merged_params
             result.evaluator_output = output
@@ -812,7 +817,9 @@ class EvaluationEngine:
                     "passed": bool(inner["passed"]),
                     "score": float(inner.get("score", 0)),
                     "feedback": str(inner.get("feedback", "")),
+                    "issues": inner.get("issues", []),
                     "suggestions": inner.get("suggestions", []),
+                    "report_path": inner.get("report_path", ""),
                 }
 
         if "passed" in parsed:
@@ -820,7 +827,9 @@ class EvaluationEngine:
                 "passed": bool(parsed["passed"]),
                 "score": float(parsed.get("score", 0)),
                 "feedback": str(parsed.get("feedback", "")),
+                "issues": parsed.get("issues", []),
                 "suggestions": parsed.get("suggestions", []),
+                "report_path": parsed.get("report_path", ""),
             }
 
         return None
@@ -864,8 +873,21 @@ class EvaluationEngine:
         parts.append(
             "请根据以上信息进行评估验证，并在完成后输出评估结论 JSON：\n"
             '```json\n'
-            '{"evaluation_result": {"passed": true/false, "score": 0-100, "feedback": "评估说明..."}}\n'
-            '```'
+            '{"evaluation_result": {\n'
+            '  "passed": true/false,\n'
+            '  "score": 0-100,\n'
+            '  "feedback": "简要总结评估结论",\n'
+            '  "issues": ["文件:行号 — 具体问题描述", ...],\n'
+            '  "suggestions": ["具体修复建议", ...],\n'
+            '  "report_path": "评估报告文件的相对路径"\n'
+            '}}\n'
+            '```\n'
+            "\n要求：\n"
+            "- issues: 逐条列出每个不通过项，包含文件路径和行号\n"
+            "- suggestions: 针对每个 issue 给出可操作的修复建议\n"
+            "- report_path: 将详细评估报告写入文件（如 "
+            f".ai_workspaces/eval_report_{metric_def.id}.md），填入相对路径\n"
+            "- 如果评估通过，issues 和 suggestions 为空数组即可"
         )
 
         return "\n".join(parts)
