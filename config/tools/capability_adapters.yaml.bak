@@ -143,7 +143,7 @@ adapters:
           compare: "visual_compare"
         timeout: 60.0
         overall_timeout: 120.0
-        available: true
+        available: false
 
       # --- Figma MCP（需 Figma Access Token）---
       # 环境变量：FIGMA_ACCESS_TOKEN 从 Figma Settings 获取

@@ -262,7 +262,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return None
 
     async def _load_previous_l1(self, ctx: PluginContext) -> str:
-        """从 ChunkService 加载历史 L1 内容作为增量压缩背景。"""
+        """从 ChunkService 加载历史 L1 内容作为增量压缩背景。
+
+        只取最早和最新的压缩块，避免背景信息膨胀导致压缩 prompt 超限。
+        """
         try:
             chunk_service = ctx.get_service("chunk_service")
         except (KeyError, AttributeError):
@@ -278,8 +281,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
             chunks = await chunk_service.find_by_pipeline(
                 pipeline_run_id, "L1",
             )
-            if chunks:
-                return chunks[-1].content if chunks[-1].content else ""
+            if not chunks:
+                return ""
+
+            # 只保留最早 + 最新的块，中间的全部丢弃
+            if len(chunks) == 1:
+                parts = [chunks[0].content]
+            else:
+                parts = [chunks[0].content, chunks[-1].content]
+
+            return "\n\n---\n\n".join(p for p in parts if p)
         except Exception:
             pass
 
