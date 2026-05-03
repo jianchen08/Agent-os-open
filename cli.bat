@@ -8,5 +8,6 @@ for /d /r src %%d in (__pycache__) do (
 )
 
 set PYTHONPATH=src
+set PYTHONIOENCODING=utf-8
 echo Starting Agent OS CLI...
 python -m channels.cli.cli_main %*

@@ -37,8 +37,9 @@ def sanitize_for_terminal(text: str) -> str:
     import sys
 
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    # UTF-8 终端可以直接输出所有 Unicode（包括 emoji）
-    if encoding.lower().replace("-", "").replace("_", "") in ("utf8", "utf_8"):
+    normalized = encoding.lower().replace("-", "").replace("_", "")
+    # UTF-8 / cp65001 (Windows UTF-8 codepage) 终端可以直接输出所有 Unicode
+    if normalized in ("utf8", "utf_8", "cp65001", "65001"):
         return text
 
     try:

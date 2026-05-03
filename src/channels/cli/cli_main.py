@@ -33,6 +33,16 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
+# Windows 编码修复：强制 stdout/stderr 使用 UTF-8，防止 GBK 编码错误
+# （LLM 返回的 emoji 等 Unicode 字符在 GBK 下无法编码，导致流式输出失败）
+if _sys.platform == "win32":
+    for _stream in (_sys.stdout, _sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 from channels.cli.cli_commands import CommandResult, SlashCommandRegistry
 from channels.cli.input_adapter import CLIInputAdapter
 from channels.cli.output_adapter import CLIOutputAdapter, sanitize_for_terminal
