@@ -50,14 +50,25 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     summary="获取线程列表",
 )
 def list_threads(
+    session_type: str | None = Query(default=None, description="按会话类型过滤，如 main_pipeline"),
     _user: dict = Depends(require_auth),
 ) -> list[ThreadResponse]:
     """获取当前用户的所有线程列表。
+
+    支持按 session_type 过滤：
+    - 不传参数：返回所有线程
+    - session_type=main_pipeline：只返回主管道线程
 
     Returns:
         ThreadResponse 列表
     """
     threads = store.get_user_threads(_user["sub"])
+    # 按 session_type 过滤：只显示匹配的线程
+    if session_type is not None:
+        threads = [
+            t for t in threads
+            if t.get("metadata", {}).get("session_type") == session_type
+        ]
     return [_build_thread_response(t) for t in threads]
 
 
@@ -79,9 +90,17 @@ def create_thread(
     Returns:
         ThreadResponse 新创建的线程
     """
+    # 自动标记为主管道会话（前端通过主界面创建的都是主管道）
+    merged_metadata = body.metadata or {}
+    if "session_type" not in merged_metadata:
+        merged_metadata["session_type"] = "main_pipeline"
+
     thread = store.create_thread(
         user_id=_user["sub"],
         title=body.title,
+        agent_id=body.agent_id,
+        metadata=merged_metadata,
+        intent=body.intent,
     )
     return _build_thread_response(thread)
 

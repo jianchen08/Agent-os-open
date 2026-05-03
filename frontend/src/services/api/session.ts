@@ -203,7 +203,10 @@ function mapBackendMessageToMessage(
 
 export async function getSessions(options: RetryOptions = {}): Promise<Session[]> {
   return requestWithRetry(async () => {
-    const response = await apiClient.get<ThreadStateResponse[]>(API_ENDPOINTS.THREADS.LIST)
+    // 只获取主管道会话（session_type=main_pipeline），过滤子任务管道
+    const response = await apiClient.get<ThreadStateResponse[]>(API_ENDPOINTS.THREADS.LIST, {
+      params: { session_type: 'main_pipeline' },
+    })
 
     const threads = Array.isArray(response.data) ? response.data : []
     return threads.map(mapThreadToSession)
