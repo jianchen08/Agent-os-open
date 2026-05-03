@@ -676,6 +676,19 @@ class ResourceSearchTool:
                 names, descriptions, schemas_list = await self._search_tools_from_db(
                     query, category, level, limit, detailed, exact
                 )
+
+            # 兜底：DynamicToolLoader 已发现但未注册的工具
+            if not names:
+                for query_part in query_parts:
+                    query_lower = query_part.lower()
+                    result = self._search_tools_from_dynamic_loader(
+                        query_lower, 1, exact=True
+                    )
+                    if result[0]:
+                        names.extend(result[0])
+                        descriptions.extend(result[1])
+                        schemas_list.extend(result[2])
+
             return names, descriptions, schemas_list
 
         query_lower = query.lower()
@@ -714,6 +727,12 @@ class ResourceSearchTool:
         if not names:
             names, descriptions, schemas_list = self._search_tools_from_yaml(
                 query_lower, category, level, limit, exact
+            )
+
+        # 兜底：从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册的工具）
+        if not names:
+            names, descriptions, schemas_list = self._search_tools_from_dynamic_loader(
+                query_lower, limit, exact
             )
 
         return names, descriptions, schemas_list
@@ -820,6 +839,62 @@ class ResourceSearchTool:
 
         except Exception as e:
             logger.warning(f"[resource_search] 数据库搜索工具失败: {e}")
+            return [], [], []
+
+    def _search_tools_from_dynamic_loader(
+        self,
+        query_lower: str,
+        limit: int,
+        exact: bool,
+    ) -> tuple[list[str], list[str], list[dict]]:
+        """从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册到 Registry 的工具）"""
+        try:
+            from tools.loader import get_dynamic_tool_loader
+
+            loader = get_dynamic_tool_loader()
+            if not loader:
+                return [], [], []
+
+            available = loader.get_available_tools()
+            if not available:
+                return [], [], []
+
+            names = []
+            descriptions = []
+            schemas_list = []
+
+            for tool_name in available:
+                if not query_lower:
+                    names.append(tool_name)
+                    descriptions.append(f"已发现的内置工具（未加载）")
+                    schemas_list.append({})
+                    if len(names) >= limit:
+                        break
+                    continue
+
+                if exact:
+                    if query_lower == tool_name.lower():
+                        names.append(tool_name)
+                        descriptions.append(f"已发现的内置工具（未加载）")
+                        schemas_list.append({})
+                        break
+                else:
+                    if query_lower in tool_name.lower():
+                        names.append(tool_name)
+                        descriptions.append(f"已发现的内置工具（未加载）")
+                        schemas_list.append({})
+                        if len(names) >= limit:
+                            break
+
+            if names:
+                logger.info(
+                    f"[resource_search] 从 DynamicToolLoader 搜索到 {len(names)} 个工具"
+                )
+
+            return names, descriptions, schemas_list
+
+        except Exception as e:
+            logger.debug(f"[resource_search] DynamicToolLoader 搜索失败: {e}")
             return [], [], []
 
     def _search_tools_from_yaml(
