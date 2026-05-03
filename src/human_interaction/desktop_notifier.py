@@ -80,6 +80,9 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         body = _build_request_body(
             _extract_mode(request), _extract_description(request)
         )
+        # 独立播放系统提示音，不依赖桌面通知自身的声音机制
+        if self._config.sound:
+            await play_alert_sound()
         return await send_notification(
             title=title, message=body,
             sound=self._config.sound, app_name=self._config.app_name,
@@ -96,6 +99,9 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         mins, secs = divmod(remaining_seconds, 60)
         time_str = f"{mins} 分 {secs} 秒" if mins else f"{secs} 秒"
         display_title = title or "交互请求"
+        # 独立播放系统提示音，不依赖桌面通知自身的声音机制
+        if self._config.sound:
+            await play_alert_sound()
         return await send_notification(
             title="超时提醒",
             message=f"「{display_title}」将在 {time_str} 后超时",
@@ -110,6 +116,9 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         body = f"请求 {request_id[:8]} 已取消"
         if reason:
             body += f"：{reason}"
+        # 独立播放系统提示音，不依赖桌面通知自身的声音机制
+        if self._config.sound:
+            await play_alert_sound()
         return await send_notification(
             title="请求已取消", message=body,
             sound=self._config.sound, app_name=self._config.app_name,
@@ -118,6 +127,9 @@ class DesktopInteractionNotifier(IInteractionNotifier):
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
         if not self._config.enabled or not self._config.notify_timeout:
             return False
+        # 独立播放系统提示音，不依赖桌面通知自身的声音机制
+        if self._config.sound:
+            await play_alert_sound()
         return await send_notification(
             title="请求已超时", message=f"请求 {request_id[:8]} 已超时",
             sound=self._config.sound, app_name=self._config.app_name,
@@ -133,6 +145,9 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         body = title
         if initial_message:
             body += f"：{initial_message[:self._config.max_message_length]}"
+        # 独立播放系统提示音，不依赖桌面通知自身的声音机制
+        if self._config.sound:
+            await play_alert_sound()
         return await send_notification(
             title="对话已开启", message=body,
             sound=self._config.sound, app_name=self._config.app_name,
