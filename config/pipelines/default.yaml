@@ -221,8 +221,8 @@ core_plugins:
       result_format: "yaml"
       level_timeouts:
         "1": 3600
-        "2": 3600
-        "3": 1800
+        "2": 14400
+        "3": 5400
       tool_timeouts:
         human_interaction: 1800
         task_evaluate: 1200
