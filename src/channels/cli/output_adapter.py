@@ -225,6 +225,8 @@ class StatusBarRenderer:
         try:
             from shutil import get_terminal_size
             term_width = get_terminal_size().columns
+            if term_width < 40:
+                term_width = 80
         except Exception:
             term_width = 80
 
@@ -286,9 +288,19 @@ class CLIOutputAdapter(IOutputAdapter):
         Args:
             console: rich Console 实例；默认创建新实例。
         """
-        self._console = console or Console(
-            force_terminal=True, legacy_windows=False,
-        )
+        if console is not None:
+            self._console = console
+        else:
+            try:
+                from shutil import get_terminal_size
+                detected_width = get_terminal_size().columns
+                width = detected_width if detected_width >= 40 else 80
+            except Exception:
+                width = 80
+            self._console = Console(
+                force_terminal=True, legacy_windows=False,
+                width=width,
+            )
         self._status_bar = StatusBarRenderer()
         self._show_thinking: bool = False
 
