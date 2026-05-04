@@ -33,8 +33,10 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
-# Windows 编码修复：强制 stdout/stderr 使用 UTF-8，防止 GBK 编码错误
-# （LLM 返回的 emoji 等 Unicode 字符在 GBK 下无法编码，导致流式输出失败）
+# Windows 终端修复：
+# 1. 强制 stdout/stderr 使用 UTF-8，防止 GBK 编码错误
+#    （LLM 返回的 emoji 等 Unicode 字符在 GBK 下无法编码，导致流式输出失败）
+# 2. 为 CMD 启用 ANSI/VT100 虚拟终端处理，让 Rich 能正确渲染颜色和定位
 if _sys.platform == "win32":
     for _stream in (_sys.stdout, _sys.stderr):
         if _stream is not None and hasattr(_stream, "reconfigure"):
@@ -42,6 +44,19 @@ if _sys.platform == "win32":
                 _stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+    # 启用 Windows CMD 的 ANSI escape code 支持
+    try:
+        import ctypes
+        _kernel32 = ctypes.windll.kernel32
+        for _handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+            _handle = _kernel32.GetStdHandle(_handle_id)
+            _mode = ctypes.c_ulong()
+            if _kernel32.GetConsoleMode(_handle, ctypes.byref(_mode)):
+                _kernel32.SetConsoleMode(
+                    _handle, _mode.value | 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                )
+    except Exception:
+        pass
 
 from channels.cli.cli_commands import CommandResult, SlashCommandRegistry
 from channels.cli.input_adapter import CLIInputAdapter

@@ -238,8 +238,8 @@ class StatusBarRenderer:
         for content, style in right_parts:
             right_text.append(content, style=style)
 
-        right_width = right_text.__len__()
-        padding_needed = max(2, term_width - len(left_text) - right_width - 2)
+        right_width = right_text.cell_len
+        padding_needed = max(2, term_width - left_text.cell_len - right_width - 2)
 
         full_text = Text()
         full_text.append_text(left_text)
@@ -298,7 +298,6 @@ class CLIOutputAdapter(IOutputAdapter):
             except Exception:
                 width = 80
             self._console = Console(
-                force_terminal=True, legacy_windows=False,
                 width=width,
             )
         self._status_bar = StatusBarRenderer()

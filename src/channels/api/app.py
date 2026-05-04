@@ -180,6 +180,7 @@ def _register_routes(app: FastAPI) -> None:
         router as thinking_mode_router,
     )
     from channels.api.routes_tools import router as tools_router
+    from channels.api.routes_ui import router as ui_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -191,6 +192,7 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(plugins_router)
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
+    app.include_router(ui_router)
 
     # ---- 补全缺失路由（前端期望但之前未注册） ----
     from channels.api.routes_missing import (

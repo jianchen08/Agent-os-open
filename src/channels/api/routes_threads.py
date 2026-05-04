@@ -38,9 +38,11 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     """
     return ThreadResponse(
         thread_id=t["id"],
-        intent=t.get("title") or None,
+        intent=t.get("intent") or t.get("title") or None,
+        current_state=t.get("current_state", "active"),
         created_at=t["created_at"],
         updated_at=t["updated_at"],
+        agent_id=t.get("agent_id"),
     )
 
 

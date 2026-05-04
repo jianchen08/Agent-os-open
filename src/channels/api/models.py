@@ -49,6 +49,9 @@ class UserResponse(BaseModel):
 class ThreadCreate(BaseModel):
     """创建线程请求模型。"""
     title: str | None = None
+    agent_id: str | None = None
+    intent: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class ThreadUpdate(BaseModel):
@@ -368,12 +371,22 @@ class MemoryStore:
         self.users[username] = user
         return user
 
-    def create_thread(self, user_id: str, title: str | None = None) -> dict[str, Any]:
+    def create_thread(
+        self,
+        user_id: str,
+        title: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        intent: str | None = None,
+    ) -> dict[str, Any]:
         """创建新线程。
 
         Args:
             user_id: 创建者用户 ID
             title: 线程标题，默认为空字符串
+            agent_id: 关联的 Agent ID
+            metadata: 线程元数据
+            intent: 线程意图描述
 
         Returns:
             创建的线程字典
@@ -384,6 +397,10 @@ class MemoryStore:
             "id": thread_id,
             "user_id": user_id,
             "title": title or "",
+            "agent_id": agent_id,
+            "metadata": metadata or {},
+            "intent": intent,
+            "current_state": "active",
             "created_at": now,
             "updated_at": now,
         }
