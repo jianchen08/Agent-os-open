@@ -768,6 +768,19 @@ class TaskWorker:
                     parent_pipeline_id, task_id, new_status, len(pending_list),
                 )
 
+                # 孤儿检测：通知累积超过阈值，判定父管道已退出
+                _ORPHAN_QUEUE_THRESHOLD = 3
+                if len(pending_list) >= _ORPHAN_QUEUE_THRESHOLD:
+                    logger.warning(
+                        "TaskWorker: 孤儿管道检测: pipeline=%s, "
+                        "pending=%d >= %d，清空队列并级联",
+                        parent_pipeline_id, len(pending_list),
+                        _ORPHAN_QUEUE_THRESHOLD,
+                    )
+                    self._services.pop(pending_key, None)
+                    self._cascade_fail_parent(task_id, task_obj)
+                    return
+
                 # 子任务失败且父管道不可达 → 级联失败到父任务
                 if new_status == "failed":
                     self._cascade_fail_parent(task_id, task_obj)
@@ -806,16 +819,27 @@ class TaskWorker:
     def _cascade_fail_parent(
         self, child_task_id: str, child_task_obj: Any,
     ) -> None:
-        """子任务失败且父管道不可达时，级联失败到父任务。
+        """子任务终态且父管道不可达时，级联失败到父任务。
 
         检查 parent_task_id 对应的父任务状态：
         - running → 标记 failed（触发递归向上传播）
         - 终态 → 无需处理
         - 不存在 → 无需处理
+
+        支持 parent_task_id（直接）和 parent_pipeline_id（回退查找）。
         """
         parent_task_id = getattr(
             child_task_obj, "parent_task_id", None,
         )
+        # 回退：无 parent_task_id 时，通过 parent_pipeline_id 查找
+        if not parent_task_id:
+            parent_pipeline_id = getattr(
+                child_task_obj, "parent_pipeline_id", None,
+            )
+            if parent_pipeline_id:
+                parent_task_id = self._find_task_by_pipeline_id(
+                    parent_pipeline_id,
+                )
         if not parent_task_id:
             return
 
@@ -866,6 +890,29 @@ class TaskWorker:
                 "TaskWorker: 级联失败异常: parent_task=%s, %s",
                 parent_task_id, exc,
             )
+
+    def _find_task_by_pipeline_id(self, pipeline_id: str) -> str | None:
+        """通过 pipeline_run_id 查找关联的任务 ID。
+
+        用于子任务仅有 parent_pipeline_id（无 parent_task_id）时，
+        回退查找父任务以触发级联。
+
+        Args:
+            pipeline_id: 要查找的 pipeline_run_id
+
+        Returns:
+            匹配的任务 ID，未找到返回 None
+        """
+        task_service = self._task_service
+        if not task_service:
+            return None
+        try:
+            for task in task_service.list_all(limit=200):
+                if getattr(task, "pipeline_run_id", None) == pipeline_id:
+                    return task.id
+        except Exception:
+            pass
+        return None
 
     def cancel_pipeline(self, task_id: str) -> bool:
         """取消任务关联的运行中管道。

@@ -767,6 +767,19 @@ class CLIApplication:
                     len(pending_list),
                 )
 
+                # 孤儿检测：通知累积超过阈值，判定父管道已退出
+                _ORPHAN_QUEUE_THRESHOLD = 3
+                if len(pending_list) >= _ORPHAN_QUEUE_THRESHOLD:
+                    logger.warning(
+                        "Callback: 孤儿管道检测: pipeline=%s, "
+                        "pending=%d >= %d，清空队列并级联",
+                        parent_pipeline_id, len(pending_list),
+                        _ORPHAN_QUEUE_THRESHOLD,
+                    )
+                    svc.pop(pending_key, None)
+                    _cascade_fail_parent(task_id, task_obj, svc)
+                    return
+
                 # 子任务失败且父管道不可达 → 级联失败
                 if new_status == "failed":
                     _cascade_fail_parent(
@@ -778,10 +791,27 @@ class CLIApplication:
                 child_task_obj: Any,
                 svc: dict,
             ) -> None:
-                """子任务失败且父管道不可达时，级联失败到父任务。"""
+                """子任务终态且父管道不可达时，级联失败到父任务。"""
                 parent_tid = getattr(
                     child_task_obj, "parent_task_id", None,
                 )
+                # 回退：无 parent_task_id 时，通过 parent_pipeline_id 查找
+                if not parent_tid:
+                    parent_ppl_id = getattr(
+                        child_task_obj, "parent_pipeline_id", None,
+                    )
+                    if parent_ppl_id:
+                        ts_fb = svc.get("task_service")
+                        if ts_fb:
+                            try:
+                                for t in ts_fb.list_all(limit=200):
+                                    if getattr(
+                                        t, "pipeline_run_id", None,
+                                    ) == parent_ppl_id:
+                                        parent_tid = t.id
+                                        break
+                            except Exception:
+                                pass
                 if not parent_tid:
                     return
                 ts = svc.get("task_service")
