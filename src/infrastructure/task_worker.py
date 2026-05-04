@@ -168,8 +168,12 @@ class TaskWorker:
             return
         self._running = True
 
-        # 存储全局引用，供 task_manage cancel 调用
-        sys._agent_os_task_worker = self
+        # 通过 ServiceProvider 注册全局引用，供 task_manage cancel 调用
+        try:
+            from infrastructure.service_provider import get_service_provider
+            get_service_provider().register("task_worker", self)
+        except Exception:
+            pass  # ServiceProvider 不可用时不阻塞启动
 
         self._init_lifecycle()
 

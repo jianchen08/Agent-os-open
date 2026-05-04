@@ -209,7 +209,6 @@ class CLIApplication:
         # 事件总线（用于接收子任务完成通知）
         from pipeline.event_bus import EventBus
         self._event_bus = EventBus()
-        _sys._agent_os_event_bus = self._event_bus
 
     def setup_pipeline(self, config_path: str | Path | None = None) -> None:
         """设置真实管道配置（从 YAML 加载 LLMCore + ToolCore + Output 插件）。
@@ -410,7 +409,12 @@ class CLIApplication:
                     services=_svc,
                 )
 
-            _sys._agent_os_pipeline_factory = _eval_pipeline_factory
+            # 注册 pipeline_factory 到 ServiceProvider，替代 sys._agent_os_* 全局变量
+            try:
+                from infrastructure.service_provider import get_service_provider
+                get_service_provider().register("pipeline_factory", _eval_pipeline_factory)
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("Failed to initialize task worker: %s", exc)
             self._task_worker = None
@@ -449,8 +453,6 @@ class CLIApplication:
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
-            import sys as _sys_local
-            _sys_local._agent_os_tool_registry = tool_registry
             logger.info("Service created: tool_registry (%d basic tools registered)", tool_registry.count())
 
             from tools.auto_loader import init_tool_auto_loader
@@ -631,7 +633,6 @@ class CLIApplication:
                 data_dir=str(_PROJECT_ROOT / "data" / "pipelines")
             )
             services["execution_record_storage"] = execution_record_storage
-            _sys._agent_os_execution_record_storage = execution_record_storage
             logger.info("Service created: execution_record_storage")
         except Exception as exc:
             logger.warning("Failed to create execution_record_storage service: %s", exc)
@@ -856,7 +857,6 @@ class CLIApplication:
 
             task_service = TaskService(on_state_change=_on_task_state_change)
             services["task_service"] = task_service
-            _sys._agent_os_task_service = task_service
             logger.info("Service created: task_service (with state change callback)")
         except Exception as exc:
             logger.warning("Failed to create task_service: %s", exc)
@@ -877,7 +877,6 @@ class CLIApplication:
         # 10b. AgentRegistry — 供 TaskWorker 加载子 agent 配置
         if agent_registry is not None:
             services["agent_registry"] = agent_registry
-            _sys._agent_os_agent_registry = agent_registry
             logger.info("Service injected: agent_registry (%d agents)", len(agent_registry._configs))
         else:
             logger.warning("agent_registry not provided to _build_services, TaskWorker will not be able to load sub-agent configs")
@@ -922,7 +921,6 @@ class CLIApplication:
         except Exception as exc:
             logger.warning("Failed to create CLIInteractionNotifier: %s", exc)
 
-        _sys._agent_os_services = services
 
         from infrastructure.service_provider import get_service_provider
         sp = get_service_provider()

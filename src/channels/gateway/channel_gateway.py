@@ -62,8 +62,36 @@ class ChannelGateway:
         self._normalizer = normalizer or MessageNormalizer()
         self._session_bridge = session_bridge or SessionBridge()
 
+        # 共享服务字典（由 Application 注入）
+        self._services: dict[str, Any] = {}
+
         # 外部管道请求回调
         self.on_pipeline_request: PipelineRequestCallback | None = None
+
+    @property
+    def services(self) -> dict[str, Any]:
+        """获取共享服务字典。"""
+        return self._services
+
+    @services.setter
+    def services(self, value: dict[str, Any]) -> None:
+        """设置共享服务字典。
+
+        Args:
+            value: 服务名称到实例的映射字典
+        """
+        self._services = value
+
+    def get_service(self, name: str) -> Any | None:
+        """获取已注册的服务实例。
+
+        Args:
+            name: 服务名称
+
+        Returns:
+            服务实例，未找到返回 None
+        """
+        return self._services.get(name)
 
     def register_adapter(self, channel_type: str, adapter: Any) -> None:
         """注册通道适配器。

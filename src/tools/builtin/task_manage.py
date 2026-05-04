@@ -43,7 +43,7 @@ def _get_task_service() -> Any:
 
     获取优先级：
     1. 模块级缓存实例
-    2. sys._agent_os_task_service（CLI 设置的全局共享实例）
+    2. ServiceProvider 中已注册的 task_service
     3. 创建新实例（降级兜底）
 
     Returns:
@@ -53,8 +53,8 @@ def _get_task_service() -> Any:
     if _task_service_instance is not None:
         return _task_service_instance
     try:
-        import sys
-        svc = getattr(sys, "_agent_os_task_service", None)
+        from infrastructure.service_provider import get_service_provider
+        svc = get_service_provider().get("task_service")
         if svc is not None:
             _task_service_instance = svc
             return _task_service_instance
@@ -78,7 +78,8 @@ def _retry_emit_event(task_id: str) -> None:
     import asyncio
     import sys
 
-    event_bus = getattr(sys, "_agent_os_event_bus", None)
+    from infrastructure.service_provider import get_service_provider
+    event_bus = get_service_provider().get("event_bus")
     if event_bus is None:
         logger.warning("[task_manage] retry: EventBus 不可用，任务 %s 可能需要手动恢复", task_id)
         return
@@ -469,7 +470,8 @@ def _cancel_running_pipeline(task_id: str) -> None:
     """
     import sys
 
-    task_worker = getattr(sys, "_agent_os_task_worker", None)
+    from infrastructure.service_provider import get_service_provider
+    task_worker = get_service_provider().get("task_worker")
     if task_worker is None:
         logger.debug("[task_manage] cancel: TaskWorker 不可用，跳过管道取消")
         return

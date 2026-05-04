@@ -33,6 +33,8 @@ from channels.api.app import create_app
 from channels.api.auth import verify_token
 from channels.api.models import store as api_store
 
+from application import Application
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -335,8 +337,9 @@ def _init_pipeline_context() -> PipelineContext:
         if agent_config_dir.exists():
             agent_registry.load_directory(agent_config_dir)
 
-        # 构建共享服务
-        services = _build_services(agent_registry=agent_registry)
+        # 构建共享服务（通过 Application 容器）
+        _app = Application(project_root=_PROJECT_ROOT)
+        services = _app.build_services(agent_registry=agent_registry)
 
         # 如果 ToolCore 存在，注册工具
         tool_core = plugin_registry.get_core("tool_execute")
@@ -367,44 +370,19 @@ def _init_pipeline_context() -> PipelineContext:
         else:
             logger.warning("未找到默认 Agent 配置，将使用原始 LLM 调用")
 
-        # 创建管道引擎
-        from pipeline.engine import PipelineEngine
-        checkpoint_mgr = services.get("checkpoint_manager")
-        engine = PipelineEngine(
-            input_route_table=pipeline_config.input_route_table,
-            output_route_table=pipeline_config.output_route_table,
-            plugin_registry=plugin_registry,
-            services=services,
-            checkpoint_manager=checkpoint_mgr,
-        )
-        logger.info("PipelineEngine 创建完成")
+        # 创建管道引擎（通过 Application 容器）
+        engine = _app.create_pipeline_engine(pipeline_config, plugin_registry)
 
-        # 初始化 TaskWorker — 处理 task_submit 提交的任务
+        # 初始化 TaskWorker（通过 Application 容器）
         try:
-            from infrastructure.task_worker import TaskWorker
-            event_bus = services.get("event_bus")
-            task_service = services.get("task_service")
-            if event_bus and task_service:
-                _task_worker = TaskWorker(
-                    task_service=task_service,
-                    plugin_registry=plugin_registry,
-                    input_route_table=pipeline_config.input_route_table,
-                    output_route_table=pipeline_config.output_route_table,
-                    services=services,
-                    event_bus=event_bus,
-                )
+            _task_worker = _app.create_task_worker(pipeline_config, plugin_registry)
+            if _task_worker is not None:
                 # 存储为模块全局变量，供 WebSocket handler 启动
                 globals()["_task_worker"] = _task_worker
-
-                def _eval_pipeline_factory():
-                    return PipelineEngine(
-                        input_route_table=pipeline_config.input_route_table,
-                        output_route_table=pipeline_config.output_route_table,
-                        plugin_registry=plugin_registry,
-                        services=services,
-                    )
-
-                sys._agent_os_pipeline_factory = _eval_pipeline_factory
+                # create_pipeline_factory 内部已注册到 ServiceProvider，无需 sys 全局变量
+                _app.create_pipeline_factory(
+                    pipeline_config, plugin_registry,
+                )
                 logger.info("TaskWorker 初始化完成（将在首次请求时启动）")
             else:
                 logger.warning("缺少 event_bus 或 task_service，TaskWorker 未初始化")
@@ -414,7 +392,7 @@ def _init_pipeline_context() -> PipelineContext:
         # 注册 WebSocket 交互通知器到 HumanInteractionService
         try:
             from human_interaction import get_human_interaction_service
-n            # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
+            # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
             try:
                 import human_interaction.desktop_notifier  # noqa: F401
             except Exception:
@@ -436,178 +414,6 @@ n            # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌
     except Exception as exc:
         logger.warning("管道引擎初始化失败，将回退到模拟回复模式: %s", exc, exc_info=True)
         return PipelineContext(available=False)
-
-
-def _build_services(agent_registry: Any = None) -> dict[str, Any]:
-    """构建共享服务字典。
-
-    创建工具注册表、记忆存储等共享服务，
-    插件通过 ctx.get_service() 自主获取。
-
-    Args:
-        agent_registry: Agent 注册表实例（可选）
-
-    Returns:
-        服务名称到实例的映射字典
-    """
-    services: dict[str, Any] = {}
-
-    # 1. ToolRegistry — 工具注册表
-    try:
-        from tools.registry import ToolRegistry
-        tool_registry = ToolRegistry()
-        _register_basic_tools(tool_registry)
-        services["tool_registry"] = tool_registry
-        sys._agent_os_tool_registry = tool_registry
-        logger.info("服务已创建: tool_registry (%d 个基础工具)", tool_registry.count())
-
-        from tools.auto_loader import init_tool_auto_loader
-        init_tool_auto_loader(tool_registry)
-        logger.info("ToolAutoLoader 已初始化")
-    except Exception as exc:
-        logger.warning("创建 tool_registry 服务失败: %s", exc)
-
-    # 2. JsonMemoryStore — 记忆存储
-    json_store = None
-    try:
-        from memory.storage.json_store import JsonMemoryStore
-        json_store = JsonMemoryStore()
-        logger.info("服务已创建: JsonMemoryStore")
-    except Exception as exc:
-        logger.warning("创建 JsonMemoryStore 失败: %s", exc)
-
-    if json_store is not None:
-        services["memory_store"] = json_store
-        services["semantic_storage"] = json_store
-
-    # 3. MessageQueue — 管道间消息传递
-    try:
-        from infrastructure.message_queue import MessageQueue
-        services["message_queue"] = MessageQueue()
-        logger.info("服务已创建: message_queue")
-    except Exception as exc:
-        logger.warning("创建 message_queue 服务失败: %s", exc)
-
-    # 4. ExecutionRecordStorage — 执行记录持久化
-    try:
-        from infrastructure.execution_record_storage import ExecutionRecordStorage
-        services["execution_record_storage"] = ExecutionRecordStorage(
-            data_dir=str(_PROJECT_ROOT / "data" / "pipelines")
-        )
-        logger.info("服务已创建: execution_record_storage")
-    except Exception as exc:
-        logger.warning("创建 execution_record_storage 服务失败: %s", exc)
-
-    # 5. EventBus — 事件总线
-    try:
-        from pipeline.event_bus import EventBus
-        event_bus = EventBus()
-        services["event_bus"] = event_bus
-        sys._agent_os_event_bus = event_bus
-    except Exception as exc:
-        logger.warning("创建 event_bus 服务失败: %s", exc)
-
-    # 6. TaskService — 任务服务
-    try:
-        from tasks.service import TaskService
-        task_service = TaskService()
-        services["task_service"] = task_service
-        sys._agent_os_task_service = task_service
-        logger.info("服务已创建: task_service")
-    except Exception as exc:
-        logger.warning("创建 task_service 服务失败: %s", exc)
-
-    # 7. AgentRegistry — 供 TaskWorker 加载子 agent 配置
-    if agent_registry is not None:
-        services["agent_registry"] = agent_registry
-        sys._agent_os_agent_registry = agent_registry
-        logger.info("服务已注入: agent_registry")
-
-    # 8. PipelineCheckpointManager — 管道检查点
-    try:
-        from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
-        services["checkpoint_manager"] = PipelineCheckpointManager()
-        logger.info("服务已创建: checkpoint_manager")
-    except Exception as exc:
-        logger.warning("创建 checkpoint_manager 服务失败: %s", exc)
-
-    sys._agent_os_services = services
-    return services
-
-
-def _register_basic_tools(registry: Any) -> None:
-    """注册基础工具（无需依赖注入）。
-
-    Args:
-        registry: ToolRegistry 实例
-    """
-    import datetime
-    import math as _math
-    from tools.types import Tool, ToolSource
-
-    # current_time
-    def current_time(params: dict[str, Any]) -> str:
-        """获取当前时间。"""
-        return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        tool = Tool(
-            name="current_time",
-            description="获取当前日期和时间",
-            source=ToolSource.BUILTIN,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "timezone": {"type": "string", "description": "时区（默认本地）"},
-                },
-            },
-        )
-        registry.register_with_handler(tool=tool, handler=current_time)
-    except Exception as exc:
-        logger.warning("注册基础工具 current_time 失败: %s", exc)
-
-    # calculator
-    def calculator(params: dict[str, Any]) -> str:
-        """执行简单数学计算。"""
-        expression = params.get("expression", "")
-        if not expression:
-            return "错误：未提供计算表达式"
-        try:
-            allowed_names = {
-                "abs": abs, "round": round, "min": min, "max": max,
-                "pow": pow, "sum": sum,
-                "pi": _math.pi, "e": _math.e,
-                "sqrt": _math.sqrt, "ceil": _math.ceil, "floor": _math.floor,
-            }
-            result = eval(expression, {"__builtins__": {}}, allowed_names)  # noqa: S307
-            return str(result)
-        except Exception as exc:
-            return f"计算错误：{exc}"
-
-    try:
-        tool = Tool(
-            name="calculator",
-            description="执行简单数学计算，支持加减乘除和常用数学函数",
-            source=ToolSource.BUILTIN,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "数学表达式，如 '123+456' 或 'sqrt(144)'",
-                    },
-                },
-                "required": ["expression"],
-            },
-        )
-        registry.register_with_handler(tool=tool, handler=calculator)
-    except Exception as exc:
-        logger.warning("注册基础工具 calculator 失败: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# 模拟回复（回退模式）
-# ---------------------------------------------------------------------------
 
 
 def _generate_simulated_reply(user_content: str) -> str:

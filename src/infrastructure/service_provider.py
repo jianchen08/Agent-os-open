@@ -1,10 +1,9 @@
 """服务提供者 — 统一管理运行时服务实例的获取。
 
-替代分散在各个工具类中的 sys._agent_os_* 全局变量获取模式。
+统一管理运行时服务实例的获取，替代 sys._agent_os_* 全局变量。
 """
 
 import logging
-import sys
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -14,9 +13,8 @@ class ServiceProvider:
     """运行时服务提供者（单例）。
 
     获取优先级：
-    1. 显式注册的实例（register()）
-    2. sys._agent_os_* 全局变量（CLI 设置）
-    3. 懒加载创建（通过 factory）
+    1. 显式注册的实例（register() / register_services()）
+    2. 懒加载创建（通过 factory / get_or_create()）
     """
 
     _instance: "ServiceProvider | None" = None
@@ -32,31 +30,43 @@ class ServiceProvider:
         """注册服务实例。
 
         Args:
-            name: 服务名称（不含 _agent_os_ 前缀）
+            name: 服务名称
             instance: 服务实例
         """
         self._services[name] = instance
 
+    def register_services(
+        self,
+        services: dict[str, Any],
+        *,
+        overwrite: bool = False,
+    ) -> None:
+        """批量注册服务实例（幂等，不覆盖已注册的同名服务）。
+
+        用于 Application.build_services() 等场景，一次性将多个服务
+        注册到 ServiceProvider，统一管理服务实例。
+
+        Args:
+            services: 服务名称到实例的映射字典
+            overwrite: 是否覆盖已存在的同名服务，默认 False（保留第一个）
+        """
+        for name, instance in services.items():
+            if overwrite or name not in self._services:
+                self._services[name] = instance
+
     def get(self, name: str) -> Any | None:
         """获取服务实例。
 
-        优先从已注册实例中获取，其次从 sys._agent_os_{name} 获取。
-        找到后自动缓存到本地字典。
+        所有服务通过 register() 或 register_services() 注册，
+        不再使用 sys._agent_os_* 全局变量回退。
 
         Args:
-            name: 服务名称（不含 _agent_os_ 前缀）
+            name: 服务名称
 
         Returns:
             服务实例，未找到返回 None
         """
-        if name in self._services:
-            return self._services[name]
-        key = f"_agent_os_{name}"
-        instance = getattr(sys, key, None)
-        if instance is not None:
-            self._services[name] = instance
-            return instance
-        return None
+        return self._services.get(name)
 
     def get_or_create(self, name: str, factory: Callable[[], Any]) -> Any | None:
         """获取或创建服务实例。
@@ -64,7 +74,7 @@ class ServiceProvider:
         先尝试 get()，如果获取不到则调用 factory 创建并缓存。
 
         Args:
-            name: 服务名称（不含 _agent_os_ 前缀）
+            name: 服务名称
             factory: 创建服务实例的可调用对象
 
         Returns:
