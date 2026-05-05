@@ -79,7 +79,7 @@ export function AgentSelector({
             </>
           ) : (
             <>
-              <Sparkles className="h-4 w-4 text-yellow-500" />
+              <Sparkles className="h-4 w-4 text-status-warning" />
               <span className="flex-1">默认助手</span>
             </>
           )}
@@ -90,7 +90,7 @@ export function AgentSelector({
       <DropdownMenuContent align="start" className="w-80">
         <DropdownMenuItem onClick={() => handleSelectAgent(null)} className="cursor-pointer">
           <div className="flex flex-1 items-center gap-3">
-            <Sparkles className="h-5 w-5 flex-shrink-0 text-yellow-500" />
+            <Sparkles className="h-5 w-5 flex-shrink-0 text-status-warning" />
             <div className="min-w-0 flex-1">
               <div className="font-medium">默认助手</div>
               <div className="text-muted-foreground text-xs">通用对话，适合大多数场景</div>

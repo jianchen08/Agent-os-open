@@ -68,7 +68,22 @@ class IHumanInteractionService(ABC):
     统一的人类交互抽象层，支持：
     - 选择模式：审批确认、澄清问题、方案选择
     - 对话模式：跳转到对话标签页
+    - 通知模式：非阻塞推送信息到前端
     """
+
+    @abstractmethod
+    async def send_notification(
+        self,
+        session_id: str,
+        thread_id: str,
+        title: str,
+        message: str = "",
+        priority: Priority = Priority.NORMAL,
+        progress: float | None = None,
+        agent_id: str | None = None,
+    ) -> str:
+        """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
+        ...
 
     @abstractmethod
     async def create_choice_request(

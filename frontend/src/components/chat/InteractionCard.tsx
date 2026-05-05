@@ -49,16 +49,16 @@ export function InteractionCard({
       className={`mx-4 my-3 rounded-xl border transition-colors ${
         isDone
           ? 'border-border/50 bg-muted/30'
-          : 'border-blue-500/40 bg-blue-500/5 animate-pulse-subtle shadow-md shadow-blue-500/10'
+          : 'border-status-info/40 bg-status-info/5 animate-pulse-subtle shadow-md shadow-status-info/10'
       }`}
     >
       {/* 标题区 */}
       <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-blue-500 dark:text-blue-400" />
+          <MessageSquare className="h-4 w-4 text-status-info" />
           <span className="text-sm font-semibold">{interaction.title || '交互请求'}</span>
           {isDone && (
-            <span className="ml-auto flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+            <span className="ml-auto flex items-center gap-1 text-xs text-status-success">
               <Check className="h-3 w-3" />
               {interaction.status === 'navigated' ? '已跳转' : '已完成'}
             </span>
@@ -78,6 +78,26 @@ export function InteractionCard({
           </div>
         )}
 
+        {/* Notification 模式：纯展示，无交互按钮 */}
+        {interaction.mode === 'notification' && !isDone && (
+          <div className="space-y-2">
+            {interaction.initialMessage && (
+              <MarkdownRenderer content={interaction.initialMessage} />
+            )}
+            {interaction.description && !interaction.initialMessage && (
+              <p className="text-muted-foreground text-sm">{interaction.description}</p>
+            )}
+            {interaction.progress != null && (
+              <div className="h-2 w-full rounded-full bg-muted">
+                <div
+                  className="h-2 rounded-full bg-status-info transition-all"
+                  style={{ width: `${Math.min(100, Math.max(0, interaction.progress))}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Choice 模式：选项按钮 */}
         {interaction.mode === 'choice' && interaction.options && interaction.options.length > 0 && !isDone && (
           <div className="flex flex-wrap gap-2">
@@ -90,7 +110,14 @@ export function InteractionCard({
                 onClick={() => onRespondChoice(opt.id)}
                 className="text-sm"
               >
-                {opt.label}
+                <span className="flex flex-col items-start gap-0.5">
+                  <span>{opt.label}</span>
+                  {opt.description && (
+                    <span className="text-muted-foreground text-xs font-normal opacity-70">
+                      {opt.description}
+                    </span>
+                  )}
+                </span>
               </Button>
             ))}
           </div>
@@ -124,7 +151,7 @@ export function InteractionCard({
                 size="sm"
                 disabled={isSubmitting}
                 onClick={onNavigateToTab}
-                className="text-sm text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
+                className="text-sm text-status-info hover:text-status-info/80"
               >
                 <ArrowRight className="mr-1 h-3.5 w-3.5" />
                 进入对话
@@ -140,7 +167,7 @@ export function InteractionCard({
                 disabled={isSubmitting}
                 placeholder="输入回复..."
                 rows={1}
-                className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400"
+                className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-status-info"
               />
               <Button
                 size="sm"
@@ -167,7 +194,7 @@ export function InteractionCard({
               disabled={isSubmitting}
               placeholder="输入回复..."
               rows={1}
-              className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-blue-500 dark:focus:ring-blue-400"
+              className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-status-info"
             />
             <Button
               size="sm"

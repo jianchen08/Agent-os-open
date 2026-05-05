@@ -40,9 +40,10 @@ class HumanInteractionTool(BuiltinTool):
     """
     人类交互工具
 
-    支持两种交互模式：
+    支持三种交互模式：
     - 选择模式（choice）：弹出选择框，阻塞等待用户做出决定
     - 对话模式（conversation）：跳转到对话标签页，用户在标签页中对话
+    - 通知模式（notification）：非阻塞推送信息到前端，不等待用户响应
     """
 
     def __init__(
@@ -57,14 +58,14 @@ class HumanInteractionTool(BuiltinTool):
         """获取工具定义"""
         return Tool(
             name="human_interaction",
-            description="与用户交互。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页。",
+            description="与用户交互。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页；通知模式：非阻塞推送信息。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["choice", "conversation"],
-                        "description": "交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页）",
+                        "enum": ["choice", "conversation", "notification"],
+                        "description": "交互模式：choice=选择模式（弹出选择框），conversation=对话模式（跳转标签页），notification=通知模式（非阻塞推送）",
                     },
                     "title": {
                         "type": "string",
@@ -92,7 +93,7 @@ class HumanInteractionTool(BuiltinTool):
                     },
                     "initial_message": {
                         "type": "string",
-                        "description": "开场消息（对话模式）",
+                        "description": "开场消息（对话模式）/ 通知内容（通知模式）",
                     },
                     "suggestions": {
                         "type": "array",
@@ -109,6 +110,10 @@ class HumanInteractionTool(BuiltinTool):
                         "enum": ["low", "normal", "high", "critical"],
                         "default": "normal",
                         "description": "优先级",
+                    },
+                    "progress": {
+                        "type": "number",
+                        "description": "进度百分比 0-100（通知模式）",
                     },
                 },
                 "required": ["mode", "title"],
@@ -150,6 +155,8 @@ class HumanInteractionTool(BuiltinTool):
             return await self._execute_choice_mode(inputs, service, pipeline_id)
         elif mode == InteractionMode.CONVERSATION.value:
             return await self._execute_conversation_mode(inputs, service, pipeline_id)
+        elif mode == InteractionMode.NOTIFICATION.value:
+            return await self._execute_notification_mode(inputs, service, pipeline_id)
         else:
             return create_failure_result(error=f"不支持的交互模式: {mode}")
 
@@ -371,6 +378,54 @@ class HumanInteractionTool(BuiltinTool):
             return create_failure_result(
                 error=(
                     f"人类交互执行失败: {str(e)}。"
+                    "你可以根据当前任务上下文决定下一步操作。"
+                ),
+                error_code="INTERACTION_FAILED",
+            )
+
+
+    async def _execute_notification_mode(
+        self,
+        inputs: dict[str, Any],
+        service,
+        pipeline_id: str,
+    ) -> ToolExecutionResult:
+        """执行通知模式，非阻塞发送通知后立即返回。"""
+        title = inputs.get("title", "")
+        description = inputs.get("description", "")
+        initial_message = inputs.get("initial_message")
+        progress = inputs.get("progress")
+        priority_str = inputs.get("priority", "normal")
+
+        priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
+
+        try:
+            request_id = await service.send_notification(
+                session_id=pipeline_id,
+                thread_id=pipeline_id,
+                title=title,
+                message=description or initial_message or "",
+                priority=priority,
+                progress=progress,
+                agent_id=pipeline_id,
+            )
+
+            return create_success_result(
+                data={
+                    "status": "sent",
+                    "request_id": request_id,
+                    "message": "通知已发送",
+                }
+            )
+
+        except Exception as e:
+            logger.error(
+                "[HumanInteractionTool] 通知模式执行失败 | "
+                "error=%s", e, exc_info=True,
+            )
+            return create_failure_result(
+                error=(
+                    f"通知发送失败: {str(e)}。"
                     "你可以根据当前任务上下文决定下一步操作。"
                 ),
                 error_code="INTERACTION_FAILED",

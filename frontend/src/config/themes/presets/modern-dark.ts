@@ -49,7 +49,7 @@ export const modernDarkTheme: ThemeConfig = {
     },
 
     bubble: {
-      user_bg: 'linear-gradient(135deg, #3b82f6 0%, #00d4ff 100%)',
+      user_bg: 'linear-gradient(135deg, #2563eb 0%, #00d4ff 100%)',
       user_text: '#ffffff',
       user_radius: '1.25rem 1.25rem 1.25rem 0.25rem',
       user_shadow: '0 4px 16px rgba(0, 212, 255, 0.3), 0 0 20px rgba(59, 130, 246, 0.15)',
@@ -123,16 +123,16 @@ export const modernDarkTheme: ThemeConfig = {
       textureOpacity: 0.2,
       variants: {
         primary: {
-          bg: 'linear-gradient(135deg, #3b82f6 0%, #00d4ff 100%)',
-          text: '#ffffff',
-          border: 'transparent',
-          hoverBg: 'linear-gradient(135deg, #2563eb 0%, #0891b2 100%)',
+          bg: 'rgba(59, 130, 246, 0.15)',
+          text: '#93c5fd',
+          border: 'rgba(59, 130, 246, 0.3)',
+          hoverBg: 'rgba(59, 130, 246, 0.25)',
         },
         secondary: {
-          bg: 'rgba(59, 130, 246, 0.1)',
-          text: '#f8fafc',
-          border: 'rgba(59, 130, 246, 0.3)',
-          hoverBg: 'rgba(59, 130, 246, 0.2)',
+          bg: 'rgba(59, 130, 246, 0.08)',
+          text: '#cbd5e1',
+          border: 'rgba(59, 130, 246, 0.2)',
+          hoverBg: 'rgba(59, 130, 246, 0.15)',
         },
         ghost: {
           bg: 'transparent',
@@ -141,10 +141,10 @@ export const modernDarkTheme: ThemeConfig = {
           hoverBg: 'rgba(255, 255, 255, 0.05)',
         },
         destructive: {
-          bg: '#ef4444',
-          text: '#ffffff',
-          border: 'transparent',
-          hoverBg: '#dc2626',
+          bg: 'rgba(239, 68, 68, 0.15)',
+          text: '#fca5a5',
+          border: 'rgba(239, 68, 68, 0.3)',
+          hoverBg: 'rgba(239, 68, 68, 0.25)',
         },
       },
     },

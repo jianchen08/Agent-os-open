@@ -1,18 +1,48 @@
 /**
  * 聊天容器组件
  *
- * 整合消息列表和输入区域的完整聊天界面
+ * 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。
+ * 支持 L1/L2/L3 多层 Agent Tab 切换，每个 Tab 独立维护消息列表。
  */
 
 import { Loader2, Search, X } from 'lucide-react'
-import { useState, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { InteractionPanel } from './InteractionPanel'
 import { MessageList } from './MessageList'
 import type { ChatContainerProps } from './types'
+
+/**
+ * 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式
+ *
+ * @param storeTabs - store 中的 AgentTab 列表
+ * @param activeTabId - 当前激活的 Tab ID
+ * @param unreadCounts - 未读计数映射
+ * @returns AgentTabBar 兼容的 Tab 数据数组
+ */
+function mapStoreTabsToBarFormat(
+  storeTabs: ReturnType<typeof useAgentTabStore.getState>['tabs'],
+  activeTabId: string | null,
+  unreadCounts: Record<string, number>,
+) {
+  return storeTabs.map((tab) => ({
+    id: tab.id,
+    name: tab.agentName,
+    status: tab.status,
+    isActive: tab.id === activeTabId,
+    unreadCount: unreadCounts[tab.id] || 0,
+    canClose: tab.canClose,
+    agentLevel: tab.agentLevel,
+    agentName: tab.agentName,
+    taskId: tab.taskId,
+    path: tab.path,
+  }))
+}
 
 /**
  * 聊天容器组件
@@ -40,16 +70,93 @@ export const ChatContainer = ({
   /** 搜索状态 */
   const [searchQuery, setSearchQuery] = useState('')
 
+  /** 从 agentTabStore 获取 Tab 状态 */
+  const tabs = useAgentTabStore((s) => s.tabs)
+  const activeTabId = useAgentTabStore((s) => s.activeTabId)
+  const tabMessages = useAgentTabStore((s) => s.tabMessages)
+  const unreadCounts = useAgentTabStore((s) => s.unreadCounts)
+  const switchToTab = useAgentTabStore((s) => s.switchToTab)
+  const closeTab = useAgentTabStore((s) => s.closeTab)
+  const initSessionTabs = useAgentTabStore((s) => s.initSessionTabs)
+
+  /**
+   * 会话切换时初始化 Tab 状态
+   *
+   * 从 localStorage 恢复该会话的 Tab 配置，
+   * 或创建空白状态等待后端推送。
+   */
+  useEffect(() => {
+    if (sessionId) {
+      initSessionTabs(sessionId)
+    }
+  }, [sessionId, initSessionTabs])
+
+  /**
+   * 判断是否为子 Tab（L2/L3）激活状态
+   *
+   * 主 Tab 使用外部传入的 messages，子 Tab 使用 tabMessages 中的数据。
+   */
+  const activeTab = tabs.find((t) => t.id === activeTabId)
+  const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
+
+  /**
+   * 根据当前激活 Tab 选择消息源
+   *
+   * - 主 Tab (L1) 或无 Tab：使用外部传入的 messages
+   * - 子 Tab (L2/L3)：使用 agentTabStore 中 tabMessages 的数据
+   */
+  const activeMessages = useMemo(() => {
+    if (isSubTabActive && activeTabId) {
+      return tabMessages[activeTabId] || []
+    }
+    return messages
+  }, [isSubTabActive, activeTabId, tabMessages, messages])
+
+  /**
+   * 将 store Tab 映射为 AgentTabBar 所需格式
+   */
+  const barTabs = useMemo(
+    () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts),
+    [tabs, activeTabId, unreadCounts],
+  )
+
+  /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
+  const showTabBar = tabs.length > 1
+
+  /**
+   * 处理 Tab 切换
+   *
+   * @param tabId - 目标 Tab ID
+   */
+  const handleTabChange = useCallback(
+    (tabId: string) => {
+      switchToTab(tabId)
+    },
+    [switchToTab],
+  )
+
+  /**
+   * 处理 Tab 关闭
+   *
+   * @param tabId - 要关闭的 Tab ID
+   */
+  const handleTabClose = useCallback(
+    (tabId: string) => {
+      closeTab(tabId)
+    },
+    [closeTab],
+  )
+
   /**
    * 过滤消息
    */
   const filteredMessages = useMemo(() => {
     if (!searchQuery.trim()) {
-      return messages
+      return activeMessages
     }
 
     const query = searchQuery.toLowerCase()
-    return messages.filter((message) => {
+    return activeMessages.filter((message) => {
       // 搜索消息内容
       if (message.content?.toLowerCase().includes(query)) {
         return true
@@ -62,7 +169,7 @@ export const ChatContainer = ({
 
       return false
     })
-  }, [messages, searchQuery])
+  }, [activeMessages, searchQuery])
 
   /** 加载状态 */
   if (isLoading) {
@@ -83,6 +190,17 @@ export const ChatContainer = ({
       data-testid="chat-container"
       data-session-id={sessionId}
     >
+      {/* Agent Tab 导航栏（多 Tab 时显示） */}
+      {showTabBar && (
+        <div className="bg-background shrink-0 border-b">
+          <AgentTabBar
+            tabs={barTabs}
+            onTabChange={handleTabChange}
+            onTabClose={handleTabClose}
+          />
+        </div>
+      )}
+
       {/* 搜索栏 */}
       <div className="bg-background shrink-0 border-b">
         <div className="flex items-center gap-2 px-4 py-2">
@@ -138,7 +256,20 @@ export const ChatContainer = ({
       {/* 输入区域 */}
       <ChatInput
         isGenerating={isGenerating}
-        onSendMessage={onSendMessage}
+        onSendMessage={(params) => {
+          /**
+           * 子 Tab 激活时注入 parentRecordId
+           *
+           * 当用户在子 Tab（L2/L3）中发送消息时，
+           * 将 activeTab 的 parentRecordId 附加到参数中，
+           * 以便 WebSocket 消息路由到对应的子管道。
+           */
+          if (isSubTabActive && activeTab?.parentRecordId) {
+            onSendMessage({ ...params, parentRecordId: activeTab.parentRecordId })
+          } else {
+            onSendMessage(params)
+          }
+        }}
         onStopGenerate={onStopGenerate}
         placeholder="输入消息，按 Enter 发送..."
         enableThinkingMode={true}

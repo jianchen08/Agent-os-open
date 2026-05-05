@@ -23,13 +23,13 @@ const thinkingTextStyle = {
 function getStepStatusIcon(status: 'pending' | 'running' | 'completed' | 'failed') {
   switch (status) {
     case 'pending':
-      return <Clock className="h-3 w-3 text-yellow-600 dark:text-yellow-400" />
+      return <Clock className="h-3 w-3 text-status-warning" />
     case 'running':
-      return <Loader2 className="h-3 w-3 animate-spin text-blue-600 dark:text-blue-400" />
+      return <Loader2 className="h-3 w-3 animate-spin text-status-info" />
     case 'completed':
-      return <CheckCircle2 className="h-3 w-3 text-green-600 dark:text-green-400" />
+      return <CheckCircle2 className="h-3 w-3 text-status-success" />
     case 'failed':
-      return <XCircle className="h-3 w-3 text-red-600 dark:text-red-400" />
+      return <XCircle className="h-3 w-3 text-status-error" />
   }
 }
 
@@ -59,10 +59,10 @@ const ThinkingStepItem: FC<{
     <div
       className={cn(
         'space-y-1.5 border-l-2 pl-3',
-        step.status === 'running' && 'border-blue-500 dark:border-blue-400',
-        step.status === 'completed' && 'border-green-500 dark:border-green-400',
-        step.status === 'failed' && 'border-red-500 dark:border-red-400',
-        step.status === 'pending' && 'border-yellow-500 dark:border-yellow-400',
+        step.status === 'running' && 'border-status-info',
+        step.status === 'completed' && 'border-status-success',
+        step.status === 'failed' && 'border-status-error',
+        step.status === 'pending' && 'border-status-warning',
       )}
     >
       {/* 步骤头部 */}
@@ -111,7 +111,7 @@ const ThinkingStepItem: FC<{
 export const ThinkingDisplay: FC<{
   thinking: ThinkingContent
   defaultExpanded?: boolean
-}> = ({ thinking, defaultExpanded = true }) => {
+}> = ({ thinking, defaultExpanded = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
   return (
@@ -122,9 +122,9 @@ export const ThinkingDisplay: FC<{
         onClick={() => setExpanded(!expanded)}
       >
         {thinking.isThinking ? (
-          <Loader2 className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
+          <Loader2 className="h-4 w-4 animate-spin text-status-info" />
         ) : (
-          <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+          <CheckCircle2 className="h-4 w-4 text-status-success" />
         )}
         <span className="text-sm font-medium">思考过程</span>
         {thinking.steps && thinking.steps.length > 0 && (

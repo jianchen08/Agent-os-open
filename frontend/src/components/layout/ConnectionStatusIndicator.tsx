@@ -15,33 +15,33 @@ const STATUS_CONFIG: Record<
   { color: string; label: string; bgColor: string; animation: string }
 > = {
   connected: {
-    color: 'text-green-400',
+    color: 'text-status-success',
     label: 'Connected',
-    bgColor: 'bg-green-400/10',
+    bgColor: 'bg-status-success/10',
     animation: '',
   },
   connecting: {
-    color: 'text-yellow-400',
+    color: 'text-status-warning',
     label: 'Connecting...',
-    bgColor: 'bg-yellow-400/10',
+    bgColor: 'bg-status-warning/10',
     animation: 'animate-pulse',
   },
   reconnecting: {
-    color: 'text-orange-400',
+    color: 'text-status-running',
     label: 'Reconnecting...',
-    bgColor: 'bg-orange-400/10',
+    bgColor: 'bg-status-running/10',
     animation: 'animate-pulse',
   },
   disconnected: {
-    color: 'text-gray-400',
+    color: 'text-status-pending',
     label: 'Disconnected',
-    bgColor: 'bg-gray-400/10',
+    bgColor: 'bg-status-pending/10',
     animation: '',
   },
   failed: {
-    color: 'text-red-400',
+    color: 'text-status-error',
     label: 'Connection Failed',
-    bgColor: 'bg-red-400/10',
+    bgColor: 'bg-status-error/10',
     animation: '',
   },
 }
@@ -86,16 +86,16 @@ export function ConnectionStatusIndicator({
         <span
           className={`inline-block h-2 w-2 rounded-full ${
             connectionStatus.state === 'connected'
-              ? 'bg-green-400'
+              ? 'bg-status-success'
               : connectionStatus.state === 'failed'
-                ? 'bg-red-400'
+                ? 'bg-status-error'
                 : connectionStatus.state === 'connecting' || connectionStatus.state === 'reconnecting'
-                  ? 'bg-yellow-400 animate-pulse'
-                  : 'bg-gray-400'
+                  ? 'bg-status-warning animate-pulse'
+                  : 'bg-status-pending'
           }`}
         />
         {connectionStatus.queuedMessages > 0 && (
-          <span className="absolute -top-1 -right-1 flex h-3 w-3 items-center justify-center rounded-full bg-orange-400 text-[8px] font-bold text-white">
+          <span className="absolute -top-1 -right-1 flex h-3 w-3 items-center justify-center rounded-full bg-status-running text-[8px] font-bold text-white">
             {connectionStatus.queuedMessages > 9 ? '9+' : connectionStatus.queuedMessages}
           </span>
         )}
@@ -113,13 +113,13 @@ export function ConnectionStatusIndicator({
         <span
           className={`inline-block h-2 w-2 rounded-full ${
             connectionStatus.state === 'connected'
-              ? 'bg-green-400'
+              ? 'bg-status-success'
               : connectionStatus.state === 'failed'
-                ? 'bg-red-400'
+                ? 'bg-status-error'
                 : connectionStatus.state === 'connecting' ||
                     connectionStatus.state === 'reconnecting'
-                  ? 'bg-yellow-400 animate-pulse'
-                  : 'bg-gray-400'
+                  ? 'bg-status-warning animate-pulse'
+                  : 'bg-status-pending'
           } ${config.animation}`}
         />
 
@@ -139,7 +139,7 @@ export function ConnectionStatusIndicator({
 
         {/* Queue indicator */}
         {showQueue && connectionStatus.queuedMessages > 0 && (
-          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-orange-400/20 px-1 text-[10px] font-bold">
+          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-status-running/20 px-1 text-[10px] font-bold">
             {connectionStatus.queuedMessages}
           </span>
         )}
@@ -159,7 +159,7 @@ export function ConnectionStatusIndicator({
             {connectionStatus.latencyMs !== null && (
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Latency</span>
-                <span className={connectionStatus.latencyMs < 100 ? 'text-green-400' : connectionStatus.latencyMs < 300 ? 'text-yellow-400' : 'text-red-400'}>
+                <span className={connectionStatus.latencyMs < 100 ? 'text-status-success' : connectionStatus.latencyMs < 300 ? 'text-status-warning' : 'text-status-error'}>
                   {connectionStatus.latencyMs}ms
                 </span>
               </div>
@@ -168,7 +168,7 @@ export function ConnectionStatusIndicator({
             {connectionStatus.reconnectAttempt > 0 && (
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Retry</span>
-                <span className="text-yellow-400">Attempt {connectionStatus.reconnectAttempt}</span>
+                <span className="text-status-warning">Attempt {connectionStatus.reconnectAttempt}</span>
               </div>
             )}
 
@@ -184,7 +184,7 @@ export function ConnectionStatusIndicator({
             {connectionStatus.queuedMessages > 0 && (
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Queued</span>
-                <span className="text-orange-400">{connectionStatus.queuedMessages} messages</span>
+                <span className="text-status-running">{connectionStatus.queuedMessages} messages</span>
               </div>
             )}
           </div>

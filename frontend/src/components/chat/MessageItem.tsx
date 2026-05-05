@@ -15,6 +15,7 @@ import { useAgentStore } from '@/stores/agentStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { formatTimestamp } from '@/utils/format'
+import { safeParseResult } from '@/utils/toolCardRegistry'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
@@ -210,12 +211,12 @@ export const MessageItem = ({
               className={cn(
                 'rounded-full px-2 py-0.5 text-xs',
                 toolStatus === 'completed'
-                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                  ? 'bg-status-success/15 text-status-success'
                   : toolStatus === 'failed'
-                    ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                    ? 'bg-status-error/15 text-status-error'
                     : toolStatus === 'running'
-                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                      : 'bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400',
+                      ? 'bg-status-info/15 text-status-info'
+                      : 'bg-status-pending/15 text-status-pending',
               )}
             >
               {toolStatus === 'completed'
@@ -229,11 +230,33 @@ export const MessageItem = ({
             {durationMs && <span className="text-muted-foreground text-xs">{durationMs}ms</span>}
           </div>
           {toolError && (
-            <div className="mt-1 text-sm text-red-600 dark:text-red-400">{toolError}</div>
+            <div className="mt-1 text-sm text-status-error">{toolError}</div>
           )}
           {toolResult && (
-            <div className="text-muted-foreground mt-1 truncate text-sm">
-              {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
+            <div className="text-muted-foreground mt-1 text-sm">
+              {(() => {
+                const parsed = safeParseResult(toolResult)
+                if (parsed) {
+                  const output = parsed.output as Record<string, unknown> | undefined
+                  const taskId = (output?.task_id as string) || (parsed.task_id as string) || ''
+                  const status = (output?.status as string) || (parsed.status as string) || ''
+                  const message = (output?.message as string) || (parsed.message as string) || ''
+                  const parts: string[] = []
+                  if (taskId) parts.push(`任务ID: ${taskId}`)
+                  if (status) parts.push(`状态: ${status}`)
+                  if (message) parts.push(message)
+                  return parts.length > 0 ? (
+                    <div className="space-y-0.5">{parts.map((p, i) => <div key={i} className={i > 0 ? 'truncate' : ''}>{p}</div>)}</div>
+                  ) : (
+                    <pre className="truncate whitespace-pre-wrap">{JSON.stringify(parsed, null, 2)}</pre>
+                  )
+                }
+                return (
+                  <span className="truncate">
+                    {typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)}
+                  </span>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -258,7 +281,7 @@ export const MessageItem = ({
           isUser
             ? 'bg-primary text-primary-foreground'
             : isSystemMessage
-              ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400'
+              ? 'bg-status-warning/15 text-status-warning'
               : 'bg-secondary text-secondary-foreground',
         )}
       >
@@ -314,7 +337,7 @@ export const MessageItem = ({
               className={cn(
                 'overflow-hidden',
                 isSystemMessage
-                  ? 'w-full border-l-4 border-amber-400'
+                  ? 'w-full border-l-4 border-status-warning/40'
                   : isUser
                     ? 'max-w-full'
                     : 'w-full',
@@ -348,8 +371,8 @@ export const MessageItem = ({
                 <div className="flex items-center gap-2">
                   {hasPendingInteraction ? (
                     <>
-                      <MessageSquare className="h-4 w-4 text-blue-500" />
-                      <span className="text-sm text-blue-600 dark:text-blue-400">等待用户响应...</span>
+                      <MessageSquare className="h-4 w-4 text-status-info" />
+                      <span className="text-sm text-status-info">等待用户响应...</span>
                     </>
                   ) : (
                     <>
@@ -376,7 +399,7 @@ export const MessageItem = ({
           )}
         >
           {isAssistant && agent && (
-            <span className="inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900/20 dark:text-blue-400">
+            <span className="inline-flex items-center gap-1 rounded-lg bg-status-info/10 px-2 py-0.5 text-xs text-status-info">
               <Sparkles className="h-3 w-3" />
               <span className="font-medium">{agent.name}</span>
             </span>

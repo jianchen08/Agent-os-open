@@ -246,11 +246,13 @@ class StreamStartData:
         message_id: 消息唯一标识
         model: 使用的 LLM 模型名称
         thinking_enabled: 是否启用思考过程
+        pipeline_id: 管道 ID，用于前端消息路由
     """
 
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     model: str = ""
     thinking_enabled: bool = False
+    pipeline_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典。"""
@@ -258,6 +260,7 @@ class StreamStartData:
             "message_id": self.message_id,
             "model": self.model,
             "thinking_enabled": self.thinking_enabled,
+            "pipeline_id": self.pipeline_id,
         }
 
 
@@ -269,11 +272,13 @@ class StreamChunkData:
         message_id: 消息唯一标识
         content: 当前 chunk 的文本内容
         sequence: chunk 序号（从 1 开始递增）
+        pipeline_id: 管道 ID，用于前端消息路由
     """
 
     message_id: str
     content: str = ""
     sequence: int = 0
+    pipeline_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典。"""
@@ -281,6 +286,7 @@ class StreamChunkData:
             "message_id": self.message_id,
             "content": self.content,
             "sequence": self.sequence,
+            "pipeline_id": self.pipeline_id,
         }
 
 
@@ -292,19 +298,23 @@ class StreamEndData:
         message_id: 消息唯一标识
         full_content: 完整生成内容
         usage: token 使用量信息
+        pipeline_id: 管道 ID，用于前端消息路由
     """
 
     message_id: str
     full_content: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+    pipeline_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典。"""
-        return {
+        result: dict[str, Any] = {
             "message_id": self.message_id,
             "full_content": self.full_content,
             "usage": self.usage,
+            "pipeline_id": self.pipeline_id,
         }
+        return result
 
 
 @dataclass
@@ -316,12 +326,14 @@ class ExecutionStartData:
         tool_name: 工具名称
         params: 工具参数
         parent_id: 父执行 ID（可选，用于嵌套调用）
+        pipeline_id: 管道 ID，用于前端消息路由
     """
 
     execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     tool_name: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     parent_id: str | None = None
+    pipeline_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典。"""
@@ -329,6 +341,7 @@ class ExecutionStartData:
             "execution_id": self.execution_id,
             "tool_name": self.tool_name,
             "params": self.params,
+            "pipeline_id": self.pipeline_id,
         }
         if self.parent_id is not None:
             result["parent_id"] = self.parent_id

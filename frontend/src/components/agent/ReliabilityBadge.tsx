@@ -38,7 +38,7 @@ export function ReliabilityBadge({
 }: ReliabilityBadgeProps) {
   /** 根据评分确定颜色 */
   const getScoreColor = () => {
-    if (score >= 90) return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30'
+    if (score >= 90) return 'bg-status-warning/20 text-status-warning border-status-warning/30'
     if (score >= 70) return 'bg-status-success/20 text-status-success border-status-success/30'
     if (score >= 50) return 'bg-status-waiting/20 text-status-waiting border-status-waiting/30'
     return 'bg-status-error/20 text-status-error border-status-error/30'

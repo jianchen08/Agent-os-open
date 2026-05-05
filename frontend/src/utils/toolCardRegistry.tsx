@@ -7,7 +7,7 @@
  * @module toolCardRegistry
  */
 
-import { Copy, FileText, Globe, Terminal, Trash2 } from 'lucide-react'
+import { Copy, FileText, Globe, Target, Terminal, Trash2 } from 'lucide-react'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -101,7 +101,7 @@ function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
     content: toolCall.tool_args,
     contentType: 'json',
     collapsible: true,
-    defaultExpanded: true,
+    defaultExpanded: false,
   })
 
   if (toolCall.result !== undefined && toolCall.result !== null) {
@@ -111,7 +111,7 @@ function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
       content: toolCall.result as string | Record<string, unknown>,
       contentType: 'json',
       collapsible: true,
-      defaultExpanded: true,
+      defaultExpanded: false,
     })
   }
 
@@ -176,6 +176,62 @@ function extractUrl(toolCall: MessageToolCall): string {
   const args = toolCall.tool_args as Record<string, unknown> | null
   if (!args) return ''
   return (args.url as string) || (args.query as string) || ''
+}
+
+/**
+ * 安全解析可能是 Python dict 字符串的结果
+ *
+ * 处理 tc.result 可能的多种格式：
+ * 1. 已经是对象 → 直接返回
+ * 2. 标准 JSON 字符串 → JSON.parse 解析
+ * 3. Python dict 字符串（单引号、True/False/None）→ 替换后解析
+ * 4. 解析失败 → 返回 null
+ *
+ * @param result - 工具调用的返回结果，可能是对象或字符串
+ * @returns 解析后的对象，或解析失败时返回 null
+ */
+export function safeParseResult(result: unknown): Record<string, unknown> | null {
+  // 已经是对象，直接返回
+  if (result !== null && result !== undefined && typeof result === 'object') {
+    return result as Record<string, unknown>
+  }
+
+  // 非字符串无法解析
+  if (typeof result !== 'string') {
+    return null
+  }
+
+  const str = result.trim()
+  if (!str) return null
+
+  // 第一次尝试：标准 JSON 解析
+  try {
+    const parsed = JSON.parse(str)
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // 不是标准 JSON，继续尝试 Python dict 格式
+  }
+
+  // 第二次尝试：Python dict 格式（单引号 → 双引号，True/False/None → JSON 值）
+  try {
+    let normalized = str
+    // 将 Python 布尔值和 None 替换为 JSON 兼容值
+    normalized = normalized.replace(/\bTrue\b/g, 'true')
+    normalized = normalized.replace(/\bFalse\b/g, 'false')
+    normalized = normalized.replace(/\bNone\b/g, 'null')
+    // 将单引号替换为双引号（注意：这只是简单替换，对嵌套引号场景可能有局限）
+    normalized = normalized.replace(/'/g, '"')
+    const parsed = JSON.parse(normalized)
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // Python dict 格式也解析失败
+  }
+
+  return null
 }
 
 registerToolCard({
@@ -446,6 +502,104 @@ registerToolCard({
         collapsible: true,
         defaultExpanded: false,
       })
+    }
+
+    return details
+  },
+  buildActions: buildDefaultActions,
+})
+
+/**
+ * task_submit 工具卡片配置
+ *
+ * 显示任务提交的目标、描述、执行者及提交结果
+ */
+registerToolCard({
+  name: 'task_submit',
+  icon: <Target className="h-4 w-4" />,
+  formatTitle: (tc) => {
+    const args = tc.tool_args as Record<string, unknown> | null
+    const goal = args?.goal as Record<string, unknown> | null
+    const title = (goal?.title as string) || (args?.description as string) || '任务提交'
+    return `提交任务: ${title}`
+  },
+  buildDetails: (tc) => {
+    const args = tc.tool_args as Record<string, unknown> | null
+    const details: ActivityDetailBlock[] = []
+
+    // 目标信息
+    const goal = args?.goal as Record<string, unknown> | null
+    if (goal?.title) {
+      details.push({
+        id: 'goal',
+        label: '任务目标',
+        content: goal.title as string,
+        contentType: 'text',
+        collapsible: false,
+      })
+    }
+    if (goal?.description) {
+      details.push({
+        id: 'goal_desc',
+        label: '详细描述',
+        content: goal.description as string,
+        contentType: 'text',
+        collapsible: true,
+        defaultExpanded: false,
+      })
+    }
+
+    // 执行者信息
+    const targetId = args?.target_id as string
+    if (targetId) {
+      details.push({
+        id: 'target',
+        label: '执行者',
+        content: targetId,
+        contentType: 'text',
+        collapsible: false,
+      })
+    }
+
+    // 提交结果：安全解析 Python dict 字符串格式的 result
+    if (tc.result !== undefined && tc.result !== null) {
+      const parsedResult = safeParseResult(tc.result)
+
+      if (parsedResult) {
+        // 解析成功，从 output 字段中提取任务数据
+        const output = parsedResult.output as Record<string, unknown> | undefined
+        const taskId = (output?.task_id as string) || (parsedResult.task_id as string) || ''
+        const status = (output?.status as string) || (parsedResult.status as string) || ''
+        const message = (output?.message as string) || (parsedResult.message as string) || ''
+        const title = (output?.title as string) || (parsedResult.title as string) || ''
+
+        const contentParts: string[] = []
+        if (taskId) contentParts.push(`任务ID: ${taskId}`)
+        if (status) contentParts.push(`状态: ${status}`)
+        if (title) contentParts.push(`标题: ${title}`)
+        if (message) contentParts.push(message)
+
+        details.push({
+          id: 'result',
+          label: '提交结果',
+          content: contentParts.length > 0 ? contentParts.join('\n') : '提交成功',
+          contentType: 'text',
+          collapsible: true,
+          defaultExpanded: false,
+        })
+      } else {
+        // 解析失败，直接展示原始字符串
+        const resultStr =
+          typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)
+        details.push({
+          id: 'result',
+          label: '提交结果',
+          content: resultStr,
+          contentType: 'text',
+          collapsible: true,
+          defaultExpanded: false,
+        })
+      }
     }
 
     return details

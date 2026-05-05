@@ -76,6 +76,14 @@ class PipelineRunSummary:
     """
 
     run_id: str = ""
+    # BUG-FIX-fix_pipeline_thread_association:
+    # 问题根因: 管道运行后生成的 YAML 文件没有存储 thread_id，
+    #           导致 7/9 个管道文件是"无主"的，无法被任何 thread 加载。
+    # 修复方案: 在 PipelineRunSummary 中新增 thread_id 字段，
+    #           管道运行时将 thread_id 写入 summary 并持久化到 YAML。
+    # 影响范围: list_messages、get_thread_detail 等消息查询接口的管道关联逻辑。
+    # 修复日期: 2026-05-05
+    thread_id: str = ""
 
     total_iterations: int = 0
     total_tokens: dict[str, int] = field(default_factory=dict)
@@ -603,6 +611,47 @@ class ExecutionRecordStorage:
     def get_summary(self, run_id: str) -> PipelineRunSummary | None:
         self._ensure_loaded(run_id)
         return self._summaries.get(run_id)
+
+    def update_summary(self, pipeline_run_id: str, updates: dict[str, Any]) -> None:
+        """更新指定管道运行的 summary 字段并持久化到磁盘。
+
+        BUG-FIX-fix_pipeline_thread_association:
+        用于在管道运行过程中/结束后将 thread_id 等关联信息写入 summary，
+        确保管道 YAML 文件与 thread 之间的关联关系被正确持久化。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+            updates: 需要更新的字段字典，例如 {"thread_id": "abc123"}
+        """
+        self._ensure_loaded(pipeline_run_id)
+        summary = self._summaries.get(pipeline_run_id)
+        if summary is None:
+            # summary 尚不存在，创建一个空 summary 再更新
+            summary = PipelineRunSummary(run_id=pipeline_run_id)
+            self._summaries[pipeline_run_id] = summary
+        for key, value in updates.items():
+            if hasattr(summary, key):
+                setattr(summary, key, value)
+        self._persist_pipeline(pipeline_run_id)
+        logger.debug(
+            "更新管道摘要字段: %s (updates=%s)",
+            pipeline_run_id,
+            list(updates.keys()),
+        )
+
+    def list_all_summaries(self) -> list[PipelineRunSummary]:
+        """返回所有已加载的管道运行摘要列表（不做数量限制）。
+
+        BUG-FIX-fix_pipeline_thread_association:
+        用于扫描所有管道文件，根据 summary.thread_id 反查
+        属于某个 thread 的所有 pipeline_run_id。
+
+        Returns:
+            全部 PipelineRunSummary 列表
+        """
+        if self._data_dir:
+            self._load_all()
+        return list(self._summaries.values())
 
     def list_summaries(
         self, limit: int = 50

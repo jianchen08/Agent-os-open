@@ -103,6 +103,17 @@ class ChildTaskGuard(IOutputPlugin):
             )
             return OutputResult()
 
+        # 主管道（task_id 为 None）不挂起。
+        # L1 Agent 调用 task_submit 后，主管道应自然结束当前轮次，
+        # 用户仍可继续聊天；只有子任务管道才需挂起等待子任务完成。
+        if task_id is None:
+            logger.debug(
+                "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
+                "main pipeline (no task_id), allowing natural flow",
+                iteration, pipeline_id[:8] if pipeline_id else "none",
+            )
+            return OutputResult()
+
         # LLM 输出了新的 tool_call 时不挂起（Agent 还在工作）
         if state.get("raw_tool_calls"):
             logger.debug(

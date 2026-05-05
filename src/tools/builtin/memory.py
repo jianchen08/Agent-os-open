@@ -58,49 +58,30 @@ class MemoryTool(BuiltinTool):
         self.tag_network = tag_network
         self._knowledge_importer = knowledge_importer
 
-    def _get_session(self, inputs: dict[str, Any]) -> Any | None:
-        """从构造函数或注入参数获取 session（按需，可能返回 None）"""
-        if self._session:
-            return self._session
-
-        session = inputs.get("_session") or inputs.get("db_session")
-        if session:
-            return session
-
-        try:
-            from infrastructure.db import get_current_session
-
-            current_session = get_current_session()
-            if current_session:
-                return current_session
-        except (ImportError, AttributeError):
-            pass
-
-        return None
-
     def _get_memory_service(self, inputs: dict[str, Any]):
-        """获取记忆服务：优先从注入参数获取，其次用 session 自建"""
+        """
+        获取记忆服务实例
+
+        优先级：
+        1. 从注入参数获取（ToolCore 通过 _SERVICE_INJECT_MAP 注入）
+        2. 使用已缓存的实例
+        3. 降级：创建空壳 MemoryService（无持久化存储，仅内存字典，重启数据丢失）
+        """
+        # 第一优先级：从注入参数获取（ToolCore 通过 _SERVICE_INJECT_MAP 注入）
         injected = inputs.get("_memory_service")
         if injected is not None:
             self._memory_service = injected
             return injected
 
+        # 第二优先级：使用已缓存的实例
         if self._memory_service is not None:
             return self._memory_service
 
-        session = self._get_session(inputs)
-        if session:
-            try:
-                from memory.service import MemoryService
-
-                self._memory_service = MemoryService(session=session)
-                return self._memory_service
-            except TypeError:
-                from memory.service import MemoryService
-
-                self._memory_service = MemoryService()
-                return self._memory_service
-        return None
+        # 降级：创建空壳 MemoryService（无存储，仅内存字典）
+        from memory.service import MemoryService
+        self._memory_service = MemoryService()
+        logger.warning("[MemoryTool] memory_service 未注入，使用内存降级模式（重启数据丢失）")
+        return self._memory_service
 
     def set_tag_network(self, tag_network: Any):
         """设置 Tag 网络检索器"""

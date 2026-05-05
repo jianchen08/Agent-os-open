@@ -592,6 +592,37 @@ export class WebSocketService {
   }
 
   /**
+   * 发送客户端能力上报消息
+   *
+   * WebSocket 连接建立后，主动向服务端上报客户端的能力信息，
+   * 包括支持的渲染空间、停靠模式、浮动位置和必需组件等。
+   * 该消息通过直接发送（不经过队列），确保服务端尽早获知客户端能力。
+   */
+  private sendClientCapabilities(): void {
+    const capabilitiesMessage = {
+      type: 'client_capabilities',
+      data: {
+        client_type: 'web',
+        rendering_spaces: ['chat', 'workspace', 'floating', 'dock', 'fullscreen'],
+        dock: true,
+        floating_position: ['center', 'bottom_right', 'top_right'],
+        required_widgets: [
+          'form', 'chart', 'gallery', 'table',
+          'progress', 'code_block', 'status_card', 'decision',
+        ],
+      },
+    }
+
+    this.sendMessageDirect(capabilitiesMessage as unknown as WebSocketClientMessage)
+      .then(() => {
+        loggers.websocket.info('客户端能力上报已发送')
+      })
+      .catch((error) => {
+        loggers.websocket.error('客户端能力上报发送失败:', error)
+      })
+  }
+
+  /**
    * 发送取消请求（直接发送，不经过队列）
    *
    * @param reason 取消原因
@@ -700,9 +731,10 @@ export class WebSocketService {
    *
    * 连接建立后：
    * 1. 更新连接状态
-   * 2. 恢复消息队列
-   * 3. 启动心跳
-   * 4. 如果是重连，请求遗漏消息（恢复状态）
+   * 2. 发送客户端能力上报
+   * 3. 恢复消息队列
+   * 4. 启动心跳
+   * 5. 如果是重连，请求遗漏消息（恢复状态）
    */
   private handleOpen(): void {
     const wasReconnecting = this.reconnectAttempts > 0
@@ -712,6 +744,9 @@ export class WebSocketService {
 
     // 记录连接开始监控数据
     this.monitor.recordConnectionStart()
+
+    // 发送客户端能力上报（连接成功后立即发送，确保服务端尽早获知客户端能力）
+    this.sendClientCapabilities()
 
     // 恢复消息队列处理
     loggers.messageQueue.debug('恢复消息队列...')
@@ -913,8 +948,16 @@ export class WebSocketService {
           this.emit(WS_SERVER_EVENTS.ITERATION_END, data)
           break
 
+        case WS_SERVER_EVENTS.HEARTBEAT:
+          this.handleHeartbeatResponse()
+          break
+
         case WS_SERVER_EVENTS.MISSED_MESSAGES:
           this.handleMissedMessages(data)
+          break
+
+        case 'iteration':
+          this.emit(WS_SERVER_EVENTS.ITERATION_START, data)
           break
 
         default:

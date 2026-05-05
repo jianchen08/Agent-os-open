@@ -67,8 +67,8 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5 text-green-500" />
-              <span className="text-green-500">已复制</span>
+              <Check className="h-3.5 w-3.5 text-status-success" />
+              <span className="text-status-success">已复制</span>
             </>
           ) : (
             <>

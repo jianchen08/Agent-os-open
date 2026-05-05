@@ -48,14 +48,14 @@ const OPTION_STYLE_MAP: Record<
   { base: string; selected: string; hover: string }
 > = {
   primary: {
-    base: 'border-blue-200 text-blue-700 hover:border-blue-400',
-    selected: 'bg-blue-500 border-blue-500 text-white',
-    hover: 'hover:bg-blue-50',
+    base: 'border-status-info/20 text-status-info hover:border-status-info/40',
+    selected: 'bg-status-info border-status-info text-white',
+    hover: 'hover:bg-status-info/10',
   },
   danger: {
-    base: 'border-red-200 text-red-700 hover:border-red-400',
-    selected: 'bg-red-500 border-red-500 text-white',
-    hover: 'hover:bg-red-50',
+    base: 'border-status-error/20 text-status-error hover:border-status-error/40',
+    selected: 'bg-status-error border-status-error text-white',
+    hover: 'hover:bg-status-error/10',
   },
   default: {
     base: 'border-border text-foreground hover:border-foreground/30',

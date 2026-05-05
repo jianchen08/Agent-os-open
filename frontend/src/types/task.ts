@@ -310,6 +310,8 @@ export interface AgentTab {
   taskId?: string
   /** 父执行记录 ID（用于过滤子执行记录） */
   parentRecordId?: string
+  /** 管道运行实例 ID（用于加载子管道消息） */
+  pipelineRunId?: string
   /** 层级路径（如 ['主Agent', '规划Agent']） */
   path: string[]
   /** Tab 状态 */

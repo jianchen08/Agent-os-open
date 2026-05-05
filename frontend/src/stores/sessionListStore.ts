@@ -8,6 +8,7 @@ import {
   deleteSession as deleteSessionApi,
   getSessions,
   updateSessionAgent as updateSessionAgentApi,
+  updateSession as updateSessionApi,
 } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { useAgentStore } from './agentStore'
@@ -240,7 +241,7 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }))
   },
 
-  renameSession: (sessionId: string, newTitle: string) => {
+  renameSession: async (sessionId: string, newTitle: string) => {
     if (!newTitle.trim()) {
       return
     }
@@ -255,6 +256,11 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           : session,
       ),
     }))
+    try {
+      await updateSessionApi(sessionId, { title: newTitle.trim() })
+    } catch (error) {
+      logger.error('重命名会话失败:', error)
+    }
   },
 
   searchSessions: (keyword: string) => {

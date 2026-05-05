@@ -130,10 +130,10 @@ export const highContrastTheme: ThemeConfig = {
           hoverBg: '#333333',
         },
         destructive: {
-          bg: '#ff0000',
+          bg: '#cc0000',
           text: '#ffffff',
           border: '2px solid #ff0000',
-          hoverBg: '#cc0000',
+          hoverBg: '#990000',
         },
       },
     },

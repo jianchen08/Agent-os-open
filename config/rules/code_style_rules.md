@@ -69,9 +69,17 @@ class Foo:
 
 ---
 
-## 五、禁止行为
+## 五、Windows 文本替换
+
+- 优先用 `search_replace` 或 Python 脚本，禁止用 sed/awk（换行符和编码问题）
+- 批量替换时先 dry_run 预览，一次性替换，始终指定 `encoding="utf-8"`
+
+---
+
+## 六、禁止行为
 
 - 禁止硬编码配置值（使用配置文件或常量）
 - 禁止忽略异常（空 `except` 块必须至少 `logger.debug`）
 - 禁止全局可变状态
 - 禁止循环导入
+- 禁止在 Windows 下使用 sed/awk 做文本替换

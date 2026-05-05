@@ -46,13 +46,13 @@ export function AgentsPage() {
   const getStatusStyle = (status: string) => {
     switch (status) {
       case 'active':
-        return 'bg-green-500/10 text-green-500'
+        return 'bg-status-success/10 text-status-success'
       case 'inactive':
-        return 'bg-gray-500/10 text-gray-500'
+        return 'bg-status-pending/10 text-status-pending'
       case 'error':
-        return 'bg-red-500/10 text-red-500'
+        return 'bg-status-error/10 text-status-error'
       default:
-        return 'bg-gray-500/10 text-gray-500'
+        return 'bg-status-pending/10 text-status-pending'
     }
   }
 
@@ -60,13 +60,13 @@ export function AgentsPage() {
   const getTypeBadge = (agentType: string) => {
     switch (agentType) {
       case 'main':
-        return 'bg-blue-500/10 text-blue-500'
+        return 'bg-status-info/10 text-status-info'
       case 'sub':
-        return 'bg-purple-500/10 text-purple-500'
+        return 'bg-accent/10 text-accent'
       case 'atomic':
-        return 'bg-orange-500/10 text-orange-500'
+        return 'bg-status-running/10 text-status-running'
       default:
-        return 'bg-gray-500/10 text-gray-500'
+        return 'bg-status-pending/10 text-status-pending'
     }
   }
 

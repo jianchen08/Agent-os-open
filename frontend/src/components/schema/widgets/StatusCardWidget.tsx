@@ -30,9 +30,9 @@ interface MetricItem {
 
 /** 趋势颜色映射 */
 const TREND_STYLES: Record<TrendDirection, { color: string; arrow: string; bg: string }> = {
-  up: { color: 'text-green-600', arrow: '↑', bg: 'bg-green-50' },
-  down: { color: 'text-red-600', arrow: '↓', bg: 'bg-red-50' },
-  flat: { color: 'text-gray-500', arrow: '→', bg: 'bg-gray-50' },
+  up: { color: 'text-status-success', arrow: '↑', bg: 'bg-status-success/10' },
+  down: { color: 'text-status-error', arrow: '↓', bg: 'bg-status-error/10' },
+  flat: { color: 'text-status-pending', arrow: '→', bg: 'bg-status-pending/10' },
 }
 
 /**

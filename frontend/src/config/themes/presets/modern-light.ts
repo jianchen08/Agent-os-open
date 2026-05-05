@@ -29,8 +29,8 @@ export const modernLightTheme: ThemeConfig = {
     text: {
       primary: '#0f172a',
       secondary: '#64748b',
-      muted: '#94a3b8',
-      disabled: '#cbd5e1',
+      muted: '#64748b',
+      disabled: '#94a3b8',
     },
 
     border: {

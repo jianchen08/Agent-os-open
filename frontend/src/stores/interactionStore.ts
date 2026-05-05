@@ -6,21 +6,35 @@
 
 import { create } from 'zustand'
 
+/**
+ * 交互优先级权重映射
+ * 数值越大优先级越高，用于排序计算
+ */
+const PRIORITY_WEIGHT: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  normal: 2,
+  low: 1,
+}
+
 /** 交互选项 */
 export interface InteractionOption {
   id: string
   label: string
+  description?: string
 }
 
 /** 待处理交互 */
 export interface PendingInteraction {
   requestId: string
-  mode: 'choice' | 'conversation'
+  mode: 'choice' | 'conversation' | 'notification'
   title: string
   description: string
   threadId: string
   tabId: string
   agentId: string
+  /** pipeline_id，用于流式消息路由到对应子 Tab */
+  pipelineId?: string
   /** 选择模式的选项 */
   options?: InteractionOption[]
   /** 澄清问题 */
@@ -31,6 +45,8 @@ export interface PendingInteraction {
   suggestions?: string[]
   /** 优先级 */
   priority?: 'low' | 'normal' | 'high' | 'critical'
+  /** 通知模式的进度百分比 (0-100) */
+  progress?: number
   timestamp: string
   status: 'pending' | 'responded' | 'navigated' | 'dismissed'
 }
@@ -61,12 +77,20 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
       )
       if (existing) return state
 
-      return {
-        pendingInteractions: [
-          ...state.pendingInteractions,
-          { ...data, status: 'pending' as const },
-        ],
-      }
+      /** 将新交互插入列表后按优先级权重降序排列，相同优先级按时间升序排列 */
+      const updated = [
+        ...state.pendingInteractions,
+        { ...data, status: 'pending' as const },
+      ]
+      updated.sort((a, b) => {
+        const weightDiff =
+          (PRIORITY_WEIGHT[b.priority ?? 'normal'] ?? 2) -
+          (PRIORITY_WEIGHT[a.priority ?? 'normal'] ?? 2)
+        if (weightDiff !== 0) return weightDiff
+        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      })
+
+      return { pendingInteractions: updated }
     })
   },
 

@@ -42,7 +42,7 @@ export function DockSpaceRenderer({
         const icon = (props.icon as string) ?? '📦'
         const label = (props.label as string) ?? moduleId
         const indicator = (props.indicator as string) ?? 'none'
-        const indicatorColor = (props.indicatorColor as string) ?? 'bg-green-500'
+        const indicatorColor = (props.indicatorColor as string) ?? 'bg-status-success'
 
         return (
           <button

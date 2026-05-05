@@ -16,6 +16,7 @@ import { ProgressWidget } from './ProgressWidget'
 import { CodeBlockWidget } from './CodeBlockWidget'
 import { StatusCardWidget } from './StatusCardWidget'
 import { DecisionWidget } from './DecisionWidget'
+import { FileTreeWidget } from './FileTreeWidget'
 import type { ComponentType } from 'react'
 
 /** Widget 注册条目定义 */
@@ -94,6 +95,22 @@ const WIDGET_REGISTRATIONS: WidgetRegistration[] = [
     description: '决策选择组件，支持单选和多选模式',
     supportedSpaces: ['chat'],
     fallbackWidget: 'form',
+  },
+  {
+    type: 'file_tree',
+    component: FileTreeWidget,
+    name: '文件树',
+    description: '通用树形结构组件，支持递归嵌套、状态显示和进度追踪',
+    supportedSpaces: ['chat', 'workspace'],
+    fallbackWidget: 'table',
+  },
+  {
+    type: 'tree',
+    component: FileTreeWidget,
+    name: '树形组件',
+    description: '通用树形结构组件，支持递归嵌套、状态显示和进度追踪',
+    supportedSpaces: ['chat', 'workspace'],
+    fallbackWidget: 'table',
   },
 ]
 

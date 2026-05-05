@@ -60,13 +60,13 @@ export function ToolsPage() {
   const getStatusStyle = (status: string) => {
     switch (status) {
       case 'active':
-        return 'bg-green-500/10 text-green-500'
+        return 'bg-status-success/10 text-status-success'
       case 'disabled':
-        return 'bg-yellow-500/10 text-yellow-500'
+        return 'bg-status-warning/10 text-status-warning'
       case 'deprecated':
-        return 'bg-red-500/10 text-red-500'
+        return 'bg-status-error/10 text-status-error'
       default:
-        return 'bg-gray-500/10 text-gray-500'
+        return 'bg-status-pending/10 text-status-pending'
     }
   }
 

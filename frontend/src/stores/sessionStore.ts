@@ -513,12 +513,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         if (append) {
           updatedMessages = [...rawMessages, ...existingMessages]
         } else {
-          // Merge: keep local-only messages (e.g. optimistically added user messages)
-          // that aren't in the API response yet
           const apiIds = new Set(rawMessages.map((m) => m.id))
           const localOnly = existingMessages.filter((m) => !apiIds.has(m.id))
           updatedMessages = localOnly.length > 0 ? [...rawMessages, ...localOnly] : rawMessages
         }
+
+        updatedMessages.sort((a, b) => {
+          const seqA = a.sequence ?? Number.MAX_SAFE_INTEGER
+          const seqB = b.sequence ?? Number.MAX_SAFE_INTEGER
+          if (seqA !== seqB) return seqA - seqB
+          return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        })
 
         return {
           messages: {

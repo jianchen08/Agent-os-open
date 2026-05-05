@@ -48,7 +48,7 @@ export const darkTheme: ThemeConfig = {
     },
 
     bubble: {
-      user_bg: '#3b82f6',
+      user_bg: '#2563eb',
       user_text: '#ffffff',
       user_radius: '1.5rem 1.5rem 1.5rem 0.25rem',
       user_shadow: '0 4px 12px rgba(59, 130, 246, 0.3)',
@@ -122,16 +122,16 @@ export const darkTheme: ThemeConfig = {
       textureOpacity: 0.1,
       variants: {
         primary: {
-          bg: '#3b82f6',
-          text: '#ffffff',
-          border: 'transparent',
-          hoverBg: '#2563eb',
+          bg: 'rgba(59, 130, 246, 0.15)',
+          text: '#93c5fd',
+          border: 'rgba(59, 130, 246, 0.3)',
+          hoverBg: 'rgba(59, 130, 246, 0.25)',
         },
         secondary: {
-          bg: 'rgba(255,255,255,0.1)',
-          text: '#f8fafc',
-          border: 'rgba(255,255,255,0.2)',
-          hoverBg: 'rgba(255,255,255,0.15)',
+          bg: 'rgba(255,255,255,0.08)',
+          text: '#cbd5e1',
+          border: 'rgba(255,255,255,0.15)',
+          hoverBg: 'rgba(255,255,255,0.12)',
         },
         ghost: {
           bg: 'transparent',
@@ -140,10 +140,10 @@ export const darkTheme: ThemeConfig = {
           hoverBg: 'rgba(255,255,255,0.05)',
         },
         destructive: {
-          bg: '#ef4444',
-          text: '#ffffff',
-          border: 'transparent',
-          hoverBg: '#dc2626',
+          bg: 'rgba(239, 68, 68, 0.15)',
+          text: '#fca5a5',
+          border: 'rgba(239, 68, 68, 0.3)',
+          hoverBg: 'rgba(239, 68, 68, 0.25)',
         },
       },
     },

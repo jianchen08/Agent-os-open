@@ -177,11 +177,11 @@ export const ACTIVITY_TYPE_TEXT_MAP: Record<ActivityType, string> = {
  */
 export function getStatusColorClass(status: ActivityStatus): string {
   const colorMap: Record<ActivityStatus, string> = {
-    pending: 'text-yellow-600 dark:text-yellow-400',
-    running: 'text-blue-600 dark:text-blue-400',
-    completed: 'text-green-600 dark:text-green-400',
-    failed: 'text-red-600 dark:text-red-400',
-    cancelled: 'text-gray-600 dark:text-gray-400',
+    pending: 'text-status-warning',
+    running: 'text-status-info',
+    completed: 'text-status-success',
+    failed: 'text-status-error',
+    cancelled: 'text-status-pending',
   }
   return colorMap[status] || colorMap.pending
 }
@@ -191,11 +191,11 @@ export function getStatusColorClass(status: ActivityStatus): string {
  */
 export function getStatusBgColorClass(status: ActivityStatus): string {
   const colorMap: Record<ActivityStatus, string> = {
-    pending: 'bg-yellow-50 dark:bg-yellow-900/20',
-    running: 'bg-blue-50 dark:bg-blue-900/20',
-    completed: 'bg-green-50 dark:bg-green-900/20',
-    failed: 'bg-red-50 dark:bg-red-900/20',
-    cancelled: 'bg-gray-50 dark:bg-gray-900/20',
+    pending: 'bg-status-warning/10',
+    running: 'bg-status-info/10',
+    completed: 'bg-status-success/10',
+    failed: 'bg-status-error/10',
+    cancelled: 'bg-status-pending/10',
   }
   return colorMap[status] || colorMap.pending
 }

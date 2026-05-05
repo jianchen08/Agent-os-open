@@ -14,15 +14,15 @@ import type { ExecutionRecord, SessionInfo } from '@/services/api/executionRecor
 function getRecordStatusStyle(status?: string): string {
   switch (status) {
     case 'completed':
-      return 'bg-green-500/10 text-green-500'
+      return 'bg-status-success/10 text-status-success'
     case 'running':
-      return 'bg-blue-500/10 text-blue-500'
+      return 'bg-status-info/10 text-status-info'
     case 'failed':
-      return 'bg-red-500/10 text-red-500'
+      return 'bg-status-error/10 text-status-error'
     case 'pending':
-      return 'bg-yellow-500/10 text-yellow-500'
+      return 'bg-status-warning/10 text-status-warning'
     default:
-      return 'bg-gray-500/10 text-gray-500'
+      return 'bg-status-pending/10 text-status-pending'
   }
 }
 

@@ -13,6 +13,7 @@
 import { useEffect } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { webSocketService } from '@/services/websocket/WebSocketService'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import type { ExecutionEvent, InteractionRequest } from '@/stores/layoutModeStore'
 
@@ -144,6 +145,30 @@ export function useRealtimeEvents(): void {
         startedAt: new Date().toISOString(),
       }
       addOrUpdateExecution(event)
+
+      // 创建子 Agent 标签页，确保 Tab 栏同步显示
+      const taskId = (data.taskId as string) || (data.agentId as string)
+      const pipelineId = data.pipelineId as string | undefined
+      const agentName = (data.agentName as string) || '子Agent'
+      const parentId = data.parentId as string | undefined
+
+      if (taskId) {
+        const tabStore = useAgentTabStore.getState()
+        tabStore.openSubAgentTab({
+          agentId: taskId,
+          agentName,
+          title: (data.title as string) || agentName,
+          pipelineId,
+          parentRecordId: parentId || taskId,
+          status: 'running',
+        })
+
+        // 注册 pipeline_id → tabId 映射
+        if (pipelineId) {
+          const tabId = `sub-${parentId || taskId}`
+          tabStore.registerPipelineTab(pipelineId, tabId)
+        }
+      }
     }
 
     const handleSubAgentWaitingInput = (data: Record<string, unknown>) => {

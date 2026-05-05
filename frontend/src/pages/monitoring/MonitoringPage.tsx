@@ -199,7 +199,7 @@ export function MonitoringPage() {
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">失败</div>
-                <div className="text-xl font-semibold text-red-500">{statistics.failed}</div>
+                <div className="text-xl font-semibold text-status-error">{statistics.failed}</div>
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">运行中</div>

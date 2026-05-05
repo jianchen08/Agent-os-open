@@ -246,6 +246,8 @@ export const API_ENDPOINTS = {
     RESUME: (id: string) => `/api/v1/projects/${id}/resume`,
     /** 删除长期任务 */
     DELETE: (id: string) => `/api/v1/projects/${id}`,
+    /** 获取项目树结构 */
+    TREE: '/api/v1/projects/tree',
   },
   /** 任务阶段相关 - 对应后端 /api/v1/tasks/{id}/phase/* */
   TASK_PHASES: {

@@ -4,6 +4,13 @@
 - ``GET /api/modules/ui`` - 返回所有启用模块的 UI Schema 列表
 - ``GET /api/modules/ui/{module_id}`` - 返回指定模块的 UI Schema
 
+同时根据模块 YAML 中的 ``data:`` 声明自动注册 CRUD 路由：
+- ``GET    /api/modules/{module_id}/data/{collection}`` - 列表查询
+- ``GET    /api/modules/{module_id}/data/{collection}/{record_id}`` - 单条查询
+- ``POST   /api/modules/{module_id}/data/{collection}`` - 创建记录
+- ``PUT    /api/modules/{module_id}/data/{collection}/{record_id}`` - 更新记录
+- ``DELETE /api/modules/{module_id}/data/{collection}/{record_id}`` - 删除记录
+
 支持按客户端能力过滤（query param ``client_type``）。
 """
 
@@ -197,3 +204,60 @@ def get_ui_schema(
         schema = filtered[0]
 
     return _schema_to_dict(schema)
+
+
+# ---- Data CRUD 路由自动注册 ----
+
+# 全局 CRUD 生成器缓存
+_crud_generator: Any | None = None
+_crud_routers_loaded: bool = False
+
+
+def register_data_crud_routes() -> list[Any]:
+    """扫描所有模块 YAML 中的 data 声明，自动注册 CRUD 路由。
+
+    在应用启动时调用，惰性初始化。会先确保 SchemaParser 已加载
+    （以触发 data 段的解析），然后遍历所有 data 声明注册路由。
+
+    Returns:
+        生成的 APIRouter 列表，需要通过 app.include_router 注册。
+    """
+    global _crud_generator, _crud_routers_loaded
+    if _crud_routers_loaded:
+        if _crud_generator is None:
+            return []
+        # 返回已生成的路由器
+        return list(_crud_generator._routers.values())
+
+    _crud_routers_loaded = True
+
+    try:
+        # 确保 parser 已加载（会同时解析 data 段）
+        parser = _get_schema_parser()
+        all_data = parser.list_all_data_decls()
+
+        if not all_data:
+            logger.info("未发现任何 data 声明，跳过 CRUD 路由注册")
+            return []
+
+        from ui_schema.auto_crud import AutoCRUDGenerator
+
+        _crud_generator = AutoCRUDGenerator()
+
+        all_routers: list[Any] = []
+        for module_id, data_decls in all_data.items():
+            if not isinstance(data_decls, dict):
+                continue
+            routers = _crud_generator.register_all(module_id, data_decls)
+            all_routers.extend(routers)
+
+        logger.info(
+            "自动注册了 %d 个 CRUD 路由器（来自 %d 个模块）",
+            len(all_routers),
+            len(all_data),
+        )
+        return all_routers
+
+    except Exception as exc:
+        logger.warning("Data CRUD 路由注册失败: %s", exc)
+        return []

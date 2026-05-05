@@ -1,11 +1,53 @@
 # UI Schema 示例模块配置
 # 包含完整的 identity/actions/rendering/clients 四部分声明
 # 包含 8 种聊天交互组件和组合式工作区示例
+# 包含 data 声明，自动生成 CRUD 接口
 
 config_id: ui_example
 name: UI 示例模块
 is_active: true
 description: 包含完整 UI Schema 的示例模块配置
+
+# ========== E. 数据声明（自动生成 CRUD 接口） ==========
+data:
+  # 物品集合 - 完整 CRUD
+  inventory:
+    fields:
+      id: { type: "uuid", primary: true, auto: true }
+      name: { type: "string", required: true }
+      type: { type: "enum", values: ["weapon", "armor", "potion", "scroll", "misc"] }
+      quantity: { type: "integer", default: 1, min: 0 }
+      description: { type: "string" }
+      rarity: { type: "enum", values: ["common", "uncommon", "rare", "epic", "legendary"] }
+    access: "crud"
+    filters: ["type", "rarity"]
+    sort: ["name", "quantity"]
+    pagination: true
+
+  # 任务集合 - 完整 CRUD
+  tasks:
+    fields:
+      id: { type: "uuid", primary: true, auto: true }
+      title: { type: "string", required: true }
+      status: { type: "enum", values: ["pending", "in_progress", "completed", "cancelled"] }
+      priority: { type: "enum", values: ["low", "medium", "high", "urgent"] }
+      assignee: { type: "string" }
+      tags: { type: "string" }
+    access: "crud"
+    filters: ["status", "priority", "assignee"]
+    sort: ["title", "priority"]
+    pagination: true
+
+  # 配置集合 - 只读
+  settings:
+    fields:
+      key: { type: "string", primary: true, required: true }
+      value: { type: "string", required: true }
+      description: { type: "string" }
+    access: "read-only"
+    filters: []
+    sort: ["key"]
+    pagination: false
 
 ui:
   # ========== A. 身份信息 ==========

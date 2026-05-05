@@ -1,13 +1,10 @@
-"""知识注入 Input 插件（memory 模块版本）。
+"""知识注入 Input 插件。
 
-包装 KnowledgeService → IInputPlugin，在管道输入阶段
-从知识库检索相关内容写入 state。
+通过 MemoryService 统一检索知识内容，在管道输入阶段
+将检索结果写入 state["knowledge.context"]。
 
-依赖注入：通过 ctx.get_service("semantic_storage") 获取 ISemanticStorage 实例，
-构造函数只接受 config，由 build_plugin_registry 统一实例化。
-
-注意：此插件位于 memory/plugins/ 下，与 M6 的
-plugins/input/knowledge_inject.py 是不同的文件，不修改 M6 的 Mock 实现。
+依赖注入：通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
+不再自行创建 KnowledgeService。
 
 State 命名空间：
     - knowledge.context : 本插件写入的知识内容
@@ -18,7 +15,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from memory.knowledge_service import KnowledgeService
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
 
@@ -26,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeInjectPlugin(IInputPlugin):
-    """知识注入 Input 插件（memory 模块版本）。
+    """知识注入 Input 插件。
 
-    从知识库检索相关内容，将结果写入 state["knowledge.context"]。
-    支持四种注入模式：FULL、COMPRESSED、HINT、DISABLED。
+    通过 MemoryService 统一检索知识内容，将结果写入 state["knowledge.context"]。
+    支持四种注入模式：full、compressed、hint、disabled。
 
-    通过 ctx.get_service("semantic_storage") 获取 ISemanticStorage 实例，
-    无需在构造时注入。
+    通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
+    不再自行创建 KnowledgeService。
 
     优先级：30（数据级，在 context_build 之后、prompt_build 之前）
     错误策略：FALLBACK（降级为无知识对话）
@@ -60,7 +56,6 @@ class KnowledgeInjectPlugin(IInputPlugin):
         self._mode = self._config.get("mode", "disabled")
         self._top_k = self._config.get("top_k", 5)
         self._max_tokens = self._config.get("max_tokens", 2000)
-        self._knowledge_service: KnowledgeService | None = None
 
     @property
     def name(self) -> str:
@@ -73,13 +68,11 @@ class KnowledgeInjectPlugin(IInputPlugin):
         return 30
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
-        """从知识库检索内容并写入 state。
+        """通过 MemoryService 从知识库检索内容并写入 state。
 
-        通过 ctx.get_service("semantic_storage") 获取语义存储实例，
-        无 semantic_storage 服务时降级为无知识对话。
-
-        优先使用 KnowledgeService.search() 进行相关性检索（结合关键词
-        匹配和语义相似度），search 不可用时回退到 list + 客户端过滤。
+        通过 ctx.get_service("memory_service") 获取 MemoryService 实例，
+        调用其 retrieve() 方法进行知识检索。
+        memory_service 不可用时降级为无知识对话。
 
         Args:
             ctx: 插件执行上下文
@@ -90,84 +83,38 @@ class KnowledgeInjectPlugin(IInputPlugin):
         if self._mode == "disabled":
             return PluginResult(state_updates={"knowledge.context": ""})
 
-        query = ctx.state.get("user_message", "")
+        try:
+            memory_service = ctx.get_service("memory_service")
+        except KeyError:
+            return PluginResult(state_updates={"knowledge.context": ""})
+
         user_id = ctx.state.get("user_id", "")
+        query = ctx.state.get("current_query", "")
+
         if not query:
             return PluginResult(state_updates={"knowledge.context": ""})
 
         try:
-            # 从服务注册表获取 semantic_storage（延迟初始化并缓存 KnowledgeService）
-            try:
-                semantic_storage = ctx.get_service("semantic_storage")
-            except KeyError:
-                logger.debug("[%s] No semantic_storage service, skipping", self.name)
-                return PluginResult(state_updates={"knowledge.context": ""})
-
-            if self._knowledge_service is None:
-                # 尝试获取 embedding_fn 以支持语义检索
-                embedding_fn = None
-                try:
-                    embedding_service = ctx.get_service("embedding_service")
-                    if hasattr(embedding_service, "embed_text"):
-                        embedding_fn = embedding_service.embed_text
-                    elif hasattr(embedding_service, "embed"):
-                        embedding_fn = embedding_service.embed
-                except KeyError:
-                    pass
-
-                self._knowledge_service = KnowledgeService(
-                    semantic_storage=semantic_storage,
-                    embedding_fn=embedding_fn,
-                )
-            knowledge_service = self._knowledge_service
-
-            # 优先使用相关性搜索（关键词 + 语义）
-            items: list[dict[str, Any]] = []
-            try:
-                search_results = await knowledge_service.search(
-                    user_id=user_id,
-                    query=query,
-                    top_k=self._top_k,
-                )
-                items = [r.to_dict() for r in search_results]
-            except Exception as search_err:
-                # 搜索失败时回退到 list + 客户端过滤
-                logger.debug(
-                    "[%s] 相关性搜索失败，回退到列表模式: %s",
-                    self.name, search_err,
-                )
-                result = await knowledge_service.list_semantic_memory(user_id)
-                items = result.get("items", [])
-
-                if items and query:
-                    items = self._filter_by_relevance(items, query)
-
-            if not items:
-                return PluginResult(state_updates={"knowledge.context": ""})
-
-            # 根据模式格式化
-            if self._mode == "full":
-                content = self._format_full(items)
-            elif self._mode == "compressed":
-                content = self._format_compressed(items)
-            elif self._mode == "hint":
-                content = self._format_hint(items)
-            else:
-                content = ""
-
-            logger.debug(
-                "[%s] 知识注入完成 | mode=%s | items=%d",
-                self.name, self._mode, len(items),
+            results = await memory_service.retrieve(
+                user_id=user_id,
+                filter={"memory_type": "semantic"},
+                inject_type=self._mode,
+                retrieval_method="keyword",
+                query=query,
+                top_k=self._top_k,
             )
-
-            return PluginResult(state_updates={"knowledge.context": content})
-
         except Exception as e:
-            logger.warning("[%s] 知识注入失败: %s", self.name, e)
+            logger.warning("[KnowledgeInjectPlugin] 检索失败: %s", e)
             return PluginResult(
                 state_updates={"knowledge.context": ""},
-                error=e,
+                error=str(e),
             )
+
+        if not results:
+            return PluginResult(state_updates={"knowledge.context": ""})
+
+        context = "\n\n".join(r.content for r in results)
+        return PluginResult(state_updates={"knowledge.context": context})
 
     def _format_full(self, items: list[dict[str, Any]]) -> str:
         """格式化完整知识内容。

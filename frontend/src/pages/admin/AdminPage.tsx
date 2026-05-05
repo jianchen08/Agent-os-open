@@ -85,11 +85,11 @@ export function AdminPage() {
             </div>
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 text-xs">活跃用户</div>
-              <div className="text-xl font-semibold text-green-500">{stats.active_users}</div>
+              <div className="text-xl font-semibold text-status-success">{stats.active_users}</div>
             </div>
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 text-xs">管理员</div>
-              <div className="text-xl font-semibold text-blue-500">{stats.admin_count}</div>
+              <div className="text-xl font-semibold text-status-info">{stats.admin_count}</div>
             </div>
           </div>
         )}

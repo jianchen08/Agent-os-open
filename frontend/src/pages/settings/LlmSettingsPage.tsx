@@ -524,7 +524,7 @@ function ProviderCard({
       <div className="flex items-center justify-between">
         <span className="text-sm font-semibold">{providerId}</span>
         <span
-          className={`rounded px-2 py-0.5 text-xs ${provider.api_key ? 'bg-green-500/10 text-green-600' : 'bg-red-500/10 text-red-500'}`}
+          className={`rounded px-2 py-0.5 text-xs ${provider.api_key ? 'bg-status-success/10 text-status-success' : 'bg-status-error/10 text-status-error'}`}
         >
           {provider.api_key ? '已配置' : '未配置'}
         </span>

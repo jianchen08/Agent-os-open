@@ -40,8 +40,8 @@ const ErrorTooltip = ({ error, visible }: { error: VoiceInputError | null; visib
  */
 const RecordingIndicator = () => (
   <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-    <span className="absolute inset-0 animate-ping rounded-full bg-red-500/50" />
-    <span className="absolute inset-0 animate-pulse rounded-full bg-red-500/30" />
+    <span className="absolute inset-0 animate-ping rounded-full bg-status-error/50" />
+    <span className="absolute inset-0 animate-pulse rounded-full bg-status-error/30" />
   </div>
 )
 

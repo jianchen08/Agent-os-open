@@ -120,7 +120,7 @@ export function DebugEvaluationMetricsPage() {
                   <h3 className="text-sm font-semibold">{metric.name}</h3>
                   <div className="flex gap-1.5">
                     {metric.is_red_line && (
-                      <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-xs text-red-500">
+                      <span className="rounded bg-status-error/10 px-1.5 py-0.5 text-xs text-status-error">
                         红线
                       </span>
                     )}

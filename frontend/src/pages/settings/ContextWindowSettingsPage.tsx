@@ -282,7 +282,7 @@ export function ContextWindowSettingsPage() {
           <span className="text-muted-foreground text-xs">
             总计: {(totalBudget * 100).toFixed(1)}%
           </span>
-          <span className={`text-xs ${budgetOk ? 'text-green-500' : 'text-red-500'}`}>
+          <span className={`text-xs ${budgetOk ? 'text-status-success' : 'text-status-error'}`}>
             {budgetOk ? '总和 = 100%' : `偏差: ${((totalBudget - 1) * 100).toFixed(1)}%`}
           </span>
         </div>

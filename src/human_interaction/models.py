@@ -17,6 +17,7 @@ class InteractionMode(str, Enum):
 
     CHOICE = "choice"
     CONVERSATION = "conversation"
+    NOTIFICATION = "notification"
 
 
 class InteractionStatus(str, Enum):

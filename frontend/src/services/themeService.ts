@@ -61,6 +61,14 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--secondary: ${config.colors.secondary}`)
   vars.push(`--accent: ${config.colors.accent}`)
 
+  // === 选中态颜色（基于 primary 色动态生成）===
+  const primaryRgb = hexToRgb(config.colors.primary)
+  if (primaryRgb) {
+    const isDark = config.category === 'dark'
+    vars.push(`--selection-bg: rgba(${primaryRgb.r}, ${primaryRgb.g}, ${primaryRgb.b}, ${isDark ? 0.35 : 0.25})`)
+    vars.push(`--selection-text: ${isDark ? '#ffffff' : 'inherit'}`)
+  }
+
   // === 背景色 ===
   Object.entries(config.colors.background).forEach(([key, value]) => {
     vars.push(`--bg-${kebabCase(key)}: ${value}`)
@@ -493,4 +501,20 @@ export function validateThemeConfig(config: unknown): { valid: boolean; errors?:
  */
 function kebabCase(str: string): string {
   return str.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase()
+}
+
+/**
+ * 将 HEX 颜色值转换为 RGB 对象
+ *
+ * @param hex - HEX 颜色值（如 #3b82f6 或 #fff）
+ * @returns RGB 对象，如果解析失败则返回 null
+ */
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const match = hex.replace(/^#/, '').match(/^([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i)
+  if (!match) return null
+  return {
+    r: parseInt(match[1], 16),
+    g: parseInt(match[2], 16),
+    b: parseInt(match[3], 16),
+  }
 }

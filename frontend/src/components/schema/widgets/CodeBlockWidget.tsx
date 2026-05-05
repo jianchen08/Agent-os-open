@@ -239,7 +239,7 @@ export function CodeBlockWidget(props: Record<string, unknown>) {
         >
           {copied ? (
             <>
-              <svg className="h-3.5 w-3.5 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <svg className="h-3.5 w-3.5 text-status-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                 <path d="M5 13l4 4L19 7" />
               </svg>
               已复制
@@ -263,7 +263,7 @@ export function CodeBlockWidget(props: Record<string, unknown>) {
             {highlightedLines.map((tokens, lineIndex) => (
               <div key={lineIndex} className="flex">
                 {showLineNumbers && (
-                  <span className="mr-4 inline-block w-8 select-none text-right text-gray-600 text-xs leading-relaxed">
+                  <span className="mr-4 inline-block w-8 select-none text-right text-status-pending text-xs leading-relaxed">
                     {lineIndex + 1}
                   </span>
                 )}

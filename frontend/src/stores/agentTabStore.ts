@@ -10,10 +10,13 @@
  */
 
 import { create } from 'zustand'
+import { getMessages } from '@/services/api/session'
 import type { AgentTab } from '@/types/task'
 
 /** localStorage 存储键前缀 */
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
+/** 每个子 Tab 缓存到 localStorage 的最大消息条数 */
+const MAX_CACHED_MESSAGES_PER_TAB = 50
 
 /**
  * 获取会话对应的存储键
@@ -23,11 +26,23 @@ function getStorageKey(sessionId: string): string {
 }
 
 /**
- * 保存标签状态到 localStorage
+ * 保存标签状态到 localStorage（包含最近 N 条消息缓存和 pipeline 映射）
  */
-function saveTabsToStorage(sessionId: string, tabs: AgentTab[], activeTabId: string | null): void {
+function saveTabsToStorage(
+  sessionId: string,
+  tabs: AgentTab[],
+  activeTabId: string | null,
+  tabMessages: Record<string, any[]>,
+  pipelineTabMap: Record<string, string>,
+): void {
   try {
-    const data = { tabs, activeTabId, savedAt: Date.now() }
+    // 对每个 Tab 的消息截取最近 N 条，避免 localStorage 超限
+    const cachedMessages: Record<string, any[]> = {}
+    for (const tabId of Object.keys(tabMessages)) {
+      const msgs = tabMessages[tabId] || []
+      cachedMessages[tabId] = msgs.slice(-MAX_CACHED_MESSAGES_PER_TAB)
+    }
+    const data = { tabs, activeTabId, tabMessages: cachedMessages, pipelineTabMap, savedAt: Date.now() }
     localStorage.setItem(getStorageKey(sessionId), JSON.stringify(data))
   } catch (e) {
     console.warn('[AgentTabStore] 保存标签状态失败:', e)
@@ -35,11 +50,11 @@ function saveTabsToStorage(sessionId: string, tabs: AgentTab[], activeTabId: str
 }
 
 /**
- * 从 localStorage 加载标签状态
+ * 从 localStorage 加载标签状态（含缓存消息和 pipeline 映射）
  */
 function loadTabsFromStorage(
   sessionId: string,
-): { tabs: AgentTab[]; activeTabId: string | null } | null {
+): { tabs: AgentTab[]; activeTabId: string | null; tabMessages: Record<string, any[]>; pipelineTabMap: Record<string, string> } | null {
   try {
     const raw = localStorage.getItem(getStorageKey(sessionId))
     if (!raw) return null
@@ -49,7 +64,12 @@ function loadTabsFromStorage(
       localStorage.removeItem(getStorageKey(sessionId))
       return null
     }
-    return { tabs: data.tabs || [], activeTabId: data.activeTabId || null }
+    return {
+      tabs: data.tabs || [],
+      activeTabId: data.activeTabId || null,
+      tabMessages: data.tabMessages || {},
+      pipelineTabMap: data.pipelineTabMap || {},
+    }
   } catch (e) {
     console.warn('[AgentTabStore] 加载标签状态失败:', e)
     return null
@@ -66,10 +86,14 @@ interface AgentTabState {
   activeTabId: string | null
   /** 每个 Tab 的消息映射 (tabId -> messages) */
   tabMessages: Record<string, any[]>
+  /** 每个 Tab 的消息加载状态（防止并发重复加载） */
+  tabMessagesLoading: Record<string, boolean>
   /** 每个 Tab 的未读消息计数 (tabId -> count) */
   unreadCounts: Record<string, number>
   /** 当前会话 ID（用于持久化标识） */
   currentSessionId: string | null
+  /** pipeline_id → tabId 映射（用于流式消息路由到对应子 Tab） */
+  pipelineTabMap: Record<string, string>
 
   /** 添加 Agent Tab */
   addTab: (tab: Omit<AgentTab, 'messages'>) => void
@@ -118,7 +142,15 @@ interface AgentTabState {
     taskId?: string
     status?: AgentTab['status']
     setActive?: boolean
+    /** pipeline_id，用于后续流式消息路由到该子 Tab */
+    pipelineId?: string
   }) => void
+  /** 注册 pipeline_id → tabId 映射 */
+  registerPipelineTab: (pipelineId: string, tabId: string) => void
+  /** 根据 pipeline_id 查找对应的 tabId */
+  getTabIdByPipeline: (pipelineId: string) => string | undefined
+  /** 从后端 API 加载子 Tab 消息（持久化恢复） */
+  loadTabMessages: (tabId: string, pipelineRunId?: string) => Promise<void>
 }
 
 /**
@@ -128,11 +160,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   tabMessages: {},
+  tabMessagesLoading: {},
   unreadCounts: {},
   currentSessionId: null,
+  pipelineTabMap: {},
 
   /**
-   * 初始化/切换会话标签（从 localStorage 恢复）
+   * 初始化/切换会话标签（从 localStorage 恢复，含缓存消息和 pipeline 映射）
    */
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
@@ -142,8 +176,17 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         currentSessionId: sessionId,
         tabs: saved.tabs,
         activeTabId: mainTab?.id || saved.activeTabId || null,
-        tabMessages: {},
+        tabMessages: saved.tabMessages || {},
+        tabMessagesLoading: {},
         unreadCounts: {},
+        pipelineTabMap: saved.pipelineTabMap || {},
+      })
+
+      // 后台异步校验：对有 parentRecordId 的子 Tab，静默从 API 刷新消息
+      saved.tabs.forEach((tab) => {
+        if (tab.parentRecordId && tab.agentLevel !== 1) {
+          get().loadTabMessages(tab.id)
+        }
       })
     } else {
       set({
@@ -151,18 +194,19 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         tabs: [],
         activeTabId: null,
         tabMessages: {},
+        tabMessagesLoading: {},
         unreadCounts: {},
       })
     }
   },
 
   /**
-   * 保存当前标签状态到 localStorage
+   * 保存当前标签状态到 localStorage（含消息缓存和 pipeline 映射）
    */
   saveCurrentTabs: () => {
-    const { currentSessionId, tabs, activeTabId } = get()
+    const { currentSessionId, tabs, activeTabId, tabMessages, pipelineTabMap } = get()
     if (currentSessionId) {
-      saveTabsToStorage(currentSessionId, tabs, activeTabId)
+      saveTabsToStorage(currentSessionId, tabs, activeTabId, tabMessages, pipelineTabMap)
     }
   },
 
@@ -228,7 +272,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   },
 
   /**
-   * 设置活跃 Tab
+   * 设置活跃 Tab（子 Tab 时自动从后端加载消息）
    */
   setActiveTab: (tabId) => {
     set({
@@ -237,6 +281,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
     get().clearTabUnread(tabId)
     get().saveCurrentTabs()
+
+    // 子 Tab 切换时触发消息持久化加载
+    const tab = get().tabs.find((t) => t.id === tabId)
+    if (tab && tab.parentRecordId && tab.agentLevel !== 1) {
+      get().loadTabMessages(tabId)
+    }
   },
 
   /**
@@ -344,7 +394,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       tabs: [],
       activeTabId: null,
       tabMessages: {},
+      tabMessagesLoading: {},
       unreadCounts: {},
+      pipelineTabMap: {},
     })
   },
 
@@ -382,7 +434,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   },
 
   /**
-   * 关闭 Tab（增强版，支持主 Tab 保护）
+   * 关闭 Tab（增强版，支持主 Tab 保护，同时清理 pipeline 映射）
    */
   closeTab: (tabId) => {
     set((state) => {
@@ -404,6 +456,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       delete newTabMessages[tabId]
       delete newUnreadCounts[tabId]
 
+      // 清理指向该 Tab 的 pipeline 映射
+      const newPipelineTabMap = { ...state.pipelineTabMap }
+      for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
+        if (tid === tabId) {
+          delete newPipelineTabMap[pid]
+        }
+      }
+
       let newActiveTabId = state.activeTabId
       if (state.activeTabId === tabId) {
         const mainTab = newTabs.find((t) => t.agentLevel === 1)
@@ -415,13 +475,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         activeTabId: newActiveTabId,
         tabMessages: newTabMessages,
         unreadCounts: newUnreadCounts,
+        pipelineTabMap: newPipelineTabMap,
       }
     })
     get().saveCurrentTabs()
   },
 
   /**
-   * 切换到 Tab（增强版，自动清除未读）
+   * 切换到 Tab（增强版，自动清除未读，子 Tab 时加载持久化消息）
    */
   switchToTab: (tabId) => {
     const { tabs } = get()
@@ -434,6 +495,11 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
     set({ activeTabId: tabId })
     get().clearTabUnread(tabId)
+
+    // 子 Tab 切换时触发消息持久化加载
+    if (tab.parentRecordId && tab.agentLevel !== 1) {
+      get().loadTabMessages(tabId)
+    }
   },
 
   /**
@@ -525,6 +591,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       taskId,
       status = 'running',
       setActive = true,
+      pipelineId,
     } = params
 
     set((state) => {
@@ -547,10 +614,11 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         agentLevel,
         taskId,
         parentRecordId,
+        pipelineRunId: pipelineId,
         path,
         status,
         hasUnread: false,
-        canClose: true,
+        canClose: agentLevel !== 1,
         messages: [],
       }
 
@@ -568,5 +636,103 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       }
     })
     get().saveCurrentTabs()
+
+    // 注册 pipeline_id → tabId 映射，便于后续流式消息路由
+    if (pipelineId) {
+      const tabId = `sub-${parentRecordId}`
+      get().registerPipelineTab(pipelineId, tabId)
+    }
+  },
+
+  /**
+   * 注册 pipeline_id → tabId 映射（注册后自动持久化）
+   */
+  registerPipelineTab: (pipelineId, tabId) => {
+    set((state) => ({
+      pipelineTabMap: {
+        ...state.pipelineTabMap,
+        [pipelineId]: tabId,
+      },
+    }))
+    get().saveCurrentTabs()
+  },
+
+  /**
+   * 根据 pipeline_id 查找对应的 tabId
+   */
+  getTabIdByPipeline: (pipelineId) => {
+    return get().pipelineTabMap[pipelineId]
+  },
+
+  /**
+   * 从后端 API 加载子 Tab 消息（持久化恢复）
+   *
+   * 逻辑：
+   * 1. 如果已有消息（tabMessages[tabId] 非空），跳过加载
+   * 2. 如果正在加载中（tabMessagesLoading[tabId]），跳过避免并发
+   * 3. 通过 getMessages API 传入 pipelineRunId 参数获取子管道消息
+   * 4. 加载成功后写入 tabMessages[tabId] 并同步保存到 localStorage
+   *
+   * @param tabId - 标签页 ID
+   * @param pipelineRunId - 可选，管道运行实例 ID（用于加载子管道消息）
+   */
+  loadTabMessages: async (tabId, pipelineRunId) => {
+    const state = get()
+
+    // 已有消息则跳过（包括从 localStorage 恢复的缓存）
+    if (state.tabMessages[tabId] && state.tabMessages[tabId].length > 0) return
+
+    // 防止并发加载
+    if (state.tabMessagesLoading[tabId]) return
+
+    const tab = state.tabs.find((t) => t.id === tabId)
+    if (!tab || !state.currentSessionId) return
+
+    // 需要有 pipelineRunId 或 parentRecordId 才能加载
+    const effectivePipelineId = pipelineRunId || tab.pipelineRunId
+    if (!effectivePipelineId && !tab.parentRecordId) return
+
+    // 标记加载中
+    set((s) => ({
+      tabMessagesLoading: {
+        ...s.tabMessagesLoading,
+        [tabId]: true,
+      },
+    }))
+
+    try {
+      // 优先使用 pipelineRunId 加载子管道消息
+      const filters: Record<string, string> = {}
+      if (effectivePipelineId) {
+        filters.pipelineRunId = effectivePipelineId
+      } else if (tab.parentRecordId) {
+        filters.parentId = tab.parentRecordId
+      }
+
+      const messages = await getMessages(state.currentSessionId, filters)
+
+      set((s) => ({
+        tabMessages: {
+          ...s.tabMessages,
+          [tabId]: messages || [],
+        },
+        tabMessagesLoading: {
+          ...s.tabMessagesLoading,
+          [tabId]: false,
+        },
+      }))
+
+      // 同步保存到 localStorage 缓存
+      get().saveCurrentTabs()
+    } catch (error) {
+      console.error('[AgentTabStore.loadTabMessages] 加载子 Tab 消息失败:', error)
+      // 加载失败时静默处理，清除加载中标记
+      set((s) => ({
+        tabMessagesLoading: {
+          ...s.tabMessagesLoading,
+          [tabId]: false,
+        },
+      }))
+    }
   },
 }))

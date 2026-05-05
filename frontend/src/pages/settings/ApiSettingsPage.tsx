@@ -265,8 +265,8 @@ export function ApiSettingsPage() {
             '保存配置'
           )}
         </Button>
-        {saveState === 'saved' && <span className="text-xs text-green-500" role="status">已保存</span>}
-        {saveState === 'error' && <span className="text-xs text-red-500" role="alert">保存失败</span>}
+        {saveState === 'saved' && <span className="text-xs text-status-success" role="status">已保存</span>}
+        {saveState === 'error' && <span className="text-xs text-status-error" role="alert">保存失败</span>}
       </div>
     </SettingsPageShell>
   )

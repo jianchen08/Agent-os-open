@@ -23,10 +23,10 @@ interface ProgressStep {
 
 /** 状态颜色映射 */
 const STATUS_COLORS: Record<ProgressStatus, { bar: string; bg: string; text: string }> = {
-  active: { bar: 'bg-blue-500', bg: 'bg-blue-500/20', text: 'text-blue-600' },
-  success: { bar: 'bg-green-500', bg: 'bg-green-500/20', text: 'text-green-600' },
-  error: { bar: 'bg-red-500', bg: 'bg-red-500/20', text: 'text-red-600' },
-  warning: { bar: 'bg-amber-500', bg: 'bg-amber-500/20', text: 'text-amber-600' },
+  active: { bar: 'bg-status-info', bg: 'bg-status-info/20', text: 'text-status-info' },
+  success: { bar: 'bg-status-success', bg: 'bg-status-success/20', text: 'text-status-success' },
+  error: { bar: 'bg-status-error', bg: 'bg-status-error/20', text: 'text-status-error' },
+  warning: { bar: 'bg-status-warning', bg: 'bg-status-warning/20', text: 'text-status-warning' },
 }
 
 /**

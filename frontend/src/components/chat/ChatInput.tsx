@@ -670,10 +670,10 @@ export const ChatInput = ({
                         className={cn(
                           'h-full rounded-full transition-all duration-300',
                           currentTokenUsage / maxTokens >= 0.9
-                            ? 'bg-red-500'
+                            ? 'bg-status-error'
                             : currentTokenUsage / maxTokens >= 0.7
-                              ? 'bg-amber-500'
-                              : 'bg-emerald-500',
+                              ? 'bg-status-warning'
+                              : 'bg-status-success',
                         )}
                         style={{
                           width: `${Math.min((currentTokenUsage / maxTokens) * 100, 100)}%`,

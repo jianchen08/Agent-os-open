@@ -3,10 +3,10 @@
 # 定义情景记忆和语义记忆的存储后端
 
 # 情景记忆存储后端
-episode_backend: database  # database | redis | file
+episode_backend: file  # database | redis | file
 
 # 语义记忆存储后端
-semantic_backend: database  # database | redis | file
+semantic_backend: file  # database | redis | file
 
 # ========== 数据库配置 ==========
 database:

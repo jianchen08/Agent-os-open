@@ -3,6 +3,9 @@
 MVP 默认的存储后端，使用 JSON 文件持久化记忆数据。
 支持 Episode 和 Knowledge 两种记忆类型。
 
+按需读取模式：启动时只扫描文件名构建 ID 索引，不加载内容到内存。
+读写操作直接操作磁盘文件，避免内存占用随数据量增长。
+
 暴露接口：
 - JsonMemoryStore: JSON 文件记忆存储
 """
@@ -24,7 +27,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     """JSON 文件记忆存储。
 
     实现三个存储接口：IMemoryStore、IEpisodeStorage、ISemanticStorage。
-    数据以 JSON 文件形式持久化到磁盘。
+    数据以 JSON 文件形式持久化到磁盘，按需读取，不预加载到内存。
 
     目录结构：
         data_dir/
@@ -37,8 +40,8 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
 
     Attributes:
         _data_dir: 数据目录路径
-        _episodes: 内存中的情景记忆缓存
-        _knowledge: 内存中的知识缓存
+        _episode_ids: 情景记忆 ID 索引集合（只存 ID，不存内容）
+        _knowledge_ids: 知识 ID 索引集合（只存 ID，不存内容）
     """
 
     def __init__(self, data_dir: str = "data/memory") -> None:
@@ -51,40 +54,61 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         self._episodes_dir = self._data_dir / "episodes"
         self._knowledge_dir = self._data_dir / "knowledge"
 
-        # 内存缓存
-        self._episodes: dict[str, Episode] = {}
-        self._knowledge: dict[str, Knowledge] = {}
-
-        # 从磁盘加载数据
-        self._load_from_disk()
-
-    def _load_from_disk(self) -> None:
-        """从磁盘加载已有数据。"""
         self._episodes_dir.mkdir(parents=True, exist_ok=True)
         self._knowledge_dir.mkdir(parents=True, exist_ok=True)
 
-        # 加载情景记忆
+        self._episode_ids: set[str] = set()
+        self._knowledge_ids: set[str] = set()
+        self._scan_existing_files()
+
+    def _scan_existing_files(self) -> None:
+        """扫描已有文件，构建 ID 索引（不加载内容）。"""
         for f in self._episodes_dir.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                episode = self._dict_to_episode(data)
-                self._episodes[episode.id] = episode
-            except Exception as e:
-                logger.warning("[JsonMemoryStore] 加载情景记忆失败 | file=%s | error=%s", f, e)
-
-        # 加载知识
+            self._episode_ids.add(f.stem)
         for f in self._knowledge_dir.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                knowledge = self._dict_to_knowledge(data)
-                self._knowledge[knowledge.id] = knowledge
-            except Exception as e:
-                logger.warning("[JsonMemoryStore] 加载知识失败 | file=%s | error=%s", f, e)
-
+            self._knowledge_ids.add(f.stem)
         logger.info(
-            "[JsonMemoryStore] 加载完成 | episodes=%d | knowledge=%d",
-            len(self._episodes), len(self._knowledge),
+            "[JsonMemoryStore] 索引扫描完成 | episodes=%d | knowledge=%d",
+            len(self._episode_ids), len(self._knowledge_ids),
         )
+
+    def _read_episode_from_disk(self, episode_id: str) -> Episode | None:
+        """按需从磁盘读取单个情景记忆。
+
+        Args:
+            episode_id: 情景记忆 ID
+
+        Returns:
+            情景记忆实例，不存在则返回 None
+        """
+        file_path = self._episodes_dir / f"{episode_id}.json"
+        if not file_path.exists():
+            return None
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            return self._dict_to_episode(data)
+        except Exception as e:
+            logger.warning("[JsonMemoryStore] 读取情景记忆失败 | id=%s | error=%s", episode_id, e)
+            return None
+
+    def _read_knowledge_from_disk(self, knowledge_id: str) -> Knowledge | None:
+        """按需从磁盘读取单个知识。
+
+        Args:
+            knowledge_id: 知识 ID
+
+        Returns:
+            知识实例，不存在则返回 None
+        """
+        file_path = self._knowledge_dir / f"{knowledge_id}.json"
+        if not file_path.exists():
+            return None
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            return self._dict_to_knowledge(data)
+        except Exception as e:
+            logger.warning("[JsonMemoryStore] 读取知识失败 | id=%s | error=%s", knowledge_id, e)
+            return None
 
     def _save_episode_to_disk(self, episode: Episode) -> None:
         """将情景记忆保存到磁盘。
@@ -117,6 +141,36 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             )
         except Exception as e:
             logger.error("[JsonMemoryStore] 保存知识失败 | id=%s | error=%s", knowledge.id, e)
+
+    def _iter_all_episodes(self) -> list[Episode]:
+        """遍历所有情景记忆文件并读取。
+
+        Returns:
+            情景记忆列表
+        """
+        episodes = []
+        for f in self._episodes_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                episodes.append(self._dict_to_episode(data))
+            except Exception as e:
+                logger.warning("[JsonMemoryStore] 读取情景记忆失败 | file=%s | error=%s", f, e)
+        return episodes
+
+    def _iter_all_knowledge(self) -> list[Knowledge]:
+        """遍历所有知识文件并读取。
+
+        Returns:
+            知识列表
+        """
+        knowledge_list = []
+        for f in self._knowledge_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                knowledge_list.append(self._dict_to_knowledge(data))
+            except Exception as e:
+                logger.warning("[JsonMemoryStore] 读取知识失败 | file=%s | error=%s", f, e)
+        return knowledge_list
 
     @staticmethod
     def _dict_to_episode(data: dict[str, Any]) -> Episode:
@@ -189,7 +243,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     # ============================================
 
     async def save(self, entry: Episode | Knowledge, memory_type: str = "episode") -> str:
-        """保存记忆条目。
+        """保存记忆条目到磁盘并更新索引。
 
         Args:
             entry: 记忆条目
@@ -199,12 +253,12 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             条目 ID
         """
         if memory_type == "episode" and isinstance(entry, Episode):
-            self._episodes[entry.id] = entry
             self._save_episode_to_disk(entry)
+            self._episode_ids.add(entry.id)
             return entry.id
         elif memory_type == "semantic" and isinstance(entry, Knowledge):
-            self._knowledge[entry.id] = entry
             self._save_knowledge_to_disk(entry)
+            self._knowledge_ids.add(entry.id)
             return entry.id
         else:
             raise ValueError(f"不支持的类型组合: memory_type={memory_type}, entry={type(entry)}")
@@ -212,7 +266,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     async def load(
         self, entry_id: str, memory_type: str = "episode",
     ) -> Episode | Knowledge | None:
-        """加载记忆条目。
+        """按需从磁盘加载记忆条目。
 
         Args:
             entry_id: 条目 ID
@@ -222,13 +276,13 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             记忆条目
         """
         if memory_type == "episode":
-            return self._episodes.get(entry_id)
+            return self._read_episode_from_disk(entry_id)
         elif memory_type == "semantic":
-            return self._knowledge.get(entry_id)
+            return self._read_knowledge_from_disk(entry_id)
         return None
 
     async def delete(self, entry_id: str, memory_type: str = "episode") -> bool:
-        """删除记忆条目。
+        """删除记忆条目（磁盘文件 + 索引）。
 
         Args:
             entry_id: 条目 ID
@@ -237,17 +291,17 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             是否删除成功
         """
-        if memory_type == "episode" and entry_id in self._episodes:
-            del self._episodes[entry_id]
+        if memory_type == "episode" and entry_id in self._episode_ids:
             file_path = self._episodes_dir / f"{entry_id}.json"
             if file_path.exists():
                 file_path.unlink()
+            self._episode_ids.discard(entry_id)
             return True
-        elif memory_type == "semantic" and entry_id in self._knowledge:
-            del self._knowledge[entry_id]
+        elif memory_type == "semantic" and entry_id in self._knowledge_ids:
             file_path = self._knowledge_dir / f"{entry_id}.json"
             if file_path.exists():
                 file_path.unlink()
+            self._knowledge_ids.discard(entry_id)
             return True
         return False
 
@@ -258,7 +312,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         limit: int = 10,
         filters: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
-        """搜索记忆（基于关键词匹配）。
+        """搜索记忆（基于关键词匹配，按需读取磁盘文件）。
 
         Args:
             query: 搜索查询
@@ -271,15 +325,17 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         """
         filters = filters or {}
         memory_type = filters.get("memory_type", "all")
+        tags_filter = filters.get("tags")
         results: list[SearchResult] = []
 
         query_lower = query.lower()
 
         if memory_type in ("all", "episode"):
-            for ep in self._episodes.values():
+            for ep in self._iter_all_episodes():
                 if user_id and ep.user_id != user_id:
                     continue
-                # 简单关键词匹配
+                if tags_filter and not any(t in ep.tags for t in tags_filter):
+                    continue
                 score = self._compute_keyword_score(
                     query_lower, [ep.intent_text, ep.execution_summary or ""] + ep.tags,
                 )
@@ -293,9 +349,13 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
                     ))
 
         if memory_type in ("all", "semantic"):
-            for kn in self._knowledge.values():
+            for kn in self._iter_all_knowledge():
                 if user_id and kn.user_id != user_id:
                     continue
+                if tags_filter:
+                    kn_tags = kn.extra_data.get("tags", []) if kn.extra_data else []
+                    if not any(t in kn_tags for t in tags_filter):
+                        continue
                 score = self._compute_keyword_score(
                     query_lower, [kn.content],
                 )
@@ -349,7 +409,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         return await self.save(episode, "episode")
 
     async def get(self, episode_id: str) -> Episode | None:
-        """获取情景记忆。
+        """获取情景记忆（按需从磁盘读取）。
 
         Args:
             episode_id: 情景记忆 ID
@@ -357,12 +417,12 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             情景记忆实例
         """
-        return self._episodes.get(episode_id)
+        return self._read_episode_from_disk(episode_id)
 
     async def find_by_user(
         self, user_id: str, limit: int = 20, offset: int = 0,
     ) -> list[Episode]:
-        """按用户查找情景记忆。
+        """按用户查找情景记忆（按需遍历磁盘文件）。
 
         Args:
             user_id: 用户 ID
@@ -373,14 +433,14 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             情景记忆列表
         """
         episodes = [
-            ep for ep in self._episodes.values()
+            ep for ep in self._iter_all_episodes()
             if ep.user_id == user_id
         ]
         episodes.sort(key=lambda x: x.created_at, reverse=True)
         return episodes[offset:offset + limit]
 
     async def update(self, episode_id: str, **kwargs: Any) -> bool:
-        """更新情景记忆。
+        """更新情景记忆（读取→修改→写回）。
 
         Args:
             episode_id: 情景记忆 ID
@@ -389,7 +449,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             是否更新成功
         """
-        episode = self._episodes.get(episode_id)
+        episode = self._read_episode_from_disk(episode_id)
         if not episode:
             return False
 
@@ -412,7 +472,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         return await self.delete(episode_id, "episode")
 
     async def count_by_user(self, user_id: str) -> int:
-        """统计用户的情景记忆数量。
+        """统计用户的情景记忆数量（按需遍历磁盘文件）。
 
         Args:
             user_id: 用户 ID
@@ -420,7 +480,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             记忆数量
         """
-        return sum(1 for ep in self._episodes.values() if ep.user_id == user_id)
+        return sum(1 for ep in self._iter_all_episodes() if ep.user_id == user_id)
 
     # ============================================
     # ISemanticStorage 接口实现
@@ -438,7 +498,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         return await self.save(knowledge, "semantic")
 
     async def get_knowledge(self, knowledge_id: str) -> Knowledge | None:
-        """获取知识。
+        """获取知识（按需从磁盘读取）。
 
         Args:
             knowledge_id: 知识 ID
@@ -446,12 +506,12 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             知识实例
         """
-        return self._knowledge.get(knowledge_id)
+        return self._read_knowledge_from_disk(knowledge_id)
 
     async def find_knowledge_by_user(
         self, user_id: str, limit: int = 20,
     ) -> list[Knowledge]:
-        """按用户查找知识。
+        """按用户查找知识（按需遍历磁盘文件）。
 
         Args:
             user_id: 用户 ID
@@ -461,7 +521,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             知识列表
         """
         knowledge = [
-            kn for kn in self._knowledge.values()
+            kn for kn in self._iter_all_knowledge()
             if kn.user_id == user_id
         ]
         knowledge.sort(key=lambda x: x.created_at, reverse=True)
@@ -470,7 +530,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     async def update_embedding(
         self, knowledge_id: str, embedding: list[float],
     ) -> bool:
-        """更新知识的向量嵌入。
+        """更新知识的向量嵌入（读取→修改→写回）。
 
         Args:
             knowledge_id: 知识 ID
@@ -479,7 +539,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         Returns:
             是否更新成功
         """
-        knowledge = self._knowledge.get(knowledge_id)
+        knowledge = self._read_knowledge_from_disk(knowledge_id)
         if not knowledge:
             return False
 
@@ -497,28 +557,3 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             是否删除成功
         """
         return await self.delete(knowledge_id, "semantic")
-
-    # IEpisodeStorage.delete 兼容
-    async def delete(self, entry_id: str, memory_type: str = "episode") -> bool:
-        """删除记忆条目。
-
-        Args:
-            entry_id: 条目 ID
-            memory_type: 记忆类型
-
-        Returns:
-            是否删除成功
-        """
-        if memory_type == "episode" and entry_id in self._episodes:
-            del self._episodes[entry_id]
-            file_path = self._episodes_dir / f"{entry_id}.json"
-            if file_path.exists():
-                file_path.unlink()
-            return True
-        elif memory_type == "semantic" and entry_id in self._knowledge:
-            del self._knowledge[entry_id]
-            file_path = self._knowledge_dir / f"{entry_id}.json"
-            if file_path.exists():
-                file_path.unlink()
-            return True
-        return False

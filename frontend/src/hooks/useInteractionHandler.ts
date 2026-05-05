@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { webSocketService } from '@/services/websocket/WebSocketService'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -35,6 +36,8 @@ function parseInteractionEvent(
     threadId: (inner.thread_id as string) || (inner.threadId as string) || '',
     tabId: (inner.tab_id as string) || (inner.tabId as string) || '',
     agentId: (inner.agent_id as string) || (inner.agentId as string) || '',
+    /** pipeline_id，优先从事件数据中获取，回退到 agentId 作为关联键 */
+    pipelineId: (inner.pipeline_id as string) || (inner.pipelineId as string) || '',
     options: inner.options as PendingInteraction['options'],
     questions: inner.questions as string[],
     initialMessage: inner.initial_message as string,
@@ -101,6 +104,23 @@ export function useInteractionHandler(sessionId: string | undefined) {
         playNotificationSound().catch(() => {
           // 静默处理播放失败
         })
+
+        // 对话模式：自动打开对应的对话子标签，同时注册 pipeline_id 映射
+        if (parsed.mode === 'conversation') {
+          const agentTabStore = useAgentTabStore.getState()
+          // 优先使用 pipeline_id，如果没有则用 agentId 作为关联键
+          const pipelineId = parsed.pipelineId || parsed.agentId || parsed.requestId
+          agentTabStore.openSubAgentTab({
+            agentId: parsed.agentId || parsed.requestId,
+            agentName: parsed.title || '人类交互',
+            parentRecordId: parsed.requestId,
+            agentLevel: 2,
+            taskId: undefined,
+            status: 'waiting_input',
+            setActive: true,
+            pipelineId,
+          })
+        }
       }
     }
 
@@ -176,7 +196,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
     [markResponded],
   )
 
-  /** 对话模式：跳转到子标签对话页 */
+  /** 对话模式：跳转到子标签对话页（Tab 内切换，不重新连接 WebSocket） */
   const navigateToTab = useCallback(
     async (requestId: string, threadId: string) => {
       await webSocketService.sendInteractionResponse({
@@ -188,20 +208,28 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
       if (!threadId) return
 
-      // 直接设置 activeSessionId（子任务 threadId 可能不在 sessions 列表中）
-      useSessionStore.setState({ activeSessionId: threadId })
+      // 通过 agentTabStore 打开/切换到子 Agent Tab（Tab 内切换，不改变 activeSessionId）
+      const tabStore = useAgentTabStore.getState()
+      tabStore.openSubAgentTab({
+        agentId: threadId,
+        agentName: '子任务',
+        parentRecordId: threadId,
+        agentLevel: 2,
+        status: 'running',
+        setActive: true,
+      })
 
-      // 加载子任务的历史消息
+      // 加载子任务的历史消息到 Tab 消息列表
       try {
         await useSessionStore.getState().fetchMessages(threadId)
+        // 将加载到的消息写入 tabMessages
+        const subMessages = useSessionStore.getState().messages[threadId] || []
+        const tabId = `sub-${threadId}`
+        for (const msg of subMessages) {
+          tabStore.addMessageToTab(tabId, msg)
+        }
       } catch (error) {
         console.error('[navigateToTab] 加载子任务消息失败:', error)
-      }
-
-      // 切换 WebSocket 连接到子任务频道
-      const currentToken = useAuthStore.getState().token
-      if (currentToken) {
-        useSessionStore.getState().connectWebSocket(threadId, currentToken)
       }
     },
     [markNavigated],

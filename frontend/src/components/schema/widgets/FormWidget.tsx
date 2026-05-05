@@ -214,13 +214,13 @@ export function FormWidget(props: Record<string, unknown>) {
           >
             <label className="text-foreground mb-1 block text-sm font-medium">
               {field.label ?? field.name}
-              {field.required && <span className="text-red-500 ml-1">*</span>}
+              {field.required && <span className="text-status-error ml-1">*</span>}
             </label>
 
             {renderFieldInput(field, values[field.name], errors[field.name], handleChange)}
 
             {errors[field.name] && (
-              <p className="mt-1 text-xs text-red-500">{errors[field.name]}</p>
+              <p className="mt-1 text-xs text-status-error">{errors[field.name]}</p>
             )}
           </div>
         ))}

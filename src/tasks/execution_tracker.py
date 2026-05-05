@@ -14,12 +14,12 @@
 """
 
 import concurrent.futures
+import os
 
-from config.settings import get_settings
-
-_settings = get_settings()
+# BUG-FIX: config.settings 模块不存在，改为从环境变量读取线程池大小
+_TASK_MAX_WORKERS = int(os.environ.get("TASK_MAX_WORKERS", "4"))
 _background_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=_settings.task_max_workers, thread_name_prefix="task_bg_"
+    max_workers=_TASK_MAX_WORKERS, thread_name_prefix="task_bg_"
 )
 
 _executing_tasks: set[str] = set()

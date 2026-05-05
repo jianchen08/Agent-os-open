@@ -10,6 +10,7 @@
 
 import { useMemo } from 'react'
 import { toolCallToActivity } from '@/utils/activityConverter'
+import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
 
@@ -88,7 +89,10 @@ function buildFragments(contentBlocks: ContentBlock[], messageId: string): Rende
 
       case 'tool_call':
         if (block.toolCall) {
-          const activity = toolCallToActivity(block.toolCall)
+          const activity = enhanceActivityWithToolConfig(
+            toolCallToActivity(block.toolCall),
+            block.toolCall,
+          )
           fragments.push({
             type: 'tool_call',
             toolCall: block.toolCall,

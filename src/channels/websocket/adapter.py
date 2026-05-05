@@ -131,6 +131,7 @@ class WebSocketInputAdapter(IInputAdapter):
             StateKeys.SHOULD_STOP: False,
             "iteration": 1,
             "_ws_session_id": session_id,
+            "_parent_record_id": data.get("parent_record_id", ""),
         }
 
 
@@ -169,6 +170,18 @@ class WebSocketOutputAdapter(IOutputAdapter):
         self._sequence_counter: int = 0
         self._full_content: str = ""
         self._stream_start_sent: bool = False
+        self._pipeline_id: str = ""
+
+    def set_pipeline_id(self, pipeline_id: str) -> None:
+        """设置当前管道 ID，用于前端消息路由。
+
+        在子管道创建时调用，使流式事件携带 pipeline_id，
+        前端据此将消息路由到对应的子 Tab。
+
+        Args:
+            pipeline_id: 管道唯一标识
+        """
+        self._pipeline_id = pipeline_id
 
     def set_session_id(self, session_id: str) -> None:
         """设置当前推送目标的会话 ID。
@@ -194,15 +207,20 @@ class WebSocketOutputAdapter(IOutputAdapter):
         self._full_content = ""
         self._stream_start_sent = True
 
-    async def send_pipeline_start(self, session_id: str, agent_level: str = "L1") -> None:
+    async def send_pipeline_start(self, session_id: str, agent_level: str = "L1", pipeline_id: str = "") -> None:
         """发送 pipeline_start 事件。
 
         在管道引擎开始执行时调用。
+        如果传入 pipeline_id，同时缓存到适配器供后续流式事件使用。
 
         Args:
             session_id: 会话 ID
             agent_level: Agent 层级
+            pipeline_id: 管道 ID（可选，传入后缓存供流式事件使用）
         """
+        # 缓存 pipeline_id，确保后续 stream_start/chunk/end 都能携带
+        if pipeline_id:
+            self._pipeline_id = pipeline_id
         event = create_event(
             EventType.PIPELINE_START,
             PipelineStartData(
@@ -220,10 +238,17 @@ class WebSocketOutputAdapter(IOutputAdapter):
         - should_stop → pipeline_end（stopped）
         - 正常完成 → pipeline_end（completed）
 
+        同时从 state 中提取 pipeline_id 并缓存，确保后续事件携带。
+
         Args:
             state: 管道引擎的最终 state 字典
         """
         session_id = state.get("_ws_session_id", getattr(self, "_session_id", ""))
+
+        # 从 state 中提取 pipeline_id（如果尚未设置），确保 pipeline_end 事件也能携带
+        state_pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
+        if state_pipeline_id and not self._pipeline_id:
+            self._pipeline_id = state_pipeline_id
 
         # 错误输出
         if error := state.get(StateKeys.RAW_ERROR):
@@ -318,6 +343,7 @@ class WebSocketOutputAdapter(IOutputAdapter):
                 StreamStartData(
                     message_id=self._current_message_id,
                     model=getattr(self, "_model", ""),
+                    pipeline_id=self._pipeline_id,
                 ).to_dict(),
             )
             await self.server.send_event(session_id, start_event)
@@ -333,6 +359,7 @@ class WebSocketOutputAdapter(IOutputAdapter):
                 message_id=self._current_message_id,
                 content=text,
                 sequence=self._sequence_counter,
+                pipeline_id=self._pipeline_id,
             ).to_dict(),
         )
         await self.server.send_event(session_id, chunk_event)
@@ -355,6 +382,7 @@ class WebSocketOutputAdapter(IOutputAdapter):
                 message_id=self._current_message_id,
                 full_content=self._full_content,
                 usage=usage or {},
+                pipeline_id=self._pipeline_id,
             ).to_dict(),
         )
         await self.server.send_event(session_id, end_event)

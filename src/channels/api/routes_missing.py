@@ -34,6 +34,169 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
     return {"id": "stub", "title": "", "status": "created", "message": "项目创建成功（存根）"}
 
 
+@projects_router.get("/tree", summary="获取任务树")
+async def get_task_tree(
+    session_id: str | None = Query(default=None, description="按会话 ID 过滤"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取项目与任务组成的树形结构数据。
+
+    从 TaskService 获取所有任务，构建 根任务 → 子任务 的树形层级，
+    支持 session_id 过滤（基于 task.metadata["session_id"]），
+    返回树形结构供前端 FileTreeWidget 渲染。
+
+    Returns:
+        包含 tree（树形结构）、items（扁平列表）、total 的字典
+    """
+    task_service = _get_task_service()
+    if task_service is None:
+        logger.warning("get_task_tree: TaskService 不可用，返回空树")
+        return _empty_tree(session_id)
+
+    try:
+        all_tasks = task_service.list_all(limit=500, reverse=False)
+    except Exception as exc:
+        logger.warning("get_task_tree: list_all 失败: %s", exc)
+        return _empty_tree(session_id)
+
+    # 按 session_id 过滤
+    # 策略 1：直接匹配 task.metadata["session_id"]
+    # 策略 2：通过 parent_pipeline_id 关联会话的 pipeline_ids
+    if session_id:
+        related_pipeline_ids: set[str] = set()
+        try:
+            from channels.api.routes_threads import store as api_store
+            session = api_store.get_session(session_id)
+            if session and session.pipeline_ids:
+                related_pipeline_ids = set(session.pipeline_ids)
+        except Exception:
+            pass
+
+        filtered = []
+        for t in all_tasks:
+            # 策略 1：直接匹配 metadata.session_id
+            if t.metadata.get("session_id") == session_id:
+                filtered.append(t)
+                continue
+            # 策略 2：parent_pipeline_id 在会话的 pipeline_ids 中
+            if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:
+                filtered.append(t)
+                continue
+            # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
+            if t.pipeline_run_id and t.pipeline_run_id in related_pipeline_ids:
+                filtered.append(t)
+                continue
+        all_tasks = filtered
+
+    # 构建扁平列表
+    flat_items = [_task_to_tree_item(t) for t in all_tasks]
+
+    # 构建树形结构：根任务 → 子任务
+    children_map: dict[str, list[dict[str, Any]]] = {}
+    root_items: list[dict[str, Any]] = []
+
+    for item in flat_items:
+        parent_id = item.get("parent_task_id")
+        if parent_id:
+            children_map.setdefault(parent_id, []).append(item)
+        else:
+            root_items.append(item)
+
+    # 递归填充子节点
+    _fill_children(root_items, children_map)
+
+    total = len(flat_items)
+    return {
+        "id": "tree",
+        "title": "任务",
+        "status": "active",
+        "children": root_items,
+        "items": flat_items,
+        "total": total,
+        "session_id": session_id,
+    }
+
+
+def _get_task_service() -> Any:
+    """通过 ServiceProvider 获取全局 TaskService 实例。
+
+    Returns:
+        TaskService 实例，服务未注册时返回 None
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get("task_service")
+    except Exception:
+        return None
+
+
+def _empty_tree(session_id: str | None) -> dict[str, Any]:
+    """构建空的任务树响应。
+
+    Args:
+        session_id: 会话 ID，可为 None
+
+    Returns:
+        空树结构的字典
+    """
+    return {
+        "id": "tree",
+        "title": "任务",
+        "status": "active",
+        "children": [],
+        "items": [],
+        "total": 0,
+        "session_id": session_id,
+    }
+
+
+def _task_to_tree_item(task: Any) -> dict[str, Any]:
+    """将 TaskModel 转换为前端树节点格式。
+
+    Args:
+        task: TaskModel 实例
+
+    Returns:
+        树节点字典，包含 id、title、status、type、pipeline_run_id 等字段
+    """
+    status_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+    return {
+        "id": task.id,
+        "title": task.title or f"任务 {task.id[:8]}",
+        "status": status_val,
+        "type": "task",
+        "parent_task_id": task.parent_task_id,
+        "pipeline_run_id": getattr(task, "pipeline_run_id", None),
+        "execution_record_id": getattr(task, "execution_record_id", None),
+        "agent_name": getattr(task, "agent_name", ""),
+        "created_at": getattr(task, "created_at", ""),
+        "completed_at": getattr(task, "completed_at", None),
+        "error": getattr(task, "error", None),
+    }
+
+
+def _fill_children(
+    items: list[dict[str, Any]],
+    children_map: dict[str, list[dict[str, Any]]],
+) -> None:
+    """递归填充树节点的 children 字段。
+
+    就地修改 items 中每个节点，将其子节点从 children_map 中
+    取出并挂载到 "children" 键下。
+
+    Args:
+        items: 当前层级的树节点列表
+        children_map: 父任务 ID → 子节点列表的映射
+    """
+    for item in items:
+        task_id = item["id"]
+        kids = children_map.get(task_id, [])
+        if kids:
+            _fill_children(kids, children_map)
+        item["children"] = kids
+
+
 @projects_router.get("/{project_id}", summary="获取项目详情")
 async def get_project(project_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {"id": project_id, "title": "", "status": "active"}
@@ -447,3 +610,43 @@ async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_au
         return await get_metric(metric_id, _user)
     except Exception:
         return {"id": metric_id, "name": "", "description": ""}
+
+
+# ---------------------------------------------------------------------------
+# Client Register 路由 - /api/client
+# ---------------------------------------------------------------------------
+client_router = APIRouter(prefix="/api/client", tags=["客户端"])
+
+_client_registry: dict[str, dict[str, Any]] = {}
+
+
+@client_router.post("/register", summary="注册客户端能力声明")
+async def register_client(body: dict[str, Any]) -> dict[str, Any]:
+    """接收客户端能力声明并存储。
+
+    前端启动时会发送客户端的渲染能力（支持的组件、渲染空间等），
+    后端可根据此信息过滤返回的 UI Schema。
+
+    Args:
+        body: 客户端能力声明，包含 renderingSpaces, supportedWidgets, clientType, version
+
+    Returns:
+        注册确认响应
+    """
+    client_type = body.get("clientType", "unknown")
+    version = body.get("version", "1.0.0")
+
+    _client_registry[client_type] = {
+        "renderingSpaces": body.get("renderingSpaces", []),
+        "supportedWidgets": body.get("supportedWidgets", []),
+        "clientType": client_type,
+        "version": version,
+    }
+
+    logger.info("客户端能力注册: type=%s, version=%s", client_type, version)
+
+    return {
+        "registered": True,
+        "clientType": client_type,
+        "version": version,
+    }

@@ -909,6 +909,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         if goal.get("context"):
             metadata["goal_context"] = goal["context"]
 
+        # 存储 session_id（供任务树 API 按会话过滤使用）
+        session_id = inputs.get("session_id")
+        if session_id:
+            metadata["session_id"] = session_id
+
         # 存储执行相关参数
         # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
         # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套

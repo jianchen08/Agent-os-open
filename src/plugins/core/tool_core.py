@@ -170,6 +170,7 @@ class ToolCore(ICorePlugin):
         "_tool_registry": "tool_registry",
         "_session": "db_session",
         "_memory_service": "memory_service",
+        "_retriever": "retriever",
     }
 
     @staticmethod

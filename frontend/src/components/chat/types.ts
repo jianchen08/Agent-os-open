@@ -57,6 +57,8 @@ export interface SendMessageParams {
   attachments?: Attachment[]
   /** 是否启用思考模式 */
   enableThinking?: boolean
+  /** 子 Tab 发消息时的父执行记录 ID */
+  parentRecordId?: string
 }
 
 /**

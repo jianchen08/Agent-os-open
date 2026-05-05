@@ -50,7 +50,7 @@ export const oceanBreezeTheme: ThemeConfig = {
 
     bubble: {
       user_bg: 'linear-gradient(135deg, #99f6e4 0%, #5eead4 50%, #2dd4bf 100%)',
-      user_text: '#0f766e',
+      user_text: '#0f172a',
       user_radius: '1.5rem 1.5rem 1.5rem 0.25rem',
       user_shadow: '0 4px 14px rgba(13, 148, 136, 0.2)',
       ai_bg: '#e6fffa',

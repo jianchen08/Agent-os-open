@@ -93,6 +93,44 @@ class HumanInteractionService(IHumanInteractionService):
         self._requests: dict[str, dict[str, Any]] = {}
         self._responses: dict[str, dict[str, Any]] = {}
 
+    async def send_notification(
+        self,
+        session_id: str,
+        thread_id: str,
+        title: str,
+        message: str = "",
+        priority: Priority = Priority.NORMAL,
+        progress: float | None = None,
+        agent_id: str | None = None,
+    ) -> str:
+        """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
+        request_id = str(uuid4())
+        record = self._make_request_record(
+            request_id=request_id,
+            session_id=session_id,
+            mode=InteractionMode.NOTIFICATION,
+            title=title,
+            description=message,
+            thread_id=thread_id,
+            tab_id="",
+            user_id=None,
+            agent_id=agent_id,
+            extra={
+                "progress": progress,
+                "priority": priority.value,
+            },
+        )
+        self._requests[request_id] = record
+        # 不创建 asyncio.Event，不等待 —— 非阻塞核心逻辑
+        if self._notifier:
+            await self._notifier.notify_request(record)
+
+        logger.info(
+            "[HumanInteraction] 发送通知 | request_id=%s | title=%s",
+            request_id, title,
+        )
+        return request_id
+
     async def create_choice_request(
         self,
         session_id: str,

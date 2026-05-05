@@ -51,7 +51,7 @@ export function toolCallToActivity(
       content: toolCall.tool_args,
       contentType: 'json',
       collapsible: true,
-      defaultExpanded: true,
+      defaultExpanded: false,
     })
 
     // 结果区块
@@ -62,7 +62,7 @@ export function toolCallToActivity(
         content: toolCall.result as string | Record<string, unknown>,
         contentType: 'json',
         collapsible: true,
-        defaultExpanded: true,
+        defaultExpanded: false,
       })
     }
 

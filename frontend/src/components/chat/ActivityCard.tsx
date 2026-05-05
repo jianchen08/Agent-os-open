@@ -343,8 +343,8 @@ const ActivityCard: FC<ActivityCardProps> = ({
 
           {activity.error && (
             <div>
-              <div className="mb-1 text-xs font-medium text-red-500 dark:text-red-400">错误</div>
-              <pre className="rounded bg-red-50/50 p-2 text-xs whitespace-pre-wrap text-red-600 dark:bg-red-900/10 dark:text-red-400">
+              <div className="mb-1 text-xs font-medium text-status-error">错误</div>
+              <pre className="rounded bg-status-error/10 p-2 text-xs whitespace-pre-wrap text-status-error">
                 {activity.error}
               </pre>
             </div>
@@ -368,7 +368,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
                     'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
                     'disabled:cursor-not-allowed disabled:opacity-50',
                     action.variant === 'destructive' &&
-                      'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50',
+                      'bg-status-error/15 text-status-error hover:bg-status-error/20',
                     action.variant === 'ghost' &&
                       'hover:bg-muted/70 text-muted-foreground hover:text-foreground',
                     action.variant === 'outline' &&

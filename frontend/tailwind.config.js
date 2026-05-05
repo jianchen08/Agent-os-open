@@ -58,11 +58,12 @@ export default {
         // === Deep Space 主题色 ===
         // 状态色
         status: {
-          running: 'var(--accent-running)',
-          waiting: 'var(--accent-waiting)',
-          success: 'var(--accent-success)',
-          error: 'var(--accent-error)',
-          pending: 'var(--accent-pending)',
+          success: 'var(--status-success)',
+          error: 'var(--status-error)',
+          warning: 'var(--status-warning)',
+          info: 'var(--status-info)',
+          running: 'var(--status-running)',
+          pending: 'var(--status-pending)',
         },
         // 背景色
         surface: {

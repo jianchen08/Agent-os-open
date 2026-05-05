@@ -21,16 +21,16 @@ export interface TokenUsageBarProps {
 const getUsageColor = (usagePercent: number) => {
   if (usagePercent >= 95) {
     return {
-      text: 'text-red-600 dark:text-red-400',
-      bg: 'bg-red-50 dark:bg-red-950/30',
-      border: 'border-red-200 dark:border-red-800',
+      text: 'text-status-error',
+      bg: 'bg-status-error/10',
+      border: 'border-status-error/30',
     }
   }
   if (usagePercent >= 80) {
     return {
-      text: 'text-orange-600 dark:text-orange-400',
-      bg: 'bg-orange-50 dark:bg-orange-950/30',
-      border: 'border-orange-200 dark:border-orange-800',
+      text: 'text-status-running',
+      bg: 'bg-status-running/10',
+      border: 'border-status-running/30',
     }
   }
   return {

@@ -164,7 +164,7 @@
   --code-text: #d4d4d4;
 
   /* 选中态 */
-  --selection-bg: hsl(var(--primary) / 0.25);
+  --selection-bg: rgba(59, 130, 246, 0.25);
   --selection-text: inherit;
 
   /* 卡片动画色 */
@@ -234,7 +234,7 @@
   --code-text: #d4d4d4;
 
   /* 选中态 */
-  --selection-bg: hsl(var(--primary) / 0.35);
+  --selection-bg: rgba(59, 130, 246, 0.35);
   --selection-text: #ffffff;
 
   /* 卡片动画色 */

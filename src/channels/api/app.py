@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from channels.api.deps import APIError, api_error_handler, generic_error_handler
+from ui_schema.auth_types import AutoCRUDError
 from channels.api.models import HealthResponse
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,7 @@ def _add_middleware(app: FastAPI) -> None:
 def _add_exception_handlers(app: FastAPI) -> None:
     """注册全局异常处理器。"""
     app.add_exception_handler(APIError, api_error_handler)
+    app.add_exception_handler(AutoCRUDError, api_error_handler)
     app.add_exception_handler(Exception, generic_error_handler)
 
 
@@ -194,6 +196,12 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(thinking_mode_router)
     app.include_router(ui_router)
 
+    # ---- 自动注册 Data CRUD 路由（基于 YAML data 声明） ----
+    from channels.api.routes_ui import register_data_crud_routes
+
+    for crud_router in register_data_crud_routes():
+        app.include_router(crud_router)
+
     # ---- 补全缺失路由（前端期望但之前未注册） ----
     from channels.api.routes_missing import (
         projects_router,
@@ -209,6 +217,7 @@ def _register_routes(app: FastAPI) -> None:
         cost_control_router,
         evaluation_router,
         eval_metrics_alias_router,
+        client_router,
     )
 
     app.include_router(projects_router)
@@ -224,3 +233,4 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(cost_control_router)
     app.include_router(evaluation_router)
     app.include_router(eval_metrics_alias_router)
+    app.include_router(client_router)

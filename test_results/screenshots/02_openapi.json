@@ -1,0 +1,154 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent OS API",
+    "description": "# Agent OS API\n\nAgent OS 后端 API 服务，提供以下功能：\n\n- **认证**: 登录、注册、令牌管理\n- **线程**: 会话线程 CRUD 与消息查询\n- **Agent 配置**: Agent 配置查询与筛选\n- **任务**: 任务 CRUD、提交、评估\n- **工具**: 工具注册查询\n- **记忆**: 记忆检索与管理\n- **评估指标**: 指标定义查询\n- **插件热重载**: 插件状态与重载\n\n## 认证方式\n\n所有受保护接口使用 Bearer Token 认证：\n\n```\nAuthorization: Bearer <access_token>\n```\n\n或通过 query 参数传递：\n\n```\n?token=<access_token>\n```\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "认证"
+        ],
+        "summary": "用户登录",
+        "description": "验证用户名密码，返回 access token 和 refresh token。\n\nArgs:\n    request: 登录请求，包含用户名和密码\n\nReturns:\n    TokenResponse 包含 access_token 和 refresh_token\n\nRaises:\n    HTTPException: 用户名或密码错误",
+        "operationId": "login_api_v1_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": [
+          "认证"
+        ],
+        "summary": "用户注册",
+        "description": "创建新用户并返回 token。\n\nArgs:\n    request: 注册请求，包含用户名、密码和可选邮箱\n\nReturns:\n    TokenResponse 包含 access_token 和 refresh_token\n\nRaises:\n    HTTPException: 用户名已存在",
+        "operationId": "register_api_v1_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "认证"
+        ],
+        "summary": "获取当前用户信息",
+        "description": "通过 Bearer token 获取当前用户信息。\n\n支持 Authorization: Bearer <token> 头和 ?token= query 参数。\n\nArgs:\n    authorization: Authorization 请求头\n    token: Query 参数中的 token（备选）\n\nReturns:\n    UserResponse 用户信息\n\nRaises:\n    HTTPException: token 无效",
+        "operationId": "get_me_api_v1_auth_me_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "认证"
+        ],
+        "summary": "刷新令牌",
+        "description": "使用 refresh token 获取新的 access token。\n\n支持 Authorization 头和 query 参数。\n\nArgs:\n    authorization: Authorization 请求头\n    token: Query 参数中的 refresh token\n\nReturns:\n    TokenResponse 新的 token 对\n\nRaises:\n    HTTPException: refresh token 无效或已撤销",
+        "operationId": "refresh_token_api_v1_auth_refre

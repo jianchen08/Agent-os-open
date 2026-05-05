@@ -280,9 +280,9 @@ class PromptBuildPlugin(IInputPlugin):
     async def _retrieve_by_tags(self, ctx: PluginContext, var_def: dict[str, Any]) -> str:
         """通过 tags 从知识库检索内容。
 
-        优先读取 state["knowledge.context"]（由 knowledge_inject 插件产出），
-        避免与 knowledge_inject 重复调用 KnowledgeService。
-        仅在 knowledge.context 为空时才自行检索。
+        统一通过 MemoryService.retrieve() 进行知识检索，
+        不再自行创建 KnowledgeService 或读取 knowledge.context 缓存。
+        所有知识检索路径收敛到 MemoryService 这一个入口。
 
         支持 inject_type: full(完整内容) / summary(摘要) / retrieval(检索)
         当 var_def 中有 tags 但无 type 字段时，自动触发此方法。
@@ -301,56 +301,32 @@ class PromptBuildPlugin(IInputPlugin):
         inject_type = var_def.get("inject_type", "full")
         top_k = var_def.get("top_k", 5)
 
-        # 优先读取 knowledge_inject 插件已产出的知识内容，避免重复检索
-        cached_context = ctx.state.get("knowledge.context", "")
-        if cached_context:
-            if inject_type == "summary":
-                snippet = cached_context[:200] + "..." if len(cached_context) > 200 else cached_context
-                return f"- {snippet}"
-            return cached_context
-
-        # 降级：knowledge_inject 未产出时自行检索
         try:
-            semantic_storage = ctx.get_service("semantic_storage")
+            memory_service = ctx.get_service("memory_service")
         except KeyError:
-            logger.debug("[%s] No semantic_storage service, skipping tags retrieval", self.name)
             return ""
 
-        try:
-            from memory.knowledge_service import KnowledgeService
-            knowledge_service = KnowledgeService(semantic_storage=semantic_storage)
-            user_id = ctx.state.get("user_id", "")
-            result = await knowledge_service.list_semantic_memory(user_id)
-            items = result.get("items", [])
-        except Exception as e:
-            logger.debug("[%s] 知识检索失败 | tags=%s | error=%s", self.name, tags, e)
-            return ""
+        user_id = ctx.state.get("user_id", "")
 
-        if not items:
-            return ""
+        results = await memory_service.retrieve(
+            user_id=user_id,
+            filter={"tags": tags, "memory_type": "semantic"},
+            inject_type=inject_type,
+            retrieval_method="keyword",
+            query=" ".join(tags),
+            top_k=top_k,
+        )
 
-        filtered = []
-        for item in items:
-            item_tags = item.get("tags", [])
-            if not item_tags:
-                item_content = item.get("content", "")
-                if item_content:
-                    filtered.append(item_content)
-            elif any(t in item_tags for t in tags):
-                filtered.append(item.get("content", ""))
-
-        filtered = [c for c in filtered if c][:top_k]
-        if not filtered:
+        if not results:
             return ""
 
         if inject_type == "summary":
-            parts = []
-            for c in filtered:
-                snippet = c[:200] + "..." if len(c) > 200 else c
-                parts.append(f"- {snippet}")
-            return "\n".join(parts)
+            return "\n".join(
+                f"- {r.content[:200]}..." if len(r.content) > 200 else f"- {r.content}"
+                for r in results
+            )
 
-        return "\n\n".join(f"---\n{c}" for c in filtered)
+        return "\n\n".join(r.content for r in results)
 
     async def _load_compression_blocks(
         self,

@@ -472,31 +472,24 @@ class TestKnowledgeInject:
         )
 
     @pytest.mark.asyncio
-    async def test_lazy_init_caches_knowledge_service(self):
-        """延迟初始化并缓存 KnowledgeService 实例。"""
-        mock_storage = MagicMock()
+    async def test_lazy_init_uses_memory_service(self):
+        """通过 MemoryService 统一检索知识。"""
+        mock_memory_service = MagicMock()
+        mock_memory_service.retrieve = AsyncMock(return_value=[])
+
         plugin = self._make_plugin(config={"mode": "full"})
 
-        # 初始时 _knowledge_service 应为 None
-        assert plugin._knowledge_service is None
+        ctx = self._make_ctx(
+            state={
+                "current_query": "test query",
+                "user_id": "user1",
+            },
+            services={"memory_service": mock_memory_service},
+        )
 
-        with patch("knowledge_inject.KnowledgeService") as MockKS:
-            mock_instance = MagicMock()
-            mock_instance.list_semantic_memory = AsyncMock(return_value={"items": []})
-            MockKS.return_value = mock_instance
+        await plugin.execute(ctx)
 
-            ctx = self._make_ctx(
-                state={
-                    "user_message": "test query",
-                    "user_id": "user1",
-                },
-                services={"semantic_storage": mock_storage},
-            )
-
-            await plugin.execute(ctx)
-
-            # 应调用 KnowledgeService 构造函数
-            MockKS.assert_called()
+        mock_memory_service.retrieve.assert_called()
 
     @pytest.mark.asyncio
     async def test_disabled_mode_returns_empty(self):
@@ -575,17 +568,20 @@ class TestPromptBuild:
         assert "Test rule content" in content
 
     @pytest.mark.asyncio
-    async def test_knowledge_context_priority(self):
-        """tags/retrieval 类型应优先读取 knowledge.context state。"""
-        plugin = self._make_plugin()
-        ctx = self._make_ctx({
-            "knowledge.context": "Cached knowledge from inject plugin",
-        })
+    async def test_retrieve_by_tags_uses_memory_service(self):
+        """tags/retrieval 类型应通过 MemoryService 检索。"""
+        mock_memory_service = MagicMock()
+        mock_memory_service.retrieve = AsyncMock(return_value=[])
 
-        # 测试 _retrieve_by_tags 应优先返回 cached knowledge.context
+        plugin = self._make_plugin()
+        ctx = self._make_ctx(
+            state={"user_id": "user1"},
+            services={"memory_service": mock_memory_service},
+        )
+
         result = await plugin._retrieve_by_tags(ctx, {"tags": ["test"], "inject_type": "full"})
 
-        assert "Cached knowledge from inject plugin" in result
+        mock_memory_service.retrieve.assert_called()
 
     @pytest.mark.asyncio
     async def test_basic_system_message_built(self):

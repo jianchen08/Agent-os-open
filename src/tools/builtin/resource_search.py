@@ -121,12 +121,17 @@ class ResourceSearchTool:
             source=ToolSource.CODE,
             category=ToolCategory.SEARCH,
             level=ToolLevel.SYSTEM,
-            injected_params=["session_id", "parent_record_id"],
+            injected_params=["session_id", "parent_record_id", "_retriever"],
             tags=["search", "resource", "system"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行搜索"""
+        # 缓存注入的向量检索器（由 ToolCore 通过 _SERVICE_INJECT_MAP 注入）
+        injected_retriever = inputs.get("_retriever")
+        if injected_retriever and not self._search_engine:
+            self._search_engine = injected_retriever
+
         resource_type = inputs.get("resource_type", "all")
         query = inputs.get("query", "")
         mode = inputs.get("mode", "simple")
@@ -331,15 +336,12 @@ class ResourceSearchTool:
             搜索结果字典，格式与 execute() 方法的 results 相同
         """
         try:
-            # 构建检索配置
-            from memory.types import RetrievalMethod
-
-            # 执行向量检索（使用 MemoryService.retrieve() 的正确参数）
+            # 直接调用 IRetriever.retrieve()（资源搜索不经过 MemoryService）
             results = await search_engine.retrieve(
-                user_id="system",  # 系统级资源搜索
                 query=query,
-                retrieval_method=RetrievalMethod.VECTOR.value,
+                user_id=None,  # 资源搜索不按用户隔离
                 top_k=limit * 2,  # 多取一些，用于过滤
+                memory_type="resource",  # 标记为资源类型检索
             )
 
             if not results:
@@ -458,38 +460,17 @@ class ResourceSearchTool:
 
     def _get_search_engine(self):
         """
-        获取搜索引擎（延迟加载）
+        获取向量检索器（优先使用注入的共享实例）
 
-        直接复用 MemoryService 的搜索接口。
-        首次调用时创建工厂函数，后续调用复用已创建的实例。
+        优先级：
+        1. 已缓存的检索器实例（可能来自构造函数参数或 execute() 中的注入缓存）
+        2. 返回 None（走遍历搜索模式）
         """
-        if self._search_engine is None:
-            try:
-                from infrastructure.db import get_async_session
-                from memory.service import MemoryService
+        if self._search_engine is not None:
+            return self._search_engine
 
-                _instance_cache = {"instance": None}
-
-                async def create_or_get_engine():
-                    """创建或复用 MemoryService 实例"""
-                    if _instance_cache["instance"] is not None:
-                        return _instance_cache["instance"]
-                    # BUG-FIX-fix_20260416_001: 修复 async for 误用为 coroutine 的问题
-                    # 问题根因: get_async_session() 是 async def 函数，返回 AsyncSession|None，
-                    #           不是异步生成器，不能用 async for 遍历
-                    # 修复方案: 改用 await 获取 session
-                    session = await get_async_session()
-                    if session is None:
-                        return None
-                    _instance_cache["instance"] = MemoryService(session=session)
-                    return _instance_cache["instance"]
-
-                self._search_engine = create_or_get_engine
-            except Exception as e:
-                logger.warning("Failed to initialize MemoryService: %s", e)
-                self._search_engine = None
-
-        return self._search_engine
+        logger.debug("[resource_search] 向量检索器未注入，使用遍历搜索模式")
+        return None
 
     def _get_agent_registry(self):
         """获取 Agent 注册表（延迟加载，从 config/agents/ YAML 目录加载）"""

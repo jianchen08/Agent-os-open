@@ -1255,6 +1255,50 @@ class TaskWorker:
                         task_id, exc,
                     )
 
+            # ── 5.1 子任务启动时通知前端创建子标签 ──
+            # BUG-FIX-fix_20260505_sub_tab_not_created:
+            # 问题根因: 后端只在 EventBus 内部发布 task.submitted 事件，
+            #           未通过 WebSocket 发送 sub_agent_created 给前端，
+            #           前端无法感知子任务创建，导致子标签页缺失。
+            # 修复方案: 在 pipeline_id 绑定后，通过全局 _ws_interaction_notifier
+            #           向所有活跃的 WebSocket 连接广播 sub_agent_created 事件，
+            #           前端据此创建子标签并注册 pipeline 映射。
+            # 影响范围: 所有通过 task_submit 提交的子任务
+            try:
+                from start_server import _ws_interaction_notifier
+                if _ws_interaction_notifier and target_id:
+                    _parent_task_id_ws = None
+                    _title_ws = task_data.get("user_input", "")
+                    if task_service:
+                        _task_for_ws = task_service.get_task(task_id)
+                        if _task_for_ws:
+                            _parent_task_id_ws = getattr(_task_for_ws, "parent_task_id", None)
+                            _title_ws = _task_for_ws.title or _title_ws
+                    _ws_event_data = {
+                        "type": "sub_agent_created",
+                        "data": {
+                            "taskId": task_id,
+                            "agentId": task_id,
+                            "pipelineId": engine._pipeline_id,
+                            "agentName": target_id or "子Agent",
+                            "title": _title_ws,
+                            "parentId": _parent_task_id_ws or "",
+                            "status": "running",
+                        },
+                    }
+                    await _ws_interaction_notifier.broadcast_event(_ws_event_data)
+                    logger.info(
+                        "TaskWorker: sub_agent_created 事件已发送: "
+                        "task_id=%s, agent=%s, pipeline=%s",
+                        task_id, target_id, engine._pipeline_id,
+                    )
+            except Exception as _ws_err:
+                logger.warning(
+                    "TaskWorker: 发送 sub_agent_created 事件失败: "
+                    "task_id=%s, error=%s",
+                    task_id, _ws_err,
+                )
+
             # BUG-FIX-fix_20260422_idle_timer_timing:
             # 问题根因: idle 计时器在 start_task() 后立即注册，但 TaskWorker 的
             #           _execute_background_task 可能因事件循环调度延迟（如上级管道

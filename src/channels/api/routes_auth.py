@@ -19,6 +19,7 @@ from channels.api.auth import (
 )
 from channels.api.models import (
     LoginRequest,
+    RefreshRequest,
     RegisterRequest,
     TokenResponse,
     UserResponse,
@@ -183,14 +184,19 @@ def get_me(
 def refresh_token(
     authorization: str = Header(default=""),
     token: str = "",
+    body: RefreshRequest | None = None,
 ) -> TokenResponse:
     """使用 refresh token 获取新的 access token。
 
-    支持 Authorization 头和 query 参数。
+    支持三种方式传递 refresh token：
+    1. Authorization: Bearer <token> 头
+    2. ?token=<token> query 参数
+    3. JSON body: {"refresh_token": "<token>"}
 
     Args:
         authorization: Authorization 请求头
         token: Query 参数中的 refresh token
+        body: JSON body 中的 refresh_token
 
     Returns:
         TokenResponse 新的 token 对
@@ -198,12 +204,13 @@ def refresh_token(
     Raises:
         HTTPException: refresh token 无效或已撤销
     """
-    # 提取 token：优先 Authorization 头，其次 query 参数
     actual_token = ""
     if authorization and authorization.startswith("Bearer "):
         actual_token = authorization[7:]
     elif token:
         actual_token = token
+    elif body and body.refresh_token:
+        actual_token = body.refresh_token
 
     if not actual_token:
         raise HTTPException(
@@ -260,24 +267,27 @@ def refresh_token(
 def logout(
     authorization: str = Header(default=""),
     token: str = "",
+    body: RefreshRequest | None = None,
 ) -> dict[str, str]:
     """登出用户，撤销 refresh token。
 
-    支持 Authorization 头和 query 参数。
+    支持 Authorization 头、query 参数和 JSON body。
 
     Args:
         authorization: Authorization 请求头
         token: Query 参数中的 refresh token
+        body: JSON body 中的 refresh_token
 
     Returns:
         登出成功消息
     """
-    # 提取 token
     actual_token = ""
     if authorization and authorization.startswith("Bearer "):
         actual_token = authorization[7:]
     elif token:
         actual_token = token
+    elif body and body.refresh_token:
+        actual_token = body.refresh_token
 
     if actual_token:
         payload = verify_token(actual_token)

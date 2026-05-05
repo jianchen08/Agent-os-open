@@ -277,6 +277,7 @@ export async function getMessages(
   filters?: {
     agentId?: string
     parentId?: string
+    pipelineRunId?: string
     depth?: number
     executorType?: 'agent' | 'tool' | 'user' | 'workflow'
     skip?: number
@@ -293,6 +294,7 @@ export async function getMessages(
     if (filters) {
       if (filters.agentId) params.agent_id = filters.agentId
       if (filters.parentId) params.parent_id = filters.parentId
+      if (filters.pipelineRunId) params.pipeline_run_id = filters.pipelineRunId
       if (filters.depth !== undefined) params.depth = filters.depth
       if (filters.executorType) params.executor_type = filters.executorType
       if (filters.skip !== undefined) params.skip = filters.skip
@@ -347,7 +349,7 @@ export async function updateSessionAgent(
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    const response = await apiClient.put<{
+    const response = await apiClient.patch<{
       thread_id: string
       agent_id: string | null
       updated_at: string
@@ -401,7 +403,7 @@ export async function updateSession(
       requestData.agent_id = agentId
     }
 
-    const response = await apiClient.put<ThreadUpdateResponse>(
+    const response = await apiClient.patch<ThreadUpdateResponse>(
       API_ENDPOINTS.THREADS.UPDATE(sessionId),
       requestData,
     )

@@ -10,8 +10,7 @@
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { API_BASE_URL, API_TIMEOUT, API_ENDPOINTS } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
-import { useAuthStore } from '../../stores/authStore'
-import { tokenManager } from '../../stores/tokenManager'
+import { triggerAuthExpired } from '../authCallbacks'
 import { isRetryableError } from '../../utils/retry'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
 import type { ApiError, RefreshResponse } from '../../types/api'
@@ -41,26 +40,26 @@ function onTokenRefreshed(token: string): void {
 /**
  * 清除认证信息并重定向到登录页
  *
+ * BUG-FIX-fix_20260506_001: 增加停止自生长闭环轮询
+ * 问题根因: clearAuthAndRedirect 未停止轮询导致 401 死循环
+ * 修复方案: 在清除认证前先销毁 GrowthLoop 停止轮询
+ *
  * Requirements: 2.4
  */
 function clearAuthAndRedirect(): void {
-  // 使用 tokenManager 清除令牌
-  tokenManager.clearAllTokens()
+  // BUG-FIX-fix_20260506_001: 先停止轮询，避免后续请求继续触发 401
+  import('../modules/GrowthLoop').then(({ destroyGrowthLoop }) => {
+    destroyGrowthLoop()
+  })
 
-  // 同步清除 authStore 状态（避免状态不一致）
-  // 注意：这里不调用 logout() 以避免循环调用 API
-  // 清除 localStorage 中的其他认证相关数据
+  // 清除 localStorage 中的令牌和认证数据
+  localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
+  localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
   localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
 
-  // 直接重置 store 状态
-  useAuthStore.setState({
-    user: null,
-    token: null,
-    refreshTokenValue: null,
-    isAuthenticated: false,
-    error: null,
-  })
+  // 通过回调机制通知 store 清除认证状态
+  triggerAuthExpired()
 
   // 报告认证错误
   reportError('认证已过期，请重新登录', ErrorType.AUTHENTICATION, ErrorSeverity.WARNING, {
@@ -90,8 +89,8 @@ const apiClient: AxiosInstance = axios.create({
  */
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    // 使用 tokenManager 获取 access_token
-    const token = tokenManager.getToken()
+    // 直接从 localStorage 获取 access_token
+    const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
 
     // 如果token存在，添加到请求头
     if (token && config.headers) {
@@ -171,7 +170,7 @@ apiClient.interceptors.response.use(
 
       try {
         // 尝试刷新token
-        const storedRefreshToken = tokenManager.getRefreshToken()
+        const storedRefreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
 
         if (storedRefreshToken) {
           // 使用与后端一致的请求格式
@@ -187,11 +186,11 @@ apiClient.interceptors.response.use(
 
           const { access_token, refresh_token } = response.data
 
-          // 使用 tokenManager 保存新token
+          // 保存新 token 到 localStorage
           // Requirements: 2.2
-          tokenManager.setToken(access_token)
+          localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, access_token)
           if (refresh_token) {
-            tokenManager.setRefreshToken(refresh_token)
+            localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refresh_token)
           }
 
           // 通知所有等待的请求

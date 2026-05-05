@@ -22,12 +22,16 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { useThemeStore } from '@/stores/themeStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { cn } from '@/lib/utils'
 import { FloatingWindowManager } from './FloatingWindowManager'
 import { WorkspacePanel } from './WorkspacePanel'
 import { DockBar } from './DockBar'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { ConnectionStatusIndicator } from './ConnectionStatusIndicator'
+import { schemaRegistry } from '@/services/schema/registry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance } from '@/types/layout'
 
 /** Props for the FiveSpaceLayout component */
@@ -77,6 +81,7 @@ export function FiveSpaceLayout({
   const themeConfig = useThemeStore((s) => s.currentTheme)
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false)
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
@@ -120,6 +125,53 @@ export function FiveSpaceLayout({
 
   const toggleWorkspace = useCallback(() => setWorkspaceCollapsed((prev) => !prev), [])
 
+  /**
+   * 处理任务树节点点击事件
+   *
+   * 当用户点击任务树中的任务节点时，自动打开对应的子标签并加载
+   * 子管道的对话历史。同时确保主 Agent 标签存在（用于 Tab 导航显示）。
+   * 容器类型任务（有子节点的父任务）不执行跳转。
+   *
+   * @param node - 被点击的树节点数据
+   */
+  const handleTaskNodeClick = useCallback((node: Record<string, unknown>) => {
+    const taskId = (node.id as string) ?? ''
+    const title = (node.title as string) ?? '子任务'
+    const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
+    if (!taskId) return
+
+    const agentTabStore = useAgentTabStore.getState()
+
+    // 确保主 Agent 标签存在（Tab 导航需要至少 2 个 tab 才显示）
+    const hasMainTab = agentTabStore.tabs.some((t) => t.agentLevel === 1)
+    if (!hasMainTab && activeSessionId) {
+      agentTabStore.openSubAgentTab({
+        agentId: activeSessionId,
+        agentName: '主 Agent',
+        parentRecordId: activeSessionId,
+        agentLevel: 1,
+        taskId: activeSessionId,
+        status: 'running',
+        setActive: false,
+      })
+    }
+
+    // 打开子任务标签
+    agentTabStore.openSubAgentTab({
+      agentId: taskId,
+      agentName: title,
+      parentRecordId: taskId,
+      agentLevel: 2,
+      taskId,
+      status: (node.status as AgentTab['status']) ?? 'running',
+      setActive: true,
+      pipelineId: pipelineRunId,
+    })
+
+    // 加载子管道消息
+    agentTabStore.loadTabMessages(`sub-${taskId}`, pipelineRunId)
+  }, [activeSessionId])
+
   // Build dynamic dock items with execution status
   const enrichedDockItems = useMemo(() => {
     const items = [...dockItems]
@@ -161,21 +213,48 @@ export function FiveSpaceLayout({
     return items
   }, [dockItems, activeExecutions, pendingInteractions])
 
-  // Render workspace tab content (placeholder for now)
+  /**
+   * 渲染工作区 Tab 内容
+   *
+   * BUG-FIX-fix_20260505_001: 连接 Schema 渲染链路
+   * 问题根因: renderTabContent 是纯占位符，不渲染真实内容
+   * 修复方案: 通过 schemaRegistry 查找模块 Schema，通过 widgetRegistry 查找组件，渲染真实内容
+   */
   const renderTabContent = useCallback(
     (tab: import('@/types/layout').WorkspaceTab) => {
+      if (tab.moduleId) {
+        const registration = schemaRegistry.get(tab.moduleId)
+        if (registration) {
+          const schema = registration.schema
+          const spaceConfig = schema.rendering?.spaces?.find(
+            (s: Record<string, unknown>) => s.space === 'workspace'
+          )
+          if (spaceConfig) {
+            const widgetType = spaceConfig.widget as string
+            const WidgetComponent = widgetRegistry.get(widgetType) ?? widgetRegistry.findFallback(widgetType)
+            if (WidgetComponent) {
+              return (
+                <div className="h-full overflow-auto p-4">
+                  <WidgetComponent
+                    {...(spaceConfig.props as Record<string, unknown> ?? {})}
+                    dataSource={spaceConfig.dataSource as string}
+                    sessionId={activeSessionId}
+                    onNodeClick={(node: any) => handleTaskNodeClick(node)}
+                  />
+                </div>
+              )
+            }
+          }
+        }
+      }
       return (
         <div className="flex h-full flex-col items-center justify-center p-4">
-          <div className="text-muted-foreground mb-2 text-sm">
-            {tab.title}
-          </div>
-          <div className="text-muted-foreground/60 text-xs">
-            Module content will appear here when activated
-          </div>
+          <div className="text-muted-foreground mb-2 text-sm">{tab.title}</div>
+          <div className="text-muted-foreground/60 text-xs">模块内容不可用</div>
         </div>
       )
     },
-    [],
+    [activeSessionId, handleTaskNodeClick],
   )
 
   // Render floating window content (placeholder)
@@ -238,7 +317,7 @@ export function FiveSpaceLayout({
           <ConnectionStatusIndicator compact={false} showLatency showQueue />
 
           {pendingInteractions.length > 0 && (
-            <div className="flex items-center gap-1 rounded-md bg-orange-500/10 px-2 py-0.5 text-xs text-orange-400">
+            <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
               <span className="font-bold">{pendingInteractions.length}</span>
               <span>pending</span>
             </div>

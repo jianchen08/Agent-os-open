@@ -158,7 +158,7 @@ export function ConcurrencySettingsPage() {
   return (
     <PageShell title="并发控制" description="设置任务并发数和队列参数">
       {loadError && (
-        <div className="mb-4 rounded-lg bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600">
+        <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}
         </div>
       )}

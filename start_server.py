@@ -239,6 +239,36 @@ class WebSocketInteractionNotifier:
     ) -> bool:
         return True
 
+    async def broadcast_event(self, event_data: dict) -> bool:
+        """向所有活跃的 WebSocket 连接广播自定义事件。
+
+        用于 TaskWorker 等后台组件向前端推送事件（如 sub_agent_created），
+        无需知道具体的 session_id 或 thread_id。
+
+        Args:
+            event_data: 完整的事件字典，包含 type 和 data 字段。
+                示例: {"type": "sub_agent_created", "data": {...}}
+
+        Returns:
+            是否至少成功发送到一个连接
+        """
+        all_conns: list[WebSocket] = []
+        for _ws_list in self._active_connections.values():
+            all_conns.extend(_ws_list)
+
+        if not all_conns:
+            return False
+
+        payload = json.dumps(event_data, ensure_ascii=False)
+        sent = False
+        for ws in all_conns:
+            try:
+                await ws.send_text(payload)
+                sent = True
+            except Exception:
+                pass
+        return sent
+
 
 # 全局 WebSocket 通知器实例
 _ws_interaction_notifier = WebSocketInteractionNotifier()
@@ -454,6 +484,24 @@ def _generate_simulated_reply(user_content: str) -> str:
 # 流式回复处理
 # ---------------------------------------------------------------------------
 
+# 缓存的 call_timeout 值（首次调用时从 llm.yaml 加载，之后复用）
+_cached_call_timeout: int | None = None
+
+
+def _get_call_timeout() -> int:
+    """从 llm.yaml defaults.call_timeout 读取超时秒数，默认 120 秒。"""
+    global _cached_call_timeout
+    if _cached_call_timeout is not None:
+        return _cached_call_timeout
+    try:
+        from config.models import ModelConfigLoader
+        loader = ModelConfigLoader()
+        defaults = loader._load_llm_data().get("defaults", {})
+        _cached_call_timeout = int(defaults.get("call_timeout", 120))
+    except Exception:
+        _cached_call_timeout = 120
+    return _cached_call_timeout
+
 
 async def _stream_engine_response(
     websocket: WebSocket,
@@ -515,12 +563,41 @@ async def _stream_engine_response(
     # 将用户消息添加到对话历史
     conversation_history.append({"role": "user", "content": user_content})
 
-    # 将 WebSocket 注册到交互通知器的 engine pipeline_id 下
-    # human_interaction 工具使用 pipeline_id 作为 thread_id 路由通知，
-    # 但 WebSocket 原本只注册在 session_id 下，导致交互请求无法送达前端。
+    # 将 engine._pipeline_id 同步为 session 的 active_pipeline_id，
+    # 确保 ExecutionRecordStorage 中的记录能通过 session.pipeline_ids 找到。
+    session = api_store.get_session(thread_id)
+    if session:
+        if session.active_pipeline_id:
+            if ctx.engine._pipeline_id != session.active_pipeline_id:
+                ctx.engine._pipeline_id = session.active_pipeline_id
+        else:
+            new_pid = session.generate_pipeline_id()
+            ctx.engine._pipeline_id = new_pid
+
+        # 确保 pipeline_id 在 pipeline_ids 列表中并持久化，
+        # 以便 list_messages API 能通过 session.pipeline_ids 找到 YAML 执行记录。
+        current_pid = ctx.engine._pipeline_id
+        if current_pid and current_pid not in session.pipeline_ids:
+            session.pipeline_ids.append(current_pid)
+            session.active_pipeline_id = current_pid
+        api_store.set_session(thread_id, session)
+
     pipeline_id = getattr(ctx.engine, "_pipeline_id", None)
     if pipeline_id:
         _ws_interaction_notifier.register(pipeline_id, websocket)
+
+    # BUG-FIX-fix_pipeline_thread_association:
+    # 问题根因: 管道运行后 YAML 文件没有存储 thread_id，导致无法关联到 thread。
+    # 修复方案: 在管道运行开始前，将 thread_id 写入 ExecutionRecordStorage 的 summary。
+    # 影响范围: list_messages、get_thread_detail 等接口的管道关联逻辑。
+    # 修复日期: 2026-05-05
+    if pipeline_id and ctx.services:
+        _exec_storage = ctx.services.get("execution_record_storage")
+        if _exec_storage is not None:
+            try:
+                _exec_storage.update_summary(pipeline_id, {"thread_id": thread_id})
+            except Exception as _exc:
+                logger.warning("写入管道 thread_id 失败: %s", _exc)
 
     try:
         # ---- stream_start ----
@@ -677,10 +754,31 @@ async def _stream_engine_response(
             )
         )
 
-        # 同时消费队列中的实时事件
-        await _drain_chunk_queue(engine_task)
+        # 同时消费队列中的实时事件（带超时保护，防止 LLM API 挂起导致前端永远卡住）
+        # BUG-FIX-fix_20260506_llm_timeout: engine.run() 挂起时 drain 循环无法退出
+        _call_timeout = _get_call_timeout()
+
+        engine_timed_out = False
+        try:
+            await asyncio.wait_for(
+                _drain_chunk_queue(engine_task),
+                timeout=_call_timeout,
+            )
+        except asyncio.TimeoutError:
+            engine_timed_out = True
+            logger.error(
+                "管道引擎执行超时 (%ds)，取消任务: message_id=%s",
+                _call_timeout, message_id,
+            )
+            engine_task.cancel()
+            try:
+                await engine_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         # 等待引擎完成并获取结果
+        if engine_timed_out:
+            raise TimeoutError(f"LLM 调用超时（{_call_timeout}s），请稍后重试")
         result = engine_task.result()
 
         # 发送 thinking_end（如果有 thinking 内容）

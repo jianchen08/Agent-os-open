@@ -1,6 +1,7 @@
 """Schema 解析器。
 
-从模块 YAML 配置文件中解析 ``ui:`` 部分为 ``ModuleUISchema`` 对象。
+从模块 YAML 配置文件中解析 ``ui:`` 部分为 ``ModuleUISchema`` 对象，
+同时解析顶层 ``data:`` 声明用于 CRUD 自动生成。
 支持目录批量加载、单文件加载和热重载变更检测。
 """
 
@@ -41,6 +42,8 @@ class SchemaParser:
         self._schemas: dict[str, ModuleUISchema] = {}
         self._file_mtimes: dict[str, float] = {}
         self._file_hashes: dict[str, str] = {}
+        # data 段缓存：key 为 module_id，value 为 data 声明字典
+        self._data_decls: dict[str, dict[str, Any]] = {}
 
     def load_directory(self, dir_path: str | Path) -> list[ModuleUISchema]:
         """从目录批量加载 YAML 配置文件。
@@ -106,6 +109,11 @@ class SchemaParser:
         # 记录文件修改时间和哈希
         self._record_file_meta(file_path, raw)
 
+        # 提取顶层 data 段（用于 CRUD 自动生成）
+        data_section = raw.get("data")
+        if isinstance(data_section, dict):
+            self._extract_and_cache_data(raw, data_section)
+
         ui_data = raw.get("ui")
         if ui_data is None:
             logger.debug("文件无 ui 部分，跳过: %s", file_path)
@@ -135,6 +143,25 @@ class SchemaParser:
             ModuleUISchema 列表。
         """
         return list(self._schemas.values())
+
+    def get_data_decls(self, module_id: str) -> dict[str, Any] | None:
+        """获取指定模块的 data 声明。
+
+        Args:
+            module_id: 模块 ID。
+
+        Returns:
+            data 声明字典（key 为集合名，value 为集合定义），不存在返回 None。
+        """
+        return self._data_decls.get(module_id)
+
+    def list_all_data_decls(self) -> dict[str, dict[str, Any]]:
+        """获取所有模块的 data 声明。
+
+        Returns:
+            字典，key 为 module_id，value 为该模块的 data 声明。
+        """
+        return dict(self._data_decls)
 
     def detect_changes(self, dir_path: str | Path) -> dict[str, str]:
         """检测目录中文件的变更。
@@ -364,3 +391,34 @@ class SchemaParser:
             return ClientCapabilities(**data)
         except Exception:
             return ClientCapabilities()
+
+    def _extract_and_cache_data(
+        self, raw: dict[str, Any], data_section: dict[str, Any]
+    ) -> None:
+        """从 YAML 原始数据中提取 data 段并缓存。
+
+        优先使用 ui.identity.id 作为模块 ID，其次使用顶层 config_id。
+
+        Args:
+            raw: YAML 文件的完整原始数据。
+            data_section: data 段的内容。
+        """
+        # 尝试从 ui.identity.id 获取 module_id
+        module_id: str | None = None
+        ui_data = raw.get("ui")
+        if isinstance(ui_data, dict):
+            identity = ui_data.get("identity")
+            if isinstance(identity, dict):
+                module_id = identity.get("id")
+
+        # 回退到顶层 config_id
+        if not module_id:
+            module_id = raw.get("config_id")
+
+        if module_id and isinstance(module_id, str):
+            self._data_decls[module_id] = data_section
+            logger.debug(
+                "缓存 data 声明: module=%s, collections=%s",
+                module_id,
+                list(data_section.keys()),
+            )

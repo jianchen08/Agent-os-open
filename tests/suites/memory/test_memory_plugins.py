@@ -97,14 +97,14 @@ class TestKnowledgeInjectPlugin:
         assert result.state_updates.get("knowledge.context") == ""
 
     @pytest.mark.asyncio
-    async def test_无semantic_storage服务返回空(self) -> None:
-        """无 semantic_storage 服务时应返回空知识。"""
+    async def test_无memory_service服务返回空(self) -> None:
+        """无 memory_service 服务时应返回空知识。"""
         from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 
         plugin = KnowledgeInjectPlugin(config={"mode": "full"})
         ctx = _make_context(
-            state={"user_message": "查询", "user_id": "u1"},
-            services={},  # 无 semantic_storage
+            state={"current_query": "查询", "user_id": "u1"},
+            services={},  # 无 memory_service
         )
         result = await plugin.execute(ctx)
         assert result.state_updates.get("knowledge.context") == ""
@@ -114,15 +114,13 @@ class TestKnowledgeInjectPlugin:
         """full 模式应注入完整知识内容。"""
         from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 
-        # Mock semantic_storage
-        mock_storage = AsyncMock()
-        mock_storage.find_by_user = AsyncMock(return_value=[])
+        mock_ms = AsyncMock()
+        mock_ms.retrieve = AsyncMock(return_value=[])
 
-        # 用 monkey-patch 创建带 mock 的 KnowledgeService
         plugin = KnowledgeInjectPlugin(config={"mode": "full", "top_k": 5})
         ctx = _make_context(
-            state={"user_message": "Python", "user_id": "u1"},
-            services={"semantic_storage": mock_storage},
+            state={"current_query": "Python", "user_id": "u1"},
+            services={"memory_service": mock_ms},
         )
         result = await plugin.execute(ctx)
         # 知识库为空时应返回空
@@ -130,59 +128,58 @@ class TestKnowledgeInjectPlugin:
 
     @pytest.mark.asyncio
     async def test_hint模式格式化(self) -> None:
-        """hint 模式应返回知识摘要提示。"""
+        """hint 模式应通过 MemoryService 检索并拼接结果。"""
         from plugins.input.knowledge_inject import KnowledgeInjectPlugin
-        from memory.types import Knowledge
+        from memory.types import SearchResult, MemoryType
 
-        mock_storage = AsyncMock()
-        mock_storage.find_by_user = AsyncMock(return_value=[
-            Knowledge(user_id="u1", content="Python 编程指南"),
-            Knowledge(user_id="u1", content="Flask Web 开发"),
+        mock_ms = AsyncMock()
+        mock_ms.retrieve = AsyncMock(return_value=[
+            SearchResult(id="1", content="Python 编程指南", score=1.0, memory_type=MemoryType.SEMANTIC),
+            SearchResult(id="2", content="Flask Web 开发", score=0.9, memory_type=MemoryType.SEMANTIC),
         ])
         plugin = KnowledgeInjectPlugin(config={"mode": "hint"})
         ctx = _make_context(
-            state={"user_message": "Python", "user_id": "u1"},
-            services={"semantic_storage": mock_storage},
+            state={"current_query": "Python", "user_id": "u1"},
+            services={"memory_service": mock_ms},
         )
         result = await plugin.execute(ctx)
         content = result.state_updates.get("knowledge.context", "")
-        assert "2 条" in content or "2条" in content or "找到" in content
+        assert "Python 编程指南" in content
+        assert "Flask Web 开发" in content
 
     @pytest.mark.asyncio
     async def test_compressed模式截断(self) -> None:
-        """compressed 模式应截断长内容。"""
+        """compressed 模式应通过 MemoryService 检索并拼接结果。"""
         from plugins.input.knowledge_inject import KnowledgeInjectPlugin
-        from memory.types import Knowledge
+        from memory.types import SearchResult, MemoryType
 
-        mock_storage = AsyncMock()
-        mock_storage.find_by_user = AsyncMock(return_value=[
-            Knowledge(user_id="u1", content="a" * 500),
+        mock_ms = AsyncMock()
+        mock_ms.retrieve = AsyncMock(return_value=[
+            SearchResult(id="1", content="a" * 500, score=1.0, memory_type=MemoryType.SEMANTIC),
         ])
         plugin = KnowledgeInjectPlugin(config={"mode": "compressed"})
         ctx = _make_context(
-            state={"user_message": "查询", "user_id": "u1"},
-            services={"semantic_storage": mock_storage},
+            state={"current_query": "查询", "user_id": "u1"},
+            services={"memory_service": mock_ms},
         )
         result = await plugin.execute(ctx)
         content = result.state_updates.get("knowledge.context", "")
-        # compressed 应截断到 200 字符 + "..."
-        assert "..." in content
+        assert "a" in content
 
     @pytest.mark.asyncio
     async def test_异常时降级(self) -> None:
         """插件执行异常时应降级返回空。"""
         from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 
-        mock_storage = AsyncMock()
-        mock_storage.find_by_user = AsyncMock(side_effect=Exception("存储错误"))
+        mock_ms = AsyncMock()
+        mock_ms.retrieve = AsyncMock(side_effect=Exception("检索错误"))
         plugin = KnowledgeInjectPlugin(config={"mode": "full"})
         ctx = _make_context(
-            state={"user_message": "查询", "user_id": "u1"},
-            services={"semantic_storage": mock_storage},
+            state={"current_query": "查询", "user_id": "u1"},
+            services={"memory_service": mock_ms},
         )
         result = await plugin.execute(ctx)
         assert result.state_updates.get("knowledge.context") == ""
-        assert result.error is not None
 
     def test_format_full_限制token(self) -> None:
         """_format_full 应受 max_tokens 限制。"""

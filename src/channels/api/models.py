@@ -6,16 +6,25 @@
 
 from __future__ import annotations
 
+import json
+import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from infrastructure.session.models import SessionModel
 from pydantic import BaseModel, Field
 
 
 # ============================================================
 # 请求/响应模型
 # ============================================================
+
+class RefreshRequest(BaseModel):
+    """刷新令牌请求模型。"""
+    refresh_token: str
+
 
 class LoginRequest(BaseModel):
     """登录请求模型。"""
@@ -57,6 +66,9 @@ class ThreadCreate(BaseModel):
 class ThreadUpdate(BaseModel):
     """更新线程请求模型。"""
     title: str | None = None
+    agent_id: str | None = None
+    intent: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class ThreadResponse(BaseModel):
@@ -67,6 +79,8 @@ class ThreadResponse(BaseModel):
     created_at: str
     updated_at: str
     agent_id: str | None = None
+    pipeline_ids: list[str] = Field(default_factory=list, description="关联的管道执行 ID 列表")
+    active_pipeline_id: str | None = Field(default=None, description="当前活跃的管道执行 ID")
 
 
 class MessageResponse(BaseModel):
@@ -78,6 +92,17 @@ class MessageResponse(BaseModel):
     timestamp: str
     sequence: int = 0
     parentId: str | None = None
+    metadata: dict[str, Any] | None = None
+    toolCalls: list[dict[str, Any]] | None = None
+    toolCallId: str | None = None
+    toolName: str | None = None
+    toolArgs: dict[str, Any] | None = None
+    toolResult: Any = None
+    toolError: str | None = None
+    status: str | None = None
+    agentId: str | None = None
+    agentName: str | None = None
+    durationMs: int | None = None
 
 
 # ============================================================
@@ -286,9 +311,10 @@ def _now_iso() -> str:
 
 
 class MemoryStore:
-    """基于字典的内存存储。
+    """基于字典的内存存储，支持 JSON 文件持久化。
 
     存储用户、线程、消息、任务等数据。初始化时创建演示用户 demo/demo123。
+    当指定 persist_dir 时，线程和会话数据会自动持久化到 JSON 文件。
 
     Attributes:
         users: 用户存储字典，key 为用户名
@@ -297,38 +323,111 @@ class MemoryStore:
         tasks: 任务存储字典，key 为任务 ID
         memories: 记忆存储字典，key 为记忆 ID
         refresh_tokens: refresh token 黑名单（已登出的 token）
+        sessions: SessionModel 桥接映射
     """
 
-    def __init__(self) -> None:
-        """初始化内存存储，创建演示用户。"""
+    def __init__(self, persist_dir: str | None = None) -> None:
+        """初始化内存存储，创建演示用户。
+
+        Args:
+            persist_dir: 持久化目录路径，为 None 则不持久化
+        """
         self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
         self.messages: dict[str, list[dict[str, Any]]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
-        self.refresh_tokens: set[str] = set()  # 已撤销的 refresh token
+        self.refresh_tokens: set[str] = set()
+        self.sessions: dict[str, SessionModel] = {}
+        self._persist_dir = persist_dir
+        self._persist_lock = threading.Lock()
 
-        # 创建演示用户 demo/demo123
-        demo_id = uuid.uuid4().hex[:12]
+        self._create_default_users()
+        self._load_persisted_data()
+
+    def _create_default_users(self) -> None:
+        """创建演示用户和管理员用户。"""
         self.users["demo"] = {
-            "id": demo_id,
+            "id": "demo_user_001",
             "username": "demo",
-            "password": "demo12345",  # 内存存储，明文即可（8位以上满足前端验证）
+            "password": "demo12345",
             "email": "demo@example.com",
             "role": "user",
             "created_at": _now_iso(),
         }
-
-        # 创建管理员用户
-        admin_id = uuid.uuid4().hex[:12]
         self.users["admin"] = {
-            "id": admin_id,
+            "id": "admin_user_001",
             "username": "admin",
             "password": "admin123",
             "email": "admin@example.com",
             "role": "admin",
             "created_at": _now_iso(),
         }
+
+    def _persist_file(self) -> str | None:
+        """返回持久化文件路径。"""
+        if not self._persist_dir:
+            return None
+        return os.path.join(self._persist_dir, "store.json")
+
+    def _load_persisted_data(self) -> None:
+        """从 JSON 文件加载持久化数据。"""
+        path = self._persist_file()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for tid, tdata in data.get("threads", {}).items():
+                self.threads[tid] = tdata
+                self.messages[tid] = []
+            for tid, sdata in data.get("sessions", {}).items():
+                self.sessions[tid] = SessionModel(
+                    session_id=sdata.get("session_id", tid),
+                    channel_type=sdata.get("channel_type", "web"),
+                    channel_ref=sdata.get("channel_ref", ""),
+                    pipeline_ids=sdata.get("pipeline_ids", []),
+                    active_pipeline_id=sdata.get("active_pipeline_id", ""),
+                    created_at=sdata.get("created_at", 0),
+                    last_active_at=sdata.get("last_active_at", 0),
+                    metadata=sdata.get("metadata", {}),
+                )
+        except Exception:
+            pass
+
+    def _save_persisted_data(self) -> None:
+        """将线程和会话数据持久化到 JSON 文件。"""
+        path = self._persist_file()
+        if not path:
+            return
+        try:
+            sessions_data = {}
+            for tid, session in self.sessions.items():
+                sessions_data[tid] = {
+                    "session_id": session.session_id,
+                    "channel_type": session.channel_type,
+                    "channel_ref": session.channel_ref,
+                    "pipeline_ids": session.pipeline_ids,
+                    "active_pipeline_id": session.active_pipeline_id,
+                    "created_at": session.created_at,
+                    "last_active_at": session.last_active_at,
+                    "metadata": session.metadata,
+                }
+            data = {
+                "threads": self.threads,
+                "sessions": sessions_data,
+            }
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            if os.path.exists(path):
+                os.replace(tmp_path, path)
+            else:
+                os.rename(tmp_path, path)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("持久化保存失败: %s [path=%s]", e, path)
 
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         """根据用户名查找用户。"""
@@ -401,23 +500,32 @@ class MemoryStore:
             "metadata": metadata or {},
             "intent": intent,
             "current_state": "active",
+            "pipeline_ids": [],
+            "active_pipeline_id": "",
             "created_at": now,
             "updated_at": now,
         }
         self.threads[thread_id] = thread
         self.messages[thread_id] = []
+        self._save_persisted_data()
         return thread
 
     def update_thread(
         self, thread_id: str, title: str | None = None,
+        agent_id: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """更新线程标题。"""
+        """更新线程属性。"""
         thread = self.threads.get(thread_id)
         if thread is None:
             return None
         if title is not None:
             thread["title"] = title
+        if agent_id is not None:
+            thread["agent_id"] = agent_id
+        if metadata is not None:
+            thread["metadata"] = {**thread.get("metadata", {}), **metadata}
         thread["updated_at"] = _now_iso()
+        self._save_persisted_data()
         return thread
 
     def get_user_threads(self, user_id: str) -> list[dict[str, Any]]:
@@ -442,7 +550,7 @@ class MemoryStore:
         }
 
     def delete_thread(self, thread_id: str) -> bool:
-        """删除指定线程及其消息。
+        """删除指定线程及其消息和关联会话。
 
         Returns:
             删除成功返回 True，线程不存在返回 False
@@ -451,7 +559,30 @@ class MemoryStore:
             return False
         del self.threads[thread_id]
         self.messages.pop(thread_id, None)
+        self.sessions.pop(thread_id, None)
+        self._save_persisted_data()
         return True
+
+    def set_session(self, thread_id: str, session: SessionModel) -> None:
+        """将 SessionModel 关联到指定线程。
+
+        Args:
+            thread_id: 线程 ID
+            session: 要关联的会话模型实例
+        """
+        self.sessions[thread_id] = session
+        self._save_persisted_data()
+
+    def get_session(self, thread_id: str) -> SessionModel | None:
+        """获取指定线程关联的会话模型。
+
+        Args:
+            thread_id: 线程 ID
+
+        Returns:
+            关联的 SessionModel，不存在则返回 None
+        """
+        return self.sessions.get(thread_id)
 
     def get_messages(self, thread_id: str) -> list[dict[str, Any]]:
         """获取指定线程的所有消息。"""
@@ -658,5 +789,6 @@ class MemoryStore:
         return token in self.refresh_tokens
 
 
-# 全局内存存储实例
-store = MemoryStore()
+# 全局内存存储实例（持久化到 data/api_store/）
+_PERSIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "data", "api_store")
+store = MemoryStore(persist_dir=_PERSIST_DIR)
