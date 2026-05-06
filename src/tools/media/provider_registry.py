@@ -66,7 +66,7 @@ class MediaProviderRegistry:
             )
 
     def get(self, provider_name: str) -> MediaProvider | None:
-        """获取已注册的 Provider。
+        """获取已注册的 Provider（大小写不敏感）。
 
         Args:
             provider_name: Provider 名称
@@ -74,7 +74,14 @@ class MediaProviderRegistry:
         Returns:
             MediaProvider 实例，不存在时返回 None
         """
-        return self._providers.get(provider_name)
+        result = self._providers.get(provider_name)
+        if result is not None:
+            return result
+        lower_name = provider_name.lower()
+        for name, provider in self._providers.items():
+            if name.lower() == lower_name:
+                return provider
+        return None
 
     def has(self, provider_name: str) -> bool:
         """检查 Provider 是否已注册。

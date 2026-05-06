@@ -357,6 +357,28 @@ export function compileThemeVariables(config: ThemeConfig): string {
     })
   }
 
+  // === shadcn/ui 桥接映射 ===
+  // 将自定义主题变量映射到 shadcn/ui 组件期望的 HSL 原始格式变量
+  // shadcn/ui 通过 hsl(var(--xxx)) 消费这些变量，所以这里存储的是不带 hsl() 包裹的原始值
+  const c = config.colors
+  vars.push(`--foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--background: ${colorToHsl(c.background.main)}`)
+  vars.push(`--card: ${colorToHsl(c.background.card)}`)
+  vars.push(`--card-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--popover: ${colorToHsl(c.background.elevated)}`)
+  vars.push(`--popover-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--primary: ${colorToHsl(c.primary)}`)
+  vars.push(`--primary-foreground: ${colorToHsl(c.bubble.user_text)}`)
+  vars.push(`--secondary: ${colorToHsl(c.secondary)}`)
+  vars.push(`--secondary-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--muted: ${colorToHsl(c.background.input)}`)
+  vars.push(`--muted-foreground: ${colorToHsl(c.text.secondary)}`)
+  vars.push(`--accent: ${colorToHsl(c.accent)}`)
+  vars.push(`--accent-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--border: ${colorToHsl(c.border.default)}`)
+  vars.push(`--input: ${colorToHsl(c.background.input)}`)
+  vars.push(`--ring: ${colorToHsl(c.primary)}`)
+
   return vars.join('; ')
 }
 
@@ -517,4 +539,79 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
     g: parseInt(match[2], 16),
     b: parseInt(match[3], 16),
   }
+}
+
+/**
+ * 将 RGB 值转换为 HSL 格式字符串
+ *
+ * 输出格式为 shadcn/ui 期望的原始 HSL 值（不含 hsl() 包裹），
+ * 如 "210 40% 98%" 或 "210 40% 98% / 0.5"（带透明度）
+ *
+ * @param r - 红色通道 (0-255)
+ * @param g - 绿色通道 (0-255)
+ * @param b - 蓝色通道 (0-255)
+ * @param alpha - 可选透明度 (0-1)
+ * @returns HSL 格式字符串
+ */
+function rgbToHsl(r: number, g: number, b: number, alpha?: number): string {
+  const rn = r / 255
+  const gn = g / 255
+  const bn = b / 255
+  const max = Math.max(rn, gn, bn)
+  const min = Math.min(rn, gn, bn)
+  const l = (max + min) / 2
+  let h = 0
+  let s = 0
+
+  if (max !== min) {
+    const d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    switch (max) {
+      case rn:
+        h = ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6
+        break
+      case gn:
+        h = ((bn - rn) / d + 2) / 6
+        break
+      case bn:
+        h = ((rn - gn) / d + 4) / 6
+        break
+    }
+  }
+
+  const hDeg = Math.round(h * 360)
+  const sPct = Math.round(s * 100)
+  const lPct = Math.round(l * 100)
+
+  if (alpha !== undefined && alpha < 1) {
+    return `${hDeg} ${sPct}% ${lPct}% / ${alpha}`
+  }
+  return `${hDeg} ${sPct}% ${lPct}%`
+}
+
+/**
+ * 将任意颜色值转换为 HSL 原始格式
+ *
+ * 支持 HEX (#rrggbb) 和 RGBA (rgba(r,g,b,a)) 格式，
+ * 输出 shadcn/ui 期望的 HSL 原始值（用于 hsl(var(--xxx)) 模式）
+ *
+ * @param color - 颜色值字符串
+ * @returns HSL 格式字符串，解析失败时返回原值
+ */
+function colorToHsl(color: string): string {
+  if (color.startsWith('#')) {
+    const rgb = hexToRgb(color)
+    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
+  }
+
+  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
+  if (rgbaMatch) {
+    const r = parseInt(rgbaMatch[1])
+    const g = parseInt(rgbaMatch[2])
+    const b = parseInt(rgbaMatch[3])
+    const a = rgbaMatch[4] !== undefined ? parseFloat(rgbaMatch[4]) : undefined
+    return rgbToHsl(r, g, b, a)
+  }
+
+  return color
 }

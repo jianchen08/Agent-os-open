@@ -254,12 +254,14 @@ class PipelineEngine:
         Returns:
             管道初始状态字典
         """
+        resolved_history = self._resolve_conversation_history(conversation_history)
+
         state: dict[str, Any] = {
             StateKeys.ITERATION: 0,
             StateKeys.CORE_TYPE: TargetType.LLM_CALL.value,
             StateKeys.ENDED: False,
             "user_input": user_input,
-            "messages": list(conversation_history) if conversation_history else [],
+            "messages": resolved_history,
         }
 
         # 将 user_input 追加为 user 消息（避免纯 system 消息被某些模型拒绝）
@@ -273,6 +275,62 @@ class PipelineEngine:
         state.update(extra_state)
 
         return state
+
+    def _resolve_conversation_history(
+        self,
+        conversation_history: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """解析对话历史，当调用方未传入历史时自动从 ExecutionRecordStorage 恢复。
+
+        当 conversation_history 非空时直接使用调用方传入的历史；
+        当为空但当前 pipeline_id 已有执行记录时，从持久化存储恢复完整历史。
+
+        Args:
+            conversation_history: 调用方传入的对话历史（可能为 None 或空列表）
+
+        Returns:
+            解析后的对话历史列表
+        """
+        if conversation_history:
+            return list(conversation_history)
+
+        exec_storage = self._services.get("execution_record_storage")
+        if not exec_storage:
+            return []
+
+        try:
+            records = exec_storage.list_by_pipeline(self._pipeline_id)
+        except Exception:
+            return []
+
+        if not records:
+            return []
+
+        history: list[dict[str, Any]] = []
+        for r in records:
+            msg: dict[str, Any] = {"role": r.role, "content": r.content}
+            if getattr(r, "name", None):
+                msg["name"] = r.name
+            if getattr(r, "tool_call_id", None):
+                msg["tool_call_id"] = r.tool_call_id
+            if getattr(r, "tool_input", None):
+                msg["tool_input"] = r.tool_input
+            if getattr(r, "tool_calls_json", None):
+                try:
+                    import json as _json
+                    msg["tool_calls"] = _json.loads(r.tool_calls_json)
+                except (ValueError, TypeError):
+                    pass
+            history.append(msg)
+
+        from infrastructure.task_worker import _reconstruct_tool_calls
+        _reconstruct_tool_calls(history)
+
+        logger.info(
+            "[Engine] 从持久化存储恢复 %d 条历史记录 (pipeline=%s)",
+            len(history), self._pipeline_id,
+        )
+        return history
 
     def _load_system_default_agent(self) -> Any | None:
         """加载系统默认 Agent 配置。

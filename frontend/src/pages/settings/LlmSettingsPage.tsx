@@ -190,10 +190,10 @@ export function LlmSettingsPage() {
   return (
     <PageShell title="LLM 模型配置" description="配置大语言模型参数">
       {loadError && (
-        <div className="mb-4 flex items-center justify-between rounded-lg bg-red-500/10 px-4 py-3">
+        <div className="mb-4 flex items-center justify-between rounded-lg bg-destructive/10 px-4 py-3">
           <div>
-            <p className="text-sm font-medium text-red-600">{loadError}</p>
-            <p className="mt-0.5 text-xs text-red-500/80">
+            <p className="text-sm font-medium text-destructive">{loadError}</p>
+            <p className="mt-0.5 text-xs text-destructive/80">
               模型列表为空，下拉选项将无可用内容。请重试或检查后端服务是否正常运行。
             </p>
           </div>
@@ -201,7 +201,7 @@ export function LlmSettingsPage() {
             variant="outline"
             size="sm"
             onClick={loadConfig}
-            className="ml-4 shrink-0 border-red-300 text-red-600 hover:bg-red-50"
+            className="ml-4 shrink-0 border-destructive/30 text-destructive hover:bg-destructive/10"
           >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             重试
@@ -289,8 +289,8 @@ export function LlmSettingsPage() {
                   '保存默认配置'
                 )}
               </Button>
-              {saveState === 'saved' && <span className="text-xs text-green-500" role="status">已保存</span>}
-              {saveState === 'error' && <span className="text-xs text-red-500" role="alert">保存失败</span>}
+              {saveState === 'saved' && <span className="text-xs text-status-success" role="status">已保存</span>}
+              {saveState === 'error' && <span className="text-xs text-status-error" role="alert">保存失败</span>}
             </div>
           </div>
         </TabsContent>

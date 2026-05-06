@@ -52,7 +52,7 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
         return (
           <div
             key={id}
-            className="bg-background border-border shadow-lg fixed rounded-lg border"
+            className="bg-background text-foreground border-border shadow-lg fixed rounded-lg border"
             style={{
               ...containerStyle,
               ...(layout?.position === 'bottom-right'

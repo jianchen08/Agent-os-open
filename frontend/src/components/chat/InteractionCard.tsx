@@ -98,28 +98,52 @@ export function InteractionCard({
           </div>
         )}
 
-        {/* Choice 模式：选项按钮 */}
+        {/* Choice 模式：选项按钮 + 自定义输入 */}
         {interaction.mode === 'choice' && interaction.options && interaction.options.length > 0 && !isDone && (
-          <div className="flex flex-wrap gap-2">
-            {interaction.options.map((opt) => (
-              <Button
-                key={opt.id}
-                variant="outline"
-                size="sm"
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {interaction.options.map((opt) => (
+                <Button
+                  key={opt.id}
+                  variant="outline"
+                  size="sm"
+                  disabled={isSubmitting}
+                  onClick={() => onRespondChoice(opt.id)}
+                  className="text-sm"
+                >
+                  <span className="flex flex-col items-start gap-0.5">
+                    <span>{opt.label}</span>
+                    {opt.description && (
+                      <span className="text-muted-foreground text-xs font-normal opacity-70">
+                        {opt.description}
+                      </span>
+                    )}
+                  </span>
+                </Button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <textarea
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                onKeyDown={handleKeyDown}
                 disabled={isSubmitting}
-                onClick={() => onRespondChoice(opt.id)}
-                className="text-sm"
+                placeholder="或输入自定义回复..."
+                rows={1}
+                className="border-border bg-background flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-shadow focus:ring-1 focus:ring-status-info"
+              />
+              <Button
+                size="sm"
+                disabled={isSubmitting || !textInput.trim()}
+                onClick={handleTextSubmit}
               >
-                <span className="flex flex-col items-start gap-0.5">
-                  <span>{opt.label}</span>
-                  {opt.description && (
-                    <span className="text-muted-foreground text-xs font-normal opacity-70">
-                      {opt.description}
-                    </span>
-                  )}
-                </span>
+                {isSubmitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  '发送'
+                )}
               </Button>
-            ))}
+            </div>
           </div>
         )}
 

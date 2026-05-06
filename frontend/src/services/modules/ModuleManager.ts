@@ -60,10 +60,12 @@ class ModuleManager {
       if (schemas.length > 0) {
         schemaRegistry.registerAll(schemas, 'api')
         loggers.websocket.info(`已注册 ${schemas.length} 个模块`)
-
-        // 同步 workspace 和 dock 配置到 layoutModeStore
-        this._syncToLayoutStore()
       }
+
+      // BUG-FIX-fix_20260507_002: 无论 schemas 是否为空都同步布局
+      // 问题根因: schemas 为空时不同步，导致已注册模块的工作区 tab 丢失
+      // 修复方案: 始终调用 _syncToLayoutStore 保持一致性
+      this._syncToLayoutStore()
     } catch (error: unknown) {
       // 401 错误时停止轮询，避免死循环
       if (this._isAuthError(error)) {
@@ -93,16 +95,21 @@ class ModuleManager {
    * 转换为 WorkspaceTab 写入 store；
    * 从每个模块的 rendering.dock 中提取 dock 配置，
    * 转换为 DockItem 写入 store。
-   * 使用独立的新增列表避免重复添加。
+   *
+   * @param fullReplace - 为 true 时全量替换 workspaceTabs（用于重启场景）
    */
-  private _syncToLayoutStore(): void {
+  private _syncToLayoutStore(fullReplace = false): void {
     const modules = schemaRegistry.getEnabled()
     const currentState = useLayoutModeStore.getState()
 
-    const existingTabIds = new Set(currentState.workspaceTabs.map((t) => t.id))
+    const existingTabIds = fullReplace
+      ? new Set<string>()
+      : new Set(currentState.workspaceTabs.map((t) => t.id))
     const existingDockIds = new Set(currentState.dockItems.map((d) => d.id))
+    const hasActiveTab = fullReplace ? false : currentState.workspaceTabs.some((t) => t.isActive)
+
     const newTabs: import('@/types/layout').WorkspaceTab[] = []
-    const allDockItems: import('@/types/layout').DockItem[] = [...currentState.dockItems]
+    const allDockItems: import('@/types/layout').DockItem[] = fullReplace ? [] : [...currentState.dockItems]
 
     modules.forEach((mod) => {
       const { identity, rendering } = mod.schema
@@ -119,7 +126,7 @@ class ModuleManager {
             component: space.widget,
             layout: space.layout as Record<string, unknown> | undefined,
             dataSource: space.dataSource,
-            isActive: newTabs.length === 0 && currentState.workspaceTabs.length === 0,
+            isActive: !hasActiveTab && newTabs.length === 0,
             isPinned: false,
           })
           existingTabIds.add(tabId)
@@ -151,16 +158,20 @@ class ModuleManager {
       }
     })
 
-    newTabs.forEach((tab) => {
-      useLayoutModeStore.getState().addWorkspaceTab(tab)
-    })
+    if (fullReplace) {
+      useLayoutModeStore.setState({ workspaceTabs: newTabs })
+    } else if (newTabs.length > 0) {
+      useLayoutModeStore.setState((state) => ({
+        workspaceTabs: [...state.workspaceTabs, ...newTabs],
+      }))
+    }
 
     if (allDockItems.length > 0) {
       useLayoutModeStore.getState().setDockItems(allDockItems)
     }
 
     loggers.websocket.info(
-      `已同步 ${newTabs.length} 个新增 workspace tabs, ${allDockItems.length} 个 dock items`,
+      `已同步 ${newTabs.length} 个 workspace tabs (${fullReplace ? '全量替换' : '增量追加'}), ${allDockItems.length} 个 dock items`,
     )
   }
 
@@ -169,6 +180,37 @@ class ModuleManager {
    */
   getModules(): ModuleRegistration[] {
     return schemaRegistry.getEnabled()
+  }
+
+  /**
+   * 拉取模块并全量重建布局（用于 restartGrowthLoop 场景）
+   *
+   * 与 fetchAndRegister 不同，此方法使用 fullReplace 模式，
+   * 直接替换所有 workspaceTabs 而非增量追加，
+   * 避免先清空再追加导致的闪烁问题。
+   */
+  async fetchAndRebuild(): Promise<void> {
+    if (!this.isAuthenticated()) {
+      return
+    }
+
+    try {
+      const response = await getModuleUISchemas()
+      const schemas = Array.isArray(response) ? response : (response?.items ?? [])
+      if (schemas.length > 0) {
+        schemaRegistry.registerAll(schemas, 'api')
+        loggers.websocket.info(`已注册 ${schemas.length} 个模块（全量重建）`)
+      }
+
+      this._syncToLayoutStore(true)
+    } catch (error: unknown) {
+      if (this._isAuthError(error)) {
+        loggers.websocket.warn('认证失败，停止模块轮询')
+        this.stopPolling()
+        return
+      }
+      loggers.websocket.warn('拉取模块 Schema 失败:', error)
+    }
   }
 
   /**

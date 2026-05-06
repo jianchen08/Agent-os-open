@@ -80,16 +80,19 @@ class Application:
 
             media_registry = MediaProviderRegistry()
             config_path = self.project_root / "config" / "models" / "media_providers.yaml"
+            logger.info("[STARTUP] MediaProviderRegistry config_path=%s exists=%s", config_path, config_path.exists())
             if config_path.exists():
                 media_registry.load_config(config_path)
+                logger.info("[STARTUP] MediaProviderRegistry config loaded, registering providers...")
                 self._register_media_providers(media_registry)
             services["media_provider_registry"] = media_registry
             logger.info(
-                "服务已创建: media_provider_registry (%d 个 Provider)",
+                "服务已创建: media_provider_registry (%d 个 Provider: %s)",
                 len(media_registry.list_all()),
+                [p.provider_name for p in media_registry.list_all()],
             )
         except Exception as exc:
-            logger.warning("创建 MediaProviderRegistry 失败: %s", exc)
+            logger.warning("创建 MediaProviderRegistry 失败: %s", exc, exc_info=True)
 
         # ── 2. JsonMemoryStore ───────────────────────────
         json_store: Any = None
@@ -436,13 +439,6 @@ class Application:
             "MiniMaxTTSProvider": "tools.media.providers.minimax_tts_provider",
         }
 
-        _API_KEY_ENV_MAP: dict[str, str] = {
-            "MiniMaxImageProvider": "MINIMAX_API_KEY",
-            "MiniMaxMusicProvider": "MINIMAX_API_KEY",
-            "MiniMaxVideoProvider": "MINIMAX_API_KEY",
-            "MiniMaxTTSProvider": "MINIMAX_API_KEY",
-        }
-
         _MEDIA_TYPE_MAP: dict[str, MediaType] = {
             "tts": MediaType.TTS,
             "image": MediaType.IMAGE,
@@ -470,11 +466,10 @@ class Application:
                     media_type = _MEDIA_TYPE_MAP.get(media_type_key, MediaType.IMAGE)
                     raw_config = dict(provider_conf.get("config", {}))
 
-                    # 从环境变量回填 api_key
-                    env_key = _API_KEY_ENV_MAP.get(class_name)
-                    if env_key and not raw_config.get("api_key"):
-                        import os
-                        raw_config["api_key"] = os.environ.get(env_key, "")
+                    if not raw_config.get("api_key"):
+                        raw_config["api_key"] = self._resolve_api_key(
+                            class_name, raw_config,
+                        )
 
                     provider_config = MediaProviderConfig(
                         class_name=class_name,
@@ -496,6 +491,59 @@ class Application:
                         class_name,
                         exc,
                     )
+
+    @staticmethod
+    def _resolve_api_key(class_name: str, raw_config: dict[str, Any]) -> str:
+        """解析 Provider 所需的 API Key。
+
+        依次尝试以下来源：
+        1. raw_config 中已有的 api_key（调用方已保证非空时不会进入此方法）
+        2. LLM 配置中对应 provider 的 api_key（通过 ModelConfigManager）
+        3. 环境变量 MINIMAX_API_KEY / OPENAI_API_KEY 等
+        4. 空字符串
+
+        Args:
+            class_name: Provider 类名
+            raw_config: Provider 原始配置字典
+
+        Returns:
+            解析到的 API Key 字符串
+        """
+        _LLM_PROVIDER_MAP: dict[str, str] = {
+            "MiniMaxImageProvider": "minimax",
+            "MiniMaxMusicProvider": "minimax",
+            "MiniMaxVideoProvider": "minimax",
+            "MiniMaxTTSProvider": "minimax",
+        }
+        _ENV_KEY_MAP: dict[str, str] = {
+            "MiniMaxImageProvider": "MINIMAX_API_KEY",
+            "MiniMaxMusicProvider": "MINIMAX_API_KEY",
+            "MiniMaxVideoProvider": "MINIMAX_API_KEY",
+            "MiniMaxTTSProvider": "MINIMAX_API_KEY",
+        }
+
+        llm_provider = _LLM_PROVIDER_MAP.get(class_name)
+        if llm_provider:
+            try:
+                from config.models import get_model_config_loader
+
+                loader = get_model_config_loader()
+                provider_conf = loader.get_provider_config(llm_provider)
+                if provider_conf:
+                    keys = provider_conf.get("keys", [])
+                    if keys:
+                        return keys[0].get("api_key", "")
+                    return provider_conf.get("api_key", "")
+            except Exception:
+                pass
+
+        env_key = _ENV_KEY_MAP.get(class_name)
+        if env_key:
+            import os
+
+            return os.environ.get(env_key, "")
+
+        return ""
 
     @staticmethod
     def _build_embedding_fn() -> Any:

@@ -51,3 +51,12 @@ test_output.txt
 debug_*.py
 _test_*.py
 *_output.txt
+
+tmp_*
+test_screenshots/
+test_results/
+*.tsbuildinfo
+*_report.md
+!docs/**/*_report.md
+!config/**/*_report.md
+!src/**/*_report.md

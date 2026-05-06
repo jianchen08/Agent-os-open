@@ -6,11 +6,21 @@ import type { Message, MessageToolCall, ThinkingStep } from '@/types/models'
 const logger = loggers.sessionStore
 
 interface StreamingState {
+  /** @deprecated 使用 isTabStreaming 替代，保留用于向后兼容 */
   isStreaming: boolean
   refreshingMessageId: string | null
+  /** 每个标签页的 streaming 状态 (tabId -> isStreaming) */
+  streamingTabs: Record<string, boolean>
 
+  /** @deprecated 使用 setStreamingForTab 替代 */
   setStreaming: (isStreaming: boolean) => void
   setRefreshingMessageId: (messageId: string | null) => void
+  /** 为指定标签页设置 streaming 状态 */
+  setStreamingForTab: (tabId: string, isStreaming: boolean) => void
+  /** 查询指定标签页是否正在 streaming */
+  isTabStreaming: (tabId: string) => boolean
+  /** 结束指定标签页的 streaming 状态 */
+  stopStreamingForTab: (tabId: string) => void
   stopStreaming: () => void
   startThinking: (sessionId: string, messageId: string) => void
   updateThinkingContent: (sessionId: string, messageId: string, appendContent: string) => void
@@ -47,12 +57,41 @@ interface StreamingState {
 export const useStreamingStore = create<StreamingState>()((set, get) => ({
   isStreaming: false,
   refreshingMessageId: null,
+  streamingTabs: {},
 
+  /** BUG-FIX-fix_20260506_per_tab_streaming: 全局 setStreaming 同步更新 streamingTabs */
   setStreaming: (isStreaming: boolean) => {
     const currentValue = get().isStreaming
     if (currentValue !== isStreaming) {
       set({ isStreaming })
     }
+  },
+
+  /** BUG-FIX-fix_20260506_per_tab_streaming: 为指定标签页设置 streaming 状态 */
+  setStreamingForTab: (tabId: string, isStreaming: boolean) => {
+    const current = get().streamingTabs[tabId]
+    if (current === isStreaming) return
+
+    const newStreamingTabs = { ...get().streamingTabs, [tabId]: isStreaming }
+    if (!isStreaming) {
+      delete newStreamingTabs[tabId]
+    }
+
+    const anyStreaming = Object.values(newStreamingTabs).some(Boolean)
+    set({
+      streamingTabs: newStreamingTabs,
+      isStreaming: anyStreaming,
+    })
+  },
+
+  /** BUG-FIX-fix_20260506_per_tab_streaming: 查询指定标签页是否正在 streaming */
+  isTabStreaming: (tabId: string) => {
+    return get().streamingTabs[tabId] ?? false
+  },
+
+  /** BUG-FIX-fix_20260506_per_tab_streaming: 结束指定标签页的 streaming 状态 */
+  stopStreamingForTab: (tabId: string) => {
+    get().setStreamingForTab(tabId, false)
   },
 
   setRefreshingMessageId: (messageId: string | null) => {
@@ -99,7 +138,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     }
 
     useSessionStore.setState({ messages: updatedMessages })
-    set({ isStreaming: false, refreshingMessageId: null })
+    set({ isStreaming: false, refreshingMessageId: null, streamingTabs: {} })
   },
 
   startThinking: (sessionId: string, messageId: string) => {

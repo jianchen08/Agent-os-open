@@ -105,7 +105,7 @@ class PromptBuildPlugin(IInputPlugin):
         updates["system_message"] = {"role": "system", "content": system_content}
 
         # 单独产出动态变量（由 LLMCore 追加在历史消息之后）
-        dynamic_vars = self._build_dynamic_vars(ctx)
+        dynamic_vars = await self._build_dynamic_vars(ctx)
         if dynamic_vars:
             updates["prompt.dynamic_vars"] = dynamic_vars
 
@@ -250,6 +250,9 @@ class PromptBuildPlugin(IInputPlugin):
             elif var_type == "retrieval":
                 content = await self._retrieve_by_tags(ctx, var_def)
 
+            elif var_type == "routed":
+                content = await self._resolve_routed_var(ctx, var_def)
+
             if not content:
                 continue
 
@@ -327,6 +330,51 @@ class PromptBuildPlugin(IInputPlugin):
             )
 
         return "\n\n".join(r.content for r in results)
+
+    async def _resolve_routed_var(self, ctx: PluginContext, var_def: dict[str, Any]) -> str:
+        """解析路由变量，根据 state 中的 route_key 值从 routes 表中选择注入内容。
+
+        routes 值支持两种形式：
+          - 字符串：直接作为内容使用
+          - 字典：作为嵌套变量定义递归解析（支持 path/tags/content 等类型）
+
+        Args:
+            ctx: 插件执行上下文
+            var_def: 变量定义字典，包含 route_key 和 routes
+
+        Returns:
+            路由匹配到的内容，或空字符串
+        """
+        route_key = var_def.get("route_key", "")
+        routes = var_def.get("routes", {})
+
+        if not route_key or not routes:
+            return ""
+
+        current_value = ctx.state.get(route_key, "")
+        matched = routes.get(str(current_value), routes.get("_default", ""))
+
+        if isinstance(matched, str):
+            return matched
+
+        if isinstance(matched, dict):
+            nested_type = matched.get("type", "")
+            if nested_type == "path":
+                file_path = matched.get("path", "")
+                if file_path:
+                    try:
+                        from pathlib import Path
+                        p = Path(file_path)
+                        if p.exists():
+                            return await asyncio.to_thread(p.read_text, "utf-8")
+                    except Exception as e:
+                        logger.warning("[%s] 路由嵌套变量文件读取失败 | path=%s | error=%s", self.name, file_path, e)
+            elif nested_type == "retrieval" or matched.get("tags"):
+                return await self._retrieve_by_tags(ctx, matched)
+            else:
+                return matched.get("content", "")
+
+        return ""
 
     async def _load_compression_blocks(
         self,
@@ -518,7 +566,7 @@ class PromptBuildPlugin(IInputPlugin):
             return 0
         return max(1, len(text) // 2)
 
-    def _build_dynamic_vars(self, ctx: PluginContext) -> str:
+    async def _build_dynamic_vars(self, ctx: PluginContext) -> str:
         """构建动态变量内容。
 
         动态变量由 LLMCore 追加到消息列表末尾（在历史消息之后），
@@ -562,6 +610,10 @@ class PromptBuildPlugin(IInputPlugin):
                     parts.append(f"- {var_name}: {model_info}")
                 elif var_type in ("reference", "content", "inline", ""):
                     content = var_def.get("content", "")
+                    if content:
+                        parts.append(f"- {var_name}: {content}")
+                elif var_type == "routed":
+                    content = await self._resolve_routed_var(ctx, var_def)
                     if content:
                         parts.append(f"- {var_name}: {content}")
         else:

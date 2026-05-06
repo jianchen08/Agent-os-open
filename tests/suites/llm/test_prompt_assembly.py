@@ -758,3 +758,183 @@ class TestFullAssemblyPipeline:
         assert order == sorted(order), (
             f"layer_order 不一致: {list(positions.keys())}"
         )
+
+
+class TestRoutedVars:
+    """routed 类型变量路由测试。"""
+
+    @pytest.mark.asyncio
+    async def test_routed_static_string_match(self) -> None:
+        """routed 变量根据 state 中的 key 值路由到字符串内容。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["scene"] = "coding"
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "场景人格",
+                "route_key": "scene",
+                "routes": {
+                    "coding": "你是专业的编程助手",
+                    "chatting": "你是温暖的聊天伙伴",
+                    "_default": "你是全能助手",
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "编程助手" in content
+        assert "聊天伙伴" not in content
+
+    @pytest.mark.asyncio
+    async def test_routed_static_default(self) -> None:
+        """routed 变量 state 中无匹配值时走 _default。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["scene"] = "unknown_mode"
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "场景人格",
+                "route_key": "scene",
+                "routes": {
+                    "coding": "你是专业的编程助手",
+                    "_default": "你是全能助手",
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "全能助手" in content
+        assert "编程助手" not in content
+
+    @pytest.mark.asyncio
+    async def test_routed_static_no_key_in_state(self) -> None:
+        """routed 变量 state 中无 route_key 时走 _default。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "场景人格",
+                "route_key": "scene",
+                "routes": {
+                    "coding": "你是专业的编程助手",
+                    "_default": "你是全能助手",
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "全能助手" in content
+
+    @pytest.mark.asyncio
+    async def test_routed_static_empty_routes(self) -> None:
+        """routed 变量 routes 为空时不注入任何内容。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["scene"] = "coding"
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "场景人格",
+                "route_key": "scene",
+                "routes": {},
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "场景人格" not in content
+
+    @pytest.mark.asyncio
+    async def test_routed_static_nested_content(self) -> None:
+        """routed 变量路由到嵌套 content 类型变量。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["scene"] = "chatting"
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "场景知识",
+                "route_key": "scene",
+                "routes": {
+                    "chatting": {
+                        "type": "content",
+                        "content": "生活百科知识",
+                    },
+                    "_default": {
+                        "type": "content",
+                        "content": "通用知识",
+                    },
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "生活百科知识" in content
+        assert "通用知识" not in content
+
+    @pytest.mark.asyncio
+    async def test_routed_dynamic_var(self) -> None:
+        """routed 变量作为动态变量使用。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["time_period"] = "morning"
+        state["context.dynamic_vars"] = [
+            {
+                "type": "routed",
+                "name": "时间段问候",
+                "route_key": "time_period",
+                "routes": {
+                    "morning": "早上好，新的一天开始了",
+                    "evening": "晚上好，辛苦了",
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        dynamic_vars = result.state_updates.get("prompt.dynamic_vars", "")
+
+        assert "早上好" in dynamic_vars
+        assert "晚上好" not in dynamic_vars
+
+    @pytest.mark.asyncio
+    async def test_routed_non_string_state_value(self) -> None:
+        """routed 变量 state 中的值为非字符串时也能正确路由。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["user_level"] = 1
+        state["context.static_vars"] = [
+            {
+                "type": "routed",
+                "name": "用户指引",
+                "route_key": "user_level",
+                "routes": {
+                    "1": "新手引导模式",
+                    "2": "进阶模式",
+                    "_default": "标准模式",
+                },
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "新手引导模式" in content

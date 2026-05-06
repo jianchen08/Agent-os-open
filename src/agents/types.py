@@ -33,7 +33,7 @@ class ContextVarItem:
 
     Attributes:
         name: 变量名称。
-        type: 变量类型（rules/path/timestamp/session/agent/model/retrieval）。
+        type: 变量类型（rules/path/timestamp/session/agent/model/retrieval/routed）。
         path: 文件路径（type=path 时使用）。
         tags: 标签列表（用于知识库检索）。
         inject_type: 注入方式（full/summary/retrieval）。
@@ -41,6 +41,8 @@ class ContextVarItem:
         content: 直接内容（内联注入）。
         memory_type: 记忆类型。
         memory_layer: 记忆层级。
+        route_key: 路由键名（type=routed 时使用），从管道 state 中取对应值作为路由依据。
+        routes: 路由表（type=routed 时使用），键为可能的 state 值，值为注入内容（字符串或嵌套变量定义）。
     """
 
     name: str = ""
@@ -52,6 +54,8 @@ class ContextVarItem:
     content: str = ""
     memory_type: str = ""
     memory_layer: str = ""
+    route_key: str = ""
+    routes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -276,6 +280,8 @@ class AgentConfig:
                     "top_k": item.top_k,
                     "memory_type": item.memory_type,
                     "memory_layer": item.memory_layer,
+                    "route_key": item.route_key,
+                    "routes": item.routes,
                 }
                 for item in self.static_vars.items
             ]
@@ -292,6 +298,8 @@ class AgentConfig:
                     "top_k": item.top_k,
                     "memory_type": item.memory_type,
                     "memory_layer": item.memory_layer,
+                    "route_key": item.route_key,
+                    "routes": item.routes,
                 }
                 for item in self.dynamic_vars.items
             ]

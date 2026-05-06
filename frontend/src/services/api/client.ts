@@ -46,11 +46,16 @@ function onTokenRefreshed(token: string): void {
  *
  * Requirements: 2.4
  */
-function clearAuthAndRedirect(): void {
-  // BUG-FIX-fix_20260506_001: 先停止轮询，避免后续请求继续触发 401
-  import('../modules/GrowthLoop').then(({ destroyGrowthLoop }) => {
+async function clearAuthAndRedirect(): Promise<void> {
+  // BUG-FIX-fix_20260507_002: await 销毁自生长闭环再清理认证
+  // 问题根因: import().then() 异步销毁，后续 401 请求可能在销毁前发出
+  // 修复方案: 使用 await import() 确保销毁完成后再清理
+  try {
+    const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
     destroyGrowthLoop()
-  })
+  } catch {
+    // 模块未加载过，忽略
+  }
 
   // 清除 localStorage 中的令牌和认证数据
   localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
@@ -149,7 +154,7 @@ apiClient.interceptors.response.use(
       if (isRefreshTokenRequest) {
         // refresh_token 已失效，这是正常的认证过期场景
         // 静默处理，不报告错误，直接清除认证状态并重定向
-        clearAuthAndRedirect()
+        await clearAuthAndRedirect()
         return Promise.reject(error)
       }
 
@@ -208,7 +213,7 @@ apiClient.interceptors.response.use(
           // 没有refresh_token，清除认证信息并重定向
           // Requirements: 2.4
           isRefreshing = false
-          clearAuthAndRedirect()
+          await clearAuthAndRedirect()
           return Promise.reject(error)
         }
       } catch (refreshError) {
@@ -216,7 +221,7 @@ apiClient.interceptors.response.use(
         // Requirements: 2.4
         isRefreshing = false
         refreshSubscribers = []
-        clearAuthAndRedirect()
+        await clearAuthAndRedirect()
         return Promise.reject(refreshError)
       }
     }

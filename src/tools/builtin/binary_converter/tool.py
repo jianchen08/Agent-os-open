@@ -123,20 +123,25 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:
         result = md.convert(str(path))
         content = result.text_content
 
-        if not content or not content.strip():
-            return create_failure_result(
-                error=f"转换结果为空：{path.name}。文件可能为空或格式不受支持。",
-                error_code="CONVERSION_EMPTY",
+        if content and content.strip():
+            return create_success_result(
+                data={
+                    "file": str(path),
+                    "content": content,
+                    "format": category,
+                    "size": _format_size(file_size),
+                },
+                metadata={"action": f"read_binary_{category}"},
             )
 
+        # 转换结果为空：文件存在且可读，只是提取不出文本，返回基本元数据
         return create_success_result(
             data={
                 "file": str(path),
-                "content": content,
                 "format": category,
                 "size": _format_size(file_size),
             },
-            metadata={"action": f"read_binary_{category}"},
+            metadata={"action": f"read_binary_{category}_no_text"},
         )
     except Exception as e:
         return create_failure_result(

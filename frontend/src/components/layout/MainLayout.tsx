@@ -86,7 +86,7 @@ export function MainLayout({
 
   return (
     <div
-      className="bg-background flex h-screen w-screen flex-col overflow-hidden"
+      className="bg-background text-foreground flex h-screen w-screen flex-col overflow-hidden"
       style={{ fontFamily: 'var(--font-family)' }}
     >
       {/* 水平区域：侧边栏 + 主内容 */}

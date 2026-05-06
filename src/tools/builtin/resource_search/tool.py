@@ -853,24 +853,31 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册到 Registry 的工具）"""
         try:
-            from tools.loader import get_dynamic_tool_loader
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
 
             loader = get_dynamic_tool_loader()
             if not loader:
-                return [], [], []
+                tool_registry = self._get_tool_registry()
+                if not tool_registry:
+                    return [], [], []
+                loader = init_dynamic_tool_loader(tool_registry)
+                logger.info("[resource_search] 已自动初始化 DynamicToolLoader")
 
-            available = loader.get_available_tools()
-            if not available:
+            discovered = loader.get_discovered_tools()
+            if not discovered:
                 return [], [], []
 
             names = []
             descriptions = []
             schemas_list = []
 
-            for tool_name in available:
+            for tool_name in discovered:
                 if not query_lower:
+                    desc = self._get_tool_description_from_code(
+                        tool_name, discovered[tool_name]
+                    )
                     names.append(tool_name)
-                    descriptions.append(f"已发现的内置工具（未加载）")
+                    descriptions.append(desc)
                     schemas_list.append({})
                     if len(names) >= limit:
                         break
@@ -878,14 +885,20 @@ class ResourceSearchTool:
 
                 if exact:
                     if query_lower == tool_name.lower():
+                        desc = self._get_tool_description_from_code(
+                            tool_name, discovered[tool_name]
+                        )
                         names.append(tool_name)
-                        descriptions.append(f"已发现的内置工具（未加载）")
+                        descriptions.append(desc)
                         schemas_list.append({})
                         break
                 else:
                     if query_lower in tool_name.lower():
+                        desc = self._get_tool_description_from_code(
+                            tool_name, discovered[tool_name]
+                        )
                         names.append(tool_name)
-                        descriptions.append(f"已发现的内置工具（未加载）")
+                        descriptions.append(desc)
                         schemas_list.append({})
                         if len(names) >= limit:
                             break
@@ -900,6 +913,37 @@ class ResourceSearchTool:
         except Exception as e:
             logger.debug(f"[resource_search] DynamicToolLoader 搜索失败: {e}")
             return [], [], []
+
+    def _get_tool_description_from_code(
+        self,
+        tool_name: str,
+        tool_info: tuple[str, str],
+    ) -> str:
+        """从工具代码中提取描述信息（缓存后复用）"""
+        cache_key = f"_desc_cache_{tool_name}"
+        cached = getattr(self, cache_key, None)
+        if cached is not None:
+            return cached
+
+        try:
+            import importlib
+
+            module_path, class_name = tool_info
+            module = importlib.import_module(module_path)
+            tool_class = getattr(module, class_name, None)
+            if tool_class and hasattr(tool_class, "get_tool_definition"):
+                try:
+                    tool_def = tool_class.get_tool_definition()
+                    desc = tool_def.description or ""
+                except Exception:
+                    desc = f"内置工具 {tool_name}"
+            else:
+                desc = f"内置工具 {tool_name}"
+        except Exception:
+            desc = f"内置工具 {tool_name}"
+
+        setattr(self, cache_key, desc)
+        return desc
 
     def _search_tools_from_yaml(
         self,

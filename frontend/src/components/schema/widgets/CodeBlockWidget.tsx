@@ -173,10 +173,10 @@ function highlightCode(
 
 /** token 颜色类 */
 const TOKEN_CLASSES: Record<string, string> = {
-  keyword: 'text-purple-400 font-semibold',
-  string: 'text-green-400',
-  comment: 'text-gray-500 italic',
-  number: 'text-orange-400',
+  keyword: 'text-status-info font-semibold',
+  string: 'text-status-success',
+  comment: 'text-muted-foreground italic',
+  number: 'text-status-warning',
   plain: '',
 }
 

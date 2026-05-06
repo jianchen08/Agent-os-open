@@ -112,7 +112,7 @@ export function LoginPage() {
 
   return (
     <div
-      className="bg-background flex min-h-screen items-center justify-center px-4 py-12"
+      className="bg-background text-foreground flex min-h-screen items-center justify-center px-4 py-12"
       data-testid="login-page"
     >
       <div className="w-full max-w-md space-y-6">

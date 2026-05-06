@@ -36,17 +36,17 @@ function formatUptime(seconds: number): string {
 function getTaskStatusStyle(status: string): string {
   switch (status) {
     case 'completed':
-      return 'bg-green-500/10 text-green-500'
+      return 'bg-status-success/10 text-status-success'
     case 'running':
-      return 'bg-blue-500/10 text-blue-500'
+      return 'bg-status-info/10 text-status-info'
     case 'failed':
-      return 'bg-red-500/10 text-red-500'
+      return 'bg-status-error/10 text-status-error'
     case 'pending':
-      return 'bg-yellow-500/10 text-yellow-500'
+      return 'bg-status-warning/10 text-status-warning'
     case 'cancelled':
-      return 'bg-gray-500/10 text-gray-500'
+      return 'bg-muted-foreground/10 text-muted-foreground'
     default:
-      return 'bg-gray-500/10 text-gray-500'
+      return 'bg-muted-foreground/10 text-muted-foreground'
   }
 }
 
@@ -195,7 +195,7 @@ export function MonitoringPage() {
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">已完成</div>
-                <div className="text-xl font-semibold text-green-500">{statistics.succeeded}</div>
+                <div className="text-xl font-semibold text-status-success">{statistics.succeeded}</div>
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">失败</div>
@@ -203,7 +203,7 @@ export function MonitoringPage() {
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">运行中</div>
-                <div className="text-xl font-semibold text-blue-500">{statistics.running}</div>
+                <div className="text-xl font-semibold text-status-info">{statistics.running}</div>
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 text-xs">成功率</div>

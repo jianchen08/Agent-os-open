@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useStreamingStore } from '@/stores/streamingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { InteractionPanel } from './InteractionPanel'
@@ -98,6 +99,21 @@ export const ChatContainer = ({
    */
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
+
+  /**
+   * BUG-FIX-fix_20260506_per_tab_streaming: 根据 Tab 计算 isGenerating
+   *
+   * 每个标签页的 streaming 状态独立管理：
+   * - 子 Tab：从 streamingStore.streamingTabs[tabId] 获取
+   * - 主 Tab：从 streamingStore.streamingTabs['__main__'] 获取，回退到外部传入的 isGenerating
+   */
+  const streamingTabs = useStreamingStore((s) => s.streamingTabs)
+  const effectiveIsGenerating = useMemo(() => {
+    if (isSubTabActive && activeTabId) {
+      return streamingTabs[activeTabId] ?? false
+    }
+    return streamingTabs['__main__'] ?? isGenerating
+  }, [isSubTabActive, activeTabId, streamingTabs, isGenerating])
 
   /**
    * 根据当前激活 Tab 选择消息源
@@ -242,7 +258,7 @@ export const ChatContainer = ({
       {/* 消息列表 */}
       <MessageList
         messages={filteredMessages}
-        isGenerating={isGenerating}
+        isGenerating={effectiveIsGenerating}
         onRegenerate={onRegenerate}
         onEdit={onEdit}
         onDelete={onDelete}
@@ -262,7 +278,7 @@ export const ChatContainer = ({
 
       {/* 输入区域 */}
       <ChatInput
-        isGenerating={isGenerating}
+        isGenerating={effectiveIsGenerating}
         onSendMessage={(params) => {
           /**
            * 子 Tab 激活时注入 parentRecordId

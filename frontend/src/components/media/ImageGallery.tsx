@@ -238,10 +238,10 @@ export const ImageGallery = memo<ImageGalleryProps>(
 
               {/* 信息区 */}
               <div className="p-3">
-                <h4 className="truncate text-sm font-medium text-[var(--foreground)]">
+                <h4 className="truncate text-sm font-medium text-foreground">
                   {image.title}
                 </h4>
-                <div className="mt-1 flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                   {image.size && <span>{image.size}</span>}
                   {image.seed !== undefined && (
                     <span>种子: {image.seed}</span>

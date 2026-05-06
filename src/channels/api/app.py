@@ -18,6 +18,7 @@ from channels.api.models import HealthResponse
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
     "http://localhost:5188",
     "http://localhost:5189",
 ]

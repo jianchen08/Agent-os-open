@@ -510,8 +510,8 @@ export function CostSettingsPage() {
             '保存配置'
           )}
         </Button>
-        {saveState === 'saved' && <span className="text-xs text-green-500" role="status">已保存</span>}
-        {saveState === 'error' && <span className="text-xs text-red-500" role="alert">保存失败</span>}
+        {saveState === 'saved' && <span className="text-xs text-status-success" role="status">已保存</span>}
+        {saveState === 'error' && <span className="text-xs text-status-error" role="alert">保存失败</span>}
       </div>
     </PageShell>
   )
@@ -530,7 +530,7 @@ function ProtectionBadge({
   return (
     <span
       className={`rounded-full px-2 py-1 text-xs ${
-        enabled ? 'bg-green-500/10 text-green-600' : 'bg-gray-500/10 text-gray-500'
+        enabled ? 'bg-status-success/10 text-status-success' : 'bg-muted-foreground/10 text-muted-foreground'
       }`}
     >
       {label} ({threshold}) {enabled ? 'ON' : 'OFF'}

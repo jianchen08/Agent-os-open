@@ -88,6 +88,7 @@ tool_ids:
   - "list_directory"     # 列出目录内容
   - "bash_execute"       # Shell命令执行
   - "enhanced_search"    # 文件内容/文件名搜索
+  - "resource_search"    # 资源搜索（搜索Agent、工具、工作流、Skill等资源）
   - "web_search"         # 互联网搜索
   - "fetch"              # HTTP请求/网页抓取
   - "memory"             # 记忆检索与存储

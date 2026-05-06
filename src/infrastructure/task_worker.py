@@ -1181,7 +1181,6 @@ class TaskWorker:
             acceptance_criteria = self._normalize_acceptance_criteria_paths(
                 acceptance_criteria, workspace
             )
-            full_input += f"\n\n验收标准（必须满足）：{json.dumps(acceptance_criteria, ensure_ascii=False, indent=2)}"
             eval_prompt = self._build_evaluation_criteria_prompt(acceptance_criteria)
             if eval_prompt:
                 full_input += eval_prompt

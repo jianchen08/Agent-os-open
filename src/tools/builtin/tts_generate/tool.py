@@ -17,8 +17,14 @@ from tools.builtin.base import BuiltinTool
 from tools.media.base import MediaType
 from tools.media.fallback import FallbackStrategy
 from tools.media.provider_registry import MediaProviderRegistry
-from tools.types import Tool
-from tools.types import create_failure_result, create_success_result
+from tools.types import (
+    Tool,
+    ToolCategory,
+    ToolLevel,
+    ToolSource,
+    create_failure_result,
+    create_success_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +96,9 @@ class TtsGenerateTool(BuiltinTool):
         return Tool(
             name="tts_generate",
             description="将文本转换为语音（TTS）。支持多种语音和音频格式。",
-            when_to_use="当用户需要将文本转换为语音时使用，例如生成语音回复、朗读文本等。",
-            when_not_to_use="不需要语音输出时不要使用。",
-            caveats="合成的语音质量取决于可用的 TTS Provider。",
+            when_to_use=["当用户需要将文本转换为语音时使用，例如生成语音回复、朗读文本等。"],
+            when_not_to_use=["不需要语音输出时不要使用。"],
+            caveats=["合成的语音质量取决于可用的 TTS Provider。"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -140,8 +146,9 @@ class TtsGenerateTool(BuiltinTool):
                     },
                 },
             },
-            category="media",
-            level="builtin",
+            category=ToolCategory.EXECUTION,
+            level=ToolLevel.USER,
+            source=ToolSource.BUILTIN,
             tags=["tts", "audio", "media", "synthesis"],
         )
 

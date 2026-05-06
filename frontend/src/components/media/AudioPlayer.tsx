@@ -150,11 +150,11 @@ export const AudioPlayer = memo<AudioPlayerProps>(
           <div className="flex items-center gap-2 text-[var(--accent-error,#ef4444)]">
             <span className="text-sm">{error}</span>
           </div>
-          <details className="mt-2 text-xs text-[var(--muted-foreground)]">
-            <summary className="cursor-pointer hover:text-[var(--foreground)]">
+          <details className="mt-2 text-xs text-muted-foreground">
+            <summary className="cursor-pointer hover:text-foreground">
               查看音频链接
             </summary>
-            <code className="mt-1 block rounded bg-[var(--muted)] p-2 text-xs break-all">
+            <code className="mt-1 block rounded bg-muted p-2 text-xs break-all">
               {src}
             </code>
           </details>
@@ -165,7 +165,7 @@ export const AudioPlayer = memo<AudioPlayerProps>(
     return (
       <div
         data-testid="audio-player"
-        className={`my-4 rounded-xl border border-[var(--border)] bg-[var(--muted)]/30 p-4 ${className}`}
+        className={`my-4 rounded-xl border border-border bg-muted/30 p-4 ${className}`}
       >
         {/* 隐藏的 audio 元素 */}
         <audio
@@ -182,7 +182,7 @@ export const AudioPlayer = memo<AudioPlayerProps>(
 
         {/* 标题 */}
         {title && (
-          <div className="mb-3 truncate text-sm font-medium text-[var(--foreground)]">
+          <div className="mb-3 truncate text-sm font-medium text-foreground">
             {title}
           </div>
         )}

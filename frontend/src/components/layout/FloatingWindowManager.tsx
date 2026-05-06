@@ -83,7 +83,7 @@ export function FloatingWindowManager({
       {windows.map((win) => (
         <div
           key={win.id}
-          className="bg-background border-border pointer-events-auto fixed overflow-hidden rounded-lg border shadow-lg"
+          className="bg-background text-foreground border-border pointer-events-auto fixed overflow-hidden rounded-lg border shadow-lg"
           style={{
             left: win.position.x,
             top: win.position.y,

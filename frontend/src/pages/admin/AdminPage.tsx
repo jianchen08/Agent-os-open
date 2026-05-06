@@ -152,8 +152,8 @@ export function AdminPage() {
                           <span
                             className={`rounded-full px-2 py-0.5 text-xs ${
                               user.role === 'admin'
-                                ? 'bg-blue-500/10 text-blue-500'
-                                : 'bg-gray-500/10 text-gray-500'
+                                ? 'bg-status-info/10 text-status-info'
+                                : 'bg-muted-foreground/10 text-muted-foreground'
                             }`}
                           >
                             {user.role}
@@ -163,8 +163,8 @@ export function AdminPage() {
                           <span
                             className={`rounded-full px-2 py-0.5 text-xs ${
                               user.is_active
-                                ? 'bg-green-500/10 text-green-500'
-                                : 'bg-red-500/10 text-red-500'
+                                ? 'bg-status-success/10 text-status-success'
+                                : 'bg-status-error/10 text-status-error'
                             }`}
                           >
                             {user.is_active ? '活跃' : '禁用'}

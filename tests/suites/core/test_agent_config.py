@@ -747,6 +747,106 @@ class TestContextBuilder:
         assert "recent_context" in retrieval_item["tags"]
         assert retrieval_item["top_k"] == 3
 
+    def test_build_routed_static_var(self) -> None:
+        """测试构建 routed 类型的静态上下文变量。"""
+        config = self._make_config_with_context(
+            static_items=[
+                ContextVarItem(
+                    name="场景人格",
+                    type="routed",
+                    route_key="scene",
+                    routes={
+                        "coding": "你是专业的编程助手",
+                        "chatting": "你是温暖的聊天伙伴",
+                        "_default": "你是全能助手",
+                    },
+                )
+            ],
+        )
+        builder = ContextBuilder()
+        ctx = builder.build_static_context(config)
+        routed_item = ctx["items"][0]
+        assert routed_item["type"] == "routed"
+        assert routed_item["name"] == "场景人格"
+        assert routed_item["route_key"] == "scene"
+        assert "coding" in routed_item["routes"]
+        assert "_default" in routed_item["routes"]
+
+    def test_build_routed_dynamic_var(self) -> None:
+        """测试构建 routed 类型的动态上下文变量。"""
+        config = self._make_config_with_context(
+            dynamic_items=[
+                ContextVarItem(
+                    name="时间段问候",
+                    type="routed",
+                    route_key="time_period",
+                    routes={
+                        "morning": "早上好",
+                        "evening": "晚上好",
+                    },
+                )
+            ],
+        )
+        builder = ContextBuilder()
+        ctx = builder.build_dynamic_context(config)
+        routed_item = ctx["items"][0]
+        assert routed_item["type"] == "routed"
+        assert routed_item["route_key"] == "time_period"
+
+    def test_to_state_includes_routed_fields(self) -> None:
+        """测试 to_state() 包含 route_key 和 routes 字段。"""
+        config = AgentConfig(
+            config_id="routed_state_test",
+            static_vars=ContextConfig(
+                enabled=True,
+                items=[
+                    ContextVarItem(
+                        name="人格",
+                        type="routed",
+                        route_key="scene",
+                        routes={"coding": "编程助手"},
+                    )
+                ],
+            ),
+            dynamic_vars=ContextConfig(
+                enabled=True,
+                items=[
+                    ContextVarItem(
+                        name="模式",
+                        type="routed",
+                        route_key="mode",
+                        routes={"fast": "快速模式"},
+                    )
+                ],
+            ),
+        )
+        state = config.to_state()
+        static_var = state["context.static_vars"][0]
+        assert static_var["route_key"] == "scene"
+        assert static_var["routes"] == {"coding": "编程助手"}
+        dynamic_var = state["context.dynamic_vars"][0]
+        assert dynamic_var["route_key"] == "mode"
+        assert dynamic_var["routes"] == {"fast": "快速模式"}
+
+    def test_loader_parses_routed_fields(self) -> None:
+        """测试 AgentConfigLoader 解析 routed 相关字段。"""
+        from agents.loader import AgentConfigLoader
+
+        item_data = {
+            "name": "场景人格",
+            "type": "routed",
+            "route_key": "scene",
+            "routes": {
+                "coding": "你是专业的编程助手",
+                "_default": "你是全能助手",
+            },
+        }
+        item = AgentConfigLoader._parse_context_var_item(item_data)
+        assert item.type == "routed"
+        assert item.route_key == "scene"
+        assert item.routes["coding"] == "你是专业的编程助手"
+        assert item.routes["_default"] == "你是全能助手"
+
 
 # ============================================================================
 # 5. schema_validator.py 测试

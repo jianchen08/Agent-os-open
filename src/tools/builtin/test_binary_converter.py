@@ -225,7 +225,7 @@ class TestConvertBinaryToMarkdown:
         assert result.data["format"] == "image"
 
     def test_empty_conversion_result(self, temp_dir: Path):
-        """转换结果为空应返回 CONVERSION_EMPTY"""
+        """转换结果为空白文本应返回成功（仅含基本元数据）"""
         path = temp_dir / "empty.pdf"
         path.write_bytes(b"%PDF-1.4 fake")
 
@@ -244,11 +244,14 @@ class TestConvertBinaryToMarkdown:
         ):
             result = original(path)
 
-        assert result.success is False
-        assert result.error_code == "CONVERSION_EMPTY"
+        assert result.success is True
+        assert result.data["format"] == "document"
+        assert "size" in result.data
+        assert "file" in result.data
+        assert "content" not in result.data
 
     def test_none_conversion_result(self, temp_dir: Path):
-        """转换结果为 None 应返回 CONVERSION_EMPTY"""
+        """转换结果为 None 应返回成功（仅含基本元数据）"""
         path = temp_dir / "none.pdf"
         path.write_bytes(b"%PDF-1.4 fake")
 
@@ -267,8 +270,10 @@ class TestConvertBinaryToMarkdown:
         ):
             result = original(path)
 
-        assert result.success is False
-        assert result.error_code == "CONVERSION_EMPTY"
+        assert result.success is True
+        assert result.data["format"] == "document"
+        assert "size" in result.data
+        assert "content" not in result.data
 
     def test_conversion_exception(self, temp_dir: Path):
         """转换抛出异常应返回 CONVERSION_FAILED"""

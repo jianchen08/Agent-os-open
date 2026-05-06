@@ -28,6 +28,7 @@ import { ThemeButton } from './components/layout/ThemeButton'
 import { ThemePanel } from './components/layout/ThemePanel'
 import { Button } from './components/ui/button'
 import type { SendMessageParams } from './components/chat/types'
+import { buildContentBlocksFromMessage } from './components/chat/hooks/useMessageRender'
 import type { Message } from './types/models'
 import type { ReactNode } from 'react'
 
@@ -114,7 +115,7 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
 
   if (isInitializing) {
     return (
-      <div className="bg-background flex min-h-screen items-center justify-center">
+      <div className="bg-background text-foreground flex min-h-screen items-center justify-center">
         <div className="space-y-2 text-center">
           <div className="border-primary mx-auto h-8 w-8 animate-spin rounded-full border-2 border-t-transparent" />
           <p className="text-muted-foreground text-sm">加载中...</p>
@@ -194,7 +195,7 @@ function HomePage(): ReactNode {
     loadMoreMessages,
   } = useSessionStore()
   const { fetchSessions, createSession, setActiveSession, deleteSession } = useSessionListStore()
-  const { isStreaming, setStreaming, stopStreaming } = useStreamingStore()
+  const { isStreaming, setStreaming, setStreamingForTab, stopStreaming, stopStreamingForTab } = useStreamingStore()
 
   /** 消息操作 hooks */
   const messageActions = useMessageActions(activeSessionId ?? undefined)
@@ -282,27 +283,38 @@ function HomePage(): ReactNode {
       const messageId = eventData.message_id || eventData.data?.message_id
       if (!messageId) return
 
+      // BUG-FIX-fix_20260506_per_tab_streaming: 提前解析 pipelineTabId，供超时回调使用
+      const pipelineTabId = resolvePipelineTab(eventData)
+      const targetTabId = pipelineTabId || '__main__'
+
       // BUG-FIX: 启动流式超时定时器，防止后端未发送 stream_end 导致前端永远卡在思考中
       clearStreamingTimeout()
       streamingTimeoutId = setTimeout(() => {
         const currentSid = useSessionStore.getState().activeSessionId
-        setStreaming(false)
+        // BUG-FIX-fix_20260506_per_tab_streaming: 超时时结束对应 Tab 的 streaming
+        stopStreamingForTab(targetTabId)
         streamingTimeoutId = null
-        // 更新 assistant 消息内容为超时错误提示
         if (currentSid) {
-          updateMessageFields(currentSid, messageId, {
-            content: '\n\n⚠️ 响应超时，请重试。',
-            status: 'error',
-          } as any)
+          if (pipelineTabId) {
+            updateSubTabMessage(pipelineTabId, messageId, {
+              content: '\n\n⚠️ 响应超时，请重试。',
+              status: 'error',
+            })
+          } else {
+            updateMessageFields(currentSid, messageId, {
+              content: '\n\n⚠️ 响应超时，请重试。',
+              status: 'error',
+            } as any)
+          }
         }
       }, STREAMING_TIMEOUT_MS)
 
       const msgs = useSessionStore.getState().messages[sid] || []
       const nextSeq = msgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
-      const pipelineTabId = resolvePipelineTab(eventData)
       if (pipelineTabId) {
-        setStreaming(true)
+        // BUG-FIX-fix_20260506_per_tab_streaming: 使用 per-tab streaming 状态
+        setStreamingForTab(pipelineTabId, true)
         useAgentTabStore.getState().addMessageToTab(pipelineTabId, {
           id: messageId,
           sessionId: sid,
@@ -317,7 +329,8 @@ function HomePage(): ReactNode {
         return
       }
 
-      setStreaming(true)
+      // BUG-FIX-fix_20260506_per_tab_streaming: 主 Tab 使用 '__main__' 作为 tabId
+      setStreamingForTab('__main__', true)
       addMessage(sid, {
         id: messageId,
         sessionId: sid,
@@ -349,15 +362,26 @@ function HomePage(): ReactNode {
       // BUG-FIX: 每次收到 chunk 重置超时定时器，说明后端仍在工作
       if (streamingTimeoutId !== null) {
         clearStreamingTimeout()
+        // BUG-FIX-fix_20260506_per_tab_streaming: 提前解析 pipelineTabId，供超时回调使用
+        const chunkPipelineTabId = resolvePipelineTab(eventData)
+        const chunkTargetTabId = chunkPipelineTabId || '__main__'
         streamingTimeoutId = setTimeout(() => {
           const currentSid = useSessionStore.getState().activeSessionId
-          setStreaming(false)
+          // BUG-FIX-fix_20260506_per_tab_streaming: 超时时结束对应 Tab 的 streaming
+          stopStreamingForTab(chunkTargetTabId)
           streamingTimeoutId = null
           if (currentSid) {
-            updateMessageFields(currentSid, messageId, {
-              content: '\n\n⚠️ 响应超时，请重试。',
-              status: 'error',
-            } as any)
+            if (chunkPipelineTabId) {
+              updateSubTabMessage(chunkPipelineTabId, messageId, {
+                content: '\n\n⚠️ 响应超时，请重试。',
+                status: 'error',
+              })
+            } else {
+              updateMessageFields(currentSid, messageId, {
+                content: '\n\n⚠️ 响应超时，请重试。',
+                status: 'error',
+              } as any)
+            }
           }
         }, STREAMING_TIMEOUT_MS)
       }
@@ -467,22 +491,69 @@ function HomePage(): ReactNode {
      * 处理流式结束事件
      *
      * BUG-FIX-fix_20260506_004: 流式结束时更新消息状态为 completed
-     * 问题根因: 只清除 streaming 标记但未更新消息 status，导致消息残留 streaming 状态
-     * 修复方案: 遍历当前会话消息，将 status === 'streaming' 的消息标记为 completed，
-     *          同时清除 thinking.isThinking 状态
+     * BUG-FIX-fix_20260507_streaming_refresh: 使用 full_content 校正内容并重建 contentBlocks
+     * 问题根因:
+     *   1. stream_end 携带 full_content 但未使用，WebSocket chunk 丢失导致内容不完整
+     *   2. 流式 contentBlocks 与刷新后 buildContentBlocksFromMessage 重建顺序不一致
+     * 修复方案:
+     *   1. 使用 full_content 替换累积内容，确保与后端存储一致
+     *   2. 用 buildContentBlocksFromMessage 重建 contentBlocks，保证流式/刷新渲染一致
      */
     const handleStreamEnd = (eventData: any) => {
       clearStreamingTimeout()
-      setStreaming(false)
+
+      const pipelineTabId = resolvePipelineTab(eventData)
+      if (pipelineTabId) {
+        stopStreamingForTab(pipelineTabId)
+      } else {
+        stopStreamingForTab('__main__')
+      }
 
       const sid = useSessionStore.getState().activeSessionId
       if (!sid) return
 
       const messageId = eventData?.message_id || eventData?.data?.message_id
+      const fullContent = eventData?.full_content || eventData?.data?.full_content
+
       if (messageId) {
-        updateMessageFields(sid, messageId, {
-          status: 'completed',
-        } as any)
+        if (pipelineTabId) {
+          const msg = getSubTabMessage(pipelineTabId, messageId)
+          const finalContent = fullContent || msg?.content || ''
+          const finalThinking = msg?.thinking
+            ? { ...msg.thinking, isThinking: false }
+            : undefined
+          const rebuiltBlocks = buildContentBlocksFromMessage(
+            finalContent,
+            msg?.toolCalls,
+            finalThinking,
+            messageId,
+          )
+          updateSubTabMessage(pipelineTabId, messageId, {
+            status: 'completed',
+            content: finalContent,
+            contentBlocks: rebuiltBlocks,
+            ...(finalThinking ? { thinking: finalThinking } : {}),
+          })
+        } else {
+          const msgs = useSessionStore.getState().messages[sid] || []
+          const msg = msgs.find((m) => m.id === messageId)
+          const finalContent = fullContent || msg?.content || ''
+          const finalThinking = msg?.thinking
+            ? { ...msg.thinking, isThinking: false }
+            : undefined
+          const rebuiltBlocks = buildContentBlocksFromMessage(
+            finalContent,
+            msg?.toolCalls,
+            finalThinking,
+            messageId,
+          )
+          updateMessageFields(sid, messageId, {
+            status: 'completed',
+            content: finalContent,
+            contentBlocks: rebuiltBlocks,
+            ...(finalThinking ? { thinking: finalThinking } : {}),
+          } as any)
+        }
       } else {
         const sessionMessages = useSessionStore.getState().messages[sid] || []
         const needsUpdate = sessionMessages.some(
@@ -498,31 +569,74 @@ function HomePage(): ReactNode {
      * 处理新消息事件
      *
      * 收到完整的最终消息，确保流式状态结束，清除超时定时器
-     * BUG-FIX-fix_20260506_004: 同步更新消息状态
-     * BUG-FIX-fix_20260506_005: 使用 new_message 的 content 补偿流式传输丢失的内容
+     * BUG-FIX-fix_20260507_streaming_refresh: 始终使用最终内容补偿并重建 contentBlocks
+     * 问题根因: 仅在 content 为空时补偿，但流式阶段 content 已有部分内容，丢失的 chunk 无法恢复
+     * 修复方案: 始终用 new_message 的 content 作为最终真实来源，重建 contentBlocks 保证一致
      */
     const handleNewMessage = (eventData: any) => {
       clearStreamingTimeout()
-      setStreaming(false)
+
+      const pipelineTabId = resolvePipelineTab(eventData)
+      if (pipelineTabId) {
+        stopStreamingForTab(pipelineTabId)
+      } else {
+        stopStreamingForTab('__main__')
+      }
 
       const sid = useSessionStore.getState().activeSessionId
       if (!sid) return
 
       const messageId = eventData?.message_id || eventData?.message?.id || eventData?.data?.message_id || eventData?.data?.id
       if (messageId) {
-        const sessionMessages = useSessionStore.getState().messages[sid] || []
-        const existingMsg = sessionMessages.find((m: any) => m.id === messageId)
         const finalContent = eventData?.content || eventData?.data?.content
 
-        if (existingMsg && finalContent && !existingMsg.content) {
-          updateMessageFields(sid, messageId, {
-            status: 'completed',
-            content: finalContent,
-          } as any)
+        if (pipelineTabId) {
+          const tabMsgs = useAgentTabStore.getState().tabMessages[pipelineTabId] || []
+          const existingMsg = tabMsgs.find((m: any) => m.id === messageId)
+          if (existingMsg && finalContent) {
+            const finalThinking = existingMsg.thinking
+              ? { ...existingMsg.thinking, isThinking: false }
+              : undefined
+            const rebuiltBlocks = buildContentBlocksFromMessage(
+              finalContent,
+              existingMsg.toolCalls,
+              finalThinking,
+              messageId,
+            )
+            updateSubTabMessage(pipelineTabId, messageId, {
+              status: 'completed',
+              content: finalContent,
+              contentBlocks: rebuiltBlocks,
+              ...(finalThinking ? { thinking: finalThinking } : {}),
+            })
+          } else if (existingMsg) {
+            updateSubTabMessage(pipelineTabId, messageId, { status: 'completed' })
+          }
         } else {
-          updateMessageFields(sid, messageId, {
-            status: 'completed',
-          } as any)
+          const sessionMessages = useSessionStore.getState().messages[sid] || []
+          const existingMsg = sessionMessages.find((m: any) => m.id === messageId)
+
+          if (existingMsg && finalContent) {
+            const finalThinking = existingMsg.thinking
+              ? { ...existingMsg.thinking, isThinking: false }
+              : undefined
+            const rebuiltBlocks = buildContentBlocksFromMessage(
+              finalContent,
+              existingMsg.toolCalls,
+              finalThinking,
+              messageId,
+            )
+            updateMessageFields(sid, messageId, {
+              status: 'completed',
+              content: finalContent,
+              contentBlocks: rebuiltBlocks,
+              ...(finalThinking ? { thinking: finalThinking } : {}),
+            } as any)
+          } else {
+            updateMessageFields(sid, messageId, {
+              status: 'completed',
+            } as any)
+          }
         }
       }
     }
@@ -989,11 +1103,22 @@ function HomePage(): ReactNode {
 
   /**
    * 停止生成
+   *
+   * BUG-FIX-fix_20260506_per_tab_streaming: 根据当前活跃 Tab 停止对应的 streaming
    */
   const handleStopGenerate = useCallback(() => {
     webSocketService.sendCancel()
-    stopStreaming()
-  }, [stopStreaming])
+    // BUG-FIX-fix_20260506_per_tab_streaming: 停止当前活跃 Tab 的 streaming
+    const currentActiveTabId = useAgentTabStore.getState().activeTabId
+    const currentTabs = useAgentTabStore.getState().tabs
+    const activeTab = currentTabs.find((t) => t.id === currentActiveTabId)
+    const isSubTab = activeTab != null && activeTab.agentLevel !== 1
+    if (isSubTab && currentActiveTabId) {
+      stopStreamingForTab(currentActiveTabId)
+    } else {
+      stopStreamingForTab('__main__')
+    }
+  }, [stopStreamingForTab])
 
   /**
    * 编辑消息
@@ -1103,7 +1228,7 @@ function HomePage(): ReactNode {
       className="flex-1"
     />
   ) : (
-    <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8">
+    <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-6 px-8">
       <div className="flex flex-col items-center gap-3">
         <div className="bg-primary/10 text-primary flex h-16 w-16 items-center justify-center rounded-2xl text-3xl">
           <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1124,7 +1249,7 @@ function HomePage(): ReactNode {
         </button>
         <a
           href={ROUTES.AGENTS}
-          className="border-border hover:bg-accent rounded-lg border px-5 py-2.5 text-sm transition-colors"
+          className="text-foreground border-border hover:bg-accent rounded-lg border px-5 py-2.5 text-sm transition-colors"
         >
           浏览智能体
         </a>

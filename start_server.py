@@ -835,6 +835,7 @@ async def _stream_engine_response(
                         except Exception:
                             pass
 
+                # tool_start 事件
                 elif chunk_type == "tool_start":
                     try:
                         await websocket.send_text(json.dumps({
@@ -848,6 +849,7 @@ async def _stream_engine_response(
                     except Exception:
                         pass
 
+                # tool_result 事件
                 elif chunk_type == "tool_result":
                     try:
                         await websocket.send_text(json.dumps({

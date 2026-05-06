@@ -121,7 +121,7 @@ const SessionItem = memo<SessionItemProps>(
 
         {/* 星标指示器 */}
         {session.starred && (
-          <Star className="mr-1 h-3 w-3 flex-shrink-0 fill-current text-yellow-500" />
+          <Star className="mr-1 h-3 w-3 flex-shrink-0 fill-current text-status-warning" />
         )}
 
         {/* 正在删除加载指示 */}

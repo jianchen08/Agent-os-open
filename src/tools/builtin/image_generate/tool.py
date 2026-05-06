@@ -192,8 +192,16 @@ class ImageGenerateTool(BuiltinTool):
             from infrastructure.service_provider import get_service_provider
 
             provider = get_service_provider()
-            return provider.get("media_provider_registry")
-        except Exception:
+            registry = provider.get("media_provider_registry")
+            if registry is None:
+                logger.warning(
+                    "[ImageGenerate] ServiceProvider 中未找到 media_provider_registry，"
+                    "可用服务: %s",
+                    list(provider._services.keys()),
+                )
+            return registry
+        except Exception as exc:
+            logger.warning("[ImageGenerate] 获取 MediaProviderRegistry 失败: %s", exc)
             return None
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:

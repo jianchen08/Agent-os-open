@@ -140,7 +140,7 @@ export function ApiSettingsPage() {
   return (
     <SettingsPageShell title="API 配置" description="管理外部 API 密钥和端点">
       {loadError && (
-        <div className="mb-4 rounded-lg bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600">
+        <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}
         </div>
       )}
@@ -177,8 +177,8 @@ export function ApiSettingsPage() {
           <Button size="sm" onClick={handleTestConnection} disabled={testStatus === 'testing'}>
             {testStatus === 'testing' ? '测试中...' : '测试连接'}
           </Button>
-          {testStatus === 'ok' && <span className="text-xs text-green-500">连接成功</span>}
-          {testStatus === 'fail' && <span className="text-xs text-red-500">连接失败</span>}
+          {testStatus === 'ok' && <span className="text-xs text-status-success">连接成功</span>}
+          {testStatus === 'fail' && <span className="text-xs text-status-error">连接失败</span>}
         </div>
       </Section>
 
@@ -197,7 +197,7 @@ export function ApiSettingsPage() {
               <span className="text-muted-foreground flex-1 font-mono text-xs">
                 ••••••••••••••••
               </span>
-              <span className="rounded bg-green-500/10 px-2 py-0.5 text-xs text-green-600">
+              <span className="rounded bg-status-success/10 px-2 py-0.5 text-xs text-status-success">
                 已配置
               </span>
             </div>

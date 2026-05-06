@@ -61,6 +61,8 @@ class AgentConfigLoader:
             content=data.get("content", ""),
             memory_type=data.get("memory_type", ""),
             memory_layer=data.get("memory_layer", ""),
+            route_key=data.get("route_key", ""),
+            routes=data.get("routes", {}),
         )
 
     @staticmethod

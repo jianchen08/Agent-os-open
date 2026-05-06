@@ -61,13 +61,14 @@ export default class ErrorBoundary extends Component<Props, State> {
             padding: '20px',
             margin: '50px auto',
             maxWidth: '800px',
-            backgroundColor: '#fff3cd',
-            border: '1px solid #ffc107',
+            backgroundColor: 'hsl(var(--background))',
+            border: '1px solid hsl(var(--border))',
             borderRadius: '4px',
+            color: 'hsl(var(--foreground))',
           }}
         >
-          <h2 style={{ color: '#856404' }}>⚠️ 出错了</h2>
-          <p style={{ color: '#856404' }}>应用程序遇到了一个错误。请刷新页面重试。</p>
+          <h2 style={{ color: 'hsl(var(--foreground))' }}>⚠️ 出错了</h2>
+          <p style={{ color: 'hsl(var(--muted-foreground))' }}>应用程序遇到了一个错误。请刷新页面重试。</p>
           {this.state.error && (
             <details style={{ marginTop: '20px' }}>
               <summary style={{ cursor: 'pointer', marginBottom: '10px' }}>
@@ -75,11 +76,12 @@ export default class ErrorBoundary extends Component<Props, State> {
               </summary>
               <pre
                 style={{
-                  backgroundColor: '#f8f9fa',
+                  backgroundColor: 'hsl(var(--muted))',
                   padding: '10px',
                   borderRadius: '4px',
                   overflow: 'auto',
                   fontSize: '12px',
+                  color: 'hsl(var(--foreground))',
                 }}
               >
                 {this.state.error.toString()}
@@ -92,8 +94,8 @@ export default class ErrorBoundary extends Component<Props, State> {
             style={{
               marginTop: '20px',
               padding: '10px 20px',
-              backgroundColor: '#007bff',
-              color: 'white',
+              backgroundColor: 'hsl(var(--primary))',
+              color: 'hsl(var(--primary-foreground))',
               border: 'none',
               borderRadius: '4px',
               cursor: 'pointer',

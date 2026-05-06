@@ -27,7 +27,7 @@ export function FullscreenOverlay({ isActive, title, onExit, children }: Fullscr
   if (!isActive) return null
 
   return (
-    <div className="bg-background fixed inset-0 z-[100] flex flex-col">
+    <div className="bg-background text-foreground fixed inset-0 z-[100] flex flex-col">
       {/* 顶部工具栏 */}
       <div className="border-border flex items-center justify-between border-b px-4 py-2">
         <span className="text-foreground text-sm font-medium">{title ?? '全屏模式'}</span>

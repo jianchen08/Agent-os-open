@@ -195,7 +195,7 @@ export function ContextWindowSettingsPage() {
   return (
     <PageShell title="上下文窗口" description="管理上下文窗口大小和策略">
       {loadError && (
-        <div className="mb-4 rounded-lg bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600">
+        <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           {loadError}
         </div>
       )}
@@ -400,10 +400,10 @@ export function ContextWindowSettingsPage() {
           )}
         </Button>
         {saveState === 'saved' && (
-          <span className="text-xs text-green-500" role="status">已保存</span>
+          <span className="text-xs text-status-success" role="status">已保存</span>
         )}
         {saveState === 'error' && (
-          <span className="text-xs text-red-500" role="alert">保存失败</span>
+          <span className="text-xs text-status-error" role="alert">保存失败</span>
         )}
       </div>
     </PageShell>

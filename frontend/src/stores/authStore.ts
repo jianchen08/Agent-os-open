@@ -134,12 +134,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: basicUser })
       }
 
-      // BUG-FIX-fix_20260506_001: 登录成功后启动自生长闭环
-      import('@/services/modules/GrowthLoop').then(({ restartGrowthLoop }) => {
-        restartGrowthLoop().catch((err) => {
-          console.error('登录后启动自生长闭环失败:', err)
-        })
-      })
+      // BUG-FIX-fix_20260507_002: 登录成功后 await restartGrowthLoop 确保模块就绪
+      // 问题根因: import().then() 不阻塞，页面渲染时模块尚未加载完成
+      // 修复方案: 使用 await 等待 restartGrowthLoop 完成
+      try {
+        const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
+        await restartGrowthLoop()
+      } catch (err) {
+        console.error('登录后启动自生长闭环失败:', err)
+      }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : '登录失败'
       set({ isLoading: false, error: errorMessage })
@@ -209,12 +212,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ user: basicUser })
       }
 
-      // BUG-FIX-fix_20260506_001: 注册成功后启动自生长闭环
-      import('@/services/modules/GrowthLoop').then(({ restartGrowthLoop }) => {
-        restartGrowthLoop().catch((err) => {
-          console.error('注册后启动自生长闭环失败:', err)
-        })
-      })
+      // BUG-FIX-fix_20260507_002: 注册成功后 await restartGrowthLoop 确保模块就绪
+      // 问题根因: import().then() 不阻塞，页面渲染时模块尚未加载完成
+      // 修复方案: 使用 await 等待 restartGrowthLoop 完成
+      try {
+        const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
+        await restartGrowthLoop()
+      } catch (err) {
+        console.error('注册后启动自生长闭环失败:', err)
+      }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : '注册失败'
       set({ isLoading: false, error: errorMessage })
@@ -230,10 +236,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
    * Requirements: 2.6
    */
   logout: async () => {
-    // BUG-FIX-fix_20260506_001: 登出时销毁自生长闭环，停止轮询
-    import('@/services/modules/GrowthLoop').then(({ destroyGrowthLoop }) => {
+    // BUG-FIX-fix_20260507_002: 登出时 await destroyGrowthLoop 确保完全清理
+    try {
+      const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
       destroyGrowthLoop()
-    })
+    } catch {
+      // 动态导入失败，忽略
+    }
 
     const refreshTokenValue =
       get().refreshTokenValue || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
@@ -301,10 +310,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         refreshTokenValue: response.refresh_token || currentRefreshToken,
       })
     } catch (_error: unknown) {
-      // BUG-FIX-fix_20260506_001: 刷新失败时销毁自生长闭环
-      import('@/services/modules/GrowthLoop').then(({ destroyGrowthLoop }) => {
+      // BUG-FIX-fix_20260507_002: 刷新失败时 await destroyGrowthLoop 确保完全清理
+      try {
+        const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
         destroyGrowthLoop()
-      })
+      } catch {
+        // 动态导入失败，忽略
+      }
       // 刷新失败，清除认证状态
       await get().logout()
       throw new Error('令牌刷新失败，请重新登录')
@@ -431,17 +443,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
    * 调用后端 GET /api/v1/auth/me 端点获取用户信息。
    */
   fetchCurrentUser: async () => {
-    try {
-      const userInfo = await authApi.getCurrentUser()
-      const user = mapUserInfoToUser(userInfo)
+    const userInfo = await authApi.getCurrentUser()
+    const user = mapUserInfoToUser(userInfo)
 
-      // 持久化用户信息（使用 STORAGE_KEYS 常量）
-      localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
+    // 持久化用户信息（使用 STORAGE_KEYS 常量）
+    localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
 
-      set({ user })
-    } catch (error: unknown) {
-      throw error
-    }
+    set({ user })
   },
 
   /**
@@ -460,11 +468,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
  *
  * BUG-FIX-fix_20260506_001: 认证过期时同时销毁自生长闭环
  */
-registerAuthExpiredCallback(() => {
-  // 销毁自生长闭环，停止轮询
-  import('@/services/modules/GrowthLoop').then(({ destroyGrowthLoop }) => {
+registerAuthExpiredCallback(async () => {
+  // BUG-FIX-fix_20260507_002: 认证过期时 await destroyGrowthLoop 确保完全清理
+  try {
+    const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
     destroyGrowthLoop()
-  })
+  } catch {
+    // 动态导入失败，忽略
+  }
 
   useAuthStore.setState({
     user: null,

@@ -14,6 +14,7 @@
 - agent: 动态生成当前 Agent 信息
 - model: 动态生成当前模型信息
 - retrieval: 基于标签的知识库检索
+- routed: 根据运行时 state 中的 key 路由到不同内容
 
 典型用法::
 
@@ -116,6 +117,12 @@ class ContextBuilder:
             # 当前模型信息
             result["type"] = "model"
             result["content"] = {"model_id": "", "provider": ""}
+        elif var_type == "routed":
+            # 路由变量 — 根据运行时 state 中的 key 值选择注入内容
+            result["type"] = "routed"
+            result["route_key"] = item.route_key
+            result["routes"] = item.routes
+            result["content"] = ""
         elif item.tags:
             # 基于标签的知识库检索
             result["type"] = "retrieval"

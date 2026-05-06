@@ -26,15 +26,16 @@ async function bootstrap() {
   const authStore = useAuthStore.getState()
   await authStore.initializeAuth()
 
-  // BUG-FIX-fix_20260506_001: 仅在已认证时初始化自生长闭环
-  // 问题根因: 无条件启动轮询导致未认证时 401 死循环
-  // 修复方案: 检查 isAuthenticated 状态，仅在已认证时启动
+  // BUG-FIX-fix_20260507_002: await initializeGrowthLoop 确保模块在渲染前就绪
+  // 问题根因: import().then() 不阻塞，React 渲染时模块尚未加载完成导致工作区为空
+  // 修复方案: 使用 await 等待 initializeGrowthLoop 完成后再渲染
   if (authStore.isAuthenticated) {
-    import('@/services/modules/GrowthLoop').then(({ initializeGrowthLoop }) => {
-      initializeGrowthLoop().catch((error) => {
-        console.error('自生长闭环初始化失败:', error)
-      })
-    })
+    try {
+      const { initializeGrowthLoop } = await import('@/services/modules/GrowthLoop')
+      await initializeGrowthLoop()
+    } catch (error) {
+      console.error('自生长闭环初始化失败:', error)
+    }
   }
 
   createRoot(root).render(

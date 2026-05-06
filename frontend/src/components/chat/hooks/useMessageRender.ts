@@ -120,8 +120,10 @@ function buildFragments(contentBlocks: ContentBlock[], messageId: string): Rende
 
 /**
  * 从消息的 content + toolCalls + thinking 动态构建 contentBlocks
+ *
+ * 构建顺序: thinking → text → toolCalls（与后端存储的执行顺序一致）
  */
-function buildContentBlocksFromMessage(
+export function buildContentBlocksFromMessage(
   content: string,
   toolCalls: MessageToolCall[] | undefined,
   thinking: Message['thinking'],

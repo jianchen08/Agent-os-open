@@ -11,7 +11,6 @@ import { loggers } from '@/utils/logger'
 import { registerCapabilities } from './ClientCapabilities'
 import { moduleManager } from './ModuleManager'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import type { RenderingSpaceConfig } from '@/types/schema'
 
 /**
  * 初始化自生长闭环
@@ -31,54 +30,15 @@ export async function initializeGrowthLoop(): Promise<void> {
   // Step 2: 注册客户端能力
   await registerCapabilities()
 
-  // Step 3: 拉取并注册模块
+  // Step 3: 拉取并注册模块（_syncToLayoutStore 已处理 workspace tab 和 dock 的同步）
   await moduleManager.initialize()
-
-  // BUG-FIX-fix_20260505_001: 将 workspace 空间的模块转为 WorkspaceTab
-  // 问题根因: Schema 注册完成后，没有任何代码将 workspace 空间的模块转为 WorkspaceTab 并添加到 layoutModeStore
-  // 修复方案: 遍历已注册模块，将 rendering.spaces 中 space === 'workspace' 的配置转为 WorkspaceTab
-  const modules = schemaRegistry.getEnabled()
-  const store = useLayoutModeStore.getState()
-
-  for (const mod of modules) {
-    const schema = mod.schema
-    if (!schema.rendering?.spaces) continue
-
-    const workspaceSpaces = schema.rendering.spaces.filter(
-      (s: RenderingSpaceConfig) => s.space === 'workspace'
-    )
-    for (const space of workspaceSpaces) {
-      const tabId = `${schema.identity.id}::workspace`
-      const existingTabs = useLayoutModeStore.getState().workspaceTabs
-      if (existingTabs.some(t => t.id === tabId)) continue
-
-      store.addWorkspaceTab({
-        id: tabId,
-        title: (space.props?.title as string) ?? schema.identity.name,
-        icon: schema.identity.icon,
-        moduleId: schema.identity.id,
-        component: space.widget,
-        dataSource: space.dataSource,
-        layout: space.layout as Record<string, unknown>,
-        isActive: false,
-        isPinned: true,
-      })
-    }
-  }
-
-  // 激活第一个 Tab（如果当前没有活跃 Tab）
-  const currentTabs = useLayoutModeStore.getState().workspaceTabs
-  const hasActive = currentTabs.some(t => t.isActive)
-  if (currentTabs.length > 0 && !hasActive) {
-    store.setActiveTab(currentTabs[0].id)
-  }
 
   // Step 4: 启动轮询
   moduleManager.startPolling(30000)
 
   loggers.websocket.info('自生长闭环初始化完成')
 
-  loggers.websocket.info(`当前已注册 ${modules.length} 个模块`)
+  loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
 }
 
 /**
@@ -93,11 +53,9 @@ export function handleSchemaUpdate(event: {
 }
 
 /**
- * 销毁自生长闭环
+ * 销毁自生长闭环（完全清理）
  *
- * BUG-FIX-fix_20260506_001: 确保完全清理轮询和注册表
- * 问题根因: destroyGrowthLoop 未完全清理所有状态
- * 修复方案: 重置 layoutModeStore 的 workspace/dock 数据，清理 schema 注册表
+ * 用于登出、认证过期等场景，需要彻底清除所有模块状态。
  */
 export function destroyGrowthLoop(): void {
   moduleManager.destroy()
@@ -110,9 +68,29 @@ export function destroyGrowthLoop(): void {
 /**
  * 重新启动自生长闭环
  *
+ * BUG-FIX-fix_20260507_002: 原子性替换，避免清空后再拉取导致工作区闪烁
+ * 问题根因: destroyGrowthLoop() 先清空 workspaceTabs，再异步 fetchAndRegister，
+ *          在此间隙用户看到空工作区
+ * 修复方案: 不清空 workspaceTabs，用 fetchAndRebuild 全量替换，
+ *          新数据到达前旧数据保持显示
+ *
  * 用于登录后重新初始化模块轮询。
  */
 export async function restartGrowthLoop(): Promise<void> {
-  destroyGrowthLoop()
-  await initializeGrowthLoop()
+  moduleManager.destroy()
+  schemaRegistry.clear()
+
+  initializeWidgets()
+
+  try {
+    await registerCapabilities()
+    await moduleManager.fetchAndRebuild()
+    moduleManager.startPolling(30000)
+    loggers.websocket.info('自生长闭环重启完成')
+    loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
+  } catch (error) {
+    useLayoutModeStore.setState({ workspaceTabs: [] })
+    useLayoutModeStore.getState().setDockItems([])
+    throw error
+  }
 }
