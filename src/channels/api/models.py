@@ -83,6 +83,14 @@ class ThreadResponse(BaseModel):
     active_pipeline_id: str | None = Field(default=None, description="当前活跃的管道执行 ID")
 
 
+class MessageListResponse(BaseModel):
+    """消息列表分页响应模型。"""
+
+    messages: list[MessageResponse] = Field(default_factory=list, description="消息列表")
+    total: int = Field(default=0, description="消息总数")
+    has_more: bool = Field(default=False, description="是否还有更多历史消息")
+
+
 class MessageResponse(BaseModel):
     """消息响应模型，字段名与前端 mapBackendMessageToMessage 对齐。"""
     id: str

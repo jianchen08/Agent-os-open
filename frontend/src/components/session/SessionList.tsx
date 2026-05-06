@@ -16,6 +16,7 @@ import {
   Loader2,
   MessageSquare,
   MoreHorizontal,
+  Pin,
   Star,
   Trash2,
 } from 'lucide-react'
@@ -56,6 +57,8 @@ interface SessionListProps {
   onCopySession: (session: Session) => void
   /** 星标切换回调 */
   onStarSession: (sessionId: string) => void
+  /** 置顶切换回调 */
+  onPinSession: (sessionId: string) => void
   /** 自定义容器类名 */
   className?: string
   /** 列表项高度 */
@@ -83,6 +86,8 @@ interface SessionItemProps {
   onCopy: () => void
   /** 星标切换回调 */
   onStar: () => void
+  /** 置顶切换回调 */
+  onPin: () => void
   /** 列表项高度 */
   itemHeight: number
 }
@@ -97,6 +102,7 @@ const SessionItem = memo<SessionItemProps>(
     onEdit,
     onCopy,
     onStar,
+    onPin,
     itemHeight,
   }) => {
     return (
@@ -113,8 +119,18 @@ const SessionItem = memo<SessionItemProps>(
         aria-label={`会话: ${session.title}`}
         aria-current={isActive ? 'true' : undefined}
       >
-        {/* 左侧图标 */}
-        <MessageSquare className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0" />
+        {/* 左侧图标：置顶会话显示 Pin，普通会话显示 MessageSquare */}
+        {session.pinned ? (
+          <Pin
+            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
+            data-testid="pin-icon"
+          />
+        ) : (
+          <MessageSquare
+            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
+            data-testid="message-icon"
+          />
+        )}
 
         {/* 标题 */}
         <span className="min-w-0 flex-1 truncate text-sm">{session.title}</span>
@@ -184,6 +200,15 @@ const SessionItem = memo<SessionItemProps>(
                   <Star className="mr-2 h-3.5 w-3.5" />
                   {session.starred ? '取消星标' : '星标'}
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onPin()
+                  }}
+                >
+                  <Pin className="mr-2 h-3.5 w-3.5" />
+                  {session.pinned ? '取消置顶' : '置顶会话'}
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={(e) => {
@@ -220,6 +245,7 @@ export const SessionList = memo<SessionListProps>(
     onEditSession,
     onCopySession,
     onStarSession,
+    onPinSession,
     className,
     itemHeight = 40,
   }) => {
@@ -263,22 +289,60 @@ export const SessionList = memo<SessionListProps>(
     const deleteTargetTitle =
       sessions.find((s) => s.id === deleteConfirmId)?.title || '此会话'
 
+    /** 按 updatedAt 降序排序的比较函数 */
+    const sortByUpdatedAt = (a: Session, b: Session): number =>
+      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+
+    /** 置顶会话列表（按 updatedAt 降序） */
+    const pinnedSessions = sessions
+      .filter((s) => s.pinned)
+      .sort(sortByUpdatedAt)
+
+    /** 普通会话列表（按 updatedAt 降序） */
+    const normalSessions = sessions
+      .filter((s) => !s.pinned)
+      .sort(sortByUpdatedAt)
+
+    /** 是否存在置顶会话 */
+    const hasPinned = pinnedSessions.length > 0
+
+    /** 渲染会话项的辅助函数 */
+    const renderItem = (session: Session): React.ReactNode => (
+      <SessionItem
+        key={session.id}
+        session={session}
+        isActive={activeSessionId === session.id}
+        isDeleting={deletingSessionIds.has(session.id)}
+        onClick={() => onSessionClick(session.id)}
+        onDelete={() => handleDeleteRequest(session.id)}
+        onEdit={() => onEditSession(session)}
+        onCopy={() => onCopySession(session)}
+        onStar={() => onStarSession(session.id)}
+        onPin={() => onPinSession(session.id)}
+        itemHeight={itemHeight}
+      />
+    )
+
     return (
       <div className={cn('space-y-0.5', className)}>
-        {sessions.map((session) => (
-          <SessionItem
-            key={session.id}
-            session={session}
-            isActive={activeSessionId === session.id}
-            isDeleting={deletingSessionIds.has(session.id)}
-            onClick={() => onSessionClick(session.id)}
-            onDelete={() => handleDeleteRequest(session.id)}
-            onEdit={() => onEditSession(session)}
-            onCopy={() => onCopySession(session)}
-            onStar={() => onStarSession(session.id)}
-            itemHeight={itemHeight}
-          />
-        ))}
+        {/* 置顶会话分组 */}
+        {hasPinned && (
+          <div data-group="pinned">
+            <div className="text-muted-foreground px-2 pb-1 pt-2 text-xs font-medium">
+              已置顶
+            </div>
+            {pinnedSessions.map(renderItem)}
+            <div className="border-border my-1 border-t" />
+          </div>
+        )}
+
+        {/* 普通会话分组 */}
+        <div data-group="normal">
+          <div className="text-muted-foreground px-2 pb-1 pt-2 text-xs font-medium">
+            全部会话
+          </div>
+          {normalSessions.map(renderItem)}
+        </div>
 
         {/* 删除确认对话框 */}
         <Dialog

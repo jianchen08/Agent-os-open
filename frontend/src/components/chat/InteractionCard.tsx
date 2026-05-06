@@ -9,8 +9,19 @@
 import { useState } from 'react'
 import { ArrowRight, Check, Loader2, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
-import type { PendingInteraction } from '@/stores/interactionStore'
+import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
+
+/** description 长度阈值：超过此值弹窗展示，否则直接执行选择 */
+const DESCRIPTION_DIALOG_THRESHOLD = 20
 
 export interface InteractionCardProps {
   interaction: PendingInteraction
@@ -28,6 +39,8 @@ export function InteractionCard({
   isSubmitting,
 }: InteractionCardProps) {
   const [textInput, setTextInput] = useState('')
+  /** 当前选中的待确认选项（弹窗打开时非 null） */
+  const [selectedOption, setSelectedOption] = useState<InteractionOption | null>(null)
   const isDone = interaction.status !== 'pending'
 
   const handleTextSubmit = () => {
@@ -42,6 +55,35 @@ export function InteractionCard({
       e.preventDefault()
       handleTextSubmit()
     }
+  }
+
+  /**
+   * 判断是否需要弹窗展示 description。
+   * description 存在且长度 >= 阈值时弹窗，否则直接执行选择。
+   */
+  const shouldShowDialog = (opt: InteractionOption): boolean =>
+    !!opt.description && opt.description.length >= DESCRIPTION_DIALOG_THRESHOLD
+
+  /** 点击选项：有长 description 弹窗，否则直接选择 */
+  const handleOptionClick = (opt: InteractionOption) => {
+    if (shouldShowDialog(opt)) {
+      setSelectedOption(opt)
+    } else {
+      onRespondChoice(opt.id)
+    }
+  }
+
+  /** 确认选择 */
+  const handleConfirmOption = () => {
+    if (selectedOption) {
+      onRespondChoice(selectedOption.id)
+      setSelectedOption(null)
+    }
+  }
+
+  /** 取消选择 */
+  const handleCancelOption = () => {
+    setSelectedOption(null)
   }
 
   return (
@@ -108,20 +150,39 @@ export function InteractionCard({
                   variant="outline"
                   size="sm"
                   disabled={isSubmitting}
-                  onClick={() => onRespondChoice(opt.id)}
+                  onClick={() => handleOptionClick(opt)}
                   className="text-sm"
                 >
-                  <span className="flex flex-col items-start gap-0.5">
-                    <span>{opt.label}</span>
-                    {opt.description && (
-                      <span className="text-muted-foreground text-xs font-normal opacity-70">
-                        {opt.description}
-                      </span>
-                    )}
-                  </span>
+                  {opt.label}
                 </Button>
               ))}
             </div>
+
+            {/* 选项描述确认弹窗 */}
+            <Dialog open={selectedOption !== null} onOpenChange={(open: boolean) => { if (!open) handleCancelOption() }}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>{selectedOption?.label}</DialogTitle>
+                  <DialogDescription>请确认您的选择</DialogDescription>
+                </DialogHeader>
+                <div
+                  data-testid="dialog-scroll-area"
+                  className="max-h-[60vh] overflow-y-auto px-6 py-2"
+                >
+                  {selectedOption?.description && (
+                    <MarkdownRenderer content={selectedOption.description} />
+                  )}
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={handleCancelOption}>
+                    取消
+                  </Button>
+                  <Button onClick={handleConfirmOption}>
+                    确认选择
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             <div className="flex gap-2">
               <textarea
                 value={textInput}

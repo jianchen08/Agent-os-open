@@ -556,17 +556,64 @@ def _try_recover_pipeline_ids(
     return recovered
 
 
+def _paginate_messages(
+    all_msgs: list[MessageResponse],
+    limit: int,
+    before_sequence: int | None,
+) -> dict[str, Any]:
+    """对已排序的消息列表进行倒序分页。
+
+    all_msgs 必须按 sequence 正序排列（最旧在前）。
+
+    分页逻辑：
+    - before_sequence=None：返回最后 limit 条消息
+    - before_sequence=N：返回 sequence < N 的最后 limit 条消息
+
+    Args:
+        all_msgs: 按 sequence 正序排列的完整消息列表
+        limit: 每页数量
+        before_sequence: 游标分页的 sequence 边界
+
+    Returns:
+        包含 messages、total、has_more 的分页结果字典
+    """
+    from channels.api.models import MessageListResponse
+
+    total = len(all_msgs)
+
+    # 按 before_sequence 过滤
+    if before_sequence is not None:
+        filtered = [m for m in all_msgs if m.sequence < before_sequence]
+    else:
+        filtered = all_msgs
+
+    filtered_total = len(filtered)
+
+    # 判断是否还有更多消息
+    has_more = filtered_total > limit
+
+    # 取最后 limit 条（即最新的 limit 条）
+    page = filtered[-limit:] if filtered_total > limit else filtered
+
+    return MessageListResponse(
+        messages=page,
+        total=total,
+        has_more=has_more,
+    ).model_dump()
+
+
 @router.get(
     "/{thread_id}/messages",
-    response_model=list[MessageResponse],
-    summary="获取消息列表",
+    summary="获取消息列表（支持倒序分页）",
 )
 def list_messages(
     thread_id: str,
     pipeline_run_id: str | None = Query(default=None, description="按管道运行 ID 过滤消息"),
+    limit: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    before_sequence: int | None = Query(default=None, description="加载此 sequence 之前的消息（游标分页）"),
     _user: dict = Depends(require_auth),
-) -> list[MessageResponse]:
-    """获取指定线程的所有消息。
+) -> dict[str, Any]:
+    """获取指定线程的消息列表，支持倒序分页。
 
     优先从 ExecutionRecordStorage 读取完整的管道执行记录，
     包含 thinking、toolCalls、toolResult 等丰富字段。
@@ -575,16 +622,24 @@ def list_messages(
     当传入 pipeline_run_id 时，仅返回该管道运行实例的消息记录，
     用于子任务标签页加载子管道的对话历史。
 
+    分页逻辑：
+    - 不传 before_sequence：返回最后 limit 条消息（倒序初始加载）
+    - 传 before_sequence：返回 sequence < before_sequence 的最后 limit 条消息
+
     Args:
         thread_id: 线程 ID
         pipeline_run_id: 可选，管道运行实例 ID
+        limit: 每页数量，默认 20，最大 100
+        before_sequence: 可选，游标分页的 sequence 边界
 
     Returns:
-        MessageResponse 消息列表
+        包含 messages、total、has_more 的字典
 
     Raises:
         APIError: 线程不存在 (404)
     """
+    from channels.api.models import MessageListResponse
+
     thread = store.get_thread(thread_id)
     if thread is None:
         raise APIError(
@@ -601,10 +656,19 @@ def list_messages(
             records = exec_storage.list_by_pipeline(pipeline_run_id)
             if records:
                 records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-                return [_record_to_message_response(r, thread_id) for r in records]
+                msgs = [_record_to_message_response(r, thread_id) for r in records]
+                return MessageListResponse(
+                    messages=msgs,
+                    total=len(msgs),
+                    has_more=False,
+                ).model_dump()
         except Exception:
             logger.warning("按 pipeline_run_id 查询执行记录失败: %s", pipeline_run_id)
-        return []
+        return MessageListResponse(
+            messages=[],
+            total=0,
+            has_more=False,
+        ).model_dump()
 
     session = store.get_session(thread_id)
 
@@ -632,10 +696,12 @@ def list_messages(
                 r.sequence,
                 r.created_at or "",
             ))
-            return [_record_to_message_response(r, thread_id) for r in all_records]
+            all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
+            return _paginate_messages(all_msgs, limit, before_sequence)
 
+    # 回退到 MemoryStore 基础消息
     messages = store.get_messages(thread_id)
-    return [
+    all_msgs = [
         MessageResponse(
             id=m.get("id", ""),
             thread_id=thread_id,
@@ -658,6 +724,7 @@ def list_messages(
         )
         for m in messages
     ]
+    return _paginate_messages(all_msgs, limit, before_sequence)
 
 
 @router.get(

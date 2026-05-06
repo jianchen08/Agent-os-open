@@ -714,7 +714,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       set((s) => ({
         tabMessages: {
           ...s.tabMessages,
-          [tabId]: messages || [],
+          [tabId]: messages.messages || [],
         },
         tabMessagesLoading: {
           ...s.tabMessagesLoading,

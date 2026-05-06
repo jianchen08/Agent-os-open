@@ -15,7 +15,8 @@ const sessionApi = {
 
 interface MessagePaginationState {
   hasMore: boolean
-  offset: number
+  /** 最旧已加载消息的 sequence，用于游标分页 */
+  oldestSequence: number | null
   limit: number
   isLoadingMore: boolean
 }
@@ -46,7 +47,7 @@ interface SessionState {
   setMessages: (sessionId: string, messages: Message[]) => void
   fetchMessages: (
     sessionId: string,
-    options?: { skip?: number; limit?: number; append?: boolean },
+    options?: { limit?: number; before_sequence?: number; append?: boolean },
   ) => Promise<void>
   fetchSubMessages: (sessionId: string, parentId: string) => Promise<void>
   loadMoreMessages: (sessionId: string) => Promise<void>
@@ -331,7 +332,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       .then(async (result) => {
         logger.debug('后端删除成功:', result)
         try {
-          const messages = await sessionApi.getMessages(sessionId)
+          const result = await sessionApi.getMessages(sessionId)
+          const messages = result.messages
           logger.debug('重新加载消息成功:', messages.length)
           set((state) => ({
             messages: {
@@ -438,20 +440,20 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   fetchMessages: async (
     sessionId: string,
-    options?: { skip?: number; limit?: number; append?: boolean },
+    options?: { limit?: number; before_sequence?: number; append?: boolean },
   ) => {
     try {
       const limit = options?.limit ?? 20
-      const skip = options?.skip ?? 0
+      const beforeSequence = options?.before_sequence
       const append = options?.append ?? false
 
       logger.debug(
         '开始从数据库加载执行记录 | sessionId:',
         sessionId,
-        'skip:',
-        skip,
         'limit:',
         limit,
+        'before_sequence:',
+        beforeSequence,
         'append:',
         append,
       )
@@ -467,7 +469,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             ...state.messagePagination,
             [sessionId]: {
               hasMore: false,
-              offset: 0,
+              oldestSequence: null,
               limit: 20,
               isLoadingMore: false,
             },
@@ -488,14 +490,18 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         }))
       }
 
-      const apiMessages = await sessionApi.getMessages(sessionId, {
-        skip,
+      const apiResult = await sessionApi.getMessages(sessionId, {
         limit,
+        before_sequence: beforeSequence,
       })
 
-      const rawMessages: Message[] = apiMessages
+      const rawMessages: Message[] = apiResult.messages
+      const hasMore = apiResult.has_more
 
-      const hasMore = rawMessages.length === limit
+      // 计算最旧消息的 sequence（用于游标分页）
+      const oldestSequence = rawMessages.length > 0
+        ? Math.min(...rawMessages.map((m) => m.sequence ?? Number.MAX_SAFE_INTEGER))
+        : null
 
       logger.debug(
         '成功加载执行记录 | sessionId:',
@@ -504,6 +510,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         rawMessages.length,
         'hasMore:',
         hasMore,
+        'oldestSequence:',
+        oldestSequence,
       )
 
       set((state) => {
@@ -534,7 +542,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             ...state.messagePagination,
             [sessionId]: {
               hasMore,
-              offset: skip + rawMessages.length,
+              oldestSequence,
               limit,
               isLoadingMore: false,
             },
@@ -575,11 +583,12 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
       logger.debug('加载子消息 | sessionId:', sessionId, 'parentId:', parentId)
 
-      const subMessages = await getMessages(sessionId, {
+      const subResult = await getMessages(sessionId, {
         parentId,
         limit: 100,
       })
 
+      const subMessages = subResult.messages
       logger.debug('子消息加载完成 | parentId:', parentId, 'count:', subMessages.length)
 
       set((state) => {
@@ -627,14 +636,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     logger.debug(
       '加载更多历史消息 | sessionId:',
       sessionId,
-      'offset:',
-      pagination.offset,
+      'before_sequence:',
+      pagination.oldestSequence,
       'limit:',
       pagination.limit,
     )
 
     await get().fetchMessages(sessionId, {
-      skip: pagination.offset,
+      before_sequence: pagination.oldestSequence ?? undefined,
       limit: pagination.limit,
       append: true,
     })
@@ -645,7 +654,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     return (
       state.messagePagination[sessionId] ?? {
         hasMore: true,
-        offset: 0,
+        oldestSequence: null,
         limit: 20,
         isLoadingMore: false,
       }

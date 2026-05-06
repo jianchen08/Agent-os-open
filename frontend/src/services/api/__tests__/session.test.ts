@@ -149,19 +149,22 @@ describe('会话和消息API服务', () => {
         },
       ]
 
-      // 模拟API响应
+      // 模拟API响应（新格式：包含 messages、total、has_more）
       mockAxios.onGet(API_ENDPOINTS.MESSAGES.LIST(sessionId)).reply(200, {
         messages: mockMessages,
+        total: 2,
+        has_more: false,
       })
 
       // 调用API
       const result = await getMessages(sessionId)
 
       // 验证结果
-      expect(result).toEqual(mockMessages)
-      expect(result).toHaveLength(2)
-      expect(result[0].role).toBe('user')
-      expect(result[1].role).toBe('assistant')
+      expect(result.messages).toHaveLength(2)
+      expect(result.messages[0].role).toBe('user')
+      expect(result.messages[1].role).toBe('assistant')
+      expect(result.total).toBe(2)
+      expect(result.has_more).toBe(false)
     })
 
     it('应该在会话ID为空时抛出验证错误', async () => {

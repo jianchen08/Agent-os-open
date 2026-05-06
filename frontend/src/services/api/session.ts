@@ -282,9 +282,10 @@ export async function getMessages(
     executorType?: 'agent' | 'tool' | 'user' | 'workflow'
     skip?: number
     limit?: number
+    before_sequence?: number
   },
   options: RetryOptions = {},
-): Promise<Message[]> {
+): Promise<{ messages: Message[]; total: number; has_more: boolean }> {
   // 参数验证
   validateSessionId(sessionId)
 
@@ -299,14 +300,30 @@ export async function getMessages(
       if (filters.executorType) params.executor_type = filters.executorType
       if (filters.skip !== undefined) params.skip = filters.skip
       if (filters.limit !== undefined) params.limit = filters.limit
+      if (filters.before_sequence !== undefined) params.before_sequence = filters.before_sequence
     }
 
     const response = await apiClient.get<any>(API_ENDPOINTS.MESSAGES.LIST(sessionId), { params })
 
-    const rawMessages = Array.isArray(response.data) ? response.data : response.data.messages || []
-    return rawMessages.map((msg: BackendMessageResponse) =>
-      mapBackendMessageToMessage(msg, sessionId),
-    )
+    // 兼容旧格式（纯数组）和新格式（带 total/has_more 的对象）
+    if (Array.isArray(response.data)) {
+      return {
+        messages: response.data.map((msg: BackendMessageResponse) =>
+          mapBackendMessageToMessage(msg, sessionId),
+        ),
+        total: response.data.length,
+        has_more: false,
+      }
+    }
+
+    const rawMessages = response.data.messages || []
+    return {
+      messages: rawMessages.map((msg: BackendMessageResponse) =>
+        mapBackendMessageToMessage(msg, sessionId),
+      ),
+      total: response.data.total ?? rawMessages.length,
+      has_more: response.data.has_more ?? false,
+    }
   }, options)
 }
 
