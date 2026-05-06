@@ -13,33 +13,54 @@ media:
         config:
           voice: zh-CN-XiaoxiaoNeural
           rate: "+0%"
-      # 示例备用 Provider（可按需启用）
-      # azure_tts:
-      #   class: AzureTTSProvider
-      #   enabled: false
-      #   priority: 2
-      #   config:
-      #     api_key: ""
-      #     region: eastasia
+      minimax_tts:
+        class: MiniMaxTTSProvider
+        enabled: true
+        priority: 2
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "speech-02-turbo"
 
   # === 图像生成 ===
   image:
-    default_provider: comfyui
+    default_provider: minimax
     providers:
+      minimax:
+        class: MiniMaxImageProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "image-01"
+          prompt_optimizer: true
       comfyui:
         class: ComfyUIProvider
         enabled: true
-        priority: 1
+        priority: 2
         config:
           api_url: "http://127.0.0.1:8188"
           workflow: default
 
   # === 视频生成 ===
   video:
-    default_provider: comfyui
-    providers: {}
+    default_provider: minimax_video
+    providers:
+      minimax_video:
+        class: MiniMaxVideoProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "MiniMax-Hailuo-2.3"
 
   # === 音乐生成 ===
   music:
-    default_provider: suno
-    providers: {}
+    default_provider: minimax_music
+    providers:
+      minimax_music:
+        class: MiniMaxMusicProvider
+        enabled: true
+        priority: 1
+        config:
+          api_key: ""  # 从环境变量 MINIMAX_API_KEY 读取
+          model: "music-2.6"

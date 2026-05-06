@@ -30,6 +30,36 @@ from fastapi import APIRouter  # noqa: E402
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
 
 
+def _get_task_service() -> Any:
+    """获取全局 TaskService 实例（来自 TaskStorage/YAML 文件）。
+
+    BUG-FIX-fix_20260506_007: 补充从 TaskStorage 获取管道引擎创建的任务
+    问题根因: routes_tasks.py 只查询 api_store（内存 dict），
+              管道引擎通过 TaskService → TaskStorage → YAML 文件管理任务，
+              两者完全独立，导致 API 返回空列表
+    修复方案: 合并 api_store 和 TaskStorage 的数据源
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+        )
+    except Exception:
+        return None
+
+
+def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
+    """将 TaskModel dataclass 转为字典。"""
+    from dataclasses import asdict
+    d = asdict(task_model)
+    d["status"] = task_model.status.value if hasattr(task_model.status, "value") else str(task_model.status)
+    if hasattr(task_model, "priority") and hasattr(task_model.priority, "value"):
+        d["priority"] = task_model.priority.value
+    return d
+
+
 def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     """将存储层任务字典转为 TaskResponse。"""
     return TaskResponse(
@@ -66,12 +96,24 @@ def list_tasks(
     """获取当前用户的任务列表。
 
     支持按状态和优先级筛选，分页返回。
+    合并 api_store 和 TaskStorage（YAML 文件）两个数据源。
 
     Returns:
         TaskListResponse 包含 items 和 total
     """
     validate_pagination(limit, offset)
     tasks = store.get_user_tasks(_user["sub"])
+
+    task_service = _get_task_service()
+    if task_service is not None:
+        try:
+            ts_tasks = task_service.list_all(limit=1000)
+            api_ids = {t["id"] for t in tasks}
+            for tm in ts_tasks:
+                if tm.id not in api_ids:
+                    tasks.append(_task_model_to_dict(tm))
+        except Exception as exc:
+            logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
     if status:
         tasks = [t for t in tasks if t.get("status") == status]
@@ -137,6 +179,12 @@ def get_task(
         APIError: 任务不存在 (404)
     """
     task = store.get_task(task_id)
+    if task is None:
+        task_service = _get_task_service()
+        if task_service is not None:
+            tm = task_service.get_task(task_id)
+            if tm is not None:
+                task = _task_model_to_dict(tm)
     if task is None:
         raise APIError(
             status_code=404,

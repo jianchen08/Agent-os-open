@@ -1,7 +1,13 @@
 """应用服务容器 — 统一管理服务构建和引擎创建。
 
-将分散在 start_server.py 中的服务构建、引擎创建、工具注册等逻辑
-集中到 Application 类中，提供统一的服务获取入口。
+作为后端服务构建的唯一入口，所有渠道（CLI、WebSocket、API）
+都通过 Application.build_services() 获取共享服务字典。
+
+职责边界：
+- 构建所有后端服务（工具、记忆、任务、管道等）
+- 创建 PipelineEngine 和 TaskWorker
+- 注册到 ServiceProvider
+- 不包含任何渠道特定逻辑（CLI 通知器、WebSocket 处理等由各渠道自行注入）
 
 用法::
 
@@ -12,9 +18,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time as _time
 from pathlib import Path
 from typing import Any, Callable
+
+_DEFAULT_OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +33,7 @@ class Application:
     """应用服务容器。
 
     集中管理服务实例的创建、工具注册、PipelineEngine 和 TaskWorker 的构建。
-    替代 start_server.py 中分散的 _build_services 和直接实例化逻辑。
+    作为后端服务构建的唯一真相源，所有入口（CLI、WebSocket）都委托此类。
 
     Attributes:
         project_root: 项目根目录路径
@@ -31,20 +41,11 @@ class Application:
     """
 
     def __init__(self, project_root: Path | None = None) -> None:
-        """初始化应用容器。
-
-        Args:
-            project_root: 项目根目录，默认为当前工作目录
-        """
         self.project_root: Path = project_root or Path.cwd()
         self.services: dict[str, Any] = {}
 
     def build_services(self, agent_registry: Any | None = None) -> dict[str, Any]:
-        """构建共享服务字典。
-
-        创建工具注册表、记忆存储等共享服务，
-        插件通过 ctx.get_service() 自主获取。
-        所有服务注册到 ServiceProvider（统一服务注入），不再写入 sys._agent_os_*。
+        """构建共享服务字典（唯一入口）。
 
         Args:
             agent_registry: Agent 注册表实例（可选）
@@ -53,17 +54,16 @@ class Application:
             服务名称到实例的映射字典
         """
         services: dict[str, Any] = {}
+        _t0 = _time.monotonic()
 
-        # 1. ToolRegistry — 工具注册表
+        # ── 1. ToolRegistry ──────────────────────────────
         try:
             from tools.registry import ToolRegistry
 
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
-            logger.info(
-                "服务已创建: tool_registry (%d 个基础工具)", tool_registry.count()
-            )
+            logger.info("服务已创建: tool_registry (%d 个基础工具)", tool_registry.count())
 
             from tools.auto_loader import init_tool_auto_loader
 
@@ -71,9 +71,28 @@ class Application:
             logger.info("ToolAutoLoader 已初始化")
         except Exception as exc:
             logger.warning("创建 tool_registry 服务失败: %s", exc)
+        logger.info("[STARTUP] 1.ToolRegistry: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
 
-        # 2. JsonMemoryStore — 记忆存储
-        json_store = None
+        # ── 1.5 MediaProviderRegistry ────────────────────
+        try:
+            from tools.media.provider_registry import MediaProviderRegistry
+
+            media_registry = MediaProviderRegistry()
+            config_path = self.project_root / "config" / "models" / "media_providers.yaml"
+            if config_path.exists():
+                media_registry.load_config(config_path)
+                self._register_media_providers(media_registry)
+            services["media_provider_registry"] = media_registry
+            logger.info(
+                "服务已创建: media_provider_registry (%d 个 Provider)",
+                len(media_registry.list_all()),
+            )
+        except Exception as exc:
+            logger.warning("创建 MediaProviderRegistry 失败: %s", exc)
+
+        # ── 2. JsonMemoryStore ───────────────────────────
+        json_store: Any = None
         try:
             from memory.storage.json_store import JsonMemoryStore
 
@@ -82,11 +101,141 @@ class Application:
         except Exception as exc:
             logger.warning("创建 JsonMemoryStore 失败: %s", exc)
 
-        if json_store is not None:
-            services["memory_store"] = json_store
-            services["semantic_storage"] = json_store
+        memory_store = json_store
+        semantic_storage = json_store
+        if memory_store is not None:
+            services["memory_store"] = memory_store
+        if semantic_storage is not None:
+            services["semantic_storage"] = semantic_storage
 
-        # 3. MessageQueue — 管道间消息传递
+        # ── 3. PgVectorRetriever（可选）──────────────────
+        vector_retriever: Any = None
+        try:
+            from infrastructure.db import get_async_session, init_db
+            from memory.storage.pgvector_retriever import PgVectorRetriever
+
+            session = asyncio.get_event_loop().run_until_complete(get_async_session())
+            if session is not None and json_store is not None:
+                asyncio.get_event_loop().run_until_complete(init_db())
+                embedding_fn = self._build_embedding_fn()
+                vector_retriever = PgVectorRetriever(
+                    session=session,
+                    content_store=json_store,
+                    embedding_fn=embedding_fn,
+                )
+                asyncio.get_event_loop().run_until_complete(vector_retriever.ensure_tables())
+                logger.info("服务已创建: PgVectorRetriever")
+        except Exception as exc:
+            logger.info("PgVectorRetriever 不可用，降级到 keyword 检索: %s", exc)
+        logger.info("[STARTUP] 3.PgVector: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        retrievers: dict[str, Any] = {}
+        if json_store is not None:
+            retrievers["keyword"] = json_store
+        if vector_retriever is not None:
+            retrievers["vector"] = vector_retriever
+            services["vector_retriever"] = vector_retriever
+
+        if vector_retriever is not None:
+            services["retriever"] = vector_retriever
+            logger.info("服务已创建: retriever (vector)")
+        elif memory_store is not None and hasattr(memory_store, "search"):
+            services["retriever"] = memory_store
+            logger.info("服务已创建: retriever (memory_store)")
+
+        # ── 4. TagService + ChunkService ─────────────────
+        tag_service: Any = None
+        chunk_service: Any = None
+        try:
+            from memory.tag_service import TagService
+
+            tag_service = TagService(
+                content_store=json_store,
+                vector_retriever=vector_retriever,
+                embedding_fn=self._build_embedding_fn(),
+                data_dir=str(self.project_root / "data" / "memory"),
+            )
+            services["tag_service"] = tag_service
+            logger.info("服务已创建: tag_service")
+        except Exception as exc:
+            logger.warning("创建 tag_service 失败: %s", exc)
+        logger.info("[STARTUP] 4.TagService: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        try:
+            from memory.chunk_service import ChunkService
+
+            chunk_service = ChunkService(
+                content_store=json_store,
+                vector_retriever=vector_retriever,
+                tag_service=tag_service,
+                data_dir=str(self.project_root / "data" / "memory"),
+            )
+            services["chunk_service"] = chunk_service
+            logger.info("服务已创建: chunk_service")
+        except Exception as exc:
+            logger.warning("创建 chunk_service 失败: %s", exc)
+        logger.info("[STARTUP] 4.5.ChunkService: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        # ── 5. MemoryContextService ──────────────────────
+        try:
+            from config.models import get_model_config_loader as _get_loader
+            from memory.memory_context_service import MemoryContextService
+
+            _loader = _get_loader()
+            _llm_data = _loader._load_llm_data()
+            _defaults = _llm_data.get("defaults", {})
+            _model_id = _defaults.get("chat", "")
+            _llm_conf = _loader.get_llm_core_config(_model_id) if _model_id else {}
+            _ctx_window = _llm_conf.get("context_window", 128000)
+
+            context_service = MemoryContextService(
+                config={
+                    "context_window": _ctx_window,
+                    "compress_trigger_ratio": 0.5,
+                },
+            )
+            services["context_service"] = context_service
+            logger.info("服务已创建: context_service (context_window=%d)", _ctx_window)
+        except Exception as exc:
+            logger.warning("创建 context_service 失败: %s", exc)
+        logger.info("[STARTUP] 5.ContextService: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        # ── 6. TagNetworkRetriever ───────────────────────
+        try:
+            from memory.tag_network import TagNetworkConfig, TagNetworkRetriever
+
+            tag_network_retriever = TagNetworkRetriever(config=TagNetworkConfig())
+            services["tag_network_retriever"] = tag_network_retriever
+            logger.info("服务已创建: tag_network_retriever")
+        except Exception as exc:
+            logger.warning("创建 tag_network_retriever 失败: %s", exc)
+        logger.info("[STARTUP] 6.TagNetwork: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        # ── 7. MemoryService ─────────────────────────────
+        try:
+            from memory.service import MemoryService
+
+            memory_service = MemoryService(
+                episode_storage=memory_store,
+                semantic_storage=semantic_storage,
+                retrievers=retrievers if retrievers else None,
+                vector_retriever=vector_retriever,
+                chunk_service=chunk_service,
+                tag_service=tag_service,
+            )
+            services["memory_service"] = memory_service
+            logger.info("服务已创建: memory_service (retrievers=%s)", list(retrievers.keys()))
+        except Exception as exc:
+            logger.warning("创建 memory_service 失败: %s", exc)
+        logger.info("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
+        _t0 = _time.monotonic()
+
+        # ── 8. MessageQueue ──────────────────────────────
         try:
             from infrastructure.message_queue import MessageQueue
 
@@ -95,11 +244,9 @@ class Application:
         except Exception as exc:
             logger.warning("创建 message_queue 服务失败: %s", exc)
 
-        # 4. ExecutionRecordStorage — 执行记录持久化
+        # ── 9. ExecutionRecordStorage ────────────────────
         try:
-            from infrastructure.execution_record_storage import (
-                ExecutionRecordStorage,
-            )
+            from infrastructure.execution_record_storage import ExecutionRecordStorage
 
             services["execution_record_storage"] = ExecutionRecordStorage(
                 data_dir=str(self.project_root / "data" / "pipelines")
@@ -108,49 +255,74 @@ class Application:
         except Exception as exc:
             logger.warning("创建 execution_record_storage 服务失败: %s", exc)
 
-        # 5. EventBus — 事件总线
+        # ── 10. EventBus ─────────────────────────────────
         try:
             from pipeline.event_bus import EventBus
 
             event_bus = EventBus()
             services["event_bus"] = event_bus
+            logger.info("服务已创建: event_bus")
         except Exception as exc:
             logger.warning("创建 event_bus 服务失败: %s", exc)
 
-        # 6. TaskService — 任务服务
+        # ── 11. TaskService（通过 EventBus 自动广播状态变更）───
         try:
             from tasks.service import TaskService
 
-            task_service = TaskService()
+            task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
-            logger.info("服务已创建: task_service")
+            logger.info("服务已创建: task_service (event_bus enabled)")
         except Exception as exc:
             logger.warning("创建 task_service 服务失败: %s", exc)
 
-        # 7. AgentRegistry — 供 TaskWorker 加载子 agent 配置
+        # ── 12. TimerManager ─────────────────────────────
+        try:
+            from tasks.timer_manager import TimerManager
+
+            timer_manager = TimerManager.get_instance()
+            services["timer_manager"] = timer_manager
+            logger.info("服务已创建: timer_manager")
+        except Exception as exc:
+            logger.warning("创建 timer_manager 失败: %s", exc)
+
+        # ── 13. AgentRegistry ────────────────────────────
         if agent_registry is not None:
             services["agent_registry"] = agent_registry
             logger.info("服务已注入: agent_registry")
 
-        # 8. PipelineCheckpointManager — 管道检查点
+        # ── 14. PipelineCheckpointManager + PipelineRecovery ──
         try:
-            from infrastructure.checkpoint.pipeline_checkpoint import (
-                PipelineCheckpointManager,
-            )
+            from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
+            from infrastructure.checkpoint.recovery import PipelineRecovery
 
-            services["checkpoint_manager"] = PipelineCheckpointManager()
-            logger.info("服务已创建: checkpoint_manager")
+            checkpoint_manager = PipelineCheckpointManager()
+            recovery = PipelineRecovery(checkpoint_manager)
+            services["checkpoint_manager"] = checkpoint_manager
+            services["pipeline_recovery"] = recovery
+            logger.info("服务已创建: checkpoint_manager, pipeline_recovery")
         except Exception as exc:
-            logger.warning("创建 checkpoint_manager 服务失败: %s", exc)
+            logger.warning("创建 checkpoint 服务失败: %s", exc)
 
-        # 9. ChannelGateway — 多渠道消息网关
+        # ── 15. SessionService ───────────────────────────
+        try:
+            from infrastructure.session import SessionService
+
+            session_dir = self.project_root / "data" / "sessions"
+            services["session_service"] = SessionService(session_dir=session_dir)
+            logger.info("服务已创建: session_service")
+        except Exception as exc:
+            logger.warning("创建 session_service 失败: %s", exc)
+
+        # ── 16. ChannelGateway ───────────────────────────
         gateway = self.create_gateway()
         if gateway is not None:
             gateway.services = services
             services["channel_gateway"] = gateway
             logger.info("服务已创建: channel_gateway")
 
-        # 统一注册到 ServiceProvider（替代 sys._agent_os_* 全局变量）
+        logger.info("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
+
+        # ── 统一注册到 ServiceProvider ───────────────────
         self._register_to_service_provider(services)
 
         self.services = services
@@ -158,15 +330,7 @@ class Application:
 
     @staticmethod
     def _register_to_service_provider(services: dict[str, Any]) -> None:
-        """将服务字典注册到 ServiceProvider 单例。
-
-        ServiceProvider 作为统一的服务注册中心，
-        替代分散在 sys._agent_os_* 的全局变量模式。
-        注册为幂等操作，已存在的服务不会被覆盖。
-
-        Args:
-            services: 服务名称到实例的映射字典
-        """
+        """将服务字典注册到 ServiceProvider 单例。"""
         try:
             from infrastructure.service_provider import get_service_provider
 
@@ -176,11 +340,7 @@ class Application:
             logger.warning("注册服务到 ServiceProvider 失败: %s", exc)
 
     def create_gateway(self) -> Any | None:
-        """创建 ChannelGateway 实例。
-
-        Returns:
-            ChannelGateway 实例，创建失败返回 None
-        """
+        """创建 ChannelGateway 实例。"""
         try:
             from channels.gateway.channel_gateway import ChannelGateway
 
@@ -192,19 +352,13 @@ class Application:
             return None
 
     def _register_basic_tools(self, registry: Any) -> None:
-        """注册基础工具（无需依赖注入）。
-
-        Args:
-            registry: ToolRegistry 实例
-        """
+        """注册基础工具（无需依赖注入）。"""
         import datetime
         import math as _math
 
         from tools.types import Tool, ToolSource
 
-        # current_time
         def current_time(params: dict[str, Any]) -> str:
-            """获取当前时间。"""
             return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
@@ -226,29 +380,17 @@ class Application:
         except Exception as exc:
             logger.warning("注册基础工具 current_time 失败: %s", exc)
 
-        # calculator
         def calculator(params: dict[str, Any]) -> str:
-            """执行简单数学计算。"""
             expression = params.get("expression", "")
             if not expression:
                 return "错误：未提供计算表达式"
             try:
                 allowed_names = {
-                    "abs": abs,
-                    "round": round,
-                    "min": min,
-                    "max": max,
-                    "pow": pow,
-                    "sum": sum,
-                    "pi": _math.pi,
-                    "e": _math.e,
-                    "sqrt": _math.sqrt,
-                    "ceil": _math.ceil,
-                    "floor": _math.floor,
+                    "abs": abs, "round": round, "min": min, "max": max,
+                    "pow": pow, "sum": sum, "pi": _math.pi, "e": _math.e,
+                    "sqrt": _math.sqrt, "ceil": _math.ceil, "floor": _math.floor,
                 }
-                result = eval(
-                    expression, {"__builtins__": {}}, allowed_names
-                )  # noqa: S307
+                result = eval(expression, {"__builtins__": {}}, allowed_names)
                 return str(result)
             except Exception as exc:
                 return f"计算错误：{exc}"
@@ -273,22 +415,146 @@ class Application:
         except Exception as exc:
             logger.warning("注册基础工具 calculator 失败: %s", exc)
 
+    @staticmethod
+    def _register_media_providers(media_registry: Any) -> None:
+        """根据已加载的配置实例化并注册媒体 Provider。
+
+        遍历 MediaProviderRegistry 中的配置条目，按 class_name
+        动态导入 Provider 类并实例化后注册到 registry。
+
+        Args:
+            media_registry: MediaProviderRegistry 实例（已加载配置）
+        """
+        from tools.media.base import MediaProviderConfig, MediaType
+
+        _PROVIDER_CLASS_MAP: dict[str, str] = {
+            "ComfyUIProvider": "tools.media.providers.comfyui_provider",
+            "EdgeTTSProvider": "tools.media.providers.edge_tts_provider",
+            "MiniMaxImageProvider": "tools.media.providers.minimax_provider",
+            "MiniMaxMusicProvider": "tools.media.providers.minimax_music_provider",
+            "MiniMaxVideoProvider": "tools.media.providers.minimax_video_provider",
+            "MiniMaxTTSProvider": "tools.media.providers.minimax_tts_provider",
+        }
+
+        _API_KEY_ENV_MAP: dict[str, str] = {
+            "MiniMaxImageProvider": "MINIMAX_API_KEY",
+            "MiniMaxMusicProvider": "MINIMAX_API_KEY",
+            "MiniMaxVideoProvider": "MINIMAX_API_KEY",
+            "MiniMaxTTSProvider": "MINIMAX_API_KEY",
+        }
+
+        _MEDIA_TYPE_MAP: dict[str, MediaType] = {
+            "tts": MediaType.TTS,
+            "image": MediaType.IMAGE,
+            "video": MediaType.VIDEO,
+            "music": MediaType.MUSIC,
+        }
+
+        for media_type_key, type_config in media_registry._configs.items():
+            providers_conf = type_config.get("providers", {})
+            for provider_name, provider_conf in providers_conf.items():
+                class_name = provider_conf.get("class", "")
+                module_path = _PROVIDER_CLASS_MAP.get(class_name)
+                if not module_path:
+                    logger.warning(
+                        "[MediaRegistry] 未知 Provider 类: %s，跳过", class_name
+                    )
+                    continue
+
+                try:
+                    import importlib
+
+                    module = importlib.import_module(module_path)
+                    provider_cls = getattr(module, class_name)
+
+                    media_type = _MEDIA_TYPE_MAP.get(media_type_key, MediaType.IMAGE)
+                    raw_config = dict(provider_conf.get("config", {}))
+
+                    # 从环境变量回填 api_key
+                    env_key = _API_KEY_ENV_MAP.get(class_name)
+                    if env_key and not raw_config.get("api_key"):
+                        import os
+                        raw_config["api_key"] = os.environ.get(env_key, "")
+
+                    provider_config = MediaProviderConfig(
+                        class_name=class_name,
+                        enabled=provider_conf.get("enabled", True),
+                        priority=provider_conf.get("priority", 99),
+                        config=raw_config,
+                    )
+
+                    provider_instance = provider_cls(config=provider_config)
+                    media_registry.register(provider_instance)
+                    logger.info(
+                        "[MediaRegistry] 已注册 Provider: %s (%s)",
+                        provider_name,
+                        class_name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[MediaRegistry] 注册 Provider '%s' 失败: %s",
+                        class_name,
+                        exc,
+                    )
+
+    @staticmethod
+    def _build_embedding_fn() -> Any:
+        """构建嵌入函数（异步，文本→向量）。"""
+        try:
+            from config.models import get_model_config_loader
+
+            loader = get_model_config_loader()
+            embedding_cfg = loader._load_embedding_data()
+            embeddings = embedding_cfg.get("embeddings", {})
+            default_id = embedding_cfg.get("default_embedding", "")
+
+            if default_id and default_id in embeddings:
+                emb_info = embeddings[default_id]
+                provider = emb_info.get("provider", "")
+
+                if provider in ("openai", "openai_compatible"):
+                    import os
+
+                    api_key = os.environ.get(emb_info.get("api_key_env", "OPENAI_API_KEY"), "")
+                    base_url = emb_info.get("base_url")
+                    model_name = emb_info.get("model", "text-embedding-3-small")
+
+                    async def _openai_embed(text: str) -> list[float]:
+                        try:
+                            import httpx
+
+                            url = f"{base_url}/embeddings" if base_url else _DEFAULT_OPENAI_EMBEDDINGS_URL
+                            async with httpx.AsyncClient() as client:
+                                resp = await client.post(
+                                    url,
+                                    headers={"Authorization": f"Bearer {api_key}"},
+                                    json={"model": model_name, "input": text},
+                                    timeout=30.0,
+                                )
+                                resp.raise_for_status()
+                                data = resp.json()
+                                return data["data"][0]["embedding"]
+                        except Exception as e:
+                            logger.warning("[EmbedFn] OpenAI 嵌入失败: %s", e)
+                            return [0.0] * 1536
+
+                    return _openai_embed
+        except Exception as exc:
+            logger.debug("[EmbedFn] 加载嵌入配置失败: %s", exc)
+
+        async def _zero_embed(text: str) -> list[float]:
+            logger.warning("[EmbedFn] 嵌入服务不可用，返回零向量")
+            return [0.0] * 1536
+
+        return _zero_embed
+
     def create_pipeline_engine(
         self,
         pipeline_config: Any,
         plugin_registry: Any,
         services: dict[str, Any] | None = None,
     ) -> Any:
-        """创建 PipelineEngine 实例。
-
-        Args:
-            pipeline_config: 管道配置对象
-            plugin_registry: 插件注册表
-            services: 共享服务字典（默认使用 self.services）
-
-        Returns:
-            PipelineEngine 实例
-        """
+        """创建 PipelineEngine 实例。"""
         from pipeline.engine import PipelineEngine
 
         svc = services or self.services
@@ -309,16 +575,7 @@ class Application:
         plugin_registry: Any,
         services: dict[str, Any] | None = None,
     ) -> Any | None:
-        """创建 TaskWorker 实例。
-
-        Args:
-            pipeline_config: 管道配置对象
-            plugin_registry: 插件注册表
-            services: 共享服务字典（默认使用 self.services）
-
-        Returns:
-            TaskWorker 实例，创建失败返回 None
-        """
+        """创建 TaskWorker 实例。"""
         from infrastructure.task_worker import TaskWorker
 
         svc = services or self.services
@@ -345,19 +602,7 @@ class Application:
         pipeline_config: Any,
         plugin_registry: Any,
     ) -> Callable[[], Any]:
-        """创建 PipelineEngine 工厂函数。
-
-        每次调用返回新的 PipelineEngine。
-        工厂创建的引擎不传递 checkpoint_manager（用于 eval 场景）。
-        工厂函数同时注册到 ServiceProvider。
-
-        Args:
-            pipeline_config: 管道配置对象
-            plugin_registry: 插件注册表
-
-        Returns:
-            无参数工厂函数，每次调用返回新的 PipelineEngine 实例
-        """
+        """创建 PipelineEngine 工厂函数。"""
         from pipeline.engine import PipelineEngine
 
         def factory() -> Any:
@@ -368,7 +613,6 @@ class Application:
                 services=self.services,
             )
 
-        # 注册到 ServiceProvider，替代 sys._agent_os_pipeline_factory
         try:
             from infrastructure.service_provider import get_service_provider
 
@@ -380,13 +624,5 @@ class Application:
         return factory
 
     def get_service(self, name: str, *, default: Any = None) -> Any | None:
-        """获取已注册的服务实例。
-
-        Args:
-            name: 服务名称
-            default: 未找到时的默认返回值，默认 None
-
-        Returns:
-            服务实例，未找到返回 default
-        """
+        """获取已注册的服务实例。"""
         return self.services.get(name, default)

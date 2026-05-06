@@ -74,7 +74,7 @@ def get_all_builtin_tools() -> list[Any]:
             _logger.debug(f"[内置工具] 跳过 {tool_name}: {e}")
 
     try:
-        from .lsp_tools import LSPTools
+        from .lsp_tools.tool import LSPTools
         tools.extend(LSPTools.get_tools())
     except Exception as e:
         _logger.debug(f"[内置工具] 跳过 LSPTools: {e}")
@@ -85,10 +85,10 @@ def get_all_builtin_tools() -> list[Any]:
 def get_all_builtin_tools_with_session() -> list[Any]:
     """获取需要数据库会话的内置工具类（不实例化）"""
     # 延迟导入需要数据库会话的工具
-    from .memory import MemoryTool
-    from .task import TaskTool
-    from .task_evaluate import TaskEvaluateTool
-    from .task_submit import TaskSubmitTool
+    from .memory.tool import MemoryTool
+    from .task.tool import TaskTool
+    from .task_evaluate.tool import TaskEvaluateTool
+    from .task_submit.tool import TaskSubmitTool
 
     return [
         MemoryTool,
@@ -141,7 +141,7 @@ def register_all_builtin_tools(
                         logger.debug(f"[内置工具注册] 工具已存在，跳过: {tool_name}")
                         continue
 
-                    from .lsp_tools import LSPTools
+                    from .lsp_tools.tool import LSPTools
 
                     lsp_instance = LSPTools()
                     handler_map = {
@@ -172,10 +172,10 @@ def register_all_builtin_tools(
 
     # 2. 如果提供了会话，注册需要会话的工具
     if session is not None:
-        from .memory import MemoryTool
-        from .task import TaskTool
-        from .task_evaluate import TaskEvaluateTool
-        from .task_submit import TaskSubmitTool
+        from .memory.tool import MemoryTool
+        from .task.tool import TaskTool
+        from .task_evaluate.tool import TaskEvaluateTool
+        from .task_submit.tool import TaskSubmitTool
 
         # 2.1 注册 TaskSubmitTool
         if skip_existing and registry.has("task_submit") and registry.get_handler("task_submit") is not None:
@@ -276,15 +276,15 @@ def register_core_tools(
 
     # 延迟导入核心工具类
     from .bash import BashTool
-    from .enhanced_search import EnhancedSearchTool
-    from .file_read import FileReadTool
-    from .file_write import FileWriteTool
-    from .lsp_tools import LSPTools
-    from .resource_merge import ResourceMergeTool
-    from .resource_search import ResourceSearchTool
-    from .web import WebTool
-    from .web_search_mcp import WebSearchMCPTool
-    from .human_interaction import HumanInteractionTool
+    from .enhanced_search.tool import EnhancedSearchTool
+    from .file_read.tool import FileReadTool
+    from .file_write.tool import FileWriteTool
+    from .lsp_tools.tool import LSPTools
+    from .resource_merge.tool import ResourceMergeTool
+    from .resource_search.tool import ResourceSearchTool
+    from .web.tool import WebTool
+    from .web_search_mcp.tool import WebSearchMCPTool
+    from .human_interaction.tool import HumanInteractionTool
 
     core_tool_map = {
         "bash_execute": BashTool,

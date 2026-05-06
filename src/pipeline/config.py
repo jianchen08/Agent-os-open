@@ -308,6 +308,11 @@ def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
     """
     class_path = plugin_conf.get("class", "")
     if class_path:
+        _migrated_paths = {
+            "plugins.core.llm_core.LLMCore": "plugins.core.llm_core.plugin.LLMCore",
+            "plugins.core.tool_core.ToolCore": "plugins.core.tool_core.plugin.ToolCore",
+        }
+        class_path = _migrated_paths.get(class_path, class_path)
         return _import_class(class_path)
 
     plugin_name = plugin_conf.get("name", "")

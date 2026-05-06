@@ -137,14 +137,17 @@ function buildContentBlocksFromMessage(
     })
   }
 
+  // BUG-FIX-fix_20260506_003: 文本块应在 toolCalls 之前
+  // 问题根因: toolCalls 放在 text 之前，导致回退路径渲染时工具参数显示在消息气泡外面
+  // 修复方案: 调整为 thinking → text → toolCalls 的顺序，与流式构建顺序一致
+  if (content && content.trim()) {
+    blocks.push({ type: 'text', text: content, sourceId: messageId })
+  }
+
   if (toolCalls) {
     for (const tc of toolCalls) {
       blocks.push({ type: 'tool_call', toolCall: tc, sourceId: messageId })
     }
-  }
-
-  if (content && content.trim()) {
-    blocks.push({ type: 'text', text: content, sourceId: messageId })
   }
 
   return blocks

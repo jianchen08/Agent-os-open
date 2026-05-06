@@ -430,7 +430,8 @@ def _init_pipeline_context() -> PipelineContext:
             human_svc = get_human_interaction_service()
             _ws_interaction_notifier.set_service(human_svc)
             human_svc.set_notifier(_ws_interaction_notifier)
-            logger.info("WebSocketInteractionNotifier 已注册到 HumanInteractionService")
+            services["ws_interaction_notifier"] = _ws_interaction_notifier
+            logger.info("WebSocketInteractionNotifier 已注册到 HumanInteractionService 和 services")
         except Exception as exc:
             logger.warning("注册 WebSocket 交互通知器失败: %s", exc)
 
@@ -741,6 +742,152 @@ async def _stream_engine_response(
                     except Exception:
                         pass
 
+        async def _drain_chunk_queue_with_suspend(
+            engine_task: asyncio.Task,
+            pipeline_engine: Any,
+            call_timeout: int,
+        ) -> None:
+            """消费 chunk_queue，管道挂起时暂停超时计时。
+
+            与 _drain_chunk_queue 相同的事件处理逻辑，
+            但增加了 LLM 活动超时检测：管道挂起等待子任务时
+            不计入 call_timeout（因为挂起期间没有 LLM 活动）。
+            """
+            nonlocal thinking_started, last_keepalive
+            _last_active = asyncio.get_event_loop().time()
+
+            while not engine_task.done() or not chunk_queue.empty():
+                try:
+                    chunk = await asyncio.wait_for(chunk_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    now = asyncio.get_event_loop().time()
+                    if now - last_keepalive > 5.0:
+                        last_keepalive = now
+                        try:
+                            await websocket.send_text(json.dumps({"type": "heartbeat_ack"}, ensure_ascii=False))
+                        except Exception:
+                            pass
+
+                    if pipeline_engine is not None and getattr(pipeline_engine, "is_suspended", False):
+                        _last_active = now
+                    else:
+                        elapsed = now - _last_active
+                        if elapsed > call_timeout:
+                            logger.warning(
+                                "LLM 活动超时 (%.1fs/%ds): pipeline=%s",
+                                elapsed, call_timeout,
+                                getattr(pipeline_engine, "_pipeline_id", "unknown"),
+                            )
+                            return
+                    continue
+
+                _last_active = asyncio.get_event_loop().time()
+                if chunk is None:
+                    break
+                chunk_type = chunk.get("type", "text")
+                content = chunk.get("content", "")
+
+                if chunk_type == "text" and content:
+                    last_keepalive = asyncio.get_event_loop().time()
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "stream_chunk",
+                            "data": {
+                                "message_id": message_id,
+                                "content": content,
+                            },
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+
+                elif chunk_type == "thinking" and content:
+                    thinking_content_parts.append(content)
+                    try:
+                        if not thinking_started:
+                            thinking_started = True
+                            await websocket.send_text(json.dumps({
+                                "type": "thinking_start",
+                                "data": {
+                                    "message_id": message_id,
+                                },
+                            }, ensure_ascii=False))
+                        await websocket.send_text(json.dumps({
+                            "type": "thinking_chunk",
+                            "data": {
+                                "message_id": message_id,
+                                "content": content,
+                            },
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+
+                elif chunk_type == "thinking_end":
+                    if thinking_started:
+                        thinking_started = False
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "thinking_end",
+                                "data": {
+                                    "message_id": message_id,
+                                    "duration_ms": chunk.get("duration_ms"),
+                                },
+                            }, ensure_ascii=False))
+                        except Exception:
+                            pass
+
+                elif chunk_type == "tool_start":
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "tool_start",
+                            "data": {
+                                "message_id": message_id,
+                                "tool_name": chunk.get("tool_name", "unknown"),
+                                "args": chunk.get("args"),
+                            },
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+
+                elif chunk_type == "tool_result":
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "tool_result",
+                            "data": {
+                                "message_id": message_id,
+                                "tool_name": chunk.get("tool_name", "unknown"),
+                                "success": chunk.get("success", True),
+                                "result": chunk.get("result"),
+                                "duration_ms": chunk.get("duration_ms"),
+                            },
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+
+                elif chunk_type == "iteration":
+                    if thinking_started:
+                        thinking_started = False
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "thinking_end",
+                                "data": {
+                                    "message_id": message_id,
+                                    "duration_ms": None,
+                                },
+                            }, ensure_ascii=False))
+                        except Exception:
+                            pass
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "iteration",
+                            "data": {
+                                "message_id": message_id,
+                                "iteration": chunk.get("iteration", 0),
+                                "max_iterations": chunk.get("max_iterations", 0),
+                            },
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+
         # 启动管道引擎（异步）
         engine_task = asyncio.create_task(
             ctx.engine.run(
@@ -755,14 +902,16 @@ async def _stream_engine_response(
         )
 
         # 同时消费队列中的实时事件（带超时保护，防止 LLM API 挂起导致前端永远卡住）
-        # BUG-FIX-fix_20260506_llm_timeout: engine.run() 挂起时 drain 循环无法退出
+        # 管道挂起等待子任务时不计入超时（挂起期间没有 LLM 活动）
         _call_timeout = _get_call_timeout()
 
         engine_timed_out = False
         try:
             await asyncio.wait_for(
-                _drain_chunk_queue(engine_task),
-                timeout=_call_timeout,
+                _drain_chunk_queue_with_suspend(
+                    engine_task, ctx.engine, _call_timeout,
+                ),
+                timeout=_call_timeout * 50,
             )
         except asyncio.TimeoutError:
             engine_timed_out = True
@@ -819,7 +968,10 @@ async def _stream_engine_response(
 
         # ---- stream_chunk: 仅在实时流未发送时补发完整内容 ----
         if actual_content and not accumulated_content:
-            # accumulated_content 为空说明 drain 没有转发过文本，补发一次
+            logger.info(
+                "补发 stream_chunk: message_id=%s, content_len=%d",
+                message_id, len(actual_content),
+            )
             await websocket.send_text(json.dumps({
                 "type": "stream_chunk",
                 "data": {
@@ -1225,6 +1377,37 @@ def create_combined_app() -> FastAPI:
             thread_id: 线程 ID
         """
         await websocket_thread(websocket, thread_id)
+
+    # 挂载媒体文件静态服务（必须放在所有路由注册之后）
+    try:
+        from fastapi.staticfiles import StaticFiles
+
+        output_dir = Path(os.environ.get("MEDIA_OUTPUT_DIR", "./output"))
+        if output_dir.exists():
+            media_dirs = {
+                "images": output_dir / "images",
+                "tts": output_dir / "tts",
+                "video": output_dir / "video",
+                "music": output_dir / "music",
+                "test_images": output_dir / "test_images",
+                "test_tts": output_dir / "test_tts",
+                "test_video": output_dir / "test_video",
+                "test_music": output_dir / "test_music",
+            }
+            for name, path in media_dirs.items():
+                if path.exists():
+                    path.mkdir(parents=True, exist_ok=True)
+                    app.mount(
+                        f"/media/{name}",
+                        StaticFiles(directory=str(path)),
+                        name=f"media_{name}",
+                    )
+            logger.info(
+                "[STARTUP] Media static files mounted at /media/* (dirs: %s)",
+                [n for n, p in media_dirs.items() if p.exists()],
+            )
+    except Exception as exc:
+        logger.warning("[STARTUP] Media static files mount failed: %s", exc)
 
     return app
 

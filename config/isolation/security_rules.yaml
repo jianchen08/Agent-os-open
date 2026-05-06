@@ -115,7 +115,7 @@ rules:
 
   - name: "protected_paths"
     tools: ["*"]
-    params: ["path", "file_path", "directory", "dest", "target", "output_path"]
+    params: ["path", "file_path", "directory", "dest", "target", "output_path", "working_dir"]
     action: block
     patterns:
       - type: keyword

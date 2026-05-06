@@ -113,12 +113,25 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
 
 /**
  * 获取模型文件能力
+ *
+ * BUG-FIX-fix_20260506_008: 静默处理 404，避免控制台报错
+ * 问题根因: 后端未实现 /api/v1/files/capabilities 接口，
+ *           导致 404 错误被全局拦截器 reportError 报错
+ * 修复方案: 在 API 层静默处理 404，返回空能力对象
+ * 影响范围: 不改变功能，capabilities 为 null 时使用默认配置
  */
 export async function getModelCapabilities(modelName: string): Promise<FileCapabilityResponse> {
-  const response = await apiClient.get<FileCapabilityResponse>(`/api/v1/files/capabilities`, {
-    params: { model_name: modelName },
-  })
-  return response.data
+  try {
+    const response = await apiClient.get<FileCapabilityResponse>(`/api/v1/files/capabilities`, {
+      params: { model_name: modelName },
+    })
+    return response.data
+  } catch (error: any) {
+    if (error?.response?.status === 404) {
+      return { supported: false, max_size: 0, allowed_types: [] } as FileCapabilityResponse
+    }
+    throw error
+  }
 }
 
 /**

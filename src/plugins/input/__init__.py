@@ -4,26 +4,26 @@
 负责在 Core 执行前对状态进行预处理。
 """
 
-from plugins.input.circuit_breaker import CircuitBreaker
-from plugins.input.context_build import ContextBuildPlugin
-from plugins.input.cost_control import CostControlPlugin
-from plugins.input.injected_param_validator import InjectedParamValidator
-from plugins.input.isolation_guard import IsolationGuard
-from plugins.input.knowledge_inject import KnowledgeInjectPlugin
-from plugins.input.level_guard import LevelGuardPlugin
-from plugins.input.memory_read import MemoryReadPlugin
-from plugins.input.message_inject import MessageInjectPlugin
-from plugins.input.multimodal_preprocessor import MultimodalPreprocessor
-from plugins.input.param_inject import ParamInjectPlugin
-from plugins.input.pause_guard import PauseGuardPlugin
-from plugins.input.prompt_build import PromptBuildPlugin
-from plugins.input.reasoning_check import ReasoningCheckPlugin
-from plugins.input.security_check import SecurityCheckPlugin
-from plugins.input.task_event_receiver import TaskEventReceiverPlugin
-from plugins.input.tool_cache import ToolCache
-from plugins.input.tool_schema import ToolSchemaPlugin
-from plugins.input.tool_call_guard import ToolCallGuard
-from plugins.input.tool_schema_validator import ToolSchemaValidator
+from plugins.input.circuit_breaker.plugin import CircuitBreaker
+from plugins.input.context_build.plugin import ContextBuildPlugin
+from plugins.input.cost_control.plugin import CostControlPlugin
+from plugins.input.injected_param_validator.plugin import InjectedParamValidator
+from plugins.input.isolation_guard.plugin import IsolationGuard
+from plugins.input.knowledge_inject.plugin import KnowledgeInjectPlugin
+from plugins.input.level_guard.plugin import LevelGuardPlugin
+from plugins.input.memory_read.plugin import MemoryReadPlugin
+from plugins.input.message_inject.plugin import MessageInjectPlugin
+from plugins.input.multimodal_preprocessor.plugin import MultimodalPreprocessor
+from plugins.input.param_inject.plugin import ParamInjectPlugin
+from plugins.input.pause_guard.plugin import PauseGuardPlugin
+from plugins.input.prompt_build.plugin import PromptBuildPlugin
+from plugins.input.reasoning_check.plugin import ReasoningCheckPlugin
+from plugins.input.security_check.plugin import SecurityCheckPlugin
+from plugins.input.task_event_receiver.plugin import TaskEventReceiverPlugin
+from plugins.input.tool_cache.plugin import ToolCache
+from plugins.input.tool_schema.plugin import ToolSchemaPlugin
+from plugins.input.tool_call_guard.plugin import ToolCallGuard
+from plugins.input.tool_schema_validator.plugin import ToolSchemaValidator
 
 __all__ = [
     "CircuitBreaker",

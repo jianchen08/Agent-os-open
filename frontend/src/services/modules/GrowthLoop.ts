@@ -102,7 +102,9 @@ export function handleSchemaUpdate(event: {
 export function destroyGrowthLoop(): void {
   moduleManager.destroy()
   schemaRegistry.clear()
-  useLayoutModeStore.getState().setDockItems([])
+  const store = useLayoutModeStore.getState()
+  store.setDockItems([])
+  useLayoutModeStore.setState({ workspaceTabs: [] })
 }
 
 /**

@@ -245,13 +245,29 @@ class ToolAutoLoader:
                     if is_new:
                         self._registry.mark_dynamic(tool_name)
 
+                    # 注册 Schema 丰富器（如果工具实例支持）
+                    if hasattr(tool_instance, 'get_schema_enricher'):
+                        enricher = tool_instance.get_schema_enricher()
+                        if enricher:
+                            self._registry.register_schema_enricher(tool_def.name, enricher)
+
                     self._cache_python_guide(tool_name, tool_def)
                     return tool_def
             except Exception as e:
                 logger.debug("[自动加载] 索引文件加载失败: %s, 错误: %s", indexed_path, e)
 
         # 索引未命中，退回全扫描（首次或索引不完整时）
-        for py_file in self.TOOL_CODE_DIR.rglob("*.py"):
+        for entry in self.TOOL_CODE_DIR.iterdir():
+            if entry.is_dir() and not entry.name.startswith("_"):
+                tool_file = entry / "tool.py"
+                if tool_file.exists():
+                    py_file = tool_file
+                else:
+                    continue
+            elif entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_"):
+                py_file = entry
+            else:
+                continue
             if py_file.name.startswith("_"):
                 continue
 
@@ -270,6 +286,12 @@ class ToolAutoLoader:
                     # 首次加载时标记为动态工具
                     if is_new:
                         self._registry.mark_dynamic(tool_name)
+
+                    # 注册 Schema 丰富器（如果工具实例支持）
+                    if hasattr(tool_instance, 'get_schema_enricher'):
+                        enricher = tool_instance.get_schema_enricher()
+                        if enricher:
+                            self._registry.register_schema_enricher(tool_def.name, enricher)
 
                     self._cache_python_guide(tool_name, tool_def)
 

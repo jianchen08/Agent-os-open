@@ -67,12 +67,17 @@ class TaskService:
     组合状态机、存储和进度计算器，提供任务的创建、
     状态转换、查询和进度计算等业务操作。
 
+    状态变更时自动通过 EventBus 广播 ``task_state_changed`` 事件，
+    无需外部注册回调。TaskWorker 订阅该事件后自动处理
+    父管道通知、终态钩子等逻辑。
+
     Attributes:
         _storage: 任务存储实例
         _state_machine: 状态机实例
         _progress: 进度计算器实例
         _scheduler: 调度器实例（可选，用于任务调度）
         _concurrency: 并发控制器（可选，用于资源管控）
+        _event_bus: 事件总线（可选，用于广播状态变更事件）
     """
 
     def __init__(
@@ -83,19 +88,20 @@ class TaskService:
         *,
         scheduler: Any = None,
         concurrency: Any = None,
+        event_bus: Any = None,
         on_state_change: Any = None,
     ) -> None:
         """初始化任务服务。
 
         Args:
-            storage: 任务存储实例，None 时使用内存存储
+            storage: 任务存储实例，None 时使用文件存储
             state_machine: 状态机实例，None 时创建默认实例
             progress: 进度计算器实例，None 时创建默认实例
             scheduler: 调度器实例（可选），来自 infrastructure 层
             concurrency: 并发控制器（可选），来自 infrastructure 层
-            on_state_change: 状态变更回调函数(task_id, old_status, new_status)
+            event_bus: 事件总线（可选），传入后自动广播 task_state_changed
+            on_state_change: 状态变更回调（已废弃，保留兼容）
         """
-        # 默认使用文件存储，确保数据持久化
         if storage is None:
             from pathlib import Path
             data_dir = Path("data") / "tasks"
@@ -103,10 +109,15 @@ class TaskService:
             storage = TaskStorage(data_dir=data_dir)
         self._storage = storage
         self._state_machine = state_machine or SimpleStateMachine()
-        self._progress = progress  # 可选，不再强制依赖 ProgressCalculator
+        self._progress = progress
         self._scheduler = scheduler
         self._concurrency = concurrency
-        self._on_state_change = on_state_change
+        self._event_bus = event_bus
+        if on_state_change is not None:
+            logger.warning(
+                "TaskService: on_state_change 参数已废弃，"
+                "请通过 event_bus 订阅 task_state_changed 事件"
+            )
 
     # ── 创建 ────────────────────────────────────────────
 
@@ -131,13 +142,7 @@ class TaskService:
         task = create_task(title=title, description=description, **kwargs)
         self._storage.save(task)
         logger.info("Task created: %s (%s)", task.id, task.title)
-        
-        # 触发状态变更回调（PENDING 状态）
-        if self._on_state_change:
-            try:
-                self._on_state_change(task.id, "", task.status.value, task=task)
-            except Exception as e:
-                logger.warning("State change callback failed: %s", e)
+        self._emit_state_changed(task, "", task.status)
                 
         return task
 
@@ -241,19 +246,7 @@ class TaskService:
         if result is not None:
             task.result = result
         self._storage.save(task)
-
-        if self._on_state_change:
-            try:
-                self._on_state_change(
-                    task.id,
-                    old_status.value,
-                    TaskStatus.COMPLETED.value,
-                    task=task,
-                )
-            except Exception as e:
-                logger.warning(
-                    "State change callback failed: %s", e
-                )
+        self._emit_state_changed(task, old_status, TaskStatus.COMPLETED)
         logger.info(
             "Task %s recovered: FAILED → COMPLETED", task_id,
         )
@@ -368,12 +361,7 @@ class TaskService:
         task.started_at = ""
         task.error = ""
         self._storage.save(task)
-
-        if self._on_state_change:
-            try:
-                self._on_state_change(task.id, old_status.value, TaskStatus.PENDING.value)
-            except Exception as e:
-                logger.warning("State change callback failed: %s", e)
+        self._emit_state_changed(task, old_status, TaskStatus.PENDING)
 
         logger.info("Task reset to pending (recovery): %s (was %s)", task_id, old_status.value)
         return task
@@ -682,27 +670,66 @@ class TaskService:
         target_status: TaskStatus,
         old_status: TaskStatus | None = None,
     ) -> None:
-        """执行状态转换并触发回调。
+        """执行状态转换并通过 EventBus 广播事件。
 
         Args:
             task: 任务模型
             target_status: 目标状态
-            old_status: 原始状态（可选，用于回调）
+            old_status: 原始状态（可选，用于事件数据）
         """
         old = old_status or task.status
         self._state_machine.transition(task, target_status)
         self._storage.save(task)
 
-        if self._on_state_change:
+        if self._event_bus is not None:
             try:
-                self._on_state_change(
-                    task.id,
-                    old.value,
-                    target_status.value,
-                    task=task,
-                )
+                import asyncio
+
+                event_data: dict[str, Any] = {
+                    "task_id": task.id,
+                    "old_status": old.value,
+                    "new_status": target_status.value,
+                    "source": "task_service",
+                    "task": task,
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._event_bus.emit("task_state_changed", event_data),
+                    )
+                except RuntimeError:
+                    pass
             except Exception as e:
-                logger.warning("State change callback failed: %s", e)
+                logger.warning("EventBus emit failed: %s", e)
+
+    def _emit_state_changed(
+        self,
+        task: TaskModel,
+        old_status: TaskStatus | str,
+        new_status: TaskStatus,
+    ) -> None:
+        """通过 EventBus 广播状态变更事件（非状态机转换场景）。"""
+        old_val = old_status.value if hasattr(old_status, "value") else str(old_status)
+        if self._event_bus is not None:
+            try:
+                import asyncio
+
+                event_data: dict[str, Any] = {
+                    "task_id": task.id,
+                    "old_status": old_val,
+                    "new_status": new_status.value,
+                    "source": "task_service",
+                    "task": task,
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._event_bus.emit("task_state_changed", event_data),
+                    )
+                except RuntimeError:
+                    pass
+            except Exception as e:
+                logger.warning("EventBus emit failed: %s", e)
 
     def _get_or_raise(self, task_id: str) -> TaskModel:
         """获取任务，不存在时抛出 KeyError。

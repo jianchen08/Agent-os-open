@@ -438,17 +438,17 @@ function HomePage(): ReactNode {
         return
       }
 
-      // 正常文本内容：更新 contentBlocks
+      // BUG-FIX-fix_20260506_002: 合并 contentBlocks 和 content 更新为单次 set() 调用
+      // 问题根因: 两次独立的 set() 调用导致两次 React re-render，中间状态不一致
+      // 修复方案: 使用 updateMessageFields 一次性更新所有字段，避免中间状态
       const prevBlocks = msg?.contentBlocks ? [...msg.contentBlocks] : []
       const lastBlock = prevBlocks[prevBlocks.length - 1]
       if (lastBlock?.type === 'text') {
-        // 最后一个 block 是 text，追加内容
         prevBlocks[prevBlocks.length - 1] = {
           ...lastBlock,
           text: (lastBlock.text || '') + content,
         }
       } else {
-        // 创建新的 text block
         prevBlocks.push({
           type: 'text',
           text: content,
@@ -456,30 +456,75 @@ function HomePage(): ReactNode {
         })
       }
 
+      const oldContent = msg?.content || ''
       updateMessageFields(sid, messageId, {
         contentBlocks: prevBlocks,
+        content: oldContent + content,
       } as any)
-      updateMessageContent(sid, messageId, content, { mode: 'append' })
     }
 
     /**
      * 处理流式结束事件
      *
-     * 标记流式生成完成，清除超时定时器
+     * BUG-FIX-fix_20260506_004: 流式结束时更新消息状态为 completed
+     * 问题根因: 只清除 streaming 标记但未更新消息 status，导致消息残留 streaming 状态
+     * 修复方案: 遍历当前会话消息，将 status === 'streaming' 的消息标记为 completed，
+     *          同时清除 thinking.isThinking 状态
      */
-    const handleStreamEnd = (_eventData: any) => {
+    const handleStreamEnd = (eventData: any) => {
       clearStreamingTimeout()
       setStreaming(false)
+
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+
+      const messageId = eventData?.message_id || eventData?.data?.message_id
+      if (messageId) {
+        updateMessageFields(sid, messageId, {
+          status: 'completed',
+        } as any)
+      } else {
+        const sessionMessages = useSessionStore.getState().messages[sid] || []
+        const needsUpdate = sessionMessages.some(
+          (m) => m.status === 'streaming' || m.thinking?.isThinking,
+        )
+        if (needsUpdate) {
+          stopStreaming()
+        }
+      }
     }
 
     /**
      * 处理新消息事件
      *
      * 收到完整的最终消息，确保流式状态结束，清除超时定时器
+     * BUG-FIX-fix_20260506_004: 同步更新消息状态
+     * BUG-FIX-fix_20260506_005: 使用 new_message 的 content 补偿流式传输丢失的内容
      */
-    const handleNewMessage = (_eventData: any) => {
+    const handleNewMessage = (eventData: any) => {
       clearStreamingTimeout()
       setStreaming(false)
+
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+
+      const messageId = eventData?.message_id || eventData?.message?.id || eventData?.data?.message_id || eventData?.data?.id
+      if (messageId) {
+        const sessionMessages = useSessionStore.getState().messages[sid] || []
+        const existingMsg = sessionMessages.find((m: any) => m.id === messageId)
+        const finalContent = eventData?.content || eventData?.data?.content
+
+        if (existingMsg && finalContent && !existingMsg.content) {
+          updateMessageFields(sid, messageId, {
+            status: 'completed',
+            content: finalContent,
+          } as any)
+        } else {
+          updateMessageFields(sid, messageId, {
+            status: 'completed',
+          } as any)
+        }
+      }
     }
 
     // 订阅所有流式相关事件
@@ -810,37 +855,27 @@ function HomePage(): ReactNode {
     /**
      * 处理子 Agent 创建事件
      *
-     * 当后端通过 task_submit 创建子任务并开始执行时，
-     * 自动在 Tab 栏创建对应的子标签页，并注册 pipeline 映射
-     * 以便后续流式消息能正确路由到该子标签。
+     * BUG-FIX-fix_auto_pop_sub_tab:
+     * 问题根因: sub_agent_created 事件自动调用 openSubAgentTab 导致子标签强制弹出，
+     *           用户尚未点击任务就被切换到子标签页，体验不佳。
+     * 修复方案: 不再自动打开子标签，仅注册 pipeline_id → tabId 映射，
+     *           子标签在以下场景才弹出：
+     *           1. 用户点击任务树节点（FiveSpaceLayout.handleTaskNodeClick）
+     *           2. 人类交互进入 conversation 模式（useInteractionHandler）
+     * 影响范围: 任务提交后的子标签创建流程
+     * 修复日期: 2026-05-06
      */
     const handleSubAgentCreated = (eventData: any) => {
       const data = eventData.data || eventData
       const taskId = data.taskId || data.agentId
       const pipelineId = data.pipelineId
-      const agentName = data.agentName || '子Agent'
-      const title = data.title || agentName
       const parentId = data.parentId
 
-      if (!taskId) return
+      if (!taskId || !pipelineId) return
 
-      const tabStore = useAgentTabStore.getState()
-
-      // 打开子 Agent 标签页
-      tabStore.openSubAgentTab({
-        agentId: taskId,
-        agentName,
-        title,
-        pipelineId,
-        parentRecordId: parentId || taskId,
-        status: 'running',
-      })
-
-      // 注册 pipeline_id → tabId 映射，确保后续流式消息路由正确
-      if (pipelineId) {
-        const tabId = `sub-${parentId || taskId}`
-        tabStore.registerPipelineTab(pipelineId, tabId)
-      }
+      // 仅注册 pipeline_id → tabId 映射，不自动打开子标签
+      const tabId = `sub-${parentId || taskId}`
+      useAgentTabStore.getState().registerPipelineTab(pipelineId, tabId)
     }
 
     webSocketService.subscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated)

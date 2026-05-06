@@ -104,12 +104,19 @@ export const ChatContainer = ({
    *
    * - 主 Tab (L1) 或无 Tab：使用外部传入的 messages
    * - 子 Tab (L2/L3)：使用 agentTabStore 中 tabMessages 的数据
+   *
+   * BUG-FIX-fix_20260506_005: 过滤掉 role=tool 的独立消息
+   * 问题根因: 后端返回 type=tool 的记录转为 role=tool 的独立消息，
+   *          同时 AI 消息的 toolCalls 也渲染工具卡片，导致重复显示。
+   *          tool 消息的工具名、参数、结果等信息显示在消息气泡外面。
+   * 修复方案: 过滤掉 role=tool 的消息，工具调用信息已包含在 AI 消息的
+   *          toolCalls/contentBlocks 渲染中（ActivityCard 工具卡片）
    */
   const activeMessages = useMemo(() => {
-    if (isSubTabActive && activeTabId) {
-      return tabMessages[activeTabId] || []
-    }
-    return messages
+    const source = isSubTabActive && activeTabId
+      ? tabMessages[activeTabId] || []
+      : messages
+    return source.filter((m) => m.role !== 'tool')
   }, [isSubTabActive, activeTabId, tabMessages, messages])
 
   /**

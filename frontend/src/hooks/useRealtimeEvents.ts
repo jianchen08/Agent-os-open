@@ -146,28 +146,22 @@ export function useRealtimeEvents(): void {
       }
       addOrUpdateExecution(event)
 
-      // 创建子 Agent 标签页，确保 Tab 栏同步显示
+      // BUG-FIX-fix_auto_pop_sub_tab:
+      // 问题根因: sub_agent_created 事件自动调用 openSubAgentTab 导致子标签强制弹出，
+      //           用户尚未点击任务就被切换到子标签页，体验不佳。
+      // 修复方案: 不再自动打开子标签，仅注册 pipeline_id → tabId 映射，
+      //           子标签在以下场景才弹出：
+      //           1. 用户点击任务树节点（FiveSpaceLayout.handleTaskNodeClick）
+      //           2. 人类交互进入 conversation 模式（useInteractionHandler）
+      // 影响范围: 任务提交后的子标签创建流程
+      // 修复日期: 2026-05-06
       const taskId = (data.taskId as string) || (data.agentId as string)
       const pipelineId = data.pipelineId as string | undefined
-      const agentName = (data.agentName as string) || '子Agent'
       const parentId = data.parentId as string | undefined
 
-      if (taskId) {
-        const tabStore = useAgentTabStore.getState()
-        tabStore.openSubAgentTab({
-          agentId: taskId,
-          agentName,
-          title: (data.title as string) || agentName,
-          pipelineId,
-          parentRecordId: parentId || taskId,
-          status: 'running',
-        })
-
-        // 注册 pipeline_id → tabId 映射
-        if (pipelineId) {
-          const tabId = `sub-${parentId || taskId}`
-          tabStore.registerPipelineTab(pipelineId, tabId)
-        }
+      if (taskId && pipelineId) {
+        const tabId = `sub-${parentId || taskId}`
+        useAgentTabStore.getState().registerPipelineTab(pipelineId, tabId)
       }
     }
 

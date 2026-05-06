@@ -23,10 +23,30 @@ import logging
 import traceback as _traceback
 import uuid as _uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
 
 _current_pipeline_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_pipeline_id", default=None,
 )
+
+_GLOBAL_SUSPENDED_ENGINES: dict[str, PipelineEngine] = {}
+
+
+def register_suspended_engine(pipeline_id: str, engine: PipelineEngine) -> None:
+    _GLOBAL_SUSPENDED_ENGINES[pipeline_id] = engine
+    logger.info("[Engine] 全局注册挂起引擎: pipeline=%s, engine_pid=%s, total=%d",
+                pipeline_id, id(engine), len(_GLOBAL_SUSPENDED_ENGINES))
+
+
+def unregister_suspended_engine(pipeline_id: str) -> None:
+    _GLOBAL_SUSPENDED_ENGINES.pop(pipeline_id, None)
+
+
+def get_global_suspended_engine(pipeline_id: str) -> PipelineEngine | None:
+    return _GLOBAL_SUSPENDED_ENGINES.get(pipeline_id)
 
 
 def _safe_deepcopy(state: dict) -> dict:
@@ -1131,6 +1151,9 @@ class PipelineEngine:
         for wait_round in range(max_wait_rounds):
             self._wake_event = asyncio.Event()
             self._services[f"__suspended_engine_{pipeline_id}"] = self
+            register_suspended_engine(pipeline_id, self)
+            if self._pipeline_id and self._pipeline_id != pipeline_id:
+                register_suspended_engine(self._pipeline_id, self)
 
             try:
                 from infrastructure.service_provider import get_service_provider
@@ -1192,6 +1215,9 @@ class PipelineEngine:
 
         # 最终清理
         self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+        unregister_suspended_engine(pipeline_id)
+        if self._pipeline_id and self._pipeline_id != pipeline_id:
+            unregister_suspended_engine(self._pipeline_id)
         try:
             from infrastructure.service_provider import get_service_provider
             get_service_provider()._services.pop(

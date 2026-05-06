@@ -183,6 +183,16 @@ class Tool(BaseModel):
         description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。如 session_id, user_id, tool_record_id"
     )
 
+    # Schema 动态增强器（每轮迭代时由 ToolSchemaPlugin 调用，可修改传给 LLM 的 schema）
+    schema_enricher: Callable[..., dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Schema 动态增强器：签名 (llm_format: dict, ctx: Any) -> dict，"
+            "在每轮迭代时由 ToolSchemaPlugin 调用，可修改传给 LLM 的 schema（如注入可用 Provider 列表）。"
+            "ctx 为 PluginContext 实例，可通过 ctx.get_service() 获取服务。"
+        ),
+    )
+
     # 元数据
     source: ToolSource = Field(..., description="工具来源: code/mcp/http")
     category: ToolCategory | None = Field(None, description="工具功能分类")

@@ -120,13 +120,22 @@ async def get_task_tree(
 def _get_task_service() -> Any:
     """通过 ServiceProvider 获取全局 TaskService 实例。
 
+    BUG-FIX-fix_20260506_006: 使用 get_or_create 替代 get，支持懒加载创建
+    问题根因: 使用 provider.get() 只能获取已注册的实例，TaskService
+              从未在启动时显式注册，导致总是返回 None，API 返回空树
+    修复方案: 使用 get_or_create 懒加载创建 TaskService 实例，
+              与 task_submit.py 中的获取方式保持一致
+
     Returns:
-        TaskService 实例，服务未注册时返回 None
+        TaskService 实例，服务不可用或创建失败时返回 None
     """
     try:
         from infrastructure.service_provider import get_service_provider
         provider = get_service_provider()
-        return provider.get("task_service")
+        return provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+        )
     except Exception:
         return None
 

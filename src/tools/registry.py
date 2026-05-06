@@ -85,6 +85,9 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）
         self._dynamic_tool_names: set[str] = set()
 
+        # Schema 动态丰富器注册表（tool_name -> enricher callable）
+        self._schema_enrichers: dict[str, Callable] = {}
+
         # 使用统计（用于 LRU 卸载策略）
         self._usage_count: dict[str, int] = {}  # 工具使用次数
         self._last_used: dict[str, float] = {}  # 最后使用时间戳
@@ -122,6 +125,31 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
             动态加载的工具名称集合
         """
         return self._dynamic_tool_names
+
+    def register_schema_enricher(
+        self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]
+    ) -> None:
+        """注册工具 Schema 动态丰富器。
+
+        丰富器在 ToolSchemaPlugin 每轮迭代生成 LLM schema 时被调用，
+        接收原始 Tool 对象和 services 字典，返回丰富后的 Tool 副本（深拷贝）。
+
+        Args:
+            tool_name: 工具名称
+            enricher: 丰富器函数，签名 (tool: Tool, services: dict) -> Tool
+        """
+        self._schema_enrichers[tool_name] = enricher
+
+    def get_schema_enricher(self, tool_name: str) -> Callable | None:
+        """获取工具的 Schema 动态丰富器。
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            丰富器函数，未注册时返回 None
+        """
+        return self._schema_enrichers.get(tool_name)
 
     def register(
         self,
@@ -265,6 +293,11 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                             tool=tool_def,
                             handler=tool_item.execute,
                         )
+                        # 注册 Schema 丰富器（如果有）
+                        if hasattr(tool_item, 'get_schema_enricher'):
+                            enricher = tool_item.get_schema_enricher()
+                            if enricher:
+                                self.register_schema_enricher(tool_def.name, enricher)
                         logger.info(f"[按需加载] 工具 {registered_name} 已自动注册")
                         return
                 elif isinstance(tool_item, Tool):
@@ -403,6 +436,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._handlers.pop(name, None)
         self._runnables.pop(name, None)
         self._dynamic_tool_names.discard(name)
+        self._schema_enrichers.pop(name, None)
 
         return tool
 
@@ -510,3 +544,4 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._handlers.clear()
         self._runnables.clear()
         self._dynamic_tool_names.clear()
+        self._schema_enrichers.clear()

@@ -1,9 +1,10 @@
-﻿"""
+"""
 内置工具基类
 
 暴露接口：
 - register_builtin_tool(tool_instance: BuiltinTool, registry: Any) -> str：register_builtin_tool功能
 - get_tool_definition() -> Tool：get_tool_definition功能
+- get_schema_enricher() -> Callable | None：获取 Schema 动态丰富器
 - to_runnable(self) -> 'ToolRunnable'：to_runnable功能
 - to_mcp_format(self) -> dict[str, Any]：to_mcp_format功能
 - to_llm_format(self) -> dict[str, Any]：to_llm_format功能
@@ -11,6 +12,7 @@
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from core.results import ToolExecutionResult
@@ -53,6 +55,21 @@ class BuiltinTool(ABC):
         tool = self.get_tool_definition()
         return tool.to_llm_format()
 
+    def get_schema_enricher(self) -> Callable | None:
+        """获取工具的 Schema 动态丰富器。
+
+        子类可重写此方法，返回一个函数：
+        (tool: Tool, services: dict) -> Tool
+
+        该函数在 ToolSchemaPlugin 每轮迭代时被调用，
+        接收原始 Tool 定义和 services 字典，
+        返回丰富后的 Tool 副本（深拷贝）。
+
+        Returns:
+            丰富器函数，默认返回 None（无丰富）
+        """
+        return None
+
 
 def register_builtin_tool(
     tool_instance: BuiltinTool,
@@ -60,7 +77,12 @@ def register_builtin_tool(
 ) -> str:
     """注册内置工具到注册表"""
     tool = tool_instance.get_tool_definition()
-    return registry.register_with_handler(
+    name = registry.register_with_handler(
         tool=tool,
         handler=tool_instance.execute,
     )
+    # 注册 Schema 丰富器（如果有）
+    enricher = tool_instance.get_schema_enricher()
+    if enricher:
+        registry.register_schema_enricher(tool.name, enricher)
+    return name

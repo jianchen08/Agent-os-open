@@ -743,6 +743,17 @@ class TaskWorker:
             # 2. 挂起引擎：inject_and_wake
             engine_key = f"__suspended_engine_{parent_pipeline_id}"
             engine = self._services.get(engine_key)
+            if engine is None:
+                try:
+                    from pipeline.engine import get_global_suspended_engine
+                    engine = get_global_suspended_engine(parent_pipeline_id)
+                    if engine:
+                        logger.info(
+                            "TaskWorker: 通过全局注册表找到引擎: pipeline=%s, task=%s",
+                            parent_pipeline_id, task_id,
+                        )
+                except Exception as exc:
+                    logger.warning("TaskWorker: 全局注册表查询失败: %s", exc)
             if engine and hasattr(engine, "inject_and_wake"):
                 try:
                     engine.inject_and_wake(notification)
@@ -1171,6 +1182,9 @@ class TaskWorker:
                 acceptance_criteria, workspace
             )
             full_input += f"\n\n验收标准（必须满足）：{json.dumps(acceptance_criteria, ensure_ascii=False, indent=2)}"
+            eval_prompt = self._build_evaluation_criteria_prompt(acceptance_criteria)
+            if eval_prompt:
+                full_input += eval_prompt
 
         if not is_default_workspace:
             full_input += "\n\n工作目录已设置（系统自动管理，无需关注具体路径）"
@@ -1256,17 +1270,11 @@ class TaskWorker:
                     )
 
             # ── 5.1 子任务启动时通知前端创建子标签 ──
-            # BUG-FIX-fix_20260505_sub_tab_not_created:
-            # 问题根因: 后端只在 EventBus 内部发布 task.submitted 事件，
-            #           未通过 WebSocket 发送 sub_agent_created 给前端，
-            #           前端无法感知子任务创建，导致子标签页缺失。
-            # 修复方案: 在 pipeline_id 绑定后，通过全局 _ws_interaction_notifier
-            #           向所有活跃的 WebSocket 连接广播 sub_agent_created 事件，
-            #           前端据此创建子标签并注册 pipeline 映射。
-            # 影响范围: 所有通过 task_submit 提交的子任务
+            # 通过 ServiceProvider 获取 ws_interaction_notifier，
+            # 避免后端直接依赖 start_server.py 前端入口模块。
             try:
-                from start_server import _ws_interaction_notifier
-                if _ws_interaction_notifier and target_id:
+                _ws_notifier = self._services.get("ws_interaction_notifier")
+                if _ws_notifier and target_id and hasattr(_ws_notifier, "broadcast_event"):
                     _parent_task_id_ws = None
                     _title_ws = task_data.get("user_input", "")
                     if task_service:
@@ -1286,7 +1294,7 @@ class TaskWorker:
                             "status": "running",
                         },
                     }
-                    await _ws_interaction_notifier.broadcast_event(_ws_event_data)
+                    await _ws_notifier.broadcast_event(_ws_event_data)
                     logger.info(
                         "TaskWorker: sub_agent_created 事件已发送: "
                         "task_id=%s, agent=%s, pipeline=%s",
@@ -2021,6 +2029,75 @@ class TaskWorker:
                 resolved = resolve_workspace(tid, tws, parent_resolved_workspace=resolved)
 
         return resolved or f"{root}/{task_id}"
+
+    def _build_evaluation_criteria_prompt(
+        self, acceptance_criteria: dict[str, Any],
+    ) -> str:
+        """根据验收标准中的指标 ID 加载完整指标定义，生成可读的评估说明文本。
+
+        将评估指标的完整信息（名称、描述、判断标准、通过/失败消息、是否红线）
+        直接注入到执行 Agent 的 prompt 中，让 Agent 清楚知道自己会被怎么评估。
+
+        Args:
+            acceptance_criteria: 验收标准字典，key 为指标 ID，
+                                 value 为 {"input_params": {...}, ...}
+
+        Returns:
+            格式化后的评估指标说明文本，无验收标准时返回空字符串
+        """
+        if not acceptance_criteria or not isinstance(acceptance_criteria, dict):
+            return ""
+
+        try:
+            from evaluation.loader import MetricLoader
+        except ImportError:
+            logger.debug("[TaskWorker] evaluation.loader 不可用，跳过指标原文注入")
+            return ""
+
+        try:
+            loader = MetricLoader()
+            loader.load_all()
+        except Exception as e:
+            logger.debug("[TaskWorker] MetricLoader 加载失败: %s", e)
+            return ""
+
+        parts: list[str] = []
+        for metric_id, config in acceptance_criteria.items():
+            metric_def = loader.get(metric_id)
+            if not metric_def:
+                continue
+
+            lines: list[str] = []
+            lines.append(f"### {metric_def.name}（{metric_id}）")
+            lines.append(f"说明：{metric_def.description}")
+
+            if config and isinstance(config, dict):
+                input_params = config.get("input_params", {})
+                if input_params:
+                    params_desc = json.dumps(input_params, ensure_ascii=False, indent=2)
+                    lines.append(f"评估参数：{params_desc}")
+
+            expect = metric_def.expect
+            if expect and expect.conditions:
+                cond_strs = []
+                for cond in expect.conditions:
+                    if cond.operator in ("is_true", "is_false"):
+                        cond_strs.append(f"{cond.field} 为 {'真' if cond.operator == 'is_true' else '假'}")
+                    else:
+                        cond_strs.append(f"{cond.field} {cond.operator} {cond.value}")
+                logic_word = "且" if expect.logic == "and" else "或"
+                lines.append(f"通过条件（{logic_word}）：{', '.join(cond_strs)}")
+
+            if metric_def.is_red_line:
+                lines.append("⚠️ 红线指标：未通过则任务直接失败")
+
+            parts.append("\n".join(lines))
+
+        if not parts:
+            return ""
+
+        header = "评估指标详情（你的产出将被以下标准评估）："
+        return f"\n\n{header}\n\n" + "\n\n".join(parts)
 
     def _normalize_acceptance_criteria_paths(
         self, criteria: dict | list, workspace: str

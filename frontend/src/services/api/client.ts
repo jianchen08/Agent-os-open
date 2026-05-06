@@ -305,15 +305,20 @@ apiClient.interceptors.response.use(
             ? ErrorType.VALIDATION
             : ErrorType.NETWORK
 
-    reportError(
-      apiError.message,
-      errorType,
-      errorType === ErrorType.AUTHENTICATION ? ErrorSeverity.WARNING : ErrorSeverity.ERROR,
-      {
-        code: apiError.code,
-        details: apiError.details,
-      },
-    )
+    const requestUrl = error.config?.url || ''
+    const isOptionalEndpoint = requestUrl.includes('/files/capabilities')
+
+    if (!isOptionalEndpoint) {
+      reportError(
+        apiError.message,
+        errorType,
+        errorType === ErrorType.AUTHENTICATION ? ErrorSeverity.WARNING : ErrorSeverity.ERROR,
+        {
+          code: apiError.code,
+          details: apiError.details,
+        },
+      )
+    }
 
     return Promise.reject(apiError)
   },
