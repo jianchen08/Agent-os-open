@@ -98,7 +98,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
   const searchSessions = useSessionListStore((state) => state.searchSessions)
   const fetchSessions = useSessionListStore((state) => state.fetchSessions)
-  const toggleSessionPin = useSessionListStore((state) => state.toggleSessionPin)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
   const toggleSidebar = useUIStore((state) => state.toggleSidebar)
@@ -237,26 +236,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       toggleSessionStar(sessionId)
     },
     [toggleSessionStar],
-  )
-
-  /**
-   * 处理置顶会话
-   */
-  const handlePinSession = useCallback(
-    (sessionId: string) => {
-      toggleSessionPin(sessionId)
-    },
-    [toggleSessionPin],
-  )
-
-  /**
-   * 处理重命名会话
-   */
-  const handleRenameSession = useCallback(
-    (sessionId: string, newTitle: string) => {
-      renameSession(sessionId, newTitle)
-    },
-    [renameSession],
   )
 
   /**
@@ -514,8 +493,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   onEditSession={handleEditSession}
                   onCopySession={handleCopySession}
                   onStarSession={handleStarSession}
-                  onPinSession={handlePinSession}
-                  onRenameSession={handleRenameSession}
                   className="px-2"
                   itemHeight={SIDEBAR_STYLES.itemHeight}
                 />

@@ -12,11 +12,37 @@ import { Input } from '@/components/ui/input'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useStreamingStore } from '@/stores/streamingStore'
+import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { InteractionPanel } from './InteractionPanel'
 import { MessageList } from './MessageList'
+import { NotificationCenter } from './NotificationCenter'
+import { SubTabRouter } from './SubTabRouter'
+import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
+
+/**
+ * 活跃投票面板列表
+ *
+ * 从 votingStore 获取当前会话的活跃投票并渲染。
+ */
+function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
+  const votingSessions = useVotingStore((s) => s.votingSessions)
+  const activeVotings = votingSessions.filter(
+    (v) => (v.sessionId === sessionId || !v.sessionId) && v.status === 'open',
+  )
+
+  if (activeVotings.length === 0) return null
+
+  return (
+    <div className="shrink-0">
+      {activeVotings.map((voting) => (
+        <VotingPanel key={voting.id} voting={voting} />
+      ))}
+    </div>
+  )
+}
 
 /**
  * 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式
@@ -224,7 +250,7 @@ export const ChatContainer = ({
         </div>
       )}
 
-      {/* 搜索栏 */}
+      {/* 搜索栏 + 通知中心 */}
       <div className="bg-background shrink-0 border-b">
         <div className="flex items-center gap-2 px-4 py-2">
           <div className="relative flex-1">
@@ -252,6 +278,10 @@ export const ChatContainer = ({
               找到 {filteredMessages.length} 条消息
             </div>
           )}
+          {/* 通知中心触发按钮 */}
+          <div className="relative">
+            <NotificationCenter />
+          </div>
         </div>
       </div>
 
@@ -271,10 +301,16 @@ export const ChatContainer = ({
         searchQuery={searchQuery}
       />
 
+      {/* 子Tab路由增强（无UI，逻辑层） */}
+      <SubTabRouter sessionId={sessionId} />
+
       {/* 人类交互卡片 */}
       <ErrorBoundary>
         <InteractionPanel sessionId={sessionId} />
       </ErrorBoundary>
+
+      {/* 活跃投票面板 */}
+      <ActiveVotingPanels sessionId={sessionId} />
 
       {/* 输入区域 */}
       <ChatInput

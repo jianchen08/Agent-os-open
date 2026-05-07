@@ -23,6 +23,24 @@ export type {
   SubAgentStatus,
 } from './SubAgentCard'
 
+// 通知系统组件
+export { NotificationCenter } from './NotificationCenter'
+export type { NotificationCenterProps } from './NotificationCenter'
+export { NotificationItemComponent } from './NotificationItem'
+export type { NotificationItemProps } from './NotificationItem'
+
+// 子 Tab 路由增强
+export { SubTabRouter, getSubTabRouterApi } from './SubTabRouter'
+export type { SubTabRouterProps } from './SubTabRouter'
+
+// 投票面板组件
+export { VotingPanel } from './VotingPanel'
+export type { VotingPanelProps } from './VotingPanel'
+
+// 文件上传组件
+export { FileUploadZone } from './FileUploadZone'
+export type { FileUploadZoneProps, UploadableFile } from './FileUploadZone'
+
 // Markdown 渲染组件
 export {
   CodeBlock,

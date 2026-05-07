@@ -227,6 +227,12 @@ def _register_routes(app: FastAPI) -> None:
         client_router,
         files_router,
     )
+    from channels.api.routes_artifacts import (
+        artifacts_router,
+        annotations_router_v1,
+    )
+    from channels.api.routes_reviews import reviews_router
+    from channels.api.routes_workspaces import workspaces_router
 
     app.include_router(projects_router)
     app.include_router(users_router)
@@ -243,3 +249,9 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(eval_metrics_alias_router)
     app.include_router(client_router)
     app.include_router(files_router)
+
+    # ---- 审批与工作空间路由（新增） ----
+    app.include_router(artifacts_router)
+    app.include_router(annotations_router_v1)
+    app.include_router(reviews_router)
+    app.include_router(workspaces_router)

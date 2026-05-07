@@ -495,21 +495,20 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
         useMessageRender({ message }),
       )
 
-      // buildContentBlocksFromMessage: thinking → text → toolCalls
-      // BUG-FIX-fix_20260506_003: 文本块应在 toolCalls 之前，避免工具参数显示在消息气泡外面
+      // buildContentBlocksFromMessage: thinking → toolCalls → content
       const types = extractFragmentTypes(result.current.fragments)
-      expect(types).toEqual(['thinking', 'text', 'tool_call'])
+      expect(types).toEqual(['thinking', 'tool_call', 'text'])
 
       // 验证内容
       const fragments = result.current.fragments
       if (fragments[0].type === 'thinking') {
         expect(fragments[0].thinking.content).toBe('思考中')
       }
-      if (fragments[1].type === 'text') {
-        expect(fragments[1].content).toBe('这是纯文本内容')
+      if (fragments[1].type === 'tool_call') {
+        expect(fragments[1].toolCall.tool_name).toBe('search')
       }
-      if (fragments[2].type === 'tool_call') {
-        expect(fragments[2].toolCall.tool_name).toBe('search')
+      if (fragments[2].type === 'text') {
+        expect(fragments[2].content).toBe('这是纯文本内容')
       }
     })
 

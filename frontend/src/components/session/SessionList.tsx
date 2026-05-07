@@ -5,9 +5,7 @@
  * - 点击切换会话
  * - Hover 时显示删除按钮（Trash 图标）
  * - 删除前弹出确认对话框（使用 shadcn/ui Dialog）
- * - 三点下拉菜单支持编辑、复制、星标、置顶、删除操作
- * - 右键上下文菜单支持重命名、置顶/取消置顶、删除操作
- * - 置顶会话分组显示（已置顶 / 全部会话）
+ * - 右键菜单支持编辑、复制、星标、删除操作
  *
  * 使用 memo 优化渲染性能，避免不必要的重渲染。
  */
@@ -22,15 +20,8 @@ import {
   Star,
   Trash2,
 } from 'lucide-react'
-import { memo, useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from '@/components/ui/context-menu'
 import {
   Dialog,
   DialogContent,
@@ -62,8 +53,6 @@ interface SessionListProps {
   onDeleteSession: (sessionId: string) => Promise<void>
   /** 编辑会话回调 */
   onEditSession: (session: Session) => void
-  /** 重命名会话回调 */
-  onRenameSession?: (sessionId: string, newTitle: string) => void
   /** 复制会话回调 */
   onCopySession: (session: Session) => void
   /** 星标切换回调 */
@@ -93,8 +82,6 @@ interface SessionItemProps {
   onDelete: () => void
   /** 编辑回调 */
   onEdit: () => void
-  /** 重命名回调 */
-  onRename: (newTitle: string) => void
   /** 复制回调 */
   onCopy: () => void
   /** 星标切换回调 */
@@ -105,55 +92,6 @@ interface SessionItemProps {
   itemHeight: number
 }
 
-/**
- * 内联重命名输入组件
- */
-function InlineRenameInput({
-  initialTitle,
-  onConfirm,
-  onCancel,
-}: {
-  initialTitle: string
-  onConfirm: (newTitle: string) => void
-  onCancel: () => void
-}) {
-  const [title, setTitle] = useState(initialTitle)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  const handleSubmit = () => {
-    const trimmed = title.trim()
-    if (trimmed && trimmed !== initialTitle) {
-      onConfirm(trimmed)
-    } else {
-      onCancel()
-    }
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      handleSubmit()
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      onCancel()
-    }
-  }
-
-  return (
-    <input
-      ref={inputRef}
-      type="text"
-      value={title}
-      onChange={(e) => setTitle(e.target.value)}
-      onBlur={handleSubmit}
-      onKeyDown={handleKeyDown}
-      className="bg-background w-full rounded border px-1 py-0.5 text-sm outline-none focus:ring-1 focus:ring-primary"
-      autoFocus
-      data-testid="rename-input"
-    />
-  )
-}
-
 const SessionItem = memo<SessionItemProps>(
   ({
     session,
@@ -162,189 +100,131 @@ const SessionItem = memo<SessionItemProps>(
     onClick,
     onDelete,
     onEdit,
-    onRename,
     onCopy,
     onStar,
     onPin,
     itemHeight,
   }) => {
-    const [isRenaming, setIsRenaming] = useState(false)
-
-    const handleRename = useCallback(
-      (newTitle: string) => {
-        setIsRenaming(false)
-        onRename(newTitle)
-      },
-      [onRename],
-    )
-
-    const handleRenameCancel = useCallback(() => {
-      setIsRenaming(false)
-    }, [])
-
     return (
-      <ContextMenu>
-        <ContextMenuTrigger asChild>
-          <div
-            className={cn(
-              'group relative flex items-center rounded-md px-2 transition-colors',
-              isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 cursor-pointer',
-              isDeleting && 'pointer-events-none opacity-50',
-            )}
-            style={{ height: `${itemHeight}px` }}
-            onClick={isRenaming ? undefined : onClick}
-            role="button"
-            tabIndex={0}
-            aria-label={`会话: ${session.title}`}
-            aria-current={isActive ? 'true' : undefined}
-            data-testid="session-item"
-          >
-            {/* 左侧图标：置顶会话显示 Pin，普通会话显示 MessageSquare */}
-            {session.pinned ? (
-              <Pin
-                className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
-                data-testid="pin-icon"
-              />
-            ) : (
-              <MessageSquare
-                className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
-                data-testid="message-icon"
-              />
-            )}
+      <div
+        className={cn(
+          'group relative flex items-center rounded-md px-2 transition-colors',
+          isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 cursor-pointer',
+          isDeleting && 'pointer-events-none opacity-50',
+        )}
+        style={{ height: `${itemHeight}px` }}
+        onClick={onClick}
+        role="button"
+        tabIndex={0}
+        aria-label={`会话: ${session.title}`}
+        aria-current={isActive ? 'true' : undefined}
+      >
+        {/* 左侧图标：置顶会话显示 Pin，普通会话显示 MessageSquare */}
+        {session.pinned ? (
+          <Pin
+            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
+            data-testid="pin-icon"
+          />
+        ) : (
+          <MessageSquare
+            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
+            data-testid="message-icon"
+          />
+        )}
 
-            {/* 标题 */}
-            {isRenaming ? (
-              <InlineRenameInput
-                initialTitle={session.title}
-                onConfirm={handleRename}
-                onCancel={handleRenameCancel}
-              />
-            ) : (
-              <span className="min-w-0 flex-1 truncate text-sm">{session.title}</span>
-            )}
+        {/* 标题 */}
+        <span className="min-w-0 flex-1 truncate text-sm">{session.title}</span>
 
-            {/* 星标指示器 */}
-            {session.starred && (
-              <Star className="mr-1 h-3 w-3 flex-shrink-0 fill-current text-status-warning" />
-            )}
+        {/* 星标指示器 */}
+        {session.starred && (
+          <Star className="mr-1 h-3 w-3 flex-shrink-0 fill-current text-status-warning" />
+        )}
 
-            {/* 正在删除加载指示 */}
-            {isDeleting && (
-              <Loader2 className="text-muted-foreground ml-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
-            )}
+        {/* 正在删除加载指示 */}
+        {isDeleting && (
+          <Loader2 className="text-muted-foreground ml-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+        )}
 
-            {/* Hover 时显示的操作区域 */}
-            {!isDeleting && !isRenaming && (
-              <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                {/* 删除按钮 - 直接显示 Trash 图标 */}
+        {/* Hover 时显示的操作区域 */}
+        {!isDeleting && (
+          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            {/* 删除按钮 - 直接显示 Trash 图标 */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onDelete()
+              }}
+              className="text-muted-foreground hover:text-destructive rounded p-0.5 transition-colors"
+              aria-label="删除会话"
+              title="删除会话"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+
+            {/* 更多操作下拉菜单 */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
                 <button
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-muted-foreground hover:text-foreground rounded p-0.5 transition-colors"
+                  aria-label="更多操作"
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-[140px]">
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onEdit()
+                  }}
+                >
+                  <Edit3 className="mr-2 h-3.5 w-3.5" />
+                  编辑
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onCopy()
+                  }}
+                >
+                  <Copy className="mr-2 h-3.5 w-3.5" />
+                  复制
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onStar()
+                  }}
+                >
+                  <Star className="mr-2 h-3.5 w-3.5" />
+                  {session.starred ? '取消星标' : '星标'}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onPin()
+                  }}
+                >
+                  <Pin className="mr-2 h-3.5 w-3.5" />
+                  {session.pinned ? '取消置顶' : '置顶会话'}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
                   onClick={(e) => {
                     e.stopPropagation()
                     onDelete()
                   }}
-                  className="text-muted-foreground hover:text-destructive rounded p-0.5 transition-colors"
-                  aria-label="删除会话"
-                  title="删除会话"
+                  className="text-destructive focus:text-destructive"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-
-                {/* 更多操作下拉菜单 */}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-muted-foreground hover:text-foreground rounded p-0.5 transition-colors"
-                      aria-label="更多操作"
-                    >
-                      <MoreHorizontal className="h-3.5 w-3.5" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-[140px]">
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onEdit()
-                      }}
-                    >
-                      <Edit3 className="mr-2 h-3.5 w-3.5" />
-                      编辑
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onCopy()
-                      }}
-                    >
-                      <Copy className="mr-2 h-3.5 w-3.5" />
-                      复制
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onStar()
-                      }}
-                    >
-                      <Star className="mr-2 h-3.5 w-3.5" />
-                      {session.starred ? '取消星标' : '星标'}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onPin()
-                      }}
-                    >
-                      <Pin className="mr-2 h-3.5 w-3.5" />
-                      {session.pinned ? '取消置顶' : '置顶会话'}
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDelete()
-                      }}
-                      className="text-destructive focus:text-destructive"
-                    >
-                      <Trash2 className="mr-2 h-3.5 w-3.5" />
-                      删除
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            )}
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  删除
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-        </ContextMenuTrigger>
-
-        {/* 右键上下文菜单 */}
-        <ContextMenuContent className="w-[160px]">
-          <ContextMenuItem
-            onClick={() => {
-              setIsRenaming(true)
-            }}
-          >
-            <Edit3 className="mr-2 h-3.5 w-3.5" />
-            重命名
-          </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() => {
-              onPin()
-            }}
-          >
-            <Pin className="mr-2 h-3.5 w-3.5" />
-            {session.pinned ? '取消置顶' : '置顶会话'}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            onClick={() => {
-              onDelete()
-            }}
-            className="text-destructive focus:text-destructive"
-          >
-            <Trash2 className="mr-2 h-3.5 w-3.5" />
-            删除
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+        )}
+      </div>
     )
   },
 )
@@ -363,7 +243,6 @@ export const SessionList = memo<SessionListProps>(
     onSessionClick,
     onDeleteSession,
     onEditSession,
-    onRenameSession,
     onCopySession,
     onStarSession,
     onPinSession,
@@ -406,20 +285,6 @@ export const SessionList = memo<SessionListProps>(
       }
     }, [deleteConfirmId, onDeleteSession])
 
-    /**
-     * 重命名会话（调用回调或降级为编辑）
-     */
-    const handleRename = useCallback(
-      (session: Session, newTitle: string) => {
-        if (onRenameSession) {
-          onRenameSession(session.id, newTitle)
-        } else {
-          onEditSession(session)
-        }
-      },
-      [onRenameSession, onEditSession],
-    )
-
     /** 待删除会话的标题，用于确认对话框显示 */
     const deleteTargetTitle =
       sessions.find((s) => s.id === deleteConfirmId)?.title || '此会话'
@@ -451,7 +316,6 @@ export const SessionList = memo<SessionListProps>(
         onClick={() => onSessionClick(session.id)}
         onDelete={() => handleDeleteRequest(session.id)}
         onEdit={() => onEditSession(session)}
-        onRename={(newTitle) => handleRename(session, newTitle)}
         onCopy={() => onCopySession(session)}
         onStar={() => onStarSession(session.id)}
         onPin={() => onPinSession(session.id)}
