@@ -8,11 +8,3 @@ export type { ThemeActions, ThemeMode, ThemeState } from './themeStore'
 export { useUIStore, type Theme } from './uiStore'
 export { useAgentTabStore } from './agentTabStore'
 export type { AgentTab } from '@/types/task'
-
-// 审批与工作空间 Store
-export { useArtifactStore } from './artifactStore'
-export { useReviewStore } from './reviewStore'
-export { useAnnotationStore } from './annotationStore'
-export { useWorkspaceStore } from './workspaceStore'
-export { useInteractionStore } from './interactionStore'
-export { useLayoutModeStore } from './layoutModeStore'

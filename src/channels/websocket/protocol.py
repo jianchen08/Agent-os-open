@@ -103,7 +103,6 @@ ACK_REQUIRED_EVENTS: set[str] = {
     "interaction_request",
     "approval_required",
     "approval_request",
-    "review_request",
 }
 """需要前端 ACK 确认的关键事件类型集合。"""
 
@@ -147,14 +146,6 @@ class EventType(str, Enum):
 
     # --- ACK 事件（前端 → 后端）---
     MESSAGE_ACK = "message_ack"
-
-    # --- 审批与工作空间事件 ---
-    REVIEW_REQUEST = "review_request"
-    REVIEW_STATUS_UPDATE = "review_status_update"
-    ARTIFACT_CREATED = "artifact_created"
-    ARTIFACT_UPDATED = "artifact_updated"
-    ANNOTATION_ADDED = "annotation_added"
-    ANNOTATION_RESOLVED = "annotation_resolved"
 
     # --- 重连事件（双向）---
     REQUEST_MISSED = "request_missed"
