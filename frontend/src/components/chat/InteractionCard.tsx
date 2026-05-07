@@ -18,9 +18,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
-import { ArtifactPreview } from '../review/ArtifactPreview'
-import type { InteractionArtifact, InteractionOption, PendingInteraction } from '@/stores/interactionStore'
-import type { Artifact } from '@/types/review'
+import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 
 /** description 长度阈值：超过此值弹窗展示，否则直接执行选择 */
 const DESCRIPTION_DIALOG_THRESHOLD = 20
@@ -210,17 +208,9 @@ export function InteractionCard({
           </div>
         )}
 
-        {/* Conversation 模式：制品预览 + 快捷回复 + 跳转 + 输入 */}
+        {/* Conversation 模式：快捷回复 + 跳转 + 输入 */}
         {interaction.mode === 'conversation' && !isDone && (
           <div className="space-y-3">
-            {/* 制品预览（有 artifacts 时显示） */}
-            {interaction.artifacts && interaction.artifacts.length > 0 && (
-              <ArtifactPreview
-                artifacts={interaction.artifacts as Artifact[]}
-                onNavigateToWorkspace={onNavigateToTab}
-              />
-            )}
-
             {/* 快捷回复芯片 */}
             {interaction.suggestions && interaction.suggestions.length > 0 && (
               <div className="flex flex-wrap gap-2">

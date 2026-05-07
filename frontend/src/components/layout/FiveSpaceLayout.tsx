@@ -129,12 +129,14 @@ export function FiveSpaceLayout({
   /**
    * 处理任务树节点点击事件
    *
-   * 当用户点击任务树中的节点时：
-   * - 容器任务（有子节点）→ 打开工作区 Tab（容器任务工作空间）
-   * - 叶子任务 → 打开子 Agent 对话标签 + 打开父容器的工作区 Tab
+   * 当用户点击任务树中的叶子任务节点时，自动打开对应的子标签并加载
+   * 子管道的对话历史。同时确保主 Agent 标签存在（用于 Tab 导航显示）。
+   * 容器类型任务（有子节点的父任务）不执行跳转，因为它们没有独立的执行者。
    *
    * BUG-FIX-fix_20260507_container_click:
-   * 容器任务不再直接 return，而是打开其专属工作空间 Tab。
+   * 问题根因: 容器任务（有子节点的父任务）点击后打开子标签，但它没有独立执行者，
+   *          其执行者就是主管道，而主管道已经是默认活跃的。
+   * 修复方案: 容器任务直接 return，不执行任何跳转操作。
    *
    * @param node - 被点击的树节点数据
    */
@@ -144,30 +146,10 @@ export function FiveSpaceLayout({
     const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
     if (!taskId) return
 
+    // 容器任务（有子节点）不打开子标签，它没有独立执行者
     const children = node.children as unknown[] | undefined
-    const isContainer = Array.isArray(children) && children.length > 0
+    if (Array.isArray(children) && children.length > 0) return
 
-    // ---- 容器任务：打开工作区 Tab ----
-    if (isContainer) {
-      const existingTab = workspaceTabs.find((t) => t.moduleId === taskId)
-      if (existingTab) {
-        setActiveTab(existingTab.id)
-      } else {
-        const tabId = `workspace-${taskId}`
-        const layoutStore = useLayoutModeStore.getState()
-        layoutStore.addWorkspaceTab({
-          id: tabId,
-          title: `${title} 工作空间`,
-          icon: '📁',
-          moduleId: taskId,
-          isActive: true,
-          isPinned: false,
-        })
-      }
-      return
-    }
-
-    // ---- 叶子任务：打开对话标签 + 父容器工作空间 ----
     const agentTabStore = useAgentTabStore.getState()
 
     // 确保主 Agent 标签存在（Tab 导航需要至少 2 个 tab 才显示）
@@ -198,7 +180,7 @@ export function FiveSpaceLayout({
 
     // 加载子管道消息
     agentTabStore.loadTabMessages(`sub-${taskId}`, pipelineRunId)
-  }, [activeSessionId, workspaceTabs, setActiveTab])
+  }, [activeSessionId])
 
   // Build dynamic dock items with execution status
   const enrichedDockItems = useMemo(() => {
