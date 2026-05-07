@@ -194,8 +194,15 @@ class HumanInteractionService(IHumanInteractionService):
         suggestions: list[str] | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        workspace_tab_id: str | None = None,
     ) -> str:
-        """创建对话模式请求，返回 request_id。"""
+        """创建对话模式请求，返回 request_id。
+
+        扩展支持 artifacts（制品列表）和 workspace_tab_id（关联工作区 Tab）。
+        artifacts 用于在 Chat 卡片中展示 AI 产出物预览。
+        workspace_tab_id 用于跳转到工作区进行深度审阅。
+        """
         request_id = str(uuid4())
 
         record = self._make_request_record(
@@ -211,6 +218,8 @@ class HumanInteractionService(IHumanInteractionService):
             extra={
                 "initial_message": initial_message,
                 "suggestions": suggestions,
+                "artifacts": artifacts or [],
+                "workspace_tab_id": workspace_tab_id,
             },
         )
         self._requests[request_id] = record
@@ -356,6 +365,79 @@ class HumanInteractionService(IHumanInteractionService):
         logger.info(
             "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",
             request_id, response_type,
+        )
+        return True
+
+    async def submit_review_feedback(
+        self,
+        request_id: str,
+        action: str,
+        annotations: list[dict[str, Any]] | None = None,
+        feedback_text: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        """提交审批反馈（包含批注）。
+
+        扩展的响应提交方法，支持结构化的批注数据。
+        批注类型包括：text_selection、image_area、video_timestamp、screenshot_area。
+        """
+        request_record = self._requests.get(request_id)
+        if not request_record:
+            logger.warning("[HumanInteraction] 审批请求不存在 | request_id=%s", request_id)
+            return False
+
+        if request_record.get("status") not in (
+            InteractionStatus.PENDING.value,
+            InteractionStatus.VIEWED.value,
+        ):
+            logger.warning(
+                "[HumanInteraction] 请求状态不允许审批 | request_id=%s | status=%s",
+                request_id, request_record.get("status"),
+            )
+            return False
+
+        response_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+
+        # 映射 action 到 response_type
+        response_type_map = {
+            "approve": ResponseType.APPROVED.value,
+            "reject": ResponseType.DENIED.value,
+            "annotate": ResponseType.ANSWERED.value,
+        }
+        response_type = response_type_map.get(action, ResponseType.ANSWERED.value)
+
+        self._responses[request_id] = {
+            "id": response_id,
+            "session_id": request_record.get("session_id"),
+            "parent_record_id": request_id,
+            "type": "review_feedback",
+            "status": "completed",
+            "message_data": {
+                "request_id": request_id,
+                "response_type": response_type,
+                "action": action,
+                "annotations": annotations or [],
+                "feedback_text": feedback_text,
+                "user_id": user_id,
+            },
+        }
+
+        request_record["status"] = InteractionStatus.COMPLETED.value
+        msg_data = request_record.setdefault("message_data", {})
+        msg_data["responded_at"] = now
+
+        async with self._lock:
+            if request_id in self._pending_events:
+                self._pending_events[request_id].set()
+            if request_id in self._timeout_tasks:
+                self._timeout_tasks[request_id].cancel()
+                del self._timeout_tasks[request_id]
+
+        annotation_count = len(annotations or [])
+        logger.info(
+            "[HumanInteraction] 审批反馈已提交 | request_id=%s | action=%s | annotations=%d",
+            request_id, action, annotation_count,
         )
         return True
 

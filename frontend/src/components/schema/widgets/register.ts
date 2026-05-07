@@ -17,6 +17,11 @@ import { CodeBlockWidget } from './CodeBlockWidget'
 import { StatusCardWidget } from './StatusCardWidget'
 import { DecisionWidget } from './DecisionWidget'
 import { FileTreeWidget } from './FileTreeWidget'
+import { ReviewableDocument } from '../review/ReviewableDocument'
+import { ReviewDiff } from '../review/ReviewDiff'
+import { ImageAreaAnnotation } from '../review/ImageAreaAnnotation'
+import { VideoTimelineAnnotation } from '../review/VideoTimelineAnnotation'
+import { ReviewPanel } from '../review/ReviewPanel'
 import type { ComponentType } from 'react'
 
 /** Widget 注册条目定义 */
@@ -111,6 +116,46 @@ const WIDGET_REGISTRATIONS: WidgetRegistration[] = [
     description: '通用树形结构组件，支持递归嵌套、状态显示和进度追踪',
     supportedSpaces: ['chat', 'workspace'],
     fallbackWidget: 'table',
+  },
+  {
+    type: 'review_document',
+    component: ReviewableDocument,
+    name: '文档审批',
+    description: '可批注的文档渲染组件，支持文字选中批注和高亮标注',
+    supportedSpaces: ['workspace', 'fullscreen'],
+    fallbackWidget: 'code_block',
+  },
+  {
+    type: 'review_image',
+    component: ImageAreaAnnotation,
+    name: '图片标注',
+    description: '图片区域标注组件，支持在图片上绘制矩形区域并添加文字反馈',
+    supportedSpaces: ['workspace', 'floating', 'fullscreen'],
+    fallbackWidget: 'gallery',
+  },
+  {
+    type: 'review_video',
+    component: VideoTimelineAnnotation,
+    name: '视频标注',
+    description: '视频播放器 + 时间轴标注，支持在时间轴上添加标记和反馈',
+    supportedSpaces: ['fullscreen'],
+    fallbackWidget: 'gallery',
+  },
+  {
+    type: 'review_diff',
+    component: ReviewDiff,
+    name: '版本对比',
+    description: '文本版本对比组件，支持左右对比和统一 diff 视图',
+    supportedSpaces: ['workspace', 'fullscreen'],
+    fallbackWidget: 'code_block',
+  },
+  {
+    type: 'review_panel',
+    component: ReviewPanel,
+    name: '审批面板',
+    description: '审批操作面板，提供通过/驳回按钮、批注计数和反馈输入',
+    supportedSpaces: ['workspace', 'floating', 'fullscreen'],
+    fallbackWidget: 'form',
   },
 ]
 

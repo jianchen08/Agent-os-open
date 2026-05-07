@@ -24,6 +24,15 @@ export interface InteractionOption {
   description?: string
 }
 
+/** 制品（简化版，审批携带的 AI 产出物） */
+export interface InteractionArtifact {
+  id: string
+  type: 'text' | 'image' | 'video' | 'audio' | 'screenshot' | 'file'
+  content: string
+  title?: string
+  metadata?: Record<string, unknown>
+}
+
 /** 待处理交互 */
 export interface PendingInteraction {
   requestId: string
@@ -43,6 +52,10 @@ export interface PendingInteraction {
   initialMessage?: string
   /** 快捷回复建议 */
   suggestions?: string[]
+  /** 制品列表（conversation 模式携带的 AI 产出物） */
+  artifacts?: InteractionArtifact[]
+  /** 关联的工作区 Tab ID（点击预览跳转用） */
+  workspaceTabId?: string
   /** 优先级 */
   priority?: 'low' | 'normal' | 'high' | 'critical'
   /** 通知模式的进度百分比 (0-100) */

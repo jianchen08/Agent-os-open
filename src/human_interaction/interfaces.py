@@ -115,8 +115,22 @@ class IHumanInteractionService(ABC):
         suggestions: list[str] | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        workspace_tab_id: str | None = None,
     ) -> str:
-        """创建对话模式请求。"""
+        """创建对话模式请求。支持携带制品和关联工作区 Tab。"""
+        ...
+
+    @abstractmethod
+    async def submit_review_feedback(
+        self,
+        request_id: str,
+        action: str,
+        annotations: list[dict[str, Any]] | None = None,
+        feedback_text: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        """提交审批反馈（包含批注）。"""
         ...
 
     @abstractmethod
