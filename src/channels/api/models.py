@@ -318,6 +318,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_time(s: str) -> float:
+    """将 ISO 格式时间字符串转为 Unix 时间戳，解析失败返回 0.0。"""
+    if not s:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 class MemoryStore:
     """基于字典的内存存储，支持 JSON 文件持久化。
 
@@ -379,7 +390,11 @@ class MemoryStore:
         return os.path.join(self._persist_dir, "store.json")
 
     def _load_persisted_data(self) -> None:
-        """从 JSON 文件加载持久化数据。"""
+        """从 JSON 文件加载持久化数据。
+
+        threads 是唯一数据源。加载每个 thread 时自动派生对应的 SessionModel，
+        无需在 JSON 中存储 sessions 段。
+        """
         path = self._persist_file()
         if not path or not os.path.exists(path):
             return
@@ -389,42 +404,30 @@ class MemoryStore:
             for tid, tdata in data.get("threads", {}).items():
                 self.threads[tid] = tdata
                 self.messages[tid] = []
-            for tid, sdata in data.get("sessions", {}).items():
                 self.sessions[tid] = SessionModel(
-                    session_id=sdata.get("session_id", tid),
-                    channel_type=sdata.get("channel_type", "web"),
-                    channel_ref=sdata.get("channel_ref", ""),
-                    pipeline_ids=sdata.get("pipeline_ids", []),
-                    active_pipeline_id=sdata.get("active_pipeline_id", ""),
-                    created_at=sdata.get("created_at", 0),
-                    last_active_at=sdata.get("last_active_at", 0),
-                    metadata=sdata.get("metadata", {}),
+                    session_id=tdata.get("id", tid),
+                    channel_type="web",
+                    channel_ref=tdata.get("id", ""),
+                    pipeline_ids=tdata.get("pipeline_ids", []),
+                    active_pipeline_id=tdata.get("active_pipeline_id", ""),
+                    created_at=_parse_iso_time(tdata.get("created_at", "")),
+                    last_active_at=_parse_iso_time(tdata.get("updated_at", "")),
+                    metadata=tdata.get("metadata", {}),
                 )
         except Exception:
             pass
 
     def _save_persisted_data(self) -> None:
-        """将线程和会话数据持久化到 JSON 文件。"""
+        """将线程数据持久化到 JSON 文件。
+
+        threads 是唯一数据源，不再单独存储 sessions 段。
+        SessionModel 在加载时从 thread 字段自动派生。
+        """
         path = self._persist_file()
         if not path:
             return
         try:
-            sessions_data = {}
-            for tid, session in self.sessions.items():
-                sessions_data[tid] = {
-                    "session_id": session.session_id,
-                    "channel_type": session.channel_type,
-                    "channel_ref": session.channel_ref,
-                    "pipeline_ids": session.pipeline_ids,
-                    "active_pipeline_id": session.active_pipeline_id,
-                    "created_at": session.created_at,
-                    "last_active_at": session.last_active_at,
-                    "metadata": session.metadata,
-                }
-            data = {
-                "threads": self.threads,
-                "sessions": sessions_data,
-            }
+            data = {"threads": self.threads}
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp_path = path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -572,13 +575,17 @@ class MemoryStore:
         return True
 
     def set_session(self, thread_id: str, session: SessionModel) -> None:
-        """将 SessionModel 关联到指定线程。
+        """将 SessionModel 关联到指定线程，并同步 pipeline_ids 到 thread 字典。
 
         Args:
             thread_id: 线程 ID
             session: 要关联的会话模型实例
         """
         self.sessions[thread_id] = session
+        thread = self.threads.get(thread_id)
+        if thread is not None:
+            thread["pipeline_ids"] = list(session.pipeline_ids)
+            thread["active_pipeline_id"] = session.active_pipeline_id
         self._save_persisted_data()
 
     def get_session(self, thread_id: str) -> SessionModel | None:

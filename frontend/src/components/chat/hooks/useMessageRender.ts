@@ -156,6 +156,62 @@ export function buildContentBlocksFromMessage(
 }
 
 /**
+ * 就地校正 contentBlocks 中的文本内容，保留流式构建的交错顺序
+ *
+ * BUG-FIX-fix_20260507_contentblocks_rebuild:
+ * 问题根因: stream_end/new_message 调用 buildContentBlocksFromMessage 从零重建，
+ *          把流式期间的交错顺序（thinking→text→tool→text→tool）覆盖为固定顺序（thinking→text→tools），
+ *          导致工具卡片位置错乱、文本段合并、部分内容消失。
+ * 修复方案: 只更新已有 text block 的内容，保留 tool_call 和 thinking block 不动。
+ *
+ * @param existingBlocks - 流式期间构建的 contentBlocks
+ * @param finalContent - 最终完整文本内容（来自 full_content 或 new_message.content）
+ * @param toolCalls - 最新的 toolCalls 列表
+ * @param thinking - 最新的 thinking 状态
+ * @param messageId - 消息 ID
+ * @returns 校正后的 contentBlocks
+ */
+export function reconcileContentBlocks(
+  existingBlocks: ContentBlock[] | undefined,
+  finalContent: string,
+  toolCalls: MessageToolCall[] | undefined,
+  thinking: Message['thinking'],
+  messageId: string,
+): ContentBlock[] {
+  if (!existingBlocks || existingBlocks.length === 0) {
+    return buildContentBlocksFromMessage(finalContent, toolCalls, thinking, messageId)
+  }
+
+  const textBlocks = existingBlocks.filter((b) => b.type === 'text')
+  if (textBlocks.length === 0) {
+    if (finalContent?.trim()) {
+      return [
+        { type: 'text', text: finalContent, sourceId: messageId },
+        ...existingBlocks,
+      ]
+    }
+    return [...existingBlocks]
+  }
+
+  const textBlockIndices: number[] = []
+  existingBlocks.forEach((b, i) => {
+    if (b.type === 'text') textBlockIndices.push(i)
+  })
+
+  const reconciled = existingBlocks.map((block, i) => {
+    if (block.type === 'text' && textBlockIndices.length === 1) {
+      return { ...block, text: finalContent, sourceId: messageId }
+    }
+    if (block.type === 'text' && i === textBlockIndices[textBlockIndices.length - 1]) {
+      return { ...block, text: finalContent, sourceId: messageId }
+    }
+    return block
+  })
+
+  return reconciled
+}
+
+/**
  * Hook 选项
  */
 export interface UseMessageRenderOptions {

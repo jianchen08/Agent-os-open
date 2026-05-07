@@ -1209,6 +1209,12 @@ class CLIApplication:
                 )
                 self._engine._pipeline_id = pipeline_id
 
+            # BUG-FIX-fix_pipeline_thread_id_missing:
+            # 将 session_id 作为 thread_id 注入管道 state，
+            # 供 TrackPlugin 在保存 PipelineRunSummary 时写入 thread_id 字段。
+            # 这确保了服务器重启后 _try_recover_pipeline_ids 能通过 summary.thread_id 找到管道记录。
+            _thread_id = session.session_id if session else ""
+
             self._pipeline_task = asyncio.create_task(
                 self._engine.run(
                     user_input=user_input,
@@ -1224,6 +1230,7 @@ class CLIApplication:
                         self._interaction_mode == "auto"
                     ),
                     interaction_mode=self._interaction_mode,
+                    thread_id=_thread_id,
                 )
             )
 

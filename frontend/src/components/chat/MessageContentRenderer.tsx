@@ -157,6 +157,11 @@ function MessageContentRendererBase({
 
 /**
  * 消息内容渲染器（带 memo 优化）
+ *
+ * BUG-FIX-fix_20260507_memo_comparison:
+ * 问题根因: memo 比较函数只检查 text.content，不检查 toolCall 的 status/result
+ *          和 thinking 的 content，导致工具完成后 ActivityCard 不更新。
+ * 修复方案: 补全所有 fragment 类型的深度比较。
  */
 export const MessageContentRenderer = memo(MessageContentRendererBase, (prev, next) => {
   if (prev.isStreaming !== next.isStreaming) {
@@ -184,9 +189,21 @@ export const MessageContentRenderer = memo(MessageContentRendererBase, (prev, ne
         return false
       }
     }
+
+    if (prevFragment.type === 'tool_call' && nextFragment.type === 'tool_call') {
+      if (prevFragment.toolCall.status !== nextFragment.toolCall.status) return false
+      if (prevFragment.toolCall.result !== nextFragment.toolCall.result) return false
+      if (prevFragment.toolCall.error !== nextFragment.toolCall.error) return false
+      if (prevFragment.toolCall.duration_ms !== nextFragment.toolCall.duration_ms) return false
+    }
+
+    if (prevFragment.type === 'thinking' && nextFragment.type === 'thinking') {
+      if (prevFragment.thinking.content !== nextFragment.thinking.content) return false
+      if (prevFragment.thinking.isThinking !== nextFragment.thinking.isThinking) return false
+    }
   }
 
-  return prev.className === next.className
+  return prev.className === next.className && prev.searchQuery === next.searchQuery
 })
 
 MessageContentRenderer.displayName = 'MessageContentRenderer'

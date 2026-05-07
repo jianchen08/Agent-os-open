@@ -99,6 +99,14 @@ class WebSocketInputAdapter(IInputAdapter):
         data = message.get("data", {})
         session_id = message.get("session_id", uuid.uuid4().hex[:12])
 
+        # BUG-FIX-fix_pipeline_thread_id_missing:
+        # 从 SessionManager 查找 thread_id，注入管道 state，
+        # 供 TrackPlugin 在保存 PipelineRunSummary 时写入 thread_id 字段。
+        _thread_id = ""
+        ws_session = self.session_manager.get_session(session_id)
+        if ws_session and ws_session.thread_id:
+            _thread_id = ws_session.thread_id
+
         if event_type == EventType.STOP_GENERATION.value:
             return {
                 "user_input": "",
@@ -107,6 +115,7 @@ class WebSocketInputAdapter(IInputAdapter):
                 StateKeys.SHOULD_STOP: True,
                 "iteration": 1,
                 "_ws_session_id": session_id,
+                "thread_id": _thread_id,
             }
 
         if event_type == EventType.RESUME_ACTION.value:
@@ -120,6 +129,7 @@ class WebSocketInputAdapter(IInputAdapter):
                 "iteration": 1,
                 "_ws_session_id": session_id,
                 "_approval_result": approved,
+                "thread_id": _thread_id,
             }
 
         # 默认处理 user_input
@@ -132,6 +142,7 @@ class WebSocketInputAdapter(IInputAdapter):
             "iteration": 1,
             "_ws_session_id": session_id,
             "_parent_record_id": data.get("parent_record_id", ""),
+            "thread_id": _thread_id,
         }
 
 

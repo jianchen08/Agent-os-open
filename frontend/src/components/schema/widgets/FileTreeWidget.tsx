@@ -543,16 +543,17 @@ function TreeNode({
   /**
    * 处理节点点击事件
    *
-   * 如果提供了 onNodeClick 回调则调用它；
-   * 同时执行选中逻辑和展开/折叠逻辑。
+   * BUG-FIX-fix_20260507_container_click:
+   * 问题根因: 容器任务（有子节点的父任务）点击时同时触发 onNodeClick 和 onToggle，
+   *          导致容器任务打开了一个无对应执行者的子标签。
+   * 修复方案: 容器任务只展开/折叠，叶子任务才触发 onNodeClick（打开子标签）。
    */
   const handleClick = useCallback(() => {
     onSelect(nodeId)
-    if (onNodeClick) {
-      onNodeClick(node)
-    }
     if (hasChildren) {
       onToggle(nodeId)
+    } else if (onNodeClick) {
+      onNodeClick(node)
     }
   }, [nodeId, hasChildren, onToggle, onSelect, onNodeClick, node])
 

@@ -128,9 +128,14 @@ export function FiveSpaceLayout({
   /**
    * 处理任务树节点点击事件
    *
-   * 当用户点击任务树中的任务节点时，自动打开对应的子标签并加载
+   * 当用户点击任务树中的叶子任务节点时，自动打开对应的子标签并加载
    * 子管道的对话历史。同时确保主 Agent 标签存在（用于 Tab 导航显示）。
-   * 容器类型任务（有子节点的父任务）不执行跳转。
+   * 容器类型任务（有子节点的父任务）不执行跳转，因为它们没有独立的执行者。
+   *
+   * BUG-FIX-fix_20260507_container_click:
+   * 问题根因: 容器任务（有子节点的父任务）点击后打开子标签，但它没有独立执行者，
+   *          其执行者就是主管道，而主管道已经是默认活跃的。
+   * 修复方案: 容器任务直接 return，不执行任何跳转操作。
    *
    * @param node - 被点击的树节点数据
    */
@@ -139,6 +144,10 @@ export function FiveSpaceLayout({
     const title = (node.title as string) ?? '子任务'
     const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
     if (!taskId) return
+
+    // 容器任务（有子节点）不打开子标签，它没有独立执行者
+    const children = node.children as unknown[] | undefined
+    if (Array.isArray(children) && children.length > 0) return
 
     const agentTabStore = useAgentTabStore.getState()
 

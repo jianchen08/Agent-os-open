@@ -53,10 +53,12 @@ class AutoConfirmNotifier:
                     feedback=self._default_feedback,
                 )
             else:
+                options = msg_data.get("options", [])
+                first_option_id = options[0]["id"] if options else "approve"
                 await self._service.submit_response(
                     request_id=request_id,
                     response_type="approved",
-                    selected_option="approved",
+                    selected_option=first_option_id,
                     feedback=self._default_feedback,
                 )
             self._confirmed_count += 1

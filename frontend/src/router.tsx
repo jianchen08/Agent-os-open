@@ -28,7 +28,7 @@ import { ThemeButton } from './components/layout/ThemeButton'
 import { ThemePanel } from './components/layout/ThemePanel'
 import { Button } from './components/ui/button'
 import type { SendMessageParams } from './components/chat/types'
-import { buildContentBlocksFromMessage } from './components/chat/hooks/useMessageRender'
+import { reconcileContentBlocks } from './components/chat/hooks/useMessageRender'
 import type { Message } from './types/models'
 import type { ReactNode } from 'react'
 
@@ -522,7 +522,8 @@ function HomePage(): ReactNode {
           const finalThinking = msg?.thinking
             ? { ...msg.thinking, isThinking: false }
             : undefined
-          const rebuiltBlocks = buildContentBlocksFromMessage(
+          const reconciledBlocks = reconcileContentBlocks(
+            msg?.contentBlocks,
             finalContent,
             msg?.toolCalls,
             finalThinking,
@@ -531,7 +532,8 @@ function HomePage(): ReactNode {
           updateSubTabMessage(pipelineTabId, messageId, {
             status: 'completed',
             content: finalContent,
-            contentBlocks: rebuiltBlocks,
+            contentBlocks: reconciledBlocks,
+            _reconciled: true,
             ...(finalThinking ? { thinking: finalThinking } : {}),
           })
         } else {
@@ -541,7 +543,8 @@ function HomePage(): ReactNode {
           const finalThinking = msg?.thinking
             ? { ...msg.thinking, isThinking: false }
             : undefined
-          const rebuiltBlocks = buildContentBlocksFromMessage(
+          const reconciledBlocks = reconcileContentBlocks(
+            msg?.contentBlocks,
             finalContent,
             msg?.toolCalls,
             finalThinking,
@@ -550,7 +553,8 @@ function HomePage(): ReactNode {
           updateMessageFields(sid, messageId, {
             status: 'completed',
             content: finalContent,
-            contentBlocks: rebuiltBlocks,
+            contentBlocks: reconciledBlocks,
+            _reconciled: true,
             ...(finalThinking ? { thinking: finalThinking } : {}),
           } as any)
         }
@@ -569,9 +573,11 @@ function HomePage(): ReactNode {
      * 处理新消息事件
      *
      * 收到完整的最终消息，确保流式状态结束，清除超时定时器
-     * BUG-FIX-fix_20260507_streaming_refresh: 始终使用最终内容补偿并重建 contentBlocks
-     * 问题根因: 仅在 content 为空时补偿，但流式阶段 content 已有部分内容，丢失的 chunk 无法恢复
-     * 修复方案: 始终用 new_message 的 content 作为最终真实来源，重建 contentBlocks 保证一致
+     * BUG-FIX-fix_20260507_streaming_refresh: 使用最终内容校正 contentBlocks
+     * BUG-FIX-fix_20260507_race_guard: 增加 _reconciled 竞态防护
+     * 问题根因: stream_end 和 new_message 可能对同一条消息各执行一次 contentBlocks 校正，
+     *          导致内容闪烁或覆盖。
+     * 修复方案: 如果 stream_end 已标记 _reconciled，new_message 只确认 status，不再重复校正。
      */
     const handleNewMessage = (eventData: any) => {
       clearStreamingTimeout()
@@ -593,11 +599,16 @@ function HomePage(): ReactNode {
         if (pipelineTabId) {
           const tabMsgs = useAgentTabStore.getState().tabMessages[pipelineTabId] || []
           const existingMsg = tabMsgs.find((m: any) => m.id === messageId)
-          if (existingMsg && finalContent) {
+
+          // 竞态防护：stream_end 已校正过，只确认 status
+          if (existingMsg && (existingMsg as any)._reconciled) {
+            updateSubTabMessage(pipelineTabId, messageId, { status: 'completed' })
+          } else if (existingMsg && finalContent) {
             const finalThinking = existingMsg.thinking
               ? { ...existingMsg.thinking, isThinking: false }
               : undefined
-            const rebuiltBlocks = buildContentBlocksFromMessage(
+            const reconciledBlocks = reconcileContentBlocks(
+              existingMsg.contentBlocks,
               finalContent,
               existingMsg.toolCalls,
               finalThinking,
@@ -606,7 +617,8 @@ function HomePage(): ReactNode {
             updateSubTabMessage(pipelineTabId, messageId, {
               status: 'completed',
               content: finalContent,
-              contentBlocks: rebuiltBlocks,
+              contentBlocks: reconciledBlocks,
+              _reconciled: true,
               ...(finalThinking ? { thinking: finalThinking } : {}),
             })
           } else if (existingMsg) {
@@ -616,11 +628,15 @@ function HomePage(): ReactNode {
           const sessionMessages = useSessionStore.getState().messages[sid] || []
           const existingMsg = sessionMessages.find((m: any) => m.id === messageId)
 
-          if (existingMsg && finalContent) {
+          // 竞态防护：stream_end 已校正过，只确认 status
+          if (existingMsg && (existingMsg as any)._reconciled) {
+            updateMessageFields(sid, messageId, { status: 'completed' } as any)
+          } else if (existingMsg && finalContent) {
             const finalThinking = existingMsg.thinking
               ? { ...existingMsg.thinking, isThinking: false }
               : undefined
-            const rebuiltBlocks = buildContentBlocksFromMessage(
+            const reconciledBlocks = reconcileContentBlocks(
+              existingMsg.contentBlocks,
               finalContent,
               existingMsg.toolCalls,
               finalThinking,
@@ -629,7 +645,8 @@ function HomePage(): ReactNode {
             updateMessageFields(sid, messageId, {
               status: 'completed',
               content: finalContent,
-              contentBlocks: rebuiltBlocks,
+              contentBlocks: reconciledBlocks,
+              _reconciled: true,
               ...(finalThinking ? { thinking: finalThinking } : {}),
             } as any)
           } else {
