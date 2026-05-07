@@ -293,15 +293,17 @@ static_vars:
       content: |
         ## 下级 Agent 映射
 
+        **强制规则**：提交任务时，target_id 必须使用本表中的 Agent ID，禁止使用 resource_search 搜索 Agent。本表已涵盖你所有可用的下级 Agent。
+
         **Goal 编写原则**：goal 只告诉下级 Agent"做什么"和"达成什么目标"，不规定"怎么做"。外部接口只写需要什么能力，不写具体实现细节。具体设计和实现由下级 Agent 自行决定。
 
-        | 阶段 | Agent | 说明 | Goal 必含信息 | 产出物路径 | 隔离级别 | 推荐指标 |
-        |------|-------|------|-------------|-----------|----------|----------|
-        | 编码 | code_writer_agent | 代码编写专家 | 1)需求描述 2)结构化AC清单(id/description/priority) 3)模块边界：需暴露哪些外部能力（不写具体接口签名，只写功能描述） 4)技术栈上下文 | src/**/*.py | container | file_check, format_valid |
-        | 测试调试 | test_debug_agent | 测试与调试专家（含API测试） | 1)任务类型(testing/bugfix) 2)验证目标 3)AC清单。Bug修复附加：错误描述+复现步骤 | tests/**/*.py + src/**/*.py | container | test_check, bash_check, function_verify |
-        | 审查 | code_reviewer_agent | 静态扫描 + 代码审查专家 | 1)待审查文件路径 2)AC清单 | {{workspace}}/review_report.md | container | file_check, semantic_check |
-        | 环境 | environment_setup_agent | 环境准备专家 | 1)需求清单{tools,materials,configs} 2)项目技术栈 3)依赖版本约束 | {{workspace}}/reports/*_environment_status.md | host | file_check, format_valid |
-        | 功能验证 | function_verifier_agent | 功能验证专家 | 1)requirement(用户需求描述) 2)可选：user_scenarios(用户旅程场景) | {{workspace}}/function_verify_report.md + {{workspace}}/verify_reproduce.py | container | file_check |
+        | 阶段 | Agent | 说明 | Goal 必含信息 | 产出物路径 | 推荐指标 |
+        |------|-------|------|-------------|-----------|----------|
+        | 编码 | code_writer_agent | 代码编写专家 | 1)需求描述 2)结构化AC清单(id/description/priority) 3)模块边界：需暴露哪些外部能力（不写具体接口签名，只写功能描述） 4)技术栈上下文 | src/**/*.py | file_check, format_valid |
+        | 测试调试 | test_debug_agent | 测试与调试专家（含API测试） | 1)任务类型(testing/bugfix) 2)验证目标 3)AC清单。Bug修复附加：错误描述+复现步骤 | tests/**/*.py + src/**/*.py | test_check, bash_check, function_verify |
+        | 审查 | code_reviewer_agent | 静态扫描 + 代码审查专家 | 1)待审查文件路径 2)AC清单 | {{workspace}}/review_report.md | file_check, semantic_check |
+        | 环境 | environment_setup_agent | 环境准备专家 | 1)需求清单{tools,materials,configs} 2)项目技术栈 3)依赖版本约束 | {{workspace}}/reports/*_environment_status.md | file_check, format_valid |
+        | 功能验证 | function_verifier_agent | 功能验证专家 | 1)requirement(用户需求描述) 2)可选：user_scenarios(用户旅程场景) | {{workspace}}/function_verify_report.md + {{workspace}}/verify_reproduce.py | file_check |
     - name: "工具输出优化技能"
       type: "path"
       path: "skills/skill-tool-output-optimize/SKILL.md"

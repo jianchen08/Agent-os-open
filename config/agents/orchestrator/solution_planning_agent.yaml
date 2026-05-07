@@ -65,10 +65,13 @@ static_vars:
       type: "reference"
       content: |
         ## 下级 Agent 映射
-        | 阶段 | Agent | 说明 | Goal 编写指南 | 产出物路径 | 隔离级别 | 推荐指标 |
-        |------|-------|------|-------------|-----------|----------|----------|
-        | 调研 | research_agent | 调研方案、分析需求 | goal 必含：research_goal + research_questions（3-5个具体问题,required）+ scope | docs/{title}_research_report.md | container | file_check（一般任务）, semantic_check(重要任务) |
-        | 环境准备 | environment_setup_agent | 安装依赖、下载模板、准备环境 | goal 必含：requirements{tools,materials,configs} + 项目上下文 | {{workspace}}/reports/*_environment_status.md | host | file_check |
+
+        **强制规则**：提交任务时，target_id 必须使用本表或"可用执行者清单"中的 Agent ID，禁止使用 resource_search 搜索 Agent。
+
+        | 阶段 | Agent | 说明 | Goal 编写指南 | 产出物路径 | 推荐指标 |
+        |------|-------|------|-------------|-----------|----------|
+        | 调研 | research_agent | 调研方案、分析需求 | goal 必含：research_goal + research_questions（3-5个具体问题,required）+ scope | docs/{title}_research_report.md | file_check（一般任务）, semantic_check(重要任务) |
+        | 环境准备 | environment_setup_agent | 安装依赖、下载模板、准备环境 | goal 必含：requirements{tools,materials,configs} + 项目上下文 | {{workspace}}/reports/*_environment_status.md | file_check |
     - name: "可用执行者清单"
       type: "reference"
       content: |
@@ -108,7 +111,6 @@ tool_ids:
   - resource_search
 
 hard_constraints:
-  - 禁止创建 container 任务（task_scope='container'），你已经在 non_container 任务中执行，直接用 task_submit(task_scope='non_container') 创建子任务即可
   - 必须调用 task_evaluate 评估任务完成质量
   - 必须读取下级 Agent（research_agent、environment_setup_agent）的产出物
   - 评估通过才能结束任务

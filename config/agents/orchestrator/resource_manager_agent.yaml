@@ -244,12 +244,15 @@ static_vars:
       type: "reference"
       content: |
         ## 下级 Agent 映射
-        | 阶段 | Agent | 说明 | Goal 编写指南 | 隔离级别 | 推荐指标 |
-        |------|-------|------|-------------|----------|----------|
-        | 调研 | research_agent | 调研方案、搜索可复用资源、调研外部模式、明确上下文需求 | goal 必含：1)research_goal(调研目标) 2)research_questions(3-5个具体问题,required) 3)scope(调研范围约束) 4)生态平台网址：MCP工具→github.com/modelcontextprotocol/servers、npmjs.com、modelcontextprotocol.io；Skill→项目skills/目录；Agent框架→github.com搜索相关仓库 5)搜索优先级：GitHub仓库优先 > 官方文档 > npmjs/PyPI > 社区问答 > 博客。调研报告和环境准备结果只传文件路径不传内容 | container | file_check（一般任务）, semantic_check(重要任务可选) |
-        | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | goal 必含：1)需求清单{tools,materials,configs} 2)调研报告中列出的上下文需求。附加调研报告文件路径 | host | file_check |
-        | 工具操作 | tool_maker | 创建或修改工具代码和配置 | goal 必含：1)operation_type(create/modify) 2)requirements{name,description,capabilities,category} 3)workspace路径。创建时附加strategy。调研报告和环境准备结果只传文件路径 | host | file_check + function_verify(功能类) / semantic_check(重要任务) |
-        | Agent操作 | agent_maker | 创建或修改 Agent 配置 | goal 必含：1)operation_type(create/modify) 2)requirements{name,description,capabilities} 3)workspace路径。修改时附加modification_type。调研报告和环境准备结果只传文件路径。相关规则、规范、skill文件路径一并传递 | host | file_check + semantic_check(重要任务) |
+
+        **强制规则**：提交任务时，target_id 必须使用本表中的 Agent ID，禁止使用 resource_search 搜索 Agent。本表已涵盖你所有可用的下级 Agent。
+
+        | 阶段 | Agent | 说明 | Goal 编写指南 | 推荐指标 |
+        |------|-------|------|-------------|----------|
+        | 调研 | research_agent | 调研方案、搜索可复用资源、调研外部模式、明确上下文需求 | goal 必含：1)research_goal(调研目标) 2)research_questions(3-5个具体问题,required) 3)scope(调研范围约束) 4)生态平台网址：MCP工具→github.com/modelcontextprotocol/servers、npmjs.com、modelcontextprotocol.io；Skill→项目skills/目录；Agent框架→github.com搜索相关仓库 5)搜索优先级：GitHub仓库优先 > 官方文档 > npmjs/PyPI > 社区问答 > 博客。调研报告和环境准备结果只传文件路径不传内容 | file_check（一般任务）, semantic_check(重要任务可选) |
+        | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | goal 必含：1)需求清单{tools,materials,configs} 2)调研报告中列出的上下文需求。附加调研报告文件路径 | file_check |
+        | 工具操作 | tool_maker | 创建或修改工具代码和配置 | goal 必含：1)operation_type(create/modify) 2)requirements{name,description,capabilities,category} 3)workspace路径。创建时附加strategy。调研报告和环境准备结果只传文件路径 | file_check + function_verify(功能类) / semantic_check(重要任务) |
+        | Agent操作 | agent_maker | 创建或修改 Agent 配置 | goal 必含：1)operation_type(create/modify) 2)requirements{name,description,capabilities} 3)workspace路径。修改时附加modification_type。调研报告和环境准备结果只传文件路径。相关规则、规范、skill文件路径一并传递 | file_check + semantic_check(重要任务) |
     - name: "资源操作报告模板"
       type: "path"
       path: "config/templates/resource_generation_report_template.md"
@@ -311,7 +314,6 @@ tool_ids:
   - memory
 
 hard_constraints:
-  - 禁止创建 container 任务（task_scope='container'），你已经在 non_container 任务中执行，直接用 task_submit(task_scope='non_container') 创建子任务即可
   - 必须调用 task_evaluate 评估任务完成质量
   - 必须读取所有下级 Agent 的产出物（完整流程时）
   - 评估通过才能结束任务

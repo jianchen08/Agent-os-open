@@ -105,6 +105,31 @@ export const MessageList = ({
   }, [messages.length, scrollToBottom])
 
   /**
+   * BUG-FIX-fix_20260507_content_change_scroll:
+   * 问题根因: 流式输出期间，工具调用完成后新文本追加到最后一条消息，
+   *          消息数量不变，上面只监听 messages.length，无法检测到内容变化，
+   *          导致新内容渲染了但视图不滚动，用户看到 UI 卡住。
+   * 修复方案: 额外监听最后一条消息的 contentBlocks 长度变化，
+   *          当内容块增加时（如工具卡片后新增文本块），触发滚动到底部。
+   */
+  const lastMessageContentSignature = useMemo(() => {
+    if (messages.length === 0) return ''
+    const last = messages[messages.length - 1]
+    const blockCount = last.contentBlocks?.length ?? 0
+    const contentLen = last.content?.length ?? 0
+    const toolCallCount = last.toolCalls?.length ?? 0
+    return `${blockCount}-${contentLen}-${toolCallCount}`
+  }, [messages])
+
+  useEffect(() => {
+    if (isGenerating && !isUserScrolling.current && messages.length > 0) {
+      requestAnimationFrame(() => {
+        scrollToBottom('auto')
+      })
+    }
+  }, [lastMessageContentSignature, isGenerating, messages.length, scrollToBottom])
+
+  /**
    * 流式输出时使用 ResizeObserver 监听内容高度变化自动跟随
    */
   useEffect(() => {

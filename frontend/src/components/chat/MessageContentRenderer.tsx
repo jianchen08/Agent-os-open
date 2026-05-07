@@ -96,7 +96,6 @@ function renderFragment(
       const isLastStreaming = isStreaming && fragment.isLast
       let content = fragment.content
 
-      // 应用搜索高亮
       if (searchQuery && searchQuery.trim()) {
         content = highlightText(content, searchQuery)
       }
@@ -105,7 +104,11 @@ function renderFragment(
         return <div key={fragment.key}>{renderText(content, isLastStreaming)}</div>
       }
       if (USE_LOBECHAT_MARKDOWN) {
-        return <div key={fragment.key}>{LobeChatTextRenderer(content, isLastStreaming)}</div>
+        return (
+          <div key={fragment.key}>
+            <LobeChatMarkdown content={content} isStreaming={isLastStreaming} />
+          </div>
+        )
       }
       return <div key={fragment.key}>{DefaultTextRenderer(content, isLastStreaming)}</div>
     }
