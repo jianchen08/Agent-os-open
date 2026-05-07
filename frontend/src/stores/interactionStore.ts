@@ -49,6 +49,10 @@ export interface PendingInteraction {
   progress?: number
   timestamp: string
   status: 'pending' | 'responded' | 'navigated' | 'dismissed'
+  /** 审批请求 ID（仅 conversation 模式下审批场景有值） */
+  reviewRequestId?: string
+  /** 关联制品 ID 列表（仅审批场景有值） */
+  artifactIds?: string[]
 }
 
 interface InteractionState {

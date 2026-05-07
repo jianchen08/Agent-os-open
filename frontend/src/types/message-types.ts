@@ -366,6 +366,91 @@ export interface AgentLevelChangedMessage extends StandardWebSocketMessage {
 }
 
 /**
+ * 审批请求推送（后端 → 前端）
+ */
+export interface ReviewRequestMessage extends StandardWebSocketMessage {
+  type: 'review_request'
+  data: {
+    review_id: string
+    task_id: string
+    thread_id: string
+    session_id: string
+    tab_id: string
+    title: string
+    description: string
+    artifact_ids: string[]
+    priority: string
+    timeout_seconds: number
+    [key: string]: any
+  }
+}
+
+/**
+ * 审批状态变更通知（后端 → 前端）
+ */
+export interface ReviewStatusUpdateMessage extends StandardWebSocketMessage {
+  type: 'review_status_update'
+  data: {
+    review_id: string
+    status: string
+    [key: string]: any
+  }
+}
+
+/**
+ * 制品创建通知（后端 → 前端）
+ */
+export interface ArtifactCreatedMessage extends StandardWebSocketMessage {
+  type: 'artifact_created'
+  data: {
+    artifact_id: string
+    task_id: string
+    artifact_type: string
+    title: string
+    [key: string]: any
+  }
+}
+
+/**
+ * 制品更新通知（后端 → 前端）
+ */
+export interface ArtifactUpdatedMessage extends StandardWebSocketMessage {
+  type: 'artifact_updated'
+  data: {
+    artifact_id: string
+    old_artifact_id: string
+    version: number
+    [key: string]: any
+  }
+}
+
+/**
+ * 批注添加通知（双向）
+ */
+export interface AnnotationAddedMessage extends StandardWebSocketMessage {
+  type: 'annotation_added'
+  data: {
+    annotation_id: string
+    artifact_id: string
+    content: string
+    author_type: string
+    [key: string]: any
+  }
+}
+
+/**
+ * 批注解决通知（后端 → 前端）
+ */
+export interface AnnotationResolvedMessage extends StandardWebSocketMessage {
+  type: 'annotation_resolved'
+  data: {
+    annotation_id: string
+    artifact_id: string
+    [key: string]: any
+  }
+}
+
+/**
  * 所有标准消息类型的联合类型
  */
 export type StandardMessage =
@@ -403,14 +488,24 @@ export type StandardMessage =
   | SubAgentWaitingInputMessage
   | SubAgentCompletedMessage
   | AgentLevelChangedMessage
+  | ReviewRequestMessage
+  | ReviewStatusUpdateMessage
+  | ArtifactCreatedMessage
+  | ArtifactUpdatedMessage
+  | AnnotationAddedMessage
+  | AnnotationResolvedMessage
 
 /**
  * 消息类型枚举
  */
 export const MessageTypes = {
   AGENT_LEVEL_CHANGED: 'agent_level_changed',
+  ANNOTATION_ADDED: 'annotation_added',
+  ANNOTATION_RESOLVED: 'annotation_resolved',
   APPROVAL: 'approval',
   APPROVAL_REQUIRED: 'approval_required',
+  ARTIFACT_CREATED: 'artifact_created',
+  ARTIFACT_UPDATED: 'artifact_updated',
   CANCEL: 'cancel',
   CONNECTION_ESTABLISHED: 'connection_established',
   CONTEXT_SUMMARY: 'context_summary',
@@ -422,6 +517,8 @@ export const MessageTypes = {
   MEMORY_COMPRESSION: 'memory_compression',
   MEMORY_ENHANCED_INPUT: 'memory_enhanced_input',
   MEMORY_RETRIEVAL: 'memory_retrieval',
+  REVIEW_REQUEST: 'review_request',
+  REVIEW_STATUS_UPDATE: 'review_status_update',
   STATE_CHANGE: 'state_change',
   STREAM_CHUNK: 'stream_chunk',
   STREAM_END: 'stream_end',
