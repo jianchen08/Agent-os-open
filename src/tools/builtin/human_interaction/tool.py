@@ -307,12 +307,21 @@ class HumanInteractionTool(BuiltinTool):
                 request_id, timeout=timeout_seconds,
             )
 
-            result = {
-                "status": "completed",
-                "response_type": response.get("response_type"),
-            }
-            if response.get("feedback"):
-                result["feedback"] = response["feedback"]
+            resp_type = response.get("response_type", "")
+            feedback = response.get("feedback", "")
+
+            if resp_type == "approved":
+                result = {
+                    "status": "user_arrived",
+                    "message": feedback or "用户已进入对话页面，可以开始对话。",
+                }
+            else:
+                result = {
+                    "status": "completed",
+                    "response_type": resp_type,
+                }
+                if feedback:
+                    result["feedback"] = feedback
             return create_success_result(data=result)
 
         except InteractionTimeoutError as e:

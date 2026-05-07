@@ -167,10 +167,12 @@ class WebSocketInteractionNotifier:
                     "[WSNotifier] 前端未响应，自动确认 | request_id=%s",
                     request_id,
                 )
+                options = msg_data.get("options", [])
+                first_option_id = options[0]["id"] if options else "approve"
                 await self._service.submit_response(
                     request_id=request_id,
                     response_type="approved",
-                    selected_option="approved",
+                    selected_option=first_option_id,
                     feedback="自动确认（前端未响应）",
                 )
         except Exception as exc:

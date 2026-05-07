@@ -159,8 +159,7 @@ tools:
   - evaluation
   - schema
 - name: resource_search
-  description: 搜索系统中的 Agent、工具、工作流和脚本资源。支持两种搜索模式：简单模式（默认）只返回名称和描述，适合快速浏览；详细模式返回完整信息包括类型、分类、标签等。使用建议：先用简单模式找到资源名称，再用
-    detailed=True + exact_match=True + exact_name 获取完整信息。
+  description: 搜索系统内 Agent、工具、Skill 资源。空结果是正常的，不要重复搜索。simple=列出匹配资源；detailed=按精确名称加载资源（tool会动态注入，支持逗号分隔批量）。
   category: search
   level: system
   requires_approval: false

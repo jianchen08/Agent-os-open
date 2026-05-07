@@ -21,19 +21,87 @@ import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 
-let streamingTimeoutId: ReturnType<typeof setTimeout> | null = null
-
-const STREAMING_TIMEOUT_MS = 120_000
+/**
+ * chunk 间隔超时时间
+ *
+ * 检测语义：streaming 开始后，如果连续 N 秒没有收到新的 chunk，
+ * 则判定为 chunk 中断（后端管道异常/网络断开），主动终止 streaming 状态。
+ */
+const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
 
 let _initialized = false
 
 const _handlers: Record<string, (data: any) => void> = {}
 
-function clearStreamingTimeout() {
-  if (streamingTimeoutId !== null) {
-    clearTimeout(streamingTimeoutId)
-    streamingTimeoutId = null
+/**
+ * 按 Tab 独立管理的 chunk 间隔超时定时器
+ *
+ * key: targetTabId（子 Tab 的 tabId 或 '__main__'）
+ * value: { timer, messageId }
+ */
+interface ChunkTimeoutEntry {
+  timer: ReturnType<typeof setTimeout>
+  messageId: string
+}
+const _chunkTimeoutMap: Map<string, ChunkTimeoutEntry> = new Map()
+
+/**
+ * 为指定 Tab 启动/重置 chunk 间隔超时定时器
+ *
+ * 每收到一个 stream_start 或 stream_chunk 时调用，
+ * 如果对应 Tab 已有定时器则重置（说明 chunk 持续到达，连接正常）。
+ */
+function resetChunkTimeout(
+  targetTabId: string,
+  messageId: string,
+  pipelineTabId: string | null,
+): void {
+  clearChunkTimeout(targetTabId)
+
+  const timer = setTimeout(() => {
+    _chunkTimeoutMap.delete(targetTabId)
+    const currentSid = useSessionStore.getState().activeSessionId
+    const { stopStreamingForTab } = useStreamingStore.getState()
+    stopStreamingForTab(targetTabId)
+
+    if (currentSid) {
+      if (pipelineTabId) {
+        updateSubTabMessage(pipelineTabId, messageId, {
+          content: '\n\n⚠️ 流式响应中断，请重试。',
+          status: 'error',
+        })
+      } else {
+        const { updateMessageFields } = useSessionStore.getState()
+        updateMessageFields(currentSid, messageId, {
+          content: '\n\n⚠️ 流式响应中断，请重试。',
+          status: 'error',
+        } as any)
+      }
+    }
+  }, CHUNK_INTERVAL_TIMEOUT_MS)
+
+  _chunkTimeoutMap.set(targetTabId, { timer, messageId })
+}
+
+/**
+ * 清除指定 Tab 的 chunk 间隔超时定时器
+ */
+function clearChunkTimeout(targetTabId: string): void {
+  const entry = _chunkTimeoutMap.get(targetTabId)
+  if (entry) {
+    clearTimeout(entry.timer)
+    _chunkTimeoutMap.delete(targetTabId)
   }
+}
+
+/**
+ * 清除所有 Tab 的 chunk 间隔超时定时器
+ */
+function clearAllChunkTimeouts(): void {
+  for (const [, entry] of _chunkTimeoutMap) {
+    clearTimeout(entry.timer)
+  }
+  _chunkTimeoutMap.clear()
 }
 
 /**
@@ -81,28 +149,10 @@ function handleStreamStart(eventData: any) {
   const pipelineTabId = resolvePipelineTab(eventData)
   const targetTabId = pipelineTabId || '__main__'
 
-  clearStreamingTimeout()
-  const { setStreamingForTab, stopStreamingForTab } = useStreamingStore.getState()
-  const { updateMessageFields, addMessage } = useSessionStore.getState()
+  const { setStreamingForTab } = useStreamingStore.getState()
+  const { addMessage } = useSessionStore.getState()
 
-  streamingTimeoutId = setTimeout(() => {
-    const currentSid = useSessionStore.getState().activeSessionId
-    stopStreamingForTab(targetTabId)
-    streamingTimeoutId = null
-    if (currentSid) {
-      if (pipelineTabId) {
-        updateSubTabMessage(pipelineTabId, messageId, {
-          content: '\n\n⚠️ 响应超时，请重试。',
-          status: 'error',
-        })
-      } else {
-        updateMessageFields(currentSid, messageId, {
-          content: '\n\n⚠️ 响应超时，请重试。',
-          status: 'error',
-        } as any)
-      }
-    }
-  }, STREAMING_TIMEOUT_MS)
+  resetChunkTimeout(targetTabId, messageId, pipelineTabId)
 
   const msgs = useSessionStore.getState().messages[sid] || []
   const nextSeq = msgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
@@ -155,31 +205,10 @@ function handleStreamChunk(eventData: any) {
   const { stopStreamingForTab } = useStreamingStore.getState()
   const { updateMessageFields } = useSessionStore.getState()
 
-  if (streamingTimeoutId !== null) {
-    clearStreamingTimeout()
-    const chunkPipelineTabId = resolvePipelineTab(eventData)
-    const chunkTargetTabId = chunkPipelineTabId || '__main__'
-    streamingTimeoutId = setTimeout(() => {
-      const currentSid = useSessionStore.getState().activeSessionId
-      stopStreamingForTab(chunkTargetTabId)
-      streamingTimeoutId = null
-      if (currentSid) {
-        if (chunkPipelineTabId) {
-          updateSubTabMessage(chunkPipelineTabId, messageId, {
-            content: '\n\n⚠️ 响应超时，请重试。',
-            status: 'error',
-          })
-        } else {
-          updateMessageFields(currentSid, messageId, {
-            content: '\n\n⚠️ 响应超时，请重试。',
-            status: 'error',
-          } as any)
-        }
-      }
-    }, STREAMING_TIMEOUT_MS)
-  }
-
   const pipelineTabId = resolvePipelineTab(eventData)
+  const targetTabId = pipelineTabId || '__main__'
+  resetChunkTimeout(targetTabId, messageId, pipelineTabId)
+
   if (pipelineTabId) {
     const msg = getSubTabMessage(pipelineTabId, messageId)
 
@@ -278,9 +307,10 @@ function handleStreamChunk(eventData: any) {
  * 使用 full_content 校正内容并重建 contentBlocks
  */
 function handleStreamEnd(eventData: any) {
-  clearStreamingTimeout()
-
   const pipelineTabId = resolvePipelineTab(eventData)
+  const targetTabId = pipelineTabId || '__main__'
+  clearChunkTimeout(targetTabId)
+
   const { stopStreamingForTab } = useStreamingStore.getState()
   if (pipelineTabId) {
     stopStreamingForTab(pipelineTabId)
@@ -357,9 +387,10 @@ function handleStreamEnd(eventData: any) {
  * 增加竞态防护：如果 stream_end 已标记 _reconciled，只确认 status。
  */
 function handleNewMessage(eventData: any) {
-  clearStreamingTimeout()
-
   const pipelineTabId = resolvePipelineTab(eventData)
+  const targetTabId = pipelineTabId || '__main__'
+  clearChunkTimeout(targetTabId)
+
   const { stopStreamingForTab } = useStreamingStore.getState()
   if (pipelineTabId) {
     stopStreamingForTab(pipelineTabId)
@@ -783,7 +814,7 @@ export function initStreamingEvents(): void {
 export function destroyStreamingEvents(): void {
   if (!_initialized) return
 
-  clearStreamingTimeout()
+  clearAllChunkTimeouts()
 
   for (const [event, handler] of Object.entries(_handlers)) {
     webSocketService.unsubscribe(event, handler)

@@ -122,6 +122,15 @@ class CapabilityAdapterBase(BuiltinTool):
         if not isinstance(result, dict):
             return result
 
+        if result.get("isError"):
+            content_list = result.get("content", [])
+            error_texts = []
+            for item in content_list:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    error_texts.append(item.get("text", ""))
+            error_msg = "\n".join(error_texts).strip() or "MCP 后端返回未知错误"
+            return {"error": True, "message": error_msg}
+
         content_list = result.get("content", [])
         if content_list and isinstance(content_list, list):
             texts = []

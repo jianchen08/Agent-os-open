@@ -22,7 +22,7 @@ tags: ["resource", "search", "agent", "tool", "workflow", "skill"]
 
 # 外部资源搜索配置
 external_search:
-  enabled: false  # 默认关闭，需显式启用
+  enabled: true
   cache_path: "data/external_tool_cache.json"  # 本地信任缓存文件路径
   review_model: "fast"  # LLM 审查模型：fast = 轻量模型，thorough = 大模型
   max_results: 5  # 每次搜索最大返回数量

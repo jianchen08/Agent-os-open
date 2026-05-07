@@ -26,10 +26,12 @@ async function bootstrap() {
   const authStore = useAuthStore.getState()
   await authStore.initializeAuth()
 
-  // BUG-FIX-fix_20260507_002: await initializeGrowthLoop 确保模块在渲染前就绪
-  // 问题根因: import().then() 不阻塞，React 渲染时模块尚未加载完成导致工作区为空
-  // 修复方案: 使用 await 等待 initializeGrowthLoop 完成后再渲染
-  if (authStore.isAuthenticated) {
+  // BUG-FIX-fix_20260507_003: 修复刷新后 GrowthLoop 不初始化的问题
+  // 问题根因: getState() 返回的是快照，initializeAuth() 通过 set() 更新 store 后，
+  //          旧快照的 isAuthenticated 仍为 false，导致 initializeGrowthLoop 永远不执行
+  // 修复方案: initializeAuth 完成后重新 getState() 获取最新认证状态
+  const freshAuthState = useAuthStore.getState()
+  if (freshAuthState.isAuthenticated) {
     try {
       const { initializeGrowthLoop } = await import('@/services/modules/GrowthLoop')
       await initializeGrowthLoop()

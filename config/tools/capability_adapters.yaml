@@ -15,6 +15,9 @@
 # 回退机制：
 #   同一适配器下多个后端按 priority 排序，第一个 available=true 的后端优先。
 #   主后端调用失败时自动回退到下一个。
+#
+# Windows 注意：
+#   command 使用 npx.cmd 而非 npx（Python subprocess 兼容性）
 # ================================================================
 
 adapters:
@@ -22,47 +25,51 @@ adapters:
   # UI 代码生成：从文字描述/截图 → 前端代码
   # ============================================================
   design_generate:
-    default_backend: screenshot_to_code
+    default_backend: magic
     backends:
-      # --- screenshot-to-code（免费开源，截图→代码）---
-      # 安装：npm install -g screenshot-to-code-mcp
-      - name: screenshot_to_code
+      # --- 21st.dev Magic（已安装，组件生成）---
+      # 需要 API Key：https://21st.dev/magic 获取，设置环境变量 MAGIC_API_KEY
+      # 工具映射说明：
+      #   generate: 用 inspiration 搜索组件（纯API，无需浏览器）
+      #   build: 用 component_builder 创建组件（需打开浏览器）
+      #   refine: 用 component_refiner 改进组件（纯API）
+      - name: magic
         priority: 1
         server:
-          command: "npx"
-          args: ["-y", "screenshot-to-code-mcp@latest"]
+          command: "npx.cmd"
+          args: ["-y", "@21st-dev/magic@latest"]
+          env:
+            API_KEY: "${MAGIC_API_KEY}"
         tool_mapping:
-          generate: "generate_code"      # ← 安装后用 tools/list 确认实际工具名
+          generate: "21st_magic_component_inspiration"
+          build: "21st_magic_component_builder"
+          refine: "21st_magic_component_refiner"
+        timeout: 60.0
+        overall_timeout: 120.0
+        available: true
+
+      # --- screenshot-to-code（截图→代码，原项目无 MCP 包，待替代）---
+      - name: screenshot_to_code
+        priority: 2
+        server:
+          command: "npx.cmd"
+          args: ["-y", "screenshot-to-code@latest"]
+        tool_mapping:
+          generate: "generate_code"
         timeout: 120.0
         overall_timeout: 180.0
         available: false
 
-      # --- Google Stitch（免费，需 Google Cloud 认证）---
-      # 环境变量：需设置 GOOGLE_CLOUD_PROJECT + gcloud auth application-default login
+      # --- Google Stitch（需 Google Cloud 认证）---
       - name: stitch
-        priority: 2
+        priority: 3
         server:
-          command: "npx"
+          command: "npx.cmd"
           args: ["-y", "stitch-mcp@latest"]
           env:
             GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT}"
         tool_mapping:
           generate: "stitch_generate"
-        timeout: 120.0
-        overall_timeout: 180.0
-        available: false
-
-      # --- 21st.dev Magic（Beta 免费组件生成）---
-      # 需要 API Key：https://21st.dev/magic 获取
-      - name: magic
-        priority: 3
-        server:
-          command: "npx"
-          args: ["-y", "@21st-dev/magic@latest"]
-          env:
-            API_KEY: "${MAGIC_API_KEY}"
-        tool_mapping:
-          generate: "magic_generate"
         timeout: 120.0
         overall_timeout: 180.0
         available: false
@@ -74,11 +81,10 @@ adapters:
     default_backend: playwright_devtools
     backends:
       # --- playwright-devtools-mcp（推荐：混合 DevTools + Playwright）---
-      # 安装：npm install playwright-devtools-mcp
       - name: playwright_devtools
         priority: 1
         server:
-          command: "npx"
+          command: "npx.cmd"
           args: ["playwright-devtools-mcp"]
         tool_mapping:
           navigate: "browser_launch"
@@ -90,12 +96,11 @@ adapters:
         overall_timeout: 120.0
         available: false
 
-      # --- Microsoft Playwright MCP（250K+ 周下载）---
-      # 安装：npx @playwright/mcp@latest
+      # --- Microsoft Playwright MCP（已验证可用，20+ 工具）---
       - name: playwright
         priority: 2
         server:
-          command: "npx"
+          command: "npx.cmd"
           args: ["-y", "@playwright/mcp@latest"]
         tool_mapping:
           navigate: "browser_navigate"
@@ -107,12 +112,11 @@ adapters:
         overall_timeout: 120.0
         available: true
 
-      # --- Google Chrome DevTools MCP（--slim 模式仅 3 个工具）---
-      # 安装：npx chrome-devtools-mcp@latest
+      # --- Google Chrome DevTools MCP（已全局安装 v0.13.0）---
       - name: chrome_devtools
         priority: 3
         server:
-          command: "npx"
+          command: "npx.cmd"
           args: ["-y", "chrome-devtools-mcp@latest", "--slim"]
         tool_mapping:
           navigate: "chrome_navigate"
@@ -122,7 +126,7 @@ adapters:
           performance: "chrome_performance"
         timeout: 60.0
         overall_timeout: 120.0
-        available: false
+        available: true
 
   # ============================================================
   # 设计审查：对比设计参考 vs 实现，识别视觉问题
@@ -130,27 +134,27 @@ adapters:
   design_review:
     default_backend: playwright_screenshot
     backends:
-      # --- Playwright + Vision（截图语义分析）---
-      # 安装：npx @playwright/mcp@latest
-      # 需要 --caps=vision 开启截图能力
+      # --- Playwright（全维度审查：快照 + JS注入 + 控制台）---
       - name: playwright_screenshot
         priority: 1
         server:
-          command: "npx"
-          args: ["-y", "@playwright/mcp@latest", "--caps=vision"]
+          command: "npx.cmd"
+          args: ["-y", "@playwright/mcp@latest", "--caps=vision", "--isolated"]
         tool_mapping:
+          navigate: "browser_navigate"
+          snapshot: "browser_snapshot"
+          evaluate: "browser_evaluate"
+          console: "browser_console_messages"
           screenshot: "browser_take_screenshot"
-          compare: "visual_compare"
         timeout: 60.0
         overall_timeout: 120.0
         available: true
 
       # --- Figma MCP（需 Figma Access Token）---
-      # 环境变量：FIGMA_ACCESS_TOKEN 从 Figma Settings 获取
       - name: figma_compare
         priority: 2
         server:
-          command: "npx"
+          command: "npx.cmd"
           args: ["-y", "figma-developer-mcp@latest"]
           env:
             FIGMA_ACCESS_TOKEN: "${FIGMA_ACCESS_TOKEN}"

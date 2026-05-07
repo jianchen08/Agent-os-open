@@ -55,7 +55,7 @@ function computeSchemaHash(schema: ModuleUISchema): string {
  * @throws 当引用格式无效时抛出错误
  */
 export function parseDataSourceRef(ref: string): DataSourceRef {
-  const match = ref.match(/^(\w+):\/\/([^\?]+)(?:\?(.+))?$/)
+  const match = ref.match(/^([\w-]+):\/\/([^\?]+)(?:\?(.+))?$/)
   if (!match) {
     throw new Error(`无效的数据源引用格式: ${ref}`)
   }

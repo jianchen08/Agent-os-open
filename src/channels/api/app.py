@@ -21,6 +21,7 @@ _DEFAULT_CORS_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5188",
     "http://localhost:5189",
+    "http://localhost:5190",
 ]
 
 # 应用启动时间
@@ -196,6 +197,11 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
     app.include_router(ui_router)
+
+    # ---- 模块数据路由（手动注册的自定义端点） ----
+    from channels.api.routes_ui import get_module_data_router
+
+    app.include_router(get_module_data_router())
 
     # ---- 自动注册 Data CRUD 路由（基于 YAML data 声明） ----
     from channels.api.routes_ui import register_data_crud_routes

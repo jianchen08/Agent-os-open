@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentOS Dashboard 测试页面</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-in-up { animation: fadeInUp 0.5s ease-out forwards; }
+    .delay-1 { animation-delay: 0.1s; opacity: 0; }
+    .delay-2 { animation-delay: 0.2s; opacity: 0; }
+    .delay-3 { animation-delay: 0.3s; opacity: 0; }
+    .delay-4 { animation-delay: 0.4s; opacity: 0; }
+    .delay-5 { animation-delay: 0.5s; opacity: 0; }
+    .delay-6 { animation-delay: 0.6s; opacity: 0; }
+    @keyframes progressGrow { from { width: 0; } }
+    .animate-progress { animation: progressGrow 1s ease-out forwards; }
+    @keyframes barGrow { from { height: 0; } }
+    .animate-bar { animation: barGrow 0.8s ease-out forwards; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 1s linear infinite; }
+    .toast-container {
+      position: fixed; top: 80px; right: 20px; z-index: 100;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .toast {
+      padding: 12px 20px; border-radius: 8px; color: white; font-size: 14px;
+      transform: translateX(120%); transition: transform 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .toast.show { transform: translateX(0); }
+    .toast-success { background: linear-gradient(135deg, #10b981, #059669); }
+    .toast-info { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-900 text-slate-100">
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <header class="sticky top-0 z-30 border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-xl">
+    <nav class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center gap-3">
+        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/25">
+          <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+        </div>
+        <span class="text-lg font-bold tracking-tight text-white">
+          Agent<span class="text-blue-400">OS</span>
+        </span>
+      </div>
+
+      <div class="hidden max-w-md flex-1 px-8 md:block">
+        <div class="relative">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input id="search-input" type="text" placeholder="搜索功能、任务、设置..."
+            class="w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 pr-4 pl-10 text-sm text-slate-200 placeholder-slate-500 transition-all duration-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none" />
+          <kbd class="absolute top-1/2 right-3 -translate-y-1/2 rounded border border-slate-600 bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">Ctrl+K</kbd>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="btn-notification" class="relative rounded-lg p-2 text-slate-400 transition-colors duration-200 hover:bg-slate-800 hover:text-white" aria-label="通知">
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"/>
+          </svg>
+          <span class="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-blue-500 ring-2 ring-slate-900"></span>
+        </button>
+        <button class="rounded-lg p-2 text-slate-400 transition-colors duration-200 hover:bg-slate-800 hover:text-white" aria-label="设置">
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+        </button>
+        <div class="ml-2 h-8 w-px bg-slate-700"></div>
+        <button class="group ml-2 flex items-center gap-2 rounded-lg p-1 transition-colors duration-200 hover:bg-slate-800">
+          <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-blue-400 to-violet-500 text-sm font-semibold text-white">A</div>
+          <span class="hidden text-sm font-medium text-slate-300 group-hover:text-white sm:inline">Admin</span>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <div class="mb-6 animate-fade-in-up">
+      <h1 class="text-xl font-bold text-white sm:text-2xl">仪表板概览</h1>
+      <p class="mt-1 text-sm text-slate-400">欢迎回来，Admin。以下是系统当前的运行概况。</p>
+    </div>
+
+    <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <article class="group relative overflow-hidden rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 transition-all duration-300 hover:border-slate-600 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-slate-900/50 animate-fade-in-up delay-1">
+        <div class="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 opacity-10 blur-2xl transition-opacity duration-300 group-hover:opacity-20"></div>
+        <div class="relative">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-slate-400">总用户数</span>
+            <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg">
+              <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-end justify-between">
+            <span class="text-2xl font-bold tracking-tight text-white">12,847</span>
+            <span class="flex items-center gap-0.5 text-xs font-medium text-emerald-400">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941"/></svg>
+              +12.5%
+            </span>
+          </div>
+        </div>
+      </article>
+
+      <article class="group relative overflow-hidden rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 transition-all duration-300 hover:border-slate-600 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-slate-900/50 animate-fade-in-up delay-2">
+        <div class="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-600 opacity-10 blur-2xl transition-opacity duration-300 group-hover:opacity-20"></div>
+        <div class="relative">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-slate-400">活跃会话</span>
+            <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg">
+              <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-end justify-between">
+            <span class="text-2xl font-bold tracking-tight text-white">3,429</span>
+            <span class="flex items-center gap-0.5 text-xs font-medium text-emerald-400">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941"/></svg>
+              +8.2%
+            </span>
+          </div>
+        </div>
+      </article>
+
+      <article class="group relative overflow-hidden rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 transition-all duration-300 hover:border-slate-600 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-slate-900/50 animate-fade-in-up delay-3">
+        <div class="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-gradient-to-br from-violet-500 to-violet-600 opacity-10 blur-2xl transition-opacity duration-300 group-hover:opacity-20"></div>
+        <div class="relative">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-slate-400">完成任务数</span>
+            <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-violet-600 shadow-lg">
+              <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-end justify-between">
+            <span class="text-2xl font-bold tracking-tight text-white">8,921</span>
+            <span class="flex items-center gap-0.5 text-xs font-medium text-emerald-400">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941"/></svg>
+              +23.1%
+            </span>
+          </div>
+        </div>
+      </article>
+
+      <article class="group relative overflow-hidden rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 transition-all duration-300 hover:border-slate-600 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-slate-900/50 animate-fade-in-up delay-4">
+        <div class="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-gradient-to-br from-amber-500 to-amber-600 opacity-10 blur-2xl transition-opacity duration-300 group-hover:opacity-20"></div>
+        <div class="relative">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-slate-400">系统负载</span>
+            <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-amber-600 shadow-lg">
+              <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z"/></svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-end justify-between">
+            <span class="text-2xl font-bold tracking-tight text-white">67.3%</span>
+            <span class="flex items-center gap-0.5 text-xs font-medium text-red-400">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6L9 12.75l4.286-4.286a11.948 11.948 0 014.306 6.43l.776 2.898m0 0l3.182-5.511m-3.182 5.51l-5.511-3.181"/></svg>
+              -3.1%
+            </span>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <div class="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <section class="rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 animate-fade-in-up delay-4">
+        <div class="mb-5 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-semibold text-white">周活跃用户</h3>
+            <p class="mt-0.5 text-xs text-slate-400">过去 7 天的用户活动趋势</p>
+          </div>
+          <div class="flex items-center gap-1 rounded-lg bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-400">
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z"/></svg>
+            图表
+          </div>
+        </div>
+        <div class="flex items-end justify-between gap-3" style="height:180px">
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">420</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:71%"></div></div><span class="text-[11px] text-slate-500">周一</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">380</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:64%"></div></div><span class="text-[11px] text-slate-500">周二</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">510</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:86%"></div></div><span class="text-[11px] text-slate-500">周三</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">470</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:80%"></div></div><span class="text-[11px] text-slate-500">周四</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">590</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:100%"></div></div><span class="text-[11px] text-slate-500">周五</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">320</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:54%"></div></div><span class="text-[11px] text-slate-500">周六</span></div>
+          <div class="flex flex-1 flex-col items-center gap-2"><span class="text-[10px] font-medium text-slate-400">280</span><div class="relative w-full" style="height:140px"><div class="animate-bar absolute right-0 bottom-0 left-0 rounded-t-md bg-gradient-to-t from-blue-600 to-blue-400 transition-all duration-500 hover:from-blue-500 hover:to-blue-300" style="height:47%"></div></div><span class="text-[11px] text-slate-500">周日</span></div>
+        </div>
+      </section>
+
+      <section class="rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 animate-fade-in-up delay-5">
+        <div class="mb-5 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-semibold text-white">服务健康度</h3>
+            <p class="mt-0.5 text-xs text-slate-400">各核心服务的运行状态</p>
+          </div>
+          <div class="flex items-center gap-1 rounded-lg bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400">
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
+            正常
+          </div>
+        </div>
+        <div class="space-y-5">
+          <div><div class="mb-1.5 flex items-center justify-between"><span class="text-sm text-slate-300">API 服务</span><span class="text-sm font-semibold text-white">96%</span></div><div class="h-2 overflow-hidden rounded-full bg-slate-700/50"><div class="animate-progress h-full rounded-full bg-emerald-500" style="width:96%"></div></div></div>
+          <div><div class="mb-1.5 flex items-center justify-between"><span class="text-sm text-slate-300">数据库</span><span class="text-sm font-semibold text-white">82%</span></div><div class="h-2 overflow-hidden rounded-full bg-slate-700/50"><div class="animate-progress h-full rounded-full bg-blue-500" style="width:82%"></div></div></div>
+          <div><div class="mb-1.5 flex items-center justify-between"><span class="text-sm text-slate-300">消息队列</span><span class="text-sm font-semibold text-white">73%</span></div><div class="h-2 overflow-hidden rounded-full bg-slate-700/50"><div class="animate-progress h-full rounded-full bg-violet-500" style="width:73%"></div></div></div>
+          <div><div class="mb-1.5 flex items-center justify-between"><span class="text-sm text-slate-300">缓存服务</span><span class="text-sm font-semibold text-white">91%</span></div><div class="h-2 overflow-hidden rounded-full bg-slate-700/50"><div class="animate-progress h-full rounded-full bg-amber-500" style="width:91%"></div></div></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <section class="rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 lg:col-span-2 animate-fade-in-up delay-5">
+        <div class="mb-4 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-semibold text-white">最近活动</h3>
+            <p class="mt-0.5 text-xs text-slate-400">团队成员的操作记录</p>
+          </div>
+          <button class="flex items-center gap-1 text-xs font-medium text-blue-400 transition-colors hover:text-blue-300">
+            查看全部
+            <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
+          </button>
+        </div>
+        <ul class="divide-y divide-slate-700/50">
+          <li class="group flex items-start gap-3 py-3.5 first:pt-0"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">张</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">张明</span><span class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-400">成功</span></div><p class="mt-0.5 truncate text-sm text-slate-400">部署了 v2.4.1 版本到生产环境</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>3 分钟前</div></li>
+          <li class="group flex items-start gap-3 py-3.5"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">李</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">李华</span><span class="rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] font-medium text-blue-400">信息</span></div><p class="mt-0.5 truncate text-sm text-slate-400">创建了新的自动化测试任务</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>15 分钟前</div></li>
+          <li class="group flex items-start gap-3 py-3.5"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">王</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">王芳</span><span class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-400">警告</span></div><p class="mt-0.5 truncate text-sm text-slate-400">数据库连接池告警已触发</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>28 分钟前</div></li>
+          <li class="group flex items-start gap-3 py-3.5"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">赵</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">赵磊</span><span class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-400">成功</span></div><p class="mt-0.5 truncate text-sm text-slate-400">修复了用户权限校验异常</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>1 小时前</div></li>
+          <li class="group flex items-start gap-3 py-3.5"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">陈</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">陈静</span><span class="rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-medium text-red-400">错误</span></div><p class="mt-0.5 truncate text-sm text-slate-400">CDN 节点响应超时</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>2 小时前</div></li>
+          <li class="group flex items-start gap-3 py-3.5 last:pb-0"><div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-300 transition-colors group-hover:bg-slate-600">刘</div><div class="min-w-0 flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-slate-200">刘洋</span><span class="rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] font-medium text-blue-400">信息</span></div><p class="mt-0.5 truncate text-sm text-slate-400">更新了系统监控阈值配置</p></div><div class="flex shrink-0 items-center gap-1 text-xs text-slate-500"><svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>3 小时前</div></li>
+        </ul>
+      </section>
+
+      <section class="rounded-xl border border-slate-700/50 bg-slate-800/50 p-5 animate-fade-in-up delay-6">
+        <div class="mb-4">
+          <h3 class="text-sm font-semibold text-white">快速操作</h3>
+          <p class="mt-0.5 text-xs text-slate-400">常用功能快捷入口</p>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <button onclick="showToast('新建任务已创建', 'success')" class="group relative flex items-center gap-3 rounded-lg border border-slate-700/50 bg-slate-800 p-3.5 text-left transition-all duration-200 hover:border-slate-600 hover:bg-slate-700 hover:shadow-md">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/25"><svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg></div>
+            <div class="min-w-0"><div class="text-sm font-medium text-slate-200">新建任务</div><div class="truncate text-[11px] text-slate-500">创建自动化执行任务</div></div>
+          </button>
+          <button onclick="showToast('文件上传中...', 'info')" class="group relative flex items-center gap-3 rounded-lg border border-slate-700/50 bg-slate-800 p-3.5 text-left transition-all duration-200 hover:border-slate-600 hover:bg-slate-700 hover:shadow-md">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/25"><svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg></div>
+            <div class="min-w-0"><div class="text-sm font-medium text-slate-200">上传文件</div><div class="truncate text-[11px] text-slate-500">批量导入配置文件</div></div>
+          </button>
+          <button onclick="showToast('报告导出成功', 'success')" class="group relative flex items-center gap-3 rounded-lg border border-slate-700/50 bg-slate-800 p-3.5 text-left transition-all duration-200 hover:border-slate-600 hover:bg-slate-700 hover:shadow-md">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-violet-600 shadow-lg shadow-violet-500/25"><svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg></div>
+            <div class="min-w-0"><div class="text-sm font-medium text-slate-200">导出报告</div><div class="truncate text-[11px] text-slate-500">下载系统运行报告</div></div>
+          </button>
+          <button id="btn-refresh" onclick="handleRefresh(this)" class="group relative flex items-center gap-3 rounded-lg border border-slate-700/50 bg-slate-800 p-3.5 text-left transition-all duration-200 hover:border-slate-600 hover:bg-slate-700 hover:shadow-md">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-amber-600 shadow-lg shadow-amber-500/25"><svg id="refresh-icon" class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182"/></svg></div>
+            <div class="min-w-0"><div class="text-sm font-medium text-slate-200">刷新数据</div><div class="truncate text-[11px] text-slate-500">同步最新系统状态</div></div>
+          </button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="border-t border-slate-800 py-6 text-center text-xs text-slate-600">
+    AgentOS Dashboard 测试页面 &copy; 2026 &mdash; 工具链测试演示
+  </footer>
+
+  <script>
+    function showToast(message, type) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'toast toast-' + type;
+      toast.textContent = message;
+      container.appendChild(toast);
+      requestAnimationFrame(() => toast.classList.add('show'));
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+      }, 2500);
+    }
+
+    function handleRefresh(btn) {
+      const icon = document.getElementById('refresh-icon');
+      icon.classList.add('spin');
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+      setTimeout(() => {
+        icon.classList.remove('spin');
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        showToast('数据已刷新', 'success');
+      }, 1200);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        document.getElementById('search-input').focus();
+      }
+    });
+
+    document.getElementById('btn-notification').addEventListener('click', () => {
+      showToast('您有 3 条未读通知', 'info');
+    });
+  </script>
+</body>
+</html>

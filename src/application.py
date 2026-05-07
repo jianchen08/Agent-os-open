@@ -467,7 +467,7 @@ class Application:
                     raw_config = dict(provider_conf.get("config", {}))
 
                     if not raw_config.get("api_key"):
-                        raw_config["api_key"] = self._resolve_api_key(
+                        raw_config["api_key"] = Application._resolve_api_key(
                             class_name, raw_config,
                         )
 

@@ -126,9 +126,11 @@ class BrowserTestTool(CapabilityAdapterBase):
             return self._fail_no_backends()
 
         last_error: Exception | None = None
+        attempted = False
         for backend in backends:
             if not backend.available:
                 continue
+            attempted = True
             try:
                 steps = self._build_steps(
                     backend, url_or_html, actions, verify
@@ -149,6 +151,9 @@ class BrowserTestTool(CapabilityAdapterBase):
                     e,
                 )
                 last_error = e
+
+        if not attempted:
+            return self._fail_no_backends()
 
         return create_failure_result(
             error=f"所有后端均失败: {last_error}",
@@ -212,21 +217,23 @@ class BrowserTestTool(CapabilityAdapterBase):
             if not isinstance(result, dict):
                 continue
 
-            if "screenshot" in result or "image" in result:
+            if result.get("type") == "screenshot" or "screenshot" in result or "image" in result:
                 screenshot = result.get("screenshot") or result.get("image")
-            if "logs" in result or "console" in result:
+            if result.get("type") == "console_log" or "logs" in result or "console" in result:
                 console_logs = result.get("logs") or result.get("console", [])
-            if "metrics" in result or "performance" in result:
+            if result.get("type") == "performance" or "metrics" in result or "performance" in result:
                 performance = result.get("metrics") or result.get(
                     "performance", {}
                 )
+
+        actions_count = max(0, len(parsed_results) - 1 - len(verify))
 
         return create_success_result(
             data={
                 "screenshot": screenshot,
                 "console_logs": console_logs,
                 "performance": performance,
-                "actions_completed": len(parsed_results),
+                "actions_completed": actions_count,
                 "verify_types": verify,
                 "backend_used": backend_name,
             },

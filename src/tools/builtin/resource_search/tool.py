@@ -74,24 +74,37 @@ class ResourceSearchTool:
         """获取工具定义"""
         return Tool(
             name="resource_search",
-            description="搜索系统中的 Agent、工具和 Skill 资源。支持模糊搜索和精确匹配。建议：先用模糊搜索找到资源名称，再用精确匹配获取完整信息。",
+            description="搜索系统内 Agent、工具、Skill 资源。已有明确资源映射时直接使用，无需搜索。空结果是正常的，不要重复搜索。",
+            when_to_use=[
+                "不确定有哪些可用资源时",
+                "需要加载未在当前工具列表中的工具时（用 detailed 模式）",
+            ],
+            when_not_to_use=[
+                "已知资源名称或映射 → 直接使用，无需搜索",
+                "搜索文件内容 → 用 enhanced_search",
+                "搜索互联网信息 → 用 web_search",
+            ],
+            caveats=[
+                "搜索无结果是正常的，不要重复调用",
+                "每次只调用一次",
+            ],
             input_schema={
                 "type": "object",
                 "properties": {
                     "resource_type": {
                         "type": "string",
                         "enum": ["agent", "tool", "skill", "all"],
-                        "description": "资源类型。agent=Agent，tool=工具，skill=Skill（包含脚本），all=全部类型",
+                        "description": "资源类型：agent/tool/skill/all",
                     },
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词。模糊模式时匹配名称、描述、标签；精确模式时作为精确名称或ID进行匹配",
+                        "description": "搜索关键词",
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["simple", "detailed"],
                         "default": "simple",
-                        "description": '返回模式。simple=模糊搜索，返回名称和描述列表；detailed=精确匹配，query作为精确名称或ID，返回单个资源的完整信息。不同资源类型的详细返回：Agent无detailed模式（产出物和评估指标已拼入description，simple即可获取完整信息）；Tool触发动态工具注入（支持逗号分隔批量加载，如query="rollback_task,state_update"，最多5个）；Skill返回SKILL.md完整文件内容。',
+                        "description": "simple=列出匹配资源；detailed=按精确名称加载资源（tool类型会动态注入到当前会话，支持逗号分隔批量，如 query=\"file_read,bash_execute\"）",
                     },
                     "filters": {
                         "type": "object",
@@ -103,20 +116,20 @@ class ResourceSearchTool:
                             "level": {
                                 "type": "string",
                                 "enum": ["system", "user", "all"],
-                                "description": "按级别过滤。system=系统级，user=用户级，all=全部",
+                                "description": "按级别过滤",
                             },
                             "language": {
                                 "type": "string",
-                                "description": "按语言过滤 Skill 中的脚本。可选：python/nodejs/bash/powershell",
+                                "description": "按语言过滤 Skill 脚本：python/nodejs/bash/powershell",
                             },
                         },
-                        "description": "可选过滤条件，用于缩小搜索范围",
+                        "description": "可选过滤条件",
                     },
                     "limit": {
                         "type": "integer",
                         "default": ToolLimits.RESOURCE_SEARCH_DEFAULT,
                         "maximum": ToolLimits.RESOURCE_SEARCH_DEFAULT,
-                        "description": "返回数量，默认20条，最大20条",
+                        "description": "返回数量，默认20",
                     },
                 },
                 "required": ["resource_type"],

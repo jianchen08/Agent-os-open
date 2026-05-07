@@ -15,6 +15,7 @@ import type { ModuleUISchema, ModuleRegistration } from '@/types/schema'
 class ModuleManager {
   private initialized = false
   private pollingTimer: ReturnType<typeof setInterval> | null = null
+  private _fetching = false
 
   /**
    * 初始化模块系统
@@ -54,6 +55,11 @@ class ModuleManager {
       return
     }
 
+    if (this._fetching) {
+      return
+    }
+    this._fetching = true
+
     try {
       const response = await getModuleUISchemas()
       const schemas = Array.isArray(response) ? response : (response?.items ?? [])
@@ -74,6 +80,8 @@ class ModuleManager {
         return
       }
       loggers.websocket.warn('拉取模块 Schema 失败:', error)
+    } finally {
+      this._fetching = false
     }
   }
 

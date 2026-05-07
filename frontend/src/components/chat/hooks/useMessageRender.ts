@@ -62,14 +62,15 @@ function buildFragments(contentBlocks: ContentBlock[], messageId: string): Rende
   const toolCallCount = contentBlocks.filter((b) => b.type === 'tool_call').length
   let toolCallIndex = 0
 
-  for (const block of contentBlocks) {
+  for (let i = 0; i < contentBlocks.length; i++) {
+    const block = contentBlocks[i]
     switch (block.type) {
       case 'thinking':
         if (block.thinking) {
           fragments.push({
             type: 'thinking',
             thinking: block.thinking,
-            key: `${messageId}-thinking-${block.sourceId || 'cb'}`,
+            key: `${messageId}-thinking-${block.sourceId || 'cb'}-${i}`,
             sourceId: block.sourceId || messageId,
           })
         }

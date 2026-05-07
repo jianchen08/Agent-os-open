@@ -196,13 +196,18 @@ export function useInteractionHandler(sessionId: string | undefined) {
     [markResponded],
   )
 
-  /** 对话模式：跳转到子标签对话页（Tab 内切换，不重新连接 WebSocket） */
+  /** 对话模式：跳转到子标签对话页（Tab 内切换，不重新连接 WebSocket）
+   *
+   * 用户点击"进入对话"时，提交 approved 响应告知后端用户已到达，
+   * 后端工具收到后返回"用户已进入对话"而非"通过自动批准"。
+   * 同时在前端完成 UI 跳转到子标签页。
+   */
   const navigateToTab = useCallback(
     async (requestId: string, threadId: string) => {
       await webSocketService.sendInteractionResponse({
         requestId,
         responseType: 'approved',
-        feedback: 'user_navigated_to_tab',
+        feedback: '用户已进入对话',
       })
       markNavigated(requestId)
 

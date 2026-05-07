@@ -26,8 +26,8 @@ import {
   Loader2,
   AlertCircle,
 } from 'lucide-react'
-import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
+import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 
 /** 树节点数据结构 */
 interface TreeNodeData {
@@ -317,15 +317,26 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
     let cancelled = false
 
-    /** 构建 API 请求参数，仅当 sessionId 有效时附加过滤条件 */
+    /**
+     * 通过通用数据协议解析 dataSource 获取 API 端点并加载树数据
+     *
+     * BUG-FIX-fix_20260507_datasource_protocol:
+     * 问题根因: 原逻辑硬编码 API_ENDPOINTS.PROJECTS.TREE，无法适配不同模块的数据源；
+     *          rawProps.dataSource（如 "task-manager://tree"）仅被当作布尔值使用，未真正解析。
+     * 修复方案: 使用 parseDataSourceRef() + resolveDataSource() 解析协议字符串得到实际 API 端点，
+     *          将 sessionId 作为参数附加到请求中。
+     */
     const loadTreeData = async () => {
       setIsLoadingRemote(true)
       try {
-        const params: Record<string, string> = {}
+        // 通过通用数据协议解析 dataSource 获取 API 端点
+        const ref = parseDataSourceRef(rawProps.dataSource as string)
+        const resolved = resolveDataSource(ref)
+        const params: Record<string, string> = { ...resolved.params as Record<string, string> }
         if (sessionId) {
           params.session_id = sessionId
         }
-        const response = await apiClient.get(API_ENDPOINTS.PROJECTS.TREE, { params })
+        const response = await apiClient.get(resolved.endpoint, { params })
         if (cancelled) return
         const raw = response.data
         const tree = raw?.children ?? []
@@ -358,9 +369,23 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   /** 搜索关键词 */
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合 */
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
-    return collectExpandedIds(allData, nodeChildrenField, expandLevel)
-  })
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+
+  /**
+   * 当 effectiveData 变化时重新计算展开节点
+   *
+   * 修复任务树不展开的 bug:
+   * 原逻辑用 allData（静态 props）初始化 expandedIds，
+   * 但远程加载场景下 allData 为空，导致节点全部折叠。
+   * 现改为监听 effectiveData 变化，数据加载后自动展开。
+   */
+  const [prevDataRef, setPrevDataRef] = useState<TreeNodeData[]>([])
+  useEffect(() => {
+    if (effectiveData !== prevDataRef && effectiveData.length > 0) {
+      setPrevDataRef(effectiveData)
+      setExpandedIds(collectExpandedIds(effectiveData, nodeChildrenField, expandLevel))
+    }
+  }, [effectiveData, prevDataRef, nodeChildrenField, expandLevel])
 
   /** 过滤后的数据 */
   const filteredData = useMemo(() => {
@@ -518,6 +543,35 @@ interface TreeNodeProps {
  * @param props - 节点组件属性
  * @returns 树节点渲染结果
  */
+/** 优先级标签映射 */
+const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
+  critical: { label: '紧急', color: 'text-red-500' },
+  high: { label: '高', color: 'text-orange-500' },
+  normal: { label: '普通', color: 'text-muted-foreground' },
+  low: { label: '低', color: 'text-muted-foreground/60' },
+}
+
+/**
+ * 格式化时间戳为可读字符串
+ *
+ * @param value - 时间戳字符串或空值
+ * @returns 格式化后的时间文本，如 "05-07 14:30"
+ */
+function formatTime(value: string | null | undefined): string | null {
+  if (!value) return null
+  try {
+    const d = new Date(value)
+    if (isNaN(d.getTime())) return null
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mi = String(d.getMinutes()).padStart(2, '0')
+    return `${mm}-${dd} ${hh}:${mi}`
+  } catch {
+    return null
+  }
+}
+
 function TreeNode({
   node,
   depth,
@@ -541,19 +595,20 @@ function TreeNode({
   const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
   const progress = node.progress as number | undefined
   const description = node.description as string | undefined
+  const agentName = node.agent_name as string | undefined
+  const priority = node.priority as string | undefined
+  const createdAt = node.created_at as string | undefined
+  const error = node.error as string | undefined
 
   const hasChildren = Array.isArray(children) && children.length > 0
   const isExpanded = expandedIds.has(nodeId)
   const isSelected = selectedId === nodeId
 
-  /**
-   * 处理节点点击事件
-   *
-   * BUG-FIX-fix_20260507_container_click:
-   * 问题根因: 容器任务（有子节点的父任务）点击时同时触发 onNodeClick 和 onToggle，
-   *          导致容器任务打开了一个无对应执行者的子标签。
-   * 修复方案: 容器任务只展开/折叠，叶子任务才触发 onNodeClick（打开子标签）。
-   */
+  /** 是否有元信息需要显示第二行 */
+  const hasMeta =
+    (agentName && agentName.trim().length > 0) ||
+    (error && error.trim().length > 0)
+
   const handleClick = useCallback(() => {
     onSelect(nodeId)
     if (hasChildren) {
@@ -563,9 +618,6 @@ function TreeNode({
     }
   }, [nodeId, hasChildren, onToggle, onSelect, onNodeClick, node])
 
-  /**
-   * 阻止展开箭头的点击冒泡
-   */
   const handleChevronClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
@@ -574,66 +626,66 @@ function TreeNode({
     [nodeId, onToggle],
   )
 
-  /** 获取状态图标 */
   const statusInfo = showStatus && status ? getStatusIcon(status, statusConfig) : null
 
-  /** 进度值处理 */
   const clampedProgress =
     typeof progress === 'number' ? Math.max(0, Math.min(100, progress)) : null
 
+  /** 优先级配置 */
+  const priorityConf = priority ? PRIORITY_LABELS[priority] ?? PRIORITY_LABELS.normal : null
+
+  /** 格式化创建时间 */
+  const formattedTime = formatTime(createdAt)
+
   return (
     <div>
-      {/* 节点行 */}
       <div
-        className={`group flex cursor-pointer items-center py-1.5 transition-colors hover:bg-accent ${
+        className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-accent ${
           isSelected
             ? 'bg-accent/50 border-l-2 border-l-status-info'
             : 'border-l-2 border-l-transparent'
         }`}
         style={{ paddingLeft: `${depth * 20 + 8}px` }}
         onClick={handleClick}
-        title={description ?? title}
       >
-        {/* 展开/折叠箭头 */}
-        <button
-          className={`mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded transition-transform ${
-            hasChildren
-              ? 'text-muted-foreground hover:text-foreground'
-              : 'invisible'
-          }`}
-          onClick={handleChevronClick}
-          tabIndex={-1}
-        >
-          <ChevronRight
-            className={`h-3.5 w-3.5 transition-transform duration-200 ${
-              isExpanded ? 'rotate-90' : ''
+        <div className="flex shrink-0 items-center pt-0.5">
+          <button
+            className={`mr-1 flex h-5 w-5 items-center justify-center rounded transition-transform ${
+              hasChildren
+                ? 'text-muted-foreground hover:text-foreground'
+                : 'invisible'
             }`}
-          />
-        </button>
+            onClick={handleChevronClick}
+            tabIndex={-1}
+          >
+            <ChevronRight
+              className={`h-3.5 w-3.5 transition-transform duration-200 ${
+                isExpanded ? 'rotate-90' : ''
+              }`}
+            />
+          </button>
 
-        {/* 节点图标 */}
-        {icon ? (
-          <span className="mr-1.5 shrink-0 text-sm">{icon}</span>
-        ) : hasChildren ? (
-          isExpanded ? (
-            <FolderOpen className="text-status-warning mr-1.5 h-4 w-4 shrink-0" />
+          {icon ? (
+            <span className="mr-1.5 shrink-0 text-sm">{icon}</span>
+          ) : hasChildren ? (
+            isExpanded ? (
+              <FolderOpen className="text-status-warning mr-1.5 h-4 w-4 shrink-0" />
+            ) : (
+              <Folder className="text-status-warning mr-1.5 h-4 w-4 shrink-0" />
+            )
           ) : (
-            <Folder className="text-status-warning mr-1.5 h-4 w-4 shrink-0" />
-          )
-        ) : (
-          <File className="text-muted-foreground mr-1.5 h-4 w-4 shrink-0" />
-        )}
+            <File className="text-muted-foreground mr-1.5 h-4 w-4 shrink-0" />
+          )}
 
-        {/* 状态图标 */}
-        {statusInfo && (
-          <span className="mr-1.5 shrink-0" title={statusInfo.label}>
-            {statusInfo.icon}
-          </span>
-        )}
+          {statusInfo && (
+            <span className="mr-1.5 shrink-0" title={statusInfo.label}>
+              {statusInfo.icon}
+            </span>
+          )}
+        </div>
 
-        {/* 标题与描述 */}
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span className={`truncate text-sm ${isSelected ? 'text-foreground font-medium' : 'text-foreground/90'}`}>
               {title}
             </span>
@@ -642,9 +694,36 @@ function TreeNode({
                 {statusInfo.label}
               </span>
             )}
+            {hasChildren && (
+              <span className="text-muted-foreground/50 shrink-0 text-[10px]">
+                [{children!.length}]
+              </span>
+            )}
           </div>
 
-          {/* 进度条 */}
+          {hasMeta && (
+            <div className="mt-0.5 space-y-0.5">
+              {error && error.trim().length > 0 && (
+                <p className="truncate text-[11px] leading-tight text-status-error">
+                  ⚠ {error}
+                </p>
+              )}
+              <div className="flex items-center gap-2 text-[10px] text-muted-foreground/50">
+                {agentName && agentName.trim().length > 0 && (
+                  <span className="text-muted-foreground/70 truncate max-w-[120px]">
+                    🤖 {agentName}
+                  </span>
+                )}
+                {priorityConf && priority !== 'normal' && (
+                  <span className={priorityConf.color}>{priorityConf.label}</span>
+                )}
+                {formattedTime && (
+                  <span>{formattedTime}</span>
+                )}
+              </div>
+            </div>
+          )}
+
           {showProgress && clampedProgress !== null && (
             <div className="mt-1 flex items-center gap-2">
               <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
@@ -659,22 +738,10 @@ function TreeNode({
             </div>
           )}
         </div>
-
-        {/* 子节点数量标记 */}
-        {hasChildren && (
-          <span className="text-muted-foreground/50 mr-2 shrink-0 text-[10px]">
-            {children!.length}
-          </span>
-        )}
       </div>
 
-      {/* 子节点递归渲染（带展开/折叠动画） */}
-      {hasChildren && (
-        <div
-          className={`overflow-hidden transition-all duration-200 ease-in-out ${
-            isExpanded ? 'max-h-[9999px] opacity-100' : 'max-h-0 opacity-0'
-          }`}
-        >
+      {hasChildren && isExpanded && (
+        <div>
           {children!.map((child) => (
             <TreeNode
               key={child.id ?? String(child.title ?? Math.random())}

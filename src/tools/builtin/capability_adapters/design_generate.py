@@ -104,9 +104,11 @@ class DesignGenerateTool(CapabilityAdapterBase):
         )
 
         last_error: Exception | None = None
+        attempted = False
         for backend in backends:
             if not backend.available:
                 continue
+            attempted = True
 
             mcp_tool_name = backend.tool_mapping.get("generate", "generate")
             try:
@@ -125,6 +127,9 @@ class DesignGenerateTool(CapabilityAdapterBase):
                 )
                 last_error = e
 
+        if not attempted:
+            return self._fail_no_backends()
+
         return create_failure_result(
             error=f"所有后端均失败: {last_error}",
             error_code="ALL_BACKENDS_FAILED",
@@ -138,16 +143,11 @@ class DesignGenerateTool(CapabilityAdapterBase):
         style_preferences: str,
     ) -> dict[str, Any]:
         """构建传给 MCP 后端的参数。"""
+        search_query = description[:60] if len(description) > 60 else description
         args: dict[str, Any] = {
-            "prompt": description,
-            "output_format": output_format,
+            "message": description,
+            "searchQuery": search_query,
         }
-        if input_type == "screenshot":
-            args["image"] = description
-        elif input_type == "url":
-            args["url"] = description
-        if style_preferences:
-            args["style"] = style_preferences
         return args
 
     def _transform_result(

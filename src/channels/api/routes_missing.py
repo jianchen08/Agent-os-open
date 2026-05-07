@@ -35,7 +35,6 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
     return {"id": "stub", "title": "", "status": "created", "message": "项目创建成功（存根）"}
 
 
-@projects_router.get("/tree", summary="获取任务树")
 async def get_task_tree(
     session_id: str | None = Query(default=None, description="按会话 ID 过滤"),
     _user: dict = Depends(require_auth),
@@ -63,6 +62,7 @@ async def get_task_tree(
     # 按 session_id 过滤
     # 策略 1：直接匹配 task.metadata["session_id"]
     # 策略 2：通过 parent_pipeline_id 关联会话的 pipeline_ids
+    # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
@@ -73,21 +73,47 @@ async def get_task_tree(
         except Exception:
             pass
 
-        filtered = []
+        # 第一轮：收集匹配的任务 ID
+        matched_ids: set[str] = set()
         for t in all_tasks:
-            # 策略 1：直接匹配 metadata.session_id
             if t.metadata.get("session_id") == session_id:
-                filtered.append(t)
+                matched_ids.add(t.id)
                 continue
-            # 策略 2：parent_pipeline_id 在会话的 pipeline_ids 中
             if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:
-                filtered.append(t)
+                matched_ids.add(t.id)
                 continue
-            # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
             if t.pipeline_run_id and t.pipeline_run_id in related_pipeline_ids:
-                filtered.append(t)
+                matched_ids.add(t.id)
                 continue
-        all_tasks = filtered
+
+        # 第二轮：向上补全祖先任务 + 向下补全子孙任务，确保树结构完整
+        task_by_id: dict[str, Any] = {t.id: t for t in all_tasks}
+        children_of: dict[str, list[str]] = {}
+        for t in all_tasks:
+            if t.parent_task_id:
+                children_of.setdefault(t.parent_task_id, []).append(t.id)
+
+        extra_ids: set[str] = set()
+        queue: list[str] = list(matched_ids)
+        while queue:
+            tid = queue.pop()
+            current = task_by_id.get(tid)
+            if not current:
+                continue
+            # 向上补全祖先
+            if current.parent_task_id:
+                parent = task_by_id.get(current.parent_task_id)
+                if parent and parent.id not in matched_ids and parent.id not in extra_ids:
+                    extra_ids.add(parent.id)
+                    queue.append(parent.id)
+            # 向下补全子孙
+            for child_id in children_of.get(tid, []):
+                if child_id not in matched_ids and child_id not in extra_ids:
+                    extra_ids.add(child_id)
+                    queue.append(child_id)
+
+        matched_ids |= extra_ids
+        all_tasks = [t for t in all_tasks if t.id in matched_ids]
 
     # 构建扁平列表
     flat_items = [_task_to_tree_item(t) for t in all_tasks]
@@ -174,12 +200,15 @@ def _task_to_tree_item(task: Any) -> dict[str, Any]:
     return {
         "id": task.id,
         "title": task.title or f"任务 {task.id[:8]}",
+        "description": getattr(task, "description", "") or "",
         "status": status_val,
         "type": "task",
         "parent_task_id": task.parent_task_id,
         "pipeline_run_id": getattr(task, "pipeline_run_id", None),
         "execution_record_id": getattr(task, "execution_record_id", None),
         "agent_name": getattr(task, "agent_name", ""),
+        "agent_level": str(getattr(task, "agent_level", "")),
+        "priority": str(getattr(task, "priority", "normal")),
         "created_at": getattr(task, "created_at", ""),
         "completed_at": getattr(task, "completed_at", None),
         "error": getattr(task, "error", None),

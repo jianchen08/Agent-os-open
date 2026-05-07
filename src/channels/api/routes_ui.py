@@ -37,7 +37,7 @@ _parser_loaded: bool = False
 def _get_schema_parser() -> Any:
     """惰性获取或创建 SchemaParser，并从配置目录加载 Schema。
 
-    搜索路径：config/agents/ 及其子目录。
+    搜索路径：config/modules/（UI 模块配置）。
 
     Returns:
         SchemaParser 实例
@@ -50,9 +50,8 @@ def _get_schema_parser() -> Any:
         from ui_schema.parser import SchemaParser
 
         _schema_parser = SchemaParser()
-        # 搜索多个可能的配置目录
         for config_dir in [
-            Path("config/agents"),
+            Path("config/modules"),
         ]:
             if config_dir.exists():
                 count = len(_schema_parser.load_directory(config_dir))
@@ -204,6 +203,53 @@ def get_ui_schema(
         schema = filtered[0]
 
     return _schema_to_dict(schema)
+
+
+# ---- 模块数据路由（手动注册） ----
+
+_module_data_router: APIRouter | None = None
+
+
+def get_module_data_router() -> APIRouter:
+    """获取模块数据路由器，包含手动注册的模块数据端点。
+
+    与 AutoCRUD 自动生成的路由互补，用于需要自定义逻辑的数据端点。
+    使用惰性单例模式，首次调用时创建并缓存路由器。
+
+    Returns:
+        包含模块数据路由的 APIRouter
+    """
+    global _module_data_router
+    if _module_data_router is not None:
+        return _module_data_router
+
+    _module_data_router = APIRouter(prefix="/api/modules", tags=["模块数据"])
+
+    @_module_data_router.get(
+        "/task-manager/data/tree",
+        summary="获取任务树（通用数据协议）",
+    )
+    async def get_task_tree_via_module_api(
+        session_id: str | None = Query(default=None, description="按会话 ID 过滤"),
+        _user: dict[str, Any] = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """通过通用数据协议获取任务树。
+
+        与 /api/v1/projects/tree 功能完全一致，
+        但使用 /api/modules/{module_id}/data/{collection} 路径格式，
+        符合通用数据协议规范，供前端 FileTreeWidget 通过
+        task-manager://tree 协议访问。
+
+        Args:
+            session_id: 可选，按会话 ID 过滤任务
+
+        Returns:
+            包含 children（树形结构）、items（扁平列表）、total 的字典
+        """
+        from channels.api.routes_missing import get_task_tree
+        return await get_task_tree(session_id=session_id, _user=_user)
+
+    return _module_data_router
 
 
 # ---- Data CRUD 路由自动注册 ----
