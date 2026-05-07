@@ -534,6 +534,22 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="MISSING_METRICS",
             )
 
+        # ── 2.5 目标 Agent 存在性与级别校验 ──
+        if target_type == "agent":
+            valid, err_msg, err_code = self._validate_target_agent(
+                target_id, parent_agent_level,
+            )
+            if not valid:
+                logger.warning(
+                    "[TaskSubmit] 目标 Agent 校验失败 | target_id=%s | parent_level=L%d | error=%s",
+                    target_id, parent_agent_level, err_msg,
+                )
+                return create_failure_result(error=err_msg, error_code=err_code)
+            logger.info(
+                "[TaskSubmit] 目标 Agent 校验通过 | target_id=%s | parent_level=L%d",
+                target_id, parent_agent_level,
+            )
+
         # ── 3. 权限验证 ──
         if not self._validate_parent_task_id(
             parent_agent_level, parent_task_id, task_scope
@@ -942,6 +958,78 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["task_role"] = inputs["task_role"]
 
         return metadata
+
+    def _validate_target_agent(
+        self,
+        target_id: str,
+        parent_agent_level: int,
+    ) -> tuple[bool, str, str]:
+        """校验目标 Agent 是否存在且级别匹配。
+
+        规则：
+        1. target_id 对应的 agent 配置必须存在
+        2. 目标 agent 不能是 L1 级别（L1 是主调度层，不能作为子任务执行者）
+        3. 目标 agent 的级别不能与提交者同级或更高（应向下委托）
+
+        Args:
+            target_id: 目标 Agent ID
+            parent_agent_level: 提交者（父任务）的 agent 级别（1=L1, 2=L2, 3=L3）
+
+        Returns:
+            (通过, 错误信息, 错误码) 元组。通过时错误信息为空字符串。
+        """
+        import yaml
+        from pathlib import Path
+
+        _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+        config_dir = _project_root / "config" / "agents"
+
+        yaml_path = None
+        for p in config_dir.rglob(f"{target_id}.yaml"):
+            yaml_path = p
+            break
+
+        if not yaml_path or not yaml_path.exists():
+            return (
+                False,
+                f"目标 Agent '{target_id}' 不存在。"
+                f"请检查 target_id 是否正确，或使用 resource_search 查找可用的 Agent。",
+                "TARGET_AGENT_NOT_FOUND",
+            )
+
+        try:
+            with open(yaml_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        except Exception as e:
+            return (
+                False,
+                f"无法读取 Agent '{target_id}' 的配置文件: {e}",
+                "TARGET_AGENT_CONFIG_ERROR",
+            )
+
+        agent_level_str = config.get("level", "")
+        level_map = {"L1": 1, "L2": 2, "L3": 3}
+        agent_level = level_map.get(agent_level_str, 0)
+
+        if agent_level == 1:
+            return (
+                False,
+                f"不能将任务提交给 L1 Agent（'{target_id}'）。"
+                f"L1 是主调度层，只负责接收用户请求和派发任务，不执行具体工作。"
+                f"请选择 L2 编排层或 L3 执行层的 Agent。",
+                "TARGET_AGENT_IS_L1",
+            )
+
+        if agent_level > 0 and agent_level <= parent_agent_level:
+            return (
+                False,
+                f"目标 Agent '{target_id}' 的级别为 {agent_level_str}，"
+                f"不能作为 L{parent_agent_level} Agent 的下级执行者。"
+                f"任务委托应向下流动：L1→L2→L3，请选择级别更低（L{parent_agent_level + 1}+）的 Agent。",
+                "TARGET_AGENT_LEVEL_INVALID",
+            )
+
+        return (True, "", "")
 
     def _auto_fill_criteria(
         self,

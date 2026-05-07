@@ -3,7 +3,8 @@
 提供前端期望但后端未实现的路由组，返回合理的占位响应。
 包括：projects, users, monitoring, triggers, interaction,
 agent-calls, execution/records, sessions, knowledge-base,
-floating-chat, cost-control, evaluation, evaluation-metrics别名。
+floating-chat, cost-control, evaluation, evaluation-metrics别名,
+files/capabilities。
 """
 
 from __future__ import annotations
@@ -658,4 +659,56 @@ async def register_client(body: dict[str, Any]) -> dict[str, Any]:
         "registered": True,
         "clientType": client_type,
         "version": version,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Files Capabilities 路由 - /api/v1/files
+# ---------------------------------------------------------------------------
+files_router = APIRouter(prefix="/api/v1/files", tags=["文件"])
+
+
+@files_router.get("/capabilities", summary="获取模型文件能力")
+async def get_model_file_capabilities(
+    model_name: str = Query(default="default", description="模型名称"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """返回指定模型支持的文件上传能力。
+
+    前端 ChatInput 组件在初始化时调用此接口，决定是否显示文件上传按钮
+    以及限制可上传的文件类型和大小。当前返回通用默认配置。
+
+    Args:
+        model_name: 模型名称（如 glm-5.1），预留用于按模型返回不同能力
+
+    Returns:
+        模型文件能力声明，包含支持的文件类型、最大大小等信息
+    """
+    return {
+        "model_name": model_name,
+        "supports_image": True,
+        "supports_document": True,
+        "supported_image_types": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        "supported_document_types": [
+            "application/pdf",
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+        ],
+        "max_image_size": 20 * 1024 * 1024,
+        "max_document_size": 50 * 1024 * 1024,
+        "supports_audio": False,
+        "supports_video": False,
+        "supports_code": True,
+        "supported_code_types": [
+            "text/x-python",
+            "text/javascript",
+            "text/typescript",
+            "text/html",
+            "text/css",
+            "application/json",
+        ],
+        "max_audio_size": 0,
+        "max_video_size": 0,
+        "max_code_size": 5 * 1024 * 1024,
     }

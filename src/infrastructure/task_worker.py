@@ -1065,10 +1065,31 @@ class TaskWorker:
         # ── 1. 加载 AgentConfig ──
         agent_config = None
         agent_registry = self._services.get("agent_registry")
-        if agent_registry and target_id:
+
+        if not target_id:
+            logger.error("TaskWorker: task %s has no target_id, failing", task_id)
+            if task_service:
+                task_service.fail_task(
+                    task_id,
+                    "任务缺少 target_id（目标 Agent），无法执行。"
+                    "请检查 task_submit 是否正确指定了 target_id。",
+                )
+            return
+
+        if agent_registry:
             agent_config = agent_registry.get(target_id)
             if agent_config is None:
-                logger.warning("TaskWorker: agent '%s' not found in registry", target_id)
+                logger.error(
+                    "TaskWorker: agent '%s' not found in registry, failing task %s",
+                    target_id, task_id,
+                )
+                if task_service:
+                    task_service.fail_task(
+                        task_id,
+                        f"目标 Agent '{target_id}' 未在系统中注册，无法执行任务。"
+                        f"请检查 task_submit 的 target_id 是否正确。",
+                    )
+                return
 
         # ── 2. 启动任务 (pending → running) ──
         if task_service:
@@ -1401,6 +1422,7 @@ class TaskWorker:
                         acceptance_criteria=acceptance_criteria,
                         workspace=workspace,
                         project_root=project_root,
+                        allow_default_fallback=False,
                     ),
                     timeout=pipeline_timeout,
                 )

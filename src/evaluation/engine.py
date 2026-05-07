@@ -638,6 +638,7 @@ class EvaluationEngine:
                     project_root=project_root,
                     workspace=project_root,
                     plugin_configs=_plugin_configs,
+                    allow_default_fallback=False,
                 )
                 return state
 

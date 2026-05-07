@@ -96,6 +96,7 @@ export function FiveSpaceLayout({
   const fullscreenContent = useLayoutModeStore((s) => s.fullscreenContent)
   const activeExecutions = useLayoutModeStore((s) => s.activeExecutions)
   const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
+  const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
   const updateFloatingWindow = useLayoutModeStore((s) => s.updateFloatingWindow)
   const closeFloatingWindow = useLayoutModeStore((s) => s.closeFloatingWindow)
   const setActiveTab = useLayoutModeStore((s) => s.setActiveTab)
@@ -248,6 +249,7 @@ export function FiveSpaceLayout({
                     {...(spaceConfig.props as Record<string, unknown> ?? {})}
                     dataSource={spaceConfig.dataSource as string}
                     sessionId={activeSessionId}
+                    refreshKey={connectionStatus?.lastConnectedAt ?? ''}
                     onNodeClick={(node: any) => handleTaskNodeClick(node)}
                   />
                 </div>

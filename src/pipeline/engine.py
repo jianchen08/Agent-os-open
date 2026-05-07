@@ -148,6 +148,7 @@ class PipelineEngine:
         agent_config: Any | None = None,
         conversation_history: list[dict[str, Any]] | None = None,
         initial_state: dict[str, Any] | None = None,
+        allow_default_fallback: bool = True,
         **extra_state: Any,
     ) -> dict[str, Any]:
         """执行管道。
@@ -164,6 +165,9 @@ class PipelineEngine:
             agent_config: Agent 配置实例，None 则使用系统默认
             conversation_history: 跨轮次对话历史（可选）
             initial_state: 管道初始状态字典（兼容旧接口）
+            allow_default_fallback: 是否允许 agent_config=None 时回退到系统默认 Agent。
+                CLI/WebSocket 主入口应为 True；TaskWorker/EvaluationEngine 等子任务
+                入口应为 False，缺少 agent_config 时直接报错。
             **extra_state: 额外注入的 state 键值对
 
         Returns:
@@ -193,6 +197,16 @@ class PipelineEngine:
             return await self._run_loop(state, resumed=False)
 
         if agent_config is None:
+            if not allow_default_fallback:
+                raise ValueError(
+                    "PipelineEngine.run() 收到 agent_config=None 且 "
+                    "allow_default_fallback=False。子任务管道必须显式提供 Agent 配置，"
+                    "禁止静默回退到系统默认 Agent（灵汐）。"
+                )
+            logger.warning(
+                "[PipelineEngine] agent_config 为 None，回退到系统默认 Agent。"
+                "调用方应显式传入 agent_config 以避免此警告。"
+            )
             agent_config = self._load_system_default_agent()
 
         state = self._build_initial_state(

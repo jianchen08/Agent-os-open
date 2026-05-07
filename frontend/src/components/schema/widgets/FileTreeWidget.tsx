@@ -285,6 +285,12 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const onNodeClick = config.onNodeClick ?? (rawProps.onNodeClick as ((node: TreeNodeData) => void) | undefined)
   /** 会话 ID */
   const sessionId = config.sessionId ?? (rawProps.sessionId as string | undefined)
+  /**
+   * 刷新 key（WebSocket 连接状态变化时更新，触发任务树重新加载）
+   *
+   * BUG-FIX-fix_20260507_ws_reconnect_refresh
+   */
+  const refreshKey = (rawProps.refreshKey as string) ?? ''
 
   /** 远程加载的树数据（sessionId 驱动） */
   const [remoteTreeData, setRemoteTreeData] = useState<TreeNodeData[]>([])
@@ -342,7 +348,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     return () => {
       cancelled = true
     }
-  }, [sessionId, rawProps.dataSource])
+  }, [sessionId, rawProps.dataSource, refreshKey])
 
   /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
   const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData

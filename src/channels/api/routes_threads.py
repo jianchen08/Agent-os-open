@@ -41,15 +41,43 @@ def _get_execution_record_storage() -> ExecutionRecordStorage | None:
     return provider.get("execution_record_storage")
 
 
+def _get_task_service() -> Any:
+    """通过 ServiceProvider 获取全局 TaskService 实例。
+
+    Returns:
+        TaskService 实例，服务不可用或创建失败时返回 None
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        return provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+        )
+    except Exception:
+        return None
+
+
 def _build_execution_graph(
     pipeline_ids: list[str],
     active_pipeline_id: str | None = None,
 ) -> dict[str, Any]:
-    """从 ExecutionRecordStorage 构建前端期望的执行图数据。
+    """从 ExecutionRecordStorage + TaskService 构建前端期望的执行图数据。
 
     遍历 pipeline_ids 中每个 pipeline_run_id，查询其执行记录和摘要，
-    将每条 ExecutionRecordData 转换为 BackendNodeData，
-    并根据 pipeline 间的父子关系（root_task_id 映射）构建 edges。
+    将每条 ExecutionRecordData 转换为 BackendNodeData。
+    同时通过 TaskService 遍历任务树，将子任务的 pipeline_run_id 也纳入图节点，
+    并根据任务的 parent_pipeline_id 构建 edges 表示父子关系。
+
+    BUG-FIX-fix_20260507_subtask_not_shown:
+    问题根因: session.pipeline_ids 只包含主管道 ID，不包含子任务的管道 ID。
+              _build_execution_graph 只遍历传入的 pipeline_ids，
+              导致子管道节点和边被遗漏，前端执行图中看不到子任务。
+    修复方案: 通过 TaskService 遍历任务树，找到每个管道关联任务的子任务，
+              将子任务的 pipeline_run_id 追加到遍历列表中。
+              父子管道关系直接从任务的 parent_pipeline_id 字段获取。
+    影响范围: 执行图 API（get_thread_detail）
+    修复日期: 2026-05-07
 
     Args:
         pipeline_ids: 关联的管道执行 ID 列表
@@ -64,10 +92,36 @@ def _build_execution_graph(
     if storage is None or not pipeline_ids:
         return {"nodes": [], "edges": []}
 
+    # BUG-FIX-fix_20260507_subtask_not_shown:
+    # 通过 TaskService 遍历任务树，收集子任务的 pipeline_run_id。
+    # 策略：pipeline_run_id → 找到关联任务 → 查找子任务 → 收集子任务的 pipeline_run_id。
+    task_service = _get_task_service()
+    pipeline_to_parent: dict[str, str | None] = {}
+    all_pipeline_ids = list(pipeline_ids)
+
+    if task_service:
+        try:
+            all_tasks = task_service.list_all(limit=500, reverse=False)
+            pipeline_to_task: dict[str, Any] = {}
+            for t in all_tasks:
+                if t.pipeline_run_id:
+                    pipeline_to_task[t.pipeline_run_id] = t
+            for pid in pipeline_ids:
+                pipeline_to_parent[pid] = None
+                task = pipeline_to_task.get(pid)
+                if task:
+                    subtasks = task_service.list_subtasks(task.id)
+                    for sub in subtasks:
+                        if sub.pipeline_run_id and sub.pipeline_run_id not in pipeline_to_parent:
+                            pipeline_to_parent[sub.pipeline_run_id] = sub.parent_pipeline_id
+                            all_pipeline_ids.append(sub.pipeline_run_id)
+        except Exception:
+            logger.warning("通过任务服务查找子管道失败")
+
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
 
-    for pipeline_run_id in pipeline_ids:
+    for pipeline_run_id in all_pipeline_ids:
         try:
             records = storage.list_by_pipeline(pipeline_run_id)
         except Exception:
@@ -80,13 +134,8 @@ def _build_execution_graph(
         # 获取管道摘要信息（状态、耗时等）
         summary = storage.get_summary(pipeline_run_id)
 
-        # 从 _pipeline_root_map 反查此 pipeline 的 root_task_id
-        # root_task_id 即是父任务的 pipeline_run_id，用于构建 edges
-        parent_pipeline_id = None
-        for child_id, root_id in storage._pipeline_root_map.items():
-            if child_id == pipeline_run_id and root_id != pipeline_run_id:
-                parent_pipeline_id = root_id
-                break
+        # 父管道 ID：直接从任务数据中获取
+        parent_pipeline_id = pipeline_to_parent.get(pipeline_run_id)
 
         # 计算时间范围和持续时间
         start_time = records[0].created_at if records else None
@@ -125,7 +174,6 @@ def _build_execution_graph(
         description = None
         for rec in reversed(records):
             if rec.type == "ai" and rec.content:
-                # 截取前 200 字符作为描述
                 description = rec.content[:200] + ("..." if len(rec.content) > 200 else "")
                 break
 
@@ -157,12 +205,11 @@ def _build_execution_graph(
             "endTime": end_time,
             "duration": duration,
         }
-        # 移除 None 值以保持响应简洁
         node = {k: v for k, v in node.items() if v is not None}
         nodes.append(node)
 
-        # 构建边：如果有父 pipeline 且父 pipeline 在当前列表中，则建立父子关系
-        if parent_pipeline_id and parent_pipeline_id in pipeline_ids:
+        # 构建边：如果有父管道，建立父子关系
+        if parent_pipeline_id and parent_pipeline_id in all_pipeline_ids:
             edge_id = f"edge-{parent_pipeline_id}-{pipeline_run_id}"
             edges.append({
                 "id": edge_id,

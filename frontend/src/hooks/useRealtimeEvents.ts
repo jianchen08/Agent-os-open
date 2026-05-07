@@ -15,6 +15,7 @@ import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { webSocketService } from '@/services/websocket/WebSocketService'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { ExecutionEvent, InteractionRequest } from '@/stores/layoutModeStore'
 
 /**
@@ -35,6 +36,20 @@ export function useRealtimeEvents(): void {
     const handleStreamStart = (data: Record<string, unknown>) => {
       // Streaming started - connection is confirmed working
       updateConnectionStatus({ state: 'connected', lastConnectedAt: new Date().toISOString() })
+    }
+
+    /**
+     * BUG-FIX-fix_20260507_ws_reconnect_refresh:
+     * 问题根因: WebSocket 重连后，任务树和消息列表不会自动刷新，
+     *          导致断线期间产生的新任务和消息无法显示。
+     * 修复方案: 监听 WebSocket connect 事件（包括重连），重新加载当前会话消息
+     *          并触发 layoutModeStore 的 workspaceTabs 更新（间接刷新任务树）。
+     */
+    const handleWsConnect = () => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (sid) {
+        useSessionStore.getState().fetchMessages(sid).catch(() => {})
+      }
     }
 
     const handleStreamChunk = (_data: Record<string, unknown>) => {
@@ -203,6 +218,9 @@ export function useRealtimeEvents(): void {
 
     // ---- Subscribe to all events ----
 
+    // WebSocket lifecycle
+    webSocketService.subscribe('connect', handleWsConnect)
+
     // Streaming events
     webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
     webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)
@@ -231,6 +249,9 @@ export function useRealtimeEvents(): void {
     )
 
     return () => {
+      // WebSocket lifecycle
+      webSocketService.unsubscribe('connect', handleWsConnect)
+
       // Streaming events
       webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
       webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)

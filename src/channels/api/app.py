@@ -219,6 +219,7 @@ def _register_routes(app: FastAPI) -> None:
         evaluation_router,
         eval_metrics_alias_router,
         client_router,
+        files_router,
     )
 
     app.include_router(projects_router)
@@ -235,3 +236,4 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(evaluation_router)
     app.include_router(eval_metrics_alias_router)
     app.include_router(client_router)
+    app.include_router(files_router)

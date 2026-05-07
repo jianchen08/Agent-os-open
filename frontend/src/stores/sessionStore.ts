@@ -86,7 +86,22 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       const sessionMessages = state.messages[sessionId] || []
       const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
 
-      const existingIndex = sessionMessages.findIndex((m) => m.id === realMessageId)
+      /**
+       * BUG-FIX-fix_20260507_duplicate_messages:
+       * 问题根因: WebSocket message_id (UUID) 与 API record_id (12位hex) 格式不一致
+       * 修复方案: 精确 ID 匹配 + 模糊匹配（角色 + 时间戳）
+       */
+      let existingIndex = sessionMessages.findIndex((m) => m.id === realMessageId)
+
+      // 精确匹配失败时，尝试模糊匹配
+      if (existingIndex < 0 && message.role === 'assistant') {
+        existingIndex = sessionMessages.findIndex((m) =>
+          m.role === 'assistant'
+          && m.timestamp
+          && message.timestamp
+          && m.timestamp === message.timestamp,
+        )
+      }
 
       let updatedMessages: Message[]
       let messageCountChanged = false
@@ -96,7 +111,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         updatedMessages[existingIndex] = {
           ...sessionMessages[existingIndex],
           ...message,
-          id: realMessageId,
+          id: sessionMessages[existingIndex].id,
         }
       } else {
         updatedMessages = [
@@ -189,7 +204,20 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   updateMessageFields: (sessionId: string, messageId: string, updates: Partial<Message>) => {
     set((state) => {
       const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+
+      /**
+       * BUG-FIX-fix_20260507_duplicate_messages:
+       * 精确 ID 匹配 + 模糊匹配（角色 + 时间戳）
+       */
+      let messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+
+      // 精确匹配失败时，如果 updates 中有 timestamp，尝试模糊匹配
+      if (messageIndex < 0 && updates.role === 'assistant' && updates.timestamp) {
+        messageIndex = sessionMessages.findIndex((m) =>
+          m.role === 'assistant'
+          && m.timestamp === updates.timestamp,
+        )
+      }
 
       if (messageIndex < 0) {
         logger.warn('消息不存在，跳过更新:', messageId)
@@ -521,8 +549,30 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         if (append) {
           updatedMessages = [...rawMessages, ...existingMessages]
         } else {
+          /**
+           * BUG-FIX-fix_20260507_duplicate_messages:
+           * 问题根因: WebSocket stream_start 的 message_id (UUID格式如 550e8400-e29b-41d4-...)
+           *          与 API 返回的 record_id (12位hex如 550e8400e29b) 格式不一致，
+           *          导致按 ID 去重失败，同一条消息出现两次。
+           * 修复方案: 首次加载时，通过「角色 + 时间戳」进行模糊匹配去重，
+           *          而非仅依赖 ID 精确匹配。
+           */
           const apiIds = new Set(rawMessages.map((m) => m.id))
-          const localOnly = existingMessages.filter((m) => !apiIds.has(m.id))
+
+          // 构建已知的 API 消息指纹集合（用于模糊匹配）
+          const apiFingerprints = new Set(
+            rawMessages.map((m) => `${m.role}::${m.timestamp}`),
+          )
+
+          const localOnly = existingMessages.filter((m) => {
+            // 精确 ID 匹配：排除 API 已包含的
+            if (apiIds.has(m.id)) return false
+            // 模糊匹配：同角色 + 同时间戳的消息视为同一条
+            const fingerprint = `${m.role}::${m.timestamp}`
+            if (apiFingerprints.has(fingerprint)) return false
+            return true
+          })
+
           updatedMessages = localOnly.length > 0 ? [...rawMessages, ...localOnly] : rawMessages
         }
 
