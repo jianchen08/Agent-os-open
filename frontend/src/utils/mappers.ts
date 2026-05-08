@@ -133,6 +133,7 @@ export interface ThreadStateResponse {
  * 将 API 的 Thread 映射为 Session
  */
 export function mapThreadToSession(thread: Thread | ThreadStateResponse): Session {
+  const metadata = (thread as any).metadata || {}
   return {
     id: thread.thread_id,
     title: thread.intent || '未命名会话',
@@ -140,8 +141,10 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
     updatedAt: thread.updated_at || new Date().toISOString(),
     messageCount: (thread as any).message_count || 0,
     status: (thread as any).status || thread.current_state || 'active',
-    metadata: (thread as any).metadata || {},
+    metadata: metadata,
     agentId: thread.agent_id || null,
+    pinned: metadata.pinned === true,
+    starred: metadata.starred === true,
   }
 }
 

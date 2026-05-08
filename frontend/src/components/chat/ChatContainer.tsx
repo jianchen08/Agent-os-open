@@ -138,8 +138,8 @@ export const ChatContainer = ({
     if (isSubTabActive && activeTabId) {
       return streamingTabs[activeTabId] ?? false
     }
-    return streamingTabs['__main__'] ?? isGenerating
-  }, [isSubTabActive, activeTabId, streamingTabs, isGenerating])
+    return streamingTabs[sessionId] ?? false
+  }, [isSubTabActive, activeTabId, streamingTabs, sessionId])
 
   /**
    * 根据当前激活 Tab 选择消息源

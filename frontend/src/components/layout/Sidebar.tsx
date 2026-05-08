@@ -94,6 +94,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const deleteSession = useSessionListStore((state) => state.deleteSession)
   const copySession = useSessionListStore((state) => state.copySession)
   const toggleSessionStar = useSessionListStore((state) => state.toggleSessionStar)
+  const toggleSessionPin = useSessionListStore((state) => state.toggleSessionPin)
   const renameSession = useSessionListStore((state) => state.renameSession)
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
   const searchSessions = useSessionListStore((state) => state.searchSessions)
@@ -236,6 +237,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       toggleSessionStar(sessionId)
     },
     [toggleSessionStar],
+  )
+
+  /**
+   * 处理置顶会话
+   */
+  const handlePinSession = useCallback(
+    (sessionId: string) => {
+      toggleSessionPin(sessionId)
+    },
+    [toggleSessionPin],
   )
 
   /**
@@ -493,6 +504,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   onEditSession={handleEditSession}
                   onCopySession={handleCopySession}
                   onStarSession={handleStarSession}
+                  onPinSession={handlePinSession}
                   className="px-2"
                   itemHeight={SIDEBAR_STYLES.itemHeight}
                 />

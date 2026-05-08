@@ -215,30 +215,50 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
   },
 
   toggleSessionStar: (sessionId: string) => {
+    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const newStarred = !session?.starred
+
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
-              starred: !session.starred,
+              starred: newStarred,
               updatedAt: new Date().toISOString(),
             }
           : session,
       ),
     }))
+
+    // 持久化到后端 metadata
+    updateSessionApi(sessionId, {
+      metadata: { starred: newStarred },
+    }).catch((error) => {
+      logger.error('星标同步失败:', error)
+    })
   },
 
   toggleSessionPin: (sessionId: string) => {
+    const session = useSessionStore.getState().sessions.find((s) => s.id === sessionId)
+    const newPinned = !session?.pinned
+
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((session) =>
         session.id === sessionId
           ? {
               ...session,
-              pinned: !session.pinned,
+              pinned: newPinned,
             }
           : session,
       ),
     }))
+
+    // 持久化到后端 metadata
+    updateSessionApi(sessionId, {
+      metadata: { pinned: newPinned },
+    }).catch((error) => {
+      logger.error('置顶同步失败:', error)
+    })
   },
 
   renameSession: async (sessionId: string, newTitle: string) => {

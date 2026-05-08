@@ -12,7 +12,7 @@
 
 import { useEffect } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-import { webSocketService } from '@/services/websocket/WebSocketService'
+import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -40,10 +40,10 @@ export function useRealtimeEvents(): void {
 
     /**
      * BUG-FIX-fix_20260507_ws_reconnect_refresh:
-     * 问题根因: WebSocket 重连后，任务树和消息列表不会自动刷新，
-     *          导致断线期间产生的新任务和消息无法显示。
-     * 修复方案: 监听 WebSocket connect 事件（包括重连），重新加载当前会话消息
-     *          并触发 layoutModeStore 的 workspaceTabs 更新（间接刷新任务树）。
+     * 问题根因: WebSocket 重连后，任务树和消息列表不会自动刷新�?
+     *          导致断线期间产生的新任务和消息无法显示�?
+     * 修复方案: 监听 WebSocket connect 事件（包括重连），重新加载当前会话消�?
+     *          并触�?layoutModeStore �?workspaceTabs 更新（间接刷新任务树）�?
      */
     const handleWsConnect = () => {
       const sid = useSessionStore.getState().activeSessionId
@@ -163,12 +163,12 @@ export function useRealtimeEvents(): void {
 
       // BUG-FIX-fix_auto_pop_sub_tab:
       // 问题根因: sub_agent_created 事件自动调用 openSubAgentTab 导致子标签强制弹出，
-      //           用户尚未点击任务就被切换到子标签页，体验不佳。
-      // 修复方案: 不再自动打开子标签，仅注册 pipeline_id → tabId 映射，
+      //           用户尚未点击任务就被切换到子标签页，体验不佳�?
+      // 修复方案: 不再自动打开子标签，仅注�?pipeline_id �?tabId 映射�?
       //           子标签在以下场景才弹出：
-      //           1. 用户点击任务树节点（FiveSpaceLayout.handleTaskNodeClick）
-      //           2. 人类交互进入 conversation 模式（useInteractionHandler）
-      // 影响范围: 任务提交后的子标签创建流程
+      //           1. 用户点击任务树节点（FiveSpaceLayout.handleTaskNodeClick�?
+      //           2. 人类交互进入 conversation 模式（useInteractionHandler�?
+      // 影响范围: 任务提交后的子标签创建流�?
       // 修复日期: 2026-05-06
       const taskId = (data.taskId as string) || (data.agentId as string)
       const pipelineId = data.pipelineId as string | undefined
@@ -219,62 +219,62 @@ export function useRealtimeEvents(): void {
     // ---- Subscribe to all events ----
 
     // WebSocket lifecycle
-    webSocketService.subscribe('connect', handleWsConnect)
+    wsPool.subscribe('connect', handleWsConnect)
 
     // Streaming events
-    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError as any)
 
     // Execution events
-    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
-    webSocketService.subscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
 
     // Sub-agent events
-    webSocketService.subscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
-    webSocketService.subscribe(
+    wsPool.subscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
+    wsPool.subscribe(
       WS_SERVER_EVENTS.SUB_AGENT_WAITING_INPUT,
       handleSubAgentWaitingInput as any,
     )
-    webSocketService.subscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
+    wsPool.subscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
 
     // Workflow events
-    webSocketService.subscribe(
+    wsPool.subscribe(
       WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
       handleWorkflowStepUpdate as any,
     )
 
     return () => {
       // WebSocket lifecycle
-      webSocketService.unsubscribe('connect', handleWsConnect)
+      wsPool.unsubscribe('connect', handleWsConnect)
 
       // Streaming events
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.STREAM_START, handleStreamStart as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError as any)
 
       // Execution events
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.EXECUTION_START, handleExecutionStart as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.EXECUTION_PROGRESS, handleExecutionProgress as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.EXECUTION_OUTPUT, handleExecutionOutput as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.EXECUTION_DONE, handleExecutionDone as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.EXECUTION_CANCELLED, handleExecutionCancelled as any)
 
       // Sub-agent events
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
-      webSocketService.unsubscribe(
+      wsPool.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated as any)
+      wsPool.unsubscribe(
         WS_SERVER_EVENTS.SUB_AGENT_WAITING_INPUT,
         handleSubAgentWaitingInput as any,
       )
-      webSocketService.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
+      wsPool.unsubscribe(WS_SERVER_EVENTS.SUB_AGENT_COMPLETED, handleSubAgentCompleted as any)
 
       // Workflow events
-      webSocketService.unsubscribe(
+      wsPool.unsubscribe(
         WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
         handleWorkflowStepUpdate as any,
       )

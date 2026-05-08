@@ -399,13 +399,15 @@ interface UpdateSessionOptions extends RetryOptions {
   title?: string
   /** Agent ID（可选） */
   agentId?: string | null
+  /** 元数据（可选） */
+  metadata?: Record<string, unknown>
 }
 
 export async function updateSession(
   sessionId: string,
   options: UpdateSessionOptions = {},
 ): Promise<Session> {
-  const { title, agentId, ...retryOptions } = options
+  const { title, agentId, metadata, ...retryOptions } = options
 
   // 参数验证
   validateSessionId(sessionId)
@@ -418,6 +420,9 @@ export async function updateSession(
     }
     if (agentId !== undefined) {
       requestData.agent_id = agentId
+    }
+    if (metadata !== undefined) {
+      requestData.metadata = metadata
     }
 
     const response = await apiClient.patch<ThreadUpdateResponse>(

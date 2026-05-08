@@ -6,6 +6,7 @@
 
 export { WebSocketService, WebSocketStatus, webSocketService } from './WebSocketService'
 export type { WebSocketStatusType } from './WebSocketService'
+export { WebSocketConnectionPool, wsPool } from './WebSocketConnectionPool'
 export { EnhancedMessageQueue, MessagePriority } from './EnhancedMessageQueue'
 export type { MessagePriorityType } from './EnhancedMessageQueue'
 export { HeartbeatManager } from './HeartbeatManager'

@@ -141,6 +141,11 @@ class PipelineEngine:
         self._max_consecutive_core_errors: int = 3
         # 外部通知队列（线程安全）：终态通知在此排队，_run_loop 每轮迭代检查
         self._pending_notifications: list[str] = []
+        # BUG-FIX-fix_20260508_sub_pipeline_streaming:
+        # 保存流式回调和 streaming 标志，resume 时重新注入 _suspended_state。
+        # _safe_deepcopy 无法拷贝函数类型的 on_chunk，导致 resume 后流式输出丢失。
+        self._saved_streaming: bool = False
+        self._saved_on_chunk: Any = None
 
     async def run(
         self,
@@ -702,6 +707,20 @@ class PipelineEngine:
         _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
         # 重置连续错误计数器
         self._consecutive_core_errors = 0
+        # BUG-FIX-fix_20260508_sub_pipeline_streaming:
+        # 保存流式回调到引擎实例。_safe_deepcopy 无法拷贝函数类型的 on_chunk，
+        # 导致 resume() 使用 _suspended_state 时丢失流式回调。在 _run_loop 首次
+        # 进入时保存，resume 时恢复。
+        if not resumed:
+            _on_chunk_val = state.get("on_chunk")
+            if _on_chunk_val is not None:
+                self._saved_on_chunk = _on_chunk_val
+                self._saved_streaming = state.get("streaming", True)
+        else:
+            # resume 时重新注入流式回调（_safe_deepcopy 会跳过函数类型）
+            if self._saved_on_chunk is not None and "on_chunk" not in state:
+                state["on_chunk"] = self._saved_on_chunk
+                state["streaming"] = self._saved_streaming
         # 注册运行中的引擎引用，供外部通知直接注入
         _engine_reg_key = f"__running_engine_{pipeline_run_id}"
         self._services[_engine_reg_key] = self

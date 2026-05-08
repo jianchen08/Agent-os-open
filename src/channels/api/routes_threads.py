@@ -242,6 +242,7 @@ def _build_thread_response(t: dict) -> ThreadResponse:
         agent_id=t.get("agent_id"),
         pipeline_ids=t.get("pipeline_ids", []),
         active_pipeline_id=t.get("active_pipeline_id") or None,
+        metadata=t.get("metadata"),
     )
 
 

@@ -1412,22 +1412,206 @@ class TaskWorker:
                             task_id, exc,
                         )
 
+            # BUG-FIX-fix_20260508_sub_pipeline_streaming:
+            # 问题根因: 子管道 engine.run() 缺少 streaming=True 和 on_chunk 参数，
+            #           导致前端子 Tab 打开后无实时流式输出。
+            # 修复方案: 创建 on_chunk 回调，通过 ws_interaction_notifier 将流式事件
+            #           广播到前端 WebSocket，事件携带 pipeline_id 供前端路由到正确的子 Tab。
+            # 影响范围: 所有通过 TaskWorker 执行的子管道（L2/L3 层级任务）
+            # 修复日期: 2026-05-08
+
+            # ── 子管道流式输出：chunk 队列 + 回调 + 消费协程 ──
+            _sub_chunk_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            _sub_pipeline_id = engine._pipeline_id
+            _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
+
+            def _sub_on_chunk(chunk: dict[str, Any]) -> None:
+                """子管道流式回调：将管道事件放入队列由消费协程广播到前端。
+
+                此回调由 LLM Adapter 在流式生成时同步调用，
+                事件放入 asyncio.Queue 后由 _drain_sub_chunks 异步消费并广播。
+
+                Args:
+                    chunk: 管道事件字典，包含 type 和 content 等字段
+                """
+                _sub_chunk_queue.put_nowait(chunk)
+
+            async def _drain_sub_chunks(engine_task: asyncio.Task) -> None:
+                """消费子管道 chunk 队列，通过 ws_interaction_notifier 广播到前端。
+
+                将管道事件转换为前端协议格式，添加 pipeline_id 以便前端路由到正确的子 Tab。
+                事件类型与 start_server.py 主管道保持一致：
+                stream_start / stream_chunk / stream_end / thinking_* / tool_* / iteration
+                """
+                _notifier = self._services.get("ws_interaction_notifier")
+                if not _notifier or not hasattr(_notifier, "broadcast_event"):
+                    # 无前端连接时仍消费队列，防止队列阻塞管道
+                    while not engine_task.done() or not _sub_chunk_queue.empty():
+                        try:
+                            await asyncio.wait_for(_sub_chunk_queue.get(), timeout=0.1)
+                        except asyncio.TimeoutError:
+                            continue
+                    return
+
+                # 发送 stream_start 事件，通知前端开始接收流式输出
+                try:
+                    await _notifier.broadcast_event({
+                        "type": "stream_start",
+                        "data": {
+                            "message_id": _sub_message_id,
+                            "pipeline_id": _sub_pipeline_id,
+                        },
+                    })
+                except Exception:
+                    pass
+
+                _thinking_active = False
+                while not engine_task.done() or not _sub_chunk_queue.empty():
+                    try:
+                        _chunk = await asyncio.wait_for(
+                            _sub_chunk_queue.get(), timeout=0.1,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    if _chunk is None:
+                        break
+
+                    _chunk_type = _chunk.get("type", "text")
+                    _content = _chunk.get("content", "")
+                    _event_data = None
+
+                    if _chunk_type == "text" and _content:
+                        _event_data = {
+                            "type": "stream_chunk",
+                            "data": {
+                                "message_id": _sub_message_id,
+                                "content": _content,
+                                "pipeline_id": _sub_pipeline_id,
+                            },
+                        }
+                    elif _chunk_type == "thinking" and _content:
+                        if not _thinking_active:
+                            _thinking_active = True
+                            try:
+                                await _notifier.broadcast_event({
+                                    "type": "thinking_start",
+                                    "data": {
+                                        "message_id": _sub_message_id,
+                                        "pipeline_id": _sub_pipeline_id,
+                                    },
+                                })
+                            except Exception:
+                                pass
+                        _event_data = {
+                            "type": "thinking_chunk",
+                            "data": {
+                                "message_id": _sub_message_id,
+                                "content": _content,
+                                "pipeline_id": _sub_pipeline_id,
+                            },
+                        }
+                    elif _chunk_type == "thinking_end":
+                        if _thinking_active:
+                            _thinking_active = False
+                            _event_data = {
+                                "type": "thinking_end",
+                                "data": {
+                                    "message_id": _sub_message_id,
+                                    "duration_ms": _chunk.get("duration_ms"),
+                                    "pipeline_id": _sub_pipeline_id,
+                                },
+                            }
+                    elif _chunk_type == "tool_start":
+                        _event_data = {
+                            "type": "tool_start",
+                            "data": {
+                                "message_id": _sub_message_id,
+                                "tool_name": _chunk.get("tool_name", "unknown"),
+                                "pipeline_id": _sub_pipeline_id,
+                            },
+                        }
+                    elif _chunk_type == "tool_result":
+                        _event_data = {
+                            "type": "tool_result",
+                            "data": {
+                                "message_id": _sub_message_id,
+                                "tool_name": _chunk.get("tool_name", "unknown"),
+                                "success": _chunk.get("success", True),
+                                "result": _chunk.get("result"),
+                                "duration_ms": _chunk.get("duration_ms"),
+                                "pipeline_id": _sub_pipeline_id,
+                            },
+                        }
+                    elif _chunk_type == "iteration":
+                        # 迭代开始时关闭旧的 thinking
+                        if _thinking_active:
+                            _thinking_active = False
+                            try:
+                                await _notifier.broadcast_event({
+                                    "type": "thinking_end",
+                                    "data": {
+                                        "message_id": _sub_message_id,
+                                        "duration_ms": None,
+                                        "pipeline_id": _sub_pipeline_id,
+                                    },
+                                })
+                            except Exception:
+                                pass
+                        _event_data = {
+                            "type": "iteration",
+                            "data": {
+                                "message_id": _sub_message_id,
+                                "iteration": _chunk.get("iteration", 0),
+                                "max_iterations": _chunk.get("max_iterations", 0),
+                                "pipeline_id": _sub_pipeline_id,
+                            },
+                        }
+
+                    if _event_data:
+                        try:
+                            await _notifier.broadcast_event(_event_data)
+                        except Exception:
+                            pass
+
+                # 发送 stream_end 事件，通知前端流式输出结束
+                try:
+                    await _notifier.broadcast_event({
+                        "type": "stream_end",
+                        "data": {
+                            "message_id": _sub_message_id,
+                            "pipeline_id": _sub_pipeline_id,
+                        },
+                    })
+                except Exception:
+                    pass
+
+            # 启动管道引擎和消费协程
+            _engine_task = asyncio.create_task(
+                engine.run(
+                    user_input=full_input,
+                    agent_config=agent_config,
+                    conversation_history=conversation_history,
+                    task_id=task_id,
+                    acceptance_criteria=acceptance_criteria,
+                    workspace=workspace,
+                    project_root=project_root,
+                    allow_default_fallback=False,
+                    streaming=True,
+                    on_chunk=_sub_on_chunk,
+                )
+            )
+            _drain_task = asyncio.create_task(_drain_sub_chunks(_engine_task))
+
+            _engine_timed_out = False
             try:
                 pipeline_state = await asyncio.wait_for(
-                    engine.run(
-                        user_input=full_input,
-                        agent_config=agent_config,
-                        conversation_history=conversation_history,
-                        task_id=task_id,
-                        acceptance_criteria=acceptance_criteria,
-                        workspace=workspace,
-                        project_root=project_root,
-                        allow_default_fallback=False,
-                    ),
+                    _engine_task,
                     timeout=pipeline_timeout,
                 )
             except asyncio.TimeoutError:
                 logger.error("TaskWorker: pipeline hard timeout for task %s (%ds)", task_id, pipeline_timeout)
+                _engine_timed_out = True
+                _engine_task.cancel()
                 if task_service:
                     try:
                         task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
@@ -1446,6 +1630,18 @@ class TaskWorker:
                     except Exception:
                         pass
                 _cleanup_done = True
+            finally:
+                # BUG-FIX-fix_20260508_sub_pipeline_streaming:
+                # 无论正常完成、超时还是异常，都发送哨兵值并等待消费协程退出。
+                # 确保前端总能收到 stream_end 事件，避免子 Tab 卡在"加载中"。
+                _sub_chunk_queue.put_nowait(None)
+                if not _drain_task.done():
+                    try:
+                        await asyncio.wait_for(_drain_task, timeout=5.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        _drain_task.cancel()
+
+            if _engine_timed_out:
                 return
 
             # ── 5.1 管道挂起处理：有子任务时 child_task_guard 会触发 wait 挂起 ──

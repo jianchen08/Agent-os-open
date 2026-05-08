@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { messageApi } from '@/services/api/messages'
 import { getMessages } from '@/services/api/session'
-import { WebSocketStatus, webSocketService } from '@/services/websocket/WebSocketService'
+import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
+import { WebSocketStatus } from '@/services/websocket/WebSocketService'
 import { loggers } from '@/utils/logger'
 import { useMessageVersionStore } from './messageVersionStore'
 import type { Message, RetryScope } from '@/types/models'
@@ -717,34 +718,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       prevUnsubscribers.cleanup()
     }
 
-    const handleStatusChange = () => {
-      set({ wsStatus: webSocketService.getStatus() })
-    }
+    wsPool.connect(sessionId, token)
+    wsPool.setActiveThread(sessionId)
 
-    webSocketService.subscribe('connect', handleStatusChange)
-    webSocketService.subscribe('disconnect', handleStatusChange)
-
-    webSocketService.subscribe(WS_SERVER_EVENTS.STATE_CHANGE, (_data) => {})
-
-    set({
-      _wsUnsubscribers: {
-        cleanup: () => {
-          webSocketService.unsubscribe('connect', handleStatusChange)
-          webSocketService.unsubscribe('disconnect', handleStatusChange)
-        },
-      },
-    })
-
-    webSocketService.connect(sessionId, token)
-    set({ wsStatus: webSocketService.getStatus() })
+    set({ wsStatus: wsPool.getStatus() })
   },
 
   disconnectWebSocket: () => {
-    const { _wsUnsubscribers } = get()
-    if (_wsUnsubscribers) {
-      _wsUnsubscribers.cleanup()
+    const { activeSessionId } = get()
+    if (activeSessionId) {
+      wsPool.disconnect(activeSessionId)
     }
-    webSocketService.disconnect()
     set({ wsStatus: WebSocketStatus.DISCONNECTED, _wsUnsubscribers: null })
   },
 

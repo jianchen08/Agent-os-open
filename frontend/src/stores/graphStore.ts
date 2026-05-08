@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 执行图状态管理Store
  *
  * 使用真实后端API和WebSocket事件更新执行图状态。
@@ -11,7 +11,7 @@ import { create } from 'zustand'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import * as graphApi from '@/services/api/graph'
 import { reportError, ErrorType } from '@/services/errorReporting'
-import { webSocketService } from '@/services/websocket/WebSocketService'
+import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
 import { mapNodeStatus, mapBackendGraphToGraphData, type BackendGraphData } from '@/utils/mappers'
 import type { GraphData, Node, NodeStatus } from '@/types/graph'
 
@@ -435,21 +435,21 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     // 订阅状态变更事件
     // Requirements: 4.3, 5.2
-    webSocketService.subscribe(
+    wsPool.subscribe(
       WS_SERVER_EVENTS.STATE_CHANGE,
       handleStateChange as (data: unknown) => void,
     )
 
     // 订阅任务完成事件
     // Requirements: 4.5
-    webSocketService.subscribe(
+    wsPool.subscribe(
       WS_SERVER_EVENTS.TASK_COMPLETED,
       handleTaskCompleted as (data: unknown) => void,
     )
 
     // 订阅工作流步骤更新事件
     // Requirements: 3.2
-    webSocketService.subscribe(
+    wsPool.subscribe(
       WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
       handleWorkflowStepUpdate as (data: unknown) => void,
     )
@@ -461,15 +461,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   cleanupWebSocketListeners: () => {
     const { handleStateChange, handleTaskCompleted, handleWorkflowStepUpdate } = get()
 
-    webSocketService.unsubscribe(
+    wsPool.unsubscribe(
       WS_SERVER_EVENTS.STATE_CHANGE,
       handleStateChange as (data: unknown) => void,
     )
-    webSocketService.unsubscribe(
+    wsPool.unsubscribe(
       WS_SERVER_EVENTS.TASK_COMPLETED,
       handleTaskCompleted as (data: unknown) => void,
     )
-    webSocketService.unsubscribe(
+    wsPool.unsubscribe(
       WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE,
       handleWorkflowStepUpdate as (data: unknown) => void,
     )

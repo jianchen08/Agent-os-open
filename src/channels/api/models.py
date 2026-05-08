@@ -81,6 +81,7 @@ class ThreadResponse(BaseModel):
     agent_id: str | None = None
     pipeline_ids: list[str] = Field(default_factory=list, description="关联的管道执行 ID 列表")
     active_pipeline_id: str | None = Field(default=None, description="当前活跃的管道执行 ID")
+    metadata: dict[str, Any] | None = Field(default=None, description="线程元数据，含 pinned/starred 等前端状态")
 
 
 class MessageListResponse(BaseModel):

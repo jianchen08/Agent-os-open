@@ -159,6 +159,9 @@ export class WebSocketService {
     { timer: ReturnType<typeof setTimeout>; retries: number }
   > = new Map()
 
+  /** 全局消息拦截器（连接池使用，拦截所有收到的消息并附带 threadId） */
+  private _onAnyMessage?: (type: string, data: unknown) => void
+
   constructor() {
     // 初始化消息队列（IndexedDB 持久化 + 指数退避重试）
     this.messageQueue = new EnhancedMessageQueue(undefined, {
@@ -803,6 +806,10 @@ export class WebSocketService {
 
       const { type, ...data } = rawMessage as Record<string, unknown>
 
+      if (this._onAnyMessage) {
+        try { this._onAnyMessage(type as string, data) } catch (_) { /* noop */ }
+      }
+
       // 跟踪最后收到的 request_id（用于重连后请求遗漏消息）
       const requestId = rawMessage.request_id as string | undefined
       if (requestId) {
@@ -1401,6 +1408,13 @@ export class WebSocketService {
    */
   getNegotiatedVersion(): string {
     return this.negotiatedVersion
+  }
+
+  /**
+   * 设置全局消息拦截器（用于连接池拦截所有消息）
+   */
+  setOnAnyMessage(callback: ((type: string, data: unknown) => void) | undefined): void {
+    this._onAnyMessage = callback
   }
 
   // ============================================

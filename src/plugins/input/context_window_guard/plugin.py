@@ -168,10 +168,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 "[%s] 压缩完成: %d -> %d 条消息",
                 self.name, len(messages), len(compressed),
             )
-            # 从 L0 持久化回读近期原始消息（而非压缩后的摘要）
-            recent_from_l0 = self._read_recent_from_l0(ctx, context_window)
-            if recent_from_l0 is not None:
-                return PluginResult(state_updates={"messages": recent_from_l0})
+            # BUG-FIX-fix_user_input_lost_in_compression:
+            # 问题根因: 旧代码用 _read_recent_from_l0 的 L0 回读结果替换了
+            #   compress_messages 返回的 compressed。但 L0 只包含已持久化的历史消息，
+            #   不包含当前轮用户输入（用户输入还没经过管道处理，未被持久化到 L0）。
+            #   导致 state["messages"] 被覆盖后用户输入丢失，LLM 收不到用户说了什么。
+            # 修复方案: 直接使用 compress_messages 返回的 compressed，不再用 L0 回读覆盖。
+            #   compress_messages 内部按 recent_ratio(30%) 从尾部保留 recent 消息，
+            #   用户输入在消息列表末尾，一定会被保留在 recent 部分，不会丢失。
+            # 影响范围: 长对话触发上下文压缩时，用户输入被吞掉。
+            # 修复日期: 2026-05-08
             return PluginResult(state_updates={"messages": compressed})
 
         # 窗口变更但不需要压缩时，返回清理后的 messages

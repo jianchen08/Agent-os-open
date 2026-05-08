@@ -535,6 +535,7 @@ async def _stream_engine_response(
     # 流式状态追踪
     stream_started = False
     accumulated_content: list[str] = []
+    engine_task: asyncio.Task | None = None
     # 用于将同步 _on_chunk 事件传递到异步发送协程的队列
     chunk_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     thinking_started = False
@@ -1029,6 +1030,19 @@ async def _stream_engine_response(
     except asyncio.CancelledError:
         """流式任务被取消（用户中断或连接断开）。"""
         logger.info("流式任务被取消: message_id=%s", message_id)
+        # BUG-FIX-fix_engine_task_orphan:
+        # 问题根因: 取消 _stream_engine_response 时，内部的 engine_task 不会被自动取消。
+        #   导致旧引擎任务仍在共享的 ctx.engine 上运行，新消息启动的新 engine.run() 与之并发，
+        #   引擎内部状态（_pipeline_id、_suspended_state 等）被污染，表现为"消息延迟一轮"。
+        # 修复方案: 在 CancelledError 中显式取消 engine_task 并等待其退出。
+        # 影响范围: 用户快速连续发送消息、发送新消息取消旧回复的场景。
+        # 修复日期: 2026-05-08
+        if engine_task is not None and not engine_task.done():
+            engine_task.cancel()
+            try:
+                await engine_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # 尝试发送 stream_end 以确保前端状态一致
         try:
             partial_content = "".join(accumulated_content)
@@ -1046,6 +1060,13 @@ async def _stream_engine_response(
     except Exception as exc:
         """管道引擎执行出错。"""
         logger.error("管道引擎执行失败: %s", exc, exc_info=True)
+        # BUG-FIX-fix_engine_task_orphan: 异常路径也必须取消 engine_task
+        if engine_task is not None and not engine_task.done():
+            engine_task.cancel()
+            try:
+                await engine_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # 发送错误信息到前端
         try:
             error_content = f"抱歉，处理你的消息时出现错误：{exc}"

@@ -15,7 +15,7 @@ import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
-import { webSocketService } from './services/websocket/WebSocketService'
+import { wsPool } from './services/websocket/WebSocketConnectionPool'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -175,7 +175,7 @@ function HomePage(): ReactNode {
     loadMoreMessages,
   } = useSessionStore()
   const { fetchSessions, createSession, setActiveSession } = useSessionListStore()
-  const { isStreaming, stopStreamingForTab } = useStreamingStore()
+  const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
 
   /** 消息操作 hooks */
   const messageActions = useMessageActions(activeSessionId ?? undefined)
@@ -292,7 +292,8 @@ function HomePage(): ReactNode {
       }
 
       // 通过 WebSocket 发送用户输入，透传 parentRecordId 以路由到对应管道
-      await webSocketService.sendUserInput(
+      await wsPool.sendUserInput(
+        sid,
         params.content,
         undefined,
         params.enableThinking,
@@ -308,16 +309,18 @@ function HomePage(): ReactNode {
    * BUG-FIX-fix_20260506_per_tab_streaming: 根据当前活跃 Tab 停止对应的 streaming
    */
   const handleStopGenerate = useCallback(() => {
-    webSocketService.sendCancel()
-    // BUG-FIX-fix_20260506_per_tab_streaming: 停止当前活跃 Tab 的 streaming
+    const sid = useSessionStore.getState().activeSessionId
+    if (sid) {
+      wsPool.sendCancel(sid)
+    }
     const currentActiveTabId = useAgentTabStore.getState().activeTabId
     const currentTabs = useAgentTabStore.getState().tabs
     const activeTab = currentTabs.find((t) => t.id === currentActiveTabId)
     const isSubTab = activeTab != null && activeTab.agentLevel !== 1
     if (isSubTab && currentActiveTabId) {
       stopStreamingForTab(currentActiveTabId)
-    } else {
-      stopStreamingForTab('__main__')
+    } else if (sid) {
+      stopStreamingForTab(sid)
     }
   }, [stopStreamingForTab])
 
@@ -363,6 +366,7 @@ function HomePage(): ReactNode {
   const handleLogout = useCallback(async () => {
     destroyStreamingEvents()
     disconnectWebSocket()
+    wsPool.disconnectAll()
     await logout()
     navigate(ROUTES.LOGIN)
   }, [logout, navigate, disconnectWebSocket])
@@ -415,7 +419,7 @@ function HomePage(): ReactNode {
       sessionId={activeSessionId}
       messages={activeMessages}
       isLoading={isSessionLoading}
-      isGenerating={isStreaming}
+      isGenerating={activeSessionId ? (streamingTabs[activeSessionId] ?? false) : false}
       modelName={modelName}
       onSendMessage={handleSendMessage}
       onStopGenerate={handleStopGenerate}

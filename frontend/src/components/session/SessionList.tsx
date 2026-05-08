@@ -145,9 +145,14 @@ const SessionItem = memo<SessionItemProps>(
           <Loader2 className="text-muted-foreground ml-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
         )}
 
-        {/* Hover 时显示的操作区域 */}
+        {/* 操作区域 - hover 或活跃会话时显示 */}
         {!isDeleting && (
-          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <div
+            className={cn(
+              'flex items-center gap-0.5 transition-opacity',
+              isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+            )}
+          >
             {/* 删除按钮 - 直接显示 Trash 图标 */}
             <button
               onClick={(e) => {
