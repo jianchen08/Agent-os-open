@@ -5,9 +5,8 @@
 @import './styles/component-optimizations.css';
 @import './styles/markdown.css';
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 /* shadcn/ui 颜色工具类 - Tailwind v4 兼容层 */
 @layer utilities {

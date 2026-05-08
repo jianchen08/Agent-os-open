@@ -3,9 +3,9 @@
  *
  * 在侧边栏中渲染会话列表，每项支持：
  * - 点击切换会话
- * - Hover 时显示删除按钮（Trash 图标）
+ * - Hover 或活跃会话时显示三点菜单（MoreHorizontal 图标）
+ * - 三点菜单支持：编辑、复制、星标、置顶、删除操作
  * - 删除前弹出确认对话框（使用 shadcn/ui Dialog）
- * - 右键菜单支持编辑、复制、星标、删除操作
  *
  * 使用 memo 优化渲染性能，避免不必要的重渲染。
  */
@@ -145,46 +145,33 @@ const SessionItem = memo<SessionItemProps>(
           <Loader2 className="text-muted-foreground ml-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
         )}
 
-        {/* 操作区域 - hover 或活跃会话时显示 */}
+        {/* 三点操作菜单 - hover 或活跃会话时显示 */}
         {!isDeleting && (
           <div
             className={cn(
-              'flex items-center gap-0.5 transition-opacity',
+              'ml-1 flex-shrink-0 transition-opacity duration-150',
               isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
             )}
           >
-            {/* 删除按钮 - 直接显示 Trash 图标 */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onDelete()
-              }}
-              className="text-muted-foreground hover:text-destructive rounded p-0.5 transition-colors"
-              aria-label="删除会话"
-              title="删除会话"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-
-            {/* 更多操作下拉菜单 */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
                   onClick={(e) => e.stopPropagation()}
-                  className="text-muted-foreground hover:text-foreground rounded p-0.5 transition-colors"
+                  className="text-muted-foreground hover:text-foreground rounded p-1 transition-colors"
                   aria-label="更多操作"
+                  title="更多操作"
                 >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
+                  <MoreHorizontal className="h-4 w-4" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-[140px]">
+              <DropdownMenuContent align="end" className="w-[160px]">
                 <DropdownMenuItem
                   onClick={(e) => {
                     e.stopPropagation()
                     onEdit()
                   }}
                 >
-                  <Edit3 className="mr-2 h-3.5 w-3.5" />
+                  <Edit3 className="mr-2 h-4 w-4" />
                   编辑
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -193,7 +180,7 @@ const SessionItem = memo<SessionItemProps>(
                     onCopy()
                   }}
                 >
-                  <Copy className="mr-2 h-3.5 w-3.5" />
+                  <Copy className="mr-2 h-4 w-4" />
                   复制
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -202,7 +189,7 @@ const SessionItem = memo<SessionItemProps>(
                     onStar()
                   }}
                 >
-                  <Star className="mr-2 h-3.5 w-3.5" />
+                  <Star className="mr-2 h-4 w-4" />
                   {session.starred ? '取消星标' : '星标'}
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -211,7 +198,7 @@ const SessionItem = memo<SessionItemProps>(
                     onPin()
                   }}
                 >
-                  <Pin className="mr-2 h-3.5 w-3.5" />
+                  <Pin className="mr-2 h-4 w-4" />
                   {session.pinned ? '取消置顶' : '置顶会话'}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -222,7 +209,7 @@ const SessionItem = memo<SessionItemProps>(
                   }}
                   className="text-destructive focus:text-destructive"
                 >
-                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  <Trash2 className="mr-2 h-4 w-4" />
                   删除
                 </DropdownMenuItem>
               </DropdownMenuContent>
