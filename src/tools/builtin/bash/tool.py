@@ -159,18 +159,17 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         保留策略：
         - pid: LLM 需要 pid 才能调用 continue/terminate/input
         - output: 核心输出
-        - exit_code: 仅非 0 时保留
+        - exit_code: 始终保留（评估框架 expect 条件依赖此字段）
+        - status: 始终保留为 completed（评估框架 expect 条件依赖此字段）
         - summary: 仅长输出（>10行）时保留，短输出直接看 output
         - warnings/errors: 仅非空时保留
-        - status: 仅非 completed 时保留（LLM 可从消息格式推断成功）
         """
         data: dict[str, Any] = {
             "pid": pid,
             "output": output,
+            "status": "completed",
+            "exit_code": exit_code,
         }
-
-        if exit_code != 0:
-            data["exit_code"] = exit_code
 
         warnings = summary_obj.get("warnings", [])
         errors = summary_obj.get("errors", [])
