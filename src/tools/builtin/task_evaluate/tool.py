@@ -134,6 +134,10 @@ class TaskEvaluateTool(BuiltinTool):
        - 失败且次数耗尽 → 更新状态 FAILED + 通知提交者
     """
 
+    def __init__(self, **kwargs: Any) -> None:
+        """初始化任务评估工具。"""
+        super().__init__()
+
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
