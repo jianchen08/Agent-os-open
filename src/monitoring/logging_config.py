@@ -132,7 +132,7 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[1] is not None:
             log_entry["exception"] = self.formatException(record.exc_info)
 
-        return json.dumps(log_entry, ensure_ascii=False)
+        return json.dumps(log_entry, ensure_ascii=False, default=str)
 
 
 class _ConsoleFormatter(logging.Formatter):

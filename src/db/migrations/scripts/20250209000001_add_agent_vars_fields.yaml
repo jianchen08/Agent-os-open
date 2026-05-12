@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+# 数据库迁移：添加 Agent 变量字段
+#
+# 为 agent_configs 表添加 static_vars 和 dynamic_vars 字段
+# 支持四层提示词结构配置
+
+version: "20250209000001"
+name: "add_agent_vars_fields"
+description: "为 agent_configs 表添加 static_vars 和 dynamic_vars 字段"
+
+up: |
+  -- 添加 agent_configs 表缺失字段 (SQLite 语法)
+  ALTER TABLE agent_configs ADD COLUMN static_vars JSON DEFAULT '{}';
+  ALTER TABLE agent_configs ADD COLUMN dynamic_vars JSON DEFAULT '{}';
+
+  -- 为现有数据设置默认值
+  UPDATE agent_configs SET static_vars = '{}' WHERE static_vars IS NULL;
+  UPDATE agent_configs SET dynamic_vars = '{}' WHERE dynamic_vars IS NULL;
+
+down: |
+  -- SQLite 不支持 DROP COLUMN，这里仅作记录
+  -- 如需回滚，需要重建表

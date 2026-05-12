@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,38 +30,48 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/modules/ui", tags=["UI Schema"])
 
-# 模块级缓存：惰性创建 SchemaParser
 _schema_parser: Any | None = None
-_parser_loaded: bool = False
+_last_scan_time: float = 0
+_SCAN_INTERVAL: float = 5.0
+
+_CONFIG_DIRS = [Path("config/modules")]
 
 
 def _get_schema_parser() -> Any:
-    """惰性获取或创建 SchemaParser，并从配置目录加载 Schema。
+    """获取 SchemaParser，支持 TTL 热重载。
 
-    搜索路径：config/modules/（UI 模块配置）。
+    每隔 _SCAN_INTERVAL 秒重新扫描配置目录，自动感知文件的增删改。
+    删除 YAML 文件后，对应的模块会从 API 响应中移除（热插拔）。
 
     Returns:
         SchemaParser 实例
     """
-    global _schema_parser, _parser_loaded
-    if _parser_loaded:
+    global _schema_parser, _last_scan_time
+
+    from ui_schema.parser import SchemaParser
+
+    if _schema_parser is None:
+        _schema_parser = SchemaParser()
+
+    now = time.monotonic()
+    if now - _last_scan_time < _SCAN_INTERVAL:
         return _schema_parser
-    _parser_loaded = True
-    try:
-        from ui_schema.parser import SchemaParser
 
-        _schema_parser = SchemaParser()
-        for config_dir in [
-            Path("config/modules"),
-        ]:
-            if config_dir.exists():
+    _last_scan_time = now
+
+    _schema_parser._schemas.clear()
+    _schema_parser._data_decls.clear()
+    _schema_parser._file_mtimes.clear()
+    _schema_parser._file_hashes.clear()
+
+    for config_dir in _CONFIG_DIRS:
+        if config_dir.exists():
+            try:
                 count = len(_schema_parser.load_directory(config_dir))
-                logger.info("从 %s 加载了 %d 个 UI Schema", config_dir, count)
-    except Exception as exc:
-        logger.warning("UI Schema 解析器初始化失败: %s", exc)
-        from ui_schema.parser import SchemaParser
+                logger.debug("热重载: 从 %s 加载了 %d 个 UI Schema", config_dir, count)
+            except Exception as exc:
+                logger.warning("热重载扫描失败 %s: %s", config_dir, exc)
 
-        _schema_parser = SchemaParser()
     return _schema_parser
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,6 +29,9 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
+
+# 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
+PLACEHOLDER_PATTERN = re.compile(r'\{\{(.+?)\}\}')
 
 # 语言指令映射 — 根据语言代码生成对应的思考和回复指令
 LANGUAGE_INSTRUCTIONS: dict[str, str] = {
@@ -77,6 +81,41 @@ class PromptBuildPlugin(IInputPlugin):
     def priority(self) -> int:
         """插件执行优先级。"""
         return self._config.get("priority", 50)
+
+    @staticmethod
+    def _parse_placeholder(content: str) -> tuple[str, dict[str, Any]]:
+        """解析占位符内容，返回 (类型名, 参数字典)。
+
+        支持的格式：
+          - 无参数：{{rules}}、{{session}}、{{timestamp}}
+          - 带参数：{{timestamp:%Y-%m-%d}}、{{path:文件路径}}、{{content:文本}}
+          - 键值对：{{retrieval:tags=a,b|top_k=5}}、{{vector:path:x|top_k=3}} 等
+
+        Args:
+            content: 占位符内部文本（不含 {{ 和 }}）
+
+        Returns:
+            (类型名, 参数字典) 二元组
+        """
+        if content in ("rules", "session"):
+            return content, {}
+        if content == "timestamp":
+            return "timestamp", {}
+
+        type_name, _, args_str = content.partition(":")
+
+        if type_name == "timestamp":
+            return "timestamp", {"format": args_str} if args_str else {}
+        elif type_name == "path":
+            return "path", {"path": args_str}
+        elif type_name == "content":
+            return "content", {"content": args_str}
+        else:
+            params = {}
+            for pair in args_str.split("|"):
+                k, _, v = pair.partition("=")
+                params[k.strip()] = v.strip()
+            return type_name, params
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """构建 SystemMessage 并写入 state。
@@ -136,6 +175,11 @@ class PromptBuildPlugin(IInputPlugin):
 
         # 1. system_prompt（兼容 context.system_prompt 和 system_prompt 两种键名）
         system_prompt = ctx.state.get("context.system_prompt", "") or ctx.state.get("system_prompt", "")
+
+        # 占位符替换：在拼接前将 {{xxx}} 替换为实际内容
+        if system_prompt and "{{" in system_prompt:
+            system_prompt = await self._resolve_placeholders(ctx, system_prompt)
+
         if system_prompt:
             parts.append(system_prompt)
 
@@ -173,6 +217,165 @@ class PromptBuildPlugin(IInputPlugin):
 
         return "\n\n".join(parts)
 
+    async def _resolve_single_var_content(
+        self, ctx: PluginContext, var_def: dict, session_id: str, constraints: dict,
+    ) -> str:
+        """解析单个变量的内容，供 _load_static_vars 和占位符替换共用。
+
+        支持 mode（exact/vector/hybrid）后处理和 output_format（full/summary）后处理。
+
+        Args:
+            ctx: 插件执行上下文
+            var_def: 变量定义字典，包含 type/name/mode/output_format 等
+            session_id: 当前会话 ID
+            constraints: 约束条件字典（含 hard/soft 列表）
+
+        Returns:
+            解析后的内容字符串，或空字符串
+        """
+        var_type = var_def.get("type", "")
+        var_name = var_def.get("name", var_type)
+        mode = var_def.get("mode", "exact")
+        output_format = var_def.get("output_format", "full")
+
+        content = ""
+
+        if var_type == "rules":
+            rules_parts = []
+            for c in constraints.get("hard", []):
+                rules_parts.append(f"- [必须] {c}")
+            for c in constraints.get("soft", []):
+                rules_parts.append(f"- [建议] {c}")
+            content = "\n".join(rules_parts)
+
+        elif var_type == "path":
+            file_path = var_def.get("path", "")
+            if file_path:
+                try:
+                    from pathlib import Path
+                    p = Path(file_path)
+                    if p.exists():
+                        content = await asyncio.to_thread(p.read_text, "utf-8")
+                except Exception as e:
+                    logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
+
+        elif var_type in ("reference", "content", ""):
+            content = var_def.get("content", "") or var_def.get("value", "")
+            if not content and var_def.get("tags"):
+                content = await self._retrieve_by_tags(ctx, var_def)
+
+        elif var_type == "timestamp":
+            now = datetime.now(UTC)
+            fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
+            content = now.strftime(fmt)
+
+        elif var_type == "session":
+            content = session_id
+
+        elif var_type == "retrieval":
+            content = await self._retrieve_by_tags(ctx, var_def)
+
+        elif var_type == "routed":
+            content = await self._resolve_routed_var(ctx, var_def)
+
+        if not content:
+            return ""
+
+        if mode in ("vector", "hybrid") and content:
+            try:
+                retriever = ctx.get_service("retriever")
+                results = await retriever.retrieve(query=content, top_k=var_def.get("top_k", 5))
+                if results:
+                    retrieved_text = "\n".join(r.content for r in results if hasattr(r, "content"))
+                    if mode == "hybrid":
+                        content = f"{content}\n\n### 相关检索结果\n{retrieved_text}"
+                    else:
+                        content = retrieved_text
+            except (KeyError, Exception) as e:
+                logger.debug("[%s] 占位符向量检索跳过 | name=%s | error=%s", self.name, var_name, e)
+
+        if output_format == "summary":
+            content = f"[摘要] {content}"
+
+        return content
+
+    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
+        """解析单个 {{占位符}} 并返回替换内容。
+
+        将占位符语法转换为兼容的 var_def 字典，复用 _resolve_single_var_content。
+
+        Args:
+            ctx: 插件执行上下文
+            placeholder_content: 占位符内部文本（不含 {{ 和 }}）
+
+        Returns:
+            替换后的内容字符串，无法识别时返回空字符串
+        """
+        var_type, params = self._parse_placeholder(placeholder_content)
+
+        if var_type == "rules":
+            var_def = {"type": "rules", "name": "rules"}
+        elif var_type == "path":
+            var_def = {"type": "path", "name": "path", "path": params["path"]}
+        elif var_type == "content":
+            var_def = {"type": "content", "name": "content", "content": params["content"]}
+        elif var_type == "timestamp":
+            var_def = {"type": "timestamp", "name": "timestamp", "format": params.get("format", "%Y-%m-%d %H:%M:%S")}
+        elif var_type == "session":
+            var_def = {"type": "session", "name": "session"}
+        elif var_type == "retrieval":
+            var_def = {
+                "type": "retrieval", "name": "retrieval",
+                "tags": params.get("tags", "").split(","),
+                "top_k": int(params.get("top_k", 5)),
+                "inject_type": params.get("inject_type", "full"),
+            }
+        elif var_type == "vector":
+            var_def = {
+                "type": "path", "name": "vector",
+                "path": params.get("path", ""),
+                "mode": "vector",
+                "top_k": int(params.get("top_k", 5)),
+            }
+        elif var_type == "hybrid":
+            var_def = {
+                "type": "retrieval", "name": "hybrid",
+                "tags": params.get("tags", "").split(","),
+                "top_k": int(params.get("top_k", 5)),
+                "mode": "hybrid",
+            }
+        elif var_type == "routed":
+            var_def = {"type": "routed", "name": "routed", "route_key": params.get("route_key", "")}
+            routes = {k: v for k, v in params.items() if k != "route_key"}
+            var_def["routes"] = routes
+        else:
+            return ""
+
+        session_id = ctx.state.get("context.session_id", "")
+        constraints = ctx.state.get("constraints", {})
+        return await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
+
+    async def _resolve_placeholders(self, ctx: PluginContext, text: str) -> str:
+        """替换文本中的所有 {{占位符}} 为实际内容。
+
+        Args:
+            ctx: 插件执行上下文
+            text: 包含占位符的原始文本
+
+        Returns:
+            替换后的文本
+        """
+        matches = PLACEHOLDER_PATTERN.findall(text)
+        if not matches:
+            return text
+
+        for match in matches:
+            content = await self._resolve_placeholder(ctx, match)
+            placeholder = "{{" + match + "}}"
+            text = text.replace(placeholder, content)
+
+        return text
+
     async def _load_static_vars(self, ctx: PluginContext) -> str:
         """从 state 中的 context.static_vars 加载静态变量。
 
@@ -206,74 +409,18 @@ class PromptBuildPlugin(IInputPlugin):
             if not var_def.get("enabled", True):
                 continue
 
-            var_type = var_def.get("type", "")
-            var_name = var_def.get("name", var_type)
-            mode = var_def.get("mode", "exact")
-            output_format = var_def.get("output_format", "full")
+            var_name = var_def.get("name", var_def.get("type", ""))
 
-            content = ""
-
-            if var_type == "rules":
-                rules_parts = []
-                for c in constraints.get("hard", []):
-                    rules_parts.append(f"- [必须] {c}")
-                for c in constraints.get("soft", []):
-                    rules_parts.append(f"- [建议] {c}")
-                content = "\n".join(rules_parts)
-
-            elif var_type == "path":
-                file_path = var_def.get("path", "")
-                if file_path:
-                    try:
-                        from pathlib import Path
-                        p = Path(file_path)
-                        if p.exists():
-                            content = await asyncio.to_thread(p.read_text, "utf-8")
-                    except Exception as e:
-                        logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
-
-            elif var_type in ("reference", "content", ""):
-                # "": 兜底 — YAML 中省略 type 但提供了 content 的情况
-                content = var_def.get("content", "") or var_def.get("value", "")
-                if not content and var_def.get("tags"):
-                    # 空 type + tags → 走检索
-                    content = await self._retrieve_by_tags(ctx, var_def)
-
-            elif var_type == "timestamp":
-                now = datetime.now(UTC)
-                fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
-                content = now.strftime(fmt)
-
-            elif var_type == "session":
-                content = session_id
-
-            elif var_type == "retrieval":
-                content = await self._retrieve_by_tags(ctx, var_def)
-
-            elif var_type == "routed":
-                content = await self._resolve_routed_var(ctx, var_def)
-
-            if not content:
-                continue
-
-            if mode in ("vector", "hybrid") and content:
-                try:
-                    retriever = ctx.get_service("retriever")
-                    results = await retriever.retrieve(query=content, top_k=var_def.get("top_k", 5))
-                    if results:
-                        retrieved_text = "\n".join(r.content for r in results if hasattr(r, "content"))
-                        if mode == "hybrid":
-                            content = f"{content}\n\n### 相关检索结果\n{retrieved_text}"
-                        else:
-                            content = retrieved_text
-                except (KeyError, Exception) as e:
-                    logger.debug("[%s] 静态变量向量检索跳过 | name=%s | error=%s", self.name, var_name, e)
-
-            if output_format == "summary":
-                content = f"[摘要] {content}"
+            content = await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
 
             if content:
                 parts.append(f"### {var_name}\n{content}")
+
+        context_window = ctx.state.get("context_window", 0)
+        if context_window:
+            model_info = ctx.state.get("llm_model", "")
+            model_line = f"模型: {model_info}\n" if model_info else ""
+            parts.append(f"### 模型信息\n{model_line}上下文窗口: {context_window} tokens")
 
         if not parts:
             return ""
@@ -425,7 +572,7 @@ class PromptBuildPlugin(IInputPlugin):
         from memory.context_compressor import CompressionConfig
 
         context_window = ctx.state.get("context_window", 128000)
-        config = CompressionConfig(context_window=context_window)
+        config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = config.get_trigger_threshold()
 

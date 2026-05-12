@@ -7,8 +7,8 @@
 
 import { create } from 'zustand'
 import { STORAGE_KEYS } from '../constants/storage'
-import { registerAuthExpiredCallback } from '../services/authCallbacks'
 import * as authApi from '../services/api/auth'
+import { registerAuthExpiredCallback } from '../services/authCallbacks'
 import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
 import type { User } from '../types/models'
 

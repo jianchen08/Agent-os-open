@@ -108,15 +108,14 @@ system_prompt: |
   - 修改不影响主项目，系统会自动处理合并
   - 完成后调用 task_evaluate 评估
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
     - name: "Agent配置模板规范"
       type: "path"
       path: "config/templates/.agent_template_spec.yaml"
@@ -127,9 +126,7 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 tool_ids:
 - file_read
@@ -144,9 +141,6 @@ hard_constraints:
 - 必须根据operation_type执行对应逻辑
 - 只能填写模板规范中定义的字段，不得自行添加字段
 - 必须自验证后才能评估
-- 必须调用 task_evaluate 进行任务评估
-- 评估通过才能结束任务
-- 所有产出必须写入工作空间
 - 创建新 Agent 时，如果有 deliverables，必须创建配套的产出物模板
 - 生成前必须先分析需求，明确目标Agent的核心职责和使用场景
 - 自验证必须包含需求覆盖度检查：需求中的每个 capability 都有对应实现
@@ -221,7 +215,7 @@ output_schema:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

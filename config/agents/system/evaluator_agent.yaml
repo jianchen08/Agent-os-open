@@ -31,15 +31,11 @@ tags:
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 system_prompt: |
   你是结果评估专家，负责客观验证任务完成质量。
@@ -234,6 +230,7 @@ tool_ids:
   - file_write
   - list_directory    # 列出目录内容（查找产出物）
   - enhanced_search
+  - task_evaluate
 
 # 约束配置
 hard_constraints:

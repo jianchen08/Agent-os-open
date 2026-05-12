@@ -154,6 +154,9 @@ plugins:
       enabled: true
       max_depth: 3
   # P1: 工具调用与重复检测
+  - name: conversation_mode
+    config:
+      enabled: true
   - name: pending_tools
     config:
       enabled: true

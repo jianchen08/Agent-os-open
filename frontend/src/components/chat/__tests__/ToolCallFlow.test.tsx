@@ -17,13 +17,13 @@
  */
 
 import { act } from '@testing-library/react'
-import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
 import {
   createMockContentBlock,
   createMockMessage,
   createMockToolCall,
   renderUseMessageRender,
 } from './testUtils'
+import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
 
 // ============================================================
 // Mock 外部依赖

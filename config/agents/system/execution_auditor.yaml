@@ -27,15 +27,11 @@ tags:
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 system_prompt: |
   你是执行审计专家，负责全面审计Agent执行过程。
@@ -481,7 +477,6 @@ tool_ids:
   - file_read
   - bash_execute
   - enhanced_search
-  - evaluate
   - memory
   - task_evaluate
 
@@ -503,7 +498,7 @@ soft_constraints:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 600
 

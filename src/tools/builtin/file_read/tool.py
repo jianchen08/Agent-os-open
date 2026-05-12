@@ -116,7 +116,6 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="NOT_A_FILE",
                 )
 
-            # 路由：根据文件类型选择读取策略
             category = get_file_category(path)
             if category in ("document", "image"):
                 return convert_binary_to_markdown(path)
@@ -130,7 +129,6 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="BINARY_FILE_NOT_SUPPORTED",
                 )
 
-            # 文本文件：原有逻辑
             filter_error = self._check_text_file_filter(path)
             if filter_error:
                 return filter_error
@@ -151,6 +149,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 total_lines = len(all_lines)
                 if tail < total_lines:
                     content = '\n'.join(all_lines[-tail:])
+                    content = self._add_line_numbers(content, start_line=total_lines - tail + 1)
                     return create_success_result(
                         data={
                             "file": display_path,
@@ -171,7 +170,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     "file": display_path,
                     "lines": lines,
                     "size": format_size(file_size),
-                    "content": content,
+                    "content": self._add_line_numbers(content),
                 },
                 metadata={"action": "read_file"},
             )
@@ -181,6 +180,17 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 error=f"读取文件失败: {str(e)}",
                 error_code="READ_FAILED",
             )
+
+    def _add_line_numbers(self, content: str, start_line: int = 1) -> str:
+        """将文本内容添加 cat -n 风格行号"""
+        lines = content.splitlines()
+        total = start_line + len(lines) - 1
+        width = len(str(total))
+        result = []
+        for i, line in enumerate(lines):
+            line_num = start_line + i
+            result.append(f"{line_num:>{width}}\u2192{line}")
+        return "\n".join(result)
 
     def _check_text_file_filter(self, path: Path) -> ToolResult | None:
         """检查文本文件是否应被过滤（超大文件/二进制内容嗅探）。

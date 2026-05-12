@@ -5,11 +5,12 @@
  * 实现自生长闭环的核心入口
  */
 
+import { STORAGE_KEYS } from '@/constants/storage'
 import { getModuleUISchemas } from '@/services/api/modules'
 import { schemaRegistry } from '@/services/schema/registry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { STORAGE_KEYS } from '@/constants/storage'
 import { loggers } from '@/utils/logger'
+import type { DockItem, WorkspaceTab } from '@/types/layout'
 import type { ModuleUISchema, ModuleRegistration } from '@/types/schema'
 
 class ModuleManager {
@@ -116,8 +117,8 @@ class ModuleManager {
     const existingDockIds = new Set(currentState.dockItems.map((d) => d.id))
     const hasActiveTab = fullReplace ? false : currentState.workspaceTabs.some((t) => t.isActive)
 
-    const newTabs: import('@/types/layout').WorkspaceTab[] = []
-    const allDockItems: import('@/types/layout').DockItem[] = fullReplace ? [] : [...currentState.dockItems]
+    const newTabs: WorkspaceTab[] = []
+    const allDockItems: DockItem[] = fullReplace ? [] : [...currentState.dockItems]
 
     modules.forEach((mod) => {
       const { identity, rendering } = mod.schema
@@ -174,7 +175,10 @@ class ModuleManager {
       }))
     }
 
-    if (allDockItems.length > 0) {
+    const currentDockItems = useLayoutModeStore.getState().dockItems
+    const dockChanged = allDockItems.length !== currentDockItems.length ||
+      allDockItems.some((item, i) => item.id !== currentDockItems[i]?.id)
+    if (dockChanged && allDockItems.length > 0) {
       useLayoutModeStore.getState().setDockItems(allDockItems)
     }
 
@@ -235,7 +239,7 @@ class ModuleManager {
    * 问题根因: 未认证时轮询持续发送请求导致 401 死循环
    * 修复方案: 每次轮询 tick 先检查认证状态，未认证则跳过
    */
-  startPolling(interval = 30000): void {
+  startPolling(interval = 300000): void {
     this.stopPolling()
     this.pollingTimer = setInterval(() => {
       if (!this.isAuthenticated()) {

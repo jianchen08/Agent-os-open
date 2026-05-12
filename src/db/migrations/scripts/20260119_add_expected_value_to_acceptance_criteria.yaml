@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# 数据库迁移：为 acceptance_criteria 表添加 expected_value 字段
+#
+# 用于存储每个通过标准的具体期望值配置
+
+version: "20260119_add_expected_value_to_acceptance_criteria"
+name: "add_expected_value_to_acceptance_criteria"
+description: "为 acceptance_criteria 表添加 expected_value 字段，用于存储评估参数"
+
+up: |
+  -- 添加 expected_value 字段
+  ALTER TABLE acceptance_criteria 
+  ADD COLUMN IF NOT EXISTS expected_value JSON;
+  
+  -- 添加注释
+  COMMENT ON COLUMN acceptance_criteria.expected_value IS '期望值配置（JSON），根据评估指标的 input_schema 提供具体参数';
+
+down: |
+  -- 删除 expected_value 字段
+  ALTER TABLE acceptance_criteria 
+  DROP COLUMN IF EXISTS expected_value;

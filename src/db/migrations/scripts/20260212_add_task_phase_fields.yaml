@@ -1,0 +1,11 @@
+version: "20260212"
+name: "add_task_phase_fields"
+description: "添加任务阶段相关字段（current_phase, phase_status）"
+
+up: |
+  ALTER TABLE tasks ADD COLUMN current_phase VARCHAR(50);
+  ALTER TABLE tasks ADD COLUMN phase_status JSON;
+
+down: |
+  ALTER TABLE tasks DROP COLUMN phase_status;
+  ALTER TABLE tasks DROP COLUMN current_phase;

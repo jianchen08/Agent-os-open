@@ -8,7 +8,7 @@ import importX from 'eslint-plugin-import-x'
 export default tseslint.config(
   // Global ignores
   {
-    ignores: ['dist', 'node_modules', '*.config.js', '*.config.ts'],
+    ignores: ['dist', 'node_modules', '*.config.js', '*.config.ts', '*.cjs'],
   },
 
   // Base JS + TS recommended rules

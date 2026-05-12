@@ -269,7 +269,7 @@ class DesignReviewTool(CapabilityAdapterBase):
                 "需要审查DOM结构（重复ID、深层嵌套等）",
             ],
             when_not_to_use=[
-                "需要功能逻辑测试（应使用 browser_test）",
+                "需要功能逻辑测试（应使用 playwright_test）",
                 "需要代码质量检查（应使用 code_reviewer agent）",
             ],
             source=ToolSource.BUILTIN,

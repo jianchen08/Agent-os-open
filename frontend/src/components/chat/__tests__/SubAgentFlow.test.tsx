@@ -15,11 +15,10 @@
 import { act, render, renderHook, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
 import { SubAgentCard } from '@/components/chat/SubAgentCard'
-import type { SubAgentData } from '@/components/chat/SubAgentCard'
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import type { SubAgentData } from '@/components/chat/SubAgentCard'
 
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react

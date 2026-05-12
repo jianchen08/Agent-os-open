@@ -20,15 +20,15 @@ import {
 } from 'lucide-react'
 import { useCallback, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
+import { PRIORITY_STYLES } from '@/types/notification'
+import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type {
   NotificationAction,
   NotificationCategory,
   NotificationItem as NotificationItemType,
   NotificationPriority,
 } from '@/types/notification'
-import { PRIORITY_STYLES } from '@/types/notification'
 
 /** 图标映射 */
 const CATEGORY_ICONS: Record<NotificationCategory, React.ElementType> = {

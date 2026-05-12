@@ -1,0 +1,16 @@
+version: "20250213000001"
+name: "add_task_flow_improvement_fields"
+description: "添加 Task 表的任务流程改进相关字段 - best_passed_count, last_passed_count, continuation_count, last_continuation_at"
+up: |
+  -- 进步重置机制相关字段
+  ALTER TABLE tasks ADD COLUMN best_passed_count INTEGER NOT NULL DEFAULT 0 COMMENT '历史最佳通过指标数';
+  ALTER TABLE tasks ADD COLUMN last_passed_count INTEGER NOT NULL DEFAULT 0 COMMENT '上次评估通过指标数';
+  
+  -- 续执行机制相关字段
+  ALTER TABLE tasks ADD COLUMN continuation_count INTEGER NOT NULL DEFAULT 0 COMMENT '续执行次数（只统计，不限制）';
+  ALTER TABLE tasks ADD COLUMN last_continuation_at TIMESTAMP WITH TIME ZONE COMMENT '上次续执行时间';
+down: |
+  ALTER TABLE tasks DROP COLUMN last_continuation_at;
+  ALTER TABLE tasks DROP COLUMN continuation_count;
+  ALTER TABLE tasks DROP COLUMN last_passed_count;
+  ALTER TABLE tasks DROP COLUMN best_passed_count;

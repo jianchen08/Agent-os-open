@@ -21,6 +21,7 @@ import uuid as _uuid
 from typing import Any
 
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +253,8 @@ class TaskWorker:
                 )
                 continue
             try:
-                self._task_service.reset_to_pending(task.id)
+                # BUG-FIX-fix_20260512_async_compat: reset_to_pending 现在是 async
+                await self._task_service.reset_to_pending(task.id)
                 logger.info(
                     "TaskWorker: 恢复 running → pending: task_id=%s", task.id,
                 )
@@ -339,7 +341,8 @@ class TaskWorker:
                     task.id, e,
                 )
                 try:
-                    self._task_service.fail_task(
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                    await self._task_service.fail_task(
                         task.id, f"评估恢复失败: {e}",
                     )
                 except Exception:
@@ -371,7 +374,8 @@ class TaskWorker:
                 "TaskWorker: 任务 %s 无评估指标，直接标记完成",
                 task_id,
             )
-            self._task_service.complete_evaluation(task_id, passed=True)
+            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+            await self._task_service.complete_evaluation(task_id, passed=True)
             return
 
         # 2. 从 evaluation_history 收集已通过指标
@@ -392,7 +396,8 @@ class TaskWorker:
                 "TaskWorker: 任务 %s 所有指标已通过，直接标记完成",
                 task_id,
             )
-            self._task_service.complete_evaluation(task_id, passed=True)
+            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+            await self._task_service.complete_evaluation(task_id, passed=True)
             return
 
         # 3. 构建 input_params
@@ -420,15 +425,13 @@ class TaskWorker:
             task_id, remaining, timeout,
         )
 
+        # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
         result = await _asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: executor.run_evaluation(
-                    task_id=task_id,
-                    metric_ids=remaining,
-                    input_params=input_params,
-                    skip_state_update=True,
-                ),
+            executor.run_evaluation(
+                task_id=task_id,
+                metric_ids=remaining,
+                input_params=input_params,
+                skip_state_update=True,
             ),
             timeout=timeout,
         )
@@ -439,7 +442,8 @@ class TaskWorker:
                 "TaskWorker: 评估恢复完成（通过）: task_id=%s",
                 task_id,
             )
-            self._task_service.complete_evaluation(
+            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+            await self._task_service.complete_evaluation(
                 task_id, passed=True, result={
                     "overall_passed": True,
                     "summary": result.summary,
@@ -464,7 +468,8 @@ class TaskWorker:
                 "failed=%s",
                 task_id, failed_metrics,
             )
-            self._task_service.complete_evaluation(
+            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+            await self._task_service.complete_evaluation(
                 task_id, passed=False, result={
                     "overall_passed": False,
                     "summary": result.summary,
@@ -585,7 +590,8 @@ class TaskWorker:
                     try:
                         task = self._task_service.get_task(tid)
                         if task and (task.status == TaskStatus.RUNNING or task.status == TaskStatus.PENDING):
-                            self._task_service.fail_task(tid, "TaskWorker stopped, task forcibly terminated")
+                            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                            await self._task_service.fail_task(tid, "TaskWorker stopped, task forcibly terminated")
                             logger.info("TaskWorker.stop: task %s marked as failed", tid)
                     except Exception as e:
                         logger.warning("TaskWorker.stop: failed to update task %s: %s", tid, e)
@@ -633,6 +639,10 @@ class TaskWorker:
         new_status = data.get("new_status", "")
 
         if new_status in _TERMINAL_STATES:
+            logger.info(
+                "TaskWorker: 收到终态事件 | task=%s, status=%s, source=%s",
+                task_id, new_status, data.get("source", "unknown"),
+            )
             evt = self._terminal_events.get(task_id)
             if evt is not None:
                 evt.set()
@@ -641,12 +651,60 @@ class TaskWorker:
                     task_id, new_status,
                 )
 
-            # ── 终态 lifecycle 钩子：合并/清理 worktree ──
-            await self._handle_terminal_lifecycle(task_id, new_status)
+            # BUG-FIX-fix_20260510_notify_guard:
+            # 问题根因: _handle_terminal_lifecycle / _check_stale_containers 抛异常时
+            #   后续的 _notify_suspended_pipelines 不会被执行，导致上级管道永远收不到通知。
+            # 修复方案: 每个调用独立 try-except，确保通知逻辑不受其他钩子影响。
+            try:
+                await self._handle_terminal_lifecycle(task_id, new_status)
+            except Exception as exc:
+                logger.warning(
+                    "TaskWorker: _handle_terminal_lifecycle 失败(不影响通知): task=%s, error=%s",
+                    task_id, exc,
+                )
 
-            await self._check_stale_containers()
+            try:
+                await self._check_stale_containers()
+            except Exception as exc:
+                logger.warning(
+                    "TaskWorker: _check_stale_containers 失败(不影响通知): error=%s",
+                    exc,
+                )
 
-            await self._notify_suspended_pipelines(task_id, new_status, data)
+            try:
+                await self._notify_suspended_pipelines(task_id, new_status, data)
+            except Exception as exc:
+                logger.error(
+                    "TaskWorker: _notify_suspended_pipelines 失败: task=%s, status=%s, error=%s",
+                    task_id, new_status, exc, exc_info=True,
+                )
+
+        # BUG-FIX-fix_20260511_task_status_realtime:
+        # 问题根因: task_state_changed 事件仅在后端 EventBus 内部流转，
+        #   从未被转发到 WebSocket，前端无法实时感知任务状态变更。
+        # 修复方案: 在状态变更时通过 ws_interaction_notifier 广播
+        #   task_status_update 事件到所有活跃的 WebSocket 连接。
+        try:
+            _ws_notifier = self._services.get("ws_interaction_notifier")
+            if _ws_notifier and hasattr(_ws_notifier, "broadcast_event"):
+                _ws_payload = {
+                    "type": "task_status_update",
+                    "data": {
+                        "task_id": task_id,
+                        "old_status": data.get("old_status", ""),
+                        "new_status": new_status,
+                    },
+                }
+                await _ws_notifier.broadcast_event(_ws_payload)
+                logger.debug(
+                    "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
+                    task_id, data.get("old_status", ""), new_status,
+                )
+        except Exception as _ws_exc:
+            logger.warning(
+                "TaskWorker: task_status_update 广播失败: task=%s, error=%s",
+                task_id, _ws_exc,
+            )
 
     async def _handle_terminal_lifecycle(self, task_id: str, new_status: str) -> None:
         """终态时触发 worktree 合并/清理（仅 worktree 模式）。"""
@@ -687,11 +745,16 @@ class TaskWorker:
             )
 
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
-        """任务系统通知挂起的管道：子任务到达终态。
+        """子任务到达终态时，通过统一消息总线通知父管道。
 
-        通过子任务的 parent_pipeline_id 直接定位父管道，O(1) 查找。
-        回退：若无 parent_pipeline_id，扫描所有 __suspended_engine_* 兜底。
+        构造通知文本后，查找 parent_pipeline_id，
+        调用 send_pipeline_message() 完成消息注入。
+        send_pipeline_message 内部自动判断管道状态（运行中/挂起/需复活）
+        并选择最佳注入策略，无需调用方关心具体路径。
         """
+        from pipeline.message_bus import send_pipeline_message
+
+        # ── 1. 构造通知文本 ──
         task_info = data.get("task", {})
         if isinstance(task_info, dict):
             title = task_info.get("title", task_id)
@@ -712,7 +775,7 @@ class TaskWorker:
                 "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
             )
 
-        # 主路径：通过 parent_pipeline_id 直接查找
+        # ── 2. 查找 parent_pipeline_id ──
         parent_pipeline_id = None
         task_obj = None
         task_service = self._task_service
@@ -721,192 +784,38 @@ class TaskWorker:
                 task_obj = task_service.get_task(task_id)
                 if task_obj:
                     parent_pipeline_id = getattr(task_obj, "parent_pipeline_id", None)
-            except Exception:
-                pass
-
-        if parent_pipeline_id:
-            # 1. 运行中引擎：直接 inject_notification
-            running_key = f"__running_engine_{parent_pipeline_id}"
-            running_engine = self._services.get(running_key)
-            if running_engine and hasattr(running_engine, "inject_notification"):
-                try:
-                    running_engine.inject_notification(notification)
-                    logger.info(
-                        "TaskWorker: 通知运行中管道: "
-                        "pipeline=%s, task=%s, status=%s",
-                        parent_pipeline_id, task_id, new_status,
-                    )
-                    return
-                except Exception as exc:
-                    logger.warning("TaskWorker: inject_notification 失败: %s", exc)
-
-            # 2. 挂起引擎：inject_and_wake
-            engine_key = f"__suspended_engine_{parent_pipeline_id}"
-            engine = self._services.get(engine_key)
-            if engine is None:
-                try:
-                    from pipeline.engine import get_global_suspended_engine
-                    engine = get_global_suspended_engine(parent_pipeline_id)
-                    if engine:
-                        logger.info(
-                            "TaskWorker: 通过全局注册表找到引擎: pipeline=%s, task=%s",
-                            parent_pipeline_id, task_id,
-                        )
-                except Exception as exc:
-                    logger.warning("TaskWorker: 全局注册表查询失败: %s", exc)
-            if engine and hasattr(engine, "inject_and_wake"):
-                try:
-                    engine.inject_and_wake(notification)
-                    logger.info(
-                        "TaskWorker: 通过 parent_pipeline_id 直接通知: "
-                        "pipeline=%s, task=%s, status=%s",
-                        parent_pipeline_id, task_id, new_status,
-                    )
-                    # 唤醒 while 循环中等待的 wake_event
-                    parent_task_id = getattr(task_obj, "parent_task_id", None) if task_obj else None
-                    if parent_task_id:
-                        wake_evt = self._wake_events.get(parent_task_id)
-                        if wake_evt is not None:
-                            wake_evt.set()
-                    return
-                except Exception as exc:
-                    logger.warning("TaskWorker: inject_and_wake 失败: %s", exc)
-            else:
-                # 父管道不存在：可能已退出或尚未创建
-                pending_key = f"__pending_notifications_{parent_pipeline_id}"
-                pending_list = self._services.get(pending_key, [])
-                pending_list.append(notification)
-                self._services[pending_key] = pending_list
-                logger.info(
-                    "TaskWorker: 父管道未找到，通知已入队: "
-                    "pipeline=%s, task=%s, status=%s, queue_size=%d",
-                    parent_pipeline_id, task_id, new_status, len(pending_list),
-                )
-
-                # 孤儿检测：通知累积超过阈值，判定父管道已退出
-                _ORPHAN_QUEUE_THRESHOLD = 3
-                if len(pending_list) >= _ORPHAN_QUEUE_THRESHOLD:
-                    logger.warning(
-                        "TaskWorker: 孤儿管道检测: pipeline=%s, "
-                        "pending=%d >= %d，清空队列并级联",
-                        parent_pipeline_id, len(pending_list),
-                        _ORPHAN_QUEUE_THRESHOLD,
-                    )
-                    self._services.pop(pending_key, None)
-                    self._cascade_fail_parent(task_id, task_obj)
-                    return
-
-                # 子任务失败且父管道不可达 → 级联失败到父任务
-                if new_status == "failed":
-                    self._cascade_fail_parent(task_id, task_obj)
-
-                return
-
-        # 回退：扫描所有挂起管道（兼容旧任务无 parent_pipeline_id 的情况）
-        for key, engine in list(self._services.items()):
-            if not key.startswith("__suspended_engine_"):
-                continue
-            if not hasattr(engine, "inject_and_wake"):
-                continue
-            watching = getattr(engine, "_watching_task_ids", [])
-            if watching and task_id not in watching:
-                logger.debug(
-                    "TaskWorker: 跳过无关管道: pipeline_key=%s, task=%s, watching=%s",
-                    key, task_id, watching,
-                )
-                continue
-            try:
-                engine.inject_and_wake(notification)
-                logger.info(
-                    "TaskWorker: 回退扫描通知挂起管道: pipeline_key=%s, task=%s",
-                    key, task_id,
-                )
-                # 回退路径：通过 _suspended_engines 反查 parent_task_id
-                for pid, pengine in self._suspended_engines.items():
-                    if pengine is engine:
-                        wake_evt = self._wake_events.get(pid)
-                        if wake_evt is not None:
-                            wake_evt.set()
-                        break
             except Exception as exc:
-                logger.warning("TaskWorker: 通知挂起管道失败: %s", exc)
+                logger.warning("TaskWorker: 获取任务信息失败: task=%s, error=%s", task_id, exc)
 
-    def _cascade_fail_parent(
-        self, child_task_id: str, child_task_obj: Any,
-    ) -> None:
-        """子任务终态且父管道不可达时，级联失败到父任务。
-
-        检查 parent_task_id 对应的父任务状态：
-        - running → 标记 failed（触发递归向上传播）
-        - 终态 → 无需处理
-        - 不存在 → 无需处理
-
-        支持 parent_task_id（直接）和 parent_pipeline_id（回退查找）。
-        """
-        parent_task_id = getattr(
-            child_task_obj, "parent_task_id", None,
-        )
-        # 回退：无 parent_task_id 时，通过 parent_pipeline_id 查找
-        if not parent_task_id:
-            parent_pipeline_id = getattr(
-                child_task_obj, "parent_pipeline_id", None,
-            )
-            if parent_pipeline_id:
-                parent_task_id = self._find_task_by_pipeline_id(
-                    parent_pipeline_id,
-                )
-        if not parent_task_id:
-            return
-
-        task_service = self._task_service
-        if not task_service:
-            return
-
-        try:
-            parent_task = task_service.get_task(parent_task_id)
-        except Exception:
-            return
-
-        if parent_task is None:
-            return
-
-        parent_status = parent_task.status
-        parent_status_str = (
-            parent_status if isinstance(parent_status, str)
-            else parent_status.value
+        logger.info(
+            "TaskWorker: 通知查找开始: task=%s, status=%s, parent_pipeline=%s, parent_task=%s",
+            task_id, new_status, parent_pipeline_id,
+            getattr(task_obj, "parent_task_id", None) if task_obj else None,
         )
 
-        if parent_status_str != "running":
-            logger.debug(
-                "TaskWorker: 级联跳过: parent_task=%s "
-                "已终态(%s), child_task=%s",
-                parent_task_id, parent_status_str, child_task_id,
-            )
-            return
-
-        child_title = getattr(child_task_obj, "title", child_task_id)
-        child_error = getattr(child_task_obj, "error", "") or ""
-        cascade_error = (
-            f"子任务 '{child_title}' ({child_task_id}) "
-            f"失败且管道不可达，级联终止"
-        )
-        if child_error:
-            cascade_error += f": {child_error[:200]}"
-
-        logger.warning(
-            "TaskWorker: 级联失败: parent_task=%s, "
-            "child_task=%s, reason=%s",
-            parent_task_id, child_task_id, cascade_error,
-        )
-        try:
-            task_service.fail_task(parent_task_id, cascade_error)
-        except Exception as exc:
+        if not parent_pipeline_id:
             logger.warning(
-                "TaskWorker: 级联失败异常: parent_task=%s, %s",
-                parent_task_id, exc,
+                "TaskWorker: parent_pipeline_id 为空，无法通知父管道（旧任务不再支持扫描模式）: "
+                "task=%s, status=%s",
+                task_id, new_status,
+            )
+            return
+
+        # ── 3. 通过统一消息总线注入通知 ──
+        result = await send_pipeline_message(parent_pipeline_id, notification)
+        if result.success:
+            logger.info(
+                "TaskWorker: 通知已注入: pipeline=%s, task=%s, status=%s, method=%s",
+                parent_pipeline_id, task_id, new_status, result.method,
+            )
+        else:
+            logger.warning(
+                "TaskWorker: 通知注入失败: pipeline=%s, task=%s, status=%s, error=%s",
+                parent_pipeline_id, task_id, new_status, result.error,
             )
 
-    def _find_task_by_pipeline_id(self, pipeline_id: str) -> str | None:
+    # BUG-FIX-fix_20260512_async_list_all: 改为 async def，添加 await
+    async def _find_task_by_pipeline_id(self, pipeline_id: str) -> str | None:
         """通过 pipeline_run_id 查找关联的任务 ID。
 
         用于子任务仅有 parent_pipeline_id（无 parent_task_id）时，
@@ -922,7 +831,7 @@ class TaskWorker:
         if not task_service:
             return None
         try:
-            for task in task_service.list_all(limit=200):
+            for task in await task_service.list_all(limit=200):
                 if getattr(task, "pipeline_run_id", None) == pipeline_id:
                     return task.id
         except Exception:
@@ -1022,7 +931,8 @@ class TaskWorker:
                             "TaskWorker: WorkspaceLifecycleManager 不可用，无法初始化容器空间: task_id=%s",
                             task_id,
                         )
-                        task_service.fail_task(task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用")
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用")
                         return
 
                     _CONTAINER_INIT_RETRIES = 3
@@ -1035,7 +945,8 @@ class TaskWorker:
                             container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
                             if container_workspace_path:
                                 task.metadata["container_workspace"] = container_workspace_path
-                                self._task_service.save_task(task)
+                                # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+                                await self._task_service.save_task(task)
                                 logger.info(
                                     "TaskWorker: 容器空间已初始化: task_id=%s, workspace=%s (attempt %d)",
                                     task_id, container_workspace_path, _attempt,
@@ -1056,7 +967,8 @@ class TaskWorker:
                             "TaskWorker: 容器空间初始化最终失败 (%d 次重试耗尽): task_id=%s, error=%s",
                             _CONTAINER_INIT_RETRIES, task_id, _last_err,
                         )
-                        task_service.fail_task(
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(
                             task_id,
                             f"容器空间初始化失败（{_CONTAINER_INIT_RETRIES} 次重试耗尽）：{_last_err}",
                         )
@@ -1069,7 +981,8 @@ class TaskWorker:
         if not target_id:
             logger.error("TaskWorker: task %s has no target_id, failing", task_id)
             if task_service:
-                task_service.fail_task(
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                await task_service.fail_task(
                     task_id,
                     "任务缺少 target_id（目标 Agent），无法执行。"
                     "请检查 task_submit 是否正确指定了 target_id。",
@@ -1084,7 +997,8 @@ class TaskWorker:
                     target_id, task_id,
                 )
                 if task_service:
-                    task_service.fail_task(
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                    await task_service.fail_task(
                         task_id,
                         f"目标 Agent '{target_id}' 未在系统中注册，无法执行任务。"
                         f"请检查 task_submit 的 target_id 是否正确。",
@@ -1098,11 +1012,13 @@ class TaskWorker:
                 if current_task and current_task.status.value == "running":
                     logger.info("TaskWorker: task %s already running, skip start", task_id)
                 else:
-                    task_service.start_task(task_id)
+                    # BUG-FIX-fix_20260512_async_compat: start_task 现在是 async
+                    await task_service.start_task(task_id)
                     logger.info("TaskWorker: task %s started", task_id)
             except Exception as e:
                 logger.error("TaskWorker: failed to start task %s: %s", task_id, e)
-                task_service.fail_task(task_id, f"启动失败: {e}")
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                await task_service.fail_task(task_id, f"启动失败: {e}")
                 return
 
         # ── 3. 构建完整的 user_input ──
@@ -1163,7 +1079,8 @@ class TaskWorker:
                     task_id, e,
                 )
                 if task_service:
-                    task_service.fail_task(task_id, f"工作空间初始化失败: {e}")
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                    await task_service.fail_task(task_id, f"工作空间初始化失败: {e}")
                 return
 
         # BUG-FIX-fix_20260421_goal_context_injection:
@@ -1189,7 +1106,8 @@ class TaskWorker:
                 if retry_message:
                     # 读取后清除，避免重试后再读到旧消息
                     _task_for_retry_msg.metadata.pop("retry_message", None)
-                    task_service.save_task(_task_for_retry_msg)
+                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+                    await task_service.save_task(_task_for_retry_msg)
 
         full_input = user_input
         if description:
@@ -1272,7 +1190,8 @@ class TaskWorker:
             # 之前只在 cli_main.py 管道完成后才回填，导致运行中查询执行记录必然为空
             if task_service:
                 try:
-                    task_service.bind_pipeline_run(task_id, engine._pipeline_id)
+                    # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
+                    await task_service.bind_pipeline_run(task_id, engine._pipeline_id)
                     logger.info(
                         "TaskWorker: bound task %s to pipeline_run %s (early binding)",
                         task_id, engine._pipeline_id,
@@ -1294,14 +1213,20 @@ class TaskWorker:
             # 避免后端直接依赖 start_server.py 前端入口模块。
             try:
                 _ws_notifier = self._services.get("ws_interaction_notifier")
-                if _ws_notifier and target_id and hasattr(_ws_notifier, "broadcast_event"):
+                if _ws_notifier and target_id:
                     _parent_task_id_ws = None
+                    _parent_pipeline_id_ws = ""
                     _title_ws = task_data.get("user_input", "")
+                    _agent_level_ws = "L2"
                     if task_service:
                         _task_for_ws = task_service.get_task(task_id)
                         if _task_for_ws:
                             _parent_task_id_ws = getattr(_task_for_ws, "parent_task_id", None)
+                            _parent_pipeline_id_ws = getattr(_task_for_ws, "parent_pipeline_id", "") or ""
                             _title_ws = _task_for_ws.title or _title_ws
+                            _raw_level = getattr(_task_for_ws, "agent_level", None)
+                            if _raw_level:
+                                _agent_level_ws = str(_raw_level)
                     _ws_event_data = {
                         "type": "sub_agent_created",
                         "data": {
@@ -1312,9 +1237,16 @@ class TaskWorker:
                             "title": _title_ws,
                             "parentId": _parent_task_id_ws or "",
                             "status": "running",
+                            "agentLevel": _agent_level_ws,
                         },
                     }
-                    await _ws_notifier.broadcast_event(_ws_event_data)
+                    _ws_tid = ""
+                    if _parent_pipeline_id_ws and hasattr(_ws_notifier, "get_thread_for_pipeline"):
+                        _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pipeline_id_ws)
+                    if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
+                        await _ws_notifier.send_to_thread(_ws_tid, _ws_event_data)
+                    elif hasattr(_ws_notifier, "broadcast_event"):
+                        await _ws_notifier.broadcast_event(_ws_event_data)
                     logger.info(
                         "TaskWorker: sub_agent_created 事件已发送: "
                         "task_id=%s, agent=%s, pipeline=%s",
@@ -1357,7 +1289,8 @@ class TaskWorker:
                         task_id, e,
                     )
                     if task_service:
-                        task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
                     evt = self._terminal_events.pop(task_id, None)
                     if evt is not None:
                         evt.set()
@@ -1412,183 +1345,51 @@ class TaskWorker:
                             task_id, exc,
                         )
 
-            # BUG-FIX-fix_20260508_sub_pipeline_streaming:
-            # 问题根因: 子管道 engine.run() 缺少 streaming=True 和 on_chunk 参数，
-            #           导致前端子 Tab 打开后无实时流式输出。
-            # 修复方案: 创建 on_chunk 回调，通过 ws_interaction_notifier 将流式事件
-            #           广播到前端 WebSocket，事件携带 pipeline_id 供前端路由到正确的子 Tab。
-            # 影响范围: 所有通过 TaskWorker 执行的子管道（L2/L3 层级任务）
-            # 修复日期: 2026-05-08
+            # ── 子管道流式输出：使用统一的 PipelineStreamBridge ──
+            _notifier = self._services.get("ws_interaction_notifier")
+            _ws_thread_id = ""
+            if task_service and _notifier:
+                try:
+                    _root_id = task_service.get_root_task_id(task_id)
+                    if _root_id:
+                        _root_task = task_service.get_task(_root_id)
+                        if _root_task:
+                            _root_pipeline_id = getattr(_root_task, "parent_pipeline_id", "") or ""
+                            if _root_pipeline_id and hasattr(_notifier, "get_thread_for_pipeline"):
+                                _ws_thread_id = _notifier.get_thread_for_pipeline(_root_pipeline_id)
+                            logger.info(
+                                "TaskWorker lookup: root_id=%s root_pipeline=%s ws_thread=%s map_size=%d",
+                                _root_id[:12] if _root_id else "",
+                                _root_pipeline_id[:12] if _root_pipeline_id else "",
+                                _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
+                                len(_notifier._pipeline_thread_map) if hasattr(_notifier, "_pipeline_thread_map") else -1,
+                            )
+                except Exception as _e:
+                    logger.warning("TaskWorker lookup error: %s", _e)
 
-            # ── 子管道流式输出：chunk 队列 + 回调 + 消费协程 ──
-            _sub_chunk_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
             _sub_pipeline_id = engine._pipeline_id
             _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
 
-            def _sub_on_chunk(chunk: dict[str, Any]) -> None:
-                """子管道流式回调：将管道事件放入队列由消费协程广播到前端。
+            if _notifier:
+                _sink = TargetedSink(_notifier, _ws_thread_id)
+                _bridge = PipelineStreamBridge(
+                    pipeline_id=_sub_pipeline_id,
+                    output_sink=_sink,
+                    message_id=_sub_message_id,
+                )
+                _on_chunk = _bridge.on_chunk
+                logger.info(
+                    "TaskWorker: 子管道桥接创建: bridge_id=%d sub_pipeline=%s ws_thread=%s",
+                    id(_bridge), _sub_pipeline_id[:12],
+                    _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
+                )
+            else:
+                _bridge = None
+                _on_chunk = lambda chunk: None
 
-                此回调由 LLM Adapter 在流式生成时同步调用，
-                事件放入 asyncio.Queue 后由 _drain_sub_chunks 异步消费并广播。
-
-                Args:
-                    chunk: 管道事件字典，包含 type 和 content 等字段
-                """
-                _sub_chunk_queue.put_nowait(chunk)
-
-            async def _drain_sub_chunks(engine_task: asyncio.Task) -> None:
-                """消费子管道 chunk 队列，通过 ws_interaction_notifier 广播到前端。
-
-                将管道事件转换为前端协议格式，添加 pipeline_id 以便前端路由到正确的子 Tab。
-                事件类型与 start_server.py 主管道保持一致：
-                stream_start / stream_chunk / stream_end / thinking_* / tool_* / iteration
-                """
-                _notifier = self._services.get("ws_interaction_notifier")
-                if not _notifier or not hasattr(_notifier, "broadcast_event"):
-                    # 无前端连接时仍消费队列，防止队列阻塞管道
-                    while not engine_task.done() or not _sub_chunk_queue.empty():
-                        try:
-                            await asyncio.wait_for(_sub_chunk_queue.get(), timeout=0.1)
-                        except asyncio.TimeoutError:
-                            continue
-                    return
-
-                # 发送 stream_start 事件，通知前端开始接收流式输出
-                try:
-                    await _notifier.broadcast_event({
-                        "type": "stream_start",
-                        "data": {
-                            "message_id": _sub_message_id,
-                            "pipeline_id": _sub_pipeline_id,
-                        },
-                    })
-                except Exception:
-                    pass
-
-                _thinking_active = False
-                while not engine_task.done() or not _sub_chunk_queue.empty():
-                    try:
-                        _chunk = await asyncio.wait_for(
-                            _sub_chunk_queue.get(), timeout=0.1,
-                        )
-                    except asyncio.TimeoutError:
-                        continue
-                    if _chunk is None:
-                        break
-
-                    _chunk_type = _chunk.get("type", "text")
-                    _content = _chunk.get("content", "")
-                    _event_data = None
-
-                    if _chunk_type == "text" and _content:
-                        _event_data = {
-                            "type": "stream_chunk",
-                            "data": {
-                                "message_id": _sub_message_id,
-                                "content": _content,
-                                "pipeline_id": _sub_pipeline_id,
-                            },
-                        }
-                    elif _chunk_type == "thinking" and _content:
-                        if not _thinking_active:
-                            _thinking_active = True
-                            try:
-                                await _notifier.broadcast_event({
-                                    "type": "thinking_start",
-                                    "data": {
-                                        "message_id": _sub_message_id,
-                                        "pipeline_id": _sub_pipeline_id,
-                                    },
-                                })
-                            except Exception:
-                                pass
-                        _event_data = {
-                            "type": "thinking_chunk",
-                            "data": {
-                                "message_id": _sub_message_id,
-                                "content": _content,
-                                "pipeline_id": _sub_pipeline_id,
-                            },
-                        }
-                    elif _chunk_type == "thinking_end":
-                        if _thinking_active:
-                            _thinking_active = False
-                            _event_data = {
-                                "type": "thinking_end",
-                                "data": {
-                                    "message_id": _sub_message_id,
-                                    "duration_ms": _chunk.get("duration_ms"),
-                                    "pipeline_id": _sub_pipeline_id,
-                                },
-                            }
-                    elif _chunk_type == "tool_start":
-                        _event_data = {
-                            "type": "tool_start",
-                            "data": {
-                                "message_id": _sub_message_id,
-                                "tool_name": _chunk.get("tool_name", "unknown"),
-                                "pipeline_id": _sub_pipeline_id,
-                            },
-                        }
-                    elif _chunk_type == "tool_result":
-                        _event_data = {
-                            "type": "tool_result",
-                            "data": {
-                                "message_id": _sub_message_id,
-                                "tool_name": _chunk.get("tool_name", "unknown"),
-                                "success": _chunk.get("success", True),
-                                "result": _chunk.get("result"),
-                                "duration_ms": _chunk.get("duration_ms"),
-                                "pipeline_id": _sub_pipeline_id,
-                            },
-                        }
-                    elif _chunk_type == "iteration":
-                        # 迭代开始时关闭旧的 thinking
-                        if _thinking_active:
-                            _thinking_active = False
-                            try:
-                                await _notifier.broadcast_event({
-                                    "type": "thinking_end",
-                                    "data": {
-                                        "message_id": _sub_message_id,
-                                        "duration_ms": None,
-                                        "pipeline_id": _sub_pipeline_id,
-                                    },
-                                })
-                            except Exception:
-                                pass
-                        _event_data = {
-                            "type": "iteration",
-                            "data": {
-                                "message_id": _sub_message_id,
-                                "iteration": _chunk.get("iteration", 0),
-                                "max_iterations": _chunk.get("max_iterations", 0),
-                                "pipeline_id": _sub_pipeline_id,
-                            },
-                        }
-
-                    if _event_data:
-                        try:
-                            await _notifier.broadcast_event(_event_data)
-                        except Exception:
-                            pass
-
-                # 发送 stream_end 事件，通知前端流式输出结束
-                try:
-                    await _notifier.broadcast_event({
-                        "type": "stream_end",
-                        "data": {
-                            "message_id": _sub_message_id,
-                            "pipeline_id": _sub_pipeline_id,
-                        },
-                    })
-                except Exception:
-                    pass
-
-            # 启动管道引擎和消费协程
             _engine_task = asyncio.create_task(
                 engine.run(
-                    user_input=full_input,
+                    user_input="" if conversation_history else full_input,
                     agent_config=agent_config,
                     conversation_history=conversation_history,
                     task_id=task_id,
@@ -1597,31 +1398,40 @@ class TaskWorker:
                     project_root=project_root,
                     allow_default_fallback=False,
                     streaming=True,
-                    on_chunk=_sub_on_chunk,
+                    on_chunk=_on_chunk,
                 )
             )
-            _drain_task = asyncio.create_task(_drain_sub_chunks(_engine_task))
 
             _engine_timed_out = False
             try:
-                pipeline_state = await asyncio.wait_for(
-                    _engine_task,
-                    timeout=pipeline_timeout,
-                )
+                if _bridge:
+                    await asyncio.wait_for(
+                        _bridge.drain_loop(_engine_task),
+                        timeout=pipeline_timeout,
+                    )
+                    pipeline_state = _engine_task.result() if _engine_task.done() else {}
+                else:
+                    pipeline_state = await asyncio.wait_for(
+                        _engine_task,
+                        timeout=pipeline_timeout,
+                    )
             except asyncio.TimeoutError:
                 logger.error("TaskWorker: pipeline hard timeout for task %s (%ds)", task_id, pipeline_timeout)
                 _engine_timed_out = True
                 _engine_task.cancel()
+                try:
+                    await _engine_task
+                except (asyncio.CancelledError, Exception):
+                    pass
                 if task_service:
                     try:
-                        task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
                     except Exception:
                         pass
                 evt = self._terminal_events.pop(task_id, None)
                 if evt is not None:
                     evt.set()
-                # BUG-FIX: pipeline hard timeout 必须清理 _active_tasks 和 idle 计时器
-                # 防止 idle 计时器在任务已失败后仍不断重新创建（超时风暴）
                 self._active_tasks.discard(task_id)
                 self._idle_remind_counts.pop(task_id, None)
                 if idle_timer_registered and timer_manager:
@@ -1631,15 +1441,8 @@ class TaskWorker:
                         pass
                 _cleanup_done = True
             finally:
-                # BUG-FIX-fix_20260508_sub_pipeline_streaming:
-                # 无论正常完成、超时还是异常，都发送哨兵值并等待消费协程退出。
-                # 确保前端总能收到 stream_end 事件，避免子 Tab 卡在"加载中"。
-                _sub_chunk_queue.put_nowait(None)
-                if not _drain_task.done():
-                    try:
-                        await asyncio.wait_for(_drain_task, timeout=5.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        _drain_task.cancel()
+                if _bridge:
+                    _bridge.stop()
 
             if _engine_timed_out:
                 return
@@ -1724,7 +1527,8 @@ class TaskWorker:
                     )
             if task_service:
                 try:
-                    task_service.fail_task(task_id, str(exc))
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                    await task_service.fail_task(task_id, str(exc))
                 except Exception as fail_exc:
                     logger.error("TaskWorker: fail_task also failed: %s", fail_exc)
             evt = self._terminal_events.pop(task_id, None)
@@ -1770,24 +1574,43 @@ class TaskWorker:
                                 )
                         evt = self._terminal_events.pop(task_id, None)
                         try:
-                            task_service.move_to_evaluating(task_id)
+                            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
+                            await task_service.move_to_evaluating(task_id)
                         except Exception as e:
                             logger.warning(
                                 "TaskWorker: move_to_evaluating failed for %s: %s, falling back to fail",
                                 task_id, e,
                             )
-                            # BUG-FIX: fallback fail_task 也需要异常保护，防止二次异常导致任务卡住
                             try:
-                                task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
+                                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                                await task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
                             except Exception as fail_exc:
                                 logger.error(
                                     "TaskWorker: fallback fail_task also failed for %s: %s",
                                     task_id, fail_exc,
                                 )
+                            if evt is not None:
+                                evt.set()
+                            self._active_tasks.discard(task_id)
+                            self._idle_remind_counts.pop(task_id, None)
+                            if idle_timer_registered and timer_manager:
+                                try:
+                                    await timer_manager.cancel_timer(task_id)
+                                except Exception:
+                                    pass
+                            _cleanup_done = True
+                            return
+                        # BUG-FIX-fix_20260510_evaluating_stuck:
+                        # 问题根因: move_to_evaluating 后直接 return，任务卡在 EVALUATING
+                        #   永远不会触发实际评估。Agent 已调用 task_evaluate 但评估未完成，
+                        #   管道退出后 move_to_evaluating 只改了状态，没有任何后续机制
+                        #   推进评估。唯一兜底是系统重启时的 _recover_evaluating_tasks。
+                        # 修复方案: move_to_evaluating 成功后，调用 _rerun_evaluation
+                        #   触发实际评估执行（复用系统重启恢复的逻辑）。
+                        # 影响范围: 所有管道退出时任务仍有 result 但未到终态的场景
+                        # 修复日期: 2026-05-10
                         if evt is not None:
                             evt.set()
-                        # BUG-FIX: 进入 evaluating 后清理 idle 计时器
-                        # 防止 evaluating 状态的任务仍触发 idle 超时
                         self._active_tasks.discard(task_id)
                         self._idle_remind_counts.pop(task_id, None)
                         if idle_timer_registered and timer_manager:
@@ -1796,6 +1619,22 @@ class TaskWorker:
                             except Exception:
                                 pass
                         _cleanup_done = True
+                        refreshed_task = task_service.get_task(task_id)
+                        if refreshed_task is not None:
+                            try:
+                                await self._rerun_evaluation(refreshed_task)
+                            except Exception as rerun_exc:
+                                logger.error(
+                                    "TaskWorker: _rerun_evaluation failed for %s: %s",
+                                    task_id, rerun_exc,
+                                )
+                                try:
+                                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                                    await task_service.fail_task(
+                                        task_id, f"管道退出后评估执行失败: {rerun_exc}",
+                                    )
+                                except Exception:
+                                    pass
                         return
                     else:
                         # 从 pipeline state 中提取完整诊断信息
@@ -1863,7 +1702,8 @@ class TaskWorker:
                         evt = self._terminal_events.pop(
                             task_id, None,
                         )
-                        task_service.fail_task(
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(
                             task_id, error_msg,
                         )
                         if evt is not None:
@@ -1895,7 +1735,8 @@ class TaskWorker:
             logger.warning("TaskWorker: task %s timed out waiting for terminal state", task_id)
             if task_service:
                 try:
-                    task_service.fail_task(task_id, f"TaskWorker 等待终态超时({terminal_wait_timeout}s)")
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                    await task_service.fail_task(task_id, f"TaskWorker 等待终态超时({terminal_wait_timeout}s)")
                 except Exception as e:
                     logger.error(
                         "TaskWorker: fail_task after timeout failed for %s: %s",
@@ -2013,9 +1854,15 @@ class TaskWorker:
                 getattr(timer_mgr, "idle_threshold", "?")
                 if timer_mgr else "?"
             )
-            task_service.fail_task(
-                task_id,
-                f"idle 超时({threshold}s无活动)",
+            # BUG-FIX-fix_20260512_async_compat:
+            # _on_idle_timeout 是同步回调，但 fail_task 现在是 async，
+            # 使用 asyncio.create_task 调度异步调用
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                task_service.fail_task(
+                    task_id,
+                    f"idle 超时({threshold}s无活动)",
+                )
             )
             logger.warning(
                 "TaskWorker: 任务 idle 超时，已标记 failed: "

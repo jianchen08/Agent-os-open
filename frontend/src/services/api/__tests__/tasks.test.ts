@@ -9,10 +9,10 @@
  * @docs docs/tasks/task-execution-loop-system.md
  */
 
+/* eslint-disable import-x/order */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as taskApi from '@/services/api/tasks'
 import type { ProjectStatus, TaskPhase } from '@/services/api/../../types/task'
-
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -23,6 +23,7 @@ vi.mock('../client', () => ({
   },
 }))
 
+ 
 import apiClient from '@/services/api/client'
 
 describe('任务管理 API', () => {

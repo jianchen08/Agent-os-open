@@ -16,37 +16,49 @@
  * - DockBar, FloatingWindowManager, FullscreenOverlay, WorkspacePanel, SplitPane
  */
 
-import React, { useCallback, useMemo, useState, useEffect } from 'react'
-import { LayoutGrid, PanelLeftClose, PanelLeftOpen, Maximize2 } from 'lucide-react'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
-import { useThemeStore } from '@/stores/themeStore'
-import { useUIStore } from '@/stores/uiStore'
-import { useSessionStore } from '@/stores/sessionStore'
-import { useAgentTabStore } from '@/stores/agentTabStore'
+import { Minimize2, FolderOpen, PanelRightOpen } from 'lucide-react'
+import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
+import { getEditorForFile } from '@/config/fileEditors'
 import { cn } from '@/lib/utils'
-import { FloatingWindowManager } from './FloatingWindowManager'
-import { WorkspacePanel } from './WorkspacePanel'
-import { DockBar } from './DockBar'
-import { FullscreenOverlay } from './FullscreenOverlay'
-import { ConnectionStatusIndicator } from './ConnectionStatusIndicator'
+import apiClient from '@/services/api/client'
+import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance } from '@/types/layout'
+import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useChatInputStore } from '@/stores/chatInputStore'
+import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useThemeStore } from '@/stores/themeStore'
+import { useUIStore } from '@/stores/uiStore'
+import { AppHeader } from './AppHeader'
+import { DockBar } from './DockBar'
+import { FloatingWindowManager } from './FloatingWindowManager'
+import { FullscreenOverlay } from './FullscreenOverlay'
+import { WorkspacePanel } from './WorkspacePanel'
+import { FileReviewTab } from '../review/FileReviewTab'
+import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance, WorkspaceTab } from '@/types/layout'
 
 /** Props for the FiveSpaceLayout component */
 export interface FiveSpaceLayoutProps {
   /** Chat panel content (the existing chat interface) */
   chatContent: React.ReactNode
 
-  /** Optional top nav content */
-  topNavContent?: React.ReactNode
-
   /** Optional sidebar content */
   sidebarContent?: React.ReactNode
 
   /** Callback when layout mode toggle is requested */
   onToggleMode?: () => void
+
+  /** Whether to show the theme panel */
+  showThemePanel?: boolean
+
+  /** Callback to toggle theme panel visibility */
+  onShowThemePanel?: (show: boolean) => void
+
+  /** 登出回调 */
+  onLogout?: () => void
 }
 
 /**
@@ -74,15 +86,20 @@ function getBreakpoint(
  */
 export function FiveSpaceLayout({
   chatContent,
-  topNavContent,
   sidebarContent,
   onToggleMode,
+  showThemePanel = false,
+  onShowThemePanel,
+  onLogout,
 }: FiveSpaceLayoutProps) {
   const themeConfig = useThemeStore((s) => s.currentTheme)
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false)
+  const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false)
+  /** 移动端工作区覆盖层是否打开 */
+  const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false)
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
   )
@@ -97,11 +114,29 @@ export function FiveSpaceLayout({
   const activeExecutions = useLayoutModeStore((s) => s.activeExecutions)
   const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
+  const workspaceDataVersion = useLayoutModeStore((s) => s.workspaceDataVersion)
   const updateFloatingWindow = useLayoutModeStore((s) => s.updateFloatingWindow)
   const closeFloatingWindow = useLayoutModeStore((s) => s.closeFloatingWindow)
   const setActiveTab = useLayoutModeStore((s) => s.setActiveTab)
   const closeWorkspaceTab = useLayoutModeStore((s) => s.closeWorkspaceTab)
   const exitFullscreen = useLayoutModeStore((s) => s.exitFullscreen)
+
+  /** 工作区刷新 key，用于驱动 FileTreeWidget 等组件重新加载 */
+  const workspaceRefreshKey = useMemo(
+    () => `${connectionStatus?.lastConnectedAt ?? ''}-v${workspaceDataVersion}`,
+    [connectionStatus?.lastConnectedAt, workspaceDataVersion],
+  )
+
+  /**
+   * 处理工作区 Tab 关闭，对文件审批类型 Tab 进行额外的数据清理
+   */
+  const handleCloseTab = useCallback((tabId: string) => {
+    const tab = useLayoutModeStore.getState().workspaceTabs.find(t => t.id === tabId)
+    if (tab?.moduleId === '__file_review__') {
+      removeFileReviewData(tabId)
+    }
+    closeWorkspaceTab(tabId)
+  }, [closeWorkspaceTab])
 
   // Layout resolution
   const layoutConfig = useMemo(() => safeLoadLayout((themeConfig as any)?.layout), [themeConfig])
@@ -117,26 +152,40 @@ export function FiveSpaceLayout({
   const isMobile = breakpoint === 'mobile'
   const isTablet = breakpoint === 'tablet'
 
-  // Track viewport width
+  const mobileInitRef = useRef(false)
+
   useEffect(() => {
     const handleResize = () => setViewportWidth(window.innerWidth)
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
+  useEffect(() => {
+    if (!mobileInitRef.current && isMobile && !sidebarCollapsed) {
+      mobileInitRef.current = true
+      useUIStore.getState().setSidebarCollapsed(true)
+    }
+  }, [isMobile, sidebarCollapsed])
+
   const toggleWorkspace = useCallback(() => setWorkspaceCollapsed((prev) => !prev), [])
+  const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
   /**
-   * 处理任务树节点点击事件
+   * 处理任务树节点点击（对话按钮）。
    *
-   * 当用户点击任务树中的叶子任务节点时，自动打开对应的子标签并加载
+   * 点击节点的对话按钮时，打开子 Agent 标签页，加载
    * 子管道的对话历史。同时确保主 Agent 标签存在（用于 Tab 导航显示）。
-   * 容器类型任务（有子节点的父任务）不执行跳转，因为它们没有独立的执行者。
    *
    * BUG-FIX-fix_20260507_container_click:
    * 问题根因: 容器任务（有子节点的父任务）点击后打开子标签，但它没有独立执行者，
    *          其执行者就是主管道，而主管道已经是默认活跃的。
    * 修复方案: 容器任务直接 return，不执行任何跳转操作。
+   *
+   * BUG-FIX-fix_20260509_task_open_and_level:
+   * 问题根因: 1) 有独立管道的 L2 编排者任务（如"Li的编排者"）因有子节点被完全阻止打开
+   *          2) agentLevel 硬编码为 2，导致所有标签都显示 L2，L3 执行者无法正确显示
+   * 修复方案: 1) 仅阻止有子节点且无独立管道的纯容器任务
+   *          2) 从后端 agent_level 字段解析正确的层级数字
    *
    * @param node - 被点击的树节点数据
    */
@@ -146,9 +195,25 @@ export function FiveSpaceLayout({
     const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
     if (!taskId) return
 
-    // 容器任务（有子节点）不打开子标签，它没有独立执行者
+    // BUG-FIX-fix_20260510_container_tab_duplicate:
+    // 容器任务（task_scope=container）不能打开对话，否则会创建重复标签
+    const taskScope = (node.task_scope as string) ?? 'non_container'
+    if (taskScope === 'container') return
+
+    // BUG-FIX-fix_20260509_task_open_and_level:
+    // 仅阻止有子节点且无独立管道的纯容器任务；
+    // 有 pipeline_run_id 的编排者任务（L2）即使有子节点也可打开
     const children = node.children as unknown[] | undefined
-    if (Array.isArray(children) && children.length > 0) return
+    const hasOwnPipeline = !!pipelineRunId
+    if (Array.isArray(children) && children.length > 0 && !hasOwnPipeline) return
+
+    // 从后端 agent_level 字段解析层级数字
+    const agentLevelStr = (node.agent_level as string) ?? ''
+    let agentLevel: 1 | 2 | 3 = 2
+    if (agentLevelStr) {
+      if (agentLevelStr === 'L1' || agentLevelStr === '1') agentLevel = 1
+      else if (agentLevelStr === 'L3' || agentLevelStr === '3') agentLevel = 3
+    }
 
     const agentTabStore = useAgentTabStore.getState()
 
@@ -166,19 +231,21 @@ export function FiveSpaceLayout({
       })
     }
 
-    // 打开子任务标签
+    // 打开子任务标签（使用解析后的正确层级）
     agentTabStore.openSubAgentTab({
       agentId: taskId,
       agentName: title,
       parentRecordId: taskId,
-      agentLevel: 2,
+      agentLevel,
       taskId,
       status: (node.status as AgentTab['status']) ?? 'running',
       setActive: true,
       pipelineId: pipelineRunId,
     })
 
-    // 加载子管道消息
+    // BUG-FIX-fix_20260509_tab_blank:
+    // 异步加载子管道消息；loadTabMessages 会将加载结果同步到 pipelineMessageStore，
+    // 与 openSubAgentTab 中同步的缓存消息形成互补（缓存优先，API 刷新补充）
     agentTabStore.loadTabMessages(`sub-${taskId}`, pipelineRunId)
   }, [activeSessionId])
 
@@ -186,7 +253,18 @@ export function FiveSpaceLayout({
   const enrichedDockItems = useMemo(() => {
     const items = [...dockItems]
 
-    // Add execution status items if any are active
+    if (isMobile) {
+      for (const item of items) {
+        if (item.moduleId) {
+          const origOnClick = item.onClick
+          item.onClick = () => {
+            origOnClick?.()
+            setWorkspaceFullscreen(true)
+          }
+        }
+      }
+    }
+
     for (const execution of activeExecutions) {
       if (execution.status === 'running') {
         items.push({
@@ -221,7 +299,7 @@ export function FiveSpaceLayout({
     }
 
     return items
-  }, [dockItems, activeExecutions, pendingInteractions])
+  }, [dockItems, pendingInteractions, isMobile])
 
   /**
    * 渲染工作区 Tab 内容
@@ -231,7 +309,83 @@ export function FiveSpaceLayout({
    * 修复方案: 通过 schemaRegistry 查找模块 Schema，通过 widgetRegistry 查找组件，渲染真实内容
    */
   const renderTabContent = useCallback(
-    (tab: import('@/types/layout').WorkspaceTab) => {
+    (tab: WorkspaceTab) => {
+      // 文件审批标签渲染
+      if (tab.moduleId === '__file_review__') {
+        const reviewData = getFileReviewData(tab.id)
+        if (!reviewData) {
+          return (
+            <div className="flex h-full flex-col items-center justify-center p-4">
+              <div className="text-muted-foreground text-sm">审批数据已过期</div>
+            </div>
+          )
+        }
+        const handleSendMessage = (message: string, quotedText?: string, quotedFile?: string) => {
+          if (quotedText) {
+            const insertText = `「${quotedFile ? `${quotedFile}: ` : ''}${quotedText}」`
+            useChatInputStore.getState().requestInsert(insertText)
+            return
+          }
+          if (message) {
+            // BUG-FIX-fix_20260511_interaction_response_lost:
+            // 问题根因: reviewData.pipelineId 可能为空，且不是 WebSocket 连接池的 key
+            // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
+            const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
+            if (sid) {
+              globalWS.sendInteractionResponse(sid, reviewData.requestId, {
+                responseType: 'approved',
+                feedback: message,
+              })
+            }
+          }
+        }
+        const handleSubmitReview = (requestId: string, response: 'approved' | 'denied', feedback?: string) => {
+          // BUG-FIX-fix_20260511_interaction_response_lost:
+          // 问题根因: reviewData.pipelineId 可能为空，且不是 WebSocket 连接池的 key
+          // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
+          const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
+          if (sid) {
+            wsPool.sendInteractionResponse(sid, {
+              requestId,
+              responseType: response,
+              feedback: feedback || '',
+            })
+          }
+        }
+        const handleOpenFolder = async () => {
+          const containerId = reviewData.containerTaskId
+          if (!containerId) return
+          try {
+            await apiClient.post(`/api/v1/workspaces/${containerId}/open`)
+          } catch {
+            // 静默失败
+          }
+        }
+        return (
+          <div className="relative h-full">
+            {reviewData.containerTaskId && (
+              <button
+                className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border bg-background/80 px-2 py-1 text-xs text-muted-foreground backdrop-blur-sm transition-colors hover:bg-accent hover:text-foreground"
+                onClick={handleOpenFolder}
+                title="在系统文件管理器中打开"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                打开文件夹
+              </button>
+            )}
+            <FileReviewTab
+              fileContents={reviewData.fileContents}
+              requestId={reviewData.requestId}
+              mode={reviewData.mode}
+              title={reviewData.title}
+              pipelineId={reviewData.pipelineId}
+              options={reviewData.options}
+              onSendMessage={handleSendMessage}
+              onSubmitReview={handleSubmitReview}
+            />
+          </div>
+        )
+      }
       if (tab.moduleId) {
         const registration = schemaRegistry.get(tab.moduleId)
         if (registration) {
@@ -244,18 +398,111 @@ export function FiveSpaceLayout({
             const WidgetComponent = widgetRegistry.get(widgetType) ?? widgetRegistry.findFallback(widgetType)
             if (WidgetComponent) {
               return (
-                <div className="h-full overflow-auto p-4">
+                <div className="h-full overflow-auto p-2 sm:p-4">
                   <WidgetComponent
                     {...(spaceConfig.props as Record<string, unknown> ?? {})}
                     dataSource={spaceConfig.dataSource as string}
                     sessionId={activeSessionId}
-                    refreshKey={connectionStatus?.lastConnectedAt ?? ''}
+                    refreshKey={workspaceRefreshKey}
                     onNodeClick={(node: any) => handleTaskNodeClick(node)}
                   />
                 </div>
               )
             }
           }
+        }
+      }
+      // component-based 渲染路径：通过 tab.component 直接查找 widget
+      if (tab.component) {
+        const WidgetComponent = widgetRegistry.get(tab.component) ?? widgetRegistry.findFallback(tab.component)
+        if (WidgetComponent) {
+          /**
+           * 处理工作空间文件树中的文件点击
+           *
+           * 加载文件内容并注册为文件审批 Tab，在工作区中以 FileReviewTab 组件展示。
+           *
+           * @param filePath - 文件相对路径（如 src/main.py）
+           * @param fileName - 文件名（如 main.py）
+           */
+          const handleFileClick = async (filePath: string, fileName: string) => {
+            const containerId = tab.dataSource?.replace('workspace://', '') || ''
+            if (!containerId) return
+
+            const editor = getEditorForFile(fileName)
+
+            if (editor.id === 'text_editor') {
+              const tabId = `review-file-${containerId}-${filePath.replace(/[/\\]/g, '_')}`
+              const layoutStore = useLayoutModeStore.getState()
+
+              try {
+                const resp = await apiClient.get(`/api/v1/workspaces/${containerId}/file-content`, {
+                  params: { path: filePath }
+                })
+                if (resp.data?.success) {
+                  registerFileReview(tabId, {
+                    requestId: `file-${containerId}-${filePath}`,
+                    mode: 'conversation',
+                    title: fileName,
+                    pipelineId: '',
+                    fileContents: { [filePath]: resp.data.content },
+                    containerTaskId: containerId,
+                  })
+                  layoutStore.addWorkspaceTab({
+                    id: tabId,
+                    title: fileName,
+                    icon: '📄',
+                    moduleId: '__file_review__',
+                    isActive: true,
+                    isPinned: false,
+                  })
+                }
+              } catch {
+                // 静默失败
+              }
+            }
+          }
+
+          /** 处理在系统文件管理器中打开工作空间目录 */
+          const handleOpenFolder = async () => {
+            const containerId = tab.dataSource?.replace('workspace://', '') || ''
+            if (!containerId) return
+            try {
+              await apiClient.post(`/api/v1/workspaces/${containerId}/open`)
+            } catch {
+              // 静默失败
+            }
+          }
+
+          const folderContainerId = tab.dataSource?.replace('workspace://', '') || ''
+
+          return (
+            <div className="relative h-full">
+              {folderContainerId && (
+                <button
+                  className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border bg-background/80 px-2 py-1 text-xs text-muted-foreground backdrop-blur-sm transition-colors hover:bg-accent hover:text-foreground"
+                  onClick={handleOpenFolder}
+                  title="在系统文件管理器中打开"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  打开文件夹
+                </button>
+              )}
+              <div className="h-full overflow-auto p-2 sm:p-4">
+                <WidgetComponent
+                  dataSource={tab.dataSource}
+                  sessionId={activeSessionId}
+                  refreshKey={workspaceRefreshKey}
+                  showStatus={false}
+                  showProgress={false}
+                  showSearch={true}
+                  expandLevel={0}
+                  nodeTitleField="name"
+                  nodeChildrenField="children"
+                  onFileClick={handleFileClick}
+                />
+              </div>
+            </div>
+          )
         }
       }
       return (
@@ -265,7 +512,7 @@ export function FiveSpaceLayout({
         </div>
       )
     },
-    [activeSessionId, handleTaskNodeClick],
+    [activeSessionId, handleTaskNodeClick, workspaceRefreshKey],
   )
 
   // Render floating window content (placeholder)
@@ -282,173 +529,213 @@ export function FiveSpaceLayout({
     [],
   )
 
-  // Handle ESC key for fullscreen exit
+  // Handle ESC key for fullscreen exit and mobile workspace close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && fullscreenActive) {
-        exitFullscreen()
+      if (e.key === 'Escape') {
+        if (fullscreenActive) {
+          exitFullscreen()
+        } else if (workspaceFullscreen) {
+          setWorkspaceFullscreen(false)
+        } else if (mobileWorkspaceOpen) {
+          setMobileWorkspaceOpen(false)
+        }
       }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [fullscreenActive, exitFullscreen])
+  }, [fullscreenActive, exitFullscreen, workspaceFullscreen, mobileWorkspaceOpen])
 
   return (
     <div
-      className="bg-background text-foreground flex h-screen w-screen flex-col overflow-hidden"
-      style={{ fontFamily: 'var(--font-family)' }}
+      className="bg-background text-foreground flex w-screen flex-col overflow-hidden"
+      style={{ fontFamily: 'var(--font-family)', height: '100dvh' }}
     >
-      {/* ---- Top Navigation Bar ---- */}
-      <header
-        className="border-border flex h-10 shrink-0 items-center border-b px-3"
-      >
-        {/* Left: sidebar toggle + title */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={toggleSidebar}
-            className="hover:bg-accent rounded p-1 transition-colors"
-            title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
-          >
-            {sidebarCollapsed ? (
-              <PanelLeftOpen className="h-4 w-4" />
-            ) : (
-              <PanelLeftClose className="h-4 w-4" />
+      {workspaceFullscreen ? (
+        <>
+          <div className="border-border flex h-8 shrink-0 items-center justify-between border-b px-3">
+            <span className="text-muted-foreground text-xs">
+              {workspaceTabs.find((t) => t.isActive)?.title ?? '工作区'}
+            </span>
+            <button
+              onClick={toggleWorkspaceFullscreen}
+              className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-0.5 text-xs transition-colors"
+              title="退出全屏 (Esc)"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+              <span>退出全屏</span>
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <WorkspacePanel
+              tabs={workspaceTabs}
+              onTabChange={setActiveTab}
+              onTabClose={handleCloseTab}
+              renderTabContent={renderTabContent}
+              onFullscreen={toggleWorkspaceFullscreen}
+              isFullscreen={true}
+            />
+          </div>
+        </>
+      ) : (
+        <>
+          {/* ---- Top Navigation Bar (shared AppHeader) ---- */}
+          <AppHeader
+            onToggleMode={onToggleMode ?? (() => {})}
+            modeLabel="Classic"
+            showThemePanel={showThemePanel}
+            onShowThemePanel={onShowThemePanel ?? (() => {})}
+            onLogout={onLogout ?? (() => {})}
+            extraRight={
+              pendingInteractions.length > 0 ? (
+                <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
+                  <span className="font-bold">{pendingInteractions.length}</span>
+                  <span>pending</span>
+                </div>
+              ) : undefined
+            }
+          />
+
+          {/* ---- Main Content Area ---- */}
+          <div className="relative flex min-h-0 flex-1 overflow-hidden">
+            {/* 移动端侧边栏：覆盖抽屉模式（从导航栏下方开始，不遮盖导航栏） */}
+            {sidebarContent && isMobile && !sidebarCollapsed && (
+              <div className="fixed inset-0 z-40" style={{ top: '2.5rem' }}>
+                {/* 背景遮罩，点击关闭侧边栏 */}
+                <div
+                  className="absolute inset-0 bg-black/50"
+                  onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
+                />
+                {/* 侧边栏面板 */}
+                <aside className="absolute left-0 top-0 bottom-0 z-50 flex w-72 flex-col border-r bg-background shadow-xl">
+                  {sidebarContent}
+                </aside>
+              </div>
             )}
-          </button>
-          <h1 className="text-sm font-semibold">SuperTerminal</h1>
-        </div>
 
-        {/* Center: top nav content */}
-        <div className="flex flex-1 items-center justify-center">
-          {topNavContent}
-        </div>
+            {/* 桌面端侧边栏：内嵌模式 */}
+            {sidebarContent && (
+              <aside
+                className={cn(
+                  'border-border hidden shrink-0 flex-col overflow-hidden border-r transition-all duration-300 md:flex',
+                )}
+                style={{
+                  width: sidebarCollapsed ? '48px' : '14rem',
+                  minWidth: sidebarCollapsed ? '48px' : '14rem',
+                  maxWidth: sidebarCollapsed ? '48px' : '14rem',
+                }}
+              >
+                {sidebarContent}
+              </aside>
+            )}
 
-        {/* Right: connection status + layout toggle */}
-        <div className="flex items-center gap-2">
-          <ConnectionStatusIndicator compact={false} showLatency showQueue />
+            {/* Chat + Workspace panels */}
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              {/* Chat Panel */}
+              <section
+                className={cn(
+                  'border-border flex flex-col overflow-hidden transition-all duration-300',
+                  // 桌面端保持 shrink-0 和 border-r；移动端移除两者以允许 flex-1 完全占满
+                  !isMobile ? 'shrink-0 border-r' : '',
+                  workspaceCollapsed || isMobile ? 'flex-1' : '',
+                )}
+                style={{
+                  width:
+                    workspaceCollapsed || isMobile
+                      ? undefined
+                      : `${resolved.chatPanel.width}px`,
+                  minWidth: isMobile ? 0 : resolved.chatPanel.minWidth,
+                }}
+              >
+                {chatContent}
+              </section>
 
-          {pendingInteractions.length > 0 && (
-            <div className="flex items-center gap-1 rounded-md bg-status-running/10 px-2 py-0.5 text-xs text-status-running">
-              <span className="font-bold">{pendingInteractions.length}</span>
-              <span>pending</span>
+              {/* Workspace toggle handle - always visible */}
+              {!isMobile && (
+                <button
+                  onClick={toggleWorkspace}
+                  className={cn(
+                    'border-border hover:bg-accent relative flex shrink-0 cursor-pointer items-center justify-center border-r transition-colors',
+                    'hover:shadow-[2px_0_8px_rgba(0,0,0,0.1)]',
+                    'active:bg-accent/80',
+                    workspaceCollapsed ? 'w-8' : 'w-4',
+                  )}
+                  style={{ minHeight: '100%' }}
+                  title={workspaceCollapsed ? 'Show workspace' : 'Hide workspace'}
+                >
+                  <span className="text-muted-foreground select-none" style={{ fontSize: workspaceCollapsed ? 16 : 10 }}>
+                    {workspaceCollapsed ? '›' : '‹'}
+                  </span>
+                </button>
+              )}
+
+              {/* Workspace Panel */}
+              {!isMobile && !workspaceCollapsed && (
+                <section className="min-w-0 flex-1 overflow-hidden">
+                  <WorkspacePanel
+                    tabs={workspaceTabs}
+                    onTabChange={setActiveTab}
+                    onTabClose={handleCloseTab}
+                    renderTabContent={renderTabContent}
+                    onFullscreen={toggleWorkspaceFullscreen}
+                    isFullscreen={false}
+                  />
+                </section>
+              )}
+            </div>
+          </div>
+
+          {/* ---- Dock Bar ---- */}
+          <div
+            className="border-border flex shrink-0 items-center gap-1 border-t px-2"
+            style={{ height: resolved.dockBar.height }}
+          >
+            <DockBar
+              items={enrichedDockItems}
+              iconSize={layoutConfig.dockBar.iconSize}
+              iconGap={layoutConfig.dockBar.iconGap}
+              showLabels={layoutConfig.dockBar.showLabels}
+            />
+
+
+          </div>
+
+          {/* 移动端工作区全屏覆盖层 */}
+          {isMobile && mobileWorkspaceOpen && (
+            <div className="fixed inset-0 z-30 flex flex-col bg-background" style={{ top: '2.5rem' }}>
+              {/* 工作区顶部操作栏 */}
+              <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
+                <span className="text-foreground text-xs font-medium">工作区</span>
+                <button
+                  onClick={() => setMobileWorkspaceOpen(false)}
+                  className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
+                  title="关闭工作区"
+                >
+                  <Minimize2 className="h-3.5 w-3.5" />
+                  <span>关闭</span>
+                </button>
+              </div>
+              {/* 工作区内容 */}
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <WorkspacePanel
+                  tabs={workspaceTabs}
+                  onTabChange={setActiveTab}
+                  onTabClose={(tabId) => {
+                    handleCloseTab(tabId)
+                    const remaining = useLayoutModeStore.getState().workspaceTabs.filter(t => t.id !== tabId)
+                    if (remaining.length === 0) {
+                      setMobileWorkspaceOpen(false)
+                    }
+                  }}
+                  renderTabContent={renderTabContent}
+                  onFullscreen={toggleWorkspaceFullscreen}
+                  isFullscreen={false}
+                />
+              </div>
             </div>
           )}
-
-          <button
-            onClick={onToggleMode}
-            className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
-            title="Switch to classic layout"
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Classic</span>
-          </button>
-        </div>
-      </header>
-
-      {/* ---- Main Content Area ---- */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Sidebar */}
-        {sidebarContent && (
-          <aside
-            className={cn(
-              'border-border flex shrink-0 flex-col overflow-hidden border-r transition-all duration-300',
-            )}
-            style={{
-              width: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem', /* 14rem = w-56 */
-              minWidth: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem',
-              maxWidth: sidebarCollapsed ? '48px' : isMobile ? '0px' : '14rem',
-            }}
-          >
-            {sidebarContent}
-          </aside>
-        )}
-
-        {/* Chat + Workspace panels */}
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Chat Panel */}
-          <section
-            className={cn(
-              'border-border flex shrink-0 flex-col overflow-hidden border-r transition-all duration-300',
-              workspaceCollapsed || isMobile ? 'flex-1' : '',
-            )}
-            style={{
-              width:
-                workspaceCollapsed || isMobile
-                  ? undefined
-                  : `${resolved.chatPanel.width}px`,
-              minWidth: isMobile ? 0 : resolved.chatPanel.minWidth,
-            }}
-          >
-            {chatContent}
-          </section>
-
-          {/* Workspace toggle handle */}
-          {!isMobile && (
-            <button
-              onClick={toggleWorkspace}
-              className={cn(
-                'border-border hover:bg-accent/50 flex w-4 shrink-0 cursor-pointer items-center justify-center border-r transition-colors',
-                workspaceCollapsed && 'hidden',
-              )}
-              title={workspaceCollapsed ? 'Show workspace' : 'Hide workspace'}
-            >
-              <span className="text-muted-foreground text-[10px]">
-                {workspaceCollapsed ? '>' : '<'}
-              </span>
-            </button>
-          )}
-
-          {/* Workspace Panel */}
-          {!isMobile && !workspaceCollapsed && (
-            <section className="min-w-0 flex-1 overflow-hidden">
-              <WorkspacePanel
-                tabs={workspaceTabs}
-                onTabChange={setActiveTab}
-                onTabClose={closeWorkspaceTab}
-                renderTabContent={renderTabContent}
-              />
-            </section>
-          )}
-        </div>
-      </div>
-
-      {/* ---- Dock Bar ---- */}
-      <div
-        className="border-border flex shrink-0 items-center justify-center gap-1 border-t px-2"
-        style={{ height: resolved.dockBar.height }}
-      >
-        <DockBar
-          items={enrichedDockItems}
-          iconSize={layoutConfig.dockBar.iconSize}
-          iconGap={layoutConfig.dockBar.iconGap}
-        />
-
-        {/* Execution progress mini-bar */}
-        {activeExecutions.length > 0 && (
-          <div className="ml-auto flex items-center gap-2">
-            {activeExecutions
-              .filter((e) => e.status === 'running')
-              .slice(0, 3)
-              .map((execution) => (
-                <div
-                  key={execution.id}
-                  className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-0.5"
-                  title={`${execution.name}: ${execution.progress}%`}
-                >
-                  <div className="bg-muted h-1 w-12 overflow-hidden rounded-full">
-                    <div
-                      className="h-full rounded-full transition-all duration-500"
-                      style={{ width: `${execution.progress}%`, backgroundColor: 'var(--status-running-color, #0ea5e9)' }}
-                    />
-                  </div>
-                  <span className="text-muted-foreground text-[10px]">
-                    {execution.progress}%
-                  </span>
-                </div>
-              ))}
-          </div>
-        )}
-      </div>
+        </>
+      )}
 
       {/* ---- Floating Windows Container ---- */}
       <div

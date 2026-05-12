@@ -29,7 +29,7 @@ class ExpectEvaluator:
     用法：
         evaluator = ExpectEvaluator()
         result = evaluator.evaluate(
-            metric_id="code_check",
+            metric_id="format_valid",
             expect=metric_def.expect,
             output={"success": True, "data": {"exit_code": 0, "status": "completed"}},
         )

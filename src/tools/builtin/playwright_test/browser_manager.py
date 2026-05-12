@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
+import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
@@ -34,6 +37,42 @@ class BrowserSession:
         self.console_messages: list[dict[str, Any]] = []
         self._console_handler: Any = None
     
+    def save_state(self, path: str) -> dict[str, Any]:
+        """
+        保存浏览器状态到文件
+
+        将当前上下文的 cookies 和 localStorage 保存到指定 JSON 文件。
+
+        Args:
+            path: 状态文件保存路径
+
+        Returns:
+            包含保存结果的字典
+        """
+        try:
+            self.context.storage_state(path=path)
+            logger.info(f"会话 {self.session_id} 状态已保存到: {path}")
+            return {"success": True, "path": path}
+        except Exception as e:
+            logger.error(f"保存会话 {self.session_id} 状态失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_state(self) -> dict[str, Any]:
+        """
+        获取浏览器状态（内存中）
+
+        返回当前上下文的 cookies 和 localStorage 状态数据，不写入文件。
+
+        Returns:
+            包含状态数据或错误信息的字典
+        """
+        try:
+            state = self.context.storage_state()
+            return {"success": True, "state": state}
+        except Exception as e:
+            logger.error(f"获取会话 {self.session_id} 状态失败: {e}")
+            return {"success": False, "error": str(e)}
+
     def cleanup(self):
         """清理会话资源"""
         try:
@@ -63,6 +102,11 @@ class BrowserManager:
     管理多个浏览器会话，支持并发操作。
     """
     
+    # 默认状态文件保存目录
+    DEFAULT_STATE_DIR = os.path.join("data", "browser_state")
+    # 保留的状态文件最大数量
+    MAX_STATE_FILES = 5
+    
     # 类级别会话存储
     _sessions: dict[str, BrowserSession] = {}
     
@@ -75,6 +119,8 @@ class BrowserManager:
         viewport_height: int = 720,
         slow_mo: int = 0,
         launch_options: dict | None = None,
+        storage_state: str | dict | None = None,
+        auto_persist: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         """
         创建新的浏览器会话
@@ -86,12 +132,23 @@ class BrowserManager:
             viewport_height: 视口高度
             slow_mo: 操作延迟（毫秒）
             launch_options: 额外启动参数
+            storage_state: 浏览器状态文件路径或状态字典，用于恢复 cookies 和 localStorage
+            auto_persist: 是否自动持久化状态（启动时自动恢复，关闭时自动保存），默认 True
         
         Returns:
             tuple[session_id, session_info]
         """
         try:
             from playwright.sync_api import sync_playwright
+            
+            # 自动恢复逻辑：当 auto_persist=True 且用户未显式提供 storage_state 时，
+            # 尝试从默认状态目录加载最新的状态文件
+            restored_state_path = None
+            if auto_persist and storage_state is None:
+                restored_state_path = cls.auto_load_state()
+                if restored_state_path:
+                    storage_state = restored_state_path
+                    logger.info(f"自动恢复浏览器状态: {restored_state_path}")
             
             # 创建会话ID
             session_id = str(uuid.uuid4())[:8]
@@ -119,9 +176,12 @@ class BrowserManager:
             browser = browser_launcher.launch(**options)
             
             # 创建上下文和页面
-            context = browser.new_context(
-                viewport={"width": viewport_width, "height": viewport_height}
-            )
+            context_options: dict[str, Any] = {
+                "viewport": {"width": viewport_width, "height": viewport_height},
+            }
+            if storage_state is not None:
+                context_options["storage_state"] = storage_state
+            context = browser.new_context(**context_options)
             page = context.new_page()
             
             # 设置 console 监听
@@ -154,6 +214,8 @@ class BrowserManager:
                 "browser_type": browser_type,
                 "browser": browser,
                 "page": page,
+                "auto_persist": auto_persist,
+                "restored_state": restored_state_path,
             }
             
             logger.info(f"创建浏览器会话: {session_id}, 类型: {browser_type}")
@@ -175,6 +237,8 @@ class BrowserManager:
         """
         关闭浏览器会话
         
+        自动保存会话状态到默认目录后关闭，保存失败不影响关闭流程。
+        
         Args:
             session_id: 会话ID
         
@@ -188,15 +252,22 @@ class BrowserManager:
                 "error": f"会话不存在: {session_id}",
             }
         
+        # 在关闭前自动保存会话状态
+        save_result = cls.auto_save_state(session_id)
+        
         try:
             session.cleanup()
             del cls._sessions[session_id]
             logger.info(f"关闭浏览器会话: {session_id}")
-            return {
+            result = {
                 "success": True,
                 "session_id": session_id,
                 "message": "会话已关闭",
             }
+            # 如果自动保存成功，附带保存信息
+            if save_result.get("success"):
+                result["auto_saved_state"] = save_result.get("path")
+            return result
         except Exception as e:
             logger.error(f"关闭会话 {session_id} 失败: {e}")
             return {
@@ -215,3 +286,158 @@ class BrowserManager:
             }
             for s in cls._sessions.values()
         ]
+
+    @classmethod
+    def save_session_state(cls, session_id: str, path: str) -> dict[str, Any]:
+        """
+        保存指定会话的浏览器状态到文件
+
+        Args:
+            session_id: 会话ID
+            path: 状态文件保存路径
+
+        Returns:
+            包含保存结果的字典
+        """
+        session = cls.get_session(session_id)
+        if not session:
+            return {
+                "success": False,
+                "error": f"会话不存在: {session_id}",
+            }
+        return session.save_state(path)
+
+    @classmethod
+    def list_saved_states(cls, directory: str) -> list[str]:
+        """
+        扫描目录下的浏览器状态文件
+
+        查找指定目录中所有 .json 格式的状态文件。
+
+        Args:
+            directory: 要扫描的目录路径
+
+        Returns:
+            匹配的状态文件路径列表
+        """
+        try:
+            pattern = os.path.join(directory, "*.json")
+            files = glob.glob(pattern)
+            return sorted(files)
+        except Exception as e:
+            logger.error(f"扫描状态文件失败: {e}")
+            return []
+
+    @classmethod
+    def auto_save_state(cls, session_id: str) -> dict[str, Any]:
+        """
+        自动保存指定会话状态到默认目录
+
+        保存会话的 cookies 和 localStorage 到 DEFAULT_STATE_DIR 目录，
+        文件命名格式为 state_{session_id}_{timestamp}.json。
+        自动清理旧状态文件，只保留最近 MAX_STATE_FILES 个。
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            包含保存结果的字典，成功时包含 path 字段
+        """
+        session = cls.get_session(session_id)
+        if not session:
+            return {
+                "success": False,
+                "error": f"会话不存在: {session_id}",
+            }
+
+        try:
+            # 确保状态目录存在
+            state_dir = cls.DEFAULT_STATE_DIR
+            os.makedirs(state_dir, exist_ok=True)
+
+            # 生成状态文件路径
+            timestamp = int(time.time())
+            filename = f"state_{session_id}_{timestamp}.json"
+            state_path = os.path.join(state_dir, filename)
+
+            # 保存状态
+            save_result = session.save_state(state_path)
+            if not save_result.get("success"):
+                logger.warning(f"自动保存会话 {session_id} 状态失败: {save_result.get('error')}")
+                return save_result
+
+            # 清理旧状态文件，只保留最近的 MAX_STATE_FILES 个
+            cls._cleanup_old_state_files(state_dir)
+
+            logger.info(f"自动保存会话 {session_id} 状态到: {state_path}")
+            return {"success": True, "path": state_path}
+
+        except Exception as e:
+            # 保存失败不影响关闭流程，仅记录警告
+            logger.warning(f"自动保存会话 {session_id} 状态异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    @classmethod
+    def auto_load_state(cls) -> str | None:
+        """
+        从默认状态目录加载最新的状态文件
+
+        扫描 DEFAULT_STATE_DIR 目录，返回最新的状态文件路径。
+        按文件修改时间排序，返回最新的一个。
+
+        Returns:
+            最新的状态文件路径，如不存在返回 None
+        """
+        state_dir = cls.DEFAULT_STATE_DIR
+        if not os.path.isdir(state_dir):
+            return None
+
+        try:
+            # 查找所有状态文件
+            pattern = os.path.join(state_dir, "state_*.json")
+            state_files = glob.glob(pattern)
+
+            if not state_files:
+                return None
+
+            # 按修改时间排序，取最新的
+            state_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+            latest_file = state_files[0]
+
+            logger.info(f"找到最新的浏览器状态文件: {latest_file}")
+            return latest_file
+
+        except Exception as e:
+            logger.warning(f"加载浏览器状态文件失败: {e}")
+            return None
+
+    @classmethod
+    def _cleanup_old_state_files(cls, state_dir: str) -> None:
+        """
+        清理旧的状态文件，只保留最新的 MAX_STATE_FILES 个
+
+        按文件修改时间排序，删除超出数量限制的旧文件。
+
+        Args:
+            state_dir: 状态文件目录路径
+        """
+        try:
+            pattern = os.path.join(state_dir, "state_*.json")
+            state_files = glob.glob(pattern)
+
+            if len(state_files) <= cls.MAX_STATE_FILES:
+                return
+
+            # 按修改时间排序（最新在前）
+            state_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+
+            # 删除超出数量的旧文件
+            for old_file in state_files[cls.MAX_STATE_FILES:]:
+                try:
+                    os.remove(old_file)
+                    logger.info(f"清理旧状态文件: {old_file}")
+                except Exception as e:
+                    logger.warning(f"清理旧状态文件失败: {old_file}, 错误: {e}")
+
+        except Exception as e:
+            logger.warning(f"清理旧状态文件异常: {e}")

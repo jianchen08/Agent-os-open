@@ -12,7 +12,7 @@ import { useMemo } from 'react'
 import { toolCallToActivity } from '@/utils/activityConverter'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
-import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
+import type { ContentBlock, Message, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
  * 渲染片段类型
@@ -20,7 +20,7 @@ import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
 export type RenderFragment =
   | {
       type: 'thinking'
-      thinking: import('@/types/models').ThinkingContent
+      thinking: ThinkingContent
       key: string
       sourceId: string
     }

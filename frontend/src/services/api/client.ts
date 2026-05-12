@@ -10,8 +10,8 @@
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { API_BASE_URL, API_TIMEOUT, API_ENDPOINTS } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
-import { triggerAuthExpired } from '../authCallbacks'
 import { isRetryableError } from '../../utils/retry'
+import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
 import type { ApiError, RefreshResponse } from '../../types/api'
 
@@ -284,16 +284,19 @@ apiClient.interceptors.response.use(
       return apiClient(originalRequest)
     }
 
-    // ✅ 判断是否应该静默处理某些 404 错误
+    // 判断是否应该静默处理某些 404 错误
     // 这些错误通常发生在：
     // 1. 消息刚创建，数据库还未保存完成
     // 2. 消息已被删除
     // 3. 临时消息 ID 更新后，数据库还未更新
+    // 4. 子管道消息尚不存在（子 Agent 未开始执行）
+    const requestUrl = error.config?.url || ''
     const shouldSilentIgnore =
       error.response?.status === 404 &&
       (errorMessage.includes('消息不存在') ||
         errorMessage.includes('[VALIDATION] 消息不存在') ||
-        errorMessage.includes('不存在'))
+        errorMessage.includes('不存在') ||
+        requestUrl.includes('/messages'))
 
     if (shouldSilentIgnore) {
       // 静默处理，不上报错误
@@ -310,7 +313,6 @@ apiClient.interceptors.response.use(
             ? ErrorType.VALIDATION
             : ErrorType.NETWORK
 
-    const requestUrl = error.config?.url || ''
     const isOptionalEndpoint = requestUrl.includes('/files/capabilities')
 
     if (!isOptionalEndpoint) {

@@ -10,7 +10,7 @@ description: |
   不是检查"代码有没有写"，而是模拟"用户真的去用"，用 bash_execute 真实运行来验证功能。
 
 # ===== 评估器配置 =====
-evaluator_id: function_verifier_agent
+evaluator_id: evaluator_function_verify_agent
 evaluator_type: agent
 
 default_config:
@@ -64,7 +64,7 @@ expected_input:
       required: false
     test_result:
       type: string
-      description: "测试执行结果（test_check 的输出）"
+      description: "测试执行结果"
       required: false
     context:
       type: object
@@ -276,8 +276,6 @@ when_to_use:
   - 需要发现执行 Agent 自测遗漏的场景
   - 需要确认功能在真实运行环境下正常工作
 when_not_use:
-  - 只需要检查代码规范（使用 code_check）
-  - 只需要检查测试是否通过（使用 test_check）
   - 只需要评估文本/文档质量（使用 semantic_check）
   - 不涉及代码实现的任务（如纯翻译、纯文档编写）
 examples:
@@ -319,7 +317,6 @@ default_weight: 2.0
 level: 3
 includes:
   - file_check
-  - test_check
 requires: []
 
 # ===== 元数据 =====

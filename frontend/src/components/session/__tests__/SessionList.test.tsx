@@ -8,8 +8,8 @@
  * - AC-1.3-4: 兼容现有功能（删除、编辑、复制、星标）
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within, act } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionList } from '../SessionList'
 import type { Session } from '@/types'
 

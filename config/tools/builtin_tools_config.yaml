@@ -146,18 +146,6 @@ tools:
   - search
   - internet
   - mcp
-- name: evaluate
-  description: 评估工具：提供Schema验证、格式检查、非空检查、JSON验证和自定义验证功能。支持操作：validate_schema(验证JSON
-    Schema)、check_format(检查字符串格式如邮箱/URL/日期)、check_not_empty(验证必填字段非空)、validate_json(验证JSON格式)、custom_validation(自定义规则验证)。Schema验证使用jsonschema库，需符合JSON
-    Schema Draft 7规范。
-  category: evaluation
-  level: system
-  requires_approval: false
-  dangerous_operations: []
-  tags:
-  - validation
-  - evaluation
-  - schema
 - name: resource_search
   description: 搜索系统内 Agent、工具、Skill 资源。空结果是正常的，不要重复搜索。simple=列出匹配资源；detailed=按精确名称加载资源（tool会动态注入，支持逗号分隔批量）。
   category: search
@@ -320,7 +308,6 @@ permission_policies:
     - enhanced_search
     - fetch
     - web_search
-    - evaluate
     - resource_search
     - yaml_validate
     - schema_evaluator
@@ -346,7 +333,6 @@ permission_policies:
     - file_read
     - file_write
     - bash_execute
-    - evaluate
     - yaml_validate
     - schema_evaluator
     - resource_evaluator

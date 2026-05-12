@@ -12,7 +12,7 @@
  * - subscribe(event, handler) - 订阅事件
  * - unsubscribe(event, handler) - 取消订阅事件
  * - send(message) - 发送通用 WebSocket 消息
- * - sendUserInput(content, attachments?, enableThinking?, parentRecordId?) - 发送用户输入
+ * - sendUserInput(content, attachments?, enableThinking?, pipelineId?) - 发送用户输入
  * - sendApproval(decision, reason?, modifications?) - 发送审批决策
  * - sendHeartbeat() - 发送心跳
  * - sendCancel(reason?) - 发送取消请求
@@ -43,6 +43,7 @@ import {
   createStandardMessage,
 } from '@/types/websocket'
 import { loggers } from '@/utils/logger'
+import { generateUUID } from '@/utils/uuid'
 import { EnhancedMessageQueue, MessagePriority } from './EnhancedMessageQueue'
 import { type WebSocketErrorHandler, createWebSocketErrorHandler } from './errorHandler'
 import { HeartbeatManager } from './HeartbeatManager'
@@ -496,7 +497,7 @@ export class WebSocketService {
    * @param content 用户输入内容
    * @param attachments 文件附件列表
    * @param enableThinking 是否启用思考模式
-   * @param parentRecordId 父执行记录 ID
+   * @param pipelineId 目标管道 ID（子 Tab 发消息时使用）
    * @returns 生成的消息 ID，失败返回 null
    */
   async sendUserInput(
@@ -507,17 +508,17 @@ export class WebSocketService {
       name: string
     }>,
     enableThinking?: boolean,
-    parentRecordId?: string,
+    pipelineId?: string,
   ): Promise<{ messageId: string } | null> {
-    const messageId = crypto.randomUUID()
+    const messageId = generateUUID()
 
     loggers.websocket.info(
       '发送用户输入:',
       content.substring(0, 50) + (content.length > 50 ? '...' : ''),
       '思考模式:',
       enableThinking,
-      'parentRecordId:',
-      parentRecordId,
+      'pipelineId:',
+      pipelineId,
     )
 
     const success = await this.sendStandardMessage<UserInputMessage>(
@@ -526,7 +527,7 @@ export class WebSocketService {
         content,
         ...(attachments && { attachments }),
         ...(enableThinking !== undefined && { enable_thinking: enableThinking }),
-        ...(parentRecordId && { parent_record_id: parentRecordId }),
+        ...(pipelineId && { pipeline_id: pipelineId }),
       },
       { messageId },
     )
@@ -965,6 +966,10 @@ export class WebSocketService {
 
         case 'iteration':
           this.emit(WS_SERVER_EVENTS.ITERATION_START, data)
+          break
+
+        case WS_SERVER_EVENTS.STREAM_KEEPALIVE:
+          this.emit(WS_SERVER_EVENTS.STREAM_KEEPALIVE, data)
           break
 
         default:

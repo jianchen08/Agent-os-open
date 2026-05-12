@@ -5,8 +5,8 @@
  */
 
 import { create } from 'zustand'
-import type { Workspace, FileTreeNode } from '@/types/workspace'
 import type { Artifact } from '@/types/artifact'
+import type { Workspace, FileTreeNode } from '@/types/workspace'
 
 interface WorkspaceState {
   /** 以 container_task_id 为 key 的工作空间缓存 */

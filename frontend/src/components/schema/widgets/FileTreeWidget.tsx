@@ -8,7 +8,6 @@
  * @module FileTreeWidget
  */
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react'
 import {
   ChevronRight,
   FolderOpen,
@@ -25,9 +24,14 @@ import {
   PlayCircle,
   Loader2,
   AlertCircle,
+  MessageSquare,
+  ExternalLink,
 } from 'lucide-react'
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import apiClient from '@/services/api/client'
+import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
 /** 树节点数据结构 */
 interface TreeNodeData {
@@ -85,6 +89,8 @@ interface TreeWidgetConfig {
   showSearch?: boolean
   /** 节点点击回调（用于外部处理节点点击事件） */
   onNodeClick?: (node: TreeNodeData) => void
+  /** 文件节点点击回调（用于打开文件编辑器） */
+  onFileClick?: (filePath: string, fileName: string) => void
   /** 会话 ID（用于按会话过滤/加载任务数据） */
   sessionId?: string
 }
@@ -144,6 +150,25 @@ function getNodeField(node: TreeNodeData, field: string): unknown {
 }
 
 /**
+ * 获取节点稳定唯一标识
+ *
+ * 优先使用 node.id，其次使用 node.path（文件树场景），
+ * 最后使用 node.title/node.name，确保每次渲染 ID 一致。
+ * 避免使用 Math.random() 导致 expandedIds 无法匹配。
+ *
+ * @param node - 树节点
+ * @returns 稳定的节点 ID 字符串
+ */
+function getStableNodeId(node: TreeNodeData): string {
+  if (node.id) return node.id
+  const path = node.path as string | undefined
+  if (path) return path
+  const title = (node.title ?? node.name) as string | undefined
+  if (title) return String(title)
+  return String(Math.random())
+}
+
+/**
  * 根据状态配置获取状态图标组件
  *
  * @param status - 节点状态
@@ -199,7 +224,7 @@ function collectExpandedIds(
     const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
     if (!children || children.length === 0) continue
 
-    const nodeId = node.id ?? String(node.title ?? Math.random())
+    const nodeId = getStableNodeId(node)
     if (maxLevel === -1 || currentLevel < maxLevel) {
       ids.add(nodeId)
       const childIds = collectExpandedIds(children, childrenField, maxLevel, currentLevel + 1)
@@ -210,6 +235,58 @@ function collectExpandedIds(
   }
 
   return ids
+}
+
+/**
+ * 递归收集节点及其所有后代节点的 ID
+ *
+ * 用于级联开关：当切换一个节点时，其所有子节点也需要同步切换
+ *
+ * @param nodes - 树节点数组
+ * @param childrenField - 子节点字段名
+ * @returns 所有后代节点 ID 的数组
+ */
+function collectDescendantIds(
+  nodes: TreeNodeData[],
+  childrenField: string,
+): string[] {
+  const ids: string[] = []
+  for (const node of nodes) {
+    const childId = getStableNodeId(node)
+    ids.push(childId)
+    const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
+    if (children && children.length > 0) {
+      ids.push(...collectDescendantIds(children, childrenField))
+    }
+  }
+  return ids
+}
+
+/**
+ * 在树中查找目标节点的直接子节点列表
+ *
+ * @param nodes - 树节点数组
+ * @param targetId - 目标节点 ID
+ * @param childrenField - 子节点字段名
+ * @returns 目标节点的子节点数组，未找到则返回 null
+ */
+function findChildrenById(
+  nodes: TreeNodeData[],
+  targetId: string,
+  childrenField: string,
+): TreeNodeData[] | null {
+  for (const node of nodes) {
+    const nodeId = getStableNodeId(node)
+    if (nodeId === targetId) {
+      return (getNodeField(node, childrenField) as TreeNodeData[] | undefined) ?? null
+    }
+    const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
+    if (children) {
+      const result = findChildrenById(children, targetId, childrenField)
+      if (result !== null) return result
+    }
+  }
+  return null
 }
 
 /**
@@ -283,6 +360,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const statusConfig = { ...DEFAULT_STATUS_CONFIG, ...(config.statusConfig ?? {}) }
   /** 节点点击回调 */
   const onNodeClick = config.onNodeClick ?? (rawProps.onNodeClick as ((node: TreeNodeData) => void) | undefined)
+  /** 文件节点点击回调 */
+  const onFileClick = config.onFileClick ?? (rawProps.onFileClick as ((filePath: string, fileName: string) => void) | undefined)
   /** 会话 ID */
   const sessionId = config.sessionId ?? (rawProps.sessionId as string | undefined)
   /**
@@ -296,18 +375,27 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [remoteTreeData, setRemoteTreeData] = useState<TreeNodeData[]>([])
   /** 是否正在加载远程数据 */
   const [isLoadingRemote, setIsLoadingRemote] = useState(false)
+  /** 内部刷新计数器（暂停/恢复操作后递增以触发重新加载） */
+  const [internalRefresh, setInternalRefresh] = useState(0)
+  /** 标记是否已完成首次加载，用于区分首次加载与刷新，避免刷新时闪烁 loading */
+  const hasLoadedRef = useRef(false)
+
+  /**
+   * 触发树数据刷新（暂停/恢复操作后调用）
+   */
+  const triggerRefresh = useCallback(() => {
+    setInternalRefresh((prev) => prev + 1)
+  }, [])
 
   /**
    * 从 API 加载任务树数据
    *
-   * BUG-FIX-fix_20260505: 修复任务树无法加载的问题
-   * 问题根因: 原逻辑在 sessionId 为 null 时直接清空数据并跳过加载，
-   *          导致用户未选择会话时任务树始终为空。
-   * 修复方案: 仅在 dataSource 未配置时跳过加载；sessionId 为 null 时
-   *          仍发起请求但不传 session_id 参数，由后端返回全部任务数据。
-   *
-   * @param sessionId - 当前会话 ID，为 null 时不传过滤参数
-   * @param rawProps.dataSource - 数据源配置，未配置时跳过加载
+   * BUG-FIX-fix_20260512_flicker:
+   * 问题根因: 每次 WS 事件（execution_done、sub_agent_created 等）都会
+   *          bump workspaceDataVersion → refreshKey 变化 → 触发本 effect →
+   *          setIsLoadingRemote(true) 导致 loading 闪烁。
+   * 修复方案: 首次加载显示 loading；后续刷新（已有数据）时跳过 loading 状态切换，
+   *          并添加 500ms 防抖，合并短时间内的多次刷新请求为一次。
    */
   useEffect(() => {
     if (!rawProps.dataSource) {
@@ -317,19 +405,11 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
     let cancelled = false
 
-    /**
-     * 通过通用数据协议解析 dataSource 获取 API 端点并加载树数据
-     *
-     * BUG-FIX-fix_20260507_datasource_protocol:
-     * 问题根因: 原逻辑硬编码 API_ENDPOINTS.PROJECTS.TREE，无法适配不同模块的数据源；
-     *          rawProps.dataSource（如 "task-manager://tree"）仅被当作布尔值使用，未真正解析。
-     * 修复方案: 使用 parseDataSourceRef() + resolveDataSource() 解析协议字符串得到实际 API 端点，
-     *          将 sessionId 作为参数附加到请求中。
-     */
     const loadTreeData = async () => {
-      setIsLoadingRemote(true)
+      if (!hasLoadedRef.current) {
+        setIsLoadingRemote(true)
+      }
       try {
-        // 通过通用数据协议解析 dataSource 获取 API 端点
         const ref = parseDataSourceRef(rawProps.dataSource as string)
         const resolved = resolveDataSource(ref)
         const params: Record<string, string> = { ...resolved.params as Record<string, string> }
@@ -339,11 +419,25 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         const response = await apiClient.get(resolved.endpoint, { params })
         if (cancelled) return
         const raw = response.data
-        const tree = raw?.children ?? []
+        const tree = raw?.children ?? raw?.tree ?? []
         const flat = raw?.items ?? []
-        setRemoteTreeData(tree.length > 0 ? tree : flat)
+        const filteredData = tree.length > 0 ? tree : flat
+
+        if (filteredData.length > 0) {
+          setRemoteTreeData(filteredData)
+        } else if (sessionId) {
+          const fallbackParams: Record<string, string> = { ...resolved.params as Record<string, string> }
+          const fallbackResp = await apiClient.get(resolved.endpoint, { params: fallbackParams })
+          if (cancelled) return
+          const fallbackRaw = fallbackResp.data
+          const fallbackTree = fallbackRaw?.children ?? fallbackRaw?.tree ?? []
+          const fallbackFlat = fallbackRaw?.items ?? []
+          setRemoteTreeData(fallbackTree.length > 0 ? fallbackTree : fallbackFlat)
+        } else {
+          setRemoteTreeData([])
+        }
+        hasLoadedRef.current = true
       } catch {
-        // 静默失败，使用直接传入的数据
         if (!cancelled) {
           setRemoteTreeData([])
         }
@@ -354,12 +448,21 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       }
     }
 
-    loadTreeData()
+    const debounceMs = hasLoadedRef.current ? 500 : 0
+    const timer = setTimeout(() => {
+      if (!cancelled) loadTreeData()
+    }, debounceMs)
 
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
-  }, [sessionId, rawProps.dataSource, refreshKey])
+  }, [sessionId, rawProps.dataSource, refreshKey, internalRefresh])
+
+  /** sessionId 变更时重置首次加载标记 */
+  useEffect(() => {
+    hasLoadedRef.current = false
+  }, [sessionId])
 
   /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
   const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
@@ -370,6 +473,57 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合 */
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  /** 节点启用/禁用状态映射（true=启用，false=禁用） */
+  const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>({})
+  /** 已知的任务 ID 集合（用于检测新提交的任务并自动开启开关） */
+  const knownTaskIdsRef = useRef<Set<string>>(new Set())
+  /** 正在切换启用/禁用状态的节点 ID 集合 */
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set())
+
+  /**
+   * 检测新提交的任务并自动开启开关。
+   *
+   * 逻辑：首次加载时仅记录所有任务 ID（不开启开关，重启后默认全部关闭）；
+   * 后续数据刷新时，发现新增的任务 ID 则自动开启其开关（新提交的任务直接运行）。
+   */
+  useEffect(() => {
+    if (effectiveData.length === 0) return
+
+    const currentIds = new Set<string>()
+    const collectIds = (nodes: TreeNodeData[]) => {
+      for (const node of nodes) {
+        currentIds.add(getStableNodeId(node))
+        const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
+        if (children) collectIds(children)
+      }
+    }
+    collectIds(effectiveData)
+
+    const known = knownTaskIdsRef.current
+    if (known.size === 0) {
+      knownTaskIdsRef.current = currentIds
+      return
+    }
+
+    const newIds: string[] = []
+    for (const id of currentIds) {
+      if (!known.has(id)) {
+        newIds.push(id)
+      }
+    }
+
+    if (newIds.length > 0) {
+      setEnabledMap((prev) => {
+        const next = { ...prev }
+        for (const id of newIds) {
+          next[id] = true
+        }
+        return next
+      })
+    }
+
+    knownTaskIdsRef.current = currentIds
+  }, [effectiveData, nodeChildrenField])
 
   /**
    * 当 effectiveData 变化时重新计算展开节点
@@ -379,13 +533,13 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
    * 但远程加载场景下 allData 为空，导致节点全部折叠。
    * 现改为监听 effectiveData 变化，数据加载后自动展开。
    */
-  const [prevDataRef, setPrevDataRef] = useState<TreeNodeData[]>([])
+  const prevDataRef = useRef<TreeNodeData[]>([])
   useEffect(() => {
-    if (effectiveData !== prevDataRef && effectiveData.length > 0) {
-      setPrevDataRef(effectiveData)
+    if (effectiveData !== prevDataRef.current && effectiveData.length > 0) {
+      prevDataRef.current = effectiveData
       setExpandedIds(collectExpandedIds(effectiveData, nodeChildrenField, expandLevel))
     }
-  }, [effectiveData, prevDataRef, nodeChildrenField, expandLevel])
+  }, [effectiveData, nodeChildrenField, expandLevel])
 
   /** 过滤后的数据 */
   const filteredData = useMemo(() => {
@@ -426,6 +580,66 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchKeyword(e.target.value)
   }, [])
+
+  /**
+   * 级联切换节点启用/禁用状态（调用后端 API + 刷新数据）
+   *
+   * 开关状态完全由后端任务状态驱动：
+   * - running/pending/evaluating → ON
+   * - paused/completed/failed → OFF
+   *
+   * 切换时调用后端 pause/resume API，成功后刷新树数据，
+   * UI 状态自然反映后端最新状态，不存在前后端不一致问题。
+   *
+   * @param nodeId - 目标节点 ID
+   * @param enabled - 目标启用状态
+   */
+  const handleToggleEnabled = useCallback(
+    async (nodeId: string, enabled: boolean) => {
+      setTogglingIds((prev) => {
+        const next = new Set(prev)
+        next.add(nodeId)
+        const children = findChildrenById(effectiveData, nodeId, nodeChildrenField)
+        if (children && children.length > 0) {
+          const descendantIds = collectDescendantIds(children, nodeChildrenField)
+          for (const id of descendantIds) {
+            next.add(id)
+          }
+        }
+        return next
+      })
+
+      try {
+        if (enabled) {
+          await resumeTask(nodeId)
+        } else {
+          await pauseTask(nodeId)
+        }
+        const children = findChildrenById(effectiveData, nodeId, nodeChildrenField)
+        if (children && children.length > 0) {
+          const descendantIds = collectDescendantIds(children, nodeChildrenField)
+          const apiCall = enabled ? resumeTask : pauseTask
+          await Promise.allSettled(descendantIds.map((id) => apiCall(id)))
+        }
+        triggerRefresh()
+      } catch {
+      } finally {
+        setTogglingIds((prev) => {
+          const next = new Set(prev)
+          next.delete(nodeId)
+          const children = findChildrenById(effectiveData, nodeId, nodeChildrenField)
+          if (children && children.length > 0) {
+            const descendantIds = collectDescendantIds(children, nodeChildrenField)
+            for (const id of descendantIds) {
+              next.delete(id)
+            }
+          }
+          return next
+        })
+      }
+    },
+    [effectiveData, nodeChildrenField, triggerRefresh],
+  )
 
   /** 空状态渲染 */
   if (effectiveData.length === 0 && !isLoadingRemote) {
@@ -479,7 +693,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         ) : (
           filteredData.map((node) => (
             <TreeNode
-              key={node.id ?? String(node.title ?? Math.random())}
+              key={getStableNodeId(node)}
               node={node}
               depth={0}
               expandedIds={expandedIds}
@@ -494,6 +708,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               onToggle={handleToggle}
               onSelect={handleSelect}
               onNodeClick={onNodeClick}
+              onFileClick={onFileClick}
+              onRefresh={triggerRefresh}
+              togglingIds={togglingIds}
+              onToggleEnabled={handleToggleEnabled}
             />
           ))
         )}
@@ -530,8 +748,16 @@ interface TreeNodeProps {
   onToggle: (nodeId: string) => void
   /** 选中回调 */
   onSelect: (nodeId: string) => void
-  /** 节点点击回调（用于外部处理节点点击事件） */
+  /** 节点点击回调（用于打开对话） */
   onNodeClick?: (node: TreeNodeData) => void
+  /** 文件节点点击回调（用于打开文件编辑器） */
+  onFileClick?: (filePath: string, fileName: string) => void
+  /** 数据刷新回调（暂停/恢复操作后触发） */
+  onRefresh?: () => void
+  /** 正在切换中的节点 ID 集合 */
+  togglingIds: Set<string>
+  /** 级联切换启用/禁用回调 */
+  onToggleEnabled: (nodeId: string, enabled: boolean) => void
 }
 
 /**
@@ -587,36 +813,50 @@ function TreeNode({
   onToggle,
   onSelect,
   onNodeClick,
+  onFileClick,
+  onRefresh,
+  togglingIds,
+  onToggleEnabled,
 }: TreeNodeProps): React.ReactNode {
-  const nodeId = node.id ?? String(node.title ?? Math.random())
+  const nodeId = getStableNodeId(node)
   const title = String(getNodeField(node, nodeTitleField) ?? '未命名')
   const icon = getNodeField(node, nodeIconField) as string | undefined
   const status = getNodeField(node, nodeStatusField) as string | undefined
   const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
   const progress = node.progress as number | undefined
   const description = node.description as string | undefined
-  const agentName = node.agent_name as string | undefined
   const priority = node.priority as string | undefined
   const createdAt = node.created_at as string | undefined
   const error = node.error as string | undefined
-
+  const pipelineRunId = node.pipeline_run_id as string | undefined
+  const wsMode = node.ws_mode as string | undefined
+  const wsPath = node.ws_path as string | undefined
   const hasChildren = Array.isArray(children) && children.length > 0
   const isExpanded = expandedIds.has(nodeId)
   const isSelected = selectedId === nodeId
+  const taskScope = node.task_scope as string | undefined
+  const isContainer = taskScope === 'container'
+  const hasPipeline = !!pipelineRunId && !isContainer
+  const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
+
+  /** 当前节点是否启用（由后端任务状态驱动） */
+  const ACTIVE_STATUSES = new Set(['running', 'pending', 'in_progress', 'evaluating', 'planning'])
+  const isEnabled = ACTIVE_STATUSES.has(status ?? '')
+  const isToggling = togglingIds.has(nodeId)
 
   /** 是否有元信息需要显示第二行 */
-  const hasMeta =
-    (agentName && agentName.trim().length > 0) ||
-    (error && error.trim().length > 0)
+  const hasMeta = error && error.trim().length > 0
 
   const handleClick = useCallback(() => {
     onSelect(nodeId)
     if (hasChildren) {
       onToggle(nodeId)
-    } else if (onNodeClick) {
-      onNodeClick(node)
+    } else if (onFileClick) {
+      // 文件节点点击：使用 path 字段作为文件路径，fallback 到 nodeId
+      const filePath = (node.path as string) ?? nodeId
+      onFileClick(filePath, title)
     }
-  }, [nodeId, hasChildren, onToggle, onSelect, onNodeClick, node])
+  }, [nodeId, hasChildren, onToggle, onSelect, onFileClick, node, title])
 
   const handleChevronClick = useCallback(
     (e: React.MouseEvent) => {
@@ -624,6 +864,66 @@ function TreeNode({
       onToggle(nodeId)
     },
     [nodeId, onToggle],
+  )
+
+  /**
+   * 处理对话按钮点击
+   *
+   * 仅当节点拥有 pipeline_run_id 时才触发对话打开，
+   * 容器任务没有管道则不显示此按钮。
+   */
+  const handleConversationClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (onNodeClick && hasPipeline) {
+        onNodeClick(node)
+      }
+    },
+    [onNodeClick, hasPipeline, node],
+  )
+
+  /**
+   * 处理打开工作空间按钮点击
+   *
+   * 通过 component-based tab 创建文件树标签，数据由 FileTreeWidget
+   * 自身通过 dataSource 协议（workspace://{containerId}/file-tree）加载。
+   */
+  const handleOpenWorkspace = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (!nodeId || !wsPath) return
+      try {
+        const layoutStore = useLayoutModeStore.getState()
+        const tabId = `ws-tree-${nodeId}`
+        layoutStore.addWorkspaceTab({
+          id: tabId,
+          title: title || '工作空间',
+          icon: '📁',
+          moduleId: '__dynamic__',
+          component: 'file_tree',
+          dataSource: `workspace://${nodeId}`,
+          isActive: true,
+          isPinned: false,
+        })
+      } catch {
+        // 静默失败
+      }
+    },
+    [nodeId, wsPath, title],
+  )
+
+  /**
+   * 处理开关切换点击
+   *
+   * 级联切换：将自身及所有下级子任务统一设置为新状态
+   */
+  const handleEnabledToggle = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (!nodeId) return
+      onToggleEnabled(nodeId, !isEnabled)
+    },
+    [nodeId, isEnabled, onToggleEnabled],
   )
 
   const statusInfo = showStatus && status ? getStatusIcon(status, statusConfig) : null
@@ -637,8 +937,11 @@ function TreeNode({
   /** 格式化创建时间 */
   const formattedTime = formatTime(createdAt)
 
+  /** 是否有操作按钮需要显示 */
+  const hasActions = hasPipeline || hasWorkspace
+
   return (
-    <div>
+    <div className={!isEnabled ? 'opacity-50' : ''}>
       <div
         className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-accent ${
           isSelected
@@ -649,6 +952,21 @@ function TreeNode({
         onClick={handleClick}
       >
         <div className="flex shrink-0 items-center pt-0.5">
+          {/* 开关按钮：始终显示 */}
+          <button
+            className={`mr-1.5 flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+              isEnabled
+                ? 'bg-status-info justify-end'
+                : 'bg-muted justify-start'
+            }`}
+            onClick={handleEnabledToggle}
+            title={isEnabled ? '点击禁用（将级联禁用所有子任务）' : '点击启用'}
+            tabIndex={-1}
+          >
+            <div className={`h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+              isEnabled ? '' : ''
+            }`} />
+          </button>
           <button
             className={`mr-1 flex h-5 w-5 items-center justify-center rounded transition-transform ${
               hasChildren
@@ -709,11 +1027,6 @@ function TreeNode({
                 </p>
               )}
               <div className="flex items-center gap-2 text-[10px] text-muted-foreground/50">
-                {agentName && agentName.trim().length > 0 && (
-                  <span className="text-muted-foreground/70 truncate max-w-[120px]">
-                    🤖 {agentName}
-                  </span>
-                )}
                 {priorityConf && priority !== 'normal' && (
                   <span className={priorityConf.color}>{priorityConf.label}</span>
                 )}
@@ -738,13 +1051,42 @@ function TreeNode({
             </div>
           )}
         </div>
+
+        {/* 操作按钮区域 */}
+        {hasActions && (
+          <div className="flex shrink-0 items-center gap-0.5 pr-2 pt-0.5">
+            {/* 对话按钮：仅当节点拥有 pipeline_run_id 时显示 */}
+            {hasPipeline && (
+              <button
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={handleConversationClick}
+                title="打开对话"
+                tabIndex={-1}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+              </button>
+            )}
+
+            {/* 打开工作空间按钮：当节点具有独立工作空间时显示 */}
+            {hasWorkspace && (
+              <button
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={handleOpenWorkspace}
+                title={`打开工作空间: ${wsPath}`}
+                tabIndex={-1}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {hasChildren && isExpanded && (
         <div>
           {children!.map((child) => (
             <TreeNode
-              key={child.id ?? String(child.title ?? Math.random())}
+              key={getStableNodeId(child)}
               node={child}
               depth={depth + 1}
               expandedIds={expandedIds}
@@ -759,6 +1101,10 @@ function TreeNode({
               onToggle={onToggle}
               onSelect={onSelect}
               onNodeClick={onNodeClick}
+              onFileClick={onFileClick}
+              onRefresh={onRefresh}
+              enabledMap={enabledMap}
+              onToggleEnabled={onToggleEnabled}
             />
           ))}
         </div>

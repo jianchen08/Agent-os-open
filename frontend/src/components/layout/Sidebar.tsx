@@ -16,18 +16,20 @@
 import { ChevronLeft, ChevronRight, Loader2, MessageSquare, Plus, Search, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { NewSessionModal } from '@/components/session/NewSessionModal'
+import { SessionEditModal } from '@/components/session/SessionEditModal'
+import { SessionList } from '@/components/session/SessionList'
+import { SessionSearch } from '@/components/session/SessionSearch'
 import { Button } from '@/components/ui/button'
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import type { Session } from '@/types'
-import { NewSessionModal } from '@/components/session/NewSessionModal'
-import { SessionEditModal } from '@/components/session/SessionEditModal'
-import { SessionList } from '@/components/session/SessionList'
-import { SessionSearch } from '@/components/session/SessionSearch'
 
 interface SidebarProps {
   /** 是否为移动端 */
@@ -127,11 +129,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     })
   }, [])
 
+  // 监听 WS session_update 事件，事件驱动刷新会话列表
   useEffect(() => {
-    const intervalId = setInterval(() => {
+    const handleSessionUpdate = () => {
       fetchSessions({ background: true }).catch(() => {})
-    }, 30000)
-    return () => clearInterval(intervalId)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.SESSION_UPDATE, handleSessionUpdate)
+    return () => {
+      globalWS.unsubscribe(WS_SERVER_EVENTS.SESSION_UPDATE, handleSessionUpdate)
+    }
   }, [fetchSessions])
 
   // 根据搜索关键词过滤会话 - 使用 useMemo 缓存计算结果

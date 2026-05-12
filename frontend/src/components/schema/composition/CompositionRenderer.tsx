@@ -8,11 +8,11 @@
  */
 
 import React from 'react'
-import type { ResolvedNode, ResolvedComponent } from '@/services/schema/CompositionEngine'
-import { SplitLayout } from './SplitLayout'
-import { TabLayout } from './TabLayout'
 import { GridLayout } from './GridLayout'
+import { SplitLayout } from './SplitLayout'
 import { StackLayout } from './StackLayout'
+import { TabLayout } from './TabLayout'
+import type { ResolvedNode, ResolvedComponent } from '@/services/schema/CompositionEngine'
 
 /**
  * 组合渲染器属性

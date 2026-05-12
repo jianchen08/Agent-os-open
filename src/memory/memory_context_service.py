@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import logging
-import time as _time
 from typing import Any, Callable, Awaitable
 
 from memory.context_compressor import CompressionConfig, ContextCompressor
@@ -49,7 +48,6 @@ class MemoryContextService:
         _config: 服务配置
         _layers: 内存中的层级数据 {session_id: {layer: content}}
         _token_estimate_fn: token 估算函数
-        _last_compress_fail_time: 上次压缩失败的时间（防死循环）
     """
 
     _MAX_COMPRESS_ROUNDS = 2
@@ -69,9 +67,8 @@ class MemoryContextService:
             token_estimate_fn: token 估算函数
             llm_call_fn: LLM 调用函数（可选，支持后续通过 set_llm_call_fn 延迟注入）
         """
-        compression_config = CompressionConfig(
-            context_window=config.get("context_window", 128000) if config else 128000,
-            compress_trigger_ratio=config.get("compress_trigger_ratio", 0.5) if config else 0.5,
+        compression_config = CompressionConfig.from_yaml_config(
+            config.get("context_window", 128000) if config else 128000,
         )
         self._compressor = compressor or ContextCompressor(config=compression_config)
         self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.5}
@@ -83,10 +80,6 @@ class MemoryContextService:
 
         # 父执行记录 ID（用于上下文隔离）
         self.parent_record_id: str | None = None
-
-        # 压缩失败冷却
-        self._last_compress_fail_time: float = 0.0
-        self._compress_fail_cooldown: float = 60.0
 
         self._validate_config()
 
@@ -171,13 +164,6 @@ class MemoryContextService:
 
         # 3. 如果超过阈值，触发递进压缩
         if total_tokens > trigger_threshold:
-            now = _time.monotonic()
-            if now - self._last_compress_fail_time < self._compress_fail_cooldown:
-                logger.debug(
-                    "[MemoryContextService] 跳过压缩：冷却中 (距上次失败 %.0fs)",
-                    now - self._last_compress_fail_time,
-                )
-                return
             logger.info(
                 "[MemoryContextService] 触发压缩 | "
                 "total=%d, threshold=%d",
@@ -226,8 +212,7 @@ class MemoryContextService:
                 len(new_l1), len(new_l2),
             )
         except Exception as e:
-            self._last_compress_fail_time = _time.monotonic()
-            logger.warning("[MemoryContextService] 压缩失败: %s，保留原文（冷却 %.0fs）", e, self._compress_fail_cooldown)
+            logger.warning("[MemoryContextService] 压缩失败: %s，保留原文", e)
 
     def _calculate_budgets(self) -> dict[str, int]:
         """计算各层预算。
@@ -275,7 +260,7 @@ class MemoryContextService:
             logger.warning("[MemoryContextService] 跳过压缩：未提供 LLM 调用函数")
             return None
 
-        config = CompressionConfig(context_window=context_window)
+        config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = int(context_window * trigger_ratio)
 
@@ -463,7 +448,6 @@ class MemoryContextService:
                 old_msgs, previous_l1=previous_l1,
             )
         except Exception as exc:
-            self._last_compress_fail_time = _time.monotonic()
             logger.warning("[MemoryContextService] 压缩失败: %s", exc)
             return None
 

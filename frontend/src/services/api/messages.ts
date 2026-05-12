@@ -16,6 +16,7 @@
  */
 
 import apiClient from '@/services/api/client'
+import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
  * 消息响应类型（数据库驱动增强）
@@ -94,7 +95,7 @@ export interface MessageResponse {
 export function toMessage(
   raw: Record<string, unknown>,
   defaults?: { sessionId?: string; sequence?: number },
-): import('@/types/models').Message {
+): Message {
   // 支持多种字段命名
   const id = (raw.message_id || raw.id) as string
   const sessionId = ((raw.thread_id || raw.sessionId || defaults?.sessionId) as string) || ''
@@ -108,7 +109,7 @@ export function toMessage(
   const agentId = (raw.agentId || raw.agent_id) as string | undefined
 
   // 思考内容：优先从顶层 thinking 字段获取，其次从 metadata.thinkingContent 恢复
-  let thinking = raw.thinking as import('@/types/models').ThinkingContent | undefined
+  let thinking = raw.thinking as ThinkingContent | undefined
   if (!thinking) {
     const meta = raw.metadata as Record<string, unknown> | undefined
     const thinkingStr = (meta?.thinkingContent || meta?.thinking_content) as string | undefined
@@ -154,7 +155,7 @@ export function toMessage(
   }
 
   // toolCalls 转换：统一字段命名
-  let toolCalls: import('@/types/models').MessageToolCall[] | undefined
+  let toolCalls: MessageToolCall[] | undefined
   const rawToolCalls = (raw.toolCalls || metadata?.toolCalls) as
     | Array<Record<string, unknown>>
     | undefined
@@ -192,7 +193,7 @@ export function toMessage(
 /**
  * 将 API 响应转换为前端 Message 类型
  */
-export function toMessageFromApi(apiResponse: MessageResponse): import('@/types/models').Message {
+export function toMessageFromApi(apiResponse: MessageResponse): Message {
   return toMessage(apiResponse as unknown as Record<string, unknown>, {
     sequence: apiResponse.sequence,
   })

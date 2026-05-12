@@ -8,6 +8,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
+import { useInteractionStore } from '@/stores/interactionStore'
 import { InteractionCard } from './InteractionCard'
 
 interface InteractionPanelProps {
@@ -17,6 +18,7 @@ interface InteractionPanelProps {
 export function InteractionPanel({ sessionId }: InteractionPanelProps) {
   const { pendingInteractions, respondChoice, respondConversation, navigateToTab } =
     useInteractionHandler(sessionId)
+  const dismissInteraction = useInteractionStore((s) => s.dismissInteraction)
 
   const [submittingId, setSubmittingId] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -25,39 +27,42 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
     async (requestId: string, optionId: string) => {
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
+      dismissInteraction(requestId)
       try {
         await respondChoice(requestId, optionId)
       } finally {
         setSubmittingId(null)
       }
     },
-    [respondChoice, submittingId],
+    [respondChoice, submittingId, dismissInteraction],
   )
 
   const handleRespondText = useCallback(
     async (requestId: string, text: string) => {
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
+      dismissInteraction(requestId)
       try {
         await respondConversation(requestId, text)
       } finally {
         setSubmittingId(null)
       }
     },
-    [respondConversation, submittingId],
+    [respondConversation, submittingId, dismissInteraction],
   )
 
   const handleNavigateToTab = useCallback(
-    async (requestId: string, threadId: string) => {
+    async (requestId: string, threadId: string, title?: string, agentLevel?: string, interactionSessionId?: string) => {
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
+      dismissInteraction(requestId)
       try {
-        await navigateToTab(requestId, threadId)
+        await navigateToTab(requestId, threadId, title, agentLevel, interactionSessionId)
       } finally {
         setSubmittingId(null)
       }
     },
-    [navigateToTab, submittingId],
+    [navigateToTab, submittingId, dismissInteraction],
   )
 
   useEffect(() => {
@@ -83,8 +88,9 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
             handleRespondText(interaction.requestId, text)
           }
           onNavigateToTab={() =>
-            handleNavigateToTab(interaction.requestId, interaction.threadId)
+            handleNavigateToTab(interaction.requestId, interaction.threadId, interaction.title, interaction.agentLevel, interaction.sessionId)
           }
+          onDismiss={() => dismissInteraction(interaction.requestId)}
           isSubmitting={submittingId === interaction.requestId}
         />
       ))}

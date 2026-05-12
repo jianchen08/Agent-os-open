@@ -1,12 +1,12 @@
 import { create } from 'zustand'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { messageApi } from '@/services/api/messages'
 import { getMessages } from '@/services/api/session'
 import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
 import { WebSocketStatus } from '@/services/websocket/WebSocketService'
 import { loggers } from '@/utils/logger'
 import { useMessageVersionStore } from './messageVersionStore'
-import type { Message, RetryScope } from '@/types/models'
+import type { MessageVersion } from './messageVersionStore'
+import type { Message, RetryScope, Session } from '@/types/models'
 
 const logger = loggers.sessionStore
 
@@ -23,8 +23,12 @@ interface MessagePaginationState {
 }
 
 interface SessionState {
-  sessions: import('../types/models').Session[]
+  sessions: Session[]
   activeSessionId: string | null
+  /**
+   * 保留 messages 状态，供 retryMessage、版本管理等场景使用。
+   * 主消息数据已迁移到 pipelineMessageStore.messagesByPipeline。
+   */
   messages: Record<string, Message[]>
   isLoading: boolean
   deletingSessionIds: Set<string>
@@ -34,18 +38,7 @@ interface SessionState {
   messagePagination: Record<string, MessagePaginationState>
   _wsUnsubscribers: { cleanup: () => void } | null
 
-  addMessage: (sessionId: string, message: Message) => void
-  updateMessageContent: (
-    sessionId: string,
-    messageId: string,
-    content: string,
-    options?: { mode?: 'append' | 'replace' },
-  ) => void
   updateMessageFields: (sessionId: string, messageId: string, updates: Partial<Message>) => void
-  deleteMessage: (sessionId: string, messageId: string, includeTarget?: boolean) => void
-  deleteMessageFromList: (sessionId: string, messageId: string, deletedCount?: number) => void
-  getActiveSessionMessages: () => Message[]
-  setMessages: (sessionId: string, messages: Message[]) => void
   fetchMessages: (
     sessionId: string,
     options?: { limit?: number; before_sequence?: number; append?: boolean },
@@ -67,7 +60,7 @@ interface SessionState {
   getMessageVersions: (
     sessionId: string,
     messageId: string,
-  ) => import('./messageVersionStore').MessageVersion[]
+  ) => MessageVersion[]
 }
 
 export const useSessionStore = create<SessionState>()((set, get) => ({
@@ -81,126 +74,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   forceReconnect: false,
   messagePagination: {},
   _wsUnsubscribers: null,
-
-  addMessage: (sessionId: string, message: Message) => {
-    set((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
-
-      /**
-       * BUG-FIX-fix_20260507_duplicate_messages:
-       * 问题根因: WebSocket message_id (UUID) 与 API record_id (12位hex) 格式不一致
-       * 修复方案: 精确 ID 匹配 + 模糊匹配（角色 + 时间戳）
-       */
-      let existingIndex = sessionMessages.findIndex((m) => m.id === realMessageId)
-
-      // 精确匹配失败时，尝试模糊匹配
-      if (existingIndex < 0 && message.role === 'assistant') {
-        existingIndex = sessionMessages.findIndex((m) =>
-          m.role === 'assistant'
-          && m.timestamp
-          && message.timestamp
-          && m.timestamp === message.timestamp,
-        )
-      }
-
-      let updatedMessages: Message[]
-      let messageCountChanged = false
-
-      if (existingIndex >= 0) {
-        updatedMessages = [...sessionMessages]
-        updatedMessages[existingIndex] = {
-          ...sessionMessages[existingIndex],
-          ...message,
-          id: sessionMessages[existingIndex].id,
-        }
-      } else {
-        updatedMessages = [
-          ...sessionMessages,
-          {
-            ...message,
-            id: realMessageId,
-          },
-        ]
-        messageCountChanged = true
-      }
-
-      updatedMessages.sort((a, b) => {
-        const seqA = a.sequence ?? Number.MAX_SAFE_INTEGER
-        const seqB = b.sequence ?? Number.MAX_SAFE_INTEGER
-        if (seqA !== seqB) {
-          return seqA - seqB
-        }
-        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      })
-
-      const newMessages = {
-        ...state.messages,
-        [sessionId]: updatedMessages,
-      }
-
-      const newSessions = messageCountChanged
-        ? state.sessions.map((session) => {
-            if (session.id === sessionId) {
-              return {
-                ...session,
-                messageCount: session.messageCount + 1,
-                updatedAt: new Date().toISOString(),
-              }
-            }
-            return session
-          })
-        : state.sessions
-
-      return {
-        messages: newMessages,
-        sessions: newSessions,
-      }
-    })
-  },
-
-  updateMessageContent: (
-    sessionId: string,
-    messageId: string,
-    content: string,
-    options?: { mode?: 'append' | 'replace' },
-  ) => {
-    const mode = options?.mode ?? 'append'
-
-    set((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        logger.warn('消息不存在，跳过更新:', messageId)
-        return state
-      }
-
-      const oldContent = sessionMessages[messageIndex].content || ''
-      let newContent: string
-
-      if (mode === 'replace') {
-        newContent = content
-      } else {
-        newContent = oldContent + content
-      }
-
-      const updatedMessages = [...sessionMessages]
-      updatedMessages[messageIndex] = {
-        ...updatedMessages[messageIndex],
-        content: newContent,
-        timestamp:
-          mode === 'replace' ? new Date().toISOString() : updatedMessages[messageIndex].timestamp,
-      }
-
-      return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
-        },
-      }
-    })
-  },
 
   updateMessageFields: (sessionId: string, messageId: string, updates: Partial<Message>) => {
     set((state) => {
@@ -238,233 +111,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         },
       }
     })
-  },
-
-  deleteMessage: (sessionId: string, messageId: string, includeTarget: boolean = true) => {
-    logger.debug('开始删除:', {
-      sessionId,
-      messageId,
-      includeTarget,
-    })
-
-    const previousMessages = get().messages[sessionId] || []
-    const previousSessions = get().sessions
-
-    set((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const targetMessage = sessionMessages.find((m) => m.id === messageId)
-
-      logger.debug('查找结果:', {
-        totalMessages: sessionMessages.length,
-        targetMessage: targetMessage
-          ? {
-              id: targetMessage.id,
-              sequence: targetMessage.sequence,
-              parentId: targetMessage.parentId,
-            }
-          : null,
-      })
-
-      if (!targetMessage) {
-        logger.warn('未找到要删除的消息')
-        return state
-      }
-
-      const targetSequence = targetMessage.sequence || 0
-      const targetParentId = targetMessage.parentId || null
-
-      const mainRecordIds = new Set<string>()
-      sessionMessages.forEach((m) => {
-        const mParentId = m.parentId || null
-        const mSequence = m.sequence || 0
-        if (mParentId === targetParentId) {
-          if (includeTarget) {
-            if (mSequence >= targetSequence) {
-              mainRecordIds.add(m.id)
-            }
-          } else {
-            if (mSequence > targetSequence) {
-              mainRecordIds.add(m.id)
-            }
-          }
-        }
-      })
-
-      const allIdsToDelete = new Set<string>(mainRecordIds)
-      if (includeTarget) {
-        allIdsToDelete.add(targetMessage.id)
-      }
-
-      const messageMap = new Map<string, typeof targetMessage>()
-      sessionMessages.forEach((m) => messageMap.set(m.id, m))
-
-      let currentParentIds = Array.from(allIdsToDelete)
-      while (currentParentIds.length > 0) {
-        const childrenIds: string[] = []
-        sessionMessages.forEach((m) => {
-          const mParentId = m.parentId || null
-          if (mParentId && currentParentIds.includes(mParentId)) {
-            if (!allIdsToDelete.has(m.id)) {
-              childrenIds.push(m.id)
-            }
-          }
-        })
-
-        if (childrenIds.length === 0) {
-          break
-        }
-
-        childrenIds.forEach((id) => allIdsToDelete.add(id))
-        currentParentIds = childrenIds
-      }
-
-      logger.debug('递归查找完成:', {
-        主记录数: mainRecordIds.size,
-        总删除数: allIdsToDelete.size,
-        includeTarget,
-      })
-
-      const updatedMessages = sessionMessages.filter((m) => !allIdsToDelete.has(m.id))
-      const deletedCount = sessionMessages.length - updatedMessages.length
-
-      logger.debug('删除结果:', {
-        原始数量: sessionMessages.length,
-        删除后数量: updatedMessages.length,
-        删除的消息数: deletedCount,
-        targetSequence,
-        targetParentId,
-      })
-
-      const newSessions = state.sessions.map((session) => {
-        if (session.id === sessionId) {
-          return {
-            ...session,
-            messageCount: Math.max(0, session.messageCount - deletedCount),
-            updatedAt: new Date().toISOString(),
-          }
-        }
-        return session
-      })
-
-      return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
-        },
-        sessions: newSessions,
-      }
-    })
-
-    logger.debug('调用后端 API 删除')
-    messageApi
-      .deleteMessage(sessionId, messageId, includeTarget)
-      .then(async (result) => {
-        logger.debug('后端删除成功:', result)
-        try {
-          const result = await sessionApi.getMessages(sessionId)
-          const messages = result.messages
-          logger.debug('重新加载消息成功:', messages.length)
-          set((state) => ({
-            messages: {
-              ...state.messages,
-              [sessionId]: messages,
-            },
-          }))
-        } catch (reloadError) {
-          logger.warn('重新加载消息失败，保持乐观更新状态:', reloadError)
-        }
-      })
-      .catch((error) => {
-        if (error.code === '404') {
-          logger.warn('消息已被删除，保持前端状态')
-          return
-        }
-
-        console.error('删除消息失败，回滚前端状态:', error)
-
-        set((state) => ({
-          messages: {
-            ...state.messages,
-            [sessionId]: previousMessages,
-          },
-          sessions: previousSessions,
-        }))
-
-        throw error
-      })
-  },
-
-  deleteMessageFromList: (sessionId: string, messageId: string, deletedCount?: number) => {
-    logger.debug('开始删除:', {
-      sessionId,
-      messageId,
-      deletedCount,
-    })
-
-    set((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        logger.warn('未找到消息:', messageId)
-        return state
-      }
-
-      let updatedMessages: Message[]
-      if (deletedCount && deletedCount > 0) {
-        updatedMessages = [
-          ...sessionMessages.slice(0, messageIndex),
-          ...sessionMessages.slice(messageIndex + deletedCount),
-        ]
-      } else {
-        updatedMessages = sessionMessages.slice(0, messageIndex)
-      }
-
-      logger.debug('删除结果:', {
-        原始数量: sessionMessages.length,
-        删除后数量: updatedMessages.length,
-        删除的消息数: sessionMessages.length - updatedMessages.length,
-      })
-
-      const updatedSessions = state.sessions.map((s) => {
-        if (s.id === sessionId) {
-          return {
-            ...s,
-            messageCount: updatedMessages.length,
-            updatedAt: new Date().toISOString(),
-          }
-        }
-        return s
-      })
-
-      return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
-        },
-        sessions: updatedSessions,
-      }
-    })
-  },
-
-  getActiveSessionMessages: () => {
-    const { activeSessionId, messages } = get()
-
-    if (!activeSessionId) {
-      return []
-    }
-
-    return messages[activeSessionId] || []
-  },
-
-  setMessages: (sessionId: string, messages: Message[]) => {
-    set((state) => ({
-      messages: {
-        ...state.messages,
-        [sessionId]: messages,
-      },
-    }))
   },
 
   fetchMessages: async (

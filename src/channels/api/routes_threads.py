@@ -7,11 +7,46 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from channels.api.deps import APIError, require_auth
+
+
+def _notify_session_update(thread_id: str, action: str) -> None:
+    """通过 WebSocket 推送会话变更事件。
+
+    在会话 CRUD 操作后调用，通知前端刷新会话列表。
+    推送失败不影响主流程。
+
+    Args:
+        thread_id: 线程 ID
+        action: 操作类型（created / updated / deleted）
+    """
+    try:
+        import asyncio
+
+        from infrastructure.service_provider import get_service_provider
+        from pipeline.stream_bridge import WebSocketSink
+
+        _notifier = get_service_provider().get("ws_interaction_notifier")
+        if _notifier and thread_id:
+            _sink = WebSocketSink(_notifier, thread_id)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(_sink.send_event({
+                    "type": "session_update",
+                    "data": {"action": action, "thread_id": thread_id},
+                }))
+            else:
+                loop.run_until_complete(_sink.send_event({
+                    "type": "session_update",
+                    "data": {"action": action, "thread_id": thread_id},
+                }))
+    except Exception:
+        pass
 from channels.api.models import (
     MessageResponse,
     ThreadCreate,
@@ -34,11 +69,25 @@ router = APIRouter(prefix="/api/v1/threads", tags=["线程"])
 def _get_execution_record_storage() -> ExecutionRecordStorage | None:
     """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。
 
+    当 ServiceProvider 中未注册时，使用 get_or_create 懒加载。
+
     Returns:
-        ExecutionRecordStorage 实例，服务未注册时返回 None
+        ExecutionRecordStorage 实例，服务不可用返回 None
     """
     provider = get_service_provider()
-    return provider.get("execution_record_storage")
+
+    # 1. 尝试从已注册服务获取
+    storage = provider.get("execution_record_storage")
+    if storage is not None:
+        return storage
+
+    # 2. 懒加载 fallback：ServiceProvider 未注册时直接创建
+    return provider.get_or_create(
+        "execution_record_storage",
+        lambda: ExecutionRecordStorage(
+            data_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "pipelines"),
+        ),
+    )
 
 
 def _get_task_service() -> Any:
@@ -58,7 +107,8 @@ def _get_task_service() -> Any:
         return None
 
 
-def _build_execution_graph(
+# BUG-FIX-fix_20260512_async_list_all: 改为 async def，内部 await task_service.list_all()
+async def _build_execution_graph(
     pipeline_ids: list[str],
     active_pipeline_id: str | None = None,
 ) -> dict[str, Any]:
@@ -101,7 +151,8 @@ def _build_execution_graph(
 
     if task_service:
         try:
-            all_tasks = task_service.list_all(limit=500, reverse=False)
+            # BUG-FIX-fix_20260512_async_list_all: 添加 await
+            all_tasks = await task_service.list_all(limit=500, reverse=False)
             pipeline_to_task: dict[str, Any] = {}
             for t in all_tasks:
                 if t.pipeline_run_id:
@@ -235,11 +286,13 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     """
     return ThreadResponse(
         thread_id=t["id"],
+        title=t.get("title") or None,
         intent=t.get("intent") or t.get("title") or None,
         current_state=t.get("current_state", "active"),
         created_at=t["created_at"],
         updated_at=t["updated_at"],
         agent_id=t.get("agent_id"),
+        message_count=t.get("message_count", 0),
         pipeline_ids=t.get("pipeline_ids", []),
         active_pipeline_id=t.get("active_pipeline_id") or None,
         metadata=t.get("metadata"),
@@ -395,7 +448,12 @@ def delete_thread(
     thread_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, str]:
-    """删除指定线程及其所有消息。
+    """删除指定线程及其所有消息和关联的管道执行记录。
+
+    清理范围包括:
+    - 线程数据、消息、关联会话
+    - 关联管道的执行记录（内存 + YAML 文件）
+    - 管道检查点文件
 
     Args:
         thread_id: 线程 ID
@@ -406,6 +464,9 @@ def delete_thread(
     Raises:
         APIError: 线程不存在 (404)
     """
+    session = store.get_session(thread_id)
+    pipeline_ids = list(session.pipeline_ids) if session else []
+
     deleted = store.delete_thread(thread_id)
     if not deleted:
         raise APIError(
@@ -413,6 +474,17 @@ def delete_thread(
             error_code="API_NOTF_2004",
             message="线程不存在",
         )
+
+    if pipeline_ids:
+        exec_storage = _get_execution_record_storage()
+        if exec_storage:
+            for pid in pipeline_ids:
+                try:
+                    exec_storage.delete_by_session(pid)
+                except Exception:
+                    logger.warning("清理管道 %s 执行记录失败", pid, exc_info=True)
+
+    _notify_session_update(thread_id, "deleted")
     return {"message": "线程已删除"}
 
 
@@ -608,6 +680,7 @@ def _paginate_messages(
     all_msgs: list[MessageResponse],
     limit: int,
     before_sequence: int | None,
+    after_sequence: int | None = None,
 ) -> dict[str, Any]:
     """对已排序的消息列表进行倒序分页。
 
@@ -616,11 +689,15 @@ def _paginate_messages(
     分页逻辑：
     - before_sequence=None：返回最后 limit 条消息
     - before_sequence=N：返回 sequence < N 的最后 limit 条消息
+    - after_sequence=N：返回 sequence > N 的消息（断线补漏，不支持分页）
+
+    before_sequence 和 after_sequence 互斥，不能同时使用。
 
     Args:
         all_msgs: 按 sequence 正序排列的完整消息列表
         limit: 每页数量
-        before_sequence: 游标分页的 sequence 边界
+        before_sequence: 游标分页的 sequence 边界（向前翻页）
+        after_sequence: 断线补漏的 sequence 边界（返回此值之后的新消息）
 
     Returns:
         包含 messages、total、has_more 的分页结果字典
@@ -634,6 +711,10 @@ def _paginate_messages(
         filtered = [m for m in all_msgs if m.sequence < before_sequence]
     else:
         filtered = all_msgs
+
+    # 按 after_sequence 过滤（只返回 sequence > after_sequence 的消息）
+    if after_sequence is not None:
+        filtered = [m for m in filtered if m.sequence > after_sequence]
 
     filtered_total = len(filtered)
 
@@ -659,6 +740,7 @@ def list_messages(
     pipeline_run_id: str | None = Query(default=None, description="按管道运行 ID 过滤消息"),
     limit: int = Query(default=20, ge=1, le=100, description="每页数量"),
     before_sequence: int | None = Query(default=None, description="加载此 sequence 之前的消息（游标分页）"),
+    after_sequence: int | None = Query(default=None, description="加载此 sequence 之后的消息（断线补漏）"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """获取指定线程的消息列表，支持倒序分页。
@@ -673,20 +755,29 @@ def list_messages(
     分页逻辑：
     - 不传 before_sequence：返回最后 limit 条消息（倒序初始加载）
     - 传 before_sequence：返回 sequence < before_sequence 的最后 limit 条消息
+    - 传 after_sequence：返回 sequence > after_sequence 的所有新消息（断线补漏）
+
+    before_sequence 和 after_sequence 互斥，不能同时使用。
 
     Args:
         thread_id: 线程 ID
         pipeline_run_id: 可选，管道运行实例 ID
         limit: 每页数量，默认 20，最大 100
-        before_sequence: 可选，游标分页的 sequence 边界
+        before_sequence: 可选，游标分页的 sequence 边界（向前翻页）
+        after_sequence: 可选，断线补漏的 sequence 边界（返回此值之后的新消息）
 
     Returns:
         包含 messages、total、has_more 的字典
 
     Raises:
+        HTTPException: before_sequence 和 after_sequence 同时使用时返回 400
         APIError: 线程不存在 (404)
     """
     from channels.api.models import MessageListResponse
+
+    # before_sequence 和 after_sequence 不能同时使用
+    if before_sequence is not None and after_sequence is not None:
+        raise HTTPException(status_code=400, detail="before_sequence 和 after_sequence 不能同时使用")
 
     thread = store.get_thread(thread_id)
     if thread is None:
@@ -697,6 +788,21 @@ def list_messages(
         )
 
     exec_storage = _get_execution_record_storage()
+
+    # DEBUG: 诊断历史消息不显示问题
+    logger.info(
+        "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
+        thread_id[:12] if thread_id else "?",
+        (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
+        "yes" if exec_storage else "None",
+    )
+
+    session = store.get_session(thread_id)
+    logger.info(
+        "[list_messages] session=%s pipeline_ids=%s",
+        "yes" if session else "None",
+        session.pipeline_ids if session else "N/A",
+    )
 
     # 按指定 pipeline_run_id 加载子管道消息
     if pipeline_run_id and exec_storage:
@@ -745,7 +851,22 @@ def list_messages(
                 r.created_at or "",
             ))
             all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
-            return _paginate_messages(all_msgs, limit, before_sequence)
+            return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
+
+    # Fallback: pipeline_ids 为空时，直接用 thread_id 作为 pipeline_run_id 尝试加载
+    # 解决重启后 session.pipeline_ids 未持久化或恢复失败的场景
+    if exec_storage and not pipeline_ids:
+        try:
+            records = exec_storage.list_by_pipeline(thread_id)
+            if records:
+                records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+                all_msgs = [_record_to_message_response(r, thread_id) for r in records]
+                if session:
+                    session.pipeline_ids = [thread_id]
+                    store.set_session(thread_id, session)
+                return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
+        except Exception:
+            logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
 
     # 回退到 MemoryStore 基础消息
     messages = store.get_messages(thread_id)
@@ -772,14 +893,15 @@ def list_messages(
         )
         for m in messages
     ]
-    return _paginate_messages(all_msgs, limit, before_sequence)
+    return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
 
 
 @router.get(
     "/{thread_id}/detail",
     summary="获取线程详情（含执行图数据）",
 )
-def get_thread_detail(
+# BUG-FIX-fix_20260512_async_list_all: 改为 async def 以支持 await _build_execution_graph
+async def get_thread_detail(
     thread_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict:
@@ -816,7 +938,8 @@ def get_thread_detail(
             pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
             active_pipeline_id = session.active_pipeline_id
 
-    execution_graph = _build_execution_graph(pipeline_ids, active_pipeline_id)
+    # BUG-FIX-fix_20260512_async_list_all: 添加 await
+    execution_graph = await _build_execution_graph(pipeline_ids, active_pipeline_id)
 
     exec_storage = _get_execution_record_storage()
     rich_messages: list[dict[str, Any]] = []

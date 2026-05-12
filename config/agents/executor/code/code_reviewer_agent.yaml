@@ -77,24 +77,17 @@ system_prompt: |
   - 通过率 ≥ 80%：审查结论可 Approve（无其他 Must Fix 时）
   - 通过率 < 80%：审查结论为 Request Changes
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_agent/code_reviewer_rules.md}}
+  {{path:config/rules/per_agent/detail_review_checklist.md}}
+  {{path:config/rules/per_agent/design_system_constraints.md}}
+
 # 静态变量
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
-    - name: "代码审查规则"
-      type: "path"
-      path: "config/rules/per_agent/code_reviewer_rules.md"
-    - name: "细节审查清单"
-      type: "path"
-      path: "config/rules/per_agent/detail_review_checklist.md"
-    - name: "设计系统约束（前端任务）"
-      type: "path"
-      path: "config/rules/per_agent/design_system_constraints.md"
     - name: "代码质量检查技能"
       type: "path"
       path: "skills/code_quality_skill.md"
@@ -108,9 +101,7 @@ static_vars:
 # 动态变量
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 # 工具配置
 tool_ids:
@@ -119,10 +110,9 @@ tool_ids:
 - list_directory
 - enhanced_search
 - bash_execute
-- evaluate
 - task_evaluate
 - resource_search
-- browser_test
+- playwright_test
 - design_review
 
 # 硬约束
@@ -177,7 +167,7 @@ recommended_metrics:
 version: "3.0.0"
 is_active: true
 status: "active"
-max_iterations: 60
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 1200
 

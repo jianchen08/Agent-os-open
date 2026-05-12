@@ -5,7 +5,6 @@
  * 所有组件自包含在此文件中，不依赖外部组件库。
  */
 
-import { useState } from 'react'
 import {
   Users,
   Activity,
@@ -25,6 +24,7 @@ import {
   Zap,
   BarChart3,
 } from 'lucide-react'
+import { useState } from 'react'
 
 // ---------------------------------------------------------------------------
 // 类型定义

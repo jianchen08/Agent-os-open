@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# 代码搜索工具
+
+name: search_code
+display_name: "代码搜索"
+description: "代码搜索工具：在代码库中搜索代码"
+
+category: "search"
+level: "user"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 600  # 10 分钟
+
+# 标签
+tags: ["search", "code"]

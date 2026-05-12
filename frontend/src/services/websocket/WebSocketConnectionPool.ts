@@ -11,9 +11,10 @@
  * - 会话切换时旧连接保持活跃，新连接按需创建
  */
 
+import { loggers } from '@/utils/logger'
 import { WebSocketService, WebSocketStatus, type WebSocketStatusType } from './WebSocketService'
 import type { EventHandler } from './eventHandlers'
-import { loggers } from '@/utils/logger'
+import type { ApprovalDecisionType } from '@/constants/websocket'
 
 interface PooledConnection {
   ws: WebSocketService
@@ -188,14 +189,14 @@ export class WebSocketConnectionPool {
     content: string,
     attachments?: Array<{ type: string; url: string; name: string }>,
     enableThinking?: boolean,
-    parentRecordId?: string,
+    pipelineId?: string,
   ): Promise<{ messageId: string } | null> {
     const ws = this.connections.get(threadId)?.ws
     if (!ws) {
       logger.warn(`[Pool] 发送失败：未找到连接 | threadId: ${threadId}`)
       return null
     }
-    return ws.sendUserInput(content, attachments, enableThinking, parentRecordId)
+    return ws.sendUserInput(content, attachments, enableThinking, pipelineId)
   }
 
   /**
@@ -215,7 +216,7 @@ export class WebSocketConnectionPool {
    */
   async sendApproval(
     threadId: string,
-    decision: import('@/constants/websocket').ApprovalDecisionType,
+    decision: ApprovalDecisionType,
     reason?: string,
     modifications?: Record<string, unknown>,
   ): Promise<boolean> {

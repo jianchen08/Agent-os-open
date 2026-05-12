@@ -38,7 +38,7 @@ class TestFileReadTool:
         result = await tool.execute({"path": str(file_path)})
 
         assert result.success is True
-        assert result.data["content"] == "hello world\nsecond line"
+        assert result.data["content"] == "1→hello world\n2→second line"
         assert result.data["lines"] == 2
         assert "size" in result.data
         assert result.data["file"] == str(file_path)
@@ -151,7 +151,7 @@ class TestFileReadTool:
         result = await tool.execute({"path": str(file_path)})
 
         assert result.success is True
-        assert result.data["content"] == "你好世界\n第二行"
+        assert result.data["content"] == "1→你好世界\n2→第二行"
         assert result.data["lines"] == 2
 
     @pytest.mark.asyncio
@@ -273,8 +273,7 @@ class TestFileReadTool:
         })
 
         assert result.success is True
-        # tail >= total_lines → 走常规路径
-        assert result.data["content"] == "only line"
+        assert result.data["content"] == "1→only line"
 
     # ── 二进制路由（document/image）──
 
@@ -287,7 +286,7 @@ class TestFileReadTool:
         from tools.types import create_success_result
 
         with patch(
-            "tools.builtin.file_read.convert_binary_to_markdown",
+            "tools.builtin.file_read.tool.convert_binary_to_markdown",
             return_value=create_success_result(
                 data={"file": str(file_path), "content": "# Report", "format": "document", "size": "13B"},
             ),
@@ -307,7 +306,7 @@ class TestFileReadTool:
         from tools.types import create_success_result
 
         with patch(
-            "tools.builtin.file_read.convert_binary_to_markdown",
+            "tools.builtin.file_read.tool.convert_binary_to_markdown",
             return_value=create_success_result(
                 data={"file": str(file_path), "content": "An image description", "format": "image", "size": "8B"},
             ),
@@ -362,7 +361,7 @@ class TestFileReadTool:
         })
 
         assert result.success is True
-        assert result.data["content"] == "workspace test"
+        assert result.data["content"] == "1→workspace test"
 
     @pytest.mark.asyncio
     async def test_fields_on_non_dict_yaml(self, tool, temp_dir):

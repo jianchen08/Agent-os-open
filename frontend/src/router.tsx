@@ -5,28 +5,38 @@
  * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
  */
 
+import { MoreHorizontal, Pencil, Copy, Star, Pin, Trash2 } from 'lucide-react'
 import { lazy, Suspense, useEffect, useState, useCallback, useMemo } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
-import { LayoutGrid } from 'lucide-react'
 import { ChatContainer } from './components/chat/ChatContainer'
+import { AppHeader } from './components/layout/AppHeader'
+import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
+import { Button } from './components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './components/ui/dropdown-menu'
 import { ROUTES } from './constants/routes'
-import { useMessageActions } from './hooks/useMessageActions'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
+import { useMessageActions } from './hooks/useMessageActions'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
-import { wsPool } from './services/websocket/WebSocketConnectionPool'
+import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
+import { useInteractionStore } from './stores/interactionStore'
 import { useLayoutModeStore } from './stores/layoutModeStore'
+import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useStreamingStore } from './stores/streamingStore'
-import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
-import { ThemeButton } from './components/layout/ThemeButton'
-import { ThemePanel } from './components/layout/ThemePanel'
-import { Button } from './components/ui/button'
+import { useUIStore } from './stores/uiStore'
+import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { Message } from './types/models'
 import type { ReactNode } from 'react'
@@ -96,6 +106,11 @@ const DebugUsersPage = lazy(() =>
 
 /** 懒加载 fallback */
 const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
+
+/** 判断当前视口是否为移动端（< md 断点 768px） */
+function isMobileViewport(): boolean {
+  return typeof window !== 'undefined' && window.innerWidth < 768
+}
 
 // ============================================
 // 路由守卫
@@ -170,18 +185,17 @@ function HomePage(): ReactNode {
     isLoading: isSessionLoading,
     connectWebSocket,
     disconnectWebSocket,
-    addMessage,
     getMessagePagination,
     loadMoreMessages,
   } = useSessionStore()
-  const { fetchSessions, createSession, setActiveSession } = useSessionListStore()
+  const { fetchSessions, createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession } = useSessionListStore()
   const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
 
   /** 消息操作 hooks */
   const messageActions = useMessageActions(activeSessionId ?? undefined)
 
-  /** 侧边栏是否折叠 */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
 
   /** 默认模型名 */
   const [modelName, setModelName] = useState('glm-5.1')
@@ -219,12 +233,33 @@ function HomePage(): ReactNode {
     initStreamingEvents()
   }, [])
 
+  // ------------------------------------------
+  // 页面刷新后恢复 WS 连接
+  // 会话状态从 localStorage 恢复后需要重新建立全局 WS 连接
+  // ------------------------------------------
+  useEffect(() => {
+    const currentToken = useAuthStore.getState().token
+    if (currentToken) {
+      globalWS.connect(currentToken)
+      useSessionStore.setState({ wsStatus: globalWS.status })
+    }
+
+    const handleStatusChange = (data: { status: string }) => {
+      useSessionStore.setState({ wsStatus: data.status as any })
+    }
+    globalWS.subscribe('_status', handleStatusChange)
+    return () => {
+      globalWS.unsubscribe('_status', handleStatusChange)
+    }
+  }, [])
+
   /**
    * 选择会话
    *
    * 设置活跃会话并建立 WebSocket 连接。
    * setActiveSession 会自动加载历史消息。
    * 切换前保存当前会话的 Tab 状态，避免数据丢失。
+   * 移动端下选择会话后自动收起侧边栏。
    */
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
@@ -235,6 +270,11 @@ function HomePage(): ReactNode {
       const currentToken = useAuthStore.getState().token
       if (currentToken) {
         connectWebSocket(sessionId, currentToken)
+      }
+
+      // 移动端选择会话后自动收起侧边栏
+      if (isMobileViewport()) {
+        useUIStore.getState().setSidebarCollapsed(true)
       }
     },
     [setActiveSession, connectWebSocket],
@@ -256,20 +296,30 @@ function HomePage(): ReactNode {
    * 发送消息
    *
    * 1. 将用户消息添加到本地状态（主 Tab 写入 sessionStore，子 Tab 写入 agentTabStore）
-   * 2. 通过 WebSocket 发送用户输入，子 Tab 时携带 parentRecordId 路由到对应管道
+   * 2. 通过 WebSocket 发送用户输入，子 Tab 时携带 pipelineId 路由到对应管道
    */
   const handleSendMessage = useCallback(
     async (params: SendMessageParams) => {
       const { activeSessionId: sid } = useSessionStore.getState()
       const currentToken = useAuthStore.getState().token
 
-      if (!sid || !currentToken) return
+      if (!sid || !currentToken) {
+        return
+      }
 
-      const existingMsgs = useSessionStore.getState().messages[sid] || []
+      const listStore = useSessionListStore.getState()
+      const sessions = listStore.sessions || []
+      const session = sessions.find(s => s.id === sid)
+      if (session && (!session.title || session.title.startsWith('新会话'))) {
+        listStore.renameSession(sid, params.content.slice(0, 50))
+      }
+
+      const activePipelineId = usePipelineMessageStore.getState().activePipelineId || sid
+      const existingMsgs = usePipelineMessageStore.getState().getMessages(activePipelineId)
       const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
       const userMessage: Message = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         sessionId: sid,
         role: 'user',
         content: params.content,
@@ -278,49 +328,50 @@ function HomePage(): ReactNode {
         sequence: nextSeq,
       }
 
-      /**
-       * 根据是否携带 parentRecordId 路由用户消息
-       *
-       * - 有 parentRecordId（子 Tab）：写入 agentTabStore 的 tabMessages
-       * - 无 parentRecordId（主 Tab）：写入 sessionStore 的 messages
-       */
-      if (params.parentRecordId) {
-        const tabId = `sub-${params.parentRecordId}`
-        useAgentTabStore.getState().addMessageToTab(tabId, userMessage)
-      } else {
-        addMessage(sid, userMessage)
+      usePipelineMessageStore.getState().addMessage(activePipelineId, userMessage)
+
+      const targetPipelineId = params.pipelineId || activePipelineId
+      const enteredInteraction =
+        useInteractionStore.getState().getEnteredForPipeline(targetPipelineId) ||
+        useInteractionStore.getState().getEnteredForPipeline(sid)
+      if (enteredInteraction) {
+        globalWS.sendInteractionResponse(sid, enteredInteraction.requestId, {
+          responseType: 'approved',
+          feedback: '用户已到达对话页面',
+        })
+        useInteractionStore.getState().markResponded(enteredInteraction.requestId)
       }
 
-      // 通过 WebSocket 发送用户输入，透传 parentRecordId 以路由到对应管道
-      await wsPool.sendUserInput(
-        sid,
-        params.content,
-        undefined,
-        params.enableThinking,
-        params.parentRecordId,
-      )
+      try {
+        await globalWS.sendUserInput(
+          sid,
+          params.content,
+          {
+            enableThinking: params.enableThinking,
+            pipelineId: params.pipelineId,
+          },
+        )
+      } catch {
+        // WebSocket 发送失败时消息已添加到本地状态，重连后会自动重试
+      }
     },
-    [addMessage],
+    [],
   )
 
   /**
    * 停止生成
    *
-   * BUG-FIX-fix_20260506_per_tab_streaming: 根据当前活跃 Tab 停止对应的 streaming
+   * BUG-FIX-fix_20260509_tab_streaming: 使用 activePipelineId 停止 streaming
    */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
     if (sid) {
-      wsPool.sendCancel(sid)
+      globalWS.sendCancel(sid)
     }
-    const currentActiveTabId = useAgentTabStore.getState().activeTabId
-    const currentTabs = useAgentTabStore.getState().tabs
-    const activeTab = currentTabs.find((t) => t.id === currentActiveTabId)
-    const isSubTab = activeTab != null && activeTab.agentLevel !== 1
-    if (isSubTab && currentActiveTabId) {
-      stopStreamingForTab(currentActiveTabId)
-    } else if (sid) {
-      stopStreamingForTab(sid)
+    // BUG-FIX-fix_20260509_tab_streaming: streamingTabs 使用 pipelineId 作为键
+    const currentPipelineId = usePipelineMessageStore.getState().activePipelineId || sid
+    if (currentPipelineId) {
+      stopStreamingForTab(currentPipelineId)
     }
   }, [stopStreamingForTab])
 
@@ -331,9 +382,7 @@ function HomePage(): ReactNode {
     async (messageId: string, newContent: string) => {
       if (!activeSessionId) return
       await messageActions.editMessage(messageId, newContent)
-      // 重新加载消息以获取更新后的内容
-      const { fetchMessages } = useSessionStore.getState()
-      await fetchMessages(activeSessionId)
+      await usePipelineMessageStore.getState().fetchMessages(activeSessionId)
     },
     [activeSessionId, messageActions],
   )
@@ -366,7 +415,7 @@ function HomePage(): ReactNode {
   const handleLogout = useCallback(async () => {
     destroyStreamingEvents()
     disconnectWebSocket()
-    wsPool.disconnectAll()
+    globalWS.disconnect()
     await logout()
     navigate(ROUTES.LOGIN)
   }, [logout, navigate, disconnectWebSocket])
@@ -397,15 +446,89 @@ function HomePage(): ReactNode {
           sessions.map((session) => (
             <div
               key={session.id}
-              onClick={() => handleSelectSession(session.id)}
-              className={`cursor-pointer truncate px-3 py-2.5 text-sm transition-colors ${
+              className={`group relative flex items-center transition-colors ${
                 activeSessionId === session.id
                   ? 'bg-accent text-accent-foreground font-medium'
                   : 'hover:bg-accent/50 text-foreground/80'
               }`}
-              title={session.title}
             >
-              {session.title}
+              <div
+                onClick={() => handleSelectSession(session.id)}
+                className="min-w-0 flex-1 cursor-pointer truncate px-3 py-2.5 text-sm"
+                title={session.title}
+              >
+                {session.title}
+              </div>
+              <div
+                className={`ml-1 mr-1 flex flex-shrink-0 items-center gap-0.5 transition-opacity ${
+                  activeSessionId === session.id
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover:opacity-100'
+                }`}
+              >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-muted-foreground hover:text-foreground rounded p-0.5 transition-colors"
+                      aria-label="更多操作"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-[140px]">
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const newTitle = window.prompt('重命名会话', session.title)
+                        if (newTitle?.trim()) {
+                          renameSession(session.id, newTitle.trim())
+                        }
+                      }}
+                    >
+                      <Pencil className="mr-2 h-3.5 w-3.5" /> 重命名
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        copySession(session.id)
+                      }}
+                    >
+                      <Copy className="mr-2 h-3.5 w-3.5" /> 复制
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleSessionStar(session.id)
+                      }}
+                    >
+                      <Star className="mr-2 h-3.5 w-3.5" />
+                      {session.starred ? '取消星标' : '星标'}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleSessionPin(session.id)
+                      }}
+                    >
+                      <Pin className="mr-2 h-3.5 w-3.5" />
+                      {session.pinned ? '取消置顶' : '置顶会话'}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (window.confirm('确定要删除此会话吗？')) {
+                          deleteSession(session.id)
+                        }
+                      }}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash2 className="mr-2 h-3.5 w-3.5" /> 删除
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </div>
           ))
         )}
@@ -419,6 +542,8 @@ function HomePage(): ReactNode {
       sessionId={activeSessionId}
       messages={activeMessages}
       isLoading={isSessionLoading}
+      // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
+      // 此 prop 仅作兼容保留，实际不影响输入框状态
       isGenerating={activeSessionId ? (streamingTabs[activeSessionId] ?? false) : false}
       modelName={modelName}
       onSendMessage={handleSendMessage}
@@ -469,35 +594,10 @@ function HomePage(): ReactNode {
       <FiveSpaceLayout
         chatContent={chatContent}
         sidebarContent={sidebarContent}
-        topNavContent={
-          <>
-            <nav className="flex min-w-0 items-center gap-1 overflow-x-auto">
-              {[
-                { path: ROUTES.TOOLS, label: '工具' },
-                { path: ROUTES.AGENTS, label: '智能体' },
-                { path: ROUTES.MONITORING, label: '监控' },
-                { path: ROUTES.MEMORY, label: '记忆' },
-                { path: ROUTES.SETTINGS, label: '设置' },
-                { path: ROUTES.DEBUG.ROOT, label: '调试' },
-              ].map((item) => (
-                <Button
-                  key={item.path}
-                  onClick={() => navigate(item.path)}
-                  variant={location.pathname === item.path ? 'default' : 'outline'}
-                  size="sm"
-                  className="rounded-md transition-all duration-200"
-                >
-                  {item.label}
-                </Button>
-              ))}
-            </nav>
-            <div className="relative ml-2">
-              <ThemeButton onClick={() => setShowThemePanel(true)} />
-              <ThemePanel isOpen={showThemePanel} onClose={() => setShowThemePanel(false)} />
-            </div>
-          </>
-        }
         onToggleMode={toggleLayoutMode}
+        showThemePanel={showThemePanel}
+        onShowThemePanel={setShowThemePanel}
+        onLogout={handleLogout}
       />
     )
   }
@@ -505,84 +605,40 @@ function HomePage(): ReactNode {
   // ---- Classic layout mode (original) ----
   return (
     <div className="bg-background text-foreground flex h-screen flex-col">
-      {/* 顶部导航栏 */}
-      <header className="flex h-10 shrink-0 items-center justify-between border-b px-3">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setSidebarCollapsed((prev) => !prev)}
-            className="hover:bg-accent rounded p-1 transition-colors"
-            title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
-          >
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 6h16M4 12h16M4 18h16"
-              />
-            </svg>
-          </button>
-          <h1 className="text-base font-semibold">超级终端</h1>
-          <span
-            className={`h-2 w-2 rounded-full ${isWsConnected ? 'bg-status-success' : 'bg-status-pending'}`}
-            title={isWsConnected ? 'WebSocket 已连接' : 'WebSocket 未连接'}
-          />
-        </div>
-        <div className="flex items-center gap-3">
-          <nav className="mr-2 flex min-w-0 shrink items-center gap-1 overflow-x-auto">
-            {[
-              { path: ROUTES.TOOLS, label: '工具' },
-              { path: ROUTES.AGENTS, label: '智能体' },
-              { path: ROUTES.MONITORING, label: '监控' },
-              { path: ROUTES.MEMORY, label: '记忆' },
-              { path: ROUTES.SETTINGS, label: '设置' },
-              { path: ROUTES.DEBUG.ROOT, label: '调试' },
-            ].map((item) => (
-              <Button
-                key={item.path}
-                onClick={() => navigate(item.path)}
-                variant={location.pathname === item.path ? 'default' : 'outline'}
-                size="sm"
-                className="rounded-md transition-all duration-200"
-              >
-                {item.label}
-              </Button>
-            ))}
-          </nav>
-          <div className="relative">
-            <ThemeButton onClick={() => setShowThemePanel(true)} />
-            {showThemePanel && <ThemePanel isOpen={showThemePanel} onClose={() => setShowThemePanel(false)} />}
-          </div>
-          {/* Layout toggle button */}
-          <button
-            onClick={toggleLayoutMode}
-            className="hover:bg-accent text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
-            title="Switch to five-space layout"
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Five-space</span>
-          </button>
-          <span className="text-muted-foreground text-sm">{user?.username}</span>
-          <button
-            onClick={handleLogout}
-            className="text-muted-foreground hover:text-foreground text-sm transition-colors"
-          >
-            登出
-          </button>
-        </div>
-      </header>
+      <AppHeader
+        onToggleMode={toggleLayoutMode}
+        modeLabel="Five-space"
+        showThemePanel={showThemePanel}
+        onShowThemePanel={setShowThemePanel}
+        onLogout={handleLogout}
+      />
 
-      <div className="flex min-h-0 flex-1">
-        {/* 左侧会话列表面板 */}
+      <div className="relative flex min-h-0 flex-1">
+        {/* 移动端侧边栏：覆盖抽屉模式（从导航栏下方开始，不遮盖导航栏） */}
+        {!sidebarCollapsed && (
+          <div className="fixed left-0 right-0 bottom-0 z-40 md:hidden" style={{ top: 40 }}>
+            {/* 背景遮罩，点击关闭侧边栏 */}
+            <div
+              className="absolute inset-0 bg-black/50"
+              onClick={() => useUIStore.getState().setSidebarCollapsed(true)}
+            />
+            {/* 侧边栏面板 */}
+            <aside className="absolute left-0 top-0 bottom-0 z-50 flex w-72 flex-col border-r bg-background shadow-xl">
+              {sidebarContent}
+            </aside>
+          </div>
+        )}
+
+        {/* 桌面端侧边栏：内嵌模式（>= md 断点） */}
         <aside
           className={`${
             sidebarCollapsed ? 'w-0' : 'w-56'
-          } flex shrink-0 flex-col overflow-hidden border-r transition-all duration-200`}
+          } hidden shrink-0 flex-col overflow-hidden border-r transition-all duration-200 md:flex`}
         >
           {sidebarContent}
         </aside>
 
-        {/* 右侧聊天区域 */}
+        {/* 主内容区：移动端占满全宽 */}
         <main className="flex min-h-0 flex-1 flex-col">
           {chatContent}
         </main>

@@ -46,6 +46,8 @@ class StateKeys:
     DELEGATION_SCORE = "delegation_score"
     DELEGATION_ERROR = "delegation_error"
     PIPELINE_ID = "pipeline_id"
+    CONVERSATION_MODE = "conversation_mode"
+    CONVERSATION_ROUND = "conversation_round"
 
 
 class ErrorPolicy(Enum):
@@ -102,6 +104,8 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.TASK_COMPLETE: False,
         StateKeys.SHOULD_STOP: False,
         StateKeys.APPROVAL_REQUIRED: False,
+        StateKeys.CONVERSATION_MODE: False,
+        StateKeys.CONVERSATION_ROUND: 0,
     }
     state.update(overrides)
     return state

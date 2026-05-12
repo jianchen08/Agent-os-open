@@ -6,13 +6,13 @@
  */
 
 import { create } from 'zustand'
+import { NOTIFICATION_PRIORITY_WEIGHT } from '@/types/notification'
 import type {
   NotificationItem,
   NotificationPriority,
   NotificationGroupState,
   NotificationAction,
 } from '@/types/notification'
-import { NOTIFICATION_PRIORITY_WEIGHT } from '@/types/notification'
 
 /** 自动递增 ID 计数器 */
 let _nextId = 1
@@ -125,19 +125,22 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
     }
 
     set((state) => {
-      // 防止重复
       if (state.notifications.some((n) => n.id === id)) return state
 
       const updated = sortNotifications([...state.notifications, newItem])
       const blockingUpdate = checkBlockingNotification(state, newItem)
 
+      const shouldAutoOpen =
+        !state.isPanelOpen &&
+        (newItem.priority === 'high' || newItem.priority === 'critical')
+
       return {
         notifications: updated,
         ...blockingUpdate,
+        ...(shouldAutoOpen ? { isPanelOpen: true } : {}),
       }
     })
 
-    // 自动消失
     if (data.autoDismissMs && data.autoDismissMs > 0 && !data.isBlocking) {
       setTimeout(() => {
         get().dismissNotification(id)

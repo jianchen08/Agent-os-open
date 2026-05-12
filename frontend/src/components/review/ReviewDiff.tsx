@@ -5,8 +5,8 @@
  * 高亮变更部分：新增绿色、删除红色、未变灰底。
  */
 
-import React, { useMemo, useState } from 'react'
 import { Columns2, Rows3 } from 'lucide-react'
+import React, { useMemo, useState } from 'react'
 import type { DiffLine, DiffLineType } from '@/types/review'
 
 export interface ReviewDiffProps {

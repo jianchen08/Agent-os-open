@@ -40,6 +40,11 @@ input_schema:
       type: "array"
       items: {"type": "string"}
       description: "快捷回复建议（对话模式）"
+    file_paths:
+      type: "array"
+      items:
+        type: "string"
+      description: "文件路径列表（用于审阅场景，自动读取文件内容展示给用户）"
     timeout_seconds:
       type: "number"
       default: 86400

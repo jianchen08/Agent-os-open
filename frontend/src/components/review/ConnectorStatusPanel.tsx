@@ -5,8 +5,8 @@
  * 支持连接/断开操作。
  */
 
-import React, { useState, useCallback } from 'react'
 import { Plug, Unplug, RefreshCw, ExternalLink, Settings } from 'lucide-react'
+import React, { useState, useCallback } from 'react'
 import type { ExternalConnector, ConnectorStatus } from '@/types/review'
 
 export interface ConnectorStatusPanelProps {

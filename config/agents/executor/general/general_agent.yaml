@@ -48,25 +48,20 @@ system_prompt: |
   - 如果工具返回"缓存结果"，说明操作已在之前完成，直接进行下一步
   - 任务执行完成后，**必须调用 task_evaluate** 进行评估，否则任务不会被标记为完成
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_agent/implementation_thinking_principles.md}}
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
-    - name: "实现思维原则"
-      type: "path"
-      path: "config/rules/per_agent/implementation_thinking_principles.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 # 上下文变量配置
 context_variables:
@@ -92,20 +87,17 @@ tool_ids:
   - "web_search"         # 互联网搜索
   - "fetch"              # HTTP请求/网页抓取
   - "memory"             # 记忆检索与存储
-  - "evaluate"           # Schema验证/格式检查
+
   - "task_evaluate"      # 任务评估（执行完成后必须调用）
   - "human_interaction"  # 向用户提问并获取回答
   - "design_generate"    # UI代码生成（从文字描述/截图生成前端代码）
-  - "browser_test"       # 浏览器测试（渲染页面+截图+控制台日志）
+  - "playwright_test"  # 浏览器测试（渲染页面+截图+控制台日志+状态保存）
   - "design_review"      # 设计审查（对比设计稿vs实现，识别视觉差异）
 
 # 约束
 hard_constraints:
   - "必须记录执行步骤"
   - "遇到无法解决的问题必须报告"
-  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
-  - "必须输出规定的产出物"
-  - "评估通过才能结束任务"
   - "必须先明确任务目标和验收标准再开始执行"
   - "如果任务描述中包含验收标准（AC），每个 AC 必须在产出物中有对应实现或回答"
   - "执行完成后必须逐条回验需求覆盖情况"
@@ -203,7 +195,7 @@ output_schema:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

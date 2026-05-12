@@ -13,8 +13,8 @@
 
 import { useCallback, useEffect, useRef } from 'react'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { useStreamingStore } from '@/stores/streamingStore'
 
 export interface SubTabRouterProps {
   /** 当前会话 ID */

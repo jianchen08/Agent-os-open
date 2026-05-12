@@ -8,7 +8,7 @@
 
 | 类型 | 指标 | 评估方式 |
 |------|------|---------|
-| **tool** | code_check, bash_check, file_check, api_check, test_check, format_valid | 调用工具执行检查，通过 expect 条件判定 |
+| **tool** | file_check, format_valid | 调用工具执行检查，通过 expect 条件判定 |
 | **agent** | semantic_check, function_verify | 调用独立 LLM Agent 评估，返回 passed/score/feedback |
 | **human** | human_review | 等待人工审核，返回 approved/rejected |
 
@@ -67,11 +67,7 @@
 
 | 文件 | 类型 | evaluator_id |
 |------|------|-------------|
-| code_check.yaml | tool | bash_execute |
-| bash_check.yaml | tool | bash_execute |
 | file_check.yaml | tool | file_read |
-| api_check.yaml | tool | fetch |
-| test_check.yaml | tool | bash_execute |
 | format_valid.yaml | tool | schema_evaluator |
 | semantic_check.yaml | agent | evaluator_agent |
 | function_verify.yaml | agent | evaluator_agent |
@@ -115,7 +111,7 @@ executor = EvaluationExecutor(task_service=task_service)
 # 运行评估
 result = executor.run_evaluation(
     task_id="abc123",
-    metric_ids=["code_check", "test_check"],
+    metric_ids=["file_check", "format_valid"],
 )
 
 # 查看结果

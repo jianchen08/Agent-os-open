@@ -7,6 +7,7 @@
  * @module RenderingEngine
  */
 
+import { widgetRegistry } from './WidgetRegistry'
 import type {
   ParsedSchema,
   RenderingSpaceType,
@@ -14,7 +15,6 @@ import type {
   ClientCapabilities,
   ChatInteractionConfig,
 } from '@/types/schema'
-import { widgetRegistry } from './WidgetRegistry'
 
 /** 渲染指令 */
 export interface RenderInstruction {

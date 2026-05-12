@@ -149,6 +149,19 @@ def add_model(body: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {"models": models}
 
 
+@router.put("/llm/models/{model_id}", summary="更新模型配置")
+def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    data = _read_yaml(_LLM_YAML)
+    models = data.setdefault("models", {})
+    if model_id not in models:
+        raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
+    models[model_id].update(body)
+    _write_yaml(_LLM_YAML, data)
+    invalidate_model_config_cache()
+    logger.info("更新模型配置: %s", model_id)
+    return {"models": models}
+
+
 @router.delete("/llm/models/{model_id}", summary="删除模型")
 def delete_model(model_id: str) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
@@ -250,7 +263,7 @@ def get_api_config() -> dict[str, Any]:
             "tasks": "20/minute",
             "websocket": "50/minute",
         },
-        "cors_origins": ["http://localhost:5188", "http://localhost:5189"],
+        "cors_origins": ["*"],
     }
 
 
@@ -289,6 +302,16 @@ def get_concurrency_config() -> dict[str, Any]:
             "default_max_concurrent": conc.get("min_concurrency", 1),
         },
     }
+
+
+_CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
+
+
+@router.put("/concurrency", summary="更新并发配置")
+def save_concurrency_config(body: dict[str, Any]) -> dict[str, Any]:
+    _write_yaml(_CONCURRENCY_YAML, body)
+    logger.info("并发配置已更新")
+    return body
 
 
 # ---------------------------------------------------------------------------

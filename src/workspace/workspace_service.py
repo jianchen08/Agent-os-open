@@ -204,7 +204,8 @@ class WorkspaceService:
                 "task_service",
                 lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
             )
-            all_tasks = task_service.list_all(limit=500, reverse=False)
+            # BUG-FIX-fix_20260512_async_list_all: 添加 await
+            all_tasks = await task_service.list_all(limit=500, reverse=False)
             child_ids: set[str] = set()
             children_of: dict[str, list[str]] = {}
             for t in all_tasks:

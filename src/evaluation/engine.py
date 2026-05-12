@@ -46,7 +46,7 @@ class EvaluationEngine:
         engine = EvaluationEngine(loader=loader)
         result = engine.evaluate(
             task_id="abc123",
-            config=EvaluationConfig(metric_ids=["code_check"]),
+            config=EvaluationConfig(metric_ids=["format_valid"]),
         )
 
     Attributes:
@@ -518,35 +518,23 @@ class EvaluationEngine:
 
     @staticmethod
     def _get_builtin_evaluator_handler(evaluator_id: str) -> Any | None:
-        """获取内置评估器的 handler。
+        """通过 DynamicToolLoader 动态发现并加载评估器 handler。
 
-        当 tool_registry 中找不到评估器时，尝试直接从
-        evaluators 子模块中实例化。
+        复用 tools.loader.DynamicToolLoader 的自动发现机制，
+        扫描 src/tools/builtin/ 目录，按工具名匹配 evaluator_id。
+        配置文件中写什么 evaluator_id，就自动找对应的工具，
+        无需在此处硬编码映射。
 
         Args:
-            evaluator_id: 评估器 ID（如 schema_evaluator）
+            evaluator_id: 评估器 ID（对应工具 name，如 file_read、bash_execute）
 
         Returns:
             可调用的 handler，或 None
         """
-        try:
-            if evaluator_id == "schema_evaluator":
-                from tools.builtin.evaluators.schema_evaluator import SchemaEvaluator
-                inst = SchemaEvaluator()
-                return inst.execute
-            elif evaluator_id == "resource_evaluator":
-                from tools.builtin.evaluators.resource_evaluator import ResourceEvaluator
-                inst = ResourceEvaluator()
-                return inst.execute
-            elif evaluator_id == "human_interaction":
-                from tools.builtin.human_interaction import (
-                    HumanInteractionTool,
-                )
-                inst = HumanInteractionTool()
-                return inst.execute
-        except Exception as e:
-            logger.debug("Failed to load builtin evaluator %s: %s", evaluator_id, e)
-        return None
+        handler = _DynamicToolResolver.resolve(evaluator_id)
+        if handler is not None:
+            return handler
+        return _EvaluatorComponentResolver.resolve(evaluator_id)
 
 
     def _evaluate_agent(
@@ -999,3 +987,124 @@ def _resolve_eval_project_root(
         pass
 
     return None
+
+
+class _DynamicToolResolver:
+    """通过 DynamicToolLoader 动态发现内置工具的 handler。
+
+    复用 tools.loader.DynamicToolLoader 的自动发现机制，
+    扫描 src/tools/builtin/ 目录中所有 BuiltinTool 子类，
+    按 get_tool_definition().name 匹配 evaluator_id。
+    """
+
+    _cache: dict[str, Any | None] = {}
+
+    @classmethod
+    def resolve(cls, evaluator_id: str) -> Any | None:
+        if evaluator_id in cls._cache:
+            return cls._cache[evaluator_id]
+
+        handler = cls._do_resolve(evaluator_id)
+        cls._cache[evaluator_id] = handler
+        return handler
+
+    @classmethod
+    def _do_resolve(cls, evaluator_id: str) -> Any | None:
+        try:
+            import importlib
+            import inspect
+
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
+            from tools.registry import ToolRegistry
+
+            loader = get_dynamic_tool_loader()
+            if loader is None:
+                registry = ToolRegistry()
+                loader = init_dynamic_tool_loader(registry)
+
+            if not loader._discovered:
+                loader._discover_tools()
+
+            entry = loader._tool_classes.get(evaluator_id)
+            if entry is None:
+                return None
+
+            module_path, class_name = entry
+            mod = importlib.import_module(module_path)
+            tool_cls = getattr(mod, class_name)
+
+            sig = inspect.signature(tool_cls.__init__)
+            required_params = [
+                p for p in sig.parameters.values()
+                if p.name != "self" and p.default is inspect.Parameter.empty
+            ]
+            if required_params:
+                logger.debug(
+                    "Evaluator '%s' requires injection params %s, skipped",
+                    evaluator_id, [p.name for p in required_params],
+                )
+                return None
+
+            inst = tool_cls()
+            return inst.execute
+        except Exception as e:
+            logger.debug(
+                "DynamicToolResolver failed for '%s': %s", evaluator_id, e,
+            )
+            return None
+
+
+class _EvaluatorComponentResolver:
+    """扫描评估专用组件目录，按命名约定匹配 evaluator_id。
+
+    处理 tools/builtin/evaluators/ 等非标准工具目录中的评估组件。
+    命名约定：evaluator_id → {evaluator_id}.py 中同名类（SnakeCase → PascalCase）。
+    """
+
+    _EVALUATOR_DIRS: list[str] = [
+        "tools.builtin.evaluators",
+    ]
+
+    _cache: dict[str, Any | None] = {}
+
+    @classmethod
+    def resolve(cls, evaluator_id: str) -> Any | None:
+        if evaluator_id in cls._cache:
+            return cls._cache[evaluator_id]
+
+        handler = cls._do_resolve(evaluator_id)
+        cls._cache[evaluator_id] = handler
+        return handler
+
+    @classmethod
+    def _do_resolve(cls, evaluator_id: str) -> Any | None:
+        try:
+            import importlib
+
+            class_name = "".join(
+                word.capitalize() for word in evaluator_id.split("_")
+            )
+
+            for pkg in cls._EVALUATOR_DIRS:
+                module_path = f"{pkg}.{evaluator_id}"
+                try:
+                    mod = importlib.import_module(module_path)
+                except ImportError:
+                    continue
+
+                candidate = getattr(mod, class_name, None)
+                if candidate is None:
+                    continue
+
+                if not (isinstance(candidate, type) and hasattr(candidate, "execute")):
+                    continue
+
+                inst = candidate()
+                return inst.execute
+
+        except Exception as e:
+            logger.debug(
+                "EvaluatorComponentResolver failed for '%s': %s",
+                evaluator_id, e,
+            )
+        return None

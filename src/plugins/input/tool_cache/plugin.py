@@ -162,7 +162,7 @@ class ToolCache(IInputPlugin):
         """
         tool_name = tool_call.get("name", "")
         args = tool_call.get("args", {})
-        raw = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+        raw = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     def _evict_expired(self) -> None:

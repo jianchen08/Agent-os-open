@@ -8,9 +8,9 @@
  */
 
 import { useMemo, useState, useCallback } from 'react'
-import type { ModuleUISchema, ClientCapabilities } from '@/types/schema'
-import { schemaParser } from '@/services/schema/SchemaParser'
 import { renderingEngine, type RenderInstructionSet } from '@/services/schema/RenderingEngine'
+import { schemaParser } from '@/services/schema/SchemaParser'
+import type { ModuleUISchema, ClientCapabilities } from '@/types/schema'
 
 /** Hook 返回值 */
 export interface UseSchemaRendererResult {

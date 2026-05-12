@@ -240,4 +240,4 @@ class RateLimiter:
 
 
 # 全局限流器实例
-rate_limiter = RateLimiter(max_requests=100, window_seconds=60)
+rate_limiter = RateLimiter(max_requests=300, window_seconds=60)

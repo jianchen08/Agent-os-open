@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { login, register, refreshToken, logout, getCurrentUser } from '@/services/api/auth'
+// eslint-disable-next-line import-x/order
 import type {
   LoginResponse,
   RegisterResponse,
@@ -25,6 +26,7 @@ vi.mock('../client', () => ({
   },
 }))
 
+// eslint-disable-next-line import-x/order
 import apiClient from '@/services/api/client'
 
 describe('认证API', () => {

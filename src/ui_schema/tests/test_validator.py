@@ -245,7 +245,7 @@ class TestActionApiEndpointValidation:
         """合法 API 端点应通过验证。"""
         valid_endpoints = [
             "/api/modules/test/items",
-            "/api/modules/ui_example/logs/stream",
+            "/api/modules/my-module/logs/stream",
             "/api/test/a-b-c",
         ]
         for endpoint in valid_endpoints:
@@ -366,23 +366,4 @@ class TestValidatorComprehensive:
         errors = validator.validate(schema)
         assert len(errors) >= 3  # 至少: id 空、name 空、api 格式、widget 白名单
 
-    def test_example_yaml_file_validates(self) -> None:
-        """示例配置文件 ui_example.yaml 应通过验证。"""
-        from pathlib import Path
 
-        import yaml
-
-        from ui_schema.parser import SchemaParser
-
-        example_path = Path("config/agents/ui_example.yaml")
-        if not example_path.exists():
-            pytest.skip("ui_example.yaml 不存在")
-
-        parser = SchemaParser()
-        schema = parser.load_file(example_path)
-        if schema is None:
-            pytest.skip("ui_example.yaml 无法解析")
-
-        validator = SchemaValidator()
-        errors = validator.validate(schema)
-        assert errors == [], f"ui_example.yaml 验证错误: {errors}"

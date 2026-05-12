@@ -179,12 +179,25 @@ class WorkspaceLifecycleManager:
         return False
 
     def _record_main_branch(self):
-        """记录项目根目录的主分支，用于检测外部分支切换。"""
+        """记录项目根目录的主分支，用于检测外部分支切换。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑只记录当前 HEAD 分支名，不验证是否为真正的主分支。
+        当用户在 feature 分支上启动任务时，worktree 会基于 feature 分支创建，
+        合并时 _resolve_main_branch 却硬找 main → 分支不匹配 → 降级为 copy_merge
+        → 旧文件覆盖新文件。现增加非主分支警告。
+        """
         try:
             rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=self._base_path)
             if rc == 0 and out.strip():
-                self._main_branch = out.strip()
-                logger.debug("[WorkspaceLifecycle] 记录主分支: %s", self._main_branch)
+                branch = out.strip()
+                self._main_branch = branch
+                if branch in ("main", "master"):
+                    logger.debug("[WorkspaceLifecycle] 记录主分支: %s", branch)
+                else:
+                    logger.warning(
+                        "[WorkspaceLifecycle] 当前分支 '%s' 不是主分支(main/master)，"
+                        "worktree 将基于此分支创建。建议在主分支上启动任务。", branch)
         except Exception:
             pass
 
@@ -801,7 +814,9 @@ class WorkspaceLifecycleManager:
                             "task_id=%s, branch=%s",
                             task_id, branch)
                         return result
-                self._cleanup_worktree(workspace, ws_meta, tag_task_id=task_id)
+                self._cleanup_worktree(
+                    workspace, ws_meta, tag_task_id=task_id,
+                    merge_method=result.get("method", ""))
                 return result
             if mode == "shared":
                 # shared 模式不触发合并：子任务共享父工作空间，
@@ -813,8 +828,15 @@ class WorkspaceLifecycleManager:
 
     def _cleanup_worktree(
         self, workspace: str, ws_meta: dict, *, tag_task_id: str = "",
+        merge_method: str = "",
     ):
-        """清理 worktree：删 worktree → 打 tag 保留记录 → 删分支"""
+        """清理 worktree：删 worktree → 条件打 tag → 删分支
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑无论合并方式（git_merge 或 copy_merge）都打 tag。
+        copy_merge 时 commit graph 上没有真正的 merge 关系，tag 指向的提交
+        在分支删除后变成孤儿提交。修复: 只在 git_merge 成功时打 tag。
+        """
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")
         if project_root.exists():
@@ -823,8 +845,8 @@ class WorkspaceLifecycleManager:
             except Exception as e:
                 logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
             if branch:
-                # 合并成功时打 tag 保留记录，方便 git revert 回退
-                if tag_task_id:
+                # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
+                if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
                     logger.info("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
@@ -889,12 +911,14 @@ class WorkspaceLifecycleManager:
     # ── 9. 安全合并 ──────────────────────────────────────────────
 
     def _safe_merge(self, workspace: str, ws_meta: dict) -> dict:
-        """安全合并：验证在主分支上后尝试 git merge，失败降级为文件复制。
+        """安全合并：在当前分支上尝试 git merge，失败降级为文件复制。
 
-        设计原则：
-        - 不执行 git checkout 切换分支
-        - 对目标项目只做 git merge，不做 git add/commit
-        - 合并层级逐层向上：子任务 worktree → 容器空间 → 主仓库
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑使用 _resolve_main_branch 硬找 main/master 分支做合并目标，
+        但 worktree 可能基于 feature 分支创建 → 分支不匹配 → 降级 copy_merge
+        → 旧文件无差别覆盖新文件。
+        修复: 使用当前实际所在分支作为合并目标，不再硬找 main。
+        同时在合并前提交项目根目录的脏文件，防止未提交修改被覆盖。
         """
         project_root = ws_meta.get("project_root", "")
         branch = ws_meta.get("branch", "")
@@ -905,14 +929,18 @@ class WorkspaceLifecycleManager:
         self._ensure_git_user(ws_path)
         self._git_add_commit_if_dirty(
             ws_path, "chore: auto commit before merge")
-        # 验证目标目录在主分支上（不做 add/commit）
-        main_branch = self._resolve_main_branch(proj_path)
-        if not self._assert_on_branch(main_branch, proj_path):
+        # BUG-FIX: 合并前提交项目根目录的脏文件，防止未提交修改被覆盖
+        self._ensure_git_user(proj_path)
+        self._git_add_commit_if_dirty(
+            proj_path, "chore: auto-save before merge")
+        # 获取项目根目录当前实际所在分支（不再硬找 main/master）
+        rc, current_branch, _ = self._run_git(
+            "rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
+        if rc != 0 or not current_branch.strip():
             logger.warning(
-                "[WorkspaceLifecycle] 不在 %s 上，降级为 copy_merge",
-                main_branch)
-            return self._copy_merge(workspace, project_root)
-        # 只做 git merge，不修改目标目录
+                "[WorkspaceLifecycle] 无法获取当前分支，降级为 copy_merge")
+            return self._copy_merge(workspace, project_root, ws_meta)
+        # 尝试 git merge（在当前分支上合并 worktree 分支）
         if branch:
             rc, _, stderr = self._run_git(
                 "merge", branch, cwd=proj_path)
@@ -924,13 +952,38 @@ class WorkspaceLifecycleManager:
                 "降级为 copy_merge: branch=%s, error=%s",
                 branch, stderr[:200] if stderr else "(empty)")
             self._run_git("merge", "--abort", cwd=proj_path)
-            return self._copy_merge(workspace, project_root)
-        return self._copy_merge(workspace, project_root)
+            return self._copy_merge(workspace, project_root, ws_meta)
+        return self._copy_merge(workspace, project_root, ws_meta)
 
-    def _copy_merge(self, workspace: str, target_dir: str) -> dict:
-        """通过文件复制方式合并变更（冲突降级策略），跳过排除目录"""
+    def _copy_merge(self, workspace: str, target_dir: str,
+                    ws_meta: dict | None = None) -> dict:
+        """通过文件复制方式合并变更（冲突降级策略），跳过排除目录。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑无差别复制 worktree 所有文件到目标目录，
+        如果 worktree 基于旧版本创建，旧文件会覆盖目标中的新文件。
+        修复: 通过 git diff 找出 worktree 分支实际修改的文件列表，
+        只复制这些被修改的文件，避免旧版本覆盖新版本。
+        """
         src, dst = Path(workspace), Path(target_dir)
         skip = self._effective_skip_dirs()
+        # BUG-FIX: 获取 worktree 分支实际修改的文件列表，只复制这些文件
+        changed_files: set[str] | None = None
+        branch = ws_meta.get("branch", "") if ws_meta else ""
+        project_root = ws_meta.get("project_root", "") if ws_meta else ""
+        if branch and project_root:
+            proj_path = Path(project_root)
+            rc, base, _ = self._run_git(
+                "merge-base", branch, "HEAD", cwd=proj_path)
+            if rc == 0 and base.strip():
+                rc2, diff_out, _ = self._run_git(
+                    "diff", "--name-only", base.strip(), branch,
+                    cwd=proj_path)
+                if rc2 == 0 and diff_out.strip():
+                    changed_files = set(diff_out.strip().splitlines())
+                    logger.info(
+                        "[WorkspaceLifecycle] copy_merge: 检测到 %d 个实际修改的文件",
+                        len(changed_files))
         merged: list[str] = []
         for item in src.rglob("*"):
             if not item.is_file():
@@ -939,6 +992,10 @@ class WorkspaceLifecycleManager:
             if any(p in skip for p in rel.parts):
                 continue
             if item.suffix in _SKIP_EXTENSIONS:
+                continue
+            rel_str = str(rel).replace("\\", "/")
+            # BUG-FIX: 如果能确定修改文件列表，只复制被修改的文件
+            if changed_files is not None and rel_str not in changed_files:
                 continue
             target_file = dst / rel
             target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -953,10 +1010,15 @@ class WorkspaceLifecycleManager:
     # ── 10. 合并验证 ─────────────────────────────────────────────
 
     def _verify_merge_in_main(self, branch_name: str, cwd: Path | None = None) -> bool:
-        """验证分支已合并到主分支：git log main..{branch} 应为空，不为空则阻止后续清理"""
+        """验证分支已合并到当前分支：git log HEAD..{branch} 应为空，不为空则阻止后续清理。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑使用 _resolve_main_branch 硬找 main/master 做验证，
+        但 worktree 可能合并到 feature 分支，导致验证误判。
+        修复: 使用当前 HEAD 所在分支做验证。
+        """
         work_dir = cwd or self._base_path
-        main_branch = self._resolve_main_branch(work_dir)
-        rc, log_output, _ = self._run_git("log", f"{main_branch}..{branch_name}", cwd=work_dir)
+        rc, log_output, _ = self._run_git("log", f"HEAD..{branch_name}", cwd=work_dir)
         if rc != 0:
             logger.warning("[WorkspaceLifecycle] 验证合并状态失败: branch=%s", branch_name)
             return False

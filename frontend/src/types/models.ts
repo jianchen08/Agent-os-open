@@ -73,6 +73,10 @@ export interface Session {
   status?: string
   /** 绑定的 Agent ID - Requirements: 2.1, 3.3 */
   agentId?: string | null
+  /** 关联的管道 ID 列表 */
+  pipelineIds?: string[]
+  /** 当前活跃的管道 ID */
+  activePipelineId?: string | null
   /** 元数据 */
   metadata?: Record<string, unknown>
   /** 是否已星标 */

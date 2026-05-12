@@ -8,8 +8,8 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { ReactNode } from 'react'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
+import type { ReactNode } from 'react'
 
 /** Layout mode type */
 export type LayoutMode = 'classic' | 'five-space'
@@ -71,6 +71,9 @@ interface LayoutModeState {
 
   /** Connection status */
   connectionStatus: ConnectionStatus
+
+  /** 工作区数据版本号，每次 bump 时递增，驱动 FileTreeWidget 等组件重新加载 */
+  workspaceDataVersion: number
 }
 
 interface LayoutModeActions {
@@ -111,6 +114,9 @@ interface LayoutModeActions {
 
   /** Connection status management */
   updateConnectionStatus: (status: Partial<ConnectionStatus>) => void
+
+  /** 递增工作区数据版本号，触发依赖组件刷新 */
+  bumpWorkspaceDataVersion: () => void
 }
 
 export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
@@ -137,6 +143,7 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
         lastConnectedAt: null,
         queuedMessages: 0,
       },
+      workspaceDataVersion: 0,
 
       // Actions
       toggleMode: () => set((state) => ({ mode: state.mode === 'classic' ? 'five-space' : 'classic' })),
@@ -167,9 +174,19 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
           ),
         })),
 
+      // BUG-FIX-fix_20260512_tab_not_switching:
+      // 问题根因: addWorkspaceTab 只追加 tab 到数组，不将其他 tab 的 isActive 设为 false，
+      //          导致多个 tab 同时 isActive=true，WorkspacePanel 用 find 取第一个匹配，
+      //          内容区渲染旧 tab 内容而新 tab 样式显示为选中。
+      // 修复方案: 新 tab 的 isActive 为 true 时，自动将其他 tab 设为 false。
       addWorkspaceTab: (tab) =>
         set((state) => ({
-          workspaceTabs: [...state.workspaceTabs, tab],
+          workspaceTabs: [
+            ...state.workspaceTabs.map((t) =>
+              tab.isActive ? { ...t, isActive: false } : t,
+            ),
+            tab,
+          ],
         })),
       setActiveTab: (tabId) =>
         set((state) => ({
@@ -236,6 +253,9 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
         set((state) => ({
           connectionStatus: { ...state.connectionStatus, ...status },
         })),
+
+      bumpWorkspaceDataVersion: () =>
+        set((state) => ({ workspaceDataVersion: state.workspaceDataVersion + 1 })),
     }),
     {
       name: 'layout-mode',

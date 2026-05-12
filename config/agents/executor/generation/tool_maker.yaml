@@ -130,15 +130,14 @@ system_prompt: |
   - 修改不影响主项目，系统会自动处理合并
   - 完成后调用 task_evaluate 评估
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
     - name: "可扩展工具索引"
       content: |
         ## 可扩展工具索引
@@ -154,9 +153,7 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 tool_ids:
   - file_read
@@ -171,12 +168,10 @@ tool_ids:
   - memory
   - task_evaluate
   - yaml_validate
-  - evaluate
 
 hard_constraints:
   - 必须根据operation_type执行对应逻辑
   - 生成的代码必须符合项目规范
-  - 所有产出必须写入工作空间
   - 创建工具只需创建 {tool_id}.py，无需修改 __init__.py
   - 必须编写单元测试文件 test_{tool_id}.py 并确保测试通过
   - 必须先编写测试再编写工具代码（TDD Red-Green-Refactor）
@@ -259,7 +254,7 @@ output_schema:
 version: "1.2.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

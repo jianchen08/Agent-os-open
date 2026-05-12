@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# 数据库迁移：添加 Agent level 字段
+#
+# 为 agent_configs 表添加 level 字段，用于区分 L1/L2/L3 Agent
+
+version: "20250208000001"
+name: "add_agent_level"
+description: "为 agent_configs 表添加 level 字段，支持 L1/L2/L3 Agent 层级区分"
+
+up: |
+  -- 添加 agent_configs 表的 level 字段
+  ALTER TABLE agent_configs
+    ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 1;
+
+  -- 为现有数据设置默认值（L1）
+  UPDATE agent_configs SET level = 1 WHERE level IS NULL;
+
+down: |
+  -- 回滚：删除 level 字段
+  ALTER TABLE agent_configs
+    DROP COLUMN IF EXISTS level;

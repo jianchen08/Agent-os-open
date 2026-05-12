@@ -17,12 +17,7 @@ from channels.api.models import HealthResponse
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CORS_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:5188",
-    "http://localhost:5189",
-    "http://localhost:5190",
-]
+_DEFAULT_CORS_ORIGINS = ["*"]
 
 # 应用启动时间
 _start_time: float = 0.0

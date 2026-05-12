@@ -75,58 +75,9 @@ adapters:
         available: false
 
   # ============================================================
-  # 浏览器测试：渲染页面 → 执行操作 → 收集验证数据
+  # 浏览器测试：已迁移到 playwright_test 内置工具
+  # （原 browser_test MCP 适配器已废弃，保留配置仅供参考）
   # ============================================================
-  browser_test:
-    default_backend: playwright_devtools
-    backends:
-      # --- playwright-devtools-mcp（推荐：混合 DevTools + Playwright）---
-      - name: playwright_devtools
-        priority: 1
-        server:
-          command: "npx.cmd"
-          args: ["playwright-devtools-mcp"]
-        tool_mapping:
-          navigate: "browser_launch"
-          interact: "browser_click"
-          screenshot: "browser_screenshot"
-          console: "console_get_logs"
-          performance: "performance_get_core_vitals"
-        timeout: 60.0
-        overall_timeout: 120.0
-        available: false
-
-      # --- Microsoft Playwright MCP（已验证可用，20+ 工具）---
-      - name: playwright
-        priority: 2
-        server:
-          command: "npx.cmd"
-          args: ["-y", "@playwright/mcp@latest"]
-        tool_mapping:
-          navigate: "browser_navigate"
-          interact: "browser_click"
-          screenshot: "browser_take_screenshot"
-          console: "browser_console_messages"
-          performance: "browser_network_requests"
-        timeout: 60.0
-        overall_timeout: 120.0
-        available: true
-
-      # --- Google Chrome DevTools MCP（已全局安装 v0.13.0）---
-      - name: chrome_devtools
-        priority: 3
-        server:
-          command: "npx.cmd"
-          args: ["-y", "chrome-devtools-mcp@latest", "--slim"]
-        tool_mapping:
-          navigate: "chrome_navigate"
-          interact: "chrome_interact"
-          screenshot: "chrome_screenshot"
-          console: "chrome_console"
-          performance: "chrome_performance"
-        timeout: 60.0
-        overall_timeout: 120.0
-        available: true
 
   # ============================================================
   # 设计审查：对比设计参考 vs 实现，识别视觉问题

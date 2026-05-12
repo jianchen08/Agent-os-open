@@ -12,6 +12,7 @@ import {
 } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { useAgentStore } from './agentStore'
+import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
 import type { Session } from '@/types/models'
 
@@ -118,18 +119,29 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     try {
       await deleteSessionApi(id)
 
+      // 清理 pipelineMessageStore 中该会话的所有管道数据
+      const pipelineStore = usePipelineMessageStore.getState()
+      const { [id]: _removedMessages, ...restMessages } = pipelineStore.messagesByPipeline
+      const { [id]: _removedPipelines, ...restPipelines } = pipelineStore.pipelines
+      const { [id]: _removedSessionMap, ...restSessionMap } = pipelineStore.pipelineSessionMap
+      const { [id]: _removedStreaming, ...restStreaming } = pipelineStore.streamingState
+      usePipelineMessageStore.setState({
+        messagesByPipeline: restMessages,
+        pipelines: restPipelines,
+        pipelineSessionMap: restSessionMap,
+        streamingState: restStreaming,
+      })
+
       useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
 
-        const { [id]: _removedMessages, ...restMessages } = state.messages
         const { [id]: _removedPagination, ...restPagination } = state.messagePagination
 
         return {
           sessions: state.sessions.filter((session) => session.id !== id),
           activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
           deletingSessionIds: newDeletingIds,
-          messages: restMessages,
           messagePagination: restPagination,
           error: null,
         }

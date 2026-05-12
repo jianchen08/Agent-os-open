@@ -350,7 +350,11 @@ class TaskTool(BuiltinTool):
         parent_agent_level: int,
         inputs: dict[str, Any],
     ) -> tuple[bool, str | None]:
-        """检查任务操作权限。
+        """检查任务操作权限：只能管理自己提交的任务。
+
+        通过 metadata.submitted_by_level 判断提交者层级，
+        与当前调用者的 parent_agent_level 匹配。
+        旧任务没有 submitted_by_level 时回退到 session_id/parent_task_id 校验。
 
         Args:
             task: 任务模型
@@ -360,6 +364,17 @@ class TaskTool(BuiltinTool):
         Returns:
             (是否有权限, 错误消息)
         """
+        submitted_by = (task.metadata or {}).get("submitted_by_level")
+
+        if submitted_by is not None:
+            if submitted_by != parent_agent_level:
+                return False, (
+                    f"权限不足：本任务由 L{submitted_by} Agent 提交，"
+                    f"当前 L{parent_agent_level} Agent 无法管理"
+                )
+            return True, None
+
+        # 兼容旧任务（无 submitted_by_level）
         if parent_agent_level == 1:
             session_id = inputs.get("session_id")
             if session_id and task.metadata.get("session_id") != session_id:
@@ -381,7 +396,8 @@ class TaskTool(BuiltinTool):
         else:
             return False, f"只有 L1 和 L2 Agent 能使用 task_manage 工具，当前层级：L{parent_agent_level}"
 
-    def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
+    # BUG-FIX-fix_20260512_async_list_all: 改为 async def，添加 await
+    async def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
         """获取全部任务列表。
 
         Args:
@@ -391,7 +407,7 @@ class TaskTool(BuiltinTool):
             任务模型列表（按创建时间倒序）
         """
         service = self._get_task_service()
-        return service.list_all(limit=limit)
+        return await service.list_all(limit=limit)
 
     def _task_to_dict(
         self, task: TaskModel, include_details: bool = False, include_agent_calls: bool = False
@@ -461,7 +477,8 @@ class TaskTool(BuiltinTool):
             project_id = inputs.get("project_id")
             limit = inputs.get("limit", 5)
 
-            tasks = self._get_all_tasks(limit)
+            # BUG-FIX-fix_20260512_async_list_all: 添加 await
+            tasks = await self._get_all_tasks(limit)
 
             # 按权限和条件过滤
             filtered_tasks = []
@@ -649,7 +666,8 @@ class TaskTool(BuiltinTool):
                     )
 
                 old_status = task.status.value
-                service.force_transition(task_id, target_status)
+                # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
+                await service.force_transition(task_id, target_status)
 
                 return create_success_result(
                     data={
@@ -705,7 +723,8 @@ class TaskTool(BuiltinTool):
                 elif injected_task_id:
                     user_parent_task_id = injected_task_id
 
-            tasks = self._get_all_tasks(limit)
+            # BUG-FIX-fix_20260512_async_list_all: 添加 await
+            tasks = await self._get_all_tasks(limit)
 
             # 过滤
             filtered = []
@@ -807,7 +826,8 @@ class TaskTool(BuiltinTool):
                 )
 
             reason = inputs.get("reason", "用户请求暂停")
-            service.pause_task(task_id)
+            # BUG-FIX-fix_20260512_async_compat: pause_task 现在是 async
+            await service.pause_task(task_id)
 
             return create_success_result(
                 data={
@@ -877,7 +897,8 @@ class TaskTool(BuiltinTool):
                 )
 
             reason = inputs.get("reason", "用户请求继续执行")
-            service.resume_task(task_id)
+            # BUG-FIX-fix_20260512_async_compat: resume_task 现在是 async
+            await service.resume_task(task_id)
 
             return create_success_result(
                 data={
@@ -958,7 +979,8 @@ class TaskTool(BuiltinTool):
             old_status = task.status.value
 
             # 通过 fail_task 设置为 failed 状态
-            service.fail_task(task_id, error=f"已取消: {reason}")
+            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+            await service.fail_task(task_id, error=f"已取消: {reason}")
 
             return create_success_result(
                 data={
@@ -1042,9 +1064,11 @@ class TaskTool(BuiltinTool):
                 )
 
             # 利用状态机从 failed -> pending
-            service.force_transition(task.id, TaskStatus.PENDING)
+            # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
+            await service.force_transition(task.id, TaskStatus.PENDING)
             task.error = None
-            service.save_task(task)
+            # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+            await service.save_task(task)
 
             # 发出 task.submitted 事件，触发 TaskWorker 重新执行
             execution_warning = None
@@ -1106,12 +1130,17 @@ class TaskTool(BuiltinTool):
     ) -> ToolExecutionResult:
         """向运行中的子任务注入指令。
 
+        通过统一的 send_pipeline_message() 入口将消息投递到目标管道，
+        由 pipeline 内部根据当前状态（运行中/挂起/未启动）自动选择
+        最优投递路径（双通道注入 / inject_and_wake / MessageQueue 兜底）。
+
         Args:
-            inputs: 工具输入参数
-            parent_agent_level: 父 Agent 层级
+            inputs: 工具输入参数，需包含 task_id 和 message
+            parent_agent_level: 父 Agent 层级，用于权限校验和注入来源标记
 
         Returns:
-            注入结果或错误
+            ToolExecutionResult: 注入结果，包含 trigger 方式和消息预览；
+                失败时返回错误码及原因
         """
         try:
             task_id = inputs.get("task_id")
@@ -1161,10 +1190,9 @@ class TaskTool(BuiltinTool):
                     error_code="MISSING_PIPELINE_ID",
                 )
 
-            # ── 主动触发注入 ──
-            # 注入消息不是被动队列，而是触发器：
-            # 只要管道空闲（不在执行 LLM 或工具），就立即触发新一轮 LLM 调用。
-            # 优先级：运行中引擎 > 挂起引擎 > MessageQueue 兜底
+            # ── 统一消息注入 ──
+            # 通过 send_pipeline_message() 统一入口投递消息，
+            # 内部自动根据管道状态选择最优投递路径。
             inject_result = {
                 "task_id": task_id,
                 "injected": True,
@@ -1173,88 +1201,25 @@ class TaskTool(BuiltinTool):
             }
 
             try:
-                from infrastructure.service_provider import get_service_provider
-                _provider = get_service_provider()
-
-                # 1. 运行中引擎：双通道注入
-                #    - MessageQueue：MessageInjectPlugin 下轮迭代立即消费（主通道）
-                #    - inject_notification：_pending_notifications 安全兜底
-                _running_key = f"__running_engine_{target_pipeline_id}"
-                _running_engine = _provider.get(_running_key)
-                if _running_engine is not None and hasattr(_running_engine, "inject_notification"):
-                    # 主通道：推入 MessageQueue，MessageInjectPlugin 下轮立即取走
-                    from infrastructure.message_queue import Message, create_message_id
-                    queue = self._get_message_queue()
-                    if queue:
-                        msg = Message(
-                            id=create_message_id(),
-                            pipeline_id=target_pipeline_id,
-                            target_id=task_id,
-                            content=message,
-                            priority=100,
-                            metadata={
-                                "source": "task_inject",
-                                "injected_by": f"L{parent_agent_level}",
-                                "task_id": task_id,
-                            },
-                        )
-                        await queue.push(msg)
-                        inject_result["message_id"] = msg.id
-                    # 兜底通道：inject_notification → _pending_notifications
-                    if hasattr(_running_engine, "inject_notification"):
-                        _running_engine.inject_notification(message)
-                    inject_result["trigger"] = "inject_notification+message_queue"
-                    logger.info(
-                        "[TaskTool] 消息已双通道注入运行中管道 | pipeline_id=%s | preview=%s",
-                        target_pipeline_id, message[:80],
-                    )
-
-                # 2. 挂起引擎：inject_and_wake() 注入并唤醒
-                else:
-                    _suspended_key = f"__suspended_engine_{target_pipeline_id}"
-                    _suspended_engine = _provider.get(_suspended_key)
-                    if _suspended_engine is not None and hasattr(_suspended_engine, "inject_and_wake"):
-                        _suspended_engine.inject_and_wake(message)
-                        inject_result["trigger"] = "inject_and_wake"
-                        logger.info(
-                            "[TaskTool] 挂起管道已被唤醒 | pipeline_id=%s",
-                            target_pipeline_id,
-                        )
-
-                    # 3. 引擎未找到：推入 MessageQueue 兜底
-                    #    （管道尚未启动或已结束，等管道恢复后 MessageInjectPlugin 消费）
-                    else:
-                        from infrastructure.message_queue import Message, create_message_id
-                        queue = self._get_message_queue()
-                        if queue:
-                            msg = Message(
-                                id=create_message_id(),
-                                pipeline_id=target_pipeline_id,
-                                target_id=task_id,
-                                content=message,
-                                priority=100,
-                                metadata={
-                                    "source": "task_inject",
-                                    "injected_by": f"L{parent_agent_level}",
-                                    "task_id": task_id,
-                                },
-                            )
-                            await queue.push(msg)
-                            inject_result["trigger"] = "message_queue"
-                            inject_result["message_id"] = msg.id
-                            logger.info(
-                                "[TaskTool] 引擎未找到，消息已入队兜底 | pipeline_id=%s",
-                                target_pipeline_id,
-                            )
-                        else:
-                            return create_failure_result(
-                                error="目标管道未运行且消息队列不可用，无法注入",
-                                error_code="ENGINE_NOT_FOUND_NO_QUEUE",
-                            )
-            except Exception as _wake_err:
-                logger.warning(
-                    "[TaskTool] 主动触发注入失败: %s", _wake_err,
+                from pipeline.message_bus import send_pipeline_message
+                result = await send_pipeline_message(
+                    target_pipeline_id, message,
+                    metadata={
+                        "source": "task_inject",
+                        "injected_by": f"L{parent_agent_level}",
+                        "task_id": task_id,
+                    },
                 )
+                inject_result["trigger"] = result.method
+                if not result.success:
+                    inject_result["trigger"] = "failed"
+                    inject_result["error"] = result.error
+                logger.info(
+                    "[TaskTool] 消息注入完成 | pipeline_id=%s | method=%s | preview=%s",
+                    target_pipeline_id, result.method, message[:80],
+                )
+            except Exception as _wake_err:
+                logger.warning("[TaskTool] 消息注入失败: %s", _wake_err)
 
             return create_success_result(
                 data=inject_result,
@@ -1326,7 +1291,8 @@ class TaskTool(BuiltinTool):
             )
 
             # 从存储中删除
-            service.delete_task(task_id)
+            # BUG-FIX-fix_20260512_async_compat: delete_task 现在是 async
+            await service.delete_task(task_id)
 
             return create_success_result(
                 data={
@@ -1404,9 +1370,11 @@ class TaskTool(BuiltinTool):
         reason = inputs.get("container_reason", inputs.get("reason", ""))
 
         try:
-            service.force_transition(task.id, TaskStatus.COMPLETED)
+            # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
+            await service.force_transition(task.id, TaskStatus.COMPLETED)
             task.completed_at = datetime.now().isoformat()
-            service.save_task(task)
+            # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+            await service.save_task(task)
             logger.info("[TaskTool] 容器已完成: %s — %s", task_id, reason)
             return create_success_result(
                 data={
@@ -1494,11 +1462,13 @@ class TaskTool(BuiltinTool):
             )
 
         try:
-            service.force_transition(task.id, TaskStatus.FAILED)
+            # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
+            await service.force_transition(task.id, TaskStatus.FAILED)
             task.completed_at = datetime.now().isoformat()
             task.metadata = task.metadata or {}
             task.metadata["container_reason"] = reason
-            service.save_task(task)
+            # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+            await service.save_task(task)
             logger.info("[TaskTool] 容器已失败: %s — %s", task_id, reason)
             return create_success_result(
                 data={

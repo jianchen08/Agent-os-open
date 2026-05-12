@@ -9,14 +9,14 @@
  */
 
 import React, { useMemo } from 'react'
-import type { Scene, SceneWidgetConfig, SceneLayoutConfig } from '@/services/api/scenes'
 import { AudioPlayer } from '@/components/media/AudioPlayer'
 import { ImageGallery } from '@/components/media/ImageGallery'
+import { CompositionRenderer } from '@/components/schema/composition/CompositionRenderer'
 import { GridLayout } from '@/components/schema/composition/GridLayout'
 import { SplitLayout } from '@/components/schema/composition/SplitLayout'
 import { StackLayout } from '@/components/schema/composition/StackLayout'
 import { TabLayout } from '@/components/schema/composition/TabLayout'
-import { CompositionRenderer } from '@/components/schema/composition/CompositionRenderer'
+import type { Scene, SceneWidgetConfig, SceneLayoutConfig } from '@/services/api/scenes'
 
 /** SceneSpaceRenderer 属性 */
 export interface SceneSpaceRendererProps {

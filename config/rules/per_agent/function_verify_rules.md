@@ -11,13 +11,13 @@
 
 ## 前端应用 / UI 组件
 
-- **主验证工具**：playwright_test（浏览器自动化） + fetch（HTML 结构检查）
+- **主验证工具**：browser_test（浏览器自动化） + fetch（HTML 结构检查）
 - **验证策略分层**：
   1. **结构层**（fetch）：页面是否包含预期 DOM 元素、表单字段
-  2. **行为层**（playwright_test）：点击/输入后是否有正确响应、页面跳转、状态变化
-  3. **视觉层**（playwright_test 截图）：关键页面截图对比
-  4. **console 层**（playwright_test）：捕获 console 错误和警告
-- **playwright 操作链**：browser_launch → navigate → interact(click/type/select/drag/hover/upload) → capture_console → screenshot_compare → close
+  2. **行为层**（browser_test）：点击/输入后是否有正确响应、页面跳转、状态变化
+  3. **视觉层**（browser_test 截图）：关键页面截图对比
+  4. **console 层**（browser_test）：捕获 console 错误和警告
+- **browser_test 操作**：通过 MCP 协议连接 Playwright/Chrome DevTools 后端，支持导航、交互、截图、控制台捕获等完整浏览器自动化能力
 
 ## CLI 工具 / 脚本
 
@@ -44,5 +44,5 @@
 
 ## 工具选择原则
 
-优先使用专用工具：fetch > curl，playwright_test > 手写脚本。
-前端项目直接使用 playwright_test 工具，无需手写脚本。
+优先使用专用工具：fetch > curl，browser_test > 手写脚本。
+前端项目直接使用 browser_test 工具，无需手写脚本。

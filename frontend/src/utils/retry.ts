@@ -31,7 +31,9 @@ export function isRetryableError(error: any): boolean {
 
   const status = error.response?.status ?? error.status
   if (status) {
-    return status >= 500 && status < 600
+    // BUG-FIX-fix_20260512_429_retry:
+    // 将 429（请求过于频繁）也视为可重试错误
+    return status === 429 || (status >= 500 && status < 600)
   }
 
   return false

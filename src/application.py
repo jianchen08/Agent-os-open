@@ -266,7 +266,7 @@ class Application:
             services["event_bus"] = event_bus
             logger.info("服务已创建: event_bus")
         except Exception as exc:
-            logger.warning("创建 event_bus 服务失败: %s", exc)
+            logger.warning("创建 event_bus 服务失败: %s", exc, exc_info=True)
 
         # ── 11. TaskService（通过 EventBus 自动广播状态变更）───
         try:
@@ -274,9 +274,9 @@ class Application:
 
             task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
-            logger.info("服务已创建: task_service (event_bus enabled)")
+            logger.info("服务已创建: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
         except Exception as exc:
-            logger.warning("创建 task_service 服务失败: %s", exc)
+            logger.warning("创建 task_service 服务失败: %s", exc, exc_info=True)
 
         # ── 12. TimerManager ─────────────────────────────
         try:
@@ -623,16 +623,38 @@ class Application:
         plugin_registry: Any,
         services: dict[str, Any] | None = None,
     ) -> Any | None:
-        """创建 TaskWorker 实例。"""
+        """创建 TaskWorker 实例。
+
+        当 services 中缺少 event_bus 或 task_service 时，尝试懒创建并回填，
+        避免因初始化顺序或依赖缺失导致 TaskWorker 无法启动。
+        """
         from infrastructure.task_worker import TaskWorker
 
-        svc = services or self.services
-        event_bus = svc.get("event_bus")
-        task_service = svc.get("task_service")
+        svc = services if services is not None else self.services
 
-        if not event_bus or not task_service:
-            logger.warning("缺少 event_bus 或 task_service，TaskWorker 未初始化")
-            return None
+        event_bus = svc.get("event_bus")
+        if not event_bus:
+            logger.warning("services 中缺少 event_bus，尝试懒创建")
+            try:
+                from pipeline.event_bus import EventBus
+                event_bus = EventBus()
+                svc["event_bus"] = event_bus
+                logger.info("event_bus 懒创建成功")
+            except Exception as exc:
+                logger.error("event_bus 懒创建失败: %s", exc)
+                return None
+
+        task_service = svc.get("task_service")
+        if not task_service:
+            logger.warning("services 中缺少 task_service，尝试懒创建")
+            try:
+                from tasks.service import TaskService
+                task_service = TaskService(event_bus=event_bus)
+                svc["task_service"] = task_service
+                logger.info("task_service 懒创建成功")
+            except Exception as exc:
+                logger.error("task_service 懒创建失败: %s", exc)
+                return None
 
         task_worker = TaskWorker(
             task_service=task_service,

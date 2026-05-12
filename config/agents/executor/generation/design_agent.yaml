@@ -1,0 +1,166 @@
+# -*- coding: utf-8 -*-
+# 方案设计 Agent - L3 执行 Agent
+# 负责根据调研结果设计执行方案
+
+config_id: "design_agent"
+name: "方案设计专家"
+display_name: "方案设计专家"
+description: |
+  负责根据调研结果设计执行方案。
+  接收技术调研报告，输出完整的执行方案（技术栈、架构、目录结构、关键流程）。
+
+agent_type: "specialized"
+category: "generation"
+level: "L3"
+
+model_name: "glm-4.7"
+model_params:
+  temperature: 0.4
+  max_tokens: 8192
+
+system_prompt: |
+  # 你是方案设计专家
+
+  你负责根据调研结果设计完整的执行方案。
+
+  ## 核心职责
+
+  1. **分析调研结果**
+     - 理解技术调研报告
+     - 识别可行的技术方案
+     - 评估各方案的优劣
+
+  2. **技术选型**
+     - 选择合适的技术栈
+     - 确定框架和库
+     - 考虑兼容性和维护性
+
+  3. **架构设计**
+     - 设计系统架构
+     - 定义模块划分
+     - 确定组件关系
+
+  4. **目录结构设计**
+     - 规划项目目录结构
+     - 定义文件组织方式
+     - 遵循项目规范
+
+  5. **关键流程设计**
+     - 设计核心业务流程
+     - 定义数据流向
+     - 规划接口设计
+
+  ## 设计原则
+
+  1. **简洁优先**：选择最简单可行的方案
+  2. **可维护性**：考虑长期维护成本
+  3. **可扩展性**：预留扩展空间
+  4. **一致性**：遵循项目现有规范
+
+# 动态变量
+dynamic_variables:
+  - "Date"
+  - "Time"
+
+# 上下文变量配置
+context_variables:
+  enable: true
+  include_timestamp: true
+  variables:
+    agent_name: "方案设计专家"
+    agent_level: "L3"
+    agent_category: "generation"
+
+# 知识库配置
+knowledge:
+  mode: "compressed"
+  max_tokens: 1500
+  top_k: 3
+  score_threshold: 0.7
+
+# 可用工具
+tool_ids:
+  - "memory_retrieve"  # 检索历史记忆
+  - "file_operate"     # 文件操作
+  - "todo_manage"      # TODO 清单管理
+  - "task_evaluate"    # 任务评估
+
+# 约束
+hard_constraints:
+  - "必须输出结构化的执行方案"
+  - "必须包含技术栈、架构、目录结构、关键流程"
+  - "必须评估风险并提供缓解措施"
+
+soft_constraints:
+  - "优先选择成熟稳定的技术方案"
+  - "考虑团队技术栈熟悉度"
+  - "遵循项目现有架构风格"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    requirement:
+      type: "string"
+      description: "业务需求描述"
+    research_report:
+      type: "object"
+      description: "技术调研报告"
+    initial_ac:
+      type: "array"
+      description: "初步验收标准"
+    context:
+      type: "object"
+      description: "上下文信息"
+  required:
+    - "requirement"
+    - "research_report"
+
+output_schema:
+  type: "object"
+  properties:
+    execution_plan:
+      type: "object"
+      description: "执行方案"
+      properties:
+        summary:
+          type: "string"
+        tech_stack:
+          type: "object"
+        architecture:
+          type: "object"
+        directory_structure:
+          type: "object"
+        key_flows:
+          type: "array"
+        risks:
+          type: "array"
+        mitigation:
+          type: "array"
+    confidence:
+      type: "number"
+    alternatives:
+      type: "array"
+  required:
+    - "execution_plan"
+
+# 元数据
+version: "1.0.0"
+is_active: true
+max_iterations: 20
+timeout_seconds: 300
+
+tags:
+  - "specialized"
+  - "generation"
+  - "design"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2026-01-15"
+  capabilities:
+    - "solution_design"
+    - "tech_selection"
+    - "architecture_design"
+    - "risk_assessment"

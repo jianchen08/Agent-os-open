@@ -79,7 +79,7 @@ class AgentConfigLoader:
             return ContextConfig()
         items = [
             AgentConfigLoader._parse_context_var_item(item)
-            for item in data.get("items", [])
+            for item in (data.get("items") or [])
         ]
         return ContextConfig(enabled=data.get("enabled", True), items=items)
 

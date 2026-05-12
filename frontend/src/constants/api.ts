@@ -6,9 +6,9 @@
  */
 
 /**
- * API基础URL（从环境变量读取，默认为本地开发地址）
+ * API基础URL（从环境变量读取，空值时使用相对路径由Vite代理转发）
  */
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8888'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 /**
  * API端点路径

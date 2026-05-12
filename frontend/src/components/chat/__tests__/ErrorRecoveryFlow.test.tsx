@@ -14,11 +14,10 @@
 
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
 import ActivityCard from '@/components/chat/ActivityCard'
-import type { ActivityData, ActivityStatus } from '@/types/activity'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import type { ActivityData, ActivityStatus } from '@/types/activity'
 
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
@@ -69,6 +68,7 @@ vi.mock('@/utils/confirm', () => ({
 //  Mock: formatDuration from activity types
 // ---------------------------------------------------------------------------
 vi.mock('@/types/activity', async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   const actual = await importOriginal<typeof import('@/types/activity')>()
   return {
     ...actual,

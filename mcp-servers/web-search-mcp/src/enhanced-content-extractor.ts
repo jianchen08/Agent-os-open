@@ -1,4 +1,4 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Page } from 'playwright';
 import { ContentExtractionOptions, SearchResult } from './types.js';
@@ -89,10 +89,49 @@ export class EnhancedContentExtractor {
   private async extractWithBrowser(options: ContentExtractionOptions): Promise<string> {
     const { url, timeout = this.defaultTimeout } = options;
     
-    const browser = await this.browserPool.getBrowser();
+    const handle = await this.browserPool.getBrowser();
     const browserType = this.browserPool.getLastUsedBrowserType();
     
     try {
+      // 持久化上下文模式：直接从持久化上下文创建页面，无需新建上下文
+      if (handle.isPersistent && handle.context) {
+        const page = await handle.context.newPage();
+
+        await page.route('**/*', (route) => {
+          const resourceType = route.request().resourceType();
+          if (['image', 'font', 'media'].includes(resourceType)) {
+            route.abort();
+          } else {
+            route.continue();
+          }
+        });
+
+        console.error(`[BrowserExtractor] Navigating to ${url} (persistent mode)`);
+        await page.goto(url, { 
+          waitUntil: 'domcontentloaded',
+          timeout: Math.min(timeout, 8000)
+        });
+
+        await page.mouse.move(Math.random() * 100, Math.random() * 100);
+        await page.waitForTimeout(500 + Math.random() * 1000);
+
+        try {
+          await page.waitForSelector('article, main, .content, .post-content, .entry-content', {
+            timeout: 2000
+          });
+        } catch {
+          console.error(`[BrowserExtractor] No main content selector found, proceeding anyway`);
+        }
+
+        const html = await page.content();
+        const content = this.parseContent(html);
+        await page.close();
+        return content;
+      }
+
+      // 普通模式：创建独立上下文
+      const browser = handle.browser!;
+
       // Create context options based on browser capabilities
       const baseContextOptions = {
         userAgent: this.getRandomUserAgent(),
@@ -106,8 +145,7 @@ export class EnhancedContentExtractor {
 
       // Firefox doesn't support isMobile option - check multiple ways to ensure detection
       const isFirefox = browserType === 'firefox' || 
-                       browserType.includes('firefox') || 
-                       browser.constructor.name.toLowerCase().includes('firefox');
+                       browserType.includes('firefox');
       
       const contextOptions = isFirefox
         ? baseContextOptions 

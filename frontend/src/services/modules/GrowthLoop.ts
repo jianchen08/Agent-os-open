@@ -7,10 +7,10 @@
 
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { schemaRegistry } from '@/services/schema/registry'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 import { registerCapabilities } from './ClientCapabilities'
 import { moduleManager } from './ModuleManager'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
 /**
  * 初始化自生长闭环
@@ -32,9 +32,6 @@ export async function initializeGrowthLoop(): Promise<void> {
 
   // Step 3: 拉取并注册模块（_syncToLayoutStore 已处理 workspace tab 和 dock 的同步）
   await moduleManager.initialize()
-
-  // Step 4: 启动轮询
-  moduleManager.startPolling(30000)
 
   loggers.websocket.info('自生长闭环初始化完成')
 
@@ -85,7 +82,6 @@ export async function restartGrowthLoop(): Promise<void> {
   try {
     await registerCapabilities()
     await moduleManager.fetchAndRebuild()
-    moduleManager.startPolling(30000)
     loggers.websocket.info('自生长闭环重启完成')
     loggers.websocket.info(`当前已注册 ${schemaRegistry.getEnabled().length} 个模块`)
   } catch (error) {

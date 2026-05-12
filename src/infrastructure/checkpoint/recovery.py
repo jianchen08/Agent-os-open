@@ -1,9 +1,14 @@
 """管道恢复服务。
 
 负责从检查点恢复管道执行状态，支持：
-- 恢复管道状态快照
+- 恢复管道状态快照（自动合并 Agent 配置）
 - 恢复并继续执行管道
 - 获取恢复信息和恢复建议
+
+恢复流程：
+1. 从 checkpoint 加载动态状态（messages、iteration 等）
+2. 从 Agent 配置文件加载静态配置（system_prompt、constraints 等）
+3. 合并为完整的管道 state
 """
 
 from __future__ import annotations
@@ -26,6 +31,9 @@ class PipelineRecovery:
     利用 PipelineCheckpointManager 提供的检查点能力，
     实现管道状态恢复、恢复后继续执行以及恢复信息查询。
 
+    恢复时自动从 Agent 配置文件重新加载静态配置（system_prompt、
+    constraints、tool_ids 等），与检查点中的动态状态合并为完整 state。
+
     Attributes:
         checkpoint_manager: 检查点管理器实例
         pipeline_registry: 管道注册表（可选，用于跨管道路由恢复）
@@ -46,33 +54,39 @@ class PipelineRecovery:
         self.pipeline_registry = pipeline_registry
 
     async def recover(self, pipeline_id: str) -> dict[str, Any] | None:
-        """恢复管道执行状态。
+        """恢复管道执行状态（动态状态 + Agent 配置合并）。
 
-        从最新检查点加载状态数据，返回反序列化后的 state，
-        由调用方负责将 state 重新注入 PipelineEngine。
+        从最新检查点加载动态状态，再从 Agent 配置文件加载静态配置，
+        合并后返回完整的管道 state。
 
         Args:
             pipeline_id: 管道 ID
 
         Returns:
-            恢复的状态字典，无可用检查点时返回 None
+            恢复的完整状态字典，无可用检查点时返回 None
         """
         checkpoint_data = await self.checkpoint_manager.get_latest(pipeline_id)
         if checkpoint_data is None:
             logger.warning("No checkpoint found for pipeline: %s", pipeline_id)
             return None
 
-        state = checkpoint_data.get("state", {})
+        saved_state = checkpoint_data.get("state", {})
         metadata = checkpoint_data.get("metadata", {})
 
+        base_state = self._load_agent_base_state()
+
+        full_state = {**base_state, **saved_state}
+
         logger.info(
-            "Pipeline state recovered: pipeline_id=%s, checkpoint_id=%s, phase=%s, iteration=%d",
+            "Pipeline state recovered: pipeline_id=%s, checkpoint_id=%s, "
+            "phase=%s, iteration=%d, merged_keys=%s",
             pipeline_id,
             metadata.get("checkpoint_id"),
             metadata.get("phase"),
             metadata.get("iteration", 0),
+            list(full_state.keys()),
         )
-        return state
+        return full_state
 
     async def recover_and_resume(
         self,
@@ -136,6 +150,31 @@ class PipelineRecovery:
             "state_keys": list(state.keys()) if isinstance(state, dict) else [],
             "recovery_suggestion": suggestion,
         }
+
+    def _load_agent_base_state(self) -> dict[str, Any]:
+        """从 Agent 配置文件加载静态基础状态。
+
+        通过 state_builder.load_default_agent 加载系统默认 Agent 配置，
+        调用其 to_state() 方法获取 system_prompt、constraints、tool_ids 等静态字段。
+
+        Returns:
+            Agent 配置的状态字典，加载失败时返回空字典
+        """
+        try:
+            from pipeline.state_builder import load_default_agent
+
+            agent_config = load_default_agent(None)
+            if agent_config and hasattr(agent_config, "to_state"):
+                base_state = agent_config.to_state()
+                logger.info(
+                    "Agent base state loaded from config: keys=%s",
+                    list(base_state.keys()),
+                )
+                return base_state
+        except Exception as exc:
+            logger.warning("Failed to load agent base state: %s", exc)
+
+        return {}
 
     def _build_suggestion(self, phase: str, metadata: dict[str, Any]) -> str:
         """根据检查点阶段生成恢复建议。

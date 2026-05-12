@@ -371,8 +371,6 @@ export const loggers = {
   reconnect: logManager.module('Reconnect'),
   /** 事件处理日志器 */
   eventHandler: logManager.module('EventHandler'),
-  /** 统一处理日志器 */
-  unifiedHandler: logManager.module('UnifiedHandler'),
 }
 
 /**

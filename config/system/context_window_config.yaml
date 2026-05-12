@@ -1,15 +1,15 @@
 version: '2.0'
-compress_trigger_ratio: 0.5
+compress_trigger_ratio: 0.6
 budgets:
   system_prompt: 0.06
   tools_description: 0.0
   static_vars: 0.03
   dynamic_variables: 0.03
   l3: 0.02
-  l2: 0.05
-  l1: 0.1
-  recent: 0.18
-  retrieval: 0.05
+  l2: 0.03
+  l1: 0.08
+  recent: 0.10
+  retrieval: 0.03
   response_reserve: 0.14
 include_tools_description_in_prompt: false
 templates:

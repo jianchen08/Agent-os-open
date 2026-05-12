@@ -70,6 +70,8 @@ class PlaywrightTestTool(BuiltinTool):
                             "interact",
                             "capture_console",
                             "screenshot_compare",
+                            "save_state",
+                            "restore_state",
                             "close",
                         ],
                         "description": "操作类型",
@@ -179,6 +181,20 @@ class PlaywrightTestTool(BuiltinTool):
                         "type": "number",
                         "description": "像素对比阈值（0.0-1.0），默认 0.1",
                     },
+                    # save_state / restore_state 参数
+                    "state_path": {
+                        "type": "string",
+                        "description": "浏览器状态文件路径（save_state/restore_state 时使用）",
+                    },
+                    # browser_launch 可选参数
+                    "storage_state": {
+                        "type": "string",
+                        "description": "恢复浏览器状态文件路径（browser_launch 时可选，用于恢复已保存的状态）",
+                    },
+                    "auto_persist": {
+                        "type": "boolean",
+                        "description": "是否自动持久化浏览器状态（关闭时自动保存，启动时自动恢复），默认 true",
+                    },
                 },
                 "required": ["action"],
             },
@@ -198,6 +214,8 @@ class PlaywrightTestTool(BuiltinTool):
             "interact": self._handle_interact,
             "capture_console": self._handle_capture_console,
             "screenshot_compare": self._handle_screenshot_compare,
+            "save_state": self._handle_save_state,
+            "restore_state": self._handle_restore_state,
             "close": self._handle_close,
         }
         
@@ -220,6 +238,8 @@ class PlaywrightTestTool(BuiltinTool):
             viewport_height = inputs.get("viewport_height", 720)
             slow_mo = inputs.get("slow_mo", 0)
             launch_options_str = inputs.get("launch_options")
+            storage_state = inputs.get("storage_state")
+            auto_persist = inputs.get("auto_persist", True)
             
             # 解析启动参数
             launch_options = None
@@ -237,10 +257,18 @@ class PlaywrightTestTool(BuiltinTool):
                 viewport_height=viewport_height,
                 slow_mo=slow_mo,
                 launch_options=launch_options,
+                storage_state=storage_state,
+                auto_persist=auto_persist,
             )
             
             # 存储会话
             self._sessions[session_id] = session_info
+            
+            # 构建返回信息
+            message = f"{browser} 浏览器会话已创建"
+            restored_state = session_info.get("restored_state")
+            if restored_state:
+                message += f"，已自动恢复状态: {restored_state}"
             
             return create_success_result(data={
                 "session_id": session_id,
@@ -250,7 +278,9 @@ class PlaywrightTestTool(BuiltinTool):
                     "width": viewport_width,
                     "height": viewport_height,
                 },
-                "message": f"{browser} 浏览器会话已创建",
+                "auto_persist": auto_persist,
+                "restored_state": restored_state,
+                "message": message,
             })
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
@@ -499,6 +529,62 @@ class PlaywrightTestTool(BuiltinTool):
             logger.error(f"截图对比失败: {e}")
             return create_failure_result(f"截图对比失败: {str(e)}")
     
+    async def _handle_save_state(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """处理保存浏览器状态"""
+        try:
+            session_id = inputs.get("session_id")
+            if not session_id:
+                return create_failure_result("session_id 是必填参数")
+            
+            state_path = inputs.get("state_path")
+            if not state_path:
+                return create_failure_result("state_path 是必填参数")
+            
+            # 保存会话状态
+            result = BrowserManager.save_session_state(session_id, state_path)
+            
+            if result.get("success"):
+                return create_success_result(data={
+                    "session_id": session_id,
+                    "state_path": state_path,
+                    "message": "浏览器状态保存成功",
+                })
+            else:
+                return create_failure_result(result.get("error", "保存浏览器状态失败"))
+        except Exception as e:
+            logger.error(f"保存浏览器状态失败: {e}")
+            return create_failure_result(f"保存浏览器状态失败: {str(e)}")
+    
+    async def _handle_restore_state(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """处理恢复浏览器状态"""
+        try:
+            state_path = inputs.get("state_path")
+            if not state_path:
+                return create_failure_result("state_path 是必填参数")
+            
+            browser = inputs.get("browser", "chromium")
+            headless = inputs.get("headless", True)
+            
+            # 创建新会话并恢复状态
+            session_id, session_info = BrowserManager.create_session(
+                browser_type=browser,
+                headless=headless,
+                storage_state=state_path,
+            )
+            
+            # 存储会话
+            self._sessions[session_id] = session_info
+            
+            return create_success_result(data={
+                "session_id": session_id,
+                "browser_type": browser,
+                "state_path": state_path,
+                "message": "浏览器状态恢复成功",
+            })
+        except Exception as e:
+            logger.error(f"恢复浏览器状态失败: {e}")
+            return create_failure_result(f"恢复浏览器状态失败: {str(e)}")
+    
     async def _handle_close(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理关闭浏览器"""
         try:
@@ -506,7 +592,7 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
             
-            # 关闭会话
+            # 关闭会话（BrowserManager.close_session 已内置自动保存）
             result = BrowserManager.close_session(session_id)
             
             # 清理本地存储
@@ -514,6 +600,12 @@ class PlaywrightTestTool(BuiltinTool):
                 del self._sessions[session_id]
             
             if result.get("success"):
+                # 构建返回信息，提示自动保存结果
+                message = result.get("message", "会话已关闭")
+                auto_saved = result.get("auto_saved_state")
+                if auto_saved:
+                    message += f"，状态已自动保存到: {auto_saved}"
+                result["message"] = message
                 return create_success_result(data=result)
             else:
                 return create_failure_result(result.get("error", "关闭会话失败"))

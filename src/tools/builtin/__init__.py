@@ -58,7 +58,9 @@ def get_all_builtin_tools() -> list[Any]:
             sig = inspect.signature(cls.__init__)
             required_params = [
                 p for p in sig.parameters.values()
-                if p.name != "self" and p.default is inspect.Parameter.empty
+                if p.name != "self"
+                and p.default is inspect.Parameter.empty
+                and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
             ]
             if required_params:
                 _logger.debug(f"[内置工具] 跳过 {tool_name}（需要参数注入，由 register_core_tools 处理）")

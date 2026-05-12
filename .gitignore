@@ -60,3 +60,6 @@ test_results/
 !docs/**/*_report.md
 !config/**/*_report.md
 !src/**/*_report.md
+*Select-String*
+Agent2/
+nul

@@ -144,6 +144,11 @@ system_prompt: |
   - 完成后调用 task_evaluate 评估
 
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+
+
 # 静态变量（可缓存，包含约束注入）
 static_vars:
   enabled: true
@@ -152,19 +157,11 @@ static_vars:
     - name: "调研报告模板"
       type: "path"
       path: "config/templates/research_report_template.md"
-    # 约束注入：将硬约束和软约束注入到静态变量
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
 
 # 动态变量（每轮变化）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 # 可用工具
 tool_ids:
@@ -181,9 +178,6 @@ hard_constraints:
   - "必须明确调研类型"
   - "关键发现必须有信息来源"
   - "建议必须有理由支撑"
-  - "必须调用 task_evaluate 进行任务评估"
-  - "必须输出规定的产出物"
-  - "评估通过才能结束任务"
   - "禁止连续 10 次迭代只调用信息获取工具而不 file_write，必须保持收集-写入循环"
   - "每次 file_write 后必须自查 research_questions 覆盖情况，确保所有调研问题都已涉及"
   - "调研报告完成前必须逐条检查 research_questions 中的每个问题是否已回答，未回答的必须补充调研或标注原因"
@@ -268,7 +262,7 @@ deliverables:
     description: "调研报告文件"
     template_source: "knowledge"
     template_name: "config/templates/research_report_template.md"
-    output_path: "docs/{title}_research_report.md"
+    output_path: "{{workspace}}/docs/{title}_research_report.md"
     type: "markdown"
     required: true
 
@@ -287,7 +281,7 @@ recommended_metrics:
 version: "2.0.1"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

@@ -6,7 +6,6 @@
  * 提供"在工作区打开完整文档"跳转按钮。
  */
 
-import React, { useState } from 'react'
 import {
   FileText,
   Image,
@@ -18,6 +17,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react'
+import React, { useState } from 'react'
 import type { Artifact, ArtifactType } from '@/types/review'
 
 export interface ArtifactPreviewProps {

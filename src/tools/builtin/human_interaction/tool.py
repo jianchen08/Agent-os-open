@@ -10,6 +10,8 @@
 import asyncio
 from asyncio import CancelledError
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from human_interaction import (
@@ -115,6 +117,11 @@ class HumanInteractionTool(BuiltinTool):
                         "type": "number",
                         "description": "进度百分比 0-100（通知模式）",
                     },
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "需要审批的文件路径列表，系统自动读取文件内容并在审批面板中展示",
+                    },
                 },
                 "required": ["mode", "title"],
             },
@@ -176,6 +183,16 @@ class HumanInteractionTool(BuiltinTool):
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
+        file_paths_list = inputs.get("file_paths")
+        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
+
+        agent_level_raw = inputs.get("parent_agent_level", 1)
+        try:
+            agent_level_val = int(str(agent_level_raw).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            agent_level_val = 1
+        agent_level_str = f"L{agent_level_val}"
+
         request_id: str | None = None
         try:
             request_id = await service.create_choice_request(
@@ -188,8 +205,10 @@ class HumanInteractionTool(BuiltinTool):
                 questions=questions,
                 timeout_seconds=timeout_seconds,
                 priority=priority,
+                file_contents=file_contents,
                 user_id=None,
                 agent_id=pipeline_id,
+                agent_level=agent_level_str,
             )
 
             response = await service.wait_for_choice(
@@ -289,6 +308,16 @@ class HumanInteractionTool(BuiltinTool):
         suggestions = inputs.get("suggestions")
         timeout_seconds = inputs.get("timeout_seconds", 86400)
 
+        file_paths_list = inputs.get("file_paths")
+        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
+
+        agent_level_raw = inputs.get("parent_agent_level", 1)
+        try:
+            agent_level_val = int(str(agent_level_raw).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            agent_level_val = 1
+        agent_level_str = f"L{agent_level_val}"
+
         request_id: str | None = None
         try:
             request_id = await service.create_conversation_request(
@@ -299,8 +328,10 @@ class HumanInteractionTool(BuiltinTool):
                 description=description,
                 initial_message=initial_message,
                 suggestions=suggestions,
+                file_contents=file_contents,
                 user_id=None,
                 agent_id=pipeline_id,
+                agent_level=agent_level_str,
             )
 
             response = await service.wait_for_choice(
@@ -313,7 +344,13 @@ class HumanInteractionTool(BuiltinTool):
             if resp_type == "approved":
                 result = {
                     "status": "user_arrived",
-                    "message": feedback or "用户已进入对话页面，可以开始对话。",
+                    "conversation_mode": True,
+                    "message": (
+                        feedback or "用户已进入对话标签页。"
+                        "【重要指令】你不得再输出任何文字，不得再调用任何工具（尤其是 human_interaction）。"
+                        "管道已自动挂起，等待用户在对话标签页中发起新消息后才会唤醒你。"
+                        "你现在什么都不需要做。"
+                    ),
                 }
             else:
                 result = {
@@ -439,6 +476,57 @@ class HumanInteractionTool(BuiltinTool):
                 ),
                 error_code="INTERACTION_FAILED",
             )
+
+    def _read_file_contents(
+        self, file_paths: list[str], inputs: dict[str, Any],
+    ) -> dict[str, str]:
+        """读取文件路径列表对应的文件内容，用于在审批面板中展示。
+
+        BUG-FIX-fix_20260511_file_not_found: 使用 workspace 解析相对路径。
+        问题根因: LLM 传入的 file_paths 可能是相对路径，直接 os.path.exists
+                  基于进程 CWD 查找，而非任务工作空间，导致文件找不到。
+        修复方案: 从 inputs 中获取 workspace，将相对路径解析为绝对路径后再读取。
+        影响范围: 审批面板中展示的文件内容。
+        """
+        result: dict[str, str] = {}
+        if not file_paths:
+            return result
+
+        workspace = inputs.get("workspace", "")
+        workspace_path = Path(workspace) if workspace else None
+
+        max_files = 10
+        max_size = 2 * 1024 * 1024
+        for raw_path in file_paths[:max_files]:
+            try:
+                p = Path(raw_path)
+                if not p.is_absolute() and workspace_path:
+                    resolved = (workspace_path / p).resolve()
+                else:
+                    resolved = p.resolve()
+
+                if not resolved.exists():
+                    result[raw_path] = f"[读取失败: 文件不存在]"
+                    continue
+                if not resolved.is_file():
+                    result[raw_path] = f"[读取失败: 路径不是文件]"
+                    continue
+                file_size = resolved.stat().st_size
+                if file_size > max_size:
+                    result[raw_path] = f"[文件过大: {file_size // (1024*1024)}MB，超过2MB限制]"
+                    continue
+                try:
+                    result[raw_path] = resolved.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    result[raw_path] = resolved.read_text(encoding="gbk", errors="ignore")
+            except Exception as e:
+                result[raw_path] = f"[读取失败: {str(e)}]"
+        if len(file_paths) > max_files:
+            logger.warning(
+                "[HumanInteractionTool] file_paths 超过最大数量限制 | "
+                "count=%d | max=%d", len(file_paths), max_files,
+            )
+        return result
 
 
 def create_human_interaction_tool(

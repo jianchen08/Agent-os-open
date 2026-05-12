@@ -48,7 +48,7 @@ export interface PendingInteraction {
   /** 通知模式的进度百分比 (0-100) */
   progress?: number
   timestamp: string
-  status: 'pending' | 'responded' | 'navigated' | 'dismissed'
+  status: 'pending' | 'responded' | 'navigated' | 'dismissed' | 'entered'
   /** 审批请求 ID（仅 conversation 模式下审批场景有值） */
   reviewRequestId?: string
   /** 关联制品 ID 列表（仅审批场景有值） */
@@ -67,8 +67,12 @@ interface InteractionState {
   markNavigated: (requestId: string) => void
   /** 取消/忽略 */
   dismissInteraction: (requestId: string) => void
+  /** 标记用户已进入对话（管道挂起等待用户输入） */
+  markEntered: (requestId: string) => void
   /** 按 threadId 获取待处理交互 */
   getPendingForThread: (threadId: string) => PendingInteraction[]
+  /** 按 pipelineId 获取已进入但未响应的交互 */
+  getEnteredForPipeline: (pipelineId: string) => PendingInteraction | undefined
 }
 
 export const useInteractionStore = create<InteractionState>()((set, get) => ({
@@ -137,9 +141,32 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
     })
   },
 
+  markEntered: (requestId) => {
+    set((state) => {
+      const existing = state.pendingInteractions.find((i) => i.requestId === requestId)
+      if (!existing || existing.status === 'entered') return state
+
+      return {
+        pendingInteractions: state.pendingInteractions.map((i) =>
+          i.requestId === requestId ? { ...i, status: 'entered' as const } : i,
+        ),
+      }
+    })
+  },
+
   getPendingForThread: (threadId) => {
     return get().pendingInteractions.filter(
       (i) => i.threadId === threadId && i.status === 'pending',
+    )
+  },
+
+  getEnteredForPipeline: (pipelineId) => {
+    return get().pendingInteractions.find(
+      (i) =>
+        i.status === 'entered' &&
+        (i.pipelineId === pipelineId ||
+          i.threadId === pipelineId ||
+          i.agentId === pipelineId),
     )
   },
 }))

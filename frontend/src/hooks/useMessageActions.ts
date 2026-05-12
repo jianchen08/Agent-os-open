@@ -8,6 +8,7 @@ import { useCallback } from 'react'
 import { toast } from 'sonner'
 import { messageApi } from '@/services/api/messages'
 import { ErrorType, reportError } from '@/services/errorReporting'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { RetryScope } from '@/types/models'
 
@@ -59,8 +60,8 @@ export const useMessageActions = (sessionId?: string) => {
         throw new Error('sessionId is required for deleting message')
       }
       try {
-        // 直接调用 store 的 deleteMessage（包含乐观更新 + API 调用）
-        sessionStore.deleteMessage(sessionId, messageId, includeTarget)
+        // 直接调用 pipelineStore 的 deleteMessage（包含乐观更新 + API 调用）
+        usePipelineMessageStore.getState().deleteMessage(sessionId, messageId, includeTarget)
 
         toast.success('消息已删除')
       } catch (error) {

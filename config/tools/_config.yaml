@@ -28,7 +28,6 @@ permission_policies:
       - "task_submit"
       - "task_evaluate"
       - "memory"
-      - "evaluate"
       - "file_read"
       - "file_write"
       - "enhanced_search"
@@ -44,7 +43,6 @@ permission_policies:
     auto_approve_tools:
       - "task_manage"
       - "memory"
-      - "evaluate"
       - "file_read"
       - "enhanced_search"
       - "fetch"

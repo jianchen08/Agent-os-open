@@ -1,0 +1,132 @@
+# 代码/文档质量评估指标
+# 使用 evaluator_agent 进行语义级别的质量评估
+
+id: quality_check
+name: 质量评估
+description: 代码/文档质量评估
+
+# ===== 评估器配置 =====
+evaluator_id: evaluator_agent
+evaluator_type: agent
+
+default_config:
+  criteria:
+    - 结构清晰
+    - 命名规范
+    - 注释充分
+    - 遵循最佳实践
+
+# ===== 预期输入定义 =====
+# Agent 在提交任务时需要提供的参数
+expected_input:
+  description: "代码/文档质量评估"
+  params:
+    content:
+      type: string
+      description: "要评估的内容"
+      required: false
+    path:
+      type: string
+      description: "或指定文件路径"
+      required: false
+    type:
+      type: string
+      description: "内容类型"
+      required: false
+      default: "code"
+      enum: ["code", "doc", "config"]
+    criteria:
+      type: array
+      description: "评估标准（覆盖默认）"
+      required: false
+
+# ===== 预期输出定义 =====
+# evaluator_agent 返回结构
+expected_output:
+  description: "返回质量评估结果"
+  params:
+    passed:
+      type: boolean
+      description: "评估是否通过"
+    score:
+      type: number
+      description: "质量分数（0-100）"
+    feedback:
+      type: string
+      description: "评估反馈"
+    issues:
+      type: array
+      description: "发现的问题列表"
+    suggestions:
+      type: array
+      description: "改进建议"
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "passed"
+      operator: "is_true"
+    - field: "score"
+      operator: "greater_than"
+      value: 80
+  logic: "and"
+  pass_message: "质量评估通过"
+  fail_message: "质量评估未达标"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    content:
+      type: string
+      description: 要评估的内容
+    path:
+      type: string
+      description: 或指定文件路径
+    type:
+      type: string
+      enum: [code, doc, config]
+      description: 内容类型
+      default: code
+    criteria:
+      type: array
+      items:
+        type: string
+      description: 评估标准（覆盖默认）
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要评估代码质量
+  - 需要评估文档质量
+  - 需要检查最佳实践
+when_not_use:
+  - 只需要语法检查
+  - 只需要功能验证
+examples:
+  - params:
+      path: /src/main.py
+      type: code
+  - params:
+      path: /docs/README.md
+      type: doc
+caveats:
+  - 需要提供足够的内容上下文
+  - 评估标准应该明确
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 3
+includes:
+  - file_check
+  - code_check
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - semantic
+  - quality
+  - code
+  - doc

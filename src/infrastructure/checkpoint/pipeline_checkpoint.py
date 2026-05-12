@@ -2,6 +2,7 @@
 
 负责管道运行时状态的快照持久化，支持保存、加载、列出、删除和清理检查点。
 每个检查点以 JSON 文件形式存储在 store_dir 目录下。
+仅持久化动态变化的状态字段，静态 Agent 配置在恢复时从配置文件重新加载。
 """
 
 from __future__ import annotations
@@ -14,6 +15,17 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_DYNAMIC_STATE_KEYS: frozenset[str] = frozenset({
+    "iteration",
+    "ended",
+    "user_input",
+    "messages",
+    "pipeline_id",
+    "core_type",
+    "conversation_mode",
+    "conversation_round",
+})
 
 
 class PipelineCheckpointManager:
@@ -44,9 +56,11 @@ class PipelineCheckpointManager:
         state: dict[str, Any],
         phase: str = "auto",
     ) -> str:
-        """保存管道状态快照。
+        """保存管道状态快照（仅持久化动态变化的字段）。
 
-        生成唯一的 checkpoint_id，将序列化后的 state 写入 JSON 文件。
+        生成唯一的 checkpoint_id，仅将动态状态写入 JSON 文件。
+        静态 Agent 配置（system_prompt、constraints、tool_ids 等）不存储，
+        恢复时由 PipelineRecovery 从 Agent 配置文件重新加载。
 
         Args:
             pipeline_id: 管道实例 ID
@@ -61,7 +75,11 @@ class PipelineCheckpointManager:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         checkpoint_id = f"{pipeline_id}_{timestamp}"
 
-        serialized_state = self._serialize_state(state)
+        dynamic_state = {
+            k: v for k, v in state.items()
+            if k in _DYNAMIC_STATE_KEYS
+        }
+        serialized_state = self._serialize_state(dynamic_state)
 
         metadata: dict[str, Any] = {
             "pipeline_id": pipeline_id,
@@ -70,6 +88,7 @@ class PipelineCheckpointManager:
             "iteration": state.get("iteration", 0),
             "timestamp": datetime.now(UTC).isoformat(),
             "state_keys": list(serialized_state.keys()),
+            "version": 2,
         }
 
         checkpoint_data: dict[str, Any] = {
@@ -84,8 +103,9 @@ class PipelineCheckpointManager:
         )
 
         logger.info(
-            "Checkpoint saved: checkpoint_id=%s, phase=%s, iteration=%d",
+            "Checkpoint saved: checkpoint_id=%s, phase=%s, iteration=%d, keys=%s",
             checkpoint_id, phase, metadata["iteration"],
+            list(serialized_state.keys()),
         )
         return checkpoint_id
 

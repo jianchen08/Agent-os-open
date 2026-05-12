@@ -9,6 +9,7 @@
  */
 
 import { useEffect } from 'react'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
 import { WebSocketStatus } from '@/services/websocket/WebSocketService'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -46,11 +47,11 @@ export function useConnectionStatus(): void {
      */
     const syncStatus = async () => {
       const wsStatus = wsPool.getStatus()
-      const isConnected = wsPool.hasAnyConnection()
+      const isConnected = wsPool.hasAnyConnection() || globalWS.status === 'connected'
       const activeThread = wsPool.getActiveThread()
       const quality = activeThread ? wsPool.getNetworkQuality(activeThread) : 'unknown'
 
-      let queuedMessages = 0
+      const queuedMessages = 0
       let latencyMs: number | null = null
 
       if (activeThread) {
@@ -64,8 +65,9 @@ export function useConnectionStatus(): void {
         }
       }
 
+      const effectiveState = globalWS.status === 'connected' ? 'connected' : mapStatus(wsStatus)
       updateConnectionStatus({
-        state: mapStatus(wsStatus),
+        state: effectiveState,
         latencyMs,
         queuedMessages,
         lastConnectedAt: isConnected ? new Date().toISOString() : undefined,
@@ -114,14 +116,28 @@ export function useConnectionStatus(): void {
     wsPool.subscribe('auth_error', handleAuthError)
     wsPool.subscribe('network_quality_change', handleNetworkQualityChange)
 
-    // Initial sync
-    syncStatus()
+    // Also subscribe to GlobalWebSocket status changes
+    const handleGlobalStatus = (data: { status: string }) => {
+      if (data.status === 'connected') {
+        handleConnect()
+      } else if (data.status === 'disconnected') {
+        handleDisconnect()
+      }
+    }
+    globalWS.subscribe('_status', handleGlobalStatus)
+
+    // Initial sync — also consider globalWS status
+    const poolStatus = wsPool.getStatus()
+    const globalStatus = globalWS.status
+    if (globalStatus === 'connected' || poolStatus === WebSocketStatus.CONNECTED) {
+      handleConnect()
+    }
 
     // Periodic polling for connection quality (every 5 seconds)
     const pollInterval = setInterval(syncStatus, 5000)
 
     // Keep a ref to the latest latency for the quality callback
-    let latencyMs: number | null = null
+    const latencyMs: number | null = null
 
     return () => {
       wsPool.unsubscribe('connect', handleConnect)
@@ -129,6 +145,7 @@ export function useConnectionStatus(): void {
       wsPool.unsubscribe('error', handleError)
       wsPool.unsubscribe('auth_error', handleAuthError)
       wsPool.unsubscribe('network_quality_change', handleNetworkQualityChange)
+      globalWS.unsubscribe('_status', handleGlobalStatus)
       clearInterval(pollInterval)
     }
   }, [updateConnectionStatus])

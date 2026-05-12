@@ -301,6 +301,7 @@ export async function getMessages(
       if (filters.skip !== undefined) params.skip = filters.skip
       if (filters.limit !== undefined) params.limit = filters.limit
       if (filters.before_sequence !== undefined) params.before_sequence = filters.before_sequence
+      if (filters.after_sequence !== undefined) params.after_sequence = filters.after_sequence
     }
 
     const response = await apiClient.get<any>(API_ENDPOINTS.MESSAGES.LIST(sessionId), { params })

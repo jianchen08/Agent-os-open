@@ -122,7 +122,7 @@ const SessionItem = memo<SessionItemProps>(
         {/* 左侧图标：置顶会话显示 Pin，普通会话显示 MessageSquare */}
         {session.pinned ? (
           <Pin
-            className="text-muted-foreground mr-2 h-3.5 w-3.5 flex-shrink-0"
+            className="mr-2 h-3.5 w-3.5 flex-shrink-0 fill-blue-500 text-blue-500"
             data-testid="pin-icon"
           />
         ) : (
@@ -137,7 +137,7 @@ const SessionItem = memo<SessionItemProps>(
 
         {/* 星标指示器 */}
         {session.starred && (
-          <Star className="mr-1 h-3 w-3 flex-shrink-0 fill-current text-status-warning" />
+          <Star className="mr-1 h-3.5 w-3.5 flex-shrink-0 fill-amber-400 text-amber-400" />
         )}
 
         {/* 正在删除加载指示 */}
@@ -345,7 +345,7 @@ export const SessionList = memo<SessionListProps>(
             <DialogHeader>
               <DialogTitle>确认删除</DialogTitle>
               <DialogDescription>
-                确定要删除会话「{deleteTargetTitle}」吗？此操作不可撤销，会话中的所有消息将被永久删除。
+                确定要删除会话「{deleteTargetTitle}」吗？此操作不可撤销。删除会话将永久清除该会话中的所有消息，同时关联的数据管道执行记录和历史数据也将全部被永久删除且无法恢复。
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

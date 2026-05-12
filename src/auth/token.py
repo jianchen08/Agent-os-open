@@ -1,0 +1,287 @@
+"""
+JWT Token 管理
+
+提供 Token 的创建、验证、刷新和撤销功能
+"""
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import uuid4
+
+import jwt
+
+from src.auth.models import TokenPair, TokenPayload
+from src.core.exceptions import (
+    TokenExpiredError,
+    TokenInvalidError,
+    TokenRevokedError,
+)
+
+
+class TokenManager:
+    """JWT Token 管理器"""
+
+    def __init__(
+        self,
+        secret_key: str,
+        algorithm: str = "HS256",
+        access_token_expire_minutes: int = 30,
+        refresh_token_expire_days: int = 7,
+    ):
+        """
+        初始化 Token 管理器
+
+        Args:
+            secret_key: JWT 签名密钥
+            algorithm: 签名算法
+            access_token_expire_minutes: 访问令牌有效期（分钟）
+            refresh_token_expire_days: 刷新令牌有效期（天）
+        """
+        self.secret_key = secret_key
+        self.algorithm = algorithm
+        self.access_token_expire_minutes = access_token_expire_minutes
+        self.refresh_token_expire_days = refresh_token_expire_days
+
+        # 已撤销的 token（生产环境应使用 Redis）
+        self._revoked_tokens: set[str] = set()
+        # 已撤销的用户（所有 token 失效）
+        self._revoked_users: dict[str, datetime] = {}
+
+    def create_access_token(
+        self,
+        user_id: str,
+        role: str = "user",
+        expires_delta: timedelta | None = None,
+    ) -> str:
+        """
+        创建访问令牌
+
+        Args:
+            user_id: 用户 ID
+            role: 用户角色
+            expires_delta: 自定义过期时间
+
+        Returns:
+            JWT 访问令牌
+        """
+        if expires_delta is None:
+            expires_delta = timedelta(minutes=self.access_token_expire_minutes)
+
+        return self._create_token(
+            user_id=user_id,
+            role=role,
+            token_type="access",
+            expires_delta=expires_delta,
+        )
+
+    def create_refresh_token(
+        self,
+        user_id: str,
+        expires_delta: timedelta | None = None,
+    ) -> str:
+        """
+        创建刷新令牌
+
+        Args:
+            user_id: 用户 ID
+            expires_delta: 自定义过期时间
+
+        Returns:
+            JWT 刷新令牌
+        """
+        if expires_delta is None:
+            expires_delta = timedelta(days=self.refresh_token_expire_days)
+
+        return self._create_token(
+            user_id=user_id,
+            role="",
+            token_type="refresh",
+            expires_delta=expires_delta,
+        )
+
+    def create_token_pair(
+        self,
+        user_id: str,
+        role: str = "user",
+    ) -> TokenPair:
+        """
+        创建 Token 对（访问令牌 + 刷新令牌）
+
+        Args:
+            user_id: 用户 ID
+            role: 用户角色
+
+        Returns:
+            TokenPair 对象
+        """
+        access_token = self.create_access_token(user_id=user_id, role=role)
+        refresh_token = self.create_refresh_token(user_id=user_id)
+
+        return TokenPair(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=self.access_token_expire_minutes * 60,
+        )
+
+    def verify_token(
+        self,
+        token: str,
+        token_type: str = "access",
+    ) -> TokenPayload:
+        """
+        验证令牌
+
+        Args:
+            token: JWT 令牌
+            token_type: 期望的令牌类型
+
+        Returns:
+            TokenPayload 对象
+
+        Raises:
+            TokenExpiredError: 令牌已过期
+            TokenInvalidError: 令牌无效
+            TokenRevokedError: 令牌已被撤销
+        """
+        # 检查是否已撤销
+        if token in self._revoked_tokens:
+            raise TokenRevokedError()
+
+        try:
+            payload = jwt.decode(
+                token,
+                self.secret_key,
+                algorithms=[self.algorithm],
+            )
+        except jwt.ExpiredSignatureError:
+            raise TokenExpiredError()
+        except jwt.InvalidTokenError:
+            raise TokenInvalidError()
+
+        # 验证 token 类型
+        if payload.get("type") != token_type:
+            raise TokenInvalidError(f"期望 {token_type} 类型的令牌")
+
+        # 检查用户是否被撤销
+        user_id = payload.get("sub")
+        if user_id in self._revoked_users:
+            # 检查 token 是否在撤销时间之前签发
+            iat = datetime.fromtimestamp(payload.get("iat", 0), tz=UTC)
+            if iat <= self._revoked_users[user_id]:
+                raise TokenRevokedError()
+
+        return TokenPayload(
+            sub=payload["sub"],
+            exp=datetime.fromtimestamp(payload["exp"], tz=UTC),
+            iat=datetime.fromtimestamp(payload["iat"], tz=UTC),
+            type=payload["type"],
+            role=payload.get("role", "user"),
+            jti=payload.get("jti"),
+        )
+
+    def refresh_token_pair(
+        self,
+        refresh_token: str,
+        role: str = "user",
+    ) -> TokenPair:
+        """
+        使用刷新令牌获取新的 Token 对
+
+        Args:
+            refresh_token: 刷新令牌
+            role: 用户角色
+
+        Returns:
+            新的 TokenPair 对象
+
+        Raises:
+            TokenInvalidError: 刷新令牌无效
+        """
+        # 验证刷新令牌
+        payload = self.verify_token(refresh_token, token_type="refresh")
+
+        # 撤销旧的刷新令牌
+        self.revoke_token(refresh_token)
+
+        # 创建新的 Token 对
+        return self.create_token_pair(user_id=payload.sub, role=role)
+
+    def revoke_token(self, token: str) -> None:
+        """
+        撤销令牌
+
+        Args:
+            token: 要撤销的令牌
+        """
+        self._revoked_tokens.add(token)
+
+    def revoke_all_user_tokens(self, user_id: str) -> None:
+        """
+        撤销用户的所有令牌
+
+        Args:
+            user_id: 用户 ID
+        """
+        self._revoked_users[user_id] = datetime.now(UTC)
+
+    def decode_token(
+        self,
+        token: str,
+        verify: bool = True,
+    ) -> dict[str, Any]:
+        """
+        解码令牌
+
+        Args:
+            token: JWT 令牌
+            verify: 是否验证签名
+
+        Returns:
+            令牌载荷字典
+        """
+        options = {"verify_signature": verify}
+        if not verify:
+            options["verify_exp"] = False
+
+        return jwt.decode(
+            token,
+            self.secret_key,
+            algorithms=[self.algorithm],
+            options=options,
+        )
+
+    def _create_token(
+        self,
+        user_id: str,
+        role: str,
+        token_type: str,
+        expires_delta: timedelta,
+    ) -> str:
+        """
+        创建 JWT 令牌
+
+        Args:
+            user_id: 用户 ID
+            role: 用户角色
+            token_type: 令牌类型
+            expires_delta: 过期时间增量
+
+        Returns:
+            JWT 令牌字符串
+        """
+        now = datetime.now(UTC)
+        expire = now + expires_delta
+
+        payload = {
+            "sub": user_id,
+            "exp": expire,
+            "iat": now,
+            "type": token_type,
+            "jti": str(uuid4()),
+        }
+
+        if role:
+            payload["role"] = role
+
+        return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)

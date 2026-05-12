@@ -131,9 +131,6 @@ tags:
 static_vars:
   enabled: true
   items:
-    # 约束注入
-    - name: "行为约束"
-      type: "rules"
     # 工具索引（仅配置了 resource_search 的 Agent 使用）
     # 列出当前未绑定但可能需要按需加载的工具（已绑定: task_submit, task_manage, resource_search）
     - name: "可扩展工具索引"
@@ -152,7 +149,7 @@ static_vars:
         - file_jump: 跳转到指定文件
         - task_evaluate: 评估任务是否满足验收标准
         - memory: 检索和存储记忆
-        - evaluate: Schema验证、格式检查、JSON验证
+
         - yaml_validate: 验证YAML配置文件的格式和内容
         - human_interaction: 向用户提问并获取回答
         - resource_merge: 基于 git 的资源合并与回滚
@@ -175,8 +172,6 @@ dynamic_vars:
   enabled: true
   items:
     # 系统变量
-    - name: "当前时间"
-      type: "timestamp"
     - name: "会话信息"
       type: "session"
     - name: "当前Agent"

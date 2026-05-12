@@ -11,16 +11,13 @@
  */
 
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '@/components/chat/InteractionCard'
-import type { InteractionCardProps } from '@/components/chat/InteractionCard'
-import type { PendingInteraction } from '@/stores/interactionStore'
+import { useInteractionHandler } from '@/hooks/useInteractionHandler'
+import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
-import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import {
   createExecutionStartEvent,
   createExecutionDoneEvent,
@@ -32,6 +29,8 @@ import {
   createMockContentBlock,
   createMockToolCall,
 } from './testUtils'
+import type { InteractionCardProps } from '@/components/chat/InteractionCard'
+import type { PendingInteraction } from '@/stores/interactionStore'
 
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
@@ -149,6 +148,7 @@ vi.mock('@/constants/websocket', () => ({
 //  Mock: formatDuration
 // ---------------------------------------------------------------------------
 vi.mock('@/types/activity', async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   const actual = await importOriginal<typeof import('@/types/activity')>()
   return {
     ...actual,

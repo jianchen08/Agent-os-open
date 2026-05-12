@@ -5,6 +5,7 @@
  * 与后端 /api/v1/agents/* 端点对齐
  */
 
+/* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createAgent,
@@ -14,7 +15,6 @@ import {
   getDefaultAgent,
   updateAgent,
 } from '@/services/api/agents'
-
 // Mock axios
 vi.mock('../client', () => ({
   default: {

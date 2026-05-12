@@ -5,8 +5,8 @@
  * 放置在审批视图的底部或侧边。
  */
 
-import React, { useState } from 'react'
 import { CheckCircle, XCircle, MessageSquare, Send, Loader2 } from 'lucide-react'
+import React, { useState } from 'react'
 import type { Annotation, ReviewFeedback } from '@/types/review'
 
 export interface ReviewPanelProps {

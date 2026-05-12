@@ -31,17 +31,10 @@ tags:
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "项目类型验证方式"
-      type: "path"
-      path: "config/rules/per_agent/function_verify_rules.md"
 
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 system_prompt: |
   你是功能验证专家，你的唯一职责是验证功能是否真正可用。
@@ -69,6 +62,10 @@ system_prompt: |
   ### 第一步：识别项目类型并选择验证工具集
 
   先判断要验证的是什么类型的项目，根据「项目类型验证方式」规则文件选择对应的工具集和验证策略。
+
+  ## 参考规则
+
+  {{path:config/rules/per_agent/function_verify_rules.md}}
 
   **工具选择原则：优先使用专用工具（fetch > curl，playwright_test > 手写脚本）。**
 
@@ -199,12 +196,14 @@ tool_ids:
   - file_read
   - bash_execute
   - enhanced_search
-  - evaluate
   - fetch
   - playwright_test
   - mcp__4_5v_mcp__analyze_image
+  - task_evaluate
 
 hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "评估通过才能结束任务"
   - "必须设计 1 条完整用户旅程（3-7 步串联操作），禁止只测独立场景"
   - "用户旅程中的步骤必须有状态传递，禁止硬编码动态值"
   - "每个用户旅程步骤和补充场景必须真实运行，禁止仅靠推理"

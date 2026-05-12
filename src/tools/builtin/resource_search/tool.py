@@ -496,7 +496,7 @@ class ResourceSearchTool:
                 from pathlib import Path
 
                 registry = AgentRegistry()
-                config_dir = Path(__file__).resolve().parent.parent.parent.parent / "config" / "agents"
+                config_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "config" / "agents"
                 if config_dir.exists():
                     registry.load_directory(config_dir)
                 self.agent_registry = registry

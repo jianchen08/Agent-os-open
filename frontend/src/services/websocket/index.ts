@@ -14,5 +14,4 @@ export type { HeartbeatCallbacks, NetworkStats } from './HeartbeatManager'
 export { WebSocketErrorHandler, createWebSocketErrorHandler } from './errorHandler'
 export type { ErrorHandlerResult } from './errorHandler'
 export type { EventHandler, EventHandlerManager } from './eventHandlers'
-export { UnifiedEventHandler } from './unifiedHandler'
-export type { IUnifiedEventHandler, UnifiedIncomingMessage } from './unifiedHandler'
+

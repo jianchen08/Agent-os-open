@@ -5,6 +5,7 @@
  * 与后端 /api/v1/execution/* 端点对齐
  */
 
+/* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   approveExecution,
@@ -17,7 +18,6 @@ import {
   resumeExecution,
   rollbackExecution,
 } from '@/services/api/executionControl'
-
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -26,6 +26,7 @@ vi.mock('../client', () => ({
   },
 }))
 
+ 
 import apiClient from '@/services/api/client'
 
 describe('执行控制 API', () => {

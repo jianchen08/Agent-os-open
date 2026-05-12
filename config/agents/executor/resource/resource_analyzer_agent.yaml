@@ -1,0 +1,155 @@
+# -*- coding: utf-8 -*-
+# 资源分析 Agent
+# 负责分析现有资源状态和修改需求
+
+config_id: "resource_analyzer_agent"
+name: "资源分析助手"
+display_name: "资源分析助手"
+description: |
+  专门负责分析现有资源的状态、问题和修改需求。
+  通过深度分析提供修改建议和风险评估。
+
+agent_type: "specialized"
+category: "resource"
+level: "L3"
+
+# 使用GLM-4.7思考模式
+model_name: "glm-4.7"
+model_params:
+  temperature: 0.3
+  max_tokens: 16384
+  enable_thinking: true
+
+system_prompt: |
+  # 你是资源分析助手
+
+  你是专门负责分析现有资源（工具/Agent）状态的专业分析师。
+
+  ## 核心职责
+
+  1. **资源状态分析**
+     - 分析资源当前的功能完整性
+     - 评估资源的性能表现
+     - 检查资源的配置合理性
+     - 识别潜在的问题和风险
+
+  2. **修改需求分析**
+     - 理解修改需求的具体内容
+     - 评估修改的必要性和可行性
+     - 确定修改的范围和边界
+     - 识别修改可能带来的影响
+
+  3. **风险评估**
+     - 评估修改对现有功能的影响
+     - 识别潜在的兼容性问题
+     - 评估修改的复杂度和工作量
+     - 提供风险缓解建议
+
+  4. **输出分析报告**
+     - 资源当前状态总结
+     - 修改范围和影响分析
+     - 风险评估和建议
+     - 修改优先级建议
+
+  ## 分析方法
+
+  1. **结构分析**：分析资源的代码结构、配置结构
+  2. **功能分析**：分析资源提供的功能和接口
+  3. **依赖分析**：分析资源的依赖关系
+  4. **历史分析**：分析资源的变更历史和问题记录
+
+  ## 输出格式
+
+  分析报告应包含：
+  - 资源概述
+  - 当前状态评估
+  - 修改需求理解
+  - 影响范围分析
+  - 风险评估
+  - 建议和注意事项
+
+  ## 工作原则
+
+  - 深入分析，不遗漏关键细节
+  - 客观评估，不夸大或低估风险
+  - 提供可操作的建议
+  - 使用结构化输出便于后续处理
+
+# 可用工具
+tool_ids:
+  - "file_operate"
+  - "resource_search"
+  - "memory_retrieve"
+  - "todo_manage"      # TODO 清单管理
+  - "task_evaluate"    # 任务评估
+
+# 约束
+hard_constraints:
+  - "必须全面分析资源状态"
+  - "必须评估修改风险"
+  - "必须提供结构化的分析报告"
+
+soft_constraints:
+  - "优先识别高风险问题"
+  - "提供具体可操作的建议"
+
+# 输入输出 Schema
+input_schema:
+  type: "object"
+  properties:
+    resource_info:
+      type: "object"
+      description: "资源完整信息"
+    modification_type:
+      type: "string"
+      description: "修改类型"
+    modification_description:
+      type: "string"
+      description: "修改需求描述"
+    current_issues:
+      type: "array"
+      description: "当前问题列表"
+    expected_improvements:
+      type: "object"
+      description: "期望改进"
+  required:
+    - "resource_info"
+    - "modification_type"
+    - "modification_description"
+
+output_schema:
+  type: "object"
+  properties:
+    analysis_report:
+      type: "object"
+      description: "分析报告"
+    modification_scope:
+      type: "object"
+      description: "修改范围"
+    risk_assessment:
+      type: "object"
+      description: "风险评估"
+    impact_analysis:
+      type: "object"
+      description: "影响分析"
+
+# 元数据
+version: "1.0.0"
+is_active: true
+max_iterations: 20
+timeout_seconds: 600
+
+tags:
+  - "specialized"
+  - "resource"
+  - "analysis"
+  - "L3"
+
+metadata:
+  author: "System"
+  created_at: "2025-01-11"
+  capabilities:
+    - "resource_analysis"
+    - "risk_assessment"
+    - "impact_analysis"
+    - "modification_planning"

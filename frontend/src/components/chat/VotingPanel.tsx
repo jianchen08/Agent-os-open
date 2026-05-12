@@ -12,9 +12,9 @@
 import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp, X } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
 import { useVotingStore } from '@/stores/votingStore'
+import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type { VotingOption, VotingSession } from '@/types/voting'
 
 /** 单个方案卡片 */

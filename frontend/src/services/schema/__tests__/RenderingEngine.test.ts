@@ -12,8 +12,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { RenderingEngine } from '@/services/schema/RenderingEngine'
 import type { RenderInstructionSet, RenderInstruction } from '@/services/schema/RenderingEngine'
-import type { ParsedSchema, ClientCapabilities } from '@/types/schema'
 import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
+import type { ParsedSchema, ClientCapabilities } from '@/types/schema'
 
 // ============================================================
 // Mock WidgetRegistry

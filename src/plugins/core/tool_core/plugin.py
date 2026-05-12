@@ -210,6 +210,7 @@ class ToolCore(ICorePlugin):
         timeout: float,
         services: dict[str, Any] | None = None,
         on_chunk: Callable[[dict[str, Any]], Any] | None = None,
+        call_id: str | None = None,
     ) -> dict[str, Any]:
         """执行单个工具调用。
 
@@ -229,10 +230,18 @@ class ToolCore(ICorePlugin):
         Returns:
             工具执行结果字典，包含 tool_name、success、data/error、duration_ms
         """
-        if on_chunk:
-            on_chunk({"type": "tool_start", "tool_name": tool_name})
+        _wrapped_chunk = on_chunk
+        if on_chunk and call_id:
+            def _wrap(chunk: dict[str, Any]) -> Any:
+                chunk.setdefault("call_id", call_id)
+                return on_chunk(chunk)
+            _wrapped_chunk = _wrap
+
+        if _wrapped_chunk:
+            _wrapped_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": call_id})
 
         if services:
+            tool_args = dict(tool_args)
             for param_key, service_key in self._SERVICE_INJECT_MAP.items():
                 if param_key not in tool_args and service_key in services:
                     tool_args[param_key] = services[service_key]
@@ -254,8 +263,8 @@ class ToolCore(ICorePlugin):
                 "error": f"Tool '{tool_name}' not found",
                 "duration_ms": 0,
             }
-            if on_chunk:
-                on_chunk({
+            if _wrapped_chunk:
+                _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": f"Tool '{tool_name}' not found",
@@ -302,14 +311,11 @@ class ToolCore(ICorePlugin):
                 "data": normalized,
                 "duration_ms": round(duration_ms, 1),
             }
-            # BUG-FIX: 保留 ToolExecutionResult 的 metadata 供下游提取
-            # （如 task_submit 的 action 标记），_normalize_tool_result 只取 data，
-            # metadata 被丢弃导致 tool_core 的 submitted_task_ids 收集失败。
             if hasattr(raw_result, "metadata") and isinstance(raw_result.metadata, dict) and raw_result.metadata:
                 result["metadata"] = raw_result.metadata
-            if on_chunk:
+            if _wrapped_chunk:
                 display_result = str(normalized)[:200] if normalized else ""
-                on_chunk({
+                _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": display_result,
@@ -332,8 +338,8 @@ class ToolCore(ICorePlugin):
                 ),
                 "duration_ms": round(duration_ms, 1),
             }
-            if on_chunk:
-                on_chunk({
+            if _wrapped_chunk:
+                _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": "cancelled",
@@ -356,8 +362,8 @@ class ToolCore(ICorePlugin):
                 "error": error_msg,
                 "duration_ms": round(duration_ms, 1),
             }
-            if on_chunk:
-                on_chunk({
+            if _wrapped_chunk:
+                _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": error_msg,
@@ -378,8 +384,8 @@ class ToolCore(ICorePlugin):
                 "error": error_msg,
                 "duration_ms": round(duration_ms, 1),
             }
-            if on_chunk:
-                on_chunk({
+            if _wrapped_chunk:
+                _wrapped_chunk({
                     "type": "tool_result",
                     "tool_name": tool_name,
                     "result": error_msg,
@@ -453,6 +459,7 @@ class ToolCore(ICorePlugin):
         for tc in tool_calls:
             tool_name = tc.get("name", "unknown")
             tool_args = tc.get("args", tc.get("arguments", {}))
+            tc_call_id = tc.get("id")
 
             # LLM 返回的 arguments 可能是 JSON 字符串，需要解析
             args_parse_failed = False
@@ -518,6 +525,8 @@ class ToolCore(ICorePlugin):
 
             # 优先通过隔离执行器执行
             if self._isolation_executor is not None:
+                if on_chunk:
+                    on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
                 func = self._get_tool(tool_name)
                 result = await self._isolation_executor.execute_tool(
                     state=ctx.state,
@@ -534,12 +543,14 @@ class ToolCore(ICorePlugin):
                         "result": str(display_data)[:200] if display_data else "",
                         "success": result.get("success", True),
                         "duration_ms": result.get("duration_ms", 0),
+                        "call_id": tc_call_id,
                     })
             else:
                 result = await self._execute_single_tool(
                     tool_name, tool_args, timeout,
                     services=ctx._services,
                     on_chunk=on_chunk,
+                    call_id=tc_call_id,
                 )
             results.append(result)
 
@@ -579,7 +590,11 @@ class ToolCore(ICorePlugin):
                         "type": "function",
                         "function": {
                             "name": tc.get("name", ""),
-                            "arguments": tc.get("args", tc.get("arguments", "")),
+                            "arguments": {
+                                k: v for k, v in (tc.get("args") or tc.get("arguments") or {}).items()
+                                if not k.startswith("_")
+                            } if isinstance(tc.get("args") or tc.get("arguments"), dict)
+                            else tc.get("args", tc.get("arguments", "")),
                         },
                     }
                     for i, tc in enumerate(tool_calls)
@@ -698,6 +713,7 @@ class ToolCore(ICorePlugin):
 
         submitted_task_ids = list(ctx.state.get("submitted_task_ids", []))
         evaluation_completed = False
+        conversation_activated = False
         for r in results:
             if not r.get("success"):
                 continue
@@ -714,6 +730,16 @@ class ToolCore(ICorePlugin):
             tool_name = r.get("tool_name", "")
             if tool_name == "task_evaluate" and tool_data.get("overall_passed") is True:
                 evaluation_completed = True
+            if tool_name == "human_interaction":
+                conv_flag = tool_data.get("conversation_mode")
+                if not conv_flag:
+                    for _key in ("output", "data"):
+                        _inner = tool_data.get(_key)
+                        if isinstance(_inner, dict) and _inner.get("conversation_mode"):
+                            conv_flag = True
+                            break
+                if conv_flag:
+                    conversation_activated = True
 
         return_dict = {
             StateKeys.TOOL_RESULTS: results,
@@ -729,5 +755,7 @@ class ToolCore(ICorePlugin):
             return_dict["task_evaluation_completed"] = True
         if has_task_failed:
             return_dict[StateKeys.ENDED] = True
+        if conversation_activated:
+            return_dict[StateKeys.CONVERSATION_MODE] = True
 
         return return_dict

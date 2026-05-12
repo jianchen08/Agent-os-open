@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# Web 获取工具
+
+name: web_fetch
+display_name: "Web 获取"
+description: "Web 获取工具：获取网页内容"
+
+category: "web"
+level: "user"
+
+# 权限配置
+requires_approval: false
+dangerous_operations: []
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 1800  # 30 分钟
+
+# 标签
+tags: ["web", "http"]

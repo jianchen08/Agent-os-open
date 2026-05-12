@@ -103,8 +103,6 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
     - name: "执行报告模板"
       type: "path"
       path: "config/templates/execution_report_template.md"
@@ -126,9 +124,7 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 tool_ids:
   - task_submit
@@ -140,15 +136,7 @@ tool_ids:
   - file_write
 
 hard_constraints:
-- 任务执行完成后必须调用 task_evaluate 工具进行评估
-- 评估通过才能结束任务
-- 任务完成的唯一标志是停止条件满足，注册触发器不代表任务完成
-- 停止条件满足后必须调用 task_evaluate 评估整体任务质量
-- 注册触发器时必须明确触发频率和执行内容
-- 触发后执行时必须先判断任务复杂度再选择执行方式
-- 简单任务必须自己执行，不得派发
-- 复杂任务必须派发给专业Agent，不得自己硬扛
-- 派发任务后必须读取下级Agent的产出物
+- 派发任务后子任务完成看通知结果即可，不清楚再用 task_manage 了解详情
 
 soft_constraints:
 - 优先复用现有Agent，避免重复创建

@@ -9,15 +9,15 @@
  */
 
 import React, { useMemo, useState, useCallback } from 'react'
-import type { ModuleUISchema, ClientCapabilities } from '@/types/schema'
-import { schemaParser, type SchemaParseError } from '@/services/schema/SchemaParser'
 import { renderingEngine, type RenderInstructionSet } from '@/services/schema/RenderingEngine'
+import { schemaParser, type SchemaParseError } from '@/services/schema/SchemaParser'
 import {
   ChatSpaceRenderer,
   WorkspaceSpaceRenderer,
   FloatingSpaceRenderer,
   DockSpaceRenderer,
 } from './spaces'
+import type { ModuleUISchema, ClientCapabilities } from '@/types/schema'
 
 /** SchemaRenderer 属性 */
 export interface SchemaRendererProps {

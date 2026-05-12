@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { loggers } from '@/utils/logger'
-import { useSessionStore } from './sessionStore'
-import type { Message, MessageToolCall, ThinkingStep } from '@/types/models'
+import { usePipelineMessageStore } from './pipelineMessageStore'
+import type { Message, MessageToolCall, ThinkingStep, ToolCallStatus } from '@/types/models'
 
 const logger = loggers.sessionStore
 
@@ -12,8 +12,6 @@ interface StreamingState {
   /** 每个标签页的 streaming 状态 (tabId -> isStreaming) */
   streamingTabs: Record<string, boolean>
 
-  /** @deprecated 使用 setStreamingForTab 替代 */
-  setStreaming: (isStreaming: boolean) => void
   setRefreshingMessageId: (messageId: string | null) => void
   /** 为指定标签页设置 streaming 状态 */
   setStreamingForTab: (tabId: string, isStreaming: boolean) => void
@@ -22,24 +20,22 @@ interface StreamingState {
   /** 结束指定标签页的 streaming 状态 */
   stopStreamingForTab: (tabId: string) => void
   stopStreaming: () => void
-  startThinking: (sessionId: string, messageId: string) => void
-  updateThinkingContent: (sessionId: string, messageId: string, appendContent: string) => void
-  endThinking: (sessionId: string, messageId: string, durationMs?: number) => void
-  updateThinkingStep: (sessionId: string, messageId: string, step: ThinkingStep) => void
+  endThinking: (pipelineId: string, messageId: string, durationMs?: number) => void
+  updateThinkingStep: (pipelineId: string, messageId: string, step: ThinkingStep) => void
   addToolCallToMessage: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCall: MessageToolCall,
     parentId?: string,
   ) => void
   updateToolCallInMessage: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     callId: string,
     updates: Partial<MessageToolCall>,
   ) => void
   updateToolCallProgress: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCallId: string,
     progress: number,
@@ -47,7 +43,7 @@ interface StreamingState {
     estimatedRemainingMs?: number,
   ) => void
   appendToolCallOutput: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCallId: string,
     output: string,
@@ -58,14 +54,6 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
   isStreaming: false,
   refreshingMessageId: null,
   streamingTabs: {},
-
-  /** BUG-FIX-fix_20260506_per_tab_streaming: 全局 setStreaming 同步更新 streamingTabs */
-  setStreaming: (isStreaming: boolean) => {
-    const currentValue = get().isStreaming
-    if (currentValue !== isStreaming) {
-      set({ isStreaming })
-    }
-  },
 
   /** BUG-FIX-fix_20260506_per_tab_streaming: 为指定标签页设置 streaming 状态 */
   setStreamingForTab: (tabId: string, isStreaming: boolean) => {
@@ -98,19 +86,22 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     set({ refreshingMessageId: messageId })
   },
 
+  /**
+   * 停止所有 streaming 状态，清理 pipelineMessageStore 中残留的 streaming/thinking 消息
+   */
   stopStreaming: () => {
-    const sessionStore = useSessionStore.getState()
-    const activeSessionId = sessionStore.activeSessionId
-    let updatedMessages = sessionStore.messages
+    const pipelineStore = usePipelineMessageStore.getState()
 
-    if (activeSessionId) {
-      const sessionMessages = sessionStore.messages[activeSessionId] || []
-      const needsUpdate = sessionMessages.some(
+    // 遍历所有管道，清理 streaming 和 thinking 状态
+    const updatedMessagesByPipeline = { ...pipelineStore.messagesByPipeline }
+    for (const pipelineId of Object.keys(updatedMessagesByPipeline)) {
+      const pipelineMessages = updatedMessagesByPipeline[pipelineId]
+      const needsUpdate = pipelineMessages.some(
         (m) => m.status === 'streaming' || m.thinking?.isThinking,
       )
 
       if (needsUpdate) {
-        const clearedMessages = sessionMessages.map((message) => {
+        updatedMessagesByPipeline[pipelineId] = pipelineMessages.map((message) => {
           const updates: Partial<Message> = {}
 
           if (message.status === 'streaming') {
@@ -129,167 +120,31 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
           }
           return message
         })
-
-        updatedMessages = {
-          ...sessionStore.messages,
-          [activeSessionId]: clearedMessages,
-        }
       }
     }
 
-    useSessionStore.setState({ messages: updatedMessages })
+    usePipelineMessageStore.setState({ messagesByPipeline: updatedMessagesByPipeline })
     set({ isStreaming: false, refreshingMessageId: null, streamingTabs: {} })
   },
 
-  startThinking: (sessionId: string, messageId: string) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
-
-      const updatedMessages = [...sessionMessages]
-
-      if (messageIndex < 0) {
-        updatedMessages.push({
-          id: messageId,
-          sessionId: sessionId,
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString(),
-          thinking: {
-            content: '',
-            isThinking: true,
-          },
-        })
-      } else {
-        const existing = updatedMessages[messageIndex]
-        updatedMessages[messageIndex] = {
-          ...existing,
-          thinking: {
-            content: '',
-            isThinking: true,
-          },
-        }
-      }
-
-      return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
-        },
-      }
-    })
-  },
-
-  updateThinkingContent: (sessionId: string, messageId: string, appendContent: string) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
-
-      const updatedMessages = [...sessionMessages]
-
-      if (messageIndex < 0) {
-        updatedMessages.push({
-          id: messageId,
-          sessionId: sessionId,
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString(),
-          thinking: {
-            content: appendContent,
-            isThinking: true,
-          },
-        })
-      } else {
-        const message = sessionMessages[messageIndex]
-        const currentThinking = message.thinking || {
-          content: '',
-          isThinking: true,
-        }
-        const currentContent = currentThinking.content
-
-        let newContent: string
-        let skipReason: string | null = null
-
-        if (appendContent.length === 0) {
-          skipReason = '追加内容为空'
-          newContent = currentContent
-        } else if (appendContent === currentContent) {
-          skipReason = '追加内容与当前内容完全相同'
-          newContent = currentContent
-        } else if (appendContent.startsWith(currentContent) && currentContent.length > 0) {
-          const newPart = appendContent.substring(currentContent.length)
-          if (newPart.length > 0) {
-            logger.debug(
-              '检测到累积内容，提取新增部分 | messageId:',
-              messageId,
-              '| 当前长度:',
-              currentContent.length,
-              '| 累积长度:',
-              appendContent.length,
-              '| 新增长度:',
-              newPart.length,
-            )
-            newContent = appendContent
-          } else {
-            skipReason = '累积内容与当前内容相同，无新增部分'
-            newContent = currentContent
-          }
-        } else if (currentContent.endsWith(appendContent)) {
-          skipReason = '追加内容已存在于当前内容末尾'
-          newContent = currentContent
-        } else if (currentContent.includes(appendContent)) {
-          skipReason = '追加内容已存在于当前内容中'
-          newContent = currentContent
-        } else {
-          newContent = currentContent + appendContent
-        }
-
-        if (skipReason) {
-          logger.debug(
-            '跳过追加 | messageId:',
-            messageId,
-            '| 原因:',
-            skipReason,
-            '| 当前长度:',
-            currentContent.length,
-            '| 追加长度:',
-            appendContent.length,
-          )
-        }
-
-        updatedMessages[messageIndex] = {
-          ...message,
-          thinking: {
-            ...currentThinking,
-            content: newContent,
-          },
-        }
-      }
-
-      return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
-        },
-      }
-    })
-  },
-
-  endThinking: (sessionId: string, messageId: string, durationMs?: number) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+  /**
+   * 结束指定管道中消息的思考状态
+   */
+  endThinking: (pipelineId: string, messageId: string, durationMs?: number) => {
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       if (!message.thinking) {
         return state
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         thinking: {
@@ -300,24 +155,27 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })
   },
 
-  updateThinkingStep: (sessionId: string, messageId: string, step: ThinkingStep) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+  /**
+   * 更新指定管道中消息的思考步骤
+   */
+  updateThinkingStep: (pipelineId: string, messageId: string, step: ThinkingStep) => {
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       const thinking = message.thinking || {
         content: '',
         isThinking: false,
@@ -334,7 +192,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
         updatedSteps = [...steps, step]
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         thinking: {
@@ -345,23 +203,26 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })
   },
 
+  /**
+   * 向指定管道的消息添加工具调用
+   */
   addToolCallToMessage: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCall: MessageToolCall,
     parentId?: string,
   ) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         logger.warn(
@@ -372,7 +233,7 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
         )
         const newMessage: Message = {
           id: messageId,
-          sessionId: sessionId,
+          sessionId: pipelineId,
           role: 'assistant',
           content: '',
           timestamp: new Date().toISOString(),
@@ -381,21 +242,21 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
           parentId: parentId || null,
         }
         return {
-          messages: {
-            ...state.messages,
-            [sessionId]: [...sessionMessages, newMessage],
+          messagesByPipeline: {
+            ...state.messagesByPipeline,
+            [pipelineId]: [...pipelineMessages, newMessage],
           },
         }
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       const existingToolCalls = message.toolCalls || []
 
       if (existingToolCalls.some((tc) => tc.call_id === toolCall.call_id)) {
         return state
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         toolCalls: [...existingToolCalls, toolCall],
@@ -404,55 +265,58 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })
   },
 
+  /**
+   * 更新指定管道中消息的工具调用
+   */
   updateToolCallInMessage: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     callId: string,
     updates: Partial<MessageToolCall>,
   ) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       const toolCalls = message.toolCalls || []
       const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === callId)
 
       if (toolCallIndex < 0) {
-        const newToolCall: import('@/types/models').MessageToolCall = {
+        const newToolCall: MessageToolCall = {
           call_id: callId,
           tool_name: ((updates as Record<string, unknown>).tool_name as string) || callId,
           tool_args:
             ((updates as Record<string, unknown>).tool_args as Record<string, unknown>) || {},
           status:
             ((updates as Record<string, unknown>)
-              .status as import('@/types/models').ToolCallStatus) || 'completed',
+              .status as ToolCallStatus) || 'completed',
           result: (updates as Record<string, unknown>).result,
           error: (updates as Record<string, unknown>).error as string | undefined,
           duration_ms: (updates as Record<string, unknown>).duration_ms as number | undefined,
           completed_at: new Date().toISOString(),
         }
-        const updatedMessages = [...sessionMessages]
+        const updatedMessages = [...pipelineMessages]
         updatedMessages[messageIndex] = {
           ...message,
           toolCalls: [...toolCalls, newToolCall],
         }
         return {
-          messages: {
-            ...state.messages,
-            [sessionId]: updatedMessages,
+          messagesByPipeline: {
+            ...state.messagesByPipeline,
+            [pipelineId]: updatedMessages,
           },
         }
       }
@@ -463,38 +327,41 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
         ...updates,
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         toolCalls: updatedToolCalls,
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })
   },
 
+  /**
+   * 更新指定管道中消息的工具调用进度
+   */
   updateToolCallProgress: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCallId: string,
     progress: number,
     currentStep?: string,
     estimatedRemainingMs?: number,
   ) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       const toolCalls = message.toolCalls || []
       const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
 
@@ -510,36 +377,39 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
         estimatedRemainingMs,
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         toolCalls: updatedToolCalls,
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })
   },
 
+  /**
+   * 追加工具调用输出到指定管道的消息
+   */
   appendToolCallOutput: (
-    sessionId: string,
+    pipelineId: string,
     messageId: string,
     toolCallId: string,
     output: string,
   ) => {
-    useSessionStore.setState((state) => {
-      const sessionMessages = state.messages[sessionId] || []
-      const messageIndex = sessionMessages.findIndex((m) => m.id === messageId)
+    usePipelineMessageStore.setState((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
         return state
       }
 
-      const message = sessionMessages[messageIndex]
+      const message = pipelineMessages[messageIndex]
       const toolCalls = message.toolCalls || []
       const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
 
@@ -554,16 +424,16 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
         partialOutput: [...existingPartialOutput, output],
       }
 
-      const updatedMessages = [...sessionMessages]
+      const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...message,
         toolCalls: updatedToolCalls,
       }
 
       return {
-        messages: {
-          ...state.messages,
-          [sessionId]: updatedMessages,
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
         },
       }
     })

@@ -13,7 +13,6 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from tools.builtin.capability_adapters import (
-    BrowserTestTool,
     DesignGenerateTool,
     DesignReviewTool,
 )
@@ -163,83 +162,6 @@ class TestDesignReviewTool(unittest.TestCase):
         self.assertEqual(data["score"], 100)
 
 
-class TestBrowserTestTool(unittest.TestCase):
-    """BrowserTestTool 测试"""
-
-    def setUp(self):
-        self.tool = BrowserTestTool()
-
-    def test_tool_definition(self):
-        """验证工具名是 browser_test"""
-        defn = BrowserTestTool.get_tool_definition()
-        self.assertEqual(defn.name, "browser_test")
-
-    def test_build_steps_navigation(self):
-        """验证导航步骤是第一步"""
-        backend = BackendConfig(
-            name="test",
-            available=True,
-            tool_mapping={"navigate": "nav_tool"},
-        )
-        steps = self.tool._build_steps(
-            backend, "https://example.com", [], ["screenshot"]
-        )
-        self.assertGreaterEqual(len(steps), 2)
-        tool_name, args = steps[0]
-        self.assertEqual(tool_name, "nav_tool")
-        self.assertEqual(args["url"], "https://example.com")
-
-    def test_build_steps_actions(self):
-        """验证 click/type 操作被正确添加"""
-        backend = BackendConfig(
-            name="test",
-            available=True,
-            tool_mapping={"navigate": "nav", "interact": "do_action"},
-        )
-        actions = [
-            {"type": "click", "selector": "#btn"},
-            {"type": "type", "selector": "#input", "value": "hello"},
-        ]
-        steps = self.tool._build_steps(
-            backend, "https://example.com", actions, []
-        )
-        # nav + 2 actions = 3 steps
-        self.assertEqual(len(steps), 3)
-        _, click_args = steps[1]
-        self.assertEqual(click_args["action"], "click")
-        self.assertEqual(click_args["selector"], "#btn")
-        _, type_args = steps[2]
-        self.assertEqual(type_args["action"], "type")
-        self.assertEqual(type_args["value"], "hello")
-
-    def test_build_steps_verify_screenshot(self):
-        """验证截图验证步骤"""
-        backend = BackendConfig(
-            name="test",
-            available=True,
-            tool_mapping={"navigate": "nav", "screenshot": "snap_tool"},
-        )
-        steps = self.tool._build_steps(
-            backend, "https://example.com", [], ["screenshot"]
-        )
-        tool_name, args = steps[1]
-        self.assertEqual(tool_name, "snap_tool")
-        self.assertEqual(args, {})
-
-    def test_execute_no_backends(self):
-        """所有后端不可用时返回 NO_BACKEND_CONFIGURED"""
-        fake_backends = [
-            BackendConfig(name="fake1", available=False),
-            BackendConfig(name="fake2", available=False),
-        ]
-        with patch.object(self.tool, "_get_backends", return_value=fake_backends):
-            result = asyncio.run(
-                self.tool.execute({"url_or_html": "https://example.com"})
-            )
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "NO_BACKEND_CONFIGURED")
-
-
 class TestExtractMcpContent(unittest.TestCase):
     """_extract_mcp_content 测试"""
 
@@ -284,16 +206,7 @@ class TestCapabilityAdapterConfig(unittest.TestCase):
         config = CapabilityAdapterConfig.load()
         self.assertIsInstance(config, dict)
         self.assertIn("design_generate", config)
-        self.assertIn("browser_test", config)
         self.assertIn("design_review", config)
-
-    def test_browser_test_backends(self):
-        """browser_test 有可用后端"""
-        config = CapabilityAdapterConfig.load()
-        backends = config.get("browser_test", [])
-        self.assertGreater(len(backends), 0)
-        available = [b for b in backends if b.available]
-        self.assertGreater(len(available), 0)
 
     def test_design_generate_backends(self):
         """design_generate 有至少一个可用后端（magic）"""

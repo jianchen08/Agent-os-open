@@ -7,15 +7,14 @@
  * @module testUtils
  */
 
-import React from 'react'
 import { render, renderHook } from '@testing-library/react'
-import type { RenderOptions } from '@testing-library/react'
+import React from 'react'
+import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { SubAgentCardProps } from '@/components/chat/SubAgentCard'
-import type { ActivityCardProps } from '@/types/activity'
-import type { ActivityData } from '@/types/activity'
+import type { ActivityCardProps, ActivityData  } from '@/types/activity'
 import type { ContentBlock, Message, MessageToolCall, ThinkingContent } from '@/types/models'
-import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
+import type { RenderOptions } from '@testing-library/react'
 
 // ============================================================
 // MockWebSocketService

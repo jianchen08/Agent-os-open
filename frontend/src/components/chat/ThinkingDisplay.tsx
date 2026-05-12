@@ -5,10 +5,10 @@
  */
 
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
-import type { ThinkingContent } from '@/types/models'
+import type { ThinkingContent, ThinkingStep } from '@/types/models'
 import type { FC } from 'react'
 
 /** 思考内容统一样式 - 使用CSS变量适配主题 */
@@ -50,7 +50,7 @@ function getStepTypeLabel(type: string): string {
  * 思考步骤组件
  */
 const ThinkingStepItem: FC<{
-  step: import('@/types/models').ThinkingStep
+  step: ThinkingStep
   index: number | string
 }> = ({ step, index }) => {
   const [expanded, setExpanded] = useState(true)
@@ -113,6 +113,10 @@ export const ThinkingDisplay: FC<{
   defaultExpanded?: boolean
 }> = ({ thinking, defaultExpanded = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
+
+  useEffect(() => {
+    if (thinking.isThinking) setExpanded(true)
+  }, [thinking.isThinking])
 
   return (
     <div className="border-border/50 bg-background/60 my-2 overflow-hidden rounded-lg border">

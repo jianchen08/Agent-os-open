@@ -111,11 +111,14 @@ class ErrorReportingService {
 
     // 开发环境下打印详细信息
     if (import.meta.env.DEV) {
-      console.error('[ErrorReporting]', {
-        message: error.message,
-        context: error.context,
-        stack: error.stack,
-      })
+      console.error(
+        '[ErrorReporting] %s (context: %s)',
+        error.message,
+        error.context ? JSON.stringify(error.context) : 'none',
+      )
+      if (error.stack) {
+        console.error('[ErrorReporting] Stack:', error.stack)
+      }
     }
 
     // 生产环境可以发送到错误跟踪服务

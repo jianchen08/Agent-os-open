@@ -3,14 +3,19 @@
  *
  * 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。
  * 支持 L1/L2/L3 多层 Agent Tab 切换，每个 Tab 独立维护消息列表。
+ * 每个管道独立获取模型上下文窗口和 token 使用量。
  */
 
 import { Loader2, Search, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { buildContentBlocksFromMessage } from '@/components/chat/hooks/useMessageRender'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import ErrorBoundary from '@/components/ErrorBoundary'
+import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useContextUsageStore } from '@/stores/contextUsageStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
@@ -21,6 +26,79 @@ import { NotificationCenter } from './NotificationCenter'
 import { SubTabRouter } from './SubTabRouter'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
+import type { Message } from '@/types/models'
+
+const EMPTY_MESSAGES: Message[] = []
+
+/**
+ * 合并连续的 assistant 消息
+ *
+ * 将多个连续的 assistant 消息合并为一条，整合 content、thinking、toolCalls 和 contentBlocks。
+ * 单条 assistant 消息若缺少 contentBlocks，也会自动补建。
+ */
+function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
+  if (messages.length <= 1) return messages
+  const result: Message[] = []
+  let i = 0
+  while (i < messages.length) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant') {
+      result.push(msg)
+      i++
+      continue
+    }
+    const groupStart = i
+    while (i < messages.length && messages[i].role === 'assistant') { i++ }
+    const group = messages.slice(groupStart, i)
+    if (group.length === 1) {
+      const single = group[0]
+      if (!single.contentBlocks || single.contentBlocks.length === 0) {
+        result.push({
+          ...single,
+          contentBlocks: buildContentBlocksFromMessage(single.content, single.toolCalls, single.thinking, single.id),
+        })
+      } else {
+        // BUG-FIX-fix_20260510_tool_display_streaming: 创建新对象引用，确保 Virtuoso 检测到变化
+        // 问题根因: 单条 assistant 消息有 contentBlocks 时直接 push 原引用，在 Virtuoso 虚拟滚动环境中，
+        //          即使 pipelineMessageStore.updateMessage 创建了新的消息对象，但 mergeConsecutiveAssistantMessages
+        //          的 useMemo 可能因 pipelineMessages 引用比较不敏感而返回缓存的旧数组（含旧对象引用），
+        //          导致下游组件无法检测到 toolCalls/contentBlocks 的变化。
+        // 修复方案: 始终创建新的消息对象引用，确保 Virtuoso 的 data 数组项是新的引用。
+        result.push({ ...single })
+      }
+      continue
+    }
+    const first = group[0]
+    const allToolCalls: Message['toolCalls'] = []
+    const allContent: string[] = []
+    const interleavedBlocks: Message['contentBlocks'] = []
+    for (const m of group) {
+      if (m.thinking?.content && m.thinking.content.trim()) {
+        interleavedBlocks.push({ type: 'thinking', thinking: { content: m.thinking.content.trim(), isThinking: false }, sourceId: m.id })
+      }
+      if (m.content && m.content.trim()) {
+        allContent.push(m.content.trim())
+        interleavedBlocks.push({ type: 'text', text: m.content.trim(), sourceId: m.id })
+      }
+      if (m.toolCalls && m.toolCalls.length > 0) {
+        for (const tc of m.toolCalls) {
+          allToolCalls.push(tc)
+          interleavedBlocks.push({ type: 'tool_call', toolCall: tc, sourceId: m.id })
+        }
+      }
+    }
+    const mergedContent = allContent.join('\n\n')
+    const mergedThinking = interleavedBlocks.filter(b => b.type === 'thinking').map(b => (b as any).thinking?.content || '').filter(Boolean).join('\n\n')
+    result.push({
+      ...first,
+      content: mergedContent,
+      thinking: mergedThinking ? { content: mergedThinking, isThinking: false } : undefined,
+      toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
+      contentBlocks: interleavedBlocks,
+    })
+  }
+  return result
+}
 
 /**
  * 活跃投票面板列表
@@ -84,9 +162,9 @@ export const ChatContainer = ({
   onRegenerate,
   onEdit,
   onDelete,
-  currentTokenUsage = 0,
-  maxTokens = 128000,
-  modelName = 'glm-5.1',
+  currentTokenUsage: _externalTokenUsage = 0,
+  maxTokens: _externalMaxTokens = 0,
+  modelName = '',
   thinkingMode,
   toggleThinkingMode,
   className = '',
@@ -100,66 +178,97 @@ export const ChatContainer = ({
   /** 从 agentTabStore 获取 Tab 状态 */
   const tabs = useAgentTabStore((s) => s.tabs)
   const activeTabId = useAgentTabStore((s) => s.activeTabId)
-  const tabMessages = useAgentTabStore((s) => s.tabMessages)
   const unreadCounts = useAgentTabStore((s) => s.unreadCounts)
   const switchToTab = useAgentTabStore((s) => s.switchToTab)
   const closeTab = useAgentTabStore((s) => s.closeTab)
   const initSessionTabs = useAgentTabStore((s) => s.initSessionTabs)
 
   /**
-   * 会话切换时初始化 Tab 状态
-   *
-   * 从 localStorage 恢复该会话的 Tab 配置，
-   * 或创建空白状态等待后端推送。
+   * 从 pipelineMessageStore 获取当前激活管道的消息
+   */
+  const pipelineMessages = usePipelineMessageStore((s) => {
+    const activeId = s.activePipelineId
+    if (!activeId) return EMPTY_MESSAGES
+    return s.messagesByPipeline[activeId] ?? EMPTY_MESSAGES
+  })
+
+  /**
+   * 会话切换时初始化 Tab 状态并激活对应管道
    */
   useEffect(() => {
     if (sessionId) {
       initSessionTabs(sessionId)
+      const { activeTabId, tabs } = useAgentTabStore.getState()
+      const activeTab = tabs.find((t) => t.id === activeTabId)
+      if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
+        usePipelineMessageStore.getState().activatePipeline(activeTab.pipelineRunId)
+      } else {
+        usePipelineMessageStore.getState().activatePipeline(sessionId)
+        const pipelineStore = usePipelineMessageStore.getState()
+        const existing = pipelineStore.messagesByPipeline[sessionId]
+        if (!existing || existing.length === 0) {
+          pipelineStore.fetchMessages(sessionId).catch(() => {})
+        }
+      }
     }
   }, [sessionId, initSessionTabs])
 
   /**
    * 判断是否为子 Tab（L2/L3）激活状态
-   *
-   * 主 Tab 使用外部传入的 messages，子 Tab 使用 tabMessages 中的数据。
    */
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
 
   /**
-   * BUG-FIX-fix_20260506_per_tab_streaming: 根据 Tab 计算 isGenerating
-   *
-   * 每个标签页的 streaming 状态独立管理：
-   * - 子 Tab：从 streamingStore.streamingTabs[tabId] 获取
-   * - 主 Tab：从 streamingStore.streamingTabs['__main__'] 获取，回退到外部传入的 isGenerating
+   * BUG-FIX-fix_20260509_tab_streaming: 根据 pipelineId 计算 isGenerating
    */
   const streamingTabs = useStreamingStore((s) => s.streamingTabs)
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
   const effectiveIsGenerating = useMemo(() => {
-    if (isSubTabActive && activeTabId) {
-      return streamingTabs[activeTabId] ?? false
-    }
-    return streamingTabs[sessionId] ?? false
-  }, [isSubTabActive, activeTabId, streamingTabs, sessionId])
+    const lookupKey = activePipelineId || sessionId
+    return streamingTabs[lookupKey] ?? false
+  }, [streamingTabs, activePipelineId, sessionId])
 
   /**
-   * 根据当前激活 Tab 选择消息源
+   * 根据当前模型名获取动态 context_window
+   */
+  const { contextWindow: modelContextWindow } = useModelContextInfo(modelName)
+
+  /**
+   * 从 contextUsageStore 获取当前活跃管道的 token 使用量
    *
-   * - 主 Tab (L1) 或无 Tab：使用外部传入的 messages
-   * - 子 Tab (L2/L3)：使用 agentTabStore 中 tabMessages 的数据
+   * 每个管道（pipelineId）独立维护自己的 usage 数据。
+   * 主 Tab 使用 sessionId 作为 pipelineId，子 Tab 使用 pipelineRunId。
+   */
+  const currentPipelineId = activePipelineId || sessionId
+  const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
+  const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
+
+  /** 最终的 maxTokens 和 currentTokenUsage */
+  const effectiveMaxTokens = modelContextWindow
+  const effectiveTokenCount = effectiveTokenUsage
+
+  /**
+   * 根据当前激活管道获取消息列表
    *
-   * BUG-FIX-fix_20260506_005: 过滤掉 role=tool 的独立消息
-   * 问题根因: 后端返回 type=tool 的记录转为 role=tool 的独立消息，
-   *          同时 AI 消息的 toolCalls 也渲染工具卡片，导致重复显示。
-   *          tool 消息的工具名、参数、结果等信息显示在消息气泡外面。
-   * 修复方案: 过滤掉 role=tool 的消息，工具调用信息已包含在 AI 消息的
-   *          toolCalls/contentBlocks 渲染中（ActivityCard 工具卡片）
+   * BUG-FIX-fix_20260512_msg_disappear:
+   * 问题根因: 之前 pipelineMessages 为空时直接用 EMPTY_MESSAGES，
+   *          但 messages prop（来自 sessionStore）可能已有数据。
+   *          页面刷新后 pipelineMessageStore 异步加载，
+   *          在加载完成前用户看到空白聊天界面。
+   * 修复方案: pipelineMessages 为空时 fallback 到 messages prop，
+   *          确保 sessionStore 先加载的消息也能正常显示。
+   *          同时将 messages 加入 useMemo 依赖，确保 prop 更新时重新计算。
+   * 影响范围: 聊天消息列表显示
+   * 修复日期: 2026-05-12
    */
   const activeMessages = useMemo(() => {
-    const source = isSubTabActive && activeTabId
-      ? tabMessages[activeTabId] || []
-      : messages
-    return source.filter((m) => m.role !== 'tool')
-  }, [isSubTabActive, activeTabId, tabMessages, messages])
+    const source = pipelineMessages.length > 0
+      ? pipelineMessages
+      : (messages && messages.length > 0 ? messages : EMPTY_MESSAGES)
+    const filtered = source.filter((m: any) => m.role !== 'tool')
+    return mergeConsecutiveAssistantMessages(filtered)
+  }, [pipelineMessages, messages])
 
   /**
    * 将 store Tab 映射为 AgentTabBar 所需格式
@@ -206,12 +315,10 @@ export const ChatContainer = ({
 
     const query = searchQuery.toLowerCase()
     return activeMessages.filter((message) => {
-      // 搜索消息内容
       if (message.content?.toLowerCase().includes(query)) {
         return true
       }
 
-      // 搜索工具调用名称
       if (message.toolCalls?.some((tool) => tool.tool_name?.toLowerCase().includes(query))) {
         return true
       }
@@ -252,8 +359,8 @@ export const ChatContainer = ({
 
       {/* 搜索栏 + 通知中心 */}
       <div className="bg-background shrink-0 border-b">
-        <div className="flex items-center gap-2 px-4 py-2">
-          <div className="relative flex-1">
+        <div className="flex items-center gap-2 px-2 py-2 sm:px-4">
+          <div className="relative min-w-0 flex-1">
             <Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 transform" />
             <Input
               type="text"
@@ -274,19 +381,22 @@ export const ChatContainer = ({
             )}
           </div>
           {searchQuery && (
-            <div className="text-muted-foreground text-sm">
+            <div className="text-muted-foreground shrink-0 text-sm">
               找到 {filteredMessages.length} 条消息
             </div>
           )}
           {/* 通知中心触发按钮 */}
-          <div className="relative">
+          <div className="relative shrink-0">
             <NotificationCenter />
           </div>
         </div>
       </div>
 
       {/* 消息列表 */}
+      {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效; activeTabKey 用于滚动位置缓存 */}
       <MessageList
+        key={activeTabId || sessionId}
+        activeTabKey={activeTabId || sessionId}
         messages={filteredMessages}
         isGenerating={effectiveIsGenerating}
         onRegenerate={onRegenerate}
@@ -317,14 +427,11 @@ export const ChatContainer = ({
         isGenerating={effectiveIsGenerating}
         onSendMessage={(params) => {
           /**
-           * 子 Tab 激活时注入 parentRecordId
-           *
-           * 当用户在子 Tab（L2/L3）中发送消息时，
-           * 将 activeTab 的 parentRecordId 附加到参数中，
-           * 以便 WebSocket 消息路由到对应的子管道。
+           * 子 Tab 激活时注入 pipelineId（即 tab.pipelineRunId）
+           * 后端直接用 pipeline_id 路由到对应管道，无需 task_service 查找
            */
-          if (isSubTabActive && activeTab?.parentRecordId) {
-            onSendMessage({ ...params, parentRecordId: activeTab.parentRecordId })
+          if (isSubTabActive && activeTab?.pipelineRunId) {
+            onSendMessage({ ...params, pipelineId: activeTab.pipelineRunId })
           } else {
             onSendMessage(params)
           }
@@ -333,8 +440,8 @@ export const ChatContainer = ({
         placeholder="输入消息，按 Enter 发送..."
         enableThinkingMode={true}
         modelName={modelName}
-        currentTokenUsage={currentTokenUsage}
-        maxTokens={maxTokens}
+        currentTokenUsage={effectiveTokenCount}
+        maxTokens={effectiveMaxTokens}
         thinkingMode={thinkingMode}
         toggleThinkingMode={toggleThinkingMode}
       />

@@ -10,7 +10,7 @@ EvaluationExecutor 是评估系统的顶层编排器，职责：
 
 用法：
     executor = EvaluationExecutor(task_service=svc)
-    result = executor.run_evaluation(task_id="abc123", metric_ids=["code_check"])
+    result = executor.run_evaluation(task_id="abc123", metric_ids=["format_valid"])
 """
 
 from __future__ import annotations
@@ -75,7 +75,8 @@ class EvaluationExecutor:
         )
         self._mapper = mapper or ResultMapper()
 
-    def run_evaluation(
+    # BUG-FIX-fix_20260512_async_compat: 改为 async，因为内部调用 complete_evaluation 是 async
+    async def run_evaluation(
         self,
         task_id: str,
         metric_ids: list[str] | None = None,
@@ -134,7 +135,8 @@ class EvaluationExecutor:
                         for r in result.results
                     ],
                 }
-                self._task_service.complete_evaluation(
+                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+                await self._task_service.complete_evaluation(
                     task_id, overall_passed, result=eval_data,
                 )
                 logger.info(

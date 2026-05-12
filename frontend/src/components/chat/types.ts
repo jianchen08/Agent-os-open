@@ -57,8 +57,8 @@ export interface SendMessageParams {
   attachments?: Attachment[]
   /** 是否启用思考模式 */
   enableThinking?: boolean
-  /** 子 Tab 发消息时的父执行记录 ID */
-  parentRecordId?: string
+  /** 子 Tab 发消息时的目标管道 ID，后端直接用它路由 */
+  pipelineId?: string
 }
 
 /**
@@ -90,7 +90,7 @@ export interface ChatContainerProps {
   /** 模型名称 */
   modelName?: string
   /** 思考模式状态 */
-  thinkingMode?: import('@/types/thinkingMode').ThinkingModeState
+  thinkingMode?: ThinkingModeState
   /** 思考模式切换回调 */
   toggleThinkingMode?: (enabled: boolean) => Promise<void>
   /** 自定义类名 */
@@ -227,7 +227,7 @@ export interface ChatInputProps {
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
   /** 思考模式状态 */
-  thinkingMode?: import('@/types/thinkingMode').ThinkingModeState
+  thinkingMode?: ThinkingModeState
   /** 思考模式切换回调 */
   toggleThinkingMode?: (enabled: boolean) => Promise<void>
   /** 自定义类名 */

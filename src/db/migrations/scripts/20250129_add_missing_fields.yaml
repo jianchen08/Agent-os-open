@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+# 数据库迁移：添加缺失字段
+#
+# 为 agent_configs、workflows、tool_library 表添加缺失的字段
+# 以支持前后端 API 的完整功能
+
+version: "20250129000001"
+name: "add_missing_fields"
+description: "为 agent_configs、workflows、tool_library 表添加缺失的 tags、metadata、category 等字段"
+
+up: |
+  -- 添加 agent_configs 表缺失字段
+  ALTER TABLE agent_configs
+    ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS agent_metadata JSONB DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+
+  -- 添加 workflows 表缺失字段
+  ALTER TABLE workflows
+    ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '[]';
+
+  -- 添加 tool_library 表缺失字段
+  ALTER TABLE tool_library
+    ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS category VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS parameters JSONB;
+
+  -- 为现有数据设置默认值
+  UPDATE agent_configs SET status = 'active' WHERE status IS NULL;
+
+down: |
+  -- 回滚 agent_configs 表字段
+  ALTER TABLE agent_configs
+    DROP COLUMN IF EXISTS tags,
+    DROP COLUMN IF EXISTS agent_metadata,
+    DROP COLUMN IF EXISTS status;
+
+  -- 回滚 workflows 表字段
+  ALTER TABLE workflows
+    DROP COLUMN IF EXISTS tags;
+
+  -- 回滚 tool_library 表字段
+  ALTER TABLE tool_library
+    DROP COLUMN IF EXISTS tags,
+    DROP COLUMN IF EXISTS category,
+    DROP COLUMN IF EXISTS parameters;

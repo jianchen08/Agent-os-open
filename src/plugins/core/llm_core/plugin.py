@@ -924,11 +924,15 @@ class LLMCore(ICorePlugin):
             if name:
                 prefix += f" name={name}"
             if tc_list:
+                try:
+                    tc_str = json.dumps(
+                        tc_list, ensure_ascii=False, default=str
+                    )
+                except (TypeError, ValueError):
+                    tc_str = str(tc_list)
                 logger.info(
                     "%s tool_calls=%s", prefix,
-                    json.dumps(
-                        tc_list, ensure_ascii=False
-                    ) if tc_list else "[]",
+                    tc_str if tc_list else "[]",
                 )
             else:
                 logger.info(

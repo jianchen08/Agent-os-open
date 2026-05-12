@@ -103,7 +103,8 @@ def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
 
     if task.status == TaskStatus.RUNNING:
         try:
-            task_service.move_to_evaluating(task_id)
+            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
+            await task_service.move_to_evaluating(task_id)
         except Exception:
             pass
 
@@ -114,7 +115,8 @@ def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
         if inputs.get("result") is not None:
             task.result = inputs["result"]
 
-        task_service.complete_evaluation(task_id, passed=True)
+        # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+        await task_service.complete_evaluation(task_id, passed=True)
         return {"success": True, "status": "completed"}
     except Exception as e:
         return {"success": False, "error_code": "EVAL_FAILED", "error": str(e)}
@@ -278,13 +280,12 @@ class TaskEvaluateTool(BuiltinTool):
             loop = asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
+            # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
             result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: executor.run_evaluation(
-                        task_id=task_id,
-                        metric_ids=[metric_id],
-                    ),
+                executor.run_evaluation(
+                    task_id=task_id,
+                    metric_ids=[metric_id],
+                    skip_state_update=True,
                 ),
                 timeout=timeout,
             )
@@ -315,7 +316,8 @@ class TaskEvaluateTool(BuiltinTool):
         # 注册评估子管道 + 追加历史记录
         self._register_eval_pipelines(task_service, task, result)
         self._append_eval_history(task, result)
-        self._save_task(task_service, task)
+        # BUG-FIX-fix_20260512_async_compat: _save_task 现在是 async
+        await self._save_task(task_service, task)
 
         # 当前指标未通过 → 返回结果，Agent 继续改进
         if not result.overall_passed:
@@ -421,15 +423,13 @@ class TaskEvaluateTool(BuiltinTool):
             loop = asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
+            # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
             result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: executor.run_evaluation(
-                        task_id=task.id,
-                        metric_ids=remaining_ids,
-                        input_params=input_params,
-                        skip_state_update=True,
-                    ),
+                executor.run_evaluation(
+                    task_id=task.id,
+                    metric_ids=remaining_ids,
+                    input_params=input_params,
+                    skip_state_update=True,
                 ),
                 timeout=timeout,
             )
@@ -513,7 +513,8 @@ class TaskEvaluateTool(BuiltinTool):
         # 追加本次评估记录到历史（保留所有评估尝试）
         self._append_eval_history(task, eval_result)
 
-        self._save_task(task_service, task)
+        # BUG-FIX-fix_20260512_async_compat: _save_task 现在是 async
+        await self._save_task(task_service, task)
 
         if not has_failure:
             return self._complete_task(task_service, task, eval_result)
@@ -566,13 +567,15 @@ class TaskEvaluateTool(BuiltinTool):
             )
             try:
                 eval_data = self._build_result_data(eval_result)
-                task_service.recover_to_completed(task.id, result=eval_data)
+                # BUG-FIX-fix_20260512_async_compat: recover_to_completed 现在是 async
+                await task_service.recover_to_completed(task.id, result=eval_data)
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
         else:
             try:
                 eval_data = self._build_result_data(eval_result)
-                task_service.complete_evaluation(task.id, passed=True, result=eval_data)
+                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+                await task_service.complete_evaluation(task.id, passed=True, result=eval_data)
             except Exception as e:
                 logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
                 return create_failure_result(
@@ -612,7 +615,8 @@ class TaskEvaluateTool(BuiltinTool):
         try:
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 eval_data = self._build_result_data(eval_result)
-                task_service.complete_evaluation(task.id, passed=False, result=eval_data)
+                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
+                await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
             else:
                 logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
         except Exception as e:
@@ -637,15 +641,18 @@ class TaskEvaluateTool(BuiltinTool):
             },
         )
 
-    def _save_task(self, task_service: Any, task: Any) -> None:
+    async def _save_task(self, task_service: Any, task: Any) -> None:
         """保存任务元数据更新。
+
+        BUG-FIX-fix_20260512_async_compat: 改为 async，因为 save_task 现在是 async。
 
         Args:
             task_service: TaskService 实例
             task: TaskModel 实例
         """
         try:
-            task_service.save_task(task)
+            # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+            await task_service.save_task(task)
         except Exception as e:
             logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
 
@@ -958,7 +965,7 @@ class TaskEvaluateTool(BuiltinTool):
                  导致 file_read 在项目根目录而非任务工作空间中查找文件，
                  文件路径解析错误使评估永远失败。
         修复方案: 从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中。
-        影响范围: 所有使用工具型评估指标（file_check、bash_check 等）的任务评估
+        影响范围: 所有使用工具型评估指标（file_check 等）的任务评估
 
         Args:
             task: TaskModel 实例

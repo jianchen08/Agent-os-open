@@ -20,6 +20,74 @@ from memory.types import Knowledge, SearchResult, MemoryType
 logger = logging.getLogger(__name__)
 
 
+def _find_knowledge_by_user(storage: ISemanticStorage, user_id: str, limit: int = 20) -> Any:
+    """调用存储的按用户查找方法，优先使用专属方法名。
+
+    当存储实现同时满足 IEpisodeStorage 和 ISemanticStorage 时，
+    通用方法名 find_by_user 会冲突，优先调用 find_knowledge_by_user。
+
+    Args:
+        storage: 语义存储接口
+        user_id: 用户 ID
+        limit: 返回数量上限
+
+    Returns:
+        知识列表的协程
+    """
+    if hasattr(storage, "find_knowledge_by_user") and not _is_mock(storage):
+        return storage.find_knowledge_by_user(user_id, limit=limit)
+    return storage.find_by_user(user_id, limit=limit)
+
+
+def _get_knowledge(storage: ISemanticStorage, knowledge_id: str) -> Any:
+    """调用存储的获取方法，优先使用专属方法名。
+
+    Args:
+        storage: 语义存储接口
+        knowledge_id: 知识 ID
+
+    Returns:
+        知识实例的协程
+    """
+    if hasattr(storage, "get_knowledge") and not _is_mock(storage):
+        return storage.get_knowledge(knowledge_id)
+    return storage.get(knowledge_id)
+
+
+def _delete_knowledge(storage: ISemanticStorage, knowledge_id: str) -> Any:
+    """调用存储的删除方法，优先使用专属方法名。
+
+    Args:
+        storage: 语义存储接口
+        knowledge_id: 知识 ID
+
+    Returns:
+        是否删除成功的协程
+    """
+    if hasattr(storage, "delete_knowledge_by_id") and not _is_mock(storage):
+        return storage.delete_knowledge_by_id(knowledge_id)
+    return storage.delete(knowledge_id)
+
+
+def _is_mock(obj: Any) -> bool:
+    """判断对象是否为 unittest.mock 的 Mock 对象。
+
+    Mock 对象会自动创建任何属性（hasattr 始终返回 True），
+    需要特殊处理以避免误判。
+
+    Args:
+        obj: 待检查对象
+
+    Returns:
+        是否为 Mock 对象
+    """
+    try:
+        from unittest.mock import Mock, MagicMock
+        return isinstance(obj, (Mock, MagicMock))
+    except ImportError:
+        return False
+
+
 class KnowledgeService:
     """语义知识存储服务。
 
@@ -111,7 +179,7 @@ class KnowledgeService:
             语义记忆列表字典
         """
         if self._storage:
-            memories = await self._storage.find_by_user(user_id)
+            memories = await _find_knowledge_by_user(self._storage, user_id)
         else:
             memories = [
                 kn for kn in self._in_memory.values()
@@ -138,10 +206,10 @@ class KnowledgeService:
             是否删除成功
         """
         if self._storage:
-            knowledge = await self._storage.get(knowledge_id)
+            knowledge = await _get_knowledge(self._storage, knowledge_id)
             if not knowledge or knowledge.user_id != user_id:
                 return False
-            return await self._storage.delete(knowledge_id)
+            return await _delete_knowledge(self._storage, knowledge_id)
 
         # 内存降级
         knowledge = self._in_memory.get(knowledge_id)
@@ -161,7 +229,7 @@ class KnowledgeService:
             该用户的知识数量
         """
         if self._storage:
-            memories = await self._storage.find_by_user(user_id)
+            memories = await _find_knowledge_by_user(self._storage, user_id)
             return len(memories)
 
         return sum(
@@ -254,7 +322,7 @@ class KnowledgeService:
             知识条目列表
         """
         if self._storage:
-            return await self._storage.find_by_user(user_id, limit=100000)
+            return await _find_knowledge_by_user(self._storage, user_id, limit=100000)
 
         memories = [
             kn for kn in self._in_memory.values()

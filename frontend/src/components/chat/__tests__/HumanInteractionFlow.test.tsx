@@ -12,16 +12,15 @@
  */
 
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '@/components/chat/InteractionCard'
-import type { InteractionCardProps } from '@/components/chat/InteractionCard'
-import type { PendingInteraction } from '@/stores/interactionStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import {
   renderInteractionCard,
 } from './testUtils'
+import type { InteractionCardProps } from '@/components/chat/InteractionCard'
+import type { PendingInteraction } from '@/stores/interactionStore'
 
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react

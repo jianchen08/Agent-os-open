@@ -323,11 +323,7 @@ class TriggerManager:
         logger.info("[TriggerManager] 后台检查循环已退出")
 
     async def _wake_pipeline(self, trigger: TriggerConfig) -> None:
-        """通过管道的 inject_and_wake 接口唤醒挂起的管道。
-
-        从 ServiceProvider 获取 services 字典，
-        通过 pipeline_id 找到对应的挂起管道引擎实例，
-        注入触发器消息并唤醒。
+        """通过统一消息入口唤醒挂起的管道。
 
         Args:
             trigger: 已触发的触发器配置
@@ -339,51 +335,41 @@ class TriggerManager:
             )
             return
 
-        try:
-            from infrastructure.service_provider import get_service_provider
-            provider = get_service_provider()
-            services = provider.get("services")
-            if services is None:
-                logger.warning("[TriggerManager] services 不可用，无法唤醒管道")
-                return
+        fire_info = (
+            f"[触发器通知] 触发器 '{trigger.name or trigger.trigger_id}' 已触发 "
+            f"(第 {trigger.fire_count} 次"
+        )
+        if trigger.max_fires > 0:
+            fire_info += f"/共 {trigger.max_fires} 次"
+        fire_info += f")\n{trigger.message}"
 
-            engine_key = f"__suspended_engine_{trigger.pipeline_id}"
-            engine = services.get(engine_key)
-            if engine is None:
-                logger.debug(
-                    f"[TriggerManager] 管道 {trigger.pipeline_id} 未挂起，跳过唤醒"
-                )
-                return
-
-            fire_info = (
-                f"[触发器通知] 触发器 '{trigger.name or trigger.trigger_id}' 已触发 "
-                f"(第 {trigger.fire_count} 次"
+        if trigger.status == TriggerStatus.FIRED:
+            fire_info += (
+                "\n\n[系统提示] 触发器已达停止条件，"
+                "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
             )
-            if trigger.max_fires > 0:
-                fire_info += f"/共 {trigger.max_fires} 次"
-            fire_info += f")\n{trigger.message}"
 
-            if trigger.status == TriggerStatus.FIRED:
-                fire_info += (
-                    "\n\n[系统提示] 触发器已达停止条件，"
-                    "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
-                )
-
-            if hasattr(engine, "inject_and_wake"):
-                engine.inject_and_wake(fire_info)
+        try:
+            from pipeline.message_bus import send_pipeline_message
+            result = await send_pipeline_message(
+                trigger.pipeline_id, fire_info,
+                metadata={"source": "trigger", "trigger_id": trigger.trigger_id},
+            )
+            if result.success:
                 logger.info(
-                    f"[TriggerManager] 已唤醒管道 {trigger.pipeline_id} "
-                    f"(trigger={trigger.trigger_id}, "
+                    f"[TriggerManager] 已通过统一入口唤醒管道 {trigger.pipeline_id} "
+                    f"(trigger={trigger.trigger_id}, method={result.method}, "
                     f"fire_count={trigger.fire_count})"
                 )
             else:
                 logger.warning(
-                    f"[TriggerManager] 管道引擎 {engine_key} 无 inject_and_wake 方法"
+                    f"[TriggerManager] 管道 {trigger.pipeline_id} 未找到 "
+                    f"(trigger={trigger.trigger_id}): {result.error}"
                 )
-
         except Exception as e:
             logger.error(
-                f"[TriggerManager] 唤醒管道失败: {e}", exc_info=True
+                f"[TriggerManager] 唤醒管道异常: pipeline={trigger.pipeline_id}, "
+                f"trigger={trigger.trigger_id}, error={e}"
             )
 
     def _ensure_check_loop(self) -> None:

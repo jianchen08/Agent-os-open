@@ -8,15 +8,15 @@
  */
 
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { FormWidget } from './FormWidget'
 import { ChartWidget } from './ChartWidget'
-import { GalleryWidget } from './GalleryWidget'
-import { TableWidget } from './TableWidget'
-import { ProgressWidget } from './ProgressWidget'
 import { CodeBlockWidget } from './CodeBlockWidget'
-import { StatusCardWidget } from './StatusCardWidget'
 import { DecisionWidget } from './DecisionWidget'
 import { FileTreeWidget } from './FileTreeWidget'
+import { FormWidget } from './FormWidget'
+import { GalleryWidget } from './GalleryWidget'
+import { ProgressWidget } from './ProgressWidget'
+import { StatusCardWidget } from './StatusCardWidget'
+import { TableWidget } from './TableWidget'
 import type { ComponentType } from 'react'
 
 /** Widget 注册条目定义 */

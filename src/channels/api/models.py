@@ -74,11 +74,13 @@ class ThreadUpdate(BaseModel):
 class ThreadResponse(BaseModel):
     """线程响应模型，字段名与前端 mapThreadToSession 对齐。"""
     thread_id: str
+    title: str | None = None
     intent: str | None = None
     current_state: str = "active"
     created_at: str
     updated_at: str
     agent_id: str | None = None
+    message_count: int = 0
     pipeline_ids: list[str] = Field(default_factory=list, description="关联的管道执行 ID 列表")
     active_pipeline_id: str | None = Field(default=None, description="当前活跃的管道执行 ID")
     metadata: dict[str, Any] | None = Field(default=None, description="线程元数据，含 pinned/starred 等前端状态")
@@ -395,6 +397,7 @@ class MemoryStore:
 
         threads 是唯一数据源。加载每个 thread 时自动派生对应的 SessionModel，
         无需在 JSON 中存储 sessions 段。
+        messages 从 JSON 中的 messages 段恢复，若无则初始化为空列表。
         """
         path = self._persist_file()
         if not path or not os.path.exists(path):
@@ -404,7 +407,6 @@ class MemoryStore:
                 data = json.load(f)
             for tid, tdata in data.get("threads", {}).items():
                 self.threads[tid] = tdata
-                self.messages[tid] = []
                 self.sessions[tid] = SessionModel(
                     session_id=tdata.get("id", tid),
                     channel_type="web",
@@ -415,20 +417,23 @@ class MemoryStore:
                     last_active_at=_parse_iso_time(tdata.get("updated_at", "")),
                     metadata=tdata.get("metadata", {}),
                 )
+            for tid, msgs in data.get("messages", {}).items():
+                if isinstance(msgs, list):
+                    self.messages[tid] = msgs
         except Exception:
             pass
 
     def _save_persisted_data(self) -> None:
-        """将线程数据持久化到 JSON 文件。
+        """将线程和消息数据持久化到 JSON 文件。
 
-        threads 是唯一数据源，不再单独存储 sessions 段。
+        threads 和 messages 一起持久化，确保页面刷新后消息不丢失。
         SessionModel 在加载时从 thread 字段自动派生。
         """
         path = self._persist_file()
         if not path:
             return
         try:
-            data = {"threads": self.threads}
+            data = {"threads": self.threads, "messages": self.messages}
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp_path = path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -532,6 +537,7 @@ class MemoryStore:
             return None
         if title is not None:
             thread["title"] = title
+            thread["intent"] = title
         if agent_id is not None:
             thread["agent_id"] = agent_id
         if metadata is not None:
@@ -640,6 +646,7 @@ class MemoryStore:
         thread = self.threads.get(thread_id)
         if thread:
             thread["updated_at"] = now
+        self._save_persisted_data()
         return msg
 
     def search_messages(

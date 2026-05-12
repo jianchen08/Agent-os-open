@@ -84,7 +84,8 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     response_model=TaskListResponse,
     summary="获取任务列表",
 )
-def list_tasks(
+# BUG-FIX-fix_20260512_async_list_all: 改为 async def 以支持 await task_service.list_all()
+async def list_tasks(
     status: str | None = Query(default=None, description="按状态筛选"),
     priority: int | None = Query(
         default=None, ge=1, le=9, description="按优先级筛选",
@@ -107,7 +108,8 @@ def list_tasks(
     task_service = _get_task_service()
     if task_service is not None:
         try:
-            ts_tasks = task_service.list_all(limit=1000)
+            # BUG-FIX-fix_20260512_async_list_all: 添加 await
+            ts_tasks = await task_service.list_all(limit=1000)
             api_ids = {t["id"] for t in tasks}
             for tm in ts_tasks:
                 if tm.id not in api_ids:
@@ -125,6 +127,33 @@ def list_tasks(
     page = tasks[offset:end]
     items = [_task_to_response(t) for t in page]
     return TaskListResponse(items=items, total=total)
+
+
+@router.get(
+    "/debug/all",
+    summary="获取任务调试数据（全字段）",
+)
+# BUG-FIX-fix_20260512_async_list_all: 改为 async def 以支持 await task_service.list_all()
+async def get_tasks_debug(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
+    status: str | None = Query(default=None),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    task_service = _get_task_service()
+    if task_service is None:
+        return {"items": [], "total": 0}
+    try:
+        # BUG-FIX-fix_20260512_async_list_all: 添加 await
+        all_tasks = await task_service.list_all(limit=limit, reverse=(sort_order == "desc"))
+        if status:
+            all_tasks = [t for t in all_tasks if t.status.value == status]
+        items = [_task_model_to_dict(t) for t in all_tasks]
+        return {"items": items, "total": len(items)}
+    except Exception:
+        return {"items": [], "total": 0}
 
 
 @router.post(
@@ -400,6 +429,225 @@ def evaluate_task(
             summary="评估引擎不可用",
             results=[],
         )
+
+
+def _cancel_running_pipeline(task_id: str) -> bool:
+    """取消任务关联的运行中管道（best-effort）。
+
+    通过 TaskWorker.cancel_pipeline 强制取消 asyncio.Task，
+    触发 PipelineEngine 的 CancelledError，真正停止执行。
+
+    Args:
+        task_id: 任务 ID
+
+    Returns:
+        是否成功取消了运行中的管道
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        task_worker = get_service_provider().get("task_worker")
+        if task_worker is None:
+            return False
+        return task_worker.cancel_pipeline(task_id)
+    except Exception:
+        return False
+
+
+@router.post(
+    "/{task_id}/pause",
+    summary="暂停任务",
+)
+async def pause_task(
+    task_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """暂停指定任务，同时取消正在运行的 PipelineEngine。
+
+    执行两步操作：
+    1. 将任务状态从 running/pending 变为 paused（持久化到 YAML）
+    2. 取消该任务关联的 PipelineEngine 协程（真正停止 LLM 调用）
+
+    重启后 paused 状态的任务不会被 TaskWorker 自动恢复执行。
+
+    Args:
+        task_id: 任务 ID
+
+    Returns:
+        暂停成功消息
+
+    Raises:
+        APIError: TaskService 不可用 (503)、任务不存在 (404) 或状态不允许 (400)
+    """
+    task_service = _get_task_service()
+    if task_service is None:
+        raise APIError(
+            status_code=503,
+            error_code="TASK_003",
+            message="TaskService 不可用，无法暂停任务",
+        )
+
+    try:
+        # BUG-FIX-fix_20260512_async_compat: pause_task 现在是 async
+        await task_service.pause_task(task_id)
+    except KeyError:
+        raise APIError(
+            status_code=404,
+            error_code="TASK_001",
+            message=f"任务不存在: {task_id}",
+        )
+    except Exception as exc:
+        from tasks.state_machine import InvalidTransitionError
+        if isinstance(exc, InvalidTransitionError):
+            raise APIError(
+                status_code=400,
+                error_code="TASK_002",
+                message=str(exc),
+            )
+        raise APIError(
+            status_code=500,
+            error_code="TASK_099",
+            message=f"暂停任务失败: {exc}",
+        )
+
+    pipeline_cancelled = _cancel_running_pipeline(task_id)
+
+    logger.info(
+        "用户 %s 暂停任务 %s (pipeline_cancelled=%s)",
+        _user.get("username"), task_id, pipeline_cancelled,
+    )
+    return {
+        "success": True,
+        "task_id": task_id,
+        "paused_count": 1,
+        "pipeline_cancelled": pipeline_cancelled,
+        "message": "任务已暂停" + ("，运行中管道已取消" if pipeline_cancelled else ""),
+    }
+
+
+@router.post(
+    "/{task_id}/resume",
+    summary="恢复任务",
+)
+async def resume_task(
+    task_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """恢复指定暂停的任务，同时重新触发 PipelineEngine 执行。
+
+    执行两步操作：
+    1. 将任务状态从 paused 变为 pending
+    2. 发布 task.submitted 事件，触发 TaskWorker 重新执行任务
+
+    Args:
+        task_id: 任务 ID
+
+    Returns:
+        恢复成功消息
+
+    Raises:
+        APIError: TaskService 不可用 (503)、任务不存在 (404) 或状态不允许 (400)
+    """
+    task_service = _get_task_service()
+    if task_service is None:
+        raise APIError(
+            status_code=503,
+            error_code="TASK_003",
+            message="TaskService 不可用，无法恢复任务",
+        )
+
+    try:
+        # BUG-FIX-fix_20260512_async_compat: resume_task 现在是 async
+        task = await task_service.resume_task(task_id)
+    except KeyError:
+        raise APIError(
+            status_code=404,
+            error_code="TASK_001",
+            message=f"任务不存在: {task_id}",
+        )
+    except Exception as exc:
+        from tasks.state_machine import InvalidTransitionError
+        if isinstance(exc, InvalidTransitionError):
+            raise APIError(
+                status_code=400,
+                error_code="TASK_002",
+                message=str(exc),
+            )
+        raise APIError(
+            status_code=500,
+            error_code="TASK_099",
+            message=f"恢复任务失败: {exc}",
+        )
+
+    task_submitted = _submit_task_event(task_id, task_service)
+
+    logger.info(
+        "用户 %s 恢复任务 %s (task_submitted=%s)",
+        _user.get("username"), task_id, task_submitted,
+    )
+    return {
+        "success": True,
+        "task_id": task_id,
+        "resumed_count": 1,
+        "task_submitted": task_submitted,
+        "message": "任务已恢复" + ("，已重新提交执行" if task_submitted else ""),
+    }
+
+
+def _submit_task_event(task_id: str, task_service: Any) -> bool:
+    """发布 task.submitted 事件，触发 TaskWorker 重新执行任务。
+
+    从 TaskService 获取任务的完整信息，构建事件数据，
+    通过 EventBus 发布 task.submitted 事件。
+    TaskWorker 订阅该事件后会创建后台协程执行 PipelineEngine。
+
+    Args:
+        task_id: 任务 ID
+        task_service: TaskService 实例
+
+    Returns:
+        是否成功发布了事件
+    """
+    try:
+        task = task_service.get_task(task_id)
+        if task is None:
+            return False
+
+        metadata = task.metadata or {}
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+
+        event_bus = provider.get("event_bus")
+        if event_bus is None:
+            logger.warning("_submit_task_event: EventBus 不可用")
+            return False
+
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(event_bus.emit("task.submitted", {
+                "task_id": task.id,
+                "target_type": task.target_type or "agent",
+                "target_id": metadata.get("target_id", ""),
+                "user_input": task.title,
+                "description": task.description,
+                "acceptance_criteria": metadata.get("acceptance_criteria", {}),
+                "workspace": metadata.get("workspace", ""),
+            }))
+        else:
+            loop.run_until_complete(event_bus.emit("task.submitted", {
+                "task_id": task.id,
+                "target_type": task.target_type or "agent",
+                "target_id": metadata.get("target_id", ""),
+                "user_input": task.title,
+                "description": task.description,
+                "acceptance_criteria": metadata.get("acceptance_criteria", {}),
+                "workspace": metadata.get("workspace", ""),
+            }))
+
+        return True
+    except Exception as exc:
+        logger.warning("_submit_task_event: 发布事件失败: task_id=%s, error=%s", task_id, exc)
+        return False
 
 
 def _get_agent_registry() -> Any:

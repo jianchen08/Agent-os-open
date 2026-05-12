@@ -1069,6 +1069,18 @@ class CLIApplication:
                     self._output_adapter.update_status_bar(
                         turn_count=0, context_pct=0.0
                     )
+                if cmd_result.should_clear_session:
+                    _checkpoint_mgr = self._services.get("checkpoint_manager")
+                    if _checkpoint_mgr and self._engine is not None:
+                        try:
+                            await _checkpoint_mgr.cleanup_old(
+                                self._engine.pipeline_id, keep_count=0,
+                            )
+                        except Exception as _cp_exc:
+                            import logging as _logging
+                            _logging.getLogger(__name__).debug(
+                                "Session checkpoint cleanup failed: %s", _cp_exc,
+                            )
                 if cmd_result.state_updates:
                     self._apply_command_updates(
                         cmd_result.state_updates
@@ -1100,22 +1112,7 @@ class CLIApplication:
                 self._pipeline_task is not None
                 and not self._pipeline_task.done()
             ):
-                # 管道挂起 → 注入用户输入并唤醒管道
-                if (
-                    self._engine is not None
-                    and self._engine.is_suspended
-                ):
-                    user_input = initial_state.get("user_input", "")
-                    if user_input:
-                        self._engine.inject_and_wake(user_input)
-                        console.print(
-                            "[dim cyan]→ 已将输入注入挂起的管道"
-                            "并唤醒[/dim cyan]"
-                        )
-                    else:
-                        self._engine.wake()
-                    continue
-                # 管道真正在运行 → 检查是否有待处理的交互请求
+                # 优先处理待处理的交互请求（保留原有逻辑）
                 if cli_notifier and cli_notifier.has_pending():
                     human_svc = self._services.get(
                         "human_interaction_service"
@@ -1150,31 +1147,30 @@ class CLIApplication:
                             self._streaming_buffer.clear()
                     self._input_adapter.drain_stdin()
                     continue
-                # 管道仍在运行但没有挂起也没有交互请求
-                # → 将用户输入推入消息队列，管道下一轮迭代会读取
+
+                # 通过统一入口注入消息（涵盖挂起唤醒与运行中通知两种场景）
                 user_input = initial_state.get("user_input", "")
                 if user_input.strip():
-                    msg_queue = self._services.get("message_queue")
-                    _pid = (
-                        session.active_pipeline_id or ""
-                    )
-                    if msg_queue and _pid:
-                        from infrastructure.message_queue import (
-                            MessageQueue,
-                            Message,
-                            create_message_id,
-                        )
-                        if isinstance(msg_queue, MessageQueue):
-                            await msg_queue.push(Message(
-                                id=create_message_id(),
-                                pipeline_id=_pid,
-                                target_id="",
-                                content=user_input,
-                            ))
+                    from pipeline.message_bus import send_pipeline_message
+                    _pid = self._engine.pipeline_id if self._engine else ""
+                    if _pid:
+                        result = await send_pipeline_message(_pid, user_input)
+                        if result.method == "wake":
                             console.print(
-                                "[dim cyan]→ 消息已发送给运行中的管道"
-                                "[/dim cyan]"
+                                "[dim cyan]→ 已将输入注入挂起的管道并唤醒[/dim cyan]"
                             )
+                        elif result.method == "notification":
+                            console.print(
+                                "[dim cyan]→ 消息已发送给运行中的管道[/dim cyan]"
+                            )
+                        elif not result.success:
+                            console.print(
+                                f"[dim red]→ 消息注入失败: {result.error}[/dim red]"
+                            )
+                else:
+                    if self._engine and self._engine.is_suspended:
+                        self._engine.wake()
+                self._input_adapter.drain_stdin()
                 continue
 
             user_input = initial_state.get("user_input", "")
@@ -1292,7 +1288,8 @@ class CLIApplication:
                     and hasattr(task_service, "bind_pipeline_run")
                 ):
                     try:
-                        task_service.bind_pipeline_run(
+                        # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
+                        await task_service.bind_pipeline_run(
                             submitted_task_id, pipeline_run_id
                         )
                         logger.info(

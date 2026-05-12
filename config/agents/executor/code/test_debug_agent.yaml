@@ -36,32 +36,13 @@ tags:
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "代码规范"
-      type: "path"
-      path: "config/rules/code_style_rules.md"
-    - name: "Python类型注解规范"
-      type: "path"
-      path: "config/rules/python_type_hints.md"
-    - name: "Bug调试方法论"
-      type: "path"
-      path: "config/rules/per_agent/debugging_methodology.md"
-    - name: "实现思维原则"
-      type: "path"
-      path: "config/rules/per_agent/implementation_thinking_principles.md"
-    - name: "状态机测试设计规则"
-      type: "path"
-      path: "config/rules/per_agent/state_machine_test_design.md"
     - name: "测试代码模板"
       type: "path"
       path: "config/templates/test_code_template.md"
 
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 system_prompt: |
   你是测试与调试专家。
@@ -169,6 +150,14 @@ system_prompt: |
   - 使用相对路径操作文件
   - 完成后调用 task_evaluate 评估
 
+  ## 参考规则
+
+  {{path:config/rules/code_style_rules.md}}
+  {{path:config/rules/python_type_hints.md}}
+  {{path:config/rules/per_agent/debugging_methodology.md}}
+  {{path:config/rules/per_agent/implementation_thinking_principles.md}}
+  {{path:config/rules/per_agent/state_machine_test_design.md}}
+
 tool_ids:
   - file_read
   - file_write
@@ -179,7 +168,6 @@ tool_ids:
   - list_directory
   - enhanced_search
   - bash_execute
-  - evaluate
   - fetch
   - task_evaluate
   - resource_search
@@ -228,12 +216,6 @@ recommended_metrics:
     default_params:
       action: "read"
       path: "tests/"
-  - metric_id: test_check
-    default_params:
-      path: "tests/"
-  - metric_id: bash_check
-    default_params:
-      path: "src/"
   - metric_id: function_verify
     default_params:
       requirement: "验证测试覆盖的功能是否真正可用"
@@ -241,7 +223,7 @@ recommended_metrics:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

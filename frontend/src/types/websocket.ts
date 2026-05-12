@@ -32,6 +32,7 @@ export interface UserInputMessage extends StandardWebSocketMessage {
     content: string // 用户输入内容
     attachments?: Array<Record<string, any>> // 文件附件（可选）
     enable_thinking?: boolean // 是否启用思考模式（可选）
+    pipeline_id?: string // 子 Tab 目标管道 ID（可选）
   }
 }
 
@@ -223,10 +224,10 @@ export function isStandardMessage(message: unknown): message is StandardMessage 
  * 消息发送策略枚举
  */
 export enum MessageSendStrategy {
-  /** 直接发送，绕过队列（适用于心跳、取消等高优先级消息） */
+  /** 直接发送（不经过队列） */
   DIRECT = 'direct',
-  /** 通过队列发送（适用于用户输入等需要保证顺序的消息） */
-  QUEUED = 'queued',
+  /** 通过队列发送 */
+  QUEUE = 'queue',
 }
 
 /**
@@ -235,71 +236,32 @@ export enum MessageSendStrategy {
 export interface MessageSendConfig {
   /** 发送策略 */
   strategy: MessageSendStrategy
-  /** 消息优先级（当使用队列时） */
+  /** 消息优先级 */
   priority: number
+  /** 是否需要确认 */
+  requiresAck: boolean
+  /** 重试次数 */
+  maxRetries: number
 }
 
 /**
- * 消息类型与发送策略的映射配置
- *
- * 定义了每种消息类型应该使用的发送策略和优先级
+ * 各消息类型的默认发送配置
  */
 export const MESSAGE_CONFIG: Record<string, MessageSendConfig> = {
-  // 心跳消息 - 直接发送，最高优先级
-  heartbeat: {
-    strategy: MessageSendStrategy.DIRECT,
-    priority: 0,
-  },
-
-  // 取消操作 - 直接发送，最高优先级
-  cancel: {
-    strategy: MessageSendStrategy.DIRECT,
-    priority: 0,
-  },
-
-  // 用户输入 - 队列发送，高优先级
-  user_input: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 3,
-  },
-
-  // 流式消息 - 队列发送，普通优先级
-  stream_chunk: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 2,
-  },
-  stream_end: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 2,
-  },
-
-  // 工具调用消息 - 队列发送，普通优先级
-  tool_call: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 2,
-  },
-
-  // 错误消息 - 队列发送，高优先级
-  error: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 3,
-  },
-
-  // 连接建立确认 - 队列发送，普通优先级
-  connection_established: {
-    strategy: MessageSendStrategy.QUEUED,
-    priority: 1,
-  },
-
-  // ACK 确认 - 直接发送，最高优先级
-  message_ack: {
-    strategy: MessageSendStrategy.DIRECT,
-    priority: 0,
-  },
-
-  // 请求遗漏消息 - 直接发送，最高优先级
-  request_missed: {
-    strategy: MessageSendStrategy.DIRECT,
-    priority: 0,
-  },
+  user_input: { strategy: MessageSendStrategy.QUEUE, priority: 5, requiresAck: true, maxRetries: 3 },
+  stream_chunk: { strategy: MessageSendStrategy.DIRECT, priority: 10, requiresAck: false, maxRetries: 0 },
+  stream_end: { strategy: MessageSendStrategy.DIRECT, priority: 10, requiresAck: true, maxRetries: 3 },
+  tool_call: { strategy: MessageSendStrategy.DIRECT, priority: 8, requiresAck: false, maxRetries: 0 },
+  error: { strategy: MessageSendStrategy.DIRECT, priority: 10, requiresAck: false, maxRetries: 0 },
+  heartbeat: { strategy: MessageSendStrategy.DIRECT, priority: 1, requiresAck: false, maxRetries: 1 },
+  heartbeat_ack: { strategy: MessageSendStrategy.DIRECT, priority: 1, requiresAck: false, maxRetries: 0 },
+  cancel: { strategy: MessageSendStrategy.DIRECT, priority: 10, requiresAck: true, maxRetries: 3 },
+  connection_established: { strategy: MessageSendStrategy.DIRECT, priority: 1, requiresAck: false, maxRetries: 0 },
+  thinking_start: { strategy: MessageSendStrategy.DIRECT, priority: 8, requiresAck: false, maxRetries: 0 },
+  thinking_chunk: { strategy: MessageSendStrategy.DIRECT, priority: 8, requiresAck: false, maxRetries: 0 },
+  thinking_end: { strategy: MessageSendStrategy.DIRECT, priority: 8, requiresAck: false, maxRetries: 0 },
+  message_ack: { strategy: MessageSendStrategy.DIRECT, priority: 5, requiresAck: false, maxRetries: 1 },
+  request_missed: { strategy: MessageSendStrategy.DIRECT, priority: 5, requiresAck: false, maxRetries: 2 },
 }
+
+

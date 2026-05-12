@@ -14,7 +14,7 @@ ui:
     version: "1.0.0"
     category: builtin
     description: 任务树管理模块
-    icon: "list-check"
+    icon: "📋"
     author: agent-os-team
     tags:
       - task
@@ -79,7 +79,7 @@ ui:
       - space: workspace
         widget: tree
         props:
-          title: 任务树
+          title: 任务管理
           showStatus: true
           showProgress: true
           expandLevel: 2
@@ -95,7 +95,7 @@ ui:
 
     # Dock 栏配置
     dock:
-      icon: "list-check"
+      icon: "📋"
       label: 任务
       indicator: dot
       indicatorColor: "bg-blue-500"

@@ -35,7 +35,7 @@ class PipelineConfig:
     output_routes: list[dict[str, Any]] = field(default_factory=list)
     plugins: list[dict[str, Any]] = field(default_factory=list)
     core_plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
-    max_iterations: int = 100
+    max_iterations: int = 500
 
 
 class PipelineConfigStore:

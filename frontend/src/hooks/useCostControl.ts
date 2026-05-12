@@ -6,6 +6,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import {
   getBudgetStatus,
   getUsageStatistics,
@@ -13,6 +14,7 @@ import {
   getCostReport,
   resetBudget,
 } from '@/services/api/costControl'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import type {
   BudgetStatusResponse,
   UsageStatisticsResponse,
@@ -153,18 +155,21 @@ export function useCostControl() {
     }
   }, [fetchBudgetStatus, fetchUsageStatistics, fetchCostConfig])
 
-  // 自动刷新数据
+  // 初始化时加载数据
   useEffect(() => {
-    // 初始化时加载数据
     refreshAll()
+  }, [refreshAll])
 
-    // 设置定时刷新
-    const interval = setInterval(() => {
+  // 监听 WS cost_update 事件，事件驱动刷新使用统计
+  useEffect(() => {
+    const handleCostUpdate = () => {
       fetchUsageStatistics()
-    }, 60000) // 每分钟刷新一次使用统计
-
-    return () => clearInterval(interval)
-  }, [refreshAll, fetchUsageStatistics])
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
+    return () => {
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
+    }
+  }, [fetchUsageStatistics])
 
   return {
     // 数据
@@ -259,10 +264,19 @@ export function useUsageStatistics(autoFetch = true, refreshInterval = 60000) {
   useEffect(() => {
     if (autoFetch) {
       fetchUsageStatistics()
-      const interval = setInterval(fetchUsageStatistics, refreshInterval)
-      return () => clearInterval(interval)
     }
-  }, [autoFetch, fetchUsageStatistics, refreshInterval])
+  }, [autoFetch, fetchUsageStatistics])
+
+  // 监听 WS cost_update 事件，事件驱动刷新
+  useEffect(() => {
+    const handleCostUpdate = () => {
+      fetchUsageStatistics()
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
+    return () => {
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
+    }
+  }, [fetchUsageStatistics])
 
   return {
     usageStats,

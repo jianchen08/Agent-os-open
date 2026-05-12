@@ -127,15 +127,15 @@ task_manage_schema: dict[str, Any] = {
             "enum": ["get", "list", "status", "pause", "resume", "cancel", "retry", "reactivate", "inject", "complete_container", "fail_container"],
             "description": (
                 "操作类型。"
-                "retry: 重试失败任务。判断原则——方向对用retry（保留工作空间+对话历史，agent继续改旧代码），"
+                "retry: 重试失败任务。判断原则——方向对用retry（保留工作空间+对话历史，agent继续工作），"
                 "方向错用新task_submit（全新agent重新来）。按以下策略处理，禁止跳步："
                 "①查看失败原因，判断是方向问题还是执行问题→"
-                "②方向对+瞬态错误：retry（工作空间和代码不变，重新跑）→"
-                "③方向对+需纠正：retry+message（传递修正方向，agent能看到之前的代码和错误）→"
+                "②方向对+瞬态错误：retry（工作空间和上下文不变，重新跑）→"
+                "③方向对+需纠正：retry+message（传递修正方向，agent能看到之前的工作和错误）→"
                 "④方向对+验收过严：retry+drop_metrics→"
                 "⑤方向错或多次retry仍失败：task_submit重新提交（全新agent，无历史包袱）。"
-                "需要项目上下文（如修改现有项目）加 inherit_workspace_from='失败任务ID'；"
-                "简单任务或新建项目不加，用空工作空间即可→"
+                "需要延续之前工作成果时加 inherit_workspace_from='失败任务ID'（前提：旧工作空间仍存在，先用 get 确认）；"
+                "不需要延续时（纯新任务）不加，用空工作空间即可→"
                 "⑥多次失败后通知人类。"
                 "drop_metrics 可移除过于严格或不适用的评估指标，降低重试难度。"
                 "reactivate: 重新激活已完成任务（保留原工作空间），携带追加需求在同一任务上下文中继续。"
@@ -395,8 +395,16 @@ def _action_pause(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "MISSING_TASK_ID",
         }
 
+    task = task_service.get_task(task_id)
+    if task is None:
+        return {"success": False, "error": f"任务不存在: {task_id}", "error_code": "TASK_NOT_FOUND"}
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     try:
-        task = task_service.pause_task(task_id)
+        # BUG-FIX-fix_20260512_async_compat: pause_task 现在是 async
+        task = await task_service.pause_task(task_id)
         logger.info("[task_manage] 任务已暂停: %s", task_id)
         return {
             "success": True,
@@ -438,8 +446,16 @@ def _action_resume(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "MISSING_TASK_ID",
         }
 
+    task = task_service.get_task(task_id)
+    if task is None:
+        return {"success": False, "error": f"任务不存在: {task_id}", "error_code": "TASK_NOT_FOUND"}
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     try:
-        task = task_service.resume_task(task_id)
+        # BUG-FIX-fix_20260512_async_compat: resume_task 现在是 async
+        task = await task_service.resume_task(task_id)
         logger.info("[task_manage] 任务已恢复: %s", task_id)
         return {
             "success": True,
@@ -512,10 +528,18 @@ def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "MISSING_TASK_ID",
         }
 
+    task = task_service.get_task(task_id)
+    if task is None:
+        return {"success": False, "error": f"任务不存在: {task_id}", "error_code": "TASK_NOT_FOUND"}
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     reason = params.get("reason", "用户取消")
 
     try:
-        task = task_service.fail_task(task_id, error=reason)
+        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+        task = await task_service.fail_task(task_id, error=reason)
         _cancel_running_pipeline(task_id)
         logger.info("[task_manage] 任务已取消: %s — %s", task_id, reason)
         return {
@@ -562,6 +586,45 @@ def _validate_and_get_task(
     return task_id, task, None
 
 
+def _check_manage_permission(
+    task: Any,
+    params: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """校验任务管理权限：只能管理自己提交的任务。
+
+    通过 metadata.submitted_by_level 判断提交者层级，
+    与当前调用者的 parent_agent_level 匹配。
+    旧任务没有 submitted_by_level 时回退到 session_id/parent_task_id 校验。
+
+    Args:
+        task: TaskModel 实例
+        params: 工具参数（含 parent_agent_level, session_id, parent_task_id）
+
+    Returns:
+        (是否有权限, 错误消息)
+    """
+    parent_agent_level = params.get("parent_agent_level", 1)
+    submitted_by = (task.metadata or {}).get("submitted_by_level")
+
+    if submitted_by is not None:
+        if submitted_by != parent_agent_level:
+            return False, (
+                f"权限不足：本任务由 L{submitted_by} Agent 提交，"
+                f"当前 L{parent_agent_level} Agent 无法管理。"
+                f"请联系提交者自行处理"
+            )
+    else:
+        if parent_agent_level == 1:
+            session_id = params.get("session_id")
+            if session_id and (task.metadata or {}).get("session_id") != session_id:
+                return False, "任务不属于当前会话"
+        elif parent_agent_level >= 2:
+            parent_task_id = params.get("parent_task_id")
+            if not parent_task_id or task.parent_task_id != parent_task_id:
+                return False, "只能管理自己提交的子任务"
+    return True, None
+
+
 def _apply_drop_metrics(task: Any, params: dict[str, Any]) -> list[str]:
     """从任务的评估指标中移除指定指标。
 
@@ -604,13 +667,15 @@ def _apply_drop_metrics(task: Any, params: dict[str, Any]) -> list[str]:
     return dropped
 
 
-def _start_task_and_emit(
+async def _start_task_and_emit(
     task_service: Any,
     task: Any,
     task_id: str,
     fallback_running: bool = False,
 ) -> Any:
     """启动任务并发布 task.submitted 事件。
+
+    BUG-FIX-fix_20260512_async_compat: 改为 async，因为 start_task 和 save 现在是 async。
 
     BUG-FIX-P7：重试后发布 task.submitted 事件，触发 TaskWorker 重新执行。
 
@@ -625,14 +690,16 @@ def _start_task_and_emit(
     """
     updated_task = task
     try:
-        updated_task = task_service.start_task(task_id)
+        # BUG-FIX-fix_20260512_async_compat: start_task 现在是 async
+        updated_task = await task_service.start_task(task_id)
     except Exception:
         if fallback_running:
             from tasks.types import TaskStatus
             from datetime import datetime
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now().isoformat()
-            task_service._storage.save(task)
+            # BUG-FIX-fix_20260512_async_compat: save 是 async，需要 await
+            await task_service.save_task(task)
     _retry_emit_event(task_id)
     return updated_task
 
@@ -659,6 +726,10 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     if err:
         return err
 
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     from tasks.types import TaskStatus
 
     if task.status != TaskStatus.FAILED:
@@ -682,7 +753,8 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     task_service._storage.save(task)
 
     try:
-        task = _start_task_and_emit(task_service, task, task_id)
+        # BUG-FIX-fix_20260512_async_compat: _start_task_and_emit 现在是 async
+        task = await _start_task_and_emit(task_service, task, task_id)
         logger.info("[task_manage] 任务重试成功: %s", task_id)
 
         msg = f"任务 {task_id} 已重新启动"
@@ -726,6 +798,10 @@ def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, A
     if err:
         return err
 
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     message_content = params.get("message")
 
     if task.status != TaskStatus.COMPLETED:
@@ -737,7 +813,8 @@ def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, A
         }
 
     try:
-        task = task_service.reactivate_task(task_id, message=message_content or "")
+        # BUG-FIX-fix_20260512_async_compat: reactivate_task 现在是 async
+        task = await task_service.reactivate_task(task_id, message=message_content or "")
     except (KeyError, InvalidTransitionError) as exc:
         return {"success": False, "error": f"重新激活失败: {exc}", "error_code": "REACTIVATE_FAILED"}
 
@@ -748,7 +825,8 @@ def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, A
             task_id, task.pipeline_run_id or "", message_content, params,
         )
 
-    task = _start_task_and_emit(task_service, task, task_id, fallback_running=True)
+    # BUG-FIX-fix_20260512_async_compat: _start_task_and_emit 现在是 async
+    task = await _start_task_and_emit(task_service, task, task_id, fallback_running=True)
 
     msg = f"任务 {task_id} 已重新激活，新管道即将启动"
     if message_content:
@@ -761,44 +839,39 @@ def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, A
 def _push_retry_message(
     task_id: str, pipeline_id: str, content: str, params: dict[str, Any],
 ) -> bool:
-    """为 retry 操作推送补充消息到 MessageQueue。
+    """为 retry 操作推送补充消息。
+
+    通过统一的 send_pipeline_message 入口将补充消息推送到目标管道，
+    避免直接依赖 MessageQueue 底层接口。
 
     Args:
         task_id: 任务 ID
         pipeline_id: 目标管道 ID（= task.pipeline_run_id）
         content: 消息内容
-        params: 原始工具参数（用于获取 _message_queue）
+        params: 原始工具参数（保留签名兼容，不再使用 _message_queue）
 
     Returns:
         是否成功推送
     """
     import asyncio
 
-    from infrastructure.message_queue import Message, create_message_id
-
-    queue = params.get("_message_queue")
-    if queue is None:
-        logger.warning("[task_manage] retry: MessageQueue 不可用，跳过消息注入")
-        return False
-
-    message = Message(
-        id=create_message_id(),
-        pipeline_id=pipeline_id,
-        target_id=task_id,
-        content=content,
-        priority=8,  # 高优先级，确保新管道第一轮就能消费
-        metadata={"source": "task_manage_retry", "task_id": task_id},
-    )
+    from pipeline.message_bus import send_pipeline_message
 
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.ensure_future(queue.push(message))
+            asyncio.ensure_future(
+                send_pipeline_message(pipeline_id, content, metadata={"source": "task_manage_retry"})
+            )
         else:
-            loop.run_until_complete(queue.push(message))
+            loop.run_until_complete(
+                send_pipeline_message(pipeline_id, content, metadata={"source": "task_manage_retry"})
+            )
     except RuntimeError:
         try:
-            asyncio.run(queue.push(message))
+            asyncio.run(
+                send_pipeline_message(pipeline_id, content, metadata={"source": "task_manage_retry"})
+            )
         except Exception as e:
             logger.error("[task_manage] retry: 消息推送失败: %s", e)
             return False
@@ -851,6 +924,10 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "TASK_NOT_FOUND",
         }
 
+    has_perm, perm_err = _check_manage_permission(task, params)
+    if not has_perm:
+        return {"success": False, "error": perm_err, "error_code": "PERMISSION_DENIED"}
+
     # 从任务的 pipeline_run_id 获取管道路由地址
     pipeline_id = task.pipeline_run_id
     if not pipeline_id:
@@ -861,40 +938,26 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             "error_code": "NO_PIPELINE",
         }
 
-    # 获取 MessageQueue
-    queue = params.get("_message_queue")
-    if queue is None:
-        return {
-            "success": False,
-            "error": "MessageQueue 服务未注入，无法执行 inject 操作。",
-            "error_code": "SERVICE_UNAVAILABLE",
-        }
-
-    # 构造并推入消息
+    # 通过统一的 send_pipeline_message 入口推送消息
     import asyncio
 
-    from infrastructure.message_queue import Message, create_message_id
+    from pipeline.message_bus import send_pipeline_message
 
-    message = Message(
-        id=create_message_id(),
-        pipeline_id=pipeline_id,
-        target_id=task_id,
-        content=message_content,
-        priority=params.get("priority", 5),
-        metadata={"source": "task_manage", "task_id": task_id},
-    )
-
-    # BUG-FIX-P8：_action_inject 是同步函数，不能直接 await，
-    # 需要判断事件循环状态来安全调用异步 push
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.ensure_future(queue.push(message))
+            asyncio.ensure_future(
+                send_pipeline_message(pipeline_id, message_content, metadata={"source": "task_manage"})
+            )
         else:
-            loop.run_until_complete(queue.push(message))
+            loop.run_until_complete(
+                send_pipeline_message(pipeline_id, message_content, metadata={"source": "task_manage"})
+            )
     except RuntimeError:
         try:
-            asyncio.run(queue.push(message))
+            asyncio.run(
+                send_pipeline_message(pipeline_id, message_content, metadata={"source": "task_manage"})
+            )
         except Exception as e:
             logger.error("[task_manage] inject: 消息推送失败: %s", e)
             return {
@@ -911,7 +974,6 @@ def _action_inject(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {
         "success": True,
         "task_id": task_id,
-        "message_id": message.id,
         "message": f"消息已注入到任务 {task_id}",
     }
 

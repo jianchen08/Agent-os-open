@@ -14,12 +14,12 @@
  */
 
 import { act } from '@testing-library/react'
-import type { ContentBlock, Message } from '@/types/models'
 import {
   createMockContentBlock,
   createMockMessage,
   renderUseMessageRender,
 } from './testUtils'
+import type { ContentBlock, Message } from '@/types/models'
 
 // ============================================================
 // Mock 外部依赖

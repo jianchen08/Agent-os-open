@@ -16,16 +16,11 @@ static_vars:
   enabled: true
   items:
     # 知识库注入：调研报告模板（全量注入）
-    # 约束注入：将硬约束和软约束注入到静态变量
-    - name: "行为约束"
-      type: "rules"
 
 # 动态变量（每轮变化）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 # 可用工具 - 配置资源搜索和任务评估工具
 tool_ids:
   - "resource_search"

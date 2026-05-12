@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import * as taskApi from '@/services/api/tasks'
+import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 import type {
   // 长期任务类型
   Project,
@@ -352,20 +353,17 @@ export function useTaskPhase(taskId: string, refreshInterval: number = 5000) {
     fetch()
   }, [fetch])
 
-  // 定时刷新
+  // 监听 longTermTaskStore 中任务状态变化，事件驱动刷新
+  const taskStatus = useLongTermTaskStore((s) => {
+    const task = s.tasks.find((t: any) => t.id === taskId)
+    return task?.status
+  })
+
   useEffect(() => {
-    if (!taskId || refreshInterval <= 0) {
-      return
-    }
-
-    const intervalId = setInterval(() => {
+    if (taskStatus) {
       fetch()
-    }, refreshInterval)
-
-    return () => {
-      clearInterval(intervalId)
     }
-  }, [taskId, refreshInterval, fetch])
+  }, [taskStatus, fetch])
 
   return {
     ...state,
@@ -551,20 +549,17 @@ export function useTaskACs(taskId: string, refreshInterval: number = 3000) {
     fetch()
   }, [fetch])
 
-  // 定时刷新
+  // 监听 longTermTaskStore 中任务状态变化，事件驱动刷新
+  const taskStatus = useLongTermTaskStore((s) => {
+    const task = s.tasks.find((t: any) => t.id === taskId)
+    return task?.status
+  })
+
   useEffect(() => {
-    if (!taskId || refreshInterval <= 0) {
-      return
-    }
-
-    const intervalId = setInterval(() => {
+    if (taskStatus) {
       fetch()
-    }, refreshInterval)
-
-    return () => {
-      clearInterval(intervalId)
     }
-  }, [taskId, refreshInterval, fetch])
+  }, [taskStatus, fetch])
 
   return {
     ...state,

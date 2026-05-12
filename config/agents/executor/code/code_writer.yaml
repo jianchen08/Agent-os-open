@@ -32,32 +32,6 @@ tags:
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
-    - name: "代码规范"
-      type: "path"
-      path: "config/rules/code_style_rules.md"
-    - name: "Python类型注解规范"
-      type: "path"
-      path: "config/rules/python_type_hints.md"
-    - name: "代码编写规则"
-      type: "path"
-      path: "config/rules/per_agent/code_writer_rules.md"
-    - name: "设计系统约束（前端任务）"
-      type: "path"
-      path: "config/rules/per_agent/design_system_constraints.md"
-    - name: "需求结构化规则"
-      type: "path"
-      path: "config/rules/per_agent/requirement_structuring_rules.md"
-    - name: "状态机测试设计规则"
-      type: "path"
-      path: "config/rules/per_agent/state_machine_test_design.md"
-    - name: "实现思维原则"
-      type: "path"
-      path: "config/rules/per_agent/implementation_thinking_principles.md"
     - name: "工具输出优化技能"
       type: "path"
       path: "skills/skill-tool-output-optimize/SKILL.md"
@@ -65,9 +39,7 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 system_prompt: |
   你是代码编写专家，负责编写高质量、可维护的代码。
@@ -125,6 +97,17 @@ system_prompt: |
   - 使用相对路径操作文件，可运行测试验证代码
   - 完成后调用 task_evaluate 评估
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/code_style_rules.md}}
+  {{path:config/rules/python_type_hints.md}}
+  {{path:config/rules/per_agent/code_writer_rules.md}}
+  {{path:config/rules/per_agent/design_system_constraints.md}}
+  {{path:config/rules/per_agent/requirement_structuring_rules.md}}
+  {{path:config/rules/per_agent/state_machine_test_design.md}}
+  {{path:config/rules/per_agent/implementation_thinking_principles.md}}
+
 tool_ids:
   - file_read
   - file_write
@@ -138,7 +121,7 @@ tool_ids:
   - task_evaluate
   - resource_search
   - design_generate
-  - browser_test
+  - playwright_test
 
 # 约束配置
 hard_constraints:
@@ -198,7 +181,7 @@ recommended_metrics:
 version: "2.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

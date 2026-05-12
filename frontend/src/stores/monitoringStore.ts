@@ -37,6 +37,8 @@ interface MonitoringState {
   refreshInterval: number
   /** 定时器 ID */
   refreshTimer: NodeJS.Timeout | null
+  /** 页面可见性事件处理器引用 */
+  _visibilityHandler: (() => void) | null
 
   /** 获取所有监控数据 */
   fetchMonitoringData: () => Promise<void>
@@ -76,6 +78,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   autoRefresh: true,
   refreshInterval: 5000, // 默认 5 秒刷新一次
   refreshTimer: null,
+  _visibilityHandler: null,
 
   /**
    * 获取 Token 用量统计
@@ -148,15 +151,23 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
       set({ refreshTimer: null })
     }
 
-    // 启用自动刷新
-    if (enabled) {
-      const timer = setInterval(() => {
-        get().fetchMonitoringData()
-      }, state.refreshInterval)
+    // 清除现有 visibilitychange 监听
+    if (state._visibilityHandler) {
+      document.removeEventListener('visibilitychange', state._visibilityHandler)
+      set({ _visibilityHandler: null })
+    }
 
+    // 启用自动刷新：使用 visibilitychange 替代 setInterval
+    if (enabled) {
+      const handler = () => {
+        if (document.visibilityState === 'visible') {
+          get().fetchMonitoringData()
+        }
+      }
+      document.addEventListener('visibilitychange', handler)
       set({
         autoRefresh: true,
-        refreshTimer: timer,
+        _visibilityHandler: handler,
       })
     } else {
       set({ autoRefresh: false })
@@ -167,25 +178,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
    * 设置刷新间隔
    */
   setRefreshInterval: (interval: number) => {
-    const state = get()
-
-    // 保存新的间隔
     set({ refreshInterval: interval })
-
-    // 如果自动刷新启用，重启定时器
-    if (state.autoRefresh) {
-      // 清除现有定时器
-      if (state.refreshTimer) {
-        clearInterval(state.refreshTimer)
-      }
-
-      // 创建新定时器
-      const timer = setInterval(() => {
-        get().fetchMonitoringData()
-      }, interval)
-
-      set({ refreshTimer: timer })
-    }
   },
 
   /**

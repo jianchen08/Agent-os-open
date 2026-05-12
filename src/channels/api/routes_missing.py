@@ -54,7 +54,8 @@ async def get_task_tree(
         return _empty_tree(session_id)
 
     try:
-        all_tasks = task_service.list_all(limit=500, reverse=False)
+        # BUG-FIX-fix_20260512_async_list_all: 添加 await
+        all_tasks = await task_service.list_all(limit=500, reverse=False)
     except Exception as exc:
         logger.warning("get_task_tree: list_all 失败: %s", exc)
         return _empty_tree(session_id)
@@ -194,9 +195,22 @@ def _task_to_tree_item(task: Any) -> dict[str, Any]:
         task: TaskModel 实例
 
     Returns:
-        树节点字典，包含 id、title、status、type、pipeline_run_id 等字段
+        树节点字典，包含 id、title、status、type、pipeline_run_id、
+        ws_mode、ws_path 等字段
     """
     status_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+
+    # 安全提取 ws_meta 工作空间元信息
+    _metadata = getattr(task, "metadata", None) or {}
+    _ws_meta = _metadata.get("ws_meta", {}) or {}
+
+    # BUG-FIX-fix_20260509_agent_level: 修复 agent_level 序列化格式
+    # 问题根因: str(AgentLevel.L2_SUBTASK) 输出 "AgentLevel.L2_SUBTASK"，
+    #          前端无法正确解析为数字层级
+    # 修复方案: 使用 .value 属性获取 "L1"/"L2"/"L3" 字符串
+    _agent_level = getattr(task, "agent_level", None)
+    _agent_level_str = _agent_level.value if _agent_level and hasattr(_agent_level, "value") else str(_agent_level or "")
+
     return {
         "id": task.id,
         "title": task.title or f"任务 {task.id[:8]}",
@@ -207,11 +221,14 @@ def _task_to_tree_item(task: Any) -> dict[str, Any]:
         "pipeline_run_id": getattr(task, "pipeline_run_id", None),
         "execution_record_id": getattr(task, "execution_record_id", None),
         "agent_name": getattr(task, "agent_name", ""),
-        "agent_level": str(getattr(task, "agent_level", "")),
+        "agent_level": _agent_level_str,
         "priority": str(getattr(task, "priority", "normal")),
         "created_at": getattr(task, "created_at", ""),
         "completed_at": getattr(task, "completed_at", None),
         "error": getattr(task, "error", None),
+        "ws_mode": _ws_meta.get("mode"),
+        "ws_path": _ws_meta.get("path"),
+        "task_scope": _metadata.get("task_scope", "non_container"),
     }
 
 
@@ -268,26 +285,32 @@ users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"])
 
 
 @users_router.get("", summary="获取用户列表")
-async def list_users(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
+async def list_users(_user: dict = Depends(require_auth)) -> list[dict[str, Any]]:
+    return []
 
 
 @users_router.get("/stats", summary="获取用户统计")
 async def get_user_stats(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total_users": 0, "active_users": 0}
+    return {"total_users": 0, "active_users": 0, "admin_count": 0}
 
 
 @users_router.post("", summary="创建用户")
-async def create_user(body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def create_user(
+    username: str | None = Query(default=None),
+    password: str | None = Query(default=None),
+    role: str | None = Query(default=None),
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
     return {"id": "stub", "username": "", "message": "用户创建成功（存根）"}
 
 
-@users_router.patch("/{user_id}/role", summary="更新用户角色")
+@users_router.api_route("/{user_id}/role", methods=["PUT", "PATCH"], summary="更新用户角色")
 async def update_user_role(user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {"id": user_id, "role": "user"}
 
 
-@users_router.patch("/{user_id}/active", summary="更新用户激活状态")
+@users_router.api_route("/{user_id}/active", methods=["PUT", "PATCH"], summary="更新用户激活状态")
 async def update_user_active(user_id: str, body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {"id": user_id, "is_active": True}
 
@@ -315,12 +338,41 @@ monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"])
 
 @monitoring_router.get("/system/metrics", summary="获取系统指标")
 async def get_system_metrics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"cpu_percent": 0, "memory_percent": 0, "disk_percent": 0}
+    return {
+        "metrics": {
+            "cpu_usage": 0,
+            "memory": {
+                "total": 0,
+                "used": 0,
+                "available": 0,
+                "usage_percent": 0,
+            },
+            "disk": {
+                "mount_point": "/",
+                "total": 0,
+                "used": 0,
+                "free": 0,
+                "usage_percent": 0,
+            },
+            "uptime": 0,
+            "timestamp": "",
+        }
+    }
 
 
 @monitoring_router.get("/tasks/statistics", summary="获取任务统计")
 async def get_task_statistics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total": 0, "pending": 0, "running": 0, "completed": 0, "failed": 0}
+    return {
+        "statistics": {
+            "total": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+            "avg_duration": 0,
+            "success_rate": 0,
+        }
+    }
 
 
 @monitoring_router.get("/tasks", summary="获取监控任务列表")
@@ -341,12 +393,18 @@ triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"])
 
 @triggers_router.get("", summary="获取触发器列表")
 async def list_triggers(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
+    return {"total": 0, "triggers": []}
 
 
 @triggers_router.get("/stats", summary="获取触发器统计")
 async def get_trigger_stats(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total": 0, "active": 0, "triggered": 0}
+    return {
+        "total_triggers": 0,
+        "enabled_triggers": 0,
+        "disabled_triggers": 0,
+        "type_counts": {},
+        "trigger_ids": [],
+    }
 
 
 @triggers_router.get("/{trigger_id}", summary="获取触发器详情")
@@ -452,9 +510,138 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"])
 
 
+@execution_router.get("/records", summary="获取执行记录列表")
+async def list_execution_records(
+    session_id: str | None = Query(default=None, description="按会话ID过滤"),
+    parent_record_id: str | None = Query(default=None, description="按父记录ID过滤"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"records": [], "total": 0, "session_id": session_id}
+
+
+@execution_router.get("/records/sessions", summary="获取有记录的会话列表")
+async def get_execution_record_sessions(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    return {"sessions": [], "total": 0}
+
+
+@execution_router.get("/records/group-summary", summary="获取记录分组概要")
+async def get_record_group_summary(
+    session_id: str | None = Query(default=None, description="按会话ID过滤"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"groups": [], "total_groups": 0}
+
+
+@execution_router.get("/records/tree/{session_id}", summary="获取执行记录树")
+async def get_execution_tree(
+    session_id: str,
+    max_depth: int = Query(default=5, ge=1, le=20),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"tree": [], "total": 0, "session_id": session_id, "max_depth": max_depth}
+
+
+@execution_router.get("/records/{record_id}/children", summary="获取子执行记录")
+async def get_children_records(
+    record_id: str,
+    _user: dict = Depends(require_auth),
+) -> list[dict[str, Any]]:
+    return []
+
+
+@execution_router.get("/records/{record_id}", summary="获取单条执行记录")
+async def get_execution_record(
+    record_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": record_id, "session_id": "", "message_data": {}, "created_at": ""}
+
+
+@execution_router.delete("/records/{record_id}", summary="删除执行记录")
+async def delete_execution_record(
+    record_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"success": True, "message": "记录已删除", "id": record_id}
+
+
+@execution_router.delete("/records/session/{session_id}", summary="按会话删除执行记录")
+async def delete_execution_records_by_session(
+    session_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"success": True, "deleted_count": 0, "session_id": session_id}
+
+
 @execution_router.post("/records/clear-all", summary="清理所有记录")
 async def clear_all_records(_user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {"success": True, "message": "所有记录已清理", "cleared_count": 0}
+
+
+@execution_router.get("", summary="获取执行列表")
+async def list_executions(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    return {"items": [], "total": 0}
+
+
+@execution_router.get("/{execution_id}", summary="获取执行状态")
+async def get_execution_status(
+    execution_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "intent": "", "status": "not_found", "created_at": ""}
+
+
+@execution_router.post("/{execution_id}/control", summary="执行控制（通用）")
+async def control_execution(
+    execution_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "status": "controlled", "action": body.get("action", "") if body else ""}
+
+
+@execution_router.post("/{execution_id}/cancel", summary="取消执行")
+async def cancel_execution(
+    execution_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "status": "cancelled"}
+
+
+@execution_router.post("/{execution_id}/retry", summary="重试执行")
+async def retry_execution(
+    execution_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "status": "running"}
+
+
+@execution_router.post("/{execution_id}/approve", summary="审批执行")
+async def approve_execution(
+    execution_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "status": "approved"}
+
+
+@execution_router.get("/{execution_id}/steps", summary="获取执行步骤")
+async def get_execution_steps(
+    execution_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"steps": [], "execution_id": execution_id}
+
+
+@execution_router.post("/{execution_id}/inject", summary="注入Agent消息")
+async def inject_agent_message(
+    execution_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    return {"id": execution_id, "status": "injected"}
 
 
 # ---------------------------------------------------------------------------
@@ -553,12 +740,36 @@ cost_control_router = APIRouter(prefix="/api/v1/cost-control", tags=["成本控�
 
 @cost_control_router.get("/budget/status", summary="获取预算状态")
 async def get_budget_status(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"budget_limit": 0, "budget_used": 0, "budget_remaining": 0}
+    return {
+        "scope": "global",
+        "scope_id": "",
+        "limit": 0,
+        "used": 0,
+        "remaining": 0,
+        "usage_percent": 0,
+        "alert_level": "normal",
+        "estimated_cost": 0,
+    }
 
 
 @cost_control_router.get("/usage/statistics", summary="获取使用统计")
 async def get_usage_statistics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"total_cost": 0, "total_tokens": 0, "period": "30d"}
+    return {
+        "global_stats": {
+            "daily_tokens": 0,
+            "monthly_tokens": 0,
+            "daily_limit": 0,
+            "monthly_limit": 0,
+            "daily_usage_percent": 0,
+            "monthly_usage_percent": 0,
+            "estimated_daily_cost": 0,
+            "estimated_monthly_cost": 0,
+        },
+        "tasks": [],
+        "sessions": [],
+        "recent_records": [],
+        "updated_at": "",
+    }
 
 
 @cost_control_router.get("/config", summary="获取成本配置")
@@ -637,9 +848,12 @@ eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=
 async def list_eval_metrics_alias(_user: dict = Depends(require_auth)) -> dict[str, Any]:
     try:
         from channels.api.routes_evaluation import list_metrics
-        return await list_metrics()
+        result = await list_metrics()
+        if "items" in result and "metrics" not in result:
+            result["metrics"] = result.pop("items")
+        return result
     except Exception:
-        return {"items": [], "total": 0}
+        return {"metrics": [], "total": 0}
 
 
 @eval_metrics_alias_router.get("/{metric_id}", summary="获取评估指标详情（别名）")
@@ -740,4 +954,19 @@ async def get_model_file_capabilities(
         "max_audio_size": 0,
         "max_video_size": 0,
         "max_code_size": 5 * 1024 * 1024,
+    }
+
+
+@files_router.post("/upload", summary="上传文件")
+async def upload_file(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    return {"file_id": "stub", "filename": "", "mime_type": "", "size": 0, "file_type": "document", "base64_data": "", "uploaded_at": ""}
+
+
+@files_router.get("/supported-types", summary="获取支持的文件类型")
+async def get_supported_file_types(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    return {
+        "image_types": {"default": ["image/png", "image/jpeg", "image/gif", "image/webp"]},
+        "document_types": {"default": ["application/pdf", "text/plain", "text/markdown", "text/csv"]},
+        "max_image_size": 20 * 1024 * 1024,
+        "max_document_size": 50 * 1024 * 1024,
     }

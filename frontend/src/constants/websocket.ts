@@ -11,8 +11,13 @@ import { API_BASE_URL } from './api'
  * 从 API_BASE_URL 派生 WebSocket URL
  * http://localhost:8888 -> ws://localhost:8888
  * https://example.com -> wss://example.com
+ * 空字符串 -> 从当前页面 location 派生（适用于 Vite 代理模式）
  */
 function deriveWsUrl(apiUrl: string): string {
+  if (!apiUrl) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}`
+  }
   const url = new URL(apiUrl)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.origin
@@ -79,6 +84,17 @@ export const buildWebSocketUrl = (threadId: string, token: string): string =>
   `${WS_BASE_URL}${WS_ENDPOINT(threadId, token)}`
 
 /**
+ * 构建全局 WebSocket 连接 URL（不带 thread_id）
+ *
+ * 用于 GlobalWebSocketService 建立 /ws/chat 全局连接。
+ *
+ * @param token - JWT访问令牌
+ * @returns 完整的 WebSocket URL
+ */
+export const buildGlobalWebSocketUrl = (token: string): string =>
+  `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
+
+/**
  * WebSocket服务端事件类型
  *
  * 对应后端发送的事件类型
@@ -94,6 +110,8 @@ export const WS_SERVER_EVENTS = {
   TASK_COMPLETED: 'task_completed',
   /** 任务取消 */
   TASK_CANCELLED: 'task_cancelled',
+  /** 任务状态实时更新 */
+  TASK_STATUS_UPDATE: 'task_status_update',
   /** 错误 */
   ERROR: 'error',
   /** 心跳响应（后端发送 heartbeat_ack） */
@@ -170,6 +188,14 @@ export const WS_SERVER_EVENTS = {
   ITERATION_END: 'iteration_end',
   /** 遗漏消息响应（重连后服务端发送） */
   MISSED_MESSAGES: 'missed_messages',
+  /** 会话更新（新建/删除/修改会话时推送） */
+  SESSION_UPDATE: 'session_update',
+  /** 成本更新（Token 用量变化时推送） */
+  COST_UPDATE: 'cost_update',
+  /** 流式保活（长时间操作期间由后端发送，防止 chunk 超时） */
+  STREAM_KEEPALIVE: 'stream_keepalive',
+  /** 迭代事件（管道引擎迭代开始/结束） */
+  ITERATION: 'iteration',
 } as const
 
 /**

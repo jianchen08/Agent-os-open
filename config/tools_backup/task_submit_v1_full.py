@@ -178,9 +178,6 @@ class TaskSubmitTool:
 【常用评估指标（直接使用）】
 - file_check: 验证文件存在。参数：path、check（exists/not_empty/contains/is_directory）
 - format_valid: 验证文件格式。参数：path、format（json/yaml/schema）
-- test_check: 验证测试通过。参数：path、check（passed/coverage）、min_coverage
-- code_check: 验证代码质量。参数：command、working_dir、timeout
-- api_check: 验证API接口。参数：url、method、expected_status
 - command_check: 验证命令执行。参数：command、check（success/time）、timeout
 - quality_check: 验证代码质量。参数：path、type（code/doc）、criteria
 - semantic_check: 验证语义正确。参数：output、check（intent/match/hallucination）
@@ -202,7 +199,7 @@ class TaskSubmitTool:
 - pass_threshold: 通过阈值 0-100（可选）
 
 【示例】
-{"file_check": {"input_params": {"path": "src/main.py"}}, "code_check": {"input_params": {"command": "ruff check src/"}}}
+{"file_check": {"input_params": {"path": "src/main.py"}}, "format_valid": {"input_params": {"path": "src/main.py", "format": "schema"}}}
 """.strip(),
                         "additionalProperties": {
                             "type": "object",

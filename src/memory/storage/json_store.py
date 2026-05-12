@@ -29,6 +29,9 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     实现三个存储接口：IMemoryStore、IEpisodeStorage、ISemanticStorage。
     数据以 JSON 文件形式持久化到磁盘，按需读取，不预加载到内存。
 
+    由于 IEpisodeStorage 和 ISemanticStorage 存在同名方法（save/get/find_by_user/delete），
+    统一方法通过 ID 索引自动判断条目类型，实现双接口兼容。
+
     目录结构：
         data_dir/
         ├── episodes/
@@ -71,6 +74,14 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             "[JsonMemoryStore] 索引扫描完成 | episodes=%d | knowledge=%d",
             len(self._episode_ids), len(self._knowledge_ids),
         )
+
+    def _is_episode_id(self, entry_id: str) -> bool:
+        """判断 ID 是否属于情景记忆。"""
+        return entry_id in self._episode_ids
+
+    def _is_knowledge_id(self, entry_id: str) -> bool:
+        """判断 ID 是否属于知识。"""
+        return entry_id in self._knowledge_ids
 
     def _read_episode_from_disk(self, episode_id: str) -> Episode | None:
         """按需从磁盘读取单个情景记忆。
@@ -245,23 +256,25 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     async def save(self, entry: Episode | Knowledge, memory_type: str = "episode") -> str:
         """保存记忆条目到磁盘并更新索引。
 
+        通过 isinstance 自动推断存储路径，无需依赖 memory_type 参数。
+
         Args:
             entry: 记忆条目
-            memory_type: 记忆类型
+            memory_type: 记忆类型（保留参数兼容，实际由 entry 类型决定）
 
         Returns:
             条目 ID
         """
-        if memory_type == "episode" and isinstance(entry, Episode):
+        if isinstance(entry, Episode):
             self._save_episode_to_disk(entry)
             self._episode_ids.add(entry.id)
             return entry.id
-        elif memory_type == "semantic" and isinstance(entry, Knowledge):
+        elif isinstance(entry, Knowledge):
             self._save_knowledge_to_disk(entry)
             self._knowledge_ids.add(entry.id)
             return entry.id
         else:
-            raise ValueError(f"不支持的类型组合: memory_type={memory_type}, entry={type(entry)}")
+            raise ValueError(f"不支持的类型: {type(entry)}")
 
     async def load(
         self, entry_id: str, memory_type: str = "episode",
@@ -284,6 +297,9 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
     async def delete(self, entry_id: str, memory_type: str = "episode") -> bool:
         """删除记忆条目（磁盘文件 + 索引）。
 
+        当 memory_type 为默认值 "episode" 但 ID 实际属于 knowledge 时，
+        自动回退到 knowledge 删除，确保 ISemanticStorage 接口调用正确。
+
         Args:
             entry_id: 条目 ID
             memory_type: 记忆类型
@@ -302,6 +318,18 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
             if file_path.exists():
                 file_path.unlink()
             self._knowledge_ids.discard(entry_id)
+            return True
+        elif entry_id in self._knowledge_ids:
+            file_path = self._knowledge_dir / f"{entry_id}.json"
+            if file_path.exists():
+                file_path.unlink()
+            self._knowledge_ids.discard(entry_id)
+            return True
+        elif entry_id in self._episode_ids:
+            file_path = self._episodes_dir / f"{entry_id}.json"
+            if file_path.exists():
+                file_path.unlink()
+            self._episode_ids.discard(entry_id)
             return True
         return False
 
@@ -394,35 +422,38 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         return matched / len(query_words) if query_words else 0.0
 
     # ============================================
-    # IEpisodeStorage 接口实现
+    # IEpisodeStorage + ISemanticStorage 共享方法
     # ============================================
+    # 由于两个接口存在同名方法（save/get/find_by_user/delete），
+    # Python 只能有一个实现。通过 ID 索引自动判断类型。
 
-    async def save_episode(self, episode: Episode) -> str:
-        """保存情景记忆。
+    async def get(self, entry_id: str) -> Episode | Knowledge | None:
+        """获取记忆条目，自动根据 ID 索引判断类型。
 
-        Args:
-            episode: 情景记忆实例
-
-        Returns:
-            条目 ID
-        """
-        return await self.save(episode, "episode")
-
-    async def get(self, episode_id: str) -> Episode | None:
-        """获取情景记忆（按需从磁盘读取）。
+        同时满足 IEpisodeStorage.get() 和 ISemanticStorage.get()。
 
         Args:
-            episode_id: 情景记忆 ID
+            entry_id: 条目 ID
 
         Returns:
-            情景记忆实例
+            记忆条目实例
         """
-        return self._read_episode_from_disk(episode_id)
+        if entry_id in self._episode_ids:
+            return self._read_episode_from_disk(entry_id)
+        if entry_id in self._knowledge_ids:
+            return self._read_knowledge_from_disk(entry_id)
+        return self._read_episode_from_disk(entry_id) or self._read_knowledge_from_disk(entry_id)
 
     async def find_by_user(
-        self, user_id: str, limit: int = 20, offset: int = 0,
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
     ) -> list[Episode]:
         """按用户查找情景记忆（按需遍历磁盘文件）。
+
+        同时满足 IEpisodeStorage.find_by_user() 和 ISemanticStorage.find_by_user()。
+        KnowledgeService 通过 find_knowledge_by_user() 专属方法调用，不会走到这里。
 
         Args:
             user_id: 用户 ID
@@ -438,6 +469,21 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         ]
         episodes.sort(key=lambda x: x.created_at, reverse=True)
         return episodes[offset:offset + limit]
+
+    # ============================================
+    # IEpisodeStorage 专用方法
+    # ============================================
+
+    async def save_episode(self, episode: Episode) -> str:
+        """保存情景记忆。
+
+        Args:
+            episode: 情景记忆实例
+
+        Returns:
+            条目 ID
+        """
+        return await self.save(episode, "episode")
 
     async def update(self, episode_id: str, **kwargs: Any) -> bool:
         """更新情景记忆（读取→修改→写回）。
@@ -483,7 +529,7 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
         return sum(1 for ep in self._iter_all_episodes() if ep.user_id == user_id)
 
     # ============================================
-    # ISemanticStorage 接口实现
+    # ISemanticStorage 专用方法
     # ============================================
 
     async def save_knowledge(self, knowledge: Knowledge) -> str:

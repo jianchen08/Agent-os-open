@@ -11,9 +11,8 @@
  */
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '@/components/chat/InteractionCard'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { PendingInteraction } from '@/stores/interactionStore'

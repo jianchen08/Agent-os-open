@@ -210,6 +210,7 @@ class VSCodeConnector(BaseConnector):
             display_name="Visual Studio Code",
             capabilities=[
                 "open_file",
+                "open_folder",
                 "insert_content",
                 "jump_to",
                 "show_diff",

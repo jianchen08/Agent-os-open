@@ -19,12 +19,12 @@ class ResourceQuota:
         max_iterations: 单个管道的最大迭代次数
     """
 
-    def __init__(self, max_pipelines: int = 10, max_iterations: int = 100) -> None:
+    def __init__(self, max_pipelines: int = 10, max_iterations: int = 500) -> None:
         """初始化资源配额。
 
         Args:
             max_pipelines: 最大管道实例数，默认 10
-            max_iterations: 最大迭代次数，默认 100
+            max_iterations: 最大迭代次数，默认 500
         """
         self.max_pipelines = max_pipelines
         self.max_iterations = max_iterations

@@ -21,11 +21,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { NotificationItemComponent } from './NotificationItem'
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notificationStore'
-import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 import { NOTIFICATION_PRIORITY_WEIGHT, PRIORITY_STYLES } from '@/types/notification'
+import { NotificationItemComponent } from './NotificationItem'
+import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 
 /** 优先级分组标签 */
 const PRIORITY_LABELS: Record<NotificationPriority, { label: string; emoji: string }> = {
@@ -58,7 +58,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   const confirmBlockingNotification = useNotificationStore((s) => s.confirmBlockingNotification)
   const executeAction = useNotificationStore((s) => s.executeAction)
 
-  const unreadCount = useNotificationStore((s) => s.getUnreadCount())
+  const unreadCount = useNotificationStore((s) => s.notifications.filter((n) => !n.isRead).length)
 
   /** 按优先级分组 */
   const groupedNotifications = useMemo(() => {

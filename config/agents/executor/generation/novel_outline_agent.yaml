@@ -145,15 +145,11 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 tool_ids:
 - file_read
@@ -164,7 +160,6 @@ hard_constraints:
 - 必须通过 human_interaction 收集完整需求后再生成大纲
 - 生成的大纲必须包含完整的世界观、人物、剧情三要素
 - 输出必须使用 Markdown 格式
-- 任务完成后必须调用 task_evaluate 进行评估
 - 必须将大纲文件写入指定路径
 
 soft_constraints:
@@ -216,7 +211,7 @@ output_schema:
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

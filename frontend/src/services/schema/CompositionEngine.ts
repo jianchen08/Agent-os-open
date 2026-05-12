@@ -10,10 +10,10 @@
  * @module CompositionEngine
  */
 
-import type { ComponentType } from 'react'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import type { DataSourceRef, ResolvedDataSource } from '@/types/schema'
+import type { ComponentType } from 'react'
 
 /** 支持的布局类型 */
 export type LayoutType =

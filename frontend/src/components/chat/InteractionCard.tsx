@@ -6,8 +6,8 @@
  * 零 store/service 依赖，完全由 props 驱动。
  */
 
+import { ArrowRight, Check, Loader2, MessageSquare, X } from 'lucide-react'
 import { useState } from 'react'
-import { ArrowRight, Check, Loader2, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -28,6 +28,7 @@ export interface InteractionCardProps {
   onRespondChoice: (optionId: string) => void
   onRespondText: (text: string) => void
   onNavigateToTab: () => void
+  onDismiss: () => void
   isSubmitting: boolean
 }
 
@@ -36,6 +37,7 @@ export function InteractionCard({
   onRespondChoice,
   onRespondText,
   onNavigateToTab,
+  onDismiss,
   isSubmitting,
 }: InteractionCardProps) {
   const [textInput, setTextInput] = useState('')
@@ -88,7 +90,7 @@ export function InteractionCard({
 
   return (
     <div
-      className={`mx-4 my-3 rounded-xl border transition-colors ${
+      className={`group mx-4 my-3 rounded-xl border transition-colors ${
         isDone
           ? 'border-border/50 bg-muted/30'
           : 'border-status-info/40 bg-status-info/5 animate-pulse-subtle shadow-md shadow-status-info/10'
@@ -97,13 +99,22 @@ export function InteractionCard({
       {/* 标题区 */}
       <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-status-info" />
+          <MessageSquare className="h-4 w-4 shrink-0 text-status-info" />
           <span className="text-sm font-semibold">{interaction.title || '交互请求'}</span>
           {isDone && (
             <span className="ml-auto flex items-center gap-1 text-xs text-status-success">
               <Check className="h-3 w-3" />
               {interaction.status === 'navigated' ? '已跳转' : '已完成'}
             </span>
+          )}
+          {!isDone && (
+            <button
+              onClick={onDismiss}
+              className="ml-auto rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 [.animate-pulse-subtle_&]:opacity-60"
+              title="关闭"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           )}
         </div>
         {interaction.description && (

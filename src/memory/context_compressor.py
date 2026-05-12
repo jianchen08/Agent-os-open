@@ -55,12 +55,33 @@ class CompressionConfig:
     """
 
     context_window: int = 128000
-    compress_trigger_ratio: float = 0.5
-    l1_ratio: float = 0.15
-    l2_ratio: float = 0.05
-    recent_ratio: float = 0.3
-    retrieval_ratio: float = 0.1
+    compress_trigger_ratio: float = 0.6
+    l1_ratio: float = 0.08
+    l2_ratio: float = 0.03
+    recent_ratio: float = 0.10
+    retrieval_ratio: float = 0.03
     max_turn_ratio: float = 0.5
+
+    @classmethod
+    def from_yaml_config(cls, context_window: int) -> "CompressionConfig":
+        """从 context_window_config.yaml 加载预算配置。"""
+        try:
+            import yaml
+            from pathlib import Path
+            config_path = Path(__file__).parent.parent.parent / "config" / "system" / "context_window_config.yaml"
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+            budgets = yaml_data.get("budgets", {})
+            return cls(
+                context_window=context_window,
+                compress_trigger_ratio=yaml_data.get("compress_trigger_ratio", 0.6),
+                l1_ratio=budgets.get("l1", 0.08),
+                l2_ratio=budgets.get("l2", 0.03),
+                recent_ratio=budgets.get("recent", 0.10),
+                retrieval_ratio=budgets.get("retrieval", 0.03),
+            )
+        except Exception:
+            return cls(context_window=context_window)
 
     def get_budgets(self) -> dict[str, int]:
         """计算各部分实际 token 预算。
@@ -109,17 +130,18 @@ class ContextCompressor:
 
     # 一次性压缩模板：L1 + L2 + 关键词
     COMPRESS_PROMPT = """## 任务
-将以下对话历史一次性压缩完成，输出三部分：
-1. **l1**：结构化记录对话的完整细节，目标是让另一个 AI 能无障碍地接手继续执行任务
-2. **l2**：从 l1 中提炼最核心的意图、过程、结果
-3. **keywords**：5-10 个反映核心主题的关键词
+将以下对话历史压缩为三部分：
+1. **l1**：精简的结构化摘要，保留关键信息让另一个 AI 能接手
+2. **l2**：一句话级别的核心要点
+3. **keywords**：3-5 个核心关键词
 
-## 要求
-- l1 的每个字段要**保留具体细节**（名称、数值、路径、引用、关键数据），不要泛泛概括
-- 宁可多保留也不要遗漏，压缩的目的是让后续能继续任务，不是写摘要
-- 适用于任何类型任务（编码、调研、写作、分析、翻译等），根据实际内容填充
+## L1 各字段详略要求
+- **需详细**（保留具体细节）：key_entities（文件路径、URL、数值要原样保留）、errors_and_corrections（错误原因和解决方案要具体）、key_results（产出物位置和关键数据要完整）、pending（具体待办事项和步骤，要能让接手者知道接下来做什么）
+- **适中**（概括但不遗漏）：workflow（做了什么+结果，省略中间过程）、domain_knowledge（重要规则和约束）、decisions（决策结论和核心理由）
+- **简洁**：session_title、current_state、task_specification（一两句话即可）
+- l2 极简，每个字段不超过 2 句话
 - 无内容填 null
-- 如果有背景信息（前次压缩摘要），请在此基础上整合新内容，但是关注点不要在之前的内容里，而是放在新的对话内容上
+- 如有背景信息，整合新内容即可，关注新对话
 
 {previous_l1_section}
 ## 当前用户消息
@@ -135,20 +157,20 @@ class ContextCompressor:
 {{
   "l1": {{
     "session_title": "会话主题（一句话）",
-    "current_state": "当前进度和状态（含具体数据：已处理几条/共几条、当前在第几步、阻塞在哪里等）",
-    "task_specification": "用户要求完成的具体任务（含验收标准、输出格式、特殊要求等）",
-    "key_entities": "对话中涉及的所有重要实体（文件、文档、工具、资源、人名、术语、URL等，逐个列出）",
-    "workflow": "已执行的每个步骤及具体结果（做了什么、输出了什么、遇到了什么）",
-    "errors_and_corrections": "每个问题/错误的完整信息（问题描述、原因、解决方案、结果）",
-    "domain_knowledge": "对话中发现的重要事实、规则、约束（领域知识、架构信息、业务逻辑等）",
-    "decisions": "对话中确认的重要决策和理由（为什么选A不选B、排除了什么方案及原因）",
-    "key_results": "已完成的具体成果（产出物的位置、内容摘要、关键数据）",
-    "pending": "未完成的具体待办（还需处理什么、还剩哪些步骤）"
+    "current_state": "当前进度和状态",
+    "task_specification": "用户要求完成的具体任务",
+    "key_entities": "对话中涉及的重要实体",
+    "workflow": "已执行的步骤及结果",
+    "errors_and_corrections": "问题和错误信息",
+    "domain_knowledge": "重要事实和约束",
+    "decisions": "重要决策和理由",
+    "key_results": "已完成的具体成果",
+    "pending": "未完成的待办"
   }},
   "l2": {{
-    "intent": "用户的目标和验收标准（含具体要求：输出格式、数量、质量标准等）",
-    "process": "已执行的关键步骤（含具体操作和产出）及重要决策（含理由）",
-    "results": "已完成的具体成果（产出物及位置）和未完成的具体待办"
+    "intent": "用户的目标和验收标准",
+    "process": "关键步骤和重要决策",
+    "results": "已完成成果和未完成待办"
   }},
   "keywords": ["关键词1", "关键词2", "关键词3"]
 }}

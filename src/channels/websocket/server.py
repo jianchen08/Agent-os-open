@@ -185,7 +185,7 @@ class WebSocketServer:
 
         event.version = PROTOCOL_VERSION
         message = json.dumps(
-            event.to_dict(), ensure_ascii=False,
+            event.to_dict(), ensure_ascii=False, default=str,
         )
         return await self.session_manager.send_to(
             session_id, message,

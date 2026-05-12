@@ -115,6 +115,8 @@ export function mapBackendGraphToGraphData(backendData: BackendGraphData): Graph
 export interface ThreadStateResponse {
   /** 线程ID */
   thread_id: string
+  /** 线程标题 */
+  title?: string | null
   /** 当前状态 */
   current_state: string
   /** 用户意图（会话标题） */
@@ -125,6 +127,12 @@ export interface ThreadStateResponse {
   updated_at: string
   /** 绑定的 Agent ID */
   agent_id?: string | null
+  /** 消息数量 */
+  message_count?: number
+  /** 关联的管道 ID 列表 */
+  pipeline_ids?: string[]
+  /** 当前活跃的管道 ID */
+  active_pipeline_id?: string | null
   /** 元数据 */
   metadata?: Record<string, any>
 }
@@ -136,13 +144,15 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
   const metadata = (thread as any).metadata || {}
   return {
     id: thread.thread_id,
-    title: thread.intent || '未命名会话',
+    title: (thread as ThreadStateResponse).title || thread.intent || '未命名会话',
     createdAt: thread.created_at || new Date().toISOString(),
     updatedAt: thread.updated_at || new Date().toISOString(),
-    messageCount: (thread as any).message_count || 0,
+    messageCount: (thread as ThreadStateResponse).message_count ?? 0,
     status: (thread as any).status || thread.current_state || 'active',
     metadata: metadata,
     agentId: thread.agent_id || null,
+    pipelineIds: (thread as ThreadStateResponse).pipeline_ids || [],
+    activePipelineId: (thread as ThreadStateResponse).active_pipeline_id || null,
     pinned: metadata.pinned === true,
     starred: metadata.starred === true,
   }

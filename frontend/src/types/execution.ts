@@ -6,6 +6,8 @@
  * @module execution
  */
 
+import type { ActivityData, ActivityDetailBlock } from './activity'
+
 /**
  * 执行类型枚举
  */
@@ -336,7 +338,7 @@ export function mergeExecutionEvent(
  *
  * 用于与现有 ActivityCard 组件兼容
  */
-export function toActivityData(execution: ExecutionCardData): import('./activity').ActivityData {
+export function toActivityData(execution: ExecutionCardData): ActivityData {
   return {
     type: 'custom',
     id: execution.id,
@@ -366,8 +368,8 @@ export function toActivityData(execution: ExecutionCardData): import('./activity
  */
 function buildExecutionDetails(
   execution: ExecutionCardData,
-): import('./activity').ActivityDetailBlock[] {
-  const details: import('./activity').ActivityDetailBlock[] = []
+): ActivityDetailBlock[] {
+  const details: ActivityDetailBlock[] = []
 
   // 添加描述
   if (execution.description) {

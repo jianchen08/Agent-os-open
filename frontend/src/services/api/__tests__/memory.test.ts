@@ -5,6 +5,7 @@
  * 与后端 /api/v1/memory/* 端点对齐
  */
 
+/* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   consolidateMemory,
@@ -14,7 +15,6 @@ import {
   getSemanticMemory,
   searchMemory,
 } from '@/services/api/memory'
-
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -23,6 +23,7 @@ vi.mock('../client', () => ({
   },
 }))
 
+ 
 import apiClient from '@/services/api/client'
 
 describe('记忆 API', () => {

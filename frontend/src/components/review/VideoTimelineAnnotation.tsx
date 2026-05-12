@@ -5,8 +5,8 @@
  * 时间轴上显示标注标记点，支持在时间轴上点击添加标注。
  */
 
-import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { Play, Pause, Plus, MessageSquare, SkipBack, SkipForward } from 'lucide-react'
+import React, { useState, useCallback, useRef, useEffect } from 'react'
 import type { Annotation } from '@/types/review'
 
 /** 生成简易唯一 ID */

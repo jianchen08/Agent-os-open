@@ -65,6 +65,10 @@ system_prompt: |
   - 修改不影响主项目，系统会自动处理合并
   - 完成后调用 task_evaluate 评估
 
+  ## 参考规则
+
+  {{path:config/rules/document_context_rules.md}}
+
   ## 环境一致性验证
 
   环境准备完成后，必须执行以下验证步骤：
@@ -93,11 +97,6 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
-    - name: "行为约束"
-      type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
     - name: "环境状态报告模板"
       type: "path"
       path: "config/templates/environment_status_template.md"
@@ -105,9 +104,7 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items:
-    - name: "当前时间"
-      type: "timestamp"
+  items: []
 
 # 上下文变量配置
 context_variables:
@@ -220,7 +217,7 @@ recommended_metrics:
 version: "2.0.0"
 is_active: true
 status: "active"
-max_iterations: 100
+max_iterations: 500
 max_reminders: 3
 timeout_seconds: 2400
 

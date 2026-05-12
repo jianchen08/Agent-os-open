@@ -52,10 +52,7 @@ class MetricLoader:
                          None 时使用默认路径 config/evaluation_metrics/
         """
         if metrics_dir is None:
-            base = Path.cwd() / "config" / "evaluation_metrics"
-            if not base.exists():
-                base = Path(__file__).resolve().parent.parent / "config" / "evaluation_metrics"
-            self._metrics_dir = base
+            self._metrics_dir = Path.cwd() / "config" / "evaluation_metrics"
         else:
             self._metrics_dir = Path(metrics_dir)
         self._metrics: dict[str, MetricDefinition] = {}
@@ -99,7 +96,7 @@ class MetricLoader:
         """加载单个指标文件。
 
         Args:
-            metric_id: 指标 ID（对应文件名如 code_check → code_check.yaml）
+            metric_id: 指标 ID（对应文件名如 format_valid → format_valid.yaml）
 
         Returns:
             加载后的 MetricDefinition，文件不存在时返回 None

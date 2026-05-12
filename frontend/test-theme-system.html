@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>主题系统测试</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 20px;
+      background: var(--bg-background, #0f172a);
+      color: var(--fg-primary, #f8fafc);
+    }
+    .test-section {
+      margin: 20px 0;
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--bg-surface, #1e293b);
+      border: 1px solid var(--border-default, #334155);
+    }
+    .test-result {
+      padding: 8px;
+      margin: 8px 0;
+      border-radius: 4px;
+    }
+    .pass { background: #22c55e33; border-left: 3px solid #22c55e; }
+    .fail { background: #ef444433; border-left: 3px solid #ef4444; }
+    button {
+      padding: 8px 16px;
+      margin: 4px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      background: var(--btn-primary-bg, #3b82f6);
+      color: var(--btn-primary-text, #ffffff);
+    }
+    button:hover {
+      background: var(--btn-primary-hover-bg, #2563eb);
+    }
+    .preview-bubble {
+      max-width: 300px;
+      padding: 12px;
+      border-radius: var(--bubble-user-radius, 1rem);
+      background: var(--bubble-user-bg, #3b82f6);
+      color: var(--bubble-user-text, #ffffff);
+      margin: 8px 0;
+    }
+    .preview-card {
+      padding: 16px;
+      border-radius: var(--card-radius, 0.75rem);
+      background: var(--card-bg, #1e293b);
+      border: var(--card-border, 1px solid #334155);
+      box-shadow: var(--card-shadow, 0 4px 12px rgb(0 0 0 / 0.4));
+    }
+    code {
+      background: #0f172a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎨 主题系统测试报告</h1>
+  <div id="results"></div>
+
+  <script type="module">
+    // 模拟测试 - 实际测试需要在真实前端环境中运行
+    const results = [];
+
+    function addTest(name, passed, details) {
+      results.push({ name, passed, details });
+    }
+
+    // 测试 1: CSS 变量存在性
+    function testCSSVariables() {
+      const root = document.documentElement;
+      const requiredVars = [
+        '--bg-background',
+        '--bg-surface',
+        '--fg-primary',
+        '--btn-primary-bg',
+        '--bubble-user-bg',
+        '--bubble-ai-bg',
+        '--card-bg',
+        '--avatar-radius'
+      ];
+
+      let allPresent = true;
+      const missing = [];
+
+      for (const varName of requiredVars) {
+        const value = getComputedStyle(root).getPropertyValue(varName);
+        if (!value) {
+          allPresent = false;
+          missing.push(varName);
+        }
+      }
+
+      addTest(
+        'CSS 变量定义',
+        allPresent,
+        allPresent ? '所有必需变量已定义' : `缺少变量: ${missing.join(', ')}`
+      );
+    }
+
+    // 测试 2: localStorage 主题存储
+    function testLocalStorage() {
+      try {
+        // 测试写入
+        localStorage.setItem('test-theme', '{"id":"test"}');
+        const value = localStorage.getItem('test-theme');
+        localStorage.removeItem('test-theme');
+
+        addTest(
+          'localStorage 存储',
+          value === '{"id":"test"}',
+          'localStorage 读写功能正常'
+        );
+      } catch (e) {
+        addTest('localStorage 存储', false, `错误: ${e.message}`);
+      }
+    }
+
+    // 测试 3: 主题配置格式
+    function testThemeConfigFormat() {
+      const testConfig = {
+        id: 'test',
+        name: '测试主题',
+        category: 'dark',
+        colors: {
+          primary: '#3b82f6',
+          backgrounds: {
+            default: '#0f172a',
+            surface: '#1e293b'
+          }
+        },
+        components: {
+          button: {
+            variants: {
+              primary: { background: '#3b82f6' }
+            }
+          }
+        }
+      };
+
+      const hasRequired = testConfig.id && testConfig.colors && testConfig.components;
+      addTest(
+        '主题配置格式',
+        hasRequired,
+        hasRequired ? '配置结构正确' : '缺少必需字段'
+      );
+    }
+
+    // 测试 4: 组件样式变量
+    function testComponentStyles() {
+      const root = document.documentElement;
+      const style = getComputedStyle(root);
+
+      const tests = [
+        { var: '--btn-primary-bg', name: '按钮主色' },
+        { var: '--bubble-user-bg', name: '用户气泡' },
+        { var: '--bubble-ai-bg', name: 'AI 气泡' },
+        { var: '--card-bg', name: '卡片背景' },
+        { var: '--avatar-radius', name: '头像圆角' }
+      ];
+
+      let passed = 0;
+      const details = [];
+
+      for (const test of tests) {
+        const value = style.getPropertyValue(test.var);
+        if (value) {
+          passed++;
+          details.push(`${test.name}: ✓ (${value.trim()})`);
+        } else {
+          details.push(`${test.name}: ✗ (未设置)`);
+        }
+      }
+
+      addTest(
+        '组件样式变量',
+        passed === tests.length,
+        `${passed}/${tests.length} 通过\n${details.join('\n')}`
+      );
+    }
+
+    // 运行所有测试
+    function runAllTests() {
+      testCSSVariables();
+      testLocalStorage();
+      testThemeConfigFormat();
+      testComponentStyles();
+
+      // 显示结果
+      const container = document.getElementById('results');
+      const summary = document.createElement('div');
+      summary.className = 'test-section';
+      summary.innerHTML = `
+        <h2>测试摘要</h2>
+        <p>总测试数: <strong>${results.length}</strong></p>
+        <p>通过: <strong style="color: #22c55e">${results.filter(r => r.passed).length}</strong></p>
+        <p>失败: <strong style="color: #ef4444">${results.filter(r => !r.passed).length}</strong></p>
+      `;
+      container.appendChild(summary);
+
+      for (const result of results) {
+        const div = document.createElement('div');
+        div.className = `test-result ${result.passed ? 'pass' : 'fail'}`;
+        div.innerHTML = `
+          <strong>${result.passed ? '✓' : '✗'} ${result.name}</strong>
+          <pre style="margin: 8px 0; white-space: pre-wrap;">${result.details}</pre>
+        `;
+        container.appendChild(div);
+      }
+
+      // 添加组件预览
+      const preview = document.createElement('div');
+      preview.className = 'test-section';
+      preview.innerHTML = `
+        <h2>组件预览</h2>
+        <button>主按钮</button>
+        <button style="background: var(--btn-secondary-bg, #6366f1)">次要按钮</button>
+        <div class="preview-bubble">用户消息气泡</div>
+        <div class="preview-bubble" style="background: var(--bubble-ai-bg, #1e293b); color: var(--bubble-ai-text, #f8fafc); margin-left: auto;">AI 消息气泡</div>
+        <div class="preview-card">
+          <h3>卡片组件</h3>
+          <p>这是一个卡片组件，使用主题定义的背景、边框和阴影。</p>
+        </div>
+      `;
+      container.appendChild(preview);
+    }
+
+    // 延迟运行以等待样式加载
+    setTimeout(runAllTests, 100);
+  </script>
+</body>
+</html>

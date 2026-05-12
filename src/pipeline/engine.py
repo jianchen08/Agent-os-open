@@ -1,17 +1,20 @@
-"""管道引擎。
+"""管道引擎 — 核心循环和生命周期管理。
 
 实现核心的 while 循环执行逻辑：
 输入路由 → Input 插件链 → Core 插件 → Output 插件链 → 输出路由仲裁 → apply_route，
 直到管道结束或挂起。
 
-支持暂停/恢复：
-- 当 Output 插件产出 wait 路由信号时，管道保存当前 state 快照并挂起
-- 调用 resume() 可从保存的 state 恢复继续执行
+职责：
+- 管道生命周期：run() / resume() / wake()
+- 核心循环：_run_loop()
+- 挂起/恢复：_suspend_and_wait()
+- 路由信号：_apply_route()
 
-支持 Agent 配置注入：
-- run(user_input, agent_config) 接受 Agent 配置，自动构建 state
-- agent_config=None 时使用系统默认 Agent 配置
-- 插件从 ctx.state["plugin_configs"] 读取自己的配置
+已拆出的职责：
+- 状态构建 → pipeline/state_builder.py
+- 插件配置 → pipeline/plugin_resolver.py
+- 检查点管理 → pipeline/checkpoint.py
+- 消息注入/唤醒 → pipeline/message_bus.py
 """
 
 from __future__ import annotations
@@ -49,15 +52,84 @@ def get_global_suspended_engine(pipeline_id: str) -> PipelineEngine | None:
     return _GLOBAL_SUSPENDED_ENGINES.get(pipeline_id)
 
 
+_SAFE_JSON_TYPES = (str, int, float, bool, type(None))
+
+_SKIP_COPY_KEYS = frozenset({
+    "on_chunk",
+})
+
 def _safe_deepcopy(state: dict) -> dict:
-    """Deep-copy state, skipping keys that hold non-deepcopyable values."""
+    """安全复制 state，避免 RecursionError。
+
+    BUG-FIX-fix_20260510_pipeline_recursion:
+    问题根因: copy.deepcopy(state) 在 state 包含复杂对象时触发 RecursionError，
+    导致 _apply_route(wait) 崩溃，管道异常退出。
+    修复方案: 放弃 copy.deepcopy，改用逐键手动复制：
+    - JSON 安全类型 (str/int/float/bool/None) → 直接引用
+    - list/dict → 递归手动复制（受深度限制保护）
+    - 其他类型 → 浅拷贝或直接引用
+    影响范围: 所有管道的挂起/恢复机制
+    """
+    import json as _json
+
     safe = {}
     for k, v in state.items():
-        try:
-            safe[k] = copy.deepcopy(v)
-        except (TypeError, AttributeError):
-            pass
+        if k in _SKIP_COPY_KEYS:
+            continue
+        if isinstance(v, _SAFE_JSON_TYPES):
+            safe[k] = v
+        elif isinstance(v, list):
+            safe[k] = _manual_copy_list(v, depth=0)
+        elif isinstance(v, dict):
+            safe[k] = _manual_copy_dict(v, depth=0)
+        elif isinstance(v, (set, tuple)):
+            try:
+                safe[k] = type(v)(v)
+            except (TypeError, ValueError):
+                safe[k] = v
+        else:
+            try:
+                safe[k] = _json.loads(_json.dumps(v, default=str))
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                safe[k] = v
     return safe
+
+
+_MAX_MANUAL_COPY_DEPTH = 20
+
+
+def _manual_copy_dict(d: dict, depth: int) -> dict:
+    """手动深拷贝 dict，受深度限制保护。"""
+    if depth > _MAX_MANUAL_COPY_DEPTH:
+        return dict(d)
+    result = {}
+    for k, v in d.items():
+        if isinstance(v, _SAFE_JSON_TYPES):
+            result[k] = v
+        elif isinstance(v, list):
+            result[k] = _manual_copy_list(v, depth + 1)
+        elif isinstance(v, dict):
+            result[k] = _manual_copy_dict(v, depth + 1)
+        else:
+            result[k] = v
+    return result
+
+
+def _manual_copy_list(lst: list, depth: int) -> list:
+    """手动深拷贝 list，受深度限制保护。"""
+    if depth > _MAX_MANUAL_COPY_DEPTH:
+        return list(lst)
+    result = []
+    for v in lst:
+        if isinstance(v, _SAFE_JSON_TYPES):
+            result.append(v)
+        elif isinstance(v, list):
+            result.append(_manual_copy_list(v, depth + 1))
+        elif isinstance(v, dict):
+            result.append(_manual_copy_dict(v, depth + 1))
+        else:
+            result.append(v)
+    return result
 from typing import TYPE_CHECKING, Any
 
 from pipeline.chain import PluginChain
@@ -121,7 +193,7 @@ class PipelineEngine:
         plugin_registry: PluginRegistry,
         pipeline_registry: PipelineRegistry | None = None,
         services: dict[str, Any] | None = None,
-        max_iterations: int = 100,
+        max_iterations: int = 500,
         agent_registry: Any | None = None,
         checkpoint_manager: PipelineCheckpointManager | None = None,
     ) -> None:
@@ -178,6 +250,14 @@ class PipelineEngine:
         Returns:
             管道最终状态字典
         """
+        # BUG-FIX: 每次新 run() 调用重置挂起状态，防止引擎复用时旧状态泄漏。
+        # 同一 PipelineEngine 实例在 WebSocket 长连接中被多次调用 run()，
+        # 上一轮的 _suspended_state 会残留，导致 is_suspended 在新一轮中误报 True。
+        self._suspended_state = None
+        self._wake_event = None
+        self._saved_streaming = False
+        self._saved_on_chunk = None
+
         # pipeline_id 由引擎构造时确定，外部不可覆盖。
         extra_state["pipeline_id"] = self._pipeline_id
 
@@ -212,20 +292,25 @@ class PipelineEngine:
                 "[PipelineEngine] agent_config 为 None，回退到系统默认 Agent。"
                 "调用方应显式传入 agent_config 以避免此警告。"
             )
-            agent_config = self._load_system_default_agent()
+            from pipeline.state_builder import load_default_agent
+            agent_config = load_default_agent(self._agent_registry)
 
-        state = self._build_initial_state(
+        from pipeline.state_builder import build_initial_state
+        state = build_initial_state(
             user_input=user_input or "",
             agent_config=agent_config,
             conversation_history=conversation_history,
+            pipeline_id=self._pipeline_id,
+            services=self._services,
             extra_state=extra_state,
         )
 
         if agent_config and hasattr(agent_config, "max_iterations") and agent_config.max_iterations:
             self.max_iterations = agent_config.max_iterations
 
-        self._apply_agent_plugin_configs(agent_config)
-        self._apply_agent_model_override(agent_config)
+        from pipeline.plugin_resolver import apply_agent_plugin_configs, apply_agent_model_override
+        apply_agent_plugin_configs(self.plugin_registry, agent_config)
+        apply_agent_model_override(self.plugin_registry, agent_config, self._services)
 
         return await self._run_loop(state, resumed=False)
 
@@ -253,396 +338,6 @@ class PipelineEngine:
 
         return await self._run_loop(saved_state, resumed=True)
 
-    def _build_initial_state(
-        self,
-        user_input: str,
-        agent_config: Any | None,
-        conversation_history: list[dict[str, Any]] | None,
-        extra_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        """构建管道初始状态字典。
-
-        将用户输入、Agent 配置、对话历史和额外状态合并为管道 state。
-
-        Args:
-            user_input: 用户输入文本
-            agent_config: Agent 配置实例
-            conversation_history: 对话历史
-            extra_state: 额外状态键值对
-
-        Returns:
-            管道初始状态字典
-        """
-        resolved_history = self._resolve_conversation_history(conversation_history)
-
-        state: dict[str, Any] = {
-            StateKeys.ITERATION: 0,
-            StateKeys.CORE_TYPE: TargetType.LLM_CALL.value,
-            StateKeys.ENDED: False,
-            "user_input": user_input,
-            "messages": resolved_history,
-        }
-
-        # 将 user_input 追加为 user 消息（避免纯 system 消息被某些模型拒绝）
-        if user_input:
-            state["messages"].append({"role": "user", "content": user_input})
-
-        if agent_config and hasattr(agent_config, "to_state"):
-            agent_state = agent_config.to_state()
-            state.update(agent_state)
-
-        state.update(extra_state)
-
-        return state
-
-    def _resolve_conversation_history(
-        self,
-        conversation_history: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        """解析对话历史，当调用方未传入历史时自动从 ExecutionRecordStorage 恢复。
-
-        当 conversation_history 非空时直接使用调用方传入的历史；
-        当为空但当前 pipeline_id 已有执行记录时，从持久化存储恢复完整历史。
-
-        Args:
-            conversation_history: 调用方传入的对话历史（可能为 None 或空列表）
-
-        Returns:
-            解析后的对话历史列表
-        """
-        if conversation_history:
-            return list(conversation_history)
-
-        exec_storage = self._services.get("execution_record_storage")
-        if not exec_storage:
-            return []
-
-        try:
-            records = exec_storage.list_by_pipeline(self._pipeline_id)
-        except Exception:
-            return []
-
-        if not records:
-            return []
-
-        history: list[dict[str, Any]] = []
-        for r in records:
-            msg: dict[str, Any] = {"role": r.role, "content": r.content}
-            if getattr(r, "name", None):
-                msg["name"] = r.name
-            if getattr(r, "tool_call_id", None):
-                msg["tool_call_id"] = r.tool_call_id
-            if getattr(r, "tool_input", None):
-                msg["tool_input"] = r.tool_input
-            if getattr(r, "tool_calls_json", None):
-                try:
-                    import json as _json
-                    msg["tool_calls"] = _json.loads(r.tool_calls_json)
-                except (ValueError, TypeError):
-                    pass
-            history.append(msg)
-
-        from infrastructure.task_worker import _reconstruct_tool_calls
-        _reconstruct_tool_calls(history)
-
-        logger.info(
-            "[Engine] 从持久化存储恢复 %d 条历史记录 (pipeline=%s)",
-            len(history), self._pipeline_id,
-        )
-        return history
-
-    def _load_system_default_agent(self) -> Any | None:
-        """加载系统默认 Agent 配置。
-
-        优先使用注入的 agent_registry；
-        如果没有注入，则内部创建 AgentRegistry。
-
-        优先级：
-        1. config/agents/default.yaml
-        2. config/agents/lingxi.yaml
-        3. 返回空配置（Engine 内部用默认值兜底）
-
-        Returns:
-            AgentConfig 实例，未找到返回 None
-        """
-        if self._agent_registry is not None:
-            registry = self._agent_registry
-        else:
-            from agents.registry import AgentRegistry
-            from agents.types import AgentLevel
-
-            project_root = Path(__file__).resolve().parent.parent.parent
-            agent_config_dir = project_root / "config" / "agents"
-
-            if not agent_config_dir.exists():
-                return None
-
-            registry = AgentRegistry()
-            count = registry.load_directory(agent_config_dir)
-            if count == 0:
-                return None
-
-        from agents.types import AgentLevel
-
-        for candidate in ["default", "lingxi"]:
-            config = registry.get(candidate)
-            if config:
-                return config
-
-        l1_agents = registry.find_by_level(AgentLevel.L1_MAIN)
-        if l1_agents:
-            return l1_agents[0]
-
-        return None
-
-    def _build_plugin_list(self, agent_config: Any | None) -> list[IPlugin]:
-        """根据 Agent 配置构建最终插件列表。
-
-        配置合并逻辑：
-        1. 从 PluginRegistry 获取所有已注册插件（Pipeline 默认）
-        2. 移除 agent_config.plugins.disabled 中声明的插件
-        3. 添加 agent_config.plugins.enabled 中声明的非默认插件
-
-        Args:
-            agent_config: Agent 配置实例
-
-        Returns:
-            最终生效的插件列表
-        """
-        result: list[IPlugin] = []
-
-        for plugin in self.plugin_registry._plugins.values():
-            result.append(plugin)
-
-        if not agent_config or not hasattr(agent_config, "plugins"):
-            return result
-
-        plugins_config = agent_config.plugins
-
-        if hasattr(plugins_config, "disabled") and plugins_config.disabled:
-            result = [p for p in result if not self._matches_disabled(p.name, plugins_config.disabled)]
-
-        if hasattr(plugins_config, "enabled") and plugins_config.enabled:
-            for name, config in plugins_config.enabled.items():
-                existing = self.plugin_registry.get(name)
-                if existing is not None:
-                    if isinstance(config, dict) and hasattr(existing, '_config'):
-                        merged_config = {**existing._config, **config}
-                        try:
-                            new_plugin = type(existing)(config=merged_config)
-                            # 在 result 列表中替换旧引用
-                            for idx, p in enumerate(result):
-                                if p is existing:
-                                    result[idx] = new_plugin
-                                    break
-                        except Exception:
-                            pass
-                    continue
-                logger.info(
-                    "Agent enables non-default plugin: %s (config=%s)",
-                    name, config,
-                )
-
-        return result
-
-    def _apply_agent_plugin_configs(
-        self, agent_config: Any | None,
-    ) -> None:
-        """将 Agent 配置的插件覆盖直接合并到 plugin_registry。
-
-        遍历 agent_config.plugins.enabled，将配置合并到 registry 中
-        已有的同名插件实例上（原地替换），使后续 _run_loop 通过
-        registry.get() 拿到的就是合并后的插件。
-
-        Args:
-            agent_config: Agent 配置实例
-        """
-        if not agent_config or not hasattr(agent_config, "plugins"):
-            return
-
-        plugins_config = agent_config.plugins
-        if not hasattr(plugins_config, "enabled") or not plugins_config.enabled:
-            return
-
-        for name, override in plugins_config.enabled.items():
-            if not isinstance(override, dict):
-                continue
-            existing = self.plugin_registry.get(name)
-            if existing is None:
-                continue
-            if not hasattr(existing, "_config"):
-                continue
-            merged_config = {**existing._config, **override}
-            try:
-                new_plugin = type(existing)(config=merged_config)
-                self.plugin_registry._plugins[name] = new_plugin
-                # 同步 core_plugins 映射
-                for core_key, pname in list(
-                    self.plugin_registry._core_plugins.items()
-                ):
-                    if pname == name:
-                        self.plugin_registry._core_plugins[core_key] = name
-                logger.debug(
-                    "Agent plugin config merged: %s + %s -> %s",
-                    name, list(override.keys()), list(merged_config.keys()),
-                )
-            except Exception:
-                logger.debug(
-                    "Agent plugin config merge failed for %s", name,
-                )
-
-    def _apply_agent_model_override(self, agent_config: Any | None) -> None:
-        """将 Agent 配置中的 model_name/model_tier 覆盖到 llm_call 核心插件。
-
-        优先级：model_name > model_tier > defaults.chat
-        - model_name: 直接使用指定的模型标识
-        - model_tier: 从 llm.yaml defaults.tiers 解析为 model_name
-        - Router 模式：直接切换路由别名，不重建插件
-        - 直连模式：从 llm.yaml 加载完整配置重建插件
-
-        Args:
-            agent_config: Agent 配置实例
-        """
-        if not agent_config or not hasattr(agent_config, "model_name"):
-            return
-
-        model_id = agent_config.model_name
-
-        # model_tier 解析：当 model_name 未指定时，从 tiers 映射
-        if not model_id and hasattr(agent_config, "model_tier") and agent_config.model_tier:
-            model_id = self._resolve_tier(agent_config.model_tier)
-            if model_id:
-                logger.info(
-                    "[_apply_agent_model_override] model_tier=%s → model_name=%s",
-                    agent_config.model_tier, model_id,
-                )
-
-        if not model_id:
-            return
-
-        llm_call = self.plugin_registry.get_core("llm_call")
-        if llm_call is None:
-            return
-
-        # Router 模式：只需切换路由别名，不重建插件
-        if getattr(llm_call, "_use_router", False):
-            llm_call._model = model_id
-            # 更新 context_window（从 model_loader 读取）
-            services = getattr(self, "_services", {})
-            model_loader = services.get("model_loader") if services else None
-            if model_loader:
-                conf = model_loader.get_model_config(model_id)
-                if conf:
-                    llm_call._provider = conf.get("provider", llm_call._provider)
-                    llm_call._context_window = conf.get("context_window")
-            logger.info(
-                "[_apply_agent_model_override] Router 模式切换模型: %s (provider=%s, context_window=%s)",
-                model_id, llm_call._provider, llm_call._context_window,
-            )
-            return
-
-        # 直连模式：重建插件（原有逻辑）
-        model_loader = None
-        services = getattr(self, "_services", {})
-        if services:
-            model_loader = services.get("model_loader")
-
-        if model_loader is None:
-            try:
-                from config.models import get_model_config_loader
-                model_loader = get_model_config_loader()
-            except Exception:
-                logger.warning(
-                    "[_apply_agent_model_override] ModelConfigLoader 不可用，跳过模型覆盖"
-                )
-                return
-
-        llm_conf = model_loader.get_llm_core_config(model_id)
-        if not llm_conf:
-            logger.warning(
-                "[_apply_agent_model_override] 模型 %r 未在 llm.yaml 中找到配置，跳过覆盖",
-                model_id,
-            )
-            return
-
-        # 以现有 llm_call 配置为基础，用模型配置覆盖
-        # 这样 provider/api_base/api_key 等字段跟随模型配置
-        if hasattr(llm_call, "_config") and isinstance(llm_call._config, dict):
-            merged_config = dict(llm_call._config)
-            merged_config.update(llm_conf)
-        else:
-            merged_config = dict(llm_conf)
-        merged_config["model_name"] = llm_conf.get("model_name", model_id)
-
-        try:
-            # 复用已有的 KeyPoolAdapter（按 key 粒度并发控制）
-            existing_adapter = getattr(llm_call, "_adapter", None)
-            if existing_adapter is not None:
-                new_plugin = type(llm_call)(config=merged_config, adapter=existing_adapter)
-            else:
-                new_plugin = type(llm_call)(config=merged_config)
-            plugin_name = getattr(llm_call, "name", "LLMCorePlugin")
-            self.plugin_registry._core_plugins["llm_call"] = new_plugin
-            self.plugin_registry._plugins[plugin_name] = new_plugin
-            logger.info(
-                "[_apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
-                getattr(agent_config, "config_id", "?"),
-                merged_config.get("model_name"),
-                merged_config.get("provider"),
-                merged_config.get("context_window"),
-            )
-        except Exception as exc:
-            logger.warning(
-                "[_apply_agent_model_override] 重建 llm_call 插件失败: %s", exc,
-            )
-
-    def _resolve_tier(self, tier: str) -> str:
-        """从 llm.yaml defaults.tiers 解析 tier 为 model_id。
-
-        Args:
-            tier: 分级标识（large/medium/small）
-
-        Returns:
-            对应的模型标识字符串，未找到返回空字符串
-        """
-        services = getattr(self, "_services", {})
-        model_loader = services.get("model_loader") if services else None
-        if model_loader is None:
-            try:
-                from config.models import get_model_config_loader
-                model_loader = get_model_config_loader()
-            except Exception:
-                logger.warning("[_resolve_tier] ModelConfigLoader 不可用")
-                return ""
-
-        llm_data = model_loader._load_llm_data()
-        tiers = llm_data.get("defaults", {}).get("tiers", {})
-        model_id = tiers.get(tier, "")
-        if not model_id:
-            logger.warning("[_resolve_tier] tier=%r 未在 llm.yaml defaults.tiers 中定义", tier)
-        return model_id
-
-    @staticmethod
-    def _matches_disabled(plugin_name: str, disabled_names: list[str]) -> bool:
-        """检查插件名称是否匹配禁用列表。
-
-        支持精确匹配和前缀匹配：
-        - 'isolation_guard' 精确匹配 'isolation_guard'
-        - 'isolation_guard' 前缀匹配 'isolation'（以 _ 分隔）
-
-        Args:
-            plugin_name: 插件完整名称
-            disabled_names: 禁用名称列表
-
-        Returns:
-            是否匹配禁用列表
-        """
-        for disabled in disabled_names:
-            if plugin_name == disabled:
-                return True
-            if plugin_name.startswith(disabled + "_"):
-                return True
-        return False
 
     def _resolve_output_plugins(
         self, state: dict[str, Any], core_type: str,
@@ -724,6 +419,14 @@ class PipelineEngine:
         # 注册运行中的引擎引用，供外部通知直接注入
         _engine_reg_key = f"__running_engine_{pipeline_run_id}"
         self._services[_engine_reg_key] = self
+        # BUG-FIX-fix_20260509_wake_pipeline:
+        # 同时注册到 ServiceProvider，使 TriggerManager 的 _wake_pipeline()
+        # 能通过 provider.get() 找到运行中的引擎实例。
+        try:
+            from infrastructure.service_provider import get_service_provider
+            get_service_provider().register(_engine_reg_key, self)
+        except Exception:
+            pass
         try:
             try:
                 _log_dir = Path.cwd() / "logs"
@@ -741,10 +444,12 @@ class PipelineEngine:
                 for _ln in [
                     "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
                     "pipeline.route", "pipeline.config", "pipeline.registry",
+                    "pipeline.stream_bridge",
                     "plugins.core", "plugins.input", "plugins.output",
                     "infrastructure.task_worker", "tasks",
                     "tools.builtin", "evaluation",
                     "llm.adapter", "llm.adapter._stream",
+                    "triggers.manager",
                 ]:
                     _lg = logging.getLogger(_ln)
                     if _lg.level == logging.NOTSET:
@@ -865,6 +570,7 @@ class PipelineEngine:
                     else:
                         break
                     logger.info("Pipeline woken up, resuming loop iteration")
+                    state[StateKeys.CORE_TYPE] = "llm_call"
 
                 # 8. 获取 Core 插件 → 执行，更新 state
                 core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
@@ -1071,7 +777,7 @@ class PipelineEngine:
                         # 检查队列，有通知则注入 state 继续循环，不急着结束。
                         notif_sources: list[str] = []
 
-                        # 来源1: inject_notification() 主动触发的消息
+                        # 来源1: message_bus 注入的通知消息
                         if self._pending_notifications:
                             notif_sources.extend(self._pending_notifications[:])
                             self._pending_notifications.clear()
@@ -1106,27 +812,84 @@ class PipelineEngine:
                             )
                             continue
 
-                        # BUG-FIX: 无 route signals 时记录详细诊断信息
-                        # 便于排查管道异常退出原因
-                        _raw_tool_calls = state.get("raw_tool_calls", [])
-                        _raw_result = state.get("raw_result")
-                        _error_analysis = state.get("error_analysis")
-                        _ended = state.get(StateKeys.ENDED, False)
+                        # BUG-FIX-fix_20260509_trigger_pipeline_end:
+                        # 管道即将结束前检查是否有活跃触发器，
+                        # 如果有则挂起等待触发器唤醒，而不是直接结束。
+                        _has_active_triggers = False
+                        try:
+                            from triggers.manager import get_trigger_manager
+                            _tm = get_trigger_manager()
+                            _pipeline_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
+                            _has_active_triggers = any(
+                                t.pipeline_id == _pipeline_id
+                                and t.status.value == "active"
+                                for t in _tm._triggers.values()
+                            )
+                        except Exception:
+                            pass
+
+                        if _has_active_triggers:
+                            logger.info(
+                                "[Engine] 管道即将结束但存在活跃触发器，"
+                                "挂起等待触发器唤醒 (iter=%d)",
+                                iteration,
+                            )
+                            state[StateKeys.CORE_TYPE] = "llm_call"
+                            state["user_input"] = (
+                                "[系统提示] 管道已挂起，等待触发器唤醒。"
+                                "当触发器触发时会自动收到通知并继续执行。"
+                            )
+                            state.setdefault("messages", []).append(
+                                {"role": "user", "content": state["user_input"]}
+                            )
+                            self._suspended_state = _safe_deepcopy(state)
+                            await self._suspend_and_wait(state)
+                            if self._suspended_state is not None:
+                                state["user_input"] = self._suspended_state.get(
+                                    "user_input", state.get("user_input", ""),
+                                )
+                                state["messages"] = self._suspended_state.get(
+                                    "messages", state.get("messages", []),
+                                )
+                                if "on_chunk" in self._suspended_state:
+                                    state["on_chunk"] = self._suspended_state["on_chunk"]
+                                    self._saved_on_chunk = self._suspended_state["on_chunk"]
+                                if "streaming" in self._suspended_state:
+                                    state["streaming"] = self._suspended_state["streaming"]
+                                    self._saved_streaming = self._suspended_state["streaming"]
+                                self._suspended_state = None
+                            continue
+
+                        # 无 route signals → 挂起等待下一条用户消息，而非直接结束。
+                        # 管道只在收到显式 end 路由信号时才真正结束。
                         logger.info(
                             "No route signals after LLM response "
-                            "(iter=%d), ending pipeline. "
-                            "output_plugins_count=%d, "
-                            "raw_tool_calls=%d, ended=%s, "
-                            "has_result=%s, "
-                            "error_analysis=%s",
+                            "(iter=%d), suspending pipeline to wait for next message.",
                             iteration,
-                            len(output_plugins) if output_plugins else 0,
-                            len(_raw_tool_calls),
-                            _ended,
-                            _raw_result is not None,
-                            _error_analysis,
                         )
-                        state[StateKeys.ENDED] = True
+                        # BUG-FIX-fix_20260511_suspended_system_msg:
+                        # 问题根因: 挂起前将 "[系统提示] 管道已挂起..." 作为 user 消息
+                        # 注入到 messages 中，LLM 会看到这条无意义的消息，且
+                        # _inject_and_wake_engine 会把它拼接到用户实际消息后面。
+                        # 修复方案: 只作为 user_input 的内部占位符，不注入 messages。
+                        state["user_input"] = ""
+                        self._suspended_state = _safe_deepcopy(state)
+                        await self._suspend_and_wait(state)
+                        if self._suspended_state is not None:
+                            state["user_input"] = self._suspended_state.get(
+                                "user_input", state.get("user_input", ""),
+                            )
+                            state["messages"] = self._suspended_state.get(
+                                "messages", state.get("messages", []),
+                            )
+                            if "on_chunk" in self._suspended_state:
+                                state["on_chunk"] = self._suspended_state["on_chunk"]
+                                self._saved_on_chunk = self._suspended_state["on_chunk"]
+                            if "streaming" in self._suspended_state:
+                                state["streaming"] = self._suspended_state["streaming"]
+                                self._saved_streaming = self._suspended_state["streaming"]
+                            self._suspended_state = None
+                        continue
 
             # 管道结束后，再执行一次 Output 插件链以保存 PipelineRunSummary 等终态数据
             if state.get(StateKeys.ENDED, False):
@@ -1174,6 +937,20 @@ class PipelineEngine:
             _current_pipeline_id.reset(_pipeline_id_token)
             # 清理运行中引擎注册
             self._services.pop(_engine_reg_key, None)
+            # BUG-FIX-fix_20260509_wake_pipeline:
+            # 同步清理 ServiceProvider 中的运行态引擎注册，避免内存泄漏。
+            try:
+                from infrastructure.service_provider import get_service_provider
+                get_service_provider()._services.pop(_engine_reg_key, None)
+            except Exception:
+                pass
+            # 管道结束后自动清理旧检查点，只保留最近 2 个
+            if self._checkpoint_manager is not None:
+                try:
+                    _cp_pipeline_id = state.get(StateKeys.PIPELINE_ID, "default")
+                    await self._checkpoint_manager.cleanup_old(_cp_pipeline_id, keep_count=2)
+                except Exception as _cp_exc:
+                    logger.debug("Checkpoint cleanup failed (non-critical): %s", _cp_exc)
             # NOTE: 不在此处关闭 litellm HTTP 客户端。
             # 客户端生命周期由应用层（cli_main / auto_confirm_runner）
             # 统一管理，每次 run 完就关闭会导致后续请求报
@@ -1192,17 +969,16 @@ class PipelineEngine:
         return self._suspended_state is not None
 
     async def _suspend_and_wait(self, state: dict[str, Any]) -> None:
-        """挂起管道，等待外部通过 wake() 或 inject_and_wake() 唤醒。
+        """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。
 
         管道挂起后不退出 _run_loop，而是 await 内部 _wake_event。
-        任何外部系统都可以通过 inject_and_wake() 注入消息并唤醒管道。
+        通过 pipeline.message_bus.send_pipeline_message() 注入消息并唤醒。
 
         超时（600s）时检查是否有新通知：
         - 有新通知：唤醒管道继续执行
         - 无新通知：重新挂起等待，避免无意义的 LLM 调用循环
 
         挂起时记录 submitted_task_ids，供外部判断该管道等待哪些任务。
-        这是管道基础设施的通用机制，不依赖任何业务系统。
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
@@ -1210,7 +986,7 @@ class PipelineEngine:
 
         # 消费子任务在父管道挂起前就已入队的通知（竞态修复）
         # 合并两个来源：services 字典（_direct_notify_parent 兜底）和
-        # 实例变量（inject_notification，管道运行时注入但未在 _run_loop 消费）
+        # 实例变量（message_bus 注入，管道运行时注入但未在 _run_loop 消费）
         pending_notifications = self._services.pop(pending_key, [])
         if self._pending_notifications:
             pending_notifications.extend(self._pending_notifications[:])
@@ -1258,7 +1034,7 @@ class PipelineEngine:
                 await asyncio.wait_for(
                     self._wake_event.wait(), timeout=600,
                 )
-                # 被外部主动唤醒（inject_and_wake / wake / resume）
+                # 被外部唤醒（message_bus / wake / resume）
                 break
             except asyncio.TimeoutError:
                 # 清理本轮注册
@@ -1323,111 +1099,29 @@ class PipelineEngine:
     def wake(self) -> None:
         """唤醒挂起的管道（不注入消息）。
 
-        供任何外部系统在需要时主动恢复管道。
+        仅用于特殊场景（如 CLI 空输入唤醒）。
+        正常消息注入请使用 pipeline.message_bus.send_pipeline_message()。
         """
-        if self._wake_event is not None:
-            self._wake_event.set()
-
-    def inject_and_wake(self, user_input: str) -> None:
-        """向挂起的管道注入消息并唤醒。
-
-        将 user_input 前置注入到 _suspended_state，然后唤醒管道。
-        下一轮迭代时 LLM 会看到注入的消息。
-
-        这是管道基础设施提供的通用消息注入能力，
-        任何外部系统都可以调用来通知管道。
-
-        Args:
-            user_input: 要注入的消息文本
-        """
-        if self._suspended_state is not None and user_input:
-            orig = self._suspended_state.get("user_input", "")
-            self._suspended_state["user_input"] = f"{user_input}\n\n{orig}".strip()
-            # 注入到 messages，确保 _build_messages() 能让 LLM 看到
-            self._suspended_state.setdefault("messages", []).append(
-                {"role": "user", "content": user_input}
-            )
-            logger.info("[Engine] 消息已注入到挂起管道 state (%d 字符)", len(user_input))
-        if self._wake_event is not None:
-            self._wake_event.set()
-
-    def inject_notification(self, msg: str) -> None:
-        """向运行中的管道注入外部通知（线程安全）。
-
-        不依赖管道挂起状态，直接入队。_run_loop 每轮迭代
-        会检查 _pending_notifications，在管道结束前将通知
-        注入 state 让 LLM 处理。
-
-        Args:
-            msg: 通知消息文本
-        """
-        if not msg:
-            return
-        self._pending_notifications.append(msg)
-        logger.info(
-            "[Engine] 外部通知已入队 (queue=%d): %.80s",
-            len(self._pending_notifications), msg,
-        )
-        # 若管道在挂起中，顺便唤醒
         if self._wake_event is not None:
             self._wake_event.set()
 
     async def save_checkpoint(self, phase: str = "manual") -> str | None:
-        """手动保存管道检查点。
-
-        Args:
-            phase: 检查点阶段标记
-
-        Returns:
-            检查点 ID，无检查点管理器时返回 None
-        """
-        if self._checkpoint_manager is None:
-            logger.warning("No checkpoint manager configured")
-            return None
-
-        current_state = self._suspended_state or {}
-        if not current_state:
-            logger.warning("No state to checkpoint")
-            return None
-
-        pipeline_id = current_state.get(StateKeys.PIPELINE_ID, "default")
-        try:
-            checkpoint_id = await self._checkpoint_manager.save(pipeline_id, current_state, phase=phase)
-            logger.info("Checkpoint saved: %s (phase=%s)", checkpoint_id, phase)
-            return checkpoint_id
-        except Exception as exc:
-            logger.error("Failed to save checkpoint: %s", exc)
-            return None
+        """保存管道检查点（委托到 pipeline.checkpoint）。"""
+        from pipeline.checkpoint import save_checkpoint as _save
+        return await _save(
+            self._checkpoint_manager,
+            self._suspended_state,
+            self._pipeline_id,
+            phase,
+        )
 
     async def restore_from_checkpoint(self, checkpoint_id: str) -> bool:
-        """从检查点恢复管道状态。
-
-        Args:
-            checkpoint_id: 检查点 ID
-
-        Returns:
-            是否恢复成功
-        """
-        if self._checkpoint_manager is None:
-            logger.warning("No checkpoint manager configured")
-            return False
-
-        try:
-            data = await self._checkpoint_manager.load(checkpoint_id)
-            if data is None:
-                logger.error("Checkpoint not found: %s", checkpoint_id)
-                return False
-
-            state = data.get("state", {})
+        """从检查点恢复管道状态（委托到 pipeline.checkpoint）。"""
+        from pipeline.checkpoint import restore_from_checkpoint as _restore
+        success, state = await _restore(self._checkpoint_manager, checkpoint_id)
+        if success and state is not None:
             self._suspended_state = state
-            logger.info(
-                "Restored from checkpoint %s (iteration=%d)",
-                checkpoint_id, state.get(StateKeys.ITERATION, 0),
-            )
-            return True
-        except Exception as exc:
-            logger.error("Failed to restore from checkpoint: %s", exc)
-            return False
+        return success
 
 
     async def _apply_route(self, route: RouteSignal, state: dict[str, Any]) -> bool:
@@ -1499,6 +1193,8 @@ class PipelineEngine:
                 state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
                 state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
                 self._suspended_state = None
+                logger.info("Pipeline woken up from output wait, resetting CORE_TYPE to llm_call")
+                state[StateKeys.CORE_TYPE] = "llm_call"
                 return False
             return True
 

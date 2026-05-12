@@ -1,0 +1,27 @@
+# -*- coding: utf-8 -*-
+# 文件操作工具
+
+name: file_operate
+display_name: "文件操作"
+description: "文件操作工具：读取、写入、搜索文件"
+
+category: "file"
+level: "user"
+
+# 权限配置
+requires_approval: false
+dangerous_operations:
+  - "write:/etc/"
+  - "write:/sys/"
+  - "write:C:\\Windows\\"
+  - "delete:"
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 300  # 5 分钟
+  invalidate_on: file_change
+  cacheable_operations: ["read"]
+
+# 标签
+tags: ["file", "io"]

@@ -88,7 +88,8 @@ class TaskSubmitTool(BuiltinTool):
 任务提交工具。将任务提交给指定的 Agent 执行，配置验收标准确保结果可验证。
 
 【示例】
-{"target_type": "agent", "target_id": "general_agent", "goal": {"title": "实现用户登录"}, "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}
+{"target_type": "agent", "target_id": "code_writer_agent", "goal": {"title": "实现用户登录"}, "acceptance_criteria": {"file_check": {"input_params": {"path": "src/auth/login.py"}}}}
+注意：target_id 应使用系统提供的 Agent 映射表中的专用 Agent ID，不要用 general_agent 替代。
 """.strip(),
             input_schema={
                 "type": "object",
@@ -100,7 +101,7 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "目标 Agent ID。non_container 必填，container 不需要。可通过 resource_search 查找",
+                        "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
                     },
                     "goal": {
                         "type": "object",
@@ -112,7 +113,14 @@ class TaskSubmitTool(BuiltinTool):
                             },
                             "description": {
                                 "type": "string",
-                                "description": "详细描述（可选），补充具体要求和预期结果",
+                                "description": (
+                                    "任务描述。只写'要达成什么目标和结果'，"
+                                    "禁止写执行步骤、工具选择、流程顺序等执行细节。"
+                                    "下级Agent有自己的完整工作流，会自行决定怎么做。"
+                                    "正确示例：'实现用户登录API，支持邮箱+密码登录，返回JWT token'。"
+                                    "错误示例：'先用file_write创建login.py，再写LoginService类，"
+                                    "然后用bash_execute安装依赖，最后用test工具测试'"
+                                ),
                             },
                             "context": {
                                 "type": "object",
@@ -132,23 +140,19 @@ class TaskSubmitTool(BuiltinTool):
 key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
 【获取推荐指标】
-用 resource_search(resource_type="agent", query="agent名称") 搜索 Agent，返回的 description 中包含推荐评估指标（格式：推荐评估：metric_id(参数键值对)）。将 metric_id 作为 key、default_params 作为 input_params 基础。
+如果系统提供了 Agent 映射表，映射表的"推荐指标"列已包含推荐评估指标（格式：metric_id(参数键值对)），直接使用即可。如果没有映射表，可用 resource_search(resource_type="agent", query="agent名称") 搜索 Agent，返回的 description 中包含推荐评估指标。
 
 【按产出物选择指标】
 - 文件产出物 → file_check(存在) + format_valid(格式)
-- 测试产出物 → test_check(通过率) + bash_check(覆盖率)
-- API产出物 → api_check(响应) + format_valid(格式)
-- 代码产出物 → code_check(静态检查) + test_check(测试)
+- 代码产出物 → function_verify(功能验证) + semantic_check(质量)
+- 文档/方案产出物 → semantic_check(质量评估)
+- 需要人工确认 → human_review(人工审核)
 
 【常用评估指标】
 - file_check: 文件存在性检查。input_params: {"path": "文件路径"}
 - format_valid: 格式验证。input_params: {"path": "文件路径"} 或 {"data": "数据内容"}
-- test_check: 测试检查。input_params: {"command": "测试命令"}
-- code_check: 代码静态检查。input_params: {"command": "检查命令"}
-- bash_check: 命令执行检查。input_params: {"command": "要执行的命令"}
-- api_check: API响应检查。input_params: {"url": "API URL"}
-- function_verify: 功能验证。input_params: {"requirement": "需求描述", "implementation": "实现代码"}
 - semantic_check: 质量评估。input_params: {"criteria": "评估要求描述（自然语言）"} 或 {}（不传参数，评估Agent根据任务目标自动评估）
+- function_verify: 功能验证。input_params: {"requirement": "需求描述", "implementation": "实现代码"}
 - human_review: 人工审核。input_params: {"mode": "choice", "title": "审核标题"}
 
 【重要】所有参数值必须是正确类型：string传字符串，object传对象(不能用字符串代替)，array传数组。
@@ -599,7 +603,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 child_level = AgentLevel.L3_ATOMIC
 
             pipeline_id = inputs.get("pipeline_id")
-            task = task_service.create_task(
+            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
+            task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
                 parent_task_id=parent_task_id,
@@ -747,7 +752,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         try:
             description = inputs.get("description") or goal.get("description", "")
             pipeline_id = inputs.get("pipeline_id")
-            task = task_service.create_task(
+            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
+            task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
                 parent_pipeline_id=pipeline_id,
@@ -764,7 +770,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         pipeline_id = inputs.get("pipeline_id")
         if pipeline_id:
             try:
-                task_service.bind_pipeline_run(task.id, pipeline_id)
+                # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
+                await task_service.bind_pipeline_run(task.id, pipeline_id)
                 logger.info(
                     "[TaskSubmit] 容器任务已绑定管道 | task_id=%s | pipeline_id=%s",
                     task.id, pipeline_id,
@@ -936,6 +943,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         if session_id:
             metadata["session_id"] = session_id
 
+        # 记录提交者层级（供权限校验：每个 Agent 只能管理自己提交的任务）
+        parent_agent_level = inputs.get("parent_agent_level")
+        if parent_agent_level:
+            metadata["submitted_by_level"] = parent_agent_level
+
         # 存储执行相关参数
         # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
         # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套
@@ -991,10 +1003,21 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             break
 
         if not yaml_path or not yaml_path.exists():
+            for p in config_dir.rglob("*.yaml"):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+                    if data.get("config_id", "") == target_id:
+                        yaml_path = p
+                        break
+                except Exception:
+                    continue
+
+        if not yaml_path or not yaml_path.exists():
             return (
                 False,
                 f"目标 Agent '{target_id}' 不存在。"
-                f"请检查 target_id 是否正确，或使用 resource_search 查找可用的 Agent。",
+                f"请检查 target_id 是否正确。如果系统提供了 Agent 映射表，请使用映射表中的 Agent ID。",
                 "TARGET_AGENT_NOT_FOUND",
             )
 
@@ -1054,8 +1077,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         # BUG-FIX-fix_20260420_eval_inject: 使用文件路径推导项目根目录，
         # 而非 Path.cwd()，避免工作目录变化导致找不到配置。
-        # task_submit.py 位于 src/tools/builtin/，向上 4 层即为项目根目录。
-        _project_root = Path(__file__).resolve().parent.parent.parent.parent
+        # task_submit.py 位于 src/tools/builtin/task_submit/，向上 5 层即为项目根目录。
+        _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
 
         if not config_dir.exists():
@@ -1068,6 +1091,17 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         for p in config_dir.rglob(f"{target_id}.yaml"):
             yaml_path = p
             break
+
+        if not yaml_path or not yaml_path.exists():
+            for p in config_dir.rglob("*.yaml"):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+                    if data.get("config_id", "") == target_id:
+                        yaml_path = p
+                        break
+                except Exception:
+                    continue
 
         if not yaml_path or not yaml_path.exists():
             logger.debug(

@@ -5,8 +5,8 @@
  * 浮动定位在选中文本附近。
  */
 
-import React, { useState, useRef, useEffect } from 'react'
 import { MessageSquare, X, Send } from 'lucide-react'
+import React, { useState, useRef, useEffect } from 'react'
 
 export interface AnnotationBubbleProps {
   /** 选中的文字 */

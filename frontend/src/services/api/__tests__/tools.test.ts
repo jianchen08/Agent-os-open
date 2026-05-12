@@ -5,6 +5,7 @@
  * 与后端 /api/v1/tools/* 端点对齐
  */
 
+/* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   deleteTool,
@@ -15,7 +16,6 @@ import {
   rollbackTool,
   searchCode,
 } from '@/services/api/tools'
-
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -25,6 +25,7 @@ vi.mock('../client', () => ({
   },
 }))
 
+ 
 import apiClient from '@/services/api/client'
 
 describe('工具 API', () => {

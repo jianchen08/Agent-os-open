@@ -120,7 +120,6 @@ when_not_use:
   - 只需要格式验证（使用 format_valid）
   - 只需要验证功能是否实现（使用 function_verify）
   - 只需要简单的是/否判断（使用 Tool 类型指标）
-  - 只需要检查代码规范（使用 code_check）
 examples:
   - params:
       criteria: "报告应包含摘要、背景、方法、结论四个章节，内容需要有足够的深度"

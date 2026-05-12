@@ -181,6 +181,15 @@
   --status-pending-color: #94a3b8;
   --status-pending-shadow: none;
 
+  /* 状态别名变量（不带 -color 后缀，供 Tailwind 引用） */
+  --status-running: var(--status-running-color);
+  --status-waiting: var(--status-waiting-color);
+  --status-warning: var(--status-waiting-color);
+  --status-success: var(--status-success-color);
+  --status-error: var(--status-error-color);
+  --status-info: #3b82f6;
+  --status-pending: var(--status-pending-color);
+
   /* 思考过程样式 */
   --thinking-text-color: rgba(100, 100, 115, 0.7);
   --thinking-border-color: rgba(59, 130, 246, 0.3);
@@ -267,6 +276,15 @@
 
   --status-pending-color: #94a3b8;
   --status-pending-shadow: none;
+
+  /* 状态别名变量（不带 -color 后缀，供 Tailwind 引用） */
+  --status-running: var(--status-running-color);
+  --status-waiting: var(--status-waiting-color);
+  --status-warning: var(--status-waiting-color);
+  --status-success: var(--status-success-color);
+  --status-error: var(--status-error-color);
+  --status-info: #60a5fa;
+  --status-pending: var(--status-pending-color);
 
   /* 思考过程样式 - dark */
   --thinking-text-color: rgba(180, 180, 195, 0.6);

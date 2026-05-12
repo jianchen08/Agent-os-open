@@ -15,6 +15,7 @@
 """
 
 import importlib
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -93,16 +94,18 @@ class DynamicToolLoader:
 
         logger.info("[动态加载] 开始自动发现工具...")
 
-        # 获取项目根目录
-        project_root = Path(__file__).parent.parent.parent
+        # BUG-FIX-fix_20260510: 使用 src 目录而非项目根目录作为基准
+        # sys.path 包含 "Agent os/src"，模块路径应为 "tools.builtin.xxx" 而非 "src.tools.builtin.xxx"
+        # 否则 importlib.import_module("src.tools.builtin...") 会因 sys.path 中无 "Agent os" 而失败
+        src_root = Path(__file__).parent.parent
 
         # 扫描所有 Python 文件
         for py_file in builtin_dir.rglob("*.py"):
             if py_file.name.startswith("_"):
                 continue
 
-            # 构建模块路径（相对于项目根目录）
-            relative_path = py_file.relative_to(project_root)
+            # 构建模块路径（相对于 src 根目录）
+            relative_path = py_file.relative_to(src_root)
             module_path = str(relative_path.with_suffix("")).replace(os.sep, ".")
 
             # 尝试导入模块并发现工具类
@@ -126,13 +129,15 @@ class DynamicToolLoader:
                 if not isinstance(attr, type):
                     continue
 
-                # 检查是否是 BuiltinTool 子类（但不是 BuiltinTool 本身）
+                # 检查是否是 BuiltinTool 子类（但不是 BuiltinTool 本身或抽象基类）
                 try:
                     from tools.builtin.base import BuiltinTool
 
                     if not issubclass(attr, BuiltinTool):
                         continue
                     if attr is BuiltinTool:
+                        continue
+                    if inspect.isabstract(attr):
                         continue
                 except (ImportError, TypeError):
                     continue
