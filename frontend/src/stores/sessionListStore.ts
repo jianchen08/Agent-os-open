@@ -12,8 +12,11 @@ import {
 } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { useAgentStore } from './agentStore'
+import { useAgentTabStore } from './agentTabStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
+import { useStreamingStore } from './streamingStore'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
@@ -110,6 +113,17 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }
   },
 
+  /**
+   * 删除会话（含完整清理）
+   *
+   * BUG-FIX-fix_20260513_delete_session:
+   * 问题根因: 删除会话时仅按 sessionId 清理，未遍历 pipelineSessionMap 找到所有子管道，
+   *          导致流式传输未终止、子管道数据残留、Agent Tab 状态未清理、后端进程未取消。
+   * 修复方案: 按顺序执行：发送取消信号 → 停止流式 → 查找所有管道 → 清理管道数据 →
+   *          清理 Agent Tab → 调用后端 API → 更新会话状态。
+   * 影响范围: 会话删除流程的所有 Store 状态
+   * 修复日期: 2026-05-13
+   */
   deleteSession: async (id: string) => {
     useSessionStore.setState((state) => ({
       deletingSessionIds: new Set(state.deletingSessionIds).add(id),
@@ -117,21 +131,77 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }))
 
     try {
-      await deleteSessionApi(id)
+      // 1. 发送 WebSocket 取消信号，让后端停止运行中的 Agent 进程
+      globalWS.sendCancel(id, '会话已删除')
 
-      // 清理 pipelineMessageStore 中该会话的所有管道数据
+      // 2. 查找所有属于该会话的 pipelineId（主管道 + 子管道 + 孙管道）
       const pipelineStore = usePipelineMessageStore.getState()
-      const { [id]: _removedMessages, ...restMessages } = pipelineStore.messagesByPipeline
-      const { [id]: _removedPipelines, ...restPipelines } = pipelineStore.pipelines
-      const { [id]: _removedSessionMap, ...restSessionMap } = pipelineStore.pipelineSessionMap
-      const { [id]: _removedStreaming, ...restStreaming } = pipelineStore.streamingState
+      const allPipelineIds = Object.entries(pipelineStore.pipelineSessionMap)
+        .filter(([, sessionId]) => sessionId === id)
+        .map(([pipelineId]) => pipelineId)
+      // sessionId 本身也可能是主管道 ID
+      if (!allPipelineIds.includes(id)) {
+        allPipelineIds.push(id)
+      }
+
+      // 3. 停止所有管道的流式传输
+      const streamingStore = useStreamingStore.getState()
+      for (const pipelineId of allPipelineIds) {
+        const tabId = useAgentTabStore.getState().getTabIdByPipeline(pipelineId)
+        if (tabId) {
+          streamingStore.stopStreamingForTab(tabId)
+        }
+      }
+
+      // 4. 清理 pipelineMessageStore 中所有相关管道的数据
+      const {
+        messagesByPipeline: curMessages,
+        pipelines: curPipelines,
+        pipelineSessionMap: curSessionMap,
+        streamingState: curStreaming,
+        topCursorsByPipeline: curTopCursors,
+        bottomCursorsByPipeline: curBottomCursors,
+        hasMoreOlderByPipeline: curHasMore,
+        isLoadingOlderByPipeline: curLoadingOlder,
+      } = pipelineStore
+
+      const removeSet = new Set(allPipelineIds)
+      const filterByKey = <T>(record: Record<string, T>): Record<string, T> => {
+        const result: Record<string, T> = {}
+        for (const [key, value] of Object.entries(record)) {
+          if (!removeSet.has(key)) {
+            result[key] = value
+          }
+        }
+        return result
+      }
+
       usePipelineMessageStore.setState({
-        messagesByPipeline: restMessages,
-        pipelines: restPipelines,
-        pipelineSessionMap: restSessionMap,
-        streamingState: restStreaming,
+        messagesByPipeline: filterByKey(curMessages),
+        pipelines: filterByKey(curPipelines),
+        pipelineSessionMap: filterByKey(curSessionMap),
+        streamingState: filterByKey(curStreaming),
+        topCursorsByPipeline: filterByKey(curTopCursors),
+        bottomCursorsByPipeline: filterByKey(curBottomCursors),
+        hasMoreOlderByPipeline: filterByKey(curHasMore),
+        isLoadingOlderByPipeline: filterByKey(curLoadingOlder),
       })
 
+      // 5. 清理 agentTabStore（标签页、映射、localStorage）
+      const agentTabStore = useAgentTabStore.getState()
+      if (agentTabStore.currentSessionId === id) {
+        agentTabStore.resetAllTabs()
+        try {
+          localStorage.removeItem(`agent-tabs-${id}`)
+        } catch {
+          // localStorage 清理失败不影响主流程
+        }
+      }
+
+      // 6. 调用后端删除 API
+      await deleteSessionApi(id)
+
+      // 7. 更新 sessionStore 状态
       useSessionStore.setState((state) => {
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)

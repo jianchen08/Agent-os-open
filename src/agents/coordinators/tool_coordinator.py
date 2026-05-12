@@ -9,7 +9,6 @@
 - 处理 subagent 工具调用（通过 TaskClient）
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -115,32 +114,21 @@ class ToolCoordinator:
         # 转换为 LangChain 工具格式
         return self._convert_to_langchain_tools(tool_defs)
 
+    # BUG-FIX-fix_20260513_tool_injection_race: 非核心工具动态加载竞态条件
+    # 问题根因: _ensure_dynamic_tools_loaded 使用 create_task 异步加载但不等待完成，
+    #           导致后续同步获取工具时工具尚未注册
+    # 修复方案: 使用 ensure_loaded_sync 同步加载，确保工具在获取前完成注册
+    # 影响范围: 所有不在 CORE_SYSTEM_TOOLS 中的工具（playwright_test、list_directory 等）
+    # 修复日期: 2026-05-13
+
     def _ensure_dynamic_tools_loaded(self) -> None:
-        """确保动态工具已加载"""
+        """确保动态工具已加载（同步方式，保证加载完成后才返回）"""
         from src.tools.loader import get_dynamic_tool_loader
-        from src.utils.background_tasks import get_global_task_manager
 
         loader = get_dynamic_tool_loader()
         if loader is not None:
             try:
-                # 获取事件循环（可能在非异步上下文）
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # 在运行的循环中，使用后台任务管理器保存引用
-                        task_manager = get_global_task_manager()
-                        asyncio.create_task(
-                            task_manager.start_task(
-                                name=f"dynamic_tool_load_{id(self)}",
-                                coro=loader.ensure_loaded(self.tool_ids),
-                            )
-                        )
-                    else:
-                        # 在新循环中运行
-                        loop.run_until_complete(loader.ensure_loaded(self.tool_ids))
-                except RuntimeError:
-                    # 没有事件循环，创建新的
-                    asyncio.run(loader.ensure_loaded(self.tool_ids))
+                loader.ensure_loaded_sync(self.tool_ids)
             except Exception as e:
                 logger.warning(f"动态加载工具失败 | error={e}")
 

@@ -74,6 +74,7 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
     const allToolCalls: Message['toolCalls'] = []
     const allContent: string[] = []
     const interleavedBlocks: Message['contentBlocks'] = []
+    const seenCallIds = new Set<string>()
     for (const m of group) {
       if (m.thinking?.content && m.thinking.content.trim()) {
         interleavedBlocks.push({ type: 'thinking', thinking: { content: m.thinking.content.trim(), isThinking: false }, sourceId: m.id })
@@ -84,6 +85,8 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       }
       if (m.toolCalls && m.toolCalls.length > 0) {
         for (const tc of m.toolCalls) {
+          if (tc.call_id && seenCallIds.has(tc.call_id)) continue
+          if (tc.call_id) seenCallIds.add(tc.call_id)
           allToolCalls.push(tc)
           interleavedBlocks.push({ type: 'tool_call', toolCall: tc, sourceId: m.id })
         }
@@ -434,6 +437,7 @@ export const ChatContainer = ({
       {/* BUG-FIX-fix_20260512_input_state_shared: key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
       <ChatInput
         key={`input-${activeTabId || sessionId}`}
+        draftKey={activeTabId || sessionId}
         isGenerating={effectiveIsGenerating}
         onSendMessage={(params) => {
           /**

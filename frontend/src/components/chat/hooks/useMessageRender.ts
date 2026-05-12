@@ -98,7 +98,7 @@ function buildFragments(contentBlocks: ContentBlock[], messageId: string): Rende
             type: 'tool_call',
             toolCall: block.toolCall,
             activity,
-            key: `${messageId}-tool-${block.toolCall.call_id}`,
+            key: `${messageId}-tool-${block.toolCall.call_id}-${block.sourceId || 'src'}-${i}`,
             index: toolCallIndex,
             total: toolCallCount,
           })

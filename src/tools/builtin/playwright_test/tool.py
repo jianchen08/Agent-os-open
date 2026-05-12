@@ -10,9 +10,9 @@ import json
 import logging
 from typing import Any
 
-from src.core.results import ToolExecutionResult
-from src.tools.builtin.base import BuiltinTool
-from src.tools.types import (
+from core.results import ToolExecutionResult
+from tools.builtin.base import BuiltinTool
+from tools.types import (
     Tool,
     ToolCategory,
     ToolSource,

@@ -34,6 +34,7 @@ import { useVoiceInput } from '@/hooks/useVoiceInput'
 import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { ThinkingModeToggle } from './ThinkingModeToggle'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
@@ -141,11 +142,18 @@ export const ChatInput = ({
   thinkingMode,
   toggleThinkingMode,
   className = '',
+  draftKey,
 }: ChatInputProps) => {
   /** 获取模型能力配置 */
   const { inputCapabilities } = useModelCapabilities(modelName)
 
-  const [text, setText] = useState('')
+  /** 初始化时从草稿 store 加载文本 */
+  const [text, setText] = useState(() => {
+    if (draftKey) {
+      return useChatInputStore.getState().loadDraft(draftKey)
+    }
+    return ''
+  })
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
@@ -153,6 +161,8 @@ export const ChatInput = ({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  /** 追踪最新文本值，用于组件卸载时保存草稿 */
+  const textRef = useRef(text)
 
   /** 思考模式状态：优先使用外部传入的值 */
   const currentThinkingMode: ThinkingModeState = thinkingMode || {
@@ -239,7 +249,14 @@ export const ChatInput = ({
    */
   const handleVoiceTranscriptionComplete = useCallback((transcribedText: string) => {
     if (transcribedText.trim()) {
-      setText((prev) => (prev ? `${prev} ${transcribedText}` : transcribedText))
+      setText((prev) => {
+        const newText = prev ? `${prev} ${transcribedText}` : transcribedText
+        textRef.current = newText
+        if (draftKey) {
+          useChatInputStore.getState().saveDraft(draftKey, newText)
+        }
+        return newText
+      })
       setTimeout(() => {
         const textarea = textareaRef.current
         if (textarea) {
@@ -248,7 +265,7 @@ export const ChatInput = ({
         }
       }, 0)
     }
-  }, [])
+  }, [draftKey])
 
   /** 语音输入 Hook */
   const voiceInput = useVoiceInput({
@@ -273,8 +290,13 @@ export const ChatInput = ({
 
   /** 处理文本变化 */
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value)
+    const newText = e.target.value
+    setText(newText)
+    textRef.current = newText
     adjustTextareaHeight()
+    if (draftKey) {
+      useChatInputStore.getState().saveDraft(draftKey, newText)
+    }
   }
 
   /** 处理键盘事件 */
@@ -415,9 +437,15 @@ export const ChatInput = ({
 
     onSendMessage(params)
     setText('')
+    textRef.current = ''
     setAttachments([])
     setPendingFiles([])
     setUploadError(null)
+
+    /** 发送后清除草稿 */
+    if (draftKey) {
+      useChatInputStore.getState().clearDraft(draftKey)
+    }
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -502,6 +530,38 @@ export const ChatInput = ({
       })
     }
   }, [pendingFiles])
+
+  /** 消费外部插入文本（如引用功能注入的文本） */
+  const pendingInsert = useChatInputStore((s) => s.pendingInsert)
+  useEffect(() => {
+    if (!pendingInsert) return
+    setText((prev) => {
+      const newText = prev ? `${prev}\n${pendingInsert}` : pendingInsert
+      textRef.current = newText
+      if (draftKey) {
+        useChatInputStore.getState().saveDraft(draftKey, newText)
+      }
+      return newText
+    })
+    useChatInputStore.getState().consumeInsert()
+    setTimeout(() => {
+      const textarea = textareaRef.current
+      if (textarea) {
+        textarea.style.height = 'auto'
+        textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+        textarea.focus()
+      }
+    }, 0)
+  }, [pendingInsert, draftKey])
+
+  /** 组件卸载前保存当前文本到草稿 */
+  useEffect(() => {
+    return () => {
+      if (draftKey) {
+        useChatInputStore.getState().saveDraft(draftKey, textRef.current)
+      }
+    }
+  }, [draftKey])
 
   const isUploading = pendingFiles.some((pf) => pf.status === 'uploading')
   const isCompactMode = mode === 'compact'

@@ -192,9 +192,6 @@ export function FiveSpaceLayout({
     const taskScope = (node.task_scope as string) ?? 'non_container'
     if (taskScope === 'container') return
 
-    const children = node.children as unknown[] | undefined
-    if (Array.isArray(children) && children.length > 0) return
-
     const agentLevelStr = (node.agent_level as string) ?? ''
     let agentLevel: 1 | 2 | 3 = 2
     if (agentLevelStr) {

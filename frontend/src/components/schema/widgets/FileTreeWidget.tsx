@@ -711,6 +711,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               onFileClick={onFileClick}
               onRefresh={triggerRefresh}
               togglingIds={togglingIds}
+              enabledMap={enabledMap}
               onToggleEnabled={handleToggleEnabled}
             />
           ))
@@ -756,6 +757,8 @@ interface TreeNodeProps {
   onRefresh?: () => void
   /** 正在切换中的节点 ID 集合 */
   togglingIds: Set<string>
+  /** 节点启用/禁用状态映射 */
+  enabledMap: Record<string, boolean>
   /** 级联切换启用/禁用回调 */
   onToggleEnabled: (nodeId: string, enabled: boolean) => void
 }
@@ -816,6 +819,7 @@ function TreeNode({
   onFileClick,
   onRefresh,
   togglingIds,
+  enabledMap,
   onToggleEnabled,
 }: TreeNodeProps): React.ReactNode {
   const nodeId = getStableNodeId(node)
@@ -1109,6 +1113,7 @@ function TreeNode({
               onNodeClick={onNodeClick}
               onFileClick={onFileClick}
               onRefresh={onRefresh}
+              togglingIds={togglingIds}
               enabledMap={enabledMap}
               onToggleEnabled={onToggleEnabled}
             />

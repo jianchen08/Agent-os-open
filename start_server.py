@@ -12,9 +12,11 @@ WebSocket 处理通过实际的 PipelineEngine 驱动 AI 回复，
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
+import socket
 import sys
 import os
 import uuid
@@ -698,8 +700,7 @@ async def _stream_wake_response(
 
     if pre_created_bridge is not None:
         bridge = pre_created_bridge
-        # BUG-FIX: 保留 TargetedSink（全局端点场景），
-        # 仅在有 ws_notifier 且 bridge 不是 TargetedSink 时才替换
+        bridge.pipeline_id = pipeline_id
         if ws_notifier is not None:
             bridge.output_sink = TargetedSink(ws_notifier, thread_id)
     else:
@@ -867,6 +868,7 @@ async def _stream_engine_response(
     # 用统一的 pipeline_id 创建或更新 Bridge
     if pre_created_bridge is not None:
         bridge = pre_created_bridge
+        bridge.pipeline_id = pipeline_id
     else:
         bridge = PipelineStreamBridge(
             pipeline_id=pipeline_id,
@@ -909,7 +911,10 @@ async def _stream_engine_response(
             """发送心跳确认消息，防止前端连接超时。"""
             try:
                 await asyncio.wait_for(
-                    websocket.send_text(json.dumps({"type": "heartbeat_ack"}, ensure_ascii=False)),
+                    ws_notifier.send_to_thread(
+                        thread_id,
+                        {"type": "heartbeat_ack", "data": {"server_time": datetime.now(timezone.utc).isoformat()}},
+                    ),
                     timeout=3.0,
                 )
             except (asyncio.TimeoutError, Exception):
@@ -1009,13 +1014,19 @@ async def _stream_engine_response(
                 "补发 stream_chunk: message_id=%s, content_len=%d",
                 message_id, len(actual_content),
             )
-            await websocket.send_text(json.dumps({
-                "type": "stream_chunk",
-                "data": {
-                    "content": actual_content,
-                    "message_id": message_id,
-                },
-            }, ensure_ascii=False))
+            try:
+                await asyncio.wait_for(
+                    ws_notifier.send_to_thread(thread_id, {
+                        "type": "stream_chunk",
+                        "data": {
+                            "content": actual_content,
+                            "message_id": message_id,
+                        },
+                    }),
+                    timeout=5.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
 
         # ---- new_message 最终消息（通过 bridge 发送）----
         await bridge.send_new_message(actual_content, sequence=1)
@@ -1192,7 +1203,8 @@ def create_combined_app() -> FastAPI:
                     _user_content = msg_data.get("content", "")
                     if not _user_content:
                         continue
-                    _msg_id = msg_data.get("client_message_id") or uuid.uuid4().hex[:12]
+                    _msg_id = uuid.uuid4().hex[:12]
+                    _client_msg_id = msg_data.get("client_message_id", "")
                     _pipeline_id = msg_data.get("pipeline_id", "")
                     _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])
@@ -1292,6 +1304,7 @@ def create_combined_app() -> FastAPI:
                             _stream_engine_response(
                                 websocket, _user_content, _msg_id,
                                 _stop_evt, thread_id, _history, _pipeline_ctx,
+                                ws_notifier=_ws_interaction_notifier,
                                 pre_created_bridge=_main_bridge,
                             )
                         )
@@ -1444,15 +1457,66 @@ def create_combined_app() -> FastAPI:
 # ---------------------------------------------------------------------------
 
 
+def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
+    """从 start_port 开始查找可用端口。
+
+    通过尝试绑定端口来判断是否可用，如果指定端口被占用则依次递增，
+    最多搜索到 start_port + 100。
+
+    Args:
+        start_port: 起始端口号
+        host: 绑定地址，默认 0.0.0.0
+
+    Returns:
+        第一个可用的端口号
+
+    Raises:
+        RuntimeError: 在搜索范围内没有可用端口
+    """
+    for port in range(start_port, start_port + 100):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return port
+        except OSError:
+            logger.debug("端口 %d 已被占用，尝试下一个", port)
+            continue
+    raise RuntimeError(f"在端口 {start_port}-{start_port + 99} 范围内没有可用端口")
+
+
 def main() -> None:
-    """主函数，启动 uvicorn 服务器。"""
+    """主函数，启动 uvicorn 服务器。
+
+    端口优先级：
+    1. 命令行参数 --port
+    2. 环境变量 BACKEND_PORT
+    3. 默认值 8888
+
+    如果指定端口被占用，自动查找下一个可用端口。
+    """
+    parser = argparse.ArgumentParser(description="Agent OS 服务器")
+    parser.add_argument("--port", type=int, default=None, help="后端服务端口")
+    args = parser.parse_args()
+
+    default_port = 8888
+    preferred_port = args.port or int(os.environ.get("BACKEND_PORT", default_port))
+
+    actual_port = find_available_port(preferred_port)
+
+    if actual_port != preferred_port:
+        logger.warning(
+            "端口 %d 已被占用，自动切换到 %d", preferred_port, actual_port,
+        )
+
     logger.info("正在启动 Agent OS 服务器...")
-    logger.info("API 地址: http://localhost:8888")
-    logger.info("API 文档: http://localhost:8888/docs")
-    logger.info("健康检查: http://localhost:8888/health")
+    logger.info("API 地址: http://localhost:%d", actual_port)
+    logger.info("API 文档: http://localhost:%d/docs", actual_port)
+    logger.info("健康检查: http://localhost:%d/health", actual_port)
+
+    os.environ["BACKEND_PORT"] = str(actual_port)
 
     app = create_combined_app()
-    uvicorn.run(app, host="0.0.0.0", port=8888, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=actual_port, log_level="info")
 
 
 if __name__ == "__main__":

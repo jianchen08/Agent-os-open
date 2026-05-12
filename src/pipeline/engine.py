@@ -399,6 +399,12 @@ class PipelineEngine:
         _pipeline_log_handler = None
         _pipeline_loggers: list[logging.Logger] = []
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
+        # BUG-FIX-fix_20260513_pipeline_cross_talk:
+        # 同步引擎实例 ID 与当前管道 ID，防止同一引擎被注册到多个 pipeline_id 下
+        # 导致通知路由到错误管道（消息串线）。
+        # 场景：引擎复用时 self._pipeline_id 为旧值，state[PIPELINE_ID] 为新值，
+        # _suspend_and_wait 的双重注册会将同一引擎挂到两个 pipeline_id 下。
+        self._pipeline_id = pipeline_run_id
         _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
         # 重置连续错误计数器
         self._consecutive_core_errors = 0
@@ -1019,8 +1025,6 @@ class PipelineEngine:
             self._wake_event = asyncio.Event()
             self._services[f"__suspended_engine_{pipeline_id}"] = self
             register_suspended_engine(pipeline_id, self)
-            if self._pipeline_id and self._pipeline_id != pipeline_id:
-                register_suspended_engine(self._pipeline_id, self)
 
             try:
                 from infrastructure.service_provider import get_service_provider
@@ -1083,8 +1087,6 @@ class PipelineEngine:
         # 最终清理
         self._services.pop(f"__suspended_engine_{pipeline_id}", None)
         unregister_suspended_engine(pipeline_id)
-        if self._pipeline_id and self._pipeline_id != pipeline_id:
-            unregister_suspended_engine(self._pipeline_id)
         try:
             from infrastructure.service_provider import get_service_provider
             get_service_provider()._services.pop(

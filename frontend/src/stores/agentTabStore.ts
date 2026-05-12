@@ -13,7 +13,22 @@
 
 import { create } from 'zustand'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { AgentTab } from '@/types/task'
+
+/**
+ * 获取主管道 ID
+ *
+ * BUG-FIX-fix_20260513_main_tab_pipeline:
+ * 问题根因: 主管道消息以 session.activePipelineId 为 key 存储在 pipelineMessageStore 中，
+ *          但 switchToTab/closeTab 用 currentSessionId 激活管道，两者不一致导致消息不显示。
+ * 修复方案: 统一通过此函数获取主管道 ID，确保管道激活与消息存储使用同一 key。
+ */
+function getMainPipelineId(sessionId: string): string | null {
+  const sessions = useSessionStore.getState().sessions
+  const session = sessions.find((s) => s.id === sessionId)
+  return session?.activePipelineId || session?.pipelineIds?.[0] || null
+}
 
 /** localStorage 存储键前缀 */
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
@@ -174,21 +189,31 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     if (saved) {
-      const mainTab = saved.tabs.find((t) => t.agentLevel === 1)
       set({
         currentSessionId: sessionId,
         tabs: saved.tabs,
-        activeTabId: mainTab?.id || saved.activeTabId || null,
+        activeTabId: saved.activeTabId || null,
         tabMessages: {},
         tabMessagesLoading: {},
         unreadCounts: {},
         pipelineTabMap: saved.pipelineTabMap || {},
       })
 
-      // 后台异步：对有 pipelineRunId 的子 Tab，从 API 加载消息到 pipelineMessageStore
-      // 使用 loadTabMessages 而非直接调 fetchMessages，因为 loadTabMessages 有 404 静默处理
+      const pipelineStore = usePipelineMessageStore.getState()
       saved.tabs.forEach((tab) => {
-        if (tab.parentRecordId && tab.agentLevel !== 1) {
+        if (tab.agentLevel !== 1 && tab.pipelineRunId) {
+          if (!pipelineStore.pipelines[tab.pipelineRunId]) {
+            pipelineStore.registerPipeline({
+              pipelineId: tab.pipelineRunId,
+              sessionId,
+              level: tab.agentLevel as 1 | 2 | 3,
+              tabId: tab.id,
+              agentName: tab.agentName,
+              status: 'running',
+              parentId: sessionId,
+              unreadCount: 0,
+            })
+          }
           get().loadTabMessages(tab.id)
         }
       })
@@ -503,9 +528,17 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       const mainTab = tabs.find((t) => t.agentLevel === 1)
       if (mainTab && activeTabId === mainTab.id) {
         const pipelineStore = usePipelineMessageStore.getState()
-        pipelineStore.activatePipeline(currentSessionId)
-        if (!pipelineStore.messagesByPipeline[currentSessionId]?.length) {
-          pipelineStore.fetchMessages(currentSessionId, { threadId: currentSessionId })
+        // BUG-FIX-fix_20260513_main_tab_pipeline:
+        // 问题根因: 同 switchToTab，用 currentSessionId 而非 actual pipelineId
+        // 修复方案: 通过 getMainPipelineId() 获取实际的管道 ID
+        // 影响范围: 关闭子 Tab 后回退到主 Tab 时的消息显示
+        // 修复日期: 2026-05-13
+        const mainPipelineId = getMainPipelineId(currentSessionId)
+        if (mainPipelineId) {
+          pipelineStore.activatePipeline(mainPipelineId)
+          if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
+            pipelineStore.fetchMessages(mainPipelineId, { threadId: currentSessionId })
+          }
         }
       }
     }
@@ -535,7 +568,16 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (tab.agentLevel === 1) {
       const { currentSessionId } = get()
       if (currentSessionId) {
-        pipelineStore.activatePipeline(currentSessionId)
+        // BUG-FIX-fix_20260513_main_tab_pipeline:
+        // 问题根因: 之前用 currentSessionId 激活管道，但主管道消息以 session.activePipelineId
+        //          为 key 存储在 pipelineMessageStore 中，两者不一致导致 pipelineMessages 读到空数组。
+        // 修复方案: 通过 getMainPipelineId() 获取实际的管道 ID 来激活。
+        // 影响范围: 从子 Tab 切换回主 Tab 时的消息显示
+        // 修复日期: 2026-05-13
+        const mainPipelineId = getMainPipelineId(currentSessionId)
+        if (mainPipelineId) {
+          pipelineStore.activatePipeline(mainPipelineId)
+        }
       }
     } else {
       const effectivePipelineId = tab.pipelineRunId || tabId
@@ -556,6 +598,15 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (tab.agentLevel !== 1) {
       get().loadTabMessages(tabId)
     }
+
+    // BUG-FIX-fix_20260513_tab_not_restored:
+    // 问题根因: switchToTab 切换标签后未调用 saveCurrentTabs()，
+    //          导致 localStorage 中保存的仍是旧的 activeTabId，
+    //          刷新页面后恢复到错误的标签（如上次选中的子标签而非当前主标签）。
+    // 修复方案: 切换完成后调用 saveCurrentTabs() 持久化当前标签状态。
+    // 影响范围: 标签切换后刷新页面的标签恢复
+    // 修复日期: 2026-05-13
+    get().saveCurrentTabs()
   },
 
   /**

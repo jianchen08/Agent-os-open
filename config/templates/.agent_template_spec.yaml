@@ -728,8 +728,8 @@ output_schema:
 #       - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本
 #       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check 或 function_verify
 #       - 一般任务（例行操作、低风险变更、简单执行）→ 仅用 tool 类指标（file_check、format_valid 等）
-#       - 资源创建/修改类：优先考虑 semantic_check 或 function_verify
-#       - 调研/通用执行类：一般仅用 file_check，重要时可选 semantic_check
+#       - 调研/通用执行/编排类：一般仅用 file_check
+#       - 代码编写环节本身只需 file_check + format_valid，质量由下游 Agent 层层把关
 
 deliverables:
   - name: "{deliverable_name}"
@@ -791,8 +791,8 @@ recommended_metrics:
 #   - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本，仅用于重要任务
 #   - 重要任务判断：涉及核心功能、影响项目质量、用户明确强调质量要求
 #   - 一般任务（例行操作、低风险变更、简单执行）仅用 tool 类指标（file_check、format_valid 等）
-#   - 资源创建/修改类：优先考虑 semantic_check 或 function_verify
-#   - 调研/通用执行类：一般仅用 file_check，重要时可选 semantic_check
+#   - 调研/通用执行/编排类：一般仅用 file_check
+#   - 代码编写环节本身只需 file_check + format_valid，质量由下游 Agent（code_reviewer、test_debug、function_verifier）层层把关
 # - 示例:
 #   recommended_metrics:
 #     - metric_id: file_check

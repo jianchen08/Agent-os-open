@@ -286,7 +286,7 @@ class TaskTool(BuiltinTool):
             category=ToolCategory.TASK,
             level=ToolLevel.SYSTEM,
             tags=["task", "management", "L1", "L2", "status", "control"],
-            injected_params=["session_id", "user_id", "_session"],
+            injected_params=["session_id", "user_id", "_session", "pipeline_id"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -375,6 +375,15 @@ class TaskTool(BuiltinTool):
             return True, None
 
         # 兼容旧任务（无 submitted_by_level）
+        pipeline_id = inputs.get("pipeline_id")
+        if pipeline_id:
+            if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                return False, (
+                    f"任务不属于当前管道：task.parent_pipeline_id={task.parent_pipeline_id}，"
+                    f"当前 pipeline_id={pipeline_id}"
+                )
+            return True, None
+
         if parent_agent_level == 1:
             session_id = inputs.get("session_id")
             if session_id and task.metadata.get("session_id") != session_id:
@@ -475,6 +484,7 @@ class TaskTool(BuiltinTool):
         try:
             task_scope = inputs.get("task_scope", "all")
             project_id = inputs.get("project_id")
+            pipeline_id = inputs.get("pipeline_id")
             limit = inputs.get("limit", 5)
 
             # BUG-FIX-fix_20260512_async_list_all: 添加 await
@@ -483,6 +493,11 @@ class TaskTool(BuiltinTool):
             # 按权限和条件过滤
             filtered_tasks = []
             for task in tasks:
+                # 管道隔离：只能看到当前管道提交的任务
+                if pipeline_id:
+                    if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                        continue
+
                 if parent_agent_level == 1:
                     session_id = inputs.get("session_id")
                     if session_id and task.metadata.get("session_id") != session_id:
@@ -711,6 +726,7 @@ class TaskTool(BuiltinTool):
         try:
             status_filter = inputs.get("status")
             session_id = inputs.get("session_id")
+            pipeline_id = inputs.get("pipeline_id")
             user_parent_task_id = inputs.get("parent_task_id")
             limit = inputs.get("limit", 5)
 
@@ -731,6 +747,11 @@ class TaskTool(BuiltinTool):
             for task in tasks:
                 if status_filter and task.status.value != status_filter:
                     continue
+
+                # 管道隔离：只能看到当前管道提交的任务
+                if pipeline_id:
+                    if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                        continue
 
                 if parent_agent_level == 1 and session_id:
                     if task.metadata.get("session_id") != session_id:

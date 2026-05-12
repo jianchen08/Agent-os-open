@@ -3,15 +3,6 @@
 通过依赖注入组合状态机、存储和进度计算器，
 提供任务生命周期管理的统一入口。
 
-BUG-FIX-fix_20260512_async_compat:
-问题根因: FileTaskStorage 的 save()/delete() 等方法是 async，
-          但 TaskService 以同步方式调用，导致返回 coroutine 对象。
-          任务数据无法持久化，list_all() 返回 coroutine。
-修复方案: 将所有调用 self._storage.save()/delete() 的方法改为 async，
-          读操作（get_task/list_by_status/list_subtasks）保持同步（从缓存读取）。
-影响范围: 所有通过 TaskService 管理的任务 CRUD 和状态转换操作。
-修复日期: 2025-05-12
-
 精简原则：
 - 去掉事件驱动 -> 同步方法调用
 - 去掉消息总线 -> 日志记录
@@ -25,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from tasks.state_machine import InvalidTransitionError
-from tasks.storage import FileTaskStorage
+from tasks.storage import TaskStorage
 from tasks.types import TaskModel, TaskStatus, create_task
 
 logger = logging.getLogger(__name__)
@@ -37,7 +28,6 @@ class SimpleStateMachine:
     定义合法的状态转换路径。
     """
 
-    # 合法转换：{from_status: [to_status, ...]}
     TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
         TaskStatus.PENDING: [TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.COMPLETED, TaskStatus.FAILED],
         TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EVALUATING, TaskStatus.PAUSED],
@@ -76,22 +66,18 @@ class TaskService:
     组合状态机、存储和进度计算器，提供任务的创建、
     状态转换、查询和进度计算等业务操作。
 
-    状态变更时自动通过 EventBus 广播 ``task_state_changed`` 事件，
-    无需外部注册回调。TaskWorker 订阅该事件后自动处理
-    父管道通知、终态钩子等逻辑。
-
     Attributes:
-        _storage: 任务存储实例
+        _storage: 任务存储实例（TaskStorage，按根任务分子目录 YAML 持久化）
         _state_machine: 状态机实例
         _progress: 进度计算器实例
-        _scheduler: 调度器实例（可选，用于任务调度）
-        _concurrency: 并发控制器（可选，用于资源管控）
-        _event_bus: 事件总线（可选，用于广播状态变更事件）
+        _scheduler: 调度器实例（可选）
+        _concurrency: 并发控制器（可选）
+        _event_bus: 事件总线（可选）
     """
 
     def __init__(
         self,
-        storage: FileTaskStorage | None = None,
+        storage: TaskStorage | None = None,
         state_machine: SimpleStateMachine | None = None,
         progress: Any | None = None,
         *,
@@ -103,7 +89,7 @@ class TaskService:
         """初始化任务服务。
 
         Args:
-            storage: 任务存储实例，None 时使用文件存储
+            storage: 任务存储实例，None 时使用默认 TaskStorage
             state_machine: 状态机实例，None 时创建默认实例
             progress: 进度计算器实例，None 时创建默认实例
             scheduler: 调度器实例（可选），来自 infrastructure 层
@@ -112,10 +98,7 @@ class TaskService:
             on_state_change: 状态变更回调（已废弃，保留兼容）
         """
         if storage is None:
-            from pathlib import Path
-            data_dir = Path("data") / "tasks"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            storage = FileTaskStorage(base_path=str(data_dir))
+            storage = TaskStorage(data_dir="data/tasks")
         self._storage = storage
         self._state_machine = state_machine or SimpleStateMachine()
         self._progress = progress
@@ -142,18 +125,14 @@ class TaskService:
             title: 任务标题
             description: 任务描述
             **kwargs: 传递给 create_task 工厂函数的额外参数
-                （priority, agent_level, parent_task_id, metadata,
-                 agent_name, dependencies, execution_record_id, target_type）
 
         Returns:
             创建后的 TaskModel 实例（状态为 PENDING）
         """
         task = create_task(title=title, description=description, **kwargs)
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task created: %s (%s)", task.id, task.title)
         self._emit_state_changed(task, "", task.status)
-                
         return task
 
     # ── 状态转换 ─────────────────────────────────────────
@@ -172,11 +151,10 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.RUNNING)
+        self._transition_with_callback(task, TaskStatus.RUNNING)
         if not task.started_at:
             task.started_at = datetime.now().isoformat()
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task started: %s", task_id)
         return task
 
@@ -184,10 +162,6 @@ class TaskService:
         self, task_id: str, passed: bool, result: Any = None,
     ) -> TaskModel:
         """完成评估（evaluating -> completed / failed）。
-
-        评估结果会同时写入 task.result（最新一次）和追加到
-        task.metadata["evaluation_history"]（保留全部历史），
-        确保多次评估的每次结果都可追溯。
 
         Args:
             task_id: 任务 ID
@@ -203,11 +177,10 @@ class TaskService:
         """
         task = self._get_or_raise(task_id)
         target = TaskStatus.COMPLETED if passed else TaskStatus.FAILED
-        await self._transition_with_callback(task, target)
+        self._transition_with_callback(task, target)
         task.completed_at = datetime.now().isoformat()
         if result is not None:
             task.result = result
-            # 追加到评估历史（保留所有评估记录）
             if task.metadata is None:
                 task.metadata = {}
             history = task.metadata.get("evaluation_history", [])
@@ -219,8 +192,7 @@ class TaskService:
                 "data": result,
             })
             task.metadata["evaluation_history"] = history
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info(
             "Task %s evaluation: %s", task_id,
             "passed" if passed else "failed",
@@ -231,9 +203,6 @@ class TaskService:
         self, task_id: str, result: Any = None,
     ) -> TaskModel:
         """评估通过时恢复被错误标记为 failed 的任务。
-
-        仅用于评估通过覆盖 idle 超时等非业务原因导致的失败。
-        绕过状态机的 FAILED->COMPLETED 限制，但仍触发回调和持久化。
 
         Args:
             task_id: 任务 ID
@@ -257,12 +226,9 @@ class TaskService:
         task.error = None
         if result is not None:
             task.result = result
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         self._emit_state_changed(task, old_status, TaskStatus.COMPLETED)
-        logger.info(
-            "Task %s recovered: FAILED -> COMPLETED", task_id,
-        )
+        logger.info("Task %s recovered: FAILED -> COMPLETED", task_id)
         return task
 
     async def pause_task(self, task_id: str) -> TaskModel:
@@ -279,7 +245,7 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.PAUSED)
+        self._transition_with_callback(task, TaskStatus.PAUSED)
         logger.info("Task paused: %s", task_id)
         return task
 
@@ -297,15 +263,12 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.RUNNING)
+        self._transition_with_callback(task, TaskStatus.RUNNING)
         logger.info("Task resumed: %s", task_id)
         return task
 
     async def reactivate_task(self, task_id: str, message: str = "") -> TaskModel:
         """重新激活已完成任务（completed -> pending -> running）。
-
-        用于任务完成后需要追加修改的场景：保持同一任务上下文，
-        生成新管道继续执行。新需求通过 message 参数注入。
 
         Args:
             task_id: 任务 ID
@@ -319,14 +282,12 @@ class TaskService:
             InvalidTransitionError: 任务不是 completed 状态
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.PENDING)
+        self._transition_with_callback(task, TaskStatus.PENDING)
 
-        # 清除上次运行的终态字段
         task.completed_at = ""
         task.error = ""
         task.reject_count = 0
 
-        # 保留旧 pipeline_run_id 到元数据供追溯
         if task.metadata is None:
             task.metadata = {}
         prev_pipeline = task.pipeline_run_id
@@ -338,7 +299,6 @@ class TaskService:
             task.metadata["pipeline_history"] = history
         task.pipeline_run_id = ""
 
-        # 追加需求记录到元数据
         if message:
             reqs = task.metadata.get("reactivate_requirements", [])
             if not isinstance(reqs, list):
@@ -349,16 +309,12 @@ class TaskService:
             })
             task.metadata["reactivate_requirements"] = reqs
 
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task reactivated: %s (was completed)", task_id)
         return task
 
     async def reset_to_pending(self, task_id: str) -> TaskModel:
         """强制重置任务为 pending（用于 Worker 启动恢复场景）。
-
-        绕过状态机，将 running/failed 等状态的任务重置为 pending，
-        以便重新拾取执行。同时清除 started_at 等运行时字段。
 
         Args:
             task_id: 任务 ID
@@ -374,10 +330,8 @@ class TaskService:
         task.status = TaskStatus.PENDING
         task.started_at = ""
         task.error = ""
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         self._emit_state_changed(task, old_status, TaskStatus.PENDING)
-
         logger.info("Task reset to pending (recovery): %s (was %s)", task_id, old_status.value)
         return task
 
@@ -396,11 +350,10 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.FAILED)
+        self._transition_with_callback(task, TaskStatus.FAILED)
         if error:
             task.error = error
-            # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-            await self._storage.save(task)
+            self._storage.save(task)
         logger.info("Task failed: %s -- %s", task_id, error or "no detail")
         return task
 
@@ -418,15 +371,12 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, TaskStatus.EVALUATING)
+        self._transition_with_callback(task, TaskStatus.EVALUATING)
         logger.info("Task moved to evaluating: %s", task_id)
         return task
 
     async def reject_task(self, task_id: str, reason: str = "", max_reject_count: int = 3) -> TaskModel:
         """打回任务（evaluating -> running），让 Agent 重新执行。
-
-        打回次数有限制，超过 max_reject_count 则转为 failed，
-        防止无限循环。
 
         Args:
             task_id: 任务 ID
@@ -444,25 +394,21 @@ class TaskService:
         task.reject_count += 1
 
         if task.reject_count >= max_reject_count:
-            # 打回次数超限，直接失败
             logger.warning(
                 "Task %s reject count (%d) exceeded max (%d), marking as failed",
                 task_id, task.reject_count, max_reject_count,
             )
-            await self._transition_with_callback(task, TaskStatus.FAILED)
+            self._transition_with_callback(task, TaskStatus.FAILED)
             task.error = f"打回次数超过上限({max_reject_count}): {reason}"
-            # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-            await self._storage.save(task)
+            self._storage.save(task)
             return task
 
-        # 正常打回：evaluating -> running
-        await self._transition_with_callback(task, TaskStatus.RUNNING)
+        self._transition_with_callback(task, TaskStatus.RUNNING)
         if reason:
             task.error = f"打回重做({task.reject_count}/{max_reject_count}): {reason}"
         else:
             task.error = f"打回重做({task.reject_count}/{max_reject_count})"
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task rejected (redo %d/%d): %s -- %s", task.reject_count, max_reject_count, task_id, reason)
         return task
 
@@ -470,8 +416,6 @@ class TaskService:
 
     async def bind_pipeline_run(self, task_id: str, pipeline_run_id: str) -> TaskModel:
         """将任务绑定到管道运行实例。
-
-        由 CLI 入口在管道启动后调用，回填 pipeline_run_id。
 
         Args:
             task_id: 任务 ID
@@ -485,16 +429,12 @@ class TaskService:
         """
         task = self._get_or_raise(task_id)
         task.pipeline_run_id = pipeline_run_id
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task %s bound to pipeline_run %s", task_id, pipeline_run_id)
         return task
 
     def get_root_task_id(self, task_id: str) -> str | None:
         """获取任务所属的根任务 ID。
-
-        沿 parent_task_id 链向上遍历，直到找到最顶层根任务。
-        使用内存缓存，同步调用。
 
         Args:
             task_id: 任务 ID
@@ -522,17 +462,12 @@ class TaskService:
         """
         task = self._get_or_raise(task_id)
         task.execution_record_id = record_id
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
         logger.info("Task %s bound to execution_record %s", task_id, record_id)
         return task
 
     def get_task(self, task_id: str) -> TaskModel | None:
         """获取任务（同步，从内存缓存读取）。
-
-        BUG-FIX-fix_20260512_async_compat:
-        保持同步方法，从 FileTaskStorage 的内存缓存读取，
-        避免大量调用方需要改为 async。
 
         Args:
             task_id: 任务 ID
@@ -545,30 +480,16 @@ class TaskService:
     def list_by_status(self, status: TaskStatus) -> list[TaskModel]:
         """按状态列出任务（同步，从内存缓存读取）。
 
-        BUG-FIX-fix_20260512_async_compat:
-        改为从 FileTaskStorage 的内存缓存读取，
-        避免调用异步的 storage.list_by_status()。
-
         Args:
             status: 任务状态
 
         Returns:
             匹配状态的任务列表
         """
-        # 优先从缓存读取
-        if hasattr(self._storage, '_tasks') and self._storage._tasks:
-            return [
-                t for t in self._storage._tasks.values()
-                if getattr(t, 'status', None) == status
-            ]
-        return []
+        return self._storage.list_by_status(status)
 
     def list_subtasks(self, parent_id: str) -> list[TaskModel]:
         """列出子任务（同步，从内存缓存读取）。
-
-        BUG-FIX-fix_20260512_async_compat:
-        改为从 FileTaskStorage 的内存缓存读取，
-        避免调用不存在的 list_by_parent() 异步方法。
 
         Args:
             parent_id: 父任务 ID
@@ -576,20 +497,8 @@ class TaskService:
         Returns:
             属于指定父任务的子任务列表
         """
-        if hasattr(self._storage, 'list_by_parent'):
-            return self._storage.list_by_parent(parent_id)
-        return [
-            t for t in self._storage._tasks.values()
-            if getattr(t, 'parent_task_id', None) == parent_id
-        ]
+        return self._storage.list_by_parent(parent_id)
 
-    # BUG-FIX-fix_20260512_async_list_all:
-    # 问题根因: FileTaskStorage.list_all() 是 async 方法，但 TaskService.list_all() 是同步方法。
-    #           在 async 上下文中调用时返回 coroutine 对象而非 list，导致 .sort() 失败：
-    #           'coroutine' object has no attribute 'sort'。
-    # 修复方案: 将 list_all 改为 async 方法，正确 await 存储层调用。
-    # 影响范围: 所有调用 TaskService.list_all() 的地方均需同步更新为 await 调用。
-    # 修复日期: 2025-05-12
     async def list_all(
         self,
         limit: int = 50,
@@ -603,24 +512,13 @@ class TaskService:
         Args:
             limit: 返回数量限制
             reverse: 是否按创建时间倒序
-            session_id: 会话 ID，用于按会话筛选任务（基于 metadata["session_id"]）
+            session_id: 会话 ID，用于按会话筛选任务
 
         Returns:
             任务列表
         """
-        if hasattr(self._storage, '_tasks') and self._storage._tasks:
-            all_tasks = list(self._storage._tasks.values())
-        elif hasattr(self._storage, 'list_all'):
-            all_tasks = await self._storage.list_all()
-        else:
-            all_tasks = []
+        all_tasks = list(self._storage._tasks.values())
 
-        # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤
-        # 问题根因: TaskService.list_all() 不接受 session_id 参数，
-        #           导致调用方无法按会话筛选任务。
-        # 修复方案: 添加 session_id 参数，在排序前按 metadata["session_id"] 过滤。
-        # 影响范围: list_tasks API、get_tasks_debug API、get_task_tree 等调用方。
-        # 修复日期: 2025-05-12
         if session_id:
             all_tasks = [
                 t for t in all_tasks
@@ -674,7 +572,7 @@ class TaskService:
             InvalidTransitionError: 状态转换不合法
         """
         task = self._get_or_raise(task_id)
-        await self._transition_with_callback(task, target_status)
+        self._transition_with_callback(task, target_status)
         return task
 
     async def delete_task(self, task_id: str) -> bool:
@@ -690,8 +588,7 @@ class TaskService:
         if task is None:
             return False
         self._cleanup_workspace(task_id)
-        # BUG-FIX-fix_20260512_async_compat: delete() 是 async，需要 await
-        await self._storage.delete(task_id)
+        self._storage.delete(task_id)
         return True
 
     async def save_task(self, task: TaskModel) -> None:
@@ -700,8 +597,7 @@ class TaskService:
         Args:
             task: 任务模型
         """
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
 
     # ── 清理 ─────────────────────────────────────────────
 
@@ -712,25 +608,20 @@ class TaskService:
                 get_service_provider,
             )
             provider = get_service_provider()
-            lifecycle = provider.get(
-                "workspace_lifecycle_manager")
+            lifecycle = provider.get("workspace_lifecycle_manager")
             if lifecycle:
                 lifecycle.cleanup_workspace(task_id)
-                logger.info(
-                    "Task %s workspace cleaned up", task_id)
+                logger.info("Task %s workspace cleaned up", task_id)
         except Exception as e:
             logger.warning(
-                "Task %s workspace cleanup failed "
-                "(non-fatal): %s", task_id, e,
+                "Task %s workspace cleanup failed (non-fatal): %s",
+                task_id, e,
             )
 
     # ── 进度 ─────────────────────────────────────────────
 
     def get_progress(self, parent_id: str) -> float:
         """计算父任务的子任务完成进度（同步，从缓存读取）。
-
-        BUG-FIX-fix_20260512_async_compat:
-        改为从内存缓存读取子任务列表。
 
         Args:
             parent_id: 父任务 ID
@@ -746,16 +637,13 @@ class TaskService:
 
     # ── 内部 ─────────────────────────────────────────────
 
-    async def _transition_with_callback(
+    def _transition_with_callback(
         self,
         task: TaskModel,
         target_status: TaskStatus,
         old_status: TaskStatus | None = None,
     ) -> None:
         """执行状态转换并通过 EventBus 广播事件。
-
-        BUG-FIX-fix_20260512_async_compat:
-        改为 async，因为内部调用 self._storage.save()。
 
         Args:
             task: 任务模型
@@ -764,8 +652,7 @@ class TaskService:
         """
         old = old_status or task.status
         self._state_machine.transition(task, target_status)
-        # BUG-FIX-fix_20260512_async_compat: save() 是 async，需要 await
-        await self._storage.save(task)
+        self._storage.save(task)
 
         if self._event_bus is not None:
             try:
@@ -830,9 +717,6 @@ class TaskService:
 
     def _get_or_raise(self, task_id: str) -> TaskModel:
         """获取任务，不存在时抛出 KeyError。
-
-        BUG-FIX-fix_20260512_async_compat:
-        保持同步，从 FileTaskStorage 内存缓存读取。
 
         Args:
             task_id: 任务 ID

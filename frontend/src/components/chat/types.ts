@@ -232,6 +232,8 @@ export interface ChatInputProps {
   toggleThinkingMode?: (enabled: boolean) => Promise<void>
   /** 自定义类名 */
   className?: string
+  /** 草稿保存的 key（通常是 tabId 或 sessionId），切换 Tab 时保留未发送文本 */
+  draftKey?: string
 }
 
 export type { Message, MessageRole, MessageToolCall, ThinkingContent }

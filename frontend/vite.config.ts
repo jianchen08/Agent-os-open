@@ -8,8 +8,8 @@ import { defineConfig, loadEnv } from 'vite'
  * 基于 Vite + React + TypeScript 模板，配置路径别名、代理和构建优化
  */
 export default defineConfig(({ mode }) => {
-  // 加载环境变量
   const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || 'http://localhost:8888'
 
   return {
     plugins: [react()],
@@ -18,16 +18,16 @@ export default defineConfig(({ mode }) => {
       strictPort: false,
       proxy: {
         '/api': {
-          target: env.VITE_API_BASE_URL || 'http://localhost:8888',
+          target: apiTarget,
           changeOrigin: true,
         },
         '/ws': {
-          target: env.VITE_API_BASE_URL || 'http://localhost:8888',
+          target: apiTarget,
           changeOrigin: true,
           ws: true,
         },
         '/media': {
-          target: env.VITE_API_BASE_URL || 'http://localhost:8888',
+          target: apiTarget,
           changeOrigin: true,
         },
       },

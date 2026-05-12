@@ -788,7 +788,14 @@ class WorkspaceLifecycleManager:
     # ── 6. 评估通过 ──────────────────────────────────────────────
 
     def on_eval_passed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
-        """评估通过后按 mode 分发合并逻辑，并发安全：按 project_root 粒度加锁"""
+        """评估通过后按 mode 分发合并逻辑，并发安全：按 project_root 粒度加锁
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑仅在 git_merge 时验证合并结果，copy_merge 无验证直接清理 worktree，
+        导致合并失败（文件未到达目标）时 worktree 被删除，任务文件丢失。
+        修复: 不论哪种合并方式都验证文件是否到达目标，失败则重试最多2次，
+        仍失败则保留 worktree 不清理，返回失败让任务标记为 failed。
+        """
         mode = ws_meta.get("mode", "")
         if mode == "plain":
             logger.info("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
@@ -797,30 +804,39 @@ class WorkspaceLifecycleManager:
         lock = self._get_merge_lock(project_root)
         with lock:
             if mode == "worktree":
-                result = self._safe_merge(workspace, ws_meta)
-                if not result.get("success"):
-                    logger.warning(
-                        "[WorkspaceLifecycle] 合并失败，跳过清理以保留文件: "
-                        "task_id=%s, workspace=%s, error=%s",
-                        task_id, workspace, result.get("error", "unknown"))
-                    return result
-                # 验证合并是否真正完成
-                branch = ws_meta.get("branch", "")
-                if branch and result.get("method") == "git_merge":
-                    proj_path = Path(project_root)
-                    if proj_path.exists() and not self._verify_merge_in_main(branch, cwd=proj_path):
+                max_retries = 2
+                for attempt in range(1, max_retries + 1):
+                    result = self._safe_merge(workspace, ws_meta)
+                    if not result.get("success"):
                         logger.warning(
-                            "[WorkspaceLifecycle] 合并验证失败，跳过清理: "
-                            "task_id=%s, branch=%s",
-                            task_id, branch)
+                            "[WorkspaceLifecycle] 合并失败 (attempt %d/%d)，跳过清理以保留文件: "
+                            "task_id=%s, workspace=%s, error=%s",
+                            attempt, max_retries, task_id, workspace, result.get("error", "unknown"))
+                        if attempt < max_retries:
+                            continue
                         return result
-                self._cleanup_worktree(
-                    workspace, ws_meta, tag_task_id=task_id,
-                    merge_method=result.get("method", ""))
+                    verified, verify_detail = self._verify_merge_result(
+                        workspace, project_root, ws_meta, result)
+                    if verified:
+                        logger.info(
+                            "[WorkspaceLifecycle] 合并验证通过 (attempt %d): task_id=%s, method=%s",
+                            attempt, task_id, result.get("method"))
+                        self._cleanup_worktree(
+                            workspace, ws_meta, tag_task_id=task_id,
+                            merge_method=result.get("method", ""))
+                        return result
+                    logger.warning(
+                        "[WorkspaceLifecycle] 合并验证失败 (attempt %d/%d): "
+                        "task_id=%s, detail=%s",
+                        attempt, max_retries, task_id, verify_detail)
+                    if attempt < max_retries:
+                        continue
+                logger.error(
+                    "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: "
+                    "task_id=%s, workspace=%s", task_id, workspace)
+                result["verify_error"] = verify_detail
                 return result
             if mode == "shared":
-                # shared 模式不触发合并：子任务共享父工作空间，
-                # 合并由父任务完成时负责（避免下下级重复合并到容器）
                 logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
                 return {"success": True, "action": "none"}
             logger.warning("[WorkspaceLifecycle] 未知 mode: %s, task_id=%s", mode, task_id)
@@ -964,10 +980,16 @@ class WorkspaceLifecycleManager:
         如果 worktree 基于旧版本创建，旧文件会覆盖目标中的新文件。
         修复: 通过 git diff 找出 worktree 分支实际修改的文件列表，
         只复制这些被修改的文件，避免旧版本覆盖新版本。
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑 merged 为空时仍返回 success=True，导致空合并后 worktree 被清理。
+        修复: merged 为空时返回失败，让上层重试或报错。
         """
         src, dst = Path(workspace), Path(target_dir)
+        if not src.exists():
+            return {"success": False, "error": f"源目录不存在: {workspace}",
+                    "method": "copy", "merged_files": []}
         skip = self._effective_skip_dirs()
-        # BUG-FIX: 获取 worktree 分支实际修改的文件列表，只复制这些文件
         changed_files: set[str] | None = None
         branch = ws_meta.get("branch", "") if ws_meta else ""
         project_root = ws_meta.get("project_root", "") if ws_meta else ""
@@ -994,7 +1016,6 @@ class WorkspaceLifecycleManager:
             if item.suffix in _SKIP_EXTENSIONS:
                 continue
             rel_str = str(rel).replace("\\", "/")
-            # BUG-FIX: 如果能确定修改文件列表，只复制被修改的文件
             if changed_files is not None and rel_str not in changed_files:
                 continue
             target_file = dst / rel
@@ -1005,9 +1026,63 @@ class WorkspaceLifecycleManager:
             self._ensure_git_user(dst)
             self._run_git("add", "-A", cwd=dst)
             self._git_add_commit_if_dirty(dst, f"merge: copy_merge ({len(merged)} files)")
-        return {"success": True, "action": "merged", "method": "copy", "merged_files": merged}
+            return {"success": True, "action": "merged", "method": "copy", "merged_files": merged}
+        logger.warning("[WorkspaceLifecycle] copy_merge: 未合并任何文件")
+        return {"success": False, "error": "copy_merge 未合并任何文件",
+                "method": "copy", "merged_files": []}
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
+
+    def _verify_merge_result(
+        self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
+    ) -> tuple[bool, str]:
+        """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑仅 git_merge 时验证 commit graph，copy_merge 无验证。
+        修复: 统一验证逻辑，包含 commit graph 验证 + 文件级验证。
+
+        Returns:
+            (verified: bool, detail: str) 验证结果和详情描述
+        """
+        branch = ws_meta.get("branch", "")
+        method = merge_result.get("method", "")
+        proj_path = Path(project_root)
+
+        if not proj_path.exists():
+            return False, f"project_root 不存在: {project_root}"
+
+        if method == "git_merge" and branch:
+            if not self._verify_merge_in_main(branch, cwd=proj_path):
+                return False, f"git_merge commit graph 验证失败: branch={branch}"
+
+        merged_files = merge_result.get("merged_files", [])
+        if method == "copy" and merged_files:
+            missing = []
+            for rel_str in merged_files:
+                target_file = proj_path / rel_str
+                if not target_file.exists():
+                    missing.append(rel_str)
+                if len(missing) >= 10:
+                    break
+            if missing:
+                return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
+
+        if method == "git_merge" and branch:
+            rc, diff_out, _ = self._run_git(
+                "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
+            if rc == 0 and diff_out.strip():
+                branch_files = set(diff_out.strip().splitlines())
+                missing = []
+                for f in branch_files:
+                    if not (proj_path / f).exists():
+                        missing.append(f)
+                    if len(missing) >= 10:
+                        break
+                if missing:
+                    return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
+
+        return True, "验证通过"
 
     def _verify_merge_in_main(self, branch_name: str, cwd: Path | None = None) -> bool:
         """验证分支已合并到当前分支：git log HEAD..{branch} 应为空，不为空则阻止后续清理。

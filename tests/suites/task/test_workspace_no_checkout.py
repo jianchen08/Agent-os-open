@@ -581,7 +581,8 @@ class TestEvalPassedMergeGuard:
         result = mgr.on_eval_passed("v1abcd1234", str(wt), ws_meta)
 
         assert result["success"] is True
-        assert call_count["n"] == 1
+        assert call_count["n"] == 2
+        assert "verify_error" in result
         # _verify_merge_in_main 应返回 False（分支未合入 main），所以 worktree 不应被删
         assert wt.exists()
 

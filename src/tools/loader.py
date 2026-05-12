@@ -329,6 +329,116 @@ class DynamicToolLoader:
                 except ToolNotFoundError:
                     logger.warning(f"[动态加载] 无法加载工具 | tool_name={tool_name}")
 
+    # BUG-FIX-fix_20260513_tool_injection_race: 非核心工具动态加载竞态条件
+    # 问题根因: _ensure_dynamic_tools_loaded 使用 create_task 异步加载但不等待完成，
+    #           导致后续同步获取工具时工具尚未注册
+    # 修复方案: 提取同步加载路径，确保工具在获取前完成注册
+    # 影响范围: 所有不在 CORE_SYSTEM_TOOLS 中的工具（playwright_test、list_directory 等）
+    # 修复日期: 2026-05-13
+
+    def load_tool_sync(self, tool_name: str) -> str:
+        """同步动态加载工具（从 load_tool 提取的纯同步路径）"""
+        if not self._discovered:
+            self._discover_tools()
+
+        if self.is_loaded(tool_name):
+            logger.debug(f"[动态加载-同步] 工具已加载 | tool_name={tool_name}")
+            return tool_name
+
+        if tool_name in self._loading:
+            logger.debug(f"[动态加载-同步] 工具正在加载中 | tool_name={tool_name}")
+            return tool_name
+
+        if tool_name not in self._tool_modules:
+            raise ToolNotFoundError(tool_name)
+
+        logger.info(f"[动态加载-同步] 开始加载工具 | tool_name={tool_name}")
+
+        self._loading[tool_name] = True
+
+        try:
+            module_path, class_name = self._tool_classes[tool_name]
+            module = importlib.import_module(module_path)
+            tool_class = getattr(module, class_name)
+
+            try:
+                tool_instance = tool_class()
+            except TypeError as e:
+                if "missing" in str(e) and "required positional argument" in str(e):
+                    logger.warning(
+                        f"[动态加载-同步] 工具需要依赖注入，将延迟实例化 | "
+                        f"tool_name={tool_name} | hint={e}"
+                    )
+                    tool_definition = tool_class.get_tool_definition()
+                    tool_instance = None
+                else:
+                    raise
+            else:
+                tool_definition = tool_instance.get_tool_definition()
+
+            if tool_instance is not None:
+                registered_name = self._registry.register_with_handler(
+                    tool=tool_definition,
+                    handler=tool_instance.execute,
+                )
+            else:
+                registered_name = self._registry.register(tool_definition)
+                logger.info(
+                    f"[动态加载-同步] 工具定义已注册（无handler），执行时需要注入依赖 | "
+                    f"tool_name={tool_name}"
+                )
+
+            self._loaded.add(tool_name)
+
+            logger.info(
+                f"[动态加载-同步] 工具加载成功 | "
+                f"tool_name={tool_name} | registered_name={registered_name}"
+            )
+
+            return registered_name
+
+        except ImportError as e:
+            logger.error(
+                f"[动态加载-同步] 导入模块失败 | "
+                f"tool_name={tool_name} | module={self._tool_modules.get(tool_name)} | "
+                f"error={e}"
+            )
+            raise ToolNotFoundError(tool_name) from e
+
+        except AttributeError as e:
+            logger.error(
+                f"[动态加载-同步] 找不到工具类 | "
+                f"tool_name={tool_name} | class={self._tool_classes.get(tool_name)} | "
+                f"error={e}"
+            )
+            raise ToolNotFoundError(tool_name) from e
+
+        except ToolNotFoundError:
+            raise
+
+        except Exception as e:
+            logger.error(
+                f"[动态加载-同步] 加载工具失败 | tool_name={tool_name} | error={e}",
+                exc_info=True,
+            )
+            raise ToolNotFoundError(tool_name) from e
+
+        finally:
+            if tool_name in self._loading:
+                del self._loading[tool_name]
+
+    def ensure_loaded_sync(self, tool_names: list[str]) -> None:
+        """同步确保指定的工具都已加载"""
+        for tool_name in tool_names:
+            if self.is_loaded(tool_name) or self._registry.has(tool_name):
+                continue
+
+            if self.is_available(tool_name):
+                try:
+                    self.load_tool_sync(tool_name)
+                except ToolNotFoundError:
+                    logger.warning(f"[动态加载-同步] 无法加载工具 | tool_name={tool_name}")
+
     def get_loaded_tools(self) -> set:
         """获取已加载的工具集合"""
         return self._loaded.copy()
