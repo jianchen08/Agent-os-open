@@ -11,6 +11,19 @@ const _debugLogger = loggers.websocket
 /** 超时间隔常量（60秒） */
 export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
 
+/**
+ * 等待 stream_start 的超时时间（45秒）
+ *
+ * BUG-FIX-fix_20260512_pending_stream_timeout:
+ * 问题根因: 用户发送消息后，如果后端 LLM API 卡住（如智谱 glm-5.1 无响应），
+ *          后端不会发送 stream_start 事件，前端也没有超时检测，
+ *          导致前端一直处于"等待"状态，用户无法得到任何反馈。
+ * 修复方案: 发送消息后启动 pending 超时计时器，如果在 45 秒内没有收到
+ *          stream_start（或任何流式事件），自动标记为超时并通知用户。
+ *          收到 stream_start 时自动清除该计时器。
+ */
+export const PENDING_STREAM_TIMEOUT_MS = 45_000
+
 interface ChunkTimeoutEntry {
   timer: ReturnType<typeof setTimeout>
   messageId: string
@@ -25,6 +38,57 @@ interface ChunkTimeoutEntry {
 }
 
 const _chunkTimeoutMap: Map<string, ChunkTimeoutEntry> = new Map()
+
+interface PendingStreamEntry {
+  timer: ReturnType<typeof setTimeout>
+  sessionId: string
+}
+
+const _pendingStreamMap: Map<string, PendingStreamEntry> = new Map()
+
+/**
+ * pending stream 超时回调：后端长时间未响应
+ */
+function _onPendingStreamTimeout(pipelineId: string): void {
+  const entry = _pendingStreamMap.get(pipelineId)
+  if (!entry) return
+  _pendingStreamMap.delete(pipelineId)
+
+  useNotificationStore.getState().addNotification({
+    title: '响应超时',
+    message: '后端处理超时，可能是 AI 模型服务暂时不可用，请稍后重试',
+    priority: 'high',
+    category: 'error',
+    isBlocking: false,
+  })
+}
+
+/**
+ * 启动"等待 stream_start"的超时计时器
+ *
+ * 用户发送消息后调用。如果在 PENDING_STREAM_TIMEOUT_MS 内没有收到
+ * stream_start 事件（通过 clearPendingStreamTimeout 清除），
+ * 则弹出超时通知提醒用户。
+ */
+export function startPendingStreamTimeout(pipelineId: string, sessionId: string): void {
+  clearPendingStreamTimeout(pipelineId)
+  const entry: PendingStreamEntry = {
+    timer: setTimeout(() => _onPendingStreamTimeout(pipelineId), PENDING_STREAM_TIMEOUT_MS),
+    sessionId,
+  }
+  _pendingStreamMap.set(pipelineId, entry)
+}
+
+/**
+ * 清除 pending stream 超时计时器（收到 stream_start 时调用）
+ */
+export function clearPendingStreamTimeout(pipelineId: string): void {
+  const entry = _pendingStreamMap.get(pipelineId)
+  if (entry) {
+    clearTimeout(entry.timer)
+    _pendingStreamMap.delete(pipelineId)
+  }
+}
 
 /**
  * chunk 超时回调：标记流式响应中断

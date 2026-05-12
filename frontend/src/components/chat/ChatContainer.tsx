@@ -202,17 +202,16 @@ export const ChatContainer = ({
       initSessionTabs(sessionId)
       const { activeTabId, tabs } = useAgentTabStore.getState()
       const activeTab = tabs.find((t) => t.id === activeTabId)
+      const pipelineStore = usePipelineMessageStore.getState()
+
       if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
-        usePipelineMessageStore.getState().activatePipeline(activeTab.pipelineRunId)
-      } else {
-        // 主管道：从 session 中获取 activePipelineId，而非用 sessionId
-        // 因为 pipeline_id 由后端 Engine 生成，全链路统一
+        pipelineStore.activatePipeline(activeTab.pipelineRunId)
+      } else if (activeTab && activeTab.agentLevel === 1) {
         const sessions = useSessionStore.getState().sessions
         const session = sessions.find(s => s.id === sessionId)
         const mainPipelineId = session?.activePipelineId || ''
         if (mainPipelineId) {
-          usePipelineMessageStore.getState().activatePipeline(mainPipelineId)
-          const pipelineStore = usePipelineMessageStore.getState()
+          pipelineStore.activatePipeline(mainPipelineId)
           const existing = pipelineStore.messagesByPipeline[mainPipelineId]
           if (!existing || existing.length === 0) {
             pipelineStore.fetchMessages(mainPipelineId, { threadId: sessionId }).catch(() => {})

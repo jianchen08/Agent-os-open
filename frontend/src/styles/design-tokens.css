@@ -205,6 +205,13 @@
 
   /* 卡片动画色 */
   --card-breathe-color: var(--status-running-color);
+
+  /* 浮动引用按钮 */
+  --floating-quote-bg: hsl(var(--popover));
+  --floating-quote-text: hsl(var(--popover-foreground));
+  --floating-quote-border: hsl(var(--border));
+  --floating-quote-shadow: 0 4px 12px rgb(0 0 0 / 0.15);
+  --floating-quote-hover-bg: hsl(var(--accent));
 }
 
 /* === Dark 模式覆盖 === */
@@ -301,4 +308,11 @@
 
   /* 卡片动画色 */
   --card-breathe-color: var(--status-running-color);
+
+  /* 浮动引用按钮 - dark */
+  --floating-quote-bg: hsl(var(--popover));
+  --floating-quote-text: hsl(var(--popover-foreground));
+  --floating-quote-border: hsl(var(--border));
+  --floating-quote-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
+  --floating-quote-hover-bg: hsl(var(--accent));
 }

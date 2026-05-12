@@ -24,6 +24,7 @@ const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 10_000
 const RECONNECT_MAX_RETRIES = 10
 const HEARTBEAT_INTERVAL = 30_000
+const HEARTBEAT_TIMEOUT = 10_000
 
 class GlobalWebSocketService {
   private ws: WebSocket | null = null
@@ -34,6 +35,7 @@ class GlobalWebSocketService {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _reconnectAttempts: number = 0
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   private _disposed: boolean = false
 
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
@@ -93,6 +95,9 @@ class GlobalWebSocketService {
     this.ws.onmessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data)
+        if (data.type === 'heartbeat_ack') {
+          this._handleHeartbeatAck()
+        }
         if (data.type) {
           this._emit(data.type, data)
         }
@@ -118,7 +123,7 @@ class GlobalWebSocketService {
         return
       }
 
-      if (!this._disposed && wasConnected) {
+      if (!this._disposed && (wasConnected || event.code === 4001)) {
         this._scheduleReconnect()
       }
     }
@@ -237,8 +242,26 @@ class GlobalWebSocketService {
     this._heartbeatTimer = setInterval(() => {
       if (this._status === 'connected') {
         this._send({ type: 'heartbeat', timestamp: Date.now() })
+        this._clearHeartbeatTimeout()
+        this._heartbeatTimeoutTimer = setTimeout(() => {
+          console.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
+          if (this.ws) {
+            this.ws.close(4001, '心跳超时')
+          }
+        }, HEARTBEAT_TIMEOUT)
       }
     }, HEARTBEAT_INTERVAL)
+  }
+
+  private _handleHeartbeatAck(): void {
+    this._clearHeartbeatTimeout()
+  }
+
+  private _clearHeartbeatTimeout(): void {
+    if (this._heartbeatTimeoutTimer) {
+      clearTimeout(this._heartbeatTimeoutTimer)
+      this._heartbeatTimeoutTimer = null
+    }
   }
 
   private _stopHeartbeat(): void {
@@ -246,6 +269,7 @@ class GlobalWebSocketService {
       clearInterval(this._heartbeatTimer)
       this._heartbeatTimer = null
     }
+    this._clearHeartbeatTimeout()
   }
 
   private _scheduleReconnect(): void {

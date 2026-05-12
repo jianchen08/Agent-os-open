@@ -9,11 +9,12 @@
  *   - Conversation 模式下全屏展示文件，对话在 Chat 面板进行
  */
 
-import { MessageSquare, CheckCircle2, XCircle, Quote, X, FileText, Code2, File, Pencil, Eye, Save } from 'lucide-react'
+import { MessageSquare, CheckCircle2, XCircle, Quote, X, FileText, Code2, File, Pencil, Eye, Save, Trash2, Send } from 'lucide-react'
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { cn } from '@/lib/utils'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { CodeBlock } from '../chat/markdown/CodeBlock'
+import { AnnotationBubble } from './AnnotationBubble'
 
 export interface FileReviewTabProps {
   /** 文件内容映射 {文件路径: 文件内容} */
@@ -86,6 +87,15 @@ function getFileName(filePath: string): string {
 // 子组件：浮动引用按钮
 // ────────────────────────────────────────────
 
+let _floatingStyleInjected = false
+function injectFloatingQuoteStyles() {
+  if (_floatingStyleInjected || typeof document === 'undefined') return
+  _floatingStyleInjected = true
+  const style = document.createElement('style')
+  style.textContent = `@keyframes floatingQuoteIn{from{opacity:0;transform:translate(-50%,-100%) scale(0.95)}to{opacity:1;transform:translate(-50%,-100%) scale(1)}}`
+  document.head.appendChild(style)
+}
+
 interface FloatingQuoteButtonProps {
   position: { x: number; y: number }
   onQuote: () => void
@@ -97,6 +107,7 @@ interface FloatingQuoteButtonProps {
  * 浮动引用按钮（Notion / Google Docs 风格）
  */
 function FloatingQuoteButton({ position, onQuote, onAnnotate, onClose }: FloatingQuoteButtonProps) {
+  useEffect(() => { injectFloatingQuoteStyles() }, [])
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Enter') { e.preventDefault(); onQuote() }
@@ -108,8 +119,13 @@ function FloatingQuoteButton({ position, onQuote, onAnnotate, onClose }: Floatin
 
   return (
     <div
-      className="pointer-events-auto absolute z-50 animate-in fade-in-0 zoom-in-95 duration-150"
-      style={{ left: position.x, top: position.y, transform: 'translate(-50%, -100%)' }}
+      className="pointer-events-auto absolute z-50"
+      style={{
+        left: position.x,
+        top: position.y,
+        transform: 'translate(-50%, -100%)',
+        animation: 'floatingQuoteIn 150ms ease-out',
+      }}
     >
       <div className="flex items-center gap-1 rounded-lg bg-[var(--floating-quote-bg)] px-1.5 py-1 shadow-[var(--floating-quote-shadow)] border border-[var(--floating-quote-border)]">
         <button
@@ -221,8 +237,8 @@ export function FileReviewTab({
       selectedText,
       selectedLineRange: lineRange,
       position: {
-        x: rect.left - containerRect.left + rect.width / 2,
-        y: rect.top - containerRect.top - 8,
+        x: rect.left - containerRect.left + rect.width / 2 + (contentRef.current?.scrollLeft ?? 0),
+        y: rect.top - containerRect.top - 8 + (contentRef.current?.scrollTop ?? 0),
       },
     })
   }, [])
