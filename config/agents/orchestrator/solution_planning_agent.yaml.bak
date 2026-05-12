@@ -86,7 +86,7 @@ static_vars:
         |------|-------|---------|
         | L2 编排 | programming_orchestrator_agent | 代码编写/测试/调试/审查任务 |
         | L2 编排 | resource_manager_agent | 需创建/修改工具或 Agent |
-        | L2 编排 | general_agent | 通用任务编排（无需专门Agent时） |
+        | L3 执行 | general_agent | 通用任务（无匹配专门Agent时） |
         | L3 执行 | research_agent | 调研/分析任务 |
         | L3 执行 | code_writer_agent | 单一编码任务（无需编排时） |
         | L3 执行 | test_debug_agent | 单一测试/调试任务（无需编排时） |
