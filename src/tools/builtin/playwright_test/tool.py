@@ -250,7 +250,7 @@ class PlaywrightTestTool(BuiltinTool):
                     return create_failure_result("launch_options 必须是有效的 JSON 字符串")
             
             # 创建会话
-            session_id, session_info = BrowserManager.create_session(
+            session_id, session_info = await BrowserManager.create_session(
                 browser_type=browser,
                 headless=headless,
                 viewport_width=viewport_width,
@@ -307,10 +307,10 @@ class PlaywrightTestTool(BuiltinTool):
             page = session.page
             
             # 导航到目标 URL
-            response = page.goto(url, wait_until=wait_until, timeout=timeout)
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout)
             
             # 获取页面信息
-            title = page.title()
+            title = await page.title()
             current_url = page.url
             
             return create_success_result(data={
@@ -349,50 +349,50 @@ class PlaywrightTestTool(BuiltinTool):
             
             # 等待元素出现
             locator = page.locator(selector)
-            locator.wait_for(timeout=timeout)
+            await locator.wait_for(timeout=timeout)
             
             result = {"action": action_type, "selector": selector}
             
             if action_type == "click":
-                locator.click(timeout=timeout)
+                await locator.click(timeout=timeout)
                 result["message"] = "点击成功"
                 
             elif action_type == "type":
                 value = inputs.get("value", "")
-                locator.fill(value)
+                await locator.fill(value)
                 result["message"] = f"输入文本成功: {value}"
                 
             elif action_type == "select":
                 value = inputs.get("value")
                 if not value:
                     return create_failure_result("select 操作需要 value 参数")
-                locator.select_option(value)
+                await locator.select_option(value)
                 result["message"] = f"选择选项成功: {value}"
                 
             elif action_type == "drag":
                 target_selector = inputs.get("target_selector")
                 if not target_selector:
                     return create_failure_result("drag 操作需要 target_selector 参数")
-                locator.drag_to(page.locator(target_selector))
+                await locator.drag_to(page.locator(target_selector))
                 result["message"] = "拖拽成功"
                 
             elif action_type == "hover":
-                locator.hover()
+                await locator.hover()
                 result["message"] = "悬停成功"
                 
             elif action_type == "upload":
                 file_paths = inputs.get("file_paths")
                 if not file_paths:
                     return create_failure_result("upload 操作需要 file_paths 参数")
-                locator.set_input_files(file_paths)
+                await locator.set_input_files(file_paths)
                 result["message"] = f"文件上传成功: {file_paths}"
                 
             else:
                 return create_failure_result(f"不支持的交互类型: {action_type}")
             
             # 获取元素状态
-            result["element_visible"] = locator.is_visible()
-            result["element_enabled"] = locator.is_enabled()
+            result["element_visible"] = await locator.is_visible()
+            result["element_enabled"] = await locator.is_enabled()
             
             return create_success_result(data=result)
         except Exception as e:
@@ -493,12 +493,12 @@ class PlaywrightTestTool(BuiltinTool):
             page = session.page
             
             if screenshot_action == "full_page":
-                result = ScreenshotManager.capture_full_page(page, output_path)
+                result = await ScreenshotManager.capture_full_page(page, output_path)
                 
             elif screenshot_action == "element":
                 if not selector:
                     return create_failure_result("element 截图需要 selector 参数")
-                result = ScreenshotManager.capture_element(page, selector, output_path)
+                result = await ScreenshotManager.capture_element(page, selector, output_path)
                 
             elif screenshot_action == "compare":
                 if not baseline_path:
@@ -507,7 +507,7 @@ class PlaywrightTestTool(BuiltinTool):
                     return create_failure_result("compare 截图需要 output_path 参数")
                 
                 # 先截取当前页面
-                compare_result = ScreenshotManager.capture_full_page(page, output_path)
+                compare_result = await ScreenshotManager.capture_full_page(page, output_path)
                 if not compare_result.get("success"):
                     return create_failure_result(compare_result.get("error", "截图失败"))
                 
@@ -541,7 +541,7 @@ class PlaywrightTestTool(BuiltinTool):
                 return create_failure_result("state_path 是必填参数")
             
             # 保存会话状态
-            result = BrowserManager.save_session_state(session_id, state_path)
+            result = await BrowserManager.save_session_state(session_id, state_path)
             
             if result.get("success"):
                 return create_success_result(data={
@@ -566,7 +566,7 @@ class PlaywrightTestTool(BuiltinTool):
             headless = inputs.get("headless", True)
             
             # 创建新会话并恢复状态
-            session_id, session_info = BrowserManager.create_session(
+            session_id, session_info = await BrowserManager.create_session(
                 browser_type=browser,
                 headless=headless,
                 storage_state=state_path,
@@ -593,7 +593,7 @@ class PlaywrightTestTool(BuiltinTool):
                 return create_failure_result("session_id 是必填参数")
             
             # 关闭会话（BrowserManager.close_session 已内置自动保存）
-            result = BrowserManager.close_session(session_id)
+            result = await BrowserManager.close_session(session_id)
             
             # 清理本地存储
             if session_id in self._sessions:

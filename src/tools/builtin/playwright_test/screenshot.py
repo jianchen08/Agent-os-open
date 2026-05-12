@@ -22,7 +22,7 @@ class ScreenshotManager:
     """
     
     @staticmethod
-    def capture_full_page(
+    async def capture_full_page(
         page: Any,
         output_path: str | None = None,
     ) -> dict[str, Any]:
@@ -49,7 +49,7 @@ class ScreenshotManager:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # 截图
-            page.screenshot(path=output_path, full_page=True)
+            await page.screenshot(path=output_path, full_page=True)
 
             # 编码为 base64 用于多模态传输
             with open(output_path, "rb") as f:
@@ -70,7 +70,7 @@ class ScreenshotManager:
             }
     
     @staticmethod
-    def capture_element(
+    async def capture_element(
         page: Any,
         selector: str,
         output_path: str | None = None,
@@ -89,7 +89,7 @@ class ScreenshotManager:
         try:
             # 定位元素
             element = page.locator(selector).first
-            element.wait_for(timeout=5000)
+            await element.wait_for(timeout=5000)
             
             if output_path is None:
                 import tempfile
@@ -103,7 +103,7 @@ class ScreenshotManager:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # 元素截图
-            element.screenshot(path=output_path)
+            await element.screenshot(path=output_path)
 
             # 编码为 base64 用于多模态传输
             with open(output_path, "rb") as f:

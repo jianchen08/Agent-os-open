@@ -28,16 +28,18 @@ class BrowserSession:
         browser: Any,
         context: Any,
         page: Any,
+        playwright: Any = None,  # BUG-FIX: 存储 playwright 实例引用，用于生命周期管理
     ):
         self.session_id = session_id
         self.browser_type = browser_type
         self.browser = browser
         self.context = context
         self.page = page
+        self.playwright = playwright
         self.console_messages: list[dict[str, Any]] = []
         self._console_handler: Any = None
     
-    def save_state(self, path: str) -> dict[str, Any]:
+    async def save_state(self, path: str) -> dict[str, Any]:
         """
         保存浏览器状态到文件
 
@@ -50,14 +52,14 @@ class BrowserSession:
             包含保存结果的字典
         """
         try:
-            self.context.storage_state(path=path)
+            await self.context.storage_state(path=path)
             logger.info(f"会话 {self.session_id} 状态已保存到: {path}")
             return {"success": True, "path": path}
         except Exception as e:
             logger.error(f"保存会话 {self.session_id} 状态失败: {e}")
             return {"success": False, "error": str(e)}
 
-    def get_state(self) -> dict[str, Any]:
+    async def get_state(self) -> dict[str, Any]:
         """
         获取浏览器状态（内存中）
 
@@ -67,13 +69,13 @@ class BrowserSession:
             包含状态数据或错误信息的字典
         """
         try:
-            state = self.context.storage_state()
+            state = await self.context.storage_state()
             return {"success": True, "state": state}
         except Exception as e:
             logger.error(f"获取会话 {self.session_id} 状态失败: {e}")
             return {"success": False, "error": str(e)}
 
-    def cleanup(self):
+    async def cleanup(self):
         """清理会话资源"""
         try:
             if self._console_handler:
@@ -83,12 +85,18 @@ class BrowserSession:
                     pass
             if self.context:
                 try:
-                    self.context.close()
+                    await self.context.close()
                 except Exception:
                     pass
             if self.browser:
                 try:
-                    self.browser.close()
+                    await self.browser.close()
+                except Exception:
+                    pass
+            # BUG-FIX: 关闭 playwright 实例，释放资源
+            if self.playwright:
+                try:
+                    await self.playwright.stop()
                 except Exception:
                     pass
         except Exception as e:
@@ -111,7 +119,7 @@ class BrowserManager:
     _sessions: dict[str, BrowserSession] = {}
     
     @classmethod
-    def create_session(
+    async def create_session(
         cls,
         browser_type: str = "chromium",
         headless: bool = True,
@@ -139,7 +147,7 @@ class BrowserManager:
             tuple[session_id, session_info]
         """
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.async_api import async_playwright  # BUG-FIX: 使用 async_api 替代 sync_api
             
             # 自动恢复逻辑：当 auto_persist=True 且用户未显式提供 storage_state 时，
             # 尝试从默认状态目录加载最新的状态文件
@@ -154,7 +162,7 @@ class BrowserManager:
             session_id = str(uuid.uuid4())[:8]
             
             # 启动 Playwright
-            playwright = sync_playwright().start()
+            playwright = await async_playwright().start()
             
             # 选择浏览器类型
             browser_map = {
@@ -173,7 +181,7 @@ class BrowserManager:
                 options.update(launch_options)
             
             # 启动浏览器
-            browser = browser_launcher.launch(**options)
+            browser = await browser_launcher.launch(**options)
             
             # 创建上下文和页面
             context_options: dict[str, Any] = {
@@ -181,8 +189,8 @@ class BrowserManager:
             }
             if storage_state is not None:
                 context_options["storage_state"] = storage_state
-            context = browser.new_context(**context_options)
-            page = context.new_page()
+            context = await browser.new_context(**context_options)
+            page = await context.new_page()
             
             # 设置 console 监听
             console_messages: list[dict[str, Any]] = []
@@ -203,6 +211,7 @@ class BrowserManager:
                 browser=browser,
                 context=context,
                 page=page,
+                playwright=playwright,  # BUG-FIX: 传递 playwright 实例引用
             )
             session.console_messages = console_messages
             session._console_handler = console_handler
@@ -233,7 +242,7 @@ class BrowserManager:
         return cls._sessions.get(session_id)
     
     @classmethod
-    def close_session(cls, session_id: str) -> dict[str, Any]:
+    async def close_session(cls, session_id: str) -> dict[str, Any]:
         """
         关闭浏览器会话
         
@@ -253,10 +262,10 @@ class BrowserManager:
             }
         
         # 在关闭前自动保存会话状态
-        save_result = cls.auto_save_state(session_id)
+        save_result = await cls.auto_save_state(session_id)
         
         try:
-            session.cleanup()
+            await session.cleanup()
             del cls._sessions[session_id]
             logger.info(f"关闭浏览器会话: {session_id}")
             result = {
@@ -288,7 +297,7 @@ class BrowserManager:
         ]
 
     @classmethod
-    def save_session_state(cls, session_id: str, path: str) -> dict[str, Any]:
+    async def save_session_state(cls, session_id: str, path: str) -> dict[str, Any]:
         """
         保存指定会话的浏览器状态到文件
 
@@ -305,7 +314,7 @@ class BrowserManager:
                 "success": False,
                 "error": f"会话不存在: {session_id}",
             }
-        return session.save_state(path)
+        return await session.save_state(path)
 
     @classmethod
     def list_saved_states(cls, directory: str) -> list[str]:
@@ -329,7 +338,7 @@ class BrowserManager:
             return []
 
     @classmethod
-    def auto_save_state(cls, session_id: str) -> dict[str, Any]:
+    async def auto_save_state(cls, session_id: str) -> dict[str, Any]:
         """
         自动保存指定会话状态到默认目录
 
@@ -361,7 +370,7 @@ class BrowserManager:
             state_path = os.path.join(state_dir, filename)
 
             # 保存状态
-            save_result = session.save_state(state_path)
+            save_result = await session.save_state(state_path)
             if not save_result.get("success"):
                 logger.warning(f"自动保存会话 {session_id} 状态失败: {save_result.get('error')}")
                 return save_result
