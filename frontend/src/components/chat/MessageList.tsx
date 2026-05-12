@@ -269,12 +269,16 @@ export const MessageList = ({
   }
 
   return (
-    <div ref={containerRef} className={`flex-1 ${className}`} data-testid="message-list">
+    <div ref={containerRef} className={`min-h-0 flex-1 overflow-hidden ${className}`} data-testid="message-list">
       <Virtuoso
         ref={virtuosoRef}
         style={{ height: '100%' }}
         data={messages}
         itemContent={renderItem}
+        computeItemKey={(index) => {
+          const msg = messages[index]
+          return msg?.id ? `${msg.id}-${msg.role}` : `msg-${index}`
+        }}
         onScroll={(e) => {
           const target = e.target as HTMLElement
           handleScroll(target.scrollTop, true)

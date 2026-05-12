@@ -111,6 +111,12 @@ interface PipelineMessageState {
 
   /** 删除指定管道中的消息（乐观更新 + API 调用） */
   deleteMessage: (pipelineId: string, messageId: string, includeTarget?: boolean) => void
+
+  /** 直接从 API 加载指定管道的历史消息 */
+  fetchMessages: (
+    pipelineId: string,
+    options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
+  ) => Promise<void>
 }
 
 /**
@@ -342,18 +348,69 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
 
   /**
    * 冷启动：从 API 写入最新消息并设置双游标
+   *
+   * BUG-FIX-fix_20260512_session_switch_msg_loss:
+   * 问题根因: 用户在会话A发送消息后切换到会话B再切回A时，setActiveSession 调用
+   *          fetchMessages → initFromAPI，后者直接替换 pipelineA 的全部消息。
+   *          由于读后写竞争（WebSocket user_input 刚到达后端，GET /messages 尚未包含），
+   *          API 返回的数据可能不包含刚发送的用户消息，导致乐观更新的用户消息被覆盖丢失。
+   *          用户消息丢失后，连续的 assistant 消息被 mergeConsecutiveAssistantMessages 合并，
+   *          AI 回复渲染到上一个 assistant 气泡中。刷新后正常因为后端已持久化完整数据。
+   * 修复方案: 当管道已有消息时，采用合并策略而非替换策略：
+   *          1. 保留 status=streaming 的本地消息（正在生成的 AI 回复）
+   *          2. 保留不在 API 响应中的本地消息（乐观更新的用户消息等），
+   *             但排除已由 API 确认的重复消息（通过 role+content+时间窗口匹配）
+   *          3. API 返回的消息作为权威数据覆盖同 ID 的本地消息
+   * 影响范围: 会话切换时的消息显示完整性
+   * 修复日期: 2026-05-12
    */
   initFromAPI: (pipelineId: string, messages: Message[]) => {
     set((state) => {
       const sorted = [...messages].sort(compareMessages)
-      const topCursor = sorted.length > 0 ? (sorted[0].sequence ?? 0) : 0
-      const bottomCursor = sorted.length > 0
-        ? sorted.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
+      const existing = state.messagesByPipeline[pipelineId]
+
+      let finalMessages: Message[]
+
+      if (existing && existing.length > 0) {
+        const apiIds = new Set(sorted.map((m) => m.id))
+
+        const preserved = existing.filter((localMsg) => {
+          if (localMsg.status === 'streaming') return true
+
+          if (!apiIds.has(localMsg.id)) {
+            const hasApiMatch = sorted.some(
+              (apiMsg) =>
+                apiMsg.role === localMsg.role
+                && apiMsg.content === localMsg.content
+                && Math.abs(
+                  new Date(apiMsg.timestamp).getTime()
+                  - new Date(localMsg.timestamp).getTime(),
+                ) < 10000,
+            )
+            return !hasApiMatch
+          }
+
+          return false
+        })
+
+        if (preserved.length > 0) {
+          finalMessages = [...sorted, ...preserved]
+          finalMessages.sort(compareMessages)
+        } else {
+          finalMessages = sorted
+        }
+      } else {
+        finalMessages = sorted
+      }
+
+      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
+      const bottomCursor = finalMessages.length > 0
+        ? finalMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
         : 0
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          [pipelineId]: sorted,
+          [pipelineId]: finalMessages,
         },
         topCursorsByPipeline: {
           ...state.topCursorsByPipeline,
@@ -390,7 +447,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       }
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      const merged = [...sorted, ...existing]
+      const existingIds = new Set(existing.map((m) => m.message_id || m.id))
+      const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
+      const merged = [...newMsgs, ...existing]
       merged.sort(compareMessages)
       const topCursor = sorted[0].sequence ?? 0
       return {
@@ -422,7 +481,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       if (messages.length === 0) return state
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId] || []
-      const merged = [...existing, ...sorted]
+      const existingIds = new Set(existing.map((m) => m.message_id || m.id))
+      const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
+      const merged = [...existing, ...newMsgs]
       merged.sort(compareMessages)
       const bottomCursor = merged.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
       return {
@@ -474,7 +535,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    */
   fetchMessages: async (
     pipelineId: string,
-    options?: { limit?: number; before_sequence?: number; after_sequence?: number },
+    options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
     if (pipelineId.startsWith('temp-')) {
       get().initFromAPI(pipelineId, [])
@@ -490,19 +551,31 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     const fetchPromise = (async () => {
       try {
         const limit = options?.limit ?? 50
+        // BUG-FIX-fix_20260512_fetch_threadid:
+        // 问题根因: 多处调用 fetchMessages(pipelineId) 未传 threadId，
+        //          导致子管道的 pipelineId 被当作 threadId 去查后端 /threads/{threadId}/messages，
+        //          后端找不到对应线程，返回 404/500 错误，消息不显示。
+        // 修复方案: 自动从 pipelineSessionMap 查找 pipelineId 对应的 sessionId 作为 threadId fallback，
+        //          并通过 pipelines 元数据判断是否为子管道（level > 1），正确传 pipelineRunId。
+        // 影响范围: 切换标签、WS 重连、删除消息后重载等所有 fetchMessages 调用场景
+        // 修复日期: 2026-05-12
+        const sessionFallback = get().pipelineSessionMap[pipelineId]
+        const threadId = options?.threadId || sessionFallback || pipelineId
+        const pipelineMeta = get().pipelines[pipelineId]
+        const isSubPipeline = pipelineMeta && pipelineMeta.level > 1
         const apiResult = await retry(
-          () => apiGetMessages(pipelineId, {
+          () => apiGetMessages(threadId, {
             limit,
             before_sequence: options?.before_sequence,
-            after_sequence: options?.after_sequence,
+            pipelineRunId: isSubPipeline ? pipelineId : undefined,
           }),
           {
             maxAttempts: 3,
             delayMs: 1000,
             shouldRetry: (error) => {
-              // 429 和 5xx 错误都可重试
               const status = error?.response?.status ?? error?.status
               if (status === 429) return true
+              if (status === 404) return false
               return isRetryableError(error)
             },
           },
@@ -526,11 +599,16 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         } else {
           get().initFromAPI(pipelineId, mainMessages)
         }
-      } catch (err) {
-        console.error(
-          '[pipelineMessageStore.fetchMessages] 加载失败（已重试）: pipelineId=%s err=%s',
-          pipelineId, err,
-        )
+      } catch (err: any) {
+        const status = err?.response?.status ?? err?.status
+        if (status === 404) {
+          logger.debug('[pipelineMessageStore.fetchMessages] 管道消息暂不可用 (404): pipelineId=%s', pipelineId)
+        } else {
+          console.error(
+            '[pipelineMessageStore.fetchMessages] 加载失败（已重试）: pipelineId=%s err=%s',
+            pipelineId, err,
+          )
+        }
       } finally {
         // 请求完成后从去重映射中移除
         _fetchingPipelines.delete(pipelineId)
@@ -650,9 +728,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         }
       })
       .catch((error: unknown) => {
-        const errorCode = (error as Record<string, unknown>)?.code
-        const errorStatus = (error as Record<string, unknown>)?.response?.status
-          ?? (error as Record<string, unknown>)?.status
+        const errorAny = error as Record<string, any>
+        const errorCode = errorAny?.code
+        const errorStatus = errorAny?.response?.status ?? errorAny?.status
         if (errorCode === '404' || errorCode === 404 || errorStatus === 404) {
           logger.warn('[pipelineMessageStore.deleteMessage] 消息已被删除，保持前端状态')
           return

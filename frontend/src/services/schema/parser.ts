@@ -84,7 +84,21 @@ export function parseDataSourceRef(ref: string): DataSourceRef {
  * @returns 包含端点、方法和参数的 ResolvedDataSource
  */
 export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
-  const endpoint = `/api/modules/${ref.moduleId}/data/${ref.collection}`
+  let endpoint: string
+
+  // BUG-FIX-fix_20260512_001: workspace:// 协议特殊处理
+  // 问题根因: resolveDataSource 将所有协议统一解析为 /api/modules/{moduleId}/data/{collection}，
+  //           导致 workspace://{containerId} 被解析为 /api/modules/workspace/data/{containerId}，
+  //           该端点不存在，返回 404。
+  // 修复方案: 对 workspace:// 协议单独映射到 /api/v1/workspaces/{containerId}/file-tree
+  // 影响范围: 工作区面板文件树加载
+  // 修复日期: 2026-05-12
+  if (ref.moduleId === 'workspace') {
+    endpoint = `/api/v1/workspaces/${ref.collection}/file-tree`
+  } else {
+    endpoint = `/api/modules/${ref.moduleId}/data/${ref.collection}`
+  }
+
   const params: Record<string, unknown> = { ...ref.query }
 
   if (ref.sort) params._sort = ref.sort

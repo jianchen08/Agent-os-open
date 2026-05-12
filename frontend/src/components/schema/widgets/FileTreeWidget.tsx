@@ -831,6 +831,7 @@ function TreeNode({
   const pipelineRunId = node.pipeline_run_id as string | undefined
   const wsMode = node.ws_mode as string | undefined
   const wsPath = node.ws_path as string | undefined
+  const agentName = node.agent_name as string | undefined
   const hasChildren = Array.isArray(children) && children.length > 0
   const isExpanded = expandedIds.has(nodeId)
   const isSelected = selectedId === nodeId
@@ -1007,6 +1008,11 @@ function TreeNode({
             <span className={`truncate text-sm ${isSelected ? 'text-foreground font-medium' : 'text-foreground/90'}`}>
               {title}
             </span>
+            {agentName && agentName.trim() && (
+              <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0 text-[10px] text-primary/70">
+                {agentName.trim()}
+              </span>
+            )}
             {statusInfo && (
               <span className={`shrink-0 text-[10px] ${statusInfo.color}`}>
                 {statusInfo.label}

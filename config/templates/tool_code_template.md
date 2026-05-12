@@ -660,17 +660,7 @@ def get_tool_definition() -> Tool:
 
 ### 8.2 工具类别与隔离速查
 
-| ToolCategory 值 | isolation | execution | fallback | 说明 |
-|-----------------|-----------|-----------|----------|------|
-| `execution` | container | command_in_container | **deny** | 命令执行类，禁止降级 |
-| `network` | container | command_in_container | allow | 网络类 |
-| `file` | container | command_in_container | allow | 文件操作类 |
-| `search` | container | command_in_container | allow | 搜索类 |
-| `analysis` | container | command_in_container | allow | 分析类 |
-| `system` | **host** | host_direct | allow | 系统工具类 |
-| `evaluation` | container | command_in_container | allow | 评估类 |
-| `task` | **host** | host_direct | allow | 任务管理类 |
-| `memory` | **host** | host_direct | allow | 记忆类 | |
+> 详见 [6.1 隔离策略 - 分类级策略](#61-隔离策略) 中的表格。
 
 ---
 

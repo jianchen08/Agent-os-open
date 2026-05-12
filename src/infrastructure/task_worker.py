@@ -679,27 +679,37 @@ class TaskWorker:
                     task_id, new_status, exc, exc_info=True,
                 )
 
-        # BUG-FIX-fix_20260511_task_status_realtime:
+        # BUG-FIX-fix_20260512_task_status_realtime:
         # 问题根因: task_state_changed 事件仅在后端 EventBus 内部流转，
         #   从未被转发到 WebSocket，前端无法实时感知任务状态变更。
-        # 修复方案: 在状态变更时通过 ws_interaction_notifier 广播
+        # 修复方案: 在状态变更时通过 connection_manager 广播
         #   task_status_update 事件到所有活跃的 WebSocket 连接。
         try:
+            _ws_payload = {
+                "type": "task_status_update",
+                "data": {
+                    "task_id": task_id,
+                    "old_status": data.get("old_status", ""),
+                    "new_status": new_status,
+                },
+            }
             _ws_notifier = self._services.get("ws_interaction_notifier")
-            if _ws_notifier and hasattr(_ws_notifier, "broadcast_event"):
-                _ws_payload = {
-                    "type": "task_status_update",
-                    "data": {
-                        "task_id": task_id,
-                        "old_status": data.get("old_status", ""),
-                        "new_status": new_status,
-                    },
-                }
-                await _ws_notifier.broadcast_event(_ws_payload)
-                logger.debug(
-                    "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
-                    task_id, data.get("old_status", ""), new_status,
-                )
+            if _ws_notifier:
+                _parent_pid = getattr(_task_obj, "parent_pipeline_id", "") or ""
+                _ws_tid = ""
+                if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
+                    _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
+                if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
+                    await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
+                elif hasattr(_ws_notifier, "send_to_user"):
+                    _task_obj = _task_obj or (self._task_service.get_task(task_id) if self._task_service else None)
+                    _uid = getattr(_task_obj, "user_id", "") or ""
+                    if _uid:
+                        await _ws_notifier.send_to_user(_uid, _ws_payload)
+            logger.debug(
+                "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
+                task_id, data.get("old_status", ""), new_status,
+            )
         except Exception as _ws_exc:
             logger.warning(
                 "TaskWorker: task_status_update 广播失败: task=%s, error=%s",
@@ -1245,8 +1255,12 @@ class TaskWorker:
                         _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pipeline_id_ws)
                     if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
                         await _ws_notifier.send_to_thread(_ws_tid, _ws_event_data)
-                    elif hasattr(_ws_notifier, "broadcast_event"):
-                        await _ws_notifier.broadcast_event(_ws_event_data)
+                    else:
+                        logger.warning(
+                            "TaskWorker: sub_agent_created 无法路由: parent_pipeline=%s thread_id=%s",
+                            _parent_pipeline_id_ws[:12] if _parent_pipeline_id_ws else "(empty)",
+                            _ws_tid[:12] if _ws_tid else "(empty)",
+                        )
                     logger.info(
                         "TaskWorker: sub_agent_created 事件已发送: "
                         "task_id=%s, agent=%s, pipeline=%s",

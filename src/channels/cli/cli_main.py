@@ -650,7 +650,7 @@ class CLIApplication:
         # 确定 Agent ID（从已加载的 agent_config 获取）
         agent_id = self._agent_config.config_id if self._agent_config else "lingxi"
 
-        # 通过 SessionService 管理会话（只管 session_id 和 pipeline_id）
+        # 通过 SessionService 管理会话（会话只做管道引用收集）
         _run_t3 = _time.monotonic()
         session_svc = self._services.get("session_service")
         if session_svc is None:
@@ -661,14 +661,18 @@ class CLIApplication:
         )
         logger.info("[STARTUP] session restore: %.2fs", _time.monotonic() - _run_t3)
 
-        # 引擎 pipeline_id 跟随 session：如果 session 有已保存的 active_pipeline_id，
-        # 用它覆盖引擎的随机 ID，保证跨 CLI 重启管道 ID 不变
+        # CLI 重启时恢复：如果有历史 pipeline_id，复用引擎的 ID 以延续对话
+        # 否则使用引擎初始化时自动生成的新 ID
         if session.active_pipeline_id and self._engine is not None:
             logger.info(
-                "Syncing engine pipeline_id to session: %s → %s",
+                "Restoring engine pipeline_id from session: %s → %s",
                 self._engine.pipeline_id, session.active_pipeline_id,
             )
             self._engine._pipeline_id = session.active_pipeline_id
+        elif self._engine is not None:
+            # 新会话：将引擎的 pipeline_id 注册到 session
+            session.register_pipeline(self._engine.pipeline_id)
+            session_svc._persist_session_state(session)
 
         # 跨轮次对话历史：从执行记录恢复（绑定 pipeline_id）
         _run_t4 = _time.monotonic()
@@ -1195,15 +1199,9 @@ class CLIApplication:
                 failed_task_count=task_stats["failed"],
             )
 
-            pipeline_id = session_svc.prepare_run(session)
-
-            # 引擎 pipeline_id 跟随 session（session 是权威来源）
-            if pipeline_id != self._engine.pipeline_id:
-                logger.info(
-                    "Syncing engine pipeline_id to session on run: %s → %s",
-                    self._engine.pipeline_id, pipeline_id,
-                )
-                self._engine._pipeline_id = pipeline_id
+            pipeline_id = self._engine.pipeline_id
+            session.register_pipeline(pipeline_id)
+            session_svc._persist_session_state(session)
 
             # BUG-FIX-fix_pipeline_thread_id_missing:
             # 将 session_id 作为 thread_id 注入管道 state，

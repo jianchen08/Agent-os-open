@@ -590,12 +590,20 @@ class TaskService:
     # 修复方案: 将 list_all 改为 async 方法，正确 await 存储层调用。
     # 影响范围: 所有调用 TaskService.list_all() 的地方均需同步更新为 await 调用。
     # 修复日期: 2025-05-12
-    async def list_all(self, limit: int = 50, reverse: bool = True) -> list[TaskModel]:
+    async def list_all(
+        self,
+        limit: int = 50,
+        reverse: bool = True,
+        session_id: str | None = None,
+    ) -> list[TaskModel]:
         """列出所有任务。
+
+        支持按 session_id 过滤，按创建时间排序后返回指定数量。
 
         Args:
             limit: 返回数量限制
             reverse: 是否按创建时间倒序
+            session_id: 会话 ID，用于按会话筛选任务（基于 metadata["session_id"]）
 
         Returns:
             任务列表
@@ -606,6 +614,19 @@ class TaskService:
             all_tasks = await self._storage.list_all()
         else:
             all_tasks = []
+
+        # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤
+        # 问题根因: TaskService.list_all() 不接受 session_id 参数，
+        #           导致调用方无法按会话筛选任务。
+        # 修复方案: 添加 session_id 参数，在排序前按 metadata["session_id"] 过滤。
+        # 影响范围: list_tasks API、get_tasks_debug API、get_task_tree 等调用方。
+        # 修复日期: 2025-05-12
+        if session_id:
+            all_tasks = [
+                t for t in all_tasks
+                if getattr(t, 'metadata', None) and t.metadata.get("session_id") == session_id
+            ]
+
         all_tasks.sort(key=lambda t: t.created_at, reverse=reverse)
         return all_tasks[:limit]
 

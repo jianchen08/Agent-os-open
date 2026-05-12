@@ -13,6 +13,10 @@ import './index.css'
 
 /**
  * 初始化应用
+ *
+ * 核心策略：先渲染 React（用户看到加载动画），再异步初始化认证。
+ * 这样即使后端 API 响应慢或不可用，页面也不会空白。
+ * ProtectedRoute 在 isInitializing=true 时会显示加载动画。
  */
 async function bootstrap() {
   const root = document.getElementById('root')
@@ -23,6 +27,16 @@ async function bootstrap() {
 
   await initializeTheme()
 
+  // 先渲染 React 应用，用户立刻看到加载状态而非空白页
+  // ProtectedRoute 会在 isInitializing=true 时显示加载动画
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+
+  // 异步初始化认证状态（不阻塞渲染）
+  // initializeAuth 更新 store 后，ProtectedRoute 会自动响应状态变化
   const authStore = useAuthStore.getState()
   await authStore.initializeAuth()
 
@@ -39,12 +53,6 @@ async function bootstrap() {
       console.error('自生长闭环初始化失败:', error)
     }
   }
-
-  createRoot(root).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  )
 }
 
 bootstrap().catch((error) => {

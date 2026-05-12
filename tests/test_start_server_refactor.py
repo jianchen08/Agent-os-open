@@ -275,15 +275,11 @@ class TestAC4EntryFunctionsExist:
         """WebSocket 交互通知器和流式处理函数应保留。"""
         source = _read_start_server()
         top_funcs = _get_top_level_functions(source)
-        # 关键函数应保留
         assert "_stream_engine_response" in top_funcs, (
             "_stream_engine_response 函数不存在"
         )
-        assert "_stream_simulated_response" in top_funcs, (
-            "_stream_simulated_response 函数不存在"
-        )
-        assert "_generate_simulated_reply" in top_funcs, (
-            "_generate_simulated_reply 函数不存在"
+        assert "_stream_wake_response" in top_funcs, (
+            "_stream_wake_response 函数不存在"
         )
 
 

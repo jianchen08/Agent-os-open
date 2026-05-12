@@ -335,13 +335,13 @@ def _parse_iso_time(s: str) -> float:
 class MemoryStore:
     """基于字典的内存存储，支持 JSON 文件持久化。
 
-    存储用户、线程、消息、任务等数据。初始化时创建演示用户 demo/demo123。
+    存储用户、线程、任务等数据。初始化时创建演示用户 demo/demo123。
     当指定 persist_dir 时，线程和会话数据会自动持久化到 JSON 文件。
+    消息数据仅存储在管道执行记录（YAML）中，不在本 store 中保存。
 
     Attributes:
         users: 用户存储字典，key 为用户名
         threads: 线程存储字典，key 为线程 ID
-        messages: 消息存储字典，key 为线程 ID，value 为消息列表
         tasks: 任务存储字典，key 为任务 ID
         memories: 记忆存储字典，key 为记忆 ID
         refresh_tokens: refresh token 黑名单（已登出的 token）
@@ -356,7 +356,6 @@ class MemoryStore:
         """
         self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
-        self.messages: dict[str, list[dict[str, Any]]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
         self.refresh_tokens: set[str] = set()
@@ -397,7 +396,6 @@ class MemoryStore:
 
         threads 是唯一数据源。加载每个 thread 时自动派生对应的 SessionModel，
         无需在 JSON 中存储 sessions 段。
-        messages 从 JSON 中的 messages 段恢复，若无则初始化为空列表。
         """
         path = self._persist_file()
         if not path or not os.path.exists(path):
@@ -417,23 +415,20 @@ class MemoryStore:
                     last_active_at=_parse_iso_time(tdata.get("updated_at", "")),
                     metadata=tdata.get("metadata", {}),
                 )
-            for tid, msgs in data.get("messages", {}).items():
-                if isinstance(msgs, list):
-                    self.messages[tid] = msgs
         except Exception:
             pass
 
     def _save_persisted_data(self) -> None:
-        """将线程和消息数据持久化到 JSON 文件。
+        """将线程数据持久化到 JSON 文件。
 
-        threads 和 messages 一起持久化，确保页面刷新后消息不丢失。
-        SessionModel 在加载时从 thread 字段自动派生。
+        只持久化 threads 数据。SessionModel 在加载时从 thread 字段自动派生。
+        消息数据由管道执行记录（YAML）独立管理。
         """
         path = self._persist_file()
         if not path:
             return
         try:
-            data = {"threads": self.threads, "messages": self.messages}
+            data = {"threads": self.threads}
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp_path = path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -523,7 +518,6 @@ class MemoryStore:
             "updated_at": now,
         }
         self.threads[thread_id] = thread
-        self.messages[thread_id] = []
         self._save_persisted_data()
         return thread
 
@@ -549,23 +543,14 @@ class MemoryStore:
     def get_user_threads(self, user_id: str) -> list[dict[str, Any]]:
         """获取指定用户的所有线程。"""
         return [
-            {
-                **t,
-                "message_count": len(self.messages.get(t["id"], [])),
-            }
+            {**t}
             for t in self.threads.values()
             if t["user_id"] == user_id
         ]
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         """获取指定线程详情。"""
-        thread = self.threads.get(thread_id)
-        if thread is None:
-            return None
-        return {
-            **thread,
-            "message_count": len(self.messages.get(thread_id, [])),
-        }
+        return self.threads.get(thread_id)
 
     def delete_thread(self, thread_id: str) -> bool:
         """删除指定线程及其消息和关联会话。
@@ -576,7 +561,6 @@ class MemoryStore:
         if thread_id not in self.threads:
             return False
         del self.threads[thread_id]
-        self.messages.pop(thread_id, None)
         self.sessions.pop(thread_id, None)
         self._save_persisted_data()
         return True
@@ -605,70 +589,6 @@ class MemoryStore:
             关联的 SessionModel，不存在则返回 None
         """
         return self.sessions.get(thread_id)
-
-    def get_messages(self, thread_id: str) -> list[dict[str, Any]]:
-        """获取指定线程的所有消息。"""
-        return self.messages.get(thread_id, [])
-
-    def add_message(
-        self,
-        thread_id: str,
-        message_id: str,
-        role: str,
-        content: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """向指定线程添加一条消息。
-
-        Args:
-            thread_id: 线程 ID
-            message_id: 消息 ID
-            role: 消息角色 (user / assistant / tool)
-            content: 消息内容
-            **kwargs: 额外字段（如 thinking, tool_calls 等）
-
-        Returns:
-            创建的消息字典
-        """
-        now = _now_iso()
-        msg: dict[str, Any] = {
-            "id": message_id,
-            "thread_id": thread_id,
-            "role": role,
-            "content": content,
-            "created_at": now,
-            **kwargs,
-        }
-        if thread_id not in self.messages:
-            self.messages[thread_id] = []
-        self.messages[thread_id].append(msg)
-        # 更新线程的 updated_at
-        thread = self.threads.get(thread_id)
-        if thread:
-            thread["updated_at"] = now
-        self._save_persisted_data()
-        return msg
-
-    def search_messages(
-        self, query: str, limit: int = 20, offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """搜索所有线程中包含查询关键词的消息。
-
-        Args:
-            query: 搜索关键词
-            limit: 返回数量
-            offset: 偏移量
-
-        Returns:
-            匹配的消息列表
-        """
-        results: list[dict[str, Any]] = []
-        query_lower = query.lower()
-        for thread_id, msgs in self.messages.items():
-            for m in msgs:
-                if query_lower in m.get("content", "").lower():
-                    results.append({**m, "thread_id": thread_id})
-        return results[offset:offset + limit]
 
     # ---- Task 存储操作 ----
 

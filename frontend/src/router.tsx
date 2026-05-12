@@ -180,13 +180,10 @@ function HomePage(): ReactNode {
   const {
     sessions,
     activeSessionId,
-    messages,
     wsStatus,
     isLoading: isSessionLoading,
     connectWebSocket,
     disconnectWebSocket,
-    getMessagePagination,
-    loadMoreMessages,
   } = useSessionStore()
   const { fetchSessions, createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession } = useSessionListStore()
   const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
@@ -210,14 +207,15 @@ function HomePage(): ReactNode {
       .catch(() => {})
   }, [])
 
-  /** 当前活跃会话的消息列表（响应式） */
+  /** 当前活跃会话的消息列表（从 pipelineMessageStore 读取） */
   const activeMessages = useMemo(
-    () => (activeSessionId ? messages[activeSessionId] || [] : []),
-    [activeSessionId, messages],
+    () => (activeSessionId ? usePipelineMessageStore.getState().getMessages(activeSessionId) : []),
+    [activeSessionId],
   )
 
-  /** 当前活跃会话的分页状态 */
-  const pagination = activeSessionId ? getMessagePagination(activeSessionId) : null
+  /** 当前活跃会话的分页状态（从 pipelineMessageStore 读取） */
+  const hasMoreMessages = activeSessionId ? usePipelineMessageStore.getState().hasMoreOlder(activeSessionId) : false
+  const isLoadingMoreMessages = activeSessionId ? usePipelineMessageStore.getState().isLoadingOlderByPipeline[activeSessionId] ?? false : false
 
   // ------------------------------------------
   // 初始化：加载会话列表
@@ -231,6 +229,9 @@ function HomePage(): ReactNode {
   // ------------------------------------------
   useEffect(() => {
     initStreamingEvents()
+    return () => {
+      destroyStreamingEvents()
+    }
   }, [])
 
   // ------------------------------------------
@@ -314,7 +315,8 @@ function HomePage(): ReactNode {
         listStore.renameSession(sid, params.content.slice(0, 50))
       }
 
-      const activePipelineId = usePipelineMessageStore.getState().activePipelineId || sid
+      const activePipelineId = usePipelineMessageStore.getState().activePipelineId
+      if (!activePipelineId) return
       const existingMsgs = usePipelineMessageStore.getState().getMessages(activePipelineId)
       const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
@@ -368,8 +370,7 @@ function HomePage(): ReactNode {
     if (sid) {
       globalWS.sendCancel(sid)
     }
-    // BUG-FIX-fix_20260509_tab_streaming: streamingTabs 使用 pipelineId 作为键
-    const currentPipelineId = usePipelineMessageStore.getState().activePipelineId || sid
+    const currentPipelineId = usePipelineMessageStore.getState().activePipelineId
     if (currentPipelineId) {
       stopStreamingForTab(currentPipelineId)
     }
@@ -382,7 +383,10 @@ function HomePage(): ReactNode {
     async (messageId: string, newContent: string) => {
       if (!activeSessionId) return
       await messageActions.editMessage(messageId, newContent)
-      await usePipelineMessageStore.getState().fetchMessages(activeSessionId)
+      const pipelineId = usePipelineMessageStore.getState().activePipelineId
+      if (pipelineId) {
+        await usePipelineMessageStore.getState().fetchMessages(pipelineId, { threadId: activeSessionId })
+      }
     },
     [activeSessionId, messageActions],
   )
@@ -544,17 +548,22 @@ function HomePage(): ReactNode {
       isLoading={isSessionLoading}
       // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
       // 此 prop 仅作兼容保留，实际不影响输入框状态
-      isGenerating={activeSessionId ? (streamingTabs[activeSessionId] ?? false) : false}
+      isGenerating={activeSessionId ? (streamingTabs[usePipelineMessageStore.getState().activePipelineId || ''] ?? false) : false}
       modelName={modelName}
       onSendMessage={handleSendMessage}
       onStopGenerate={handleStopGenerate}
       onEdit={handleEditMessage}
       onRegenerate={handleRegenerateMessage}
       onDelete={handleDeleteMessage}
-      hasMoreMessages={pagination?.hasMore ?? false}
-      isLoadingMoreMessages={pagination?.isLoadingMore ?? false}
+      hasMoreMessages={hasMoreMessages}
+      isLoadingMoreMessages={isLoadingMoreMessages}
       onLoadMoreMessages={() => {
-        if (activeSessionId) loadMoreMessages(activeSessionId)
+        const pid = usePipelineMessageStore.getState().activePipelineId
+        const sid = useSessionStore.getState().activeSessionId
+        if (pid) {
+          const topCursor = usePipelineMessageStore.getState().getTopCursor(pid)
+          usePipelineMessageStore.getState().fetchMessages(pid, { before_sequence: topCursor, threadId: sid || undefined })
+        }
       }}
       className="flex-1"
     />

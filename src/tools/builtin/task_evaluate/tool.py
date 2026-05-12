@@ -62,7 +62,7 @@ def _simple_evaluate(task: Any, notes: str = "") -> tuple[bool, str]:
     return True, detail
 
 
-def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
+async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
     """同步任务评估函数（供测试和简单场景使用）。
 
     Args:
@@ -279,6 +279,8 @@ class TaskEvaluateTool(BuiltinTool):
             )
             return await self._auto_complete(inputs, task_service, task)
 
+        import litellm
+
         try:
             import asyncio
             loop = asyncio.get_running_loop()
@@ -340,7 +342,7 @@ class TaskEvaluateTool(BuiltinTool):
                 "[TaskEvaluate] 所有指标已通过，完成任务 | task_id=%s",
                 task_id,
             )
-            return self._complete_task(task_service, task, result)
+            return await self._complete_task(task_service, task, result)
 
         # 还有指标未评估，返回进度
         evaluated, remaining = self._get_eval_progress(task, metric_ids)
@@ -383,7 +385,7 @@ class TaskEvaluateTool(BuiltinTool):
                 "直接标记完成",
                 task.id,
             )
-            return self._complete_task(
+            return await self._complete_task(
                 task_service, task,
                 type("EvalResult", (), {
                     "task_id": task.id,
@@ -403,7 +405,7 @@ class TaskEvaluateTool(BuiltinTool):
                 "task_id=%s | passed=%d/%d",
                 task.id, already_passed, len(metric_ids),
             )
-            return self._complete_task(
+            return await self._complete_task(
                 task_service, task,
                 type("EvalResult", (), {
                     "task_id": task.id,
@@ -437,7 +439,7 @@ class TaskEvaluateTool(BuiltinTool):
                 ),
                 timeout=timeout,
             )
-            return self._handle_evaluation_result(inputs, task_service, task, result)
+            return await self._handle_evaluation_result(inputs, task_service, task, result)
         except asyncio.TimeoutError:
             logger.warning(
                 "[TaskEvaluate] 自动评估超时 | task_id=%s | "
@@ -454,7 +456,7 @@ class TaskEvaluateTool(BuiltinTool):
                 error=f"评估失败: {e}", error_code="EVAL_FAILED"
             )
 
-    def _handle_evaluation_result(
+    async def _handle_evaluation_result(
         self,
         inputs: dict[str, Any],
         task_service: Any,
@@ -521,9 +523,9 @@ class TaskEvaluateTool(BuiltinTool):
         await self._save_task(task_service, task)
 
         if not has_failure:
-            return self._complete_task(task_service, task, eval_result)
+            return await self._complete_task(task_service, task, eval_result)
         elif exhausted:
-            return self._fail_task(task_service, task, eval_result, max_retries)
+            return await self._fail_task(task_service, task, eval_result, max_retries)
         else:
             min_remaining = max_retries - min(retry_counts.values())
             failed_details = []
@@ -547,7 +549,7 @@ class TaskEvaluateTool(BuiltinTool):
                 },
             )
 
-    def _complete_task(
+    async def _complete_task(
         self, task_service: Any, task: Any, eval_result: Any
     ) -> ToolExecutionResult:
         """评估通过，完成任务。
@@ -596,7 +598,7 @@ class TaskEvaluateTool(BuiltinTool):
             },
         )
 
-    def _fail_task(
+    async def _fail_task(
         self,
         task_service: Any,
         task: Any,

@@ -79,7 +79,7 @@ system_prompt: |
 
   ## 参考规则
 
-  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/coding_context_rules.md}}
   {{path:config/rules/per_agent/code_reviewer_rules.md}}
   {{path:config/rules/per_agent/detail_review_checklist.md}}
   {{path:config/rules/per_agent/design_system_constraints.md}}
@@ -97,6 +97,26 @@ static_vars:
     - name: "代码分析报告模板"
       type: "path"
       path: "config/templates/code_analysis_report_template.md"
+    - name: "前端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        frontend:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+    - name: "后端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        backend:
+          type: "path"
+          path: "config/rules/backend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/backend_rules.md"
 
 # 动态变量
 dynamic_vars:

@@ -159,17 +159,19 @@ class TestDataClasses:
         """StreamStartData 序列化。"""
         data = StreamStartData(message_id="m1", model="MiniMax-M2.7", thinking_enabled=True)
         result = data.to_dict()
-        assert result == {
-            "message_id": "m1",
-            "model": "MiniMax-M2.7",
-            "thinking_enabled": True,
-        }
+        assert result["message_id"] == "m1"
+        assert result["model"] == "MiniMax-M2.7"
+        assert result["thinking_enabled"] is True
+        assert "pipeline_id" in result
 
     def test_stream_chunk_data(self) -> None:
         """StreamChunkData 序列化。"""
         data = StreamChunkData(message_id="m1", content="hello", sequence=5)
         result = data.to_dict()
-        assert result == {"message_id": "m1", "content": "hello", "sequence": 5}
+        assert result["message_id"] == "m1"
+        assert result["content"] == "hello"
+        assert result["sequence"] == 5
+        assert "pipeline_id" in result
 
     def test_stream_end_data(self) -> None:
         """StreamEndData 序列化。"""

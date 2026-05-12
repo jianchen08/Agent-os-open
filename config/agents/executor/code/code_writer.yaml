@@ -35,6 +35,33 @@ static_vars:
     - name: "工具输出优化技能"
       type: "path"
       path: "skills/skill-tool-output-optimize/SKILL.md"
+    - name: "前端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        frontend:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+    - name: "后端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        backend:
+          type: "path"
+          path: "config/rules/backend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/backend_rules.md"
+    - name: "测试规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        _default:
+          type: "path"
+          path: "config/rules/testing_rules.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -99,7 +126,7 @@ system_prompt: |
 
   ## 参考规则
 
-  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/coding_context_rules.md}}
   {{path:config/rules/code_style_rules.md}}
   {{path:config/rules/python_type_hints.md}}
   {{path:config/rules/per_agent/code_writer_rules.md}}

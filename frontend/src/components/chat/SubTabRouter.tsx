@@ -14,7 +14,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 
 export interface SubTabRouterProps {
   /** 当前会话 ID */
@@ -38,14 +37,13 @@ interface BufferedMessage {
  * 3. 路由失败时 fallback 到主 Tab
  * 4. Tab 切换时缓冲消息，防止丢失
  */
-export function SubTabRouter({ sessionId }: SubTabRouterProps) {
+export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
   /** 消息缓冲区 */
   const messageBuffer = useRef<BufferedMessage[]>([])
   /** 已报告的路由失败（防止重复通知） */
   const reportedFailures = useRef<Set<string>>(new Set())
 
   const tabs = useAgentTabStore((s) => s.tabs)
-  const activeTabId = useAgentTabStore((s) => s.activeTabId)
   const pipelineTabMap = useAgentTabStore((s) => s.pipelineTabMap)
   const addMessageToTab = useAgentTabStore((s) => s.addMessageToTab)
   const registerPipelineTab = useAgentTabStore((s) => s.registerPipelineTab)

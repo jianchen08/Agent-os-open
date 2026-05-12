@@ -183,7 +183,10 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     if (fetchData) {
       try {
-        await useSessionStore.getState().fetchMessages(id)
+        const pipelineId = session?.activePipelineId || session?.pipelineIds?.[0]
+        if (pipelineId) {
+          await usePipelineMessageStore.getState().fetchMessages(pipelineId, { threadId: id })
+        }
       } catch (error) {
         console.error('[setActiveSession] 加载会话数据失败:', error)
       }

@@ -1,7 +1,7 @@
 """会话模型定义。
 
-会话（Session）只是一个"筐"，用来装属于同一个交互上下文的 pipeline 执行记录。
-对话历史来自执行记录，不由会话管理。
+会话（Session）只是一个标记/标签，维护属于同一个交互上下文的管道引用集合。
+管道的创建、消息收发、ID 生成都由管道自身负责，会话不参与。
 """
 
 from __future__ import annotations
@@ -14,16 +14,17 @@ from typing import Any
 
 @dataclass
 class SessionModel:
-    """会话模型 — 装管道历史的筐。
+    """会话模型 — 管道历史的引用集合。
 
-    session_id 固定不变，pipeline_ids 记录所有属于这个筐的 pipeline run。
+    会话只是一个标记，记录哪些管道属于这个会话。
+    不负责创建管道、生成 pipeline_id 或管理管道生命周期。
 
     Attributes:
-        session_id: 筐的标签，创建后固定不变
+        session_id: 会话标签，创建后固定不变
         channel_type: 来源通道 — "cli" 或 "web"
         channel_ref: 通道级引用
-        pipeline_ids: 属于这个筐的所有 pipeline_run_id
-        active_pipeline_id: 当前正在用的 pipeline_run_id
+        pipeline_ids: 属于这个会话的 pipeline_run_id 引用列表
+        active_pipeline_id: 最近一次使用的 pipeline_run_id（仅引用）
         created_at: 创建时间戳
         last_active_at: 最后活跃时间戳
         metadata: 扩展元数据
@@ -41,20 +42,21 @@ class SessionModel:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def touch(self) -> None:
+        """更新最后活跃时间戳。"""
         self.last_active_at = time.time()
 
-    def generate_pipeline_id(self) -> str:
-        """生成新 pipeline_id 并加到 pipeline_ids。"""
-        pid = uuid.uuid4().hex[:12]
-        self.active_pipeline_id = pid
-        self.pipeline_ids.append(pid)
+    def register_pipeline(self, pipeline_id: str) -> None:
+        """将一个管道 ID 注册到本会话的引用集合中。
+
+        由管道运行完成后或运行前调用，会话只做记录，不创建管道。
+        """
+        if pipeline_id and pipeline_id not in self.pipeline_ids:
+            self.pipeline_ids.append(pipeline_id)
+        self.active_pipeline_id = pipeline_id
         self.touch()
-        return pid
 
     def clear(self) -> None:
-        """清空管道列表，保留当前 active_pipeline_id。
-
-        session_id 和 active_pipeline_id 均不变。
-        """
+        """清空管道引用列表。"""
         self.pipeline_ids.clear()
+        self.active_pipeline_id = ""
         self.touch()

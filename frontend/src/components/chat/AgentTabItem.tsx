@@ -112,8 +112,6 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
       )}
       title={tab.path?.join(' \u2192 ') || tab.name}
     >
-      {getAgentLevelBadge(tab.agentLevel)}
-
       <span
         className={cn(
           'flex-shrink-0 text-xs',

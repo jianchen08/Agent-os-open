@@ -35,7 +35,6 @@ from channels.api.models import store as api_store
 
 from application import Application
 from src.pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
-from src.infrastructure.execution_record_storage import ExecutionRecordData
 
 # 配置日志
 logging.basicConfig(
@@ -45,45 +44,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent
-
-
-def _persist_messages_to_yaml(
-    exec_storage: Any,
-    pipeline_id: str,
-    user_msg_id: str,
-    user_content: str,
-    assistant_msg_id: str,
-    assistant_content: str,
-    thinking_content: str | None = None,
-) -> None:
-    if exec_storage is None or not pipeline_id:
-        return
-    try:
-        existing = exec_storage.list_by_pipeline(pipeline_id)
-        next_seq = max((r.sequence for r in existing), default=0) + 1
-        exec_storage.save(ExecutionRecordData(
-            record_id=user_msg_id,
-            pipeline_run_id=pipeline_id,
-            type="user",
-            sequence=next_seq,
-            role="user",
-            content=user_content,
-        ))
-        exec_storage.save(ExecutionRecordData(
-            record_id=assistant_msg_id,
-            pipeline_run_id=pipeline_id,
-            type="ai",
-            sequence=next_seq + 1,
-            role="assistant",
-            content=assistant_content,
-            thinking_content=thinking_content or None,
-        ))
-        logger.info(
-            "[persist_yaml] pipeline=%s user_seq=%d ai_seq=%d thinking=%d",
-            pipeline_id[:12], next_seq, next_seq + 1, len(thinking_content or ""),
-        )
-    except Exception as exc:
-        logger.warning("持久化消息到 ExecutionRecordStorage 失败: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -188,33 +148,42 @@ class WebSocketInteractionNotifier:
                 all_conns.extend(_ws_list)
             conns = all_conns
 
+        payload_obj = {
+            "type": "interaction_request",
+            "data": {
+                "request_id": request_id,
+                "interaction_mode": msg_data.get(
+                    "interaction_mode", "choice"
+                ),
+                "title": msg_data.get("title", ""),
+                "description": msg_data.get("description", ""),
+                "options": msg_data.get("options"),
+                "questions": msg_data.get("questions"),
+                "initial_message": msg_data.get("initial_message"),
+                "suggestions": msg_data.get("suggestions"),
+                "timeout_seconds": msg_data.get("timeout_seconds"),
+                "priority": msg_data.get("priority", "normal"),
+                "thread_id": thread_id,
+                "tab_id": msg_data.get("tab_id", ""),
+                "agent_id": msg_data.get("agent_id", ""),
+                "pipeline_id": record.get("message_data", {}).get("pipeline_id", ""),
+                "file_contents": msg_data.get("file_contents"),
+                "agent_level": msg_data.get("agent_level"),
+                "session_id": record.get("session_id", ""),
+            },
+        }
+
+        # BUG-FIX-fix_20260512_interaction_card_not_showing:
+        # 问题根因: notify_request 只查找 _active_connections（per-session 连接），
+        #           前端使用 GlobalWebSocket 注册在 _global_connections 中，
+        #           导致交互请求消息永远到不了前端，卡片不显示。
+        #           后端桌面通知（DesktopInteractionNotifier）独立于 WebSocket，
+        #           所以声音和 OS 通知正常。
+        # 修复方案: 优先 _active_connections，失败时回退到 _global_connections，
+        #           与 send_to_thread 方法保持一致。
+        payload = json.dumps(payload_obj, ensure_ascii=False)
         sent = False
         if conns:
-            payload = json.dumps({
-                "type": "interaction_request",
-                "data": {
-                    "request_id": request_id,
-                    "interaction_mode": msg_data.get(
-                        "interaction_mode", "choice"
-                    ),
-                    "title": msg_data.get("title", ""),
-                    "description": msg_data.get("description", ""),
-                    "options": msg_data.get("options"),
-                    "questions": msg_data.get("questions"),
-                    "initial_message": msg_data.get("initial_message"),
-                    "suggestions": msg_data.get("suggestions"),
-                    "timeout_seconds": msg_data.get("timeout_seconds"),
-                    "priority": msg_data.get("priority", "normal"),
-                    "thread_id": thread_id,
-                    "tab_id": msg_data.get("tab_id", ""),
-                    "agent_id": msg_data.get("agent_id", ""),
-                    "pipeline_id": record.get("message_data", {}).get("pipeline_id", ""),
-                    "file_contents": msg_data.get("file_contents"),
-                    "agent_level": msg_data.get("agent_level"),
-                    "session_id": record.get("session_id", ""),
-                },
-            }, ensure_ascii=False)
-
             for ws in conns:
                 try:
                     await ws.send_text(payload)
@@ -223,6 +192,15 @@ class WebSocketInteractionNotifier:
                     logger.debug(
                         "[WSNotifier] 发送交互请求失败，连接可能已断开"
                     )
+
+        if not sent:
+            for user_id, ws in list(self._global_connections.items()):
+                try:
+                    await ws.send_text(json.dumps(payload_obj, ensure_ascii=False))
+                    sent = True
+                    break
+                except Exception:
+                    self._global_connections.pop(user_id, None)
 
         if sent:
             logger.info(
@@ -335,46 +313,58 @@ class WebSocketInteractionNotifier:
     async def notify_cancel(
         self, request_id: str, reason: str | None = None, thread_id: str = ""
     ) -> bool:
-        conns = self._active_connections.get(thread_id, [])
-        if not conns:
-            return True
-
         payload = json.dumps({
             "type": "interaction_cancelled",
             "data": {"request_id": request_id, "reason": reason},
         }, ensure_ascii=False)
 
-        for ws in conns:
+        # BUG-FIX-fix_20260512_interaction_card_not_showing:
+        # 回退到 _global_connections，与 notify_request 保持一致
+        conns = self._active_connections.get(thread_id, [])
+        if conns:
+            for ws in conns:
+                try:
+                    await ws.send_text(payload)
+                except Exception:
+                    pass
+            return True
+
+        for user_id, ws in list(self._global_connections.items()):
             try:
                 await ws.send_text(payload)
+                return True
             except Exception:
-                pass
+                self._global_connections.pop(user_id, None)
         return True
 
     async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
-        conns = self._active_connections.get(thread_id, [])
-        if not conns:
-            return True
-
         payload = json.dumps({
             "type": "interaction_timeout",
             "data": {"request_id": request_id},
         }, ensure_ascii=False)
 
-        for ws in conns:
+        # BUG-FIX-fix_20260512_interaction_card_not_showing:
+        # 回退到 _global_connections，与 notify_request 保持一致
+        conns = self._active_connections.get(thread_id, [])
+        if conns:
+            for ws in conns:
+                try:
+                    await ws.send_text(payload)
+                except Exception:
+                    pass
+            return True
+
+        for user_id, ws in list(self._global_connections.items()):
             try:
                 await ws.send_text(payload)
+                return True
             except Exception:
-                pass
+                self._global_connections.pop(user_id, None)
         return True
 
     async def notify_timeout_reminder(
         self, request_id, remaining_seconds, thread_id="", **kw
     ) -> bool:
-        conns = self._active_connections.get(thread_id, [])
-        if not conns:
-            return True
-
         payload = json.dumps({
             "type": "interaction_timeout_reminder",
             "data": {
@@ -383,11 +373,23 @@ class WebSocketInteractionNotifier:
             },
         }, ensure_ascii=False)
 
-        for ws in conns:
+        # BUG-FIX-fix_20260512_interaction_card_not_showing:
+        # 回退到 _global_connections，与 notify_request 保持一致
+        conns = self._active_connections.get(thread_id, [])
+        if conns:
+            for ws in conns:
+                try:
+                    await ws.send_text(payload)
+                except Exception:
+                    pass
+            return True
+
+        for user_id, ws in list(self._global_connections.items()):
             try:
                 await ws.send_text(payload)
+                return True
             except Exception:
-                pass
+                self._global_connections.pop(user_id, None)
         return True
 
     async def notify_conversation_start(
@@ -441,54 +443,6 @@ class WebSocketInteractionNotifier:
             list(self._global_connections.keys()),
         )
         return False
-
-    async def broadcast_event(self, event_data: dict) -> bool:
-        """向所有活跃的 WebSocket 连接广播自定义事件。
-
-        用于 TaskWorker 等后台组件向前端推送事件（如 sub_agent_created），
-        无需知道具体的 session_id 或 thread_id。
-
-        Args:
-            event_data: 完整的事件字典，包含 type 和 data 字段。
-                示例: {"type": "sub_agent_created", "data": {...}}
-
-        Returns:
-            是否至少成功发送到一个连接
-        """
-        all_conns: list[WebSocket] = []
-        for tid, _ws_list in self._active_connections.items():
-            all_conns.extend(_ws_list)
-            if len(_ws_list) > 1:
-                logger.warning(
-                    "broadcast_event: thread_id=%s 有 %d 个连接!",
-                    tid, len(_ws_list),
-                )
-
-        if not all_conns:
-            return False
-
-        etype = event_data.get("type", "unknown")
-        _quiet_types = {
-            "heartbeat_ack", "sub_agent_created",
-            "stream_start", "stream_chunk", "stream_end", "stream_keepalive",
-            "thinking_start", "thinking_chunk", "thinking_end",
-            "tool_start", "tool_result", "new_message", "iteration",
-        }
-        if etype not in _quiet_types:
-            logger.warning(
-                "broadcast_event: 流式事件走了广播路径! type=%s, conns=%d",
-                etype, len(all_conns),
-            )
-
-        payload = json.dumps(event_data, ensure_ascii=False)
-        sent = False
-        for ws in all_conns:
-            try:
-                await ws.send_text(payload)
-                sent = True
-            except Exception:
-                pass
-        return sent
 
 
 # 全局 WebSocket 通知器实例
@@ -804,37 +758,8 @@ async def _stream_wake_response(
                 },
             })
 
-        # 持久化消息到 store（唤醒路径）
         if full_content and thread_id:
-            try:
-                user_msg_id = (
-                    conversation_history[-2]["id"]
-                    if conversation_history and len(conversation_history) >= 2 and "id" in conversation_history[-2]
-                    else None
-                )
-                resolved_user_msg_id = user_msg_id or f"user_{message_id}"
-                api_store.add_message(
-                    thread_id=thread_id,
-                    message_id=resolved_user_msg_id,
-                    role="user",
-                    content=user_content,
-                )
-                api_store.add_message(
-                    thread_id=thread_id,
-                    message_id=message_id,
-                    role="assistant",
-                    content=full_content,
-                )
-                thinking_text = "".join(drain_result.get("thinking_content_parts", []))
-                _exec_storage = ctx.services.get("execution_record_storage") if ctx.services else None
-                _persist_messages_to_yaml(
-                    _exec_storage, bridge.pipeline_id,
-                    resolved_user_msg_id, user_content,
-                    message_id, full_content,
-                    thinking_content=thinking_text or None,
-                )
-            except Exception as persist_err:
-                logger.warning("唤醒路径持久化消息失败: %s", persist_err)
+            pass
 
         # BUG-FIX-20260511: 唤醒路径需要从引擎内部状态同步 conversation_history
         # 问题根因: 引擎内部维护 state["messages"]（含完整对话历史），
@@ -922,60 +847,36 @@ async def _stream_engine_response(
         conversation_history: 对话历史列表（会被就地更新）
         ctx: 管道上下文
     """
+    engine_task: asyncio.Task | None = None
+    drain_result: dict = {}
+
+    conversation_history.append({"role": "user", "content": user_content})
+
+    # 确定 pipeline_id：优先沿用 session 已有的（创建会话时分配），
+    # 否则用 Engine 自身的。然后同步到 Engine，全链路统一。
+    session = api_store.get_session(thread_id)
+    pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else ctx.engine.pipeline_id
+    ctx.engine._pipeline_id = pipeline_id
+
+    # 用统一的 pipeline_id 创建或更新 Bridge
     if pre_created_bridge is not None:
         bridge = pre_created_bridge
     else:
         bridge = PipelineStreamBridge(
-            pipeline_id=thread_id,
+            pipeline_id=pipeline_id,
             output_sink=TargetedSink(ws_notifier, thread_id),
             message_id=message_id,
         )
-    engine_task: asyncio.Task | None = None
-    drain_result: dict = {}
 
-    # 将用户消息添加到对话历史
-    conversation_history.append({"role": "user", "content": user_content})
-
-    # 将 engine._pipeline_id 同步为 session 的 active_pipeline_id，
-    # 确保 ExecutionRecordStorage 中的记录能通过 session.pipeline_ids 找到。
-    session = api_store.get_session(thread_id)
     if session:
-        if session.active_pipeline_id:
-            if ctx.engine._pipeline_id != session.active_pipeline_id:
-                ctx.engine._pipeline_id = session.active_pipeline_id
-        else:
-            new_pid = session.generate_pipeline_id()
-            ctx.engine._pipeline_id = new_pid
-
-        # 确保 pipeline_id 在 pipeline_ids 列表中并持久化，
-        # 以便 list_messages API 能通过 session.pipeline_ids 找到 YAML 执行记录。
-        current_pid = ctx.engine._pipeline_id
-        if current_pid and current_pid not in session.pipeline_ids:
-            session.pipeline_ids.append(current_pid)
-            session.active_pipeline_id = current_pid
+        session.register_pipeline(pipeline_id)
         api_store.set_session(thread_id, session)
 
-    pipeline_id = getattr(ctx.engine, "_pipeline_id", None)
+    _ws_notifier = ctx.services.get("ws_interaction_notifier") if ctx.services else None
+    if _ws_notifier:
+        _ws_notifier.register_pipeline_thread(pipeline_id, thread_id)
 
-    if pipeline_id:
-        _ws_notifier = ctx.services.get("ws_interaction_notifier") if ctx.services else None
-        if _ws_notifier:
-            _ws_notifier.register_pipeline_thread(pipeline_id, thread_id)
-        else:
-            logger.warning(
-                "register_pipeline_thread SKIPPED: pipeline=%s thread=%s has_services=%s has_notifier=%s",
-                pipeline_id[:12], thread_id[:12],
-                ctx.services is not None, _ws_notifier is not None,
-            )
-    else:
-        logger.warning("register_pipeline_thread SKIPPED: pipeline_id is None")
-
-    # BUG-FIX-fix_pipeline_thread_association:
-    # 问题根因: 管道运行后 YAML 文件没有存储 thread_id，导致无法关联到 thread。
-    # 修复方案: 在管道运行开始前，将 thread_id 写入 ExecutionRecordStorage 的 summary。
-    # 影响范围: list_messages、get_thread_detail 等接口的管道关联逻辑。
-    # 修复日期: 2026-05-05
-    if pipeline_id and ctx.services:
+    if ctx.services:
         _exec_storage = ctx.services.get("execution_record_storage")
         if _exec_storage is not None:
             try:
@@ -1107,33 +1008,6 @@ async def _stream_engine_response(
         # ---- new_message 最终消息（通过 bridge 发送）----
         await bridge.send_new_message(actual_content, sequence=1)
 
-        # ---- 持久化消息到 store ----
-        try:
-            user_msg_id = conversation_history[-2]["id"] if len(conversation_history) >= 2 and "id" in conversation_history[-2] else None
-            resolved_user_msg_id = user_msg_id or f"user_{message_id}"
-            api_store.add_message(
-                thread_id=thread_id,
-                message_id=resolved_user_msg_id,
-                role="user",
-                content=user_content,
-            )
-            api_store.add_message(
-                thread_id=thread_id,
-                message_id=message_id,
-                role="assistant",
-                content=actual_content,
-            )
-            thinking_text = "".join(drain_result.get("thinking_content_parts", []))
-            _exec_storage = ctx.services.get("execution_record_storage") if ctx.services else None
-            _persist_messages_to_yaml(
-                _exec_storage, bridge.pipeline_id,
-                resolved_user_msg_id, user_content,
-                message_id, actual_content,
-                thinking_content=thinking_text or None,
-            )
-        except Exception as persist_err:
-            logger.warning("持久化消息失败: %s", persist_err)
-
     except asyncio.CancelledError:
         """流式任务被取消（用户中断或连接断开）。"""
         logger.info("流式任务被取消: message_id=%s", message_id)
@@ -1231,6 +1105,15 @@ def create_combined_app() -> FastAPI:
         await websocket.accept()
         _ws_interaction_notifier.register_global(user_id, websocket)
 
+        # BUG-FIX-fix_20260512_stop_generation_global_ws:
+        # 问题根因: /ws/chat 全局端点的 stop_generation 处理只发送假的 stopped 状态，
+        #           没有实际取消流式任务和管道引擎运行，导致前端点击停止按钮后
+        #           后端继续生成并消耗资源。
+        # 修复方案: 添加 thread_id → (stream_task, stop_event) 追踪字典，
+        #           在创建流式任务时存储引用，在 stop_generation 时实际取消。
+        _thread_stream_tasks: dict[str, asyncio.Task] = {}
+        _thread_stop_events: dict[str, asyncio.Event] = {}
+
         try:
             await websocket.send_text(json.dumps({
                 "type": "connection_confirmation",
@@ -1302,6 +1185,17 @@ def create_combined_app() -> FastAPI:
                     _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])
 
+                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
+                    # 在创建新的流式任务前，取消该 thread_id 之前的旧任务，
+                    # 确保同一 thread_id 同时只有一个活跃的流式生成任务。
+                    _old_task = _thread_stream_tasks.get(thread_id)
+                    if _old_task and not _old_task.done():
+                        _old_stop = _thread_stop_events.get(thread_id)
+                        if _old_stop:
+                            _old_stop.set()
+                        _old_task.cancel()
+                    _thread_stop_events[thread_id] = _stop_evt
+
                     if _pipeline_id:
                         from pipeline.message_bus import send_pipeline_message, _find_engine as _find_engine_for_sub
                         _sub_eng, _sub_st = _find_engine_for_sub(_pipeline_id)
@@ -1318,7 +1212,7 @@ def create_combined_app() -> FastAPI:
                                 _sub_eng._suspended_state["streaming"] = True
                             sub_result = await send_pipeline_message(_pipeline_id, _user_content)
                             if sub_result.success:
-                                asyncio.create_task(
+                                _stream_task = asyncio.create_task(
                                     _stream_wake_response(
                                         websocket, _user_content, _msg_id,
                                         _stop_evt, _sub_eng, _pipeline_id,
@@ -1328,6 +1222,7 @@ def create_combined_app() -> FastAPI:
                                         pre_created_bridge=_sub_bridge,
                                     )
                                 )
+                                _thread_stream_tasks[thread_id] = _stream_task
                                 continue
                         else:
                             sub_result = await send_pipeline_message(_pipeline_id, _user_content)
@@ -1340,14 +1235,16 @@ def create_combined_app() -> FastAPI:
                         continue
 
                     from pipeline.message_bus import _find_engine
-                    _main_pid = ""
-                    if _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
+                    # 优先用 session 已有的 pipeline_id（创建会话时分配）
+                    _sess = api_store.get_session(thread_id)
+                    _main_pid = _sess.active_pipeline_id if _sess and _sess.active_pipeline_id else ""
+                    if not _main_pid and _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
                         _main_pid = _pipeline_ctx.engine.pipeline_id
                     _ex_eng, _eng_st = _find_engine(_main_pid) if _main_pid else (None, "")
 
                     if _ex_eng and _eng_st == "suspended":
                         _wake_bridge = PipelineStreamBridge(
-                            pipeline_id=thread_id or _main_pid,
+                            pipeline_id=_main_pid,
                             output_sink=TargetedSink(_ws_interaction_notifier, thread_id),
                             message_id=_msg_id,
                         )
@@ -1359,7 +1256,7 @@ def create_combined_app() -> FastAPI:
                         from pipeline.message_bus import send_pipeline_message
                         inject_result = await send_pipeline_message(_main_pid, _user_content)
                         if inject_result.success:
-                            asyncio.create_task(
+                            _stream_task = asyncio.create_task(
                                 _stream_wake_response(
                                     websocket, _user_content, _msg_id,
                                     _stop_evt, _ex_eng, _main_pid,
@@ -1369,22 +1266,24 @@ def create_combined_app() -> FastAPI:
                                     pre_created_bridge=_wake_bridge,
                                 )
                             )
+                            _thread_stream_tasks[thread_id] = _stream_task
                         continue
 
                     if _pipeline_ctx and _pipeline_ctx.available:
                         _main_sink = TargetedSink(_ws_interaction_notifier, thread_id)
                         _main_bridge = PipelineStreamBridge(
-                            pipeline_id=thread_id,
+                            pipeline_id=_main_pid,
                             output_sink=_main_sink,
                             message_id=_msg_id,
                         )
-                        asyncio.create_task(
+                        _stream_task = asyncio.create_task(
                             _stream_engine_response(
                                 websocket, _user_content, _msg_id,
                                 _stop_evt, thread_id, _history, _pipeline_ctx,
                                 pre_created_bridge=_main_bridge,
                             )
                         )
+                        _thread_stream_tasks[thread_id] = _stream_task
                     else:
                         await websocket.send_text(json.dumps({
                             "type": "stream_error",
@@ -1404,9 +1303,80 @@ def create_combined_app() -> FastAPI:
                             logger.warning("[GlobalWS] interaction_response 处理失败: %s", exc)
                     continue
                 elif msg_type == "stop_generation":
+                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
+                    # 问题根因: 旧代码只发送假的 stopped 状态，没有实际取消流式任务
+                    #           和管道引擎运行，导致停止按钮无效。
+                    # 修复方案:
+                    #   1. 设置对应 thread_id 的 stop_event
+                    #   2. 取消对应 thread_id 的流式任务
+                    #   3. 尝试查找并取消关联的管道引擎
+                    #   4. 尝试取消 TaskWorker 中的关联后台任务
+                    #   5. 发送 state_change 回前端
+                    logger.info("[GlobalWS] 用户请求停止生成: thread_id=%s user=%s", thread_id[:12], user_id[:12])
+
+                    # 1. 设置 stop_event 并取消流式任务
+                    _stop_evt = _thread_stop_events.get(thread_id)
+                    if _stop_evt:
+                        _stop_evt.set()
+                    _stream_task = _thread_stream_tasks.get(thread_id)
+                    if _stream_task and not _stream_task.done():
+                        _stream_task.cancel()
+                        try:
+                            await _stream_task
+                        except asyncio.CancelledError:
+                            pass
+                    _thread_stream_tasks.pop(thread_id, None)
+                    _thread_stop_events.pop(thread_id, None)
+
+                    # 2. 尝试查找并取消关联的管道引擎
+                    #    通过 _pipeline_thread_map 反查 pipeline_id，
+                    #    再通过 _find_engine 找到运行中的引擎进行取消。
+                    _all_pipeline_ids: set[str] = set()
+                    try:
+                        from pipeline.message_bus import _find_engine
+                        if hasattr(_ws_interaction_notifier, "_pipeline_thread_map"):
+                            for _pid, _tid in _ws_interaction_notifier._pipeline_thread_map.items():
+                                if _tid == thread_id:
+                                    _all_pipeline_ids.add(_pid)
+                        for _pid in _all_pipeline_ids:
+                            _eng, _st = _find_engine(_pid)
+                            if _eng:
+                                # 取消引擎的挂起状态
+                                if hasattr(_eng, "_suspended_state") and _eng._suspended_state is not None:
+                                    _eng._suspended_state["ended"] = True
+                                # 唤醒引擎使其退出挂起等待
+                                if hasattr(_eng, "_wake_event") and _eng._wake_event is not None:
+                                    _eng._wake_event.set()
+                                logger.info("[GlobalWS] 已取消管道引擎: pipeline=%s state=%s", _pid[:12], _st)
+                    except Exception as _eng_err:
+                        logger.warning("[GlobalWS] 取消管道引擎时出错: %s", _eng_err)
+
+                    # 3. 尝试取消 TaskWorker 中与该 thread_id 关联的后台任务
+                    try:
+                        tw = globals().get("_task_worker")
+                        if tw and hasattr(tw, "_task_id_to_bg_task") and hasattr(tw, "_task_service"):
+                            _task_svc = getattr(tw, "_task_service", None)
+                            if _task_svc:
+                                # 遍历活跃任务，查找与 thread_id 关联的 task
+                                for _active_tid in list(getattr(tw, "_active_tasks", set())):
+                                    try:
+                                        _t = _task_svc.get_task(_active_tid)
+                                        if _t:
+                                            # 通过 task 的 pipeline_run_id 或 parent_pipeline_id
+                                            # 关联到 thread_id 对应的管道
+                                            _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
+                                            _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
+                                            if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
+                                                tw.cancel_pipeline(_active_tid)
+                                                logger.info("[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12])
+                                    except Exception:
+                                        pass
+                    except Exception as _tw_err:
+                        logger.warning("[GlobalWS] 取消 TaskWorker 任务时出错: %s", _tw_err)
+
                     await websocket.send_text(json.dumps({
                         "type": "state_change",
-                        "data": {"status": "stopped"},
+                        "data": {"status": "stopped", "thread_id": thread_id},
                     }))
 
         except WebSocketDisconnect:
@@ -1422,337 +1392,6 @@ def create_combined_app() -> FastAPI:
                         del active_connections[tid]
                         conversation_histories.pop(tid, None)
             _ws_interaction_notifier.unregister_all_for_ws(websocket)
-
-    @app.websocket("/ws/{thread_id}")
-    async def websocket_thread(websocket: WebSocket, thread_id: str) -> None:
-        """处理线程 WebSocket 连接，支持 AI 流式回复。
-
-        根据管道引擎是否可用，自动选择真实 AI 回复或模拟回复。
-        每个线程维护独立的对话历史。
-
-        支持可选的 token query 参数进行认证。
-        处理前端发送的 user_input / heartbeat / stop_generation 消息类型，
-        并通过 stream_start -> stream_chunk -> stream_end -> new_message 协议回复。
-
-        Args:
-            websocket: WebSocket 连接实例
-            thread_id: 线程 ID
-        """
-        # 可选 token 验证
-        token = websocket.query_params.get("token", "")
-        if token:
-            payload = verify_token(token)
-            if payload is None:
-                await websocket.close(code=4001, reason="Invalid or expired token")
-                return
-
-        await websocket.accept()
-
-        # 管理连接
-        if thread_id not in active_connections:
-            active_connections[thread_id] = []
-        active_connections[thread_id].append(websocket)
-
-        # 注册到 WebSocket 交互通知器
-        _ws_interaction_notifier.register(thread_id, websocket)
-
-        # 初始化对话历史
-        if thread_id not in conversation_histories:
-            conversation_histories[thread_id] = []
-
-        # 发送连接确认
-        await websocket.send_text(json.dumps({
-            "type": "connection_confirmation",
-            "data": {
-                "thread_id": thread_id,
-                "status": "connected",
-            },
-        }, ensure_ascii=False))
-
-        logger.info("WebSocket 连接已建立: thread_id=%s", thread_id)
-
-        # 当前流式生成任务和取消事件
-        current_stream_task: asyncio.Task | None = None
-        stop_event = asyncio.Event()
-
-        # 获取当前线程的对话历史引用
-        history = conversation_histories[thread_id]
-
-        try:
-            while True:
-                data = await websocket.receive_text()
-
-                # 尝试解析 JSON，兼容纯文本消息
-                try:
-                    message = json.loads(data)
-                except (json.JSONDecodeError, TypeError):
-                    message = {"type": "user_input", "content": data}
-
-                msg_type = message.get("type", "")
-
-                # ---- 心跳响应 ----
-                if msg_type == "heartbeat":
-                    await websocket.send_text(json.dumps({"type": "heartbeat_ack"}))
-                    continue
-
-                # ---- 停止生成 ----
-                if msg_type == "stop_generation":
-                    stop_event.set()
-                    if current_stream_task and not current_stream_task.done():
-                        current_stream_task.cancel()
-                        try:
-                            await current_stream_task
-                        except asyncio.CancelledError:
-                            pass
-                    logger.info("用户请求停止生成: thread_id=%s", thread_id)
-                    continue
-
-                # ---- 用户输入：启动流式回复 ----
-                if msg_type == "user_input":
-                    # 首次请求时启动 TaskWorker
-                    global _task_worker_started
-                    if not _task_worker_started:
-                        _task_worker_started = True
-                        try:
-                            tw = globals().get("_task_worker")
-                            if tw and hasattr(tw, "start"):
-                                await tw.start()
-                                logger.info("TaskWorker started (web server mode)")
-                        except Exception as exc:
-                            logger.warning("TaskWorker start failed: %s", exc)
-
-                    # 提取用户文本内容
-                    msg_data = message.get("data") if isinstance(message.get("data"), dict) else message
-                    user_content = (
-                        msg_data.get("content", "") if isinstance(msg_data, dict)
-                        else message.get("content", "")
-                    )
-                    if not user_content:
-                        continue
-
-                    # 子管道路由：前端子Tab发送消息时携带 pipeline_id，
-                    # 后端直接用它路由到对应管道。
-                    # BUG-FIX-fix_20260511_conversation_mode_no_response:
-                    # 问题根因: 旧逻辑通过 task_service 按 task.id 查找 pipeline_run_id，
-                    # 但 conversation 模式下前端传的是 pipeline_id 而非 task.id，
-                    # 查找失败导致消息被丢弃。
-                    # 修复方案: 前端直接传 tab.pipelineRunId 作为 pipeline_id，
-                    # 后端直接用它调用 send_pipeline_message。
-                    pipeline_id = (
-                        msg_data.get("pipeline_id", "") if isinstance(msg_data, dict)
-                        else ""
-                    )
-                    if pipeline_id:
-                        from pipeline.message_bus import send_pipeline_message, _find_engine as _find_engine_for_sub
-
-                        _sub_engine, _sub_state = _find_engine_for_sub(pipeline_id)
-
-                        if _sub_engine and _sub_state == "suspended":
-                            # 挂起引擎：先创建新 bridge 再唤醒
-                            stop_event.set()
-                            if current_stream_task and not current_stream_task.done():
-                                current_stream_task.cancel()
-                                try:
-                                    await current_stream_task
-                                except asyncio.CancelledError:
-                                    pass
-
-                            stop_event = asyncio.Event()
-                            _sub_msg_id = uuid.uuid4().hex[:12]
-                            _sub_bridge = PipelineStreamBridge(
-                                pipeline_id=pipeline_id,
-                                output_sink=TargetedSink(_ws_interaction_notifier, thread_id),
-                                message_id=_sub_msg_id,
-                            )
-                            _sub_engine._saved_on_chunk = _sub_bridge.on_chunk
-                            _sub_engine._saved_streaming = True
-                            if _sub_engine._suspended_state is not None:
-                                _sub_engine._suspended_state["on_chunk"] = _sub_bridge.on_chunk
-                                _sub_engine._suspended_state["streaming"] = True
-
-                            sub_result = await send_pipeline_message(pipeline_id, user_content)
-                            if sub_result.success:
-                                logger.info(
-                                    "子管道唤醒成功: pipeline_id=%s", pipeline_id[:12],
-                                )
-                                current_stream_task = asyncio.create_task(
-                                    _stream_wake_response(
-                                        websocket, user_content, _sub_msg_id,
-                                        stop_event, _sub_engine, pipeline_id,
-                                        thread_id=thread_id,
-                                        ws_notifier=_ws_interaction_notifier,
-                                        conversation_history=history,
-                                        pre_created_bridge=_sub_bridge,
-                                    )
-                                )
-                                continue
-                        else:
-                            # 运行中或无引擎：直接注入 / revive
-                            sub_result = await send_pipeline_message(pipeline_id, user_content)
-                            if sub_result.success:
-                                logger.info(
-                                    "子管道路由成功: pipeline_id=%s method=%s",
-                                    pipeline_id[:12], sub_result.method,
-                                )
-                                continue
-
-                        await websocket.send_text(json.dumps({
-                            "type": "pipeline_error",
-                            "data": {
-                                "message_id": uuid.uuid4().hex[:12],
-                                "error": f"子管道未找到或已退出: pipeline={pipeline_id}",
-                                "pipeline_id": pipeline_id,
-                            },
-                        }, ensure_ascii=False))
-                        continue
-
-                    # 检查主管道引擎是否已挂起（多轮对话场景）
-                    from pipeline.message_bus import _find_engine
-                    _main_pid = ""
-                    logger.info(
-                        "开始管道状态检查: ctx=%s ctx_avail=%s has_engine=%s",
-                        "yes" if _pipeline_ctx else "no",
-                        _pipeline_ctx.available if _pipeline_ctx else "no_ctx",
-                        "yes" if (_pipeline_ctx and _pipeline_ctx.engine) else "no",
-                    )
-                    if _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
-                        _main_pid = _pipeline_ctx.engine.pipeline_id
-                    _existing_engine, _engine_state = _find_engine(_main_pid) if _main_pid else (None, "")
-                    logger.info(
-                        "管道状态检查: main_pid=%s engine=%s state=%s ctx_avail=%s",
-                        str(_main_pid)[:12] if _main_pid else "None",
-                        "yes" if _existing_engine else "no",
-                        _engine_state or "none",
-                        _pipeline_ctx.available if _pipeline_ctx else "no_ctx",
-                    )
-
-                    stop_event.set()
-                    if current_stream_task and not current_stream_task.done():
-                        current_stream_task.cancel()
-                        try:
-                            await current_stream_task
-                        except asyncio.CancelledError:
-                            pass
-
-                    stop_event = asyncio.Event()
-                    message_id = uuid.uuid4().hex[:12]
-
-                    if _existing_engine and _engine_state == "suspended":
-                        # BUG-FIX-20260511: 必须在唤醒引擎之前注入新的 on_chunk。
-                        # 时序问题: send_pipeline_message 会唤醒引擎，引擎立刻在另一个
-                        # task 中开始处理，如果此时 on_chunk 还是旧的（已关闭的 bridge），
-                        # LLM 输出会丢失。必须先注入新的 on_chunk 再唤醒。
-                        #
-                        # BUG-FIX-fix_20260511_wake_pipeline_id_mismatch:
-                        # 问题根因: 唤醒路径的 bridge 使用 _main_pid（引擎 pipeline ID）
-                        # 作为 pipeline_id，但第一条消息的 bridge 使用 thread_id（会话 ID）。
-                        # 前端按 pipeline_id 路由事件到 pipelineMessageStore，
-                        # activePipelineId = sessionId（L1 主管道场景）。
-                        # _main_pid ≠ thread_id 导致第二条消息的事件路由到错误的 store key，
-                        # 前端看不到 AI 回复（"思考中转圈然后消失"）。
-                        # 修复方案: 唤醒路径的 bridge 使用 thread_id，与第一条消息一致。
-                        _wake_bridge = PipelineStreamBridge(
-                            pipeline_id=thread_id or _main_pid,
-                            output_sink=TargetedSink(_ws_interaction_notifier, thread_id),
-                            message_id=message_id,
-                        )
-                        _existing_engine._saved_on_chunk = _wake_bridge.on_chunk
-                        _existing_engine._saved_streaming = True
-                        if _existing_engine._suspended_state is not None:
-                            _existing_engine._suspended_state["on_chunk"] = _wake_bridge.on_chunk
-                            _existing_engine._suspended_state["streaming"] = True
-
-                        from pipeline.message_bus import send_pipeline_message
-                        inject_result = await send_pipeline_message(_main_pid, user_content)
-                        if inject_result.success:
-                            current_stream_task = asyncio.create_task(
-                                _stream_wake_response(
-                                    websocket, user_content, message_id,
-                                    stop_event, _existing_engine, _main_pid,
-                                    thread_id=thread_id,
-                                    ws_notifier=_ws_interaction_notifier,
-                                    conversation_history=history,
-                                    pre_created_bridge=_wake_bridge,
-                                )
-                            )
-                        continue
-
-                    # 引擎不存在 → 正常启动
-                    if _pipeline_ctx and _pipeline_ctx.available:
-                        current_stream_task = asyncio.create_task(
-                            _stream_engine_response(
-                                websocket, user_content, message_id,
-                                stop_event, thread_id, history, _pipeline_ctx,
-                                ws_notifier=_ws_interaction_notifier,
-                            )
-                        )
-                    else:
-                        await websocket.send_text(json.dumps({
-                            "type": "stream_error",
-                            "data": {
-                                "message_id": message_id,
-                                "error": "管道引擎未初始化，无法处理消息。请检查服务器日志并重启。",
-                                "pipeline_id": "",
-                            },
-                        }, ensure_ascii=False))
-                    continue
-
-                # ---- 交互响应：前端用户对 interaction_request 的回复 ----
-                if msg_type == "interaction_response":
-                    resp_data = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
-                    request_id = resp_data.get("request_id", "")
-                    if not request_id:
-                        logger.warning("interaction_response 缺少 request_id")
-                        continue
-
-                    try:
-                        from human_interaction import get_human_interaction_service
-                        human_svc = get_human_interaction_service()
-                        await human_svc.submit_response(
-                            request_id=request_id,
-                            response_type=resp_data.get("response_type", "approved"),
-                            selected_option=resp_data.get("selected_option"),
-                            answers=resp_data.get("answers"),
-                            feedback=resp_data.get("feedback"),
-                        )
-                        logger.info(
-                            "交互响应已提交: request_id=%s, type=%s",
-                            request_id, resp_data.get("response_type"),
-                        )
-                    except Exception as exc:
-                        logger.error("提交交互响应失败: %s", exc, exc_info=True)
-                    continue
-
-                # 未知消息类型，忽略
-                logger.debug("收到未处理的消息类型: %s", msg_type)
-
-        except WebSocketDisconnect:
-            logger.info("WebSocket 连接已断开: thread_id=%s", thread_id)
-        finally:
-            # 连接断开时取消进行中的流式任务
-            stop_event.set()
-            if current_stream_task and not current_stream_task.done():
-                current_stream_task.cancel()
-            # 从 WebSocket 交互通知器注销
-            _ws_interaction_notifier.unregister(thread_id, websocket)
-            if thread_id in active_connections:
-                active_connections[thread_id] = [
-                    c for c in active_connections[thread_id] if c != websocket
-                ]
-                if not active_connections[thread_id]:
-                    del active_connections[thread_id]
-                    # 清理对话历史（无活跃连接时）
-                    conversation_histories.pop(thread_id, None)
-
-    @app.websocket("/ws/chat/{thread_id}")
-    async def websocket_chat(websocket: WebSocket, thread_id: str) -> None:
-        """处理聊天 WebSocket 连接，复用 websocket_thread 的流式回复逻辑。
-
-        Args:
-            websocket: WebSocket 连接实例
-            thread_id: 线程 ID
-        """
-        await websocket_thread(websocket, thread_id)
 
     # 挂载媒体文件静态服务（必须放在所有路由注册之后）
     try:

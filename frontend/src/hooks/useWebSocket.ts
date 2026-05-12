@@ -1,65 +1,56 @@
 /**
  * WebSocket 连接管理 Hook
  *
- * 暴露接口：
- * - useWebSocket(): WebSocket 连接管理和事件订阅
- *
- * 已切换到连接池模式：所有事件通过 wsPool 订阅，
- * 支持多会话并行，每个管道独立流式输出。
+ * 基于 GlobalWebSocket 单连接模式。
+ * 已从 WebSocketConnectionPool 迁移。
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
-import { WebSocketStatus, type WebSocketStatusType } from '@/services/websocket/WebSocketService'
-import type { EventHandler } from '@/services/websocket/eventHandlers'
+import { globalWS, type ConnectionStatus } from '@/services/websocket/GlobalWebSocket'
 
 export interface UseWebSocketReturn {
-  status: WebSocketStatusType
+  status: ConnectionStatus
   connected: boolean
   connecting: boolean
-  reconnecting: boolean
-  failed: boolean
-  subscribe: (event: string, handler: EventHandler) => () => void
-  unsubscribe: (event: string, handler: EventHandler) => void
+  subscribe: (event: string, handler: (data: any) => void) => () => void
+  unsubscribe: (event: string, handler: (data: any) => void) => void
   reconnect: () => void
 }
 
 interface Subscription {
   event: string
-  handler: EventHandler
+  handler: (data: any) => void
 }
 
-/**
- * WebSocket 连接管理 Hook
- *
- * 通过连接池订阅事件，支持多会话并行。
- */
 export function useWebSocket(): UseWebSocketReturn {
-  const [status, setStatus] = useState<WebSocketStatusType>(wsPool.getStatus())
+  const [status, setStatus] = useState<ConnectionStatus>(globalWS.status)
   const subscriptionsRef = useRef<Set<Subscription>>(new Set())
 
   useEffect(() => {
-    const poll = setInterval(() => {
-      setStatus(wsPool.getStatus())
-    }, 2000)
-
-    setStatus(wsPool.getStatus())
-    return () => clearInterval(poll)
-  }, [])
-
-  const subscribe = useCallback((event: string, handler: EventHandler) => {
-    const subscription: Subscription = { event, handler }
-    subscriptionsRef.current.add(subscription)
-    wsPool.subscribe(event, handler)
+    const handleStatus = (data: { status: string }) => {
+      setStatus(data.status as ConnectionStatus)
+    }
+    globalWS.subscribe('_status', handleStatus)
+    setStatus(globalWS.status)
 
     return () => {
-      subscriptionsRef.current.delete(subscription)
-      wsPool.unsubscribe(event, handler)
+      globalWS.unsubscribe('_status', handleStatus)
     }
   }, [])
 
-  const unsubscribe = useCallback((event: string, handler: EventHandler) => {
-    wsPool.unsubscribe(event, handler)
+  const subscribe = useCallback((event: string, handler: (data: any) => void) => {
+    const subscription: Subscription = { event, handler }
+    subscriptionsRef.current.add(subscription)
+    globalWS.subscribe(event, handler)
+
+    return () => {
+      subscriptionsRef.current.delete(subscription)
+      globalWS.unsubscribe(event, handler)
+    }
+  }, [])
+
+  const unsubscribe = useCallback((event: string, handler: (data: any) => void) => {
+    globalWS.unsubscribe(event, handler)
     subscriptionsRef.current.forEach((sub) => {
       if (sub.event === event && sub.handler === handler) {
         subscriptionsRef.current.delete(sub)
@@ -68,23 +59,15 @@ export function useWebSocket(): UseWebSocketReturn {
   }, [])
 
   const reconnect = useCallback(() => {
-    const activeThread = wsPool.getActiveThread()
-    if (activeThread) {
-      const conn = wsPool.getConnection(activeThread)
-      if (conn) {
-        const token = conn.getToken()
-        if (token) {
-          wsPool.disconnect(activeThread)
-          wsPool.connect(activeThread, token)
-        }
-      }
+    if (globalWS.status === 'disconnected') {
+      console.info('[useWebSocket] reconnect 不再需要：GlobalWebSocket 自动重连')
     }
   }, [])
 
   useEffect(() => {
     return () => {
       subscriptionsRef.current.forEach(({ event, handler }) => {
-        wsPool.unsubscribe(event, handler)
+        globalWS.unsubscribe(event, handler)
       })
       subscriptionsRef.current.clear()
     }
@@ -92,10 +75,8 @@ export function useWebSocket(): UseWebSocketReturn {
 
   return {
     status,
-    connected: status === WebSocketStatus.CONNECTED,
-    connecting: status === WebSocketStatus.CONNECTING,
-    reconnecting: status === WebSocketStatus.RECONNECTING,
-    failed: status === WebSocketStatus.FAILED,
+    connected: status === 'connected',
+    connecting: status === 'connecting',
     subscribe,
     unsubscribe,
     reconnect,

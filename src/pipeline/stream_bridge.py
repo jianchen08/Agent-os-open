@@ -75,31 +75,30 @@ class DirectWebSocketSink:
 class TargetedSink:
     """定向输出目标，按 thread_id 直接路由事件到对应 WebSocket 连接。
 
-    当 thread_id 为空或定向路由失败时，回退到广播模式（broadcast_event），
-    前端根据事件中的 pipeline_id 路由到正确的标签页。
+    路由失败时记录错误并返回 False，不广播。
+    广播是消息串扰的根因，已被删除。
     """
 
     def __init__(self, notifier: Any, thread_id: str) -> None:
         """初始化定向输出目标。
 
         Args:
-            notifier: 具备 send_to_thread 和 broadcast_event 方法的通知器对象
+            notifier: 具备 send_to_thread 和 send_to_user 方法的通知器对象
             thread_id: 目标会话的 ws_thread_id（通过 pipeline_thread_map 映射得到）
         """
         self._notifier = notifier
         self._thread_id = thread_id
-        self._broadcast_fallback_count: int = 0
+        self._fail_count: int = 0
 
     @property
     def sink_id(self) -> str:
         """返回定向发送标识。"""
-        return f"targeted:{self._thread_id or 'broadcast-fallback'}"
+        return f"targeted:{self._thread_id or 'no-thread'}"
 
     async def send_event(self, event: dict) -> bool:
         """直接路由事件到指定 thread_id 的 WebSocket 连接。
 
-        回退策略：thread_id 为空或 send_to_thread 失败时，
-        使用 broadcast_event 广播到所有连接，前端按 pipeline_id 路由。
+        路由失败时记录错误，不广播。广播会导致消息串扰。
 
         Args:
             event: 要发送的事件字典
@@ -107,46 +106,41 @@ class TargetedSink:
         Returns:
             发送成功返回 True，失败返回 False
         """
-        try:
-            if self._thread_id:
-                ok = await self._notifier.send_to_thread(self._thread_id, event)
-                if ok:
-                    return True
-                logger.debug(
-                    "TargetedSink: 定向路由失败，回退广播: thread_id=%s type=%s",
-                    self._thread_id[:12], event.get("type", "?"),
+        if not self._thread_id:
+            self._fail_count += 1
+            if self._fail_count <= 3:
+                logger.error(
+                    "TargetedSink: thread_id 为空，事件丢失 #%d type=%s pipeline=%s",
+                    self._fail_count,
+                    event.get("type", "?"),
+                    (event.get("data", {}).get("pipeline_id") or "?")[:12],
                 )
-            return await self._broadcast_fallback(event)
+            return False
+
+        try:
+            ok = await self._notifier.send_to_thread(self._thread_id, event)
+            if ok:
+                return True
+            self._fail_count += 1
+            if self._fail_count <= 3:
+                logger.error(
+                    "TargetedSink: 定向推送失败 #%d thread_id=%s type=%s pipeline=%s",
+                    self._fail_count,
+                    self._thread_id[:12],
+                    event.get("type", "?"),
+                    (event.get("data", {}).get("pipeline_id") or "?")[:12],
+                )
+            return False
         except Exception:
-            return await self._broadcast_fallback(event)
-
-    async def _broadcast_fallback(self, event: dict) -> bool:
-        """广播兜底：往所有活跃 WebSocket 连接发送事件。
-
-        前端 streamingEventService 已根据 pipeline_id 路由事件到正确的标签页，
-        因此广播不会导致消息错乱。
-
-        Args:
-            event: 要发送的事件字典
-
-        Returns:
-            发送成功返回 True，失败返回 False
-        """
-        if not hasattr(self._notifier, "broadcast_event"):
-            logger.warning(
-                "TargetedSink: notifier 无 broadcast_event 方法，事件丢失: type=%s",
+            self._fail_count += 1
+            logger.error(
+                "TargetedSink: 推送异常 #%d thread_id=%s type=%s err=%s",
+                self._fail_count,
+                self._thread_id[:12],
                 event.get("type", "?"),
+                exc_info=True,
             )
             return False
-        self._broadcast_fallback_count += 1
-        if self._broadcast_fallback_count <= 3:
-            logger.info(
-                "TargetedSink: 使用广播兜底 (#%d): type=%s pipeline=%s",
-                self._broadcast_fallback_count,
-                event.get("type", "?"),
-                (event.get("data", {}).get("pipeline_id") or "?")[:12],
-            )
-        return await self._notifier.broadcast_event(event)
 
 
 # ---------------------------------------------------------------------------

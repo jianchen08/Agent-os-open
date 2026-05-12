@@ -691,6 +691,30 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
+        # BUG-FIX-fix_20260512_task_status_realtime:
+        # 问题根因: 任务创建后未通过 WebSocket 广播 task_status_update 事件，
+        #   前端工作区任务列表无法实时感知新任务。
+        # 修复方案: 任务创建成功后直接通过 connection_manager 广播通知到所有前端连接。
+        try:
+            from src.api.websocket.handler import connection_manager
+            await connection_manager.broadcast({
+                "type": "task_status_update",
+                "data": {
+                    "task_id": task.id,
+                    "old_status": "",
+                    "new_status": "pending",
+                },
+            })
+            logger.debug(
+                "[TaskSubmit] task_status_update 已广播 | task_id=%s | status=pending",
+                task.id,
+            )
+        except Exception as _ws_exc:
+            logger.warning(
+                "[TaskSubmit] task_status_update 广播失败 | task_id=%s | error=%s",
+                task.id, _ws_exc,
+            )
+
         result_data = {
             "task_id": task.id,
             "title": task.title,
@@ -789,6 +813,30 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 )
 
         logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
+
+        # BUG-FIX-fix_20260512_task_status_realtime:
+        # 问题根因: 容器任务创建后未通过 WebSocket 广播 task_status_update 事件，
+        #   前端工作区任务列表无法实时感知新任务。
+        # 修复方案: 任务创建成功后直接通过 connection_manager 广播通知到所有前端连接。
+        try:
+            from src.api.websocket.handler import connection_manager
+            await connection_manager.broadcast({
+                "type": "task_status_update",
+                "data": {
+                    "task_id": task.id,
+                    "old_status": "",
+                    "new_status": "pending",
+                },
+            })
+            logger.debug(
+                "[TaskSubmit] 容器 task_status_update 已广播 | task_id=%s | status=pending",
+                task.id,
+            )
+        except Exception as _ws_exc:
+            logger.warning(
+                "[TaskSubmit] 容器 task_status_update 广播失败 | task_id=%s | error=%s",
+                task.id, _ws_exc,
+            )
 
         # BUG-FIX-fix_20260425_container_workspace_race:
         # 问题根因: 容器任务不发布 task.submitted 事件，TaskWorker 不会收到通知，

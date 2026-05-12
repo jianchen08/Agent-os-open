@@ -42,6 +42,7 @@ class GlobalWebSocketService {
   connect(token: string): void {
     if (this._disposed) return
     if (this._status === 'connected' && this._token === token) return
+    if (this._status === 'connecting' && this._token === token && this._connectTimer) return
 
     this._token = token
     this._status = 'connecting'
@@ -111,6 +112,11 @@ class GlobalWebSocketService {
       this._stopHeartbeat()
       this._emit('_status', { status: 'disconnected', code: event.code, reason: event.reason })
       useLayoutModeStore.getState().updateConnectionStatus({ state: 'disconnected' })
+
+      if (event.code === 4000) {
+        console.info('[GlobalWS] 被新连接替换(code=4000)，跳过重连')
+        return
+      }
 
       if (!this._disposed && wasConnected) {
         this._scheduleReconnect()

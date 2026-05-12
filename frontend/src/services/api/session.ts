@@ -68,6 +68,10 @@ interface ThreadCreateResponse {
   updated_at?: string
   /** 绑定的 Agent ID - Requirements: 6.3 */
   agent_id?: string | null
+  /** 关联的管道 ID 列表 */
+  pipeline_ids?: string[]
+  /** 当前活跃的管道 ID */
+  active_pipeline_id?: string | null
 }
 
 /**
@@ -257,6 +261,8 @@ export async function createSession(
       created_at: response.data.created_at,
       updated_at: response.data.updated_at || response.data.created_at,
       agent_id: response.data.agent_id || null,
+      pipeline_ids: response.data.pipeline_ids || [],
+      active_pipeline_id: response.data.active_pipeline_id || null,
     }
 
     return mapThreadToSession(threadState)

@@ -364,9 +364,14 @@ def create_thread(
         channel_ref=thread["id"],
         session_id=thread["id"],
     )
+
+    # 创建会话时立即分配 pipeline_id，前端拿到后可直接激活管道
+    # 后续消息处理时 Engine 会沿用这个 pipeline_id
+    import uuid as _uuid
+    pipeline_id = _uuid.uuid4().hex[:12]
+    session.register_pipeline(pipeline_id)
     store.set_session(thread["id"], session)
 
-    # 将 SessionModel 的管道信息同步到线程字典
     thread["pipeline_ids"] = list(session.pipeline_ids)
     thread["active_pipeline_id"] = session.active_pipeline_id
 
@@ -779,32 +784,15 @@ def list_messages(
     if before_sequence is not None and after_sequence is not None:
         raise HTTPException(status_code=400, detail="before_sequence 和 after_sequence 不能同时使用")
 
-    thread = store.get_thread(thread_id)
-    if thread is None:
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message="线程不存在",
-        )
-
     exec_storage = _get_execution_record_storage()
 
-    # DEBUG: 诊断历史消息不显示问题
-    logger.info(
-        "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
-        thread_id[:12] if thread_id else "?",
-        (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
-        "yes" if exec_storage else "None",
-    )
-
-    session = store.get_session(thread_id)
-    logger.info(
-        "[list_messages] session=%s pipeline_ids=%s",
-        "yes" if session else "None",
-        session.pipeline_ids if session else "N/A",
-    )
-
-    # 按指定 pipeline_run_id 加载子管道消息
+    # BUG-FIX-fix_20260512_pipeline_direct_query:
+    # 问题根因: 前端 fetchMessages 用 pipelineId 调 API，但后端先验证 thread_id 必须是有效线程，
+    #          子管道的 pipelineId 不是线程 ID，导致 404 错误，消息不显示。
+    # 修复方案: 当传入 pipeline_run_id 时，跳过线程存在性验证，直接用 pipeline_run_id 查消息。
+    #          pipelineId 是消息系统的唯一索引，sessionId 仅用于 UI 路由，不参与消息获取。
+    # 影响范围: 切换标签、WS 重连、子管道消息加载等所有通过 pipelineId 获取消息的场景
+    # 修复日期: 2026-05-12
     if pipeline_run_id and exec_storage:
         try:
             records = exec_storage.list_by_pipeline(pipeline_run_id)
@@ -823,6 +811,29 @@ def list_messages(
             total=0,
             has_more=False,
         ).model_dump()
+
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="线程不存在",
+        )
+
+    # DEBUG: 诊断历史消息不显示问题
+    logger.info(
+        "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
+        thread_id[:12] if thread_id else "?",
+        (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
+        "yes" if exec_storage else "None",
+    )
+
+    session = store.get_session(thread_id)
+    logger.info(
+        "[list_messages] session=%s pipeline_ids=%s",
+        "yes" if session else "None",
+        session.pipeline_ids if session else "N/A",
+    )
 
     session = store.get_session(thread_id)
 
@@ -868,32 +879,7 @@ def list_messages(
         except Exception:
             logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
 
-    # 回退到 MemoryStore 基础消息
-    messages = store.get_messages(thread_id)
-    all_msgs = [
-        MessageResponse(
-            id=m.get("id", ""),
-            thread_id=thread_id,
-            role=m.get("role", "user"),
-            content=m.get("content", ""),
-            timestamp=m.get("created_at", ""),
-            sequence=m.get("sequence", 0),
-            parentId=m.get("parentId"),
-            metadata=m.get("metadata"),
-            toolCalls=m.get("toolCalls"),
-            toolCallId=m.get("toolCallId"),
-            toolName=m.get("toolName"),
-            toolArgs=m.get("toolArgs"),
-            toolResult=m.get("toolResult"),
-            toolError=m.get("toolError"),
-            status=m.get("status"),
-            agentId=m.get("agentId"),
-            agentName=m.get("agentName"),
-            durationMs=m.get("durationMs"),
-        )
-        for m in messages
-    ]
-    return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
+    return _paginate_messages([], limit, before_sequence, after_sequence)
 
 
 @router.get(
@@ -959,19 +945,6 @@ async def get_thread_detail(
                 r.created_at or "",
             ))
             rich_messages = [_record_to_message_response(r, thread_id).model_dump() for r in all_records]
-
-    if not rich_messages:
-        messages = store.get_messages(thread_id)
-        rich_messages = [
-            {
-                "id": m.get("id", ""),
-                "thread_id": thread_id,
-                "role": m.get("role", "user"),
-                "content": m.get("content", ""),
-                "timestamp": m.get("created_at", ""),
-            }
-            for m in messages
-        ]
 
     return {
         "thread_id": thread["id"],
@@ -1053,19 +1026,6 @@ def get_thread_history(
             ))
             rich_messages = [_record_to_message_response(r, thread_id).model_dump() for r in all_records]
 
-    if not rich_messages:
-        messages = store.get_messages(thread_id)
-        rich_messages = [
-            {
-                "id": m.get("id", ""),
-                "thread_id": thread_id,
-                "role": m.get("role", "user"),
-                "content": m.get("content", ""),
-                "timestamp": m.get("created_at", ""),
-            }
-            for m in messages
-        ]
-
     return {
         "thread_id": thread_id,
         "messages": rich_messages,
@@ -1120,14 +1080,8 @@ def search_messages(
     Returns:
         MessageResponse 匹配的消息列表
     """
-    results = store.search_messages(query=query, limit=limit, offset=offset)
-    return [
-        MessageResponse(
-            id=m["id"],
-            thread_id=m["thread_id"],
-            role=m["role"],
-            content=m["content"],
-            timestamp=m["created_at"],
-        )
-        for m in results
-    ]
+    raise APIError(
+        status_code=501,
+        error_code="NOT_IMPLEMENTED",
+        message="消息搜索功能暂未实现，请通过管道执行记录查询",
+    )

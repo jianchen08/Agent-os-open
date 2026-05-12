@@ -24,7 +24,7 @@ import apiClient from '@/services/api/client'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { wsPool } from '@/services/websocket/WebSocketConnectionPool'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
@@ -173,41 +173,28 @@ export function FiveSpaceLayout({
   /**
    * 处理任务树节点点击（对话按钮）。
    *
-   * 点击节点的对话按钮时，打开子 Agent 标签页，加载
-   * 子管道的对话历史。同时确保主 Agent 标签存在（用于 Tab 导航显示）。
-   *
-   * BUG-FIX-fix_20260507_container_click:
-   * 问题根因: 容器任务（有子节点的父任务）点击后打开子标签，但它没有独立执行者，
-   *          其执行者就是主管道，而主管道已经是默认活跃的。
-   * 修复方案: 容器任务直接 return，不执行任何跳转操作。
-   *
-   * BUG-FIX-fix_20260509_task_open_and_level:
-   * 问题根因: 1) 有独立管道的 L2 编排者任务（如"Li的编排者"）因有子节点被完全阻止打开
-   *          2) agentLevel 硬编码为 2，导致所有标签都显示 L2，L3 执行者无法正确显示
-   * 修复方案: 1) 仅阻止有子节点且无独立管道的纯容器任务
-   *          2) 从后端 agent_level 字段解析正确的层级数字
+   * 正确流程：
+   * 1. 获取节点的 pipelineRunId（核心标识）
+   * 2. 通过 pipelineRunId 从 pipelineSessionMap 间接查找所属会话
+   *    （Task → pipeline_run_id → Session.pipeline_ids → Session.id，间接关联）
+   * 3. 如果属于其他会话 → 先切换会话
+   * 4. 用 pipelineRunId 查找是否已有对应标签 → 已有则切换
+   * 5. 没有 → 创建新标签（以 pipelineRunId 为标识）并打开
    *
    * @param node - 被点击的树节点数据
    */
-  const handleTaskNodeClick = useCallback((node: Record<string, unknown>) => {
+  const handleTaskNodeClick = useCallback(async (node: Record<string, unknown>) => {
     const taskId = (node.id as string) ?? ''
     const title = (node.title as string) ?? '子任务'
     const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
-    if (!taskId) return
+    if (!taskId || !pipelineRunId) return
 
-    // BUG-FIX-fix_20260510_container_tab_duplicate:
-    // 容器任务（task_scope=container）不能打开对话，否则会创建重复标签
     const taskScope = (node.task_scope as string) ?? 'non_container'
     if (taskScope === 'container') return
 
-    // BUG-FIX-fix_20260509_task_open_and_level:
-    // 仅阻止有子节点且无独立管道的纯容器任务；
-    // 有 pipeline_run_id 的编排者任务（L2）即使有子节点也可打开
     const children = node.children as unknown[] | undefined
-    const hasOwnPipeline = !!pipelineRunId
-    if (Array.isArray(children) && children.length > 0 && !hasOwnPipeline) return
+    if (Array.isArray(children) && children.length > 0) return
 
-    // 从后端 agent_level 字段解析层级数字
     const agentLevelStr = (node.agent_level as string) ?? ''
     let agentLevel: 1 | 2 | 3 = 2
     if (agentLevelStr) {
@@ -215,27 +202,44 @@ export function FiveSpaceLayout({
       else if (agentLevelStr === 'L3' || agentLevelStr === '3') agentLevel = 3
     }
 
-    const agentTabStore = useAgentTabStore.getState()
+    const currentSid = useSessionStore.getState().activeSessionId
 
-    // 确保主 Agent 标签存在（Tab 导航需要至少 2 个 tab 才显示）
-    const hasMainTab = agentTabStore.tabs.some((t) => t.agentLevel === 1)
-    if (!hasMainTab && activeSessionId) {
-      agentTabStore.openSubAgentTab({
-        agentId: activeSessionId,
-        agentName: '主 Agent',
-        parentRecordId: activeSessionId,
-        agentLevel: 1,
-        taskId: activeSessionId,
+    const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
+    const pipelineStore = usePipelineMessageStore.getState()
+    const targetSessionId = pipelineStore.pipelineSessionMap[pipelineRunId]
+
+    if (targetSessionId && targetSessionId !== currentSid) {
+      const { useSessionListStore } = await import('@/stores/sessionListStore')
+      await useSessionListStore.getState().setActiveSession(targetSessionId)
+    }
+
+    const effectiveSid = targetSessionId || currentSid || ''
+    if (!pipelineStore.pipelines[pipelineRunId]) {
+      pipelineStore.registerPipeline({
+        pipelineId: pipelineRunId,
+        sessionId: effectiveSid,
+        level: agentLevel,
+        tabId: null,
+        agentName: title,
         status: 'running',
-        setActive: false,
+        parentId: effectiveSid,
+        unreadCount: 0,
       })
     }
 
-    // 打开子任务标签（使用解析后的正确层级）
+    const agentTabStore = useAgentTabStore.getState()
+    const tabId = `sub-${pipelineRunId}`
+
+    const existingTab = agentTabStore.tabs.find((t) => t.id === tabId)
+    if (existingTab) {
+      agentTabStore.switchToTab(tabId)
+      return
+    }
+
     agentTabStore.openSubAgentTab({
       agentId: taskId,
       agentName: title,
-      parentRecordId: taskId,
+      parentRecordId: pipelineRunId,
       agentLevel,
       taskId,
       status: (node.status as AgentTab['status']) ?? 'running',
@@ -243,10 +247,7 @@ export function FiveSpaceLayout({
       pipelineId: pipelineRunId,
     })
 
-    // BUG-FIX-fix_20260509_tab_blank:
-    // 异步加载子管道消息；loadTabMessages 会将加载结果同步到 pipelineMessageStore，
-    // 与 openSubAgentTab 中同步的缓存消息形成互补（缓存优先，API 刷新补充）
-    agentTabStore.loadTabMessages(`sub-${taskId}`, pipelineRunId)
+    agentTabStore.loadTabMessages(tabId, pipelineRunId)
   }, [activeSessionId])
 
   // Build dynamic dock items with execution status
@@ -345,7 +346,7 @@ export function FiveSpaceLayout({
           // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
           const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
           if (sid) {
-            wsPool.sendInteractionResponse(sid, {
+            globalWS.sendInteractionResponse(sid, {
               requestId,
               responseType: response,
               feedback: feedback || '',

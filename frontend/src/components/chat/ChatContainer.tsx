@@ -16,6 +16,8 @@ import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionListStore } from '@/stores/sessionListStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
@@ -156,7 +158,7 @@ export const ChatContainer = ({
   sessionId,
   messages,
   isLoading = false,
-  isGenerating = false,
+  isGenerating: _isGenerating = false,
   onSendMessage,
   onStopGenerate,
   onRegenerate,
@@ -203,11 +205,18 @@ export const ChatContainer = ({
       if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
         usePipelineMessageStore.getState().activatePipeline(activeTab.pipelineRunId)
       } else {
-        usePipelineMessageStore.getState().activatePipeline(sessionId)
-        const pipelineStore = usePipelineMessageStore.getState()
-        const existing = pipelineStore.messagesByPipeline[sessionId]
-        if (!existing || existing.length === 0) {
-          pipelineStore.fetchMessages(sessionId).catch(() => {})
+        // 主管道：从 session 中获取 activePipelineId，而非用 sessionId
+        // 因为 pipeline_id 由后端 Engine 生成，全链路统一
+        const sessions = useSessionStore.getState().sessions
+        const session = sessions.find(s => s.id === sessionId)
+        const mainPipelineId = session?.activePipelineId || ''
+        if (mainPipelineId) {
+          usePipelineMessageStore.getState().activatePipeline(mainPipelineId)
+          const pipelineStore = usePipelineMessageStore.getState()
+          const existing = pipelineStore.messagesByPipeline[mainPipelineId]
+          if (!existing || existing.length === 0) {
+            pipelineStore.fetchMessages(mainPipelineId, { threadId: sessionId }).catch(() => {})
+          }
         }
       }
     }
@@ -225,9 +234,11 @@ export const ChatContainer = ({
   const streamingTabs = useStreamingStore((s) => s.streamingTabs)
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
   const effectiveIsGenerating = useMemo(() => {
-    const lookupKey = activePipelineId || sessionId
-    return streamingTabs[lookupKey] ?? false
-  }, [streamingTabs, activePipelineId, sessionId])
+    if (activePipelineId) {
+      return streamingTabs[activePipelineId] ?? false
+    }
+    return false
+  }, [streamingTabs, activePipelineId])
 
   /**
    * 根据当前模型名获取动态 context_window
@@ -238,9 +249,8 @@ export const ChatContainer = ({
    * 从 contextUsageStore 获取当前活跃管道的 token 使用量
    *
    * 每个管道（pipelineId）独立维护自己的 usage 数据。
-   * 主 Tab 使用 sessionId 作为 pipelineId，子 Tab 使用 pipelineRunId。
    */
-  const currentPipelineId = activePipelineId || sessionId
+  const currentPipelineId = activePipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
 
@@ -342,7 +352,7 @@ export const ChatContainer = ({
 
   return (
     <div
-      className={`flex h-full flex-col ${className}`}
+      className={`flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
     >
@@ -393,10 +403,9 @@ export const ChatContainer = ({
       </div>
 
       {/* 消息列表 */}
-      {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效; activeTabKey 用于滚动位置缓存 */}
+      {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效 */}
       <MessageList
         key={activeTabId || sessionId}
-        activeTabKey={activeTabId || sessionId}
         messages={filteredMessages}
         isGenerating={effectiveIsGenerating}
         onRegenerate={onRegenerate}
@@ -423,7 +432,9 @@ export const ChatContainer = ({
       <ActiveVotingPanels sessionId={sessionId} />
 
       {/* 输入区域 */}
+      {/* BUG-FIX-fix_20260512_input_state_shared: key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
       <ChatInput
+        key={`input-${activeTabId || sessionId}`}
         isGenerating={effectiveIsGenerating}
         onSendMessage={(params) => {
           /**

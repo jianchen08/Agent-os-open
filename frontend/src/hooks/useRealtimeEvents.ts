@@ -67,10 +67,13 @@ export function useRealtimeEvents(): void {
       lastFetchTimeRef.current = now
 
       const { activeSessionId } = useSessionStore.getState()
-      if (activeSessionId) {
-        const isStreaming = usePipelineMessageStore.getState().isStreaming(activeSessionId)
+      // BUG-FIX-fix_20260512_fetch_threadid: 用 activePipelineId 而非 sessionId 调 fetchMessages，
+      // 因为 pipelineId 是消息系统的唯一索引，后端通过 pipeline_run_id 查消息
+      const activePipelineId = usePipelineMessageStore.getState().activePipelineId
+      if (activeSessionId && activePipelineId) {
+        const isStreaming = usePipelineMessageStore.getState().isStreaming(activePipelineId)
         if (!isStreaming) {
-          usePipelineMessageStore.getState().fetchMessages(activeSessionId).catch(() => {})
+          usePipelineMessageStore.getState().fetchMessages(activePipelineId, { threadId: activeSessionId }).catch(() => {})
         }
       }
     }

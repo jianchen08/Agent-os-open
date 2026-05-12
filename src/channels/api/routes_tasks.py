@@ -90,14 +90,16 @@ async def list_tasks(
     priority: int | None = Query(
         default=None, ge=1, le=9, description="按优先级筛选",
     ),
+    session_id: str | None = Query(default=None, description="按会话 ID 筛选"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     _user: dict = Depends(require_auth),
 ) -> TaskListResponse:
     """获取当前用户的任务列表。
 
-    支持按状态和优先级筛选，分页返回。
+    支持按状态、优先级和会话 ID 筛选，分页返回。
     合并 api_store 和 TaskStorage（YAML 文件）两个数据源。
+    session_id 筛选基于 task.metadata["session_id"] 字段匹配。
 
     Returns:
         TaskListResponse 包含 items 和 total
@@ -109,13 +111,24 @@ async def list_tasks(
     if task_service is not None:
         try:
             # BUG-FIX-fix_20260512_async_list_all: 添加 await
-            ts_tasks = await task_service.list_all(limit=1000)
+            # BUG-FIX-fix_20260512_session_filter: 传递 session_id 到 list_all 减少不必要数据获取
+            ts_tasks = await task_service.list_all(limit=1000, session_id=session_id)
             api_ids = {t["id"] for t in tasks}
             for tm in ts_tasks:
                 if tm.id not in api_ids:
                     tasks.append(_task_model_to_dict(tm))
         except Exception as exc:
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
+
+    # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤 api_store 来源的任务
+    # 问题根因: 前端 FileTreeWidget 已传递 session_id 参数，
+    #           但后端 API 未按此参数筛选，导致所有会话的任务混在一起显示。
+    # 修复方案: TaskStorage 来源的任务已在 list_all 中过滤，
+    #           这里仅过滤 api_store 来源的任务。
+    # 影响范围: list_tasks API 返回的任务列表。
+    # 修复日期: 2026-05-12
+    if session_id:
+        tasks = [t for t in tasks if t.get("metadata", {}).get("session_id") == session_id]
 
     if status:
         tasks = [t for t in tasks if t.get("status") == status]
@@ -140,8 +153,16 @@ async def get_tasks_debug(
     sort_by: str = Query(default="created_at"),
     sort_order: str = Query(default="desc"),
     status: str | None = Query(default=None),
+    session_id: str | None = Query(default=None, description="按会话 ID 筛选"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
+    """获取任务调试数据（全字段）。
+
+    支持按状态和会话 ID 筛选，返回全字段数据用于调试。
+
+    Returns:
+        包含 items 和 total 的字典
+    """
     task_service = _get_task_service()
     if task_service is None:
         return {"items": [], "total": 0}
@@ -150,6 +171,9 @@ async def get_tasks_debug(
         all_tasks = await task_service.list_all(limit=limit, reverse=(sort_order == "desc"))
         if status:
             all_tasks = [t for t in all_tasks if t.status.value == status]
+        # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤
+        if session_id:
+            all_tasks = [t for t in all_tasks if t.metadata.get("session_id") == session_id]
         items = [_task_model_to_dict(t) for t in all_tasks]
         return {"items": items, "total": len(items)}
     except Exception:

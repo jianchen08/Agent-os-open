@@ -299,15 +299,9 @@ class TestTaskManager:
 >   - 不要为了覆盖率而写无意义的测试
 >   - 重点覆盖核心业务逻辑和异常分支
 
-**运行覆盖率检查示例**：
+**运行覆盖率检查**：
 
 ```bash
-# 检查整体覆盖率
 pytest tests/ --cov=src --cov-report=term-missing
-
-# 检查指定模块覆盖率
-pytest tests/unit/test_auth.py --cov=src/auth --cov-report=term-missing
-
-# 生成 HTML 覆盖率报告
 pytest tests/ --cov=src --cov-report=html
 ```

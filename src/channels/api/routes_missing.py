@@ -117,7 +117,7 @@ async def get_task_tree(
         all_tasks = [t for t in all_tasks if t.id in matched_ids]
 
     # 构建扁平列表
-    flat_items = [_task_to_tree_item(t) for t in all_tasks]
+    flat_items = [_task_to_tree_item(t, session_id) for t in all_tasks]
 
     # 构建树形结构：根任务 → 子任务
     children_map: dict[str, list[dict[str, Any]]] = {}
@@ -188,11 +188,12 @@ def _empty_tree(session_id: str | None) -> dict[str, Any]:
     }
 
 
-def _task_to_tree_item(task: Any) -> dict[str, Any]:
+def _task_to_tree_item(task: Any, session_id: str | None = None) -> dict[str, Any]:
     """将 TaskModel 转换为前端树节点格式。
 
     Args:
         task: TaskModel 实例
+        session_id: 当前会话 ID，写入节点以便前端判断跨会话
 
     Returns:
         树节点字典，包含 id、title、status、type、pipeline_run_id、
@@ -229,6 +230,7 @@ def _task_to_tree_item(task: Any) -> dict[str, Any]:
         "ws_mode": _ws_meta.get("mode"),
         "ws_path": _ws_meta.get("path"),
         "task_scope": _metadata.get("task_scope", "non_container"),
+        "session_id": _metadata.get("session_id") or session_id,
     }
 
 
