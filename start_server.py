@@ -258,9 +258,12 @@ class WebSocketInteractionNotifier:
             logger.error("[GlobalWS] 用户不在线: user=%s", user_id[:12])
             return False
         try:
-            await ws.send_text(json.dumps(event, ensure_ascii=False, default=str))
+            await asyncio.wait_for(
+                ws.send_text(json.dumps(event, ensure_ascii=False, default=str)),
+                timeout=5.0,
+            )
             return True
-        except Exception as exc:
+        except (asyncio.TimeoutError, Exception) as exc:
             logger.error("[GlobalWS] 推送失败，注销连接: user=%s err=%s", user_id[:12], exc)
             self._global_connections.pop(user_id, None)
             return False
@@ -419,9 +422,9 @@ class WebSocketInteractionNotifier:
             stale: list = []
             for ws in conns:
                 try:
-                    await ws.send_text(payload)
+                    await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
                     return True
-                except Exception:
+                except (asyncio.TimeoutError, Exception):
                     stale.append(ws)
             if stale:
                 self._active_connections[thread_id] = [
@@ -430,9 +433,12 @@ class WebSocketInteractionNotifier:
 
         for user_id, ws in list(self._global_connections.items()):
             try:
-                await ws.send_text(json.dumps(event_data, ensure_ascii=False))
+                await asyncio.wait_for(
+                    ws.send_text(json.dumps(event_data, ensure_ascii=False)),
+                    timeout=5.0,
+                )
                 return True
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 self._global_connections.pop(user_id, None)
 
         logger.warning(
@@ -901,7 +907,13 @@ async def _stream_engine_response(
         # 心跳回调：通过 WebSocket 发送心跳保活消息
         async def _heartbeat():
             """发送心跳确认消息，防止前端连接超时。"""
-            await websocket.send_text(json.dumps({"type": "heartbeat_ack"}, ensure_ascii=False))
+            try:
+                await asyncio.wait_for(
+                    websocket.send_text(json.dumps({"type": "heartbeat_ack"}, ensure_ascii=False)),
+                    timeout=3.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
 
         # 通过 bridge.drain_loop 消费事件队列并实时发送到前端
         _call_timeout = _get_call_timeout()
@@ -1180,7 +1192,7 @@ def create_combined_app() -> FastAPI:
                     _user_content = msg_data.get("content", "")
                     if not _user_content:
                         continue
-                    _msg_id = uuid.uuid4().hex[:12]
+                    _msg_id = msg_data.get("client_message_id") or uuid.uuid4().hex[:12]
                     _pipeline_id = msg_data.get("pipeline_id", "")
                     _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])

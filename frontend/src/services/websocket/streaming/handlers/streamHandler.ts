@@ -8,7 +8,7 @@ import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessa
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
-import { clearChunkTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
+import { clearChunkTimeout, clearPendingStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
 import { appendTextBlock, appendThinkingChunk } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
@@ -54,6 +54,11 @@ export function handleStreamStart(eventData: any) {
   }
 
   resetChunkTimeout(pipelineId, messageId)
+
+  clearPendingStreamTimeout(pipelineId)
+  if (threadId && threadId !== pipelineId) {
+    clearPendingStreamTimeout(threadId)
+  }
 
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
   const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1

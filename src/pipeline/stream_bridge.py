@@ -66,9 +66,12 @@ class DirectWebSocketSink:
             发送成功返回 True，失败返回 False
         """
         try:
-            await self._websocket.send_text(json.dumps(event, ensure_ascii=False, default=str))
+            await asyncio.wait_for(
+                self._websocket.send_text(json.dumps(event, ensure_ascii=False, default=str)),
+                timeout=5.0,
+            )
             return True
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
             return False
 
 

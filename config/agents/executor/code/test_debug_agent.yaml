@@ -217,9 +217,6 @@ recommended_metrics:
     default_params:
       action: "read"
       path: "tests/"
-  - metric_id: function_verify
-    default_params:
-      requirement: "验证测试覆盖的功能是否真正可用"
 
 version: "1.0.0"
 is_active: true

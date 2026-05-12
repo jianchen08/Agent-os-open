@@ -7,7 +7,6 @@
 """
 
 import fnmatch
-import os
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,8 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
     """
     目录列表工具
 
-    列出目录内容和信息，支持递归、隐藏文件过滤和文件名模式匹配。
+    列出单层目录内容，支持隐藏文件过滤和文件名模式匹配。
+    仅展示直接子项，Agent 应逐层探索子目录。
     """
 
     def __init__(self, base_path: str | None = None):
@@ -39,19 +39,14 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
         """获取工具定义"""
         return Tool(
             name="list_directory",
-            description="列出目录内容，包括文件/目录名称、类型、大小和修改时间。"
-            "适用场景：需要浏览目录结构、查看文件列表。",
+            description="列出目录的直接子项（文件和目录），包括名称、类型和大小。"
+            "仅展示一层，需浏览子目录内容请再次调用并指定子目录路径。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "目录路径（相对路径或绝对路径）",
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "是否递归列出子目录，默认 false",
-                        "default": False,
                     },
                     "include_hidden": {
                         "type": "boolean",
@@ -84,7 +79,6 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="MISSING_PATH",
                 )
 
-            recursive = inputs.get("recursive", False)
             include_hidden = inputs.get("include_hidden", False)
             pattern = inputs.get("pattern")
 
@@ -103,7 +97,7 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="NOT_A_DIRECTORY",
                 )
 
-            items = self._list_items(path, recursive, include_hidden, pattern)
+            items = self._list_directory(path, include_hidden, pattern)
 
             return create_success_result(
                 data={
@@ -123,30 +117,13 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="LIST_FAILED",
             )
 
-    def _list_items(
-        self,
-        directory: Path,
-        recursive: bool,
-        include_hidden: bool,
-        pattern: str | None,
-    ) -> list[dict[str, Any]]:
-        """列出目录项"""
-        items = []
-
-        if recursive:
-            items = self._list_recursive(directory, include_hidden, pattern)
-        else:
-            items = self._list_single(directory, include_hidden, pattern)
-
-        return items
-
-    def _list_single(
+    def _list_directory(
         self,
         directory: Path,
         include_hidden: bool,
         pattern: str | None,
     ) -> list[dict[str, Any]]:
-        """列出单个目录的内容"""
+        """列出目录的直接子项"""
         items = []
         try:
             for entry in sorted(directory.iterdir()):
@@ -162,47 +139,8 @@ class ListDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
 
         return items
 
-    def _list_recursive(
-        self,
-        directory: Path,
-        include_hidden: bool,
-        pattern: str | None,
-    ) -> list[dict[str, Any]]:
-        """递归列出目录内容"""
-        items = []
-        for root, dirs, files in os.walk(directory):
-            root_path = Path(root)
-
-            # 过滤隐藏目录
-            if not include_hidden:
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-
-            # 处理文件
-            for filename in sorted(files):
-                if not include_hidden and filename.startswith("."):
-                    continue
-
-                if pattern and not fnmatch.fnmatch(filename, pattern):
-                    continue
-
-                file_path = root_path / filename
-                items.append(self._get_item_info(file_path))
-
-            # 处理目录
-            for dirname in sorted(dirs):
-                if not include_hidden and dirname.startswith("."):
-                    continue
-
-                if pattern and not fnmatch.fnmatch(dirname, pattern):
-                    continue
-
-                dir_path = root_path / dirname
-                items.append(self._get_item_info(dir_path))
-
-        return items
-
     def _get_item_info(self, path: Path) -> dict[str, Any]:
-        """获取目录项信息（精简版，节省 LLM token）"""
+        """获取目录项信息"""
         try:
             stat = path.stat()
             return {

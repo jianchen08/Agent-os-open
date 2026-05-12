@@ -1384,7 +1384,7 @@ class TaskWorker:
             _sub_pipeline_id = engine._pipeline_id
             _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
 
-            if _notifier:
+            if _notifier and _ws_thread_id:
                 _sink = TargetedSink(_notifier, _ws_thread_id)
                 _bridge = PipelineStreamBridge(
                     pipeline_id=_sub_pipeline_id,

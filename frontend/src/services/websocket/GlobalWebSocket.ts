@@ -152,6 +152,7 @@ class GlobalWebSocketService {
     pipelineId?: string
     attachments?: unknown[]
     enableThinking?: boolean
+    clientMessageId?: string
   }): void {
     this._send({
       type: 'user_input',
@@ -160,6 +161,7 @@ class GlobalWebSocketService {
       pipeline_id: opts?.pipelineId || '',
       attachments: opts?.attachments || [],
       enable_thinking: opts?.enableThinking || false,
+      client_message_id: opts?.clientMessageId || '',
     })
   }
 

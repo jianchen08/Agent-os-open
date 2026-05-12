@@ -187,6 +187,8 @@ export function clearChunkTimeout(pipelineId: string): void {
 export function clearAllChunkTimeouts(): void {
   for (const [, entry] of _chunkTimeoutMap) clearTimeout(entry.timer)
   _chunkTimeoutMap.clear()
+  for (const [, entry] of _pendingStreamMap) clearTimeout(entry.timer)
+  _pendingStreamMap.clear()
 }
 
 /**

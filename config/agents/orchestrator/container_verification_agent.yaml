@@ -198,14 +198,6 @@ recommended_metrics:
     default_params:
       action: "read"
       path: "{{workspace}}/docs/verification_report.md"
-  - metric_id: semantic_check
-    default_params:
-      criteria:
-        required_sections:
-          - "验证工具能力评估"
-          - "需求核验清单"
-          - "产出物验证清单"
-          - "发现的问题"
 
 # 静态变量
 static_vars:

@@ -27,6 +27,7 @@ import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
+import { startPendingStreamTimeout } from './services/websocket/streaming/chunkTimeout'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
@@ -351,8 +352,10 @@ function HomePage(): ReactNode {
           {
             enableThinking: params.enableThinking,
             pipelineId: params.pipelineId,
+            clientMessageId: userMessage.id,
           },
         )
+        startPendingStreamTimeout(targetPipelineId, sid)
       } catch {
         // WebSocket 发送失败时消息已添加到本地状态，重连后会自动重试
       }

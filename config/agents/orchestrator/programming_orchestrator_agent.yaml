@@ -474,14 +474,6 @@ recommended_metrics:
     default_params:
       action: "read"
       path: "{{workspace}}/programming_orchestration_report.md"
-  - metric_id: semantic_check
-    default_params:
-      criteria:
-        required_sections:
-          - "任务分析"
-          - "执行过程"
-          - "质量门禁结果"
-          - "总结"
 
 version: "3.0.0"
 is_active: true
