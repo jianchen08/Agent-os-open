@@ -11,8 +11,7 @@ config/
 │   ├── main/                   # L1 主 Agent
 │   │   ├── lingxi.yaml         # 灵汐主Agent (已优化)
 │   │   └── main_agent.yaml     # 主控Agent
-│   ├── orchestrator/               # L2 编排 Agent
-│   │   ├── general_agent.yaml            # 通用任务编排
+│   ├── orchestrator/           # L2 编排 Agent
 │   │   ├── solution_planning_agent.yaml   # 方案规划
 │   │   ├── resource_manager_agent.yaml   # 资源管理
 │   │   ├── ac_refine_agent.yaml          # AC细化
@@ -20,6 +19,7 @@ config/
 │   │   ├── resource_analyzer_agent.yaml   # 资源分析
 │   │   └── resource_modifier_agent.yaml   # 资源修改
 │   ├── executor/               # L3 执行 Agent
+│   │   ├── general_agent.yaml            # 通用执行
 │   │   ├── planning_agent.yaml           # 执行规划
 │   │   ├── design_agent.yaml             # 设计Agent
 │   │   ├── research_agent.yaml           # 研究Agent
