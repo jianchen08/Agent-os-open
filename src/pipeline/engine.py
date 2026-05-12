@@ -258,6 +258,26 @@ class PipelineEngine:
         self._saved_streaming = False
         self._saved_on_chunk = None
 
+        # BUG-FIX-fix_20260513_pipeline_cross_talk:
+        # 清除旧 pipeline_id 的引擎注册残留，防止 _find_engine 通过旧 key
+        # 找到当前引擎实例，导致通知路由到错误的管道（消息串线）。
+        # 场景：WebSocket 长连接中同一引擎实例被不同 thread_id 复用，
+        # 上一轮 run() 注册了 __running_engine_{old_pid}，如果正常结束
+        # 会在 finally 中清理，但如果引擎被挂起后通过新 run() 恢复，
+        # 旧的 __running_engine_ 和 __suspended_engine_ 可能仍残留。
+        if self._pipeline_id:
+            _old_running_key = f"__running_engine_{self._pipeline_id}"
+            _old_suspended_key = f"__suspended_engine_{self._pipeline_id}"
+            self._services.pop(_old_running_key, None)
+            self._services.pop(_old_suspended_key, None)
+            unregister_suspended_engine(self._pipeline_id)
+            try:
+                from infrastructure.service_provider import get_service_provider
+                get_service_provider()._services.pop(_old_running_key, None)
+                get_service_provider()._services.pop(_old_suspended_key, None)
+            except Exception:
+                pass
+
         # pipeline_id 由引擎构造时确定，外部不可覆盖。
         extra_state["pipeline_id"] = self._pipeline_id
 

@@ -685,6 +685,12 @@ class TaskWorker:
         # 修复方案: 在状态变更时通过 connection_manager 广播
         #   task_status_update 事件到所有活跃的 WebSocket 连接。
         try:
+            _task_obj = data.get("task")
+            if not _task_obj and self._task_service:
+                try:
+                    _task_obj = self._task_service.get_task(task_id)
+                except Exception:
+                    pass
             _ws_payload = {
                 "type": "task_status_update",
                 "data": {

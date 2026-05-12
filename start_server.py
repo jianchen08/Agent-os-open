@@ -463,16 +463,22 @@ _ws_interaction_notifier = WebSocketInteractionNotifier()
 
 
 class PipelineContext:
-    """管道引擎上下文，持有引擎实例、Agent 配置和服务字典。
+    """管道引擎上下文，按 pipeline_id 管理独立的引擎实例。
 
     由 ``_init_pipeline_context()`` 创建，在 WebSocket 处理中通过
     ``_pipeline_ctx`` 全局变量访问。
 
+    每调用 ``get_or_create_engine(pipeline_id)`` 时，若该 pipeline_id
+    尚无引擎实例，则基于共享的 pipeline_config / plugin_registry / services
+    创建一个新的 PipelineEngine，确保管道之间状态完全隔离。
+
     Attributes:
-        engine: PipelineEngine 实例
+        engine: 默认 PipelineEngine 实例（向后兼容）
         agent_config: 默认 Agent 配置（灵汐）
         services: 共享服务字典
         available: 是否成功初始化
+        pipeline_config: 管道配置（用于创建新引擎）
+        plugin_registry: 插件注册表（用于创建新引擎）
     """
 
     def __init__(
@@ -481,19 +487,47 @@ class PipelineContext:
         agent_config: Any | None = None,
         services: dict[str, Any] | None = None,
         available: bool = False,
+        pipeline_config: Any | None = None,
+        plugin_registry: Any | None = None,
     ) -> None:
         """初始化管道上下文。
 
         Args:
-            engine: PipelineEngine 实例
+            engine: 默认 PipelineEngine 实例
             agent_config: Agent 配置
             services: 共享服务字典
             available: 是否成功初始化
+            pipeline_config: 管道配置（用于创建新引擎）
+            plugin_registry: 插件注册表（用于创建新引擎）
         """
         self.engine = engine
         self.agent_config = agent_config
         self.services = services or {}
         self.available = available
+        self.pipeline_config = pipeline_config
+        self.plugin_registry = plugin_registry
+        self._engines: dict[str, Any] = {}
+        if engine is not None:
+            self._engines[engine.pipeline_id] = engine
+
+    def get_or_create_engine(self, pipeline_id: str) -> Any:
+        """获取或创建指定 pipeline_id 的独立引擎实例。
+
+        每个 pipeline_id 对应一个独立的 PipelineEngine 实例，
+        确保管道之间状态完全隔离，通知不会串线。
+        """
+        if pipeline_id in self._engines:
+            return self._engines[pipeline_id]
+        from pipeline.engine import PipelineEngine
+        new_engine = PipelineEngine(
+            input_route_table=self.plugin_registry,
+            output_route_table=self.plugin_registry,
+            plugin_registry=self.plugin_registry,
+            services=self.services,
+        )
+        new_engine._pipeline_id = pipeline_id
+        self._engines[pipeline_id] = new_engine
+        return new_engine
 
 
 # 全局管道上下文（延迟初始化）
@@ -623,6 +657,8 @@ def _init_pipeline_context() -> PipelineContext:
             agent_config=agent_config,
             services=services,
             available=True,
+            pipeline_config=pipeline_config,
+            plugin_registry=plugin_registry,
         )
 
     except Exception as exc:
@@ -860,10 +896,13 @@ async def _stream_engine_response(
     conversation_history.append({"role": "user", "content": user_content})
 
     # 确定 pipeline_id：优先沿用 session 已有的（创建会话时分配），
-    # 否则用 Engine 自身的。然后同步到 Engine，全链路统一。
+    # 否则用 Engine 自身的。
     session = api_store.get_session(thread_id)
     pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else ctx.engine.pipeline_id
-    ctx.engine._pipeline_id = pipeline_id
+
+    # BUG-FIX-fix_20260513_pipeline_cross_talk:
+    # 每个 pipeline_id 对应独立的引擎实例，确保管道之间状态完全隔离。
+    engine = ctx.get_or_create_engine(pipeline_id)
 
     # 用统一的 pipeline_id 创建或更新 Bridge
     if pre_created_bridge is not None:
@@ -895,7 +934,7 @@ async def _stream_engine_response(
     try:
         # 启动管道引擎（异步），通过 bridge.on_chunk 接收流式事件
         engine_task = asyncio.create_task(
-            ctx.engine.run(
+            engine.run(
                 user_input=user_content,
                 agent_config=ctx.agent_config,
                 conversation_history=conversation_history[:-1],
@@ -930,7 +969,7 @@ async def _stream_engine_response(
                     engine_task,
                     heartbeat_callback=_heartbeat,
                     heartbeat_interval=5.0,
-                    suspend_check=lambda: getattr(ctx.engine, "is_suspended", False),
+                    suspend_check=lambda: getattr(engine, "is_suspended", False),
                     call_timeout=_call_timeout,
                 ),
                 timeout=_call_timeout * 50,
