@@ -21,7 +21,7 @@ system_prompt: |
   ## 第一步：调研 + 初步方案
 
   1. 提交任务给 research_agent 进行调研
-  2. 读取调研结果，按方案模板形成初步方案，写入 `docs/{title}_plan.md`
+  2. 读取调研结果，按 YAML 模板（solution + task_chain 两段式结构）形成初步方案，写入 `docs/{title}_solution.yaml`
   3. 使用 human_interaction（conversation 模式）通知用户：文件路径 + 核心要点（2-3句），**必须传 file_paths 参数**指向方案文件路径
 
   ## 第二步：讨论 + 细化
@@ -30,22 +30,24 @@ system_prompt: |
   5. 讨论中主动细化模糊部分（补充实施细节、量化指标、结构划分等），让方案足够具体可直接生成任务链
   6. 基于讨论修改方案，每次修改后使用 human_interaction（conversation 模式）通知用户，**必须传 file_paths 参数**指向方案文件，让用户直接在审批面板中查看文件内容
   7. 重复直至用户明确确认方案
-  8. 将最终方案写入指定路径（默认 `docs/{title}_plan.md`）
+  8. 将最终方案写入指定路径（默认 `docs/{title}_solution.yaml`），格式为结构化 YAML
 
-  规则：调研和讨论交替进行；[必填] 章节必须完成；方案要在讨论中细化到位，不留模糊空间给后续；必须用户确认才能定稿。
+  **产出格式要求**：最终产出文件必须是合法的 YAML，顶层包含 `solution`（方案内容）和 `task_chain`（任务链）两个字段。所有内容严格按照 solution_template.yaml 模板结构输出。
+
+  规则：调研和讨论交替进行；[必填] 字段必须完成；方案要在讨论中细化到位，不留模糊空间给后续；必须用户确认才能定稿。
 
   ## 第三步：任务链
 
-  **已确认方案不可更改**。核心设计、功能范围、关键决策已由人类确认，有问题写入任务链"问题上报"章节。
+  **已确认方案不可更改**。核心设计、功能范围、关键决策已由人类确认，有问题写入 task_chain 的 notes 字段。
 
-  9. **内容量评估**（按任务链模板的"执行评估"章节）：识别自然单元，估算大小，按上下文容量打包
-  10. **任务拆分与执行者分配**（按任务链模板的"任务链"章节）：
+  9. **内容量评估**（填入 task_chain.content_estimation）：识别自然单元，估算大小，按上下文容量打包
+  10. **任务拆分与执行者分配**（填入 task_chain.tasks）：
       - 按内容边界打包，禁止按人工工序拆（不按分析→设计→实现→测试拆）
       - 需要编排 → L2；不需要编排 → L3；不存在的标记"需新建"
       - 同类型包优先合并给同一个 L2
-  11. 设定依赖关系和执行顺序，标注可并行任务
-  12. 将方案和任务链写入同一文档
-  13. 使用 human_interaction（conversation 模式）通知用户审阅任务链，**必须传 file_paths 参数**指向方案文档，让用户直接在审批面板中查看完整的方案和任务链
+  11. 设定依赖关系和执行顺序（填入 task_chain.execution_order），标注可并行任务
+  12. 将方案（solution）和任务链（task_chain）写入同一 YAML 文件
+  13. 使用 human_interaction（conversation 模式）通知用户审阅任务链，**必须传 file_paths 参数**指向方案 YAML 文件，让用户直接在审批面板中查看完整的方案和任务链
   14. 与用户讨论调整任务链，直至用户明确确认
   15. 提交任务给 environment_setup_agent 准备环境，验证就绪后提交任务完成
 
@@ -94,7 +96,7 @@ static_vars:
         | 标记需新建 | — | 无匹配执行者时在任务链中标注 |
     - name: "方案与执行计划模板"
       type: "path"
-      path: "config/templates/plan_template.md"
+      path: "config/templates/solution_template.yaml"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -150,32 +152,38 @@ input_schema:
 output_schema:
   type: object
   properties:
-    plan_document_path:
+    solution_document_path:
       type: string
-      description: 方案与执行计划文档路径
+      description: 结构化方案与任务链 YAML 文件路径
+    solution_name:
+      type: string
+      description: 方案名称
+    task_count:
+      type: integer
+      description: 任务链中的任务数量
   required:
-    - plan_document_path
+    - solution_document_path
 
 deliverables:
-  - name: "plan_document"
-    description: "方案与执行计划文档，包含确认的方案和任务链"
+  - name: "solution_document"
+    description: "结构化方案与任务链 YAML 文件，包含确认的方案（solution）和任务链（task_chain）"
     template_source: "knowledge"
-    template_name: "config/templates/plan_template.md"
-    output_path: "{{workspace}}/docs/{title}_plan.md"
-    type: "markdown"
+    template_name: "config/templates/solution_template.yaml"
+    output_path: "{{workspace}}/docs/{title}_solution.yaml"
+    type: "yaml"
     required: true
 
 recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "docs/{title}_plan.md"
+      path: "docs/{title}_solution.yaml"
   - metric_id: format_valid
     default_params:
-      path: "docs/{title}_plan.md"
-      type: "markdown"
+      path: "docs/{title}_solution.yaml"
+      type: "yaml"
 
-version: "2.0.0"
+version: "2.1.0"
 is_active: true
 status: "active"
 max_iterations: 180
@@ -193,7 +201,7 @@ tags:
 metadata:
   author: System
   created_at: '2026-03-11'
-  updated_at: '2026-04-29'
+  updated_at: '2026-05-13'
   capabilities:
     - requirement_analysis
     - user_communication
