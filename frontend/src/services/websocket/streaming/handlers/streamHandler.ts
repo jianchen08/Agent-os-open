@@ -18,6 +18,14 @@ const _debugLogger = loggers.websocket
  * 处理流式开始事件
  */
 export function handleStreamStart(eventData: any) {
+  console.log(
+    '%c[STREAM_START_RAW] type=%s dataKeys=%s pipelineId=%s messageId=%s',
+    'color:lime;font-weight:bold',
+    eventData.type,
+    eventData.data ? Object.keys(eventData.data).join(',') : '(no data)',
+    eventData.data?.pipeline_id?.slice(0, 12) || 'null',
+    eventData.data?.message_id?.slice(0, 12) || eventData.message_id?.slice(0, 12) || 'null',
+  )
   const pipelineId = resolvePipelineId(eventData)
   const messageId = eventData.message_id || eventData.data?.message_id
   _debugLogger.info(
@@ -78,6 +86,13 @@ export function handleStreamStart(eventData: any) {
     status: 'streaming',
     contentBlocks: [],
   } as any)
+
+  console.log(
+    '%c[STREAM_START_ADD] pipelineId=%s msgId=%s storeKeys=%o',
+    'color:cyan;font-weight:bold',
+    pipelineId?.slice(0, 12), messageId?.slice(0, 12),
+    Object.keys(pipelineStore.getState().messagesByPipeline).map(k => k.slice(0, 12)),
+  )
 }
 
 /**
@@ -108,16 +123,27 @@ export function handleStreamChunk(eventData: any) {
     //          如果找到，将 chunk 路由到消息所在的 pipeline，而不是创建 placeholder。
     const state = pipelineStore.getState()
     const allPipelines = Object.keys(state.messagesByPipeline)
+    console.warn(
+      '%c[CHUNK_MISMATCH] chunk_pipeline=%s msgId=%s allPipelines=%o',
+      'color:red;font-weight:bold',
+      pipelineId?.slice(0, 12), messageId?.slice(0, 12),
+      allPipelines.map(p => p.slice(0, 12)),
+    )
     for (const pid of allPipelines) {
       if (pid === pipelineId) continue
-      const found = state.getMessages(pid).find((m: any) => m.id === messageId)
+      const pMsgs = state.getMessages(pid)
+      const found = pMsgs.find((m: any) => m.id === messageId)
+      console.log(
+        '[CHUNK_MISMATCH] searching pipeline=%s msgs=%d found=%s',
+        pid.slice(0, 12), pMsgs.length, found ? 'YES' : 'no',
+      )
       if (found) {
         _debugLogger.info(
           `[STREAM_CHUNK] pipeline mismatch resolved: chunk_pipeline=%s msg_pipeline=%s msgId=%s`,
           pipelineId?.slice(0, 8), pid.slice(0, 8), messageId?.slice(0, 12),
         )
         pipelineId = pid
-        msgs = state.getMessages(pid)
+        msgs = pMsgs
         msg = found
         break
       }
