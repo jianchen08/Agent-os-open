@@ -189,12 +189,18 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
           ],
         })),
       setActiveTab: (tabId) =>
-        set((state) => ({
-          workspaceTabs: state.workspaceTabs.map((t) => ({
+        set((state) => {
+          const newTabs = state.workspaceTabs.map((t) => ({
             ...t,
             isActive: t.id === tabId,
-          })),
-        })),
+          }))
+          const activeTab = newTabs.find((t) => t.isActive)
+          const newDockItems = state.dockItems.map((item) => ({
+            ...item,
+            isActive: activeTab ? item.moduleId === activeTab.moduleId : false,
+          }))
+          return { workspaceTabs: newTabs, dockItems: newDockItems }
+        }),
       closeWorkspaceTab: (tabId) =>
         set((state) => ({
           workspaceTabs: state.workspaceTabs.filter((t) => t.id !== tabId),

@@ -62,6 +62,7 @@ echo [OK] 前端端口: !FRONTEND_PORT!
 :: 保存端口到项目目录的 .ports 文件
 echo BACKEND_PORT=!BACKEND_PORT!> "%PORTS_FILE%"
 echo FRONTEND_PORT=!FRONTEND_PORT!>> "%PORTS_FILE%"
+echo PROJECT_ROOT=!ROOT!>> "%PORTS_FILE%"
 echo [INFO] 端口信息已保存到 %PORTS_FILE%
 
 :: ========== 安装前端依赖 ==========
@@ -261,9 +262,19 @@ echo [INFO] 检测到本项目的旧实例，正在关闭...
 
 set "OLD_BACKEND_PORT="
 set "OLD_FRONTEND_PORT="
+set "OLD_PROJECT_ROOT="
 for /f "usebackq tokens=1,2 delims==" %%a in ("%PORTS_FILE%") do (
     if "%%a"=="BACKEND_PORT" set "OLD_BACKEND_PORT=%%b"
     if "%%a"=="FRONTEND_PORT" set "OLD_FRONTEND_PORT=%%b"
+    if "%%a"=="PROJECT_ROOT" set "OLD_PROJECT_ROOT=%%b"
+)
+
+if defined OLD_PROJECT_ROOT (
+    if /i not "!ROOT!"=="!OLD_PROJECT_ROOT!" (
+        echo [INFO] 端口文件属于其他项目目录 [!OLD_PROJECT_ROOT!]，跳过关闭
+        del "%PORTS_FILE%" 2>nul
+        exit /b 0
+    )
 )
 
 if not defined OLD_BACKEND_PORT goto :skip_stop_backend

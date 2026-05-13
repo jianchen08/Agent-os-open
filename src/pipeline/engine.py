@@ -542,6 +542,29 @@ class PipelineEngine:
                     except Exception as exc:
                         logger.debug("Checkpoint auto-save failed: %s", exc)
 
+                # BUG-FIX-fix_20260514_subtab_inject:
+                # 问题根因: _pending_notifications 只在管道"即将结束且无 route_signals"时
+                #           才被消费（L807-809），而子标签注入消息时管道通常正在持续循环
+                #           （LLM→工具→LLM...），每次迭代都有 route_signals，永远不会走到
+                #           通知消费逻辑，导致子标签消息被静默丢弃。
+                # 修复方案: 在每次迭代开始时（Input 插件执行前）检查并消费 _pending_notifications，
+                #           将用户消息注入到 state["messages"] 中，确保实时响应。
+                if self._pending_notifications:
+                    _iter_notifs = self._pending_notifications[:]
+                    self._pending_notifications.clear()
+                    _combined = "\n\n".join(_iter_notifs)
+                    state["user_input"] = _combined
+                    state.setdefault("messages", []).append(
+                        {"role": "user", "content": _combined}
+                    )
+                    state[StateKeys.CORE_TYPE] = "llm_call"
+                    state.pop("raw_result", None)
+                    state.pop("error_analysis", None)
+                    logger.info(
+                        "[Engine] 迭代 %d 开始时消费 %d 条待处理通知，注入 state",
+                        iteration, len(_iter_notifs),
+                    )
+
                 # 2. 第一步：解析插件列表
                 plugin_names = self.input_route_table.resolve_plugins(state)
                 logger.info("Input route resolved plugins: %s", plugin_names)

@@ -61,6 +61,7 @@ system_prompt: |
      - **禁止自行决定执行细节**：你只需将需求传递给规划 agent，不得自行指定执行顺序、执行者分配等细节。这些由规划 agent 根据方案自主规划
   5. **执行任务链**（任务链生成后立即执行，无需询问用户是否执行）：
      - **读取任务链并派发是你自身的职责，不得下放给下级 Agent**
+     - **精准读取任务链**：方案文档（如 `docs/{title}_solution.yaml`）包含 `solution`（方案内容）和 `task_chain`（任务链）两段。你只需要 `task_chain`，使用 `file_read(path="{workspace}/docs/{title}_solution.yaml", fields=["task_chain"])` 只读任务链字段，禁止读取整个文件浪费 token
      - 任务链中每个子任务会声明推荐的执行者（L2 编排者或 L3 执行者）
      - 检查所需执行者是否已存在，将缺失的汇总
      - 缺失资源 → 触发「资源准备流程」（见下文）创建
@@ -297,7 +298,7 @@ hard_constraints:
   - "触发器触发时只查看已知正在执行的子任务，不要盲目 list 全部任务"
   - "资源管理任务（提交给 resource_manager_agent）必须设置 workspace 为项目根目录"
   - "收到子任务通知立即处理对应任务，不要攒着等全部完成"
-  - "方案规划完成后读取任务链文件时，直接用任务详情中的工作空间路径 + 产出物路径，不要反复搜索查找"
+  - "方案规划完成后读取任务链时，用 file_read(path='{workspace}/docs/{title}_solution.yaml', fields=['task_chain']) 精准读取 task_chain 字段，不要读整个文件，不要反复搜索查找路径"
 
 soft_constraints:
   - "按任务类型选择处理方式"

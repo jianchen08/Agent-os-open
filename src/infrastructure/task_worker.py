@@ -1443,6 +1443,7 @@ class TaskWorker:
             )
 
             _engine_timed_out = False
+            pipeline_state: dict[str, Any] | None = None
             try:
                 if _bridge:
                     await asyncio.wait_for(
@@ -1694,6 +1695,10 @@ class TaskWorker:
                             and isinstance(max_iter, int)
                             and iteration_count >= max_iter
                         )
+                        state_is_empty = not pipeline_state
+                        state_not_ended = (
+                            isinstance(ended, bool) and not ended
+                        )
 
                         if raw_error:
                             # 管道内有明确错误（LLM 调用失败、工具异常等）
@@ -1710,8 +1715,16 @@ class TaskWorker:
                                 f"管道迭代耗尽"
                                 f"({iteration_count}/{max_iter})"
                             )
+                        elif state_is_empty or state_not_ended:
+                            # pipeline_state 为空（进程被杀/重启导致 asyncio task 未完成）
+                            # 或 ended=False（管道循环被外部中断，如 CancelledError 后进程退出）
+                            parts.append(
+                                f"管道被中断(可能原因: 进程重启或被强制终止)"
+                                f"(iterations={iteration_count}/{max_iter},"
+                                f" ended={ended})"
+                            )
                         else:
-                            # 其他原因（无 route signal 强制退出等）
+                            # 其他未知原因
                             parts.append(
                                 f"管道异常结束(iterations="
                                 f"{iteration_count}/{max_iter})"
@@ -1728,6 +1741,7 @@ class TaskWorker:
                             else "管道异常退出，Agent 未完成评估"
                         )
 
+                        is_interrupted = state_is_empty or state_not_ended
                         logger.warning(
                             "TaskWorker: task %s still RUNNING "
                             "after pipeline exit. "
@@ -1742,10 +1756,28 @@ class TaskWorker:
                         evt = self._terminal_events.pop(
                             task_id, None,
                         )
-                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
-                        await task_service.fail_task(
-                            task_id, error_msg,
-                        )
+
+                        if is_interrupted and task_service:
+                            try:
+                                await task_service.reset_to_pending(task_id)
+                                logger.info(
+                                    "TaskWorker: task %s reset to pending for retry"
+                                    " (pipeline was interrupted, likely process restart)",
+                                    task_id,
+                                )
+                            except Exception as reset_exc:
+                                logger.warning(
+                                    "TaskWorker: reset_to_pending failed for %s: %s,"
+                                    " falling back to fail_task",
+                                    task_id, reset_exc,
+                                )
+                                await task_service.fail_task(
+                                    task_id, error_msg,
+                                )
+                        else:
+                            await task_service.fail_task(
+                                task_id, error_msg,
+                            )
                         if evt is not None:
                             evt.set()
                         # BUG-FIX: fail_task 后清理 idle 计时器

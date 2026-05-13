@@ -26,6 +26,7 @@ import {
   AlertCircle,
   MessageSquare,
   ExternalLink,
+  ArrowUpDown,
 } from 'lucide-react'
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import apiClient from '@/services/api/client'
@@ -122,6 +123,8 @@ interface TreeWidgetConfig {
   data?: TreeNodeData[]
   /** 是否显示搜索框 */
   showSearch?: boolean
+  /** 是否显示启用/禁用开关（默认 true，workspace:// 数据源自动 false） */
+  showEnabledToggle?: boolean
   /** 节点点击回调（用于外部处理节点点击事件） */
   onNodeClick?: (node: TreeNodeData) => void
   /** 文件节点点击回调（用于打开文件编辑器） */
@@ -360,6 +363,50 @@ function filterNodes(
   return result
 }
 
+/** 排序模式 */
+type SortMode = 'none' | 'name-asc' | 'name-desc' | 'type'
+
+/**
+ * 递归排序树节点
+ *
+ * @param nodes - 待排序节点数组
+ * @param mode - 排序模式
+ * @param titleField - 标题字段名
+ * @param childrenField - 子节点字段名
+ * @returns 排序后的节点数组
+ */
+function sortNodes(
+  nodes: TreeNodeData[],
+  mode: SortMode,
+  titleField: string,
+  childrenField: string,
+): TreeNodeData[] {
+  if (mode === 'none') return nodes
+
+  const sorted = [...nodes].sort((a, b) => {
+    const titleA = String(getNodeField(a, titleField) ?? '').toLowerCase()
+    const titleB = String(getNodeField(b, titleField) ?? '').toLowerCase()
+    const childrenA = getNodeField(a, childrenField) as TreeNodeData[] | undefined
+    const childrenB = getNodeField(b, childrenField) as TreeNodeData[] | undefined
+    const isDirA = Array.isArray(childrenA) && childrenA.length > 0
+    const isDirB = Array.isArray(childrenB) && childrenB.length > 0
+
+    if (mode === 'type') {
+      if (isDirA !== isDirB) return isDirA ? -1 : 1
+      return titleA.localeCompare(titleB)
+    }
+
+    const cmp = titleA.localeCompare(titleB)
+    return mode === 'name-desc' ? -cmp : cmp
+  })
+
+  return sorted.map((node) => {
+    const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
+    if (!Array.isArray(children) || children.length === 0) return node
+    return { ...node, [childrenField]: sortNodes(children, mode, titleField, childrenField) }
+  })
+}
+
 /**
  * 通用树形组件
  *
@@ -391,6 +438,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const nodeChildrenField = config.nodeChildrenField ?? 'children'
   /** 是否显示搜索框 */
   const showSearch = config.showSearch ?? false
+  /** 是否显示启用/禁用开关（workspace:// 数据源默认隐藏） */
+  const ds = rawProps.dataSource as string | undefined
+  const showEnabledToggle = config.showEnabledToggle ?? !(ds?.startsWith('workspace://'))
   /** 合并状态配置 */
   const statusConfig = { ...DEFAULT_STATUS_CONFIG, ...(config.statusConfig ?? {}) }
   /** 节点点击回调 */
@@ -611,10 +661,31 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     }
   }, [expandedIds, treeKey])
 
-  /** 过滤后的数据 */
+  /** 排序模式 */
+  const [sortMode, setSortMode] = useState<SortMode>('none')
+
+  /** 排序模式循环切换标签 */
+  const SORT_CYCLE: SortMode[] = ['none', 'name-asc', 'name-desc', 'type']
+  const SORT_LABELS: Record<SortMode, string> = {
+    none: '默认排序',
+    'name-asc': '名称 A→Z',
+    'name-desc': '名称 Z→A',
+    type: '文件夹优先',
+  }
+
+  /** 过滤 + 排序后的数据 */
   const filteredData = useMemo(() => {
-    return filterNodes(effectiveData, searchKeyword, nodeTitleField, nodeChildrenField)
-  }, [effectiveData, searchKeyword, nodeTitleField, nodeChildrenField])
+    const filtered = filterNodes(effectiveData, searchKeyword, nodeTitleField, nodeChildrenField)
+    return sortNodes(filtered, sortMode, nodeTitleField, nodeChildrenField)
+  }, [effectiveData, searchKeyword, sortMode, nodeTitleField, nodeChildrenField])
+
+  /** 切换排序模式 */
+  const handleSortToggle = useCallback(() => {
+    setSortMode((prev) => {
+      const idx = SORT_CYCLE.indexOf(prev)
+      return SORT_CYCLE[(idx + 1) % SORT_CYCLE.length]
+    })
+  }, [])
 
   /**
    * 切换节点展开/折叠状态
@@ -743,19 +814,35 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         </div>
       )}
 
-      {/* 搜索框 */}
+      {/* 搜索框 + 排序 */}
       {showSearch && (
         <div className="border-b px-3 py-2">
-          <div className="relative">
-            <Search className="text-muted-foreground absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchKeyword}
-              onChange={handleSearchChange}
-              placeholder="搜索节点..."
-              className="bg-muted/50 focus:bg-background w-full rounded-md border py-1.5 pl-7 pr-3 text-xs outline-none transition-colors focus:border-status-info/50"
-            />
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="text-muted-foreground absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchKeyword}
+                onChange={handleSearchChange}
+                placeholder="搜索节点..."
+                className="bg-muted/50 focus:bg-background w-full rounded-md border py-1.5 pl-7 pr-3 text-xs outline-none transition-colors focus:border-status-info/50"
+              />
+            </div>
+            <button
+              onClick={handleSortToggle}
+              title={SORT_LABELS[sortMode]}
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+                sortMode !== 'none' ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 text-muted-foreground'
+              }`}
+            >
+              <ArrowUpDown className="h-3.5 w-3.5" />
+            </button>
           </div>
+          {sortMode !== 'none' && (
+            <div className="text-muted-foreground mt-1 text-[10px]">
+              {SORT_LABELS[sortMode]}
+            </div>
+          )}
         </div>
       )}
 
@@ -775,6 +862,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               selectedId={selectedId}
               showStatus={showStatus}
               showProgress={showProgress}
+              showEnabledToggle={showEnabledToggle}
               nodeIconField={nodeIconField}
               nodeTitleField={nodeTitleField}
               nodeStatusField={nodeStatusField}
@@ -810,6 +898,8 @@ interface TreeNodeProps {
   showStatus: boolean
   /** 是否显示进度条 */
   showProgress: boolean
+  /** 是否显示启用/禁用开关 */
+  showEnabledToggle: boolean
   /** 节点图标字段名 */
   nodeIconField: string
   /** 节点标题字段名 */
@@ -883,6 +973,7 @@ function TreeNode({
   selectedId,
   showStatus,
   showProgress,
+  showEnabledToggle,
   nodeIconField,
   nodeTitleField,
   nodeStatusField,
@@ -1021,7 +1112,7 @@ function TreeNode({
   const hasActions = hasPipeline || hasWorkspace
 
   return (
-    <div className={!isEnabled ? 'opacity-50' : ''}>
+    <div className={showEnabledToggle && !isEnabled ? 'opacity-50' : ''}>
       <div
         className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-accent ${
           isSelected
@@ -1032,7 +1123,7 @@ function TreeNode({
         onClick={handleClick}
       >
         <div className="flex shrink-0 items-center pt-0.5">
-          {/* 开关按钮：始终显示 */}
+          {showEnabledToggle && (
           <button
             className={`mr-1.5 flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors ${
               isEnabled
@@ -1047,6 +1138,7 @@ function TreeNode({
               isEnabled ? '' : ''
             }`} />
           </button>
+          )}
           <button
             className={`mr-1 flex h-5 w-5 items-center justify-center rounded transition-transform ${
               hasChildren
@@ -1178,6 +1270,7 @@ function TreeNode({
               selectedId={selectedId}
               showStatus={showStatus}
               showProgress={showProgress}
+              showEnabledToggle={showEnabledToggle}
               nodeIconField={nodeIconField}
               nodeTitleField={nodeTitleField}
               nodeStatusField={nodeStatusField}
