@@ -389,23 +389,16 @@ export const ChatContainer = ({
       data-testid="chat-container"
       data-session-id={sessionId}
     >
-      {/* Agent Tab 导航栏 + 通知中心 */}
-      <div className="bg-background shrink-0 border-b">
-        <div className="flex items-center">
-          <div className="min-w-0 flex-1">
-            {showTabBar && (
-              <AgentTabBar
-                tabs={barTabs}
-                onTabChange={handleTabChange}
-                onTabClose={handleTabClose}
-              />
-            )}
-          </div>
-          <div className="relative shrink-0 pr-2">
-            <NotificationCenter />
-          </div>
+      {/* Agent Tab 导航栏（多 Tab 时显示） */}
+      {showTabBar && (
+        <div className="bg-background shrink-0 border-b">
+          <AgentTabBar
+            tabs={barTabs}
+            onTabChange={handleTabChange}
+            onTabClose={handleTabClose}
+          />
         </div>
-      </div>
+      )}
 
       {/* 消息列表 */}
       {/* BUG-FIX-fix_20260509_scroll_position: key 强制切换时重新挂载使 initialTopMostItemIndex 生效 */}
@@ -433,32 +426,33 @@ export const ChatContainer = ({
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />
 
-      {/* 输入区域 */}
-      {/* BUG-FIX-fix_20260512_input_state_shared: key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
-      <ChatInput
-        key={`input-${activeTabId || sessionId}`}
-        draftKey={activeTabId || sessionId}
-        isGenerating={effectiveIsGenerating}
-        onSendMessage={(params) => {
-          /**
-           * 子 Tab 激活时注入 pipelineId（即 tab.pipelineRunId）
-           * 后端直接用 pipeline_id 路由到对应管道，无需 task_service 查找
-           */
-          if (isSubTabActive && activeTab?.pipelineRunId) {
-            onSendMessage({ ...params, pipelineId: activeTab.pipelineRunId })
-          } else {
-            onSendMessage(params)
-          }
-        }}
-        onStopGenerate={onStopGenerate}
-        placeholder="输入消息，按 Enter 发送..."
-        enableThinkingMode={true}
-        modelName={modelName}
-        currentTokenUsage={effectiveTokenCount}
-        maxTokens={effectiveMaxTokens}
-        thinkingMode={thinkingMode}
-        toggleThinkingMode={toggleThinkingMode}
-      />
+      {/* 输入区域 + 通知中心 */}
+      <div className="relative shrink-0">
+        <div className="absolute -top-10 right-2 z-10">
+          <NotificationCenter />
+        </div>
+        {/* BUG-FIX-fix_20260512_input_state_shared: key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
+        <ChatInput
+          key={`input-${activeTabId || sessionId}`}
+          draftKey={activeTabId || sessionId}
+          isGenerating={effectiveIsGenerating}
+          onSendMessage={(params) => {
+            if (isSubTabActive && activeTab?.pipelineRunId) {
+              onSendMessage({ ...params, pipelineId: activeTab.pipelineRunId })
+            } else {
+              onSendMessage(params)
+            }
+          }}
+          onStopGenerate={onStopGenerate}
+          placeholder="输入消息，按 Enter 发送..."
+          enableThinkingMode={true}
+          modelName={modelName}
+          currentTokenUsage={effectiveTokenCount}
+          maxTokens={effectiveMaxTokens}
+          thinkingMode={thinkingMode}
+          toggleThinkingMode={toggleThinkingMode}
+        />
+      </div>
     </div>
   )
 }

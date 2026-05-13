@@ -170,6 +170,7 @@ class WebSocketInteractionNotifier:
                 "agent_id": msg_data.get("agent_id", ""),
                 "pipeline_id": record.get("message_data", {}).get("pipeline_id", ""),
                 "file_contents": msg_data.get("file_contents"),
+                "progress": msg_data.get("progress"),
                 "agent_level": msg_data.get("agent_level"),
                 "session_id": record.get("session_id", ""),
             },

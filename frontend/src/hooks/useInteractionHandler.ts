@@ -50,7 +50,7 @@ function parseInteractionEvent(
 
   return {
     requestId,
-    mode: (inner.interaction_mode as 'choice' | 'conversation') || 'choice',
+    mode: (inner.interaction_mode as 'choice' | 'conversation' | 'notification') || 'choice',
     title: (inner.title as string) || '',
     description: (inner.description as string) || '',
     threadId: (inner.thread_id as string) || (inner.threadId as string) || '',
@@ -62,6 +62,7 @@ function parseInteractionEvent(
     initialMessage: inner.initial_message as string,
     suggestions: inner.suggestions as string[],
     priority: inner.priority as PendingInteraction['priority'],
+    progress: inner.progress as number | undefined,
     timestamp: new Date().toISOString(),
     agentLevel: rawAgentLevel || undefined,
     fileContents,
@@ -142,7 +143,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
         const tabId = `review-${parsed.requestId}`
         registerFileReview(tabId, {
           requestId: parsed.requestId,
-          mode: parsed.mode as 'choice' | 'conversation',
+          mode: parsed.mode as 'choice' | 'conversation' | 'notification',
           title: parsed.title || '',
           pipelineId: parsed.pipelineId || '',
           fileContents: parsed.fileContents,

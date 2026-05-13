@@ -362,6 +362,24 @@ export function FiveSpaceLayout({
             // 静默失败
           }
         }
+        /**
+         * 保存文件内容到后端
+         * 调用 PUT /api/v1/workspaces/{containerId}/file-content 接口
+         */
+        const handleSaveFile = async (filePath: string, content: string): Promise<boolean> => {
+          const containerId = reviewData.containerTaskId
+          if (!containerId) return false
+          try {
+            const resp = await apiClient.put(
+              `/api/v1/workspaces/${containerId}/file-content`,
+              { content },
+              { params: { path: filePath } },
+            )
+            return resp.data?.success ?? false
+          } catch {
+            return false
+          }
+        }
         return (
           <div className="relative h-full">
             {reviewData.containerTaskId && (
@@ -383,6 +401,7 @@ export function FiveSpaceLayout({
               options={reviewData.options}
               onSendMessage={handleSendMessage}
               onSubmitReview={handleSubmitReview}
+              onSaveFile={handleSaveFile}
             />
           </div>
         )

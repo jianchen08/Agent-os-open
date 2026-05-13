@@ -102,6 +102,7 @@ class HumanInteractionService(IHumanInteractionService):
         priority: Priority = Priority.NORMAL,
         progress: float | None = None,
         agent_id: str | None = None,
+        file_contents: dict[str, str] | None = None,
     ) -> str:
         """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
         request_id = str(uuid4())
@@ -118,6 +119,7 @@ class HumanInteractionService(IHumanInteractionService):
             extra={
                 "progress": progress,
                 "priority": priority.value,
+                "file_contents": file_contents,
             },
         )
         self._requests[request_id] = record

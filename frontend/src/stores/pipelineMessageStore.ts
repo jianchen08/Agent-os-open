@@ -390,14 +390,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           }
 
           if (!apiIds.has(localMsg.id)) {
+            // BUG-FIX-fix_20260513_session_switch_duplicate:
+            // 问题根因: 乐观更新的用户消息（前端 generateUUID）和后端持久化的消息 ID 不同，
+            //          切换会话后切回时时间差可能远超 10 秒，导致时间窗口去重失败，
+            //          同一条消息在本地保留 + API 添加 = 前端显示两条。
+            // 修复方案: 去掉时间窗口限制，仅用 role + content 匹配，覆盖所有切换场景。
+            // 影响范围: 会话切换时的消息去重
+            // 修复日期: 2026-05-13
             const hasApiMatch = sorted.some(
               (apiMsg) =>
                 apiMsg.role === localMsg.role
-                && apiMsg.content === localMsg.content
-                && Math.abs(
-                  new Date(apiMsg.timestamp).getTime()
-                  - new Date(localMsg.timestamp).getTime(),
-                ) < 10000,
+                && apiMsg.content === localMsg.content,
             )
             return !hasApiMatch
           }

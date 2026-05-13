@@ -15,7 +15,7 @@ export interface FileReviewData {
   /** 交互请求 ID */
   requestId: string
   /** 交互模式 */
-  mode: 'choice' | 'conversation'
+  mode: 'choice' | 'conversation' | 'notification'
   /** 交互标题 */
   title: string
   /** 管道 ID（用于发送消息） */

@@ -120,7 +120,7 @@ class HumanInteractionTool(BuiltinTool):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要审批的文件路径列表，系统自动读取文件内容并在审批面板中展示",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。适用于：通知模式下将某个文件推送给用户查看、选择/对话模式下让用户审批文件变更。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -445,6 +445,9 @@ class HumanInteractionTool(BuiltinTool):
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
+        file_paths_list = inputs.get("file_paths")
+        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
+
         try:
             request_id = await service.send_notification(
                 session_id=pipeline_id,
@@ -454,6 +457,7 @@ class HumanInteractionTool(BuiltinTool):
                 priority=priority,
                 progress=progress,
                 agent_id=pipeline_id,
+                file_contents=file_contents,
             )
 
             return create_success_result(
