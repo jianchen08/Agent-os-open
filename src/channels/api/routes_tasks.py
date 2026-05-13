@@ -626,7 +626,7 @@ async def resume_task(
             message=f"恢复任务失败: {exc}",
         )
 
-    task_submitted = _submit_task_event(task_id, task_service)
+    task_submitted = await _submit_task_event(task_id, task_service)
 
     logger.info(
         "用户 %s 恢复任务 %s (task_submitted=%s)",
@@ -641,7 +641,7 @@ async def resume_task(
     }
 
 
-def _submit_task_event(task_id: str, task_service: Any) -> bool:
+async def _submit_task_event(task_id: str, task_service: Any) -> bool:
     """发布 task.submitted 事件，触发 TaskWorker 重新执行任务。
 
     从 TaskService 获取任务的完整信息，构建事件数据，
@@ -669,28 +669,19 @@ def _submit_task_event(task_id: str, task_service: Any) -> bool:
             logger.warning("_submit_task_event: EventBus 不可用")
             return False
 
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(event_bus.emit("task.submitted", {
-                "task_id": task.id,
-                "target_type": task.target_type or "agent",
-                "target_id": metadata.get("target_id", ""),
-                "user_input": task.title,
-                "description": task.description,
-                "acceptance_criteria": metadata.get("acceptance_criteria", {}),
-                "workspace": metadata.get("workspace", ""),
-            }))
-        else:
-            loop.run_until_complete(event_bus.emit("task.submitted", {
-                "task_id": task.id,
-                "target_type": task.target_type or "agent",
-                "target_id": metadata.get("target_id", ""),
-                "user_input": task.title,
-                "description": task.description,
-                "acceptance_criteria": metadata.get("acceptance_criteria", {}),
-                "workspace": metadata.get("workspace", ""),
-            }))
+        # BUG-FIX-fix_20260513_submit_event_async:
+        # 问题根因: _submit_task_event 是同步函数，使用已弃用的 asyncio.get_event_loop()
+        #           和 ensure_future，在 async 上下文中可能不可靠
+        # 修复方案: 改为 async 函数，直接 await event_bus.emit
+        await event_bus.emit("task.submitted", {
+            "task_id": task.id,
+            "target_type": task.target_type or "agent",
+            "target_id": metadata.get("target_id", ""),
+            "user_input": task.title,
+            "description": task.description,
+            "acceptance_criteria": metadata.get("acceptance_criteria", {}),
+            "workspace": metadata.get("workspace", ""),
+        })
 
         return True
     except Exception as exc:

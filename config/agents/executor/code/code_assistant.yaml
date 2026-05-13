@@ -59,6 +59,10 @@ tool_ids:
   - grep
   - bash
   - memory_search
+  - lsp_definition
+  - lsp_references
+  - lsp_diagnostics
+  - file_jump
 
 metadata:
   version: "1.0.0"

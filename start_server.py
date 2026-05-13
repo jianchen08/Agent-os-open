@@ -1158,6 +1158,23 @@ def create_combined_app() -> FastAPI:
     else:
         logger.error("管道引擎未就绪！消息发送功能将不可用。请检查上方日志中的错误信息。")
 
+    # BUG-FIX-fix_20260513_task_worker_startup:
+    # 问题根因: TaskWorker.start() 只在首次 WebSocket user_input 消息到达时才被调用，
+    #           导致服务器重启后 _recover_running_tasks() 从未执行。
+    # 修复方案: 在 FastAPI startup 事件中立即启动 TaskWorker，确保残留任务能被恢复。
+    @app.on_event("startup")
+    async def _startup_task_worker() -> None:
+        """服务器启动时立即启动 TaskWorker，恢复残留的 running/pending 任务。"""
+        global _task_worker_started
+        tw = globals().get("_task_worker")
+        if tw and hasattr(tw, "start") and not _task_worker_started:
+            try:
+                await tw.start()
+                _task_worker_started = True
+                logger.info("TaskWorker started (server startup, auto-recovery active)")
+            except Exception as exc:
+                logger.warning("TaskWorker start failed during startup: %s", exc)
+
     # WebSocket 连接管理
     active_connections: dict[str, list[WebSocket]] = {}
 

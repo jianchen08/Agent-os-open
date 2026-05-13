@@ -149,6 +149,10 @@ tool_ids:
   - resource_search
   - design_generate
   - playwright_test
+  - lsp_definition
+  - lsp_references
+  - lsp_diagnostics
+  - file_jump
 
 # 约束配置
 hard_constraints:

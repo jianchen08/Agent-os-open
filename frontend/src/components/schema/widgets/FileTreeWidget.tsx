@@ -692,7 +692,12 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           await Promise.allSettled(descendantIds.map((id) => apiCall(id)))
         }
         triggerRefresh()
-      } catch {
+      // BUG-FIX-fix_20260513_toggle_error_handling:
+      // 问题根因: catch 块为空，API 调用失败时用户无感知，UI 状态停留在乐观更新
+      // 修复方案: 添加 console.error 日志并调用 triggerRefresh 恢复 UI 状态
+      } catch (err) {
+        console.error('[FileTreeWidget] toggle enabled failed:', err)
+        triggerRefresh()
       } finally {
         setTogglingIds((prev) => {
           const next = new Set(prev)

@@ -72,6 +72,7 @@ class LSPGateway:
         self.clients: dict[str, LSPClient] = {}
         self.ide_info: IDEInfo | None = None
         self._lock = asyncio.Lock()
+        self._opened_documents: set[str] = set()
 
     async def initialize(self):
         """初始化 LSP 网关"""
@@ -100,10 +101,47 @@ class LSPGateway:
                 except Exception as e:
                     logger.error(f"停止 LSP 客户端失败: {e}")
             self.clients.clear()
+            self._opened_documents.clear()
 
     def get_client(self, language: str) -> LSPClient | None:
         """获取指定语言的 LSP 客户端"""
         return self.clients.get(language)
+
+    def _language_id(self, file_path: str) -> str:
+        """根据文件扩展名获取 LSP languageId"""
+        ext = Path(file_path).suffix.lower()
+        language_id_map = {
+            ".py": "python",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".jsx": "javascriptreact",
+            ".tsx": "typescriptreact",
+            ".go": "go",
+            ".rs": "rust",
+        }
+        return language_id_map.get(ext, "plaintext")
+
+    async def ensure_document_opened(self, file_path: str, language: str | None = None) -> None:
+        """确保文档在 LSP 服务器中已打开（didOpen）"""
+        if not language:
+            language = self._detect_language(file_path)
+
+        client = self.get_client(language)
+        if not client:
+            return
+
+        uri = Path(file_path).as_uri()
+        if uri in self._opened_documents:
+            return
+
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            language_id = self._language_id(file_path)
+            await client.open_document(uri, language_id, 1, content)
+            self._opened_documents.add(uri)
+            logger.debug(f"文档已打开: {uri}")
+        except Exception as e:
+            logger.warning(f"打开文档失败: {e}")
 
     async def go_to_definition(
         self,
@@ -120,6 +158,7 @@ class LSPGateway:
             logger.warning(f"未找到 {language} 的 LSP 客户端")
             return []
 
+        await self.ensure_document_opened(file_path, language)
         uri = Path(file_path).as_uri()
         return await client.go_to_definition(uri, position)
 
@@ -139,6 +178,7 @@ class LSPGateway:
             return []
 
         uri = Path(file_path).as_uri()
+        await self.ensure_document_opened(file_path, language)
         return await client.find_references(uri, position)
 
     async def get_diagnostics(
@@ -155,6 +195,7 @@ class LSPGateway:
             logger.warning(f"未找到 {language} 的 LSP 客户端")
             return []
 
+        await self.ensure_document_opened(file_path, language)
         uri = Path(file_path).as_uri()
         return await client.get_diagnostics(uri)
 
@@ -173,6 +214,7 @@ class LSPGateway:
             logger.warning(f"未找到 {language} 的 LSP 客户端")
             return []
 
+        await self.ensure_document_opened(file_path, language)
         uri = Path(file_path).as_uri()
         return await client.get_completion(uri, position)
 

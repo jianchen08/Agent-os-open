@@ -95,7 +95,36 @@ def apply_agent_plugin_configs(
         plugin_registry: PluginRegistry 实例
         agent_config: Agent 配置实例
     """
-    if not agent_config or not hasattr(agent_config, "plugins"):
+    if not agent_config:
+        return
+
+    # 自动注入 agent_level 到 context_build 插件
+    # BUG-FIX-fix_20260513_agent_level_wrong:
+    # 问题根因: ContextBuildPlugin 的 agent_level 默认为 "L1"，
+    #           但 Agent YAML 配置中未通过 plugins.enabled 覆盖该值，
+    #           导致所有 Agent 的管道 state 中 AGENT_LEVEL 始终为 "L1"，
+    #           task_submit 计算 child_level = min(1+1, 3) = 2，永远是 L2。
+    # 修复方案: 在此自动将 agent_config.level 注入到 context_build 插件配置中。
+    if hasattr(agent_config, "level") and agent_config.level:
+        cb_plugin = plugin_registry.get("context_build")
+        if cb_plugin and hasattr(cb_plugin, "_config"):
+            level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
+            if cb_plugin._config.get("agent_level") != level_value:
+                merged_config = {**cb_plugin._config, "agent_level": level_value}
+                try:
+                    new_plugin = type(cb_plugin)(config=merged_config)
+                    plugin_registry._plugins["context_build"] = new_plugin
+                    for core_key, pname in list(plugin_registry._core_plugins.items()):
+                        if pname == "context_build":
+                            plugin_registry._core_plugins[core_key] = "context_build"
+                    logger.debug(
+                        "Agent plugin config auto-injected: context_build.agent_level=%s",
+                        level_value,
+                    )
+                except Exception:
+                    logger.debug("Agent plugin config auto-inject failed for context_build")
+
+    if not hasattr(agent_config, "plugins"):
         return
 
     plugins_config = agent_config.plugins

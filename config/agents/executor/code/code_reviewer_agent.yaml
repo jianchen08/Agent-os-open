@@ -134,6 +134,10 @@ tool_ids:
 - resource_search
 - playwright_test
 - design_review
+- lsp_definition
+- lsp_references
+- lsp_diagnostics
+- file_jump
 
 # 硬约束
 hard_constraints:

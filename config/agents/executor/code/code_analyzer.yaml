@@ -367,6 +367,10 @@ tool_ids:
   - read
   - bash
   - evaluate_schema
+  - lsp_definition
+  - lsp_references
+  - lsp_diagnostics
+  - file_jump
 
 metadata:
   version: "1.0.0"
