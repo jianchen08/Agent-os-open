@@ -1029,8 +1029,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
     ) -> tuple[bool, str, str]:
         """校验目标 Agent 是否存在且级别匹配。
 
+        优先从 agent_registry（内存）查找，与 TaskWorker 使用同一数据源，
+        确保校验通过时 TaskWorker 也一定能找到该 Agent。
+        如果 registry 不可用，回退到磁盘 YAML 文件查找。
+
         规则：
-        1. target_id 对应的 agent 配置必须存在
+        1. target_id 对应的 agent 配置必须存在于 registry 或磁盘
         2. 目标 agent 不能是 L1 级别（L1 是主调度层，不能作为子任务执行者）
         3. 目标 agent 的级别不能与提交者同级或更高（应向下委托）
 
@@ -1040,6 +1044,83 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         Returns:
             (通过, 错误信息, 错误码) 元组。通过时错误信息为空字符串。
+        """
+        agent_level_str = ""
+        agent_level = 0
+
+        agent_config = self._get_agent_config_from_registry(target_id)
+
+        if agent_config is not None:
+            level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
+            level_map = {"L1": 1, "L2": 2, "L3": 3}
+            agent_level = level_map.get(level_value, 0)
+            agent_level_str = level_value
+        else:
+            logger.warning(
+                "[TaskSubmit] Agent '%s' 未在 registry 中找到，回退到磁盘文件查找",
+                target_id,
+            )
+            found, agent_level_str, agent_level = self._lookup_agent_from_disk(target_id)
+            if not found:
+                return (
+                    False,
+                    f"目标 Agent '{target_id}' 不存在。"
+                    f"请检查 target_id 是否正确。如果系统提供了 Agent 映射表，请使用映射表中的 Agent ID。",
+                    "TARGET_AGENT_NOT_FOUND",
+                )
+
+        if agent_level == 1:
+            return (
+                False,
+                f"不能将任务提交给 L1 Agent（'{target_id}'）。"
+                f"L1 是主调度层，只负责接收用户请求和派发任务，不执行具体工作。"
+                f"请选择 L2 编排层或 L3 执行层的 Agent。",
+                "TARGET_AGENT_IS_L1",
+            )
+
+        if agent_level > 0 and agent_level <= parent_agent_level:
+            return (
+                False,
+                f"目标 Agent '{target_id}' 的级别为 {agent_level_str}，"
+                f"不能作为 L{parent_agent_level} Agent 的下级执行者。"
+                f"任务委托应向下流动：L1→L2→L3，请选择级别更低（L{parent_agent_level + 1}+）的 Agent。",
+                "TARGET_AGENT_LEVEL_INVALID",
+            )
+
+        return (True, "", "")
+
+    def _get_agent_config_from_registry(self, target_id: str) -> Any | None:
+        """从 agent_registry 查找 Agent 配置。
+
+        与 TaskWorker 使用完全相同的数据源，确保校验和执行的一致性。
+
+        Args:
+            target_id: 目标 Agent ID
+
+        Returns:
+            AgentConfig 实例，未找到返回 None
+        """
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            agent_registry = provider.get("agent_registry")
+            if agent_registry is not None:
+                return agent_registry.get(target_id)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int]:
+        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
+
+        当 agent_registry 中找不到目标 Agent 时，尝试从磁盘文件查找。
+
+        Args:
+            target_id: 目标 Agent ID
+
+        Returns:
+            (是否找到, 级别字符串, 级别数字) 元组
         """
         import yaml
         from pathlib import Path
@@ -1064,46 +1145,18 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     continue
 
         if not yaml_path or not yaml_path.exists():
-            return (
-                False,
-                f"目标 Agent '{target_id}' 不存在。"
-                f"请检查 target_id 是否正确。如果系统提供了 Agent 映射表，请使用映射表中的 Agent ID。",
-                "TARGET_AGENT_NOT_FOUND",
-            )
+            return (False, "", 0)
 
         try:
             with open(yaml_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
-        except Exception as e:
-            return (
-                False,
-                f"无法读取 Agent '{target_id}' 的配置文件: {e}",
-                "TARGET_AGENT_CONFIG_ERROR",
-            )
+        except Exception:
+            return (False, "", 0)
 
         agent_level_str = config.get("level", "")
         level_map = {"L1": 1, "L2": 2, "L3": 3}
         agent_level = level_map.get(agent_level_str, 0)
-
-        if agent_level == 1:
-            return (
-                False,
-                f"不能将任务提交给 L1 Agent（'{target_id}'）。"
-                f"L1 是主调度层，只负责接收用户请求和派发任务，不执行具体工作。"
-                f"请选择 L2 编排层或 L3 执行层的 Agent。",
-                "TARGET_AGENT_IS_L1",
-            )
-
-        if agent_level > 0 and agent_level <= parent_agent_level:
-            return (
-                False,
-                f"目标 Agent '{target_id}' 的级别为 {agent_level_str}，"
-                f"不能作为 L{parent_agent_level} Agent 的下级执行者。"
-                f"任务委托应向下流动：L1→L2→L3，请选择级别更低（L{parent_agent_level + 1}+）的 Agent。",
-                "TARGET_AGENT_LEVEL_INVALID",
-            )
-
-        return (True, "", "")
+        return (True, agent_level_str, agent_level)
 
     def _auto_fill_criteria(
         self,

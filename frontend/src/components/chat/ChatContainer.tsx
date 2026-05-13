@@ -164,9 +164,6 @@ export const ChatContainer = ({
   isGenerating: _isGenerating = false,
   onSendMessage,
   onStopGenerate,
-  onRegenerate,
-  onEdit,
-  onDelete,
   currentTokenUsage: _externalTokenUsage = 0,
   maxTokens: _externalMaxTokens = 0,
   modelName = '',
@@ -210,7 +207,16 @@ export const ChatContainer = ({
       if (!Array.isArray(a) || !Array.isArray(b)) return false
       if (a.length !== b.length) return false
       if (a.length === 0 && b.length === 0) return true
-      return a === b
+      // BUG-FIX-fix_20260513_ai_msg_duplicate:
+      // 问题根因: 之前 return a === b 永远为 false（因为开头已排除 a === b），
+      //          导致每次 store 更新都触发组件重渲染。
+      // 修复方案: 逐项比较数组引用，仅当所有项引用相同时才认为相等。
+      // 影响范围: ChatContainer 渲染性能
+      // 修复日期: 2026-05-13
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false
+      }
+      return true
     },
   )
 
@@ -427,9 +433,6 @@ export const ChatContainer = ({
         key={activeTabId || sessionId}
         messages={filteredMessages}
         isGenerating={effectiveIsGenerating}
-        onRegenerate={onRegenerate}
-        onEdit={onEdit}
-        onDelete={onDelete}
         modelName={modelName}
         className="flex-1"
         hasMore={hasMoreMessages}

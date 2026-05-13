@@ -208,11 +208,16 @@ function mapBackendMessageToMessage(
 export async function getSessions(options: RetryOptions = {}): Promise<Session[]> {
   return requestWithRetry(async () => {
     // 只获取主管道会话（session_type=main_pipeline），过滤子任务管道
-    const response = await apiClient.get<ThreadStateResponse[]>(API_ENDPOINTS.THREADS.LIST, {
+    const response = await apiClient.get<any>(API_ENDPOINTS.THREADS.LIST, {
       params: { session_type: 'main_pipeline' },
     })
 
-    const threads = Array.isArray(response.data) ? response.data : []
+    // BUG-FIX-fix_20260513_sessions_empty: 后端返回 {threads: [...], total: N} 格式，非纯数组
+    // 问题根因: response.data 是对象而非数组，Array.isArray 判断为 false 导致 threads 为空
+    // 修复方案: 优先取 response.data.threads，兼容旧版纯数组格式
+    const threads = Array.isArray(response.data)
+      ? response.data
+      : (response.data?.threads || [])
     return threads.map(mapThreadToSession)
   }, options)
 }

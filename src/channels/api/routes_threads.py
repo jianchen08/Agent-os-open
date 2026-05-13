@@ -52,13 +52,19 @@ from channels.api.models import (
     ThreadCreate,
     ThreadResponse,
     ThreadUpdate,
+    _now_iso,
+    _parse_iso_time,
     store,
 )
 from infrastructure.execution_record_storage import ExecutionRecordStorage
 from infrastructure.service_provider import get_service_provider
+from infrastructure.session.models import SessionModel
 from infrastructure.session.session_service import SessionService
 
 logger = logging.getLogger(__name__)
+
+# 已执行过线程恢复的用户 ID 缓存，避免每次 list_threads 请求都全量扫描管道文件
+_recovered_user_ids: set[str] = set()
 
 # Web API 层不持久化会话状态，使用无 session_dir 的 SessionService
 _session_svc = SessionService()
@@ -299,6 +305,124 @@ def _build_thread_response(t: dict) -> ThreadResponse:
     )
 
 
+def _recover_threads_from_pipelines(user_id: str) -> None:
+    """从管道 YAML 文件中恢复丢失的线程映射。
+
+    扫描所有主管道 YAML 文件的 summary.thread_id 字段，
+    将不在 store 中的线程自动创建并关联管道 ID。
+    只恢复主管道（目录结构为 data/pipelines/{run_id}.yaml 或无父级映射的）。
+
+    BUG-FIX-fix_20260513_recover_lost_threads:
+    问题根因: _get_pipeline_ids_for_thread 覆盖写入导致旧管道映射丢失，
+              且 store.json 重启后可能缺少线程记录。
+    修复方案: list_threads 时自动从管道 YAML 扫描恢复丢失的线程和管道映射。
+    影响范围: 前端会话列表加载
+    修复日期: 2026-05-13
+    """
+    exec_storage = _get_execution_record_storage()
+    if not exec_storage:
+        return
+
+    # 性能优化：已恢复过的用户跳过全量扫描
+    if user_id in _recovered_user_ids:
+        return
+
+    try:
+        all_summaries = exec_storage.list_all_summaries()
+    except Exception:
+        logger.warning("恢复线程: 扫描管道摘要失败")
+        return
+
+    thread_to_pipelines: dict[str, list[str]] = {}
+    pipeline_to_thread: dict[str, str] = {}
+    pipeline_created_at: dict[str, str] = {}
+
+    for s in all_summaries:
+        run_id = getattr(s, "run_id", None)
+        tid = getattr(s, "thread_id", None)
+        if not run_id:
+            continue
+        created = getattr(s, "created_at", "") or ""
+        if created:
+            pipeline_created_at[run_id] = created
+        if tid:
+            pipeline_to_thread[run_id] = tid
+            thread_to_pipelines.setdefault(tid, []).append(run_id)
+
+    root_map = getattr(exec_storage, "_pipeline_root_map", {})
+    for tid, pipeline_ids in thread_to_pipelines.items():
+        if not tid or tid in store.threads:
+            continue
+
+        all_pipeline_ids = list(pipeline_ids)
+        for pid in pipeline_ids:
+            for child_id, root_id in root_map.items():
+                if root_id == pid and child_id not in all_pipeline_ids:
+                    all_pipeline_ids.append(child_id)
+
+        earliest = ""
+        for pid in all_pipeline_ids:
+            c = pipeline_created_at.get(pid, "")
+            if c and (not earliest or c < earliest):
+                earliest = c
+
+        now_str = _now_iso()
+        from datetime import datetime, timezone
+        created = earliest or now_str
+        if created:
+            try:
+                dt = datetime.fromisoformat(created)
+                created = dt.isoformat()
+            except Exception:
+                created = now_str
+
+        thread = {
+            "id": tid,
+            "user_id": user_id,
+            "title": "",
+            "agent_id": None,
+            "metadata": {"session_type": "main_pipeline"},
+            "intent": "",
+            "current_state": "active",
+            "pipeline_ids": all_pipeline_ids,
+            "active_pipeline_id": all_pipeline_ids[-1] if all_pipeline_ids else "",
+            "created_at": created,
+            "updated_at": now_str,
+        }
+        store.threads[tid] = thread
+        store.sessions[tid] = SessionModel(
+            session_id=tid,
+            channel_type="web",
+            channel_ref=tid,
+            pipeline_ids=all_pipeline_ids,
+            active_pipeline_id=all_pipeline_ids[-1] if all_pipeline_ids else "",
+            created_at=_parse_iso_time(created),
+            last_active_at=_parse_iso_time(now_str),
+            metadata={"session_type": "main_pipeline"},
+        )
+        logger.info(
+            "恢复丢失线程: thread=%s, pipelines=%s",
+            tid, all_pipeline_ids,
+        )
+
+    for tid in thread_to_pipelines:
+        if tid and tid in store.threads:
+            existing_thread = store.threads[tid]
+            existing_pids = set(existing_thread.get("pipeline_ids", []))
+            for pid in thread_to_pipelines[tid]:
+                if pid not in existing_pids:
+                    existing_pids.add(pid)
+            existing_thread["pipeline_ids"] = list(existing_pids)
+            if not existing_thread.get("active_pipeline_id"):
+                existing_thread["active_pipeline_id"] = existing_thread["pipeline_ids"][-1] if existing_thread["pipeline_ids"] else ""
+
+    if thread_to_pipelines:
+        store._save_persisted_data()
+
+    # 标记该用户已完成恢复，后续请求跳过
+    _recovered_user_ids.add(user_id)
+
+
 @router.get(
     "",
     response_model=list[ThreadResponse],
@@ -317,8 +441,9 @@ def list_threads(
     Returns:
         ThreadResponse 列表
     """
+    _recover_threads_from_pipelines(_user["sub"])
+
     threads = store.get_user_threads(_user["sub"])
-    # 按 session_type 过滤：只显示匹配的线程
     if session_type is not None:
         threads = [
             t for t in threads
@@ -357,6 +482,9 @@ def create_thread(
         metadata=merged_metadata,
         intent=body.intent,
     )
+
+    # 创建新线程后，清除该用户的恢复缓存，以便下次列表请求时重新检查
+    _recovered_user_ids.discard(_user["sub"])
 
     # 桥接基础设施层：以 thread_id 作为 session_id 创建 SessionModel
     session = _session_svc.create(
@@ -479,6 +607,9 @@ def delete_thread(
             error_code="API_NOTF_2004",
             message="线程不存在",
         )
+
+    # 删除线程后，清除该用户的恢复缓存，以便下次列表请求时重新检查
+    _recovered_user_ids.discard(_user["sub"])
 
     if pipeline_ids:
         exec_storage = _get_execution_record_storage()
@@ -667,15 +798,24 @@ def _try_recover_pipeline_ids(
             logger.warning("扫描管道 summary 关联 thread_id 失败: thread_id=%s", thread_id)
 
     # 4. 恢复成功时自动修复 session 并持久化
+    # BUG-FIX-fix_20260513_pipeline_overwrite: 合并而非覆盖 pipeline_ids
+    # 问题根因: session.pipeline_ids = recovered 会覆盖已有管道映射，导致旧管道丢失
+    # 修复方案: 将恢复的管道 ID 与已有列表合并去重
+    # 影响范围: 所有通过 _get_pipeline_ids_for_thread 恢复管道的场景
+    # 修复日期: 2026-05-13
     if recovered:
-        session.pipeline_ids = recovered
+        existing = set(session.pipeline_ids) if session.pipeline_ids else set()
+        merged = existing | set(recovered)
+        session.pipeline_ids = list(merged)
         if not session.active_pipeline_id:
             session.active_pipeline_id = recovered[-1]
         store.set_session(thread_id, session)
         logger.info(
-            "自动恢复旧会话 pipeline_ids: thread=%s, pipelines=%s",
+            "自动恢复旧会话 pipeline_ids (merged): thread=%s, existing=%s, recovered=%s, merged=%s",
             thread_id,
+            list(existing),
             recovered,
+            session.pipeline_ids,
         )
 
     return recovered
@@ -846,35 +986,27 @@ def list_messages(
         pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
 
     if exec_storage and pipeline_ids:
-        all_records: list[Any] = []
-        pipeline_order = {pid: idx for idx, pid in enumerate(pipeline_ids)}
-        for pipeline_id in pipeline_ids:
-            try:
-                records = exec_storage.list_by_pipeline(pipeline_id)
-                all_records.extend(records)
-            except Exception:
-                logger.warning("查询管道执行记录失败: %s", pipeline_id)
+        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
+        try:
+            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+        except Exception:
+            logger.warning("批量查询管道执行记录失败")
+            all_records = []
 
         if all_records:
-            all_records.sort(key=lambda r: (
-                pipeline_order.get(r.pipeline_run_id, 999),
-                r.sequence,
-                r.created_at or "",
-            ))
             all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
             return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
 
+    # BUG-FIX-fix_20260513_fallback_no_mutation:
     # Fallback: pipeline_ids 为空时，直接用 thread_id 作为 pipeline_run_id 尝试加载
-    # 解决重启后 session.pipeline_ids 未持久化或恢复失败的场景
+    # 只做只读查询返回消息，不修改 session 状态，不污染 pipeline_ids。
+    # 管道映射的恢复由 _get_pipeline_ids_for_thread 负责，不应由 fallback 代劳。
     if exec_storage and not pipeline_ids:
         try:
             records = exec_storage.list_by_pipeline(thread_id)
             if records:
                 records.sort(key=lambda r: (r.sequence, r.created_at or ""))
                 all_msgs = [_record_to_message_response(r, thread_id) for r in records]
-                if session:
-                    session.pipeline_ids = [thread_id]
-                    store.set_session(thread_id, session)
                 return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
         except Exception:
             logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
@@ -930,20 +1062,12 @@ async def get_thread_detail(
     exec_storage = _get_execution_record_storage()
     rich_messages: list[dict[str, Any]] = []
     if exec_storage and session and pipeline_ids:
-        pipeline_order = {pid: idx for idx, pid in enumerate(pipeline_ids)}
-        all_records: list[Any] = []
-        for pid in pipeline_ids:
-            try:
-                records = exec_storage.list_by_pipeline(pid)
-                all_records.extend(records)
-            except Exception:
-                pass
+        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
+        try:
+            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+        except Exception:
+            all_records = []
         if all_records:
-            all_records.sort(key=lambda r: (
-                pipeline_order.get(r.pipeline_run_id, 999),
-                r.sequence,
-                r.created_at or "",
-            ))
             rich_messages = [_record_to_message_response(r, thread_id).model_dump() for r in all_records]
 
     return {
@@ -1010,20 +1134,12 @@ def get_thread_history(
             pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
 
     if exec_storage and pipeline_ids:
-        pipeline_order = {pid: idx for idx, pid in enumerate(pipeline_ids)}
-        all_records: list[Any] = []
-        for pid in pipeline_ids:
-            try:
-                records = exec_storage.list_by_pipeline(pid)
-                all_records.extend(records)
-            except Exception:
-                pass
+        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
+        try:
+            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+        except Exception:
+            all_records = []
         if all_records:
-            all_records.sort(key=lambda r: (
-                pipeline_order.get(r.pipeline_run_id, 999),
-                r.sequence,
-                r.created_at or "",
-            ))
             rich_messages = [_record_to_message_response(r, thread_id).model_dump() for r in all_records]
 
     return {

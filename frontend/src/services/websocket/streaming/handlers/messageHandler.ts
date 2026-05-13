@@ -31,10 +31,10 @@ export function handleNewMessage(eventData: any) {
 
   if (!pipelineId) return
 
-  const messageId = eventData?.message_id || eventData?.message?.id || eventData?.data?.message_id || eventData?.data?.id
+  const messageId = eventData?.message_id || eventData?.message?.id || eventData?.data?.message_id || eventData?.data?.id || eventData?.data?.ai_message_id
   if (!messageId) return
 
-  const finalContent = eventData?.content || eventData?.data?.content
+  const finalContent = eventData?.content || eventData?.data?.content || eventData?.data?.final_content
   const data = eventData?.data || eventData
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)

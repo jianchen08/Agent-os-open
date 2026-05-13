@@ -519,11 +519,44 @@ class TaskService:
         """
         all_tasks = list(self._storage._tasks.values())
 
+        # BUG-FIX-fix_20260513_task_pipeline_filter: 通过 pipeline_ids 关联任务
+        # 问题根因: 任务 metadata 中没有 session_id，原过滤逻辑永远为空
+        # 修复方案: 从 api_store 获取 session 关联的 pipeline_ids，匹配任务的管道字段
+        # 影响范围: 任务列表按会话过滤
+        # 修复日期: 2026-05-13
         if session_id:
-            all_tasks = [
-                t for t in all_tasks
-                if getattr(t, 'metadata', None) and t.metadata.get("session_id") == session_id
-            ]
+            from channels.api.models import store as api_store
+            pipeline_ids = set()
+            thread_data = api_store.threads.get(session_id)
+            if thread_data:
+                pipeline_ids.update(thread_data.get("pipeline_ids", []))
+            try:
+                from infrastructure.execution_record_storage import ExecutionRecordStorage
+                exec_storage = ExecutionRecordStorage()
+                root_map = getattr(exec_storage, "_pipeline_root_map", {})
+                child_ids = {c for c, r in root_map.items() if r in pipeline_ids}
+                pipeline_ids.update(child_ids)
+            except Exception:
+                pass
+
+            filtered = []
+            for t in all_tasks:
+                meta = getattr(t, 'metadata', None)
+                if meta and meta.get("session_id") == session_id:
+                    filtered.append(t)
+                    continue
+                if pipeline_ids:
+                    ppid = getattr(t, 'parent_pipeline_id', '') or ''
+                    prid = getattr(t, 'pipeline_run_id', '') or ''
+                    if ppid in pipeline_ids or prid in pipeline_ids:
+                        filtered.append(t)
+                        continue
+                    if meta:
+                        for pid in pipeline_ids:
+                            if meta.get("parent_pipeline_id") == pid or meta.get("pipeline_run_id") == pid:
+                                filtered.append(t)
+                                break
+            all_tasks = filtered
 
         all_tasks.sort(key=lambda t: t.created_at, reverse=reverse)
         return all_tasks[:limit]

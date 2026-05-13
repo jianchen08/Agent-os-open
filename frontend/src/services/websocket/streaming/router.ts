@@ -7,6 +7,11 @@
  *
  * 优先级：data.pipeline_id（非空字符串）> null
  *
+ * ⚠️ 重要：pipeline_id 和 thread_id 是不同维度的字段，严禁混用：
+ *   - pipeline_id: 管道标识，用于前端消息路由到正确的 pipeline tab
+ *   - thread_id: 会话标识，用于后端连接管理
+ *   混用会导致子管道消息路由到主管道，造成消息串扰。
+ *
  * BUG-FIX-fix_20260511_message_cross_talk:
  * 问题根因: 后端 TargetedSink 定向路由失败时回退到 broadcast_event()，
  *          事件被发送到所有 WebSocket 连接。每个连接池连接会为事件打上自己的 _threadId。

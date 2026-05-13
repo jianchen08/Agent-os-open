@@ -321,7 +321,9 @@ export function FiveSpaceLayout({
         }
         const handleSendMessage = (message: string, quotedText?: string, quotedFile?: string) => {
           if (quotedText) {
-            const insertText = `「${quotedFile ? `${quotedFile}: ` : ''}${quotedText}」`
+            const insertText = quotedFile
+              ? `「${quotedFile}:\n${quotedText}」`
+              : `「${quotedText}」`
             useChatInputStore.getState().requestInsert(insertText)
             return
           }

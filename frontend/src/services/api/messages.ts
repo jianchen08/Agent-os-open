@@ -4,18 +4,10 @@
  * 暴露接口：
  * - toMessage(raw, defaults): Message - 统一消息转换函数
  * - toMessageFromApi(apiResponse): Message - 将 API 响应转换为前端 Message 类型
- * - MessageApiService - 消息 API 服务类
- * - messageApi - 消息 API 单例实例
  * - MessageResponse - 消息响应类型
- * - MessageVersion - 消息版本信息
  * - MessageListResponse - 消息列表响应
- * - MessageEditRequest - 消息编辑请求
- * - MessageRetryRequest - 消息重试请求
- * - DeleteMessageResult - 删除消息结果
- * - RetryMessageResult - 重试消息结果
  */
 
-import apiClient from '@/services/api/client'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
@@ -200,17 +192,6 @@ export function toMessageFromApi(apiResponse: MessageResponse): Message {
 }
 
 /**
- * 消息版本信息
- */
-export interface MessageVersion {
-  id: string
-  version: number
-  content: string
-  created_at: string
-  is_current: boolean
-}
-
-/**
  * 消息列表响应
  */
 export interface MessageListResponse {
@@ -218,102 +199,3 @@ export interface MessageListResponse {
   total: number
   session_id: string
 }
-
-/**
- * 消息编辑请求
- */
-export interface MessageEditRequest {
-  content: string
-}
-
-/**
- * 消息重试请求
- */
-export interface MessageRetryRequest {
-  new_content?: string
-  regenerate_all?: boolean
-}
-
-/**
- * 删除消息结果
- */
-export interface DeleteMessageResult {
-  success: boolean
-  message: string
-  message_id: string
-}
-
-/**
- * 重试消息结果
- */
-export interface RetryMessageResult {
-  success: boolean
-  message: string
-  message_id: string
-  session_id: string
-  version?: number // 版本号
-  is_new_branch: boolean
-}
-
-/**
- * 消息 API 服务类
- */
-export class MessageApiService {
-  async deleteMessage(
-    sessionId: string,
-    messageId: string,
-    includeTarget: boolean = true,
-  ): Promise<DeleteMessageResult> {
-    const response = await apiClient.delete<DeleteMessageResult>(
-      `/api/v1/threads/${sessionId}/messages/${messageId}`,
-      { params: { include_target: includeTarget } },
-    )
-    return response.data
-  }
-
-  async editMessage(
-    sessionId: string,
-    messageId: string,
-    content: string,
-  ): Promise<MessageResponse> {
-    const response = await apiClient.put<MessageResponse>(
-      `/api/v1/threads/${sessionId}/messages/${messageId}`,
-      { content },
-    )
-    return response.data
-  }
-
-  async retryMessage(
-    sessionId: string,
-    messageId: string,
-    request?: MessageRetryRequest,
-    _createBranch: boolean = true,
-  ): Promise<RetryMessageResult> {
-    // 重试操作需要等待 AI 完整生成，使用更长的超时时间（2分钟）
-    const response = await apiClient.post<RetryMessageResult>(
-      `/api/v1/threads/${sessionId}/messages/${messageId}/retry`,
-      request,
-      { timeout: 120000 },
-    )
-    return response.data
-  }
-
-  async getMessageVersions(
-    sessionId: string,
-    messageId: string,
-  ): Promise<{
-    versions: MessageVersion[]
-    total: number
-    message_id: string
-  }> {
-    const response = await apiClient.get<{
-      versions: MessageVersion[]
-      total: number
-      message_id: string
-    }>(`/api/v1/threads/${sessionId}/messages/${messageId}/versions`)
-    return response.data
-  }
-}
-
-// 导出单例实例
-export const messageApi = new MessageApiService()

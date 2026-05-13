@@ -114,15 +114,12 @@ export const MessageItem = ({
   message,
   isLast = false,
   isGenerating = false,
-  onRegenerate: _onRegenerate,
   onEdit,
-  onDelete: _onDelete,
   modelName,
   className = '',
   searchQuery,
 }: MessageItemProps) => {
   const [isEditing, setIsEditing] = useState(false)
-  const [_isRetrying, _setIsRetrying] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
 
   const isUser = message.role === 'user'

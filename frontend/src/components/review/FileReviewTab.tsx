@@ -297,6 +297,17 @@ export function FileReviewTab({
       lineRange = { start: startLine, end: endLine }
     } catch { /* ignore */ }
 
+    if (!lineRange) {
+      const sourceIndex = displayContent.indexOf(selectedText)
+      if (sourceIndex >= 0) {
+        const before = displayContent.substring(0, sourceIndex)
+        const startLine = (before.match(/\n/g) || []).length + 1
+        const including = displayContent.substring(0, sourceIndex + selectedText.length)
+        const endLine = (including.match(/\n/g) || []).length + 1
+        lineRange = { start: startLine, end: endLine }
+      }
+    }
+
     justSelectedRef.current = true
     setFloatingButton({
       visible: true,
@@ -324,8 +335,8 @@ export function FileReviewTab({
 
   /**
    * 引用选中文字到 Chat 输入框
-   * 增强版：自动检测选中文字所在的函数名，附带上下文信息
-   * 格式：文件路径:函数名(行号范围) 或 文件路径:行号范围
+   * 增强版：自动检测选中文字所在的函数名，附带上下文信息和行号
+   * 格式：文件路径:函数名(L行号范围)，引用文本每行前附带行号
    */
   const handleQuote = useCallback(() => {
     if (!floatingButton.selectedText) return
@@ -335,19 +346,16 @@ export function FileReviewTab({
     setFloatingButton((prev) => ({ ...prev, visible: false }))
     window.getSelection()?.removeAllRanges()
 
-    // 尝试检测选中文字所在的函数名
     const funcName = lineRange
       ? detectFunctionName(displayContent, lineRange.start)
       : null
 
-    // 格式化行号信息
     const lineInfo = lineRange
       ? (lineRange.start === lineRange.end
-          ? `${lineRange.start}`
-          : `${lineRange.start}-${lineRange.end}`)
+          ? `L${lineRange.start}`
+          : `L${lineRange.start}-${lineRange.end}`)
       : ''
 
-    // 组装引用路径：有函数名时附带函数名(行号)，否则只附行号
     let quotedFileInfo: string
     if (funcName && lineInfo) {
       quotedFileInfo = `${quotedFile}:${funcName}(${lineInfo})`
@@ -359,7 +367,15 @@ export function FileReviewTab({
       quotedFileInfo = quotedFile
     }
 
-    onSendMessage('', quotedText, quotedFileInfo)
+    let formattedQuotedText = quotedText
+    if (lineRange) {
+      const lines = quotedText.split('\n')
+      formattedQuotedText = lines
+        .map((line, i) => `L${lineRange.start + i}: ${line}`)
+        .join('\n')
+    }
+
+    onSendMessage('', formattedQuotedText, quotedFileInfo)
   }, [floatingButton.selectedText, floatingButton.selectedLineRange, activeFilePath, displayContent, onSendMessage])
 
   /**

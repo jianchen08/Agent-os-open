@@ -186,26 +186,37 @@ class MessageView:
                         formatted_seg["toolName"] = seg.get("tool_name") or seg.get("toolName", "")
                     formatted_segments.append(formatted_seg)
 
+        # BUG-FIX-fix_20260513_field_mismatch: 添加前端期望的 camelCase 字段和顶层 sequence
+        # 问题根因: 后端返回 agent_id/agent_name (snake_case)，前端期望 agentId/agentName (camelCase)；
+        #           sequence 只在 metadata 中，前端期望在顶层
+        # 修复方案: 同时返回两种命名格式，并在顶层添加 sequence 字段
+        # 影响范围: 所有通过数据库版 API 加载的消息
+        # 修复日期: 2026-05-13
+        sequence = message.metadata.get("sequence", 0) if message.metadata else 0
+
         return {
             "id": message.id,
             "sessionId": message.session_id,
-            "session_id": message.session_id,  # 兼容旧格式
-            "parentId": message.parent_id,  # 驼峰命名（前端期望）
-            "parent_id": message.parent_id,  # 下划线命名（兼容）
+            "session_id": message.session_id,
+            "parentId": message.parent_id,
+            "parent_id": message.parent_id,
+            "sequence": sequence,
             "role": message.role,
             "content": message.content,
             "timestamp": message.timestamp,
-            "created_at": message.timestamp,  # 兼容旧格式
+            "created_at": message.timestamp,
             "status": message.status,
             "sender_type": message.sender_type,
             "sender_id": message.sender_id,
             "sender_name": message.sender_name,
             "agent_id": message.agent_id,
             "agent_name": message.agent_name,
+            "agentId": message.agent_id,
+            "agentName": message.agent_name,
             "metadata": message.metadata,
-            "toolCalls": formatted_tool_calls,  # 驼峰命名（前端期望）
-            "tool_calls": formatted_tool_calls,  # 下划线命名（兼容）
-            "segments": formatted_segments,  # 添加消息分段字段
+            "toolCalls": formatted_tool_calls,
+            "tool_calls": formatted_tool_calls,
+            "segments": formatted_segments,
         }
 
     @classmethod

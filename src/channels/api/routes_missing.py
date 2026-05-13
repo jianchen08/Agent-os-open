@@ -67,10 +67,23 @@ async def get_task_tree(
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
-            from channels.api.routes_threads import store as api_store
+            from channels.api.routes_threads import (
+                store as api_store,
+                _recover_threads_from_pipelines,
+            )
+            _recover_threads_from_pipelines(_user.get("sub", ""))
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
+            # BUG-FIX-fix_20260513_child_pipeline: 加入子管道 ID
+            from infrastructure.execution_record_storage import ExecutionRecordStorage
+            try:
+                exec_storage = ExecutionRecordStorage()
+                root_map = getattr(exec_storage, "_pipeline_root_map", {})
+                child_ids = {c for c, r in root_map.items() if r in related_pipeline_ids}
+                related_pipeline_ids.update(child_ids)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -120,12 +133,14 @@ async def get_task_tree(
     flat_items = [_task_to_tree_item(t, session_id) for t in all_tasks]
 
     # 构建树形结构：根任务 → 子任务
+    # BUG-FIX-fix_20260513_orphan_tasks: parent_task_id 指向不存在的任务时视为根任务
+    task_id_set = {t.id for t in all_tasks}
     children_map: dict[str, list[dict[str, Any]]] = {}
     root_items: list[dict[str, Any]] = []
 
     for item in flat_items:
         parent_id = item.get("parent_task_id")
-        if parent_id:
+        if parent_id and parent_id in task_id_set:
             children_map.setdefault(parent_id, []).append(item)
         else:
             root_items.append(item)

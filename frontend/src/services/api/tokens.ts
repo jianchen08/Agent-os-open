@@ -83,39 +83,7 @@ export interface MessagesTokenCountResponse {
   model: string
 }
 
-/**
- * 上下文Token统计明细
- */
-export interface ContextTokensBreakdown {
-  /** 用户意图Token数 */
-  user_intent: number
-  /** Agent定义Token数 */
-  agent_definition: number
-  /** 领域知识Token数 */
-  domain_knowledge: number
-  /** 工具描述Token数（包括工具描述本身） */
-  tool_descriptions: number
-  /** 执行历史Token数 */
-  execution_history: number
-  /** 用户偏好Token数 */
-  user_preferences: number
-  /** 错误上下文Token数 */
-  error_context: number
-}
 
-/**
- * 上下文Token统计响应类型
- */
-export interface ContextTokensResponse {
-  /** 总Token数 */
-  total_tokens: number
-  /** 明细 */
-  breakdown: ContextTokensBreakdown
-  /** 使用的模型名称 */
-  model_name: string
-  /** 模型上下文窗口大小 */
-  context_window: number
-}
 
 /**
  * 计算文本的 Token 数量
@@ -160,24 +128,4 @@ export async function countMessagesTokens(
   return response.data
 }
 
-/**
- * 获取线程的上下文Token统计
- *
- * 根据上下文引擎构建的上下文进行Token统计，包括：
- * - 用户意图
- * - Agent定义
- * - 领域知识
- * - 工具描述（包括工具描述本身）
- * - 执行历史
- * - 用户偏好
- * - 错误上下文
- *
- * @param threadId - 线程ID
- * @returns 上下文Token统计响应
- */
-export async function getContextTokens(threadId: string): Promise<ContextTokensResponse> {
-  const response = await apiClient.get<ContextTokensResponse>(
-    `/api/v1/threads/${threadId}/context-tokens`,
-  )
-  return response.data
-}
+

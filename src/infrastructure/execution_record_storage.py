@@ -127,6 +127,8 @@ class ExecutionRecordStorage:
             self._load_root_map()
         # pipeline_run_id -> current part number
         self._active_part: dict[str, int] = {}
+        # 标记是否已通过 _load_all_summaries_only 加载过全部 summary（避免重复解析）
+        self._all_summaries_loaded: bool = False
 
     def _load_all(self) -> None:
         if not self._data_dir:
@@ -196,6 +198,42 @@ class ExecutionRecordStorage:
                         self._records[record.record_id] = record
         except Exception:
             logger.warning("管道文件损坏，跳过: %s", yaml_file.name)
+
+    def _load_all_summaries_only(self) -> None:
+        """仅加载所有 YAML 文件的 summary 部分，跳过 records 解析。
+
+        用于 list_all_summaries() 场景，只需要 summary 信息（如 thread_id），
+        无需解析可能很大的 records 列表，显著减少内存和 CPU 开销。
+        """
+        if not self._data_dir:
+            return
+        # 扁平文件（向后兼容）
+        for yaml_file in sorted(self._data_dir.glob("*.yaml")):
+            self._load_summary_only(yaml_file)
+        # 子目录中的分组文件
+        for subdir in sorted(self._data_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            for yaml_file in sorted(subdir.glob("*.yaml")):
+                self._load_summary_only(yaml_file)
+
+    def _load_summary_only(self, yaml_file: Path) -> None:
+        """从单个 YAML 文件中仅解析 summary 部分，跳过 records。
+
+        Args:
+            yaml_file: YAML 文件路径
+        """
+        try:
+            text = yaml_file.read_text(encoding="utf-8")
+            data = yaml.safe_load(text)
+            if not isinstance(data, dict):
+                return
+            summary_dict = data.get("summary")
+            if summary_dict and isinstance(summary_dict, dict):
+                summary = self._dict_to_summary(summary_dict)
+                self._summaries[summary.run_id] = summary
+        except Exception:
+            logger.warning("管道文件损坏，跳过 summary 加载: %s", yaml_file.name)
 
     def _get_pipeline_file(
         self, pipeline_run_id: str, part: int | None = None
@@ -367,6 +405,8 @@ class ExecutionRecordStorage:
         if record.pipeline_run_id:
             self._loaded_pipelines.add(record.pipeline_run_id)
             self._persist_pipeline(record.pipeline_run_id)
+        # 写入新记录后，summary 缓存可能需要更新
+        self._all_summaries_loaded = False
         logger.debug("保存执行记录: %s (pipeline=%s, iteration=%d)",
                       record.record_id, record.pipeline_run_id, record.iteration)
         return record.record_id
@@ -415,6 +455,8 @@ class ExecutionRecordStorage:
             # 清理映射
             self._pipeline_root_map.pop(session_id, None)
             self._persist_root_map()
+        # 删除会话记录后重置 summary 缓存标记
+        self._all_summaries_loaded = False
         logger.debug("删除会话 %s 的执行记录: %d 条", session_id, len(to_delete))
         return len(to_delete)
 
@@ -427,6 +469,39 @@ class ExecutionRecordStorage:
             if r.pipeline_run_id == pipeline_run_id
         ]
         records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+        return records
+
+    def list_by_pipelines_batch(
+        self, pipeline_ids: list[str],
+    ) -> list[ExecutionRecordData]:
+        """批量加载多个管道的执行记录，避免 N+1 查询问题。
+
+        一次性确保所有指定管道的数据已加载到内存，
+        然后从 self._records 中过滤并排序返回。
+
+        Args:
+            pipeline_ids: 管道运行 ID 列表
+
+        Returns:
+            所有管道的执行记录列表，按 pipeline_order + sequence 排序
+        """
+        if not pipeline_ids:
+            return []
+        # 确保所有指定管道的数据已加载
+        pid_set = set(pipeline_ids)
+        for pid in pipeline_ids:
+            self._ensure_loaded(pid)
+        # 从内存缓存中过滤
+        pipeline_order = {pid: idx for idx, pid in enumerate(pipeline_ids)}
+        records = [
+            r for r in self._records.values()
+            if r.pipeline_run_id in pid_set
+        ]
+        records.sort(key=lambda r: (
+            pipeline_order.get(r.pipeline_run_id, 999),
+            r.sequence,
+            r.created_at or "",
+        ))
         return records
 
     def reconstruct_messages(
@@ -570,6 +645,8 @@ class ExecutionRecordStorage:
         self._summaries[summary.run_id] = summary
         self._loaded_pipelines.add(summary.run_id)
         self._persist_pipeline(summary.run_id)
+        # 写入 summary 后重置缓存标记
+        self._all_summaries_loaded = False
         logger.debug("保存管道摘要: %s (iterations=%d, status=%s)",
                       summary.run_id, summary.total_iterations, summary.status)
         return summary.run_id
@@ -633,6 +710,8 @@ class ExecutionRecordStorage:
             if hasattr(summary, key):
                 setattr(summary, key, value)
         self._persist_pipeline(pipeline_run_id)
+        # 更新 summary 字段后重置缓存标记
+        self._all_summaries_loaded = False
         logger.debug(
             "更新管道摘要字段: %s (updates=%s)",
             pipeline_run_id,
@@ -646,11 +725,15 @@ class ExecutionRecordStorage:
         用于扫描所有管道文件，根据 summary.thread_id 反查
         属于某个 thread 的所有 pipeline_run_id。
 
+        性能优化: 使用 _load_all_summaries_only 仅加载 summary 部分，
+        并通过 _all_summaries_loaded 标记避免重复解析。
+
         Returns:
             全部 PipelineRunSummary 列表
         """
-        if self._data_dir:
-            self._load_all()
+        if self._data_dir and not self._all_summaries_loaded:
+            self._load_all_summaries_only()
+            self._all_summaries_loaded = True
         return list(self._summaries.values())
 
     def list_summaries(

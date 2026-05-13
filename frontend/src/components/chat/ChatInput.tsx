@@ -544,6 +544,15 @@ export const ChatInput = ({
    *          同时将 saveDraft 从 setText updater 中移出，消除 state updater 中的副作用。
    * 影响范围: ChatInput 的外部文本插入功能（如引用注入）
    * 修复日期: 2026-05-13
+   *
+   * BUG-FIX-fix_20260513_duplicate_quote_insert:
+   * 问题根因: processInsert 中先调用 saveDraft() 再调用 consumeInsert()，
+   *          saveDraft() 改变 store state → 同步触发 subscribe 回调 →
+   *          此时 pendingInsert 仍为非 null → 再次调用 processInsert() → 无限递归，
+   *          导致引用文本被重复追加上百次直到栈溢出。
+   * 修复方案: 将 consumeInsert() 移至 saveDraft() 之前，确保 subscribe 回调触发时
+   *          pendingInsert 已被清空，回调直接 return 不再递归。
+   * 修复日期: 2026-05-13
    */
   useEffect(() => {
     const processInsert = (insertText: string) => {
@@ -551,10 +560,10 @@ export const ChatInput = ({
       const newText = currentText ? `${currentText}\n${insertText}` : insertText
       setText(newText)
       textRef.current = newText
+      useChatInputStore.getState().consumeInsert()
       if (draftKey) {
         useChatInputStore.getState().saveDraft(draftKey, newText)
       }
-      useChatInputStore.getState().consumeInsert()
       setTimeout(() => {
         const textarea = textareaRef.current
         if (textarea) {

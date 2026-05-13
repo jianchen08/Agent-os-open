@@ -360,6 +360,8 @@ class MemoryStore:
         self.memories: dict[str, dict[str, Any]] = {}
         self.refresh_tokens: set[str] = set()
         self.sessions: dict[str, SessionModel] = {}
+        # 用户线程索引：user_id -> thread_id 列表，加速 get_user_threads 查询
+        self._user_thread_index: dict[str, list[str]] = {}
         self._persist_dir = persist_dir
         self._persist_lock = threading.Lock()
 
@@ -417,6 +419,9 @@ class MemoryStore:
                 )
         except Exception:
             pass
+        else:
+            # 从已加载的 threads 中构建用户线程索引
+            self._rebuild_user_thread_index()
 
     def _save_persisted_data(self) -> None:
         """将线程数据持久化到 JSON 文件。
@@ -444,6 +449,43 @@ class MemoryStore:
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         """根据用户名查找用户。"""
         return self.users.get(username)
+
+    def _rebuild_user_thread_index(self) -> None:
+        """从 threads 字典重建用户线程索引。
+
+        在数据加载完成后调用，确保索引与实际数据一致。
+        """
+        self._user_thread_index.clear()
+        for tid, thread in self.threads.items():
+            user_id = thread.get("user_id")
+            if user_id:
+                self._user_thread_index.setdefault(user_id, []).append(tid)
+
+    def _add_thread_to_index(self, user_id: str, thread_id: str) -> None:
+        """将线程添加到用户线程索引中。
+
+        Args:
+            user_id: 用户 ID
+            thread_id: 线程 ID
+        """
+        idx_list = self._user_thread_index.get(user_id)
+        if idx_list is None:
+            self._user_thread_index[user_id] = [thread_id]
+        elif thread_id not in idx_list:
+            idx_list.append(thread_id)
+
+    def _remove_thread_from_index(self, user_id: str, thread_id: str) -> None:
+        """从用户线程索引中移除线程。
+
+        Args:
+            user_id: 用户 ID
+            thread_id: 线程 ID
+        """
+        idx_list = self._user_thread_index.get(user_id)
+        if idx_list and thread_id in idx_list:
+            idx_list.remove(thread_id)
+            if not idx_list:
+                del self._user_thread_index[user_id]
 
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         """根据用户 ID 查找用户。"""
@@ -518,6 +560,7 @@ class MemoryStore:
             "updated_at": now,
         }
         self.threads[thread_id] = thread
+        self._add_thread_to_index(user_id, thread_id)
         self._save_persisted_data()
         return thread
 
@@ -541,11 +584,15 @@ class MemoryStore:
         return thread
 
     def get_user_threads(self, user_id: str) -> list[dict[str, Any]]:
-        """获取指定用户的所有线程。"""
+        """获取指定用户的所有线程。
+
+        使用 _user_thread_index 索引加速查找，避免遍历全量 threads 字典。
+        """
+        thread_ids = self._user_thread_index.get(user_id, [])
         return [
-            {**t}
-            for t in self.threads.values()
-            if t["user_id"] == user_id
+            {**self.threads[tid]}
+            for tid in thread_ids
+            if tid in self.threads
         ]
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
@@ -560,8 +607,11 @@ class MemoryStore:
         """
         if thread_id not in self.threads:
             return False
+        user_id = self.threads[thread_id].get("user_id")
         del self.threads[thread_id]
         self.sessions.pop(thread_id, None)
+        if user_id:
+            self._remove_thread_from_index(user_id, thread_id)
         self._save_persisted_data()
         return True
 

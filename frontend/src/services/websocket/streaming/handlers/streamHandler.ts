@@ -18,54 +18,17 @@ const _debugLogger = loggers.websocket
  * 处理流式开始事件
  */
 export function handleStreamStart(eventData: any) {
-  console.log(
-    '%c[STREAM_START_RAW] type=%s dataKeys=%s pipelineId=%s messageId=%s',
-    'color:lime;font-weight:bold',
-    eventData.type,
-    eventData.data ? Object.keys(eventData.data).join(',') : '(no data)',
-    eventData.data?.pipeline_id?.slice(0, 12) || 'null',
-    eventData.data?.message_id?.slice(0, 12) || eventData.message_id?.slice(0, 12) || 'null',
-  )
   const pipelineId = resolvePipelineId(eventData)
-  const messageId = eventData.message_id || eventData.data?.message_id
-  _debugLogger.info(
-    `[STREAM_START] pipelineId=%s messageId=%s _threadId=%s dataKeys=%s`,
-    pipelineId, messageId, eventData._threadId,
-    eventData.data ? Object.keys(eventData.data).join(',') : '(no data)',
-  )
-  // BUG-FIX-fix_20260513_msg_not_realtime: pipelineId 为 null 时添加警告帮助定位问题
-  if (!pipelineId) {
-    console.warn('[STREAM_START] resolvePipelineId returned null, eventData:', eventData)
-    return
-  }
-  if (!messageId) return
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
+  if (!pipelineId || !messageId) return
 
   pipelineStore.getState().startStreaming(pipelineId, messageId)
-
-  // BUG-FIX-fix_20260509_tab_streaming:
-  // 问题根因: handleStreamStart 未调用 setStreamingForTab，导致 streamingTabs 始终为空，
-  //          ChatContainer 的 effectiveIsGenerating 始终为 false，子 Tab 无法显示流式状态。
-  // 修复方案: 在流式开始时通过 pipelineId 设置 streaming 状态。
-  // 影响范围: 所有标签页的流式指示器和停止按钮。
   useStreamingStore.getState().setStreamingForTab(pipelineId, true)
 
-  // BUG-FIX-fix_20260511_streaming_key_mismatch:
-  // 问题根因: router.tsx 和 ChatContainer 使用 sessionId (thread_id) 查找 streamingTabs，
-  //          但 setStreamingForTab 只用 pipelineId 作为 key。主管道场景下 pipelineId ≠ thread_id，
-  //          导致 effectiveIsGenerating 始终为 true（stream_end 未清除 thread_id 对应的 key），
-  //          前端输入框被禁用，用户无法发送第二条消息。
-  // 修复方案: 同时用 _threadId 设置 streaming 状态，确保两套 key 都能命中。
-  // 影响范围: 主管道多轮对话的输入框可用性。
-  // 双 key 设置：主管道场景下 pipelineId（事件携带）可能与 threadId（WS连接标识）不同。
-  // ChatContainer 使用 activePipelineId 查找 streaming 状态，
-  // 但 activePipelineId 在主管道场景下等于 sessionId/threadId，
-  // 所以需要同时设置两个 key 确保 ChatContainer 能正确命中。
   const threadId = eventData._threadId
   if (threadId && threadId !== pipelineId) {
     useStreamingStore.getState().setStreamingForTab(threadId, true)
   }
-
-  resetChunkTimeout(pipelineId, messageId)
 
   clearPendingStreamTimeout(pipelineId)
   if (threadId && threadId !== pipelineId) {
@@ -86,95 +49,27 @@ export function handleStreamStart(eventData: any) {
     status: 'streaming',
     contentBlocks: [],
   } as any)
-
-  console.log(
-    '%c[STREAM_START_ADD] pipelineId=%s msgId=%s storeKeys=%o',
-    'color:cyan;font-weight:bold',
-    pipelineId?.slice(0, 12), messageId?.slice(0, 12),
-    Object.keys(pipelineStore.getState().messagesByPipeline).map(k => k.slice(0, 12)),
-  )
 }
 
 /**
  * 处理流式块事件
  */
 export function handleStreamChunk(eventData: any) {
-  let pipelineId = resolvePipelineId(eventData)
-  // BUG-FIX-fix_20260513_msg_not_realtime: pipelineId 为 null 时添加警告帮助定位问题
-  if (!pipelineId) {
-    console.warn('[STREAM_CHUNK] resolvePipelineId returned null, eventData:', eventData)
-    return
-  }
-  const messageId = eventData.message_id || eventData.data?.message_id
-  const content = eventData.content || eventData.data?.content || ''
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) return
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
+  const content = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId) return
 
-  resetChunkTimeout(pipelineId, messageId)
-
-  let msgs = pipelineStore.getState().getMessages(pipelineId)
-  let msg = msgs.find((m: any) => m.id === messageId)
-  if (!msg) {
-    // BUG-FIX-fix_20260513_pipeline_id_mismatch:
-    // 问题根因: 后端可能存在多个 PipelineStreamBridge 实例（主管道 + 子任务管道），
-    //          stream_start 从桥接 A（pipeline_id=X）发出，但 stream_chunk 从桥接 B
-    //          （pipeline_id=Y）发出。前端在 pipeline Y 中找不到 stream_start 创建的消息，
-    //          导致 "msg not found"，内容被写入无人显示的 placeholder。
-    // 修复方案: 在当前 pipeline 找不到消息时，跨所有 pipeline 搜索该 messageId。
-    //          如果找到，将 chunk 路由到消息所在的 pipeline，而不是创建 placeholder。
-    const state = pipelineStore.getState()
-    const allPipelines = Object.keys(state.messagesByPipeline)
-    console.warn(
-      '%c[CHUNK_MISMATCH] chunk_pipeline=%s msgId=%s allPipelines=%o',
-      'color:red;font-weight:bold',
-      pipelineId?.slice(0, 12), messageId?.slice(0, 12),
-      allPipelines.map(p => p.slice(0, 12)),
-    )
-    for (const pid of allPipelines) {
-      if (pid === pipelineId) continue
-      const pMsgs = state.getMessages(pid)
-      const found = pMsgs.find((m: any) => m.id === messageId)
-      console.log(
-        '[CHUNK_MISMATCH] searching pipeline=%s msgs=%d found=%s',
-        pid.slice(0, 12), pMsgs.length, found ? 'YES' : 'no',
-      )
-      if (found) {
-        _debugLogger.info(
-          `[STREAM_CHUNK] pipeline mismatch resolved: chunk_pipeline=%s msg_pipeline=%s msgId=%s`,
-          pipelineId?.slice(0, 8), pid.slice(0, 8), messageId?.slice(0, 12),
-        )
-        pipelineId = pid
-        msgs = pMsgs
-        msg = found
-        break
-      }
-    }
-  }
+  const msgs = pipelineStore.getState().getMessages(pipelineId)
+  const msg = msgs.find((m: any) => m.id === messageId)
 
   if (!msg) {
     _debugLogger.warn(
-      `[STREAM_CHUNK] msg not found, auto-creating placeholder: pipeline=%s msgId=%s totalMsgs=%d _threadId=%s`,
-      pipelineId, messageId, msgs.length, eventData._threadId,
+      `[STREAM_CHUNK] msg not found: pipeline=%s msgId=%s totalMsgs=%d`,
+      pipelineId?.slice(0, 12), messageId?.slice(0, 12), msgs.length,
     )
-
-    const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
-    const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
-
-    pipelineStore.getState().addMessage(pipelineId, {
-      id: messageId,
-      sessionId: eventData._threadId || '',
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString(),
-      parentId: null,
-      sequence: nextSeq,
-      status: 'streaming',
-      contentBlocks: [],
-    } as any)
-
-    useStreamingStore.getState().setStreamingForTab(pipelineId, true)
-
-    msg = pipelineStore.getState().getMessages(pipelineId).find((m: any) => m.id === messageId)
-    if (!msg) return
+    return
   }
 
   if ((msg as any).thinking?.isThinking) {
@@ -189,20 +84,22 @@ export function handleStreamChunk(eventData: any) {
       contentBlocks: blocks,
       content: (msg.content || '') + content,
     } as any)
+    console.log(
+      '%c[CHUNK_OK] pipeline=%s msgId=%s contentLen=%d totalLen=%d',
+      'color:green',
+      pipelineId?.slice(0, 12), messageId?.slice(0, 12),
+      content.length, ((msg.content || '') + content).length,
+    )
   }
 }
 
 /**
  * 处理流式结束事件
- *
- * 关键修改：不再无条件调用 reconcileContentBlocks，
- * 而是先检查 hasTextBlocks 再决定是否需要对齐。
  */
 export function handleStreamEnd(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = eventData._threadId
 
-  // 清理 streaming 状态：优先用 pipelineId，fallback 到 threadId
   const cleanupId = pipelineId || threadId
   if (cleanupId) {
     clearChunkTimeout(cleanupId)
@@ -210,8 +107,6 @@ export function handleStreamEnd(eventData: any) {
     useStreamingStore.getState().setStreamingForTab(cleanupId, false)
   }
 
-  // BUG-FIX-fix_20260511_streaming_key_mismatch:
-  // 双 key 清理：如果 pipelineId 和 threadId 不同，也需要清理另一个，与 handleStreamStart 中的设置配对。
   if (pipelineId && threadId && pipelineId !== threadId) {
     clearChunkTimeout(threadId)
     useStreamingStore.getState().setStreamingForTab(threadId, false)
@@ -224,8 +119,8 @@ export function handleStreamEnd(eventData: any) {
     useContextUsageStore.getState().updateUsage(pipelineId, usage)
   }
 
-  const messageId = eventData?.message_id || eventData?.data?.message_id
-  const fullContent = eventData?.full_content || eventData?.data?.full_content
+  const messageId = eventData?.message_id || eventData?.data?.message_id || eventData?.data?.ai_message_id
+  const fullContent = eventData?.full_content || eventData?.data?.full_content || eventData?.data?.final_content
   if (!messageId) return
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)
@@ -267,21 +162,11 @@ export function handleStreamEnd(eventData: any) {
 
 /**
  * 处理流式错误事件
- *
- * BUG-FIX-fix_20260510_streaming_stuck:
- * 当 LLM 调用失败或流式传输异常时，后端发送 stream_error 事件。
- * 前端必须清理该管道的 streaming 状态，否则输入框会一直卡在执行中。
  */
 export function handleStreamError(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = eventData._threadId
 
-  _debugLogger.warn(
-    `[STREAM_ERROR] pipelineId=%s _threadId=%s`,
-    pipelineId, threadId,
-  )
-
-  // 清理 streaming 状态：优先用 pipelineId，fallback 到 threadId
   const cleanupId = pipelineId || threadId
   if (cleanupId) {
     clearChunkTimeout(cleanupId)
@@ -289,7 +174,6 @@ export function handleStreamError(eventData: any) {
     useStreamingStore.getState().stopStreamingForTab(cleanupId)
   }
 
-  // 双 key 清理：如果 pipelineId 和 threadId 不同，也需要清理另一个
   if (pipelineId && threadId && pipelineId !== threadId) {
     useStreamingStore.getState().stopStreamingForTab(threadId)
   }
@@ -314,7 +198,7 @@ export function handleStreamError(eventData: any) {
 }
 
 /**
- * 处理流式保活事件（压缩等长时间操作期间由后端发送）
+ * 处理流式保活事件
  */
 export function handleStreamKeepalive(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)

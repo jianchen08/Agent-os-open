@@ -11,9 +11,7 @@
  *          只要后端持续发送事件（chunk / keepalive 等），集中式 wrapper 就会重置计时器。
  *          如果真的 60 秒无任何事件，超时是合理的。
  */
-import { useNotificationStore } from '@/stores/notificationStore'
-import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
-import { useStreamingStore } from '@/stores/streamingStore'
+
 
 /** 超时间隔常量（60秒） */
 export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
@@ -52,14 +50,9 @@ function _onPendingStreamTimeout(pipelineId: string): void {
   const entry = _pendingStreamMap.get(pipelineId)
   if (!entry) return
   _pendingStreamMap.delete(pipelineId)
-
-  useNotificationStore.getState().addNotification({
-    title: '响应超时',
-    message: '后端处理超时，可能是 AI 模型服务暂时不可用，请稍后重试',
-    priority: 'high',
-    category: 'error',
-    isBlocking: false,
-  })
+  console.debug(
+    `[chunkTimeout] pending stream 超时: pipelineId=${pipelineId}, 后端 ${PENDING_STREAM_TIMEOUT_MS / 1000}s 未发送 stream_start`,
+  )
 }
 
 /**
@@ -96,19 +89,9 @@ function _onChunkTimeout(pipelineId: string): void {
   const entry = _chunkTimeoutMap.get(pipelineId)
   if (!entry) return
   _chunkTimeoutMap.delete(pipelineId)
-  useStreamingStore.getState().stopStreamingForTab(pipelineId)
-  pipelineStore.getState().updateMessage(pipelineId, entry.messageId, {
-    content: '\n\n⚠️ 流式响应中断，请重试。',
-    status: 'error',
-  } as any)
-
-  useNotificationStore.getState().addNotification({
-    title: '响应中断',
-    message: '流式响应超时中断，请重新发送消息',
-    priority: 'high',
-    category: 'error',
-    isBlocking: false,
-  })
+  console.debug(
+    `[chunkTimeout] chunk 间隔超时: pipelineId=${pipelineId}, messageId=${entry.messageId}, ${CHUNK_INTERVAL_TIMEOUT_MS / 1000}s 未收到任何流式事件`,
+  )
 }
 
 /**

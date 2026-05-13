@@ -31,9 +31,6 @@ export interface ExtendedMessageListProps extends MessageListProps {
 export const MessageList = ({
   messages,
   isGenerating = false,
-  onRegenerate,
-  onEdit,
-  onDelete,
   modelName,
   className = '',
   hasMore = false,
@@ -195,16 +192,13 @@ export const MessageList = ({
             message={message}
             isLast={isLast}
             isGenerating={isGenerating && isLast}
-            onRegenerate={onRegenerate}
-            onEdit={onEdit}
-            onDelete={onDelete}
             modelName={modelName}
             searchQuery={searchQuery}
           />
         </div>
       )
     },
-    [messages, isGenerating, onRegenerate, onEdit, onDelete, modelName, searchQuery],
+    [messages, isGenerating, modelName, searchQuery],
   )
 
   /**

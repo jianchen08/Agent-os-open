@@ -6,7 +6,6 @@
  */
 
 import { create } from 'zustand'
-import { messageApi } from '@/services/api/messages'
 import { getMessages as apiGetMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { retry, isRetryableError } from '@/utils/retry'
@@ -108,9 +107,6 @@ interface PipelineMessageState {
   isInitialized: (pipelineId: string) => boolean
   /** 判断指定管道是否还有更早的消息 */
   hasMoreOlder: (pipelineId: string) => boolean
-
-  /** 删除指定管道中的消息（乐观更新 + API 调用） */
-  deleteMessage: (pipelineId: string, messageId: string, includeTarget?: boolean) => void
 
   /** 直接从 API 加载指定管道的历史消息 */
   fetchMessages: (
@@ -375,7 +371,15 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         const apiIds = new Set(sorted.map((m) => m.id))
 
         const preserved = existing.filter((localMsg) => {
-          if (localMsg.status === 'streaming') return true
+          // BUG-FIX-fix_20260513_ai_msg_duplicate:
+          // 问题根因: streaming 消息被无条件保留，但 API 响应可能已包含同 ID 的消息，
+          //          导致 [...sorted, ...preserved] 中同一消息出现两次。
+          // 修复方案: streaming 消息仅在 API 未返回同 ID 消息时才保留。
+          // 影响范围: fetchMessages 调用期间的 AI 消息显示
+          // 修复日期: 2026-05-13
+          if (localMsg.status === 'streaming') {
+            return !apiIds.has(localMsg.id)
+          }
 
           if (!apiIds.has(localMsg.id)) {
             const hasApiMatch = sorted.some(
@@ -619,135 +623,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     _fetchingPipelines.set(pipelineId, fetchPromise)
 
     return fetchPromise
-  },
-
-  /**
-   * 删除指定管道中的消息（乐观更新 + API 调用）
-   *
-   * 从 sessionStore.deleteMessage 迁移而来，以 pipelineId 为索引。
-   * 逻辑：
-   * 1. 根据 messageId 定位目标消息
-   * 2. 根据 includeTarget 决定删除范围（目标及之后 / 仅之后）
-   * 3. 递归查找子消息一并删除
-   * 4. 乐观更新前端状态，异步调用后端 API
-   * 5. API 成功后重新加载消息确保一致性；失败则回滚
-   */
-  deleteMessage: (pipelineId: string, messageId: string, includeTarget: boolean = true) => {
-    logger.debug('[pipelineMessageStore.deleteMessage] 开始删除:', {
-      pipelineId,
-      messageId,
-      includeTarget,
-    })
-
-    // 保存回滚用快照
-    const previousMessages = get().messagesByPipeline[pipelineId] || []
-
-    set((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const targetMessage = pipelineMessages.find((m) => m.id === messageId)
-
-      if (!targetMessage) {
-        logger.warn('[pipelineMessageStore.deleteMessage] 未找到要删除的消息')
-        return state
-      }
-
-      const targetSequence = targetMessage.sequence || 0
-      const targetParentId = targetMessage.parentId || null
-
-      // 收集同 parentId 下满足条件的消息 ID
-      const mainRecordIds = new Set<string>()
-      pipelineMessages.forEach((m) => {
-        const mParentId = m.parentId || null
-        const mSequence = m.sequence || 0
-        if (mParentId === targetParentId) {
-          if (includeTarget) {
-            if (mSequence >= targetSequence) {
-              mainRecordIds.add(m.id)
-            }
-          } else {
-            if (mSequence > targetSequence) {
-              mainRecordIds.add(m.id)
-            }
-          }
-        }
-      })
-
-      const allIdsToDelete = new Set<string>(mainRecordIds)
-      if (includeTarget) {
-        allIdsToDelete.add(targetMessage.id)
-      }
-
-      // 递归查找子消息
-      let currentParentIds = Array.from(allIdsToDelete)
-      while (currentParentIds.length > 0) {
-        const childrenIds: string[] = []
-        pipelineMessages.forEach((m) => {
-          const mParentId = m.parentId || null
-          if (mParentId && currentParentIds.includes(mParentId)) {
-            if (!allIdsToDelete.has(m.id)) {
-              childrenIds.push(m.id)
-            }
-          }
-        })
-
-        if (childrenIds.length === 0) {
-          break
-        }
-
-        childrenIds.forEach((id) => allIdsToDelete.add(id))
-        currentParentIds = childrenIds
-      }
-
-      const updatedMessages = pipelineMessages.filter((m) => !allIdsToDelete.has(m.id))
-
-      logger.debug('[pipelineMessageStore.deleteMessage] 删除结果:', {
-        原始数量: pipelineMessages.length,
-        删除后数量: updatedMessages.length,
-        删除的消息数: pipelineMessages.length - updatedMessages.length,
-      })
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
-
-    // 异步调用后端 API
-    logger.debug('[pipelineMessageStore.deleteMessage] 调用后端 API 删除')
-    messageApi
-      .deleteMessage(pipelineId, messageId, includeTarget)
-      .then(async (result) => {
-        logger.debug('[pipelineMessageStore.deleteMessage] 后端删除成功:', result)
-        try {
-          // 重新加载消息以确保一致性
-          await get().fetchMessages(pipelineId)
-        } catch (reloadError) {
-          logger.warn('[pipelineMessageStore.deleteMessage] 重新加载消息失败，保持乐观更新状态:', reloadError)
-        }
-      })
-      .catch((error: unknown) => {
-        const errorAny = error as Record<string, any>
-        const errorCode = errorAny?.code
-        const errorStatus = errorAny?.response?.status ?? errorAny?.status
-        if (errorCode === '404' || errorCode === 404 || errorStatus === 404) {
-          logger.warn('[pipelineMessageStore.deleteMessage] 消息已被删除，保持前端状态')
-          return
-        }
-
-        console.error('[pipelineMessageStore.deleteMessage] 删除消息失败，回滚前端状态:', error)
-
-        // 回滚到之前的状态
-        set((state) => ({
-          messagesByPipeline: {
-            ...state.messagesByPipeline,
-            [pipelineId]: previousMessages,
-          },
-        }))
-
-        throw error
-      })
   },
 
 }))

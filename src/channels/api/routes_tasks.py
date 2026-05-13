@@ -120,15 +120,39 @@ async def list_tasks(
         except Exception as exc:
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
-    # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤 api_store 来源的任务
-    # 问题根因: 前端 FileTreeWidget 已传递 session_id 参数，
-    #           但后端 API 未按此参数筛选，导致所有会话的任务混在一起显示。
-    # 修复方案: TaskStorage 来源的任务已在 list_all 中过滤，
-    #           这里仅过滤 api_store 来源的任务。
-    # 影响范围: list_tasks API 返回的任务列表。
-    # 修复日期: 2026-05-12
+    # BUG-FIX-fix_20260513_task_session_filter: 通过 pipeline_ids 关联任务与会话
+    # 问题根因: 任务 metadata 中没有 session_id 字段，按 session_id 过滤永远匹配不上
+    # 修复方案: 通过 session_id 从 store 获取 pipeline_ids，然后匹配任务的
+    #           parent_pipeline_id / pipeline_run_id（包括子管道）
+    # 影响范围: 任务列表按会话过滤功能
+    # 修复日期: 2026-05-13
     if session_id:
-        tasks = [t for t in tasks if t.get("metadata", {}).get("session_id") == session_id]
+        pipeline_ids = set()
+        thread_data = store.threads.get(session_id)
+        if thread_data:
+            pipeline_ids.update(thread_data.get("pipeline_ids", []))
+        root_map = getattr(
+            _get_execution_record_storage(), "_pipeline_root_map", {}
+        ) if _get_execution_record_storage() else {}
+        child_ids = {c for c, r in root_map.items() if r in pipeline_ids}
+        pipeline_ids.update(child_ids)
+
+        def _task_matches_pipeline(task_dict: dict) -> bool:
+            meta = task_dict.get("metadata", {})
+            task_session = meta.get("session_id")
+            if task_session == session_id:
+                return True
+            if pipeline_ids:
+                ppid = task_dict.get("parent_pipeline_id", "")
+                prid = task_dict.get("pipeline_run_id", "")
+                if ppid in pipeline_ids or prid in pipeline_ids:
+                    return True
+                for pid in pipeline_ids:
+                    if meta.get("parent_pipeline_id") == pid or meta.get("pipeline_run_id") == pid:
+                        return True
+            return False
+
+        tasks = [t for t in tasks if _task_matches_pipeline(t)]
 
     if status:
         tasks = [t for t in tasks if t.get("status") == status]

@@ -229,13 +229,22 @@ class PipelineStreamBridge:
     async def _send_stream_start(self) -> None:
         """发送 stream_start 事件，通知前端开始接收流式输出。"""
         self._stream_started = True
-        await self._send_event({
+        logger.info(
+            "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s",
+            self.message_id[:12], self.pipeline_id[:12],
+            getattr(self.output_sink, 'sink_id', '?'), type(self.output_sink).__name__,
+        )
+        success = await self._send_event({
             "type": "stream_start",
             "data": {
                 "message_id": self.message_id,
                 "pipeline_id": self.pipeline_id,
             },
         })
+        logger.info(
+            "DEBUG _send_stream_start result: success=%s msg=%s pipeline=%s",
+            success, self.message_id[:12], self.pipeline_id[:12],
+        )
 
     async def _close_thinking_if_active(self, duration_ms: Any = None) -> None:
         """如果 thinking 处于活跃状态，发送 thinking_end 事件关闭。

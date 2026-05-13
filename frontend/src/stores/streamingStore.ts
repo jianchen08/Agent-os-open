@@ -225,28 +225,20 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
       const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
       if (messageIndex < 0) {
+        // BUG-FIX-fix_20260513_ai_msg_duplicate:
+        // 问题根因: 直接用 setState 创建消息，绕过了 addMessage 的 ID 去重逻辑，
+        //          如果 handleStreamStart 已创建同 ID 消息，会导致重复。
+        // 修复方案: 不在此处创建消息占位，直接返回 state 不做修改。
+        //          handleStreamStart 应先于 tool_start 到达，如果 tool_start 先到达说明时序异常。
+        // 影响范围: 工具调用与流式消息的时序竞争场景
+        // 修复日期: 2026-05-13
         logger.warn(
-          '消息不存在，创建消息占位 | messageId:',
+          '消息不存在，跳过工具调用添加 | messageId:',
           messageId,
           'toolCall:',
           toolCall.call_id,
         )
-        const newMessage: Message = {
-          id: messageId,
-          sessionId: pipelineId,
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString(),
-          toolCalls: [toolCall],
-          // BUG-FIX: 设置 parentId，确保消息被正确的 tab 过滤
-          parentId: parentId || null,
-        }
-        return {
-          messagesByPipeline: {
-            ...state.messagesByPipeline,
-            [pipelineId]: [...pipelineMessages, newMessage],
-          },
-        }
+        return state
       }
 
       const message = pipelineMessages[messageIndex]

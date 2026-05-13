@@ -120,6 +120,15 @@ class GlobalWebSocketService {
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
         }
+        if (data.type === 'stream_start' || data.type === 'stream_chunk') {
+          console.log(
+            '%c[WS_RAW] type=%s data.pipeline_id=%s data.message_id=%s',
+            data.type === 'stream_start' ? 'color:magenta;font-weight:bold' : 'color:gray',
+            data.type,
+            data.data?.pipeline_id?.slice(0, 12) || 'null',
+            data.data?.message_id?.slice(0, 12) || 'null',
+          )
+        }
         if (data.type) {
           this._emit(data.type, data)
         }

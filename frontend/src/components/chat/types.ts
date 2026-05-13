@@ -77,12 +77,6 @@ export interface ChatContainerProps {
   onSendMessage: (params: SendMessageParams) => Promise<void>
   /** 停止生成回调 */
   onStopGenerate?: () => void
-  /** 重新生成回调 */
-  onRegenerate?: (messageId: string) => Promise<void>
-  /** 编辑消息回调 */
-  onEdit?: (messageId: string, newContent: string) => Promise<void>
-  /** 删除消息回调 */
-  onDelete?: (messageId: string) => Promise<void>
   /** 当前 Token 使用量 */
   currentTokenUsage?: number
   /** 最大 Token 限制 */
@@ -111,12 +105,6 @@ export interface MessageListProps {
   messages: Message[]
   /** 是否正在生成回复 */
   isGenerating?: boolean
-  /** 重新生成回调 */
-  onRegenerate?: (messageId: string) => Promise<void>
-  /** 编辑消息回调 */
-  onEdit?: (messageId: string, newContent: string) => Promise<void>
-  /** 删除消息回调 */
-  onDelete?: (messageId: string) => Promise<void>
   /** 模型名称 */
   modelName?: string
   /** 自定义类名 */
@@ -143,12 +131,6 @@ export interface MessageItemProps {
   isLast?: boolean
   /** 是否正在生成 */
   isGenerating?: boolean
-  /** 重新生成回调 */
-  onRegenerate?: (messageId: string) => Promise<void>
-  /** 编辑消息回调 */
-  onEdit?: (messageId: string, newContent: string) => Promise<void>
-  /** 删除消息回调 */
-  onDelete?: (messageId: string) => Promise<void>
   /** 模型名称 */
   modelName?: string
   /** 自定义类名 */

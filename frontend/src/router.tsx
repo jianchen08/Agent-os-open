@@ -21,7 +21,6 @@ import {
 } from './components/ui/dropdown-menu'
 import { ROUTES } from './constants/routes'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
-import { useMessageActions } from './hooks/useMessageActions'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
@@ -199,9 +198,6 @@ function HomePage(): ReactNode {
   } = useSessionStore()
   const { fetchSessions, createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession } = useSessionListStore()
   const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
-
-  /** 消息操作 hooks */
-  const messageActions = useMessageActions(activeSessionId ?? undefined)
 
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
@@ -405,43 +401,6 @@ function HomePage(): ReactNode {
   }, [stopStreamingForTab])
 
   /**
-   * 编辑消息
-   */
-  const handleEditMessage = useCallback(
-    async (messageId: string, newContent: string) => {
-      if (!activeSessionId) return
-      await messageActions.editMessage(messageId, newContent)
-      const pipelineId = usePipelineMessageStore.getState().activePipelineId
-      if (pipelineId) {
-        await usePipelineMessageStore.getState().fetchMessages(pipelineId, { threadId: activeSessionId })
-      }
-    },
-    [activeSessionId, messageActions],
-  )
-
-  /**
-   * 重新生成消息
-   */
-  const handleRegenerateMessage = useCallback(
-    async (messageId: string) => {
-      if (!activeSessionId) return
-      await messageActions.retryMessageWithScope(messageId, 'all')
-    },
-    [activeSessionId, messageActions],
-  )
-
-  /**
-   * 删除消息
-   */
-  const handleDeleteMessage = useCallback(
-    async (messageId: string) => {
-      if (!activeSessionId) return
-      await messageActions.deleteMessage(messageId)
-    },
-    [activeSessionId, messageActions],
-  )
-
-  /**
    * 登出并跳转到登录页
    */
   const handleLogout = useCallback(async () => {
@@ -580,9 +539,6 @@ function HomePage(): ReactNode {
       modelName={modelName}
       onSendMessage={handleSendMessage}
       onStopGenerate={handleStopGenerate}
-      onEdit={handleEditMessage}
-      onRegenerate={handleRegenerateMessage}
-      onDelete={handleDeleteMessage}
       hasMoreMessages={hasMoreMessages}
       isLoadingMoreMessages={isLoadingMoreMessages}
       onLoadMoreMessages={() => {
