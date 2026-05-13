@@ -175,8 +175,19 @@ function HomePage(): ReactNode {
   useRealtimeEvents()
 
   // Layout mode toggle
+  // BUG-FIX-fix_20260513_workspace_two_clicks:
+  // 问题根因: toggleMode 只切换 mode 字段，不同步 workspaceCollapsed，
+  //          导致切换到 five-space 模式后工作区仍为折叠状态，需要再点一次展开
+  // 修复方案: 包装 toggleMode，切换到 five-space 时自动展开工作区面板
   const layoutMode = useLayoutModeStore((s) => s.mode)
-  const toggleLayoutMode = useLayoutModeStore((s) => s.toggleMode)
+  const rawToggleMode = useLayoutModeStore((s) => s.toggleMode)
+  const toggleLayoutMode = useCallback(() => {
+    const currentMode = useLayoutModeStore.getState().mode
+    rawToggleMode()
+    if (currentMode === 'classic') {
+      useUIStore.getState().setWorkspaceCollapsed(false)
+    }
+  }, [rawToggleMode])
 
   const {
     sessions,
@@ -208,10 +219,24 @@ function HomePage(): ReactNode {
       .catch(() => {})
   }, [])
 
-  /** 当前活跃会话的消息列表（从 pipelineMessageStore 读取） */
+  /**
+   * 当前活跃会话的消息列表（从 pipelineMessageStore 读取）
+   *
+   * BUG-FIX-fix_20260513_msg_not_realtime:
+   * 问题根因: useMemo 只依赖 activeSessionId，但内部用 session ID 而非 pipeline ID
+   *          作为 getMessages 的 key，导致在主管道场景下永远返回空数组。
+   * 修复方案: 改用 activePipelineId 作为主要查询 key，并添加为依赖项，
+   *          确保管道切换时重新计算消息列表。
+   * 影响范围: ChatContainer 接收的 messages prop
+   * 修复日期: 2026-05-13
+   */
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
   const activeMessages = useMemo(
-    () => (activeSessionId ? usePipelineMessageStore.getState().getMessages(activeSessionId) : []),
-    [activeSessionId],
+    () => {
+      const pid = activePipelineId || activeSessionId
+      return pid ? usePipelineMessageStore.getState().getMessages(pid) : []
+    },
+    [activePipelineId, activeSessionId],
   )
 
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 读取） */

@@ -489,6 +489,7 @@ class PipelineContext:
         available: bool = False,
         pipeline_config: Any | None = None,
         plugin_registry: Any | None = None,
+        app: Any | None = None,
     ) -> None:
         """初始化管道上下文。
 
@@ -499,6 +500,7 @@ class PipelineContext:
             available: 是否成功初始化
             pipeline_config: 管道配置（用于创建新引擎）
             plugin_registry: 插件注册表（用于创建新引擎）
+            app: Application 实例（用于创建新引擎）
         """
         self.engine = engine
         self.agent_config = agent_config
@@ -506,6 +508,7 @@ class PipelineContext:
         self.available = available
         self.pipeline_config = pipeline_config
         self.plugin_registry = plugin_registry
+        self.app = app
         self._engines: dict[str, Any] = {}
         if engine is not None:
             self._engines[engine.pipeline_id] = engine
@@ -518,12 +521,10 @@ class PipelineContext:
         """
         if pipeline_id in self._engines:
             return self._engines[pipeline_id]
-        from pipeline.engine import PipelineEngine
-        new_engine = PipelineEngine(
-            input_route_table=self.plugin_registry,
-            output_route_table=self.plugin_registry,
-            plugin_registry=self.plugin_registry,
-            services=self.services,
+        new_engine = self.app.create_pipeline_engine(
+            self.pipeline_config,
+            self.plugin_registry,
+            self.services,
         )
         new_engine._pipeline_id = pipeline_id
         self._engines[pipeline_id] = new_engine
@@ -659,6 +660,7 @@ def _init_pipeline_context() -> PipelineContext:
             available=True,
             pipeline_config=pipeline_config,
             plugin_registry=plugin_registry,
+            app=_app,
         )
 
     except Exception as exc:
@@ -1047,6 +1049,11 @@ async def _stream_engine_response(
             actual_content = result.get("raw_result", "")
 
         # ---- stream_chunk: 仅在实时流未发送时补发完整内容 ----
+        # BUG-FIX-stream_chunk-pipeline_id:
+        # 问题: 补发 stream_chunk 时缺少 pipeline_id 字段，导致前端
+        #   resolvePipelineId 返回 null，chunk 被静默丢弃，流式输出卡住。
+        # 修复: 在 data 中添加 pipeline_id 字段，确保前端能正确匹配管道。
+        # 修复日期: 2026-05-13
         bridge_accumulated = drain_result.get("accumulated_content", "")
         if actual_content and not bridge_accumulated:
             logger.info(
@@ -1060,6 +1067,7 @@ async def _stream_engine_response(
                         "data": {
                             "content": actual_content,
                             "message_id": message_id,
+                            "pipeline_id": pipeline_id,
                         },
                     }),
                     timeout=5.0,
@@ -1092,6 +1100,12 @@ async def _stream_engine_response(
 
     except Exception as exc:
         """管道引擎执行出错。"""
+        # BUG-FIX-stream_error-on-exception:
+        # 问题: drain_loop 完成后，后续代码（如 send_new_message）抛异常时，
+        #   前端不会收到 stream_error 事件，导致流式状态可能无法正确结束。
+        # 修复: 在 send_new_message 之前先发送 stream_error 事件，确保前端
+        #   知道管道已出错，能正确清理 streamingTabs 中的残留状态。
+        # 修复日期: 2026-05-13
         logger.error("管道引擎执行失败: %s", exc, exc_info=True)
         if engine_task is not None and not engine_task.done():
             engine_task.cancel()
@@ -1099,6 +1113,19 @@ async def _stream_engine_response(
                 await engine_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # 先发送 stream_error 事件，通知前端管道出错
+        try:
+            await bridge._send_event({
+                "type": "stream_error",
+                "data": {
+                    "message_id": message_id,
+                    "pipeline_id": bridge.pipeline_id,
+                    "error": str(exc),
+                },
+            })
+        except Exception:
+            pass
+        # 再发送错误消息作为最终回复
         try:
             error_content = f"抱歉，处理你的消息时出现错误：{exc}"
             await bridge.send_new_message(error_content, sequence=1)
@@ -1555,7 +1582,15 @@ def main() -> None:
     os.environ["BACKEND_PORT"] = str(actual_port)
 
     app = create_combined_app()
-    uvicorn.run(app, host="0.0.0.0", port=actual_port, log_level="info")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=actual_port,
+        log_level="info",
+        timeout_keep_alive=120,
+        ws_ping_interval=30.0,
+        ws_ping_timeout=60.0,
+    )
 
 
 if __name__ == "__main__":

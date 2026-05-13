@@ -38,7 +38,8 @@ export function DockSpaceRenderer({
   return (
     <div className="border-border bg-background/95 flex items-center gap-1 border-t px-2 py-1 backdrop-blur-sm">
       {instructions.map((instruction) => {
-        const { id, moduleId, props } = instruction
+        const { moduleId, widgetType, props } = instruction
+        const stableKey = `${moduleId}::dock::${widgetType}`
         const icon = (props.icon as string) ?? '📦'
         const label = (props.label as string) ?? moduleId
         const indicator = (props.indicator as string) ?? 'none'
@@ -46,7 +47,7 @@ export function DockSpaceRenderer({
 
         return (
           <button
-            key={id}
+            key={stableKey}
             type="button"
             className="hover:bg-muted relative flex flex-col items-center rounded-md px-3 py-1.5 text-xs transition-colors"
             title={label}

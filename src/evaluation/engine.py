@@ -17,6 +17,7 @@ tool 类型评估器通过注入 ToolRegistry 实现真实工具调用；
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable
 from typing import Any, Callable
 
 from evaluation.expect import ExpectEvaluator
@@ -31,8 +32,8 @@ from evaluation.types import (
 
 logger = logging.getLogger(__name__)
 
-# 评估器函数签名：接收指标定义和输入参数，返回输出字典
-EvaluatorFunc = Callable[[MetricDefinition, dict[str, Any]], dict[str, Any]]
+# 评估器函数签名：接收指标定义和输入参数，返回输出字典（异步）
+EvaluatorFunc = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class EvaluationEngine:
@@ -99,7 +100,11 @@ class EvaluationEngine:
         self._evaluators[metric_type] = func
         logger.info("Registered evaluator for %s", metric_type.value)
 
-    def evaluate(
+    # BUG-FIX-fix_20260513_eval_blocking:
+    # 问题根因: evaluate() 是同步方法，通过 .result() 阻塞 asyncio 事件循环，
+    #           导致前端 WebSocket 连接无法处理。
+    # 修复方案: 将整个评估链路改为 async，使用 await 替代 .result() 阻塞调用。
+    async def evaluate(
         self,
         task_id: str,
         config: EvaluationConfig | None = None,
@@ -136,7 +141,7 @@ class EvaluationEngine:
         # 逐指标评估
         results: list[MetricResult] = []
         for metric_def in metrics_to_run:
-            result = self._evaluate_metric(
+            result = await self._evaluate_metric(
                 metric_def=metric_def,
                 input_params=config.input_params.get(metric_def.id, {}),
                 task_id=task_id,
@@ -157,7 +162,7 @@ class EvaluationEngine:
         eval_result.compute_overall()
         return eval_result
 
-    def evaluate_with_metrics(
+    async def evaluate_with_metrics(
         self,
         task_id: str,
         metrics: list[MetricDefinition],
@@ -189,7 +194,7 @@ class EvaluationEngine:
         for metric_def in metrics:
             # 合并全局输入参数和指标默认配置
             merged_params = {**metric_def.default_config, **input_params}
-            result = self._evaluate_metric(
+            result = await self._evaluate_metric(
                 metric_def=metric_def,
                 input_params=merged_params,
                 task_id=task_id,
@@ -203,7 +208,7 @@ class EvaluationEngine:
         eval_result.compute_overall()
         return eval_result
 
-    def evaluate_single(
+    async def evaluate_single(
         self,
         task_id: str,
         metric_id: str,
@@ -226,7 +231,7 @@ class EvaluationEngine:
         if metric_def is None:
             raise KeyError(f"Metric '{metric_id}' not found")
 
-        return self._evaluate_metric(
+        return await self._evaluate_metric(
             metric_def=metric_def,
             input_params=input_params or {},
             task_id=task_id,
@@ -282,7 +287,7 @@ class EvaluationEngine:
                 resolved[key] = value
         return resolved
 
-    def _evaluate_metric(
+    async def _evaluate_metric(
         self,
         metric_def: MetricDefinition,
         input_params: dict[str, Any],
@@ -320,7 +325,7 @@ class EvaluationEngine:
             }
 
             # 调用评估器获取输出
-            output = evaluator(
+            output = await evaluator(
                 metric_def, merged_params, task_id,
             )
 
@@ -415,7 +420,7 @@ class EvaluationEngine:
 
     # ── 默认评估器实现（Mock） ────────────────────────────
 
-    def _evaluate_tool(
+    async def _evaluate_tool(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
@@ -454,29 +459,13 @@ class EvaluationEngine:
                         and "pipeline_id" not in params):
                     params["pipeline_id"] = task_id or "eval_session"
 
+                # BUG-FIX-fix_20260513_eval_blocking:
+                # 问题根因: _evaluate_tool 是同步方法，通过 .result() 阻塞 asyncio 事件循环，
+                #           导致前端 WebSocket 连接无法处理。
+                # 修复方案: 将 _evaluate_tool 改为 async，使用 await 替代 .result() 阻塞调用。
                 tool_result = handler(params)
                 if asyncio.iscoroutine(tool_result):
-                    if (
-                        evaluator_id == "human_interaction"
-                        and self._main_loop
-                        and self._main_loop.is_running()
-                    ):
-                        # human_interaction 必须在主事件循环上运行，
-                        # 否则 asyncio.Event 跨循环不互通导致死锁
-                        future = asyncio.run_coroutine_threadsafe(
-                            tool_result, self._main_loop
-                        )
-                        tool_result = future.result()
-                    else:
-                        import concurrent.futures
-
-                        def _run_async(coro):
-                            return asyncio.run(coro)
-
-                        with concurrent.futures.ThreadPoolExecutor() as pool:
-                            tool_result = pool.submit(
-                                _run_async, tool_result
-                            ).result()
+                    tool_result = await tool_result
 
                 if hasattr(tool_result, "to_dict"):
                     result_dict = tool_result.to_dict()
@@ -537,7 +526,7 @@ class EvaluationEngine:
         return _EvaluatorComponentResolver.resolve(evaluator_id)
 
 
-    def _evaluate_agent(
+    async def _evaluate_agent(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
@@ -630,19 +619,11 @@ class EvaluationEngine:
                 )
                 return state
 
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    pipeline_state = pool.submit(
-                        lambda: asyncio.run(_run_eval_pipeline())
-                    ).result()
-            else:
-                pipeline_state = asyncio.run(_run_eval_pipeline())
+            # BUG-FIX-fix_20260513_eval_blocking:
+            # 问题根因: _evaluate_agent 通过 pool.submit(lambda: asyncio.run(...)).result()
+            #           阻塞当前事件循环，导致 WebSocket 连接无法处理。
+            # 修复方案: 直接在当前事件循环中 await 异步管道，无需线程池。
+            pipeline_state = await _run_eval_pipeline()
 
             # 提取子管道 ID
             _pipeline_run_id = pipeline_state.get(

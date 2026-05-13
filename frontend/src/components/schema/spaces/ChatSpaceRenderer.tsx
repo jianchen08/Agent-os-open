@@ -34,13 +34,14 @@ export function ChatSpaceRenderer({ instructions }: ChatSpaceRendererProps) {
 
   return (
     <div className="space-y-3">
-      {instructions.map((instruction) => {
-        const { component: WidgetComponent, id, widgetType, props } = instruction
+      {instructions.map((instruction, index) => {
+        const { component: WidgetComponent, widgetType, props, moduleId } = instruction
+        const stableKey = `${moduleId}::chat::${widgetType}::${index}`
 
         if (!WidgetComponent) {
           return (
             <div
-              key={id}
+              key={stableKey}
               className="text-muted-foreground rounded-md border border-dashed p-3 text-sm"
             >
               未注册的组件类型: {widgetType}
@@ -49,7 +50,7 @@ export function ChatSpaceRenderer({ instructions }: ChatSpaceRendererProps) {
         }
 
         return (
-          <div key={id} className="chat-widget-container">
+          <div key={stableKey} className="chat-widget-container">
             <WidgetComponent {...props} />
           </div>
         )

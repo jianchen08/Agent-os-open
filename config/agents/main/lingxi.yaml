@@ -53,7 +53,8 @@ system_prompt: |
      - **触发间隔**：15分钟
      - **最大触发次数**：小型 32 次（约 8 小时）、中型 96 次（约 24 小时）、大型 288 次（约 3 天）
      - **触发动作**：检查子任务状态，停滞或失败则及时处理
-     - **超时处理**：触发次数耗尽后容器仍未完成 → 直接重新设置触发器，并通知用户说明当前进度和未完成原因
+     - **共用触发器**：如果已有相同间隔的活跃触发器（如另一个容器的进度检查），不要新建，使用 `trigger_setup(action="update", trigger_id="已有ID", max_count=新总次数)` 延长其生命周期。message 内容应覆盖所有共用该触发器的容器
+     - **超时处理**：触发次数耗尽后容器仍未完成 → 用 update 延长次数，并通知用户说明当前进度和未完成原因
      - **记录 trigger_id**：设置后保存返回的 trigger_id，容器完成时用于取消
   4. **提交规划任务**：派发给 `solution_planning_agent`，由其完成方案讨论、用户确认和任务链生成
      - **AC**：方案文档和任务链格式正确；语义评估包括方案完整性、可行性、风险评估、技术选型合理性；任务链的依赖关系清晰、任务粒度合理、执行顺序正确；**必须包含 human_review**（方案需要人类确认才能继续）
@@ -112,6 +113,7 @@ system_prompt: |
   1. **注册触发器**：直接使用 `trigger_setup` 工具注册触发器
      - 设置触发类型（interval/schedule/delay）、频率、message（触发时注入的执行内容描述）
      - 必须设置 max_count 或 max_time 作为停止条件
+     - **共用触发器**：如果已有相同间隔和类型的活跃触发器，优先用 `action="update"` 延长次数而非新建
      - 记录返回的 trigger_id
   2. **触发后执行**：系统触发后，根据任务复杂度自适应执行：
      - **简单任务**（1-2个工具可完成）→ 自己直接执行（使用 resource_search 搜索工具后执行）
@@ -119,7 +121,8 @@ system_prompt: |
   3. **停止条件管理**：
      - 每次触发执行后检查停止条件（次数/时间到达）
      - 条件未满足 → 继续等待
-     - 条件满足 → 用 file_write 生成执行总结报告
+     - 条件接近满足但仍需继续 → 用 `trigger_setup(action="update")` 延长次数
+     - 条件满足且无需继续 → 用 file_write 生成执行总结报告
   4. **执行总结报告**（停止条件满足时）：写入 `{{workspace}}/execution_summary_report.md`
      - 任务概述、执行统计（总触发次数/成功/失败/时间跨度）、各次执行结果摘要、后续建议
 
@@ -160,7 +163,7 @@ static_vars:
 
         | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
         |------|-------|------|-----------|----------|----------|
-        | 调研/分析 | research_agent | 调研方案、分析需求 | `docs/{title}_research_report.md` | container | file_check |
+        | 调研/分析 | research_agent | 调研方案、分析需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | `docs/{title}_research_report.md` | container | file_check |
         | 方案规划 | solution_planning_agent | 与用户讨论方案、确认并生成任务链 | 方案: `docs/{title}_solution.md`，任务链: `docs/{title}_task_chain.md` | container | file_check, human_review（人类评估为必须！！！） |
         | 容器验证 | container_verification_agent | 整体验收：逐条核验需求、验证可用性、通知人类审查 | `docs/verification_report.md` | container | file_check |
         | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | 视任务而定 | container | file_check（一般任务）, format_valid(格式要求时) |

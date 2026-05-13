@@ -95,9 +95,10 @@ class TriggerSetupTool(BuiltinTool):
         return Tool(
             name="trigger_setup",
             description=(
-                "设置或取消触发器，在指定条件满足时向当前会话注入消息并唤醒管道。"
+                "设置、更新或取消触发器，在指定条件满足时向当前会话注入消息并唤醒管道。"
                 "触发器只能触发自己所在的会话。"
                 "支持延迟触发、定时触发、周期触发、事件触发和条件触发五种类型。"
+                "支持通过 action=update 更新已有触发器的次数，多个任务可共用同一触发器。"
                 "支持通过 action=cancel 取消已设置的触发器。"
             ),
             input_schema={
@@ -105,16 +106,17 @@ class TriggerSetupTool(BuiltinTool):
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["setup", "cancel"],
+                        "enum": ["setup", "cancel", "update"],
                         "description": (
                             "操作类型: "
                             "setup=设置触发器(默认), "
-                            "cancel=取消指定触发器"
+                            "cancel=取消指定触发器, "
+                            "update=更新已有触发器的次数或时长"
                         ),
                     },
                     "trigger_id": {
                         "type": "string",
-                        "description": "要取消的触发器 ID（action=cancel 时必填）",
+                        "description": "触发器 ID（action=cancel/update 时必填）",
                     },
                     "trigger_type": {
                         "type": "string",
@@ -209,6 +211,9 @@ class TriggerSetupTool(BuiltinTool):
         if action == "cancel":
             return await self._cancel_trigger(inputs, pipeline_id)
 
+        if action == "update":
+            return await self._update_trigger(inputs, pipeline_id)
+
         trigger_type = inputs.get("trigger_type")
         message = inputs.get("message")
         execution_id = inputs.get("execution_id")
@@ -278,6 +283,83 @@ class TriggerSetupTool(BuiltinTool):
                 error=f"设置触发器失败: {str(e)}",
                 error_code="TRIGGER_SETUP_FAILED",
             )
+
+    async def _update_trigger(
+        self,
+        inputs: dict[str, Any],
+        pipeline_id: str | None,
+    ) -> ToolExecutionResult:
+        """更新已有触发器的最大触发次数和/或最长运行时间。
+
+        适用于多个任务共用同一个触发器时，延长触发器生命周期的场景。
+        已达 FIRED 状态的触发器会自动重新激活。
+        """
+        trigger_id = inputs.get("trigger_id")
+
+        if not trigger_id:
+            return create_failure_result(
+                error="缺少必需参数: trigger_id",
+                error_code="MISSING_TRIGGER_ID",
+            )
+
+        trigger = self._manager._triggers.get(trigger_id)
+        if trigger is None:
+            return create_failure_result(
+                error=f"触发器不存在: {trigger_id}",
+                error_code="TRIGGER_NOT_FOUND",
+            )
+
+        if pipeline_id and trigger.pipeline_id != pipeline_id:
+            return create_failure_result(
+                error="只能更新当前管道的触发器",
+                error_code="TRIGGER_PIPELINE_MISMATCH",
+            )
+
+        max_count = self._parse_max_count(inputs.get("max_count"))
+        max_time_seconds = self._parse_max_time(inputs.get("max_time"))
+
+        if max_count == 0 and max_time_seconds == 0:
+            return create_failure_result(
+                error="update 操作需要提供 max_count 或 max_time 至少一项",
+                error_code="MISSING_UPDATE_PARAMS",
+            )
+
+        old_max_fires = trigger.max_fires
+        old_max_time = trigger.max_time_seconds
+
+        success = self._manager.update_max_fires(
+            trigger_id, max_count, max_time_seconds if max_time_seconds > 0 else None
+        )
+        if not success:
+            return create_failure_result(
+                error=f"触发器无法更新（可能已取消）: {trigger_id}",
+                error_code="TRIGGER_UPDATE_FAILED",
+            )
+
+        logger.info(
+            f"[TriggerSetupTool] 触发器已更新 | "
+            f"trigger_id={trigger_id} | "
+            f"max_fires: {old_max_fires}→{max_count} | "
+            f"max_time: {old_max_time}s→{max_time_seconds}s"
+        )
+
+        return create_success_result(
+            data={
+                "success": True,
+                "trigger_id": trigger_id,
+                "action": "update",
+                "old_max_fires": old_max_fires,
+                "new_max_fires": max_count,
+                "old_max_time_seconds": old_max_time,
+                "new_max_time_seconds": max_time_seconds,
+                "current_fire_count": trigger.fire_count,
+                "message": (
+                    f"触发器 {trigger_id} 已更新: "
+                    f"最大次数 {old_max_fires}→{max_count}"
+                    + (f", 最长运行时间 {old_max_time}s→{max_time_seconds}s" if max_time_seconds > 0 else "")
+                ),
+            },
+        )
 
     async def _cancel_trigger(
         self,

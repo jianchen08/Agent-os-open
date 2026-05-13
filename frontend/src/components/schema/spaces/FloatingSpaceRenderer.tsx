@@ -37,11 +37,12 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
       {instructions.map((instruction) => {
         const {
           component: WidgetComponent,
-          id,
+          moduleId,
           widgetType,
           props,
           layout,
         } = instruction
+        const stableKey = `${moduleId}::floating::${widgetType}`
 
         // 布局样式
         const containerStyle: React.CSSProperties = {
@@ -51,7 +52,7 @@ export function FloatingSpaceRenderer({ instructions }: FloatingSpaceRendererPro
 
         return (
           <div
-            key={id}
+            key={stableKey}
             className="bg-background text-foreground border-border shadow-lg fixed rounded-lg border"
             style={{
               ...containerStyle,

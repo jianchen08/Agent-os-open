@@ -190,12 +190,29 @@ export const ChatContainer = ({
 
   /**
    * 从 pipelineMessageStore 获取当前激活管道的消息
+   *
+   * BUG-FIX-fix_20260513_msg_not_realtime:
+   * 问题根因: EMPTY_MESSAGES 常量导致 Zustand selector 在状态转换时返回相同引用，
+   *          React 浅比较认为数据未变化，跳过重新渲染，导致消息不实时显示。
+   * 修复方案: 使用自定义 equality 函数，通过数组长度和引用比较判断是否变化，
+   *          确保 store 更新后组件能正确重新渲染。
+   * 影响范围: 所有消息列表的实时更新
+   * 修复日期: 2026-05-13
    */
-  const pipelineMessages = usePipelineMessageStore((s) => {
-    const activeId = s.activePipelineId
-    if (!activeId) return EMPTY_MESSAGES
-    return s.messagesByPipeline[activeId] ?? EMPTY_MESSAGES
-  })
+  const pipelineMessages = usePipelineMessageStore(
+    (s) => {
+      const activeId = s.activePipelineId
+      if (!activeId) return EMPTY_MESSAGES
+      return s.messagesByPipeline[activeId] ?? EMPTY_MESSAGES
+    },
+    (a, b) => {
+      if (a === b) return true
+      if (!Array.isArray(a) || !Array.isArray(b)) return false
+      if (a.length !== b.length) return false
+      if (a.length === 0 && b.length === 0) return true
+      return a === b
+    },
+  )
 
   /**
    * 会话切换时初始化 Tab 状态并激活对应管道

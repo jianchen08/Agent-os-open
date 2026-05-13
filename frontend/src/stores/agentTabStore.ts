@@ -34,6 +34,8 @@ function getMainPipelineId(sessionId: string): string | null {
 const STORAGE_KEY_PREFIX = 'agent-tabs-'
 /** 每个 Tab 缓存到 localStorage 的最大消息条数 */
 const MAX_CACHED_MESSAGES_PER_TAB = 50
+/** 降级策略：消息截取数量的递减阶梯 */
+const MESSAGE_LIMIT_STEPS = [MAX_CACHED_MESSAGES_PER_TAB, 10, 0]
 
 /**
  * 获取会话对应的存储键
@@ -43,7 +45,62 @@ function getStorageKey(sessionId: string): string {
 }
 
 /**
+ * 清理其他会话的过期 localStorage 数据，释放空间
+ * 保留当前会话，按 savedAt 时间排序，优先清理最旧的数据
+ */
+function cleanupExpiredSessionData(currentSessionId: string): void {
+  const allKeys: { key: string; savedAt: number }[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && key.startsWith(STORAGE_KEY_PREFIX) && key !== getStorageKey(currentSessionId)) {
+      try {
+        const raw = localStorage.getItem(key)
+        if (raw) {
+          const data = JSON.parse(raw)
+          allKeys.push({ key, savedAt: data.savedAt || 0 })
+        }
+      } catch {
+        allKeys.push({ key, savedAt: 0 })
+      }
+    }
+  }
+  allKeys.sort((a, b) => a.savedAt - b.savedAt)
+  for (const { key } of allKeys) {
+    localStorage.removeItem(key)
+  }
+}
+
+/**
+ * 尝试用指定消息数量限制保存数据到 localStorage
+ */
+function trySaveWithLimit(
+  sessionId: string,
+  tabs: AgentTab[],
+  activeTabId: string | null,
+  tabMessages: Record<string, any[]>,
+  pipelineTabMap: Record<string, string>,
+  messageLimit: number,
+): boolean {
+  const cachedMessages: Record<string, any[]> = {}
+  if (messageLimit > 0) {
+    for (const tabId of Object.keys(tabMessages)) {
+      const msgs = tabMessages[tabId] || []
+      if (msgs.length > 0) {
+        cachedMessages[tabId] = msgs.slice(-messageLimit)
+      }
+    }
+  }
+  const data = { tabs, activeTabId, tabMessages: cachedMessages, pipelineTabMap, savedAt: Date.now() }
+  localStorage.setItem(getStorageKey(sessionId), JSON.stringify(data))
+  return true
+}
+
+/**
  * 保存标签状态到 localStorage（包含最近 N 条消息缓存和 pipeline 映射）
+ *
+ * 采用渐进式降级策略应对 QuotaExceededError：
+ * 1. 按 50 → 10 → 0 递减消息数量重试
+ * 2. 仍失败则清理其他会话的旧数据后重试
  */
 function saveTabsToStorage(
   sessionId: string,
@@ -52,18 +109,27 @@ function saveTabsToStorage(
   tabMessages: Record<string, any[]>,
   pipelineTabMap: Record<string, string>,
 ): void {
-  try {
-    // 对每个 Tab 的消息截取最近 N 条，避免 localStorage 超限
-    const cachedMessages: Record<string, any[]> = {}
-    for (const tabId of Object.keys(tabMessages)) {
-      const msgs = tabMessages[tabId] || []
-      cachedMessages[tabId] = msgs.slice(-MAX_CACHED_MESSAGES_PER_TAB)
+  for (const limit of MESSAGE_LIMIT_STEPS) {
+    try {
+      trySaveWithLimit(sessionId, tabs, activeTabId, tabMessages, pipelineTabMap, limit)
+      return
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === 'QuotaExceededError')) {
+        console.warn('[AgentTabStore] 保存标签状态失败', e)
+        return
+      }
     }
-    const data = { tabs, activeTabId, tabMessages: cachedMessages, pipelineTabMap, savedAt: Date.now() }
-    localStorage.setItem(getStorageKey(sessionId), JSON.stringify(data))
-  } catch (e) {
-    console.warn('[AgentTabStore] 保存标签状态失败', e)
   }
+
+  try {
+    cleanupExpiredSessionData(sessionId)
+    trySaveWithLimit(sessionId, tabs, activeTabId, tabMessages, pipelineTabMap, 0)
+    return
+  } catch {
+    // 清理后仍然失败，放弃本次保存
+  }
+
+  console.warn('[AgentTabStore] 保存标签状态失败：localStorage 配额不足，已清理旧数据仍无法写入')
 }
 
 /**
@@ -749,13 +815,25 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
     if (pipelineId) {
       get().registerPipelineTab(pipelineId, tabId)
+      const pipelineStore = usePipelineMessageStore.getState()
+      if (!pipelineStore.pipelines[pipelineId]) {
+        pipelineStore.registerPipeline({
+          pipelineId,
+          sessionId: get().currentSessionId || '',
+          level: agentLevel,
+          tabId,
+          agentName,
+          status: 'running',
+          parentId: get().currentSessionId || '',
+          unreadCount: 0,
+        })
+      }
     }
 
     if (setActive) {
       const effectivePipelineId = pipelineId || tabId
       const pipelineStore = usePipelineMessageStore.getState()
       pipelineStore.activatePipeline(effectivePipelineId)
-      // BUG-FIX-fix_20260512_msg_order: 移除缓存预填，避免与后续 loadTabMessages 竞争覆盖 WebSocket 数据
       set({ activeTabId: tabId })
     }
   },
@@ -809,9 +887,19 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     }))
 
     try {
-      // BUG-FIX-fix_20260512_fetch_threadid: 传入 threadId（currentSessionId），
-      // 确保 fetchMessages 用正确的 threadId 查询后端 API，而非用 pipelineId 当 threadId
       const pipelineStore = usePipelineMessageStore.getState()
+      if (!pipelineStore.pipelines[effectivePipelineId]) {
+        pipelineStore.registerPipeline({
+          pipelineId: effectivePipelineId,
+          sessionId: state.currentSessionId,
+          level: (tab.agentLevel as 1 | 2 | 3) || 2,
+          tabId,
+          agentName: tab.agentName,
+          status: 'running',
+          parentId: state.currentSessionId,
+          unreadCount: 0,
+        })
+      }
       await pipelineStore.fetchMessages(effectivePipelineId, { threadId: state.currentSessionId })
 
       if (get().activeTabId === tabId) {

@@ -294,6 +294,22 @@ export const uiStorage = {
   },
 
   /**
+   * 保存工作区面板状态
+   * @param collapsed - 是否折叠
+   */
+  setWorkspaceCollapsed(collapsed: boolean): void {
+    storage.setItem(STORAGE_KEYS.WORKSPACE_COLLAPSED, collapsed)
+  },
+
+  /**
+   * 获取工作区面板状态
+   * @returns 是否折叠或null
+   */
+  getWorkspaceCollapsed(): boolean | null {
+    return storage.getItem<boolean>(STORAGE_KEYS.WORKSPACE_COLLAPSED)
+  },
+
+  /**
    * 保存思考模式启用状态
    * @param enabled - 是否启用
    */

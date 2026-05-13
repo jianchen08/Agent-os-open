@@ -15,6 +15,21 @@ import type { ApprovalRequest } from '@/types/models'
 export type Theme = 'light' | 'dark'
 
 /**
+ * 从 localStorage 读取初始折叠状态，读取失败时回退为默认值
+ */
+function loadCollapsedState(
+  getter: () => boolean | null,
+  fallback: boolean,
+): boolean {
+  try {
+    const stored = getter()
+    return stored !== null ? stored : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/**
  * UI 状态接口
  */
 interface UIState {
@@ -26,6 +41,8 @@ interface UIState {
   executionGraphCollapsed: boolean
   /** 任务状态面板是否折叠 */
   taskPanelCollapsed: boolean
+  /** 工作区面板是否折叠 */
+  workspaceCollapsed: boolean
 }
 
 interface UIActions {
@@ -45,18 +62,29 @@ interface UIActions {
   toggleTaskPanel: () => void
   /** 设置任务状态面板状态 */
   setTaskPanelCollapsed: (collapsed: boolean) => void
+  /** 切换工作区面板 */
+  toggleWorkspace: () => void
+  /** 设置工作区面板状态 */
+  setWorkspaceCollapsed: (collapsed: boolean) => void
   /** 初始化 UI 状态（从 localStorage 恢复） */
   initializeUI: () => void
 }
 
 /**
  * UI Store
+ *
+ * 折叠状态在 store 创建时直接从 localStorage 读取初始值，
+ * 无需依赖外部调用 initializeUI()。
  */
 export const useUIStore = create<UIState & UIActions>((set) => ({
-  sidebarCollapsed: false,
+  sidebarCollapsed: loadCollapsedState(uiStorage.getSidebarCollapsed, false),
   approvalDialog: null,
-  executionGraphCollapsed: false,
-  taskPanelCollapsed: false,
+  executionGraphCollapsed: loadCollapsedState(
+    uiStorage.getExecutionGraphCollapsed,
+    false,
+  ),
+  taskPanelCollapsed: loadCollapsedState(uiStorage.getTaskPanelCollapsed, false),
+  workspaceCollapsed: loadCollapsedState(uiStorage.getWorkspaceCollapsed, false),
 
   /**
    * 切换侧边栏折叠状态
@@ -93,6 +121,7 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
 
   /**
    * 初始化 UI 状态（从 localStorage 恢复）
+   * @deprecated 状态现在在 store 创建时直接从 localStorage 读取，此方法保留仅为兼容
    */
   initializeUI: () => {
     try {
@@ -107,6 +136,10 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
       const storedTaskPanelCollapsed = uiStorage.getTaskPanelCollapsed()
       if (storedTaskPanelCollapsed !== null) {
         set({ taskPanelCollapsed: storedTaskPanelCollapsed })
+      }
+      const storedWorkspaceCollapsed = uiStorage.getWorkspaceCollapsed()
+      if (storedWorkspaceCollapsed !== null) {
+        set({ workspaceCollapsed: storedWorkspaceCollapsed })
       }
     } catch (error) {
       console.error('初始化 UI 状态失败:', error)
@@ -145,5 +178,22 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setTaskPanelCollapsed: (collapsed: boolean) => {
     uiStorage.setTaskPanelCollapsed(collapsed)
     set({ taskPanelCollapsed: collapsed })
+  },
+  /**
+   * 切换工作区面板折叠状态
+   */
+  toggleWorkspace: () => {
+    set((state) => {
+      const newCollapsed = !state.workspaceCollapsed
+      uiStorage.setWorkspaceCollapsed(newCollapsed)
+      return { workspaceCollapsed: newCollapsed }
+    })
+  },
+  /**
+   * 设置工作区面板状态
+   */
+  setWorkspaceCollapsed: (collapsed: boolean) => {
+    uiStorage.setWorkspaceCollapsed(collapsed)
+    set({ workspaceCollapsed: collapsed })
   },
 }))

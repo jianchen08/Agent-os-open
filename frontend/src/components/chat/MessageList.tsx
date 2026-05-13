@@ -90,15 +90,28 @@ export const MessageList = ({
 
   /**
    * 处理消息变化：新消息到达时自动滚动到底部
+   *
+   * BUG-FIX-fix_20260513_msg_not_realtime:
+   * 问题根因: 用户发送消息后 isUserScrolling 可能刚被 handleScroll 设为 true
+   *          （滚动检测过于敏感），导致新消息不会触发自动滚动。
+   * 修复方案: 当检测到新消息且最后一条是 user 消息时，强制重置 isUserScrolling，
+   *          确保用户发送的消息始终能滚动到底部可见。
+   * 影响范围: 用户发送消息后的自动滚动行为
+   * 修复日期: 2026-05-13
    */
   useEffect(() => {
     const messageCount = messages.length
     const hasNewMessages = messageCount > lastMessageCount.current
 
-    if (hasNewMessages && !isUserScrolling.current) {
-      requestAnimationFrame(() => {
-        scrollToBottom('smooth')
-      })
+    if (hasNewMessages) {
+      if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+        isUserScrolling.current = false
+      }
+      if (!isUserScrolling.current) {
+        requestAnimationFrame(() => {
+          scrollToBottom('smooth')
+        })
+      }
     }
 
     lastMessageCount.current = messageCount
@@ -286,7 +299,7 @@ export const MessageList = ({
         initialTopMostItemIndex={initialTopMostItemIndex}
         increaseViewportBy={{ top: 100, bottom: 300 }}
         alignToBottom={true}
-        followOutput={isGenerating ? 'smooth' : false}
+        followOutput={isGenerating || messages.length > 0 ? 'smooth' : false}
         components={{
           Header: HeaderComponent,
           Footer: () => (

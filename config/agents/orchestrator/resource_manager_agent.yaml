@@ -259,7 +259,7 @@ static_vars:
 
         | 阶段 | Agent | 说明 | Goal 应包含 | 推荐指标 |
         |------|-------|------|------------|----------|
-        | 调研 | research_agent | 调研方案、搜索可复用资源、调研外部模式、明确上下文需求 | 调研目标 + 调研范围 + 关注的平台/生态方向。调研报告和环境准备结果只传文件路径不传内容 | file_check（一般任务）, semantic_check(重要任务可选) |
+        | 调研 | research_agent | 调研方案、搜索可复用资源、调研外部模式、明确上下文需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | 调研目标 + 调研范围 + 关注的平台/生态方向。调研报告和环境准备结果只传文件路径不传内容 | file_check（一般任务）, semantic_check(重要任务可选) |
         | 环境准备 | environment_setup_agent | 安装技能、安装依赖、下载模板、准备环境 | 需要准备的环境目标 + 调研报告中列出的上下文需求。附加调研报告文件路径 | file_check |
         | 工具操作 | tool_maker | 创建或修改工具代码和配置 | 操作目标(create/modify) + 工具能力需求描述。调研报告和环境准备结果只传文件路径 | file_check + function_verify(功能类) / semantic_check(重要任务) |
         | Agent操作 | agent_maker | 创建或修改 Agent 配置 | 操作目标(create/modify) + Agent能力需求描述。调研报告和环境准备结果只传文件路径。相关规则、规范、skill文件路径一并传递 | file_check + semantic_check(重要任务) |

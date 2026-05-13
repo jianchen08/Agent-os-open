@@ -41,7 +41,7 @@ export function WorkspaceSpaceRenderer({
   }
 
   const activeInstruction = instructions[activeIndex]
-  const { component: WidgetComponent, id, widgetType, props } = activeInstruction
+  const { component: WidgetComponent, moduleId, widgetType, props } = activeInstruction
 
   return (
     <div className="flex h-full flex-col">
@@ -50,7 +50,7 @@ export function WorkspaceSpaceRenderer({
         <div className="border-border flex border-b">
           {instructions.map((inst, i) => (
             <button
-              key={inst.id}
+              key={`${inst.moduleId}::workspace::${inst.widgetType}::${i}`}
               type="button"
               className={`cursor-pointer border-b-2 px-4 py-2 text-sm transition-colors ${
                 i === activeIndex

@@ -95,8 +95,10 @@ export function FiveSpaceLayout({
   const themeConfig = useThemeStore((s) => s.currentTheme)
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+  const workspaceCollapsed = useUIStore((s) => s.workspaceCollapsed)
+  const toggleWorkspace = useUIStore((s) => s.toggleWorkspace)
+  const setWorkspaceCollapsed = useUIStore((s) => s.setWorkspaceCollapsed)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false)
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false)
   /** 移动端工作区覆盖层是否打开 */
   const [mobileWorkspaceOpen, setMobileWorkspaceOpen] = useState(false)
@@ -167,7 +169,6 @@ export function FiveSpaceLayout({
     }
   }, [isMobile, sidebarCollapsed])
 
-  const toggleWorkspace = useCallback(() => setWorkspaceCollapsed((prev) => !prev), [])
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
   /**

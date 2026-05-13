@@ -25,7 +25,11 @@ export function handleStreamStart(eventData: any) {
     pipelineId, messageId, eventData._threadId,
     eventData.data ? Object.keys(eventData.data).join(',') : '(no data)',
   )
-  if (!pipelineId) return
+  // BUG-FIX-fix_20260513_msg_not_realtime: pipelineId 为 null 时添加警告帮助定位问题
+  if (!pipelineId) {
+    console.warn('[STREAM_START] resolvePipelineId returned null, eventData:', eventData)
+    return
+  }
   if (!messageId) return
 
   pipelineStore.getState().startStreaming(pipelineId, messageId)
@@ -80,16 +84,46 @@ export function handleStreamStart(eventData: any) {
  * 处理流式块事件
  */
 export function handleStreamChunk(eventData: any) {
-  const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) return
+  let pipelineId = resolvePipelineId(eventData)
+  // BUG-FIX-fix_20260513_msg_not_realtime: pipelineId 为 null 时添加警告帮助定位问题
+  if (!pipelineId) {
+    console.warn('[STREAM_CHUNK] resolvePipelineId returned null, eventData:', eventData)
+    return
+  }
   const messageId = eventData.message_id || eventData.data?.message_id
   const content = eventData.content || eventData.data?.content || ''
   if (!messageId) return
 
   resetChunkTimeout(pipelineId, messageId)
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
+  let msgs = pipelineStore.getState().getMessages(pipelineId)
   let msg = msgs.find((m: any) => m.id === messageId)
+  if (!msg) {
+    // BUG-FIX-fix_20260513_pipeline_id_mismatch:
+    // 问题根因: 后端可能存在多个 PipelineStreamBridge 实例（主管道 + 子任务管道），
+    //          stream_start 从桥接 A（pipeline_id=X）发出，但 stream_chunk 从桥接 B
+    //          （pipeline_id=Y）发出。前端在 pipeline Y 中找不到 stream_start 创建的消息，
+    //          导致 "msg not found"，内容被写入无人显示的 placeholder。
+    // 修复方案: 在当前 pipeline 找不到消息时，跨所有 pipeline 搜索该 messageId。
+    //          如果找到，将 chunk 路由到消息所在的 pipeline，而不是创建 placeholder。
+    const state = pipelineStore.getState()
+    const allPipelines = Object.keys(state.messagesByPipeline)
+    for (const pid of allPipelines) {
+      if (pid === pipelineId) continue
+      const found = state.getMessages(pid).find((m: any) => m.id === messageId)
+      if (found) {
+        _debugLogger.info(
+          `[STREAM_CHUNK] pipeline mismatch resolved: chunk_pipeline=%s msg_pipeline=%s msgId=%s`,
+          pipelineId?.slice(0, 8), pid.slice(0, 8), messageId?.slice(0, 12),
+        )
+        pipelineId = pid
+        msgs = state.getMessages(pid)
+        msg = found
+        break
+      }
+    }
+  }
+
   if (!msg) {
     _debugLogger.warn(
       `[STREAM_CHUNK] msg not found, auto-creating placeholder: pipeline=%s msgId=%s totalMsgs=%d _threadId=%s`,

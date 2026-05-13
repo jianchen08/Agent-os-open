@@ -531,28 +531,51 @@ export const ChatInput = ({
     }
   }, [pendingFiles])
 
-  /** 消费外部插入文本（如引用功能注入的文本） */
-  const pendingInsert = useChatInputStore((s) => s.pendingInsert)
+  /**
+   * 消费外部插入文本（如引用功能注入的文本）
+   *
+   * BUG-FIX-fix_20260513_render_while_rendering:
+   * 问题根因: 使用 useChatInputStore((s) => s.pendingInsert) 在渲染期间订阅 store，
+   *          effect 中 consumeInsert() 将 pendingInsert 置为 null 时，
+   *          Zustand 通过 useSyncExternalStore 检测变化并触发另一个 ChatInput 实例的 setState，
+   *          导致 React 报 "Cannot update a component while rendering a different component" 警告。
+   * 修复方案: 改用 useChatInputStore.subscribe 在 effect 中监听 store 变化，
+   *          避免 useSyncExternalStore 在渲染阶段的级联更新；
+   *          同时将 saveDraft 从 setText updater 中移出，消除 state updater 中的副作用。
+   * 影响范围: ChatInput 的外部文本插入功能（如引用注入）
+   * 修复日期: 2026-05-13
+   */
   useEffect(() => {
-    if (!pendingInsert) return
-    setText((prev) => {
-      const newText = prev ? `${prev}\n${pendingInsert}` : pendingInsert
+    const processInsert = (insertText: string) => {
+      const currentText = textRef.current
+      const newText = currentText ? `${currentText}\n${insertText}` : insertText
+      setText(newText)
       textRef.current = newText
       if (draftKey) {
         useChatInputStore.getState().saveDraft(draftKey, newText)
       }
-      return newText
+      useChatInputStore.getState().consumeInsert()
+      setTimeout(() => {
+        const textarea = textareaRef.current
+        if (textarea) {
+          textarea.style.height = 'auto'
+          textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+          textarea.focus()
+        }
+      }, 0)
+    }
+
+    const { pendingInsert } = useChatInputStore.getState()
+    if (pendingInsert) {
+      processInsert(pendingInsert)
+    }
+
+    const unsubscribe = useChatInputStore.subscribe((state) => {
+      if (!state.pendingInsert) return
+      processInsert(state.pendingInsert)
     })
-    useChatInputStore.getState().consumeInsert()
-    setTimeout(() => {
-      const textarea = textareaRef.current
-      if (textarea) {
-        textarea.style.height = 'auto'
-        textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-        textarea.focus()
-      }
-    }, 0)
-  }, [pendingInsert, draftKey])
+    return unsubscribe
+  }, [draftKey])
 
   /** 组件卸载前保存当前文本到草稿 */
   useEffect(() => {

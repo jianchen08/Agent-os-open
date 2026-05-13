@@ -33,6 +33,41 @@ import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
+/**
+ * 树展开状态的 localStorage 持久化工具
+ */
+const TREE_EXPANDED_PREFIX = 'tree_expanded_'
+
+/**
+ * 获取树展开状态的 localStorage key
+ * @param treeKey - 树的唯一标识（sessionId + title）
+ */
+function getExpandedStorageKey(treeKey: string): string {
+  return `${TREE_EXPANDED_PREFIX}${treeKey}`
+}
+
+/**
+ * 保存展开节点 ID 集合到 localStorage
+ */
+function saveExpandedIds(treeKey: string, ids: Set<string>): void {
+  try {
+    localStorage.setItem(getExpandedStorageKey(treeKey), JSON.stringify([...ids]))
+  } catch { /* ignore */ }
+}
+
+/**
+ * 从 localStorage 读取展开节点 ID 集合
+ */
+function loadExpandedIds(treeKey: string): Set<string> | null {
+  try {
+    const raw = localStorage.getItem(getExpandedStorageKey(treeKey))
+    if (!raw) return null
+    const arr = JSON.parse(raw)
+    if (Array.isArray(arr)) return new Set(arr)
+  } catch { /* ignore */ }
+  return null
+}
+
 /** 树节点数据结构 */
 interface TreeNodeData {
   /** 节点唯一标识 */
@@ -364,6 +399,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const onFileClick = config.onFileClick ?? (rawProps.onFileClick as ((filePath: string, fileName: string) => void) | undefined)
   /** 会话 ID */
   const sessionId = config.sessionId ?? (rawProps.sessionId as string | undefined)
+  /** 树的唯一标识（用于 localStorage 持久化展开状态） */
+  const treeKey = `${sessionId ?? 'default'}_${title ?? 'untitled'}`
+  /** 从 localStorage 恢复的展开状态（null 表示无保存记录，需用默认值） */
+  const restoredExpandedIds = useMemo(() => loadExpandedIds(treeKey), [treeKey])
   /**
    * 刷新 key（WebSocket 连接状态变化时更新，触发任务树重新加载）
    *
@@ -471,8 +510,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   /** 搜索关键词 */
   const [searchKeyword, setSearchKeyword] = useState('')
-  /** 展开的节点 ID 集合 */
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  /** 展开的节点 ID 集合（优先从 localStorage 恢复） */
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => restoredExpandedIds ?? new Set<string>())
   /** 节点启用/禁用状态映射（true=启用，false=禁用） */
   const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>({})
   /** 已知的任务 ID 集合（用于检测新提交的任务并自动开启开关） */
@@ -526,20 +565,51 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   }, [effectiveData, nodeChildrenField])
 
   /**
-   * 当 effectiveData 变化时重新计算展开节点
+   * 当 effectiveData 变化时计算展开节点
    *
-   * 修复任务树不展开的 bug:
-   * 原逻辑用 allData（静态 props）初始化 expandedIds，
-   * 但远程加载场景下 allData 为空，导致节点全部折叠。
-   * 现改为监听 effectiveData 变化，数据加载后自动展开。
+   * 策略：
+   * - 首次加载（localStorage 无记录）：按 expandLevel 配置自动展开
+   * - 数据刷新（已有用户操作记录）：只添加新增的父节点，不覆盖用户手动折叠的节点
+   * - 展开状态变更后自动持久化到 localStorage
    */
   const prevDataRef = useRef<TreeNodeData[]>([])
+  const hasInitializedRef = useRef(false)
   useEffect(() => {
-    if (effectiveData !== prevDataRef.current && effectiveData.length > 0) {
-      prevDataRef.current = effectiveData
+    if (effectiveData.length === 0) return
+    if (effectiveData === prevDataRef.current) return
+    prevDataRef.current = effectiveData
+
+    if (!hasInitializedRef.current) {
+      hasInitializedRef.current = true
+      if (restoredExpandedIds) {
+        return
+      }
       setExpandedIds(collectExpandedIds(effectiveData, nodeChildrenField, expandLevel))
+      return
     }
-  }, [effectiveData, nodeChildrenField, expandLevel])
+
+    const newParentIds = collectExpandedIds(effectiveData, nodeChildrenField, expandLevel)
+    setExpandedIds((prev) => {
+      const merged = new Set(prev)
+      let changed = false
+      for (const id of newParentIds) {
+        if (!merged.has(id)) {
+          merged.add(id)
+          changed = true
+        }
+      }
+      return changed ? merged : prev
+    })
+  }, [effectiveData, nodeChildrenField, expandLevel, restoredExpandedIds])
+
+  /**
+   * 展开状态变化时自动持久化到 localStorage
+   */
+  useEffect(() => {
+    if (expandedIds.size > 0 || hasInitializedRef.current) {
+      saveExpandedIds(treeKey, expandedIds)
+    }
+  }, [expandedIds, treeKey])
 
   /** 过滤后的数据 */
   const filteredData = useMemo(() => {

@@ -515,7 +515,7 @@ class LLMCore(ICorePlugin):
            导致智谱AI等 API 报"工具类型不能为空"）
 
         MiniMax 专有修正：
-        1. system 消息只能在第一位，非首位 system 消息转为 user+name=system
+        1. 非首位 system 消息转为 user 角色（MiniMax 仅允许首位为 system）
         2. assistant(tool_calls) 后只能紧跟 tool 消息，中间插入的非 tool
            消息（如 TaskReminder 注入的 system/user）需移到 tool 消息组之后
 
@@ -570,7 +570,7 @@ class LLMCore(ICorePlugin):
         converted_count = 0
         relocated_count = 0
 
-        # Phase 1: 标准转换（system→user, tool 内容清理）
+        # Phase 1: 标准转换（非首位 system→user, tool 内容清理）
         # MiniMax 要求所有 user 消息的 name 字段一致，因此统一不设置 name
         converted: list[dict[str, Any]] = []
         for idx, msg in enumerate(messages):
@@ -675,7 +675,7 @@ class LLMCore(ICorePlugin):
 
         if converted_count:
             logger.info(
-                "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user+name=system",
+                "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user",
                 self.name, converted_count,
             )
         if relocated_count:
@@ -909,6 +909,16 @@ class LLMCore(ICorePlugin):
             统一的 LLMResponse 响应结构
         """
         normalized_messages = self._normalize_messages_for_provider(messages)
+
+        if self._provider == "minimax":
+            for _i, _m in enumerate(normalized_messages):
+                if _m.get("role") == "system" and _i > 0:
+                    logger.error(
+                        "[%s] MiniMax normalize 后仍存在非首位 system 消息! "
+                        "idx=%d, content=%s",
+                        self.name, _i,
+                        str(_m.get("content", ""))[:200],
+                    )
 
         logger.info(
             "[%s] Sending %d messages to LLM",

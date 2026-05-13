@@ -258,6 +258,42 @@ class TriggerManager:
             if t.status == TriggerStatus.ACTIVE
         ]
 
+    def update_max_fires(
+        self, trigger_id: str, max_fires: int, max_time_seconds: float | None = None
+    ) -> bool:
+        """更新触发器的最大触发次数和最长运行时间。
+
+        当多个任务共用同一个触发器时，可通过此方法延长触发器的生命周期。
+        如果触发器已达到 FIRED 状态，会自动重新激活为 ACTIVE。
+
+        Args:
+            trigger_id: 触发器 ID。
+            max_fires: 新的最大触发次数，0 表示无限。
+            max_time_seconds: 新的最长运行时间（秒），None 表示不更新。
+
+        Returns:
+            是否成功更新。
+        """
+        trigger = self._triggers.get(trigger_id)
+        if trigger is None:
+            return False
+        if trigger.status == TriggerStatus.CANCELLED:
+            return False
+
+        trigger.max_fires = max_fires
+        if max_time_seconds is not None:
+            trigger.max_time_seconds = max_time_seconds
+
+        if trigger.status == TriggerStatus.FIRED:
+            trigger.status = TriggerStatus.ACTIVE
+
+        logger.info(
+            f"更新触发器: {trigger_id} - "
+            f"max_fires={max_fires}, max_time={max_time_seconds}s, "
+            f"fire_count={trigger.fire_count}, status={trigger.status.value}"
+        )
+        return True
+
     def cancel(self, trigger_id: str) -> bool:
         """取消触发器。
 

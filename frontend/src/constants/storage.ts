@@ -37,6 +37,8 @@ export const STORAGE_KEYS = {
   EXECUTION_GRAPH_COLLAPSED: 'execution_graph_collapsed',
   /** 任务状态面板折叠状态 */
   TASK_PANEL_COLLAPSED: 'task_panel_collapsed',
+  /** 工作区面板折叠状态 */
+  WORKSPACE_COLLAPSED: 'workspace_collapsed',
   /** 思考模式启用状态 */
   THINKING_MODE_ENABLED: 'thinking_mode_enabled',
 } as const

@@ -21,10 +21,11 @@ interface PendingMessage {
 type EventHandler = (data: any) => void
 
 const RECONNECT_BASE_DELAY = 1000
-const RECONNECT_MAX_DELAY = 10_000
-const RECONNECT_MAX_RETRIES = 10
+const RECONNECT_MAX_DELAY = 30_000
+const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
-const HEARTBEAT_TIMEOUT = 10_000
+const HEARTBEAT_TIMEOUT = 30_000
+const CONNECTION_TIMEOUT = 15_000
 
 class GlobalWebSocketService {
   private ws: WebSocket | null = null
@@ -39,6 +40,7 @@ class GlobalWebSocketService {
   private _disposed: boolean = false
 
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
+  private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
@@ -78,7 +80,27 @@ class GlobalWebSocketService {
     console.log('[GlobalWS] connecting to', url.substring(0, 60))
     this.ws = new WebSocket(url)
 
+    this._connectionTimeoutTimer = setTimeout(() => {
+      if (this._status === 'connecting') {
+        console.warn('[GlobalWS] 连接超时，关闭并重连')
+        if (this.ws) {
+          this.ws.onclose = null
+          this.ws.onerror = null
+          this.ws.onmessage = null
+          this.ws.onopen = null
+          try { this.ws.close(1000, 'connection_timeout') } catch { /* ignore */ }
+          this.ws = null
+        }
+        this._status = 'disconnected'
+        this._scheduleReconnect()
+      }
+    }, CONNECTION_TIMEOUT)
+
     this.ws.onopen = () => {
+      if (this._connectionTimeoutTimer) {
+        clearTimeout(this._connectionTimeoutTimer)
+        this._connectionTimeoutTimer = null
+      }
       console.log('[GlobalWS] connected')
       this._status = 'connected'
       this._reconnectAttempts = 0
@@ -112,6 +134,10 @@ class GlobalWebSocketService {
     }
 
     this.ws.onclose = (event) => {
+      if (this._connectionTimeoutTimer) {
+        clearTimeout(this._connectionTimeoutTimer)
+        this._connectionTimeoutTimer = null
+      }
       const wasConnected = this._status === 'connected'
       this._status = 'disconnected'
       this._stopHeartbeat()
@@ -123,7 +149,7 @@ class GlobalWebSocketService {
         return
       }
 
-      if (!this._disposed && (wasConnected || event.code === 4001)) {
+      if (!this._disposed) {
         this._scheduleReconnect()
       }
     }
@@ -134,6 +160,10 @@ class GlobalWebSocketService {
     this._disposed = true
     this._clearTimers()
     this._stopHeartbeat()
+    if (this._connectionTimeoutTimer) {
+      clearTimeout(this._connectionTimeoutTimer)
+      this._connectionTimeoutTimer = null
+    }
     if (this.ws) {
       this.ws.onclose = null
       this.ws.onerror = null
@@ -276,14 +306,17 @@ class GlobalWebSocketService {
 
   private _scheduleReconnect(): void {
     if (this._disposed) return
+
+    let delay: number
     if (this._reconnectAttempts >= RECONNECT_MAX_RETRIES) {
-      console.error('[GlobalWS] 达到最大重连次数，停止重连')
-      return
+      delay = RECONNECT_MAX_DELAY
+      console.info('[GlobalWS] 超过最大重连次数，改为 %dms 间隔持续重连', delay)
+    } else {
+      delay = Math.min(
+        RECONNECT_BASE_DELAY * Math.pow(2, this._reconnectAttempts),
+        RECONNECT_MAX_DELAY,
+      )
     }
-    const delay = Math.min(
-      RECONNECT_BASE_DELAY * Math.pow(2, this._reconnectAttempts),
-      RECONNECT_MAX_DELAY,
-    )
     this._reconnectAttempts++
     console.info('[GlobalWS] %dms 后重连（第 %d 次）', delay, this._reconnectAttempts)
     this._reconnectTimer = setTimeout(() => {

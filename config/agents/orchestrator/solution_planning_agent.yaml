@@ -76,7 +76,7 @@ static_vars:
 
         | 阶段 | Agent | 说明 | Goal 应包含 | 产出物路径 | 推荐指标 |
         |------|-------|------|------------|-----------|----------|
-        | 调研 | research_agent | 调研方案、分析需求 | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check（一般任务）, semantic_check(重要任务) |
+        | 调研 | research_agent | 调研方案、分析需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check（一般任务）, semantic_check(重要任务) |
         | 环境准备 | environment_setup_agent | 安装依赖、下载模板、准备环境 | 需要准备的环境目标 + 项目上下文 | reports/*_environment_status.md | file_check |
     - name: "可用执行者清单"
       type: "reference"

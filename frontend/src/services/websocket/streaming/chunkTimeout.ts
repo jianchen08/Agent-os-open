@@ -1,12 +1,19 @@
 /**
- * 流式块超时检测（页面可见性感知）
+ * 流式块超时检测
+ *
+ * BUG-FIX-fix_20260513_chunk_timeout_false_alarm:
+ * 问题根因: 页面可见性暂停/恢复机制导致误触发超时。当页面隐藏时，浏览器可能延迟
+ *          处理 WebSocket 事件（JS 事件循环节流），而 visibilitychange 的 resume
+ *          回调先于排队的 WS 事件执行，导致 remainingMs<=0 时直接触发超时。
+ *          即使事件到达了，wrapper 的 resetChunkTimeout 也会因为浏览器节流而
+ *          不被及时执行，最终 resumeAllChunkTimeouts 使用过期的 remainingMs 触发误报。
+ * 修复方案: 移除页面可见性暂停/恢复机制，计时器始终正常运行。
+ *          只要后端持续发送事件（chunk / keepalive 等），集中式 wrapper 就会重置计时器。
+ *          如果真的 60 秒无任何事件，超时是合理的。
  */
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
-import { loggers } from '@/utils/logger'
-
-const _debugLogger = loggers.websocket
 
 /** 超时间隔常量（60秒） */
 export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
@@ -27,14 +34,6 @@ export const PENDING_STREAM_TIMEOUT_MS = 45_000
 interface ChunkTimeoutEntry {
   timer: ReturnType<typeof setTimeout>
   messageId: string
-  /** 计时器启动时的单调时间戳（毫秒），用于页面后台期间暂停计时 */
-  startedAt: number
-  /** 页面可见时剩余的超时毫秒数 */
-  remainingMs: number
-  /** 是否处于暂停状态（页面不可见时暂停） */
-  paused: boolean
-  /** 暂停时记录的时间戳，用于计算已消耗时间 */
-  pausedAt: number
 }
 
 const _chunkTimeoutMap: Map<string, ChunkTimeoutEntry> = new Map()
@@ -115,59 +114,15 @@ function _onChunkTimeout(pipelineId: string): void {
 /**
  * 重置流式块超时计时器
  *
- * 页面可见性感知：只在页面可见时才真正启动超时计时器，
- * 页面隐藏时暂停计时，恢复可见后继续倒计时。
+ * 每次收到非终止流式事件时调用，重新开始 60 秒倒计时。
  */
 export function resetChunkTimeout(pipelineId: string, messageId: string): void {
   clearChunkTimeout(pipelineId)
-  const now = performance.now()
-  const isPageVisible = !document.hidden
   const entry: ChunkTimeoutEntry = {
-    timer: null!,
+    timer: setTimeout(() => _onChunkTimeout(pipelineId), CHUNK_INTERVAL_TIMEOUT_MS),
     messageId,
-    startedAt: now,
-    remainingMs: CHUNK_INTERVAL_TIMEOUT_MS,
-    paused: !isPageVisible,
-    pausedAt: isPageVisible ? 0 : now,
-  }
-  if (isPageVisible) {
-    entry.timer = setTimeout(() => _onChunkTimeout(pipelineId), CHUNK_INTERVAL_TIMEOUT_MS)
   }
   _chunkTimeoutMap.set(pipelineId, entry)
-}
-
-/**
- * 页面变为不可见时暂停所有 chunk 超时计时器
- */
-function pauseAllChunkTimeouts(): void {
-  const now = performance.now()
-  for (const [pipelineId, entry] of _chunkTimeoutMap) {
-    if (entry.paused) continue
-    clearTimeout(entry.timer)
-    const elapsed = now - entry.startedAt
-    entry.remainingMs = Math.max(0, entry.remainingMs - elapsed)
-    entry.paused = true
-    entry.pausedAt = now
-    _debugLogger.debug(`[CHUNK_TIMEOUT] 暂停: pipeline=%s remaining=%dms`, pipelineId.slice(0, 8), entry.remainingMs)
-  }
-}
-
-/**
- * 页面恢复可见时恢复所有 chunk 超时计时器
- */
-function resumeAllChunkTimeouts(): void {
-  const now = performance.now()
-  for (const [pipelineId, entry] of _chunkTimeoutMap) {
-    if (!entry.paused) continue
-    entry.paused = false
-    entry.startedAt = now
-    if (entry.remainingMs <= 0) {
-      _onChunkTimeout(pipelineId)
-    } else {
-      entry.timer = setTimeout(() => _onChunkTimeout(pipelineId), entry.remainingMs)
-      _debugLogger.debug(`[CHUNK_TIMEOUT] 恢复: pipeline=%s remaining=%dms`, pipelineId.slice(0, 8), entry.remainingMs)
-    }
-  }
 }
 
 /**
@@ -196,29 +151,4 @@ export function clearAllChunkTimeouts(): void {
  */
 export function getChunkTimeoutMessageId(pipelineId: string): string | null {
   return _chunkTimeoutMap.get(pipelineId)?.messageId ?? null
-}
-
-/**
- * 页面可见性变化处理函数
- */
-function _handleVisibilityChange(): void {
-  if (document.hidden) {
-    pauseAllChunkTimeouts()
-  } else {
-    resumeAllChunkTimeouts()
-  }
-}
-
-/**
- * 初始化页面可见性监听器
- */
-export function initVisibilityListener(): void {
-  document.addEventListener('visibilitychange', _handleVisibilityChange)
-}
-
-/**
- * 销毁页面可见性监听器
- */
-export function destroyVisibilityListener(): void {
-  document.removeEventListener('visibilitychange', _handleVisibilityChange)
 }
