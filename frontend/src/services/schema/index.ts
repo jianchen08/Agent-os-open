@@ -31,5 +31,4 @@ export type {
   WidgetEntry,
 } from './WidgetRegistry'
 
-// ===== React Hook =====
-export { useSchemaRenderer } from '../../hooks/useSchemaRenderer'
+

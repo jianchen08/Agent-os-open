@@ -42,7 +42,7 @@ class TaskTool(BuiltinTool):
     - 注入指令（inject）
 
     权限规则：
-    - L1：可管理所属 session_id 的所有任务
+    - L1：默认只显示自己提交的任务；传 show_all=true 可递归查看当前会话所有任务（含子任务的子任务）
     - L2：只能管理自己提交的子任务
     """
 
@@ -188,7 +188,7 @@ class TaskTool(BuiltinTool):
                 "- delete：删除任务\n"
                 "- complete_container/fail_container：标记容器完成/失败（仅L1）\n\n"
                 "## 权限\n"
-                "- L1：可管理所属会话的所有任务\n"
+                "- L1：默认只显示自己提交的任务；传 show_all=true 可递归查看当前会话所有任务（含子任务的子任务）\n"
                 "- L2：只能管理自己提交的子任务"
             ),
             input_schema={
@@ -200,7 +200,7 @@ class TaskTool(BuiltinTool):
                         "description": (
                             "操作类型，根据场景选择：\n"
                             "- get：查询单个任务详情，需要 task_id；加 include_details=true 可展开最近执行活动\n"
-                            "- list：列出任务列表；传 parent_task_id 可查看某容器下所有子任务的执行情况（状态+最新动作+耗时）\n"
+                            "- list：列出任务列表；L1 默认只显示自己提交的任务，传 show_all=true 可递归查看当前会话所有层级任务；传 parent_task_id 可查看某容器下所有子任务的执行情况\n"
                             "- status：查看全局状态概览（各状态数量统计 + 最近任务摘要），适合快速了解整体进度\n"
                             "- update：更新任务状态字段\n"
                             "- pause：暂停运行中的任务\n"
@@ -279,6 +279,11 @@ class TaskTool(BuiltinTool):
                         "default": 50,
                         "maximum": 100,
                     },
+                    "show_all": {
+                        "type": "boolean",
+                        "description": "是否显示当前会话的所有任务（含子任务的子任务）。默认 false，L1 只显示自己提交的任务。设为 true 时递归展示当前会话中所有层级的任务。仅 L1 生效。",
+                        "default": False,
+                    },
                 },
                 "required": ["action"],
             },
@@ -350,11 +355,12 @@ class TaskTool(BuiltinTool):
         parent_agent_level: int,
         inputs: dict[str, Any],
     ) -> tuple[bool, str | None]:
-        """检查任务操作权限：只能管理自己提交的任务。
+        """检查任务操作权限。
 
-        通过 metadata.submitted_by_level 判断提交者层级，
-        与当前调用者的 parent_agent_level 匹配。
-        旧任务没有 submitted_by_level 时回退到 session_id/parent_task_id 校验。
+        L1 主 Agent 可查看和管理当前会话的所有任务（含子任务的子任务），
+        仅按 session_id 隔离，不检查 submitted_by_level。
+        L2 只能管理自己提交的子任务（通过 parent_task_id 校验）。
+        L3 禁止使用 task_manage 工具。
 
         Args:
             task: 任务模型
@@ -364,26 +370,6 @@ class TaskTool(BuiltinTool):
         Returns:
             (是否有权限, 错误消息)
         """
-        submitted_by = (task.metadata or {}).get("submitted_by_level")
-
-        if submitted_by is not None:
-            if submitted_by != parent_agent_level:
-                return False, (
-                    f"权限不足：本任务由 L{submitted_by} Agent 提交，"
-                    f"当前 L{parent_agent_level} Agent 无法管理"
-                )
-            return True, None
-
-        # 兼容旧任务（无 submitted_by_level）
-        pipeline_id = inputs.get("pipeline_id")
-        if pipeline_id:
-            if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
-                return False, (
-                    f"任务不属于当前管道：task.parent_pipeline_id={task.parent_pipeline_id}，"
-                    f"当前 pipeline_id={pipeline_id}"
-                )
-            return True, None
-
         if parent_agent_level == 1:
             session_id = inputs.get("session_id")
             if session_id and task.metadata.get("session_id") != session_id:
@@ -392,7 +378,26 @@ class TaskTool(BuiltinTool):
                     f"当前 session_id={session_id}"
                 )
             return True, None
-        elif parent_agent_level == 2:
+
+        if parent_agent_level == 2:
+            submitted_by = (task.metadata or {}).get("submitted_by_level")
+            if submitted_by is not None:
+                if submitted_by != parent_agent_level:
+                    return False, (
+                        f"权限不足：本任务由 L{submitted_by} Agent 提交，"
+                        f"当前 L{parent_agent_level} Agent 无法管理"
+                    )
+                return True, None
+
+            pipeline_id = inputs.get("pipeline_id")
+            if pipeline_id:
+                if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                    return False, (
+                        f"任务不属于当前管道：task.parent_pipeline_id={task.parent_pipeline_id}，"
+                        f"当前 pipeline_id={pipeline_id}"
+                    )
+                return True, None
+
             parent_task_id = inputs.get("parent_task_id")
             if parent_task_id:
                 if task.parent_task_id == parent_task_id:
@@ -402,8 +407,8 @@ class TaskTool(BuiltinTool):
                     f"当前 parent_task_id={parent_task_id}"
                 )
             return False, "L2 缺少 parent_task_id 参数，无法验证权限"
-        else:
-            return False, f"只有 L1 和 L2 Agent 能使用 task_manage 工具，当前层级：L{parent_agent_level}"
+
+        return False, f"只有 L1 和 L2 Agent 能使用 task_manage 工具，当前层级：L{parent_agent_level}"
 
     # BUG-FIX-fix_20260512_async_list_all: 改为 async def，添加 await
     async def _get_all_tasks(self, limit: int = 5) -> list[TaskModel]:
@@ -486,6 +491,7 @@ class TaskTool(BuiltinTool):
             project_id = inputs.get("project_id")
             pipeline_id = inputs.get("pipeline_id")
             limit = inputs.get("limit", 5)
+            show_all = inputs.get("show_all", False)
 
             # BUG-FIX-fix_20260512_async_list_all: 添加 await
             tasks = await self._get_all_tasks(limit)
@@ -493,16 +499,19 @@ class TaskTool(BuiltinTool):
             # 按权限和条件过滤
             filtered_tasks = []
             for task in tasks:
-                # 管道隔离：只能看到当前管道提交的任务
-                if pipeline_id:
-                    if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
-                        continue
-
                 if parent_agent_level == 1:
                     session_id = inputs.get("session_id")
                     if session_id and task.metadata.get("session_id") != session_id:
                         continue
+                    if not show_all:
+                        submitted_by = (task.metadata or {}).get("submitted_by_level")
+                        if submitted_by is not None and submitted_by != 1:
+                            continue
                 elif parent_agent_level == 2:
+                    pipeline_id = inputs.get("pipeline_id")
+                    if pipeline_id:
+                        if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                            continue
                     parent_task_id = inputs.get("parent_task_id")
                     if parent_task_id and task.parent_task_id != parent_task_id:
                         continue
@@ -729,6 +738,7 @@ class TaskTool(BuiltinTool):
             pipeline_id = inputs.get("pipeline_id")
             user_parent_task_id = inputs.get("parent_task_id")
             limit = inputs.get("limit", 5)
+            show_all = inputs.get("show_all", False)
 
             # 默认只展示自己的子任务：未显式传 parent_task_id 时，
             # 用注入的 task_id（当前任务ID）作为 parent_task_id
@@ -748,17 +758,21 @@ class TaskTool(BuiltinTool):
                 if status_filter and task.status.value != status_filter:
                     continue
 
-                # 管道隔离：只能看到当前管道提交的任务
-                if pipeline_id:
-                    if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                if parent_agent_level == 1:
+                    session_id = inputs.get("session_id")
+                    if session_id and task.metadata.get("session_id") != session_id:
                         continue
-
-                if parent_agent_level == 1 and session_id:
-                    if task.metadata.get("session_id") != session_id:
-                        continue
-                elif parent_agent_level == 2 and inputs.get("parent_task_id"):
-                    if task.parent_task_id != inputs["parent_task_id"]:
-                        continue
+                    if not show_all:
+                        submitted_by = (task.metadata or {}).get("submitted_by_level")
+                        if submitted_by is not None and submitted_by != 1:
+                            continue
+                elif parent_agent_level == 2:
+                    if pipeline_id:
+                        if task.parent_pipeline_id != pipeline_id and task.pipeline_run_id != pipeline_id:
+                            continue
+                    if inputs.get("parent_task_id"):
+                        if task.parent_task_id != inputs["parent_task_id"]:
+                            continue
 
                 if user_parent_task_id:
                     if task.parent_task_id != user_parent_task_id:

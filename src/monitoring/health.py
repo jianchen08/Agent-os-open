@@ -6,6 +6,7 @@
 - Redis: 缓存/会话存储连接
 - Channels: 各 IM 通道适配器状态
 - Pipeline: 管道引擎运行状态
+- Isolation: 隔离环境（Docker）可用性和状态
 
 探针说明：
 - liveness_probe: 进程存活检查，始终返回 healthy
@@ -117,6 +118,66 @@ class HealthChecker:
             logger.debug("Pipeline check failed: %s", exc)
             return {"status": "unhealthy", "detail": str(exc)}
 
+    def check_isolation(self) -> dict[str, Any]:
+        """检查隔离环境（Docker）可用性和状态。
+
+        检测 Docker CLI 是否安装且 daemon 是否运行，
+        以及 IsolationManager 中活跃环境数量。
+        Docker 不可用时标记为 degraded（不影响总体健康判定），
+        但会在 detail 中说明工具将在宿主机执行。
+
+        Returns:
+            包含 status、docker_available、active_environments 等信息的字典
+        """
+        import shutil
+        import subprocess
+
+        available = False
+        reason = ""
+        if not shutil.which("docker"):
+            reason = "Docker CLI 未安装"
+        else:
+            try:
+                result = subprocess.run(
+                    ["docker", "info"],
+                    capture_output=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    available = True
+                else:
+                    reason = "Docker daemon 未运行"
+            except FileNotFoundError:
+                reason = "Docker CLI 未找到"
+            except subprocess.TimeoutExpired:
+                reason = "Docker 检查超时"
+            except Exception as exc:
+                reason = str(exc)
+
+        env_count = 0
+        try:
+            from isolation.manager import _global_manager
+            if _global_manager is not None:
+                stats = _global_manager.get_stats()
+                env_count = stats.get("total_environments", 0)
+        except Exception:
+            pass
+
+        if available:
+            return {
+                "status": "healthy",
+                "docker_available": True,
+                "active_environments": env_count,
+                "mode": "container",
+            }
+        return {
+            "status": "degraded",
+            "docker_available": False,
+            "detail": f"Docker 不可用: {reason}，工具将在宿主机执行",
+            "active_environments": env_count,
+            "mode": "host",
+        }
+
     def full_check(self) -> dict[str, Any]:
         """执行完整健康检查。
 
@@ -131,6 +192,7 @@ class HealthChecker:
             "redis": self.check_redis(),
             "channels": self.check_channels(),
             "pipeline": self.check_pipeline(),
+            "isolation": self.check_isolation(),
         }
 
         # 判定总体状态：全部 healthy/unknown → healthy，否则 degraded

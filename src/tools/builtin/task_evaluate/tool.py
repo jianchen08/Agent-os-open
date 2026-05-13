@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_EVAL_TIMEOUT = 1200.0
+# BUG-FIX-fix_20260513_eval_sequential_retry:
+# 新增全局评估调用次数上限，防止 Agent 无限循环调用评估工具。
+# 当总调用次数超过此值时，直接标记任务失败。
+_DEFAULT_MAX_EVAL_CALLS = 15
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -233,6 +237,31 @@ class TaskEvaluateTool(BuiltinTool):
         if task is None:
             return create_failure_result(
                 error="任务不存在", error_code="TASK_NOT_FOUND"
+            )
+
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 检查全局评估调用次数上限，防止 Agent 无限循环调用评估工具。
+        max_eval_calls = _DEFAULT_MAX_EVAL_CALLS
+        if task.metadata and isinstance(task.metadata, dict):
+            max_eval_calls = task.metadata.get(
+                "max_eval_calls", _DEFAULT_MAX_EVAL_CALLS
+            )
+        eval_total_calls = self._increment_eval_call_count(task)
+
+        if eval_total_calls > max_eval_calls:
+            logger.warning(
+                "[TaskEvaluate] 全局评估调用次数超限 | task_id=%s | "
+                "calls=%d | max=%d | 直接标记失败",
+                task_id, eval_total_calls, max_eval_calls,
+            )
+            await self._save_task(task_service, task)
+            return create_failure_result(
+                error=(
+                    f"评估调用次数已达上限（{eval_total_calls}/{max_eval_calls}），"
+                    f"任务自动失败。请检查评估指标是否存在无法满足的条件。"
+                ),
+                error_code="EVAL_CALL_LIMIT_EXCEEDED",
+                metadata={"task_failed": True},
             )
 
         if action == "evaluate_single":
@@ -493,13 +522,22 @@ class TaskEvaluateTool(BuiltinTool):
 
         _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")
 
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 渐进重试逻辑：每个指标的 retry_count 是"连续失败次数"，
+        # 当指标通过时重置为 0。这样偶尔的失败不会累积。
+        # 两个上限：
+        #   1. per-metric: 连续失败 N 次（默认 3）→ 任务失败
+        #   2. overall: 全局评估调用次数（默认 15）→ 任务失败
         for r in eval_result.results:
+            mid = r.metric_id
             if not r.passed:
                 has_failure = True
-                mid = r.metric_id
                 output_str = str(r.evaluator_output or "").lower()
                 message_str = (r.message or "").lower()
-                is_unrecoverable = any(p in output_str or p in message_str for p in _UNRECOVERABLE_PATTERNS)
+                is_unrecoverable = any(
+                    p in output_str or p in message_str
+                    for p in _UNRECOVERABLE_PATTERNS
+                )
                 if is_unrecoverable:
                     retry_counts[mid] = max_retries
                     exhausted = True
@@ -508,6 +546,16 @@ class TaskEvaluateTool(BuiltinTool):
                 retry_counts[mid] = current
                 if current >= max_retries:
                     exhausted = True
+            else:
+                # 渐进重试：指标通过时重置连续失败计数
+                prev_count = retry_counts.get(mid, 0)
+                if prev_count > 0:
+                    logger.info(
+                        "[TaskEvaluate] 指标 %s 通过，重置连续失败计数 "
+                        "%d → 0 (渐进重试)",
+                        mid, prev_count,
+                    )
+                retry_counts[mid] = 0
 
         if task.metadata is None:
             task.metadata = {}
@@ -528,6 +576,11 @@ class TaskEvaluateTool(BuiltinTool):
             return await self._fail_task(task_service, task, eval_result, max_retries)
         else:
             min_remaining = max_retries - min(retry_counts.values())
+            # BUG-FIX-fix_20260513_eval_sequential_retry:
+            # 在反馈中同时显示 per-metric 和 overall 两个剩余次数
+            eval_total = task.metadata.get("eval_total_calls", 0) if task.metadata else 0
+            max_eval_calls = task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS) if task.metadata else _DEFAULT_MAX_EVAL_CALLS
+            overall_remaining = max_eval_calls - eval_total
             failed_details = []
             for r in eval_result.results:
                 if not r.passed:
@@ -538,7 +591,8 @@ class TaskEvaluateTool(BuiltinTool):
                         detail += f" (得分: {r.score})"
                     failed_details.append(detail)
             feedback = "评估未通过，请根据以下反馈继续改进：\n" + "\n".join(failed_details)
-            feedback += f"\n\n剩余重试次数：{min_remaining}"
+            feedback += f"\n\n指标连续失败剩余重试：{min_remaining} 次"
+            feedback += f"\n全局评估调用剩余次数：{overall_remaining} 次（已调用 {eval_total}/{max_eval_calls}）"
             return create_success_result(
                 data=self._build_result_data(eval_result),
                 metadata={
@@ -941,6 +995,31 @@ class TaskEvaluateTool(BuiltinTool):
             except (TypeError, ValueError):
                 pass
         return _DEFAULT_EVAL_TIMEOUT
+
+    @staticmethod
+    def _increment_eval_call_count(task: Any) -> int:
+        """递增全局评估调用计数并返回当前值。
+
+        每次 task_evaluate 工具被调用时执行，用于实现全局调用次数上限。
+        计数值存储在 task.metadata["eval_total_calls"] 中。
+
+        BUG-FIX-fix_20260513_eval_sequential_retry:
+        防止 Agent 无限循环调用评估工具，超过上限直接标记任务失败。
+
+        Args:
+            task: TaskModel 实例
+
+        Returns:
+            递增后的调用次数
+        """
+        if task.metadata is None:
+            task.metadata = {}
+        current = task.metadata.get("eval_total_calls", 0)
+        if not isinstance(current, int):
+            current = 0
+        current += 1
+        task.metadata["eval_total_calls"] = current
+        return current
 
     def _get_metric_ids(self, task: Any) -> list[str]:
         """从任务模型中提取评估指标 ID 列表。

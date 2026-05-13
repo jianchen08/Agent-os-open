@@ -6,12 +6,10 @@
  * 每个管道独立获取模型上下文窗口和 token 使用量。
  */
 
-import { Loader2, Search, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { buildContentBlocksFromMessage } from '@/components/chat/hooks/useMessageRender'
 import ErrorBoundary from '@/components/ErrorBoundary'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
@@ -19,6 +17,7 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
+import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
@@ -94,8 +93,17 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
     }
     const mergedContent = allContent.join('\n\n')
     const mergedThinking = interleavedBlocks.filter(b => b.type === 'thinking').map(b => (b as any).thinking?.content || '').filter(Boolean).join('\n\n')
+    // BUG-FIX-fix_20260513_virtuoso_key_conflict:
+    // 问题根因: 合并后的消息使用 first.id，与 Virtuoso computeItemKey 中的 msg.id 冲突，
+    //          导致虚拟列表复用错误的 DOM 节点，渲染异常。
+    // 修复方案: 使用唯一的合成 ID（merged_{first.id}_{count}），保留原始 ID 到 _originalIds。
+    // 影响范围: 连续 assistant 消息合并后的渲染
+    // 修复日期: 2026-05-13
+    const mergedId = `merged_${first.id}_${group.length}`
     result.push({
       ...first,
+      id: mergedId,
+      _originalIds: group.map(m => m.id),
       content: mergedContent,
       thinking: mergedThinking ? { content: mergedThinking, isThinking: false } : undefined,
       toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
@@ -174,8 +182,8 @@ export const ChatContainer = ({
   isLoadingMoreMessages = false,
   onLoadMoreMessages,
 }: ChatContainerProps) => {
-  /** 搜索状态 */
-  const [searchQuery, setSearchQuery] = useState('')
+  /** 搜索状态（从 uiStore 共享，Sidebar 中输入） */
+  const searchQuery = useUIStore((s) => s.messageSearchQuery)
 
   /** 从 agentTabStore 获取 Tab 状态 */
   const tabs = useAgentTabStore((s) => s.tabs)
@@ -381,47 +389,19 @@ export const ChatContainer = ({
       data-testid="chat-container"
       data-session-id={sessionId}
     >
-      {/* Agent Tab 导航栏（多 Tab 时显示） */}
-      {showTabBar && (
-        <div className="bg-background shrink-0 border-b">
-          <AgentTabBar
-            tabs={barTabs}
-            onTabChange={handleTabChange}
-            onTabClose={handleTabClose}
-          />
-        </div>
-      )}
-
-      {/* 搜索栏 + 通知中心 */}
+      {/* Agent Tab 导航栏 + 通知中心 */}
       <div className="bg-background shrink-0 border-b">
-        <div className="flex items-center gap-2 px-2 py-2 sm:px-4">
-          <div className="relative min-w-0 flex-1">
-            <Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 transform" />
-            <Input
-              type="text"
-              placeholder="搜索消息内容..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-8 pr-8 pl-9 text-sm"
-            />
-            {searchQuery && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="absolute top-1/2 right-1 h-6 w-6 -translate-y-1/2 transform p-0"
-                onClick={() => setSearchQuery('')}
-              >
-                <X className="h-3 w-3" />
-              </Button>
+        <div className="flex items-center">
+          <div className="min-w-0 flex-1">
+            {showTabBar && (
+              <AgentTabBar
+                tabs={barTabs}
+                onTabChange={handleTabChange}
+                onTabClose={handleTabClose}
+              />
             )}
           </div>
-          {searchQuery && (
-            <div className="text-muted-foreground shrink-0 text-sm">
-              找到 {filteredMessages.length} 条消息
-            </div>
-          )}
-          {/* 通知中心触发按钮 */}
-          <div className="relative shrink-0">
+          <div className="relative shrink-0 pr-2">
             <NotificationCenter />
           </div>
         </div>

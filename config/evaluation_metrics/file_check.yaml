@@ -95,8 +95,10 @@ examples:
       fields: ["id", "name"]
     description: "检查 YAML 文件是否存在并读取特定字段"
 caveats:
-  - 路径必须是有效的文件路径（不支持目录路径）
+  - ⚠️ path 必须写具体的文件路径（如 tests/test_login.py）
+  - 如果文件路径在运行时才能确定，请使用 {{模板变量}}（如 {{test_file}}），系统会在未解析时自动跳过
   - file_read 工具无需额外参数，只需传入 path 即可
+  - 不要传入 action 等非 file_read 支持的参数
 
 # ===== 依赖关系 =====
 is_red_line: false

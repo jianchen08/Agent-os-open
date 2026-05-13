@@ -15,8 +15,11 @@
  */
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useStreamingStore } from '@/stores/streamingStore'
+import { loggers } from '@/utils/logger'
 
-import { clearAllChunkTimeouts, getChunkTimeoutMessageId, resetChunkTimeout } from './chunkTimeout'
+import { clearAllChunkTimeouts, clearChunkTimeout, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout } from './chunkTimeout'
 import {
   handleNewMessage,
   handleStreamChunk,
@@ -89,6 +92,68 @@ export function initStreamingEvents(): void {
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)
   }
+
+  // BUG-FIX-fix_20260513_reconnect_msg_compensation:
+  // 问题根因: WebSocket 断线重连后，断线期间的消息不会自动补偿，
+  //          导致 streaming 消息永远停留在 streaming 状态。
+  // 修复方案: 监听 GlobalWebSocket 的 'reconnected' 事件，对正在 streaming 的管道
+  //          调用 fetchMessages(after_sequence: bottomCursor) 做断线补漏，
+  //          同时清理超时的 streaming 状态。
+  // 影响范围: WebSocket 断线重连后的消息完整性
+  // 修复日期: 2026-05-13
+  _handlers['reconnected'] = () => {
+    const pipelineStore = usePipelineMessageStore.getState()
+    const streamingState = pipelineStore.streamingState
+    const logger = loggers.sessionStore
+
+    logger.info('[streaming] WS 重连，开始补偿遗漏消息，streaming 管道数=%d', Object.keys(streamingState).length)
+
+    for (const [pipelineId, streamStatus] of Object.entries(streamingState)) {
+      if (!streamStatus.isStreaming) continue
+
+      const bottomCursor = pipelineStore.getBottomCursor(pipelineId)
+      const sessionId = pipelineStore.pipelineSessionMap[pipelineId]
+
+      if (sessionId) {
+        pipelineStore.fetchMessages(pipelineId, {
+          after_sequence: bottomCursor,
+          threadId: sessionId,
+        }).catch((err) => {
+          logger.warn('[streaming] 重连补漏失败: pipelineId=%s err=%s', pipelineId, err)
+        })
+      }
+    }
+  }
+  globalWS.subscribe('reconnected', _handlers['reconnected'])
+
+  // BUG-FIX-fix_20260513_chunk_timeout_cleanup:
+  // 问题根因: chunkTimeout 超时后只打 console.debug，不清理 streaming 状态、
+  //          不标记消息为 error、不通知用户，导致消息永远卡在 streaming 状态。
+  // 修复方案: 通过 onChunkTimeout 回调注册，在超时时将对应消息标记为 error 状态并清理 streaming。
+  // 影响范围: 流式响应超时后的用户体验
+  // 修复日期: 2026-05-13
+  onChunkTimeout((data: { pipelineId: string; messageId: string }) => {
+    const { pipelineId, messageId } = data
+    const pipelineStore = usePipelineMessageStore.getState()
+    const streamingStore = useStreamingStore.getState()
+    const logger = loggers.sessionStore
+
+    logger.warn('[streaming] chunk 超时，清理管道状态: pipelineId=%s messageId=%s', pipelineId, messageId)
+
+    // 有 messageId 时将消息标记为 error 状态
+    if (messageId) {
+      pipelineStore.updateMessage(pipelineId, messageId, {
+        status: 'error',
+        error: '流式响应超时，请重试',
+      } as any)
+    }
+
+    // 清理 streaming 状态
+    if (pipelineStore.isStreaming(pipelineId)) {
+      pipelineStore.stopStreaming(pipelineId)
+    }
+    streamingStore.setStreamingForTab(pipelineId, false)
+  })
 }
 
 /**

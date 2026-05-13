@@ -138,7 +138,26 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
-        # 逐指标评估
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 问题根因: 评估指标按传入顺序执行，不区分类型（tool/agent/human），
+        #           导致 agent 评估可能在 tool 评估之前执行，浪费 Token 且无法快速失败。
+        # 修复方案: 按 MetricType 优先级排序：TOOL(1) → AGENT(2) → HUMAN(3)，
+        #           确保快速、零 Token 的工具评估优先执行。
+        _TYPE_PRIORITY = {
+            MetricType.TOOL: 1,
+            MetricType.AGENT: 2,
+            MetricType.HUMAN: 3,
+        }
+        metrics_to_run.sort(
+            key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
+        )
+
+        type_order = [m.metric_type.value for m in metrics_to_run]
+        logger.info(
+            "Evaluation order for task %s: %s (sorted by type priority)",
+            task_id, type_order,
+        )
+
         results: list[MetricResult] = []
         for metric_def in metrics_to_run:
             result = await self._evaluate_metric(
@@ -188,11 +207,21 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 同 evaluate() 一样按类型优先级排序
+        _TYPE_PRIORITY = {
+            MetricType.TOOL: 1,
+            MetricType.AGENT: 2,
+            MetricType.HUMAN: 3,
+        }
+        metrics = sorted(
+            metrics, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
+        )
+
         input_params = input_params or {}
         results: list[MetricResult] = []
 
         for metric_def in metrics:
-            # 合并全局输入参数和指标默认配置
             merged_params = {**metric_def.default_config, **input_params}
             result = await self._evaluate_metric(
                 metric_def=metric_def,

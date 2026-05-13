@@ -239,6 +239,8 @@ system_prompt: |
 
   **重要原则：门禁通过 task_submit 附带评估指标实现，由系统在子任务完成时自动判定，编排 Agent 禁止自行判定门禁通过/失败。**
 
+  **⚠️ file_check 路径约束**：file_check 的 path 必须写具体的文件路径（如 `tests/test_login.py`）。
+
   ### 路径 A（编码开发）的门禁
 
   **A1 编码质量**：code_writer_agent 提交时附带

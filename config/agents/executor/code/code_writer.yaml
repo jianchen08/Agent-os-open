@@ -197,11 +197,10 @@ deliverables:
 recommended_metrics:
   - metric_id: file_check
     default_params:
-      action: "read"
-      path: "src/module/file.py"
+      path: "{{output_file}}"
   - metric_id: format_valid
     default_params:
-      path: "src/module/file.py"
+      path: "{{output_file}}"
       type: "python"
 
 # 运行配置

@@ -12,7 +12,6 @@
  *          如果真的 60 秒无任何事件，超时是合理的。
  */
 
-
 /** 超时间隔常量（60秒） */
 export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
 
@@ -44,7 +43,38 @@ interface PendingStreamEntry {
 const _pendingStreamMap: Map<string, PendingStreamEntry> = new Map()
 
 /**
+ * 超时回调类型：超时触发时通知上层进行状态清理
+ */
+type ChunkTimeoutCallback = (data: { pipelineId: string; messageId: string }) => void
+
+/**
+ * 超时回调注册表（由 streaming/index.ts 注册）
+ *
+ * BUG-FIX-fix_20260513_chunk_timeout_cleanup:
+ * 问题根因: 超时后只打 console.debug，不通知上层，导致用户无反馈、streaming 状态残留。
+ * 修复方案: 通过回调注册机制，由 streaming handler 注册超时回调，统一处理状态清理。
+ * 影响范围: 流式响应超时后的用户体验
+ * 修复日期: 2026-05-13
+ */
+let _chunkTimeoutCallback: ChunkTimeoutCallback | null = null
+
+/**
+ * 注册超时回调（由 streaming/index.ts 调用）
+ *
+ * chunkTimeout 只负责超时检测和通知，不直接操作 store，保持职责分离。
+ */
+export function onChunkTimeout(callback: ChunkTimeoutCallback): void {
+  _chunkTimeoutCallback = callback
+}
+
+/**
  * pending stream 超时回调：后端长时间未响应
+ *
+ * BUG-FIX-fix_20260513_chunk_timeout_cleanup:
+ * 问题根因: 超时后只打 console.debug，不通知上层，导致用户无反馈、streaming 状态残留。
+ * 修复方案: 通过回调通知上层处理超时状态清理。
+ * 影响范围: 后端无响应时的用户体验
+ * 修复日期: 2026-05-13
  */
 function _onPendingStreamTimeout(pipelineId: string): void {
   const entry = _pendingStreamMap.get(pipelineId)
@@ -53,6 +83,8 @@ function _onPendingStreamTimeout(pipelineId: string): void {
   console.debug(
     `[chunkTimeout] pending stream 超时: pipelineId=${pipelineId}, 后端 ${PENDING_STREAM_TIMEOUT_MS / 1000}s 未发送 stream_start`,
   )
+  // 通知上层处理超时状态清理
+  _chunkTimeoutCallback?.({ pipelineId, messageId: '' })
 }
 
 /**
@@ -84,6 +116,12 @@ export function clearPendingStreamTimeout(pipelineId: string): void {
 
 /**
  * chunk 超时回调：标记流式响应中断
+ *
+ * BUG-FIX-fix_20260513_chunk_timeout_cleanup:
+ * 问题根因: 超时后只打 console.debug，不通知上层，导致用户无反馈、streaming 状态残留。
+ * 修复方案: 通过回调通知上层处理超时状态清理。
+ * 影响范围: 流式响应超时后的用户体验
+ * 修复日期: 2026-05-13
  */
 function _onChunkTimeout(pipelineId: string): void {
   const entry = _chunkTimeoutMap.get(pipelineId)
@@ -92,6 +130,8 @@ function _onChunkTimeout(pipelineId: string): void {
   console.debug(
     `[chunkTimeout] chunk 间隔超时: pipelineId=${pipelineId}, messageId=${entry.messageId}, ${CHUNK_INTERVAL_TIMEOUT_MS / 1000}s 未收到任何流式事件`,
   )
+  // 通知上层处理超时状态清理
+  _chunkTimeoutCallback?.({ pipelineId, messageId: entry.messageId })
 }
 
 /**

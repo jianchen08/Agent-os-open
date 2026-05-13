@@ -133,7 +133,11 @@ class IsolationExecutor:
                 state, tool_name, tool_args, timeout,
             )
 
-        # host 模式：直接调用工具函数
+        # host 模式：注入隔离上下文信息，让工具感知当前隔离级别
+        if tool_args.get("_isolation_provider") is None:
+            tool_args = dict(tool_args)
+            tool_args["_isolation_provider"] = provider
+
         return await self._execute_on_host(tool_name, tool_args, tool_func, timeout)
 
     async def cleanup_task(self, task_id: str, success: bool = True) -> None:

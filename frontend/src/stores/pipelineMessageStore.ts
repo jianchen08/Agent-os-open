@@ -255,6 +255,14 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       }
 
       if (messageIndex < 0) {
+        // BUG-FIX-fix_20260513_update_message_silent_swallow:
+        // 问题根因: updateMessage 找不到消息时静默返回原 state，不报错不日志，导致消息更新丢失但无法排查。
+        // 修复方案: 打印 warn 日志，包含 pipelineId 和 messageId 以便排查。
+        // 影响范围: 所有通过 updateMessage 更新消息的场景
+        logger.warn(
+          `[updateMessage] message not found: pipelineId=%s messageId=%s totalMsgs=%d`,
+          pipelineId?.slice(0, 12), messageId?.slice(0, 12), pipelineMessages.length,
+        )
         return state
       }
 
@@ -567,10 +575,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         const threadId = options?.threadId || sessionFallback || pipelineId
         const pipelineMeta = get().pipelines[pipelineId]
         const isSubPipeline = pipelineMeta && pipelineMeta.level > 1
+        // BUG-FIX-fix_20260513_reconnect_msg_compensation:
+        // 问题根因: apiGetMessages 调用缺少 after_sequence 参数，导致断线补漏时
+        //          API 无法知道从哪条消息之后开始返回，返回全量消息。
+        // 修复方案: 将 after_sequence 一并传递给 API，确保只获取断线期间的新消息。
+        // 影响范围: WebSocket 断线重连后的消息补漏
+        // 修复日期: 2026-05-13
         const apiResult = await retry(
           () => apiGetMessages(threadId, {
             limit,
             before_sequence: options?.before_sequence,
+            after_sequence: options?.after_sequence,
             pipelineRunId: isSubPipeline ? pipelineId : undefined,
           }),
           {

@@ -42,7 +42,7 @@ system_prompt: |
 
   5. 通过 task_submit 将子方向并行提交给 research_agent
      - 每个 task 的 goal 中包含：research_goal、research_questions、scope
-     - 每个 task 设置合适的验收标准（file_check 检查报告产出）
+     - 每个 task 设置合适的验收标准（file_check 检查报告产出，path 必须写具体文件路径）
   6. 提交后等待系统通知，收到通知后使用 task_manage 查看结果
 
   ### 阶段三：整合

@@ -101,13 +101,22 @@ class GlobalWebSocketService {
         clearTimeout(this._connectionTimeoutTimer)
         this._connectionTimeoutTimer = null
       }
-      console.log('[GlobalWS] connected')
+      // BUG-FIX-fix_20260513_reconnect_msg_compensation:
+      // 问题根因: 重连成功后没有通知上层模块，断线期间的 streaming 消息永远停留在 streaming 状态。
+      // 修复方案: 区分首次连接与重连，重连时额外 emit 'reconnected' 事件，由 streaming handler 处理补漏。
+      // 影响范围: WebSocket 断线重连后的消息完整性
+      // 修复日期: 2026-05-13
+      const isReconnect = this._reconnectAttempts > 0
+      console.log('[GlobalWS] connected', isReconnect ? '(reconnect)' : '')
       this._status = 'connected'
       this._reconnectAttempts = 0
       this._flushQueue()
       this._startHeartbeat()
       this._emit('_status', { status: 'connected' })
       this._emit('connect', { status: 'connected' })
+      if (isReconnect) {
+        this._emit('reconnected', { status: 'connected' })
+      }
       useLayoutModeStore.getState().updateConnectionStatus({
         state: 'connected',
         lastConnectedAt: new Date().toISOString(),

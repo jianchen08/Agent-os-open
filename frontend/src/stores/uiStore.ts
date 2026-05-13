@@ -43,6 +43,8 @@ interface UIState {
   taskPanelCollapsed: boolean
   /** 工作区面板是否折叠 */
   workspaceCollapsed: boolean
+  /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
+  messageSearchQuery: string
 }
 
 interface UIActions {
@@ -66,6 +68,8 @@ interface UIActions {
   toggleWorkspace: () => void
   /** 设置工作区面板状态 */
   setWorkspaceCollapsed: (collapsed: boolean) => void
+  /** 设置消息搜索关键词 */
+  setMessageSearchQuery: (query: string) => void
   /** 初始化 UI 状态（从 localStorage 恢复） */
   initializeUI: () => void
 }
@@ -85,6 +89,7 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   ),
   taskPanelCollapsed: loadCollapsedState(uiStorage.getTaskPanelCollapsed, false),
   workspaceCollapsed: loadCollapsedState(uiStorage.getWorkspaceCollapsed, false),
+  messageSearchQuery: '',
 
   /**
    * 切换侧边栏折叠状态
@@ -195,5 +200,8 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setWorkspaceCollapsed: (collapsed: boolean) => {
     uiStorage.setWorkspaceCollapsed(collapsed)
     set({ workspaceCollapsed: collapsed })
+  },
+  setMessageSearchQuery: (query: string) => {
+    set({ messageSearchQuery: query })
   },
 }))

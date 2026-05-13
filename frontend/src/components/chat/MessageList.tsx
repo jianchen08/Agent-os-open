@@ -284,7 +284,10 @@ export const MessageList = ({
         itemContent={renderItem}
         computeItemKey={(index) => {
           const msg = messages[index]
-          return msg?.id ? `${msg.id}-${msg.role}` : `msg-${index}`
+          // BUG-FIX-fix_20260513_virtuoso_key_conflict:
+          // 问题根因: 仅用 msg.id-role 作为 key，合并消息的 id 可能与原始消息冲突，
+          //          导致 Virtuoso 复用错误的 DOM 节点。加入 index 确保位置唯一性。
+          return msg?.id ? `${msg.id}-${msg.role}-${index}` : `msg-${index}`
         }}
         onScroll={(e) => {
           const target = e.target as HTMLElement

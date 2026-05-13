@@ -7,6 +7,12 @@
 
 import { API_BASE_URL } from './api'
 
+export enum WebSocketStatus {
+  DISCONNECTED = 'disconnected',
+  CONNECTING = 'connecting',
+  CONNECTED = 'connected',
+}
+
 /**
  * 从 API_BASE_URL 派生 WebSocket URL
  * http://localhost:8888 -> ws://localhost:8888

@@ -151,7 +151,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 ⚠️ Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本，仅在重要任务（涉及核心功能、影响项目质量、用户明确要求质量）中使用。简单任务仅用 tool 类指标（file_check、format_valid 等）即可。
 
 【常用评估指标】
-- file_check: 文件存在性检查。input_params: {"path": "文件路径"}
+- file_check: 文件存在性检查。input_params: {"path": "具体文件路径（如 tests/test_login.py，禁止传目录如 tests/）"}
 - format_valid: 格式验证。input_params: {"path": "文件路径"} 或 {"data": "数据内容"}
 - semantic_check: 质量评估（调用 LLM，慎用）。input_params: {"criteria": "评估要求描述（自然语言）"} 或 {}（不传参数，评估Agent根据任务目标自动评估）
 - function_verify: 功能验证（调用 LLM，慎用）。input_params: {"requirement": "需求描述", "implementation": "实现代码"}
@@ -165,7 +165,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                             "properties": {
                                 "input_params": {
                                     "type": "object",
-                                    "description": '传递给评估工具的参数。例如 file_check 需要 {"path": "src/main.py"}，可选 action 参数指定操作类型',
+                                    "description": '传递给评估工具的参数。例如 file_check 需要 {"path": "具体文件路径（如 src/main.py）"}',
                                 },
                                 "expected_output": {
                                     "type": "object",

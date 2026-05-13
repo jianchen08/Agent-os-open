@@ -44,12 +44,6 @@ from src.orchestration.types import (
     TaskResult,
 )
 
-# TaskClient 和 TaskClientFactory 延迟导入以避免循环依赖
-# 使用: from src.orchestration.task_client import TaskClient, TaskClientFactory
-
-# AgentExecutor 延迟导入以避免循环依赖（依赖 src.agents.loop）
-# 使用: from src.orchestration.agent_executor import AgentExecutor, get_global_executor
-
 __all__ = [
     "AgentLevel",
     "TaskPriority",
@@ -98,14 +92,4 @@ def get_scheduler():
     return get_global_scheduler()
 
 
-def __getattr__(name: str):
-    """延迟导入 AgentExecutor 和 get_global_executor 以避免循环依赖"""
-    if name == "AgentExecutor":
-        from src.orchestration.agent_executor import AgentExecutor
 
-        return AgentExecutor
-    if name == "get_global_executor":
-        from src.orchestration.agent_executor import get_global_executor
-
-        return get_global_executor
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -50,7 +50,7 @@ system_prompt: |
   在开始任何验证工作之前，先评估当前可用工具能否覆盖本次验证需求：
 
   1. **梳理验证内容类型**：根据需求描述，识别需要验证的功能涉及哪些类型（后端API、前端UI、数据库、文件系统、CLI命令等）
-  2. **审查工具覆盖范围**：对照可用工具列表（file_read、bash_execute、fetch、playwright_test 等），逐项检查每种验证内容是否有合适的工具支撑
+  2. **审查工具覆盖范围**：对照可用工具列表（file_read、file_write、bash_execute、fetch、playwright_test 等），逐项检查每种验证内容是否有合适的工具支撑
   3. **识别工具缺口**：如果某些验证内容没有合适的工具：
      - 在验证输出中明确记录：哪些内容**无法验证**，原因是什么
      - 说明需要什么工具才能补上这些验证能力
@@ -194,6 +194,7 @@ system_prompt: |
 
 tool_ids:
   - file_read
+  - file_write
   - bash_execute
   - enhanced_search
   - fetch

@@ -2,9 +2,12 @@
  * 工具调用事件处理器（start / result）
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { loggers } from '@/utils/logger'
 
 import { resetChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
+
+const _debugLogger = loggers.websocket
 
 /**
  * 处理工具调用开始事件
@@ -85,7 +88,16 @@ export function handleToolStart(eventData: any) {
  */
 export function handleToolResult(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) return
+  if (!pipelineId) {
+    // BUG-FIX-fix_20260513_pipeline_id_silent_drop: tool_result 缺少 pipeline_id 时记录 warn
+    _debugLogger.warn(
+      `[TOOL_RESULT] pipeline_id missing, _threadId=%s msgId=%s tool=%s`,
+      eventData._threadId?.slice(0, 12),
+      (eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id)?.slice(0, 12),
+      eventData.tool_name || eventData.data?.tool_name,
+    )
+    return
+  }
   const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
   if (!messageId) return

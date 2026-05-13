@@ -18,7 +18,19 @@ const _debugLogger = loggers.websocket
  * 处理流式开始事件
  */
 export function handleStreamStart(eventData: any) {
-  const pipelineId = resolvePipelineId(eventData)
+  let pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    // BUG-FIX-fix_20260513_pipeline_id_silent_drop:
+    // 问题根因: 后端事件缺少 pipeline_id 时，resolvePipelineId 返回 null，handler 直接 return 不报错不打日志。
+    // 修复方案: 打印 warn 日志，尝试用 _threadId 作为 fallback。
+    // 影响范围: 所有缺少 pipeline_id 的流式开始事件
+    _debugLogger.warn(
+      `[STREAM_START] pipeline_id missing, trying _threadId fallback: _threadId=%s msgId=%s`,
+      eventData._threadId?.slice(0, 12),
+      (eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id)?.slice(0, 12),
+    )
+    pipelineId = eventData._threadId || null
+  }
   const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   if (!pipelineId || !messageId) return
 
@@ -55,21 +67,55 @@ export function handleStreamStart(eventData: any) {
  * 处理流式块事件
  */
 export function handleStreamChunk(eventData: any) {
-  const pipelineId = resolvePipelineId(eventData)
+  let pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    // BUG-FIX-fix_20260513_pipeline_id_silent_drop:
+    // 问题根因: 同 handleStreamStart，chunk 事件缺少 pipeline_id 时被静默丢弃。
+    // 修复方案: 打印 warn 日志，尝试用 _threadId 作为 fallback。
+    // 影响范围: 所有缺少 pipeline_id 的流式块事件
+    _debugLogger.warn(
+      `[STREAM_CHUNK] pipeline_id missing, trying _threadId fallback: _threadId=%s`,
+      eventData._threadId?.slice(0, 12),
+    )
+    pipelineId = eventData._threadId || null
+  }
   if (!pipelineId) return
   const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   const content = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId) return
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
+  let msgs = pipelineStore.getState().getMessages(pipelineId)
+  let msg = msgs.find((m: any) => m.id === messageId)
 
   if (!msg) {
+    // BUG-FIX-fix_20260513_chunk_without_start:
+    // 问题根因: PipelineStreamBridge (子管道) 通过 TargetedSink 发送的 stream_start
+    // 可能因 WebSocket 竞争或连接状态问题丢失，但后续 stream_chunk 正常到达。
+    // 导致消息占位符从未被创建，所有 chunk 被静默丢弃。
+    // 修复方案: 收到 chunk 时如果消息不存在，自动创建占位符（和 handleStreamStart 相同逻辑）。
+    // 影响范围: 所有子管道流式消息的显示
     _debugLogger.warn(
-      `[STREAM_CHUNK] msg not found: pipeline=%s msgId=%s totalMsgs=%d`,
+      `[STREAM_CHUNK] msg not found, auto-creating placeholder: pipeline=%s msgId=%s totalMsgs=%d`,
       pipelineId?.slice(0, 12), messageId?.slice(0, 12), msgs.length,
     )
-    return
+    pipelineStore.getState().startStreaming(pipelineId, messageId)
+    useStreamingStore.getState().setStreamingForTab(pipelineId, true)
+    const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
+    const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1
+    pipelineStore.getState().addMessage(pipelineId, {
+      id: messageId,
+      sessionId: eventData._threadId || '',
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+      parentId: null,
+      sequence: nextSeq,
+      status: 'streaming',
+      contentBlocks: [],
+    } as any)
+    msgs = pipelineStore.getState().getMessages(pipelineId)
+    msg = msgs.find((m: any) => m.id === messageId)
+    if (!msg) return
   }
 
   if ((msg as any).thinking?.isThinking) {
@@ -112,7 +158,18 @@ export function handleStreamEnd(eventData: any) {
     useStreamingStore.getState().setStreamingForTab(threadId, false)
   }
 
-  if (!pipelineId) return
+  if (!pipelineId) {
+    // BUG-FIX-fix_20260513_pipeline_id_silent_drop:
+    // 问题根因: end 事件缺少 pipeline_id 时被静默丢弃。
+    // 修复方案: 打印 warn 日志。
+    // 影响范围: 所有缺少 pipeline_id 的流式结束事件
+    _debugLogger.warn(
+      `[STREAM_END] pipeline_id missing, _threadId=%s msgId=%s`,
+      eventData._threadId?.slice(0, 12),
+      (eventData?.message_id || eventData?.data?.message_id)?.slice(0, 12),
+    )
+    return
+  }
 
   const usage = eventData?.usage || eventData?.data?.usage
   if (usage && typeof usage === 'object') {

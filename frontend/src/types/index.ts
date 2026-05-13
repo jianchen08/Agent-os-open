@@ -52,20 +52,6 @@ export type {
   ToolListResponse,
 } from './tool'
 
-// 导出 Agent 执行类型
-export type {
-  AgentExecution,
-  EvaluationResult,
-  ExecutionDetails,
-  ExecutionListResponse,
-  ExecutionStatus,
-  ExecutionStatusUpdateMessage,
-  ExecutionSummary,
-  ExecutionTraceItem,
-  SubAgentInputRequestMessage,
-  UserInputRequest,
-} from './agent-execution'
-
 // 导出主题类型
 export type {
   BackgroundConfig,

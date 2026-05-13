@@ -104,6 +104,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
   const toggleSidebar = useUIStore((state) => state.toggleSidebar)
+  const messageSearchQuery = useUIStore((state) => state.messageSearchQuery)
+  const setMessageSearchQuery = useUIStore((state) => state.setMessageSearchQuery)
 
   // Agent 数据统一在这里加载
   const fetchAgents = useAgentStore((state) => state.fetchAgents)
@@ -473,6 +475,30 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 className="sidebar-search"
                 inputClassName={SIDEBAR_STYLES.searchHeight}
               />
+              {/* 消息搜索框 */}
+              <div className="relative mt-1">
+                <Search className="text-muted-foreground absolute top-1/2 left-2 h-3.5 w-3.5 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="搜索消息内容..."
+                  value={messageSearchQuery}
+                  onChange={(e) => setMessageSearchQuery(e.target.value)}
+                  className={cn(
+                    'bg-muted/50 border-border/50 focus:border-primary w-full rounded-md border py-1 pr-7 pl-7 text-xs outline-none transition-colors',
+                    SIDEBAR_STYLES.searchHeight,
+                  )}
+                  aria-label="搜索消息内容"
+                />
+                {messageSearchQuery && (
+                  <button
+                    onClick={() => setMessageSearchQuery('')}
+                    className="text-muted-foreground hover:text-foreground absolute top-1/2 right-1.5 -translate-y-1/2 rounded p-0.5"
+                    aria-label="清除消息搜索"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* 会话列表 - Requirements: 9.3, 9.4 */}

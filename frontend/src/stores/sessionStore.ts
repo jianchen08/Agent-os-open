@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { WebSocketStatus } from '@/services/websocket/WebSocketService'
+import { WebSocketStatus } from '@/constants/websocket'
 import { loggers } from '@/utils/logger'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import type { Message, Session } from '@/types/models'

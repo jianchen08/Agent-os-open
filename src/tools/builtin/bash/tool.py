@@ -314,16 +314,19 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_COMMAND",
             )
 
-        # 安全检查
-        is_safe, needs_warning, message = self.security.check(command)
-        if not is_safe:
-            return create_failure_result(
-                error=f"安全检查失败: {message}",
-                error_code="SECURITY_CHECK_FAILED",
-            )
-
-        # 如果需要警告，记录但不阻止
-        warning = message if needs_warning else None
+        # 安全检查：容器隔离模式下跳过内部安全检查
+        # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为
+        # 安全检查由管道层 SecurityCheckPlugin 和 ApprovalDecisionEngine 统一处理
+        warning = None
+        is_isolated = inputs.get("_isolation_provider") in ("docker", "container")
+        if not is_isolated:
+            is_safe, needs_warning, message = self.security.check(command)
+            if not is_safe:
+                return create_failure_result(
+                    error=f"安全检查失败: {message}",
+                    error_code="SECURITY_CHECK_FAILED",
+                )
+            warning = message if needs_warning else None
 
         timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
         wd = self.get_working_dir(inputs)

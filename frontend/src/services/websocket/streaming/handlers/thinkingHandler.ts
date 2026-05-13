@@ -2,10 +2,13 @@
  * 思考事件处理器（start / chunk / end）
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { loggers } from '@/utils/logger'
 
 import { resetChunkTimeout } from '../chunkTimeout'
 import { appendThinkingChunk, endThinkingBlock } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
+
+const _debugLogger = loggers.websocket
 
 /**
  * 处理思考开始事件
@@ -38,7 +41,15 @@ export function handleThinkingStart(eventData: any) {
  */
 export function handleThinkingChunk(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) return
+  if (!pipelineId) {
+    // BUG-FIX-fix_20260513_pipeline_id_silent_drop: thinking_chunk 缺少 pipeline_id 时记录 warn
+    _debugLogger.warn(
+      `[THINKING_CHUNK] pipeline_id missing, _threadId=%s msgId=%s`,
+      eventData._threadId?.slice(0, 12),
+      (eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id)?.slice(0, 12),
+    )
+    return
+  }
   const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   const chunk = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId || !chunk) return

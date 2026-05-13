@@ -195,6 +195,16 @@ task_manage_schema: dict[str, Any] = {
             "type": "string",
             "description": "容器操作原因（complete_container/fail_container 操作时填写）",
         },
+        "show_all": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "是否显示当前会话的所有任务（含子任务的子任务）。"
+                "默认 false，L1 只显示自己提交的任务。"
+                "设为 true 时递归展示当前会话中所有层级的任务。"
+                "仅 list/status 操作、L1 生效。"
+            ),
+        },
     },
     "required": ["action"],
 }
@@ -308,6 +318,9 @@ def _action_get(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
 def _action_list(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """按状态列出任务。
 
+    L1 默认只显示自己提交的任务（submitted_by_level == 1 或无此字段的顶层任务）。
+    L2+ 只显示自己提交的子任务。
+
     Args:
         task_service: TaskService 实例
         params: 工具参数，可选含 status_filter
@@ -316,6 +329,8 @@ def _action_list(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         包含任务列表的字典
     """
     from tasks.types import TaskStatus
+
+    parent_agent_level = params.get("parent_agent_level", 1)
 
     status_filter = params.get("status_filter")
     if status_filter:
@@ -329,10 +344,24 @@ def _action_list(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
             }
         tasks = task_service.list_by_status(status)
     else:
-        # 列出所有状态的任务
         tasks = []
         for status in TaskStatus:
             tasks.extend(task_service.list_by_status(status))
+
+    # 按层级过滤
+    if parent_agent_level == 1:
+        session_id = params.get("session_id")
+        show_all = params.get("show_all", False)
+        filtered = []
+        for t in tasks:
+            if session_id and (t.metadata or {}).get("session_id") != session_id:
+                continue
+            if not show_all:
+                submitted_by = (t.metadata or {}).get("submitted_by_level")
+                if submitted_by is not None and submitted_by != 1:
+                    continue
+            filtered.append(t)
+        tasks = filtered
 
     return {
         "success": True,
@@ -375,7 +404,7 @@ def _action_status(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _action_pause(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def _action_pause(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """暂停任务（running → paused）。
 
     Args:
@@ -426,7 +455,7 @@ def _action_pause(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def _action_resume(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def _action_resume(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """恢复任务（paused → running）。
 
     Args:
@@ -506,7 +535,7 @@ def _cancel_running_pipeline(task_id: str) -> None:
         )
 
 
-def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """取消任务（→ failed）。
 
     将任务标记为失败并记录取消原因。
@@ -590,11 +619,11 @@ def _check_manage_permission(
     task: Any,
     params: dict[str, Any],
 ) -> tuple[bool, str | None]:
-    """校验任务管理权限：只能管理自己提交的任务。
+    """校验任务管理权限。
 
-    通过 metadata.submitted_by_level 判断提交者层级，
-    与当前调用者的 parent_agent_level 匹配。
-    旧任务没有 submitted_by_level 时回退到 session_id/parent_task_id 校验。
+    L1 主 Agent 可管理当前会话的所有任务（含子任务的子任务），
+    仅按 session_id 隔离，不检查 submitted_by_level。
+    L2+ 只能管理自己提交的任务（通过 submitted_by_level / parent_task_id 校验）。
 
     Args:
         task: TaskModel 实例
@@ -604,6 +633,13 @@ def _check_manage_permission(
         (是否有权限, 错误消息)
     """
     parent_agent_level = params.get("parent_agent_level", 1)
+
+    if parent_agent_level == 1:
+        session_id = params.get("session_id")
+        if session_id and (task.metadata or {}).get("session_id") != session_id:
+            return False, "任务不属于当前会话"
+        return True, None
+
     submitted_by = (task.metadata or {}).get("submitted_by_level")
 
     if submitted_by is not None:
@@ -614,11 +650,7 @@ def _check_manage_permission(
                 f"请联系提交者自行处理"
             )
     else:
-        if parent_agent_level == 1:
-            session_id = params.get("session_id")
-            if session_id and (task.metadata or {}).get("session_id") != session_id:
-                return False, "任务不属于当前会话"
-        elif parent_agent_level >= 2:
+        if parent_agent_level >= 2:
             parent_task_id = params.get("parent_task_id")
             if not parent_task_id or task.parent_task_id != parent_task_id:
                 return False, "只能管理自己提交的子任务"
@@ -704,7 +736,7 @@ async def _start_task_and_emit(
     return updated_task
 
 
-def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """重试失败任务（failed → running）。
 
     将 failed 状态的任务重新启动。当前状态机不支持
@@ -773,7 +805,7 @@ def _action_retry(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": f"重试失败: {exc}", "error_code": "RETRY_FAILED"}
 
 
-def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def _action_reactivate(task_service: Any, params: dict[str, Any]) -> dict[str, Any]:
     """重新激活已完成任务（completed → running），携带追加需求。
 
     与 retry 的区别：

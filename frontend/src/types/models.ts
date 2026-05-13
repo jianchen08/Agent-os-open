@@ -244,6 +244,8 @@ export interface Message {
    * 第二轮 thinking[splitLength:] 关联到 tool_call 后的文本。
    */
   _thinkingSplitLength?: number
+  /** 合并前的原始消息 ID 列表（合并连续 assistant 消息时填充） */
+  _originalIds?: string[]
   /** 工具调用列表（AI 消息可选，旧模式） */
   toolCalls?: MessageToolCall[]
   /** 有序内容块列表（新模式，按 sequence 顺序排列，优先于 content + toolCalls） */
