@@ -22,7 +22,7 @@ import { resolvePipelineId } from '../router'
 export function handleToolStart(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = eventData.message_id || eventData.data?.message_id
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
   if (!messageId) return
 
@@ -86,7 +86,7 @@ export function handleToolStart(eventData: any) {
 export function handleToolResult(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = eventData.message_id || eventData.data?.message_id
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
   if (!messageId) return
 

@@ -20,7 +20,7 @@ import {
   Star,
   Trash2,
 } from 'lucide-react'
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -281,19 +281,16 @@ export const SessionList = memo<SessionListProps>(
     const deleteTargetTitle =
       sessions.find((s) => s.id === deleteConfirmId)?.title || '此会话'
 
-    /** 按 updatedAt 降序排序的比较函数 */
-    const sortByUpdatedAt = (a: Session, b: Session): number =>
-      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    /** 使用 useMemo 缓存排序计算，避免每次渲染重复执行 filter + sort */
+    const { pinnedSessions, normalSessions } = useMemo(() => {
+      const sortByUpdatedAt = (a: Session, b: Session): number =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
 
-    /** 置顶会话列表（按 updatedAt 降序） */
-    const pinnedSessions = sessions
-      .filter((s) => s.pinned)
-      .sort(sortByUpdatedAt)
-
-    /** 普通会话列表（按 updatedAt 降序） */
-    const normalSessions = sessions
-      .filter((s) => !s.pinned)
-      .sort(sortByUpdatedAt)
+      return {
+        pinnedSessions: sessions.filter((s) => s.pinned).sort(sortByUpdatedAt),
+        normalSessions: sessions.filter((s) => !s.pinned).sort(sortByUpdatedAt),
+      }
+    }, [sessions])
 
     /** 是否存在置顶会话 */
     const hasPinned = pinnedSessions.length > 0

@@ -196,7 +196,7 @@ function HomePage(): ReactNode {
     connectWebSocket,
     disconnectWebSocket,
   } = useSessionStore()
-  const { fetchSessions, createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession } = useSessionListStore()
+  const { createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession, fetchSessions } = useSessionListStore()
   const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
 
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */

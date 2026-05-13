@@ -378,28 +378,13 @@ export async function updateSessionAgent(
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
-    const response = await apiClient.patch<{
-      thread_id: string
-      agent_id: string | null
-      updated_at: string
-    }>(API_ENDPOINTS.THREADS.UPDATE_AGENT(sessionId), { agent_id: agentId })
-
-    // 获取更新后的会话详情
-    const detailResponse = await apiClient.get<ThreadUpdateResponse>(
-      API_ENDPOINTS.THREADS.GET(sessionId),
+    // PATCH 现在返回完整的 ThreadResponse，无需二次 GET
+    const response = await apiClient.patch<ThreadStateResponse>(
+      API_ENDPOINTS.THREADS.UPDATE_AGENT(sessionId),
+      { agent_id: agentId },
     )
 
-    // 将更新响应转换为ThreadStateResponse格式，然后映射为Session
-    const threadState: ThreadStateResponse = {
-      thread_id: detailResponse.data.thread_id || sessionId,
-      current_state: detailResponse.data.current_state,
-      intent: detailResponse.data.intent,
-      created_at: detailResponse.data.created_at,
-      updated_at: detailResponse.data.updated_at,
-      agent_id: response.data.agent_id || null,
-    }
-
-    return mapThreadToSession(threadState)
+    return mapThreadToSession(response.data)
   }, options)
 }
 

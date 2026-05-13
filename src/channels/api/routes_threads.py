@@ -390,6 +390,7 @@ def _recover_threads_from_pipelines(user_id: str) -> None:
             "updated_at": now_str,
         }
         store.threads[tid] = thread
+        store._add_thread_to_index(user_id, tid)
         store.sessions[tid] = SessionModel(
             session_id=tid,
             channel_type="web",
@@ -975,8 +976,6 @@ def list_messages(
         session.pipeline_ids if session else "N/A",
     )
 
-    session = store.get_session(thread_id)
-
     # 确定要查询的 pipeline_ids：优先使用已有值，否则尝试从 YAML 文件恢复
     pipeline_ids: list[str] = []
     if session and session.pipeline_ids:
@@ -1151,14 +1150,19 @@ def get_thread_history(
 
 @router.patch(
     "/{thread_id}/agent",
+    response_model=ThreadResponse,
     summary="更新会话绑定的Agent",
 )
 def update_thread_agent(
     thread_id: str,
     body: dict,
     _user: dict = Depends(require_auth),
-) -> dict:
-    """更新会话绑定的Agent。"""
+) -> ThreadResponse:
+    """更新会话绑定的Agent，直接返回完整线程信息。
+
+    性能优化: PATCH 接口返回与 GET 线程详情相同的 ThreadResponse 格式，
+    前端无需在 PATCH 之后再发一次 GET 请求获取最新状态。
+    """
     thread = store.get_thread(thread_id)
     if thread is None:
         raise APIError(
@@ -1167,12 +1171,8 @@ def update_thread_agent(
             message="线程不存在",
         )
     agent_id = body.get("agent_id", "")
-    store.update_thread(thread_id, agent_id=agent_id)
-    return {
-        "thread_id": thread_id,
-        "agent_id": agent_id,
-        "message": "Agent 已更新",
-    }
+    updated_thread = store.update_thread(thread_id, agent_id=agent_id)
+    return _build_thread_response(updated_thread)
 
 
 @router.get(

@@ -39,8 +39,8 @@ export function handleThinkingStart(eventData: any) {
 export function handleThinkingChunk(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = eventData.message_id || eventData.data?.message_id
-  const chunk = eventData.content || eventData.data?.content || ''
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
+  const chunk = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId || !chunk) return
 
   resetChunkTimeout(pipelineId, messageId)
@@ -62,7 +62,7 @@ export function handleThinkingChunk(eventData: any) {
 export function handleThinkingEnd(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = eventData.message_id || eventData.data?.message_id
+  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
   if (!messageId) return
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)

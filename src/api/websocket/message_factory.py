@@ -39,12 +39,15 @@ class MessageFactory:
         Returns:
             标准格式的消息字典
         """
+        # BUG-FIX: 在 data 中自动注入 pipeline_id，默认回退到 thread_id
+        # 修复原因：前端 resolvePipelineId 依赖 data.pipeline_id 路由消息到正确的管道
+        enriched_data = {**data, "pipeline_id": data.get("pipeline_id", thread_id)}
         return {
             "type": message_type,
             "message_id": message_id or str(uuid.uuid4()),
             "thread_id": thread_id,
             "timestamp": timestamp or datetime.utcnow().isoformat(),
-            "data": data,
+            "data": enriched_data,
         }
 
     @staticmethod
@@ -153,10 +156,13 @@ class MessageFactory:
                 data["parent_message_id"] = parent_message_id
             if is_retry:
                 data["is_retry"] = is_retry
+            # BUG-FIX: 传递 message_id=ai_message_id，避免生成随机 UUID
+            # 导致前端创建重复的消息占位符
             return MessageFactory.create_message(
                 MessageTypes.STREAM_START,
                 thread_id,
                 data,
+                message_id=ai_message_id,
             )
         elif is_end:
             data = {
@@ -165,17 +171,20 @@ class MessageFactory:
             }
             if cancelled:
                 data["cancelled"] = cancelled
+            # BUG-FIX: 传递 message_id=ai_message_id，避免生成随机 UUID
             return MessageFactory.create_message(
                 MessageTypes.STREAM_END,
                 thread_id,
                 data,
+                message_id=ai_message_id,
             )
         else:
-            # 片段消息
+            # BUG-FIX: 片段消息同样传递 message_id=ai_message_id，保持一致性
             return MessageFactory.create_message(
                 MessageTypes.STREAM_CHUNK,
                 thread_id,
                 {"chunk": chunk or "", "ai_message_id": ai_message_id},
+                message_id=ai_message_id,
             )
 
     @staticmethod

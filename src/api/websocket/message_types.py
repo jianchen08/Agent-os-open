@@ -301,11 +301,15 @@ def create_standard_message(
     Returns:
         标准格式的消息字典
     """
+    # BUG-FIX: 在 data 中自动注入 pipeline_id，默认回退到 thread_id
+    # 修复原因：前端依赖 pipeline_id 追踪消息流，部分调用方未显式传递该字段
+    enriched_data = {**data, "pipeline_id": data.get("pipeline_id", thread_id)}
+
     message = {
         "type": message_type,
         "thread_id": thread_id,
         "timestamp": timestamp or datetime.utcnow().isoformat(),
-        "data": data,
+        "data": enriched_data,
     }
 
     if message_id:
