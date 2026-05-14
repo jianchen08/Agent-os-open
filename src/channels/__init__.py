@@ -3,7 +3,6 @@
 提供管道与外部系统之间的输入/输出适配层：
 - IInputAdapter: 输入适配器基类，接收外部请求
 - IOutputAdapter: 输出适配器基类，输出管道结果
-- WebSocketAdapter: WebSocket 通道适配器（M9）
 """
 
 from channels.input_adapter import IInputAdapter

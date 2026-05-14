@@ -1410,6 +1410,21 @@ class TaskWorker:
             _sub_pipeline_id = engine._pipeline_id
             _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
 
+            # BUG-FIX-fix_20260514_sub_pipeline_register: 注册子管道的 pipeline_id 到 _pipeline_thread_map
+            # 问题根因: 主管道的 pipeline_id 在 start_server.py 中通过 register_pipeline_thread 注册了映射,
+            #           但子管道（由 TaskWorker._execute_background_task 创建）的 pipeline_id 从未注册。
+            #           当子Agent创建的子子任务通过 parent_pipeline_id 查找 _pipeline_thread_map 时,
+            #           如果 parent_pipeline_id 指向子管道（而非最顶层管道），查找失败，消息被静默丢弃。
+            # 修复方案: 将子管道的 pipeline_id 也注册到 _pipeline_thread_map，映射到同一个 ws_thread_id。
+            # 影响范围: 子Agent任务状态实时推送到前端的功能
+            # 修复日期: 2026-05-14
+            if _notifier and _ws_thread_id and hasattr(_notifier, "register_pipeline_thread"):
+                _notifier.register_pipeline_thread(_sub_pipeline_id, _ws_thread_id)
+                logger.info(
+                    "TaskWorker: 注册子管道映射: sub_pipeline=%s ws_thread=%s",
+                    _sub_pipeline_id[:12], _ws_thread_id[:12],
+                )
+
             if _notifier and _ws_thread_id:
                 _sink = TargetedSink(_notifier, _ws_thread_id)
                 _bridge = PipelineStreamBridge(

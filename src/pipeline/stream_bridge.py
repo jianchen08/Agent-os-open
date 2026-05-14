@@ -1,13 +1,12 @@
 """管道流式事件桥接模块。
 
 将 engine 的 on_chunk 同步回调转换为前端 WebSocket 协议事件，
-通过 IOutputSink 抽象统一发送到 DirectWebSocketSink（主管道）或 TargetedSink（子管道）。
+通过 IOutputSink 抽象统一发送到 TargetedSink（按 thread_id 定向路由）。
 消除了 start_server.py 和 task_worker.py 中约 300 行重复的流式事件发送逻辑。
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -33,46 +32,6 @@ class IOutputSink(Protocol):
         """返回输出目标的唯一标识，用于日志和调试。"""
         ...
 
-
-class DirectWebSocketSink:
-    """直接 WebSocket 连接输出目标，包装单个 WebSocket 连接。"""
-
-    def __init__(self, websocket: Any) -> None:
-        """初始化 WebSocket 输出目标。
-
-        Args:
-            websocket: WebSocket 连接对象，需支持 send_text 方法
-        """
-        self._websocket = websocket
-        # 尝试获取 websocket 的唯一标识
-        self._sink_id = getattr(websocket, "client", None)
-        if self._sink_id is not None:
-            self._sink_id = str(self._sink_id)
-        else:
-            self._sink_id = f"ws-{id(websocket):#x}"
-
-    @property
-    def sink_id(self) -> str:
-        """返回 WebSocket 连接标识。"""
-        return self._sink_id
-
-    async def send_event(self, event: dict) -> bool:
-        """通过 WebSocket 发送 JSON 事件。
-
-        Args:
-            event: 要发送的事件字典
-
-        Returns:
-            发送成功返回 True，失败返回 False
-        """
-        try:
-            await asyncio.wait_for(
-                self._websocket.send_text(json.dumps(event, ensure_ascii=False, default=str)),
-                timeout=5.0,
-            )
-            return True
-        except (asyncio.TimeoutError, Exception):
-            return False
 
 
 class TargetedSink:

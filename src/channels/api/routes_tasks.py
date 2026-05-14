@@ -314,11 +314,18 @@ def update_task(
     "/{task_id}",
     summary="删除任务",
 )
-def delete_task(
+async def delete_task(
     task_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, str]:
-    """删除指定任务。
+    """删除指定任务，根据任务类型执行不同策略。
+
+    BUG-FIX-fix_20260514_task_delete_pipeline:
+    问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
+    修复方案:
+      - 容器任务: 软删除（标记取消，保留数据）
+      - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
+      - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
 
     Args:
         task_id: 任务 ID
@@ -329,13 +336,35 @@ def delete_task(
     Raises:
         APIError: 任务不存在 (404)
     """
-    deleted = store.delete_task(task_id)
-    if not deleted:
-        raise APIError(
-            status_code=404,
-            error_code="TASK_001",
-            message="任务不存在或已被删除",
-        )
+    task_service = _get_task_service()
+
+    if task_service is not None:
+        deleted = await task_service.delete_task(task_id)
+        if not deleted:
+            raise APIError(
+                status_code=404,
+                error_code="TASK_001",
+                message="任务不存在或已被删除",
+            )
+        task = task_service.get_task(task_id)
+        if task is not None and task.metadata.get("soft_deleted"):
+            logger.info(
+                "用户 %s 软删除容器任务 %s",
+                _user.get("username"), task_id,
+            )
+            return {"message": "容器任务已标记删除"}
+    else:
+        if not store.delete_task(task_id):
+            raise APIError(
+                status_code=404,
+                error_code="TASK_001",
+                message="任务不存在或已被删除",
+            )
+
+    logger.info(
+        "用户 %s 删除任务 %s",
+        _user.get("username"), task_id,
+    )
     return {"message": "任务已删除"}
 
 

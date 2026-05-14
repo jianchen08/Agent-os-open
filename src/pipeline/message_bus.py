@@ -261,6 +261,32 @@ async def _try_revive_pipeline(
     if agent_config is None and provider and task_id:
         agent_config = _load_agent_config(task_id, provider)
 
+    # BUG-FIX-fix_20260514_history_rebuild:
+    # 问题根因: agent_config 为 None 时（调用方未传入且 task_id 为空），
+    #   allow_default_fallback=False 会导致 engine.run() 直接抛出 ValueError，
+    #   管道复活永远失败。重启后通过 send_pipeline_message 路径发消息时
+    #   通常没有 task_id，因此 agent_config 始终为 None。
+    # 修复方案: 当 agent_config 为 None 时，尝试从 ServiceProvider 加载
+    #   默认 Agent 配置；如果仍为 None，将 allow_default_fallback 改为 True
+    #   让 engine.run() 内部回退到系统默认 Agent（灵汐）。
+    _allow_default_fallback = False
+    if agent_config is None:
+        try:
+            _agent_reg = provider.get("agent_registry") if provider else None
+            if _agent_reg:
+                for _candidate in ["default", "lingxi"]:
+                    agent_config = _agent_reg.get(_candidate)
+                    if agent_config:
+                        break
+        except Exception:
+            pass
+        if agent_config is None:
+            _allow_default_fallback = True
+            logger.info(
+                "[MessageBus] 管道复活无 agent_config，回退到系统默认: pipeline=%s",
+                pipeline_id[:12],
+            )
+
     try:
         from pipeline.engine import PipelineEngine
         from pipeline.route import InputRouteTable, OutputRouteTable
@@ -297,7 +323,7 @@ async def _try_revive_pipeline(
             task_id=task_id,
             workspace=workspace,
             project_root="",
-            allow_default_fallback=False,
+            allow_default_fallback=_allow_default_fallback,
             streaming=streaming,
             on_chunk=on_chunk or (lambda chunk: None),
         )

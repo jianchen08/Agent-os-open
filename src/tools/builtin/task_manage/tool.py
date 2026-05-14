@@ -570,13 +570,21 @@ async def _action_cancel(task_service: Any, params: dict[str, Any]) -> dict[str,
         # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
         task = await task_service.fail_task(task_id, error=reason)
         _cancel_running_pipeline(task_id)
-        logger.info("[task_manage] 任务已取消: %s — %s", task_id, reason)
-        return {
+
+        # BUG-FIX-fix_20260514_cancel_cascade:
+        # 级联取消所有子任务，避免子任务管道继续执行
+        cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
+
+        logger.info("[task_manage] 任务已取消: %s — %s (级联取消 %d 个子任务)", task_id, reason, cascaded)
+        result = {
             "success": True,
             "task_id": task.id,
             "status": task.status.value,
             "message": f"任务 {task_id} 已取消",
         }
+        if cascaded > 0:
+            result["cascaded_subtasks"] = cascaded
+        return result
     except KeyError:
         return {
             "success": False,

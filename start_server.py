@@ -590,6 +590,24 @@ def _init_pipeline_context() -> PipelineContext:
         _app = Application(project_root=_PROJECT_ROOT)
         services = _app.build_services(agent_registry=agent_registry)
 
+        # BUG-FIX-fix_20260514_spreg: 注册路由表和插件注册表到 ServiceProvider
+        # 问题根因: _try_revive_pipeline() 在管道被清理后尝试通过 ServiceProvider
+        #   获取 input_route_table / output_route_table / plugin_registry 来重建管道，
+        #   但这三个对象从未被注册到 ServiceProvider，导致 revive 始终失败。
+        # 修复方案: 在 build_services() 之后（ServiceProvider 已初始化）立即注册这三个对象。
+        # 影响范围: 管道 revive 机制、触发器唤醒功能。
+        # 修复日期: 2026-05-14
+        try:
+            from infrastructure.service_provider import get_service_provider
+
+            _provider = get_service_provider()
+            _provider.register("input_route_table", pipeline_config.input_route_table)
+            _provider.register("output_route_table", pipeline_config.output_route_table)
+            _provider.register("plugin_registry", plugin_registry)
+            logger.info("[STARTUP] 路由表和插件注册表已注册到 ServiceProvider")
+        except Exception as _exc:
+            logger.warning("注册路由表/插件注册表到 ServiceProvider 失败: %s", _exc)
+
         # 如果 ToolCore 存在，注册工具
         tool_core = plugin_registry.get_core("tool_execute")
         if tool_core is not None:
@@ -934,13 +952,49 @@ async def _stream_engine_response(
             except Exception as _exc:
                 logger.warning("写入管道 thread_id 失败: %s", _exc)
 
+    # BUG-FIX-fix_20260514_history_rebuild:
+    # 问题根因: 服务重启后 conversation_histories 为空（内存变量丢失），
+    #   conversation_history[:-1] 为空列表。虽然 engine.run() 内部的
+    #   resolve_conversation_history 会在 conversation_history 为空时
+    #   从 ExecutionRecordStorage 加载历史，但加载结果只存在于引擎内部
+    #   state["messages"] 中，不会回写到外部的 conversation_history 变量。
+    #   导致：1) 前端 conversation_histories 未恢复，后续消息无法累积历史；
+    #         2) 如果 engine.run() 内部加载失败（如 services 中缺少
+    #            execution_record_storage），历史完全丢失。
+    # 修复方案: 在调用 engine.run() 之前，检查 conversation_history[:-1]
+    #   是否为空（重启后首次消息的标志）。如果为空，主动从
+    #   ExecutionRecordStorage 加载历史并填充到 conversation_history，
+    #   确保外部变量和引擎内部都能获得完整历史。
+    # 影响范围: 服务重启后的首次消息发送、长时间未活动后的消息发送。
+    _history_for_engine = conversation_history[:-1]
+    if not _history_for_engine and ctx.services:
+        _exec_storage = ctx.services.get("execution_record_storage")
+        if _exec_storage is not None:
+            try:
+                from pipeline.state_builder import resolve_conversation_history
+                _resolved = resolve_conversation_history(
+                    None, pipeline_id, ctx.services,
+                )
+                if _resolved:
+                    conversation_history.clear()
+                    conversation_history.extend(_resolved)
+                    conversation_history.append({"role": "user", "content": user_content})
+                    _history_for_engine = conversation_history[:-1]
+                    logger.info(
+                        "[HistoryRebuild] 重启后从存储恢复 %d 条历史记录: "
+                        "pipeline=%s thread=%s",
+                        len(_resolved), pipeline_id[:12], thread_id[:12],
+                    )
+            except Exception as _exc:
+                logger.warning("[HistoryRebuild] 从存储恢复历史失败: %s", _exc)
+
     try:
         # 启动管道引擎（异步），通过 bridge.on_chunk 接收流式事件
         engine_task = asyncio.create_task(
             engine.run(
                 user_input=user_content,
                 agent_config=ctx.agent_config,
-                conversation_history=conversation_history[:-1],
+                conversation_history=_history_for_engine,
                 streaming=True,
                 on_chunk=bridge.on_chunk,
                 auto_approve=True,
@@ -1375,6 +1429,25 @@ def create_combined_app() -> FastAPI:
                                 )
                             )
                             _thread_stream_tasks[thread_id] = _stream_task
+                        continue
+
+                    # BUG-FIX-fix_20260514_running_race:
+                    # 问题根因: 引擎处于 running 状态时，没有专门的处理分支，
+                    # 代码直接落到 _pipeline_ctx.available 分支，创建新 bridge 并再次
+                    # 调用 engine.run()，导致两个 engine.run() 并发运行在同一个引擎
+                    # 实例上，共享内部状态互相干扰。新 bridge 的 drain_loop 发送了
+                    # stream_start，但后续 chunk 因引擎内部状态混乱而永远不到达，
+                    # 前端卡在 streaming 状态。
+                    # 修复方案: running 状态下不创建新 bridge 和 engine.run()，
+                    # 而是将用户消息注入到正在运行的引擎的 _pending_notifications 中，
+                    # 让引擎在下一轮迭代自动消费。不发 stream_start，直接 continue。
+                    if _ex_eng and _eng_st == "running":
+                        from pipeline.message_bus import _inject_notification_to_engine
+                        _inject_notification_to_engine(_ex_eng, _user_content)
+                        logger.info(
+                            "[GlobalWS] 主管道运行中，消息已注入: pipeline=%s thread=%s",
+                            _main_pid[:12], thread_id[:12],
+                        )
                         continue
 
                     if _pipeline_ctx and _pipeline_ctx.available:

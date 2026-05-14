@@ -1017,14 +1017,23 @@ class TaskTool(BuiltinTool):
             # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
             await service.fail_task(task_id, error=f"已取消: {reason}")
 
+            # BUG-FIX-fix_20260514_cancel_cascade:
+            # 级联取消所有子任务，避免子任务管道继续执行
+            self._cancel_pipeline_recursive(task_id)
+            cascaded = await service.cancel_task_cascade(task_id, reason=reason)
+
+            result_data = {
+                "task_id": task_id,
+                "cancelled": True,
+                "old_status": old_status,
+                "new_status": TaskStatus.FAILED.value,
+                "reason": reason,
+            }
+            if cascaded > 0:
+                result_data["cascaded_subtasks"] = cascaded
+
             return create_success_result(
-                data={
-                    "task_id": task_id,
-                    "cancelled": True,
-                    "old_status": old_status,
-                    "new_status": TaskStatus.FAILED.value,
-                    "reason": reason,
-                },
+                data=result_data,
                 metadata={"action": "cancel_task"},
             )
 
@@ -1271,9 +1280,14 @@ class TaskTool(BuiltinTool):
     async def _delete_task(
         self, inputs: dict[str, Any], parent_agent_level: int
     ) -> ToolExecutionResult:
-        """删除任务。
+        """删除任务，根据任务类型执行不同策略。
 
-        从存储中移除任务，并尝试清理容器和工作空间。
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
+        修复方案:
+          - 容器任务: 软删除（标记取消，保留数据）
+          - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
+          - 非容器任务(根任务): 取消管道 + 清理资源 + 清理工作空间 + 删除数据
 
         Args:
             inputs: 工具输入参数
@@ -1308,24 +1322,49 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            if task.metadata.get("task_scope") == "container":
-                return create_failure_result(
-                    error=f"容器任务不允许直接删除（task_id={task_id}），请使用 complete_container 或 fail_container 管理",
-                    error_code="CANNOT_DELETE_CONTAINER",
-                )
-
             reason = inputs.get("reason", "用户请求删除")
             old_status = task.status.value
             task_title = task.title
-            workspace = task.metadata.get("workspace")
 
-            # 清理关联资源
-            cleanup_results = await self._cleanup_task_resources(
-                task_id=task_id,
-                workspace=workspace,
-            )
+            if task.metadata.get("task_scope") == "container":
+                from tasks.types import TaskStatus
+                task.status = TaskStatus.FAILED
+                task.error = f"已取消: {reason}"
+                if task.metadata is None:
+                    task.metadata = {}
+                task.metadata["soft_deleted"] = True
+                await service.save_task(task)
+                # BUG-FIX-fix_20260514_cancel_cascade:
+                # 容器任务删除时级联取消子任务管道和状态
+                self._cancel_pipeline_recursive(task_id)
+                cascaded = await service.cancel_task_cascade(task_id, reason=reason)
+                result_data = {
+                    "task_id": task_id,
+                    "deleted": False,
+                    "soft_deleted": True,
+                    "old_status": old_status,
+                    "title": task_title,
+                    "reason": reason,
+                    "message": "容器任务已标记删除（软删除）",
+                }
+                if cascaded > 0:
+                    result_data["cascaded_subtasks"] = cascaded
+                return create_success_result(
+                    data=result_data,
+                    metadata={"action": "soft_delete_container"},
+                )
 
-            # 从存储中删除
+            is_child_of_container = self._is_child_of_container(service, task)
+
+            if not is_child_of_container:
+                workspace = task.metadata.get("workspace")
+                cleanup_results = await self._cleanup_task_resources(
+                    task_id=task_id,
+                    workspace=workspace,
+                )
+            else:
+                cleanup_results = {"skipped": "容器子任务不清理工作空间"}
+
             # BUG-FIX-fix_20260512_async_compat: delete_task 现在是 async
             await service.delete_task(task_id)
 
@@ -1526,6 +1565,58 @@ class TaskTool(BuiltinTool):
                 error=f"容器失败操作失败: {str(e)}",
                 error_code="CONTAINER_FAIL_FAILED",
             )
+
+    def _cancel_pipeline(self, task_id: str) -> None:
+        """取消任务关联的运行中管道（best-effort）。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        通过 TaskWorker.cancel_pipeline 强制取消 asyncio.Task，
+        在删除任务前确保管道停止执行。
+        """
+        try:
+            from infrastructure.service_provider import get_service_provider
+
+            provider = get_service_provider()
+            task_worker = provider.get("task_worker")
+            if task_worker is None:
+                return
+            cancelled = task_worker.cancel_pipeline(task_id)
+            if cancelled:
+                logger.info(
+                    "[TaskTool] 任务 %s 管道已取消", task_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "[TaskTool] 任务 %s 管道取消失败 (non-fatal): %s",
+                task_id, e,
+            )
+
+    def _cancel_pipeline_recursive(self, task_id: str) -> None:
+        """递归取消任务及其所有子任务的运行中管道。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        删除任务时需要同时取消所有下级子任务的管道，避免孤立管道继续执行。
+        """
+        service = self._get_task_service()
+        self._cancel_pipeline(task_id)
+        subtasks = service.list_subtasks(task_id)
+        for subtask in subtasks:
+            self._cancel_pipeline_recursive(subtask.id)
+
+    def _is_child_of_container(self, service: Any, task: Any) -> bool:
+        """判断非容器任务是否属于某个容器任务的子树。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        向上追溯 parent_task_id 链，检查根任务是否为 container 类型。
+        容器的子任务删除时不需要清理工作空间（工作空间由容器管理）。
+        """
+        root_id = service.get_root_task_id(task.id)
+        if root_id is None or root_id == task.id:
+            return False
+        root_task = service.get_task(root_id)
+        if root_task is None:
+            return False
+        return root_task.metadata.get("task_scope") == "container"
 
     async def _cleanup_task_resources(
         self,

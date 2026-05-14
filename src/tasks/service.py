@@ -34,7 +34,7 @@ class SimpleStateMachine:
         TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.RUNNING],
         TaskStatus.FAILED: [TaskStatus.PENDING],
         TaskStatus.COMPLETED: [TaskStatus.PENDING],
-        TaskStatus.PAUSED: [TaskStatus.PENDING, TaskStatus.RUNNING],
+        TaskStatus.PAUSED: [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED],
     }
 
     def can_transition(self, from_status: TaskStatus, to_status: TaskStatus) -> bool:
@@ -609,7 +609,14 @@ class TaskService:
         return task
 
     async def delete_task(self, task_id: str) -> bool:
-        """删除任务，并清理关联的 worktree。
+        """删除任务，根据任务类型执行不同的删除策略。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
+        修复方案:
+          - 容器任务: 软删除（标记取消，保留数据）
+          - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
+          - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
 
         Args:
             task_id: 任务 ID
@@ -620,7 +627,29 @@ class TaskService:
         task = self.get_task(task_id)
         if task is None:
             return False
-        self._cleanup_workspace(task_id)
+
+        if task.metadata.get("task_scope") == "container":
+            task.status = TaskStatus.FAILED
+            task.error = "已取消: 用户删除"
+            if task.metadata is None:
+                task.metadata = {}
+            task.metadata["soft_deleted"] = True
+            self._storage.save(task)
+            # BUG-FIX-fix_20260514_cancel_cascade:
+            # 容器任务删除时级联标记子任务为 failed
+            await self.cancel_task_cascade(task_id, reason="用户删除")
+            return True
+
+        is_child_of_container = self._is_child_of_container(task)
+
+        # BUG-FIX-fix_20260514_cancel_cascade:
+        # 非容器任务删除时级联标记子任务为 failed + 取消管道
+        self._cancel_pipeline_recursive(task_id)
+        await self.cancel_task_cascade(task_id, reason="用户删除")
+
+        if not is_child_of_container:
+            self._cleanup_workspace(task_id)
+
         self._storage.delete(task_id)
         return True
 
@@ -633,6 +662,103 @@ class TaskService:
         self._storage.save(task)
 
     # ── 清理 ─────────────────────────────────────────────
+
+    def _cancel_pipeline(self, task_id: str) -> None:
+        """取消任务关联的运行中管道（best-effort）。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        通过 TaskWorker.cancel_pipeline 强制取消 asyncio.Task，
+        触发 PipelineEngine 的 CancelledError，停止管道执行。
+        """
+        try:
+            from infrastructure.service_provider import get_service_provider
+
+            provider = get_service_provider()
+            task_worker = provider.get("task_worker")
+            if task_worker is None:
+                return
+            cancelled = task_worker.cancel_pipeline(task_id)
+            if cancelled:
+                logger.info("Task %s pipeline cancelled on delete", task_id)
+        except Exception as e:
+            logger.warning(
+                "Task %s pipeline cancel failed (non-fatal): %s",
+                task_id, e,
+            )
+
+    def _cancel_pipeline_recursive(self, task_id: str) -> None:
+        """递归取消任务及其所有子任务的运行中管道。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        删除任务时需要同时取消所有下级子任务的管道，避免孤立管道继续执行。
+        """
+        self._cancel_pipeline(task_id)
+        subtasks = self.list_subtasks(task_id)
+        for subtask in subtasks:
+            self._cancel_pipeline_recursive(subtask.id)
+
+    async def cancel_task_cascade(self, task_id: str, reason: str = "用户取消") -> int:
+        """级联取消子任务：将所有非终态子任务标记为 failed 并取消管道。
+
+        BUG-FIX-fix_20260514_cancel_cascade:
+        问题根因: cancel 操作只取消当前任务本身，不级联取消子任务，
+        导致子任务管道继续执行、状态不一致。
+        修复方案: 递归遍历子任务树，将非终态子任务标记为 failed 并取消管道，
+        跳过已完成/已失败的终态任务，但仍然递归其子树确保深层覆盖。
+
+        注意: 调用方应先完成主任务的 fail_task 和管道取消，
+        本方法只负责子任务树的级联处理。
+
+        Args:
+            task_id: 被取消的任务 ID（从其子任务开始级联）
+            reason: 取消原因
+
+        Returns:
+            被级联取消的子任务数量（不含 task_id 自身）
+        """
+        cascaded_count = 0
+        subtasks = self.list_subtasks(task_id)
+        terminal_statuses = {TaskStatus.COMPLETED, TaskStatus.FAILED}
+
+        for subtask in subtasks:
+            # BUG-FIX: 先递归子树，确保终态任务的后代也能被处理
+            cascaded_count += await self.cancel_task_cascade(
+                subtask.id, reason=reason,
+            )
+
+            if subtask.status in terminal_statuses:
+                continue
+
+            try:
+                await self.fail_task(
+                    subtask.id,
+                    error=f"父任务取消，级联取消: {reason}",
+                )
+                cascaded_count += 1
+            except Exception as e:
+                logger.warning(
+                    "级联取消子任务失败 (non-fatal): task_id=%s, error=%s",
+                    subtask.id, e,
+                )
+
+            self._cancel_pipeline(subtask.id)
+
+        return cascaded_count
+
+    def _is_child_of_container(self, task: "TaskModel") -> bool:
+        """判断非容器任务是否属于某个容器任务的子树。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        向上追溯 parent_task_id 链，检查根任务是否为 container 类型。
+        容器的子任务删除时不需要清理工作空间（工作空间由容器管理）。
+        """
+        root_id = self.get_root_task_id(task.id)
+        if root_id is None or root_id == task.id:
+            return False
+        root_task = self.get_task(root_id)
+        if root_task is None:
+            return False
+        return root_task.metadata.get("task_scope") == "container"
 
     def _cleanup_workspace(self, task_id: str) -> None:
         """尝试清理任务关联的 worktree（best-effort）。"""

@@ -686,11 +686,11 @@ async def test_websocket():
         record("WebSocket", "WebSocket鏈嶅姟鍣ㄥ惎鍋?, "PART", "鍚仠澶辫触", traceback.format_exc())
 
     try:
-        from channels.websocket.adapter import WebSocketAdapter
-        adapter = WebSocketAdapter()
-        record("WebSocket", "WebSocketAdapter瀹炰緥鍖?, "PASS", "WebSocketAdapter() 瀹炰緥鍖栨垚鍔?)
+        from channels.websocket.server import WebSocketServer
+        adapter_server = WebSocketServer()
+        record("WebSocket", "WebSocketServer实例化", "PASS", "WebSocketServer() 实例化成功")
     except Exception as e:
-        record("WebSocket", "WebSocketAdapter", "FAIL", "瀹炰緥鍖栧け璐?, traceback.format_exc())
+        record("WebSocket", "WebSocketServer", "FAIL", "实例化失败", traceback.format_exc())
 
 
 # ============================================================================

@@ -568,6 +568,30 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const knownTaskIdsRef = useRef<Set<string>>(new Set())
   /** 正在切换启用/禁用状态的节点 ID 集合 */
   const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set())
+  /** 数据变更追踪 */
+  const prevDataRef = useRef<TreeNodeData[]>([])
+  const hasInitializedRef = useRef(false)
+
+  /**
+   * treeKey 变更时重新从 localStorage 恢复展开状态
+   *
+   * 修复场景：sessionId 在组件挂载后才从 sessionStore 异步加载完成，
+   * 导致 treeKey 从 "default_任务书" 变为 "{sessionId}_任务书"。
+   * 此时需要用正确的 key 重新读取保存的展开状态，并跳过首次保存
+   * 以避免用临时展开状态覆盖正确的 localStorage 数据。
+   */
+  const prevTreeKeyRef = useRef(treeKey)
+  const skipNextSaveRef = useRef(false)
+  useEffect(() => {
+    if (prevTreeKeyRef.current === treeKey) return
+    prevTreeKeyRef.current = treeKey
+    skipNextSaveRef.current = true
+    const restored = loadExpandedIds(treeKey)
+    setExpandedIds(restored ?? new Set<string>())
+    hasInitializedRef.current = false
+    prevDataRef.current = []
+    seenNodeIdsRef.current = new Set()
+  }, [treeKey])
 
   /**
    * 检测新提交的任务并自动开启开关。
@@ -615,15 +639,34 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   }, [effectiveData, nodeChildrenField])
 
   /**
+   * 已出现过的节点 ID 集合（用于区分新老节点）
+   */
+  const seenNodeIdsRef = useRef<Set<string>>(new Set())
+
+  /**
+   * 收集树中所有节点 ID
+   */
+  const collectAllNodeIds = useCallback((nodes: TreeNodeData[]): Set<string> => {
+    const ids = new Set<string>()
+    const walk = (list: TreeNodeData[]) => {
+      for (const node of list) {
+        ids.add(getStableNodeId(node))
+        const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
+        if (children) walk(children)
+      }
+    }
+    walk(nodes)
+    return ids
+  }, [nodeChildrenField])
+
+  /**
    * 当 effectiveData 变化时计算展开节点
    *
    * 策略：
-   * - 首次加载（localStorage 无记录）：按 expandLevel 配置自动展开
-   * - 数据刷新（已有用户操作记录）：只添加新增的父节点，不覆盖用户手动折叠的节点
-   * - 展开状态变更后自动持久化到 localStorage
+   * - 首次加载（localStorage 有记录）：直接使用保存的状态
+   * - 首次加载（localStorage 无记录）：按 expandLevel 配置设置默认展开
+   * - 数据刷新：老节点保持原状态，仅新节点按 expandLevel 设置默认展开状态
    */
-  const prevDataRef = useRef<TreeNodeData[]>([])
-  const hasInitializedRef = useRef(false)
   useEffect(() => {
     if (effectiveData.length === 0) return
     if (effectiveData === prevDataRef.current) return
@@ -631,6 +674,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
     if (!hasInitializedRef.current) {
       hasInitializedRef.current = true
+      const currentIds = collectAllNodeIds(effectiveData)
+      seenNodeIdsRef.current = currentIds
       if (restoredExpandedIds) {
         return
       }
@@ -638,24 +683,44 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       return
     }
 
-    const newParentIds = collectExpandedIds(effectiveData, nodeChildrenField, expandLevel)
+    const currentIds = collectAllNodeIds(effectiveData)
+    const prevIds = seenNodeIdsRef.current
+    seenNodeIdsRef.current = currentIds
+
+    const trulyNewIds = new Set<string>()
+    for (const id of currentIds) {
+      if (!prevIds.has(id)) {
+        trulyNewIds.add(id)
+      }
+    }
+
+    if (trulyNewIds.size === 0) return
+
+    const defaultExpanded = collectExpandedIds(effectiveData, nodeChildrenField, expandLevel)
     setExpandedIds((prev) => {
       const merged = new Set(prev)
       let changed = false
-      for (const id of newParentIds) {
-        if (!merged.has(id)) {
+      for (const id of defaultExpanded) {
+        if (trulyNewIds.has(id) && !merged.has(id)) {
           merged.add(id)
           changed = true
         }
       }
       return changed ? merged : prev
     })
-  }, [effectiveData, nodeChildrenField, expandLevel, restoredExpandedIds])
+  }, [effectiveData, nodeChildrenField, expandLevel, restoredExpandedIds, collectAllNodeIds])
 
   /**
    * 展开状态变化时自动持久化到 localStorage
+   *
+   * 当 treeKey 刚变更时跳过首次保存，避免用临时展开状态
+   * 覆盖 localStorage 中正确的持久化数据。
    */
   useEffect(() => {
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false
+      return
+    }
     if (expandedIds.size > 0 || hasInitializedRef.current) {
       saveExpandedIds(treeKey, expandedIds)
     }

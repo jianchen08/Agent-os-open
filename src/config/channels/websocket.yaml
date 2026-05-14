@@ -7,8 +7,5 @@ channel:
     ping_timeout: 10
   session:
     timeout: 3600
-  input:
-    adapter: WebSocketInputAdapter
   output:
-    adapter: WebSocketOutputAdapter
     streaming: true
