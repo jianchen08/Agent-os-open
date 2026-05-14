@@ -183,6 +183,18 @@ class Tool(BaseModel):
         description="注入参数列表：这些参数由系统在运行时注入，不暴露给 LLM 决策。如 session_id, user_id, tool_record_id"
     )
 
+    # 参数层级限制：声明哪些参数/枚举值只在特定 Agent 层级可见
+    # 格式: { "param_name": { "enum_restrictions": { "value": max_agent_level } } }
+    # max_agent_level=0 表示所有层级可见，max_agent_level=1 表示仅 L1 可见
+    param_level_restrictions: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "参数层级限制：控制参数的枚举值在不同 Agent 层级的可见性。"
+            "格式: { 'param_name': { 'enum_restrictions': { 'enum_value': max_agent_level } } }。"
+            "max_agent_level=0 表示所有层级可见，max_agent_level=1 表示仅 L1 可见。"
+        ),
+    )
+
     # Schema 动态增强器（每轮迭代时由 ToolSchemaPlugin 调用，可修改传给 LLM 的 schema）
     schema_enricher: Callable[..., dict[str, Any]] | None = Field(
         default=None,
@@ -257,10 +269,13 @@ class Tool(BaseModel):
 
         return "\n".join(parts)
 
-    def to_llm_format(self) -> dict[str, Any]:
-        """转换为 LLM 可用的工具格式（OpenAI function calling 格式）"""
-        # 构建排除注入参数后的 schema
-        llm_schema = self._get_llm_schema()
+    def to_llm_format(self, agent_level: int | None = None) -> dict[str, Any]:
+        """转换为 LLM 可用的工具格式（OpenAI function calling 格式）
+
+        Args:
+            agent_level: 当前 Agent 层级，用于过滤参数枚举值
+        """
+        llm_schema = self._get_llm_schema(agent_level=agent_level)
 
         return {
             "type": "function",
@@ -271,31 +286,68 @@ class Tool(BaseModel):
             },
         }
 
-    def _get_llm_schema(self) -> dict[str, Any]:
-        """获取传给 LLM 的 schema（排除注入参数）"""
-        if not self.injected_params:
+    def _get_llm_schema(self, agent_level: int | None = None) -> dict[str, Any]:
+        """获取传给 LLM 的 schema（排除注入参数 + 按层级过滤枚举值）。
+
+        Args:
+            agent_level: 当前 Agent 层级（1=L1, 2=L2, 3=L3）。
+                为 None 时不做层级过滤（向后兼容）。
+
+        Returns:
+            过滤后的 schema
+        """
+        import copy
+
+        if not self.injected_params and not self.param_level_restrictions:
+            if agent_level is not None and self.param_level_restrictions:
+                return copy.deepcopy(self.input_schema)
             return self.input_schema
 
-        # 深拷贝 schema，避免修改原始数据
-        import copy
         schema = copy.deepcopy(self.input_schema)
 
-        # 从 properties 中移除注入参数
         if "properties" in schema:
             for param in self.injected_params:
                 if param in schema["properties"]:
                     del schema["properties"][param]
 
-        # 从 required 中移除注入参数
         if "required" in schema and isinstance(schema["required"], list):
             schema["required"] = [
                 r for r in schema["required"] if r not in self.injected_params
             ]
-            # 如果 required 为空，移除该字段
             if not schema["required"]:
                 del schema["required"]
 
+        if agent_level is not None and self.param_level_restrictions:
+            self._apply_level_restrictions(schema, agent_level)
+
         return schema
+
+    def _apply_level_restrictions(self, schema: dict[str, Any], agent_level: int) -> None:
+        """根据 Agent 层级过滤 schema 中的枚举值。
+
+        Args:
+            schema: 待修改的 schema（会被原地修改）
+            agent_level: 当前 Agent 层级
+        """
+        properties = schema.get("properties", {})
+        for param_name, restriction in self.param_level_restrictions.items():
+            if param_name not in properties:
+                continue
+            enum_restrictions = restriction.get("enum_restrictions", {})
+            if not enum_restrictions:
+                continue
+            prop_def = properties[param_name]
+            if "enum" not in prop_def:
+                continue
+            allowed_values = []
+            for value in prop_def["enum"]:
+                max_level = enum_restrictions.get(value, 0)
+                if max_level == 0 or agent_level <= max_level:
+                    allowed_values.append(value)
+            if allowed_values:
+                prop_def["enum"] = allowed_values
+                if len(allowed_values) == 1:
+                    prop_def.pop("default", None)
 
     def get_tool_call_schema(self) -> dict[str, Any]:
         """获取工具调用 schema（排除注入参数）"""

@@ -306,6 +306,14 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "tool_record_id",
                 "parent_agent_level",
             ],
+            param_level_restrictions={
+                "task_scope": {
+                    "enum_restrictions": {
+                        "non_container": 0,
+                        "container": 1,
+                    },
+                },
+            },
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -340,12 +348,20 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 str(goal)[:200] if goal else "None",
             )
             goal = None
-        parent_agent_level = inputs.get("parent_agent_level", 1)
+        parent_agent_level = inputs.get("parent_agent_level")
 
         logger.info(
             "[TaskSubmit] 开始执行 | task_scope=%s | parent_agent_level=%s",
             task_scope, parent_agent_level,
         )
+
+        # ── 0. 注入参数校验 ──
+        if parent_agent_level is None:
+            logger.error("[TaskSubmit] 注入参数缺失 | parent_agent_level 未注入")
+            return create_failure_result(
+                error="系统错误：parent_agent_level 未注入，无法确定调用者层级",
+                error_code="MISSING_INJECTED_PARAM",
+            )
 
         # ── 1. 基础参数验证 ──
         if not goal or not goal.get("title"):
@@ -755,7 +771,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             工具执行结果
         """
         goal = inputs.get("goal")
-        parent_agent_level = inputs.get("parent_agent_level", 1)
+        parent_agent_level = inputs.get("parent_agent_level")
 
         logger.info(
             "[TaskSubmit] 容器任务提交 | title=%s | parent_agent_level=%s",

@@ -148,6 +148,7 @@ class ToolSchemaPlugin(IInputPlugin):
             return {"tool_schemas": []}
 
         # 构建 function calling 格式的 Schema（始终写入）
+        agent_level = self._resolve_agent_level(ctx)
         schemas = []
         services = self._get_services(ctx)
         for tool in tools:
@@ -155,15 +156,15 @@ class ToolSchemaPlugin(IInputPlugin):
             if enricher:
                 try:
                     enriched_tool = enricher(tool, services)
-                    llm_format = enriched_tool.to_llm_format()
+                    llm_format = enriched_tool.to_llm_format(agent_level=agent_level)
                 except Exception as exc:
                     logger.debug(
                         "[%s] Schema enrichment failed for %s: %s",
                         self.name, tool.name, exc,
                     )
-                    llm_format = tool.to_llm_format()
+                    llm_format = tool.to_llm_format(agent_level=agent_level)
             else:
-                llm_format = tool.to_llm_format()
+                llm_format = tool.to_llm_format(agent_level=agent_level)
             schemas.append(llm_format)
 
         result: dict[str, Any] = {"tool_schemas": schemas}
@@ -198,3 +199,24 @@ class ToolSchemaPlugin(IInputPlugin):
             except KeyError:
                 continue
         return services
+
+    @staticmethod
+    def _resolve_agent_level(ctx: PluginContext) -> int | None:
+        """从管道 state 解析当前 Agent 层级。
+
+        Returns:
+            Agent 层级数字（1/2/3），解析失败返回 None（不过滤）
+        """
+        from pipeline.types import StateKeys
+
+        raw_level = (
+            ctx.state.get(StateKeys.AGENT_LEVEL)
+            or ctx.state.get("context.agent_level", "")
+        )
+        if raw_level:
+            level_str = str(raw_level).upper().lstrip("L")
+            try:
+                return int(level_str)
+            except (ValueError, TypeError):
+                pass
+        return None

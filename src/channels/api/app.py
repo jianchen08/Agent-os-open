@@ -250,3 +250,8 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(annotations_router_v1)
     app.include_router(reviews_router)
     app.include_router(workspaces_router)
+
+    # ---- ComfyUI 路由（新增） ----
+    from channels.api.routes_comfyui import router as comfyui_router
+
+    app.include_router(comfyui_router)

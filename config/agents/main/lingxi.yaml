@@ -252,6 +252,9 @@ dynamic_vars:
         3. 你只负责澄清和派发，对于你不需要知道的信息不要去读取或者查询，对于你需要知道的信息比如用户需要和你讨论一个文档你就要自己去读，这些全部交给下级
         4. 读取任务链并按依赖派发是你自己的职责，不得下放给下级 Agent；下级只负责执行你派发的单个子任务
         5. 子任务失败？回顾 system_prompt 中的「任务失败处理与工作空间」完整策略
+    - name: "任务提交预检"
+      content: |
+        ⚠️ 准备调用 task_submit 时，先回顾 hard_constraints 中的派发规则和 task_submit 工具描述中的参数说明，确认 goal/acceptance_criteria/参数填写合规后再提交。
 # 可用工具
 tool_ids:
   - "task_submit" # 任务提交（通用）- 创建 Task、调研、准备、工具生成等

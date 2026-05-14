@@ -244,6 +244,10 @@ system_prompt: |
   - 如遇合并冲突，系统会通知你处理
   高级操作（通常不需要）：查看变更 git_diff、查看状态 git_status、手动回滚 rollback
 
+  ## 参考规则
+
+  {{path:config/rules/orchestrator_core_principles.md}}
+
 # 静态变量（会话级不变，可缓存）
 static_vars:
   enabled: true
@@ -252,12 +256,6 @@ static_vars:
       type: "reference"
       content: |
         ## 下级 Agent 映射
-
-        **强制规则**：提交任务时，target_id 必须使用本表中的 Agent ID，禁止使用 resource_search 搜索 Agent。本表已涵盖你所有可用的下级 Agent。
-
-        **Goal 编写原则**：goal 只写"要达成什么目标和结果"，不写"怎么做、分几步、检查什么"。下级 Agent 有自己的完整工作流，你只需告诉它目标和上下文，它会自行决定具体步骤。
-
-        **⚠️ file_check 路径约束**：file_check 的 path 必须写具体的文件路径（如 `docs/research_report.md`）。
 
         | 阶段 | Agent | 说明 | Goal 应包含 | 推荐指标 |
         |------|-------|------|------------|----------|
@@ -314,7 +312,13 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items: []
+  items:
+    - name: "决策检查点"
+      content: |
+        每轮检查：回顾 orchestrator_core_principles.md 中的核心原则。调研和环境准备必须派发给下级 Agent，不要自己做。轻量模式直接执行，完整模式按 Phase 推进。
+    - name: "任务提交预检"
+      content: |
+        ⚠️ 准备调用 task_submit 时，先回顾 hard_constraints 中的规则和 task_submit 工具描述中的参数说明，确认 goal/acceptance_criteria/参数填写合规后再提交。
 
 tool_ids:
   - task_submit

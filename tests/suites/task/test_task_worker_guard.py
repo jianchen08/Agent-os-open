@@ -139,6 +139,151 @@ class TestOnIdleTimeout:
         worker._task_service.fail_task.assert_called_once()
 
 
+# ── _get_pipeline_last_activity ──
+
+
+class TestGetPipelineLastActivity:
+    """测试活跃管道 checkpoint 存活检测。"""
+
+    def test_no_task_service(self, worker):
+        """无 task_service 时返回 None。"""
+        worker._task_service = None
+        assert worker._get_pipeline_last_activity("task-001") is None
+
+    def test_task_not_found(self, worker):
+        """任务不存在时返回 None。"""
+        worker._task_service.get_task.return_value = None
+        assert worker._get_pipeline_last_activity("task-001") is None
+
+    def test_no_pipeline_run_id(self, worker):
+        """任务无 pipeline_run_id 时返回 None。"""
+        task = MagicMock()
+        task.pipeline_run_id = None
+        worker._task_service.get_task.return_value = task
+        assert worker._get_pipeline_last_activity("task-001") is None
+
+    def test_checkpoint_dir_not_exists(self, worker, tmp_path, monkeypatch):
+        """checkpoint 目录不存在时返回 None。"""
+        task = MagicMock()
+        task.pipeline_run_id = "pipe-123"
+        worker._task_service.get_task.return_value = task
+        monkeypatch.chdir(tmp_path)
+        assert worker._get_pipeline_last_activity("task-001") is None
+
+    def test_fresh_checkpoint_returns_mtime(self, worker, tmp_path, monkeypatch):
+        """有 checkpoint 文件时返回最新修改时间。"""
+        import time
+
+        task = MagicMock()
+        task.pipeline_run_id = "pipe-123"
+        worker._task_service.get_task.return_value = task
+
+        ckpt_dir = tmp_path / "data" / "pipeline_checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "pipe-123_step1.json").write_text("{}")
+        time.sleep(0.1)
+        (ckpt_dir / "pipe-123_step2.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        result = worker._get_pipeline_last_activity("task-001")
+        assert result is not None
+        assert result > 0
+
+    def test_no_matching_checkpoint(self, worker, tmp_path, monkeypatch):
+        """checkpoint 文件不匹配时返回 None。"""
+        task = MagicMock()
+        task.pipeline_run_id = "pipe-123"
+        worker._task_service.get_task.return_value = task
+
+        ckpt_dir = tmp_path / "data" / "pipeline_checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "other-pipe_step1.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        assert worker._get_pipeline_last_activity("task-001") is None
+
+
+# ── _on_idle_timeout: 活跃管道死亡检测 ──
+
+
+class TestActivePipelineDeathDetection:
+    """测试活跃管道异常死亡后的检测机制。
+
+    BUG-FIX-fix_20260514_active_pipeline_deadlock:
+    验证管道进程异常死亡后 idle_timer 能检测到并标记任务失败。
+    """
+
+    def test_active_pipeline_with_stale_checkpoint_fails(self, worker, tmp_path, monkeypatch):
+        """活跃管道但 checkpoint 过期 → 判定死亡 → fail。"""
+        import asyncio
+        import os
+        import time
+
+        task = MagicMock()
+        task.status.value = "running"
+        task.pipeline_run_id = "pipe-dead"
+        worker._task_service.get_task.return_value = task
+
+        ckpt_dir = tmp_path / "data" / "pipeline_checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        old_file = ckpt_dir / "pipe-dead_step1.json"
+        old_file.write_text("{}")
+        old_mtime = old_file.stat().st_mtime
+        os.utime(str(old_file), (old_mtime - 3600, old_mtime - 3600))
+        monkeypatch.chdir(tmp_path)
+
+        worker._active_tasks.add("task-001")
+
+        async def _run():
+            worker._on_idle_timeout("task-001")
+            worker._task_service.fail_task.assert_called_once()
+
+        asyncio.run(_run())
+
+    def test_active_pipeline_no_checkpoint_fails(self, worker, tmp_path, monkeypatch):
+        """活跃管道但无 checkpoint → 判定死亡 → fail。"""
+        import asyncio
+
+        task = MagicMock()
+        task.status.value = "running"
+        task.pipeline_run_id = "pipe-nock"
+        worker._task_service.get_task.return_value = task
+        monkeypatch.chdir(tmp_path)
+
+        worker._active_tasks.add("task-001")
+
+        async def _run():
+            worker._on_idle_timeout("task-001")
+            worker._task_service.fail_task.assert_called_once()
+
+        asyncio.run(_run())
+
+    def test_active_pipeline_fresh_checkpoint_survives(self, worker, tmp_path, monkeypatch):
+        """活跃管道且 checkpoint 新鲜 → 重建 timer，不 fail。"""
+        task = MagicMock()
+        task.status.value = "running"
+        task.pipeline_run_id = "pipe-alive"
+        worker._task_service.get_task.return_value = task
+
+        ckpt_dir = tmp_path / "data" / "pipeline_checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "pipe-alive_step1.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        mock_timer_mgr = MagicMock()
+        mock_timer_mgr.idle_threshold = 300
+        worker._services["timer_manager"] = mock_timer_mgr
+        worker._active_tasks.add("task-001")
+
+        import asyncio
+
+        async def _run():
+            worker._on_idle_timeout("task-001")
+            worker._task_service.fail_task.assert_not_called()
+
+        asyncio.run(_run())
+
+
 # ── _on_task_state_changed ──
 
 

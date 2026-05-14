@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import time as _time
 import uuid as _uuid
 from typing import Any
 
@@ -1844,9 +1845,13 @@ class TaskWorker:
     def _on_idle_timeout(self, task_id: str) -> None:
         """idle 计时器超时回调。
 
-        idle 计时器仅在管道挂起（等待子任务）期间有意义：
-        - 管道活跃时：暂停计时器（重建但不计数），不干预执行
+        idle 计时器在管道运行全生命周期中持续监控：
+        - 管道活跃时：通过 checkpoint 文件龄判断是否真正存活，
+          存活则重建 timer 继续监控，死亡则标记 failed
         - 管道挂起时：唤醒并提醒（最多 idle_remind_limit 次），超限则标记 failed
+
+        BUG-FIX-fix_20260514_active_pipeline_deadlock:
+        新增活跃管道存活检测，解决管道进程异常死亡后任务永远卡在 running 的问题。
 
         Args:
             task_id: 超时的任务ID
@@ -1887,25 +1892,49 @@ class TaskWorker:
         idle_remind_limit = 3
         remind_count = self._idle_remind_counts.get(task_id, 0)
 
-        # 活跃管道期间直接取消 idle 计时器（不重建）：
-        # 活跃管道本身不是"空闲"，不需要 idle 检测。
-        # 计时器会在管道挂起（等待子任务）时重新注册。
+        # BUG-FIX-fix_20260514_active_pipeline_deadlock:
+        # 原逻辑: 管道活跃时直接取消 timer → 管道死亡后无检测机制 → 任务永远卡在 running
+        # 新逻辑: 管道活跃时通过 checkpoint 文件龄判断是否真正存活，
+        #         存活则重建 timer 继续监控，死亡则标记任务 failed
         if task_id in self._active_tasks:
-            logger.debug(
-                "TaskWorker: idle 超时但管道活跃，"
-                "取消计时器（不重建）: task_id=%s",
-                task_id,
-            )
             timer_manager = self._services.get("timer_manager")
-            if timer_manager:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        timer_manager.cancel_timer(task_id),
+            idle_threshold = (
+                getattr(timer_manager, "idle_threshold", 300)
+                if timer_manager else 300
+            )
+            max_stale_seconds = idle_threshold * 3
+
+            last_activity = self._get_pipeline_last_activity(task_id)
+            if last_activity is not None:
+                stale_seconds = _time.time() - last_activity
+                if stale_seconds < max_stale_seconds:
+                    logger.debug(
+                        "TaskWorker: idle 超时但管道活跃且近期有进度"
+                        "(checkpoint %.0fs 前)，重建 timer: task_id=%s",
+                        stale_seconds, task_id,
                     )
-                except RuntimeError:
-                    pass
-            return
+                    if timer_manager:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(
+                                self._recreate_idle_timer_async(
+                                    task_id, timer_manager,
+                                ),
+                            )
+                        except RuntimeError:
+                            pass
+                    return
+                logger.warning(
+                    "TaskWorker: 管道标记活跃但 checkpoint 已 %.0fs "
+                    "无更新(阈值 %ds)，判定管道死亡: task_id=%s",
+                    stale_seconds, max_stale_seconds, task_id,
+                )
+            else:
+                logger.warning(
+                    "TaskWorker: 管道标记活跃但无 checkpoint 记录，"
+                    "判定管道死亡: task_id=%s",
+                    task_id,
+                )
 
         if task_id in self._suspended_engines and remind_count < idle_remind_limit:
             self._idle_remind_counts[task_id] = remind_count + 1
@@ -1965,6 +1994,57 @@ class TaskWorker:
                 "TaskWorker: idle 超时处理失败: "
                 "task_id=%s, error=%s", task_id, e,
             )
+
+    def _get_pipeline_last_activity(self, task_id: str) -> float | None:
+        """通过 checkpoint 文件最后修改时间判断管道是否仍在运行。
+
+        遍历 data/pipeline_checkpoints/ 目录，查找以 pipeline_run_id
+        为前缀的 .json 文件，返回最新修改时间的 Unix 时间戳。
+        仅在 _on_idle_timeout 中调用，用于检测"活跃但实际已死亡"的管道。
+
+        BUG-FIX-fix_20260514_active_pipeline_deadlock:
+        问题根因: 管道进程异常死亡后 task_id 残留在 _active_tasks，
+                 idle_timer 因"管道活跃"被取消不再触发，任务永远卡在
+                 running 状态，只能等系统重启时 _recover_running_tasks 恢复。
+        修复方案: idle_timer 触发时通过 checkpoint 文件龄判断管道是否真正存活，
+                 超过阈值则标记任务失败。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            最新 checkpoint 的 Unix 时间戳，无 checkpoint 时返回 None
+        """
+        if not self._task_service:
+            return None
+
+        task = self._task_service.get_task(task_id)
+        if not task or not task.pipeline_run_id:
+            return None
+
+        checkpoint_dir = os.path.join(
+            os.getcwd(), "data", "pipeline_checkpoints",
+        )
+        if not os.path.exists(checkpoint_dir):
+            return None
+
+        latest_mtime = 0.0
+        prefix = task.pipeline_run_id + "_"
+        try:
+            for f in os.listdir(checkpoint_dir):
+                if f.startswith(prefix) and f.endswith(".json"):
+                    fpath = os.path.join(checkpoint_dir, f)
+                    try:
+                        latest_mtime = max(
+                            latest_mtime,
+                            os.path.getmtime(fpath),
+                        )
+                    except OSError:
+                        pass
+        except OSError:
+            return None
+
+        return latest_mtime if latest_mtime > 0 else None
 
     def _cancel_idle_timer_async(self, task_id: str) -> None:
         """异步取消残留的 idle 计时器（从同步回调调用）。

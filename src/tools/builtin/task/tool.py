@@ -292,6 +292,24 @@ class TaskTool(BuiltinTool):
             level=ToolLevel.SYSTEM,
             tags=["task", "management", "L1", "L2", "status", "control"],
             injected_params=["session_id", "user_id", "_session", "pipeline_id"],
+            param_level_restrictions={
+                "action": {
+                    "enum_restrictions": {
+                        "get": 0,
+                        "update": 0,
+                        "list": 0,
+                        "status": 0,
+                        "pause": 0,
+                        "resume": 0,
+                        "cancel": 0,
+                        "retry": 0,
+                        "delete": 0,
+                        "inject": 0,
+                        "complete_container": 1,
+                        "fail_container": 1,
+                    },
+                },
+            },
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -304,7 +322,14 @@ class TaskTool(BuiltinTool):
             工具执行结果
         """
         action = inputs.get("action")
-        parent_agent_level = inputs.get("parent_agent_level", 1)
+        parent_agent_level = inputs.get("parent_agent_level")
+
+        if parent_agent_level is None:
+            logger.error("[TaskTool] 注入参数缺失 | parent_agent_level 未注入")
+            return create_failure_result(
+                error="系统错误：parent_agent_level 未注入，无法确定调用者层级",
+                error_code="MISSING_INJECTED_PARAM",
+            )
 
         # ToolCore 通过 _SERVICE_INJECT_MAP 自动注入服务到 inputs，
         # 在此捕获并缓存到实例属性，供后续 _get_message_queue() 使用
