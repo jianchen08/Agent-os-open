@@ -260,6 +260,9 @@ class AgentConfig:
         if self.system_prompt:
             state["system_prompt"] = self._build_full_system_prompt()
 
+        if hasattr(self, "level") and self.level:
+            state["agent_level"] = self.level.value
+
         if self.tool_ids:
             state["tool_ids"] = self.tool_ids
 

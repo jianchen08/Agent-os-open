@@ -53,3 +53,35 @@ export interface ReviewFeedbackAnnotation {
   targetData: Record<string, any>
   content: string
 }
+
+/** 差异行类型 */
+export type DiffLineType = 'unchanged' | 'added' | 'removed'
+
+/** 差异行 */
+export interface DiffLine {
+  type: DiffLineType
+  content: string
+  lineNumber: number
+}
+
+/** 批注类型 */
+export type AnnotationType = 'image_area' | 'video_timestamp' | 'text_selection'
+
+/** 图片区域定义 */
+export interface AnnotationArea {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** 审批批注 */
+export interface Annotation {
+  id: string
+  type: AnnotationType
+  area?: AnnotationArea
+  timestamp?: number
+  imageUrl?: string
+  suggestion: string
+  createdAt: string
+}

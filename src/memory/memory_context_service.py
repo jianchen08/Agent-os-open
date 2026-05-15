@@ -346,19 +346,58 @@ class MemoryContextService:
             len(old_blocks) // 2,
         )
 
-        # 压缩新消息 → L1 + L2 + keywords 三元组
-        comp_result = await self._build_compression_content(
-            old_msgs, context_window, budgets, previous_l1,
-        )
-        if not comp_result:
-            return None
+        # BUG-FIX-add_chunked_compression:
+        # 问题根因: 旧消息可能非常长（几万 token），一次性发给 LLM 压缩
+        #   会超出压缩模型的上下文限制或导致压缩质量差。
+        # 修复方案: 当旧消息 token 超过压缩阈值时自动分片，每片走正常的压缩+保存流程，
+        #   即每片独立压缩为 L1/L2/keywords，独立保存为独立的 chunk。
+        #   等效于一次插件运行触发了多次正常压缩。
+        # 影响范围: 长对话首次触发压缩时，旧消息被分片压缩而非失败。
+        # 修复日期: 2026-05-14
+        total_old_tokens = sum(self._estimate_msg_tokens(m) for m in old_msgs)
+        threshold = int(context_window * self._config.get("compress_trigger_ratio", 0.6))
 
-        # 持久化
-        if save_chunk_fn:
-            try:
-                await save_chunk_fn(old_msgs, comp_result)
-            except Exception as exc:
-                logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
+        if total_old_tokens <= threshold:
+            comp_result = await self._build_compression_content(
+                old_msgs, context_window, budgets, previous_l1,
+            )
+            if not comp_result:
+                return None
+            if save_chunk_fn:
+                try:
+                    await save_chunk_fn(old_msgs, comp_result)
+                except Exception as exc:
+                    logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
+        else:
+            num_chunks = int(total_old_tokens // threshold) + 1
+            per_chunk_tokens = total_old_tokens // num_chunks
+            logger.info(
+                "[MemoryContextService] 分片压缩: total_tokens=%d, threshold=%d, "
+                "num_chunks=%d, per_chunk=%d",
+                total_old_tokens, threshold, num_chunks, per_chunk_tokens,
+            )
+            slices = self._split_into_chunks(old_msgs, per_chunk_tokens)
+            running_background = previous_l1
+            for i, slice_msgs in enumerate(slices):
+                logger.info(
+                    "[MemoryContextService] 压缩分片 %d/%d: %d 条消息",
+                    i + 1, len(slices), len(slice_msgs),
+                )
+                slice_result = await self._build_compression_content(
+                    slice_msgs, context_window, budgets, running_background,
+                )
+                if not slice_result:
+                    continue
+                if save_chunk_fn:
+                    try:
+                        await save_chunk_fn(slice_msgs, slice_result)
+                    except Exception as exc:
+                        logger.warning(
+                            "[MemoryContextService] 分片 %d 保存失败: %s",
+                            i + 1, exc,
+                        )
+                if slice_result.get("l1"):
+                    running_background = slice_result["l1"]
 
         # 压缩内容已通过 save_chunk_fn 保存到 chunk_service，
         # prompt_build 会从 chunk_service 统一加载，不在消息列表中重复返回
@@ -425,6 +464,47 @@ class MemoryContextService:
             total_tokens -= old_tokens - self._estimate_msg_tokens(blocks[idx])
 
         return blocks
+
+    def _split_into_chunks(
+        self,
+        messages: list[dict[str, Any]],
+        per_chunk_tokens: int,
+    ) -> list[list[dict[str, Any]]]:
+        """将消息列表按 token 预算分片，保证 tool call 配对完整。
+
+        Args:
+            messages: 消息列表
+            per_chunk_tokens: 每片 token 预算
+
+        Returns:
+            分片后的消息列表
+        """
+        chunks: list[list[dict[str, Any]]] = []
+        remaining = list(messages)
+
+        while remaining:
+            accumulated = 0
+            split_idx = len(remaining)
+
+            for i, msg in enumerate(remaining):
+                msg_tokens = self._estimate_msg_tokens(msg)
+                if accumulated + msg_tokens > per_chunk_tokens and i > 0:
+                    split_idx = i
+                    break
+                accumulated += msg_tokens
+
+            chunk_msgs, rest = self._split_preserving_tool_pairs(
+                remaining, split_idx,
+            )
+
+            if not chunk_msgs:
+                chunk_msgs = [remaining[0]]
+                rest = remaining[1:]
+
+            chunks.append(chunk_msgs)
+            remaining = rest
+
+        return chunks
 
     async def _build_compression_content(
         self,

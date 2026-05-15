@@ -56,6 +56,8 @@ _SAFE_JSON_TYPES = (str, int, float, bool, type(None))
 
 _SKIP_COPY_KEYS = frozenset({
     "on_chunk",
+    "messages",
+    "streaming",
 })
 
 def _safe_deepcopy(state: dict) -> dict:
@@ -612,11 +614,7 @@ class PipelineEngine:
                         except Exception as exc:
                             logger.debug("Checkpoint suspended-save failed: %s", exc)
                     await self._suspend_and_wait(state)
-                    if self._suspended_state is not None:
-                        state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
-                        state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
-                        self._suspended_state = None
-                    else:
+                    if not self._restore_from_suspended(state):
                         break
                     logger.info("Pipeline woken up, resuming loop iteration")
                     state[StateKeys.CORE_TYPE] = "llm_call"
@@ -893,20 +891,13 @@ class PipelineEngine:
                             )
                             self._suspended_state = _safe_deepcopy(state)
                             await self._suspend_and_wait(state)
-                            if self._suspended_state is not None:
-                                state["user_input"] = self._suspended_state.get(
-                                    "user_input", state.get("user_input", ""),
+                            if self._restore_from_suspended(state):
+                                logger.info(
+                                    "[Engine] 管道从触发器挂起中唤醒 (iter=%d)",
+                                    iteration,
                                 )
-                                state["messages"] = self._suspended_state.get(
-                                    "messages", state.get("messages", []),
-                                )
-                                if "on_chunk" in self._suspended_state:
-                                    state["on_chunk"] = self._suspended_state["on_chunk"]
-                                    self._saved_on_chunk = self._suspended_state["on_chunk"]
-                                if "streaming" in self._suspended_state:
-                                    state["streaming"] = self._suspended_state["streaming"]
-                                    self._saved_streaming = self._suspended_state["streaming"]
-                                self._suspended_state = None
+                            else:
+                                break
                             continue
 
                         # 无 route signals → 挂起等待下一条用户消息，而非直接结束。
@@ -924,20 +915,7 @@ class PipelineEngine:
                         state["user_input"] = ""
                         self._suspended_state = _safe_deepcopy(state)
                         await self._suspend_and_wait(state)
-                        if self._suspended_state is not None:
-                            state["user_input"] = self._suspended_state.get(
-                                "user_input", state.get("user_input", ""),
-                            )
-                            state["messages"] = self._suspended_state.get(
-                                "messages", state.get("messages", []),
-                            )
-                            if "on_chunk" in self._suspended_state:
-                                state["on_chunk"] = self._suspended_state["on_chunk"]
-                                self._saved_on_chunk = self._suspended_state["on_chunk"]
-                            if "streaming" in self._suspended_state:
-                                state["streaming"] = self._suspended_state["streaming"]
-                                self._saved_streaming = self._suspended_state["streaming"]
-                            self._suspended_state = None
+                        self._restore_from_suspended(state)
                         continue
 
             # 管道结束后，再执行一次 Output 插件链以保存 PipelineRunSummary 等终态数据
@@ -1016,6 +994,42 @@ class PipelineEngine:
     def is_suspended(self) -> bool:
         """管道是否处于暂停状态。"""
         return self._suspended_state is not None
+
+    def _restore_from_suspended(self, state: dict[str, Any]) -> bool:
+        """从 _suspended_state 恢复关键字段到 state。
+
+        所有挂起唤醒路径必须调用此方法，确保 on_chunk/streaming 等流式回调
+        被正确恢复。缺少恢复会导致 chunks 发送到旧 bridge，前端卡在 streaming 状态。
+
+        Args:
+            state: 当前管道状态字典（就地更新）
+
+        Returns:
+            True 表示恢复成功（有 suspended_state），False 表示无 suspended_state
+        """
+        if self._suspended_state is None:
+            return False
+        state["user_input"] = self._suspended_state.get(
+            "user_input", state.get("user_input", ""),
+        )
+        state["messages"] = self._suspended_state.get(
+            "messages", state.get("messages", []),
+        )
+        # BUG-FIX-fix_20260514_on_chunk_lost:
+        # 问题根因: _safe_deepcopy 跳过 on_chunk（函数不可序列化），
+        #   但外部唤醒代码（start_server.py）在唤醒前会手动将新 bridge 的
+        #   on_chunk 注入到 _suspended_state 中。唤醒路径必须检查并恢复，
+        #   否则引擎使用旧的 on_chunk（指向旧 bridge），新 bridge 的
+        #   drain_loop 永远收不到 chunks，前端收到 stream_start 后卡死。
+        # 影响范围: 子任务委派(wait)、人类交互(human_interaction)、触发器挂起
+        if "on_chunk" in self._suspended_state:
+            state["on_chunk"] = self._suspended_state["on_chunk"]
+            self._saved_on_chunk = self._suspended_state["on_chunk"]
+        if "streaming" in self._suspended_state:
+            state["streaming"] = self._suspended_state["streaming"]
+            self._saved_streaming = self._suspended_state["streaming"]
+        self._suspended_state = None
+        return True
 
     async def _suspend_and_wait(self, state: dict[str, Any]) -> None:
         """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。
@@ -1234,10 +1248,7 @@ class PipelineEngine:
             state[StateKeys.ENDED] = False
             logger.info("Route applied: wait, pipeline suspended")
             await self._suspend_and_wait(state)
-            if self._suspended_state is not None:
-                state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
-                state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
-                self._suspended_state = None
+            if self._restore_from_suspended(state):
                 logger.info("Pipeline woken up from output wait, resetting CORE_TYPE to llm_call")
                 state[StateKeys.CORE_TYPE] = "llm_call"
                 return False

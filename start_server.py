@@ -799,16 +799,8 @@ async def _stream_wake_response(
             pipeline_id[:12], len(full_content), drain_result.get("timed_out"),
         )
 
-        # 发送 stream_end
+        # drain_loop 已在内部发送 stream_end，此处只需关闭可能残留的 thinking
         await bridge._close_thinking_if_active(None)
-        await bridge._send_event({
-            "type": "stream_end",
-            "data": {
-                "message_id": message_id,
-                "full_content": full_content,
-                "pipeline_id": bridge.pipeline_id,
-            },
-        })
 
         # 发送 new_message 更新前端
         if full_content:
@@ -860,6 +852,25 @@ async def _stream_wake_response(
                     "唤醒路径追加 assistant 消息: history_len=%d, content_len=%d",
                     len(conversation_history), len(full_content),
                 )
+
+    except asyncio.CancelledError:
+        """唤醒流式任务被取消。"""
+        logger.info("唤醒流式任务被取消: pipeline=%s msg=%s", pipeline_id[:12], message_id[:12])
+        try:
+            await bridge._close_thinking_if_active(None)
+            _cancel_content = "".join(bridge._accumulated_content)
+            await bridge._send_event({
+                "type": "stream_end",
+                "data": {
+                    "message_id": message_id,
+                    "full_content": _cancel_content,
+                    "pipeline_id": bridge.pipeline_id,
+                    "cancelled": True,
+                },
+            })
+        except Exception:
+            pass
+        raise
 
     except Exception as exc:
         logger.error("唤醒流式响应失败: %s", exc)
@@ -948,7 +959,9 @@ async def _stream_engine_response(
         _exec_storage = ctx.services.get("execution_record_storage")
         if _exec_storage is not None:
             try:
-                _exec_storage.update_summary(pipeline_id, {"thread_id": thread_id})
+                # BUG-FIX-fix_20260514_event_loop_block:
+                # 同步磁盘 I/O 必须放到线程池，否则阻塞事件循环导致 WS/HTTP 超时
+                await asyncio.to_thread(_exec_storage.update_summary, pipeline_id, {"thread_id": thread_id})
             except Exception as _exc:
                 logger.warning("写入管道 thread_id 失败: %s", _exc)
 
@@ -972,8 +985,8 @@ async def _stream_engine_response(
         if _exec_storage is not None:
             try:
                 from pipeline.state_builder import resolve_conversation_history
-                _resolved = resolve_conversation_history(
-                    None, pipeline_id, ctx.services,
+                _resolved = await asyncio.to_thread(
+                    resolve_conversation_history, None, pipeline_id, ctx.services,
                 )
                 if _resolved:
                     conversation_history.clear()
@@ -1137,20 +1150,34 @@ async def _stream_engine_response(
         """流式任务被取消（用户中断或连接断开）。"""
         logger.info("流式任务被取消: message_id=%s", message_id)
         bridge.stop()
+        # BUG-FIX-fix_20260514_cancel_stream_end:
+        # 问题根因: task 被取消时 drain_loop 收到 CancelledError 直接退出，
+        #   不走正常 stream_end 发送路径，导致前端 streaming 状态卡死。
+        # 修复方案: 在 CancelledError handler 中补发 stream_end 作为安全网，
+        #   确保前端总是收到配对的 start/end（重复 stream_end 前端可容忍）。
+        try:
+            await bridge._close_thinking_if_active(None)
+            _cancel_content = "".join(bridge._accumulated_content)
+            await bridge._send_event({
+                "type": "stream_end",
+                "data": {
+                    "message_id": message_id,
+                    "full_content": _cancel_content,
+                    "pipeline_id": bridge.pipeline_id,
+                    "cancelled": True,
+                },
+            })
+        except Exception:
+            pass
         # BUG-FIX-fix_engine_task_orphan:
-        # 问题根因: 取消 _stream_engine_response 时，内部的 engine_task 不会被自动取消。
-        #   导致旧引擎任务仍在共享的 ctx.engine 上运行，新消息启动的新 engine.run() 与之并发，
-        #   引擎内部状态（_pipeline_id、_suspended_state 等）被污染，表现为"消息延迟一轮"。
-        # 修复方案: 在 CancelledError 中显式取消 engine_task 并等待其退出。
-        # 影响范围: 用户快速连续发送消息、发送新消息取消旧回复的场景。
-        # 修复日期: 2026-05-08
+        # 取消 _stream_engine_response 时，内部的 engine_task 不会被自动取消。
+        # 显式取消 engine_task 并等待其退出，防止旧任务与新任务并发。
         if engine_task is not None and not engine_task.done():
             engine_task.cancel()
             try:
                 await engine_task
             except (asyncio.CancelledError, Exception):
                 pass
-        # drain_loop 已发送 stream_end，此处不再重复发送
         raise
 
     except Exception as exc:
@@ -1347,21 +1374,34 @@ def create_combined_app() -> FastAPI:
                     _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])
 
-                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
-                    # 在创建新的流式任务前，取消该 thread_id 之前的旧任务，
-                    # 确保同一 thread_id 同时只有一个活跃的流式生成任务。
-                    _old_task = _thread_stream_tasks.get(thread_id)
-                    if _old_task and not _old_task.done():
-                        _old_stop = _thread_stop_events.get(thread_id)
-                        if _old_stop:
-                            _old_stop.set()
-                        _old_task.cancel()
+                    # BUG-FIX-fix_20260514_running_drain_cancel:
+                    # 问题根因: 旧代码在处理 user_input 时无条件取消该 thread_id 的旧
+                    #   stream task，但 running 状态下旧的 drain_loop 仍在正常消费引擎
+                    #   输出并发送到前端。取消 drain_loop 导致:
+                    #   1. stream_end 丢失 → 前端 streaming 状态卡死
+                    #   2. 新注入的消息无人消费 → 响应丢失
+                    #   3. engine_task 也被 CancelledError handler 取消 → 引擎被杀
+                    # 核心原则: 前后端通信应完全解耦，引擎运行状态不影响 WS 消息投递。
+                    #   running 状态下 drain_loop 继续运行即可消费新通知产生的 chunks。
+                    # 修复方案: 取消旧 task 仅在"需要创建新 stream task"时执行，
+                    #   running 状态下的通知注入路径跳过取消逻辑。
+                    # 影响范围: 引擎运行中用户发送新消息、子任务管道运行中注入通知。
+                    def _cancel_old_stream_task_for_thread(tid: str) -> None:
+                        """取消该 thread_id 的旧流式任务（仅用于即将创建新 task 的场景）。"""
+                        _old = _thread_stream_tasks.get(tid)
+                        if _old and not _old.done():
+                            _old_s = _thread_stop_events.get(tid)
+                            if _old_s:
+                                _old_s.set()
+                            _old.cancel()
+
                     _thread_stop_events[thread_id] = _stop_evt
 
                     if _pipeline_id:
                         from pipeline.message_bus import send_pipeline_message, _find_engine as _find_engine_for_sub
                         _sub_eng, _sub_st = _find_engine_for_sub(_pipeline_id)
                         if _sub_eng and _sub_st == "suspended":
+                            _cancel_old_stream_task_for_thread(thread_id)
                             _sub_bridge = PipelineStreamBridge(
                                 pipeline_id=_pipeline_id,
                                 output_sink=TargetedSink(_ws_interaction_notifier, thread_id),
@@ -1387,8 +1427,13 @@ def create_combined_app() -> FastAPI:
                                 _thread_stream_tasks[thread_id] = _stream_task
                                 continue
                         else:
+                            # 子管道 running 或不存在：注入消息，不取消 drain_loop
                             sub_result = await send_pipeline_message(_pipeline_id, _user_content)
                             if sub_result.success:
+                                logger.info(
+                                    "[GlobalWS] 子管道消息已注入: pipeline=%s thread=%s method=%s",
+                                    _pipeline_id[:12], thread_id[:12], sub_result.method,
+                                )
                                 continue
                         await websocket.send_text(json.dumps({
                             "type": "pipeline_error",
@@ -1397,7 +1442,6 @@ def create_combined_app() -> FastAPI:
                         continue
 
                     from pipeline.message_bus import _find_engine
-                    # 优先用 session 已有的 pipeline_id（创建会话时分配）
                     _sess = api_store.get_session(thread_id)
                     _main_pid = _sess.active_pipeline_id if _sess and _sess.active_pipeline_id else ""
                     if not _main_pid and _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
@@ -1405,6 +1449,7 @@ def create_combined_app() -> FastAPI:
                     _ex_eng, _eng_st = _find_engine(_main_pid) if _main_pid else (None, "")
 
                     if _ex_eng and _eng_st == "suspended":
+                        _cancel_old_stream_task_for_thread(thread_id)
                         _wake_bridge = PipelineStreamBridge(
                             pipeline_id=_main_pid,
                             output_sink=TargetedSink(_ws_interaction_notifier, thread_id),
@@ -1432,15 +1477,9 @@ def create_combined_app() -> FastAPI:
                         continue
 
                     # BUG-FIX-fix_20260514_running_race:
-                    # 问题根因: 引擎处于 running 状态时，没有专门的处理分支，
-                    # 代码直接落到 _pipeline_ctx.available 分支，创建新 bridge 并再次
-                    # 调用 engine.run()，导致两个 engine.run() 并发运行在同一个引擎
-                    # 实例上，共享内部状态互相干扰。新 bridge 的 drain_loop 发送了
-                    # stream_start，但后续 chunk 因引擎内部状态混乱而永远不到达，
-                    # 前端卡在 streaming 状态。
-                    # 修复方案: running 状态下不创建新 bridge 和 engine.run()，
-                    # 而是将用户消息注入到正在运行的引擎的 _pending_notifications 中，
-                    # 让引擎在下一轮迭代自动消费。不发 stream_start，直接 continue。
+                    # running 状态下不创建新 bridge 和 engine.run()，
+                    # 将用户消息注入到正在运行的引擎的 _pending_notifications 中，
+                    # 让引擎在下一轮迭代自动消费。不取消 drain_loop。
                     if _ex_eng and _eng_st == "running":
                         from pipeline.message_bus import _inject_notification_to_engine
                         _inject_notification_to_engine(_ex_eng, _user_content)
@@ -1450,6 +1489,8 @@ def create_combined_app() -> FastAPI:
                         )
                         continue
 
+                    # 无活跃引擎：取消旧任务后创建新 stream task
+                    _cancel_old_stream_task_for_thread(thread_id)
                     if _pipeline_ctx and _pipeline_ctx.available:
                         _main_sink = TargetedSink(_ws_interaction_notifier, thread_id)
                         _main_bridge = PipelineStreamBridge(

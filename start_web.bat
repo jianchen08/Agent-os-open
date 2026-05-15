@@ -8,6 +8,9 @@ set "ROOT=%cd%"
 set "LOG=%ROOT%\start_web.log"
 set "PORTS_FILE=%ROOT%\.ports"
 
+set "PROJECT_ID="
+for /f "delims=" %%h in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes('%ROOT%'))).Replace('-','').Substring(0,8).ToLower()"') do set "PROJECT_ID=%%h"
+
 echo %date% %time% 启动脚本开始 > "%LOG%"
 
 echo ========================================
@@ -58,11 +61,14 @@ if !errorlevel! neq 0 (
 
 echo [OK] 后端端口: !BACKEND_PORT!
 echo [OK] 前端端口: !FRONTEND_PORT!
+echo [OK] 项目标识: !PROJECT_ID!
 
 :: 保存端口到项目目录的 .ports 文件
 echo BACKEND_PORT=!BACKEND_PORT!> "%PORTS_FILE%"
 echo FRONTEND_PORT=!FRONTEND_PORT!>> "%PORTS_FILE%"
 echo PROJECT_ROOT=!ROOT!>> "%PORTS_FILE%"
+echo PROJECT_ID=!PROJECT_ID!>> "%PORTS_FILE%"
+echo REDIS_HOST_PORT=!REDIS_HOST_PORT!>> "%PORTS_FILE%"
 echo [INFO] 端口信息已保存到 %PORTS_FILE%
 
 :: ========== 安装前端依赖 ==========
@@ -75,7 +81,7 @@ if not exist "frontend\node_modules" (
 :: ========== 启动后端 ==========
 echo [1/2] 启动后端服务器 (FastAPI + WebSocket :!BACKEND_PORT!)...
 set "VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!"
-start "Agent OS Backend" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& python start_server.py"
+start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python start_server.py"
 
 :: ========== 等待后端就绪 ==========
 echo [INFO] 等待后端服务就绪...
@@ -95,9 +101,13 @@ if "!BACKEND_READY!"=="0" (
     echo [WARN] 后端未在 30 秒内就绪，继续启动前端...
 )
 
+:: 获取后端进程 PID
+set "BACKEND_PID="
+for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!BACKEND_PORT! " ^| findstr "LISTENING"') do set "BACKEND_PID=%%p"
+
 :: ========== 启动前端 ==========
 echo [2/2] 启动前端开发服务器 (Vite :!FRONTEND_PORT!)...
-start "Agent OS Frontend" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!&& npm run dev -- --port !FRONTEND_PORT!"
+start "Agent OS Frontend - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& npm run dev -- --port !FRONTEND_PORT!"
 
 :: ========== 等待前端就绪并打开浏览器 ==========
 echo [INFO] 等待前端服务就绪...
@@ -117,9 +127,13 @@ if "!FRONTEND_READY!"=="0" (
     echo [WARN] 前端未在 30 秒内就绪，尝试打开浏览器...
 )
 
-:: 打开浏览器
-echo [INFO] 打开浏览器...
-start "" "http://localhost:!FRONTEND_PORT!"
+:: 获取前端进程 PID
+set "FRONTEND_PID="
+for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!FRONTEND_PORT! " ^| findstr "LISTENING"') do set "FRONTEND_PID=%%p"
+
+:: 更新 .ports 文件，追加 PID 信息
+echo BACKEND_PID=!BACKEND_PID!>> "%PORTS_FILE%"
+echo FRONTEND_PID=!FRONTEND_PID!>> "%PORTS_FILE%"
 
 echo.
 echo ========================================
@@ -187,32 +201,29 @@ if "!DOCKER_READY!"=="0" (
 
 :docker_already_running
 set "REDIS_RUNNING=0"
-for /f "usebackq" %%c in (`docker ps -q -f "name=agent-os-redis" 2^>nul`) do set "REDIS_RUNNING=1"
+for /f "usebackq" %%c in (`docker ps -q -f "name=agent-os-redis-!PROJECT_ID!" 2^>nul`) do set "REDIS_RUNNING=1"
 if "!REDIS_RUNNING!"=="1" (
     echo [OK] Redis 容器已运行
     exit /b 0
 )
 
 set "REDIS_EXISTS=0"
-for /f "usebackq" %%c in (`docker ps -a -q -f "name=agent-os-redis" 2^>nul`) do set "REDIS_EXISTS=1"
+for /f "usebackq" %%c in (`docker ps -a -q -f "name=agent-os-redis-!PROJECT_ID!" 2^>nul`) do set "REDIS_EXISTS=1"
 if "!REDIS_EXISTS!"=="1" (
     echo [INFO] Redis 容器已存在但未运行，正在启动...
-    docker start agent-os-redis >nul 2>&1
+    docker start agent-os-redis-!PROJECT_ID! >nul 2>&1
     if !errorlevel! equ 0 (
         echo [OK] Redis 容器已启动
         exit /b 0
     )
 )
 
-if not exist "%ROOT%\docker-compose.yml" (
-    echo [WARN] 未找到 docker-compose.yml，跳过 Redis 启动
-    exit /b 0
-)
-
-echo [INFO] 正在通过 docker compose 启动 Redis...
-docker compose -f "%ROOT%\docker-compose.yml" up -d redis 2>nul
+echo [INFO] 正在启动 Redis 容器 (agent-os-redis-!PROJECT_ID!)...
+set "REDIS_HOST_PORT=6379"
+call :find_available_port REDIS_HOST_PORT
+docker run -d --name "agent-os-redis-!PROJECT_ID!" --restart unless-stopped -p !REDIS_HOST_PORT!:6379 redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [WARN] docker compose 启动 Redis 失败，继续启动
+    echo [WARN] Redis 容器启动失败，继续启动
     exit /b 0
 )
 
@@ -220,7 +231,7 @@ echo [INFO] 等待 Redis 就绪...
 set "REDIS_READY=0"
 for /L %%i in (1,1,20) do (
     if "!REDIS_READY!"=="0" (
-        docker exec agent-os-redis redis-cli ping >nul 2>&1
+        docker exec agent-os-redis-!PROJECT_ID! redis-cli ping >nul 2>&1
         if !errorlevel! equ 0 (
             set "REDIS_READY=1"
             echo [OK] Redis 已就绪
@@ -258,15 +269,21 @@ exit /b 0
 :stop_project_instance
 if not exist "%PORTS_FILE%" exit /b 0
 
-echo [INFO] 检测到本项目的旧实例，正在关闭...
+echo [INFO] 检测到本项目的旧实例，正在检查...
 
 set "OLD_BACKEND_PORT="
 set "OLD_FRONTEND_PORT="
 set "OLD_PROJECT_ROOT="
+set "OLD_PROJECT_ID="
+set "OLD_BACKEND_PID="
+set "OLD_FRONTEND_PID="
 for /f "usebackq tokens=1,2 delims==" %%a in ("%PORTS_FILE%") do (
     if "%%a"=="BACKEND_PORT" set "OLD_BACKEND_PORT=%%b"
     if "%%a"=="FRONTEND_PORT" set "OLD_FRONTEND_PORT=%%b"
     if "%%a"=="PROJECT_ROOT" set "OLD_PROJECT_ROOT=%%b"
+    if "%%a"=="PROJECT_ID" set "OLD_PROJECT_ID=%%b"
+    if "%%a"=="BACKEND_PID" set "OLD_BACKEND_PID=%%b"
+    if "%%a"=="FRONTEND_PID" set "OLD_FRONTEND_PID=%%b"
 )
 
 if defined OLD_PROJECT_ROOT (
@@ -278,20 +295,44 @@ if defined OLD_PROJECT_ROOT (
 )
 
 if not defined OLD_BACKEND_PORT goto :skip_stop_backend
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":!OLD_BACKEND_PORT! " ^| findstr "LISTENING" 2^>nul') do (
-    echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
-    taskkill /F /PID %%p >nul 2>&1
+set "KILLED_BACKEND=0"
+for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_BACKEND_PORT! " ^| findstr "LISTENING"') do (
+    if defined OLD_BACKEND_PID (
+        if "%%p"=="!OLD_BACKEND_PID!" (
+            echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
+            taskkill /F /PID %%p >nul 2>&1
+            set "KILLED_BACKEND=1"
+        ) else (
+            echo [WARN] 端口 !OLD_BACKEND_PORT! 上的进程已变更（旧PID=!OLD_BACKEND_PID!，当前PID=%%p），跳过关闭
+        )
+    ) else (
+        echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
+        taskkill /F /PID %%p >nul 2>&1
+        set "KILLED_BACKEND=1"
+    )
 )
 :skip_stop_backend
 
 if not defined OLD_FRONTEND_PORT goto :skip_stop_frontend
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":!OLD_FRONTEND_PORT! " ^| findstr "LISTENING" 2^>nul') do (
-    echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
-    taskkill /F /PID %%p >nul 2>&1
+set "KILLED_FRONTEND=0"
+for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_FRONTEND_PORT! " ^| findstr "LISTENING"') do (
+    if defined OLD_FRONTEND_PID (
+        if "%%p"=="!OLD_FRONTEND_PID!" (
+            echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
+            taskkill /F /PID %%p >nul 2>&1
+            set "KILLED_FRONTEND=1"
+        ) else (
+            echo [WARN] 端口 !OLD_FRONTEND_PORT! 上的进程已变更（旧PID=!OLD_FRONTEND_PID!，当前PID=%%p），跳过关闭
+        )
+    ) else (
+        echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
+        taskkill /F /PID %%p >nul 2>&1
+        set "KILLED_FRONTEND=1"
+    )
 )
 :skip_stop_frontend
 
 timeout /t 2 /nobreak >nul
 del "%PORTS_FILE%" 2>nul
-echo [OK] 旧实例已关闭
+echo [OK] 旧实例检查完成
 exit /b 0

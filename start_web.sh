@@ -8,12 +8,15 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
 PORTS_FILE="$PROJECT_ROOT/.ports"
+PROJECT_ID=$(echo -n "$PROJECT_ROOT" | md5sum | cut -c1-8)
+REDIS_CONTAINER="agent-os-redis-$PROJECT_ID"
 
 echo "========================================"
 echo "  Agent OS Web Channel 启动脚本"
 echo "========================================"
 echo ""
 echo "项目目录: $PROJECT_ROOT"
+echo "项目标识: $PROJECT_ID"
 
 # 检查 Python
 if ! command -v python &>/dev/null; then
@@ -59,31 +62,29 @@ ensure_docker_and_redis() {
         fi
     fi
 
-    if docker ps -q -f "name=agent-os-redis" | grep -q .; then
-        echo "[OK] Redis 容器已运行"
+    if docker ps -q -f "name=$REDIS_CONTAINER" | grep -q .; then
+        echo "[OK] Redis 容器 ($REDIS_CONTAINER) 已运行"
         return 0
     fi
 
-    if docker ps -a -q -f "name=agent-os-redis" | grep -q .; then
-        echo "[INFO] Redis 容器已存在但未运行，正在启动..."
-        docker start agent-os-redis &>/dev/null
+    if docker ps -a -q -f "name=$REDIS_CONTAINER" | grep -q .; then
+        echo "[INFO] Redis 容器 ($REDIS_CONTAINER) 已存在但未运行，正在启动..."
+        docker start "$REDIS_CONTAINER" &>/dev/null
         if [ $? -eq 0 ]; then
             echo "[OK] Redis 容器已启动"
             return 0
         fi
     fi
 
-    if [ ! -f "$PROJECT_ROOT/docker-compose.yml" ]; then
-        echo "[WARN] 未找到 docker-compose.yml，跳过 Redis 启动"
-        return 0
-    fi
-
-    echo "[INFO] 正在通过 docker compose 启动 Redis..."
-    docker compose -f "$PROJECT_ROOT/docker-compose.yml" up -d redis 2>/dev/null
+    echo "[INFO] 正在创建 Redis 容器 ($REDIS_CONTAINER)..."
+    REDIS_HOST_PORT=$(find_available_port 6379)
+    docker run -d --name "$REDIS_CONTAINER" --restart unless-stopped \
+        -p "$REDIS_HOST_PORT:6379" \
+        redis:7-alpine redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes &>/dev/null
     if [ $? -eq 0 ]; then
         echo "[INFO] 等待 Redis 就绪..."
         for i in $(seq 1 20); do
-            if docker exec agent-os-redis redis-cli ping &>/dev/null; then
+            if docker exec "$REDIS_CONTAINER" redis-cli ping &>/dev/null; then
                 echo "[OK] Redis 已就绪"
                 return 0
             fi
@@ -91,7 +92,7 @@ ensure_docker_and_redis() {
         done
         echo "[WARN] Redis 未能在 20 秒内就绪，继续启动"
     else
-        echo "[WARN] docker compose 启动 Redis 失败，继续启动（将使用内存模式）"
+        echo "[WARN] Redis 容器启动失败，继续启动（将使用内存模式）"
     fi
 }
 
@@ -99,25 +100,70 @@ ensure_docker_and_redis
 
 # ========== 关闭当前项目的旧实例 ==========
 if [ -f "$PORTS_FILE" ]; then
-    echo "[INFO] 检测到本项目的旧实例，正在关闭..."
-    source "$PORTS_FILE"
-    if [ -n "$BACKEND_PORT" ]; then
-        OLD_PIDS=$(lsof -ti:$BACKEND_PORT 2>/dev/null || true)
-        if [ -n "$OLD_PIDS" ]; then
-            echo "[INFO] 关闭旧后端进程: $OLD_PIDS (端口 $BACKEND_PORT)"
-            echo "$OLD_PIDS" | xargs kill -9 2>/dev/null || true
+    echo "[INFO] 检测到本项目的旧实例，正在检查..."
+
+    OLD_BACKEND_PORT=""
+    OLD_FRONTEND_PORT=""
+    OLD_PROJECT_ROOT=""
+    OLD_PROJECT_ID=""
+    OLD_BACKEND_PID=""
+    OLD_FRONTEND_PID=""
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            BACKEND_PORT) OLD_BACKEND_PORT="$value" ;;
+            FRONTEND_PORT) OLD_FRONTEND_PORT="$value" ;;
+            PROJECT_ROOT) OLD_PROJECT_ROOT="$value" ;;
+            PROJECT_ID) OLD_PROJECT_ID="$value" ;;
+            BACKEND_PID) OLD_BACKEND_PID="$value" ;;
+            FRONTEND_PID) OLD_FRONTEND_PID="$value" ;;
+        esac
+    done < "$PORTS_FILE"
+
+    if [ -n "$OLD_PROJECT_ROOT" ] && [ "$PROJECT_ROOT" != "$OLD_PROJECT_ROOT" ]; then
+        echo "[INFO] 端口文件属于其他项目目录 [$OLD_PROJECT_ROOT]，跳过关闭"
+        rm -f "$PORTS_FILE"
+    else
+        if [ -n "$OLD_BACKEND_PORT" ] && command -v lsof &>/dev/null; then
+            OLD_PIDS=$(lsof -ti:$OLD_BACKEND_PORT 2>/dev/null || true)
+            if [ -n "$OLD_PIDS" ]; then
+                if [ -n "$OLD_BACKEND_PID" ]; then
+                    for pid in $OLD_PIDS; do
+                        if [ "$pid" = "$OLD_BACKEND_PID" ]; then
+                            echo "[INFO] 关闭旧后端进程: $pid (端口 $OLD_BACKEND_PORT)"
+                            kill -9 "$pid" 2>/dev/null || true
+                        else
+                            echo "[WARN] 端口 $OLD_BACKEND_PORT 上的进程已变更（旧PID=$OLD_BACKEND_PID，当前PID=$pid），跳过关闭"
+                        fi
+                    done
+                else
+                    echo "[INFO] 关闭旧后端进程: $OLD_PIDS (端口 $OLD_BACKEND_PORT)"
+                    echo "$OLD_PIDS" | xargs kill -9 2>/dev/null || true
+                fi
+            fi
         fi
-    fi
-    if [ -n "$FRONTEND_PORT" ]; then
-        OLD_PIDS=$(lsof -ti:$FRONTEND_PORT 2>/dev/null || true)
-        if [ -n "$OLD_PIDS" ]; then
-            echo "[INFO] 关闭旧前端进程: $OLD_PIDS (端口 $FRONTEND_PORT)"
-            echo "$OLD_PIDS" | xargs kill -9 2>/dev/null || true
+        if [ -n "$OLD_FRONTEND_PORT" ] && command -v lsof &>/dev/null; then
+            OLD_PIDS=$(lsof -ti:$OLD_FRONTEND_PORT 2>/dev/null || true)
+            if [ -n "$OLD_PIDS" ]; then
+                if [ -n "$OLD_FRONTEND_PID" ]; then
+                    for pid in $OLD_PIDS; do
+                        if [ "$pid" = "$OLD_FRONTEND_PID" ]; then
+                            echo "[INFO] 关闭旧前端进程: $pid (端口 $OLD_FRONTEND_PORT)"
+                            kill -9 "$pid" 2>/dev/null || true
+                        else
+                            echo "[WARN] 端口 $OLD_FRONTEND_PORT 上的进程已变更（旧PID=$OLD_FRONTEND_PID，当前PID=$pid），跳过关闭"
+                        fi
+                    done
+                else
+                    echo "[INFO] 关闭旧前端进程: $OLD_PIDS (端口 $OLD_FRONTEND_PORT)"
+                    echo "$OLD_PIDS" | xargs kill -9 2>/dev/null || true
+                fi
+            fi
         fi
+        rm -f "$PORTS_FILE"
+        sleep 2
+        echo "[OK] 旧实例检查完成"
     fi
-    rm -f "$PORTS_FILE"
-    sleep 2
-    echo "[OK] 旧实例已关闭"
 fi
 
 # ========== 查找可用端口 ==========
@@ -151,6 +197,9 @@ echo "[OK] 前端端口: $FRONTEND_PORT"
 
 echo "BACKEND_PORT=$BACKEND_PORT" > "$PORTS_FILE"
 echo "FRONTEND_PORT=$FRONTEND_PORT" >> "$PORTS_FILE"
+echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$PORTS_FILE"
+echo "PROJECT_ID=$PROJECT_ID" >> "$PORTS_FILE"
+echo "REDIS_HOST_PORT=${REDIS_HOST_PORT:-6379}" >> "$PORTS_FILE"
 echo "[INFO] 端口信息已保存到 $PORTS_FILE"
 
 # ========== 安装前端依赖 ==========
@@ -175,6 +224,8 @@ trap cleanup INT TERM
 # ========== 启动后端 ==========
 echo "[1/2] 启动后端服务器 (FastAPI + WebSocket :$BACKEND_PORT)..."
 export BACKEND_PORT=$BACKEND_PORT
+export REDIS_PORT=${REDIS_HOST_PORT:-6379}
+export _AO_PROJECT_ID=$PROJECT_ID
 PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/start_server.py" &
 BACKEND_PID=$!
 
@@ -194,7 +245,7 @@ done
 # ========== 启动前端 ==========
 echo "[2/2] 启动前端开发服务器 (Vite :$FRONTEND_PORT)..."
 export VITE_API_BASE_URL="http://localhost:$BACKEND_PORT"
-cd "$FRONTEND_DIR" && npx vite --port "$FRONTEND_PORT" &
+cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx vite --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 # 等待前端就绪并打开浏览器
@@ -210,15 +261,9 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# 打开浏览器
-echo "[INFO] 打开浏览器..."
-if command -v xdg-open &>/dev/null; then
-    xdg-open "http://localhost:$FRONTEND_PORT"
-elif command -v open &>/dev/null; then
-    open "http://localhost:$FRONTEND_PORT"
-elif command -v start &>/dev/null; then
-    start "http://localhost:$FRONTEND_PORT"
-fi
+# 更新 .ports 文件，追加 PID 信息
+echo "BACKEND_PID=$BACKEND_PID" >> "$PORTS_FILE"
+echo "FRONTEND_PID=$FRONTEND_PID" >> "$PORTS_FILE"
 
 echo ""
 echo "========================================"
@@ -228,6 +273,8 @@ echo "  前端: http://localhost:$FRONTEND_PORT"
 echo "  API 文档: http://localhost:$BACKEND_PORT/docs"
 echo ""
 echo "  项目目录: $PROJECT_ROOT"
+echo "  项目标识: $PROJECT_ID"
+echo "  Redis 容器: $REDIS_CONTAINER"
 echo "  端口文件: $PORTS_FILE"
 echo "  按 Ctrl+C 停止所有服务"
 echo "========================================"
