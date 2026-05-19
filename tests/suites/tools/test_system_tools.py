@@ -324,8 +324,8 @@ class TestResourceMergeToolGitStatus:
     async def test_git_status_success_with_changes(self):
         """测试 git_status 成功返回暂存、未暂存和未跟踪文件"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=True)
-        tool._run_git = AsyncMock(return_value=(
+        tool._git_helpers.is_worktree = AsyncMock(return_value=True)
+        tool._git_helpers.run_git = AsyncMock(return_value=(
             0,
             "M  src/main.py\n?? new_file.py\nA  added.py",
             "",
@@ -346,8 +346,8 @@ class TestResourceMergeToolGitStatus:
     async def test_git_status_clean_workspace(self):
         """测试 git_status 在干净工作空间返回空列表"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=True)
-        tool._run_git = AsyncMock(return_value=(0, "", ""))
+        tool._git_helpers.is_worktree = AsyncMock(return_value=True)
+        tool._git_helpers.run_git = AsyncMock(return_value=(0, "", ""))
 
         result = await tool.execute({
             "action": "git_status",
@@ -363,7 +363,7 @@ class TestResourceMergeToolGitStatus:
     async def test_git_status_not_initialized(self):
         """测试 git_status 在未初始化 workspace 时返回 NOT_INITIALIZED 错误"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=False)
+        tool._git_helpers.is_worktree = AsyncMock(return_value=False)
 
         result = await tool.execute({
             "action": "git_status",
@@ -380,9 +380,9 @@ class TestResourceMergeToolPrepare:
     async def test_prepare_creates_worktree(self):
         """测试 prepare 成功创建 worktree 并返回分支名和 base_commit"""
         tool = ResourceMergeTool()
-        tool._ensure_project_repo = AsyncMock(return_value=None)
-        tool._is_worktree = AsyncMock(return_value=False)
-        tool._run_git = AsyncMock(side_effect=[
+        tool._git_helpers.ensure_project_repo = AsyncMock(return_value=None)
+        tool._git_helpers.is_worktree = AsyncMock(return_value=False)
+        tool._git_helpers.run_git = AsyncMock(side_effect=[
             (0, "", ""),                   # git worktree add
             (0, "abc123def456", ""),       # git rev-parse HEAD
         ])
@@ -400,8 +400,8 @@ class TestResourceMergeToolPrepare:
     async def test_prepare_skips_existing_worktree(self):
         """测试 prepare 对已存在的 worktree 跳过创建并返回提示"""
         tool = ResourceMergeTool()
-        tool._ensure_project_repo = AsyncMock(return_value=None)
-        tool._is_worktree = AsyncMock(return_value=True)
+        tool._git_helpers.ensure_project_repo = AsyncMock(return_value=None)
+        tool._git_helpers.is_worktree = AsyncMock(return_value=True)
 
         result = await tool.execute({
             "action": "prepare",
@@ -416,7 +416,7 @@ class TestResourceMergeToolPrepare:
         from tools.types import create_failure_result
 
         tool = ResourceMergeTool()
-        tool._ensure_project_repo = AsyncMock(
+        tool._git_helpers.ensure_project_repo = AsyncMock(
             return_value=create_failure_result(
                 error="项目目录不是 git 仓库",
                 error_code="NOT_A_GIT_REPO",
@@ -438,7 +438,7 @@ class TestResourceMergeToolMerge:
     async def test_merge_not_initialized(self):
         """测试 merge 在未初始化 workspace 时返回 NOT_INITIALIZED 错误"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=False)
+        tool._git_helpers.is_worktree = AsyncMock(return_value=False)
 
         result = await tool.execute({
             "action": "merge",
@@ -455,7 +455,7 @@ class TestResourceMergeToolRollback:
     async def test_rollback_not_initialized(self):
         """测试 rollback 在未初始化 workspace 时返回 NOT_INITIALIZED 错误"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=False)
+        tool._git_helpers.is_worktree = AsyncMock(return_value=False)
 
         result = await tool.execute({
             "action": "rollback",
@@ -468,9 +468,9 @@ class TestResourceMergeToolRollback:
     async def test_rollback_success(self):
         """测试 rollback 成功恢复到分支初始状态"""
         tool = ResourceMergeTool()
-        tool._is_worktree = AsyncMock(return_value=True)
-        # _rollback 内部调用 _run_git 两次：checkout 和 clean
-        tool._run_git = AsyncMock(return_value=(0, "", ""))
+        tool._git_helpers.is_worktree = AsyncMock(return_value=True)
+        # _rollback 内部调用 _git_helpers.run_git 两次：checkout 和 clean
+        tool._git_helpers.run_git = AsyncMock(return_value=(0, "", ""))
 
         result = await tool.execute({
             "action": "rollback",

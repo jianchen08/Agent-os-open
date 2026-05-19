@@ -3,33 +3,49 @@
 提供 WorkspaceLifecycleManager 的合并、验证和清理方法。
 从 workspace_lifecycle.py 拆分而来。
 """
-
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 排除的目录（不参与场景检测和大小计算）
+_SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache"})
+_SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
+
+
+def _force_rmtree(path: str) -> None:
+    """强制删除目录树，兼容 Windows 下 .git 只读文件。
+
+    Windows 上 git objects 文件为只读属性，shutil.rmtree 默认无法删除。
+    通过 onerror 回调去除只读属性后重试。
+    """
+    def _on_error(func, filepath, exc_info):
+        if os.name == "nt":
+            os.chmod(filepath, stat.S_IWRITE)
+            func(filepath)
+        else:
+            raise
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+    except OSError:
+        shutil.rmtree(path, onerror=_on_error)
+
 
 class _MergeOpsMixin:
-    """合并操作 Mixin，提供安全合并、copy_merge、验证和清理方法。
+    """合并/评估操作 Mixin：封装评估前保存、合并、验证、清理等方法。
 
-    要求宿主类提供以下方法（来自 _GitOpsMixin）：
-    - self._run_git(...)
-    - self._ensure_git_user(...)
-    - self._git_add_commit_if_dirty(...)
-    - self._get_merge_lock(...)
-    - self._effective_skip_dirs(...)
-    - self._guard_root_branch(...)
-    - self._worktree_add_with_repair(...)
-    - self._setup_sparse_worktree(...)
-    - self._calc_project_size(...)
+    方法通过 self 访问实例属性和 _GitOpsMixin 提供的 Git 方法，
+    这些由 WorkspaceLifecycleManager.__init__ 和 _GitOpsMixin 提供。
     """
 
-    # ── 评估前保存 ────────────────────────────────────────────────
+    # ── 5. 评估前保存 ────────────────────────────────────────────
 
     def on_before_evaluate(self, workspace: str, ws_meta: dict | None = None) -> dict:
         """评估前保存：git add -A + git commit（plain 模式跳过 git 操作）"""
@@ -47,10 +63,17 @@ class _MergeOpsMixin:
         return {"success": True, "commit_hash": commit_hash,
                 "has_changes": bool(status and status.strip())}
 
-    # ── 评估通过 ──────────────────────────────────────────────
+    # ── 6. 评估通过 ──────────────────────────────────────────────
 
     def on_eval_passed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
-        """评估通过后按 mode 分发合并逻辑，并发安全：按 project_root 粒度加锁"""
+        """评估通过后按 mode 分发合并逻辑，并发安全：按 project_root 粒度加锁
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑仅在 git_merge 时验证合并结果，copy_merge 无验证直接清理 worktree，
+        导致合并失败（文件未到达目标）时 worktree 被删除，任务文件丢失。
+        修复: 不论哪种合并方式都验证文件是否到达目标，失败则重试最多2次，
+        仍失败则保留 worktree 不清理，返回失败让任务标记为 failed。
+        """
         mode = ws_meta.get("mode", "")
         if mode == "plain":
             logger.info("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
@@ -101,9 +124,13 @@ class _MergeOpsMixin:
         self, workspace: str, ws_meta: dict, *, tag_task_id: str = "",
         merge_method: str = "",
     ):
-        """清理 worktree：删 worktree → 条件打 tag → 删分支"""
-        from isolation._workspace_git_ops import _force_rmtree
+        """清理 worktree：删 worktree → 条件打 tag → 删分支
 
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑无论合并方式（git_merge 或 copy_merge）都打 tag。
+        copy_merge 时 commit graph 上没有真正的 merge 关系，tag 指向的提交
+        在分支删除后变成孤儿提交。修复: 只在 git_merge 成功时打 tag。
+        """
         project_root = Path(ws_meta.get("project_root", ""))
         branch = ws_meta.get("branch", "")
         if project_root.exists():
@@ -112,6 +139,7 @@ class _MergeOpsMixin:
             except Exception as e:
                 logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
             if branch:
+                # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
                 if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
@@ -125,7 +153,7 @@ class _MergeOpsMixin:
             except OSError as e:
                 logger.warning("[WorkspaceLifecycle] 强制清理 worktree 目录失败: %s, %s", workspace, e)
 
-    # ── 评估失败 ──────────────────────────────────────────────
+    # ── 7. 评估失败 ──────────────────────────────────────────────
 
     def on_eval_failed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
         """评估失败：reject_count >= max_retries 时回滚，否则允许重试"""
@@ -146,12 +174,10 @@ class _MergeOpsMixin:
         logger.info("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
         return {"success": True, "action": "retry", "reject_count": reject_count}
 
-    # ── 任务异常回滚 ──────────────────────────────────────────
+    # ── 8. 任务异常回滚 ──────────────────────────────────────────
 
     def on_task_failed(self, workspace: str, ws_meta: dict) -> dict:
         """异常回滚：worktree 模式先 checkout+clean 再清理 worktree，其他模式直接回滚"""
-        from isolation._workspace_git_ops import _force_rmtree
-
         ws_path = Path(workspace)
         if not ws_path.exists():
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
@@ -176,27 +202,39 @@ class _MergeOpsMixin:
         logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，拒绝执行破坏性操作: %s", mode, workspace)
         return {"success": False, "error": f"未知工作模式: {mode}"}
 
-    # ── 安全合并 ──────────────────────────────────────────────
+    # ── 9. 安全合并 ──────────────────────────────────────────────
 
     def _safe_merge(self, workspace: str, ws_meta: dict) -> dict:
-        """安全合并：在当前分支上尝试 git merge，失败降级为文件复制。"""
+        """安全合并：在当前分支上尝试 git merge，失败降级为文件复制。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑使用 _resolve_main_branch 硬找 main/master 分支做合并目标，
+        但 worktree 可能基于 feature 分支创建 → 分支不匹配 → 降级 copy_merge
+        → 旧文件无差别覆盖新文件。
+        修复: 使用当前实际所在分支作为合并目标，不再硬找 main。
+        同时在合并前提交项目根目录的脏文件，防止未提交修改被覆盖。
+        """
         project_root = ws_meta.get("project_root", "")
         branch = ws_meta.get("branch", "")
         if not project_root:
             return {"success": False, "error": "缺少 project_root 信息"}
         proj_path, ws_path = Path(project_root), Path(workspace)
+        # workspace 中提交所有变更
         self._ensure_git_user(ws_path)
         self._git_add_commit_if_dirty(
             ws_path, "chore: auto commit before merge")
+        # BUG-FIX: 合并前提交项目根目录的脏文件，防止未提交修改被覆盖
         self._ensure_git_user(proj_path)
         self._git_add_commit_if_dirty(
             proj_path, "chore: auto-save before merge")
+        # 获取项目根目录当前实际所在分支（不再硬找 main/master）
         rc, current_branch, _ = self._run_git(
             "rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
         if rc != 0 or not current_branch.strip():
             logger.warning(
                 "[WorkspaceLifecycle] 无法获取当前分支，降级为 copy_merge")
             return self._copy_merge(workspace, project_root, ws_meta)
+        # 尝试 git merge（在当前分支上合并 worktree 分支）
         if branch:
             rc, _, stderr = self._run_git(
                 "merge", branch, cwd=proj_path)
@@ -213,7 +251,18 @@ class _MergeOpsMixin:
 
     def _copy_merge(self, workspace: str, target_dir: str,
                     ws_meta: dict | None = None) -> dict:
-        """通过文件复制方式合并变更（冲突降级策略），跳过排除目录。"""
+        """通过文件复制方式合并变更（冲突降级策略），跳过排除目录。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑无差别复制 worktree 所有文件到目标目录，
+        如果 worktree 基于旧版本创建，旧文件会覆盖目标中的新文件。
+        修复: 通过 git diff 找出 worktree 分支实际修改的文件列表，
+        只复制这些被修改的文件，避免旧版本覆盖新版本。
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑 merged 为空时仍返回 success=True，导致空合并后 worktree 被清理。
+        修复: merged 为空时返回失败，让上层重试或报错。
+        """
         src, dst = Path(workspace), Path(target_dir)
         if not src.exists():
             return {"success": False, "error": f"源目录不存在: {workspace}",
@@ -242,7 +291,7 @@ class _MergeOpsMixin:
             rel = item.relative_to(src)
             if any(p in skip for p in rel.parts):
                 continue
-            if item.suffix in set({".bak", ".pyc", ".pyo"}):
+            if item.suffix in _SKIP_EXTENSIONS:
                 continue
             rel_str = str(rel).replace("\\", "/")
             if changed_files is not None and rel_str not in changed_files:
@@ -260,12 +309,20 @@ class _MergeOpsMixin:
         return {"success": False, "error": "copy_merge 未合并任何文件",
                 "method": "copy", "merged_files": []}
 
-    # ── 合并验证 ──────────────────────────────────────────────
+    # ── 10. 合并验证 ─────────────────────────────────────────────
 
     def _verify_merge_result(
         self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
     ) -> tuple[bool, str]:
-        """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。"""
+        """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。
+
+        BUG-FIX-fix_20260513_merge_verify:
+        原逻辑仅 git_merge 时验证 commit graph，copy_merge 无验证。
+        修复: 统一验证逻辑，包含 commit graph 验证 + 文件级验证。
+
+        Returns:
+            (verified: bool, detail: str) 验证结果和详情描述
+        """
         branch = ws_meta.get("branch", "")
         method = merge_result.get("method", "")
         proj_path = Path(project_root)
@@ -306,7 +363,13 @@ class _MergeOpsMixin:
         return True, "验证通过"
 
     def _verify_merge_in_main(self, branch_name: str, cwd: Path | None = None) -> bool:
-        """验证分支已合并到当前分支。"""
+        """验证分支已合并到当前分支：git log HEAD..{branch} 应为空，不为空则阻止后续清理。
+
+        BUG-FIX-fix_20260512_worktree_base:
+        原逻辑使用 _resolve_main_branch 硬找 main/master 做验证，
+        但 worktree 可能合并到 feature 分支，导致验证误判。
+        修复: 使用当前 HEAD 所在分支做验证。
+        """
         work_dir = cwd or self._base_path
         rc, log_output, _ = self._run_git("log", f"HEAD..{branch_name}", cwd=work_dir)
         if rc != 0:
@@ -317,3 +380,49 @@ class _MergeOpsMixin:
                            branch_name, len(log_output.splitlines()))
             return False
         return True
+
+    # ── 12. 工作空间清理 ──────────────────────────────────────────
+
+    def cleanup_workspace(self, task_id: str) -> dict[str, Any]:
+        """清理单个任务关联的工作空间（worktree/分支/目录），不递归子任务"""
+        self.restore_ws_meta(task_id)
+        meta = self._ws_meta_store.get(task_id)
+        if not meta:
+            return {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
+
+        mode = meta.get("mode", "")
+        workspace = meta.get("path", "")
+        result: dict[str, Any] = {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
+
+        if mode == "worktree":
+            project_root = Path(meta.get("project_root", "")).resolve()
+            branch = meta.get("branch", "")
+            ws_path = Path(workspace).resolve()
+            if project_root.exists():
+                if ws_path.exists():
+                    rc, _, _ = self._run_git("worktree", "remove", str(ws_path), "--force", cwd=project_root)
+                    result["worktree_removed"] = rc == 0
+                if branch:
+                    rc, _, _ = self._run_git("branch", "-D", branch, cwd=project_root)
+                    result["branch_deleted"] = rc == 0
+            if ws_path.exists() and "__wt_" in ws_path.name:
+                try:
+                    _force_rmtree(str(ws_path))
+                    result["dir_removed"] = True
+                except OSError as e:
+                    logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s", workspace, e)
+        elif mode == "plain":
+            ws_path = Path(workspace)
+            if not ws_path.is_absolute():
+                ws_path = ws_path.resolve()
+            if ws_path.exists():
+                try:
+                    _force_rmtree(str(ws_path))
+                    result["dir_removed"] = True
+                    logger.info("[WorkspaceLifecycle] 已清理 plain 工作空间: %s", ws_path)
+                except OSError as e:
+                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s", workspace, e)
+
+        self._ws_meta_store.pop(task_id, None)
+        logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s", task_id, mode, result)
+        return result

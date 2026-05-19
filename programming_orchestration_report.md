@@ -1,108 +1,147 @@
-# task_submit 与任务系统权责边界文档
+# 功能验证报告：大文件拆分和代码清理后完整性检查
 
-## 1. 概述
-
-本文档明确 `task_submit` 工具与内部任务系统之间的权责边界，确保两者职责清晰、不越界。
+> **验证时间**: 2026-05-19  
+> **验证类型**: 静态检查 + Import 链验证（不启动服务器）  
+> **项目类型**: Python FastAPI 后端服务  
 
 ---
 
-## 2. task_submit 工具职责（对外原子操作）
+## 一、验证总结
 
-`task_submit` 是任务创建的**唯一外部入口**，负责将外部请求转化为内部任务系统的标准输入。其职责为：
+| 验证项 | 状态 | 说明 |
+|--------|------|------|
+| 已删除文件确认 | ⚠️ 部分通过 | 7个目标文件中6个已删除，src/errors.py 仍存在 |
+| Dockerfile 引用文件 | ✅ 通过 | 全部 COPY 引用的文件和目录均存在 |
+| app_factory.py Import 链 | ✅ 通过 | 导入成功，create_app() 返回 FastAPI 实例（229条路由） |
+| isolation 包拆分 Import | ✅ 通过 | 三个文件均可独立导入，跨模块引用正确 |
+| tool_marketplace 合并 | ✅ 通过 | 仅保留 tool_marketplace.py，无重复文件 |
+| 残留引用检查 | ✅ 通过 | 代码中无功能性残留引用（仅文档注释） |
+| .bak 文件清理 | ⚠️ 未完成 | 5个 .bak 文件仍存在 |
 
-| 职责 | 说明 |
+**总体评估**: 🟡 **基本通过** — 核心功能完整，存在少量清理遗留项
+
+---
+
+## 二、详细验证结果
+
+### 2.1 已删除文件确认
+
+| 文件 | 期望状态 | 实际状态 | 结果 |
+|------|----------|----------|------|
+| start_server.py | 已删除 | 不存在 | ✅ |
+| tool_marketplace_service.py | 已删除 | 不存在 | ✅ |
+| debug_page_structure.py | 已删除 | 不存在 | ✅ |
+| diag_ws.py | 已删除 | 不存在 | ✅ |
+| hello.txt | 已删除 | 不存在 | ✅ |
+| identical_files.csv | 已删除 | 不存在 | ✅ |
+| src/errors.py | 已删除 | **仍存在 (4.7KB)** | ❌ |
+
+**src/errors.py 说明**: 该文件头部注释表明因 `tests/test_state_evolution_levels.py` 的引用而暂时保留。经验证，确实仅有 2 个测试文件引用它，属于可控范围。建议后续迁移测试引用后删除。
+
+### 2.2 .bak 文件检查
+
+发现以下 .bak 文件未清理：
+
+| 文件 | 大小 |
 |------|------|
-| **参数验证** | 检查传入参数的完整性（必填字段是否齐全）和合法性（类型、取值范围是否符合要求） |
-| **工作空间准备** | 根据任务配置创建或分配隔离工作空间（worktree/目录），确保任务间文件隔离 |
-| **依赖检查** | 验证 `dependencies` 中指定的前置任务是否已完成，未完成则拒绝创建 |
-| **调用 TaskService 创建任务** | 将验证通过的参数传递给内部 TaskService，触发任务生命周期 |
-| **返回成功/失败** | 向调用方返回明确的创建结果（任务ID + 状态），不返回任务执行细节 |
+| Dockerfile.bak | 3.3KB |
+| start_web.bat.bak | 11.1KB |
+| start_web.sh.bak | 10.0KB |
+| tests/test_import_integrity.py.bak | - |
+| tests/test_start_server_refactor.py.bak | - |
 
-### 关键原则
+**建议**: 这些 .bak 文件为重构前的备份，确认功能正常后可安全删除。
 
-- task_submit 是**同步原子操作**：要么成功创建任务并返回ID，要么失败并返回错误原因
-- task_submit **不做状态管理**：不负责任务的后续状态转换、进度更新等
-- task_submit **不做任务执行**：只负责创建，不负责调度或运行
+### 2.3 Dockerfile 引用文件检查
+
+Dockerfile 中所有 COPY 指令引用的文件均已确认存在：
+
+```
+COPY src/ ./src/                       ✅
+COPY config/ ./config/                 ✅
+COPY conftest.py ./                    ✅
+COPY app_factory.py ./stream_handler.py ./ws_handler.py ./static_files.py ./  ✅
+COPY run.py ./                         ✅
+COPY docker-entrypoint.sh ./           ✅
+COPY pyproject.toml ./                 ✅
+```
+
+CMD 指令 `CMD ["python", "app_factory.py"]` 引用的文件存在 ✅
+
+### 2.4 app_factory.py Import 链验证
+
+```
+测试命令: python3 -c "import app_factory; app = create_app()"
+结果: ✅ 成功
+  - create_app() 返回 FastAPI 实例
+  - 应用标题: "Agent OS API"
+  - 注册路由数量: 229
+  - UI Schema 加载: 从 config/modules 加载了 1 个 UI Schema
+```
+
+**结论**: app_factory.py 完整替代 start_server.py 作为应用入口，功能正常。
+
+### 2.5 isolation 包拆分验证
+
+workspace_lifecycle.py 拆分为三个文件的验证结果：
+
+| 文件 | 大小 | 导入状态 | 说明 |
+|------|------|----------|------|
+| workspace_lifecycle.py | 19.9KB | ✅ 成功 | 主模块，导出 WorkspaceLifecycleManager |
+| _workspace_git_ops.py | 20.6KB | ✅ 成功 | Git 操作子模块 |
+| _workspace_merge_ops.py | 16.5KB | ✅ 成功 | 合并操作子模块 |
+
+**跨模块引用验证**:
+- workspace_lifecycle.py → 引用 _workspace_git_ops ✅
+- workspace_lifecycle.py → 引用 _workspace_merge_ops ✅
+- isolation 包 `__init__.py` 正常 ✅
+
+**公共 API**: WorkspaceLifecycleManager 类可通过 `from src.isolation.workspace_lifecycle import WorkspaceLifecycleManager` 正常导入，API 未变。
+
+### 2.6 tool_marketplace 重复文件合并
+
+搜索结果仅发现：
+- `src/services/tool_marketplace.py` (16.8KB) ✅
+- `tool_marketplace_service.py` — 不存在 ✅（已删除）
+
+残留引用仅存在于 `tests/test_import_integrity.py`（文档/测试引用），无功能性影响。
+
+### 2.7 残留引用分析
+
+**代码文件中 start_server 引用**: 全部为注释/文档字符串，无功能性 import：
+- `app_factory.py:5` — 注释 "从 start_server.py 拆分而来"
+- `stream_handler.py:5` — 注释 "从 start_server.py 拆分而来"
+- `ws_handler.py:6` — 注释 "从 start_server.py 拆分而来"
+- `static_files.py:5` — 注释 "从 start_server.py 拆分而来"
+- 其余均为文档文件(.md)中的历史描述
+
+**src/errors.py 引用**: 仅 2 个测试文件引用
+- `tests/test_import_integrity.py`
+- `tests/test_state_evolution_levels.py`
 
 ---
 
-## 3. 任务系统职责（内部运行管理）
+## 三、发现的问题与建议
 
-任务系统负责任务创建后的**全生命周期管理**，其职责为：
+### 问题 1: src/errors.py 未删除（低优先级）
+- **现状**: 文件仍存在（4.7KB），头部注释说明因测试引用暂保留
+- **影响**: 不影响功能，项目已有完整的 `src/core/errors.py`
+- **建议**: 迁移 `test_state_evolution_levels.py` 中的引用后删除
 
-| 职责 | 说明 |
-|------|------|
-| **任务状态管理** | 通过 SimpleStateMachine 驱动任务状态转换（pending → running → completed/failed 等） |
-| **存储持久化** | 任务的创建、更新、查询等数据持久化操作 |
-| **进度计算** | 子任务进度汇总、父任务进度更新、整体完成度计算 |
-| **任务查询** | 按状态筛选、详情获取、列表查询、全局状态概览等 |
-| **生命周期回调** | 状态变化时触发回调（如通知上级任务、触发下游依赖等） |
-
-### 关键原则
-
-- 任务系统**不做参数验证**：参数合法性由 task_submit 在入口处保证
-- 任务系统**不对外暴露**：外部调用方通过 task_submit 间接使用，不直接调用 TaskService
-- 任务系统**管理运行时**：关注任务如何执行、何时完成、如何通知，而非如何创建
+### 问题 2: 5 个 .bak 文件未清理（低优先级）
+- **现状**: Dockerfile.bak、start_web.bat.bak、start_web.sh.bak、tests 下 2 个 .bak
+- **影响**: 不影响功能，仅占用空间
+- **建议**: 确认无误后执行 `find . -name "*.bak" -delete`
 
 ---
 
-## 4. 边界原则
+## 四、验证结论
 
-### 4.1 职责不交叉
+大文件拆分和代码清理工作**整体成功**：
 
-```
-外部调用方
-    │
-    ▼
-task_submit（入口层：验证 + 准备 + 转发）
-    │
-    ▼
-TaskService（运行层：状态 + 存储 + 进度 + 回调）
-```
-
-### 4.2 错误归属
-
-| 错误类型 | 归属 | 处理方式 |
-|----------|------|----------|
-| 参数缺失/类型错误 | task_submit | 直接返回错误，不进入任务系统 |
-| 依赖任务未完成 | task_submit | 直接返回错误，不创建任务 |
-| 工作空间创建失败 | task_submit | 直接返回错误，不创建任务 |
-| 状态转换非法 | 任务系统 | 抛出 InvalidTransitionError |
-| 任务执行超时 | 任务系统 | 标记任务为 timeout 状态 |
-| 进度计算异常 | 任务系统 | 记录异常，返回最后已知进度 |
-
-### 4.3 数据流向
-
-- **task_submit → TaskService**：任务参数（goal、priority、acceptance_criteria 等）经验证后一次性传入
-- **TaskService → task_submit（返回值）**：仅返回任务ID和初始状态，不返回内部实现细节
-- **TaskService → 外部通知**：通过系统通知机制异步推送状态变化，不由 task_submit 负责
-
----
-
-## 5. 交互流程
-
-```
-1. 调用方发起 task_submit(goal, priority, ...)
-2. task_submit 验证参数完整性
-3. task_submit 检查依赖任务状态
-4. task_submit 准备工作空间（如需要）
-5. task_submit 调用 TaskService.create_task(...)
-6. TaskService 创建任务记录，设置初始状态 (pending)
-7. TaskService 返回 task_id 给 task_submit
-8. task_submit 返回 {task_id, status: "pending"} 给调用方
---- 后续由任务系统接管 ---
-9. 任务系统调度执行
-10. 状态变化通过系统通知异步推送
-```
-
----
-
-## 6. 总结
-
-| 维度 | task_submit | 任务系统 |
-|------|------------|----------|
-| 定位 | 对外原子入口 | 内部运行引擎 |
-| 关注点 | 创建前：参数对不对、能不能创建 | 创建后：怎么运行、何时完成 |
-| 操作粒度 | 一次调用，一个结果 | 持续管理，全生命周期 |
-| 错误处理 | 即时返回，快速失败 | 异步处理，状态标记 |
-| 对外可见 | 是（调用方直接使用） | 否（通过 task_submit 间接使用） |
+1. ✅ start_server.py 已成功拆分为 app_factory.py + stream_handler.py + ws_handler.py + static_files.py，且 app_factory.py 能正常创建 FastAPI 应用（229条路由）
+2. ✅ workspace_lifecycle.py 已成功拆分为 3 个文件，公共 API（WorkspaceLifecycleManager）不变
+3. ✅ Dockerfile 已正确更新，所有引用文件存在
+4. ✅ 重复文件 tool_marketplace_service.py 已删除
+5. ✅ 过期文件（debug_page_structure.py、diag_ws.py、hello.txt、identical_files.csv）已清理
+6. ⚠️ src/errors.py 和 5 个 .bak 文件仍有遗留，建议后续清理

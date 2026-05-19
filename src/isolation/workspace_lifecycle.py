@@ -4,59 +4,30 @@
 
 暴露接口：
 - WorkspaceLifecycleManager：工作空间生命周期管理器
+
+从 _workspace_git_ops._GitOpsMixin 和 _workspace_merge_ops._MergeOpsMixin 继承
+Git 操作和合并操作方法，本文件仅保留业务编排层代码。
 """
+from __future__ import annotations
+
 import logging
-import os
 import shutil
-import stat
-import subprocess
-import threading
 from pathlib import Path
 from typing import Any
 
+from isolation._workspace_git_ops import _GitOpsMixin, _force_rmtree, _safe_ws_name
+from isolation._workspace_merge_ops import _MergeOpsMixin
+
 logger = logging.getLogger(__name__)
 
-# 排除的目录（不参与场景检测和大小计算）
-_SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache"})
-_SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
-_SPARSE_THRESHOLD_BYTES = 50 * 1024 * 1024  # sparse checkout 大小阈值（50MB）
-_GIT_TIMEOUT = 30  # git 命令执行超时（秒）
-_GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
+__all__ = [
+    "WorkspaceLifecycleManager",
+    "_safe_ws_name",
+    "_force_rmtree",
+]
 
 
-def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 15) -> str:
-    """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限。"""
-    import re
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', project_name)
-    safe = safe.replace(" ", "_")
-    safe = re.sub(r'_+', '_', safe).strip('._')
-    if not safe:
-        safe = "ws"
-    if len(safe) > name_limit:
-        safe = safe[:name_limit].rstrip('._')
-    return f"{safe}__wt_{task_id[:8]}"
-
-
-def _force_rmtree(path: str) -> None:
-    """强制删除目录树，兼容 Windows 下 .git 只读文件。
-
-    Windows 上 git objects 文件为只读属性，shutil.rmtree 默认无法删除。
-    通过 onerror 回调去除只读属性后重试。
-    """
-    def _on_error(func, filepath, exc_info):
-        if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)
-            func(filepath)
-        else:
-            raise
-
-    try:
-        shutil.rmtree(path, onerror=_on_error)
-    except OSError:
-        shutil.rmtree(path, onerror=_on_error)
-
-
-class WorkspaceLifecycleManager:
+class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     """工作空间统一生命周期管理器
 
     场景A: 新项目（workspace 为空或路径不存在）
@@ -64,6 +35,10 @@ class WorkspaceLifecycleManager:
     场景C: 已有项目有 .git（通过 worktree 或 sparse-checkout 隔离）
 
     四种工作模式: project_root / branch / worktree / shared
+
+    继承:
+        _GitOpsMixin: Git 命令封装和分支管理方法
+        _MergeOpsMixin: 合并、验证和清理方法
     """
 
     def __init__(self, resource_merge: Any, config: dict[str, Any],
@@ -83,8 +58,8 @@ class WorkspaceLifecycleManager:
         self._ws_meta_store = ws_meta_store
         self._base_path = Path(base_path)
         # 按 project_root 粒度的并发锁
-        self._merge_locks: dict[str, threading.Lock] = {}
-        self._global_lock = threading.Lock()
+        self._merge_locks: dict[str, Any] = {}
+        self._global_lock = __import__("threading").Lock()
         # 项目大小计算缓存 {project_root: (mtime, size)}
         self._size_cache: dict[str, tuple[float, int]] = {}
         # 记录项目根目录的主分支，用于守卫 auto-save 不写入错误分支
@@ -94,274 +69,64 @@ class WorkspaceLifecycleManager:
         except Exception:
             logger.warning("[WorkspaceLifecycle] __init__ 中记录主分支失败", exc_info=True)
 
-    def _get_workspace_root(self) -> str:
-        """从配置中读取工作空间根目录，读取失败则使用全局默认值"""
-        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT
-        return self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
-
     # ── 内部工具方法 ──────────────────────────────────────────────
 
-    def _run_git(self, *args: str, cwd: Path, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
-        """执行 git 命令（同步，使用 subprocess）"""
-        cmd = ["git"] + list(args)
-        try:
-            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-            # BUG-FIX-fix_20260425_git_error_log:
-            # 问题根因: 原条件 `r.returncode != 0 and r.stderr` 在 stderr 为空时跳过日志，
-            #           导致 git commit 失败时无法追踪原因（Windows 环境下 git 可能通过 stdout 输出错误）。
-            # 修复方案: returncode != 0 时始终记录，同时包含 stdout 和 stderr。
-            if r.returncode != 0:
-                err_parts = []
-                if r.stderr.strip():
-                    err_parts.append(f"stderr={r.stderr[:200]}")
-                if r.stdout.strip():
-                    err_parts.append(f"stdout={r.stdout[:200]}")
-                detail = " | ".join(err_parts) if err_parts else "(no output)"
-                logger.warning("[WorkspaceLifecycle] git %s failed (rc=%d): %s", " ".join(args), r.returncode, detail)
-            return r.returncode, r.stdout.strip(), r.stderr.strip()
-        except subprocess.TimeoutExpired:
-            return -1, "", f"命令执行超时（{timeout}秒）"
-        except FileNotFoundError:
-            return -1, "", "未找到 git 命令"
-
-    def _get_merge_lock(self, project_root: str) -> threading.Lock:
-        """获取指定 project_root 的合并锁，确保同一项目目录的合并操作串行执行"""
-        with self._global_lock:
-            if project_root not in self._merge_locks:
-                self._merge_locks[project_root] = threading.Lock()
-            return self._merge_locks[project_root]
-
-    def _ensure_git_user(self, cwd: Path):
-        """配置 workspace 的 git 用户信息"""
-        self._run_git("config", "user.email", "agent@agent-os.local", cwd=cwd)
-        self._run_git("config", "user.name", "Agent OS", cwd=cwd)
-
-    def _remove_index_lock(self, cwd: Path) -> bool:
-        """Remove stale git index.lock if it exists. Returns True if a lock was removed."""
-        lock_path = cwd / ".git" / "index.lock"
-        if lock_path.exists():
-            try:
-                lock_path.unlink()
-                logger.info("[WorkspaceLifecycle] Removed stale index.lock: %s", lock_path)
-                return True
-            except OSError as e:
-                logger.warning("[WorkspaceLifecycle] Failed to remove index.lock %s: %s", lock_path, e)
-                return False
-        return False
-
-    def _resolve_main_branch(self, cwd: Path) -> str:
-        """动态检测仓库的主分支名，优先尝试 main，回退到实际 HEAD 所在分支。
-
-        BUG-FIX-fix_20260425_main_branch:
-        git init 在不同平台/版本下默认分支名不同（main 或 master），
-        硬编码 'main' 会导致 checkout/merge 失败。
-        """
-        rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
-        if rc == 0 and out.strip():
-            current = out.strip()
-            if current in ("main", "master"):
-                return current
-        rc2, _, _ = self._run_git("rev-parse", "--verify", "main", cwd=cwd)
-        if rc2 == 0:
-            return "main"
-        return "master"
-
-    def _assert_on_branch(self, expected: str, cwd: Path) -> bool:
-        """验证 cwd 当前处于期望分支，绝不 checkout 切换。
-
-        主仓库 / 容器空间都不允许 git checkout，修改任何分支应通过 worktree。
-        Returns:
-            True if on expected branch, False otherwise.
-        """
-        rc, current, _ = self._run_git(
-            "rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
-        if rc == 0 and current.strip() == expected:
-            return True
-        logger.warning(
-            "[WorkspaceLifecycle] EXPECT %s but on %s — "
-            "不允许 checkout 切换分支: cwd=%s",
-            expected, current.strip() if rc == 0 else "(unknown)", cwd)
-        return False
-
-    def _record_main_branch(self):
-        """记录项目根目录的主分支，用于检测外部分支切换。
-
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑只记录当前 HEAD 分支名，不验证是否为真正的主分支。
-        当用户在 feature 分支上启动任务时，worktree 会基于 feature 分支创建，
-        合并时 _resolve_main_branch 却硬找 main → 分支不匹配 → 降级为 copy_merge
-        → 旧文件覆盖新文件。现增加非主分支警告。
-        """
-        try:
-            rc, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=self._base_path)
-            if rc == 0 and out.strip():
-                branch = out.strip()
-                self._main_branch = branch
-                if branch in ("main", "master"):
-                    logger.debug("[WorkspaceLifecycle] 记录主分支: %s", branch)
-                else:
-                    logger.warning(
-                        "[WorkspaceLifecycle] 当前分支 '%s' 不是主分支(main/master)，"
-                        "worktree 将基于此分支创建。建议在主分支上启动任务。", branch)
-        except Exception:
-            logger.warning("[WorkspaceLifecycle] _record_main_branch 失败", exc_info=True)
-
-    def _guard_root_branch(self, cwd: Path) -> bool:
-        """守卫：如果 cwd 是项目根目录，验证分支未被外部切换。
-
-        workspace_lifecycle 只允许对项目根目录做 commit 和 merge，
-        不允许 checkout 切换分支。如果检测到分支变更则拒绝操作。
-        """
-        try:
-            if not self._main_branch:
-                return True
-            if cwd.resolve() != self._base_path.resolve():
-                return True
-            rc, current, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
-            if rc == 0 and current.strip() == self._main_branch:
-                return True
-            logger.warning(
-                "[WorkspaceLifecycle] BRANCH GUARD: 项目根目录分支已变更! "
-                "expected=%s, actual=%s — 跳过操作避免写入错误分支",
-                self._main_branch, current.strip() if rc == 0 else "(unknown)")
-            return False
-        except Exception:
-            logger.warning("[WorkspaceLifecycle] _guard_root_branch 检查异常，默认放行", exc_info=True)
-            return True
-
-    def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
-        """Initialize a new git repo and make the initial commit with all files.
-
-        Handles edge cases: stale index.lock, pre-existing but empty .git directory,
-        and ensures the init -> add -> commit sequence completes atomically.
-
-        Returns:
-            True if the repo was successfully initialized with a commit, False otherwise.
-        """
-        git_dir = cwd / ".git"
-        needs_init = True
-        if git_dir.exists():
-            # .git exists — check if it is a valid repo with at least one commit
-            rc, _, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
-            if rc == 0:
-                # Valid repo with commits — no need to re-init
-                needs_init = False
-            else:
-                # Empty/corrupt .git — remove it and start fresh
-                logger.info("[WorkspaceLifecycle] Existing .git is empty/corrupt, removing: %s", git_dir)
-                try:
-                    _force_rmtree(str(git_dir))
-                except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] Failed to remove corrupt .git: %s", e)
-                    return False
-
-        if needs_init:
-            rc, _, stderr = self._run_git("init", "--initial-branch=main", cwd=cwd)
-            if rc != 0:
-                logger.warning("[WorkspaceLifecycle] git init --initial-branch=main failed: %s, retry without flag", stderr)
-                rc, _, stderr = self._run_git("init", cwd=cwd)
-                if rc != 0:
-                    logger.warning("[WorkspaceLifecycle] git init failed: %s", stderr)
-                    return False
-                self._run_git("checkout", "-b", "main", cwd=cwd)
-
-        self._ensure_git_user(cwd)
-
-        gitignore = cwd / ".gitignore"
-        if not gitignore.exists():
-            try:
-                gitignore.write_text("\n".join([
-                    "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/",
-                    "*.bak", "*.egg-info/", ".mypy_cache/",
-                    "node_modules/", ".env", "*.log", ".tox/",
-                ]) + "\n", encoding="utf-8")
-            except OSError:
-                pass
-
-        self._remove_index_lock(cwd)
-
-        rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
-        if rc != 0:
-            # If add failed due to index.lock, remove it and retry once
-            if "index.lock" in (stderr or ""):
-                if self._remove_index_lock(cwd):
-                    rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
-            if rc != 0:
-                logger.warning("[WorkspaceLifecycle] git add -A failed after retry: %s", stderr)
-                return False
-
-        rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
-        if rc != 0:
-            if "index.lock" in (stderr or ""):
-                if self._remove_index_lock(cwd):
-                    rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
-            if rc != 0:
-                logger.warning("[WorkspaceLifecycle] git commit failed after retry: %s | stdout: %s", stderr, out)
-                return False
-
-        return True
-
-    def _git_add_commit_if_dirty(self, cwd: Path, message: str) -> str | None:
-        """暂存并提交变更（如果有），返回 commit hash 或 None"""
-        # Remove stale index.lock before any git operations
-        self._remove_index_lock(cwd)
-
-        rc, _, _ = self._run_git("add", "-A", cwd=cwd)
-        if rc != 0:
-            # Retry after removing index.lock
-            self._remove_index_lock(cwd)
-            rc, _, _ = self._run_git("add", "-A", cwd=cwd)
-            if rc != 0:
-                return None
-
-        rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
-        if rc == 0 and status.strip():
-            commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
-            if commit_rc != 0:
-                self._remove_index_lock(cwd)
-                commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
-                if commit_rc != 0:
-                    return None
-            _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
-            return h.strip() if h else None
-        return None
-
-    # ── 1. 场景检测 ──────────────────────────────────────────────
-
-    def _detect_scenario(self, workspace: str, task_data: dict) -> tuple[str, str]:
-        """检测工作空间场景
-
-        workspace 为空 -> new_project，path = {ws_root}/{task_id}
-        路径存在且有文件（排除 .git/.ai_workspaces/__pycache__/.pytest_cache）-> existing_project
-        路径不存在或无文件 -> new_project
-
-        Returns:
-            (scenario: "existing_project"|"new_project", project_root: str)
-        """
-        task_id = task_data.get("task_id", "")
-        ws_root = self._get_workspace_root()
-        if not workspace:
-            return "new_project", str(Path(ws_root) / task_id)
-        path = Path(workspace)
+    def _ensure_dir_and_git(self, path: Path) -> None:
+        """确保目录存在且有 git 初始化。"""
         if not path.exists():
-            return "new_project", str(path)
-        has_files = False
-        for item in path.iterdir():
-            if item.name in _SKIP_DIRS:
-                continue
-            if item.is_file():
-                has_files = True
-                break
-            if item.is_dir():
-                try:
-                    if any(item.rglob("*")):
-                        has_files = True
-                        break
-                except PermissionError:
-                    pass
-        return ("existing_project" if has_files else "new_project"), str(path)
+            path.mkdir(parents=True, exist_ok=True)
+        if not (path / ".git").exists():
+            if not self._git_init_and_initial_commit(path, "chore: initial container project"):
+                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
+        else:
+            self._ensure_git_user(path)
 
-    # ── 2. 任务启动 ──────────────────────────────────────────────
+    # ── 容器空间初始化 ──────────────────────────────────────────
+
+    def init_container_workspace(self, container_task_id: str, workspace: str | None,
+                                 task_data: dict) -> dict:
+        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
+
+        BUG-FIX-fix_20260519_container_workspace_path:
+        规则：
+        - 有 workspace + host 模式 → 直接用 workspace（原空间）
+        - 有 workspace + 非 host 模式 → 在 ws_root 创建容器空间，从 workspace 复制
+        - 无 workspace → 在 ws_root 创建容器空间，空空间 + git init
+        """
+        isolation_mode = task_data.get("isolation_mode", "") or ""
+        ws_root = self._get_workspace_root()
+
+        if workspace and isolation_mode == "host":
+            path = Path(workspace)
+            self._ensure_dir_and_git(path)
+            logger.info("[WorkspaceLifecycle] host模式复用原空间: task_id=%s, path=%s",
+                        container_task_id, path)
+        else:
+            path = Path(ws_root) / f"container_{container_task_id}"
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                if workspace:
+                    src_path = Path(workspace)
+                    if not src_path.is_absolute():
+                        src_path = self._base_path / src_path
+                    copied = self._copy_project_to_container(path, src=src_path)
+                    logger.info("[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d",
+                                container_task_id, copied)
+                if not self._git_init_and_initial_commit(path, "chore: initial container project"):
+                    raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
+            else:
+                self._ensure_dir_and_git(path)
+
+        meta = {"mode": "project_root", "path": str(path),
+                "branch": "main", "project_root": str(path),
+                "is_container_workspace": True}
+        self._ws_meta_store[container_task_id] = meta
+        self._persist_ws_meta(container_task_id)
+        logger.info("[WorkspaceLifecycle] 容器空间已初始化: task_id=%s, path=%s",
+                     container_task_id, path)
+        return meta
+
+    # ── 任务启动 ──────────────────────────────────────────────
 
     def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """任务启动时的生命周期钩子，根据 is_root 分发到子任务或根任务处理"""
@@ -389,7 +154,8 @@ class WorkspaceLifecycleManager:
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """子任务启动：通过 TaskService API 查找父任务，共享父工作空间"""
-        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get("default_level", "")
+        _isolation_mode = (task_data.get("isolation_mode", "")
+                           or self._config.get("coordinator", {}).get("default_level", ""))
         if _isolation_mode == "host":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
@@ -413,115 +179,14 @@ class WorkspaceLifecycleManager:
                 parent_meta = self._ws_meta_store.get(parent_id, {})
                 parent_path = parent_meta.get("path", workspace)
         except Exception as e:
-            logger.warning("[WorkspaceLifecycle] _start_subtask 查找父任务失败: task_id=%s, error=%s", task_id, e)
+            logger.warning("[WorkspaceLifecycle] _start_subtask 查找父任务失败: task_id=%s, error=%s",
+                           task_id, e)
 
         meta = {"mode": "shared", "path": parent_path,
                 "parent_workspace": workspace,
                 "project_root": parent_meta.get("project_root", "")}
         self._ws_meta_store[task_id] = meta
         return meta
-
-    def _effective_skip_dirs(self) -> frozenset[str]:
-        """合并硬编码排除目录和配置文件中的 worktree_exclude_patterns。"""
-        ws_cfg = self._config.get("workspace", {})
-        extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
-        return _SKIP_DIRS | extra
-
-    def _copy_project_to_container(self, container_path: Path, src: Path) -> int:
-        """从指定源目录复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
-        if not src.exists():
-            return 0
-        skip = self._effective_skip_dirs()
-        count = 0
-        for item in src.rglob("*"):
-            if not item.is_file():
-                continue
-            rel = item.relative_to(src)
-            if any(p in skip for p in rel.parts):
-                continue
-            if item.suffix in _SKIP_EXTENSIONS:
-                continue
-            target = container_path / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(item), str(target))
-            count += 1
-        return count
-
-    def _ensure_dir_and_git(self, path: Path) -> None:
-        """确保目录存在且有 git 初始化。"""
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-        if not (path / ".git").exists():
-            if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-        else:
-            self._ensure_git_user(path)
-
-    def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
-        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
-
-        BUG-FIX-fix_20260519_container_workspace_path:
-        规则：
-        - 有 workspace + host 模式 → 直接用 workspace（原空间）
-        - 有 workspace + 非 host 模式 → 在 ws_root 创建容器空间，从 workspace 复制
-        - 无 workspace → 在 ws_root 创建容器空间，空空间 + git init
-        """
-        isolation_mode = task_data.get("isolation_mode", "") or ""
-        ws_root = self._get_workspace_root()
-
-        if workspace and isolation_mode == "host":
-            path = Path(workspace)
-            self._ensure_dir_and_git(path)
-            logger.info("[WorkspaceLifecycle] host模式复用原空间: task_id=%s, path=%s", container_task_id, path)
-        else:
-            path = Path(ws_root) / f"container_{container_task_id}"
-            if not path.exists():
-                path.mkdir(parents=True, exist_ok=True)
-                if workspace:
-                    src_path = Path(workspace)
-                    if not src_path.is_absolute():
-                        src_path = self._base_path / src_path
-                    copied = self._copy_project_to_container(path, src=src_path)
-                    logger.info("[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d", container_task_id, copied)
-                if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                    raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-            else:
-                self._ensure_dir_and_git(path)
-
-        meta = {"mode": "project_root", "path": str(path),
-                "branch": "main", "project_root": str(path),
-                "is_container_workspace": True}
-        self._ws_meta_store[container_task_id] = meta
-        self._persist_ws_meta(container_task_id)
-        logger.info("[WorkspaceLifecycle] 容器空间已初始化: task_id=%s, path=%s", container_task_id, path)
-        return meta
-
-    def _find_container_workspace(self, task_id: str) -> str | None:
-        """查找父容器任务的工作空间路径
-
-        BUG-FIX-fix_20260425_container_workspace_init:
-        先尝试 restore_ws_meta 从持久化恢复，再查找。
-        """
-        try:
-            task = self._task_tree.get_task(task_id)
-            if not task or not task.parent_task_id:
-                return None
-            parent_task = self._task_tree.get_task(task.parent_task_id)
-            if not parent_task:
-                return None
-            if parent_task.metadata.get("task_scope") != "container":
-                return None
-
-            self.restore_ws_meta(parent_task.id)
-
-            parent_meta = self._ws_meta_store.get(parent_task.id, {})
-            container_ws = parent_meta.get("path", "")
-            if not container_ws:
-                container_ws = parent_task.metadata.get("container_workspace", "")
-            return container_ws if container_ws else None
-        except Exception as e:
-            logger.warning("[WorkspaceLifecycle] _find_container_workspace 失败: task_id=%s, error=%s", task_id, e)
-            return None
 
     def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)
@@ -573,7 +238,7 @@ class WorkspaceLifecycleManager:
                     rel = item.relative_to(source_dir)
                     if any(p in skip for p in rel.parts):
                         continue
-                    if item.suffix in _SKIP_EXTENSIONS:
+                    if item.suffix in set({".bak", ".pyc", ".pyo"}):
                         continue
                     target = target_dir / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -594,8 +259,9 @@ class WorkspaceLifecycleManager:
             self._ws_meta_store[task_id] = meta
             return meta
 
-        # ── Host isolation mode: 有 workspace 或父容器空间时直接操作，否则走正常创建逻辑 ──
-        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get("default_level", "")
+        # ── Host isolation mode ──
+        _isolation_mode = (task_data.get("isolation_mode", "")
+                           or self._config.get("coordinator", {}).get("default_level", ""))
         if _isolation_mode == "host":
             container_ws = self._find_container_workspace(task_id)
             host_path = container_ws or workspace
@@ -621,7 +287,8 @@ class WorkspaceLifecycleManager:
                     raise RuntimeError(f"容器空间 git 初始化失败: {container_path}")
             self._ensure_git_user(container_path)
             if self._guard_root_branch(container_path):
-                self._git_add_commit_if_dirty(container_path, f"chore: auto-save before subtask {task_id}")
+                self._git_add_commit_if_dirty(container_path,
+                                              f"chore: auto-save before subtask {task_id}")
             else:
                 logger.warning("[WorkspaceLifecycle] 跳过容器空间 auto-save: 分支守卫检测到变更")
 
@@ -629,7 +296,8 @@ class WorkspaceLifecycleManager:
             ws_dir = container_path.parent / _safe_ws_name(
                 container_path.name, task_id)
             project_size = self._calc_project_size(str(container_path), task_id)
-            threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
+            threshold = (self._config.get("workspace", {})
+                         .get("sparse_threshold_mb", 50) * 1024 * 1024)
 
             if project_size > threshold:
                 self._setup_sparse_worktree(ws_dir, container_path, branch)
@@ -695,7 +363,8 @@ class WorkspaceLifecycleManager:
 
         scenario, project_root = self._detect_scenario(workspace, task_data)
         root_path = Path(project_root)
-        logger.info("[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, workspace=%s, root_path=%s",
+        logger.info("[WorkspaceLifecycle] _start_root_task: task_id=%s, scenario=%s, "
+                     "workspace=%s, root_path=%s",
                      task_id, scenario, workspace, root_path)
 
         # 统一走 worktree：确保有 .git → 创建 worktree 分支隔离
@@ -703,7 +372,8 @@ class WorkspaceLifecycleManager:
             root_path.mkdir(parents=True, exist_ok=True)
         if not (root_path / ".git").exists():
             if not self._git_init_and_initial_commit(root_path, "chore: initial project"):
-                raise RuntimeError(f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")
+                raise RuntimeError(
+                    f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")
         else:
             self._ensure_git_user(root_path)
             if self._guard_root_branch(root_path):
@@ -712,14 +382,16 @@ class WorkspaceLifecycleManager:
                     f"chore: auto-save before worktree for task {task_id}")
             else:
                 logger.warning(
-                    "[WorkspaceLifecycle] 跳过项目根目录 auto-save: 分支守卫检测到变更, task_id=%s",
+                    "[WorkspaceLifecycle] 跳过项目根目录 auto-save: "
+                    "分支守卫检测到变更, task_id=%s",
                     task_id)
 
         branch = f"task/{task_id}"
         ws_root = self._get_workspace_root()
         ws_dir = root_path / ws_root / _safe_ws_name(root_path.name, task_id)
         project_size = self._calc_project_size(str(root_path), task_id)
-        threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
+        threshold = (self._config.get("workspace", {})
+                     .get("sparse_threshold_mb", 50) * 1024 * 1024)
 
         if project_size > threshold:
             self._setup_sparse_worktree(ws_dir, root_path, branch)
@@ -732,444 +404,7 @@ class WorkspaceLifecycleManager:
         self._ws_meta_store[task_id] = meta
         return meta
 
-    # ── Worktree 创建（含自动修复）──────────────────────────────
-
-    def _worktree_add_with_repair(
-        self, repo_path: Path, branch: str, ws_dir: Path, task_id: str,
-    ) -> None:
-        """创建 worktree，失败时自动 prune 并重试一次。
-
-        常见失败原因：之前 worktree 清理不彻底，.git/worktrees 下残留引用，
-        导致 git 认为路径状态不一致。prune 可清除这些失效引用。
-        """
-        rc, _, stderr = self._run_git(
-            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
-        if rc == 0:
-            return
-
-        logger.warning(
-            "[WorkspaceLifecycle] worktree add 失败，尝试 prune 修复: "
-            "task_id=%s, path=%s, error=%s",
-            task_id, repo_path, stderr,
-        )
-        # 清理无效的 worktree 引用和残留目录
-        self._run_git("worktree", "prune", cwd=repo_path)
-        # 如果目标目录已存在（残留），删除后重试
-        if ws_dir.exists():
-            def _remove_readonly(func, path, exc_info):
-                import stat
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            shutil.rmtree(str(ws_dir), onexc=_remove_readonly)
-        # 清理可能残留的分支
-        self._run_git("branch", "-D", branch, cwd=repo_path)
-
-        rc, _, stderr = self._run_git(
-            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
-        if rc != 0:
-            raise RuntimeError(
-                f"git worktree add 失败（prune 后重试仍失败）: "
-                f"task_id={task_id}, error={stderr}")
-
-    # ── 3. Sparse Worktree 设置 ──────────────────────────────────
-
-    def _setup_sparse_worktree(self, ws_dir: Path, project_root: Path, branch: str):
-        """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）"""
-        self._run_git("worktree", "add", "--no-checkout", "-b", branch, str(ws_dir), cwd=project_root)
-        self._run_git("sparse-checkout", "init", "--cone", cwd=ws_dir)
-        whitelist = self._config.get("workspace", {}).get("worktree_include_patterns", ["src", "config"])
-        if whitelist:
-            self._run_git("sparse-checkout", "set", *whitelist, cwd=ws_dir)
-        # sparse-checkout patterns 已设好，checkout 把文件拉出来
-        self._run_git("checkout", "HEAD", cwd=ws_dir)
-        link_patterns = self._config.get("workspace", {}).get("worktree_link_patterns", [])
-        for link_name in link_patterns:
-            src, dst = project_root / link_name, ws_dir / link_name
-            if src.exists() and not dst.exists():
-                try:
-                    if os.name == "nt":
-                        subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                                       capture_output=True, timeout=10)
-                    else:
-                        dst.symlink_to(src)
-                except Exception as e:
-                    logger.warning("[WorkspaceLifecycle] 创建符号链接失败: %s -> %s, error=%s", src, dst, e)
-
-    # ── 4. 项目大小计算 ──────────────────────────────────────────
-
-    def _calc_project_size(self, project_root: str, task_id: str) -> int:
-        """计算项目工作文件总大小（不含 .git），两轮扫描策略 + 增量缓存"""
-        root = Path(project_root)
-        skip = self._effective_skip_dirs()
-        # 检查缓存
-        if project_root in self._size_cache:
-            cached_mtime, cached_size = self._size_cache[project_root]
-            git_dir = root / ".git"
-            cur = git_dir.stat().st_mtime if git_dir.exists() else root.stat().st_mtime
-            if cur == cached_mtime:
-                return cached_size
-        total = 0
-        for item in root.iterdir():
-            if item.name in skip:
-                continue
-            if item.is_file():
-                try:
-                    total += item.stat().st_size
-                except OSError:
-                    pass
-            elif item.is_dir():
-                for f in item.rglob("*"):
-                    if not f.is_file():
-                        continue
-                    if any(p in skip for p in f.relative_to(root).parts):
-                        continue
-                    try:
-                        total += f.stat().st_size
-                    except OSError:
-                        pass
-        git_dir = root / ".git"
-        mtime = git_dir.stat().st_mtime if git_dir.exists() else root.stat().st_mtime
-        self._size_cache[project_root] = (mtime, total)
-        logger.debug("[WorkspaceLifecycle] 项目大小: root=%s, size=%d, task=%s", project_root, total, task_id)
-        return total
-
-    # ── 5. 评估前保存 ────────────────────────────────────────────
-
-    def on_before_evaluate(self, workspace: str, ws_meta: dict | None = None) -> dict:
-        """评估前保存：git add -A + git commit（plain 模式跳过 git 操作）"""
-        ws_path = Path(workspace)
-        if not ws_path.exists():
-            return {"success": False, "error": f"工作空间不存在: {workspace}"}
-        mode = (ws_meta or {}).get("mode", "")
-        if mode == "plain":
-            return {"success": True, "commit_hash": None, "has_changes": True}
-        if mode == "shared":
-            return {"success": True, "commit_hash": None, "has_changes": True}
-        self._ensure_git_user(ws_path)
-        commit_hash = self._git_add_commit_if_dirty(ws_path, "checkpoint: before evaluate")
-        rc, status, _ = self._run_git("status", "--porcelain", cwd=ws_path)
-        return {"success": True, "commit_hash": commit_hash,
-                "has_changes": bool(status and status.strip())}
-
-    # ── 6. 评估通过 ──────────────────────────────────────────────
-
-    def on_eval_passed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
-        """评估通过后按 mode 分发合并逻辑，并发安全：按 project_root 粒度加锁
-
-        BUG-FIX-fix_20260513_merge_verify:
-        原逻辑仅在 git_merge 时验证合并结果，copy_merge 无验证直接清理 worktree，
-        导致合并失败（文件未到达目标）时 worktree 被删除，任务文件丢失。
-        修复: 不论哪种合并方式都验证文件是否到达目标，失败则重试最多2次，
-        仍失败则保留 worktree 不清理，返回失败让任务标记为 failed。
-        """
-        mode = ws_meta.get("mode", "")
-        if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
-            return {"success": True, "action": "none"}
-        project_root = ws_meta.get("project_root", "")
-        lock = self._get_merge_lock(project_root)
-        with lock:
-            if mode == "worktree":
-                max_retries = 2
-                for attempt in range(1, max_retries + 1):
-                    result = self._safe_merge(workspace, ws_meta)
-                    if not result.get("success"):
-                        logger.warning(
-                            "[WorkspaceLifecycle] 合并失败 (attempt %d/%d)，跳过清理以保留文件: "
-                            "task_id=%s, workspace=%s, error=%s",
-                            attempt, max_retries, task_id, workspace, result.get("error", "unknown"))
-                        if attempt < max_retries:
-                            continue
-                        return result
-                    verified, verify_detail = self._verify_merge_result(
-                        workspace, project_root, ws_meta, result)
-                    if verified:
-                        logger.info(
-                            "[WorkspaceLifecycle] 合并验证通过 (attempt %d): task_id=%s, method=%s",
-                            attempt, task_id, result.get("method"))
-                        self._cleanup_worktree(
-                            workspace, ws_meta, tag_task_id=task_id,
-                            merge_method=result.get("method", ""))
-                        return result
-                    logger.warning(
-                        "[WorkspaceLifecycle] 合并验证失败 (attempt %d/%d): "
-                        "task_id=%s, detail=%s",
-                        attempt, max_retries, task_id, verify_detail)
-                    if attempt < max_retries:
-                        continue
-                logger.error(
-                    "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: "
-                    "task_id=%s, workspace=%s", task_id, workspace)
-                result["verify_error"] = verify_detail
-                return result
-            if mode == "shared":
-                logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
-                return {"success": True, "action": "none"}
-            logger.warning("[WorkspaceLifecycle] 未知 mode: %s, task_id=%s", mode, task_id)
-            return {"success": False, "error": f"未知工作模式: {mode}"}
-
-    def _cleanup_worktree(
-        self, workspace: str, ws_meta: dict, *, tag_task_id: str = "",
-        merge_method: str = "",
-    ):
-        """清理 worktree：删 worktree → 条件打 tag → 删分支
-
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑无论合并方式（git_merge 或 copy_merge）都打 tag。
-        copy_merge 时 commit graph 上没有真正的 merge 关系，tag 指向的提交
-        在分支删除后变成孤儿提交。修复: 只在 git_merge 成功时打 tag。
-        """
-        project_root = Path(ws_meta.get("project_root", ""))
-        branch = ws_meta.get("branch", "")
-        if project_root.exists():
-            try:
-                self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
-            except Exception as e:
-                logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
-            if branch:
-                # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
-                if tag_task_id and merge_method == "git_merge":
-                    tag = f"task-merge/{tag_task_id[:8]}"
-                    self._run_git("tag", tag, branch, cwd=project_root)
-                    logger.info("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
-                self._run_git("branch", "-D", branch, cwd=project_root)
-        ws_path = Path(workspace).resolve()
-        if ws_path.exists() and "__wt_" in ws_path.name:
-            try:
-                _force_rmtree(str(ws_path))
-                logger.info("[WorkspaceLifecycle] 强制清理残留 worktree 目录: %s", workspace)
-            except OSError as e:
-                logger.warning("[WorkspaceLifecycle] 强制清理 worktree 目录失败: %s, %s", workspace, e)
-
-    # ── 7. 评估失败 ──────────────────────────────────────────────
-
-    def on_eval_failed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
-        """评估失败：reject_count >= max_retries 时回滚，否则允许重试"""
-        mode = ws_meta.get("mode", "")
-        if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
-            return {"success": True, "action": "none"}
-        if mode == "shared":
-            logger.info("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
-            return {"success": True, "action": "none"}
-        reject_count = ws_meta.get("reject_count", 0) + 1
-        max_retries = ws_meta.get("max_retries", self._config.get("max_retries", 3))
-        ws_meta["reject_count"] = reject_count
-        self._ws_meta_store[task_id] = ws_meta
-        if reject_count >= max_retries:
-            logger.info("[WorkspaceLifecycle] 评估失败超限，回滚: task_id=%s, count=%d", task_id, reject_count)
-            return self.on_task_failed(workspace, ws_meta)
-        logger.info("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
-        return {"success": True, "action": "retry", "reject_count": reject_count}
-
-    # ── 8. 任务异常回滚 ──────────────────────────────────────────
-
-    def on_task_failed(self, workspace: str, ws_meta: dict) -> dict:
-        """异常回滚：worktree 模式先 checkout+clean 再清理 worktree，其他模式直接回滚"""
-        ws_path = Path(workspace)
-        if not ws_path.exists():
-            return {"success": False, "error": f"工作空间不存在: {workspace}"}
-        mode = ws_meta.get("mode", "")
-        if mode == "plain":
-            logger.info("[WorkspaceLifecycle] plain 模式，跳过回滚: %s", workspace)
-            return {"success": True, "action": "none"}
-        if mode == "shared":
-            logger.info("[WorkspaceLifecycle] shared 模式，跳过回滚: %s", workspace)
-            return {"success": True, "action": "none"}
-        if mode == "worktree":
-            self._run_git("checkout", "--", ".", cwd=ws_path)
-            self._run_git("clean", "-fd", cwd=ws_path)
-            if not ws_path.exists():
-                logger.warning(
-                    "[WorkspaceLifecycle] worktree 目录在回滚过程中已不存在，跳过清理: %s",
-                    workspace)
-                return {"success": True, "action": "rollback_worktree"}
-            self._cleanup_worktree(workspace, ws_meta)
-            logger.info("[WorkspaceLifecycle] worktree 回滚并清理: %s", workspace)
-            return {"success": True, "action": "rollback_worktree"}
-        logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，拒绝执行破坏性操作: %s", mode, workspace)
-        return {"success": False, "error": f"未知工作模式: {mode}"}
-
-    # ── 9. 安全合并 ──────────────────────────────────────────────
-
-    def _safe_merge(self, workspace: str, ws_meta: dict) -> dict:
-        """安全合并：在当前分支上尝试 git merge，失败降级为文件复制。
-
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑使用 _resolve_main_branch 硬找 main/master 分支做合并目标，
-        但 worktree 可能基于 feature 分支创建 → 分支不匹配 → 降级 copy_merge
-        → 旧文件无差别覆盖新文件。
-        修复: 使用当前实际所在分支作为合并目标，不再硬找 main。
-        同时在合并前提交项目根目录的脏文件，防止未提交修改被覆盖。
-        """
-        project_root = ws_meta.get("project_root", "")
-        branch = ws_meta.get("branch", "")
-        if not project_root:
-            return {"success": False, "error": "缺少 project_root 信息"}
-        proj_path, ws_path = Path(project_root), Path(workspace)
-        # workspace 中提交所有变更
-        self._ensure_git_user(ws_path)
-        self._git_add_commit_if_dirty(
-            ws_path, "chore: auto commit before merge")
-        # BUG-FIX: 合并前提交项目根目录的脏文件，防止未提交修改被覆盖
-        self._ensure_git_user(proj_path)
-        self._git_add_commit_if_dirty(
-            proj_path, "chore: auto-save before merge")
-        # 获取项目根目录当前实际所在分支（不再硬找 main/master）
-        rc, current_branch, _ = self._run_git(
-            "rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
-        if rc != 0 or not current_branch.strip():
-            logger.warning(
-                "[WorkspaceLifecycle] 无法获取当前分支，降级为 copy_merge")
-            return self._copy_merge(workspace, project_root, ws_meta)
-        # 尝试 git merge（在当前分支上合并 worktree 分支）
-        if branch:
-            rc, _, stderr = self._run_git(
-                "merge", branch, cwd=proj_path)
-            if rc == 0:
-                return {"success": True, "action": "merged",
-                        "method": "git_merge"}
-            logger.warning(
-                "[WorkspaceLifecycle] git merge 失败，"
-                "降级为 copy_merge: branch=%s, error=%s",
-                branch, stderr[:200] if stderr else "(empty)")
-            self._run_git("merge", "--abort", cwd=proj_path)
-            return self._copy_merge(workspace, project_root, ws_meta)
-        return self._copy_merge(workspace, project_root, ws_meta)
-
-    def _copy_merge(self, workspace: str, target_dir: str,
-                    ws_meta: dict | None = None) -> dict:
-        """通过文件复制方式合并变更（冲突降级策略），跳过排除目录。
-
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑无差别复制 worktree 所有文件到目标目录，
-        如果 worktree 基于旧版本创建，旧文件会覆盖目标中的新文件。
-        修复: 通过 git diff 找出 worktree 分支实际修改的文件列表，
-        只复制这些被修改的文件，避免旧版本覆盖新版本。
-
-        BUG-FIX-fix_20260513_merge_verify:
-        原逻辑 merged 为空时仍返回 success=True，导致空合并后 worktree 被清理。
-        修复: merged 为空时返回失败，让上层重试或报错。
-        """
-        src, dst = Path(workspace), Path(target_dir)
-        if not src.exists():
-            return {"success": False, "error": f"源目录不存在: {workspace}",
-                    "method": "copy", "merged_files": []}
-        skip = self._effective_skip_dirs()
-        changed_files: set[str] | None = None
-        branch = ws_meta.get("branch", "") if ws_meta else ""
-        project_root = ws_meta.get("project_root", "") if ws_meta else ""
-        if branch and project_root:
-            proj_path = Path(project_root)
-            rc, base, _ = self._run_git(
-                "merge-base", branch, "HEAD", cwd=proj_path)
-            if rc == 0 and base.strip():
-                rc2, diff_out, _ = self._run_git(
-                    "diff", "--name-only", base.strip(), branch,
-                    cwd=proj_path)
-                if rc2 == 0 and diff_out.strip():
-                    changed_files = set(diff_out.strip().splitlines())
-                    logger.info(
-                        "[WorkspaceLifecycle] copy_merge: 检测到 %d 个实际修改的文件",
-                        len(changed_files))
-        merged: list[str] = []
-        for item in src.rglob("*"):
-            if not item.is_file():
-                continue
-            rel = item.relative_to(src)
-            if any(p in skip for p in rel.parts):
-                continue
-            if item.suffix in _SKIP_EXTENSIONS:
-                continue
-            rel_str = str(rel).replace("\\", "/")
-            if changed_files is not None and rel_str not in changed_files:
-                continue
-            target_file = dst / rel
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(item), str(target_file))
-            merged.append(str(rel))
-        if merged:
-            self._ensure_git_user(dst)
-            self._run_git("add", "-A", cwd=dst)
-            self._git_add_commit_if_dirty(dst, f"merge: copy_merge ({len(merged)} files)")
-            return {"success": True, "action": "merged", "method": "copy", "merged_files": merged}
-        logger.warning("[WorkspaceLifecycle] copy_merge: 未合并任何文件")
-        return {"success": False, "error": "copy_merge 未合并任何文件",
-                "method": "copy", "merged_files": []}
-
-    # ── 10. 合并验证 ─────────────────────────────────────────────
-
-    def _verify_merge_result(
-        self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
-    ) -> tuple[bool, str]:
-        """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。
-
-        BUG-FIX-fix_20260513_merge_verify:
-        原逻辑仅 git_merge 时验证 commit graph，copy_merge 无验证。
-        修复: 统一验证逻辑，包含 commit graph 验证 + 文件级验证。
-
-        Returns:
-            (verified: bool, detail: str) 验证结果和详情描述
-        """
-        branch = ws_meta.get("branch", "")
-        method = merge_result.get("method", "")
-        proj_path = Path(project_root)
-
-        if not proj_path.exists():
-            return False, f"project_root 不存在: {project_root}"
-
-        if method == "git_merge" and branch:
-            if not self._verify_merge_in_main(branch, cwd=proj_path):
-                return False, f"git_merge commit graph 验证失败: branch={branch}"
-
-        merged_files = merge_result.get("merged_files", [])
-        if method == "copy" and merged_files:
-            missing = []
-            for rel_str in merged_files:
-                target_file = proj_path / rel_str
-                if not target_file.exists():
-                    missing.append(rel_str)
-                if len(missing) >= 10:
-                    break
-            if missing:
-                return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
-
-        if method == "git_merge" and branch:
-            rc, diff_out, _ = self._run_git(
-                "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
-            if rc == 0 and diff_out.strip():
-                branch_files = set(diff_out.strip().splitlines())
-                missing = []
-                for f in branch_files:
-                    if not (proj_path / f).exists():
-                        missing.append(f)
-                    if len(missing) >= 10:
-                        break
-                if missing:
-                    return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
-
-        return True, "验证通过"
-
-    def _verify_merge_in_main(self, branch_name: str, cwd: Path | None = None) -> bool:
-        """验证分支已合并到当前分支：git log HEAD..{branch} 应为空，不为空则阻止后续清理。
-
-        BUG-FIX-fix_20260512_worktree_base:
-        原逻辑使用 _resolve_main_branch 硬找 main/master 做验证，
-        但 worktree 可能合并到 feature 分支，导致验证误判。
-        修复: 使用当前 HEAD 所在分支做验证。
-        """
-        work_dir = cwd or self._base_path
-        rc, log_output, _ = self._run_git("log", f"HEAD..{branch_name}", cwd=work_dir)
-        if rc != 0:
-            logger.warning("[WorkspaceLifecycle] 验证合并状态失败: branch=%s", branch_name)
-            return False
-        if log_output.strip():
-            logger.warning("[WorkspaceLifecycle] 分支未完全合并: branch=%s, 未合并=%d",
-                           branch_name, len(log_output.splitlines()))
-            return False
-        return True
-
-    # ── 11. ws_meta 持久化与恢复 ────────────────────────────────────
+    # ── ws_meta 持久化与恢复 ────────────────────────────────────
 
     def _persist_ws_meta(self, task_id: str):
         """将 ws_meta 持久化到 task.metadata["ws_meta"]"""
@@ -1182,7 +417,8 @@ class WorkspaceLifecycleManager:
                 task.metadata["ws_meta"] = meta
                 self._task_tree.save_task(task)
         except Exception as e:
-            logger.warning("[WorkspaceLifecycle] _persist_ws_meta 失败: task_id=%s, error=%s", task_id, e)
+            logger.warning("[WorkspaceLifecycle] _persist_ws_meta 失败: task_id=%s, error=%s",
+                           task_id, e)
 
     def restore_ws_meta(self, task_id: str):
         """从 task.metadata["ws_meta"] 恢复到 ws_meta_store"""
@@ -1195,9 +431,10 @@ class WorkspaceLifecycleManager:
                 if saved:
                     self._ws_meta_store[task_id] = saved
         except Exception as e:
-            logger.warning("[WorkspaceLifecycle] restore_ws_meta 失败: task_id=%s, error=%s", task_id, e)
+            logger.warning("[WorkspaceLifecycle] restore_ws_meta 失败: task_id=%s, error=%s",
+                           task_id, e)
 
-    # ── 12. 工作空间清理 ──────────────────────────────────────────
+    # ── 工作空间清理 ──────────────────────────────────────────
 
     def cleanup_workspace(self, task_id: str) -> dict[str, Any]:
         """清理单个任务关联的工作空间（worktree/分支/目录），不递归子任务"""
@@ -1208,7 +445,8 @@ class WorkspaceLifecycleManager:
 
         mode = meta.get("mode", "")
         workspace = meta.get("path", "")
-        result: dict[str, Any] = {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
+        result: dict[str, Any] = {
+            "worktree_removed": False, "branch_deleted": False, "dir_removed": False}
 
         if mode == "worktree":
             project_root = Path(meta.get("project_root", "")).resolve()
@@ -1216,7 +454,8 @@ class WorkspaceLifecycleManager:
             ws_path = Path(workspace).resolve()
             if project_root.exists():
                 if ws_path.exists():
-                    rc, _, _ = self._run_git("worktree", "remove", str(ws_path), "--force", cwd=project_root)
+                    rc, _, _ = self._run_git("worktree", "remove", str(ws_path),
+                                             "--force", cwd=project_root)
                     result["worktree_removed"] = rc == 0
                 if branch:
                     rc, _, _ = self._run_git("branch", "-D", branch, cwd=project_root)
@@ -1226,7 +465,8 @@ class WorkspaceLifecycleManager:
                     _force_rmtree(str(ws_path))
                     result["dir_removed"] = True
                 except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s", workspace, e)
+                    logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s",
+                                   workspace, e)
         elif mode == "plain":
             ws_path = Path(workspace)
             if not ws_path.is_absolute():
@@ -1237,8 +477,10 @@ class WorkspaceLifecycleManager:
                     result["dir_removed"] = True
                     logger.info("[WorkspaceLifecycle] 已清理 plain 工作空间: %s", ws_path)
                 except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s", workspace, e)
+                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s",
+                                   workspace, e)
 
         self._ws_meta_store.pop(task_id, None)
-        logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s", task_id, mode, result)
+        logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s",
+                     task_id, mode, result)
         return result

@@ -73,8 +73,9 @@ class _GitOpsMixin:
     """
 
     def _get_workspace_root(self) -> str:
-        """从配置中读取工作空间根目录，读取失败则返回默认值 .ai_workspaces"""
-        return self._config.get("workspace", {}).get("root", ".ai_workspaces")
+        """从配置中读取工作空间根目录，读取失败则使用全局默认值"""
+        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT
+        return self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
 
     def _run_git(self, *args: str, cwd: Path, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
         """执行 git 命令（同步，使用 subprocess）"""
@@ -298,14 +299,14 @@ class _GitOpsMixin:
         extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
         return _SKIP_DIRS | extra
 
-    def _copy_project_to_container(self, container_path: Path) -> int:
-        """从主项目复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
-        src = self._base_path
-        if not src.exists():
+    def _copy_project_to_container(self, container_path: Path, src: Path | None = None) -> int:
+        """从指定源目录复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
+        _src = src if src is not None else self._base_path
+        if not _src.exists():
             return 0
         skip = self._effective_skip_dirs()
         count = 0
-        for item in src.rglob("*"):
+        for item in _src.rglob("*"):
             if not item.is_file():
                 continue
             rel = item.relative_to(src)

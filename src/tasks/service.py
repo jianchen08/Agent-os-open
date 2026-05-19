@@ -1,56 +1,892 @@
-"""
-任务服务模块 - 提供任务的业务逻辑处理。
+"""任务服务 -- 任务系统的业务编排层。
 
-重构说明：
-- 状态机逻辑已迁移到 state_machine.py
-- 本模块仅包含 TaskService
+通过依赖注入组合状态机、存储和进度计算器，
+提供任务生命周期管理的统一入口。
+
+精简原则：
+- 去掉事件驱动 -> 同步方法调用
+- 去掉消息总线 -> 日志记录
+- DI 注入基础设施组件（scheduler / concurrency 可选）
 """
 
 from __future__ import annotations
 
-from src.tasks.state_machine import SimpleStateMachine, InvalidTransitionError
+import logging
+from datetime import datetime
+from typing import Any
+
+from tasks.state_machine import InvalidTransitionError
+from tasks.storage import TaskStorage
+from tasks.types import TaskModel, TaskStatus, create_task
+
+logger = logging.getLogger(__name__)
 
 
-# 默认任务状态转换规则
-DEFAULT_TASK_TRANSITIONS: dict[str, list[str]] = {
-    "pending": ["running"],
-    "running": ["completed", "failed", "cancelled"],
-    "completed": [],
-    "failed": ["pending"],
-    "cancelled": [],
-}
+class SimpleStateMachine:
+    """精简版任务状态机（无 DB 依赖）。
+
+    定义合法的状态转换路径。
+    """
+
+    TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
+        TaskStatus.PENDING: [TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.COMPLETED, TaskStatus.FAILED],
+        TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EVALUATING, TaskStatus.PAUSED],
+        TaskStatus.EVALUATING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.RUNNING],
+        TaskStatus.FAILED: [TaskStatus.PENDING],
+        TaskStatus.COMPLETED: [TaskStatus.PENDING],
+        TaskStatus.PAUSED: [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED],
+    }
+
+    def can_transition(self, from_status: TaskStatus, to_status: TaskStatus) -> bool:
+        """检查状态转换是否合法。"""
+        allowed = self.TRANSITIONS.get(from_status, [])
+        return to_status in allowed
+
+    def transition(self, task: TaskModel, target_status: TaskStatus) -> None:
+        """执行状态转换。
+
+        Args:
+            task: 任务模型
+            target_status: 目标状态
+
+        Raises:
+            InvalidTransitionError: 状态转换不合法
+        """
+        if not self.can_transition(task.status, target_status):
+            raise InvalidTransitionError(
+                task.status.value,
+                target_status.value,
+            )
+        task.status = target_status
 
 
 class TaskService:
-    """任务服务类。
+    """任务服务 -- 任务生命周期管理的统一入口。
 
-    负责任务的创建、状态管理等相关业务逻辑。
-    状态转换委托给 SimpleStateMachine 处理。
+    组合状态机、存储和进度计算器，提供任务的创建、
+    状态转换、查询和进度计算等业务操作。
 
-    Args:
-        task_id: 任务唯一标识。
-        initial_state: 任务初始状态，默认为 "pending"。
+    Attributes:
+        _storage: 任务存储实例（TaskStorage，按根任务分子目录 YAML 持久化）
+        _state_machine: 状态机实例
+        _progress: 进度计算器实例
+        _scheduler: 调度器实例（可选）
+        _concurrency: 并发控制器（可选）
+        _event_bus: 事件总线（可选）
     """
 
-    def __init__(self, task_id: str, initial_state: str = "pending") -> None:
-        self.task_id = task_id
-        self._state_machine = SimpleStateMachine(
-            initial_state=initial_state,
-            transitions=DEFAULT_TASK_TRANSITIONS,
-        )
-
-    @property
-    def state(self) -> str:
-        """获取当前任务状态。"""
-        return self._state_machine.current_state
-
-    def advance(self, target_state: str) -> None:
-        """推进任务到目标状态。
+    def __init__(
+        self,
+        storage: TaskStorage | None = None,
+        state_machine: SimpleStateMachine | None = None,
+        progress: Any | None = None,
+        *,
+        scheduler: Any = None,
+        concurrency: Any = None,
+        event_bus: Any = None,
+        on_state_change: Any = None,
+    ) -> None:
+        """初始化任务服务。
 
         Args:
-            target_state: 目标状态。
+            storage: 任务存储实例，None 时使用默认 TaskStorage
+            state_machine: 状态机实例，None 时创建默认实例
+            progress: 进度计算器实例，None 时创建默认实例
+            scheduler: 调度器实例（可选），来自 infrastructure 层
+            concurrency: 并发控制器（可选），来自 infrastructure 层
+            event_bus: 事件总线（可选），传入后自动广播 task_state_changed
+            on_state_change: 状态变更回调（已废弃，保留兼容）
+        """
+        if storage is None:
+            storage = TaskStorage(data_dir="data/tasks")
+        self._storage = storage
+        self._state_machine = state_machine or SimpleStateMachine()
+        self._progress = progress
+        self._scheduler = scheduler
+        self._concurrency = concurrency
+        self._event_bus = event_bus
+        if on_state_change is not None:
+            logger.warning(
+                "TaskService: on_state_change 参数已废弃，"
+                "请通过 event_bus 订阅 task_state_changed 事件"
+            )
+
+    # ── 创建 ────────────────────────────────────────────
+
+    async def create_task(
+        self,
+        title: str,
+        description: str = "",
+        **kwargs: Any,
+    ) -> TaskModel:
+        """创建新任务并保存到存储。
+
+        Args:
+            title: 任务标题
+            description: 任务描述
+            **kwargs: 传递给 create_task 工厂函数的额外参数
+
+        Returns:
+            创建后的 TaskModel 实例（状态为 PENDING）
+        """
+        task = create_task(title=title, description=description, **kwargs)
+        self._storage.save(task)
+        logger.info("Task created: %s (%s)", task.id, task.title)
+        self._emit_state_changed(task, "", task.status)
+        return task
+
+    # ── 状态转换 ─────────────────────────────────────────
+
+    async def start_task(self, task_id: str) -> TaskModel:
+        """启动任务（pending -> running）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
 
         Raises:
-            InvalidTransitionError: 当状态转换不被允许时。
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
         """
-        self._state_machine.transition(target_state)
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.RUNNING)
+        if not task.started_at:
+            task.started_at = datetime.now().isoformat()
+        self._storage.save(task)
+        logger.info("Task started: %s", task_id)
+        return task
+
+    async def complete_evaluation(
+        self, task_id: str, passed: bool, result: Any = None,
+    ) -> TaskModel:
+        """完成评估（evaluating -> completed / failed）。
+
+        Args:
+            task_id: 任务 ID
+            passed: 评估是否通过
+            result: 评估结果数据（可选）
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        target = TaskStatus.COMPLETED if passed else TaskStatus.FAILED
+        self._transition_with_callback(task, target)
+        task.completed_at = datetime.now().isoformat()
+        if result is not None:
+            task.result = result
+            if task.metadata is None:
+                task.metadata = {}
+            history = task.metadata.get("evaluation_history", [])
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "timestamp": datetime.now().isoformat(),
+                "passed": passed,
+                "data": result,
+            })
+            task.metadata["evaluation_history"] = history
+        self._storage.save(task)
+        logger.info(
+            "Task %s evaluation: %s", task_id,
+            "passed" if passed else "failed",
+        )
+        return task
+
+    async def recover_to_completed(
+        self, task_id: str, result: Any = None,
+    ) -> TaskModel:
+        """评估通过时恢复被错误标记为 failed 的任务。
+
+        Args:
+            task_id: 任务 ID
+            result: 评估结果数据（可选）
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        if task.status != TaskStatus.FAILED:
+            raise ValueError(
+                f"recover_to_completed 仅用于 FAILED 状态，"
+                f"当前状态: {task.status.value}"
+            )
+        old_status = task.status
+        task.status = TaskStatus.COMPLETED
+        task.completed_at = datetime.now().isoformat()
+        task.error = None
+        if result is not None:
+            task.result = result
+        self._storage.save(task)
+        self._emit_state_changed(task, old_status, TaskStatus.COMPLETED)
+        logger.info("Task %s recovered: FAILED -> COMPLETED", task_id)
+        return task
+
+    async def pause_task(self, task_id: str) -> TaskModel:
+        """暂停任务（running -> paused）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.PAUSED)
+        logger.info("Task paused: %s", task_id)
+        return task
+
+    async def resume_task(self, task_id: str) -> TaskModel:
+        """恢复任务（paused -> running）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.RUNNING)
+        logger.info("Task resumed: %s", task_id)
+        return task
+
+    async def reactivate_task(self, task_id: str, message: str = "") -> TaskModel:
+        """重新激活已完成任务（completed -> pending -> running）。
+
+        Args:
+            task_id: 任务 ID
+            message: 追加需求描述（注入到新管道首轮）
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 任务不是 completed 状态
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.PENDING)
+
+        task.completed_at = ""
+        task.error = ""
+        task.reject_count = 0
+
+        if task.metadata is None:
+            task.metadata = {}
+        prev_pipeline = task.pipeline_run_id
+        if prev_pipeline:
+            history = task.metadata.get("pipeline_history", [])
+            if not isinstance(history, list):
+                history = []
+            history.append(prev_pipeline)
+            task.metadata["pipeline_history"] = history
+        task.pipeline_run_id = ""
+
+        if message:
+            reqs = task.metadata.get("reactivate_requirements", [])
+            if not isinstance(reqs, list):
+                reqs = []
+            reqs.append({
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+            })
+            task.metadata["reactivate_requirements"] = reqs
+
+        self._storage.save(task)
+        logger.info("Task reactivated: %s (was completed)", task_id)
+        return task
+
+    async def reset_to_pending(self, task_id: str) -> TaskModel:
+        """强制重置任务为 pending（用于 Worker 启动恢复场景）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        old_status = task.status
+        task.status = TaskStatus.PENDING
+        task.started_at = ""
+        task.error = ""
+        self._storage.save(task)
+        self._emit_state_changed(task, old_status, TaskStatus.PENDING)
+        logger.info("Task reset to pending (recovery): %s (was %s)", task_id, old_status.value)
+        return task
+
+    async def fail_task(self, task_id: str, error: str = "") -> TaskModel:
+        """标记任务失败（running -> failed）。
+
+        Args:
+            task_id: 任务 ID
+            error: 错误信息
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.FAILED)
+        if error:
+            task.error = error
+            self._storage.save(task)
+        logger.info("Task failed: %s -- %s", task_id, error or "no detail")
+        return task
+
+    async def move_to_evaluating(self, task_id: str) -> TaskModel:
+        """将任务移入评估阶段（running -> evaluating）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, TaskStatus.EVALUATING)
+        logger.info("Task moved to evaluating: %s", task_id)
+        return task
+
+    async def reject_task(self, task_id: str, reason: str = "", max_reject_count: int = 3) -> TaskModel:
+        """打回任务（evaluating -> running），让 Agent 重新执行。
+
+        Args:
+            task_id: 任务 ID
+            reason: 打回原因
+            max_reject_count: 最大打回次数，默认 3
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        task.reject_count += 1
+
+        if task.reject_count >= max_reject_count:
+            logger.warning(
+                "Task %s reject count (%d) exceeded max (%d), marking as failed",
+                task_id, task.reject_count, max_reject_count,
+            )
+            self._transition_with_callback(task, TaskStatus.FAILED)
+            task.error = f"打回次数超过上限({max_reject_count}): {reason}"
+            self._storage.save(task)
+            return task
+
+        self._transition_with_callback(task, TaskStatus.RUNNING)
+        if reason:
+            task.error = f"打回重做({task.reject_count}/{max_reject_count}): {reason}"
+        else:
+            task.error = f"打回重做({task.reject_count}/{max_reject_count})"
+        self._storage.save(task)
+        logger.info("Task rejected (redo %d/%d): %s -- %s", task.reject_count, max_reject_count, task_id, reason)
+        return task
+
+    # ── 查询 ─────────────────────────────────────────────
+
+    async def bind_pipeline_run(self, task_id: str, pipeline_run_id: str) -> TaskModel:
+        """将任务绑定到管道运行实例。
+
+        Args:
+            task_id: 任务 ID
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        task.pipeline_run_id = pipeline_run_id
+        self._storage.save(task)
+        logger.info("Task %s bound to pipeline_run %s", task_id, pipeline_run_id)
+        return task
+
+    def get_root_task_id(self, task_id: str) -> str | None:
+        """获取任务所属的根任务 ID。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            根任务 ID，任务不存在时返回 None
+        """
+        task = self._storage.get(task_id)
+        if task is None:
+            return None
+        return self._storage._find_root_id(task)
+
+    async def bind_execution_record(self, task_id: str, record_id: str) -> TaskModel:
+        """将任务绑定到执行记录（出生证明）。
+
+        Args:
+            task_id: 任务 ID
+            record_id: 执行记录 ID
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._get_or_raise(task_id)
+        task.execution_record_id = record_id
+        self._storage.save(task)
+        logger.info("Task %s bound to execution_record %s", task_id, record_id)
+        return task
+
+    def get_task(self, task_id: str) -> TaskModel | None:
+        """获取任务（同步，从内存缓存读取）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            任务模型，不存在时返回 None
+        """
+        return self._storage.get(task_id)
+
+    def list_by_status(self, status: TaskStatus) -> list[TaskModel]:
+        """按状态列出任务（同步，从内存缓存读取）。
+
+        Args:
+            status: 任务状态
+
+        Returns:
+            匹配状态的任务列表
+        """
+        return self._storage.list_by_status(status)
+
+    def list_subtasks(self, parent_id: str) -> list[TaskModel]:
+        """列出子任务（同步，从内存缓存读取）。
+
+        Args:
+            parent_id: 父任务 ID
+
+        Returns:
+            属于指定父任务的子任务列表
+        """
+        return self._storage.list_by_parent(parent_id)
+
+    async def list_all(
+        self,
+        limit: int = 50,
+        reverse: bool = True,
+        session_id: str | None = None,
+    ) -> list[TaskModel]:
+        """列出所有任务。
+
+        支持按 session_id 过滤，按创建时间排序后返回指定数量。
+
+        Args:
+            limit: 返回数量限制
+            reverse: 是否按创建时间倒序
+            session_id: 会话 ID，用于按会话筛选任务
+
+        Returns:
+            任务列表
+        """
+        all_tasks = list(self._storage._tasks.values())
+
+        # BUG-FIX-fix_20260513_task_pipeline_filter: 通过 pipeline_ids 关联任务
+        # 问题根因: 任务 metadata 中没有 session_id，原过滤逻辑永远为空
+        # 修复方案: 从 api_store 获取 session 关联的 pipeline_ids，匹配任务的管道字段
+        # 影响范围: 任务列表按会话过滤
+        # 修复日期: 2026-05-13
+        if session_id:
+            from channels.api.models import store as api_store
+            pipeline_ids = set()
+            thread_data = api_store.threads.get(session_id)
+            if thread_data:
+                pipeline_ids.update(thread_data.get("pipeline_ids", []))
+            try:
+                from infrastructure.execution_record_storage import ExecutionRecordStorage
+                exec_storage = ExecutionRecordStorage()
+                root_map = getattr(exec_storage, "_pipeline_root_map", {})
+                child_ids = {c for c, r in root_map.items() if r in pipeline_ids}
+                pipeline_ids.update(child_ids)
+            except Exception:
+                pass
+
+            filtered = []
+            for t in all_tasks:
+                meta = getattr(t, 'metadata', None)
+                if meta and meta.get("session_id") == session_id:
+                    filtered.append(t)
+                    continue
+                if pipeline_ids:
+                    ppid = getattr(t, 'parent_pipeline_id', '') or ''
+                    prid = getattr(t, 'pipeline_run_id', '') or ''
+                    if ppid in pipeline_ids or prid in pipeline_ids:
+                        filtered.append(t)
+                        continue
+                    if meta:
+                        for pid in pipeline_ids:
+                            if meta.get("parent_pipeline_id") == pid or meta.get("pipeline_run_id") == pid:
+                                filtered.append(t)
+                                break
+            all_tasks = filtered
+
+        all_tasks.sort(key=lambda t: t.created_at, reverse=reverse)
+        return all_tasks[:limit]
+
+    def can_transition(self, task_id: str, target_status: TaskStatus) -> bool:
+        """检查任务是否可以转换到目标状态。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态
+
+        Returns:
+            是否可以转换，任务不存在时返回 False
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return False
+        return self._state_machine.can_transition(task.status, target_status)
+
+    def get_valid_transitions(self, task_id: str) -> list[str]:
+        """获取任务可转换的目标状态列表。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            可转换状态值列表，任务不存在时返回空列表
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return []
+        return [s.value for s in self._state_machine.TRANSITIONS.get(task.status, [])]
+
+    async def force_transition(self, task_id: str, target_status: TaskStatus) -> TaskModel:
+        """强制转换任务状态（含回调通知）。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态
+
+        Returns:
+            更新后的 TaskModel
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态转换不合法
+        """
+        task = self._get_or_raise(task_id)
+        self._transition_with_callback(task, target_status)
+        return task
+
+    async def delete_task(self, task_id: str) -> bool:
+        """删除任务，根据任务类型执行不同的删除策略。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
+        修复方案:
+          - 容器任务: 软删除（标记取消，保留数据）
+          - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
+          - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            是否删除成功
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            return False
+
+        if task.metadata.get("task_scope") == "container":
+            task.status = TaskStatus.FAILED
+            task.error = "已取消: 用户删除"
+            if task.metadata is None:
+                task.metadata = {}
+            task.metadata["soft_deleted"] = True
+            self._storage.save(task)
+            # BUG-FIX-fix_20260514_cancel_cascade:
+            # 容器任务删除时级联标记子任务为 failed
+            await self.cancel_task_cascade(task_id, reason="用户删除")
+            return True
+
+        is_child_of_container = self._is_child_of_container(task)
+
+        # BUG-FIX-fix_20260514_cancel_cascade:
+        # 非容器任务删除时级联标记子任务为 failed + 取消管道
+        self._cancel_pipeline_recursive(task_id)
+        await self.cancel_task_cascade(task_id, reason="用户删除")
+
+        if not is_child_of_container:
+            self._cleanup_workspace(task_id)
+
+        self._storage.delete(task_id)
+        return True
+
+    async def save_task(self, task: TaskModel) -> None:
+        """保存任务（供外部更新后调用）。
+
+        Args:
+            task: 任务模型
+        """
+        self._storage.save(task)
+
+    # ── 清理 ─────────────────────────────────────────────
+
+    def _cancel_pipeline(self, task_id: str) -> None:
+        """取消任务关联的运行中管道（best-effort）。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        通过 TaskWorker.cancel_pipeline 强制取消 asyncio.Task，
+        触发 PipelineEngine 的 CancelledError，停止管道执行。
+        """
+        try:
+            from infrastructure.service_provider import get_service_provider
+
+            provider = get_service_provider()
+            task_worker = provider.get("task_worker")
+            if task_worker is None:
+                return
+            cancelled = task_worker.cancel_pipeline(task_id)
+            if cancelled:
+                logger.info("Task %s pipeline cancelled on delete", task_id)
+        except Exception as e:
+            logger.warning(
+                "Task %s pipeline cancel failed (non-fatal): %s",
+                task_id, e,
+            )
+
+    def _cancel_pipeline_recursive(self, task_id: str) -> None:
+        """递归取消任务及其所有子任务的运行中管道。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        删除任务时需要同时取消所有下级子任务的管道，避免孤立管道继续执行。
+        """
+        self._cancel_pipeline(task_id)
+        subtasks = self.list_subtasks(task_id)
+        for subtask in subtasks:
+            self._cancel_pipeline_recursive(subtask.id)
+
+    async def cancel_task_cascade(self, task_id: str, reason: str = "用户取消") -> int:
+        """级联取消子任务：将所有非终态子任务标记为 failed 并取消管道。
+
+        BUG-FIX-fix_20260514_cancel_cascade:
+        问题根因: cancel 操作只取消当前任务本身，不级联取消子任务，
+        导致子任务管道继续执行、状态不一致。
+        修复方案: 递归遍历子任务树，将非终态子任务标记为 failed 并取消管道，
+        跳过已完成/已失败的终态任务，但仍然递归其子树确保深层覆盖。
+
+        注意: 调用方应先完成主任务的 fail_task 和管道取消，
+        本方法只负责子任务树的级联处理。
+
+        Args:
+            task_id: 被取消的任务 ID（从其子任务开始级联）
+            reason: 取消原因
+
+        Returns:
+            被级联取消的子任务数量（不含 task_id 自身）
+        """
+        cascaded_count = 0
+        subtasks = self.list_subtasks(task_id)
+        terminal_statuses = {TaskStatus.COMPLETED, TaskStatus.FAILED}
+
+        for subtask in subtasks:
+            # BUG-FIX: 先递归子树，确保终态任务的后代也能被处理
+            cascaded_count += await self.cancel_task_cascade(
+                subtask.id, reason=reason,
+            )
+
+            if subtask.status in terminal_statuses:
+                continue
+
+            try:
+                await self.fail_task(
+                    subtask.id,
+                    error=f"父任务取消，级联取消: {reason}",
+                )
+                cascaded_count += 1
+            except Exception as e:
+                logger.warning(
+                    "级联取消子任务失败 (non-fatal): task_id=%s, error=%s",
+                    subtask.id, e,
+                )
+
+            self._cancel_pipeline(subtask.id)
+
+        return cascaded_count
+
+    def _is_child_of_container(self, task: "TaskModel") -> bool:
+        """判断非容器任务是否属于某个容器任务的子树。
+
+        BUG-FIX-fix_20260514_task_delete_pipeline:
+        向上追溯 parent_task_id 链，检查根任务是否为 container 类型。
+        容器的子任务删除时不需要清理工作空间（工作空间由容器管理）。
+        """
+        root_id = self.get_root_task_id(task.id)
+        if root_id is None or root_id == task.id:
+            return False
+        root_task = self.get_task(root_id)
+        if root_task is None:
+            return False
+        return root_task.metadata.get("task_scope") == "container"
+
+    def _cleanup_workspace(self, task_id: str) -> None:
+        """尝试清理任务关联的 worktree（best-effort）。"""
+        try:
+            from infrastructure.service_provider import (
+                get_service_provider,
+            )
+            provider = get_service_provider()
+            lifecycle = provider.get("workspace_lifecycle_manager")
+            if lifecycle:
+                lifecycle.cleanup_workspace(task_id)
+                logger.info("Task %s workspace cleaned up", task_id)
+        except Exception as e:
+            logger.warning(
+                "Task %s workspace cleanup failed (non-fatal): %s",
+                task_id, e,
+            )
+
+    # ── 进度 ─────────────────────────────────────────────
+
+    def get_progress(self, parent_id: str) -> float:
+        """计算父任务的子任务完成进度（同步，从缓存读取）。
+
+        Args:
+            parent_id: 父任务 ID
+
+        Returns:
+            进度百分比（0.0 ~ 100.0），无子任务时返回 0.0
+        """
+        subtasks = self.list_subtasks(parent_id)
+        if not subtasks:
+            return 0.0
+        completed = sum(1 for t in subtasks if t.status == TaskStatus.COMPLETED)
+        return (completed / len(subtasks)) * 100.0
+
+    # ── 内部 ─────────────────────────────────────────────
+
+    def _transition_with_callback(
+        self,
+        task: TaskModel,
+        target_status: TaskStatus,
+        old_status: TaskStatus | None = None,
+    ) -> None:
+        """执行状态转换并通过 EventBus 广播事件。
+
+        Args:
+            task: 任务模型
+            target_status: 目标状态
+            old_status: 原始状态（可选，用于事件数据）
+        """
+        old = old_status or task.status
+        self._state_machine.transition(task, target_status)
+        self._storage.save(task)
+
+        if self._event_bus is not None:
+            try:
+                import asyncio
+
+                event_data: dict[str, Any] = {
+                    "task_id": task.id,
+                    "old_status": old.value,
+                    "new_status": target_status.value,
+                    "source": "task_service",
+                    "task": task,
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._event_bus.emit("task_state_changed", event_data),
+                    )
+                    logger.info(
+                        "TaskService: 事件已调度 | task=%s, %s -> %s",
+                        task.id, old.value, target_status.value,
+                    )
+                except RuntimeError:
+                    logger.warning(
+                        "TaskService: 无 event loop，事件丢失 | task=%s, %s -> %s",
+                        task.id, old.value, target_status.value,
+                    )
+            except Exception as e:
+                logger.warning("EventBus emit failed: %s", e)
+
+    def _emit_state_changed(
+        self,
+        task: TaskModel,
+        old_status: TaskStatus | str,
+        new_status: TaskStatus,
+    ) -> None:
+        """通过 EventBus 广播状态变更事件（非状态机转换场景）。"""
+        old_val = old_status.value if hasattr(old_status, "value") else str(old_status)
+        if self._event_bus is not None:
+            try:
+                import asyncio
+
+                event_data: dict[str, Any] = {
+                    "task_id": task.id,
+                    "old_status": old_val,
+                    "new_status": new_status.value,
+                    "source": "task_service",
+                    "task": task,
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._event_bus.emit("task_state_changed", event_data),
+                    )
+                except RuntimeError:
+                    logger.warning(
+                        "TaskService: 无 event loop(_emit_state_changed)，事件丢失 | "
+                        "task=%s, %s -> %s",
+                        task.id, old_val, new_status.value,
+                    )
+            except Exception as e:
+                logger.warning("EventBus emit failed: %s", e)
+
+    def _get_or_raise(self, task_id: str) -> TaskModel:
+        """获取任务，不存在时抛出 KeyError。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            任务模型
+
+        Raises:
+            KeyError: 任务不存在
+        """
+        task = self._storage.get(task_id)
+        if task is None:
+            raise KeyError(f"Task '{task_id}' not found")
+        return task

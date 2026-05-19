@@ -182,16 +182,22 @@ class TestBug4SilentExceptionLogging:
         )
 
     def test_workspace_lifecycle_key_paths_have_logging(self):
-        """BUG-4: workspace_lifecycle.py 关键位置应有 logger.warning。"""
+        """BUG-4: workspace_lifecycle.py 及其 Mixin 文件关键位置应有 logger.warning。"""
         wl_path = Path("src/isolation/workspace_lifecycle.py")
         content = wl_path.read_text(encoding="utf-8")
 
-        assert "logger.warning" in content
+        # 重构后部分方法移至 Mixin 文件，需合并内容一起检查
+        mixin_path = Path("src/isolation/_workspace_git_ops.py")
+        mixin_content = mixin_path.read_text(encoding="utf-8") if mixin_path.exists() else ""
+        combined = content + mixin_content
+
+        assert "logger.warning" in combined
+
         # 验证 __init__ 中的记录主分支失败有日志
-        assert "__init__ 中记录主分支失败" in content or "_record_main_branch 失败" in content, (
+        assert "__init__ 中记录主分支失败" in combined or "_record_main_branch 失败" in combined, (
             "__init__ 中记录主分支失败应有 logger.warning"
         )
         # 验证 _guard_root_branch 有日志
-        assert "_guard_root_branch 检查异常" in content, (
+        assert "_guard_root_branch 检查异常" in combined, (
             "_guard_root_branch 应有异常日志"
         )
