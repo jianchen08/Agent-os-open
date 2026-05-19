@@ -9,8 +9,23 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+
+# [DEPRECATED] SQLAlchemy ORM 已移除，以下为兼容存根
+# 该模块未来应迁移到纯 aiosqlite / asyncpg 直接执行，不再依赖 SQLAlchemy。
+
+
+def text(sql: str):
+    """SQLAlchemy text() 存根 —— 仅保留包装语义，返回原始 SQL 字符串。
+
+    真正的参数绑定功能已不可用（:param 占位符仍可出现在 SQL 中，
+    但不会做字典替换）。如需参数化查询，请使用各数据库驱动的原生参数机制。
+    """
+    return sql
+
+
+# AsyncSession 类型存根 —— 标记待迁移，当前用法通过 get_db_manager().get_session() 获取
+# 实际会话对象。此类型别名仅用于类型注解，运行时不依赖 SQLAlchemy。
+AsyncSession = object  # type: ignore[misc,assignment]
 
 
 class Migration:
