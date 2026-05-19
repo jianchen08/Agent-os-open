@@ -24,3 +24,6 @@ export type { ImageAreaAnnotationProps } from './ImageAreaAnnotation'
 
 export { VideoTimelineAnnotation } from './VideoTimelineAnnotation'
 export type { VideoTimelineAnnotationProps } from './VideoTimelineAnnotation'
+
+export { MediaMetadataPanel } from './MediaMetadataPanel'
+export type { MediaMetadataPanelProps } from './MediaMetadataPanel'

@@ -26,14 +26,23 @@ export type ProjectStatus =
 
 /**
  * 任务状态
+ *
+ * 与后端 ExecutionStatus 对齐。
+ * 后端 running/evaluating 通过 API 映射层转为 in_progress，
+ * 前端也接受原始值作为兼容别名。
  */
 export type TaskStatus =
   | 'pending' // 待执行
-  | 'in_progress' // 执行中
+  | 'in_progress' // 执行中（后端 running/evaluating 映射为此值）
+  | 'running' // [兼容] 后端原始值，等价于 in_progress
+  | 'evaluating' // [兼容] 后端原始值，等价于 in_progress
+  | 'scheduled' // [兼容] 后端原始值，等价于 pending
   | 'completed' // 已完成
   | 'failed' // 已失败
   | 'blocked' // 已阻塞
   | 'suspended' // 已暂停
+  | 'cancelled' // 已取消
+  | 'timeout' // 超时
 
 /**
  * 任务类型
@@ -204,10 +213,20 @@ export interface Task {
   acceptanceCriteria?: AcceptanceCriterion[]
   /** Agent 层级 */
   agentLevel?: AgentLevel
+  /** 执行者 Agent ID */
+  agentId?: string
+  /** 会话线程 ID */
+  threadId?: string
   /** 所属会话 ID */
   sessionId?: string
+  /** 创建者 ID */
+  createdBy?: string
   /** 所属用户 ID */
   userId?: string
+  /** 输入数据 */
+  inputData?: Record<string, any>
+  /** 任务结果 */
+  result?: Record<string, any>
   /** 目标执行者类型 */
   targetType?: 'agent' | 'workflow' | 'long_term'
   /** 目标执行者 ID */

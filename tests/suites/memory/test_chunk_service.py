@@ -80,7 +80,7 @@ class TestChunkServiceInit:
 
     def test_创建chunks目录(self, temp_dir: str) -> None:
         """初始化时应创建 chunks 子目录。"""
-        svc = ChunkService(data_dir=temp_dir)
+        ChunkService(data_dir=temp_dir)
         chunks_dir = Path(temp_dir) / "chunks"
         assert chunks_dir.exists()
         assert chunks_dir.is_dir()

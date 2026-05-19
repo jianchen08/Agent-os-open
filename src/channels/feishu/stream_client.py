@@ -305,7 +305,7 @@ class FeishuStreamClient:
         # 飞书 Stream 协议：需要回复 ACK
         headers = data.get("headers", {})
         event_type = headers.get("event_type", "")
-        message_id = headers.get("message_id", "")
+        headers.get("message_id", "")
 
         # 回复 ACK
         if data.get("schema") == "2.0":

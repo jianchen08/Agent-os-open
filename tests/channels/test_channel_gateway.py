@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from channels.gateway.channel_gateway import ChannelGateway
-from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
+from channels.gateway.unified_types import UnifiedResponse
 
 
 class TestChannelGateway:

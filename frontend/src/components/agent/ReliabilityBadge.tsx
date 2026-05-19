@@ -38,10 +38,10 @@ export function ReliabilityBadge({
 }: ReliabilityBadgeProps) {
   /** 根据评分确定颜色 */
   const getScoreColor = () => {
-    if (score >= 90) return 'bg-status-warning/20 text-status-warning border-status-warning/30'
-    if (score >= 70) return 'bg-status-success/20 text-status-success border-status-success/30'
-    if (score >= 50) return 'bg-status-waiting/20 text-status-waiting border-status-waiting/30'
-    return 'bg-status-error/20 text-status-error border-status-error/30'
+    if (score >= 90) return 'bg-[var(--badge-warning-bg)] text-[var(--badge-warning-text)] border-[var(--badge-warning-text)]/30'
+    if (score >= 70) return 'bg-[var(--badge-success-bg)] text-[var(--badge-success-text)] border-[var(--badge-success-text)]/30'
+    if (score >= 50) return 'bg-[var(--badge-warning-bg)] text-[var(--badge-warning-text)] border-[var(--badge-warning-text)]/30'
+    return 'bg-[var(--badge-error-bg)] text-[var(--badge-error-text)] border-[var(--badge-error-text)]/30'
   }
 
   const sizeStyles = {

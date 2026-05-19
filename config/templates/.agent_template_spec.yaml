@@ -93,7 +93,7 @@ model_tier: {model_tier}
 # 【可选】模型分级
 # - 类型: string (枚举)
 # - 作用: 从 llm.yaml defaults.tiers 解析为具体的 model_name。优先级低于 model_name 字段。
-# - 可能值:
+# - 可能（也可以使用具体的值）:
 #   | 值 | 说明 | 使用场景 |
 #   |---|---|---|
 #   | "large" | 大模型 | L2 编排者、复杂分析任务 |
@@ -725,9 +725,9 @@ output_schema:
 #       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
 #       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
 #       ### 评估规则
-#       - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本
-#       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check 或 function_verify
-#       - 一般任务（例行操作、低风险变更、简单执行）→ 仅用 tool 类指标（file_check、format_valid 等）
+#       - Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本
+#       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check
+#       - 一般任务（例行操作、低风险变更、简单执行）→ 仅用 tool 类指标（file_check、format_valid、test_check 等）
 #       - 调研/通用执行/编排类：一般仅用 file_check
 #       - 代码编写环节本身只需 file_check + format_valid，质量由下游 Agent 层层把关
 
@@ -784,13 +784,13 @@ recommended_metrics:
 #   |---|---|---|---|
 #   | "file_check" | 检查文件是否存在/可读 | action: "read"/"exists", path: 文件路径 | 验证文件产出（必选，低成本） |
 #   | "semantic_check" | 检查内容质量（结构、格式、语义） | criteria: {required_sections} | 验证内容质量（可选，调用 LLM 有成本） |
-#   | "function_verify" | 功能验证 | requirement: 需求描述 | 验证功能真正可用 |
+#   | "test_check" | 测试运行检查 | path: 测试文件路径 | 验证测试是否通过（低成本） |
 #   | "coverage_check" | 检查测试覆盖率 | path: 代码路径, threshold: 覆盖率阈值 | 验证测试覆盖率 |
 #   | "schema_validation" | 验证输出是否符合 Schema | schema: JSON Schema | 验证结构化输出 |
 # - 评估规则:
-#   - Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本，仅用于重要任务
+#   - Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本，仅用于重要任务
 #   - 重要任务判断：涉及核心功能、影响项目质量、用户明确强调质量要求
-#   - 一般任务（例行操作、低风险变更、简单执行）仅用 tool 类指标（file_check、format_valid 等）
+#   - 一般任务（例行操作、低风险变更、简单执行）仅用 tool 类指标（file_check、format_valid、test_check 等）
 #   - 调研/通用执行/编排类：一般仅用 file_check
 #   - 代码编写环节本身只需 file_check + format_valid，质量由下游 Agent（code_reviewer、test_debug、function_verifier）层层把关
 # - 示例:

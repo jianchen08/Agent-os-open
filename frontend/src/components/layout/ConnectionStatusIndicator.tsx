@@ -17,31 +17,31 @@ const STATUS_CONFIG: Record<
   connected: {
     color: 'text-status-success',
     label: 'Connected',
-    bgColor: 'bg-status-success/10',
+    bgColor: 'bg-[var(--badge-success-bg)]',
     animation: '',
   },
   connecting: {
-    color: 'text-status-warning',
+    color: 'text-[var(--badge-warning-text)]',
     label: 'Connecting...',
-    bgColor: 'bg-status-warning/10',
+    bgColor: 'bg-[var(--badge-warning-bg)]',
     animation: 'animate-pulse',
   },
   reconnecting: {
     color: 'text-status-running',
     label: 'Reconnecting...',
-    bgColor: 'bg-status-running/10',
+    bgColor: 'bg-[var(--badge-info-bg)]',
     animation: 'animate-pulse',
   },
   disconnected: {
     color: 'text-status-pending',
     label: 'Disconnected',
-    bgColor: 'bg-status-pending/10',
+    bgColor: 'bg-[var(--badge-default-bg)]',
     animation: '',
   },
   failed: {
-    color: 'text-status-error',
+    color: 'text-[var(--badge-error-text)]',
     label: 'Connection Failed',
-    bgColor: 'bg-status-error/10',
+    bgColor: 'bg-[var(--badge-error-bg)]',
     animation: '',
   },
 }
@@ -139,7 +139,7 @@ export function ConnectionStatusIndicator({
 
         {/* Queue indicator */}
         {showQueue && connectionStatus.queuedMessages > 0 && (
-          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-status-running/20 px-1 text-[10px] font-bold">
+          <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--badge-info-bg)] px-1 text-[10px] font-bold">
             {connectionStatus.queuedMessages}
           </span>
         )}

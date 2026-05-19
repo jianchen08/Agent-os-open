@@ -257,11 +257,19 @@ class AgentConfig:
         """
         state: dict[str, Any] = {}
 
+        # BUG-FIX-fix_20260515_parent_agent_level:
+        # 将 Agent 层级写入 state，确保 ParamInjectPlugin 能读到 agent_level
+        # 并注入为 parent_agent_level 参数到 task_submit 等工具。
+        # 此前 agent_level 仅由 ContextBuildPlugin 通过插件配置设置，
+        # 若 agent YAML 未配置 plugins.enabled.context_build.agent_level，
+        # 则 state 中缺失该值导致 parent_agent_level 注入失败。
+        state["agent_level"] = self.level.value
+
+        if self.config_id:
+            state["agent_config_id"] = self.config_id
+
         if self.system_prompt:
             state["system_prompt"] = self._build_full_system_prompt()
-
-        if hasattr(self, "level") and self.level:
-            state["agent_level"] = self.level.value
 
         if self.tool_ids:
             state["tool_ids"] = self.tool_ids
@@ -272,7 +280,7 @@ class AgentConfig:
         }
 
         if self.static_vars.enabled and self.static_vars.items:
-            state["context.static_vars"] = [
+            sv_items = [
                 {
                     "name": item.name,
                     "type": item.type,
@@ -288,6 +296,21 @@ class AgentConfig:
                 }
                 for item in self.static_vars.items
             ]
+            if self.config_id:
+                sv_items.append({
+                    "name": "agent_self_memory",
+                    "tags": [self.config_id],
+                    "inject_type": "retrieval",
+                    "top_k": 5,
+                })
+            state["context.static_vars"] = sv_items
+        elif self.config_id:
+            state["context.static_vars"] = [{
+                "name": "agent_self_memory",
+                "tags": [self.config_id],
+                "inject_type": "retrieval",
+                "top_k": 5,
+            }]
 
         if self.dynamic_vars.enabled and self.dynamic_vars.items:
             state["context.dynamic_vars"] = [

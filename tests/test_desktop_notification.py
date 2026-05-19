@@ -14,7 +14,6 @@ from human_interaction.composite_notifier import CompositeNotifier
 from human_interaction.desktop_notifier import (
     DesktopInteractionNotifier,
     DesktopNotifierConfig,
-    install_hook,
 )
 from human_interaction.os_notification import is_supported, send_notification
 

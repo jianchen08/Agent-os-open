@@ -82,14 +82,14 @@ export function AgentsPage() {
           <button
             onClick={fetchAgents}
             disabled={isLoading}
-            className="hover:bg-accent/50 rounded-lg border px-2 py-1 text-xs disabled:opacity-50"
+            className="hover:bg-accent/50 min-h-[44px] min-w-[44px] rounded-lg border px-2 py-1 text-xs disabled:opacity-50"
             aria-label="刷新智能体列表"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
         {/* 搜索 */}
         <input
           type="text"

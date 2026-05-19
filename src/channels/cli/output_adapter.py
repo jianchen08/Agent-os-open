@@ -16,10 +16,8 @@ import logging
 from typing import Any
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.status import Status
-from rich.table import Table
 from rich.text import Text
 
 from channels.output_adapter import IOutputAdapter
@@ -164,7 +162,6 @@ class StatusBarRenderer:
         Returns:
             rich Text 对象
         """
-        from rich.columns import Columns
 
         left_parts: list[tuple[str, str]] = []
         right_parts: list[tuple[str, str]] = []

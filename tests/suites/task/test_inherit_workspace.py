@@ -14,7 +14,6 @@ import pytest
 os.environ["PYTHONPATH"] = "src"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
-from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock
 
 from tools.builtin.task_submit import TaskSubmitTool

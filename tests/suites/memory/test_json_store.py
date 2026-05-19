@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -15,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from memory.storage.json_store import JsonMemoryStore
-from memory.types import Episode, Knowledge, MemoryType
+from memory.types import Episode, Knowledge
 
 
 @pytest.fixture

@@ -26,7 +26,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.core.event_bus.base import EventBusBase
-from src.core.event_bus.types import EventType, ExecutionEvent
 from src.core.states import ExecutionStatus
 from src.db.models import Task
 

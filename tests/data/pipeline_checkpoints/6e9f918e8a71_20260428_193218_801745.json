@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "pipeline_id": "6e9f918e8a71",
+    "checkpoint_id": "6e9f918e8a71_20260428_193218_801745",
+    "phase": "auto",
+    "iteration": 1,
+    "timestamp": "2026-04-28T19:32:18.801781+00:00",
+    "state_keys": [
+      "user_input",
+      "iteration",
+      "ended",
+      "pipeline_id",
+      "context_window"
+    ]
+  },
+  "state": {
+    "user_input": "你好，请用一句话介绍你自己。",
+    "iteration": 1,
+    "ended": false,
+    "pipeline_id": "6e9f918e8a71",
+    "context_window": 200000
+  }
+}

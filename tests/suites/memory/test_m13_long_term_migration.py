@@ -13,8 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -518,7 +516,7 @@ class TestE2ELifecycle:
 
         svc = _make_svc(data_dir=tmp_path)
 
-        worker = TaskWorker(
+        TaskWorker(
             task_service=svc,
             plugin_registry=MagicMock(),
             input_route_table=MagicMock(),

@@ -105,7 +105,10 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items: []
+  items:
+    - name: "最小行动原则"
+      content: |
+        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
 
 # 上下文变量配置
 context_variables:

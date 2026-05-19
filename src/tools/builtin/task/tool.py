@@ -1118,19 +1118,38 @@ class TaskTool(BuiltinTool):
                     error_code="INVALID_STATUS",
                 )
 
+            # BUG-FIX-fix_20260519_pipeline_retry:
+            # 问题根因: _retry_task 没有检查 max_retries，AI 可通过 task_manage retry
+            #   无限次重试同一任务，每次都成功 failed->pending，max_retries 限制形同虚设。
+            # 修复方案: 在重试前从 metadata 读取 retry_count/max_retries，
+            #   超限时拒绝重试并返回失败。
+            if not task.metadata:
+                task.metadata = {}
+            retry_count = task.metadata.get("retry_count", 0)
+            max_retries = task.metadata.get("max_retries", 3)
+            if retry_count >= max_retries:
+                return create_failure_result(
+                    error=(
+                        f"任务已达到最大重试次数 ({retry_count}/{max_retries})，"
+                        f"无法继续重试。请考虑其他方案或标记任务失败。"
+                    ),
+                    error_code="MAX_RETRIES_EXCEEDED",
+                )
+
             reason = inputs.get("reason", "用户请求重试")
             message = inputs.get("message", "")
             old_status = task.status.value
 
             # 将纠正信息存入 metadata，供 _execute_background_task 读取拼入 full_input
             if message:
-                if not task.metadata:
-                    task.metadata = {}
                 task.metadata["retry_message"] = message
                 logger.info(
                     "[TaskTool] retry 携带纠正信息 | task_id=%s | preview=%s",
                     task_id, message[:80],
                 )
+
+            # BUG-FIX-fix_20260519_pipeline_retry: 递增 retry_count 并写回 metadata
+            task.metadata["retry_count"] = retry_count + 1
 
             # 利用状态机从 failed -> pending
             # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
@@ -1173,6 +1192,8 @@ class TaskTool(BuiltinTool):
                 "old_status": old_status,
                 "new_status": TaskStatus.PENDING.value,
                 "reason": reason,
+                "retry_count": retry_count + 1,
+                "max_retries": max_retries,
             }
             if execution_warning:
                 result_data["warning"] = execution_warning
@@ -1307,12 +1328,12 @@ class TaskTool(BuiltinTool):
     ) -> ToolExecutionResult:
         """删除任务，根据任务类型执行不同策略。
 
-        BUG-FIX-fix_20260514_task_delete_pipeline:
-        问题根因: 删除任务时未取消运行中的管道，且未区分容器子任务与根任务
-        修复方案:
-          - 容器任务: 软删除（标记取消，保留数据）
-          - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
-          - 非容器任务(根任务): 取消管道 + 清理资源 + 清理工作空间 + 删除数据
+        重构版本：使用级联清理辅助方法完成完整清理。
+
+        策略：
+          - 容器任务: 软删除（标记取消，保留数据）+ 级联清理子任务资源
+          - 非容器任务(容器的子任务): 取消管道 + 级联清理 + 清理管道文件 + 删除记录
+          - 非容器任务(根任务): 取消管道 + 级联清理 + 清理管道文件 + 清理工作空间 + 删除记录
 
         Args:
             inputs: 工具输入参数
@@ -1351,6 +1372,7 @@ class TaskTool(BuiltinTool):
             old_status = task.status.value
             task_title = task.title
 
+            # --- 容器任务：软删除路径 ---
             if task.metadata.get("task_scope") == "container":
                 from tasks.types import TaskStatus
                 task.status = TaskStatus.FAILED
@@ -1359,11 +1381,25 @@ class TaskTool(BuiltinTool):
                     task.metadata = {}
                 task.metadata["soft_deleted"] = True
                 await service.save_task(task)
-                # BUG-FIX-fix_20260514_cancel_cascade:
-                # 容器任务删除时级联取消子任务管道和状态
+
+                # 级联取消子任务管道和状态
                 self._cancel_pipeline_recursive(task_id)
                 cascaded = await service.cancel_task_cascade(task_id, reason=reason)
-                result_data = {
+
+                # 级联清理子任务资源（管道文件 + 工作空间 + 存储记录）
+                container_workspace = (task.metadata or {}).get("workspace", "")
+                cascade_stats = await self._cascade_cleanup_subtasks(
+                    service, task_id,
+                    skip_workspace=False,
+                    container_workspace=container_workspace,
+                )
+
+                # 清理容器自身的管道执行文件
+                pipeline_cleaned = False
+                if task.pipeline_run_id:
+                    pipeline_cleaned = self._cleanup_pipeline_file(task.pipeline_run_id)
+
+                result_data: dict[str, Any] = {
                     "task_id": task_id,
                     "deleted": False,
                     "soft_deleted": True,
@@ -1371,6 +1407,8 @@ class TaskTool(BuiltinTool):
                     "title": task_title,
                     "reason": reason,
                     "message": "容器任务已标记删除（软删除）",
+                    "pipeline_file_cleaned": pipeline_cleaned,
+                    "cascade_cleanup": cascade_stats,
                 }
                 if cascaded > 0:
                     result_data["cascaded_subtasks"] = cascaded
@@ -1379,9 +1417,35 @@ class TaskTool(BuiltinTool):
                     metadata={"action": "soft_delete_container"},
                 )
 
+            # --- 非容器任务：硬删除路径 ---
             is_child_of_container = self._is_child_of_container(service, task)
+            skip_workspace = is_child_of_container
 
-            if not is_child_of_container:
+            # 取消任务及其子任务的运行中管道
+            self._cancel_pipeline_recursive(task_id)
+
+            # 对有子任务的任务进行级联清理
+            cascade_stats: dict[str, Any] = {
+                "subtasks_deleted": 0,
+                "pipeline_files_cleaned": 0,
+                "workspaces_cleaned": 0,
+                "errors": [],
+            }
+            subtasks = service.list_subtasks(task_id)
+            if subtasks:
+                cascade_stats = await self._cascade_cleanup_subtasks(
+                    service, task_id,
+                    skip_workspace=skip_workspace,
+                    container_workspace="",
+                )
+
+            # 清理任务自身的管道执行文件
+            pipeline_cleaned = False
+            if task.pipeline_run_id:
+                pipeline_cleaned = self._cleanup_pipeline_file(task.pipeline_run_id)
+
+            # 清理任务自身的 workspace
+            if not skip_workspace:
                 workspace = task.metadata.get("workspace")
                 cleanup_results = await self._cleanup_task_resources(
                     task_id=task_id,
@@ -1390,8 +1454,48 @@ class TaskTool(BuiltinTool):
             else:
                 cleanup_results = {"skipped": "容器子任务不清理工作空间"}
 
-            # BUG-FIX-fix_20260512_async_compat: delete_task 现在是 async
-            await service.delete_task(task_id)
+            # 删除任务自身的存储记录
+            service._storage.delete(task_id)
+
+            try:
+                from infrastructure.service_provider import get_service_provider
+                _provider = get_service_provider()
+                _ws_notifier = _provider.get("ws_interaction_notifier")
+                if _ws_notifier:
+                    _ws_payload = {
+                        "type": "task_deleted",
+                        "data": {
+                            "task_id": task_id,
+                            "title": task_title,
+                        },
+                    }
+                    _parent_pid = getattr(task, "parent_pipeline_id", "") or ""
+                    _ws_tid = ""
+                    if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
+                        _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
+                    if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
+                        await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
+                        logger.debug("[TaskTool] task_deleted 已通过 send_to_thread 发送 | task_id=%s", task_id)
+                    elif hasattr(_ws_notifier, "send_to_user"):
+                        _conns = getattr(_ws_notifier, "_active_connections", {})
+                        _global_conns = getattr(_ws_notifier, "_global_connections", {})
+                        if _conns or _global_conns:
+                            for _tid, _ws_list in _conns.items():
+                                for _ws in _ws_list:
+                                    try:
+                                        import json
+                                        await _ws.send_json(_ws_payload)
+                                    except Exception:
+                                        pass
+                            for _uid, _ws_list in _global_conns.items():
+                                for _ws in _ws_list:
+                                    try:
+                                        await _ws.send_json(_ws_payload)
+                                    except Exception:
+                                        pass
+                            logger.debug("[TaskTool] task_deleted 已广播 | task_id=%s", task_id)
+            except Exception as _ws_exc:
+                logger.warning("[TaskTool] task_deleted 广播失败: %s", _ws_exc)
 
             return create_success_result(
                 data={
@@ -1400,7 +1504,9 @@ class TaskTool(BuiltinTool):
                     "old_status": old_status,
                     "title": task_title,
                     "reason": reason,
+                    "pipeline_file_cleaned": pipeline_cleaned,
                     "cleanup": cleanup_results,
+                    "cascade_cleanup": cascade_stats,
                 },
                 metadata={"action": "delete_task"},
             )
@@ -1468,6 +1574,23 @@ class TaskTool(BuiltinTool):
 
         reason = inputs.get("container_reason", inputs.get("reason", ""))
 
+        # 清理子任务的 worktree（在状态转换之前执行）
+        cleanup_info: dict[str, Any] = {}
+        try:
+            cleanup_info = await self._cleanup_subtask_worktrees(task, subtasks)
+        except Exception as e:
+            logger.warning(
+                "[TaskTool] 容器 %s 子任务 worktree 清理异常 (non-fatal): %s",
+                task_id, e,
+            )
+            cleanup_info = {
+                "total_subtasks": len(subtasks),
+                "cleaned_count": 0,
+                "skipped_count": 0,
+                "error_count": 1,
+                "errors": [str(e)],
+            }
+
         try:
             # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
             await service.force_transition(task.id, TaskStatus.COMPLETED)
@@ -1484,6 +1607,7 @@ class TaskTool(BuiltinTool):
                     "completed_subtasks": sum(
                         1 for s in subtasks if s.status == TaskStatus.COMPLETED
                     ),
+                    "cleanup": cleanup_info,
                 },
                 metadata={"action": "complete_container"},
             )
@@ -1782,3 +1906,334 @@ class TaskTool(BuiltinTool):
         except Exception as e:
             cleanup_results["errors"].append(f"清理 worktree 失败: {str(e)}")
             logger.warning("[TaskTool] 清理 worktree 失败: %s, 错误: %s", workspace_path, e)
+
+    async def _cleanup_subtask_worktrees(
+        self,
+        container_task: TaskModel,
+        subtasks: list[TaskModel],
+    ) -> dict[str, Any]:
+        """清理容器下所有子任务的 worktree。
+
+        在容器标记完成之前调用，遍历每个子任务的 workspace_path，
+        执行 git worktree remove 和分支清理。
+
+        安全保护：
+        - 跳过与容器自身 workspace 相同的路径（防止误删容器工作目录）
+        - 每个子任务清理用 try-except 包裹，单个失败不阻塞后续清理
+        - 整个清理过程不抛出异常到外层
+
+        Args:
+            container_task: 容器任务模型
+            subtasks: 容器下的子任务列表
+
+        Returns:
+            清理结果统计字典，包含 total_subtasks / cleaned_count /
+            skipped_count / error_count / errors
+        """
+        result: dict[str, Any] = {
+            "total_subtasks": len(subtasks),
+            "cleaned_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "errors": [],
+        }
+
+        if not subtasks:
+            logger.info(
+                "[TaskTool] 容器 %s 无子任务，跳过 worktree 清理",
+                container_task.id,
+            )
+            return result
+
+        # 获取容器自身的 workspace 路径，用于保护
+        container_workspace = (container_task.metadata or {}).get("workspace", "")
+        # 解析为绝对路径用于比较
+        container_ws_resolved = ""
+        if container_workspace:
+            try:
+                container_ws_resolved = str(Path(container_workspace).resolve())
+            except Exception:
+                container_ws_resolved = container_workspace
+
+        logger.info(
+            "[TaskTool] 开始清理容器 %s 的子任务 worktree，共 %d 个子任务",
+            container_task.id,
+            len(subtasks),
+        )
+
+        for subtask in subtasks:
+            workspace = (subtask.metadata or {}).get("workspace", "")
+
+            # 跳过无 workspace 的子任务
+            if not workspace:
+                logger.debug(
+                    "[TaskTool] 子任务 %s 无 workspace_path，跳过",
+                    subtask.id,
+                )
+                result["skipped_count"] += 1
+                continue
+
+            # 安全校验：保护容器自身的 workspace
+            try:
+                sub_ws_resolved = str(Path(workspace).resolve())
+            except Exception:
+                sub_ws_resolved = workspace
+
+            if container_ws_resolved and sub_ws_resolved == container_ws_resolved:
+                logger.info(
+                    "[TaskTool] 子任务 %s 的 workspace 与容器相同 (%s)，跳过以保护容器工作目录",
+                    subtask.id,
+                    workspace,
+                )
+                result["skipped_count"] += 1
+                continue
+
+            # 执行清理
+            try:
+                # 优先使用 workspace_lifecycle 进行清理
+                lifecycle_cleaned = False
+                try:
+                    from infrastructure.service_provider import get_service_provider
+
+                    provider = get_service_provider()
+                    lifecycle = provider.get("workspace_lifecycle_manager")
+                    if lifecycle:
+                        lifecycle.restore_ws_meta(subtask.id)
+                        cleanup_result = lifecycle.cleanup_workspace(subtask.id)
+                        if cleanup_result and (
+                            cleanup_result.get("worktree_removed")
+                            or cleanup_result.get("dir_removed")
+                        ):
+                            lifecycle_cleaned = True
+                            result["cleaned_count"] += 1
+                            logger.info(
+                                "[TaskTool] 已通过 lifecycle 清理子任务 %s 的 worktree: %s",
+                                subtask.id,
+                                workspace,
+                            )
+                except Exception as e:
+                    logger.debug(
+                        "[TaskTool] lifecycle 清理子任务 %s 不可用: %s",
+                        subtask.id,
+                        e,
+                    )
+
+                # lifecycle 不可用时回退到 _cleanup_task_resources
+                if not lifecycle_cleaned:
+                    cleanup_result = await self._cleanup_task_resources(
+                        task_id=subtask.id,
+                        workspace=workspace,
+                    )
+                    if cleanup_result.get("workspace_cleaned"):
+                        result["cleaned_count"] += 1
+                        logger.info(
+                            "[TaskTool] 已清理子任务 %s 的 worktree: %s",
+                            subtask.id,
+                            workspace,
+                        )
+                    else:
+                        # 清理了但 workspace 可能已不存在，不视为错误
+                        errors = cleanup_result.get("errors", [])
+                        if errors:
+                            result["error_count"] += 1
+                            result["errors"].extend(
+                                [f"子任务 {subtask.id}: {e}" for e in errors]
+                            )
+                        else:
+                            # workspace 已不存在，正常跳过
+                            result["skipped_count"] += 1
+
+            except Exception as e:
+                result["error_count"] += 1
+                error_msg = f"子任务 {subtask.id}: {str(e)}"
+                result["errors"].append(error_msg)
+                logger.warning(
+                    "[TaskTool] 清理子任务 %s 的 worktree 失败: %s, 错误: %s",
+                    subtask.id,
+                    workspace,
+                    e,
+                )
+
+        logger.info(
+            "[TaskTool] 容器 %s 子任务 worktree 清理完成: "
+            "总计=%d, 已清理=%d, 跳过=%d, 失败=%d",
+            container_task.id,
+            result["total_subtasks"],
+            result["cleaned_count"],
+            result["skipped_count"],
+            result["error_count"],
+        )
+
+        return result
+
+    # ── 级联清理辅助方法 ─────────────────────────────────────
+
+    @staticmethod
+    def _collect_all_descendant_ids(
+        service: Any, task_id: str,
+    ) -> list[str]:
+        """递归收集任务的所有后代任务 ID（不含自身，深度优先）。
+
+        Args:
+            service: TaskService 实例
+            task_id: 起始任务 ID
+
+        Returns:
+            后代任务 ID 列表（叶子节点在前，根在后）
+        """
+        descendants: list[str] = []
+        subtasks = service.list_subtasks(task_id)
+        for subtask in subtasks:
+            # 先递归收集更深层的后代
+            descendants.extend(
+                TaskTool._collect_all_descendant_ids(service, subtask.id)
+            )
+            # 再加入当前子任务
+            descendants.append(subtask.id)
+        return descendants
+
+    def _cleanup_pipeline_file(self, pipeline_run_id: str) -> bool:
+        """清理单个管道的执行记录文件（best-effort）。
+
+        通过 ExecutionRecordStorage.delete_by_session 删除管道 YAML
+        及其分片文件，并清理内存缓存。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            是否成功清理了记录
+        """
+        if not pipeline_run_id:
+            return False
+        try:
+            storage = self._get_execution_record_storage()
+            if storage is None:
+                return False
+            deleted = storage.delete_by_session(pipeline_run_id)
+            if deleted > 0:
+                logger.info(
+                    "[TaskTool] 已清理管道执行文件: %s (%d 条记录)",
+                    pipeline_run_id, deleted,
+                )
+                return True
+            return False
+        except Exception as e:
+            logger.warning(
+                "[TaskTool] 清理管道执行文件失败 (non-fatal): %s, 错误: %s",
+                pipeline_run_id, e,
+            )
+            return False
+
+    async def _cascade_cleanup_subtasks(
+        self,
+        service: Any,
+        task_id: str,
+        *,
+        skip_workspace: bool = False,
+        container_workspace: str = "",
+    ) -> dict[str, Any]:
+        """级联清理任务的所有子任务资源并删除存储记录。
+
+        执行以下操作（对每个后代任务）：
+        1. 清理管道执行文件（ExecutionRecordStorage YAML）
+        2. 清理工作空间 / worktree（跳过与容器 workspace 相同的路径）
+        3. 从 TaskStorage 中删除存储记录
+
+        处理顺序：叶子节点 → 根，确保父任务最后被删除。
+
+        Args:
+            service: TaskService 实例
+            task_id: 父任务 ID（其子树将被清理）
+            skip_workspace: 是否完全跳过工作空间清理
+            container_workspace: 容器自身的 workspace 路径（用于保护，防止误删）
+
+        Returns:
+            清理统计信息字典
+        """
+        stats: dict[str, Any] = {
+            "subtasks_deleted": 0,
+            "pipeline_files_cleaned": 0,
+            "workspaces_cleaned": 0,
+            "errors": [],
+        }
+
+        # 收集所有后代（深度优先，叶子在前）
+        descendant_ids = self._collect_all_descendant_ids(service, task_id)
+
+        if not descendant_ids:
+            return stats
+
+        logger.info(
+            "[TaskTool] 开始级联清理任务 %s 的 %d 个后代子任务",
+            task_id, len(descendant_ids),
+        )
+
+        # 解析容器 workspace 用于保护
+        container_ws_resolved = ""
+        if container_workspace:
+            try:
+                container_ws_resolved = str(Path(container_workspace).resolve())
+            except Exception:
+                container_ws_resolved = container_workspace
+
+        for descendant_id in descendant_ids:
+            descendant_task = service.get_task(descendant_id)
+            if descendant_task is None:
+                continue
+
+            # 1. 清理管道执行文件
+            if descendant_task.pipeline_run_id:
+                if self._cleanup_pipeline_file(descendant_task.pipeline_run_id):
+                    stats["pipeline_files_cleaned"] += 1
+
+            # 2. 清理工作空间（非跳过模式下）
+            if not skip_workspace:
+                workspace = (descendant_task.metadata or {}).get("workspace")
+                if workspace:
+                    # 保护容器自身的 workspace
+                    try:
+                        sub_ws_resolved = str(Path(workspace).resolve())
+                    except Exception:
+                        sub_ws_resolved = workspace
+
+                    if container_ws_resolved and sub_ws_resolved == container_ws_resolved:
+                        logger.debug(
+                            "[TaskTool] 子任务 %s 的 workspace 与容器相同，跳过",
+                            descendant_id,
+                        )
+                    else:
+                        try:
+                            cleanup_result = await self._cleanup_task_resources(
+                                task_id=descendant_id,
+                                workspace=workspace,
+                            )
+                            if cleanup_result.get("workspace_cleaned"):
+                                stats["workspaces_cleaned"] += 1
+                        except Exception as e:
+                            stats["errors"].append(
+                                f"子任务 {descendant_id} 工作空间清理失败: {str(e)}"
+                            )
+
+            # 3. 删除存储记录
+            try:
+                service._storage.delete(descendant_id)
+                stats["subtasks_deleted"] += 1
+            except Exception as e:
+                stats["errors"].append(
+                    f"子任务 {descendant_id} 记录删除失败: {str(e)}"
+                )
+                logger.warning(
+                    "[TaskTool] 删除子任务记录失败 (non-fatal): %s, 错误: %s",
+                    descendant_id, e,
+                )
+
+        logger.info(
+            "[TaskTool] 级联清理完成: 子任务删除=%d, 管道文件清理=%d, 工作空间清理=%d, 错误=%d",
+            stats["subtasks_deleted"],
+            stats["pipeline_files_cleaned"],
+            stats["workspaces_cleaned"],
+            len(stats["errors"]),
+        )
+
+        return stats

@@ -162,31 +162,32 @@ class TaskSubmitOrchestrator:
                     error_code=submit_result.get("error_code", "SUBMIT_FAILED"),
                 )
 
-            # 5. 提交事务
-            await self.session.commit()
-
-            # 6. 通过统一调度入口启动任务执行
-            from src.orchestration import schedule as schedule_task
-
             task_id = submit_result["task_id"]
-            schedule_result = await schedule_task(task_id)
 
-            logger.info(
-                f"[TaskSubmitOrchestrator] 任务已提交并启动 | task_id={task_id} | "
-                f"schedule_success={schedule_result.get('success')}"
-            )
-
-            # 7. 更新 Agent 调用记录
+            # 5. 更新 Agent 调用记录（必须在 commit 前，确保数据持久化）
             await self._complete_agent_call(
                 execution_id=execution_id,
                 task_id=task_id,
             )
 
-            # 8. 构建返回数据
-            return self._build_agent_result(
+            # 6. 提交事务（所有准备工作完成后才持久化）
+            await self.session.commit()
+
+            # 7. 构建返回数据
+            result = self._build_agent_result(
                 submit_result=submit_result,
                 agent=agent,
             )
+
+            # BUG-FIX-fix_20260516_double_dispatch:
+            # 移除直接 schedule_task 调用。任务执行已由 SubmissionService.publish_submitted_event
+            # → EventBus → TaskWorker._on_task_submitted 事件驱动路径完成调度，
+            # 此处直接调用 schedule_task 会导致同一任务被调度两次（双重调度竞态条件）。
+            logger.info(
+                f"[TaskSubmitOrchestrator] 任务已提交 | task_id={task_id}（调度由事件驱动）"
+            )
+
+            return result
 
         except Exception as e:
             logger.error(
@@ -244,24 +245,25 @@ class TaskSubmitOrchestrator:
                     error_code=submit_result.get("error_code", "SUBMIT_FAILED"),
                 )
 
-            # 4. 提交事务
+            task_id = submit_result["task_id"]
+
+            # 4. 提交事务（所有准备工作完成后才持久化）
             await self.session.commit()
 
-            # 5. 通过统一调度入口启动任务执行
-            from src.orchestration import schedule as schedule_task
-
-            task_id = submit_result["task_id"]
-            schedule_result = await schedule_task(task_id)
-
-            logger.info(
-                f"[TaskSubmitOrchestrator] 工作流任务已提交并启动 | task_id={task_id} | "
-                f"schedule_success={schedule_result.get('success')}"
-            )
-
-            # 6. 构建返回数据
-            return self._build_workflow_result(
+            # 5. 构建返回数据
+            result = self._build_workflow_result(
                 submit_result=submit_result,
             )
+
+            # BUG-FIX-fix_20260516_double_dispatch:
+            # 移除直接 schedule_task 调用。任务执行已由 SubmissionService.publish_submitted_event
+            # → EventBus → TaskWorker._on_task_submitted 事件驱动路径完成调度，
+            # 此处直接调用 schedule_task 会导致同一任务被调度两次（双重调度竞态条件）。
+            logger.info(
+                f"[TaskSubmitOrchestrator] 工作流任务已提交 | task_id={task_id}（调度由事件驱动）"
+            )
+
+            return result
 
         except Exception as e:
             logger.error(

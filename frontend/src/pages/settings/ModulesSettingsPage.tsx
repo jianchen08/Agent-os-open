@@ -56,7 +56,7 @@ export function ModulesSettingsPage() {
       </div>
 
       {/* 配置面板 */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-6">
         {activeReg ? (
           <div>
             <div className="mb-6 flex items-center gap-3">

@@ -6,7 +6,9 @@
 - FileReadTool：FileReadTool类
 """
 
+import asyncio
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,6 @@ import yaml
 
 from tools.builtin.base import BuiltinTool
 from tools.builtin.binary_converter import (
-    REJECTED_EXTENSIONS,
     convert_binary_to_markdown,
     get_file_category,
 )
@@ -37,7 +38,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     """文件读取工具
 
     提供读取文件内容功能。自动路由文本/二进制文件：
-    - 文本文件：直接读取内容（支持 fields/tail 参数）
+    - 文本文件：直接读取内容（支持 fields/tail/start_line/end_line 参数）
     - 文档文件（PDF/DOCX/XLSX/PPTX）：通过 markitdown 转 Markdown
     - 图片文件（PNG/JPG 等）：通过 markitdown 转 Markdown 描述
     """
@@ -71,6 +72,16 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         "description": "要读取的字段列表（仅支持 YAML/JSON 文件）。"
                         "例如：['id', 'name']。支持嵌套字段，用点号分隔。"
                         "不指定则返回完整内容。",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "起始行号（从1开始），仅读取指定行范围。"
+                        "不指定则从第1行开始。",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "结束行号（从1开始，包含该行），仅读取指定行范围。"
+                        "不指定则到文件末尾。",
                     },
                     "tail": {
                         "type": "integer",
@@ -129,37 +140,31 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="BINARY_FILE_NOT_SUPPORTED",
                 )
 
-            filter_error = self._check_text_file_filter(path)
+            filter_error = await self._check_text_file_filter(path)
             if filter_error:
                 return filter_error
 
-            try:
-                content = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                content = path.read_text(encoding="gbk", errors="ignore")
+            # 获取行范围参数
+            start_line = inputs.get("start_line")
+            end_line = inputs.get("end_line")
+            tail = inputs.get("tail")
 
+            # tail 模式：用 deque 高效读取最后 N 行，避免全量读取
+            if tail and isinstance(tail, int) and tail > 0:
+                return await self._read_tail(path, display_path, tail)
+
+            # 行范围模式：只读取指定行范围
+            if start_line is not None or end_line is not None:
+                return await self._read_line_range(
+                    path, display_path, start_line, end_line
+                )
+
+            # 全量读取
+            content = await asyncio.to_thread(self._read_text_safe, path)
             file_size = path.stat().st_size
             lines = content.count("\n") + (
                 1 if content and not content.endswith("\n") else 0
             )
-
-            tail = inputs.get("tail")
-            if tail and isinstance(tail, int) and tail > 0:
-                all_lines = content.splitlines()
-                total_lines = len(all_lines)
-                if tail < total_lines:
-                    content = '\n'.join(all_lines[-tail:])
-                    content = self._add_line_numbers(content, start_line=total_lines - tail + 1)
-                    return create_success_result(
-                        data={
-                            "file": display_path,
-                            "total_lines": total_lines,
-                            "lines": tail,
-                            "size": format_size(file_size),
-                            "content": content,
-                        },
-                        metadata={"action": "read_file_tail"},
-                    )
 
             fields = inputs.get("fields")
             if fields:
@@ -181,6 +186,124 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="READ_FAILED",
             )
 
+    async def _read_tail(
+        self, path: Path, display_path: str, tail: int
+    ) -> ToolResult:
+        """高效读取文件末尾N行，使用 deque 避免全量加载到内存。
+
+        Args:
+            path: 文件路径
+            display_path: 显示用路径
+            tail: 要读取的末尾行数
+        """
+        file_size = path.stat().st_size
+        # 先获取总行数（用于显示）
+        total_lines = 0
+        tail_lines: deque[str] = deque(maxlen=tail)
+
+        # 使用 deque 只保留最后 tail 行
+        def _scan_tail() -> tuple[int, list[str]]:
+            nonlocal total_lines
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    total_lines += 1
+                    tail_lines.append(line.rstrip("\n"))
+            return total_lines, list(tail_lines)
+
+        total_lines, lines = await asyncio.to_thread(_scan_tail)
+
+        if tail < total_lines:
+            content = "\n".join(lines)
+            content = self._add_line_numbers(content, start_line=total_lines - tail + 1)
+            return create_success_result(
+                data={
+                    "file": display_path,
+                    "total_lines": total_lines,
+                    "lines": tail,
+                    "size": format_size(file_size),
+                    "content": content,
+                },
+                metadata={"action": "read_file_tail"},
+            )
+
+        # 文件总行数 <= tail，返回全部内容
+        content = "\n".join(lines)
+        content = self._add_line_numbers(content)
+        return create_success_result(
+            data={
+                "file": display_path,
+                "total_lines": total_lines,
+                "lines": total_lines,
+                "size": format_size(file_size),
+                "content": content,
+            },
+            metadata={"action": "read_file_tail"},
+        )
+
+    async def _read_line_range(
+        self,
+        path: Path,
+        display_path: str,
+        start_line: int | None,
+        end_line: int | None,
+    ) -> ToolResult:
+        """按行范围读取文件，避免全量加载。
+
+        Args:
+            path: 文件路径
+            display_path: 显示用路径
+            start_line: 起始行号（1-based），None表示从第1行
+            end_line: 结束行号（1-based，包含），None表示到末尾
+        """
+        file_size = path.stat().st_size
+        start = start_line or 1
+        if start < 1:
+            return create_failure_result(
+                error=f"起始行号不能小于1: {start}",
+                error_code="LINE_OUT_OF_RANGE",
+            )
+
+        def _read_range() -> tuple[int, list[str]]:
+            total = 0
+            collected: list[str] = []
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    total += 1
+                    if total >= start:
+                        collected.append(line.rstrip("\n"))
+                    if end_line is not None and total >= end_line:
+                        break
+            return total, collected
+
+        total_lines, lines = await asyncio.to_thread(_read_range)
+
+        if start > total_lines:
+            return create_failure_result(
+                error=f"起始行号越界: {start}，文件共 {total_lines} 行",
+                error_code="LINE_OUT_OF_RANGE",
+            )
+
+        content = "\n".join(lines)
+        content = self._add_line_numbers(content, start_line=start)
+        return create_success_result(
+            data={
+                "file": display_path,
+                "total_lines": total_lines,
+                "lines": len(lines),
+                "size": format_size(file_size),
+                "content": content,
+            },
+            metadata={"action": "read_file_range"},
+        )
+
+    @staticmethod
+    def _read_text_safe(path: Path) -> str:
+        """安全读取文本，自动处理编码。"""
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return path.read_text(encoding="gbk", errors="ignore")
+
     def _add_line_numbers(self, content: str, start_line: int = 1) -> str:
         """将文本内容添加 cat -n 风格行号"""
         lines = content.splitlines()
@@ -192,7 +315,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             result.append(f"{line_num:>{width}}\u2192{line}")
         return "\n".join(result)
 
-    def _check_text_file_filter(self, path: Path) -> ToolResult | None:
+    async def _check_text_file_filter(self, path: Path) -> ToolResult | None:
         """检查文本文件是否应被过滤（超大文件/二进制内容嗅探）。
 
         仅对判定为 text 类型的文件调用。
@@ -203,7 +326,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 error=f"文件过大 ({format_size(file_size)})，"
                 f"超过限制 ({format_size(MAX_FILE_SIZE)}): {path.name}。"
                 f"请使用 fields 参数读取特定字段，"
-                f"或使用 bash_execute 分段读取。",
+                f"或使用 start_line/end_line/tail 参数分段读取。",
                 error_code="FILE_TOO_LARGE",
             )
 

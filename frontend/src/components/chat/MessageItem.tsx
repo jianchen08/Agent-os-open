@@ -406,7 +406,7 @@ export const MessageItem = ({
           )}
         >
           {isAssistant && agent && (
-            <span className="inline-flex items-center gap-1 rounded-lg bg-status-info/10 px-2 py-0.5 text-xs text-status-info">
+            <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--badge-info-bg)] px-2 py-0.5 text-xs text-[var(--badge-info-text)]">
               <Sparkles className="h-3 w-3" />
               <span className="font-medium">{agent.name}</span>
             </span>

@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from evaluation.engine import EvaluationEngine
-from evaluation.types import MetricDefinition, MetricType
 
 
 # ---------------------------------------------------------------------------

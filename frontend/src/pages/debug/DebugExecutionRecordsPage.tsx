@@ -89,7 +89,7 @@ export function DebugExecutionRecordsPage() {
         <h1 className="ml-4 text-base font-semibold">执行记录</h1>
         <span className="text-muted-foreground ml-auto text-xs">共 {total} 条</span>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
         {/* 会话过滤 */}
         <select
           value={selectedSession}
@@ -124,50 +124,73 @@ export function DebugExecutionRecordsPage() {
 
         {/* 记录列表 */}
         {!isLoading && !error && records.length > 0 && (
-          <div className="overflow-hidden rounded-lg border">
-            <table className="w-full text-sm">
-              <thead className="bg-accent/30">
-                <tr>
-                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                    ID
-                  </th>
-                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                    类型
-                  </th>
-                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                    状态
-                  </th>
-                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                    深度
-                  </th>
-                  <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                    创建时间
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {records.map((record) => (
-                  <tr key={record.id} className="hover:bg-accent/20 border-t">
-                    <td className="max-w-[200px] truncate px-4 py-2 font-mono text-xs">
-                      {record.id}
-                    </td>
-                    <td className="px-4 py-2 text-xs">{record.record_type || '--'}</td>
-                    <td className="px-4 py-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
-                      >
-                        {record.status || '--'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2 text-xs">{record.depth ?? '--'}</td>
-                    <td className="text-muted-foreground px-4 py-2 text-xs">
-                      {new Date(record.created_at).toLocaleString()}
-                    </td>
+          <>
+            {/* 移动端卡片视图 */}
+            <div className="space-y-2 md:hidden">
+              {records.map((record) => (
+                <div key={record.id} className="rounded-lg border p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="max-w-[180px] truncate font-mono text-xs">{record.id}</span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
+                    >
+                      {record.status || '--'}
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground mt-2 space-y-1 text-xs">
+                    <div>类型：{record.record_type || '--'}</div>
+                    <div>深度：{record.depth ?? '--'}</div>
+                    <div>创建时间：{new Date(record.created_at).toLocaleString()}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {/* 桌面端表格视图 */}
+            <div className="hidden md:block overflow-hidden rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="bg-accent/30">
+                  <tr>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      ID
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      类型
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      状态
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      深度
+                    </th>
+                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                      创建时间
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {records.map((record) => (
+                    <tr key={record.id} className="hover:bg-accent/20 border-t">
+                      <td className="max-w-[200px] truncate px-4 py-2 font-mono text-xs">
+                        {record.id}
+                      </td>
+                      <td className="px-4 py-2 text-xs">{record.record_type || '--'}</td>
+                      <td className="px-4 py-2">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
+                        >
+                          {record.status || '--'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-xs">{record.depth ?? '--'}</td>
+                      <td className="text-muted-foreground px-4 py-2 text-xs">
+                        {new Date(record.created_at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </main>
     </div>

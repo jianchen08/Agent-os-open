@@ -6,7 +6,6 @@
 """
 
 import datetime
-from typing import Any
 
 import pytest
 
@@ -38,8 +37,11 @@ class TestTriggerType:
     def test_condition_value(self) -> None:
         assert TriggerType.CONDITION.value == "condition"
 
+    def test_interval_value(self) -> None:
+        assert TriggerType.INTERVAL.value == "interval"
+
     def test_all_types(self) -> None:
-        assert len(TriggerType) == 4
+        assert len(TriggerType) == 5
 
 
 class TestTriggerStatus:

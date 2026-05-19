@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from memory.types import MemoryType, RetrievalMethod, SearchResult
+from memory.types import RetrievalMethod, SearchResult
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +121,6 @@ class TestModuleImports:
     def test_import_memory_types(self) -> None:
         """应能导入所有必要的类型。"""
         from memory.types import (
-            ChunkData,
-            Context,
-            Episode,
-            Knowledge,
-            MemoryType,
-            RetrievalConfig,
             RetrievalMethod,
             SearchResult,
         )
@@ -273,7 +267,7 @@ class TestCrossDomainIntegration:
                 if "cross_domain" in r:
                     domains.add(r.get("domain", ""))
             # 验证跨域标记
-            cross_domain_results = [r for r in results if r.get("cross_domain", False)]
+            [r for r in results if r.get("cross_domain", False)]
             # 即使没有明确的跨域标记，至少应返回相关结果
             assert len(results) > 0
 

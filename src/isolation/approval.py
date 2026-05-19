@@ -7,9 +7,10 @@
 - DangerChecker: 危险操作检测器
 - ApprovalDecisionEngine: 审批决策引擎
 
-审批决策逻辑（可配置）：
-- 默认规则：HOST模式 + 危险操作 → 需要审批
-- 其他情况 → 自动批准
+Host 模式安全审批策略：
+- SAFE_TOOLS 白名单：只读/查询类工具，免审批直接放行
+- DANGEROUS_TOOLS 黑名单：写入/执行类工具，必须经用户审批
+- 未在两个列表中的工具：HOST 模式下默认需要审批
 """
 
 import logging
@@ -32,6 +33,49 @@ TOOL_COMMAND_FIELDS = {
     "python_execute": "code",
     "file_write": "content",
     "rollback": "operation",
+}
+
+# ── Host 模式工具安全分类 ──────────────────────────────────────
+# 只读 / 查询类工具：HOST 模式下免审批白名单
+SAFE_TOOLS: set[str] = {
+    # 文件读取
+    "file_read",
+    "read_file",
+    "list_directory",
+    # 搜索
+    "enhanced_search",
+    "code_search",
+    "search",
+    "grep",
+    # 资源查询
+    "resource_search",
+    # 记忆/知识
+    "memory",
+    "retrieve_memory",
+    # 任务管理（只读操作为主）
+    "task_manage",
+    "task_evaluate",
+    # 工具自身信息
+    "tool_info",
+    # 评估
+    "evaluate",
+}
+
+# 危险操作类工具：HOST 模式下必须审批
+DANGEROUS_TOOLS: set[str] = {
+    # 文件写入
+    "file_write",
+    "write_file",
+    "file_edit",
+    "file_delete",
+    # 命令执行
+    "bash_execute",
+    "shell_execute",
+    "python_execute",
+    "command_execute",
+    # 系统操作
+    "rollback",
+    "checkpoint",
 }
 
 
@@ -168,14 +212,34 @@ class DangerChecker:
         return None
 
 
+def classify_tool_safety(tool_name: str) -> str:
+    """分类工具的安全级别。
+
+    Args:
+        tool_name: 工具名称
+
+    Returns:
+        "safe" / "dangerous" / "unknown"
+    """
+    if tool_name in SAFE_TOOLS:
+        return "safe"
+    if tool_name in DANGEROUS_TOOLS:
+        return "dangerous"
+    return "unknown"
+
+
 class ApprovalDecisionEngine:
     """审批决策引擎
 
-    默认决策规则：
-    - HOST模式 + 危险操作 → 需要审批
-    - 其他情况 → 自动批准
+    HOST 模式安全审批策略（三层决策）：
 
-    通过配置可以自定义审批规则。
+    1. 策略级审批：策略配置 (policy.approval) 要求审批时直接返回
+    2. HOST 模式 + 工具级分类：
+       - SAFE_TOOLS → 自动批准
+       - DANGEROUS_TOOLS → 需要审批
+       - 未知工具 → 需要审批（安全优先）
+    3. HOST 模式 + 危险操作检测（基于工具声明的 dangerous_operations）
+    4. 其他情况 → 自动批准
     """
 
     def __init__(
@@ -202,6 +266,12 @@ class ApprovalDecisionEngine:
     async def decide(self, context: ApprovalContext) -> ApprovalDecision:
         """决策是否需要审批
 
+        决策优先级：
+        1. 策略级审批 (policy.approval)
+        2. HOST 模式 + 工具安全分类
+        3. HOST 模式 + 危险操作检测
+        4. 其他情况 → 自动批准
+
         Args:
             context: 审批上下文
 
@@ -210,7 +280,7 @@ class ApprovalDecisionEngine:
         """
         logger.debug(f"[ApprovalDecisionEngine] 开始审批决策 | tool={context.tool_name}")
 
-        # 1. 策略级审批：策略配置要求审批时直接返回
+        # ── 第 1 层：策略级审批 ──
         if context.policy and context.policy.approval:
             decision = ApprovalDecision(
                 requires_approval=True,
@@ -226,47 +296,99 @@ class ApprovalDecisionEngine:
             )
             return decision
 
-        # 2. 检测危险操作
+        # ── 第 2 层：HOST 模式工具级分类 ──
+        if context.isolation_level == IsolationLevel.HOST:
+            tool_safety = classify_tool_safety(context.tool_name)
+
+            if tool_safety == "safe":
+                # 白名单工具：免审批直接放行
+                decision = ApprovalDecision(
+                    requires_approval=False,
+                    decision_type="AUTO_APPROVED",
+                    reason=f"HOST 模式安全工具白名单: {context.tool_name}",
+                    risk_score=0.1,
+                    risk_factors=["HOST_MODE"],
+                    details={"tool_safety": "safe"},
+                )
+                logger.debug(
+                    f"[ApprovalDecisionEngine] HOST 安全工具免审批 | "
+                    f"tool={context.tool_name}"
+                )
+                return decision
+
+            if tool_safety == "dangerous":
+                # 危险工具：必须审批
+                decision = ApprovalDecision(
+                    requires_approval=True,
+                    decision_type="NEEDS_APPROVAL",
+                    reason=f"HOST 模式危险工具需要审批: {context.tool_name}",
+                    risk_score=0.9,
+                    risk_factors=["HOST_MODE", "DANGEROUS_TOOL"],
+                    details={"tool_safety": "dangerous"},
+                )
+                logger.info(
+                    f"[ApprovalDecisionEngine] HOST 危险工具需要审批 | "
+                    f"tool={context.tool_name}"
+                )
+                return decision
+
+            # 未知工具：HOST 模式下安全优先，需要审批
+            # 但先检测危险操作再决定
+            has_dangerous_op = self._danger_checker.check(
+                tool_name=context.tool_name,
+                tool_definition=context.tool_definition,
+                inputs=context.inputs,
+            )
+
+            if has_dangerous_op:
+                decision = ApprovalDecision(
+                    requires_approval=True,
+                    decision_type="NEEDS_APPROVAL",
+                    reason=f"HOST 模式未知工具检测到危险操作: {has_dangerous_op}",
+                    risk_score=min(0.5 + 0.4, 1.0),
+                    risk_factors=["HOST_MODE", "DANGEROUS_OPERATION"],
+                    details={"dangerous_operation": has_dangerous_op},
+                )
+                logger.info(
+                    f"[ApprovalDecisionEngine] HOST 未知工具 + 危险操作需要审批 | "
+                    f"tool={context.tool_name}, op={has_dangerous_op}"
+                )
+                return decision
+
+            # 未知工具 + 无检测到危险操作：安全优先，仍需审批
+            decision = ApprovalDecision(
+                requires_approval=True,
+                decision_type="NEEDS_APPROVAL",
+                reason=f"HOST 模式未知工具，安全优先需要审批: {context.tool_name}",
+                risk_score=0.6,
+                risk_factors=["HOST_MODE", "UNKNOWN_TOOL"],
+                details={"tool_safety": "unknown"},
+            )
+            logger.info(
+                f"[ApprovalDecisionEngine] HOST 未知工具需要审批（安全优先） | "
+                f"tool={context.tool_name}"
+            )
+            return decision
+
+        # ── 第 3 层：非 HOST 模式，检测危险操作 ──
         has_dangerous_op = self._danger_checker.check(
             tool_name=context.tool_name,
             tool_definition=context.tool_definition,
             inputs=context.inputs,
         )
 
-        # 3. 构建风险因子
         risk_factors = []
         risk_score = 0.0
-
-        if context.isolation_level == IsolationLevel.HOST:
-            risk_factors.append("HOST_MODE")
-            risk_score += 0.5
 
         if has_dangerous_op:
             risk_factors.append("DANGEROUS_OPERATION")
             risk_score += 0.4
 
-        # 4. 决策：只有 HOST + 危险操作 才需要审批
-        if context.isolation_level == IsolationLevel.HOST and has_dangerous_op:
-            decision = ApprovalDecision(
-                requires_approval=True,
-                decision_type="NEEDS_APPROVAL",
-                reason=f"HOST模式危险操作: {has_dangerous_op}",
-                risk_score=min(risk_score, 1.0),
-                risk_factors=risk_factors,
-                details={"dangerous_operation": has_dangerous_op},
-            )
-            logger.info(
-                f"[ApprovalDecisionEngine] HOST模式危险操作需要审批 | "
-                f"tool={context.tool_name}, op={has_dangerous_op}, "
-                f"risk_score={decision.risk_score}"
-            )
-            return decision
-
-        # 其他情况自动批准
+        # 非 HOST 模式自动批准
         decision = ApprovalDecision(
             requires_approval=False,
             decision_type="AUTO_APPROVED",
-            reason="沙盒模式或无危险操作",
+            reason="非 HOST 模式，自动批准",
             risk_score=risk_score,
             risk_factors=risk_factors,
             details={},

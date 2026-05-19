@@ -19,15 +19,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from memory.types import ChunkData, SearchResult
+from memory.types import ChunkData
 from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys, create_initial_state
+from pipeline.types import create_initial_state
 from plugins.core.llm_core import LLMCore
 from plugins.input.prompt_build import PromptBuildPlugin
 from plugins.input.tool_schema import ToolSchemaPlugin

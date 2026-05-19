@@ -10,7 +10,6 @@ import asyncio
 import logging
 import random
 import time
-from typing import Any
 
 from pipeline.plugin import (
     IPlugin,

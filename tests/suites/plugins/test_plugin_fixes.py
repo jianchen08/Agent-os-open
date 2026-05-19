@@ -16,7 +16,6 @@
 - ReasoningCheck: 误报率降低 + SHOULD_STOP
 """
 
-import asyncio
 import logging
 import os
 import time
@@ -198,7 +197,7 @@ class TestIsolationGuard:
         mod = _load("isolation_guard", ["plugins", "input", "isolation_guard.py"])
         with caplog.at_level(logging.WARNING):
             with patch.object(mod, "IsolationDecider"):
-                plugin = mod.IsolationGuard(config={"docker_available": False})
+                mod.IsolationGuard(config={"docker_available": False})
 
         assert any("docker_available=False" in record.message for record in caplog.records)
 
@@ -579,7 +578,7 @@ class TestPromptBuild:
             services={"memory_service": mock_memory_service},
         )
 
-        result = await plugin._retrieve_by_tags(ctx, {"tags": ["test"], "inject_type": "full"})
+        await plugin._retrieve_by_tags(ctx, {"tags": ["test"], "inject_type": "full"})
 
         mock_memory_service.retrieve.assert_called()
 
@@ -972,14 +971,13 @@ class TestReasoningCheck:
         blocks1 = plugin._extract_reasoning_blocks(text1)
         # 如果正则不匹配（因为没有 > ），用闭合标签格式测试
         if len(blocks1) == 0:
-            text1_fixed = "<think\nSome reasoning here\n</think >"
             # 使用标准格式重试
             text1_std = "<think\nSome reasoning here\n</think >"
             blocks1 = plugin._extract_reasoning_blocks(text1_std)
 
         # 测试标准闭合格式
         text1b = "<think\nSome reasoning here\n</think >"
-        blocks1b = plugin._extract_reasoning_blocks(text1b)
+        plugin._extract_reasoning_blocks(text1b)
         # [Reasoning] 标题格式（更可靠）
         text2 = "[Reasoning]\nStep 1: Analyze\nStep 2: Think"
         blocks2 = plugin._extract_reasoning_blocks(text2)

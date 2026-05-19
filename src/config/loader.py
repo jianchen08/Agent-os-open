@@ -17,7 +17,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import ConfigNotFoundError, EnvVarNotFoundError
+from src.core.exceptions import ConfigNotFoundError, ConfigurationException, EnvVarNotFoundError
 from src.db.models import AgentConfig, ToolLibrary, Workflow
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,11 @@ class ConfigLoader:
                 # 使用文件名（不含扩展名）作为键
                 key = yaml_file.stem
                 result[key] = config
+            except yaml.YAMLError as e:
+                raise ConfigurationException(
+                    message=f"YAML 语法错误 ({yaml_file}): {e}",
+                    config_key=str(yaml_file),
+                ) from e
             except Exception:
                 continue
 
@@ -240,6 +245,11 @@ class ConfigLoader:
 
                     loaded.append(config_id)
 
+                except yaml.YAMLError as e:
+                    raise ConfigurationException(
+                        message=f"YAML 语法错误 ({yaml_file}): {e}",
+                        config_key=str(yaml_file),
+                    ) from e
                 except Exception as e:
                     logger.debug(f"加载 Agent 配置失败 {yaml_file}: {e}")
                     continue
@@ -478,10 +488,22 @@ class ConfigLoader:
         }
 
     def _load_yaml(self, path: Path) -> dict[str, Any] | None:
-        """加载 YAML 文件"""
+        """加载 YAML 文件
+
+        Args:
+            path: YAML 文件路径
+
+        Returns:
+            解析后的字典，文件不存在时返回 None
+
+        Raises:
+            yaml.YAMLError: YAML 语法错误（必须上抛，不允许吞掉）
+        """
         try:
             with open(path, encoding="utf-8") as f:
                 return yaml.safe_load(f)
+        except yaml.YAMLError:
+            raise  # YAML 语法错误必须上抛
         except Exception:
             return None
 

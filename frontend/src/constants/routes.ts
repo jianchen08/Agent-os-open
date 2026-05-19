@@ -20,6 +20,8 @@ export const ROUTES = {
   SETTINGS_CONTEXT: '/settings/context',
   SETTINGS_CONCURRENCY: '/settings/concurrency',
   SETTINGS_COST: '/settings/cost',
+  /** 插件设置 */
+  SETTINGS_PLUGINS: '/settings/plugins',
   /** 工具页面 */
   TOOLS: '/tools',
   /** 智能体页面 */
@@ -30,6 +32,10 @@ export const ROUTES = {
   ADMIN: '/admin',
   /** 记忆页面 */
   MEMORY: '/memory',
+  /** 触发器页面 */
+  TRIGGERS: '/triggers',
+  /** 知识库页面 */
+  KNOWLEDGE_BASE: '/knowledge-base',
   /** 会话页面 */
   SESSION: (id: string) => `/session/${id}`,
   /** 演示页面 */

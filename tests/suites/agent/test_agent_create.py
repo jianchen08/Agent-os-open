@@ -87,7 +87,6 @@ async def run_e2e_test():
 
         if task_id and tw:
             try:
-                from tasks.service import TaskService
                 ts = app._services.get("task_service")
                 if ts:
                     task = ts.get_task(task_id)

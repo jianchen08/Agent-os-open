@@ -17,14 +17,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import tempfile
 from typing import Any
 
 import pytest
 
-from pipeline.chain import PluginChain
 from pipeline.engine import PipelineEngine
 from pipeline.plugin import (
     ICorePlugin,
@@ -40,20 +38,18 @@ from pipeline.types import (
     AgentLevel,
     RouteSignal,
     StateKeys,
-    TaskPriority,
-    TargetType,
     create_initial_state,
 )
 
 # M4
 from infrastructure.concurrency import ConcurrencyController
-from infrastructure.scheduler import DefaultSchedulerStrategy, PriorityItem, Scheduler
+from infrastructure.scheduler import Scheduler
 
 # M5a — 依赖 sqlalchemy（tasks/state_machine.py 顶层导入 sqlalchemy）
 # 如果 sqlalchemy 未安装，这些测试将被跳过
 try:
     from tasks.service import TaskService
-    from tasks.state_machine import InvalidTransitionError, TaskStateMachine
+    from tasks.state_machine import InvalidTransitionError
     from tasks.storage import TaskStorage
     from tasks.types import TaskStatus, create_task
     _HAS_SQLALCHEMY = True
@@ -249,7 +245,7 @@ class TestM1PipelineReal:
             messages=[{"role": "user", "content": "路由测试"}],
         )
         state[StateKeys.CORE_TYPE] = "echo"
-        result = await engine.run(state)
+        await engine.run(state)
 
         # 验证 Output 插件被执行了
         assert SignalOutput.executed, "Output 插件应被执行"
@@ -412,7 +408,7 @@ class TestM5aTaskSystemReal:
         parent = service.create_task("父任务")
 
         sub1 = service.create_task("子任务1", parent_task_id=parent.id)
-        sub2 = service.create_task("子任务2", parent_task_id=parent.id)
+        service.create_task("子任务2", parent_task_id=parent.id)
 
         progress = service.get_progress(parent.id)
         assert progress == 0.0
@@ -579,7 +575,7 @@ class TestM5bEvaluationReal:
             loader=loader,
         )
 
-        result = executor.run_evaluation(
+        executor.run_evaluation(
             task_id=task.id,
             metric_ids=["simple_check"],
             input_params={"simple_check": {}},
@@ -733,7 +729,6 @@ class TestM9WebSocketReal:
         import aiohttp
 
         from channels.websocket.protocol import (
-            EventEnvelope,
             EventType,
             create_event,
         )

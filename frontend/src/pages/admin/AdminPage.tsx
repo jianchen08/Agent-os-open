@@ -75,10 +75,10 @@ export function AdminPage() {
         </a>
         <h1 className="ml-4 text-base font-semibold">管理员面板</h1>
       </header>
-      <main className="flex-1 space-y-6 overflow-y-auto p-6">
+      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
         {/* 统计卡片 */}
         {stats && (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 text-xs">总用户数</div>
               <div className="text-xl font-semibold">{stats.total_users}</div>
@@ -119,36 +119,27 @@ export function AdminPage() {
                 </p>
               </div>
             ) : (
-              <div className="overflow-hidden rounded-lg border">
-                <table className="w-full text-sm">
-                  <thead className="bg-accent/30">
-                    <tr>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        用户名
-                      </th>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        邮箱
-                      </th>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        角色
-                      </th>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        状态
-                      </th>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        创建时间
-                      </th>
-                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                        操作
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((user) => (
-                      <tr key={user.id} className="hover:bg-accent/20 border-t">
-                        <td className="px-4 py-2 font-medium">{user.username}</td>
-                        <td className="text-muted-foreground px-4 py-2">{user.email || '--'}</td>
-                        <td className="px-4 py-2">
+              <>
+                {/* 移动端卡片视图 */}
+                <div className="space-y-2 md:hidden">
+                  {users.map((user) => (
+                    <div key={user.id} className="rounded-lg border p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-sm font-medium">{user.username}</span>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
+                            user.is_active
+                              ? 'bg-status-success/10 text-status-success'
+                              : 'bg-status-error/10 text-status-error'
+                          }`}
+                        >
+                          {user.is_active ? '活跃' : '禁用'}
+                        </span>
+                      </div>
+                      <div className="text-muted-foreground mt-2 space-y-1 text-xs">
+                        <div>邮箱：{user.email || '--'}</div>
+                        <div className="flex items-center gap-2">
+                          <span>角色：</span>
                           <span
                             className={`rounded-full px-2 py-0.5 text-xs ${
                               user.role === 'admin'
@@ -158,35 +149,91 @@ export function AdminPage() {
                           >
                             {user.role}
                           </span>
-                        </td>
-                        <td className="px-4 py-2">
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs ${
-                              user.is_active
-                                ? 'bg-status-success/10 text-status-success'
-                                : 'bg-status-error/10 text-status-error'
-                            }`}
-                          >
-                            {user.is_active ? '活跃' : '禁用'}
-                          </span>
-                        </td>
-                        <td className="text-muted-foreground px-4 py-2 text-xs">
-                          {new Date(user.created_at).toLocaleString()}
-                        </td>
-                        <td className="px-4 py-2">
-                          <button
-                            onClick={() => handleToggleActive(user.id, user.is_active)}
-                            className="text-primary text-xs hover:underline"
-                            aria-label={user.is_active ? `禁用用户 ${user.username}` : `启用用户 ${user.username}`}
-                          >
-                            {user.is_active ? '禁用' : '启用'}
-                          </button>
-                        </td>
+                        </div>
+                        <div>创建时间：{new Date(user.created_at).toLocaleString()}</div>
+                      </div>
+                      <div className="mt-2">
+                        <button
+                          onClick={() => handleToggleActive(user.id, user.is_active)}
+                          className="text-primary text-xs hover:underline"
+                          aria-label={user.is_active ? `禁用用户 ${user.username}` : `启用用户 ${user.username}`}
+                        >
+                          {user.is_active ? '禁用' : '启用'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {/* 桌面端表格视图 */}
+                <div className="hidden md:block overflow-hidden rounded-lg border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-accent/30">
+                      <tr>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          用户名
+                        </th>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          邮箱
+                        </th>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          角色
+                        </th>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          状态
+                        </th>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          创建时间
+                        </th>
+                        <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                          操作
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {users.map((user) => (
+                        <tr key={user.id} className="hover:bg-accent/20 border-t">
+                          <td className="px-4 py-2 font-medium">{user.username}</td>
+                          <td className="text-muted-foreground px-4 py-2">{user.email || '--'}</td>
+                          <td className="px-4 py-2">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs ${
+                                user.role === 'admin'
+                                  ? 'bg-status-info/10 text-status-info'
+                                  : 'bg-muted-foreground/10 text-muted-foreground'
+                              }`}
+                            >
+                              {user.role}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs ${
+                                user.is_active
+                                  ? 'bg-status-success/10 text-status-success'
+                                  : 'bg-status-error/10 text-status-error'
+                              }`}
+                            >
+                              {user.is_active ? '活跃' : '禁用'}
+                            </span>
+                          </td>
+                          <td className="text-muted-foreground px-4 py-2 text-xs">
+                            {new Date(user.created_at).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-2">
+                            <button
+                              onClick={() => handleToggleActive(user.id, user.is_active)}
+                              className="text-primary text-xs hover:underline"
+                              aria-label={user.is_active ? `禁用用户 ${user.username}` : `启用用户 ${user.username}`}
+                            >
+                              {user.is_active ? '禁用' : '启用'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </>
         )}

@@ -92,7 +92,6 @@ from src.core.exceptions.orchestration import (
     OrchestrationError,
     ResourceExhaustedError,
     SchedulerError,
-    SubAgentNestingError,
     TaskExecutionError,
     TaskNotFoundError,
 )
@@ -194,6 +193,7 @@ __all__ = [
     "EnvVarNotFoundError",
     # Orchestration 异常
     "OrchestrationException",
+    "OrchestrationError",
     "TaskNotFoundError",
     "ResourceExhaustedError",
     "TaskExecutionError",

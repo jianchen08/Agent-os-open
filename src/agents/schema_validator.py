@@ -88,9 +88,7 @@ class SchemaValidator:
             # 枚举值检查
             enum_values = prop_schema.get("enum")
             if enum_values and value not in enum_values:
-                errors.append(
-                    f"{field_path}: 值 {value!r} 不在枚举 {enum_values} 中"
-                )
+                errors.append(f"{field_path}: 值 {value!r} 不在枚举 {enum_values} 中")
 
             # 嵌套 object 递归检查
             if prop_type == "object" and isinstance(value, dict):
@@ -101,9 +99,7 @@ class SchemaValidator:
 
         return errors
 
-    def validate_input(
-        self, config: AgentConfig, data: dict[str, Any]
-    ) -> list[str]:
+    def validate_input(self, config: AgentConfig, data: dict[str, Any]) -> list[str]:
         """验证输入数据是否符合 Agent 的 input_schema。
 
         Args:
@@ -117,9 +113,7 @@ class SchemaValidator:
             return []
         return self._validate_schema(config.input_schema, data, prefix="input.")
 
-    def validate_output(
-        self, config: AgentConfig, data: dict[str, Any]
-    ) -> list[str]:
+    def validate_output(self, config: AgentConfig, data: dict[str, Any]) -> list[str]:
         """验证输出数据是否符合 Agent 的 output_schema。
 
         Args:

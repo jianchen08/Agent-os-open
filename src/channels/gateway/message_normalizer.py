@@ -569,7 +569,7 @@ def _parse_qq_content(raw: dict[str, Any]) -> tuple[str, str]:
     import re
 
     message = raw.get("message", "")
-    msg_type = raw.get("message_type", "private")
+    raw.get("message_type", "private")
 
     # 默认内容类型映射
     content_type = "text"

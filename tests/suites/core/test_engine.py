@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -217,7 +217,7 @@ class TestPipelineEngine:
           第二轮: 输出路由返回 end → ended=True
           验证: iteration == 2
         """
-        from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
+        from pipeline.route import InputRouteEntry, InputRouteTable
         from pipeline.registry import PluginRegistry
 
         core_plugin = MockCorePlugin(
@@ -273,7 +273,7 @@ class TestPipelineEngine:
           输入路由返回 target="end"
           验证: 直接结束，不执行 Core 和 Output
         """
-        from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
+        from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteTable
         from pipeline.registry import PluginRegistry
 
         core_plugin = MockCorePlugin(

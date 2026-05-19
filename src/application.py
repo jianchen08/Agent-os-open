@@ -54,6 +54,7 @@ class Application:
             服务名称到实例的映射字典
         """
         services: dict[str, Any] = {}
+        services["project_root"] = str(self.project_root)
         _t0 = _time.monotonic()
 
         # ── 1. ToolRegistry ──────────────────────────────
@@ -463,7 +464,7 @@ class Application:
                     module = importlib.import_module(module_path)
                     provider_cls = getattr(module, class_name)
 
-                    media_type = _MEDIA_TYPE_MAP.get(media_type_key, MediaType.IMAGE)
+                    _MEDIA_TYPE_MAP.get(media_type_key, MediaType.IMAGE)
                     raw_config = dict(provider_conf.get("config", {}))
 
                     if not raw_config.get("api_key"):

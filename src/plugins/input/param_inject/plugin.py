@@ -200,6 +200,13 @@ class ParamInjectPlugin(IInputPlugin):
                     except (ValueError, TypeError):
                         pass
 
+            # 注入 agent_config_id：从 state 中获取当前 Agent 的 config_id
+            # 供 memory 等工具自动标记记忆来源（谁写的就将谁作为标签）
+            if "agent_config_id" not in args:
+                agent_config_id = ctx.state.get("agent_config_id", "")
+                if agent_config_id:
+                    args["agent_config_id"] = agent_config_id
+
             # 注入工具默认参数
             tool_name = injected_tc.get("name", "")
             if tool_name in self._default_params:

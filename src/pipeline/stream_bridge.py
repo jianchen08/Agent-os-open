@@ -198,6 +198,7 @@ class PipelineStreamBridge:
             "data": {
                 "message_id": self.message_id,
                 "pipeline_id": self.pipeline_id,
+                "_threadId": self.output_sink._thread_id if hasattr(self.output_sink, '_thread_id') else None,
             },
         })
         logger.info(
@@ -431,11 +432,7 @@ class PipelineStreamBridge:
                                 "LLM 活动超时 (%.1fs/%.1fs): pipeline=%s",
                                 elapsed, call_timeout, self.pipeline_id,
                             )
-                            # BUG-FIX-fix_20260510_streaming_stuck:
-                            # 问题根因: 超时路径直接 return，跳过 stream_end 发送，
-                            #          导致前端 streamingTabs[pipelineId] 永远为 true，输入框卡在执行中状态。
-                            # 修复方案: 超时退出前补发 stream_end，确保前端总是收到配对的 start/end。
-                            # 影响范围: 所有标签页的流式指示器和停止按钮。
+                            # FIX: 超时退出前补发 stream_end，确保前端总是收到配对的 start/end
                             await self._close_thinking_if_active(None)
                             full_content = "".join(self._accumulated_content)
                             try:
@@ -504,16 +501,37 @@ class PipelineStreamBridge:
     async def send_new_message(self, content: str, sequence: int = 1) -> None:
         """发送 new_message 最终消息，包含完整的助手消息数据。
 
+        BUG-FIX-20260515: 当 content 为空但流式累积有内容时，
+        使用 _accumulated_content 作为保底，防止发送空消息。
+
         Args:
             content: 消息内容
             sequence: 消息序号，默认为 1
         """
+        # BUG-FIX-20260515: 空内容保底逻辑
+        # 问题根因: _stream_engine_response 提取 actual_content 时，
+        #   引擎返回的 messages 中 assistant 内容可能为空，
+        #   导致 send_new_message('') 发送空消息，前端显示空白。
+        # 修复: 当传入内容为空但流式累积有内容时，用累积内容保底。
+        effective_content = content
+        if not effective_content:
+            accumulated = "".join(self._accumulated_content)
+            if accumulated:
+                effective_content = accumulated
+                logger.info(
+                    "send_new_message: 传入内容为空，使用累积内容保底 "
+                    "(%d chars): msg=%s pipeline=%s",
+                    len(effective_content),
+                    self.message_id[:12],
+                    self.pipeline_id[:12],
+                )
+
         await self._send_event({
             "type": "new_message",
             "data": {
                 "id": self.message_id,
                 "role": "assistant",
-                "content": content,
+                "content": effective_content,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "sequence": sequence,
                 "pipeline_id": self.pipeline_id,

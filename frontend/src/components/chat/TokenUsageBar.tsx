@@ -21,16 +21,16 @@ export interface TokenUsageBarProps {
 const getUsageColor = (usagePercent: number) => {
   if (usagePercent >= 95) {
     return {
-      text: 'text-status-error',
-      bg: 'bg-status-error/10',
-      border: 'border-status-error/30',
+      text: 'text-[var(--badge-error-text)]',
+      bg: 'bg-[var(--badge-error-bg)]',
+      border: 'border-[var(--badge-error-text)]/30',
     }
   }
   if (usagePercent >= 80) {
     return {
       text: 'text-status-running',
-      bg: 'bg-status-running/10',
-      border: 'border-status-running/30',
+      bg: 'bg-[var(--badge-info-bg)]',
+      border: 'border-[var(--badge-info-text)]/30',
     }
   }
   return {

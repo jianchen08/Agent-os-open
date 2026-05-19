@@ -2,7 +2,7 @@
  * TextDiffView - 文本差异对比视图组件
  *
  * 展示两个文本版本之间的差异，支持增/删/改行高亮。
- * 底层使用 LCS（最长公共子序列）算法。
+ * 底层使用 ReviewDiff 的 computeDiff 算法。
  */
 
 import React, { useMemo } from 'react'
@@ -35,18 +35,11 @@ const LINE_PREFIX: Record<DiffLineType, string> = {
  * 简易逐行 diff —— 最长公共子序列（LCS）算法
  */
 function computeDiff(oldText: string, newText: string): { oldLines: DiffLine[]; newLines: DiffLine[] } {
-  // 处理空字符串："".split('\n') 返回 [""]，需要特殊处理
-  const oldArr = oldText ? oldText.split('\n') : []
-  const newArr = newText ? newText.split('\n') : []
+  const oldArr = oldText.split('\n')
+  const newArr = newText.split('\n')
 
   const m = oldArr.length
   const n = newArr.length
-
-  // 空内容快速返回
-  if (m === 0 && n === 0) {
-    return { oldLines: [], newLines: [] }
-  }
-
   const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
 
   for (let i = 1; i <= m; i++) {
@@ -124,9 +117,6 @@ export function TextDiffView({
     return { added, removed, unchanged }
   }, [oldLines, newLines])
 
-  /** 是否没有任何差异（内容完全相同或都为空） */
-  const hasNoChanges = stats.added === 0 && stats.removed === 0
-
   /** 合并两个列表为统一视图 */
   const unifiedLines = useMemo(() => {
     const result: Array<{
@@ -183,40 +173,38 @@ export function TextDiffView({
 
       {/* 统一 diff 视图 */}
       <div className="flex-1 overflow-auto">
-        {/* 无差异时显示提示 */}
-        {hasNoChanges ? (
-          <div className="px-3 py-4 text-center text-xs text-muted-foreground" data-testid="diff-empty">
-            {oldContent === '' && newContent === '' ? '无内容' : '两个版本内容相同'}
-          </div>
-        ) : (
-          <div className="font-mono text-xs" data-testid="diff-content">
-            {unifiedLines.map((line, idx) => (
-              <div
-                key={idx}
-                className={`flex ${LINE_COLOR[line.type]}`}
-                data-testid={`diff-line-${idx}`}
-                data-line-type={line.type}
-              >
-                {showLineNumbers && (
-                  <>
-                    <span className="w-8 shrink-0 select-none border-r border-border px-1 text-right text-muted-foreground/50">
-                      {line.oldNum ?? ''}
-                    </span>
-                    <span className="w-8 shrink-0 select-none border-r border-border px-1 text-right text-muted-foreground/50">
-                      {line.newNum ?? ''}
-                    </span>
-                  </>
-                )}
-                <span className="w-5 shrink-0 select-none text-center font-bold">
-                  {LINE_PREFIX[line.type]}
-                </span>
-                <span className="flex-1 whitespace-pre-wrap break-all px-1">
-                  {line.content}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        <div className="font-mono text-xs" data-testid="diff-content">
+          {unifiedLines.map((line, idx) => (
+            <div
+              key={idx}
+              className={`flex ${LINE_COLOR[line.type]}`}
+              data-testid={`diff-line-${idx}`}
+              data-line-type={line.type}
+            >
+              {showLineNumbers && (
+                <>
+                  <span className="w-8 shrink-0 select-none border-r border-border px-1 text-right text-muted-foreground/50">
+                    {line.oldNum ?? ''}
+                  </span>
+                  <span className="w-8 shrink-0 select-none border-r border-border px-1 text-right text-muted-foreground/50">
+                    {line.newNum ?? ''}
+                  </span>
+                </>
+              )}
+              <span className="w-5 shrink-0 select-none text-center font-bold">
+                {LINE_PREFIX[line.type]}
+              </span>
+              <span className="flex-1 whitespace-pre-wrap break-all px-1">
+                {line.content}
+              </span>
+            </div>
+          ))}
+          {unifiedLines.length === 0 && (
+            <div className="px-3 py-4 text-center text-xs text-muted-foreground" data-testid="diff-empty">
+              两个版本内容相同
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

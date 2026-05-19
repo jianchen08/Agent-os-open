@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,7 +24,7 @@ from pipeline.plugin import (
 )
 from pipeline.registry import PluginRegistry
 from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
-from pipeline.types import ErrorPolicy, RouteSignal, create_initial_state
+from pipeline.types import ErrorPolicy, RouteSignal
 from plugins.output.child_task_guard import ChildTaskGuard
 
 
@@ -261,7 +260,7 @@ class TestGuardIntegration:
         services = {"task_service": task_svc_running, "timer_manager": timer_mgr}
         engine = _build_engine(core, services=services)
 
-        result = await engine.run(
+        await engine.run(
             user_input="测试",
             agent_config=None,
             task_id="task-001",

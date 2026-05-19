@@ -44,7 +44,6 @@ def _simple_evaluate(task: Any, notes: str = "") -> tuple[bool, str]:
     Returns:
         (passed, detail) 元组
     """
-    from tasks.types import TaskStatus
 
     ac = (task.metadata or {}).get("acceptance_criteria", {})
 
@@ -312,7 +311,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         try:
             import asyncio
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
             # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
@@ -455,7 +454,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         try:
             import asyncio
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
             # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await

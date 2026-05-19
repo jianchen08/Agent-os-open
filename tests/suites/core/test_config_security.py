@@ -170,7 +170,7 @@ class TestBuildPluginRegistryConfigMerge:
             },
         )
 
-        registry = build_plugin_registry(config, model_loader)
+        build_plugin_registry(config, model_loader)
 
         # 验证插件被创建
         mock_plugin_class.assert_called_once()

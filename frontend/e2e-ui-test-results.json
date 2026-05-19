@@ -1,0 +1,299 @@
+{
+  "summary": {
+    "total": 36,
+    "passed": 25,
+    "failed": 11,
+    "criticalFails": 3,
+    "warningFails": 5
+  },
+  "results": [
+    {
+      "category": "登录",
+      "name": "登录状态",
+      "passed": true,
+      "expected": "URL 不包含 /login",
+      "actual": "URL: http://127.0.0.1:5188/",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航栏可见",
+      "passed": true,
+      "expected": "header 元素可见",
+      "actual": "header 元素可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "标题 SuperTerminal",
+      "passed": true,
+      "expected": "包含 SuperTerminal",
+      "actual": "标题文本: \"SuperTerminal\"",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"工具\"",
+      "passed": true,
+      "expected": "\"工具\" 按钮可见",
+      "actual": "\"工具\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"智能体\"",
+      "passed": true,
+      "expected": "\"智能体\" 按钮可见",
+      "actual": "\"智能体\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"监控\"",
+      "passed": true,
+      "expected": "\"监控\" 按钮可见",
+      "actual": "\"监控\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"记忆\"",
+      "passed": true,
+      "expected": "\"记忆\" 按钮可见",
+      "actual": "\"记忆\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"设置\"",
+      "passed": true,
+      "expected": "\"设置\" 按钮可见",
+      "actual": "\"设置\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "导航按钮 \"调试\"",
+      "passed": true,
+      "expected": "\"调试\" 按钮可见",
+      "actual": "\"调试\" 按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"工具\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /tools",
+      "actual": "URL: http://127.0.0.1:5188/tools",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"智能体\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /agents",
+      "actual": "URL: http://127.0.0.1:5188/agents",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"监控\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /monitoring",
+      "actual": "URL: http://127.0.0.1:5188/monitoring",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"记忆\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /memory",
+      "actual": "URL: http://127.0.0.1:5188/memory",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"设置\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /settings",
+      "actual": "URL: http://127.0.0.1:5188/settings",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "点击\"调试\"跳转",
+      "passed": true,
+      "expected": "URL 包含 /debug",
+      "actual": "URL: http://127.0.0.1:5188/debug",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "主题切换",
+      "passed": true,
+      "expected": "点击后背景色变化",
+      "actual": "切换前: rgba(0, 0, 0, 0), 切换后: rgba(0, 0, 0, 0)",
+      "severity": "warning"
+    },
+    {
+      "category": "执行异常",
+      "name": "主题切换按钮",
+      "passed": false,
+      "expected": "无异常",
+      "actual": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('header button[title*=\"浅色\"]').first()\u001b[22m\n",
+      "severity": "critical"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "布局切换按钮可见",
+      "passed": true,
+      "expected": "Classic/Five-space 布局按钮可见",
+      "actual": "按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "布局切换功能",
+      "passed": false,
+      "expected": "布局模式从 unknown 变为其他",
+      "actual": "切换前: unknown, 切换后: unknown",
+      "severity": "warning"
+    },
+    {
+      "category": "顶部导航栏",
+      "name": "侧边栏切换按钮可见",
+      "passed": true,
+      "expected": "可见",
+      "actual": "可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "侧边栏可见",
+      "passed": false,
+      "expected": "aside 元素可见",
+      "actual": "aside 元素不可见",
+      "severity": "warning"
+    },
+    {
+      "category": "侧边栏",
+      "name": "\"新会话\" 按钮可见",
+      "passed": false,
+      "expected": "包含 \"新会话\" 文字的按钮可见",
+      "actual": "按钮不可见",
+      "severity": "critical"
+    },
+    {
+      "category": "侧边栏",
+      "name": "更多操作按钮可见",
+      "passed": false,
+      "expected": "更多操作按钮可见",
+      "actual": "按钮不可见（可能需要悬停）",
+      "severity": "warning"
+    },
+    {
+      "category": "聊天区域",
+      "name": "消息输入框可见",
+      "passed": false,
+      "expected": "textarea 输入框可见",
+      "actual": "输入框不可见",
+      "severity": "critical"
+    },
+    {
+      "category": "聊天区域",
+      "name": "附件按钮可见",
+      "passed": false,
+      "expected": "附件按钮可见",
+      "actual": "附件按钮不可见",
+      "severity": "warning"
+    },
+    {
+      "category": "聊天区域",
+      "name": "语音按钮可见",
+      "passed": false,
+      "expected": "语音按钮可见",
+      "actual": "语音按钮不可见（可能浏览器不支持）",
+      "severity": "info"
+    },
+    {
+      "category": "聊天区域",
+      "name": "思考模式按钮可见",
+      "passed": false,
+      "expected": "思考模式按钮可见",
+      "actual": "思考模式按钮不可见",
+      "severity": "info"
+    },
+    {
+      "category": "聊天区域",
+      "name": "模型名/Token 计数显示",
+      "passed": false,
+      "expected": "模型名或 Token 计数区域可见",
+      "actual": "模型名/Token 区域不可见",
+      "severity": "warning"
+    },
+    {
+      "category": "工作区面板",
+      "name": "工作区切换手柄可见",
+      "passed": true,
+      "expected": "工作区切换按钮可见",
+      "actual": "切换按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "点击收起按钮后面板收起",
+      "passed": true,
+      "expected": "收起后出现展开按钮",
+      "actual": "展开按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "点击展开按钮后面板展开",
+      "passed": true,
+      "expected": "展开后出现收起按钮",
+      "actual": "收起按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "工作区标签页数量: 0",
+      "passed": true,
+      "expected": "有标签页显示",
+      "actual": "找到 0 个标签页",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "Dock Bar 可见",
+      "passed": true,
+      "expected": "底部 Dock Bar 可见",
+      "actual": "Dock Bar 可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "Dock Bar 项目数量: 1",
+      "passed": true,
+      "expected": "Dock Bar 有图标项",
+      "actual": "找到 1 个项",
+      "severity": "info"
+    },
+    {
+      "category": "滚动行为",
+      "name": "聊天区域存在",
+      "passed": false,
+      "expected": "聊天区域可见",
+      "actual": "聊天区域不可见",
+      "severity": "info"
+    },
+    {
+      "category": "滚动行为",
+      "name": "会话列表可滚动",
+      "passed": true,
+      "expected": "会话列表区域可见",
+      "actual": "会话列表区域可见",
+      "severity": "info"
+    }
+  ]
+}

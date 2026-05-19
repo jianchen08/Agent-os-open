@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any
 
 from connectors.base import BaseConnector
 from connectors.types import (

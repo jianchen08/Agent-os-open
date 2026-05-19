@@ -86,6 +86,15 @@ class ThreadResponse(BaseModel):
     metadata: dict[str, Any] | None = Field(default=None, description="线程元数据，含 pinned/starred 等前端状态")
 
 
+class ThreadListResponse(BaseModel):
+    """线程列表分页响应模型。"""
+
+    threads: list[ThreadResponse] = Field(default_factory=list, description="线程列表")
+    total: int = Field(default=0, description="线程总数")
+    skip: int = Field(default=0, description="当前偏移量")
+    limit: int = Field(default=20, description="每页数量")
+
+
 class MessageListResponse(BaseModel):
     """消息列表分页响应模型。"""
 
@@ -362,6 +371,9 @@ class MemoryStore:
         self.sessions: dict[str, SessionModel] = {}
         # 用户线程索引：user_id -> thread_id 列表，加速 get_user_threads 查询
         self._user_thread_index: dict[str, list[str]] = {}
+
+        # 线程消息存储：thread_id -> 消息列表（带 sequence 字段）
+        self._messages: dict[str, list[dict[str, Any]]] = {}
         self._persist_dir = persist_dir
         self._persist_lock = threading.Lock()
 
@@ -628,6 +640,84 @@ class MemoryStore:
             thread["pipeline_ids"] = list(session.pipeline_ids)
             thread["active_pipeline_id"] = session.active_pipeline_id
         self._save_persisted_data()
+
+
+    def add_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        sequence: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """向线程添加消息。
+
+        Args:
+            thread_id: 线程 ID
+            message_id: 消息 ID
+            role: 消息角色（user/assistant/tool/system）
+            content: 消息内容
+            sequence: 消息序号
+            metadata: 可选元数据
+
+        Returns:
+            创建的消息字典
+        """
+        msg: dict[str, Any] = {
+            "id": message_id,
+            "thread_id": thread_id,
+            "role": role,
+            "content": content,
+            "sequence": sequence,
+            "timestamp": _now_iso(),
+            "metadata": metadata or {},
+        }
+        self._messages.setdefault(thread_id, []).append(msg)
+        return msg
+
+    def get_messages(
+        self,
+        thread_id: str,
+        limit: int = 20,
+        before_sequence: int | None = None,
+        after_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        """获取线程的消息列表（支持分页）。
+
+        Args:
+            thread_id: 线程 ID
+            limit: 每页数量
+            before_sequence: 游标分页的 sequence 边界
+            after_sequence: 断线补漏的 sequence 边界
+
+        Returns:
+            包含 messages、total、has_more 的分页结果字典
+        """
+        all_msgs = self._messages.get(thread_id, [])
+
+        # 按 before_sequence 过滤
+        if before_sequence is not None:
+            filtered = [m for m in all_msgs if m["sequence"] < before_sequence]
+        else:
+            filtered = list(all_msgs)
+
+        # 按 after_sequence 过滤
+        if after_sequence is not None:
+            filtered = [m for m in filtered if m["sequence"] > after_sequence]
+
+        total = len(all_msgs)
+        filtered_total = len(filtered)
+        has_more = filtered_total > limit
+
+        # 取最后 limit 条（即最新的 limit 条）
+        page = filtered[-limit:] if filtered_total > limit else filtered
+
+        return {
+            "messages": page,
+            "total": total,
+            "has_more": has_more,
+        }
 
     def get_session(self, thread_id: str) -> SessionModel | None:
         """获取指定线程关联的会话模型。

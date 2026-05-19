@@ -164,7 +164,6 @@ class ReasoningCheckPlugin(IInputPlugin):
         Returns:
             推理步数
         """
-        import re
 
         # 先尝试定位推理上下文块；若未找到则回退到全文
         reasoning_blocks = self._extract_reasoning_blocks(text)
@@ -195,7 +194,6 @@ class ReasoningCheckPlugin(IInputPlugin):
         Returns:
             提取到的推理上下文块列表
         """
-        import re
 
         blocks: list[str] = []
 

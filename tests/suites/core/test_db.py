@@ -99,7 +99,7 @@ class TestGetEngine:
 
         with patch.dict(os.environ, {"DATABASE_URL": "postgres://user:pass@localhost/mydb"}):
             with patch("infrastructure.db.create_async_engine", return_value=mock_engine) as mock_create:
-                engine = get_engine()
+                get_engine()
                 call_args = mock_create.call_args
                 assert "postgresql+asyncpg://" in call_args[0][0]
 

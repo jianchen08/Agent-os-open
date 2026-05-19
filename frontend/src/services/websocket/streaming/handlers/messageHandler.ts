@@ -3,10 +3,11 @@
  */
 import { reconcileContentBlocks } from '@/components/chat/hooks/useMessageRender'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 
 import { clearChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
+
+import { extractMessageId, stopPipelineStreaming } from './utils'
 
 /**
  * 处理新消息事件
@@ -15,23 +16,23 @@ import { resolvePipelineId } from '../router'
  */
 export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
-  const fallbackPipelineId = pipelineId || eventData._threadId || null
+  const threadId = eventData.data?._threadId || eventData._threadId
 
-  if (fallbackPipelineId) {
-    clearChunkTimeout(fallbackPipelineId)
-    useStreamingStore.getState().stopStreamingForTab(fallbackPipelineId)
-    pipelineStore.getState().stopStreaming(fallbackPipelineId)
-  }
-
-  const threadId = eventData._threadId
-  if (threadId && threadId !== fallbackPipelineId) {
+  if (pipelineId) {
+    clearChunkTimeout(pipelineId)
+    stopPipelineStreaming(pipelineId, threadId)
+  } else if (threadId) {
+    // FIX: pipeline_id 缺失时仍清理 threadId 的 tab 状态
     clearChunkTimeout(threadId)
-    useStreamingStore.getState().stopStreamingForTab(threadId)
+    pipelineStore.getState().stopStreaming(threadId)
   }
 
   if (!pipelineId) return
 
-  const messageId = eventData?.message_id || eventData?.message?.id || eventData?.data?.message_id || eventData?.data?.id || eventData?.data?.ai_message_id
+  // messageHandler 还需要兼容更多消息 ID 来源（event.message?.id, eventData.data?.id）
+  const messageId = extractMessageId(eventData)
+    || eventData?.message?.id
+    || eventData?.data?.id
   if (!messageId) return
 
   const finalContent = eventData?.content || eventData?.data?.content || eventData?.data?.final_content

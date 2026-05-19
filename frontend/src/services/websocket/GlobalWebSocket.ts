@@ -5,13 +5,16 @@
  * - 每个用户只维持一条 WS 连接，所有会话的消息通过消息体中的
  *   thread_id 和 pipeline_id 进行路由
  * - 路由失败时记录错误，不广播（广播是消息串扰的根因）
- * - 连接断开时自动重连（指数退避，最大 10 秒间隔）
+ * - 连接断开时自动重连（指数退避，初始 4 秒，最大 60 秒间隔）
  */
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { loggers } from '@/utils/logger'
 
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
+const _wsLogger = loggers.websocket
+
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 
 interface PendingMessage {
   type: string
@@ -20,12 +23,27 @@ interface PendingMessage {
 
 type EventHandler = (data: any) => void
 
-const RECONNECT_BASE_DELAY = 1000
-const RECONNECT_MAX_DELAY = 30_000
+const RECONNECT_BASE_DELAY = 4_000
+const RECONNECT_MAX_DELAY = 60_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
 const HEARTBEAT_TIMEOUT = 30_000
 const CONNECTION_TIMEOUT = 15_000
+
+/** 发送缓冲区阈值：超过此值延迟发送（1MB） */
+const SEND_BUFFER_THRESHOLD = 1_000_000
+
+/** 发送确认超时：未收到 stream_start 则重发（5秒） */
+const SEND_ACK_TIMEOUT_MS = 5_000
+
+/** 最大发送重试次数 */
+const SEND_ACK_MAX_RETRIES = 2
+
+interface PendingAckEntry {
+  timer: ReturnType<typeof setTimeout>
+  retries: number
+  msg: PendingMessage
+}
 
 class GlobalWebSocketService {
   private ws: WebSocket | null = null
@@ -41,6 +59,9 @@ class GlobalWebSocketService {
 
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 待确认的 user_input 消息：key 为 threadId */
+  private _pendingAcks: Map<string, PendingAckEntry> = new Map()
 
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
@@ -77,7 +98,7 @@ class GlobalWebSocketService {
     if (this._disposed || this._status !== 'connecting') return
 
     const url = buildGlobalWebSocketUrl(this._token)
-    console.log('[GlobalWS] connecting to', url.substring(0, 60))
+    _wsLogger.debug('[GlobalWS] connecting to %s', url.substring(0, 60))
     this.ws = new WebSocket(url)
 
     this._connectionTimeoutTimer = setTimeout(() => {
@@ -101,13 +122,9 @@ class GlobalWebSocketService {
         clearTimeout(this._connectionTimeoutTimer)
         this._connectionTimeoutTimer = null
       }
-      // BUG-FIX-fix_20260513_reconnect_msg_compensation:
-      // 问题根因: 重连成功后没有通知上层模块，断线期间的 streaming 消息永远停留在 streaming 状态。
-      // 修复方案: 区分首次连接与重连，重连时额外 emit 'reconnected' 事件，由 streaming handler 处理补漏。
-      // 影响范围: WebSocket 断线重连后的消息完整性
-      // 修复日期: 2026-05-13
+      // FIX: 区分首次连接与重连，重连时额外 emit 'reconnected' 事件供 streaming handler 补漏
       const isReconnect = this._reconnectAttempts > 0
-      console.log('[GlobalWS] connected', isReconnect ? '(reconnect)' : '')
+      _wsLogger.debug('[GlobalWS] connected %s', isReconnect ? '(reconnect)' : '')
       this._status = 'connected'
       this._reconnectAttempts = 0
       this._flushQueue()
@@ -129,15 +146,12 @@ class GlobalWebSocketService {
         if (data.type === 'heartbeat_ack') {
           this._handleHeartbeatAck()
         }
-        if (data.type === 'stream_start' || data.type === 'stream_chunk') {
-          console.log(
-            '%c[WS_RAW] type=%s data.pipeline_id=%s data.message_id=%s',
-            data.type === 'stream_start' ? 'color:magenta;font-weight:bold' : 'color:gray',
-            data.type,
-            data.data?.pipeline_id?.slice(0, 12) || 'null',
-            data.data?.message_id?.slice(0, 12) || 'null',
-          )
-        }
+        _wsLogger.debug(
+          '[WS_RAW] type=%s pipeline_id=%s message_id=%s',
+          data.type,
+          data.data?.pipeline_id?.slice(0, 12) || 'null',
+          data.data?.message_id?.slice(0, 12) || 'null',
+        )
         if (data.type) {
           this._emit(data.type, data)
         }
@@ -195,14 +209,14 @@ class GlobalWebSocketService {
     this._handlers.clear()
   }
 
-  /** 向指定会话发送用户输入 */
+  /** 向指定会话发送用户输入（带发送确认机制） */
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
     enableThinking?: boolean
     clientMessageId?: string
   }): void {
-    this._send({
+    const msg: PendingMessage = {
       type: 'user_input',
       thread_id: threadId,
       content,
@@ -210,7 +224,63 @@ class GlobalWebSocketService {
       attachments: opts?.attachments || [],
       enable_thinking: opts?.enableThinking || false,
       client_message_id: opts?.clientMessageId || '',
-    })
+    }
+
+    // 先清除该线程之前的待确认（避免重复）
+    this._clearPendingAck(threadId)
+
+    // 发送消息
+    this._send(msg)
+
+    // 启动发送确认计时器
+    this._startAckTimer(threadId, msg)
+  }
+
+  /** 清除指定线程的发送确认计时器（收到 stream_start 时调用） */
+  clearPendingAckForThread(threadId: string): void {
+    this._clearPendingAck(threadId)
+  }
+
+  /** 启动发送确认计时器：超时未收到响应则重发 */
+  private _startAckTimer(threadId: string, msg: PendingMessage): void {
+    const entry: PendingAckEntry = {
+      timer: setTimeout(() => {
+        this._onAckTimeout(threadId)
+      }, SEND_ACK_TIMEOUT_MS),
+      retries: 0,
+      msg,
+    }
+    this._pendingAcks.set(threadId, entry)
+  }
+
+  /** 发送确认超时：重发消息或放弃 */
+  private _onAckTimeout(threadId: string): void {
+    const entry = this._pendingAcks.get(threadId)
+    if (!entry) return
+
+    entry.retries++
+    if (entry.retries > SEND_ACK_MAX_RETRIES) {
+      console.warn('[GlobalWS] 发送确认超时，已达最大重试次数: threadId=%s', threadId)
+      this._pendingAcks.delete(threadId)
+      return
+    }
+
+    console.info('[GlobalWS] 发送确认超时，第 %d 次重发: threadId=%s', entry.retries, threadId)
+    this._send(entry.msg)
+
+    // 重启计时器
+    entry.timer = setTimeout(() => {
+      this._onAckTimeout(threadId)
+    }, SEND_ACK_TIMEOUT_MS)
+  }
+
+  /** 清除指定线程的发送确认计时器 */
+  private _clearPendingAck(threadId: string): void {
+    const entry = this._pendingAcks.get(threadId)
+    if (entry) {
+      clearTimeout(entry.timer)
+      this._pendingAcks.delete(threadId)
+    }
   }
 
   /** 发送审批决策 */
@@ -256,7 +326,14 @@ class GlobalWebSocketService {
   private _send(msg: PendingMessage): void {
     if (this._status === 'connected' && this.ws) {
       try {
-        this.ws.send(JSON.stringify(msg))
+        const payload = JSON.stringify(msg)
+        // 发送前检查缓冲区，超过阈值则延迟发送避免积压
+        if (this.ws.bufferedAmount > SEND_BUFFER_THRESHOLD) {
+          console.warn('[GlobalWS] bufferedAmount 超过阈值，消息入队延迟发送')
+          this._queue.push(msg)
+          return
+        }
+        this.ws.send(payload)
       } catch {
         this._queue.push(msg)
       }
@@ -324,6 +401,11 @@ class GlobalWebSocketService {
 
   private _scheduleReconnect(): void {
     if (this._disposed) return
+
+    // 标记为重连中，更新 UI 状态
+    this._status = 'reconnecting'
+    this._emit('_status', { status: 'reconnecting' })
+    useLayoutModeStore.getState().updateConnectionStatus({ state: 'reconnecting' })
 
     let delay: number
     if (this._reconnectAttempts >= RECONNECT_MAX_RETRIES) {

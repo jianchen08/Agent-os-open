@@ -14,7 +14,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from memory.constants import Retrieval, Similarity
+from memory.constants import Retrieval
 from memory.episode_service import EpisodeService
 from memory.knowledge_service import KnowledgeService
 from memory.ports import IEpisodeStorage, IRetriever, ISemanticStorage
@@ -23,7 +23,6 @@ from memory.types import (
     Episode,
     InjectType,
     Knowledge,
-    RetrievalConfig,
     RetrievalMethod,
     SearchResult,
 )
@@ -772,7 +771,7 @@ class MemoryService:
         if self._vector_retriever and hasattr(self._vector_retriever, "retrieve"):
             try:
                 # 用空查询检测向量表中的条目数（通过全量注入接口）
-                sample_results = await self._vector_retriever.retrieve(
+                await self._vector_retriever.retrieve(
                     query="__health_check_probe__",
                     user_id=None,
                     top_k=1,

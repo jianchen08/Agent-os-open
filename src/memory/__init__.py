@@ -66,7 +66,7 @@ from memory.history_buffer import (
     MessageEntry,
 )
 from memory.variable_priority import VariablePriority
-from memory.maintenance import MemoryMaintenanceService
+from memory.maintenance import MaintenanceConfig, MemoryMaintenanceService
 
 __all__ = [
     # types
@@ -100,6 +100,7 @@ __all__ = [
     "KnowledgeService",
     "MemoryContextService",
     # maintenance
+    "MaintenanceConfig",
     "MemoryMaintenanceService",
     # tag network
     "TagNetworkConfig",

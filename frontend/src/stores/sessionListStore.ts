@@ -206,7 +206,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         const newDeletingIds = new Set(state.deletingSessionIds)
         newDeletingIds.delete(id)
 
-        const { [id]: _removedPagination, ...restPagination } = state.messagePagination
+        const safePagination = state.messagePagination || {}
+        const { [id]: _removedPagination, ...restPagination } = safePagination
 
         return {
           sessions: state.sessions.filter((session) => session.id !== id),
@@ -255,7 +256,16 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       try {
         const pipelineId = session?.activePipelineId || session?.pipelineIds?.[0]
         if (pipelineId) {
-          await usePipelineMessageStore.getState().fetchMessages(pipelineId, { threadId: id })
+          // BUG-FIX-fix_20260515_streaming_interrupt:
+          // 问题根因: 切换回正在流式输出的会话时，fetchMessages -> initFromAPI
+          //          会用后端 API 数据覆盖本地的流式消息，导致流式输出中断。
+          // 修复方案: 管道正在流式传输时跳过 API 请求，保留本地流式数据。
+          // 影响范围: 会话切换时的流式输出连续性
+          // 修复日期: 2026-05-15
+          const pipelineStore = usePipelineMessageStore.getState()
+          if (!pipelineStore.isStreaming(pipelineId)) {
+            await pipelineStore.fetchMessages(pipelineId, { threadId: id })
+          }
         }
       } catch (error) {
         console.error('[setActiveSession] 加载会话数据失败:', error)

@@ -26,7 +26,7 @@ export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
  *          stream_start（或任何流式事件），自动标记为超时并通知用户。
  *          收到 stream_start 时自动清除该计时器。
  */
-export const PENDING_STREAM_TIMEOUT_MS = 45_000
+export const PENDING_STREAM_TIMEOUT_MS = 15_000
 
 interface ChunkTimeoutEntry {
   timer: ReturnType<typeof setTimeout>

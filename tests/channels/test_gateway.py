@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import sys
 import os
-import asyncio
 import json
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,7 +25,6 @@ from channels.gateway.unified_types import UnifiedMessage, UnifiedResponse
 from channels.gateway.message_normalizer import MessageNormalizer
 from channels.gateway.session_bridge import SessionBridge
 from channels.gateway.channel_gateway import ChannelGateway
-from pipeline.types import StateKeys
 
 
 # ═══════════════════════════════════════════════════════════

@@ -6,13 +6,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import glob
 import logging
 import os
 import time
 import uuid
-from contextlib import asynccontextmanager
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class BrowserSession:
     """浏览器会话"""
-    
+
     def __init__(
         self,
         session_id: str,
@@ -38,7 +36,7 @@ class BrowserSession:
         self.playwright = playwright
         self.console_messages: list[dict[str, Any]] = []
         self._console_handler: Any = None
-    
+
     async def save_state(self, path: str) -> dict[str, Any]:
         """
         保存浏览器状态到文件
@@ -106,18 +104,18 @@ class BrowserSession:
 class BrowserManager:
     """
     浏览器会话管理器
-    
+
     管理多个浏览器会话，支持并发操作。
     """
-    
+
     # 默认状态文件保存目录
     DEFAULT_STATE_DIR = os.path.join("data", "browser_state")
     # 保留的状态文件最大数量
     MAX_STATE_FILES = 5
-    
+
     # 类级别会话存储
     _sessions: dict[str, BrowserSession] = {}
-    
+
     @classmethod
     async def create_session(
         cls,
@@ -132,7 +130,7 @@ class BrowserManager:
     ) -> tuple[str, dict[str, Any]]:
         """
         创建新的浏览器会话
-        
+
         Args:
             browser_type: 浏览器类型 (chromium/firefox/webkit)
             headless: 是否无头模式
@@ -142,13 +140,13 @@ class BrowserManager:
             launch_options: 额外启动参数
             storage_state: 浏览器状态文件路径或状态字典，用于恢复 cookies 和 localStorage
             auto_persist: 是否自动持久化状态（启动时自动恢复，关闭时自动保存），默认 True
-        
+
         Returns:
             tuple[session_id, session_info]
         """
         try:
             from playwright.async_api import async_playwright  # BUG-FIX: 使用 async_api 替代 sync_api
-            
+
             # 自动恢复逻辑：当 auto_persist=True 且用户未显式提供 storage_state 时，
             # 尝试从默认状态目录加载最新的状态文件
             restored_state_path = None
@@ -157,13 +155,13 @@ class BrowserManager:
                 if restored_state_path:
                     storage_state = restored_state_path
                     logger.info(f"自动恢复浏览器状态: {restored_state_path}")
-            
+
             # 创建会话ID
             session_id = str(uuid.uuid4())[:8]
-            
+
             # 启动 Playwright
             playwright = await async_playwright().start()
-            
+
             # 选择浏览器类型
             browser_map = {
                 "chromium": playwright.chromium,
@@ -171,7 +169,7 @@ class BrowserManager:
                 "webkit": playwright.webkit,
             }
             browser_launcher = browser_map.get(browser_type, browser_map["chromium"])
-            
+
             # 构建启动参数
             options = {
                 "headless": headless,
@@ -179,10 +177,10 @@ class BrowserManager:
             }
             if launch_options:
                 options.update(launch_options)
-            
+
             # 启动浏览器
             browser = await browser_launcher.launch(**options)
-            
+
             # 创建上下文和页面
             context_options: dict[str, Any] = {
                 "viewport": {"width": viewport_width, "height": viewport_height},
@@ -191,19 +189,19 @@ class BrowserManager:
                 context_options["storage_state"] = storage_state
             context = await browser.new_context(**context_options)
             page = await context.new_page()
-            
+
             # 设置 console 监听
             console_messages: list[dict[str, Any]] = []
-            
+
             def console_handler(msg):
                 console_messages.append({
                     "type": msg.type,
                     "text": msg.text,
                     "location": msg.location,
                 })
-            
+
             page.on("console", console_handler)
-            
+
             # 创建会话
             session = BrowserSession(
                 session_id=session_id,
@@ -215,9 +213,9 @@ class BrowserManager:
             )
             session.console_messages = console_messages
             session._console_handler = console_handler
-            
+
             cls._sessions[session_id] = session
-            
+
             session_info = {
                 "session_id": session_id,
                 "browser_type": browser_type,
@@ -226,31 +224,31 @@ class BrowserManager:
                 "auto_persist": auto_persist,
                 "restored_state": restored_state_path,
             }
-            
+
             logger.info(f"创建浏览器会话: {session_id}, 类型: {browser_type}")
-            
+
             return session_id, session_info
-            
+
         except ImportError as e:
             raise ImportError(f"Playwright 未安装: {e}")
         except Exception as e:
             raise RuntimeError(f"创建浏览器会话失败: {e}")
-    
+
     @classmethod
     def get_session(cls, session_id: str) -> BrowserSession | None:
         """获取会话"""
         return cls._sessions.get(session_id)
-    
+
     @classmethod
     async def close_session(cls, session_id: str) -> dict[str, Any]:
         """
         关闭浏览器会话
-        
+
         自动保存会话状态到默认目录后关闭，保存失败不影响关闭流程。
-        
+
         Args:
             session_id: 会话ID
-        
+
         Returns:
             关闭结果
         """
@@ -260,10 +258,10 @@ class BrowserManager:
                 "success": False,
                 "error": f"会话不存在: {session_id}",
             }
-        
+
         # 在关闭前自动保存会话状态
         save_result = await cls.auto_save_state(session_id)
-        
+
         try:
             await session.cleanup()
             del cls._sessions[session_id]
@@ -284,7 +282,7 @@ class BrowserManager:
                 "session_id": session_id,
                 "error": str(e),
             }
-    
+
     @classmethod
     def get_all_sessions(cls) -> list[dict[str, Any]]:
         """获取所有会话"""

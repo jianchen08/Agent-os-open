@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import logging
 import os
 import re
@@ -22,6 +21,7 @@ from typing import Any
 import yaml
 
 from pipeline.plugin import ICorePlugin, IInputPlugin, IOutputPlugin, IPlugin
+from pipeline.plugin_types import PluginTypeSlot
 from pipeline.registry import PluginRegistry
 from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
 
@@ -350,6 +350,7 @@ def build_plugin_registry(
         已注册所有插件的 PluginRegistry 实例
     """
     registry = PluginRegistry()
+    type_slot = PluginTypeSlot()
 
     # 注册普通插件（Input / Output）
     for plugin_conf in config.plugins:
@@ -367,6 +368,7 @@ def build_plugin_registry(
                 continue
             plugin_instance: IPlugin = plugin_cls(config=plugin_config)
             registry.register(plugin_instance)
+            plugin_cls.register_types(type_slot)
             logger.info("Plugin loaded: %s", plugin_id)
         except Exception as exc:
             logger.warning("Failed to load plugin '%s': %s", plugin_id, exc)
@@ -440,8 +442,12 @@ def build_plugin_registry(
             else:
                 core_instance = plugin_cls(config=plugin_config)
             registry.register_core(core_type, core_instance)
+            plugin_cls.register_types(type_slot)
             logger.info("Core plugin loaded: %s (core_type=%s)", class_path, core_type)
         except Exception as exc:
             logger.error("Failed to load core plugin '%s': %s", class_path, exc)
+
+    # 将共享的 type_slot 附加到 registry，供下游使用
+    registry.plugin_types = type_slot  # type: ignore[attr-defined]
 
     return registry

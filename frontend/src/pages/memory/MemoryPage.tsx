@@ -117,10 +117,10 @@ export function MemoryPage() {
         </a>
         <h1 className="ml-4 text-base font-semibold">记忆管理</h1>
       </header>
-      <main className="flex-1 space-y-6 overflow-y-auto p-6">
+      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
         {/* 统计卡片 */}
         {stats && (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="rounded-lg border p-4">
               <div className="text-muted-foreground mb-1 text-xs">情景记忆</div>
               <div className="text-xl font-semibold">{stats.episode_count}</div>
@@ -142,7 +142,7 @@ export function MemoryPage() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm transition-colors ${
+              className={`min-h-[44px] px-4 py-2 text-sm transition-colors ${
                 activeTab === tab
                   ? 'border-primary text-foreground border-b-2 font-medium'
                   : 'text-muted-foreground hover:text-foreground'
@@ -216,7 +216,7 @@ export function MemoryPage() {
                     fetchEpisodes(episodesPage - 1)
                   }}
                   disabled={episodesPage <= 1}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -229,7 +229,7 @@ export function MemoryPage() {
                     fetchEpisodes(episodesPage + 1)
                   }}
                   disabled={episodesPage >= Math.ceil(episodesTotal / 10)}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>
@@ -266,7 +266,7 @@ export function MemoryPage() {
         {/* 搜索 */}
         {!isLoading && activeTab === 'search' && (
           <div className="space-y-4">
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <input
                 type="text"
                 placeholder="搜索记忆..."
@@ -279,7 +279,7 @@ export function MemoryPage() {
               <button
                 onClick={handleSearch}
                 disabled={isSearching}
-                className="bg-primary text-primary-foreground rounded-lg px-4 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+                className="bg-primary text-primary-foreground min-h-[44px] rounded-lg px-4 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
               >
                 {isSearching ? '搜索中...' : '搜索'}
               </button>

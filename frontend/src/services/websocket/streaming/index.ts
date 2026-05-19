@@ -33,6 +33,7 @@ import {
   handleThinkingStart,
   handleToolResult,
   handleToolStart,
+  handleIteration,
 } from './handlers'
 import { resolvePipelineId } from './router'
 
@@ -42,6 +43,11 @@ const TERMINAL_EVENTS = new Set([
   WS_SERVER_EVENTS.STREAM_ERROR,
   WS_SERVER_EVENTS.NEW_MESSAGE,
 ])
+
+/** 重连后补漏轮询间隔（5秒） */
+const RECONNECT_POLL_INTERVAL_MS = 5_000
+/** 重连后补漏最大轮询时长（3分钟） */
+const RECONNECT_POLL_MAX_DURATION_MS = 180_000
 
 let _initialized = false
 const _handlers: Record<string, (data: any) => void> = {}
@@ -70,6 +76,44 @@ function _wrapWithTimeoutReset(event: string, handler: (data: any) => void): (da
 }
 
 /**
+ * 重连后补漏轮询：fetchMessages 失败或返回空时，启动定时轮询
+ * 直到 streaming 状态结束或超时（最多 3 分钟）
+ */
+function _startReconnectPolling(
+  pipelineId: string,
+  sessionId: string,
+  initialCursor: number,
+  logger: ReturnType<typeof loggers.sessionStore>,
+): void {
+  const startTime = Date.now()
+
+  const pollTimer = setInterval(() => {
+    const pipelineStore = usePipelineMessageStore.getState()
+
+    // streaming 已结束，停止轮询
+    if (!pipelineStore.isStreaming(pipelineId)) {
+      clearInterval(pollTimer)
+      return
+    }
+
+    // 超过最大轮询时长，停止轮询
+    if (Date.now() - startTime > RECONNECT_POLL_MAX_DURATION_MS) {
+      logger.warn('[streaming] 重连补漏轮询超时: pipelineId=%s', pipelineId)
+      clearInterval(pollTimer)
+      return
+    }
+
+    const bottomCursor = pipelineStore.getBottomCursor(pipelineId)
+    pipelineStore.fetchMessages(pipelineId, {
+      after_sequence: bottomCursor,
+      threadId: sessionId,
+    }).catch((err) => {
+      logger.warn('[streaming] 重连补漏轮询失败: pipelineId=%s err=%s', pipelineId, err)
+    })
+  }, RECONNECT_POLL_INTERVAL_MS)
+}
+
+/**
  * 初始化全局流式事件处理器（幂等，重复调用安全）
  */
 export function initStreamingEvents(): void {
@@ -88,25 +132,42 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
   _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = handleSubAgentCreated
   _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
+  _handlers[WS_SERVER_EVENTS.ITERATION] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.ITERATION, handleIteration)
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)
   }
 
-  // BUG-FIX-fix_20260513_reconnect_msg_compensation:
-  // 问题根因: WebSocket 断线重连后，断线期间的消息不会自动补偿，
-  //          导致 streaming 消息永远停留在 streaming 状态。
-  // 修复方案: 监听 GlobalWebSocket 的 'reconnected' 事件，对正在 streaming 的管道
-  //          调用 fetchMessages(after_sequence: bottomCursor) 做断线补漏，
-  //          同时清理超时的 streaming 状态。
-  // 影响范围: WebSocket 断线重连后的消息完整性
-  // 修复日期: 2026-05-13
+  // FIX: WS 重连后对正在 streaming 的管道调用 fetchMessages 做断线补漏
   _handlers['reconnected'] = () => {
     const pipelineStore = usePipelineMessageStore.getState()
     const streamingState = pipelineStore.streamingState
+    const streamingStore = useStreamingStore.getState()
     const logger = loggers.sessionStore
 
     logger.info('[streaming] WS 重连，开始补偿遗漏消息，streaming 管道数=%d', Object.keys(streamingState).length)
+
+    // 遍历所有管道消息，将 isThinking=true 的消息强制清理
+    const messagesByPipeline = pipelineStore.messagesByPipeline
+    for (const [pipelineId, messages] of Object.entries(messagesByPipeline)) {
+      const stuckMessages = messages.filter(
+        (m: any) => m.thinking?.isThinking || (m.contentBlocks || []).some((b: any) => b.type === 'thinking' && b.thinking?.isThinking),
+      )
+      for (const msg of stuckMessages) {
+        logger.info('[streaming] 重连清理残留 thinking: pipelineId=%s messageId=%s', pipelineId, (msg as any).id)
+        pipelineStore.updateMessage(pipelineId, (msg as any).id, {
+          thinking: { ...(msg as any).thinking, isThinking: false },
+        } as any)
+      }
+    }
+
+    // 清理 streamingStore 中残留的 thinking 状态
+    const streamingTabs = streamingStore.streamingTabs
+    for (const tabId of Object.keys(streamingTabs)) {
+      if (!streamingState[tabId]?.isStreaming) {
+        streamingStore.setStreamingForTab(tabId, false)
+      }
+    }
 
     for (const [pipelineId, streamStatus] of Object.entries(streamingState)) {
       if (!streamStatus.isStreaming) continue
@@ -118,34 +179,41 @@ export function initStreamingEvents(): void {
         pipelineStore.fetchMessages(pipelineId, {
           after_sequence: bottomCursor,
           threadId: sessionId,
+        }).then(() => {
+          // fetchMessages 成功后检查是否仍在 streaming，如果是则启动轮询
+          const currentStore = usePipelineMessageStore.getState()
+          if (currentStore.isStreaming(pipelineId)) {
+            _startReconnectPolling(pipelineId, sessionId, bottomCursor, logger)
+          }
         }).catch((err) => {
-          logger.warn('[streaming] 重连补漏失败: pipelineId=%s err=%s', pipelineId, err)
+          logger.warn('[streaming] 重连补漏失败，启动轮询: pipelineId=%s err=%s', pipelineId, err)
+          _startReconnectPolling(pipelineId, sessionId, bottomCursor, logger)
         })
       }
     }
   }
   globalWS.subscribe('reconnected', _handlers['reconnected'])
 
-  // BUG-FIX-fix_20260513_chunk_timeout_cleanup:
-  // 问题根因: chunkTimeout 超时后只打 console.debug，不清理 streaming 状态、
-  //          不标记消息为 error、不通知用户，导致消息永远卡在 streaming 状态。
-  // 修复方案: 通过 onChunkTimeout 回调注册，在超时时将对应消息标记为 error 状态并清理 streaming。
-  // 影响范围: 流式响应超时后的用户体验
-  // 修复日期: 2026-05-13
+  // FIX: chunk 超时时保留已累积内容，避免显示空白
   onChunkTimeout((data: { pipelineId: string; messageId: string }) => {
     const { pipelineId, messageId } = data
     const pipelineStore = usePipelineMessageStore.getState()
     const streamingStore = useStreamingStore.getState()
     const logger = loggers.sessionStore
 
-    logger.warn('[streaming] chunk 超时，清理管道状态: pipelineId=%s messageId=%s', pipelineId, messageId)
+    logger.warn('[streaming] chunk 超时，清理管道状态（保留已累积内容）: pipelineId=%s messageId=%s', pipelineId, messageId)
 
-    // 有 messageId 时将消息标记为 error 状态
+    // 有 messageId 时将消息标记为 completed（而非 error），保留已累积的内容
     if (messageId) {
-      pipelineStore.updateMessage(pipelineId, messageId, {
-        status: 'error',
-        error: '流式响应超时，请重试',
-      } as any)
+      const msgs = pipelineStore.getMessages(pipelineId)
+      const msg = msgs.find((m: any) => m.id === messageId)
+      if (msg) {
+        pipelineStore.updateMessage(pipelineId, messageId, {
+          status: 'completed',
+          // 清理残留的 thinking 状态
+          ...((msg as any).thinking?.isThinking ? { thinking: { ...(msg as any).thinking, isThinking: false } } : {}),
+        } as any)
+      }
     }
 
     // 清理 streaming 状态

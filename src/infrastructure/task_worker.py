@@ -163,6 +163,8 @@ class TaskWorker:
         self._last_container_check: float = 0.0
         self._active_tasks: set[str] = set()  # 管道正在执行中的任务（含运行工具/评估器）
         self._task_id_to_bg_task: dict[str, asyncio.Task] = {}  # task_id → asyncio.Task（cancel 支持）
+        # BUG-FIX-fix_20260518_submitted_dedup: 事件级去重集合，防止重复 task.submitted 并发调度
+        self._submitted_task_ids: set[str] = set()
 
     async def start(self) -> None:
         """启动后台任务监听，并恢复残留的 running 任务。"""
@@ -175,7 +177,7 @@ class TaskWorker:
             from infrastructure.service_provider import get_service_provider
             get_service_provider().register("task_worker", self)
         except Exception:
-            pass  # ServiceProvider 不可用时不阻塞启动
+            logger.warning("TaskWorker: ServiceProvider 注册失败，不阻塞启动", exc_info=True)
 
         self._init_lifecycle()
 
@@ -347,7 +349,7 @@ class TaskWorker:
                         task.id, f"评估恢复失败: {e}",
                     )
                 except Exception:
-                    pass
+                    logger.warning("TaskWorker: fail_task 也失败: task_id=%s", task.id, exc_info=True)
 
     async def _rerun_evaluation(self, task: Any) -> None:
         """为 evaluating 状态的任务重新运行评估。
@@ -607,6 +609,11 @@ class TaskWorker:
     async def _on_task_submitted(self, event: Any) -> None:
         """处理任务提交事件。
 
+        BUG-FIX-fix_20260516_double_dispatch:
+        问题根因: _on_task_submitted 没有去重，同一 task_id 收到两次 task.submitted 事件时
+                 会创建两个并发协程，两个协程都尝试 create_timer 导致 ValueError。
+        修复方案: 创建前检查 _task_id_to_bg_task，已有未完成的同 task_id 协程则跳过。
+
         Args:
             event: 任务提交事件
         """
@@ -614,13 +621,36 @@ class TaskWorker:
             return
         task_data = event.data if hasattr(event, "data") else event
         task_id = task_data.get("task_id", "unknown") if isinstance(task_data, dict) else "unknown"
+
+        # BUG-FIX-fix_20260518_submitted_dedup: 事件级 set[str] 去重
+        if task_id != "unknown":
+            if task_id in self._submitted_task_ids:
+                logger.info(
+                    "TaskWorker: 跳过重复调度 | task_id=%s (事件级去重命中)", task_id,
+                )
+                return
+            self._submitted_task_ids.add(task_id)
+
+        # 去重：已有同 task_id 的运行中协程则跳过
+        if task_id != "unknown":
+            existing = self._task_id_to_bg_task.get(task_id)
+            if existing is not None and not existing.done():
+                logger.info(
+                    "TaskWorker: 跳过重复调度 | task_id=%s (已有运行中协程)", task_id,
+                )
+                self._submitted_task_ids.discard(task_id)
+                return
+
         logger.info("TaskWorker received task: %s", task_id)
         bg_task = asyncio.create_task(self._execute_background_task(task_data))
         self._tasks.add(bg_task)
         bg_task.add_done_callback(self._tasks.discard)
         if task_id != "unknown":
             self._task_id_to_bg_task[task_id] = bg_task
-            bg_task.add_done_callback(lambda t, tid=task_id: self._task_id_to_bg_task.pop(tid, None))
+            bg_task.add_done_callback(lambda t, tid=task_id: (
+                self._task_id_to_bg_task.pop(tid, None),
+                self._submitted_task_ids.discard(tid),
+            ))
 
     async def _on_task_state_changed(self, event: Any) -> None:
         """处理任务状态变更事件，触发对应的 asyncio.Event。
@@ -791,28 +821,7 @@ class TaskWorker:
         """
         from pipeline.message_bus import send_pipeline_message
 
-        # ── 1. 构造通知文本 ──
-        task_info = data.get("task", {})
-        if isinstance(task_info, dict):
-            title = task_info.get("title", task_id)
-            error = task_info.get("error", "")
-        else:
-            title = getattr(task_info, "title", task_id)
-            error = getattr(task_info, "error", "") or ""
-
-        if new_status == "completed":
-            notification = (
-                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
-                "请继续执行后续流程，提交下一个子任务。"
-            )
-        else:
-            err_hint = f": {error[:100]}" if error else ""
-            notification = (
-                f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
-                "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
-            )
-
-        # ── 2. 查找 parent_pipeline_id ──
+        # ── 1. 查找 parent_pipeline_id 并获取完整任务信息 ──
         parent_pipeline_id = None
         task_obj = None
         task_service = self._task_service
@@ -824,10 +833,54 @@ class TaskWorker:
             except Exception as exc:
                 logger.warning("TaskWorker: 获取任务信息失败: task=%s, error=%s", task_id, exc)
 
+        # ── 2. 构造通知文本（含重试信息） ──
+        task_info = data.get("task", {})
+        if isinstance(task_info, dict):
+            title = task_info.get("title", task_id)
+            error = task_info.get("error", "")
+        else:
+            title = getattr(task_info, "title", task_id)
+            error = getattr(task_info, "error", "") or ""
+
+        # BUG-FIX-fix_20260519_pipeline_retry:
+        # 问题根因: 通知文本中不包含 retry_count / max_retries 信息，
+        #   父管道 AI 无法区分首次失败还是重试失败，也不知道是否应继续重试。
+        # 修复方案: 从 task.metadata 读取重试计数，在通知中加入重试状态，
+        #   达到最大次数时明确告知 AI 放弃重试。
+        _task_meta = getattr(task_obj, "metadata", None) or {}
+        retry_count = _task_meta.get("retry_count", 0) if task_obj else 0
+        max_retries = _task_meta.get("max_retries", 3) if task_obj else 3
+
+        if new_status == "completed":
+            notification = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
+                "请继续执行后续流程，提交下一个子任务。"
+            )
+        else:
+            err_hint = f": {error[:100]}" if error else ""
+            if retry_count > 0 and retry_count >= max_retries:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
+                    f" (已达最大重试次数 {retry_count}/{max_retries}){err_hint}\n"
+                    "请放弃重试，考虑其他方案或标记任务失败。"
+                )
+            elif retry_count > 0:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
+                    f" (已重试 {retry_count}/{max_retries} 次){err_hint}\n"
+                    "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+                )
+            else:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                    "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+                )
+
         logger.info(
-            "TaskWorker: 通知查找开始: task=%s, status=%s, parent_pipeline=%s, parent_task=%s",
+            "TaskWorker: 通知查找开始: task=%s, status=%s, parent_pipeline=%s, parent_task=%s, retry=%d/%d",
             task_id, new_status, parent_pipeline_id,
             getattr(task_obj, "parent_task_id", None) if task_obj else None,
+            retry_count, max_retries,
         )
 
         if not parent_pipeline_id:
@@ -872,7 +925,7 @@ class TaskWorker:
                 if getattr(task, "pipeline_run_id", None) == pipeline_id:
                     return task.id
         except Exception:
-            pass
+            logger.warning("TaskWorker: _find_task_by_pipeline_id 失败: pipeline_id=%s", pipeline_id, exc_info=True)
         return None
 
     def cancel_pipeline(self, task_id: str) -> bool:
@@ -903,7 +956,7 @@ class TaskWorker:
                 if task:
                     pipeline_id = getattr(task, "pipeline_run_id", None)
             except Exception:
-                pass
+                logger.warning("TaskWorker: cancel_pipeline 获取 pipeline_id 失败: task_id=%s", task_id, exc_info=True)
 
         if pipeline_id:
             self._services.pop(f"__suspended_engine_{pipeline_id}", None)
@@ -977,7 +1030,28 @@ class TaskWorker:
                     _last_err: Exception | None = None
                     for _attempt in range(1, _CONTAINER_INIT_RETRIES + 1):
                         try:
-                            container_ws = task.metadata.get("workspace") or None
+                            # BUG-FIX-fix_20260518_container_ws_override:
+                            # 问题根因: 容器任务读取自身 metadata 中的 workspace 覆盖子任务指定的值，
+                            #          导致子任务在空目录执行。
+                            # 修复方案: 优先使用 task_data 中子任务显式指定的 workspace。
+                            explicit_ws = task_data.get("workspace") or None
+                            container_ws = explicit_ws or task.metadata.get("workspace") or None
+                            # BUG-FIX-fix_20260519_container_workspace_path:
+                            # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
+                            if "isolation_mode" not in task_data:
+                                _task_iso = task.metadata.get("isolation_level") if task and task.metadata else None
+                                if _task_iso:
+                                    task_data["isolation_mode"] = _task_iso
+                                else:
+                                    try:
+                                        import yaml as _yaml
+                                        from pathlib import Path as _P
+                                        _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
+                                        if _iso_cfg_path.exists():
+                                            _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
+                                            task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
+                                    except Exception:
+                                        pass
                             lifecycle.init_container_workspace(task_id, container_ws, task_data)
                             container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
                             if container_workspace_path:
@@ -1065,6 +1139,31 @@ class TaskWorker:
         explicit_workspace = task_data.get("workspace") or None
         workspace = self._resolve_task_workspace(task_id, explicit_workspace)
         task_data["_has_explicit_workspace"] = bool(explicit_workspace)
+
+        # ── 注入隔离模式配置 ──
+        # BUG-FIX-fix_20260519_container_workspace_path:
+        # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
+        if task_data.get("isolation_level"):
+            task_data["isolation_mode"] = task_data["isolation_level"]
+        elif task_obj and task_obj.metadata and task_obj.metadata.get("isolation_level"):
+            task_data["isolation_mode"] = task_obj.metadata["isolation_level"]
+        else:
+            try:
+                import yaml as _yaml
+                from pathlib import Path as _P
+                _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
+                if _iso_cfg_path.exists():
+                    _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
+                    task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
+            except Exception:
+                pass
+
+        # HOST模式支持：将 isolation_level 传递给 lifecycle，用于工作空间创建决策
+        task_obj = self._task_service.get_task(task_id)
+        if task_obj and task_obj.metadata:
+            iso_level = task_obj.metadata.get("isolation_level")
+            if iso_level:
+                task_data["isolation_level"] = iso_level
 
         # ── 3.x.0 等待父容器工作空间就绪（解决竞态条件） ──
         # BUG-FIX-fix_20260425_container_workspace_race:
@@ -1205,6 +1304,7 @@ class TaskWorker:
         # ── 5. 创建子 PipelineEngine 并执行 ──
         timer_manager = self._services.get("timer_manager")
         idle_timer_registered = False
+        _engine_task: asyncio.Task | None = None
         try:
             checkpoint_mgr = self._services.get("checkpoint_manager")
             engine = PipelineEngine(
@@ -1570,6 +1670,27 @@ class TaskWorker:
             self._suspended_engines.pop(task_id, None)
             self._active_tasks.discard(task_id)
             logger.info("TaskWorker: pipeline completed for task %s", task_id)
+
+        except asyncio.CancelledError:
+            logger.info("TaskWorker: task %s cancelled, stopping engine", task_id)
+            if _engine_task is not None and not _engine_task.done():
+                _engine_task.cancel()
+                try:
+                    await _engine_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if _bridge:
+                try:
+                    _bridge.stop()
+                except Exception:
+                    pass
+            self._active_tasks.discard(task_id)
+            if idle_timer_registered and timer_manager:
+                try:
+                    await timer_manager.cancel_timer(task_id)
+                except Exception:
+                    pass
+            raise
 
         except Exception as exc:
             logger.error("TaskWorker: pipeline failed for task %s: %s", task_id, exc)
@@ -2348,13 +2469,16 @@ class TaskWorker:
             规范化后的验收标准字典或列表
         """
         workspace_normalized = workspace.replace("\\", "/").rstrip("/")
+        from pathlib import Path as _PathLib
+        from isolation.workspace import get_workspace_config_root
+        _ws_root_name = _PathLib(get_workspace_config_root()).name + "/"
 
         def _to_relative(value_normalized: str) -> str:
             if value_normalized.startswith(workspace_normalized + "/"):
                 return value_normalized[len(workspace_normalized) + 1:]
             if value_normalized == workspace_normalized:
                 return "."
-            if value_normalized.startswith(".ai_workspaces/") or (
+            if value_normalized.startswith(_ws_root_name) or (
                 "/" in value_normalized and not value_normalized.startswith("/")
             ):
                 try:

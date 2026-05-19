@@ -21,7 +21,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from tools.builtin.resource_merge import ResourceMergeTool
 
@@ -450,7 +449,7 @@ class TestExternalProjectE2E:
         # 准备：创建项目并初始化 git
         project_dir = tmp_path / "log_project"
         _create_temp_project(project_dir)
-        initial_hash = _init_git_repo(project_dir)
+        _init_git_repo(project_dir)
 
         tool = ResourceMergeTool(base_path=str(project_dir))
         workspace_dir = tmp_path / "ws_log"

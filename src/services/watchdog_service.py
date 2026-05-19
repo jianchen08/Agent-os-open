@@ -173,7 +173,7 @@ class WatchdogServiceManager:
         for pending_task in self._pending_tasks:
             processed += 1
             task_id = pending_task["task_id"]
-            project_id = pending_task["project_id"]
+            pending_task["project_id"]
 
             retry_count = pending_task.get("retry_count", 0)
             if retry_count >= 3:

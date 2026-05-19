@@ -282,9 +282,9 @@ async def test_5_message_inject(app: Any) -> None:
     record("消息注入 - 入队", "PASS", f"消息入队成功, size=1")
 
     try:
-        state = await run_pipeline(app, "你好", timeout=60.0)
+        await run_pipeline(app, "你好", timeout=60.0)
     except Exception as exc:
-        state = {"error": str(exc)}
+        {"error": str(exc)}
 
     queue_size_after = await message_queue.size(session_id)
     if queue_size_after == 0:

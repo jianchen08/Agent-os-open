@@ -28,6 +28,11 @@ from human_interaction.service import (
     reset_human_interaction_service,
     set_human_interaction_service,
 )
+from human_interaction.view_router import (
+    ViewMode,
+    get_artifact_view_hints,
+    resolve_view_mode,
+)
 
 __all__ = [
     "IHumanInteractionService",
@@ -44,4 +49,8 @@ __all__ = [
     "InteractionTimeoutError",
     "InteractionCancelledError",
     "InteractionDeniedError",
+    # 审批视图路由
+    "ViewMode",
+    "resolve_view_mode",
+    "get_artifact_view_hints",
 ]

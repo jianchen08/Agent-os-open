@@ -16,7 +16,6 @@ import inspect
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Callable
 
 from isolation.providers.docker_provider import DockerProvider

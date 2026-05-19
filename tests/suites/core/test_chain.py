@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, RouteSignal, create_initial_state

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -133,7 +134,7 @@ class WorkspaceService:
             {"tree": [...]}
         """
         if base_path and os.path.isdir(base_path):
-            tree = self._scan_directory(base_path, base_path)
+            tree = await asyncio.to_thread(self._scan_directory, base_path, base_path)
         else:
             tree = []
 
@@ -167,7 +168,7 @@ class WorkspaceService:
                 lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
             )
 
-            task = task_service.get_task(task_id)
+            task = await asyncio.to_thread(task_service.get_task, task_id)
             if not task:
                 return task_id
 
@@ -184,7 +185,7 @@ class WorkspaceService:
             visited = {task_id}
             while current.parent_task_id and current.parent_task_id not in visited:
                 visited.add(current.parent_task_id)
-                parent = task_service.get_task(current.parent_task_id)
+                parent = await asyncio.to_thread(task_service.get_task, current.parent_task_id)
                 if not parent:
                     break
                 current = parent
@@ -196,7 +197,10 @@ class WorkspaceService:
             return task_id
 
     async def _get_child_task_ids(self, container_task_id: str) -> set[str]:
-        """获取容器任务下所有子任务 ID。"""
+        """获取容器任务下所有子任务 ID。
+
+        使用 list_subtasks 递归查询，避免加载全部任务。
+        """
         try:
             from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
@@ -204,21 +208,20 @@ class WorkspaceService:
                 "task_service",
                 lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
             )
-            # BUG-FIX-fix_20260512_async_list_all: 添加 await
-            all_tasks = await task_service.list_all(limit=500, reverse=False)
-            child_ids: set[str] = set()
-            children_of: dict[str, list[str]] = {}
-            for t in all_tasks:
-                if t.parent_task_id:
-                    children_of.setdefault(t.parent_task_id, []).append(t.id)
 
-            # BFS 收集所有子孙
-            queue = list(children_of.get(container_task_id, []))
+            child_ids: set[str] = set()
+            visited: set[str] = set()
+            queue = [container_task_id]
+
             while queue:
-                tid = queue.pop(0)
-                child_ids.add(tid)
-                for cid in children_of.get(tid, []):
-                    queue.append(cid)
+                parent_id = queue.pop(0)
+                if parent_id in visited:
+                    continue
+                visited.add(parent_id)
+                subtasks = task_service.list_subtasks(parent_id)
+                for t in subtasks:
+                    child_ids.add(t.id)
+                    queue.append(t.id)
 
             return child_ids
         except Exception:

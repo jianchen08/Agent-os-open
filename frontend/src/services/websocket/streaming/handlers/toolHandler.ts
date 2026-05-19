@@ -7,32 +7,25 @@ import { loggers } from '@/utils/logger'
 import { resetChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
+import { extractMessageId } from './utils'
+
 const _debugLogger = loggers.websocket
 
 /**
  * 处理工具调用开始事件
  *
- * BUG-FIX-fix_20260513_duplicate_toolcall:
- * 问题根因: 去重条件只检查 status==='running'，当 tool_result 先于 tool_start 到达（WS 乱序）
- *          时，已有的 completed 状态条目不匹配去重条件，导致追加重复的 running 条目。
- *          同时 contentBlocks 的去重也存在同样问题（只检查 call_id 存在，不看状态），
- *          但 call_id 的去重是正确的（不看状态），所以 contentBlocks 不会重复，但 toolCalls 数组会。
- * 修复方案:
- *   1. toolCalls 去重改为只看 call_id 是否已存在（不看状态），与 contentBlocks 保持一致
- *   2. 无 callId 时仍按 tool_name + running 去重
- * 影响范围: WebSocket 消息乱序场景下的 toolCall 数据一致性
+ * FIX: toolCalls 去重改为只看 call_id 是否已存在（不看状态），避免 WS 乱序时重复。
  */
 export function handleToolStart(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
+  const messageId = extractMessageId(eventData)
   const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
   if (!messageId) return
 
   const callId = eventData.call_id || eventData.data?.call_id
-  console.warn(
-    `%c[TOOL_START] tool=%s callId=%s pipelineId=%s msgId=%s`,
-    'color:orange;font-weight:bold',
+  _debugLogger.debug(
+    `[TOOL_START] tool=%s callId=%s pipelineId=%s msgId=%s`,
     toolName, callId || '(no-call-id)', pipelineId?.slice(0, 8), messageId?.slice(0, 12),
   )
 
@@ -74,31 +67,21 @@ export function handleToolStart(eventData: any) {
 /**
  * 处理工具调用结果事件
  *
- * BUG-FIX-fix_20260513_duplicate_toolcall:
- * 问题根因: buildUpdated 的 map 匹配条件是 tool_name + status==='running'，
- *          当同名工具连续调用两次时，map 只更新第一个 running 的，第二个被忽略。
- *          fallback 的判断条件也存在漏洞：用 tool_name 匹配而非 call_id。
- *          当 tool_result 先于 tool_start 到达（WS 乱序），不存在 running 条目，
- *          fallback 会创建新条目，后续 tool_start 又追加一个 running 条目，产生重复。
- * 修复方案:
- *   1. 优先用 call_id 精确匹配（而非 tool_name）
- *   2. 无 callId 时 fallback 到 tool_name 匹配
- *   3. fallback 判断也改为 call_id 维度
- * 影响范围: WebSocket 消息乱序和同名工具连续调用场景
+ * FIX: 优先用 call_id 精确匹配，无 callId 时 fallback 到 tool_name 匹配。
  */
 export function handleToolResult(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) {
-    // BUG-FIX-fix_20260513_pipeline_id_silent_drop: tool_result 缺少 pipeline_id 时记录 warn
+    // FIX: pipeline_id 缺失时记录 warn
     _debugLogger.warn(
       `[TOOL_RESULT] pipeline_id missing, _threadId=%s msgId=%s tool=%s`,
-      eventData._threadId?.slice(0, 12),
-      (eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id)?.slice(0, 12),
+      eventData.data?._threadId?.slice(0, 12),
+      extractMessageId(eventData)?.slice(0, 12),
       eventData.tool_name || eventData.data?.tool_name,
     )
     return
   }
-  const messageId = eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id
+  const messageId = extractMessageId(eventData)
   const toolName = eventData.tool_name || eventData.data?.tool_name || 'unknown'
   if (!messageId) return
 

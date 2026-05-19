@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -477,7 +476,7 @@ class TestEvaluationExecutor:
             task_service=mock_service,
             loader=loader,
         )
-        result = executor.run_evaluation(
+        executor.run_evaluation(
             task_id="task1",
             metric_ids=["bash_check"],
         )

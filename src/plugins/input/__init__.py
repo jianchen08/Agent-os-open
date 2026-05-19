@@ -23,6 +23,7 @@ from plugins.input.task_event_receiver.plugin import TaskEventReceiverPlugin
 from plugins.input.tool_cache.plugin import ToolCache
 from plugins.input.tool_schema.plugin import ToolSchemaPlugin
 from plugins.input.tool_call_guard.plugin import ToolCallGuard
+from plugins.input.tool_context.plugin import ToolContextPlugin
 from plugins.input.tool_schema_validator.plugin import ToolSchemaValidator
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "TaskEventReceiverPlugin",
     "ToolCache",
     "ToolCallGuard",
+    "ToolContextPlugin",
     "ToolSchemaPlugin",
     "ToolSchemaValidator",
 ]

@@ -231,6 +231,24 @@ class SecurityCheckPlugin(IInputPlugin):
                     ctx, tool_name, rule_name
                 )
 
+        # 4. Host模式审批：非白名单工具需要用户确认
+        host_contexts = [
+            c for c in ctx.state.get("execution_contexts", [])
+            if c.get("provider") == "host"
+        ]
+        if host_contexts:
+            _HOST_SAFE_TOOLS = frozenset({
+                "file_read", "enhanced_search", "code_search", "resource_search",
+                "list_directory", "memory", "task_manage", "task_evaluate",
+                "human_interaction", "collect_tool_info",
+            })
+            for tc in tool_calls:
+                tool_name = tc.get("name", "")
+                if tool_name not in _HOST_SAFE_TOOLS:
+                    return await self._await_approval(
+                        ctx, tool_name, "host_mode_dangerous_operation"
+                    )
+
         return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
 
     async def _await_approval(
@@ -330,7 +348,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 },
             }
 
-        except InteractionTimeoutError as e:
+        except InteractionTimeoutError:
             logger.warning(
                 "[%s] Approval timed out | request_id=%s | tool=%s",
                 self.name, request_id, tool_name,

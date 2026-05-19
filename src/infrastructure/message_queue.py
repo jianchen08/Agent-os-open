@@ -17,7 +17,7 @@ import logging
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class Message:
         """检查消息是否已过期。"""
         if self.expires_at is None:
             return False
-        return datetime.utcnow() > self.expires_at
+        return datetime.now(timezone.utc) > self.expires_at
 
 
 class MessageQueue:
@@ -127,7 +127,7 @@ class MessageQueue:
                 )
 
             if message.expires_at is None:
-                message.expires_at = datetime.utcnow() + timedelta(
+                message.expires_at = datetime.now(timezone.utc) + timedelta(
                     seconds=self._default_ttl
                 )
 

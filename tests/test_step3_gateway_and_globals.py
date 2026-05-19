@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +248,6 @@ class TestTaskManageUsesServiceProvider:
 
     def test_get_task_service_falls_back_to_sys(self) -> None:
         """_get_task_service 在 ServiceProvider 无服务时应回退到 sys。"""
-        from infrastructure.service_provider import ServiceProvider
 
         _reset_sp()
         mock_svc = MagicMock(name="sys_task_service")
@@ -271,7 +269,6 @@ class TestTaskWorkerRegistersViaServiceProvider:
 
     def test_worker_creation_succeeds(self) -> None:
         """TaskWorker 应能正常创建实例。"""
-        from infrastructure.service_provider import ServiceProvider
         from infrastructure.task_worker import TaskWorker
 
         _reset_sp()

@@ -10,7 +10,6 @@ MemoryTool、TaskSubmitTool、HumanInteractionTool 全面单元测试
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from tools.builtin.memory import MemoryTool
 from tools.builtin.task_submit import TaskSubmitTool

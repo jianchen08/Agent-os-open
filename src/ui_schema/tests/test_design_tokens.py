@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from ui_schema.design_tokens import (
     BorderRadiusScale,

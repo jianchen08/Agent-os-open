@@ -1,0 +1,407 @@
+{
+  "summary": {
+    "total": 43,
+    "passed": 35,
+    "failed": 8,
+    "criticalFails": 3,
+    "mediumFails": 4,
+    "passRate": "81.4%"
+  },
+  "bugs": [
+    {
+      "testItem": "主页面布局 - 侧边栏可见",
+      "expected": "侧边栏 aside 元素可见",
+      "actual": "侧边栏不可见",
+      "severity": "高"
+    },
+    {
+      "testItem": "主页面布局 - \"新会话\" 按钮可见",
+      "expected": "\"新会话\" 按钮在侧边栏中可见",
+      "actual": "\"新会话\" 按钮不可见",
+      "severity": "高"
+    },
+    {
+      "testItem": "主页面布局 - 工作区面板/切换手柄可见",
+      "expected": "工作区面板或切换手柄可见",
+      "actual": "面板: false, 手柄: false",
+      "severity": "中"
+    },
+    {
+      "testItem": "导航-工具 - 工具数据已渲染 (0 个元素)",
+      "expected": "页面显示工具数据",
+      "actual": "找到 0 个工具相关元素",
+      "severity": "中"
+    },
+    {
+      "testItem": "聊天交互 - 消息输入框可见",
+      "expected": "textarea 输入框可见",
+      "actual": "输入框不可见",
+      "severity": "高"
+    },
+    {
+      "testItem": "聊天交互 - 思考模式按钮可见",
+      "expected": "思考模式按钮可见",
+      "actual": "未找到思考模式按钮",
+      "severity": "中"
+    },
+    {
+      "testItem": "聊天交互 - 模型名显示 (glm)",
+      "expected": "页面包含 \"glm\" 模型名",
+      "actual": "未找到 glm",
+      "severity": "中"
+    },
+    {
+      "testItem": "聊天交互 - Token 计数显示",
+      "expected": "页面包含 token/上下文相关信息",
+      "actual": "未找到",
+      "severity": "低"
+    }
+  ],
+  "results": [
+    {
+      "category": "登录",
+      "name": "管理员登录",
+      "passed": true,
+      "expected": "登录后 URL 不包含 /login",
+      "actual": "URL: http://127.0.0.1:5188/",
+      "severity": "info"
+    },
+    {
+      "category": "主页面布局",
+      "name": "侧边栏可见",
+      "passed": false,
+      "expected": "侧边栏 aside 元素可见",
+      "actual": "侧边栏不可见",
+      "severity": "high"
+    },
+    {
+      "category": "主页面布局",
+      "name": "\"新会话\" 按钮可见",
+      "passed": false,
+      "expected": "\"新会话\" 按钮在侧边栏中可见",
+      "actual": "\"新会话\" 按钮不可见",
+      "severity": "high"
+    },
+    {
+      "category": "主页面布局",
+      "name": "会话列表包含会话 (8 个)",
+      "passed": true,
+      "expected": "至少有一个会话",
+      "actual": "找到 8 个会话",
+      "severity": "info"
+    },
+    {
+      "category": "主页面布局",
+      "name": "工作区面板/切换手柄可见",
+      "passed": false,
+      "expected": "工作区面板或切换手柄可见",
+      "actual": "面板: false, 手柄: false",
+      "severity": "medium"
+    },
+    {
+      "category": "导航-工具",
+      "name": "URL 跳转到 /tools",
+      "passed": true,
+      "expected": "URL 包含 /tools",
+      "actual": "URL: http://127.0.0.1:5188/tools",
+      "severity": "info"
+    },
+    {
+      "category": "导航-工具",
+      "name": "搜索框可见",
+      "passed": true,
+      "expected": "搜索输入框可见",
+      "actual": "搜索框可见",
+      "severity": "info"
+    },
+    {
+      "category": "导航-工具",
+      "name": "搜索框可以输入",
+      "passed": true,
+      "expected": "输入 \"test\"",
+      "actual": "实际值: \"test\"",
+      "severity": "info"
+    },
+    {
+      "category": "导航-工具",
+      "name": "分类下拉框可见",
+      "passed": true,
+      "expected": "分类选择下拉框可见",
+      "actual": "下拉框可见",
+      "severity": "info"
+    },
+    {
+      "category": "导航-工具",
+      "name": "工具数据已渲染 (0 个元素)",
+      "passed": false,
+      "expected": "页面显示工具数据",
+      "actual": "找到 0 个工具相关元素",
+      "severity": "medium"
+    },
+    {
+      "category": "导航-智能体",
+      "name": "URL 跳转到 /agents",
+      "passed": true,
+      "expected": "URL 包含 /agents",
+      "actual": "URL: http://127.0.0.1:5188/agents",
+      "severity": "info"
+    },
+    {
+      "category": "导航-智能体",
+      "name": "智能体层级标签显示",
+      "passed": true,
+      "expected": "页面包含 L1/L2/L3 或层级标签",
+      "actual": "层级标签可见",
+      "severity": "info"
+    },
+    {
+      "category": "导航-智能体",
+      "name": "智能体名称显示",
+      "passed": true,
+      "expected": "页面包含智能体相关文字",
+      "actual": "包含智能体文字",
+      "severity": "info"
+    },
+    {
+      "category": "导航-监控",
+      "name": "URL 跳转到 /monitoring",
+      "passed": true,
+      "expected": "URL 包含 /monitoring",
+      "actual": "URL: http://127.0.0.1:5188/monitoring",
+      "severity": "info"
+    },
+    {
+      "category": "导航-监控",
+      "name": "监控页面内容渲染",
+      "passed": true,
+      "expected": "页面包含监控相关内容",
+      "actual": "包含监控内容",
+      "severity": "info"
+    },
+    {
+      "category": "导航-记忆",
+      "name": "URL 跳转到 /memory",
+      "passed": true,
+      "expected": "URL 包含 /memory",
+      "actual": "URL: http://127.0.0.1:5188/memory",
+      "severity": "info"
+    },
+    {
+      "category": "导航-记忆",
+      "name": "记忆页面内容渲染",
+      "passed": true,
+      "expected": "页面包含记忆相关内容",
+      "actual": "包含记忆内容",
+      "severity": "info"
+    },
+    {
+      "category": "导航-设置",
+      "name": "URL 跳转到 /settings",
+      "passed": true,
+      "expected": "URL 包含 /settings",
+      "actual": "URL: http://127.0.0.1:5188/settings",
+      "severity": "info"
+    },
+    {
+      "category": "导航-设置",
+      "name": "设置页面内容渲染",
+      "passed": true,
+      "expected": "页面包含设置相关内容",
+      "actual": "包含设置内容",
+      "severity": "info"
+    },
+    {
+      "category": "导航-设置",
+      "name": "设置子页面导航项 (6 个)",
+      "passed": true,
+      "expected": "有设置子页面导航项",
+      "actual": "找到 6 个",
+      "severity": "info"
+    },
+    {
+      "category": "导航-调试",
+      "name": "URL 跳转到 /debug",
+      "passed": true,
+      "expected": "URL 包含 /debug",
+      "actual": "URL: http://127.0.0.1:5188/debug",
+      "severity": "info"
+    },
+    {
+      "category": "导航-调试",
+      "name": "调试页面内容渲染",
+      "passed": true,
+      "expected": "页面包含调试相关内容",
+      "actual": "包含调试内容",
+      "severity": "info"
+    },
+    {
+      "category": "聊天交互",
+      "name": "消息输入框可见",
+      "passed": false,
+      "expected": "textarea 输入框可见",
+      "actual": "输入框不可见",
+      "severity": "high"
+    },
+    {
+      "category": "聊天交互",
+      "name": "思考模式按钮可见",
+      "passed": false,
+      "expected": "思考模式按钮可见",
+      "actual": "未找到思考模式按钮",
+      "severity": "medium"
+    },
+    {
+      "category": "聊天交互",
+      "name": "模型名显示 (glm)",
+      "passed": false,
+      "expected": "页面包含 \"glm\" 模型名",
+      "actual": "未找到 glm",
+      "severity": "medium"
+    },
+    {
+      "category": "聊天交互",
+      "name": "Token 计数显示",
+      "passed": false,
+      "expected": "页面包含 token/上下文相关信息",
+      "actual": "未找到",
+      "severity": "low"
+    },
+    {
+      "category": "工作区面板",
+      "name": "点击隐藏后面板收起",
+      "passed": true,
+      "expected": "出现 \"Show workspace\" 按钮",
+      "actual": "展开按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "点击展开后面板恢复",
+      "passed": true,
+      "expected": "出现 \"Hide workspace\" 按钮",
+      "actual": "收起按钮可见",
+      "severity": "info"
+    },
+    {
+      "category": "工作区面板",
+      "name": "标签关闭按钮可见",
+      "passed": true,
+      "expected": "有标签关闭按钮",
+      "actual": "找到 1 个关闭按钮",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "点击\"新会话\"创建成功",
+      "passed": true,
+      "expected": "会话数从 4 增加到 5",
+      "actual": "之前: 4, 之后: 5",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "新会话后进入聊天界面",
+      "passed": true,
+      "expected": "聊天输入框可见",
+      "actual": "输入框可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "更多操作菜单弹出",
+      "passed": true,
+      "expected": "下拉菜单可见",
+      "actual": "菜单可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "菜单项 \"重命名\"",
+      "passed": true,
+      "expected": "\"重命名\" 菜单项可见",
+      "actual": "菜单项可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "菜单项 \"复制\"",
+      "passed": true,
+      "expected": "\"复制\" 菜单项可见",
+      "actual": "菜单项可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "菜单项 \"星标\"",
+      "passed": true,
+      "expected": "\"星标\" 菜单项可见",
+      "actual": "菜单项可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "菜单项 \"置顶\"",
+      "passed": true,
+      "expected": "\"置顶\" 菜单项可见",
+      "actual": "菜单项可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "菜单项 \"删除\"",
+      "passed": true,
+      "expected": "\"删除\" 菜单项可见",
+      "actual": "菜单项可见",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "重命名弹出对话框",
+      "passed": true,
+      "expected": "弹出 window.prompt 对话框",
+      "actual": "message: \"重命名会话\", default: \"测试重命名\"",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "点击隐藏后侧边栏收起",
+      "passed": true,
+      "expected": "侧边栏宽度变小或隐藏",
+      "actual": "侧边栏宽度: 48px",
+      "severity": "info"
+    },
+    {
+      "category": "侧边栏",
+      "name": "点击显示后侧边栏恢复",
+      "passed": true,
+      "expected": "侧边栏宽度恢复",
+      "actual": "侧边栏宽度: 224px",
+      "severity": "info"
+    },
+    {
+      "category": "主题",
+      "name": "浅色模式切换",
+      "passed": true,
+      "expected": "背景色变化",
+      "actual": "之前: rgba(0, 0, 0, 0), 之后: rgb(248, 250, 252)",
+      "severity": "info"
+    },
+    {
+      "category": "主题",
+      "name": "深色模式恢复",
+      "passed": true,
+      "expected": "切换回深色模式",
+      "actual": "已切换",
+      "severity": "info"
+    },
+    {
+      "category": "布局",
+      "name": "Classic/Five-space 布局切换",
+      "passed": true,
+      "expected": "按钮 title 从 \"切换到Classic布局\" 变化",
+      "actual": "切换后: \"切换到Five-space布局\"",
+      "severity": "info"
+    }
+  ],
+  "screenshots": 23
+}

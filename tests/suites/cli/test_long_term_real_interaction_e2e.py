@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import shutil
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -252,7 +251,7 @@ async def _find_rogue_snake_container(task_service: Any) -> Any | None:
         if meta.get("task_scope") != "long_term":
             continue
         title = (t.title or "").lower()
-        desc = (t.description or "").lower()
+        (t.description or "").lower()
         if "rogue" in title or "snake" in title or "贪吃蛇" in title:
             return t
     return None
@@ -377,7 +376,7 @@ async def test_real_long_term_with_real_interaction() -> None:
         print("=" * 60, flush=True)
 
         try:
-            result = await asyncio.wait_for(
+            await asyncio.wait_for(
                 app._engine.run(
                     user_input=TASK_SUBMIT_MSG,
                     agent_config=app._agent_config,

@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -343,7 +342,7 @@ class TestSchemaParser:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            filepath = self._write_yaml(tmp_dir, "hot.yaml", {
+            self._write_yaml(tmp_dir, "hot.yaml", {
                 "config_id": "hot",
                 "name": "热重载",
                 "ui": {

@@ -6,12 +6,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from memory.context_compressor import CompressionConfig
 from memory.memory_context_service import MemoryContextService
 
 

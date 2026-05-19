@@ -48,7 +48,7 @@ class TriggerManager:
         """
         config.status = TriggerStatus.ACTIVE
         if "register_time" not in config.metadata:
-            config.metadata["register_time"] = datetime.datetime.utcnow().isoformat()
+            config.metadata["register_time"] = datetime.datetime.now(datetime.UTC).isoformat()
         if "last_fire_time" not in config.metadata:
             config.metadata["last_fire_time"] = None
         self._triggers[config.trigger_id] = config
@@ -105,7 +105,7 @@ class TriggerManager:
                 continue
 
             trigger.fire_count += 1
-            trigger.metadata["last_fire_time"] = datetime.datetime.utcnow().isoformat()
+            trigger.metadata["last_fire_time"] = datetime.datetime.now(datetime.UTC).isoformat()
             fired.append(trigger.trigger_id)
 
             if self._is_max_fires_reached(trigger):
@@ -150,7 +150,7 @@ class TriggerManager:
                 )
                 if result:
                     trigger.fire_count += 1
-                    trigger.metadata["last_fire_time"] = datetime.datetime.utcnow().isoformat()
+                    trigger.metadata["last_fire_time"] = datetime.datetime.now(datetime.UTC).isoformat()
                     fired.append(trigger.trigger_id)
 
                     if self._is_max_fires_reached(trigger):
@@ -341,7 +341,7 @@ class TriggerManager:
             try:
                 await asyncio.sleep(_TRIGGER_CHECK_INTERVAL)
 
-                now = datetime.datetime.utcnow()
+                now = datetime.datetime.now(datetime.UTC)
                 fired_ids = self.check_scheduled(now)
 
                 for trigger_id in fired_ids:
@@ -425,7 +425,7 @@ class TriggerManager:
 
         Args:
             trigger: 触发器配置。
-            now: 当前时间，None 时使用 utcnow()。
+            now: 当前时间，None 时使用 now(datetime.UTC)。
 
         Returns:
             True 表示仍可继续触发，False 表示应停止。
@@ -435,7 +435,7 @@ class TriggerManager:
             if register_time_str:
                 try:
                     register_time = datetime.datetime.fromisoformat(register_time_str)
-                    check_time = now or datetime.datetime.utcnow()
+                    check_time = now or datetime.datetime.now(datetime.UTC)
                     elapsed = (check_time - register_time).total_seconds()
                     if elapsed >= trigger.max_time_seconds:
                         logger.info(

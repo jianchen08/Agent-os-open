@@ -9,7 +9,7 @@
 """
 
 import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -706,7 +706,6 @@ class TestEndToEndNotification:
         """状态切换: 挂起态被唤醒后变为运行态，后续通知走运行态路径。"""
         services: dict = {"__test__": True}
         engine = _make_engine(services)
-        pipeline_id = "transition-pipe"
 
         engine._suspended_state = {
             "user_input": "初始",

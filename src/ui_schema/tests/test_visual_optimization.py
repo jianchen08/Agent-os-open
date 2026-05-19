@@ -14,18 +14,13 @@
 
 from __future__ import annotations
 
-import pytest
 
 from ui_schema.design_tokens import (
-    BorderRadiusScale,
     ColorPalette,
     DesignTokens,
     LayoutScale,
     OpacityScale,
-    ShadowScale,
-    SpacingScale,
     TransitionScale,
-    TypographyScale,
     VisualPreset,
     ZIndexScale,
     generate_css_stylesheet,

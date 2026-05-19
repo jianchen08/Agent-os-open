@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials

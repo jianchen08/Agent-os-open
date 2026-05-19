@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
@@ -130,8 +129,13 @@ class TestDoubleDispatchRaceCondition:
         TimerManager._initialized = False
 
     @pytest.mark.asyncio
-    async def test_task_worker_no_dedup_on_submitted(self):
-        """验证 _on_task_submitted 没有去重机制，同一 task_id 会被创建两次协程。"""
+    async def test_task_worker_dedup_on_submitted(self):
+        """验证 _on_task_submitted 有去重机制，同一 task_id 只创建一次协程。
+
+        BUG-FIX-fix_20260516_double_dispatch:
+        修复前：_on_task_submitted 无去重，同一 task_id 收到两次事件会创建两个协程。
+        修复后：通过 _task_id_to_bg_task 检查，已有未完成协程则跳过。
+        """
         from infrastructure.task_worker import TaskWorker
 
         executed_count = 0
@@ -150,6 +154,7 @@ class TestDoubleDispatchRaceCondition:
             worker._running = True
             worker._tasks = set()
             worker._terminal_events = {}
+            worker._task_id_to_bg_task = {}
             worker._services = services
             worker._event_bus = event_bus
 
@@ -160,7 +165,6 @@ class TestDoubleDispatchRaceCondition:
             event2 = MagicMock()
             event2.data = {"task_id": "task_001"}
 
-            # _on_task_submitted 不会检查重复
             original_create_task = asyncio.create_task
 
             created_tasks = []
@@ -175,9 +179,9 @@ class TestDoubleDispatchRaceCondition:
                     await worker._on_task_submitted(event1)
                     await worker._on_task_submitted(event2)
 
-            # 应该创建了两个协程
-            assert len(created_tasks) == 2, (
-                f"_on_task_submitted 应该创建 2 个协程，实际创建了 {len(created_tasks)}"
+            # 修复后应该只创建一个协程（第二次被去重跳过）
+            assert len(created_tasks) == 1, (
+                f"_on_task_submitted 应该只创建 1 个协程（去重），实际创建了 {len(created_tasks)}"
             )
 
 

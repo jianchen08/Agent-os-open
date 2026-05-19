@@ -13,7 +13,6 @@ import pytest
 from memory.history_buffer import (
     ConversationHistory,
     HistoryBuffer,
-    MessageEntry,
     _batch_cosine_similarity,
     _cosine_similarity,
 )
@@ -442,3 +441,113 @@ class TestBatchCosineSimilarity:
         results = _batch_cosine_similarity(query, vectors, top_k=5, min_similarity=0.5)
         assert len(results) == 1
         assert results[0][1] >= 0.5
+
+
+
+# ============================================================
+# 5. HistoryBuffer 默认容量 + 配置支持 测试
+# ============================================================
+
+
+class TestHistoryBufferDefaultCapacity:
+    """测试 HistoryBuffer 默认容量优化（从 1000 降至 100）。"""
+
+    def test_默认max_size应为优化值(self) -> None:
+        """HistoryBuffer 默认 max_size 应为 100（非 1000）。
+
+        意图：确保多会话并发场景下内存压力得到缓解。
+        """
+        buf = HistoryBuffer()
+        assert buf.max_size == 100
+
+    def test_默认max_size不再为1000(self) -> None:
+        """确认旧的默认值 1000 已被替换，防止回归。"""
+        buf = HistoryBuffer()
+        assert buf.max_size != 1000
+
+    def test_自定义max_size优先(self) -> None:
+        """显式传入 max_size 时应优先使用传入值。"""
+        buf = HistoryBuffer(max_size=50)
+        assert buf.max_size == 50
+
+
+class TestConversationHistoryDefaultCapacity:
+    """测试 ConversationHistory 默认容量优化。"""
+
+    def test_默认max_messages应为优化值(self) -> None:
+        """ConversationHistory 默认 max_messages 应为 100（非 1000）。"""
+        history = ConversationHistory()
+        assert history.buffer.max_size == 100
+
+    def test_默认max_tokens保持128000(self) -> None:
+        """默认 max_tokens 应保持 128000 不变。"""
+        history = ConversationHistory()
+        assert history.max_tokens == 128000
+
+    def test_自定义max_messages优先(self) -> None:
+        """显式传入 max_messages 时应优先使用传入值。"""
+        history = ConversationHistory(max_messages=50)
+        assert history.buffer.max_size == 50
+
+    def test_自定义max_tokens优先(self) -> None:
+        """显式传入 max_tokens 时应优先使用传入值。"""
+        history = ConversationHistory(max_tokens=50000)
+        assert history.max_tokens == 50000
+
+
+class TestHistoryBufferEnvConfig:
+    """测试环境变量配置支持。"""
+
+    def test_环境变量覆盖max_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HISTORY_BUFFER_MAX_SIZE 环境变量应覆盖默认 max_size。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_SIZE", "200")
+        buf = HistoryBuffer()
+        assert buf.max_size == 200
+
+    def test_环境变量覆盖max_messages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HISTORY_BUFFER_MAX_MESSAGES 环境变量应覆盖默认 max_messages。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_MESSAGES", "200")
+        history = ConversationHistory()
+        assert history.buffer.max_size == 200
+
+    def test_环境变量覆盖max_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HISTORY_BUFFER_MAX_TOKENS 环境变量应覆盖默认 max_tokens。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_TOKENS", "64000")
+        history = ConversationHistory()
+        assert history.max_tokens == 64000
+
+    def test_显式参数优先于环境变量(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """显式传入的参数应优先于环境变量。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_SIZE", "999")
+        buf = HistoryBuffer(max_size=50)
+        assert buf.max_size == 50
+
+    def test_显式max_messages优先于环境变量(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ConversationHistory 显式 max_messages 应优先于环境变量。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_MESSAGES", "999")
+        history = ConversationHistory(max_messages=30)
+        assert history.buffer.max_size == 30
+
+    def test_显式max_tokens优先于环境变量(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ConversationHistory 显式 max_tokens 应优先于环境变量。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_TOKENS", "99999")
+        history = ConversationHistory(max_tokens=30000)
+        assert history.max_tokens == 30000
+
+    def test_环境变量无效值使用默认(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量为非数字时应回退到默认值。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_SIZE", "abc")
+        buf = HistoryBuffer()
+        assert buf.max_size == 100
+
+    def test_环境变量空值使用默认(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量为空字符串时应回退到默认值。"""
+        monkeypatch.setenv("HISTORY_BUFFER_MAX_SIZE", "")
+        buf = HistoryBuffer()
+        assert buf.max_size == 100
+
+    def test_无环境变量使用默认(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """未设置环境变量时应使用常量默认值。"""
+        monkeypatch.delenv("HISTORY_BUFFER_MAX_SIZE", raising=False)
+        buf = HistoryBuffer()
+        assert buf.max_size == 100

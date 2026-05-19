@@ -12,11 +12,9 @@
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -296,7 +294,7 @@ class TestPlainMode:
 
         mgr._ws_meta_store["abc12345"] = {"mode": "plain", "path": str(ws)}
 
-        result = mgr.cleanup_workspace("abc12345")
+        mgr.cleanup_workspace("abc12345")
 
         assert ws.exists()  # 目录没被删
         assert (ws / "result.txt").exists()
@@ -569,7 +567,6 @@ class TestEvalPassedMergeGuard:
         ws_meta = {"mode": "worktree", "project_root": str(repo), "branch": "task/v1"}
 
         # Mock _safe_merge to return success via git_merge
-        original_safe_merge = mgr._safe_merge
         call_count = {"n": 0}
 
         def _mock_safe_merge(workspace, meta):

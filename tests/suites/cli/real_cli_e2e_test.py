@@ -12,7 +12,6 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Optional
 
 # 添加 src 到路径
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -140,7 +139,7 @@ async def run_memory_test():
     tester = RealE2ETester()
 
     # 第一轮：告诉模型一个事实
-    r1 = await tester.send_message(
+    await tester.send_message(
         "记住这个信息：我的名字叫测试用户"
     )
 

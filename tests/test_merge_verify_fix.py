@@ -1,10 +1,7 @@
 """验证合并修复：copy_merge 空文件返回失败 + 验证 + 重试 + fail_task"""
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -142,7 +139,6 @@ class TestMergeVerifyFix:
             "branch": "task/test1",
             "project_root": str(proj),
         }
-        original_verify = lifecycle._verify_merge_result
         call_count = 0
 
         def mock_verify(workspace, project_root, ws_meta_arg, merge_result):

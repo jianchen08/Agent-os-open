@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import Depends, Header, HTTPException, Query, Request, status
+from fastapi import Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from channels.api.auth import get_current_user

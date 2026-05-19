@@ -4,7 +4,7 @@
  * 暴露接口：
  * - getUsers(skip, limit): 获取用户列表
  * - getUserStats(): 获取用户统计
- * - createUser(data): 创建用户
+ * - createUser(data): 创建用户（含 email 可选字段）
  * - updateUserRole(userId, role): 更新用户角色
  * - updateUserActiveStatus(userId, isActive): 更新用户激活状态
  * - deleteUser(userId): 删除用户
@@ -33,6 +33,7 @@ export interface UserStats {
 export interface CreateUserRequest {
   username: string
   password: string
+  email?: string
   role?: 'admin' | 'user'
 }
 
@@ -68,6 +69,7 @@ export async function createUser(data: CreateUserRequest): Promise<User> {
       params: {
         username: data.username,
         password: data.password,
+        email: data.email || '',
         role: data.role || 'user',
       },
     })

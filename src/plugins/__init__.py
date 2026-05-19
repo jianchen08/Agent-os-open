@@ -22,11 +22,10 @@ from plugins.input import (
     TaskEventReceiverPlugin,
     ToolCallGuard,
     ToolCache,
+    ToolContextPlugin,
     ToolSchemaPlugin,
     ToolSchemaValidator,
 )
-from plugins.output import OutputRepetitionGuard
-
 # Lazy import for hot-reload to avoid circular imports at module level
 # Use: from plugins.hot_reload import PluginHotReloader
 
@@ -53,7 +52,6 @@ __all__ = [
     "MemoryReadPlugin",
     "MessageInjectPlugin",
     "MultimodalPreprocessor",
-    "OutputRepetitionGuard",
     "ParamInjectPlugin",
     "PauseGuardPlugin",
     "PromptBuildPlugin",
@@ -62,6 +60,7 @@ __all__ = [
     "TaskEventReceiverPlugin",
     "ToolCallGuard",
     "ToolCache",
+    "ToolContextPlugin",
     "ToolSchemaPlugin",
     "ToolSchemaValidator",
     # Hot-reload

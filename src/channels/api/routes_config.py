@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException
 
-from config.models import get_model_config_loader, invalidate_model_config_cache
+from config.models import invalidate_model_config_cache
 
 logger = logging.getLogger(__name__)
 

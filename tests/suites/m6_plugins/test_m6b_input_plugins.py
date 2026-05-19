@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline.plugin import PluginContext, PluginResult
+from pipeline.plugin import PluginContext
 from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.input.param_inject import ParamInjectPlugin
 from plugins.input.reasoning_check import ReasoningCheckPlugin

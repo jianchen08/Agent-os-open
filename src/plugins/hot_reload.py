@@ -213,6 +213,9 @@ class PluginHotReloader:
         self._observer: Observer | None = None
         self._running = False
 
+        # Thread pool for non-blocking reload dispatch
+        self._reload_executor: Any = None
+
         # Track loaded plugins by their absolute path
         self._records: dict[str, PluginRecord] = {}
         self._records_lock = threading.Lock()
@@ -378,12 +381,22 @@ class PluginHotReloader:
     def _on_file_change(self, event_type: str, file_path: str) -> None:
         """Entry point called by the watchdog handler.
 
-        Dispatches to _do_reload in a thread-safe manner.
+        Dispatches to _do_reload in a background thread so the watchdog
+        thread is never blocked by I/O-heavy reload work.
 
         Args:
             event_type: 'modified', 'created', or 'deleted'.
             file_path: Absolute path to the changed file.
         """
+        # Lazily create a single-thread executor on first use
+        if self._reload_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._reload_executor = ThreadPoolExecutor(max_workers=1)
+
+        self._reload_executor.submit(self._do_reload_safe, event_type, file_path)
+
+    def _do_reload_safe(self, event_type: str, file_path: str) -> None:
+        """Run _do_reload with exception guard (executed in worker thread)."""
         try:
             result = self._do_reload(event_type, file_path)
             if not result.success:

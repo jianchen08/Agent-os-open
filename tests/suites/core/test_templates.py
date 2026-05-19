@@ -7,7 +7,6 @@
 4. registry.py — 注册/查找/筛选/批量加载
 """
 
-import os
 import tempfile
 from pathlib import Path
 

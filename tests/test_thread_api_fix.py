@@ -325,10 +325,15 @@ class TestThreadRoutes:
         self.headers = _auth_headers(self.token)
 
     def test_list_threads(self) -> None:
-        """GET /api/v1/threads 返回列表。"""
+        """GET /api/v1/threads 返回分页格式的线程列表。"""
         response = self.client.get("/api/v1/threads", headers=self.headers)
         assert response.status_code == 200
-        assert isinstance(response.json(), list)
+        data = response.json()
+        # 新格式：{threads, total, skip, limit}
+        assert isinstance(data, dict)
+        assert "threads" in data
+        assert "total" in data
+        assert isinstance(data["threads"], list)
 
     def test_create_thread_basic(self) -> None:
         """POST /api/v1/threads 创建线程。"""

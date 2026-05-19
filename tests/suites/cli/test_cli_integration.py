@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import importlib.util
 import logging
 import sys
 import os
@@ -196,7 +196,7 @@ async def test_3_tool_call():
 
     raw_result = state.get("raw_result") or ""
     raw_error = state.get("raw_error") or ""
-    raw_tool_calls = state.get("raw_tool_calls") or []
+    state.get("raw_tool_calls") or []
     messages = state.get("messages") or []
 
     # 检查 messages 中是否有 tool_calls 和 tool result
@@ -225,10 +225,8 @@ async def test_4_task_submit():
     logger.info("测试 4: 任务提交")
     logger.info("=" * 60)
 
-    try:
-        from tasks.services.submission import TaskSubmissionService
-    except ImportError as exc:
-        logger.warning("⚠️ 测试 4 跳过: TaskSubmissionService 导入失败: %s", exc)
+    if not importlib.util.find_spec("tasks.services.submission"):
+        logger.warning("⚠️ 测试 4 跳过: TaskSubmissionService 导入失败")
         return True
 
     try:

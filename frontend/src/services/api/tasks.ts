@@ -38,14 +38,22 @@ export interface TaskInfo {
   phase_status?: Record<string, unknown>
   /** 执行者 ID */
   agent_id?: string
+  /** 会话线程 ID */
+  thread_id?: string
   /** 父任务 ID */
   parent_task_id?: string
   /** 会话 ID */
   session_id?: string
+  /** 创建者 ID */
+  created_by?: string
   /** 评估指标 IDs */
   evaluation_metric_ids?: string[]
   /** 标签 */
   tags?: string[]
+  /** 输入数据 */
+  input_data?: Record<string, unknown>
+  /** 任务结果 */
+  result?: Record<string, unknown>
   /** 错误信息 */
   error_message?: string
   /** 创建时间 */
@@ -114,10 +122,8 @@ export async function getTasks(params?: {
   limit?: number
   status?: string
   session_id?: string
-  root_only?: boolean
-  include_subtasks?: boolean
-}): Promise<TaskInfo[]> {
-  const response = await apiClient.get<TaskInfo[]>(API_ENDPOINTS.TASKS.LIST, { params })
+}): Promise<TaskListResponse> {
+  const response = await apiClient.get<TaskListResponse>(API_ENDPOINTS.TASKS.LIST, { params })
   return response.data
 }
 

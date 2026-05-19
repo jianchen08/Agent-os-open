@@ -331,10 +331,12 @@ class InteractionResponse:
 
     @property
     def is_approved(self) -> bool:
+        # BUG-FIX: CONVERSATION_END 不应视为 approved。
+        # 对话模式仅表示用户到达了对话页面，不包含审批决策，
+        # 不应被评估系统视为"通过"。
         return self.response_type in (
             ResponseType.APPROVED,
             ResponseType.MODIFIED,
-            ResponseType.CONVERSATION_END,
         )
 
     @property

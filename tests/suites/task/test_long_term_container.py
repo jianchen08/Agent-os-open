@@ -13,17 +13,15 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from tasks.service import SimpleStateMachine, TaskService
 from tasks.storage import TaskStorage
-from tasks.timer_manager import TimerManager
-from tasks.types import TaskStatus, create_task
+from tasks.types import TaskStatus
 from tools.builtin.task_submit import TaskSubmitTool
 
 
@@ -582,7 +580,7 @@ class TestContainerManualCompletion:
             title="方案准备", parent_task_id=container.id,
             metadata={"task_role": "solution_preparation"},
         )
-        sub2 = task_service.create_task(
+        task_service.create_task(
             title="方案细化", parent_task_id=container.id,
             metadata={"task_role": "solution_refinement"},
         )

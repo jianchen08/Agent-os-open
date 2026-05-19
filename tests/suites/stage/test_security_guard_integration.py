@@ -21,10 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pipeline.plugin import (
-    ICorePlugin,
     IInputPlugin,
     IOutputPlugin,
-    IPlugin,
     OutputResult,
     PluginContext,
     PluginResult,

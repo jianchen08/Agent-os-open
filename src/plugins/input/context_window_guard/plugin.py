@@ -142,13 +142,15 @@ class ContextWindowGuardPlugin(IInputPlugin):
             context_window, self._trigger_ratio, len(messages),
         )
 
-        # BUG-FIX-fix_truncate_not_compress:
-        # 问题根因: _try_fast_truncate 直接截断丢弃旧消息，不经过 LLM 压缩，
-        #   导致旧上下文完全丢失而非被压缩为 L1/L2 摘要。
-        # 修复方案: 移除快速截断路径，所有超阈值的压缩都走 MemoryContextService.compress_messages，
-        #   通过 LLM 生成结构化摘要（L1/L2/keywords），由 prompt_build 从 chunk_service 加载。
-        # 影响范围: 长对话触发上下文压缩时，旧消息被正确压缩而非截断。
-        # 修复日期: 2026-05-14
+        # 快速截断：按 recent 预算从尾部截取，旧消息由 prompt_build 通过压缩块加载
+        truncated = await self._try_fast_truncate(ctx, messages, context_window)
+        if truncated is not None and len(truncated) < len(messages):
+            logger.info(
+                "[%s] 快速截断: %d -> %d 条消息",
+                self.name, len(messages), len(truncated),
+            )
+            return PluginResult(state_updates={"messages": truncated})
+
         service = self._get_memory_service(ctx)
         if not service:
             return PluginResult()
@@ -193,6 +195,84 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return PluginResult(state_updates={"messages": messages})
 
         return PluginResult()
+
+    async def _try_fast_truncate(
+        self,
+        ctx: PluginContext,
+        messages: list[dict[str, Any]],
+        context_window: int,
+    ) -> list[dict[str, Any]] | None:
+        """按 recent 预算从尾部截取消息，不调 LLM。
+
+        messages 超阈值时，先尝试按 recent 预算截断。
+        被截掉的旧消息由 prompt_build 通过 chunk_service 加载压缩块来补充。
+        只有当截断后仍在阈值内时才返回截断结果，否则返回 None 让调用方走完整压缩。
+
+        Returns:
+            截断后的消息列表，或 None（需要走完整压缩）
+        """
+        from memory.context_compressor import CompressionConfig
+
+        config = CompressionConfig.from_yaml_config(context_window)
+        recent_budget = config.get_budgets()["recent"]
+        trigger_tokens = config.get_trigger_threshold()
+
+        # 分离 system 消息和其他消息
+        system_msgs: list[dict[str, Any]] = []
+        other_msgs: list[dict[str, Any]] = []
+        for m in messages:
+            if m.get("role") == "system":
+                content = str(m.get("content", ""))
+                if not content.startswith("## 历史对话压缩摘要") and content != _COMPRESSION_NOTICE:
+                    system_msgs.append(m)
+            else:
+                other_msgs.append(m)
+
+        if not other_msgs:
+            return None
+
+        # 按 recent 预算从尾部截取
+        accumulated = 0
+        split_idx = len(other_msgs)
+        for i in range(len(other_msgs) - 1, -1, -1):
+            msg_tokens = self._estimate_msg_tokens_simple(other_msgs[i])
+            if accumulated + msg_tokens > recent_budget:
+                split_idx = i + 1
+                break
+            accumulated += msg_tokens
+
+        if split_idx <= 0:
+            return None
+
+        # 保证 tool call 配对完整
+        from memory.memory_context_service import MemoryContextService
+        _, recent_msgs = MemoryContextService._split_preserving_tool_pairs(
+            other_msgs, split_idx,
+        )
+
+        truncated = system_msgs + recent_msgs
+        truncated_tokens = sum(self._estimate_msg_tokens_simple(m) for m in truncated)
+
+        if truncated_tokens >= trigger_tokens:
+            return None
+
+        return truncated
+
+    @staticmethod
+    def _estimate_msg_tokens_simple(msg: dict[str, Any]) -> int:
+        """简单 token 估算（用于快速截断）。"""
+        tokens = 0.0
+        content = str(msg.get("content", ""))
+        for c in content:
+            if "一" <= c <= "鿿" or "぀" <= c <= "ヿ":
+                tokens += 1.5
+            else:
+                tokens += 0.25
+        for tc in msg.get("tool_calls", []):
+            args = tc.get("function", {}).get("arguments", "")
+            if args:
+                tokens += len(args) * 0.25
+        return int(tokens)
 
     async def _clean_if_window_changed(
         self,

@@ -703,7 +703,6 @@ class TaskRunner:
 
     def _get_l3_execution_guide(self, task: Task) -> str:
         """生成 L3 执行者执行步骤指南"""
-        task_title = task.title or "任务"
         acceptance_criteria = self._get_acceptance_criteria(task)
 
         criteria_str = ""

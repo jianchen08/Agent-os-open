@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,7 +63,6 @@ class TestPipelineIdSync:
 
         async def _mock_run_loop(state, *, resumed=False):
             """直接检查同步是否生效，不执行真正循环。"""
-            from pipeline.engine import _current_pipeline_id
 
             pipeline_run_id = state.get(StateKeys.PIPELINE_ID, engine._pipeline_id)
             engine._pipeline_id = pipeline_run_id
@@ -72,7 +71,7 @@ class TestPipelineIdSync:
             return state
 
         engine._run_loop = _mock_run_loop
-        result = await engine.run(initial_state=state)
+        await engine.run(initial_state=state)
 
         assert engine._pipeline_id == target_id
         assert engine._pipeline_id != original_id
@@ -88,9 +87,7 @@ class TestPipelineIdSync:
         修复后：_run_loop 入口同步了 ID，双重注册代码已移除。
         """
         from pipeline.engine import (
-            PipelineEngine,
             _GLOBAL_SUSPENDED_ENGINES,
-            get_global_suspended_engine,
         )
 
         engine = _make_engine()
@@ -131,7 +128,6 @@ class TestNotificationRoutingIsolation:
         - Pipeline B 不应收到 Pipeline A 的通知
         """
         from pipeline.engine import (
-            PipelineEngine,
             register_suspended_engine,
             unregister_suspended_engine,
         )

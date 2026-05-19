@@ -313,9 +313,15 @@ export const ImageGallery = memo<ImageGalleryProps>(
               onClick={(e) => e.stopPropagation()}
             >
               <img
-                src={currentImage.url}
+                src={currentImage.url || currentImage.thumbnailUrl}
                 alt={currentImage.title}
                 className="max-h-[70vh] rounded-lg object-contain"
+                onError={(e) => {
+                  const img = e.currentTarget
+                  if (img.src !== currentImage.thumbnailUrl && currentImage.thumbnailUrl) {
+                    img.src = currentImage.thumbnailUrl
+                  }
+                }}
               />
 
               {/* 底部信息栏 */}

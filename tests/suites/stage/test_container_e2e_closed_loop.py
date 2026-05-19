@@ -16,7 +16,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -273,7 +273,7 @@ async def main():
                 print(f"\n  [WARN] Container still PENDING but all subtasks completed.", flush=True)
                 print(f"      L1 may need another turn. Sending confirm...", flush=True)
                 try:
-                    result3 = await asyncio.wait_for(
+                    await asyncio.wait_for(
                         app._engine.run(
                             user_input=CONFIRM_MESSAGE,
                             agent_config=app._agent_config,

@@ -29,7 +29,6 @@ from rich.table import Table
 
 from pipeline.engine import PipelineEngine
 from pipeline.plugin import (
-    ICorePlugin,
     IOutputPlugin,
     OutputResult,
     PluginContext,
@@ -157,56 +156,6 @@ class DefaultEndRoute(IOutputPlugin):
                 reason="single turn complete",
             ),
         )
-
-
-class DefaultEndRoute(IOutputPlugin):
-    """默认路由输出插件 — 单轮结束后返回 END 信号。
-
-    每轮 LLM 调用后直接结束管道循环。适用于单轮问答场景。
-
-    Attributes:
-        error_policy: 错误策略为 SKIP
-    """
-
-    error_policy = ErrorPolicy.SKIP
-
-    @property
-    def name(self) -> str:
-        """插件唯一标识名称。"""
-        return "default_end_route"
-
-    @property
-    def priority(self) -> int:
-        """插件执行优先级。"""
-        return 99
-
-    @property
-    def route_signals(self) -> list[str]:
-        """关注所有 core_type。"""
-        return []
-
-    async def execute(self, ctx: PluginContext) -> OutputResult:
-        """执行默认路由。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            END 路由信号，表示单轮处理完成
-        """
-        return OutputResult(
-            route_signal=RouteSignal(
-                route_type="end",
-                reason="single turn complete",
-            ),
-        )
-
-
-# ---------------------------------------------------------------------------
-# 管道构建工具
-# ---------------------------------------------------------------------------
-
-
 def build_simple_pipeline(
     llm_config: dict[str, Any] | None = None,
 ) -> PipelineEngine:

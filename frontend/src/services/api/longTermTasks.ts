@@ -19,6 +19,14 @@ export interface LongTermTasksResponse {
 }
 
 /**
+ * 任务列表响应结构（匹配后端 list_tasks 返回格式）
+ */
+interface TaskListApiResponse {
+  items: Task[]
+  total: number
+}
+
+/**
  * 获取长期任务列表
  *
  * 查询带有 'long-term' 标签的任务
@@ -32,22 +40,21 @@ export async function fetchLongTermTasks(params?: {
 
   const skip = (page - 1) * limit
 
-  // 构建查询参数
+  // 构建查询参数（仅使用后端支持的参数：status, priority, session_id, limit, offset, skip）
   const queryParams = new URLSearchParams({
     skip: skip.toString(),
     limit: limit.toString(),
-    root_only: 'true', // 只获取根任务
-    include_subtasks: 'true', // 包含子任务
   })
 
   if (status) {
     queryParams.append('status', status)
   }
 
-  const response = await apiClient.get<Task[]>(`/api/v1/tasks?${queryParams}`)
+  const response = await apiClient.get<TaskListApiResponse>(`/api/v1/tasks?${queryParams}`)
 
-  // 过滤出长期任务（带有 long-term 标签）
-  const longTermTasks = response.data.filter((task) => task.tags?.includes('long-term'))
+  // 从后端 {items, total} 结构中取出任务列表，再客户端侧过滤长期任务
+  const allTasks = response.data.items
+  const longTermTasks = allTasks.filter((task) => task.tags?.includes('long-term'))
 
   return {
     items: longTermTasks,
@@ -69,7 +76,7 @@ export async function toggleAutoExecute(taskId: string, enabled: boolean): Promi
     ? [...tags.filter((t) => t !== 'auto-execute'), 'auto-execute']
     : tags.filter((t) => t !== 'auto-execute')
 
-  const updateResponse = await apiClient.put<Task>(`/api/v1/tasks/${taskId}`, {
+  const updateResponse = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
     tags: newTags,
   })
 
@@ -80,7 +87,7 @@ export async function toggleAutoExecute(taskId: string, enabled: boolean): Promi
  * 暂停长期任务
  */
 export async function pauseLongTermTask(taskId: string): Promise<Task> {
-  const response = await apiClient.put<Task>(`/api/v1/tasks/${taskId}`, {
+  const response = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
     status: 'blocked',
   })
 
@@ -91,7 +98,7 @@ export async function pauseLongTermTask(taskId: string): Promise<Task> {
  * 恢复长期任务
  */
 export async function resumeLongTermTask(taskId: string): Promise<Task> {
-  const response = await apiClient.put<Task>(`/api/v1/tasks/${taskId}`, {
+  const response = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
     status: 'in_progress',
   })
 

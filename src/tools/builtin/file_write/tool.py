@@ -6,13 +6,13 @@
 - FileWriteTool：FileWriteTool类
 """
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from tools.builtin.base import BuiltinTool
-from tools.builtin.shared import format_size
 from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
@@ -616,25 +616,29 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="NOT_A_FILE",
                 )
 
-            # 读取原文件内容
-            try:
-                original_content = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                original_content = path.read_text(encoding="gbk", errors="ignore")
-
             # 创建备份
             backup_path = None
             if create_backup:
                 backup_path = self._create_backup(path)
 
-            # 追加内容（确保有换行符分隔）
-            if original_content and not original_content.endswith("\n"):
-                new_content = original_content + "\n" + content
-            else:
-                new_content = original_content + content
+            # 直接追加写入，避免读取整个文件
+            def _append_to_file() -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "r+b") as f:
+                    # 检查文件末尾是否已有换行符
+                    needs_newline = False
+                    if path.stat().st_size > 0:
+                        f.seek(-1, 2)
+                        last_byte = f.read(1)
+                        needs_newline = last_byte != b"\n"
+                    f.seek(0, 2)  # 移到末尾
+                # 用文本模式追加写入
+                with open(path, "a", encoding="utf-8") as f:
+                    if needs_newline:
+                        f.write("\n")
+                    f.write(content)
 
-            # 写入新内容
-            self._atomic_write(path, new_content)
+            await asyncio.to_thread(_append_to_file)
 
             lines_affected = len(content.splitlines()) if content else 0
 

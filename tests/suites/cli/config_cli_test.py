@@ -40,7 +40,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from config.models import ModelConfigLoader
-from pipeline.config import load_pipeline_config, build_plugin_registry
+from pipeline.config import load_pipeline_config
 from pipeline.engine import PipelineEngine
 from pipeline.plugin import (
     IOutputPlugin,
@@ -56,7 +56,6 @@ from pipeline.route import (
 )
 from pipeline.types import ErrorPolicy, RouteSignal, StateKeys
 from plugins.core.llm_core import LLMCore
-from plugins.core.tool_core import ToolCore
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +503,7 @@ async def test_multi_model_switch(console: Console) -> None:
         loader = ModelConfigLoader()
 
         # 列出所有可用模型
-        all_models = loader.get_model_config("__all__")  # 触发加载
+        loader.get_model_config("__all__")  # 触发加载
         llm_data = loader._load_llm_data()
         model_ids = list(llm_data.get("models", {}).keys())
         console.print(f"  可用模型: {model_ids}")

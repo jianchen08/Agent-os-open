@@ -41,7 +41,7 @@ export const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_B
  *
  * 与后端 PROTOCOL_VERSION 保持一致，用于版本协商。
  */
-export const PROTOCOL_VERSION = '2.0.0'
+export const PROTOCOL_VERSION = '3.0.0'
 
 // ---- ACK 配置 ----
 
@@ -63,31 +63,6 @@ export const WS_ACK_REQUIRED_EVENTS: ReadonlySet<string> = new Set([
   'approval_required',
   'approval_request',
 ])
-
-/**
- * WebSocket端点生成函数
- *
- * 生成带有thread_id、token和version参数的WebSocket连接URL。
- * 对应后端端点：/ws/chat/{thread_id}?token={token}&version={version}
- *
- * @param threadId - 线程ID
- * @param token - JWT访问令牌
- * @returns 完整的WebSocket连接URL
- *
- * Requirements: 4.1, 4.2
- */
-export const WS_ENDPOINT = (threadId: string, token: string): string =>
-  `/ws/chat/${threadId}?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
-
-/**
- * 构建完整的WebSocket URL
- *
- * @param threadId - 线程ID
- * @param token - JWT访问令牌
- * @returns 完整的WebSocket URL（包含基础URL）
- */
-export const buildWebSocketUrl = (threadId: string, token: string): string =>
-  `${WS_BASE_URL}${WS_ENDPOINT(threadId, token)}`
 
 /**
  * 构建全局 WebSocket 连接 URL（不带 thread_id）
@@ -118,6 +93,8 @@ export const WS_SERVER_EVENTS = {
   TASK_CANCELLED: 'task_cancelled',
   /** 任务状态实时更新 */
   TASK_STATUS_UPDATE: 'task_status_update',
+  /** 任务删除 */
+  TASK_DELETED: 'task_deleted',
   /** 错误 */
   ERROR: 'error',
   /** 心跳响应（后端发送 heartbeat_ack） */

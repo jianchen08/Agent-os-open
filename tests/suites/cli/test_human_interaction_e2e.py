@@ -21,7 +21,6 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -319,7 +318,7 @@ async def test_human_interaction_choice_mode(cli: CLIProcess) -> None:
 
     # Step 5: wait for the agent to acknowledge the response.
     # After the user submits, the agent will process the result and respond.
-    final_line = await cli.wait_for_any(
+    await cli.wait_for_any(
         [
             r"已收到|收到|好的|继续执行|approved|completed|选择.*继续",
             r"感谢|回复|response",
@@ -339,7 +338,6 @@ async def test_human_interaction_choice_mode(cli: CLIProcess) -> None:
         await cli._proc.wait()
 
     full_stdout = cli.stdout_clean
-    full_stderr = cli.stderr_clean
 
     # No Python traceback in stdout (would indicate an unhandled crash)
     assert "Traceback (most recent call last)" not in full_stdout, (

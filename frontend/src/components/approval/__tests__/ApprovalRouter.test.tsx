@@ -62,7 +62,9 @@ describe('ApprovalRouter', () => {
       />,
     )
 
+    // 应该渲染 text_diff 路由容器
     expect(screen.getByTestId('approval-route-text_diff')).toBeInTheDocument()
+    // 应该渲染 TextDiffView 组件
     expect(screen.getByTestId('text-diff-view')).toBeInTheDocument()
   })
 
@@ -102,6 +104,7 @@ describe('ApprovalRouter', () => {
       />,
     )
 
+    // 降级到 text_diff
     expect(screen.getByTestId('approval-route-text_diff')).toBeInTheDocument()
     expect(screen.getByTestId('text-diff-view')).toBeInTheDocument()
   })
@@ -142,6 +145,7 @@ describe('ApprovalRouter', () => {
       />,
     )
 
+    // 应该显示标注数量
     expect(screen.getByTestId('annotation-count')).toHaveTextContent('1 个标注')
   })
 })
@@ -160,7 +164,6 @@ describe('TextDiffView', () => {
     )
 
     expect(screen.getByTestId('text-diff-view')).toBeInTheDocument()
-    // 有差异时应显示 diff-content
     expect(screen.getByTestId('diff-content')).toBeInTheDocument()
   })
 
@@ -172,8 +175,10 @@ describe('TextDiffView', () => {
       />,
     )
 
+    // 应有1个新增行
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
 
+    // 查找所有 diff 行
     const diffLines = screen.getAllByTestId(/^diff-line-/)
     const addedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'added')
     expect(addedLines.length).toBe(1)
@@ -188,6 +193,7 @@ describe('TextDiffView', () => {
       />,
     )
 
+    // 应有1个删除行
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
 
     const diffLines = screen.getAllByTestId(/^diff-line-/)
@@ -196,48 +202,47 @@ describe('TextDiffView', () => {
     expect(removedLines[0]).toHaveTextContent('line2')
   })
 
-  it('内容完全相同时应显示无差异提示', () => {
+  it('应显示未变更行', () => {
     render(
       <TextDiffView
-        oldContent="same text"
-        newContent="same text"
+        oldContent="same\ncontent"
+        newContent="same\ncontent"
       />,
     )
 
-    // 无差异时显示 diff-empty
-    expect(screen.getByTestId('diff-empty')).toBeInTheDocument()
-    expect(screen.getByTestId('diff-empty')).toHaveTextContent('两个版本内容相同')
-    // 不应显示 diff-content
-    expect(screen.queryByTestId('diff-content')).not.toBeInTheDocument()
-  })
-
-  it('内容相同时变更统计应为零', () => {
-    render(
-      <TextDiffView
-        oldContent="same text"
-        newContent="same text"
-      />,
-    )
-
-    // 内容相同：无增删，只有未变更行
+    // 不应有新增或删除
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+0')
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
+    expect(screen.getByTestId('diff-unchanged-count')).toHaveTextContent('~2')
+  })
+
+  it('内容完全相同时应显示空状态提示', () => {
+    render(
+      <TextDiffView
+        oldContent="same text"
+        newContent="same text"
+      />,
+    )
+
+    expect(screen.getByTestId('diff-empty')).toBeInTheDocument()
+    expect(screen.getByTestId('diff-empty')).toHaveTextContent('两个版本内容相同')
   })
 
   it('应正确统计变更行数', () => {
     render(
       <TextDiffView
-        oldContent="line1"
-        newContent="line2"
+        oldContent="a\nb\nc"
+        newContent="a\nd\ne"
       />,
     )
 
-    // line1 整行被替换: 1 removed + 1 added
-    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
-    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
+    // b->removed, c->removed, d->added, e->added, a->unchanged
+    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+2')
+    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-2')
+    expect(screen.getByTestId('diff-unchanged-count')).toHaveTextContent('~1')
   })
 
-  it('两侧都为空内容应显示无差异', () => {
+  it('空内容应正确处理', () => {
     render(
       <TextDiffView
         oldContent=""
@@ -246,25 +251,22 @@ describe('TextDiffView', () => {
     )
 
     expect(screen.getByTestId('diff-empty')).toBeInTheDocument()
-    expect(screen.getByTestId('diff-empty')).toHaveTextContent('无内容')
   })
 
-  it('旧内容为空时应全部标记为新增', () => {
-    render(
+  it('一侧为空时应全部标记为新增或删除', () => {
+    const { rerender } = render(
       <TextDiffView
         oldContent=""
-        newContent="only new content"
+        newContent="only new"
       />,
     )
 
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-0')
-  })
 
-  it('新内容为空时应全部标记为删除', () => {
-    render(
+    rerender(
       <TextDiffView
-        oldContent="only old content"
+        oldContent="only old"
         newContent=""
       />,
     )
@@ -276,27 +278,28 @@ describe('TextDiffView', () => {
   it('多行差异应正确交错显示删除和新增', () => {
     render(
       <TextDiffView
-        oldContent={"line1\nline2"}
-        newContent={"line1\nline3"}
+        oldContent="keep\nremove1\nremove2\nkeep2"
+        newContent="keep\nadd1\nadd2\nkeep2"
       />,
     )
 
-    // 应有1个删除和1个新增，1个未变更
-    expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
-    expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
-
-    // 差异内容应存在
-    expect(screen.getByTestId('diff-content')).toBeInTheDocument()
-
-    // 验证存在 removed 和 added 类型的行
     const diffLines = screen.getAllByTestId(/^diff-line-/)
-    const removedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'removed')
-    const addedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'added')
-    const unchangedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'unchanged')
 
-    expect(removedLines.length).toBeGreaterThanOrEqual(1)
-    expect(addedLines.length).toBeGreaterThanOrEqual(1)
-    expect(unchangedLines.length).toBeGreaterThanOrEqual(1)
+    // 第一行 unchanged
+    expect(diffLines[0].getAttribute('data-line-type')).toBe('unchanged')
+    expect(diffLines[0]).toHaveTextContent('keep')
+
+    // 接下来应该是 removed 行
+    const removedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'removed')
+    expect(removedLines).toHaveLength(2)
+
+    // 然后是 added 行
+    const addedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'added')
+    expect(addedLines).toHaveLength(2)
+
+    // 最后一行 unchanged
+    const unchangedLines = diffLines.filter((el) => el.getAttribute('data-line-type') === 'unchanged')
+    expect(unchangedLines).toHaveLength(2)
   })
 })
 
@@ -391,6 +394,7 @@ describe('ImageAnnotationView', () => {
       />,
     )
 
+    // 应渲染 2 个标注叠加层
     expect(screen.getByTestId('annotation-overlay-0')).toBeInTheDocument()
     expect(screen.getByTestId('annotation-overlay-1')).toBeInTheDocument()
 
@@ -412,6 +416,7 @@ describe('ImageAnnotationView', () => {
       />,
     )
 
+    // 只应显示 1 个图片标注
     expect(screen.getByTestId('annotation-count')).toHaveTextContent('1 个标注')
     expect(screen.getByTestId('annotation-overlay-0')).toBeInTheDocument()
   })
@@ -490,6 +495,7 @@ describe('MediaTimelineView', () => {
 
     const playBtn = screen.getByTestId('play-pause-btn')
     expect(playBtn).toBeInTheDocument()
+    // 初始状态应显示播放图标
     expect(playBtn).toHaveTextContent('▶')
   })
 
@@ -505,6 +511,7 @@ describe('MediaTimelineView', () => {
 
     const timeDisplay = screen.getByTestId('time-display')
     expect(timeDisplay).toBeInTheDocument()
+    // 初始时间 00:00 / 02:00
     expect(timeDisplay).toHaveTextContent('00:00')
     expect(timeDisplay).toHaveTextContent('02:00')
   })
@@ -561,6 +568,7 @@ describe('MediaTimelineView', () => {
     expect(screen.getByTestId('annotation-item-0')).toBeInTheDocument()
     expect(screen.getByTestId('annotation-item-1')).toBeInTheDocument()
 
+    // 标注内容
     expect(screen.getByTestId('annotation-item-0')).toHaveTextContent('第一段标注')
     expect(screen.getByTestId('annotation-item-1')).toHaveTextContent('第二段标注')
   })
@@ -579,6 +587,7 @@ describe('MediaTimelineView', () => {
       />,
     )
 
+    // 不应显示标注列表（因为过滤了非 video_timestamp 类型的批注）
     expect(screen.queryByTestId('annotation-list')).not.toBeInTheDocument()
   })
 
@@ -597,6 +606,7 @@ describe('MediaTimelineView', () => {
       />,
     )
 
+    // 列表中应该先显示时间靠前的标注
     const firstItem = screen.getByTestId('annotation-item-0')
     expect(firstItem).toHaveTextContent('前面的标注')
 
@@ -614,6 +624,7 @@ describe('MediaTimelineView', () => {
       />,
     )
 
+    // 180秒 = 03:00
     const timeDisplay = screen.getByTestId('time-display')
     expect(timeDisplay).toHaveTextContent('03:00')
   })
@@ -633,6 +644,7 @@ describe('ApprovalRouter 集成测试', () => {
       />,
     )
 
+    // TextDiffView 应该显示差异统计
     expect(screen.getByTestId('diff-added-count')).toHaveTextContent('+1')
     expect(screen.getByTestId('diff-removed-count')).toHaveTextContent('-1')
   })

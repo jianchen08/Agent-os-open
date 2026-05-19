@@ -11,7 +11,6 @@ import pathlib
 import pytest
 
 from connectors.degradation import DegradationManager
-from connectors.types import ActionResult
 
 
 @pytest.fixture

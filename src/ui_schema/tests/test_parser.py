@@ -14,7 +14,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
 import yaml
 
 
@@ -182,7 +181,7 @@ class TestSchemaParserLoadFile:
             # 写入无效 YAML
             filepath.write_text(":\n  :\n    - [\n", encoding="utf-8")
             parser = SchemaParser()
-            result = parser.load_file(filepath)
+            parser.load_file(filepath)
             # 结果要么是 None，要么解析成功（某些无效 YAML 也能被解析）
             # 关键是不抛出异常
 
@@ -554,7 +553,7 @@ class TestSchemaParserHotReload:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            filepath = self._write_yaml(tmp_dir, "hot.yaml", {
+            self._write_yaml(tmp_dir, "hot.yaml", {
                 "config_id": "hot",
                 "name": "热重载",
                 "ui": {

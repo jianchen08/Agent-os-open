@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import types
 from pathlib import Path
@@ -175,7 +174,7 @@ class TestSynthesize:
         mock_edge_tts.Communicate.return_value = mock_communicate
 
         with patch.dict(sys.modules, {"edge_tts": mock_edge_tts}):
-            result = await provider.synthesize(
+            await provider.synthesize(
                 text="测试",
                 rate="+50%",
                 volume="+20%",

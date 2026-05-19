@@ -54,7 +54,6 @@ async def test_assembly_and_llm_call():
 
     from config.models import ModelConfigLoader
     from pipeline.config import build_plugin_registry, load_pipeline_config
-    from pipeline.engine import PipelineEngine
     from pipeline.plugin import PluginContext
     from pipeline.chain import PluginChain
     from pipeline.types import StateKeys

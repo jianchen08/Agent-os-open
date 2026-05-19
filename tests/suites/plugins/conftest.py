@@ -7,10 +7,7 @@ plugins/__init__.py 和 plugins/output/__init__.py 存在导入不一致问题�
 import importlib.util
 import os
 import sys
-from types import ModuleType
-from unittest.mock import MagicMock
 
-import pytest
 
 # src 目录的绝对路径
 _SRC_DIR = os.path.normpath(os.path.join(

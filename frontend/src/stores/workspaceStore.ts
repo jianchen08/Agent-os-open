@@ -7,6 +7,12 @@
 import { create } from 'zustand'
 import type { Artifact } from '@/types/artifact'
 import type { Workspace, FileTreeNode } from '@/types/workspace'
+import {
+  createEntry as apiCreateEntry,
+  deleteEntry as apiDeleteEntry,
+  renameEntry as apiRenameEntry,
+  moveEntry as apiMoveEntry,
+} from '@/services/api/workspaces'
 
 interface WorkspaceState {
   /** 以 container_task_id 为 key 的工作空间缓存 */
@@ -36,6 +42,14 @@ interface WorkspaceActions {
   togglePathExpanded: (path: string) => void
   /** 选中文件 */
   setSelectedFile: (path: string | null) => void
+  /** 创建文件或目录 */
+  createEntry: (containerTaskId: string, path: string, type: 'file' | 'directory') => Promise<boolean>
+  /** 删除文件或目录 */
+  deleteEntry: (containerTaskId: string, path: string) => Promise<boolean>
+  /** 重命名文件或目录 */
+  renameEntry: (containerTaskId: string, oldPath: string, newName: string) => Promise<boolean>
+  /** 移动文件或目录 */
+  moveEntry: (containerTaskId: string, sourcePath: string, destinationDir: string) => Promise<boolean>
   /** 解析任务到容器任务 */
   resolveContainerTask: (taskId: string) => Promise<string>
   /** 清除缓存 */
@@ -135,6 +149,54 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()((se
       if (containerTaskId === taskId) return containerTaskId
     }
     return taskId
+  },
+
+  createEntry: async (containerTaskId, path, type) => {
+    try {
+      await apiCreateEntry(containerTaskId, path, type)
+      await get().fetchFileTree(containerTaskId)
+      return true
+    } catch (e: any) {
+      console.error('[workspaceStore] createEntry failed:', e)
+      window.alert(`创建失败: ${e?.message ?? '未知错误'}`)
+      return false
+    }
+  },
+
+  deleteEntry: async (containerTaskId, path) => {
+    try {
+      await apiDeleteEntry(containerTaskId, path)
+      await get().fetchFileTree(containerTaskId)
+      return true
+    } catch (e: any) {
+      console.error('[workspaceStore] deleteEntry failed:', e)
+      window.alert(`删除失败: ${e?.message ?? '未知错误'}`)
+      return false
+    }
+  },
+
+  renameEntry: async (containerTaskId, oldPath, newName) => {
+    try {
+      await apiRenameEntry(containerTaskId, oldPath, newName)
+      await get().fetchFileTree(containerTaskId)
+      return true
+    } catch (e: any) {
+      console.error('[workspaceStore] renameEntry failed:', e)
+      window.alert(`重命名失败: ${e?.message ?? '未知错误'}`)
+      return false
+    }
+  },
+
+  moveEntry: async (containerTaskId, sourcePath, destinationDir) => {
+    try {
+      await apiMoveEntry(containerTaskId, sourcePath, destinationDir)
+      await get().fetchFileTree(containerTaskId)
+      return true
+    } catch (e: any) {
+      console.error('[workspaceStore] moveEntry failed:', e)
+      window.alert(`移动失败: ${e?.message ?? '未知错误'}`)
+      return false
+    }
   },
 
   clearCache: () => {

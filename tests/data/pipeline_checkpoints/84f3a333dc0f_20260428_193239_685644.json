@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "pipeline_id": "84f3a333dc0f",
+    "checkpoint_id": "84f3a333dc0f_20260428_193239_685644",
+    "phase": "auto",
+    "iteration": 1,
+    "timestamp": "2026-04-28T19:32:39.685683+00:00",
+    "state_keys": [
+      "user_input",
+      "iteration",
+      "ended",
+      "pipeline_id",
+      "context_window"
+    ]
+  },
+  "state": {
+    "user_input": "test",
+    "iteration": 1,
+    "ended": false,
+    "pipeline_id": "84f3a333dc0f",
+    "context_window": 200000
+  }
+}

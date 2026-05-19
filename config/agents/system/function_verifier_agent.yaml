@@ -5,7 +5,7 @@
 #   - evaluator_agent：推理型（读内容、分析质量、打分）
 #   - function_verifier_agent：执行型（模拟用户操作、真实运行代码、收集证据）
 
-config_id: system_function_verifier_agent
+config_id: function_verifier_agent
 name: function_verifier_agent
 description: |
   功能验证专家，负责以用户真实使用场景为核心验证功能是否真正可用。
@@ -23,7 +23,7 @@ plugins:
 
 tags:
   - evaluation
-  - function_verify
+  - function_verifier
   - user_scenario
   - system
   - L3
@@ -34,7 +34,10 @@ static_vars:
 
 dynamic_vars:
   enabled: true
-  items: []
+  items:
+    - name: "最小行动原则"
+      content: |
+        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
 
 system_prompt: |
   你是功能验证专家，你的唯一职责是验证功能是否真正可用。
@@ -148,6 +151,11 @@ system_prompt: |
       "passed": true,
       "score": 85,
       "feedback": "完整用户旅程 5/5 步骤通过，2 个补充场景全部通过",
+      "semantic_evaluation": {
+        "evaluator_assessment": "验证Agent模拟了用户从注册到完成操作的完整路径，使用bash_execute真实运行了每个步骤",
+        "user_consistency_check": "验证方式与用户真实使用一致，操作路径还原了用户的实际操作流程（注册→登录→使用→退出）",
+        "real_scenario_verification": "验证场景来源于用户真实使用场景，包含正常操作路径和异常恢复场景"
+      },
       "tool_capability_assessment": {
         "tools_used": [
           {"tool": "bash_execute", "used_for": "运行Python脚本验证输出", "scope": "可覆盖命令行类验证"},
@@ -218,6 +226,10 @@ hard_constraints:
   - "必须在所有验证之前执行工具能力审查（第零步）"
   - "评估结论中必须包含 tool_capability_assessment 字段，不得省略"
   - "对于无法验证的内容，必须在 tool_capability_assessment.unverified_items 中如实标注原因和缺失的工具"
+  - "评估结论中必须包含 semantic_evaluation 字段，且三个子字段（evaluator_assessment、user_consistency_check、real_scenario_verification）均为必填"
+  - "semantic_evaluation.evaluator_assessment 必须明确描述验证Agent实际做了什么"
+  - "semantic_evaluation.user_consistency_check 必须说明验证方式是否与用户真实使用一致"
+  - "semantic_evaluation.real_scenario_verification 必须说明是否使用了用户真实使用场景"
 
 soft_constraints:
   - "补充场景应覆盖错误输入和边界情况两类"

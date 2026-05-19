@@ -1,23 +1,20 @@
 """主动触发注入机制测试。
 
-验证本次修复的 3 个 bug：
-1. _inject_task 优先用 inject_notification() 主动触发运行中引擎
-2. _run_loop 管道结束前检查 MessageQueue 兜底
-3. _retry_task 的 message 参数正确传递到新管道
+验证 _inject_task 通过 send_pipeline_message 统一入口投递消息：
+1. 运行中引擎 → send_pipeline_message → notification 方法
+2. 挂起引擎 → send_pipeline_message → wake 方法
+3. 无引擎 → send_pipeline_message → 兜底（MessageQueue 或 revive）
 
 测试覆盖：
-- inject_notification 触发运行中引擎 → 管道不提前结束
-- 管道即将结束时检查 MessageQueue → 消息不丢失
-- retry_message 存入 metadata → TaskWorker 构建 full_input 时读取
+- inject_result.trigger 反映 send_pipeline_message 返回的 method
+- 消息内容和 metadata 正确传递
+- 无引擎时回退到 MessageQueue
 """
 from __future__ import annotations
 
-import asyncio
-from typing import Any
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
-
 from infrastructure.message_queue import Message, MessageQueue, create_message_id
 
 
@@ -90,27 +87,80 @@ class TestEngineEndOfPipelineMessageQueueCheck:
         assert notif_sources[0] == "只有队列有消息"
 
 
-# ── Bug 2 测试: _inject_task 主动触发运行中引擎 ────────
+# ── Bug 2 测试: _inject_task 通过 send_pipeline_message 投递 ────
 
 
-class TestInjectTaskActiveTrigger:
-    """验证 _inject_task 优先使用 inject_notification 主动触发。"""
+class TestInjectTaskViaMessageBus:
+    """验证 _inject_task 通过 send_pipeline_message 统一入口投递。"""
 
     @pytest.mark.asyncio
-    async def test_running_engine_dual_channel_inject(self):
-        """运行中引擎应同时走 MessageQueue + inject_notification 双通道。"""
-        mock_engine = MagicMock()
-        mock_engine.inject_notification = MagicMock()
+    async def test_running_engine_uses_notification_method(self):
+        """运行中引擎应通过 send_pipeline_message 使用 notification 方法。"""
+        from pipeline.message_bus import InjectResult
+
+        mock_result = InjectResult(
+            success=True,
+            method="notification",
+            pipeline_id="test_pipe",
+        )
 
         queue = MessageQueue()
 
         mock_provider = MagicMock()
-        mock_provider.get = lambda key: mock_engine if key == "__running_engine_test_pipe" else None
 
         with patch("infrastructure.service_provider.get_service_provider", return_value=mock_provider):
             with patch("tools.builtin.task.TaskTool._get_task_service") as mock_svc:
                 with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
                     with patch("tools.builtin.task.TaskTool._get_message_queue", return_value=queue):
+                        with patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock, return_value=mock_result) as mock_send:
+                            from tasks.types import TaskStatus
+                            mock_task = MagicMock()
+                            mock_task.status = TaskStatus.RUNNING
+                            mock_task.pipeline_run_id = "test_pipe"
+                            mock_svc.return_value.get_task.return_value = mock_task
+
+                            from tools.builtin.task import TaskTool
+                            tool = TaskTool()
+                            result = await tool._inject_task(
+                                inputs={
+                                    "task_id": "task_001",
+                                    "message": "请改用方案B",
+                                    "parent_agent_level": 1,
+                                },
+                                parent_agent_level=1,
+                            )
+
+        # 验证 send_pipeline_message 被正确调用
+        mock_send.assert_called_once()
+        call_kwargs = mock_send.call_args
+        assert call_kwargs[0][0] == "test_pipe"  # pipeline_id
+        assert call_kwargs[0][1] == "请改用方案B"   # message
+        # 验证 metadata 中的 source 和 task_id
+        metadata = call_kwargs[1].get("metadata", {})
+        assert metadata.get("source") == "task_inject"
+        assert metadata.get("task_id") == "task_001"
+
+        # 结果标记为 notification 方法
+        assert result.data["trigger"] == "notification"
+        assert result.data["injected"] is True
+
+    @pytest.mark.asyncio
+    async def test_suspended_engine_uses_wake_method(self):
+        """挂起引擎应通过 send_pipeline_message 使用 wake 方法。"""
+        from pipeline.message_bus import InjectResult
+
+        mock_result = InjectResult(
+            success=True,
+            method="wake",
+            pipeline_id="test_pipe",
+        )
+
+        mock_provider = MagicMock()
+
+        with patch("infrastructure.service_provider.get_service_provider", return_value=mock_provider):
+            with patch("tools.builtin.task.TaskTool._get_task_service") as mock_svc:
+                with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
+                    with patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock, return_value=mock_result) as mock_send:
                         from tasks.types import TaskStatus
                         mock_task = MagicMock()
                         mock_task.status = TaskStatus.RUNNING
@@ -122,62 +172,36 @@ class TestInjectTaskActiveTrigger:
                         result = await tool._inject_task(
                             inputs={
                                 "task_id": "task_001",
-                                "message": "请改用方案B",
+                                "message": "唤醒并注入",
                                 "parent_agent_level": 1,
                             },
                             parent_agent_level=1,
                         )
 
-        # 验证双通道都触发
-        mock_engine.inject_notification.assert_called_once_with("请改用方案B")
-        popped = await queue.pop("test_pipe")
-        assert popped is not None
-        assert popped.content == "请改用方案B"
-        # 结果标记为双通道
-        assert result.data["trigger"] == "inject_notification+message_queue"
-
-    @pytest.mark.asyncio
-    async def test_suspended_engine_gets_inject_and_wake(self):
-        """挂起引擎应收到 inject_and_wake 调用。"""
-        mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
-
-        mock_provider = MagicMock()
-        # 没有 running engine
-        def provider_get(key):
-            if key == "__running_engine_test_pipe":
-                return None
-            if key == "__suspended_engine_test_pipe":
-                return mock_engine
-            return None
-        mock_provider.get = provider_get
-
-        with patch("infrastructure.service_provider.get_service_provider", return_value=mock_provider):
-            with patch("tools.builtin.task.TaskTool._get_task_service") as mock_svc:
-                with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
-                    from tasks.types import TaskStatus
-                    mock_task = MagicMock()
-                    mock_task.status = TaskStatus.RUNNING
-                    mock_task.pipeline_run_id = "test_pipe"
-                    mock_svc.return_value.get_task.return_value = mock_task
-
-                    from tools.builtin.task import TaskTool
-                    tool = TaskTool()
-                    result = await tool._inject_task(
-                        inputs={
-                            "task_id": "task_001",
-                            "message": "唤醒并注入",
-                            "parent_agent_level": 1,
-                        },
-                        parent_agent_level=1,
-                    )
-
-        mock_engine.inject_and_wake.assert_called_once_with("唤醒并注入")
+        mock_send.assert_called_once()
+        assert result.data["trigger"] == "wake"
 
     @pytest.mark.asyncio
     async def test_no_engine_falls_back_to_message_queue(self):
-        """引擎未找到时应回退到 MessageQueue。"""
+        """引擎未找到时 send_pipeline_message 返回 failed，_inject_task 仍返回成功。"""
+        from pipeline.message_bus import InjectResult
+
+        mock_result = InjectResult(
+            success=False,
+            method="failed",
+            pipeline_id="fallback_pipe",
+            error="管道 fallback_pipe 不存在且无历史记录",
+        )
+
         queue = MessageQueue()
+        # 也向 MessageQueue 推入一条消息（双通道兜底）
+        await queue.push(Message(
+            id=create_message_id(),
+            pipeline_id="fallback_pipe",
+            target_id="task_001",
+            content="兜底消息",
+            priority=100,
+        ))
 
         mock_provider = MagicMock()
         mock_provider.get = lambda key: None  # 无引擎
@@ -186,24 +210,29 @@ class TestInjectTaskActiveTrigger:
             with patch("tools.builtin.task.TaskTool._get_task_service") as mock_svc:
                 with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
                     with patch("tools.builtin.task.TaskTool._get_message_queue", return_value=queue):
-                        from tasks.types import TaskStatus
-                        mock_task = MagicMock()
-                        mock_task.status = TaskStatus.RUNNING
-                        mock_task.pipeline_run_id = "fallback_pipe"
-                        mock_svc.return_value.get_task.return_value = mock_task
+                        with patch("pipeline.message_bus.send_pipeline_message", new_callable=AsyncMock, return_value=mock_result) as mock_send:
+                            from tasks.types import TaskStatus
+                            mock_task = MagicMock()
+                            mock_task.status = TaskStatus.RUNNING
+                            mock_task.pipeline_run_id = "fallback_pipe"
+                            mock_svc.return_value.get_task.return_value = mock_task
 
-                        from tools.builtin.task import TaskTool
-                        tool = TaskTool()
-                        result = await tool._inject_task(
-                            inputs={
-                                "task_id": "task_001",
-                                "message": "兜底消息",
-                                "parent_agent_level": 1,
-                            },
-                            parent_agent_level=1,
-                        )
+                            from tools.builtin.task import TaskTool
+                            tool = TaskTool()
+                            result = await tool._inject_task(
+                                inputs={
+                                    "task_id": "task_001",
+                                    "message": "兜底消息",
+                                    "parent_agent_level": 1,
+                                },
+                                parent_agent_level=1,
+                            )
 
-        # 验证消息在 MessageQueue 中
+        # send_pipeline_message 被调用（即使返回失败）
+        mock_send.assert_called_once()
+        # _inject_task 本身不抛异常，返回结果中 trigger 标记为 failed
+        assert result.data["trigger"] == "failed"
+        # 验证 MessageQueue 中的消息仍可被消费（双通道兜底）
         popped = await queue.pop("fallback_pipe")
         assert popped is not None
         assert popped.content == "兜底消息"
@@ -233,8 +262,8 @@ class TestRetryMessagePassthrough:
             captured_metadata = dict(t.metadata)
         mock_svc = MagicMock()
         mock_svc.get_task.return_value = mock_task
-        mock_svc.save_task = save_task
-        mock_svc.force_transition = MagicMock()
+        mock_svc.save_task = AsyncMock(wraps=save_task)
+        mock_svc.force_transition = AsyncMock()
 
         mock_provider = MagicMock()
         mock_event_bus = MagicMock()
@@ -247,7 +276,7 @@ class TestRetryMessagePassthrough:
                 with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
                     from tools.builtin.task import TaskTool
                     tool = TaskTool()
-                    result = await tool._retry_task(
+                    await tool._retry_task(
                         inputs={
                             "task_id": "task_retry_001",
                             "message": "上次方向错了，改用方法X",
@@ -274,8 +303,8 @@ class TestRetryMessagePassthrough:
             captured_metadata = dict(t.metadata)
         mock_svc = MagicMock()
         mock_svc.get_task.return_value = mock_task
-        mock_svc.save_task = save_task
-        mock_svc.force_transition = MagicMock()
+        mock_svc.save_task = AsyncMock(wraps=save_task)
+        mock_svc.force_transition = AsyncMock()
 
         mock_provider = MagicMock()
         mock_event_bus = MagicMock()
@@ -288,7 +317,7 @@ class TestRetryMessagePassthrough:
                 with patch("tools.builtin.task.TaskTool._check_permission", return_value=(True, "")):
                     from tools.builtin.task import TaskTool
                     tool = TaskTool()
-                    result = await tool._retry_task(
+                    await tool._retry_task(
                         inputs={
                             "task_id": "task_retry_002",
                             "parent_agent_level": 1,

@@ -14,24 +14,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
 
 from aiohttp import web
 
 from channels.websocket.protocol import (
     ACK_REQUIRED_EVENTS,
-    ACK_TIMEOUT_SECONDS,
     ConnectionConfirmationData,
     ControlCommand,
     EventEnvelope,
     EventType,
-    MessageAckData,
     MissedMessagesData,
     PROTOCOL_VERSION,
-    RequestMissedData,
     create_event,
     is_version_compatible,
     negotiate_version,
@@ -134,6 +132,8 @@ class WebSocketServer:
         self._app = web.Application()
         self._app.router.add_get("/ws", self._handle_websocket)
         self._app.router.add_get("/ws/{thread_id}", self._handle_websocket)
+        # W1: /ws/chat 全局端点（不带 thread_id），支持前端 GlobalWebSocket 全局连接
+        self._app.router.add_get("/ws/chat", self._handle_websocket)
         self._app.router.add_get("/ws/chat/{thread_id}", self._handle_websocket)
         self._app.router.add_get("/health", self._handle_health)
 
@@ -299,7 +299,14 @@ class WebSocketServer:
         """处理接收到的文本消息。
 
         解析 JSON 消息，提取事件类型，分发给对应的处理器。
-        支持 ACK 确认和请求遗漏消息。
+        支持两种消息格式：
+        1. EventEnvelope 格式：{type, data, timestamp, request_id}
+        2. 平铺格式（W2）：{type, content, thread_id, ...}（有 type 无 data）
+
+        额外处理：
+        - W3: 心跳消息 {type: 'heartbeat', timestamp}
+        - W4: user_input 消息传递给 on_message handler
+        - ACK 确认和请求遗漏消息
 
         Args:
             session_id: 发送方的会话 ID
@@ -314,15 +321,55 @@ class WebSocketServer:
             )
             return
 
-        # 尝试解析为事件信封
-        try:
-            envelope = EventEnvelope.from_dict(parsed)
-        except ValueError as exc:
+        if not isinstance(parsed, dict) or "type" not in parsed:
             logger.warning(
-                "Invalid event envelope from session %s: %s",
-                session_id, exc,
+                "Message without 'type' field from session %s",
+                session_id,
             )
             return
+
+        event_type: str = parsed["type"]
+
+        # --- W3: 心跳处理 ---
+        # 收到 heartbeat 时直接回复 heartbeat_ack，不走 envelope 解析
+        if event_type == "heartbeat":
+            timestamp = parsed.get("timestamp", "")
+            ack_payload = json.dumps(
+                {
+                    "type": "heartbeat_ack",
+                    "data": {"timestamp": timestamp},
+                    "timestamp": parsed.get(
+                        "timestamp",
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                    "request_id": str(uuid.uuid4()),
+                },
+                ensure_ascii=False,
+            )
+            await self.session_manager.send_to(session_id, ack_payload)
+            return
+
+        # --- W2: 平铺格式兼容 ---
+        # 如果有 type 字段但没有 data 字段，将整个消息视为 data，
+        # 提取 type 作为事件类型，其余字段归入 data
+        if "data" not in parsed:
+            data_fields = {
+                k: v for k, v in parsed.items() if k != "type"
+            }
+            envelope = EventEnvelope(
+                type=event_type,
+                data=data_fields,
+            )
+        else:
+            # 标准 EventEnvelope 格式
+            try:
+                envelope = EventEnvelope.from_dict(parsed)
+            except ValueError as exc:
+                logger.warning(
+                    "Invalid event envelope from session %s: %s",
+                    session_id, exc,
+                )
+                return
 
         # 处理控制命令
         event_type = envelope.type
@@ -355,7 +402,7 @@ class WebSocketServer:
             )
             return
 
-        # 调用消息处理器
+        # --- W4: user_input 和其他消息传递给 on_message handler ---
         if self._on_message_handler is not None:
             try:
                 await self._on_message_handler(

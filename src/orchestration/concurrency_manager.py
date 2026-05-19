@@ -106,89 +106,13 @@ class ConcurrencyStats:
     last_updated: datetime = field(default_factory=datetime.now)
 
 
-class LevelPrioritySemaphore:
-    """按 AgentLevel 优先级分配的信号量。
-
-    L1 优先于 L2，L2 优先于 L3。
-    当有更高层级任务等待且有容量时，低层级任务会被阻塞。
-    """
-
-    def __init__(self, level_limits: dict[AgentLevel, int]) -> None:
-        self._level_limits = level_limits
-        self._level_active: dict[AgentLevel, int] = {l: 0 for l in AgentLevel}
-        self._level_waiting: dict[AgentLevel, int] = {l: 0 for l in AgentLevel}
-        self._waiters: list[asyncio.Future] = []
-
-    async def acquire(self, level: AgentLevel, timeout: float | None = None) -> bool:
-        """按优先级获取许可。如果更高层级有任务在等待且有容量，当前任务需要等待。"""
-        self._level_waiting[level] += 1
-        try:
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            self._waiters.append(fut)
-
-            deadline = None
-            if timeout is not None:
-                deadline = loop.time() + timeout
-
-            try:
-                while True:
-                    higher_can_acquire = any(
-                        self._level_waiting[hl] > 0
-                        and self._level_active[hl] < self._level_limits[hl]
-                        for hl in AgentLevel
-                        if hl.value < level.value
-                    )
-
-                    at_capacity = self._level_active[level] >= self._level_limits[level]
-
-                    if not higher_can_acquire and not at_capacity:
-                        self._level_active[level] += 1
-                        return True
-
-                    if deadline is not None:
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
-                            return False
-                        try:
-                            await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
-                        except TimeoutError:
-                            return False
-                        except asyncio.CancelledError:
-                            return False
-                    else:
-                        await fut
-
-                    fut = loop.create_future()
-                    self._waiters.append(fut)
-            finally:
-                if fut in self._waiters:
-                    self._waiters.remove(fut)
-        finally:
-            self._level_waiting[level] -= 1
-
-    def release(self, level: AgentLevel) -> None:
-        """释放许可并同步唤醒等待者。"""
-        self._level_active[level] = max(0, self._level_active[level] - 1)
-        self._waiters = [w for w in self._waiters if not w.done()]
-        for w in self._waiters:
-            w.set_result(None)
-
-    def wake_all(self) -> None:
-        """唤醒所有等待者（用于 reset 场景）。"""
-        for w in self._waiters:
-            if not w.done():
-                w.set_result(None)
-        self._waiters.clear()
-
-
 class ConcurrencyManager:
     """
     统一并发管理器
 
     提供多层级并发控制：
     1. LLM 层：提供商级、模型级、请求类型级
-    2. Agent 层：L1/L2/L3 层级（按层级优先级分配）
+    2. Agent 层：L1/L2/L3 层级
     3. 工作流层：全局工作流并发限制
 
     特性：
@@ -224,8 +148,8 @@ class ConcurrencyManager:
         self._request_type_semaphores: dict[str, asyncio.Semaphore] = {}
         self._default_semaphore: asyncio.Semaphore | None = None
 
-        # Agent 层级优先级信号量
-        self._agent_priority_semaphore: LevelPrioritySemaphore | None = None
+        # Agent 信号量
+        self._agent_semaphores: dict[AgentLevel, asyncio.Semaphore] = {}
 
         # 工作流信号量
         self._workflow_semaphore: asyncio.Semaphore | None = None
@@ -303,9 +227,10 @@ class ConcurrencyManager:
         self._default_semaphore = asyncio.Semaphore(self._config.default_limit)
         logger.debug("[并发管理器] 默认信号量已初始化 | limit=%s", self._config.default_limit)
 
-        # 初始化 Agent 层级优先级信号量
-        self._agent_priority_semaphore = LevelPrioritySemaphore(self._config.agent_level_limits)
-        logger.debug("[并发管理器] Agent 层级优先级信号量已初始化")
+        # 初始化 Agent 信号量
+        for level, limit in self._config.agent_level_limits.items():
+            self._agent_semaphores[level] = asyncio.Semaphore(limit)
+            logger.debug("[并发管理器] Agent 信号量已初始化 | level=%s, limit=%s", level.name, limit)
 
         # 初始化工作流信号量
         self._workflow_semaphore = asyncio.Semaphore(self._config.workflow_limit)
@@ -475,10 +400,7 @@ class ConcurrencyManager:
         timeout: float | None = None,
     ) -> bool:
         """
-        获取 Agent 执行许可（按层级优先级）
-
-        L1 优先于 L2，L2 优先于 L3。
-        当有更高层级任务等待时，低层级任务会被阻塞。
+        获取 Agent 执行许可
 
         Args:
             level: Agent 层级
@@ -488,23 +410,29 @@ class ConcurrencyManager:
             bool: 是否成功获取许可
         """
         self._ensure_semaphores_initialized()
+        semaphore = self._agent_semaphores[level]
 
-        acquired = await self._agent_priority_semaphore.acquire(level, timeout)
-        if not acquired:
+        try:
+            if timeout is not None:
+                await asyncio.wait_for(semaphore.acquire(), timeout=timeout)
+            else:
+                await semaphore.acquire()
+
+            # 更新计数
+            self._agent_active[level] += 1
+            self._stats.total_acquires += 1
+            self._stats.agent_active += 1
+            level_name = level.name
+            self._stats.agent_by_level[level_name] = self._stats.agent_by_level.get(level_name, 0) + 1
+            self._stats.last_updated = datetime.now()
+
+            logger.debug("[并发管理器] Agent 许可已获取 | level=%s", level.name)
+            return True
+
+        except TimeoutError:
             self._stats.total_timeouts += 1
             logger.warning("[并发管理器] 获取 Agent 信号量超时 | level=%s, timeout=%s", level.name, timeout)
             return False
-
-        # 更新计数
-        self._agent_active[level] += 1
-        self._stats.total_acquires += 1
-        self._stats.agent_active += 1
-        level_name = level.name
-        self._stats.agent_by_level[level_name] = self._stats.agent_by_level.get(level_name, 0) + 1
-        self._stats.last_updated = datetime.now()
-
-        logger.debug("[并发管理器] Agent 许可已获取 | level=%s", level.name)
-        return True
 
     def release_agent(self, level: AgentLevel) -> None:
         """
@@ -513,21 +441,32 @@ class ConcurrencyManager:
         Args:
             level: Agent 层级
         """
-        if self._agent_active[level] <= 0:
+        # 确保信号量已初始化
+        self._ensure_semaphores_initialized()
+
+        if level not in self._agent_semaphores:
             return
 
-        self._agent_active[level] -= 1
-        self._stats.total_releases += 1
-        self._stats.agent_active = max(0, self._stats.agent_active - 1)
-        level_name = level.name
-        if level_name in self._stats.agent_by_level and self._stats.agent_by_level[level_name] > 0:
-            self._stats.agent_by_level[level_name] -= 1
-        self._stats.last_updated = datetime.now()
+        semaphore = self._agent_semaphores[level]
 
-        if self._agent_priority_semaphore is not None:
-            self._agent_priority_semaphore.release(level)
+        try:
+            semaphore.release()
 
-        logger.debug("[并发管理器] Agent 许可已释放 | level=%s", level.name)
+            # 更新计数
+            if self._agent_active[level] > 0:
+                self._agent_active[level] -= 1
+            self._stats.total_releases += 1
+            self._stats.agent_active = max(0, self._stats.agent_active - 1)
+            level_name = level.name
+            if level_name in self._stats.agent_by_level and self._stats.agent_by_level[level_name] > 0:
+                self._stats.agent_by_level[level_name] -= 1
+            self._stats.last_updated = datetime.now()
+
+            logger.debug("[并发管理器] Agent 许可已释放 | level=%s", level.name)
+
+        except ValueError:
+            # 信号量已经释放，忽略错误
+            pass
 
     @asynccontextmanager
     async def agent_context(
@@ -688,13 +627,11 @@ class ConcurrencyManager:
 
         主要用于测试，生产环境一般不需要调用
         """
-        if self._agent_priority_semaphore is not None:
-            self._agent_priority_semaphore.wake_all()
         self._provider_semaphores.clear()
         self._model_semaphores.clear()
         self._request_type_semaphores.clear()
         self._default_semaphore = None
-        self._agent_priority_semaphore = None
+        self._agent_semaphores.clear()
         self._workflow_semaphore = None
         self._llm_active.clear()
         self._agent_active = {

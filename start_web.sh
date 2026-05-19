@@ -226,7 +226,7 @@ echo "[1/2] 启动后端服务器 (FastAPI + WebSocket :$BACKEND_PORT)..."
 export BACKEND_PORT=$BACKEND_PORT
 export REDIS_PORT=${REDIS_HOST_PORT:-6379}
 export _AO_PROJECT_ID=$PROJECT_ID
-PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/start_server.py" &
+PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/app_factory.py" &
 BACKEND_PID=$!
 
 # 等待后端就绪

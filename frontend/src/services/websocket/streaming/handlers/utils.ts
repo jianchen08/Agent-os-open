@@ -1,0 +1,105 @@
+/**
+ * 流式事件处理器公共工具函数
+ *
+ * 统一抽取的消息 ID 提取、流式占位符创建、Streaming 状态管理，
+ * 消除各 handler 中的重复代码，确保 pipeline_id 唯一路由原则。
+ */
+import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useStreamingStore } from '@/stores/streamingStore'
+
+/**
+ * 从事件数据中提取消息 ID
+ *
+ * 统一处理 message_id 的多种来源，避免各 handler 重复写
+ * `eventData.message_id || eventData.data?.message_id || eventData.data?.ai_message_id` 模式。
+ *
+ * @param eventData - WebSocket 事件数据（顶层或嵌套 data）
+ * @returns 消息 ID 字符串，找不到时返回 null
+ */
+export function extractMessageId(eventData: any): string | null {
+  if (!eventData) return null
+  return (
+    eventData.message_id
+    || eventData.data?.message_id
+    || eventData.data?.ai_message_id
+    || null
+  )
+}
+
+/**
+ * 统一启动管道流式状态（pipelineStore + streamingStore）
+ *
+ * pipelineStore.streamingState 为唯一数据源，
+ * streamingStore.setStreamingForTab 仅在 pipelineStore 操作后统一调用一次。
+ * threadId 用于 streamingStore 的双 key 配对（UI tab 指示器），不参与消息路由。
+ *
+ * @param pipelineId - 管道 ID（唯一路由键）
+ * @param messageId - 正在流式传输的消息 ID
+ * @param threadId - 可选的会话 ID，用于 streamingStore tab 配对
+ */
+export function startPipelineStreaming(
+  pipelineId: string,
+  messageId: string,
+  threadId?: string,
+): void {
+  pipelineStore.getState().startStreaming(pipelineId, messageId)
+  useStreamingStore.getState().setStreamingForTab(pipelineId, true)
+
+  // FIX: threadId 仅用于 streamingStore 双 key 配对，不参与消息路由
+  if (threadId && threadId !== pipelineId) {
+    useStreamingStore.getState().setStreamingForTab(threadId, true)
+  }
+}
+
+/**
+ * 统一停止管道流式状态（pipelineStore + streamingStore）
+ *
+ * pipelineStore.stopStreaming 内部已调用 streamingStore.setStreamingForTab(pipelineId, false)，
+ * 此处仅额外清理 threadId 对应的 tab 状态。
+ *
+ * @param pipelineId - 管道 ID（唯一路由键）
+ * @param threadId - 可选的会话 ID，用于清理 streamingStore tab 配对
+ */
+export function stopPipelineStreaming(pipelineId: string, threadId?: string): void {
+  pipelineStore.getState().stopStreaming(pipelineId)
+
+  // FIX: pipelineStore.stopStreaming 已清理 pipelineId 的 tab 状态，仅需额外清理 threadId
+  if (threadId && threadId !== pipelineId) {
+    useStreamingStore.getState().setStreamingForTab(threadId, false)
+  }
+}
+
+/**
+ * 确保流式占位符消息存在
+ *
+ * 合并 startStreaming + setStreamingForTab + addMessage 三步操作，
+ * 当 stream_start 丢失或 chunk 先于 start 到达时自动创建占位符。
+ *
+ * @param pipelineId - 管道 ID（唯一路由键）
+ * @param messageId - 消息 ID
+ * @param threadId - 可选的会话 ID，用于 streamingStore tab 配对
+ */
+export function ensureStreamingPlaceholder(
+  pipelineId: string,
+  messageId: string,
+  threadId?: string,
+): void {
+  startPipelineStreaming(pipelineId, messageId, threadId)
+
+  const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
+  const nextSeq = existingMsgs.reduce(
+    (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
+  ) + 1
+
+  pipelineStore.getState().addMessage(pipelineId, {
+    id: messageId,
+    sessionId: threadId || '',
+    role: 'assistant',
+    content: '',
+    timestamp: new Date().toISOString(),
+    parentId: null,
+    sequence: nextSeq,
+    status: 'streaming',
+    contentBlocks: [],
+  } as any)
+}

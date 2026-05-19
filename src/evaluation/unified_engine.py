@@ -28,7 +28,6 @@ from src.core.results import (
 
 # 兼容性别名
 EvaluationResult = EvaluationExecutionResult
-from src.evaluation.types import EvaluatorType
 from src.evaluation.mapper import ContextBuilder, MappingError, ParameterMapper
 from src.tools.executor import ExecutionContext, ToolExecutor
 from src.tools.registry import ToolRegistry

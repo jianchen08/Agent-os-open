@@ -30,6 +30,28 @@ from fastapi import APIRouter  # noqa: E402
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
 
 
+# BUG-FIX: 前后端任务状态名称映射
+# 后端 ExecutionStatus 使用 running，前端 TaskStatus 使用 in_progress
+# 此映射层确保 API 响应中使用前端期望的状态名称
+_BACKEND_TO_FRONTEND_STATUS: dict[str, str] = {
+    "running": "in_progress",
+    "evaluating": "in_progress",
+    "scheduled": "pending",
+}
+
+
+def _map_status_for_api(status: str) -> str:
+    """将后端 ExecutionStatus 映射为前端 TaskStatus 期望的值。
+
+    Args:
+        status: 后端状态字符串
+
+    Returns:
+        映射后的前端状态字符串
+    """
+    return _BACKEND_TO_FRONTEND_STATUS.get(status, status)
+
+
 def _get_task_service() -> Any:
     """获取全局 TaskService 实例（来自 TaskStorage/YAML 文件）。
 
@@ -54,7 +76,8 @@ def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
     """将 TaskModel dataclass 转为字典。"""
     from dataclasses import asdict
     d = asdict(task_model)
-    d["status"] = task_model.status.value if hasattr(task_model.status, "value") else str(task_model.status)
+    raw_status = task_model.status.value if hasattr(task_model.status, "value") else str(task_model.status)
+    d["status"] = _map_status_for_api(raw_status)
     if hasattr(task_model, "priority") and hasattr(task_model.priority, "value"):
         d["priority"] = task_model.priority.value
     return d
@@ -62,11 +85,12 @@ def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
 
 def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     """将存储层任务字典转为 TaskResponse。"""
+    raw_status = t.get("status", "pending")
     return TaskResponse(
         id=t["id"],
         title=t["title"],
         description=t.get("description"),
-        status=t.get("status", "pending"),
+        status=_map_status_for_api(raw_status),
         priority=t.get("priority", 5),
         agent_id=t.get("agent_id"),
         thread_id=t.get("thread_id"),
@@ -93,6 +117,7 @@ async def list_tasks(
     session_id: str | None = Query(default=None, description="按会话 ID 筛选"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    skip: int | None = Query(default=None, ge=0, description="skip 参数（等价于 offset）"),
     _user: dict = Depends(require_auth),
 ) -> TaskListResponse:
     """获取当前用户的任务列表。
@@ -100,10 +125,14 @@ async def list_tasks(
     支持按状态、优先级和会话 ID 筛选，分页返回。
     合并 api_store 和 TaskStorage（YAML 文件）两个数据源。
     session_id 筛选基于 task.metadata["session_id"] 字段匹配。
+    同时支持 skip 和 offset 参数（skip 优先）。
 
     Returns:
         TaskListResponse 包含 items 和 total
     """
+    # R7: skip 参数兼容，等价于 offset
+    if skip is not None:
+        offset = skip
     validate_pagination(limit, offset)
     tasks = store.get_user_tasks(_user["sub"])
 

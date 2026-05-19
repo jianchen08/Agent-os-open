@@ -17,12 +17,12 @@
 - 自检验：每个步骤都验证产出文件和日志
 """
 
+import asyncio
 import logging
 import shutil
 import sys
 import time
 import traceback
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
@@ -58,7 +58,7 @@ def teardown():
 # ═══════════════════════════════════════════════════════════
 
 
-def test_01_create_task_and_persist():
+async def test_01_create_task_and_persist():
     """TC01: 创建任务 → 验证 YAML 持久化。"""
     from tasks.service import TaskService
     from tasks.storage import TaskStorage
@@ -66,7 +66,7 @@ def test_01_create_task_and_persist():
     storage = TaskStorage(data_dir=str(TEST_DATA_DIR))
     svc = TaskService(storage=storage)
 
-    task = svc.create_task(
+    task = await svc.create_task(
         title="闭环测试任务-01",
         description="验证任务创建和持久化",
         metadata={"acceptance_criteria": {"basic_check": {"pass_threshold": 50}}},
@@ -95,16 +95,16 @@ def test_01_create_task_and_persist():
     return task.id, svc
 
 
-def test_02_state_transitions(task_id, svc):
+async def test_02_state_transitions(task_id, svc):
     """TC02: 状态转换 PENDING → RUNNING → EVALUATING → COMPLETED。"""
     # PENDING → RUNNING
-    task = svc.start_task(task_id)
+    task = await svc.start_task(task_id)
     assert task.status.value == "running", f"状态应为 running，实际: {task.status.value}"
     assert task.started_at, "started_at 不能为空"
     logger.info("[TC02] PENDING → RUNNING | started_at=%s", task.started_at)
 
     # RUNNING → EVALUATING
-    task = svc.move_to_evaluating(task_id)
+    task = await svc.move_to_evaluating(task_id)
     assert task.status.value == "evaluating", f"状态应为 evaluating，实际: {task.status.value}"
     logger.info("[TC02] RUNNING → EVALUATING")
 
@@ -116,7 +116,7 @@ def test_02_state_transitions(task_id, svc):
     assert data["status"] == "evaluating", f"YAML 中状态应为 evaluating，实际: {data['status']}"
 
     # EVALUATING → COMPLETED
-    task = svc.complete_evaluation(task_id, passed=True, result={"score": 100, "detail": "全部通过"})
+    task = await svc.complete_evaluation(task_id, passed=True, result={"score": 100, "detail": "全部通过"})
     assert task.status.value == "completed", f"状态应为 completed，实际: {task.status.value}"
     assert task.completed_at, "completed_at 不能为空"
     assert task.result == {"score": 100, "detail": "全部通过"}
@@ -126,7 +126,7 @@ def test_02_state_transitions(task_id, svc):
     return task
 
 
-def test_03_verify_completed_yaml(task_id):
+async def test_03_verify_completed_yaml(task_id):
     """TC03: 验证完成状态的 YAML 文件所有字段正确。"""
     import yaml
 
@@ -166,14 +166,14 @@ def test_03_verify_completed_yaml(task_id):
     return data
 
 
-def test_04_subtask_hierarchy(svc):
+async def test_04_subtask_hierarchy(svc):
     """TC04: 子任务创建与层级关系。"""
     # 创建父任务
-    parent = svc.create_task(title="父任务", description="测试层级关系")
+    parent = await svc.create_task(title="父任务", description="测试层级关系")
     assert parent.id
 
     # 创建子任务
-    child = svc.create_task(
+    child = await svc.create_task(
         title="子任务A",
         description="子任务描述",
         parent_task_id=parent.id,
@@ -181,9 +181,9 @@ def test_04_subtask_hierarchy(svc):
     assert child.parent_task_id == parent.id
 
     # 执行子任务完整流程
-    svc.start_task(child.id)
-    svc.move_to_evaluating(child.id)
-    svc.complete_evaluation(child.id, passed=True, result={"done": True})
+    await svc.start_task(child.id)
+    await svc.move_to_evaluating(child.id)
+    await svc.complete_evaluation(child.id, passed=True, result={"done": True})
 
     # 验证子任务文件在同一个 tree 目录下
     tree_dir = TEST_DATA_DIR / f"tree_{parent.id}"
@@ -192,13 +192,13 @@ def test_04_subtask_hierarchy(svc):
     assert parent_file.exists(), f"父任务文件不存在: {parent_file}"
     assert child_file.exists(), f"子任务文件不存在: {child_file}"
 
-    # 验证 list_subtasks
+    # 验证 list_subtasks（同步方法）
     subs = svc.list_subtasks(parent.id)
     assert len(subs) == 1
     assert subs[0].id == child.id
     assert subs[0].status.value == "completed"
 
-    # 验证进度
+    # 验证进度（同步方法）
     progress = svc.get_progress(parent.id)
     assert progress == 100.0, f"进度应为 100%，实际: {progress}%"
 
@@ -206,16 +206,16 @@ def test_04_subtask_hierarchy(svc):
     return parent, child
 
 
-def test_05_failed_path(svc):
+async def test_05_failed_path(svc):
     """TC05: 评估失败路径（EVALUATING → FAILED）。"""
-    task = svc.create_task(
+    task = await svc.create_task(
         title="会失败的任务",
         description="验证失败路径",
     )
 
-    svc.start_task(task.id)
-    svc.move_to_evaluating(task.id)
-    task = svc.complete_evaluation(task.id, passed=False, result={"error": "验收不通过"})
+    await svc.start_task(task.id)
+    await svc.move_to_evaluating(task.id)
+    task = await svc.complete_evaluation(task.id, passed=False, result={"error": "验收不通过"})
 
     assert task.status.value == "failed", f"状态应为 failed，实际: {task.status.value}"
     assert task.completed_at, "failed 也应有 completed_at"
@@ -230,53 +230,53 @@ def test_05_failed_path(svc):
     logger.info("[TC05 PASS] 失败路径验证通过 | task_id=%s", task.id)
 
 
-def test_06_reject_and_retry(svc):
+async def test_06_reject_and_retry(svc):
     """TC06: 打回重做路径。"""
-    task = svc.create_task(title="打回重做测试")
-    svc.start_task(task.id)
-    svc.move_to_evaluating(task.id)
+    task = await svc.create_task(title="打回重做测试")
+    await svc.start_task(task.id)
+    await svc.move_to_evaluating(task.id)
 
     # 第一次打回
-    task = svc.reject_task(task.id, reason="不够好")
+    task = await svc.reject_task(task.id, reason="不够好")
     assert task.status.value == "running"
     assert task.reject_count == 1
     logger.info("[TC06] 第一次打回 | reject_count=%d", task.reject_count)
 
     # 重新执行到评估
-    svc.move_to_evaluating(task.id)
-    task = svc.reject_task(task.id, reason="还是不行")
+    await svc.move_to_evaluating(task.id)
+    task = await svc.reject_task(task.id, reason="还是不行")
     assert task.reject_count == 2
     logger.info("[TC06] 第二次打回 | reject_count=%d", task.reject_count)
 
     # 第三次打回（默认 max=3，应该标记为 failed）
-    svc.move_to_evaluating(task.id)
-    task = svc.reject_task(task.id, reason="仍然不行")
+    await svc.move_to_evaluating(task.id)
+    task = await svc.reject_task(task.id, reason="仍然不行")
     assert task.status.value == "failed", f"超过 3 次打回应为 failed，实际: {task.status.value}"
     assert task.reject_count == 3
 
     logger.info("[TC06 PASS] 打回重做路径验证通过 | task_id=%s", task.id)
 
 
-def test_07_task_evaluate_func(svc):
+async def test_07_task_evaluate_func(svc):
     """TC07: 模拟 task_evaluate 评估流程（直接调用 TaskService API）。
 
     task_evaluate_func 内部创建独立的 TaskService 实例，
     使用默认 data/tasks 目录，无法访问测试目录。
     因此直接用 TaskService API 模拟评估流程。
     """
-    task = svc.create_task(
+    task = await svc.create_task(
         title="工具评估测试",
         description="模拟 task_evaluate 自动完成",
     )
 
-    svc.start_task(task.id)
-    svc.move_to_evaluating(task.id)
-    svc.complete_evaluation(
+    await svc.start_task(task.id)
+    await svc.move_to_evaluating(task.id)
+    await svc.complete_evaluation(
         task.id, passed=True,
         result={"output": "任务执行完毕"},
     )
 
-    # 验证任务状态
+    # 验证任务状态（get_task 是同步方法）
     task = svc.get_task(task.id)
     assert task.status.value == "completed"
     assert task.result["output"] == "任务执行完毕"
@@ -292,34 +292,34 @@ def test_07_task_evaluate_func(svc):
     return task.id
 
 
-def test_08_pause_and_resume(svc):
+async def test_08_pause_and_resume(svc):
     """TC08: 暂停和恢复任务。"""
-    task = svc.create_task(title="暂停恢复测试")
-    svc.start_task(task.id)
+    task = await svc.create_task(title="暂停恢复测试")
+    await svc.start_task(task.id)
     assert task.status.value == "running"
 
-    task = svc.pause_task(task.id)
+    task = await svc.pause_task(task.id)
     assert task.status.value == "paused"
 
-    task = svc.resume_task(task.id)
+    task = await svc.resume_task(task.id)
     assert task.status.value == "running"
 
     # 完成任务
-    svc.move_to_evaluating(task.id)
-    svc.complete_evaluation(task.id, passed=True)
+    await svc.move_to_evaluating(task.id)
+    await svc.complete_evaluation(task.id, passed=True)
 
     logger.info("[TC08 PASS] 暂停恢复路径验证通过 | task_id=%s", task.id)
 
 
-def test_09_reset_to_pending(svc):
+async def test_09_reset_to_pending(svc):
     """TC09: 重置失败任务为 pending（模拟 Worker 恢复场景）。"""
-    task = svc.create_task(title="重置测试")
-    svc.start_task(task.id)
-    svc.fail_task(task.id, error="模拟崩溃")
+    task = await svc.create_task(title="重置测试")
+    await svc.start_task(task.id)
+    await svc.fail_task(task.id, error="模拟崩溃")
 
     assert task.status.value == "failed"
 
-    task = svc.reset_to_pending(task.id)
+    task = await svc.reset_to_pending(task.id)
     assert task.status.value == "pending"
     assert task.started_at == ""
     assert task.error == ""
@@ -335,27 +335,27 @@ def test_09_reset_to_pending(svc):
     logger.info("[TC09 PASS] 重置为 pending 验证通过 | task_id=%s", task.id)
 
 
-def test_10_state_machine_constraints(svc):
+async def test_10_state_machine_constraints(svc):
     """TC10: 状态机约束验证（非法转换应抛异常）。"""
     from tasks.state_machine import InvalidTransitionError
 
-    task = svc.create_task(title="状态约束测试")
+    task = await svc.create_task(title="状态约束测试")
 
     # COMPLETED 状态不应再转换
-    svc.start_task(task.id)
-    svc.move_to_evaluating(task.id)
-    svc.complete_evaluation(task.id, passed=True)
+    await svc.start_task(task.id)
+    await svc.move_to_evaluating(task.id)
+    await svc.complete_evaluation(task.id, passed=True)
 
     try:
-        svc.start_task(task.id)
+        await svc.start_task(task.id)
         assert False, "已完成任务不应能启动"
     except (InvalidTransitionError, ValueError):
         pass
 
     # 直接从 PENDING 到 EVALUATING 应该不允许
-    task2 = svc.create_task(title="约束测试2")
+    task2 = await svc.create_task(title="约束测试2")
     try:
-        svc.move_to_evaluating(task2.id)
+        await svc.move_to_evaluating(task2.id)
         # SimpleStateMachine 允许 PENDING → EVALUATING，检查当前状态机规则
         # 根据当前 TRANSITIONS 定义，PENDING 可以转到 EVALUATING
         logger.info("[TC10] PENDING → EVALUATING 允许（符合当前状态机定义）")
@@ -365,7 +365,7 @@ def test_10_state_machine_constraints(svc):
     logger.info("[TC10 PASS] 状态机约束验证通过")
 
 
-def test_11_full_data_consistency(svc):
+async def test_11_full_data_consistency(svc):
     """TC11: 全量数据一致性校验。
 
     创建多个任务，执行各种操作，最后验证内存和文件完全一致。
@@ -375,23 +375,23 @@ def test_11_full_data_consistency(svc):
     # 创建一批任务
     tasks = []
     for i in range(5):
-        t = svc.create_task(title=f"批量任务-{i}", description=f"第 {i} 个")
+        t = await svc.create_task(title=f"批量任务-{i}", description=f"第 {i} 个")
         tasks.append(t)
 
     # 对不同任务执行不同操作
-    svc.start_task(tasks[0].id)
-    svc.complete_evaluation(tasks[0].id, passed=True, result={"idx": 0})
+    await svc.start_task(tasks[0].id)
+    await svc.complete_evaluation(tasks[0].id, passed=True, result={"idx": 0})
 
-    svc.start_task(tasks[1].id)
-    svc.fail_task(tasks[1].id, error="故意失败")
+    await svc.start_task(tasks[1].id)
+    await svc.fail_task(tasks[1].id, error="故意失败")
 
-    svc.start_task(tasks[2].id)
-    svc.move_to_evaluating(tasks[2].id)
+    await svc.start_task(tasks[2].id)
+    await svc.move_to_evaluating(tasks[2].id)
 
     # tasks[3] 保持 PENDING
     # tasks[4] 保持 PENDING
 
-    # 校验每个任务的内存数据与文件数据一致
+    # 校验每个任务的内存数据与文件数据一致（get_task 是同步方法）
     for t in tasks:
         mem_task = svc.get_task(t.id)
         assert mem_task is not None, f"内存中找不到任务: {t.id}"
@@ -405,7 +405,7 @@ def test_11_full_data_consistency(svc):
         assert data["status"] == mem_task.status.value
         assert data["title"] == mem_task.title
 
-    # 校验按状态查询
+    # 校验按状态查询（list_by_status 是同步方法）
     pending_tasks = svc.list_by_status(
         __import__("tasks.types", fromlist=["TaskStatus"]).TaskStatus.PENDING
     )
@@ -414,29 +414,37 @@ def test_11_full_data_consistency(svc):
     logger.info("[TC11 PASS] 全量数据一致性校验通过 | 共 %d 个任务", len(tasks))
 
 
-def test_12_on_state_change_callback():
-    """TC12: 状态变更回调验证。"""
+async def test_12_on_state_change_callback():
+    """TC12: 状态变更事件验证（通过 mock EventBus）。"""
     transitions_log = []
 
-    def on_change(task_id, old_status, new_status, **kwargs):
-        transitions_log.append({
-            "task_id": task_id,
-            "old": old_status,
-            "new": new_status,
-        })
+    class MockEventBus:
+        """Mock EventBus，捕获 task_state_changed 事件。"""
+
+        async def emit(self, event_name: str, data: dict) -> None:
+            if event_name == "task_state_changed":
+                transitions_log.append({
+                    "task_id": data.get("task_id"),
+                    "old": data.get("old_status"),
+                    "new": data.get("new_status"),
+                })
 
     from tasks.storage import TaskStorage
     from tasks.service import TaskService
 
     storage = TaskStorage(data_dir=str(TEST_DATA_DIR))
-    svc = TaskService(storage=storage, on_state_change=on_change)
+    mock_bus = MockEventBus()
+    svc = TaskService(storage=storage, event_bus=mock_bus)
 
-    task = svc.create_task(title="回调测试")
-    svc.start_task(task.id)
-    svc.move_to_evaluating(task.id)
-    svc.complete_evaluation(task.id, passed=True)
+    task = await svc.create_task(title="回调测试")
+    await svc.start_task(task.id)
+    await svc.move_to_evaluating(task.id)
+    await svc.complete_evaluation(task.id, passed=True)
 
-    # 应该有 4 次状态变更记录（create → pending, start → running, evaluating, completed）
+    # 给 asyncio 一点时间让 create_task 调度的事件完成
+    await asyncio.sleep(0.1)
+
+    # 应该有多次状态变更记录（create → pending, start → running, evaluating, completed）
     assert len(transitions_log) >= 3, f"应至少有 3 次状态变更，实际: {len(transitions_log)}"
 
     # 验证转换序列
@@ -445,34 +453,35 @@ def test_12_on_state_change_callback():
     assert "evaluating" in news, "缺少 evaluating 状态变更"
     assert "completed" in news, "缺少 completed 状态变更"
 
-    logger.info("[TC12 PASS] 状态变更回调验证通过 | 变更次数=%d", len(transitions_log))
+    logger.info("[TC12 PASS] 状态变更事件验证通过 | 变更次数=%d", len(transitions_log))
 
 
-def test_13_delete_task(svc):
+async def test_13_delete_task(svc):
     """TC13: 删除任务及文件清理。"""
-    task = svc.create_task(title="待删除任务")
+    task = await svc.create_task(title="待删除任务")
 
     yaml_file = TEST_DATA_DIR / f"tree_{task.id}" / f"{task.id}.yaml"
     assert yaml_file.exists()
 
-    deleted = svc.delete_task(task.id)
+    deleted = await svc.delete_task(task.id)
     assert deleted, "删除应返回 True"
     assert not yaml_file.exists(), f"文件应已删除: {yaml_file}"
     assert svc.get_task(task.id) is None, "内存中应已移除"
 
     # 删除不存在的任务
-    deleted = svc.delete_task("nonexistent_id")
+    deleted = await svc.delete_task("nonexistent_id")
     assert not deleted
 
     logger.info("[TC13 PASS] 删除任务验证通过")
 
 
-def test_14_can_transition_and_valid_transitions(svc):
+async def test_14_can_transition_and_valid_transitions(svc):
     """TC14: 查询合法状态转换。"""
     from tasks.types import TaskStatus as TS
 
-    task = svc.create_task(title="转换查询测试")
+    task = await svc.create_task(title="转换查询测试")
 
+    # can_transition 是同步方法
     # pending 可以转 running
     assert svc.can_transition(task.id, TS.RUNNING)
     # SimpleStateMachine 允许 PENDING → COMPLETED（直接完成）
@@ -480,6 +489,7 @@ def test_14_can_transition_and_valid_transitions(svc):
     # pending 不能转 evaluating（中间必须有 running）
     assert not svc.can_transition(task.id, TS.EVALUATING)
 
+    # get_valid_transitions 是同步方法
     transitions = svc.get_valid_transitions(task.id)
     assert "running" in transitions
     assert "completed" in transitions
@@ -495,7 +505,7 @@ def test_14_can_transition_and_valid_transitions(svc):
 # 测试运行器
 # ═══════════════════════════════════════════════════════════
 
-def run_all_tests():
+async def run_all_tests():
     """运行所有测试用例，收集结果。"""
     setup()
 
@@ -537,7 +547,7 @@ def run_all_tests():
 
     for name, test_fn, is_standalone in tests:
         try:
-            result = test_fn()
+            result = await test_fn()
             if name == "TC01":
                 _tc01_id, _tc01_svc = result
             passed.append(name)
@@ -594,5 +604,5 @@ def run_all_tests():
 
 
 if __name__ == "__main__":
-    success = run_all_tests()
+    success = asyncio.run(run_all_tests())
     sys.exit(0 if success else 1)

@@ -9,15 +9,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
-import json
 import os
 import struct
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -264,7 +261,7 @@ class TestWeComStreamClient:
         client._access_token = "test_token"
         client._token_expires = time.time() + 3600
 
-        result = await client.send_message("user1", "**Bold**", msg_type="markdown")
+        await client.send_message("user1", "**Bold**", msg_type="markdown")
 
         call_args = mock_session.post.call_args
         body = call_args[1]["json"]
@@ -493,7 +490,7 @@ class TestWeComAdapter:
 
         # 从加密 XML 中提取参数
         root = ET.fromstring(encrypted_xml)
-        encrypt_content = root.find("Encrypt").text
+        root.find("Encrypt").text
         timestamp = root.find("TimeStamp").text
         nonce = root.find("Nonce").text
         signature = root.find("MsgSignature").text

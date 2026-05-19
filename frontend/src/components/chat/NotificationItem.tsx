@@ -233,7 +233,7 @@ export function NotificationItemComponent({
         )}
 
         {/* 阻塞式确认按钮 */}
-        {isBlocking && (
+        {isBlocking && (!actions || actions.length === 0) && (
           <div className="mt-3 flex items-center justify-end gap-2 pl-6">
             <Button
               size="sm"

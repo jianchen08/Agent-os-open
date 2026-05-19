@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler

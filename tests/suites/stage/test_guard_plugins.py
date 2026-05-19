@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline.plugin import OutputResult, PluginContext, PluginResult
+from pipeline.plugin import PluginContext
 from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.input.level_guard import LevelGuardPlugin
 from plugins.output.delegate_depth_guard import DelegateDepthGuardPlugin

@@ -9,7 +9,6 @@
 用法: cd src && python -m test_keypool_adapter
 """
 import asyncio
-import sys
 import time
 import logging
 

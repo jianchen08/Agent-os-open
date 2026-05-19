@@ -210,7 +210,7 @@ class ScientificCalculatorTool(BuiltinTool):
             "abs": abs,
             "round": round,
         }
-        
+
         result = eval(expr, {"__builtins__": {}}, allowed_names)
         return result
 

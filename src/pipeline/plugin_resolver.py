@@ -81,6 +81,47 @@ def build_plugin_list(
     return result
 
 
+def _ensure_context_build_level(
+    plugin_registry: Any,
+    agent_config: Any,
+) -> None:
+    """确保 context_build 插件的 agent_level 与 Agent 实际层级一致。
+
+    如果 context_build 插件配置中没有明确设置 agent_level（即当前值为
+    默认的 "L1"），则自动注入 Agent 的实际层级。已在 agent YAML 中
+    明确配置了 agent_level 的情况不做覆盖。
+
+    Args:
+        plugin_registry: PluginRegistry 实例
+        agent_config: Agent 配置实例
+    """
+    cb = plugin_registry.get("context_build")
+    if not cb or not hasattr(cb, "_config"):
+        return
+
+    level_value = (
+        agent_config.level.value
+        if hasattr(agent_config.level, "value")
+        else str(agent_config.level)
+    )
+
+    current_level = cb._config.get("agent_level", "L1")
+
+    if current_level == level_value:
+        return
+
+    merged = {**cb._config, "agent_level": level_value}
+    try:
+        new_cb = type(cb)(config=merged)
+        plugin_registry._plugins["context_build"] = new_cb
+        logger.debug(
+            "Auto-inject agent_level=%s into context_build (was %s)",
+            level_value, current_level,
+        )
+    except Exception:
+        logger.debug("Failed to auto-inject agent_level into context_build")
+
+
 def apply_agent_plugin_configs(
     plugin_registry: Any,
     agent_config: Any | None,
@@ -95,40 +136,16 @@ def apply_agent_plugin_configs(
         plugin_registry: PluginRegistry 实例
         agent_config: Agent 配置实例
     """
-    if not agent_config:
-        return
-
-    # 自动注入 agent_level 到 context_build 插件
-    # BUG-FIX-fix_20260513_agent_level_wrong:
-    # 问题根因: ContextBuildPlugin 的 agent_level 默认为 "L1"，
-    #           但 Agent YAML 配置中未通过 plugins.enabled 覆盖该值，
-    #           导致所有 Agent 的管道 state 中 AGENT_LEVEL 始终为 "L1"，
-    #           task_submit 计算 child_level = min(1+1, 3) = 2，永远是 L2。
-    # 修复方案: 在此自动将 agent_config.level 注入到 context_build 插件配置中。
-    if hasattr(agent_config, "level") and agent_config.level:
-        cb_plugin = plugin_registry.get("context_build")
-        if cb_plugin and hasattr(cb_plugin, "_config"):
-            level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
-            if cb_plugin._config.get("agent_level") != level_value:
-                merged_config = {**cb_plugin._config, "agent_level": level_value}
-                try:
-                    new_plugin = type(cb_plugin)(config=merged_config)
-                    plugin_registry._plugins["context_build"] = new_plugin
-                    for core_key, pname in list(plugin_registry._core_plugins.items()):
-                        if pname == "context_build":
-                            plugin_registry._core_plugins[core_key] = "context_build"
-                    logger.debug(
-                        "Agent plugin config auto-injected: context_build.agent_level=%s",
-                        level_value,
-                    )
-                except Exception:
-                    logger.debug("Agent plugin config auto-inject failed for context_build")
-
-    if not hasattr(agent_config, "plugins"):
+    if not agent_config or not hasattr(agent_config, "plugins"):
         return
 
     plugins_config = agent_config.plugins
     if not hasattr(plugins_config, "enabled") or not plugins_config.enabled:
+        # BUG-FIX-fix_20260515_parent_agent_level:
+        # 即使没有 plugins.enabled 配置，也需要确保 context_build 的
+        # agent_level 与 Agent 实际层级一致。
+        if hasattr(agent_config, "level"):
+            _ensure_context_build_level(plugin_registry, agent_config)
         return
 
     for name, override in plugins_config.enabled.items():
@@ -160,6 +177,11 @@ def apply_agent_plugin_configs(
                 "Agent plugin config merge failed for %s",
                 name,
             )
+
+    # BUG-FIX-fix_20260515_parent_agent_level:
+    # for 循环处理完显式配置后，确保 context_build 的 agent_level 正确。
+    if hasattr(agent_config, "level"):
+        _ensure_context_build_level(plugin_registry, agent_config)
 
 
 def apply_agent_model_override(
@@ -277,8 +299,14 @@ def apply_agent_model_override(
         )
 
 
+# 模块级 tier 缓存：避免每次调用都触发 _load_llm_data()
+_tier_cache: dict[str, str] = {}
+
+
 def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     """从 llm.yaml defaults.tiers 解析 tier 为 model_id。
+
+    使用模块级缓存，同一 tier 值只读取一次 llm_data。
 
     Args:
         tier: 分级标识（large/medium/small）
@@ -287,6 +315,11 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     Returns:
         对应的模型标识字符串，未找到返回空字符串
     """
+    global _tier_cache
+
+    if tier in _tier_cache:
+        return _tier_cache[tier]
+
     model_loader = services.get("model_loader") if services else None
     if model_loader is None:
         try:
@@ -305,6 +338,8 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
             "[resolve_tier] tier=%r 未在 llm.yaml defaults.tiers 中定义",
             tier,
         )
+    else:
+        _tier_cache[tier] = model_id
     return model_id
 
 

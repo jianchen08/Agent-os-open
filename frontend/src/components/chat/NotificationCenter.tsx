@@ -24,6 +24,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { NOTIFICATION_PRIORITY_WEIGHT, PRIORITY_STYLES } from '@/types/notification'
+import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 
@@ -107,7 +108,11 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
               <span>⚠️</span>
               <span>{activeBlockingNotification.title}</span>
             </DialogTitle>
-            <DialogDescription>{activeBlockingNotification.message ?? '请确认后继续执行'}</DialogDescription>
+            <DialogDescription className="text-sm text-muted-foreground">
+              {activeBlockingNotification.message
+                ? <MarkdownRenderer content={activeBlockingNotification.message} />
+                : '请确认后继续执行'}
+            </DialogDescription>
           </DialogHeader>
 
           {/* 进度条 */}
@@ -307,7 +312,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
           </div>
 
           {/* 面板内容 */}
-          <div className="flex-1 overflow-y-auto p-3">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3">
             {hasNotifications ? (
               PRIORITY_ORDER.map(renderGroup)
             ) : (

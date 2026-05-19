@@ -232,11 +232,23 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     },
                     "workspace": {
                         "type": "string",
-                        "description": """
-工作空间路径。不设置：系统在 .ai_workspaces 下创建新目录（新建项目）。
-设置为已存在的项目目录（绝对路径）：系统创建隔离副本进行修改（改造现有项目）。
-改造 Agent OS 自身时，使用 {{project_root}} 变量。子任务不需要设置此参数，自动继承父任务的工作空间。
-""".strip(),
+                        "description": (
+                            "工作空间路径（可选，一般不需要设置）。"
+                            "容器任务：传入已有项目目录时，系统会在隔离空间中创建副本；"
+                            "不设置则创建空的工作空间。"
+                            "非容器任务（子任务）：不设置时系统自动基于父容器空间创建 worktree 隔离；"
+                            "传入目录路径时基于该目录创建 worktree。"
+                            "在原空间直接工作：设置 isolation_level 为 host，系统直接在传入的目录工作。"
+                        ),
+                    },
+                    "isolation_level": {
+                        "type": "string",
+                        "enum": ["host", "container"],
+                        "description": (
+                            "隔离级别（可选，默认使用系统配置）。"
+                            "host：直接在原空间工作，不做隔离。适合在已有项目上直接修改。"
+                            "container：在隔离的工作空间中工作，不影响原项目。"
+                        ),
                     },
                     "inherit_workspace_from": {
                         "type": "string",
@@ -880,26 +892,37 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             except Exception as exc:
                 logger.warning("[TaskSubmit] 容器任务事件发布失败 | task_id=%s | error=%s", task.id, exc)
 
+        # BUG-FIX-fix_20260519_container_workspace_path:
+        # 路径计算逻辑集中在 isolation.workspace 模块。
+        # 优先使用 LLM 传入的 isolation_level，没有才用配置文件。
+        from isolation.workspace import resolve_container_workspace_path
+        container_workspace_path = resolve_container_workspace_path(
+            inputs.get("workspace"), task.id,
+            isolation_mode=inputs.get("isolation_level"),
+        )
+
+        result_data = {
+            "task_id": task.id,
+            "title": task.title,
+            "status": task.status.value,
+            "task_scope": "container",
+            "submit_status": "submitted",
+        }
+
+        if parent_agent_level == 1:
+            result_data["workspace_path"] = container_workspace_path
+
+        result_data["message"] = (
+            f"容器任务 [{task.title}]（ID: {task.id}）已提交"
+            + (f"，工作空间：{container_workspace_path}。" if parent_agent_level == 1 else "。")
+            + "容器只是组织框架，不直接执行。你现在必须立即继续操作："
+            f"下一步——使用 task_submit(parent_task_id='{task.id}', target_type='agent', "
+            "target_id='solution_planning_agent') 提交方案规划子任务。"
+            "请在同一轮对话中立即调用，不要等待。"
+        )
+
         return create_success_result(
-            data={
-                "task_id": task.id,
-                "title": task.title,
-                "status": task.status.value,
-                "task_scope": "container",
-                "submit_status": "submitted",
-                # BUG-FIX-fix_20260425_container_flow:
-                # 问题根因: 容器任务返回消息说"请先继续处理其他工作"和"在收到系统提醒前，不要查询任务状态"，
-                #           导致 LLM 误以为不需要继续操作，直接结束对话，未提交子任务。
-                # 修复方案: 容器任务只是组织框架，LLM 必须在同一轮对话中立即提交准备子任务。
-                #           返回消息明确引导 LLM 继续提交 solution_planning_agent 子任务。
-                "message": (
-                    f"容器任务 [{task.title}]（ID: {task.id}）已提交。"
-                    "容器只是组织框架，不直接执行。你现在必须立即继续操作："
-                    f"下一步——使用 task_submit(parent_task_id='{task.id}', target_type='agent', "
-                    "target_id='solution_planning_agent') 提交方案规划子任务。"
-                    "请在同一轮对话中立即调用，不要等待。"
-                ),
-            },
+            data=result_data,
             metadata={"action": "task_submit_container"},
         )
 
@@ -1026,6 +1049,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             metadata["needs_preparation"] = inputs["needs_preparation"]
         if inputs.get("task_scope"):
             metadata["task_scope"] = inputs["task_scope"]
+        if inputs.get("isolation_level"):
+            metadata["isolation_level"] = inputs["isolation_level"]
 
         # 存储执行者信息
         if inputs.get("target_id"):

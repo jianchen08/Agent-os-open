@@ -225,7 +225,7 @@ async def test_create_agent_e2e() -> None:
         print(f"  请求: {TASK_SUBMIT_MSG}", flush=True)
 
         try:
-            result = await asyncio.wait_for(
+            await asyncio.wait_for(
                 app._engine.run(
                     user_input=TASK_SUBMIT_MSG,
                     agent_config=app._agent_config,
@@ -274,7 +274,6 @@ async def test_create_agent_e2e() -> None:
         print("=" * 60, flush=True)
         print(f"  [DEBUG] Phase 3 开始 | time={time.time() - start_time:.1f}s", flush=True)
 
-        from tasks.types import TaskStatus
 
         poll_elapsed = 0
         terminal_statuses = {"completed", "failed", "cancelled"}

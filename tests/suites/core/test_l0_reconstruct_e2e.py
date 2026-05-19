@@ -709,8 +709,8 @@ class TestSplitAndReconstructE2E:
         # 验证时间正序：sequence 从小到大
         # 从 content 中提取 iteration 编号来验证
         for i in range(1, len(messages)):
-            c_prev = messages[i - 1].get("content", "")
-            c_curr = messages[i].get("content", "")
+            messages[i - 1].get("content", "")
+            messages[i].get("content", "")
             # 同一轮的消息（iteration 相同）顺序合法
             # 跨轮的消息 iteration 编号应递增
             pass  # 顺序由 _select_within_budget 的 reverse 保证

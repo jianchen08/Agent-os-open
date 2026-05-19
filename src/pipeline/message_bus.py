@@ -113,15 +113,14 @@ def _inject_and_wake_engine(engine: Any, user_input: str) -> None:
     """
     if engine._suspended_state is not None and user_input:
         orig = engine._suspended_state.get("user_input", "")
-        # BUG-FIX-fix_20260511: 不再将 orig 拼接到用户消息中。
-        # orig 是挂起时的内部占位文本，不应暴露给 LLM。
         engine._suspended_state["user_input"] = user_input
-        engine._suspended_state.setdefault("messages", []).append(
-            {"role": "user", "content": user_input}
-        )
-        logger.info(
-            "[MessageBus] 消息已注入到挂起引擎 state (%d 字符)", len(user_input)
-        )
+        _msgs = engine._suspended_state.get("messages", [])
+        _last = _msgs[-1] if _msgs else {}
+        _will_append = not (_last.get("role") == "user" and _last.get("content") == user_input)
+        if _will_append:
+            engine._suspended_state.setdefault("messages", []).append(
+                {"role": "user", "content": user_input}
+            )
     if engine._wake_event is not None:
         engine._wake_event.set()
 
@@ -255,8 +254,6 @@ async def _try_revive_pipeline(
                 method="failed",
                 pipeline_id=pipeline_id,
             )
-
-    conversation_history.append({"role": "user", "content": message})
 
     if agent_config is None and provider and task_id:
         agent_config = _load_agent_config(task_id, provider)

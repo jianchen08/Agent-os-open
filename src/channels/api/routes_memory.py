@@ -14,7 +14,6 @@ from channels.api.deps import APIError, require_auth, validate_pagination
 from channels.api.models import (
     MemoryListResponse,
     MemoryResponse,
-    MemorySearchRequest,
     store,
 )
 

@@ -11,6 +11,20 @@ from enum import Enum
 from typing import Any
 
 
+class EvaluatorType(Enum):
+    """评估器类型枚举。
+
+    每种类型对应一种评估器实现：
+    - PROGRAMMATIC: 程序化评估（L1）
+    - SEMANTIC: 语义评估（L2）
+    - UNIFIED: 综合对比（L3）
+    """
+
+    PROGRAMMATIC = "programmatic"
+    SEMANTIC = "semantic"
+    UNIFIED = "unified"
+
+
 class MetricType(Enum):
     """评估指标类型枚举。
 

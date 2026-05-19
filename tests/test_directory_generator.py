@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from memory.directory_generator import DirectoryConfig, DirectoryGenerator
 

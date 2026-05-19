@@ -8,12 +8,9 @@ from __future__ import annotations
 
 import sys
 import os
-import asyncio
 import hashlib
 import hmac
-import json
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -36,7 +33,7 @@ class TestDingTalkInputAdapter:
 
     def test_receive_text_message(self) -> None:
         """接收文本消息 → state。"""
-        adapter = DingTalkInputAdapter()
+        DingTalkInputAdapter()
         raw_msg = {
             "conversationId": "cid-1",
             "senderStaffId": "user_dt_1",
@@ -193,7 +190,7 @@ class TestDingTalkStreamClient:
         mock_session.closed = False
         client._session = mock_session
 
-        result = await client.send_message("user_dt_1", "Hello")
+        await client.send_message("user_dt_1", "Hello")
 
         mock_session.post.assert_called_once()
         call_args = mock_session.post.call_args

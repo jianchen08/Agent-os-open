@@ -103,6 +103,19 @@ const DebugEvaluationMetricsPage = lazy(() =>
 const DebugUsersPage = lazy(() =>
   import('@/pages/debug/DebugUsersPage').then((m) => ({ default: m.DebugUsersPage })),
 )
+const PluginsSettingsPage = lazy(() =>
+  import('@/pages/settings/PluginsSettingsPage').then((m) => ({
+    default: m.PluginsSettingsPage,
+  })),
+)
+const TriggersPage = lazy(() =>
+  import('@/pages/triggers/TriggersPage').then((m) => ({ default: m.TriggersPage })),
+)
+const KnowledgeBasePage = lazy(() =>
+  import('@/pages/knowledge-base/KnowledgeBasePage').then((m) => ({
+    default: m.KnowledgeBasePage,
+  })),
+)
 
 /** 懒加载 fallback */
 const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
@@ -510,7 +523,7 @@ function HomePage(): ReactNode {
                       onClick={(e) => {
                         e.stopPropagation()
                         if (window.confirm('确定要删除此会话吗？')) {
-                          deleteSession(session.id)
+                          deleteSession(session.id).catch(() => {})
                         }
                       }}
                       className="text-destructive focus:text-destructive"
@@ -752,6 +765,16 @@ export function createRouter() {
       ),
     },
     {
+      path: ROUTES.SETTINGS_PLUGINS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <PluginsSettingsPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
       path: ROUTES.TOOLS,
       element: (
         <ProtectedRoute>
@@ -797,6 +820,26 @@ export function createRouter() {
         <ProtectedRoute>
           <Suspense fallback={LazyFallback}>
             <MemoryPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.TRIGGERS,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <TriggersPage />
+          </Suspense>
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: ROUTES.KNOWLEDGE_BASE,
+      element: (
+        <ProtectedRoute>
+          <Suspense fallback={LazyFallback}>
+            <KnowledgeBasePage />
           </Suspense>
         </ProtectedRoute>
       ),

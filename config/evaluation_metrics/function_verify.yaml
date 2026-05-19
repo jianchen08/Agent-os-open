@@ -208,14 +208,54 @@ expected_output:
                 type: string
                 description: "修复建议"
 
+# ===== 语义评估（必须在功能验证通过后执行） =====
+semantic_evaluation:
+  required: true
+  description: |
+    功能验证必须有语义评估，语义评估是对验证过程本身的审查。
+    评估者需要回答以下问题：
+    1. 验证Agent做了什么：评估者必须清楚描述验证Agent实际执行了哪些操作、覆盖了哪些场景。
+    2. 验证行为与用户真实使用是否一致：验证Agent的验证方式是否还原了用户真实的使用路径和操作方式，
+       而不是仅从技术角度做单元测试式的验证。
+    3. 是否使用了用户真实的使用场景去验证：验证场景是否来源于真实的用户使用场景，
+       而非仅凭技术推测构造的测试用例。
+  evaluation_points:
+    - point: "验证Agent行为描述"
+      description: "评估者必须明确说明验证Agent具体做了什么，包括执行了哪些操作、使用了什么工具、覆盖了哪些场景"
+      required: true
+    - point: "与用户真实使用的一致性"
+      description: "评估者必须判断验证Agent的验证行为是否与用户真实使用时一致，是否模拟了用户的真实操作路径"
+      required: true
+    - point: "用户真实场景覆盖"
+      description: "评估者必须确认验证是否使用了用户真实的使用场景，而非仅靠技术推测"
+      required: true
+  output_fields:
+    evaluator_assessment:
+      type: string
+      description: "评估者对验证Agent行为的总结描述"
+      required: true
+    user_consistency_check:
+      type: string
+      description: "验证Agent的验证方式与用户真实使用方式的一致性判断"
+      required: true
+    real_scenario_verification:
+      type: string
+      description: "是否使用了用户真实场景验证的说明及证据"
+      required: true
+
 # ===== 评估判断标准 =====
 expect:
   conditions:
     - field: "passed"
       operator: "is_true"
-  logic: "and"
-  pass_message: "功能验证通过"
-  fail_message: "功能验证未通过"
+      logic: "and"
+      pass_message: "功能验证通过"
+      fail_message: "功能验证未通过"
+    - field: "semantic_evaluation"
+      operator: "is_present"
+      logic: "and"
+      pass_message: "语义评估已完成"
+      fail_message: "缺少语义评估，功能验证必须包含语义评估"
 
 # ===== 输入参数定义 =====
 input_schema:
@@ -310,6 +350,7 @@ caveats:
   - 如果调用方未提供 user_scenarios，评估Agent必须自行根据需求推断至少3个典型用户场景并逐个验证
   - 每个用户场景必须记录实际执行的命令和真实输出，作为验证证据
   - 验证质量取决于需求描述的清晰度，复杂系统可能需要结合人工审核
+  - 功能验证必须包含语义评估，评估者必须回答：验证Agent做了什么、验证方式与用户真实使用是否一致、是否用了用户真实场景去验证
 
 # ===== 依赖关系 =====
 is_red_line: false

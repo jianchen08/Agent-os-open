@@ -26,11 +26,8 @@ from rich.console import Console
 
 from human_interaction.service import (
     HumanInteractionService,
-    InteractionCancelledError,
-    InteractionDeniedError,
     InteractionTimeoutError,
 )
-from human_interaction.models import InteractionMode, Priority
 from channels.cli.cli_interaction import (
     CLIInteractionNotifier,
     _resolve_choice,

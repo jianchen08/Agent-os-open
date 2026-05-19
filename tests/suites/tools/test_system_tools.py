@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from tools.builtin.bash.tool import BashTool
 from tools.builtin.compatibility_checker import CompatibilityCheckerTool

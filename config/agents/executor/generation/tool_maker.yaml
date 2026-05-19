@@ -153,7 +153,10 @@ static_vars:
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
   enabled: true
-  items: []
+  items:
+    - name: "最小行动原则"
+      content: |
+        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
 
 tool_ids:
   - file_read
@@ -267,9 +270,12 @@ deliverables:
     required: true
 
 # 推荐评估指标（L2 提交给 L3 时参考）
-# function_verify 不需要文件路径，只需功能描述，评估器自行验证
 recommended_metrics:
-  - metric_id: function_verify
+  - metric_id: file_check
+    default_params:
+      action: "read"
+      path: "{tool_id}.py"
+  - metric_id: test_check
     default_params:
       requirement: "验证工具功能是否符合需求规格，能正确执行并返回预期结果"
 

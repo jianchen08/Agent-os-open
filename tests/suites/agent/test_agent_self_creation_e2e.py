@@ -13,7 +13,6 @@ Agent自创建完整流程测试
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
 
@@ -21,10 +20,7 @@ import pytest
 import yaml
 
 from agents.context_builder import ContextBuilder
-from agents.loader import AgentConfigLoader
 from agents.registry import AgentRegistry
-from agents.types import AgentConfig
-from pipeline.types import create_initial_state
 from tools.builtin.file_write import FileWriteTool
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent

@@ -13,10 +13,10 @@ import logging
 from typing import Any
 
 from memory.ports import IEpisodeStorage, ISemanticStorage
-from memory.types import Episode, Knowledge, SearchResult
+from memory.types import Episode, Knowledge
 
 try:
-    from sqlalchemy import select, text
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import AsyncSession
 except ImportError as exc:
     raise ImportError(
@@ -255,7 +255,7 @@ class PgVectorStore(IEpisodeStorage, ISemanticStorage):
             extra_data=row.memory_metadata,
         )
 
-    async def find_by_user(self, user_id: str, limit: int = 20) -> list[Knowledge]:
+    async def find_by_user(self, user_id: str, limit: int = 20) -> list[Knowledge]:  # noqa: F811
         """按用户查找知识。
 
         Args:

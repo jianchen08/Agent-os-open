@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from memory.episode_service import EpisodeService
-from memory.experience_bridge import ExperienceBridge, KnowledgeResult
+from memory.experience_bridge import ExperienceBridge
 from memory.knowledge_service import KnowledgeService
 
 

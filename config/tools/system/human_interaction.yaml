@@ -3,7 +3,7 @@
 
 name: human_interaction
 display_name: "人类交互"
-description: "与用户交互工具。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页；通知模式：非阻塞推送信息给用户。"
+description: "人类交互工具——只要是需要请求人类交互的场景，就必须使用此工具，禁止通过其他方式绕过人类交互。支持三种模式：选择模式（choice）——弹出选择框等待用户决定；对话模式（conversation）——跳转到对话标签页进行多轮对话；通知模式（notification）——非阻塞推送信息给用户。"
 
 category: "system"
 level: "all"

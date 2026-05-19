@@ -1,0 +1,124 @@
+# ================================================================
+# 能力适配器统一注册配置
+# ================================================================
+#
+# 本文件定义所有外部连接器的注册信息，供 ConnectorRegistry 加载使用。
+# 每个适配器包含连接器的类型、优先级、能力列表和 MCP 配置路径。
+#
+# 字段说明：
+#   type         - 适配器类别（ide / creative / browser / desktop）
+#   priority     - 优先级，数值越大越优先（ConnectorRegistry 按此排序）
+#   display_name - 连接器显示名称
+#   capabilities - 支持的操作类型列表（与 ConnectorAction.action_type 对应）
+#   mcp_config   - MCP 服务器配置（非 MCP 连接器设为 null）
+#     command    - MCP 服务启动命令
+#     args       - 命令参数列表
+#     env        - 环境变量（支持 ${VAR} 插值）
+#   connector_class - 连接器实现类的完整导入路径（非 MCP 连接器必填）
+#   available    - 是否启用（默认 true）
+#
+# 加载方式：
+#   ConnectorRegistry 启动时读取本文件，按 connector_type 注册连接器实例。
+#   非 MCP 连接器通过 connector_class 反射创建；MCP 连接器通过 mcp_config 启动。
+#   同类适配器按 priority 降序排序，优先级最高的优先使用。
+#
+# ================================================================
+
+adapters:
+  # ==============================================================
+  # VSCode IDE 连接器
+  # 通过 HTTP 短轮询与 VSCode 扩展通信，支持双向交互。
+  # 实现：src/connectors/vscode/connector.py
+  # ==============================================================
+  vscode:
+    type: "ide"
+    priority: 10
+    display_name: "Visual Studio Code"
+    capabilities:
+      - "open_file"
+      - "open_folder"
+      - "insert_content"
+      - "jump_to"
+      - "show_diff"
+      - "get_selection"
+    mcp_config: null
+    connector_class: "connectors.vscode.connector.VSCodeConnector"
+    available: true
+
+  # ==============================================================
+  # ComfyUI 创意生产连接器
+  # 通过 HTTP API + WebSocket 连接 ComfyUI，支持 AI 图像生成工作流。
+  # 实现：src/connectors/creative/comfyui.py
+  # ==============================================================
+  comfyui:
+    type: "creative"
+    priority: 10
+    display_name: "ComfyUI"
+    capabilities:
+      - "generate_image"
+      - "submit_workflow"
+      - "get_progress"
+      - "get_result"
+      - "list_models"
+      - "list_workflows"
+      - "capture_screenshot"
+      - "interrupt_task"
+      - "clear_queue"
+      - "ws_progress"
+    mcp_config: null
+    connector_class: "connectors.creative.comfyui.ComfyUIConnector"
+    available: true
+
+  # ==============================================================
+  # Playwright 浏览器连接器
+  # 通过 MCP Server 驱动 Playwright，支持浏览器自动化和页面截图。
+  # MCP 工具映射详情见 config/tools/capability_adapters.yaml
+  # ==============================================================
+  playwright:
+    type: "browser"
+    priority: 5
+    display_name: "Playwright"
+    capabilities:
+      - "navigate"
+      - "snapshot"
+      - "evaluate"
+      - "console"
+      - "screenshot"
+    mcp_config:
+      command: "npx.cmd"
+      args:
+        - "-y"
+        - "@playwright/mcp@latest"
+        - "--caps=vision"
+      env: {}
+    connector_class: null
+    available: true
+
+  # ==============================================================
+  # Windows Desktop 连接器
+  # 通过 MCP Server 实现桌面级操作：屏幕截图、窗口管理、键鼠输入等。
+  # ==============================================================
+  windows_desktop:
+    type: "desktop"
+    priority: 8
+    display_name: "Windows Desktop"
+    capabilities:
+      - "screen_capture"
+      - "window_list"
+      - "window_focus"
+      - "window_resize"
+      - "keyboard_input"
+      - "mouse_click"
+      - "mouse_move"
+      - "mouse_scroll"
+      - "clipboard_read"
+      - "clipboard_write"
+      - "file_dialog"
+    mcp_config:
+      command: "npx.cmd"
+      args:
+        - "-y"
+        - "@anthropic/windows_desktop_mcp@latest"
+      env: {}
+    connector_class: null
+    available: true

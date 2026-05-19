@@ -81,7 +81,7 @@ if not exist "frontend\node_modules" (
 :: ========== 启动后端 ==========
 echo [1/2] 启动后端服务器 (FastAPI + WebSocket :!BACKEND_PORT!)...
 set "VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!"
-start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python start_server.py"
+start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python app_factory.py"
 
 :: ========== 等待后端就绪 ==========
 echo [INFO] 等待后端服务就绪...

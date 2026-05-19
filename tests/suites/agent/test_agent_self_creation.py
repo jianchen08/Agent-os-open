@@ -13,7 +13,6 @@ Agent自创建端到端测试
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
 
@@ -21,7 +20,6 @@ import pytest
 import yaml
 
 from agents.registry import AgentRegistry
-from pipeline.types import create_initial_state
 from tools.builtin.file_write import FileWriteTool
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent

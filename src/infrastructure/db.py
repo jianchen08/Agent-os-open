@@ -25,7 +25,7 @@ _engine: Any | None = None
 # 尝试导入 SQLAlchemy，失败时标记不可用
 _SQLALCHEMY_AVAILABLE: bool
 try:
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
 
     _SQLALCHEMY_AVAILABLE = True

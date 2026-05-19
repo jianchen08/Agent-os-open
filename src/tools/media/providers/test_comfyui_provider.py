@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -204,7 +203,7 @@ class TestGeneratePromptMode:
             assert mock_submit.called
             # 获取传入的工作流 JSON
             call_args = mock_submit.call_args
-            workflow = call_args[0][0] if call_args[0] else call_args.kwargs.get("workflow", {})
+            call_args[0][0] if call_args[0] else call_args.kwargs.get("workflow", {})
 
             # 检查参数是否被替换到工作流中
             assert result.metadata["prompt"] == "a cat"

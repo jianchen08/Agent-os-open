@@ -8,7 +8,6 @@
 5. 手动复制辅助函数正确性
 """
 import sys
-import pytest
 
 sys.path.insert(0, "src")
 
@@ -16,7 +15,6 @@ from pipeline.engine import (
     _safe_deepcopy,
     _manual_copy_dict,
     _manual_copy_list,
-    _SKIP_COPY_KEYS,
 )
 
 

@@ -9,7 +9,6 @@
 
 import re
 from pathlib import Path
-from typing import Any
 
 from .types import (
     EvaluationDimension,

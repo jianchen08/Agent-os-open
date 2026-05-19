@@ -10,7 +10,6 @@ Network Search Tool (Based on mcp-webgate)
 特性：BM25 重排序、HTML 去噪、URL 去重、上下文保护、纯 HTTP 抓取（无浏览器依赖）
 """
 
-import asyncio
 import os
 import shutil
 from dataclasses import dataclass, field

@@ -32,6 +32,7 @@ _KNOWN_INJECT_SOURCES: dict[str, str] = {
     "_tool_registry": "ToolCore._SERVICE_INJECT_MAP",
     "_session": "ToolCore._SERVICE_INJECT_MAP",
     "_memory_service": "ToolCore._SERVICE_INJECT_MAP",
+    "agent_config_id": "ParamInjectPlugin",
 }
 
 

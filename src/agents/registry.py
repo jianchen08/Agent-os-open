@@ -21,9 +21,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -144,11 +144,15 @@ class AgentRegistry:
             return p
         return None
 
+    # _find_yaml_by_content 最大扫描文件数，防止目录过大时阻塞
+    _MAX_SCAN_FILES = 200
+
     def _find_yaml_by_content(self, config_id: str) -> Path | None:
         """按 YAML 内容中的 config_id 字段查找配置文件。
 
         遍历所有未扫描过的 YAML 文件，读取其 config_id 字段进行匹配。
         匹配成功的文件路径会被缓存到 _scanned_files 中。
+        设置最大扫描数量限制，避免大目录阻塞。
 
         Args:
             config_id: 配置唯一标识。
@@ -157,10 +161,18 @@ class AgentRegistry:
             匹配的 YAML 文件路径，未找到返回 None。
         """
         assert self._config_dir is not None
+        scanned_count = 0
         for p in self._config_dir.rglob("*.yaml"):
+            if scanned_count >= self._MAX_SCAN_FILES:
+                logger.warning(
+                    "已达到最大扫描文件数限制 (%d)，停止扫描: config_id=%s",
+                    self._MAX_SCAN_FILES, config_id,
+                )
+                break
             p_str = str(p)
             if p_str in self._scanned_files:
                 continue
+            scanned_count += 1
             try:
                 with open(p, encoding="utf-8") as f:
                     data = yaml.safe_load(f) or {}
@@ -291,3 +303,18 @@ class AgentRegistry:
             配置数量。
         """
         return len(self._configs)
+
+    # ---- 异步方法 ----
+
+    async def get_async(self, config_id: str) -> AgentConfig | None:
+        """异步版本的 get，将懒加载中的同步 I/O 卸载到线程池。"""
+        config = self._configs.get(config_id)
+        if config is not None:
+            return config
+        if self._config_dir is None or not self._config_dir.exists():
+            return None
+        return await asyncio.to_thread(self._lazy_load, config_id)
+
+    async def load_directory_async(self, dir_path: str | Path) -> int:
+        """异步版本的 load_directory，将同步 I/O 卸载到线程池。"""
+        return await asyncio.to_thread(self.load_directory, dir_path)

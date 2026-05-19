@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from typing import Any
@@ -249,6 +250,256 @@ async def save_file_content(
     except Exception as e:
         logger.warning("保存工作空间文件失败: %s | path=%s", e, path)
         return {"success": False, "message": f"保存文件失败: {e}"}
+
+
+def _validate_path_in_workspace(workspace_path: Path, rel_path: str) -> Path | None:
+    """验证相对路径在工作空间范围内，防止路径穿越攻击。
+
+    Args:
+        workspace_path: 工作空间根路径（已 resolve）
+        rel_path: 相对路径字符串
+
+    Returns:
+        安全的完整路径，不安全时返回 None
+    """
+    full_path = (workspace_path / rel_path).resolve()
+    if not str(full_path).startswith(str(workspace_path)):
+        return None
+    return full_path
+
+
+@workspaces_router.post("/{container_task_id}/create-entry", summary="创建文件或文件夹")
+async def create_entry(
+    container_task_id: str,
+    body: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """在工作空间中创建文件或文件夹。
+
+    Args:
+        container_task_id: 容器任务 ID
+        body: 请求体，包含 path（必需）和 type（必需：file 或 directory）
+        _user: 已认证用户信息
+
+    Returns:
+        包含 success、message、path 的操作结果字典
+    """
+    path = body.get("path", "")
+    entry_type = body.get("type", "")
+
+    if not path:
+        return {"success": False, "message": "path 参数不能为空"}
+
+    if entry_type not in ("file", "directory"):
+        return {"success": False, "message": "type 参数必须为 file 或 directory"}
+
+    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    if not workspace_path_str:
+        return {"success": False, "message": "未找到工作空间路径"}
+
+    workspace_path = Path(workspace_path_str).resolve()
+    full_path = _validate_path_in_workspace(workspace_path, path)
+    if full_path is None:
+        return {"success": False, "message": "路径超出工作空间范围"}
+
+    if full_path.exists():
+        return {"success": False, "message": f"路径已存在: {path}"}
+
+    try:
+        if entry_type == "directory":
+            full_path.mkdir(parents=True, exist_ok=False)
+        else:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text("", encoding="utf-8")
+
+        return {"success": True, "message": f"创建成功: {path}", "path": path}
+    except Exception as e:
+        logger.warning("创建文件/文件夹失败: %s | path=%s", e, path)
+        return {"success": False, "message": f"创建失败: {e}"}
+
+
+@workspaces_router.delete("/{container_task_id}/entries", summary="删除文件或文件夹")
+async def delete_entry(
+    container_task_id: str,
+    path: str = Query(..., description="要删除的文件或文件夹相对路径"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """删除工作空间中的文件或文件夹。
+
+    Args:
+        container_task_id: 容器任务 ID
+        path: 要删除的文件或文件夹的相对路径
+        _user: 已认证用户信息
+
+    Returns:
+        包含 success、message 的操作结果字典
+    """
+    if not path:
+        return {"success": False, "message": "path 参数不能为空"}
+
+    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    if not workspace_path_str:
+        return {"success": False, "message": "未找到工作空间路径"}
+
+    workspace_path = Path(workspace_path_str).resolve()
+    full_path = _validate_path_in_workspace(workspace_path, path)
+    if full_path is None:
+        return {"success": False, "message": "路径超出工作空间范围"}
+
+    # 禁止删除根目录
+    if full_path == workspace_path:
+        return {"success": False, "message": "禁止删除工作空间根目录"}
+
+    if not full_path.exists():
+        return {"success": False, "message": f"路径不存在: {path}"}
+
+    try:
+        if full_path.is_dir():
+            import shutil
+            shutil.rmtree(full_path)
+        else:
+            full_path.unlink()
+
+        return {"success": True, "message": f"删除成功: {path}"}
+    except Exception as e:
+        logger.warning("删除文件/文件夹失败: %s | path=%s", e, path)
+        return {"success": False, "message": f"删除失败: {e}"}
+
+
+@workspaces_router.post("/{container_task_id}/rename-entry", summary="重命名文件或文件夹")
+async def rename_entry(
+    container_task_id: str,
+    body: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """重命名工作空间中的文件或文件夹。
+
+    Args:
+        container_task_id: 容器任务 ID
+        body: 请求体，包含 old_path（必需）和 new_name（必需）
+        _user: 已认证用户信息
+
+    Returns:
+        包含 success、message、old_path、new_path 的操作结果字典
+    """
+    old_path = body.get("old_path", "")
+    new_name = body.get("new_name", "")
+
+    if not old_path:
+        return {"success": False, "message": "old_path 参数不能为空"}
+    if not new_name:
+        return {"success": False, "message": "new_name 参数不能为空"}
+
+    # new_name 不能包含路径分隔符（防止路径穿越）
+    if "/" in new_name or "\\" in new_name:
+        return {"success": False, "message": "new_name 不能包含路径分隔符"}
+
+    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    if not workspace_path_str:
+        return {"success": False, "message": "未找到工作空间路径"}
+
+    workspace_path = Path(workspace_path_str).resolve()
+    full_old_path = _validate_path_in_workspace(workspace_path, old_path)
+    if full_old_path is None:
+        return {"success": False, "message": "路径超出工作空间范围"}
+
+    if not full_old_path.exists():
+        return {"success": False, "message": f"路径不存在: {old_path}"}
+
+    # 计算新路径：在同一个目录下替换文件/目录名
+    full_new_path = full_old_path.parent / new_name
+    # 确保新路径也在工作空间范围内
+    if not str(full_new_path).startswith(str(workspace_path)):
+        return {"success": False, "message": "目标路径超出工作空间范围"}
+
+    if full_new_path.exists():
+        return {"success": False, "message": f"目标名称已存在: {new_name}"}
+
+    # 计算新的相对路径
+    new_rel_path = str(Path(old_path).parent / new_name) if Path(old_path).parent != Path(".") else new_name
+
+    try:
+        full_old_path.rename(full_new_path)
+        return {
+            "success": True,
+            "message": f"重命名成功: {old_path} -> {new_rel_path}",
+            "old_path": old_path,
+            "new_path": new_rel_path,
+        }
+    except Exception as e:
+        logger.warning("重命名文件/文件夹失败: %s | old_path=%s", e, old_path)
+        return {"success": False, "message": f"重命名失败: {e}"}
+
+
+@workspaces_router.post("/{container_task_id}/move-entry", summary="移动文件或文件夹")
+async def move_entry(
+    container_task_id: str,
+    body: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """移动工作空间中的文件或文件夹到指定目录。
+
+    Args:
+        container_task_id: 容器任务 ID
+        body: 请求体，包含 source_path（必需）和 destination_dir（必需）
+        _user: 已认证用户信息
+
+    Returns:
+        包含 success、message、source_path、destination_path 的操作结果字典
+    """
+    source_path = body.get("source_path", "")
+    destination_dir = body.get("destination_dir", "")
+
+    if not source_path:
+        return {"success": False, "message": "source_path 参数不能为空"}
+    if not destination_dir:
+        return {"success": False, "message": "destination_dir 参数不能为空"}
+
+    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    if not workspace_path_str:
+        return {"success": False, "message": "未找到工作空间路径"}
+
+    workspace_path = Path(workspace_path_str).resolve()
+    full_source = _validate_path_in_workspace(workspace_path, source_path)
+    if full_source is None:
+        return {"success": False, "message": "源路径超出工作空间范围"}
+
+    full_dest_dir = _validate_path_in_workspace(workspace_path, destination_dir)
+    if full_dest_dir is None:
+        return {"success": False, "message": "目标路径超出工作空间范围"}
+
+    if not full_source.exists():
+        return {"success": False, "message": f"源路径不存在: {source_path}"}
+
+    if not full_dest_dir.is_dir():
+        return {"success": False, "message": f"目标目录不存在或不是目录: {destination_dir}"}
+
+    # 禁止移动到自身子目录
+    if str(full_dest_dir).startswith(str(full_source) + os.sep):
+        return {"success": False, "message": "不能将目录移动到其自身子目录中"}
+
+    dest_full_path = full_dest_dir / full_source.name
+    if dest_full_path.exists():
+        return {"success": False, "message": f"目标位置已存在同名文件: {full_source.name}"}
+
+    # 确保目标路径在工作空间内
+    if not str(dest_full_path).startswith(str(workspace_path)):
+        return {"success": False, "message": "目标路径超出工作空间范围"}
+
+    new_rel_path = str(Path(destination_dir) / full_source.name)
+
+    try:
+        import shutil
+        shutil.move(str(full_source), str(dest_full_path))
+        return {
+            "success": True,
+            "message": f"移动成功: {source_path} -> {new_rel_path}",
+            "source_path": source_path,
+            "destination_path": new_rel_path,
+        }
+    except Exception as e:
+        logger.warning("移动文件/文件夹失败: %s | source=%s", e, source_path)
+        return {"success": False, "message": f"移动失败: {e}"}
 
 
 @workspaces_router.post("/{container_task_id}/open", summary="在IDE中打开工作空间")

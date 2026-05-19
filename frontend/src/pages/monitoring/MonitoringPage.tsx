@@ -88,7 +88,7 @@ export function MonitoringPage() {
         <h1 className="ml-4 text-base font-semibold">系统监控</h1>
         <div className="ml-auto flex items-center gap-3">
           {lastUpdated && (
-            <span className="text-muted-foreground text-xs">
+            <span className="text-muted-foreground hidden text-xs sm:inline">
               更新于 {new Date(lastUpdated).toLocaleTimeString()}
             </span>
           )}
@@ -99,7 +99,7 @@ export function MonitoringPage() {
               onChange={(e) => setAutoRefresh(e.target.checked)}
               className="rounded"
             />
-            自动刷新
+            <span className="hidden sm:inline">自动刷新</span>
           </label>
           <button
             onClick={handleRefresh}
@@ -111,7 +111,7 @@ export function MonitoringPage() {
           </button>
         </div>
       </header>
-      <main className="space-y-6 p-6">
+      <main className="space-y-6 p-3 sm:p-6">
         {/* 错误提示 */}
         {error && (
           <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
@@ -223,48 +223,70 @@ export function MonitoringPage() {
               <p className="text-muted-foreground/60 mt-1 text-xs">当有任务执行时，这里会显示最近的任务</p>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-lg border">
-              <table className="w-full text-sm">
-                <thead className="bg-accent/30">
-                  <tr>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      任务
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      状态
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      创建时间
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      耗时
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentTasks.map((task) => (
-                    <tr key={task.id} className="hover:bg-accent/20 border-t">
-                      <td className="max-w-[200px] truncate px-4 py-2">
-                        {task.intent || task.name || task.id}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
-                        >
-                          {task.status}
-                        </span>
-                      </td>
-                      <td className="text-muted-foreground px-4 py-2 text-xs">
-                        {new Date(task.created_at).toLocaleString()}
-                      </td>
-                      <td className="text-muted-foreground px-4 py-2 text-xs">
-                        {task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}
-                      </td>
+            <>
+              {/* 移动端卡片视图 */}
+              <div className="space-y-2 md:hidden">
+                {recentTasks.map((task) => (
+                  <div key={task.id} className="rounded-lg border p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-sm font-medium leading-snug">{task.intent || task.name || task.id}</span>
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
+                      >
+                        {task.status}
+                      </span>
+                    </div>
+                    <div className="text-muted-foreground mt-2 space-y-1 text-xs">
+                      <div>创建时间：{new Date(task.created_at).toLocaleString()}</div>
+                      <div>耗时：{task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {/* 桌面端表格视图 */}
+              <div className="hidden md:block overflow-hidden rounded-lg border">
+                <table className="w-full text-sm">
+                  <thead className="bg-accent/30">
+                    <tr>
+                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                        任务
+                      </th>
+                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                        状态
+                      </th>
+                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                        创建时间
+                      </th>
+                      <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
+                        耗时
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {recentTasks.map((task) => (
+                      <tr key={task.id} className="hover:bg-accent/20 border-t">
+                        <td className="max-w-[200px] truncate px-4 py-2">
+                          {task.intent || task.name || task.id}
+                        </td>
+                        <td className="px-4 py-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
+                          >
+                            {task.status}
+                          </span>
+                        </td>
+                        <td className="text-muted-foreground px-4 py-2 text-xs">
+                          {new Date(task.created_at).toLocaleString()}
+                        </td>
+                        <td className="text-muted-foreground px-4 py-2 text-xs">
+                          {task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </section>
       </main>

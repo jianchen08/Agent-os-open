@@ -175,18 +175,9 @@ class ModuleManager {
       }))
     }
 
-    const allTabs = useLayoutModeStore.getState().workspaceTabs
-    const activeTab = allTabs.find((t) => t.isActive)
-    if (activeTab) {
-      allDockItems.forEach((item) => {
-        item.isActive = item.moduleId === activeTab.moduleId
-      })
-    }
-
     const currentDockItems = useLayoutModeStore.getState().dockItems
     const dockChanged = allDockItems.length !== currentDockItems.length ||
-      allDockItems.some((item, i) => item.id !== currentDockItems[i]?.id) ||
-      allDockItems.some((item, i) => item.isActive !== currentDockItems[i]?.isActive)
+      allDockItems.some((item, i) => item.id !== currentDockItems[i]?.id)
     if (dockChanged && allDockItems.length > 0) {
       useLayoutModeStore.getState().setDockItems(allDockItems)
     }

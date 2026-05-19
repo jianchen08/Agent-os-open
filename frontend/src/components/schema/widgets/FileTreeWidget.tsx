@@ -33,6 +33,12 @@ import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useWorkspaceStore } from '@/stores/workspaceStore'
+import {
+  FileTreeContextMenu,
+  type ContextMenuContext,
+  type ContextMenuTreeNode,
+} from './FileTreeContextMenu'
 
 /**
  * 树展开状态的 localStorage 持久化工具
@@ -476,6 +482,96 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     setInternalRefresh((prev) => prev + 1)
   }, [])
 
+  /** 右键上下文菜单状态 */
+  const [contextMenu, setContextMenu] = useState<{
+    x: number
+    y: number
+    context: ContextMenuContext
+  } | null>(null)
+
+  /** 从 rawProps 获取 containerTaskId（用于文件操作 API） */
+  const containerTaskId = rawProps.containerTaskId as string
+    ?? (rawProps.dataSource as string | undefined)?.replace('workspace://', '')?.split('/')[0]
+    ?? ''
+
+  /**
+   * 将 TreeNodeData[] 转换为 ContextMenuTreeNode[]（供上下文菜单移动对话框使用）
+   */
+  const toContextMenuTree = useCallback(
+    (nodes: TreeNodeData[]): ContextMenuTreeNode[] =>
+      nodes.map((n) => ({
+        name: String(getNodeField(n, nodeTitleField) ?? ''),
+        path: (n.path as string) ?? getStableNodeId(n),
+        isDirectory: !!(getNodeField(n, nodeChildrenField) as TreeNodeData[] | undefined)?.length
+          || (n.type as string) === 'directory',
+        children: (getNodeField(n, nodeChildrenField) as TreeNodeData[] | undefined)
+          ?.map((c) => ({
+            name: String(getNodeField(c, nodeTitleField) ?? ''),
+            path: (c.path as string) ?? getStableNodeId(c),
+            isDirectory: !!(getNodeField(c, nodeChildrenField) as TreeNodeData[] | undefined)?.length
+              || (c.type as string) === 'directory',
+            children: undefined,
+          })),
+      })),
+    [nodeTitleField, nodeChildrenField],
+  )
+
+  /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
+  const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
+
+  /**
+   * 处理节点右键菜单
+   */
+  const handleNodeContextMenu = useCallback(
+    (e: React.MouseEvent, node: TreeNodeData) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const nodePath = (node.path as string) ?? getStableNodeId(node)
+      const nodeTitle = String(getNodeField(node, nodeTitleField) ?? '')
+      const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
+      const isDir = !!children?.length || (node.type as string) === 'directory'
+      const parentPath = nodePath.includes('/') ? nodePath.substring(0, nodePath.lastIndexOf('/')) : ''
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        context: {
+          containerTaskId,
+          targetPath: nodePath,
+          targetName: nodeTitle,
+          isDirectory: isDir,
+          parentDir: isDir ? nodePath : parentPath,
+          treeData: toContextMenuTree(effectiveData),
+          onRefresh: triggerRefresh,
+        },
+      })
+    },
+    [containerTaskId, nodeTitleField, nodeChildrenField, effectiveData, toContextMenuTree, triggerRefresh],
+  )
+
+  /**
+   * 处理空白区域右键菜单
+   */
+  const handleBlankContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      if (!containerTaskId) return
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        context: {
+          containerTaskId,
+          targetPath: null,
+          targetName: null,
+          isDirectory: false,
+          parentDir: '',
+          treeData: toContextMenuTree(effectiveData),
+          onRefresh: triggerRefresh,
+        },
+      })
+    },
+    [containerTaskId, effectiveData, toContextMenuTree, triggerRefresh],
+  )
+
   /**
    * 从 API 加载任务树数据
    *
@@ -552,9 +648,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   useEffect(() => {
     hasLoadedRef.current = false
   }, [sessionId])
-
-  /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
-  const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
 
   /** 选中节点 ID */
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -912,7 +1005,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       )}
 
       {/* 树节点列表 */}
-      <div className="py-1">
+      <div className="py-1" onContextMenu={handleBlankContextMenu}>
         {filteredData.length === 0 ? (
           <div className="px-4 py-6 text-center">
             <p className="text-muted-foreground text-xs">未找到匹配的节点</p>
@@ -941,10 +1034,21 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               togglingIds={togglingIds}
               enabledMap={enabledMap}
               onToggleEnabled={handleToggleEnabled}
+              onContextMenu={handleNodeContextMenu}
             />
           ))
         )}
       </div>
+
+      {/* 上下文菜单 */}
+      {contextMenu && (
+        <FileTreeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          context={contextMenu.context}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   )
 }
@@ -991,6 +1095,8 @@ interface TreeNodeProps {
   enabledMap: Record<string, boolean>
   /** 级联切换启用/禁用回调 */
   onToggleEnabled: (nodeId: string, enabled: boolean) => void
+  /** 右键菜单回调（用于文件操作上下文菜单） */
+  onContextMenu?: (e: React.MouseEvent, node: TreeNodeData) => void
 }
 
 /**
@@ -1052,6 +1158,7 @@ function TreeNode({
   togglingIds,
   enabledMap,
   onToggleEnabled,
+  onContextMenu,
 }: TreeNodeProps): React.ReactNode {
   const nodeId = getStableNodeId(node)
   const title = String(getNodeField(node, nodeTitleField) ?? '未命名')
@@ -1177,7 +1284,10 @@ function TreeNode({
   const hasActions = hasPipeline || hasWorkspace
 
   return (
-    <div className={showEnabledToggle && !isEnabled ? 'opacity-50' : ''}>
+    <div
+      className={showEnabledToggle && !isEnabled ? 'opacity-50' : ''}
+      onContextMenu={(e) => onContextMenu?.(e, node)}
+    >
       <div
         className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-accent ${
           isSelected
@@ -1349,10 +1459,15 @@ function TreeNode({
               togglingIds={togglingIds}
               enabledMap={enabledMap}
               onToggleEnabled={onToggleEnabled}
+              onContextMenu={onContextMenu}
             />
+
           ))}
+
         </div>
       )}
+
     </div>
   )
+
 }

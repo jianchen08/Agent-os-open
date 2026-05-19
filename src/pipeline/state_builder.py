@@ -56,7 +56,12 @@ def build_initial_state(
     }
 
     if user_input:
-        state["messages"].append({"role": "user", "content": user_input})
+        _last = resolved_history[-1] if resolved_history else {}
+        if not (_last.get("role") == "user" and _last.get("content") == user_input):
+            state["messages"].append({"role": "user", "content": user_input})
+            logger.info("[StateBuilder] appended user_input to messages (dedup skipped)")
+        else:
+            logger.info("[StateBuilder] dedup: skipped appending user_input (last msg is same)")
 
     if agent_config and hasattr(agent_config, "to_state"):
         agent_state = agent_config.to_state()

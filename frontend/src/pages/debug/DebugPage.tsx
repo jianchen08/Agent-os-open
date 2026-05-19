@@ -58,7 +58,7 @@ export function DebugPage() {
         </a>
         <h1 className="ml-4 text-base font-semibold">调试中心</h1>
       </header>
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className="flex-1 overflow-y-auto p-3 sm:p-6">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {DEBUG_CARDS.map((card) => (
             <a

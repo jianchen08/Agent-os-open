@@ -23,7 +23,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 # ── 测试常量 ──────────────────────────────────────────────────────────────
 
@@ -253,7 +252,7 @@ def _merge_feature_to_main(project_dir: Path) -> dict:
     """
     _run_git("checkout", "main", cwd=project_dir)
     # 使用 --no-ff 确保产生合并 commit（与 WorkspaceLifecycleManager 行为一致）
-    merge_result = _run_git("merge", "--no-ff", _FEATURE_BRANCH, cwd=project_dir)
+    _run_git("merge", "--no-ff", _FEATURE_BRANCH, cwd=project_dir)
 
     hash_result = _run_git("rev-parse", "HEAD", cwd=project_dir)
     return {
@@ -356,7 +355,7 @@ class TestNewProjectE2E:
         assert (project_dir / "README.md").exists(), "初始 README.md 应存在"
 
         # ── 步骤 4：子任务创建 feature 分支 → mode=branch ──
-        branch_name = _create_feature_branch(project_dir)
+        _create_feature_branch(project_dir)
 
         # 验证：当前分支为 feature
         branch_result = _run_git("branch", "--show-current", cwd=project_dir)
@@ -386,7 +385,7 @@ class TestNewProjectE2E:
         assert agent_commit != initial_commit, "Agent commit 应不同于初始 commit"
 
         # ── 步骤 6a：评估前保存（checkpoint） ──
-        checkpoint_hash = _checkpoint_before_evaluate(project_dir)
+        _checkpoint_before_evaluate(project_dir)
         # 无额外变更时 checkpoint 为 None（Agent 已提交）
         # 如果有未保存的变更则会生成 checkpoint commit
 

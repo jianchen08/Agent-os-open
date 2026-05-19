@@ -155,12 +155,17 @@ class EvaluationStatusResponse(BaseModel): ...
 | ExecutionRecordCreate | 创建执行记录模式 |
 | ExecutionRecordResponse | 执行记录响应模式 |
 | EvaluationStatusResponse | 评估状态响应模式 |
+| MessageType | 消息类型枚举（thinking/executing/waiting/completed/failed/cancelled） |
+| MessageSubtype | 消息子类型枚举（text/error/progress/status/system） |
+| UnifiedMessage | 统一消息模型（WebSocket + HTTP API 共用） |
+| MESSAGE_TYPE_UI_MAP | 前端 UI 状态映射（颜色/图标/标签） |
 
 ### 3.2 文件清单
 
-| 文件 | 说明 |
-|---|---|
-| `task.py` | 任务相关模式定义 |
+| 文件 | 说明 | 创建时间 |
+|---|---|---|
+| `task.py` | 任务相关模式定义 | — |
+| `message.py` | 统一消息格式系统（枚举、模型、工具函数、UI映射） | 2026-05-15 |
 
 ### 3.3 测试策略
 

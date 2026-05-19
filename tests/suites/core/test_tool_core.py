@@ -15,7 +15,7 @@ import pytest
 
 from core.exceptions import ToolNotFoundError
 from pipeline.plugin import PluginContext
-from pipeline.types import ErrorPolicy, StateKeys, TargetType
+from pipeline.types import StateKeys
 from plugins.core.tool_core import ToolCore
 from plugins.output.pending_tools import PendingToolsOutput
 from tools.registry import ToolRegistry

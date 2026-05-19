@@ -179,7 +179,7 @@ static_vars:
         |------|-------|------|-----------|----------|----------|
         | 调研/分析 | research_agent | 调研方案、分析需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | `docs/{title}_research_report.md` | container | file_check |
         | 复杂调研编排 | research_orchestrator_agent | 编排复杂调研：拆解为多个子方向并行派发给 research_agent，整合综合调研结论 | `docs/{title}_synthesis_report.md` | container | file_check |
-        | 方案规划 | solution_planning_agent | 与用户讨论方案、确认并生成任务链 | `docs/{title}_solution.yaml` | container | file_check, human_review（人类评估为必须！！！） |
+        | 方案规划 | solution_planning_agent | 与用户讨论方案、确认并生成任务链 | `docs/{title}_solution.md` | container | file_check, human_review（人类评估为必须！！！） |
         | 容器验证 | container_verification_agent | 整体验收：逐条核验需求、验证可用性、通知人类审查 | `docs/verification_report.md` | container | file_check |
         | 通用执行 | general_agent | 不需要专门 Agent 的通用任务 | 视任务而定 | container | file_check（一般任务）, format_valid(格式要求时) |
         | 编程任务 | programming_orchestrator_agent | 编程编排：需求结构化→编码→审查→测试→功能验证 | {{workspace}}/programming_orchestration_report.md | container | file_check |

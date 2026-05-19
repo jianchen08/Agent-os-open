@@ -60,7 +60,7 @@ COPY config/ ./config/
 COPY conftest.py ./
 
 # 复制启动脚本
-COPY start_server.py ./
+COPY app_factory.py ./stream_handler.py ./ws_handler.py ./static_files.py ./
 COPY run.py ./
 COPY docker-entrypoint.sh ./
 
@@ -100,4 +100,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 ENTRYPOINT ["./docker-entrypoint.sh"]
 
 # 默认命令：启动 API 服务器
-CMD ["python", "start_server.py"]
+CMD ["python", "app_factory.py"]

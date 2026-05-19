@@ -41,7 +41,7 @@ def health() -> dict[str, Any]:
 def list_models() -> list[dict[str, Any]]:
     data = _get_llm_data()
     models = data.get("models", {})
-    defaults = data.get("defaults", {})
+    data.get("defaults", {})
     result = []
     for mid, mconf in models.items():
         if not mconf.get("reasoning_model"):

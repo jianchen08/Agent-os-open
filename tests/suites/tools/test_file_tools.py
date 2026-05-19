@@ -9,7 +9,6 @@ FileReadTool 和 FileWriteTool 全面单元测试
 """
 
 import json
-import pytest
 
 from tools.builtin.file_read import FileReadTool
 from tools.builtin.file_write import FileWriteTool

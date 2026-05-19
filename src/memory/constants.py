@@ -130,3 +130,24 @@ class ImportExport:
     CSV_FORMAT = "csv"
     MAX_IMPORT_SIZE = 10 * 1024 * 1024
     MAX_EXPORT_SIZE = 50 * 1024 * 1024
+
+
+class HistoryConfig:
+    """对话历史缓冲区配置常量。
+
+    默认容量从 1000 优化为 100，减少多会话并发时的内存压力。
+    所有默认值均可通过环境变量覆盖。
+
+    环境变量:
+        HISTORY_BUFFER_MAX_SIZE: HistoryBuffer 最大消息数
+        HISTORY_BUFFER_MAX_MESSAGES: ConversationHistory 最大消息数
+        HISTORY_BUFFER_MAX_TOKENS: ConversationHistory 最大 token 数
+    """
+
+    DEFAULT_MAX_SIZE: int = 100
+    DEFAULT_MAX_MESSAGES: int = 100
+    DEFAULT_MAX_TOKENS: int = 128000
+
+    ENV_KEY_MAX_SIZE: str = "HISTORY_BUFFER_MAX_SIZE"
+    ENV_KEY_MAX_MESSAGES: str = "HISTORY_BUFFER_MAX_MESSAGES"
+    ENV_KEY_MAX_TOKENS: str = "HISTORY_BUFFER_MAX_TOKENS"

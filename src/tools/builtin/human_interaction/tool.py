@@ -10,7 +10,6 @@
 import asyncio
 from asyncio import CancelledError
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -259,9 +258,12 @@ class HumanInteractionTool(BuiltinTool):
                 "[HumanInteractionTool] 交互拒绝 | "
                 "request_id=%s", e.request_id,
             )
+            # BUG-FIX: 明确设置 selected_option="reject"，确保评估系统能
+            # 显式判定为不通过，而非依赖字段缺失隐式判定。
             return create_success_result(
                 data={
                     "status": "denied",
+                    "selected_option": "reject",
                     "reason": e.reason or "用户拒绝",
                 }
             )
@@ -341,10 +343,15 @@ class HumanInteractionTool(BuiltinTool):
             resp_type = response.get("response_type", "")
             feedback = response.get("feedback", "")
 
+            # BUG-FIX: 对话模式不应被评估系统视为"通过"。
+            # 对话模式仅表示用户到达了对话页面，不包含审批决策。
+            # 通过设置 conversation_mode=True 且不设置 selected_option，
+            # 确保 YAML 中的 data.selected_option == "approve" 条件无法满足。
             if resp_type == "approved":
                 result = {
                     "status": "user_arrived",
                     "conversation_mode": True,
+                    "selected_option": None,
                     "message": (
                         feedback or "用户已进入对话标签页。"
                         "【重要指令】你不得再输出任何文字，不得再调用任何工具（尤其是 human_interaction）。"
@@ -356,6 +363,8 @@ class HumanInteractionTool(BuiltinTool):
                 result = {
                     "status": "completed",
                     "response_type": resp_type,
+                    "conversation_mode": True,
+                    "selected_option": None,
                 }
                 if feedback:
                     result["feedback"] = feedback
@@ -396,6 +405,8 @@ class HumanInteractionTool(BuiltinTool):
             return create_success_result(
                 data={
                     "status": "denied",
+                    "selected_option": "reject",
+                    "conversation_mode": True,
                     "reason": e.reason or "用户拒绝",
                 }
             )

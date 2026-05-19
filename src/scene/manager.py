@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from .models import Scene, SceneCreateRequest, SceneLayoutConfig, SceneUpdateRequest
+from .models import Scene, SceneLayoutConfig, SceneUpdateRequest
 from .persistence import ScenePersistence
 from .templates import get_template
 

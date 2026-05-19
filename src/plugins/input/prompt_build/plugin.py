@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
 PLACEHOLDER_PATTERN = re.compile(r'\{\{(.+?)\}\}')
 
+
 # 语言指令映射 — 根据语言代码生成对应的思考和回复指令
 LANGUAGE_INSTRUCTIONS: dict[str, str] = {
     "zh-CN": "请使用中文（简体）思考和回复，所有输出内容必须使用中文",
@@ -97,7 +98,7 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             (类型名, 参数字典) 二元组
         """
-        if content in ("rules", "session"):
+        if content in ("rules", "session", "workspace", "project_root"):
             return content, {}
         if content == "timestamp":
             return "timestamp", {}
@@ -177,7 +178,8 @@ class PromptBuildPlugin(IInputPlugin):
         system_prompt = ctx.state.get("context.system_prompt", "") or ctx.state.get("system_prompt", "")
 
         # 占位符替换：在拼接前将 {{xxx}} 替换为实际内容
-        if system_prompt and "{{" in system_prompt:
+        has_placeholders = bool(system_prompt and "{{" in system_prompt)
+        if has_placeholders:
             system_prompt = await self._resolve_placeholders(ctx, system_prompt)
 
         if system_prompt:
@@ -315,6 +317,16 @@ class PromptBuildPlugin(IInputPlugin):
 
         if var_type == "rules":
             var_def = {"type": "rules", "name": "rules"}
+        elif var_type == "workspace":
+            ws = ctx.state.get("workspace", "")
+            if not ws:
+                ws = (ctx._services or {}).get("project_root", "")
+            return str(ws) if ws else ""
+        elif var_type == "project_root":
+            pr = ctx.state.get("project_root", "")
+            if not pr:
+                pr = (ctx._services or {}).get("project_root", "")
+            return str(pr) if pr else ""
         elif var_type == "path":
             var_def = {"type": "path", "name": "path", "path": params["path"]}
         elif var_type == "content":
@@ -648,7 +660,7 @@ class PromptBuildPlugin(IInputPlugin):
             l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
             l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
             kw_text = ", ".join(keywords) if keywords else ""
-            kw_tokens = self._estimate_tokens_for_budget(kw_text) if kw_text else 0
+            self._estimate_tokens_for_budget(kw_text) if kw_text else 0
 
             # 尝试 L1
             if l1_budget > 0 and l1_used + l1_tokens <= l1_budget and l1_content:

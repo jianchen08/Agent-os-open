@@ -12,11 +12,11 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from pipeline.plugin import PluginContext, PluginResult
+from pipeline.plugin import PluginContext
 from pipeline.types import ErrorPolicy
 
 
@@ -315,7 +315,6 @@ class TestMemoryReadPlugin:
     async def test_Agent覆盖top_k(self) -> None:
         """Agent 通过 plugin_configs 覆盖 top_k。"""
         from plugins.input.memory_read import MemoryReadPlugin
-        from memory.types import SearchResult, MemoryType
 
         mock_retriever = AsyncMock()
         mock_retriever.retrieve = AsyncMock(return_value=[])

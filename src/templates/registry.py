@@ -7,7 +7,6 @@
 """
 
 from pathlib import Path
-from typing import Any
 
 from .loader import TemplateLoader
 from .types import TemplateSpec, TemplateType

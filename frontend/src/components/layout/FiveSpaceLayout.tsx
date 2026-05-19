@@ -28,6 +28,7 @@ import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
+import { getFileEditorData, registerFileEditor, removeFileEditorData } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -38,6 +39,8 @@ import { FloatingWindowManager } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { WorkspacePanel } from './WorkspacePanel'
 import { FileReviewTab } from '../review/FileReviewTab'
+import { CodeEditor } from '../workspace/CodeEditor'
+import { FilePreview } from '../workspace/FilePreview'
 import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance, WorkspaceTab } from '@/types/layout'
 
 /** Props for the FiveSpaceLayout component */
@@ -136,6 +139,9 @@ export function FiveSpaceLayout({
     const tab = useLayoutModeStore.getState().workspaceTabs.find(t => t.id === tabId)
     if (tab?.moduleId === '__file_review__') {
       removeFileReviewData(tabId)
+    }
+    if (tab?.moduleId === '__file_editor__') {
+      removeFileEditorData(tabId)
     }
     closeWorkspaceTab(tabId)
   }, [closeWorkspaceTab])
@@ -309,6 +315,69 @@ export function FiveSpaceLayout({
    */
   const renderTabContent = useCallback(
     (tab: WorkspaceTab) => {
+      // 文件编辑器/预览器标签渲染
+      if (tab.moduleId === '__file_editor__') {
+        const editorData = getFileEditorData(tab.id)
+        if (!editorData) {
+          return (
+            <div className="flex h-full flex-col items-center justify-center p-4">
+              <div className="text-muted-foreground text-sm">文件数据已过期</div>
+            </div>
+          )
+        }
+
+        /** 保存文件内容到后端 */
+        const handleSaveFile = async (content: string): Promise<boolean> => {
+          const containerId = editorData.containerTaskId
+          if (!containerId) return false
+          try {
+            const resp = await apiClient.put(
+              `/api/v1/workspaces/${containerId}/file-content`,
+              { content },
+              { params: { path: editorData.filePath } },
+            )
+            return resp.data?.success ?? false
+          } catch {
+            return false
+          }
+        }
+
+        const editor = getEditorForFile(editorData.fileName)
+
+        if (editor.id === 'image_viewer') {
+          return (
+            <FilePreview
+              filePath={editorData.filePath}
+              content={editorData.content}
+              size={editorData.size}
+              containerTaskId={editorData.containerTaskId}
+            />
+          )
+        }
+
+        // PDF 预览
+        const ext = editorData.filePath.substring(editorData.filePath.lastIndexOf('.')).toLowerCase()
+        if (ext === '.pdf') {
+          return (
+            <FilePreview
+              filePath={editorData.filePath}
+              content={editorData.content}
+              size={editorData.size}
+              containerTaskId={editorData.containerTaskId}
+            />
+          )
+        }
+
+        return (
+          <CodeEditor
+            filePath={editorData.filePath}
+            content={editorData.content}
+            size={editorData.size}
+            onSave={handleSaveFile}
+          />
+        )
+      }
+
       // 文件审批标签渲染
       if (tab.moduleId === '__file_review__') {
         const reviewData = getFileReviewData(tab.id)
@@ -346,8 +415,7 @@ export function FiveSpaceLayout({
           // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
           const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
           if (sid) {
-            globalWS.sendInteractionResponse(sid, {
-              requestId,
+            globalWS.sendInteractionResponse(sid, requestId, {
               responseType: response,
               feedback: feedback || '',
             })
@@ -439,7 +507,7 @@ export function FiveSpaceLayout({
           /**
            * 处理工作空间文件树中的文件点击
            *
-           * 加载文件内容并注册为文件审批 Tab，在工作区中以 FileReviewTab 组件展示。
+           * 加载文件内容并注册为文件编辑器 Tab，在工作区中以 CodeEditor 或 FilePreview 组件展示。
            *
            * @param filePath - 文件相对路径（如 src/main.py）
            * @param fileName - 文件名（如 main.py）
@@ -448,37 +516,39 @@ export function FiveSpaceLayout({
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return
 
-            const editor = getEditorForFile(fileName)
+            const tabId = `file-${containerId}-${filePath.replace(/[/\\]/g, '_')}`
+            const layoutStore = useLayoutModeStore.getState()
 
-            if (editor.id === 'text_editor') {
-              const tabId = `review-file-${containerId}-${filePath.replace(/[/\\]/g, '_')}`
-              const layoutStore = useLayoutModeStore.getState()
+            // 如果 Tab 已存在，直接激活
+            const existingTab = layoutStore.workspaceTabs.find(t => t.id === tabId)
+            if (existingTab) {
+              layoutStore.setActiveTab(tabId)
+              return
+            }
 
-              try {
-                const resp = await apiClient.get(`/api/v1/workspaces/${containerId}/file-content`, {
-                  params: { path: filePath }
+            try {
+              const resp = await apiClient.get(`/api/v1/workspaces/${containerId}/file-content`, {
+                params: { path: filePath }
+              })
+              if (resp.data?.success) {
+                registerFileEditor(tabId, {
+                  filePath,
+                  fileName,
+                  content: resp.data.content ?? '',
+                  size: resp.data.size,
+                  containerTaskId: containerId,
                 })
-                if (resp.data?.success) {
-                  registerFileReview(tabId, {
-                    requestId: `file-${containerId}-${filePath}`,
-                    mode: 'conversation',
-                    title: fileName,
-                    pipelineId: '',
-                    fileContents: { [filePath]: resp.data.content },
-                    containerTaskId: containerId,
-                  })
-                  layoutStore.addWorkspaceTab({
-                    id: tabId,
-                    title: fileName,
-                    icon: '📄',
-                    moduleId: '__file_review__',
-                    isActive: true,
-                    isPinned: false,
-                  })
-                }
-              } catch {
-                // 静默失败
+                layoutStore.addWorkspaceTab({
+                  id: tabId,
+                  title: fileName,
+                  icon: '📄',
+                  moduleId: '__file_editor__',
+                  isActive: true,
+                  isPinned: false,
+                })
               }
+            } catch {
+              // 静默失败
             }
           }
 

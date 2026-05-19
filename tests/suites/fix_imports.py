@@ -2,7 +2,6 @@
 """修复 import 语句：从 agent_os.xxx 改为直接模块引用"""
 
 import re
-import os
 from pathlib import Path
 
 def fix_imports_in_file(filepath: Path) -> int:
@@ -13,7 +12,6 @@ def fix_imports_in_file(filepath: Path) -> int:
         print(f"  跳过 {filepath}: {e}")
         return 0
 
-    original = content
     changes = 0
 
     # 处理 from agent_os.xxx import yyy

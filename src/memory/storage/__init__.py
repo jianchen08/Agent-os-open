@@ -20,14 +20,14 @@ __all__ = ["JsonMemoryStore"]
 
 # pgvector 向量检索器可选导入
 try:
-    from memory.storage.pgvector_retriever import PgVectorRetriever
+    from memory.storage.pgvector_retriever import PgVectorRetriever as PgVectorRetriever
     __all__.append("PgVectorRetriever")
 except ImportError:
     pass
 
 # 向后兼容：PgVectorStore 标记为 deprecated
 try:
-    from memory.storage.pgvector_store import PgVectorStore
+    from memory.storage.pgvector_store import PgVectorStore as PgVectorStore
     __all__.append("PgVectorStore")
 except ImportError:
     pass

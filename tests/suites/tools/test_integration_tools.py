@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

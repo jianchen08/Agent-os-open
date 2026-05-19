@@ -11,14 +11,12 @@ evaluate() → _evaluate_metric() → _evaluate_agent() → _parse_evaluation_re
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from evaluation.engine import EvaluationEngine
 from evaluation.executor import EvaluationExecutor
-from evaluation.loader import MetricLoader
 from evaluation.types import (
     EvaluationConfig,
     EvaluationResult,

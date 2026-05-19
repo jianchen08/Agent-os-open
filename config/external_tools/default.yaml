@@ -1,0 +1,29 @@
+# 外部工具默认配置
+# 所有工具配置会继承这些默认值，可在各自配置文件中覆盖
+
+# 全局超时配置（秒）
+connect_timeout: 10.0
+read_timeout: 30.0
+execute_timeout: 60.0
+
+# 重试策略
+retry_policy:
+  max_retries: 3
+  base_delay: 1.0
+  max_delay: 30.0
+  exponential_base: 2.0
+  jitter: true
+
+# 连接池
+max_connections: 5
+idle_timeout: 300.0
+
+# 心跳保活
+heartbeat_interval: 30.0
+
+# 沙箱资源配置
+sandbox_image: "python:3.11-slim"
+enable_sandbox: false
+
+# 日志级别
+log_level: "INFO"

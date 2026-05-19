@@ -280,7 +280,6 @@ def _register_template(
     """
     try:
         from templates.registry import TemplateRegistry
-        from templates.types import TemplateSpec, TemplateType
 
         registry = _get_service("template_registry")
         if registry is None:

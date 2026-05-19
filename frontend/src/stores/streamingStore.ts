@@ -115,6 +115,16 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
             }
           }
 
+          // 清理 contentBlocks 中残留的 thinking block
+          if ((message.contentBlocks || []).some((b: any) => b.type === 'thinking' && b.thinking?.isThinking)) {
+            updates.contentBlocks = (message.contentBlocks || []).map((b: any) => {
+              if (b.type === 'thinking' && b.thinking?.isThinking) {
+                return { ...b, thinking: { ...b.thinking, isThinking: false } }
+              }
+              return b
+            })
+          }
+
           if (Object.keys(updates).length > 0) {
             return { ...message, ...updates }
           }

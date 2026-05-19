@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, PropertyMock
 import pytest
 
 from connectors.registry import ConnectorRegistry
-from connectors.types import ConnectorInfo, ConnectorState
+from connectors.types import ConnectorInfo
 
 
 def _make_mock_connector(

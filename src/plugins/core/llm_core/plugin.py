@@ -820,6 +820,28 @@ class LLMCore(ICorePlugin):
             )
         result = final
 
+        # Phase 5: 终极安全网 — 确保所有非首位 system 消息都已转换
+        # 根因：StreamRepetitionGuard、ThinkingTruncationGuard 等管道组件
+        # 会注入 system 消息，Phase 1-4 的复杂重定位在极端边界可能遗漏。
+        # 此阶段做最终扫描，确保 MiniMax 永远不会收到非法 system 消息。
+        final_fix_count = 0
+        for _i, _m in enumerate(result):
+            if _i > 0 and _m.get("role") == "system":
+                logger.warning(
+                    "[%s] MiniMax Phase 5 安全网: 非首位 system→user "
+                    "idx=%d, content=%s",
+                    self.name, _i,
+                    str(_m.get("content", ""))[:200],
+                )
+                _m["role"] = "user"
+                _m.pop("name", None)
+                final_fix_count += 1
+        if final_fix_count:
+            logger.warning(
+                "[%s] MiniMax Phase 5 安全网修复了 %d 条遗漏的 system 消息",
+                self.name, final_fix_count,
+            )
+
         return result
 
     @staticmethod
@@ -910,15 +932,26 @@ class LLMCore(ICorePlugin):
         """
         normalized_messages = self._normalize_messages_for_provider(messages)
 
+        # 主动修复：Phase 1-4 转换后仍可能存在遗漏（极端边界情况），
+        # 此处主动修复而非仅做诊断日志。
         if self._provider == "minimax":
+            fix_count = 0
             for _i, _m in enumerate(normalized_messages):
-                if _m.get("role") == "system" and _i > 0:
-                    logger.error(
-                        "[%s] MiniMax normalize 后仍存在非首位 system 消息! "
+                if _i > 0 and _m.get("role") == "system":
+                    logger.warning(
+                        "[%s] MiniMax 主动修复: 非首位 system→user "
                         "idx=%d, content=%s",
                         self.name, _i,
                         str(_m.get("content", ""))[:200],
                     )
+                    _m["role"] = "user"
+                    _m.pop("name", None)
+                    fix_count += 1
+            if fix_count:
+                logger.warning(
+                    "[%s] MiniMax 主动修复了 %d 条遗漏的 system 消息",
+                    self.name, fix_count,
+                )
 
         logger.info(
             "[%s] Sending %d messages to LLM",

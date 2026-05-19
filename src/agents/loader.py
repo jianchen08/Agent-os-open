@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -118,9 +119,7 @@ class AgentConfigLoader:
             enabled=data.get("enabled", True),
             include_hard_constraints=data.get("include_hard_constraints", True),
             include_soft_constraints=data.get("include_soft_constraints", False),
-            include_system_prompt_rules=data.get(
-                "include_system_prompt_rules", True
-            ),
+            include_system_prompt_rules=data.get("include_system_prompt_rules", True),
             extraction_markers=data.get(
                 "extraction_markers", ["【重要】", "【必须】", "必须"]
             ),
@@ -274,9 +273,7 @@ class AgentConfigLoader:
             data.get("rule_reinforcement")
         )
         plugins = cls._parse_plugins_config(data.get("plugins"))
-        deliverables = [
-            cls._parse_deliverable(d) for d in data.get("deliverables", [])
-        ]
+        deliverables = [cls._parse_deliverable(d) for d in data.get("deliverables", [])]
         recommended_metrics = [
             cls._parse_metric_ref(m) for m in data.get("recommended_metrics", [])
         ]
@@ -339,7 +336,38 @@ class AgentConfigLoader:
             try:
                 config = cls.load_from_yaml(yaml_file)
                 configs.append(config)
-                logger.debug("已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file)
-            except (ValueError, yaml.YAMLError) as e:
+                logger.debug(
+                    "已加载 Agent 配置: %s (from %s)", config.config_id, yaml_file
+                )
+            except ValueError as e:
+                # YAML 语法错误（load_from_yaml 已包装为 ValueError，通过 __cause__ 链识别）需上抛
+                if isinstance(e.__cause__, yaml.YAMLError):
+                    raise
                 logger.warning("跳过无效配置文件 %s: %s", yaml_file, e)
         return configs
+
+    # ---- 异步加载方法 ----
+
+    @classmethod
+    async def load_from_yaml_async(cls, path: str | Path) -> AgentConfig:
+        """异步版本的 load_from_yaml，将同步 I/O 卸载到线程池。
+
+        Args:
+            path: YAML 文件路径。
+
+        Returns:
+            AgentConfig 实例。
+        """
+        return await asyncio.to_thread(cls.load_from_yaml, path)
+
+    @classmethod
+    async def load_from_directory_async(cls, dir_path: str | Path) -> list[AgentConfig]:
+        """异步版本的 load_from_directory，将同步 I/O 卸载到线程池。
+
+        Args:
+            dir_path: 目录路径。
+
+        Returns:
+            AgentConfig 列表。
+        """
+        return await asyncio.to_thread(cls.load_from_directory, dir_path)

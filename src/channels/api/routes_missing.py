@@ -26,13 +26,41 @@ projects_router = APIRouter(prefix="/api/v1/projects", tags=["项目"])
 
 
 @projects_router.get("", summary="获取项目列表")
-async def list_projects(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
+async def list_projects(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取项目列表。
+
+    Returns:
+        {items: [], total: 0, limit: 20, offset: 0}
+    """
+    return {"items": [], "total": 0, "limit": limit, "offset": offset}
 
 
 @projects_router.post("", summary="创建项目")
 async def create_project(body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": "stub", "title": "", "status": "created", "message": "项目创建成功（存根）"}
+    """创建项目。
+
+    Returns:
+        {project: {id, userId, goal, status, autoExecute, currentTaskIndex, tasks: [],
+                   timestamps: {createdAt, updatedAt}}}
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "project": {
+            "id": "stub-project-1",
+            "userId": _user.get("sub", ""),
+            "goal": (body or {}).get("goal", ""),
+            "status": "created",
+            "autoExecute": False,
+            "currentTaskIndex": 0,
+            "tasks": [],
+            "timestamps": {"createdAt": now, "updatedAt": now},
+        }
+    }
 
 
 async def get_task_tree(
@@ -67,11 +95,7 @@ async def get_task_tree(
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
-            from channels.api.routes_threads import (
-                store as api_store,
-                _recover_threads_from_pipelines,
-            )
-            _recover_threads_from_pipelines(_user.get("sub", ""))
+            from channels.api.routes_threads import store as api_store
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
@@ -272,22 +296,42 @@ def _fill_children(
 
 @projects_router.get("/{project_id}", summary="获取项目详情")
 async def get_project(project_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": project_id, "title": "", "status": "active"}
+    """获取项目详情。
+
+    Returns:
+        {project: {id, goal, status, ...tasks}}
+    """
+    return {"project": {"id": project_id, "goal": "", "status": "active", "tasks": []}}
 
 
 @projects_router.post("/{project_id}/auto-execute", summary="切换自动执行")
 async def toggle_auto_execute(project_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": project_id, "auto_execute": False}
+    """切换自动执行。
+
+    Returns:
+        {project: {...}}
+    """
+    return {"project": {"id": project_id, "autoExecute": False, "status": "active"}}
 
 
 @projects_router.post("/{project_id}/pause", summary="暂停项目")
 async def pause_project(project_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": project_id, "status": "paused"}
+    """暂停项目。
+
+    Returns:
+        {project: {...}}
+    """
+    return {"project": {"id": project_id, "status": "paused"}}
 
 
 @projects_router.post("/{project_id}/resume", summary="恢复项目")
 async def resume_project(project_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": project_id, "status": "active"}
+    """恢复项目。
+
+    Returns:
+        {project: {...}}
+    """
+    return {"project": {"id": project_id, "status": "active"}}
 
 
 @projects_router.delete("/{project_id}", summary="删除项目")
@@ -986,4 +1030,115 @@ async def get_supported_file_types(_user: dict = Depends(require_auth)) -> dict[
         "document_types": {"default": ["application/pdf", "text/plain", "text/markdown", "text/csv"]},
         "max_image_size": 20 * 1024 * 1024,
         "max_document_size": 50 * 1024 * 1024,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task Phase & AC 路由 - /api/v1/tasks/{id}/phase, /api/v1/tasks/{id}/ac
+# ---------------------------------------------------------------------------
+
+task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"])
+
+
+@task_phase_router.get("/{task_id}/phase", summary="获取任务当前阶段")
+async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """获取任务当前执行阶段。
+
+    Returns:
+        {taskId, currentPhase, phaseStatus}
+    """
+    return {
+        "taskId": task_id,
+        "currentPhase": "prepare",
+        "phaseStatus": "pending",
+    }
+
+
+@task_phase_router.post("/{task_id}/phase/prepare/complete", summary="完成准备阶段")
+async def complete_prepare_phase(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """标记准备阶段完成。
+
+    Returns:
+        {task_id, current_phase}
+    """
+    return {"task_id": task_id, "current_phase": "execute"}
+
+
+@task_phase_router.post("/{task_id}/phase/execute/complete", summary="完成执行阶段")
+async def complete_execute_phase(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """标记执行阶段完成。
+
+    Returns:
+        {task_id, current_phase}
+    """
+    return {"task_id": task_id, "current_phase": "review"}
+
+
+@task_phase_router.get("/{task_id}/phase/{phase}/output", summary="获取阶段输出")
+async def get_phase_output(task_id: str, phase: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """获取指定阶段的输出结果。
+
+    Returns:
+        {output, error}
+    """
+    return {"output": None, "error": None}
+
+
+@task_phase_router.get("/{task_id}/ac", summary="获取任务验收标准")
+async def get_task_ac(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """获取任务的验收标准列表。
+
+    Returns:
+        {taskId, acceptanceCriteria: []}
+    """
+    return {"taskId": task_id, "acceptanceCriteria": []}
+
+
+@task_phase_router.post("/{task_id}/ac/{ac_id}/evaluate", summary="评估单个验收标准")
+async def evaluate_ac(
+    task_id: str, ac_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """评估单个验收标准。
+
+    Returns:
+        {acceptance_criterion: {...}}
+    """
+    return {
+        "acceptance_criterion": {
+            "id": ac_id,
+            "task_id": task_id,
+            "status": "not_evaluated",
+            "passed": None,
+        },
+    }
+
+
+@task_phase_router.post("/{task_id}/ac/evaluate-all", summary="评估所有验收标准")
+async def evaluate_all_ac(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """评估任务的所有验收标准。
+
+    Returns:
+        {taskId, acceptanceCriteria: []}
+    """
+    return {"taskId": task_id, "acceptanceCriteria": []}
+
+
+@task_phase_router.get("/{task_id}/ac/{ac_id}/result", summary="获取验收标准评估结果")
+async def get_ac_result(
+    task_id: str, ac_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取验收标准的评估结果。
+
+    Returns:
+        {acceptance_criterion: {...}}
+    """
+    return {
+        "acceptance_criterion": {
+            "id": ac_id,
+            "task_id": task_id,
+            "status": "not_evaluated",
+            "passed": None,
+        },
     }

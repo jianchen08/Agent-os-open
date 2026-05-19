@@ -5,14 +5,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipeline.plugin import PluginContext
-from pipeline.types import RouteSignal, StateKeys
+from pipeline.types import StateKeys
 
 
 # =====================================================================
@@ -463,7 +461,7 @@ class TestSecurityCheckEnhanced:
     @pytest.mark.asyncio
     async def test_high_risk_approval_granted(self) -> None:
         """高风险操作审批通过后放行。"""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock
         from plugins.input.security_check import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin()
@@ -490,7 +488,7 @@ class TestSecurityCheckEnhanced:
     @pytest.mark.asyncio
     async def test_high_risk_approval_denied(self) -> None:
         """高风险操作审批拒绝后拦截。"""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock
         from plugins.input.security_check import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin()

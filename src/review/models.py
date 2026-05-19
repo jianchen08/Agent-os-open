@@ -54,7 +54,10 @@ class ReviewRequest:
         updated_at: 更新时间
         reviewed_at: 用户开始审查时间
         completed_at: 审批完成时间
-        metadata: 扩展元数据
+        metadata: 扩展元数据，支持以下子字段：
+            - media_review_results: dict，媒体审阅结果（文件路径 → 审阅结果字典）
+            - media_files: list[dict]，媒体附件列表（每项含 path 和 media_type）
+            - cancel_reason: str，取消原因
     """
 
     id: str = field(default_factory=_new_id)
@@ -172,3 +175,119 @@ class ReviewFeedback:
             user_id=data.get("user_id"),
             created_at=data.get("created_at", _now_iso()),
         )
+
+
+# ---------------------------------------------------------------------------
+# 媒体审阅数据模型
+# ---------------------------------------------------------------------------
+
+_DEFAULT_IMAGE_FORMATS: list[str] = ["JPEG", "PNG", "GIF", "WEBP", "BMP", "TIFF"]
+_DEFAULT_VIDEO_FORMATS: list[str] = ["MP4", "AVI", "MOV", "MKV", "WEBM"]
+
+
+@dataclass
+class ImageReviewResult:
+    """图片审阅结果。
+
+    Attributes:
+        is_valid: 是否通过审阅（无 error）
+        format: 图片格式（JPEG / PNG / GIF / WebP / BMP / TIFF）
+        width: 图片宽度（像素）
+        height: 图片高度（像素）
+        aspect_ratio: 宽高比（width / height）
+        exif: EXIF 元数据字典
+        warnings: 审阅警告列表
+        errors: 审阅错误列表
+    """
+
+    is_valid: bool
+    format: str = ""
+    width: int = 0
+    height: int = 0
+    aspect_ratio: float = 0.0
+    exif: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "is_valid": self.is_valid,
+            "format": self.format,
+            "width": self.width,
+            "height": self.height,
+            "aspect_ratio": self.aspect_ratio,
+            "exif": self.exif,
+            "warnings": self.warnings,
+            "errors": self.errors,
+        }
+
+
+@dataclass
+class VideoReviewResult:
+    """视频审阅结果。
+
+    Attributes:
+        is_valid: 是否通过审阅（无 error）
+        format: 容器格式（MP4 / AVI / MOV / MKV / WebM）
+        duration_seconds: 时长（秒）
+        width: 视频宽度（像素）
+        height: 视频高度（像素）
+        fps: 帧率
+        codec: 视频编解码器名称
+        warnings: 审阅警告列表
+        errors: 审阅错误列表
+    """
+
+    is_valid: bool
+    format: str = ""
+    duration_seconds: float = 0.0
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    codec: str = ""
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "is_valid": self.is_valid,
+            "format": self.format,
+            "duration_seconds": self.duration_seconds,
+            "width": self.width,
+            "height": self.height,
+            "fps": self.fps,
+            "codec": self.codec,
+            "warnings": self.warnings,
+            "errors": self.errors,
+        }
+
+
+@dataclass
+class MediaReviewConfig:
+    """媒体审阅配置。
+
+    Attributes:
+        image_min_width: 图片最小宽度（像素）
+        image_max_width: 图片最大宽度（像素）
+        image_min_height: 图片最小高度（像素）
+        image_max_height: 图片最大高度（像素）
+        allowed_image_formats: 允许的图片格式列表
+        video_min_duration: 视频最短时长（秒）
+        video_max_duration: 视频最长时长（秒）
+        allowed_video_formats: 允许的视频格式列表
+    """
+
+    image_min_width: int = 1
+    image_max_width: int = 7680
+    image_min_height: int = 1
+    image_max_height: int = 4320
+    allowed_image_formats: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_IMAGE_FORMATS)
+    )
+    video_min_duration: float = 0.0
+    video_max_duration: float = 3600.0
+    allowed_video_formats: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_VIDEO_FORMATS)
+    )

@@ -15,7 +15,6 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
@@ -126,7 +125,6 @@ async def main() -> bool:
 
     # ── 5. 等待任务完成 ──
     print(f"\n[4/6] 等待 TaskWorker 执行 (最多 {MAX_WAIT_SECONDS}s)...")
-    from tasks.types import TaskStatus
 
     final_status = "unknown"
     elapsed_wait = 0

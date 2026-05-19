@@ -11,21 +11,11 @@
 
 from __future__ import annotations
 
-import pytest
 
-from ui_schema.design_tokens import (
-    BorderRadiusScale,
-    ColorPalette,
-    DesignTokens,
-    ShadowScale,
-    SpacingScale,
-    TypographyScale,
-)
 from ui_schema.style_config import (
     BreakpointConfig,
     ModuleStyleConfig,
     SceneStyleConfig,
-    ThemeName,
     validate_style_config,
 )
 

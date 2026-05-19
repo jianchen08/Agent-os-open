@@ -86,7 +86,7 @@ sys.modules.setdefault("triggers.message_queue", _mq)
 
 from memory.ports import IEpisodeStorage, ISemanticStorage
 from memory.service import MemoryService
-from memory.types import Episode, Knowledge, SearchResult
+from memory.types import Episode, Knowledge
 from tools.builtin.memory import MemoryTool
 
 from pipeline.event_bus import EventBus

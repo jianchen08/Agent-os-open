@@ -15,7 +15,6 @@ import os
 import time
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 
 _src_dir = os.path.join(os.path.dirname(__file__), "..", "..", "src")
@@ -27,7 +26,7 @@ import yaml
 
 from agents.loader import AgentConfigLoader
 from agents.registry import AgentRegistry
-from agents.types import AgentLevel, AgentType
+from agents.types import AgentLevel
 from plugins.hot_reload import PluginHotReloader, ReloadEvent
 
 

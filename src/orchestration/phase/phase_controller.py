@@ -24,14 +24,12 @@
 """
 
 import logging
-from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import NotFoundException
 from src.db.models import Task
 
 logger = logging.getLogger(__name__)

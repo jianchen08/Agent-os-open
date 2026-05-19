@@ -10,11 +10,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -108,7 +105,7 @@ class TestOneBotClient:
         mock_response.__aexit__ = AsyncMock(return_value=False)
         client._session.post = MagicMock(return_value=mock_response)
 
-        result = await client.send_message(
+        await client.send_message(
             user_id=98765,
             content="群消息",
             message_type="group",

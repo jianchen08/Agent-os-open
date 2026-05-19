@@ -89,7 +89,7 @@ export function DebugTasksPage() {
         <h1 className="ml-4 text-base font-semibold">调试任务</h1>
         <span className="text-muted-foreground ml-auto text-xs">共 {total} 个任务</span>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
         {/* 状态过滤 */}
         <div className="flex gap-2">
           {STATUS_OPTIONS.map((opt) => (
@@ -128,7 +128,28 @@ export function DebugTasksPage() {
         {/* 任务列表 */}
         {!isLoading && !error && tasks.length > 0 && (
           <>
-            <div className="overflow-hidden rounded-lg border">
+            {/* 移动端卡片视图 */}
+            <div className="space-y-2 md:hidden">
+              {tasks.map((task) => (
+                <div key={task.id} className="rounded-lg border p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-sm font-medium leading-snug">{task.intent || task.name || task.id}</span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
+                    >
+                      {task.status}
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground mt-2 space-y-1 text-xs">
+                    <div>当前步骤：{task.current_step || '--'}</div>
+                    <div>创建时间：{new Date(task.created_at).toLocaleString()}</div>
+                    <div>耗时：{task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {/* 桌面端表格视图 */}
+            <div className="hidden md:block overflow-hidden rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -183,7 +204,7 @@ export function DebugTasksPage() {
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -193,7 +214,7 @@ export function DebugTasksPage() {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>

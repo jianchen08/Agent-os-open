@@ -128,6 +128,27 @@ function compareMessages(a: Message, b: Message): number {
 }
 
 /**
+ * 生成消息指纹，用于跨 ID 格式（WS UUID vs API hex）去重
+ *
+ * BUG-FIX-fix_20260515_long_context_message_loss:
+ * 问题根因: 原去重逻辑使用 role::timestamp 作为指纹，在长会话中
+ *          多条消息可能共享相同的 role+timestamp（例如工具调用后紧跟文本回复），
+ *          导致 initFromAPI 合并时错误地将有效消息当作重复消息丢弃。
+ * 修复方案: 使用 sequence 作为主要去重键（sequence 在会话内唯一递增），
+ *          sequence 不可用时回退到 role::timestamp::contentPrefix 提高区分度。
+ */
+function makeMessageFingerprint(m: Message): string {
+  const seq = m.sequence
+  if (seq != null) {
+    return m.role + '::seq::' + seq
+  }
+  // Fallback: include content prefix for disambiguation
+  const contentPrefix = (m.content || '').substring(0, 80)
+  return m.role + '::' + m.timestamp + '::' + contentPrefix
+}
+
+
+/**
  * 统一管道消息 Store
  */
 export const usePipelineMessageStore = create<PipelineMessageState>()((set, get) => ({
@@ -194,7 +215,32 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
 
       // 精确 ID 匹配去重
-      const existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
+      let existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
+
+      // BUG-FIX-fix_20260515_long_context_message_loss:
+      // 精确匹配失败时，尝试基于 sequence 或指纹的模糊匹配
+      // 避免同一消息因 WS/API ID 格式不同被当作两条消息
+      if (existingIndex < 0 && message.sequence != null) {
+        existingIndex = pipelineMessages.findIndex((m) =>
+          m.sequence === message.sequence,
+        )
+      }
+      if (existingIndex < 0 && message.role === 'assistant') {
+        // 优先用 sequence 匹配（sequence 在会话内唯一）
+        if (message.sequence != null) {
+          existingIndex = pipelineMessages.findIndex((m) =>
+            m.role === 'assistant' && m.sequence === message.sequence,
+          )
+        }
+        // sequence 匹配失败时，回退到 role + timestamp（保持兼容）
+        if (existingIndex < 0 && message.timestamp) {
+          existingIndex = pipelineMessages.findIndex((m) =>
+            m.role === 'assistant'
+            && m.timestamp
+            && m.timestamp === message.timestamp,
+          )
+        }
+      }
 
       let updatedMessages: Message[]
       let unreadChanged = false
@@ -246,19 +292,27 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
 
       let messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
+      // BUG-FIX-fix_20260515_long_context_message_loss:
       // 精确匹配失败时，assistant 消息尝试模糊匹配
-      if (messageIndex < 0 && partial.role === 'assistant' && partial.timestamp) {
-        messageIndex = pipelineMessages.findIndex((m) =>
-          m.role === 'assistant'
-          && m.timestamp === partial.timestamp,
-        )
+      // 优先使用 sequence 匹配（sequence 在会话内唯一），回退到 role + timestamp
+      if (messageIndex < 0 && partial.role === 'assistant') {
+        // 优先用 sequence 精确匹配
+        if (partial.sequence != null) {
+          messageIndex = pipelineMessages.findIndex((m) =>
+            m.role === 'assistant' && m.sequence === partial.sequence,
+          )
+        }
+        // sequence 匹配失败时，回退到 role + timestamp（保持兼容）
+        if (messageIndex < 0 && partial.timestamp) {
+          messageIndex = pipelineMessages.findIndex((m) =>
+            m.role === 'assistant'
+            && m.timestamp === partial.timestamp,
+          )
+        }
       }
 
       if (messageIndex < 0) {
-        // BUG-FIX-fix_20260513_update_message_silent_swallow:
-        // 问题根因: updateMessage 找不到消息时静默返回原 state，不报错不日志，导致消息更新丢失但无法排查。
-        // 修复方案: 打印 warn 日志，包含 pipelineId 和 messageId 以便排查。
-        // 影响范围: 所有通过 updateMessage 更新消息的场景
+        // FIX: 找不到消息时打印 warn 日志以便排查
         logger.warn(
           `[updateMessage] message not found: pipelineId=%s messageId=%s totalMsgs=%d`,
           pipelineId?.slice(0, 12), messageId?.slice(0, 12), pipelineMessages.length,
@@ -353,20 +407,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
   /**
    * 冷启动：从 API 写入最新消息并设置双游标
    *
-   * BUG-FIX-fix_20260512_session_switch_msg_loss:
-   * 问题根因: 用户在会话A发送消息后切换到会话B再切回A时，setActiveSession 调用
-   *          fetchMessages → initFromAPI，后者直接替换 pipelineA 的全部消息。
-   *          由于读后写竞争（WebSocket user_input 刚到达后端，GET /messages 尚未包含），
-   *          API 返回的数据可能不包含刚发送的用户消息，导致乐观更新的用户消息被覆盖丢失。
-   *          用户消息丢失后，连续的 assistant 消息被 mergeConsecutiveAssistantMessages 合并，
-   *          AI 回复渲染到上一个 assistant 气泡中。刷新后正常因为后端已持久化完整数据。
-   * 修复方案: 当管道已有消息时，采用合并策略而非替换策略：
-   *          1. 保留 status=streaming 的本地消息（正在生成的 AI 回复）
-   *          2. 保留不在 API 响应中的本地消息（乐观更新的用户消息等），
-   *             但排除已由 API 确认的重复消息（通过 role+content+时间窗口匹配）
-   *          3. API 返回的消息作为权威数据覆盖同 ID 的本地消息
-   * 影响范围: 会话切换时的消息显示完整性
-   * 修复日期: 2026-05-12
+   * FIX: 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。
+   * 删除模糊的时间窗口匹配逻辑（WS 和 API 竞争由 streaming 保留逻辑覆盖）。
    */
   initFromAPI: (pipelineId: string, messages: Message[]) => {
     set((state) => {
@@ -376,36 +418,37 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       let finalMessages: Message[]
 
       if (existing && existing.length > 0) {
-        const apiIds = new Set(sorted.map((m) => m.id))
+        // BUG-FIX-fix_20260515_long_context_message_loss:
+        // 原逻辑只保留 streaming 消息，导致 WS 已接收但 API 尚未同步的消息被丢弃。
+        // 修复方案: 使用指纹去重，逐条检查旧消息是否在新消息列表中有匹配，
+        //          只丢弃已被 API 数据覆盖的旧消息，保留 API 尚未返回的有效消息。
+        const apiFingerprints = new Map<string, Message[]>()
+        for (const m of sorted) {
+          const fp = makeMessageFingerprint(m)
+          const arr = apiFingerprints.get(fp) || []
+          arr.push(m)
+          apiFingerprints.set(fp, arr)
+        }
 
+        // 逐条过滤旧消息：仅在指纹匹配且新消息列表中确实存在对应条目时才移除旧消息
+        const matchedApiIds = new Set<string>()
         const preserved = existing.filter((localMsg) => {
-          // BUG-FIX-fix_20260513_ai_msg_duplicate:
-          // 问题根因: streaming 消息被无条件保留，但 API 响应可能已包含同 ID 的消息，
-          //          导致 [...sorted, ...preserved] 中同一消息出现两次。
-          // 修复方案: streaming 消息仅在 API 未返回同 ID 消息时才保留。
-          // 影响范围: fetchMessages 调用期间的 AI 消息显示
-          // 修复日期: 2026-05-13
+          // streaming 消息始终保留（API 可能还没有这条消息）
           if (localMsg.status === 'streaming') {
+            const apiIds = new Set(sorted.map((m) => m.id))
             return !apiIds.has(localMsg.id)
           }
 
-          if (!apiIds.has(localMsg.id)) {
-            // BUG-FIX-fix_20260513_session_switch_duplicate:
-            // 问题根因: 乐观更新的用户消息（前端 generateUUID）和后端持久化的消息 ID 不同，
-            //          切换会话后切回时时间差可能远超 10 秒，导致时间窗口去重失败，
-            //          同一条消息在本地保留 + API 添加 = 前端显示两条。
-            // 修复方案: 去掉时间窗口限制，仅用 role + content 匹配，覆盖所有切换场景。
-            // 影响范围: 会话切换时的消息去重
-            // 修复日期: 2026-05-13
-            const hasApiMatch = sorted.some(
-              (apiMsg) =>
-                apiMsg.role === localMsg.role
-                && apiMsg.content === localMsg.content,
-            )
-            return !hasApiMatch
+          const fp = makeMessageFingerprint(localMsg)
+          const candidates = apiFingerprints.get(fp)
+          if (!candidates) return true // 没有匹配的API消息 -> 保留这条WS消息
+          // 检查是否有尚未被匹配的 API 消息
+          const unmatched = candidates.find((c) => !matchedApiIds.has(c.id))
+          if (unmatched) {
+            matchedApiIds.add(unmatched.id)
+            return false // 这条旧消息被新 API 消息替代
           }
-
-          return false
+          return true // API 消息已全部匹配完毕，保留旧消息
         })
 
         if (preserved.length > 0) {
@@ -566,24 +609,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     const fetchPromise = (async () => {
       try {
         const limit = options?.limit ?? 50
-        // BUG-FIX-fix_20260512_fetch_threadid:
-        // 问题根因: 多处调用 fetchMessages(pipelineId) 未传 threadId，
-        //          导致子管道的 pipelineId 被当作 threadId 去查后端 /threads/{threadId}/messages，
-        //          后端找不到对应线程，返回 404/500 错误，消息不显示。
-        // 修复方案: 自动从 pipelineSessionMap 查找 pipelineId 对应的 sessionId 作为 threadId fallback，
-        //          并通过 pipelines 元数据判断是否为子管道（level > 1），正确传 pipelineRunId。
-        // 影响范围: 切换标签、WS 重连、删除消息后重载等所有 fetchMessages 调用场景
-        // 修复日期: 2026-05-12
+        // FIX: 自动从 pipelineSessionMap 查找 sessionId 作为 threadId fallback，子管道正确传 pipelineRunId
         const sessionFallback = get().pipelineSessionMap[pipelineId]
         const threadId = options?.threadId || sessionFallback || pipelineId
         const pipelineMeta = get().pipelines[pipelineId]
         const isSubPipeline = pipelineMeta && pipelineMeta.level > 1
-        // BUG-FIX-fix_20260513_reconnect_msg_compensation:
-        // 问题根因: apiGetMessages 调用缺少 after_sequence 参数，导致断线补漏时
-        //          API 无法知道从哪条消息之后开始返回，返回全量消息。
-        // 修复方案: 将 after_sequence 一并传递给 API，确保只获取断线期间的新消息。
-        // 影响范围: WebSocket 断线重连后的消息补漏
-        // 修复日期: 2026-05-13
         const apiResult = await retry(
           () => apiGetMessages(threadId, {
             limit,
@@ -604,14 +634,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         )
 
         const rawMessages: Message[] = apiResult.messages || []
-        // BUG-FIX-fix_20260512_msg_disappear:
-        // 问题根因: 之前过滤掉所有带 parentId 的消息，导致子 Agent 回复等消息在刷新后消失。
-        //          后端 message_view.py 的 MessageQueryBuilder 已通过 is_current 条件
-        //          确保只返回当前版本的消息，不需要前端再额外过滤。
-        // 修复方案: 移除 parentId 过滤，保留所有从 API 返回的消息。
-        //          ChatContainer 的 mergeConsecutiveAssistantMessages 会处理连续 assistant 消息的合并显示。
-        // 影响范围: 页面刷新后的消息加载
-        // 修复日期: 2026-05-12
+        // FIX: 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端不再额外过滤 parentId
         const mainMessages = rawMessages
 
         if (options?.after_sequence !== undefined) {
@@ -626,7 +649,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         if (status === 404) {
           logger.debug('[pipelineMessageStore.fetchMessages] 管道消息暂不可用 (404): pipelineId=%s', pipelineId)
         } else {
-          console.error(
+          logger.warn(
             '[pipelineMessageStore.fetchMessages] 加载失败（已重试）: pipelineId=%s err=%s',
             pipelineId, err,
           )

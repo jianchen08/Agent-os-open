@@ -19,7 +19,7 @@ from infrastructure.execution_record_storage import (
     summarize_text,
 )
 from pipeline.plugin import PluginContext
-from pipeline.types import ErrorPolicy, StateKeys
+from pipeline.types import StateKeys
 from plugins.output.track import TrackPlugin
 
 

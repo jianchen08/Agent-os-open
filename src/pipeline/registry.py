@@ -18,7 +18,6 @@ from typing import Any, TYPE_CHECKING
 
 from pipeline.plugin import (
     ICorePlugin,
-    IInputPlugin,
     IOutputPlugin,
     IPlugin,
 )
@@ -65,6 +64,8 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._plugins: dict[str, IPlugin] = {}
         self._core_plugins: dict[str, ICorePlugin] = {}
+        # 缓存 output_plugins 列表，避免每轮迭代全量扫描
+        self._output_plugins_cache: list[IOutputPlugin] | None = None
 
     def register(self, plugin: IPlugin) -> None:
         """注册一个插件实例。
@@ -76,6 +77,7 @@ class PluginRegistry:
             plugin: 插件实例
         """
         self._plugins[plugin.name] = plugin
+        self._output_plugins_cache = None  # 缓存失效
         if isinstance(plugin, ICorePlugin):
             # Core 插件按 core_type 注册，但 register() 使用 plugin.name 作为 key
             # 与 register_core(name, plugin) 的 name 语义不同，发出警告
@@ -97,6 +99,7 @@ class PluginRegistry:
         """
         self._core_plugins[name] = plugin
         self._plugins[plugin.name] = plugin
+        self._output_plugins_cache = None  # 缓存失效
         logger.debug("Core plugin registered: name=%s, plugin=%s", name, plugin.name)
 
     def get(self, name: str) -> IPlugin | None:
@@ -124,7 +127,7 @@ class PluginRegistry:
     def get_output_plugins(
         self, core_type: str | None = None
     ) -> list[IOutputPlugin]:
-        """获取所有输出插件列表。
+        """获取所有输出插件列表（带缓存）。
 
         core_type 参数保留签名兼容性但不再用于过滤。
         Output 插件自身通过 execute() 内部逻辑判断是否需要处理。
@@ -135,11 +138,14 @@ class PluginRegistry:
         Returns:
             所有输出插件列表，按优先级排序
         """
+        if self._output_plugins_cache is not None:
+            return self._output_plugins_cache
         output_plugins: list[IOutputPlugin] = []
         for plugin in self._plugins.values():
             if isinstance(plugin, IOutputPlugin):
                 output_plugins.append(plugin)
-        return sorted(output_plugins, key=lambda p: p.priority)
+        self._output_plugins_cache = sorted(output_plugins, key=lambda p: p.priority)
+        return self._output_plugins_cache
 
     def fork(self) -> PluginRegistry:
         """创建插件注册表的深拷贝副本。
@@ -213,6 +219,7 @@ class PluginRegistry:
                 del self._core_plugins[name]
         # 用指定的 name 作为键注册，而非 new_plugin.name
         self._plugins[name] = new_plugin
+        self._output_plugins_cache = None  # 缓存失效
         if isinstance(new_plugin, ICorePlugin):
             self._core_plugins[name] = new_plugin
         try:

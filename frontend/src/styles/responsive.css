@@ -1,0 +1,87 @@
+/**
+ * 移动端响应式工具样式
+ *
+ * 提供：
+ * - 触控目标最小尺寸
+ * - 移动端动画减少媒体查询
+ * - 移动端表格转卡片基础样式
+ * - 小屏下减少动画
+ */
+
+/* ============================================ */
+/* 触控目标最小尺寸                                */
+/* ============================================ */
+
+@layer utilities {
+  .min-touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* ============================================ */
+/* 减少动画（用户偏好 + 小屏）                     */
+/* ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .reduce-motion-sm *,
+  .reduce-motion-sm *::before,
+  .reduce-motion-sm *::after {
+    animation-duration: 0.15ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.1ms !important;
+  }
+}
+
+/* ============================================ */
+/* 移动端表格转卡片辅助                            */
+/* ============================================ */
+
+@media (max-width: 767px) {
+  .mobile-card-table {
+    display: block;
+  }
+
+  .mobile-card-table thead {
+    display: none;
+  }
+
+  .mobile-card-table tbody {
+    display: block;
+  }
+
+  .mobile-card-table tr {
+    display: block;
+    border-radius: 0.5rem;
+    border: 1px solid hsl(var(--border));
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .mobile-card-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    border: none;
+  }
+
+  .mobile-card-table td::before {
+    content: attr(data-label);
+    font-size: 0.75rem;
+    color: hsl(var(--muted-foreground));
+    margin-right: 0.5rem;
+    flex-shrink: 0;
+  }
+}

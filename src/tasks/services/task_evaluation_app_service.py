@@ -342,7 +342,7 @@ class TaskEvaluationAppService:
         )
 
         # 6. 转换结果为应用格式
-        evaluated_at = datetime.now(UTC).isoformat()
+        datetime.now(UTC).isoformat()
         eval_results = []
 
         for result in summary.results:

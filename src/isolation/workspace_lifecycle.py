@@ -92,7 +92,12 @@ class WorkspaceLifecycleManager:
         try:
             self._record_main_branch()
         except Exception:
-            pass
+            logger.warning("[WorkspaceLifecycle] __init__ 中记录主分支失败", exc_info=True)
+
+    def _get_workspace_root(self) -> str:
+        """从配置中读取工作空间根目录，读取失败则使用全局默认值"""
+        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT
+        return self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
 
     # ── 内部工具方法 ──────────────────────────────────────────────
 
@@ -199,7 +204,7 @@ class WorkspaceLifecycleManager:
                         "[WorkspaceLifecycle] 当前分支 '%s' 不是主分支(main/master)，"
                         "worktree 将基于此分支创建。建议在主分支上启动任务。", branch)
         except Exception:
-            pass
+            logger.warning("[WorkspaceLifecycle] _record_main_branch 失败", exc_info=True)
 
     def _guard_root_branch(self, cwd: Path) -> bool:
         """守卫：如果 cwd 是项目根目录，验证分支未被外部切换。
@@ -221,6 +226,7 @@ class WorkspaceLifecycleManager:
                 self._main_branch, current.strip() if rc == 0 else "(unknown)")
             return False
         except Exception:
+            logger.warning("[WorkspaceLifecycle] _guard_root_branch 检查异常，默认放行", exc_info=True)
             return True
 
     def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
@@ -322,8 +328,7 @@ class WorkspaceLifecycleManager:
 
     # ── 1. 场景检测 ──────────────────────────────────────────────
 
-    @staticmethod
-    def _detect_scenario(workspace: str, task_data: dict) -> tuple[str, str]:
+    def _detect_scenario(self, workspace: str, task_data: dict) -> tuple[str, str]:
         """检测工作空间场景
 
         workspace 为空 -> new_project，path = {ws_root}/{task_id}
@@ -334,7 +339,7 @@ class WorkspaceLifecycleManager:
             (scenario: "existing_project"|"new_project", project_root: str)
         """
         task_id = task_data.get("task_id", "")
-        ws_root = task_data.get("workspace_root", ".ai_workspaces")
+        ws_root = self._get_workspace_root()
         if not workspace:
             return "new_project", str(Path(ws_root) / task_id)
         path = Path(workspace)
@@ -384,6 +389,20 @@ class WorkspaceLifecycleManager:
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """子任务启动：通过 TaskService API 查找父任务，共享父工作空间"""
+        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get("default_level", "")
+        if _isolation_mode == "host":
+            container_ws = self._find_container_workspace(task_id)
+            host_path = container_ws or workspace
+            if host_path:
+                meta = {"mode": "shared", "path": host_path}
+                self._ws_meta_store[task_id] = meta
+                logger.info(
+                    "[WorkspaceLifecycle] host 隔离模式(子任务): 共享目录 "
+                    "task_id=%s, path=%s, container_ws=%s",
+                    task_id, host_path, container_ws,
+                )
+                return meta
+
         parent_path = workspace
         parent_meta: dict = {}
         try:
@@ -408,9 +427,8 @@ class WorkspaceLifecycleManager:
         extra = frozenset(ws_cfg.get("worktree_exclude_patterns", []))
         return _SKIP_DIRS | extra
 
-    def _copy_project_to_container(self, container_path: Path) -> int:
-        """从主项目复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
-        src = self._base_path
+    def _copy_project_to_container(self, container_path: Path, src: Path) -> int:
+        """从指定源目录复制文件到容器空间，跳过排除目录和扩展名。返回复制的文件数。"""
         if not src.exists():
             return 0
         skip = self._effective_skip_dirs()
@@ -429,33 +447,46 @@ class WorkspaceLifecycleManager:
             count += 1
         return count
 
-    def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
-        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
-
-        BUG-FIX-fix_20260425_container_workspace_init:
-        容器任务必须先初始化工作空间（mkdir + git init），
-        否则后续子任务找不到容器空间，各自创建空目录。
-
-        BUG-FIX-fix_20260429_container_project_files:
-        容器空间初始化时从主项目复制文件，否则子任务 worktree 只有 .gitignore，
-        子 agent 无法看到项目代码。
-        """
-        ws_root = task_data.get("workspace_root", ".ai_workspaces")
-        container_path = str(Path(ws_root) / f"container_{container_task_id}")
-        path = Path(container_path)
-
+    def _ensure_dir_and_git(self, path: Path) -> None:
+        """确保目录存在且有 git 初始化。"""
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
-            if workspace:
-                copied = self._copy_project_to_container(path)
-                logger.info("[WorkspaceLifecycle] 容器空间已复制项目文件: task_id=%s, files=%d", container_task_id, copied)
+        if not (path / ".git").exists():
             if not self._git_init_and_initial_commit(path, "chore: initial container project"):
-                raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
-        elif not (path / ".git").exists():
-            if not self._git_init_and_initial_commit(path, "chore: initial commit for container workspace"):
                 raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
         else:
             self._ensure_git_user(path)
+
+    def init_container_workspace(self, container_task_id: str, workspace: str | None, task_data: dict) -> dict:
+        """容器任务的空间初始化（由 TaskWorker 在跳过执行前调用）
+
+        BUG-FIX-fix_20260519_container_workspace_path:
+        规则：
+        - 有 workspace + host 模式 → 直接用 workspace（原空间）
+        - 有 workspace + 非 host 模式 → 在 ws_root 创建容器空间，从 workspace 复制
+        - 无 workspace → 在 ws_root 创建容器空间，空空间 + git init
+        """
+        isolation_mode = task_data.get("isolation_mode", "") or ""
+        ws_root = self._get_workspace_root()
+
+        if workspace and isolation_mode == "host":
+            path = Path(workspace)
+            self._ensure_dir_and_git(path)
+            logger.info("[WorkspaceLifecycle] host模式复用原空间: task_id=%s, path=%s", container_task_id, path)
+        else:
+            path = Path(ws_root) / f"container_{container_task_id}"
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                if workspace:
+                    src_path = Path(workspace)
+                    if not src_path.is_absolute():
+                        src_path = self._base_path / src_path
+                    copied = self._copy_project_to_container(path, src=src_path)
+                    logger.info("[WorkspaceLifecycle] 容器空间已复制文件: task_id=%s, files=%d", container_task_id, copied)
+                if not self._git_init_and_initial_commit(path, "chore: initial container project"):
+                    raise RuntimeError(f"容器空间初始化失败（git init）: {path}")
+            else:
+                self._ensure_dir_and_git(path)
 
         meta = {"mode": "project_root", "path": str(path),
                 "branch": "main", "project_root": str(path),
@@ -529,7 +560,7 @@ class WorkspaceLifecycleManager:
         # ── inherit_workspace_from：直接复制源目录文件到新目录 ──
         # 跳过 git init / worktree add 等所有初始化步骤
         if task_data.get("_inherit_workspace_resolved"):
-            ws_root = task_data.get("workspace_root", ".ai_workspaces")
+            ws_root = self._get_workspace_root()
             target_dir = Path(ws_root) / task_id
             source_dir = Path(workspace)
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +593,21 @@ class WorkspaceLifecycleManager:
             meta = {"mode": "plain", "path": str(target_dir)}
             self._ws_meta_store[task_id] = meta
             return meta
+
+        # ── Host isolation mode: 有 workspace 或父容器空间时直接操作，否则走正常创建逻辑 ──
+        _isolation_mode = task_data.get("isolation_mode", "") or self._config.get("coordinator", {}).get("default_level", "")
+        if _isolation_mode == "host":
+            container_ws = self._find_container_workspace(task_id)
+            host_path = container_ws or workspace
+            if host_path:
+                meta = {"mode": "plain", "path": host_path}
+                self._ws_meta_store[task_id] = meta
+                logger.info(
+                    "[WorkspaceLifecycle] host 隔离模式: 直接操作目录 "
+                    "task_id=%s, path=%s, container_ws=%s（无 git worktree/branch）",
+                    task_id, host_path, container_ws,
+                )
+                return meta
         # BUG-FIX-fix_20260425_container_workspace_init:
         # 容器子任务优先查找容器空间，基于容器空间做 worktree/copy
         # 但当 _inherit_workspace_resolved 时跳过容器查找，使用继承的工作空间
@@ -611,12 +657,32 @@ class WorkspaceLifecycleManager:
             except RuntimeError:
                 raise
             except Exception:
-                pass
+                logger.warning("[WorkspaceLifecycle] 工作空间初始化异常", exc_info=True)
+
+        # HOST 模式：直接操作项目目录，不创建 worktree 隔离
+        isolation_level = task_data.get("isolation_level", "")
+        if isolation_level == "host":
+            scenario, project_root = self._detect_scenario(workspace, task_data)
+            root_path = Path(project_root)
+            if not root_path.exists():
+                root_path.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "mode": "shared",
+                "path": str(root_path),
+                "project_root": str(root_path),
+            }
+            self._ws_meta_store[task_id] = meta
+            logger.info(
+                "[WorkspaceLifecycle] HOST模式: task_id=%s, 直接操作项目目录: %s",
+                task_id,
+                root_path,
+            )
+            return meta
 
         # 无显式 workspace 且无容器 → plain 模式：只创建目录，不做 git 操作
         has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
         if not has_explicit_workspace and not container_ws:
-            ws_root = task_data.get("workspace_root", ".ai_workspaces")
+            ws_root = self._get_workspace_root()
             plain_path = Path(ws_root) / task_id
             plain_path.mkdir(parents=True, exist_ok=True)
             meta = {"mode": "plain", "path": str(plain_path)}
@@ -650,7 +716,7 @@ class WorkspaceLifecycleManager:
                     task_id)
 
         branch = f"task/{task_id}"
-        ws_root = task_data.get("workspace_root", ".ai_workspaces")
+        ws_root = self._get_workspace_root()
         ws_dir = root_path / ws_root / _safe_ws_name(root_path.name, task_id)
         project_size = self._calc_project_size(str(root_path), task_id)
         threshold = self._config.get("workspace", {}).get("sparse_threshold_mb", 50) * 1024 * 1024
@@ -1162,7 +1228,16 @@ class WorkspaceLifecycleManager:
                 except OSError as e:
                     logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s", workspace, e)
         elif mode == "plain":
-            pass
+            ws_path = Path(workspace)
+            if not ws_path.is_absolute():
+                ws_path = ws_path.resolve()
+            if ws_path.exists():
+                try:
+                    _force_rmtree(str(ws_path))
+                    result["dir_removed"] = True
+                    logger.info("[WorkspaceLifecycle] 已清理 plain 工作空间: %s", ws_path)
+                except OSError as e:
+                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s", workspace, e)
 
         self._ws_meta_store.pop(task_id, None)
         logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s", task_id, mode, result)

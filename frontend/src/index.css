@@ -1,3 +1,4 @@
+@import './styles/responsive.css';
 @import './styles/design-tokens.css';
 @import './styles/theme.css';
 @import './styles/animations.css';

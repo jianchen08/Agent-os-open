@@ -10,7 +10,7 @@ import sys
 import os
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -34,7 +34,7 @@ class TestFeishuInputAdapter:
 
     def test_receive_text_message(self) -> None:
         """接收文本消息 → state。"""
-        adapter = FeishuInputAdapter()
+        FeishuInputAdapter()
         raw_msg = {
             "header": {"event_id": "evt-1", "event_type": "im.message.receive_v1"},
             "event": {
@@ -235,7 +235,7 @@ class TestFeishuStreamClient:
         mock_session.closed = False
         client._session = mock_session
 
-        result = await client.send_message("ou_test", "Hello")
+        await client.send_message("ou_test", "Hello")
 
         # 验证调用格式
         mock_session.post.assert_called_once()

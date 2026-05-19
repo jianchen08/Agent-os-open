@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from pathlib import Path
@@ -54,6 +55,9 @@ class ContextBuilder:
         """
         self._base_path = Path(base_path) if base_path else Path.cwd()
 
+    # 上下文文件大小上限（10MB），超过则跳过
+    _MAX_CONTEXT_FILE_SIZE = 10 * 1024 * 1024
+
     def _resolve_path_content(self, file_path: str) -> str:
         """尝试读取文件内容。
 
@@ -66,6 +70,12 @@ class ContextBuilder:
         full_path = self._base_path / file_path
         try:
             if full_path.exists() and full_path.is_file():
+                if full_path.stat().st_size > self._MAX_CONTEXT_FILE_SIZE:
+                    logger.warning(
+                        "上下文文件过大，跳过: %s (%d bytes)",
+                        full_path, full_path.stat().st_size,
+                    )
+                    return ""
                 return full_path.read_text(encoding="utf-8")
         except OSError as e:
             logger.warning("读取文件失败 %s: %s", full_path, e)
@@ -140,7 +150,9 @@ class ContextBuilder:
 
         return result
 
-    def _build_context(self, config: ContextConfig, config_obj: AgentConfig) -> dict[str, Any]:
+    def _build_context(
+        self, config: ContextConfig, config_obj: AgentConfig
+    ) -> dict[str, Any]:
         """从 ContextConfig 构建上下文字典。
 
         Args:
@@ -203,3 +215,23 @@ class ContextBuilder:
             "static": static,
             "dynamic": dynamic,
         }
+
+    # ---- 异步方法 ----
+
+    async def _resolve_path_content_async(self, file_path: str) -> str:
+        """异步版本的文件内容读取。"""
+        return await asyncio.to_thread(self._resolve_path_content, file_path)
+
+    async def build_static_context_async(self, config: AgentConfig) -> dict[str, Any]:
+        """异步构建静态上下文，文件读取卸载到线程池。"""
+        return await asyncio.to_thread(self.build_static_context, config)
+
+    async def build_dynamic_context_async(self, config: AgentConfig) -> dict[str, Any]:
+        """异步构建动态上下文。"""
+        return await asyncio.to_thread(self.build_dynamic_context, config)
+
+    async def build_full_context_async(self, config: AgentConfig) -> dict[str, Any]:
+        """异步构建完整上下文。"""
+        static = await self.build_static_context_async(config)
+        dynamic = await self.build_dynamic_context_async(config)
+        return {"static": static, "dynamic": dynamic}

@@ -29,7 +29,6 @@ from typing import Any, Callable, Awaitable
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +305,7 @@ class SlashCommandRegistry:
     async def _cmd_context(self, args: str, ctx: dict[str, Any]) -> CommandResult:
         """显示上下文占用情况。"""
         conversation_history = ctx.get("conversation_history", [])
-        state = ctx.get("last_state", {})
+        ctx.get("last_state", {})
 
         # 估算上下文大小
         msg_count = len(conversation_history)

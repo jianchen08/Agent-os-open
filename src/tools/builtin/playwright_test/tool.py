@@ -29,14 +29,14 @@ logger = logging.getLogger(__name__)
 class PlaywrightTestTool(BuiltinTool):
     """
     Playwright 前端测试封装工具
-    
+
     提供浏览器启动、页面导航、元素交互、console 捕获、截图对比等功能。
     支持 Chromium/Firefox/WebKit 三种浏览器引擎。
     """
-    
+
     # 类级别会话存储
     _sessions: dict[str, Any] = {}
-    
+
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
@@ -202,11 +202,11 @@ class PlaywrightTestTool(BuiltinTool):
             category=ToolCategory.EXECUTION,
             dangerous_operations=[],
         )
-    
+
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行工具"""
         action = inputs.get("action", "")
-        
+
         # 路由到对应的处理方法
         handlers = {
             "browser_launch": self._handle_browser_launch,
@@ -218,17 +218,17 @@ class PlaywrightTestTool(BuiltinTool):
             "restore_state": self._handle_restore_state,
             "close": self._handle_close,
         }
-        
+
         handler = handlers.get(action)
         if not handler:
             return create_failure_result(f"不支持的操作: {action}")
-        
+
         try:
             return await handler(inputs)
         except Exception as e:
             logger.error(f"Playwright 测试工具执行失败: {e}")
             return create_failure_result(str(e))
-    
+
     async def _handle_browser_launch(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理浏览器启动"""
         try:
@@ -240,7 +240,7 @@ class PlaywrightTestTool(BuiltinTool):
             launch_options_str = inputs.get("launch_options")
             storage_state = inputs.get("storage_state")
             auto_persist = inputs.get("auto_persist", True)
-            
+
             # 解析启动参数
             launch_options = None
             if launch_options_str:
@@ -248,7 +248,7 @@ class PlaywrightTestTool(BuiltinTool):
                     launch_options = json.loads(launch_options_str)
                 except json.JSONDecodeError:
                     return create_failure_result("launch_options 必须是有效的 JSON 字符串")
-            
+
             # 创建会话
             session_id, session_info = await BrowserManager.create_session(
                 browser_type=browser,
@@ -260,16 +260,16 @@ class PlaywrightTestTool(BuiltinTool):
                 storage_state=storage_state,
                 auto_persist=auto_persist,
             )
-            
+
             # 存储会话
             self._sessions[session_id] = session_info
-            
+
             # 构建返回信息
             message = f"{browser} 浏览器会话已创建"
             restored_state = session_info.get("restored_state")
             if restored_state:
                 message += f"，已自动恢复状态: {restored_state}"
-            
+
             return create_success_result(data={
                 "session_id": session_id,
                 "browser_type": browser,
@@ -285,34 +285,34 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
             return create_failure_result(f"浏览器启动失败: {str(e)}")
-    
+
     async def _handle_navigate(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理页面导航"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             session = BrowserManager.get_session(session_id)
             if not session:
                 return create_failure_result(f"会话不存在: {session_id}")
-            
+
             url = inputs.get("url")
             if not url:
                 return create_failure_result("url 是必填参数")
-            
+
             wait_until = inputs.get("wait_until", "load")
             timeout = inputs.get("timeout", 30000)
-            
+
             page = session.page
-            
+
             # 导航到目标 URL
             response = await page.goto(url, wait_until=wait_until, timeout=timeout)
-            
+
             # 获取页面信息
             title = await page.title()
             current_url = page.url
-            
+
             return create_success_result(data={
                 "session_id": session_id,
                 "title": title,
@@ -324,113 +324,113 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"页面导航失败: {e}")
             return create_failure_result(f"页面导航失败: {str(e)}")
-    
+
     async def _handle_interact(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理元素交互"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             session = BrowserManager.get_session(session_id)
             if not session:
                 return create_failure_result(f"会话不存在: {session_id}")
-            
+
             action_type = inputs.get("action_type")
             if not action_type:
                 return create_failure_result("action_type 是必填参数")
-            
+
             selector = inputs.get("selector")
             if not selector:
                 return create_failure_result("selector 是必填参数")
-            
+
             page = session.page
             timeout = inputs.get("timeout", 30000)
-            
+
             # 等待元素出现
             locator = page.locator(selector)
             await locator.wait_for(timeout=timeout)
-            
+
             result = {"action": action_type, "selector": selector}
-            
+
             if action_type == "click":
                 await locator.click(timeout=timeout)
                 result["message"] = "点击成功"
-                
+
             elif action_type == "type":
                 value = inputs.get("value", "")
                 await locator.fill(value)
                 result["message"] = f"输入文本成功: {value}"
-                
+
             elif action_type == "select":
                 value = inputs.get("value")
                 if not value:
                     return create_failure_result("select 操作需要 value 参数")
                 await locator.select_option(value)
                 result["message"] = f"选择选项成功: {value}"
-                
+
             elif action_type == "drag":
                 target_selector = inputs.get("target_selector")
                 if not target_selector:
                     return create_failure_result("drag 操作需要 target_selector 参数")
                 await locator.drag_to(page.locator(target_selector))
                 result["message"] = "拖拽成功"
-                
+
             elif action_type == "hover":
                 await locator.hover()
                 result["message"] = "悬停成功"
-                
+
             elif action_type == "upload":
                 file_paths = inputs.get("file_paths")
                 if not file_paths:
                     return create_failure_result("upload 操作需要 file_paths 参数")
                 await locator.set_input_files(file_paths)
                 result["message"] = f"文件上传成功: {file_paths}"
-                
+
             else:
                 return create_failure_result(f"不支持的交互类型: {action_type}")
-            
+
             # 获取元素状态
             result["element_visible"] = await locator.is_visible()
             result["element_enabled"] = await locator.is_enabled()
-            
+
             return create_success_result(data=result)
         except Exception as e:
             logger.error(f"元素交互失败: {e}")
             return create_failure_result(f"元素交互失败: {str(e)}")
-    
+
     async def _handle_capture_console(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理 console 捕获"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             session = BrowserManager.get_session(session_id)
             if not session:
                 return create_failure_result(f"会话不存在: {session_id}")
-            
+
             filter_type = inputs.get("filter_type", "all")
             assert_absent = inputs.get("assert_absent", [])
             assert_present = inputs.get("assert_present", [])
             clear = inputs.get("clear", False)
-            
+
             # 获取 console 消息
             console_messages = session.console_messages
-            
+
             # 过滤消息
             if filter_type != "all":
                 console_messages = [
                     msg for msg in console_messages
                     if msg.get("type") == filter_type
                 ]
-            
+
             # 断言检查
             assertion_results = {
                 "passed": True,
                 "errors": [],
             }
-            
+
             # 检查不应存在的错误
             error_types = {"error", "exception", "warning"}
             if assert_absent:
@@ -442,7 +442,7 @@ class PlaywrightTestTool(BuiltinTool):
                                 assertion_results["errors"].append(
                                     f"断言失败: 不应存在的 {absent_type} 消息: {msg.get('text')}"
                                 )
-            
+
             # 检查必须存在的消息
             if assert_present:
                 present_found = {keyword: False for keyword in assert_present}
@@ -450,18 +450,18 @@ class PlaywrightTestTool(BuiltinTool):
                     for keyword in present_found:
                         if keyword.lower() in msg.get("text", "").lower():
                             present_found[keyword] = True
-                
+
                 for keyword, found in present_found.items():
                     if not found:
                         assertion_results["passed"] = False
                         assertion_results["errors"].append(
                             f"断言失败: 缺少必需消息关键词: {keyword}"
                         )
-            
+
             # 清空 console（如果需要）
             if clear:
                 session.console_messages = []
-            
+
             return create_success_result(data={
                 "session_id": session_id,
                 "console_messages": console_messages,
@@ -472,51 +472,51 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"console 捕获失败: {e}")
             return create_failure_result(f"console 捕获失败: {str(e)}")
-    
+
     async def _handle_screenshot_compare(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理截图对比"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             session = BrowserManager.get_session(session_id)
             if not session:
                 return create_failure_result(f"会话不存在: {session_id}")
-            
+
             screenshot_action = inputs.get("screenshot_action", "full_page")
             selector = inputs.get("selector")
             baseline_path = inputs.get("baseline_path")
             output_path = inputs.get("output_path")
             threshold = inputs.get("threshold", 0.1)
-            
+
             page = session.page
-            
+
             if screenshot_action == "full_page":
                 result = await ScreenshotManager.capture_full_page(page, output_path)
-                
+
             elif screenshot_action == "element":
                 if not selector:
                     return create_failure_result("element 截图需要 selector 参数")
                 result = await ScreenshotManager.capture_element(page, selector, output_path)
-                
+
             elif screenshot_action == "compare":
                 if not baseline_path:
                     return create_failure_result("compare 截图需要 baseline_path 参数")
                 if not output_path:
                     return create_failure_result("compare 截图需要 output_path 参数")
-                
+
                 # 先截取当前页面
                 compare_result = await ScreenshotManager.capture_full_page(page, output_path)
                 if not compare_result.get("success"):
                     return create_failure_result(compare_result.get("error", "截图失败"))
-                
+
                 # 然后对比
                 result = ScreenshotManager.compare_images(baseline_path, output_path, threshold)
-                
+
             else:
                 return create_failure_result(f"不支持的截图类型: {screenshot_action}")
-            
+
             if result.get("success"):
                 return create_success_result(data={
                     "session_id": session_id,
@@ -528,21 +528,21 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"截图对比失败: {e}")
             return create_failure_result(f"截图对比失败: {str(e)}")
-    
+
     async def _handle_save_state(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理保存浏览器状态"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             state_path = inputs.get("state_path")
             if not state_path:
                 return create_failure_result("state_path 是必填参数")
-            
+
             # 保存会话状态
             result = await BrowserManager.save_session_state(session_id, state_path)
-            
+
             if result.get("success"):
                 return create_success_result(data={
                     "session_id": session_id,
@@ -554,27 +554,27 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"保存浏览器状态失败: {e}")
             return create_failure_result(f"保存浏览器状态失败: {str(e)}")
-    
+
     async def _handle_restore_state(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理恢复浏览器状态"""
         try:
             state_path = inputs.get("state_path")
             if not state_path:
                 return create_failure_result("state_path 是必填参数")
-            
+
             browser = inputs.get("browser", "chromium")
             headless = inputs.get("headless", True)
-            
+
             # 创建新会话并恢复状态
             session_id, session_info = await BrowserManager.create_session(
                 browser_type=browser,
                 headless=headless,
                 storage_state=state_path,
             )
-            
+
             # 存储会话
             self._sessions[session_id] = session_info
-            
+
             return create_success_result(data={
                 "session_id": session_id,
                 "browser_type": browser,
@@ -584,21 +584,21 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"恢复浏览器状态失败: {e}")
             return create_failure_result(f"恢复浏览器状态失败: {str(e)}")
-    
+
     async def _handle_close(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理关闭浏览器"""
         try:
             session_id = inputs.get("session_id")
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
-            
+
             # 关闭会话（BrowserManager.close_session 已内置自动保存）
             result = await BrowserManager.close_session(session_id)
-            
+
             # 清理本地存储
             if session_id in self._sessions:
                 del self._sessions[session_id]
-            
+
             if result.get("success"):
                 # 构建返回信息，提示自动保存结果
                 message = result.get("message", "会话已关闭")

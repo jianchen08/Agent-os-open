@@ -12,7 +12,6 @@
 
 import asyncio
 import logging
-import sys
 import threading
 import time
 
@@ -84,7 +83,6 @@ class AutoConfirmNotifier:
 def inject_auto_confirm():
     """注入自动确认通知器到全局人类交互服务。"""
     from human_interaction import get_human_interaction_service
-    from human_interaction.interfaces import IInteractionNotifier
 
     notifier = AutoConfirmNotifier(confirm_delay=1.5)
     human_svc = get_human_interaction_service()

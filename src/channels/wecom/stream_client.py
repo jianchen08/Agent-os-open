@@ -14,8 +14,6 @@ https://developer.work.weixin.qq.com/document/path/90236
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import time
 from typing import Any, Callable, Awaitable

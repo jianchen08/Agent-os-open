@@ -295,7 +295,7 @@ function SettingsPageShell({
         <h1 className="ml-4 text-base font-semibold">{title}</h1>
         <span className="text-muted-foreground ml-2 text-xs">{description}</span>
       </header>
-      <main className="max-w-3xl flex-1 overflow-y-auto p-6" role="form" aria-label="API配置表单">{children}</main>
+      <main className="max-w-3xl flex-1 overflow-y-auto p-3 sm:p-6" role="form" aria-label="API配置表单">{children}</main>
     </div>
   )
 }
@@ -321,10 +321,10 @@ function FieldRow({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex items-start gap-4">
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-4">
       <label
         htmlFor={htmlFor}
-        className="text-muted-foreground min-w-[120px] shrink-0 pt-2 text-right text-sm"
+        className="text-muted-foreground text-sm sm:min-w-[120px] sm:shrink-0 sm:pt-2 sm:text-right"
       >
         {label}
       </label>

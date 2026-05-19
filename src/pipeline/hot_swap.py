@@ -219,9 +219,6 @@ class HotSwapManager:
         warnings: list[str] = []
 
         if old_plugin is not None:
-            old_type = type(old_plugin)
-            new_type = type(new_plugin)
-
             # 检查插件接口类型是否一致
             from pipeline.plugin import IInputPlugin, ICorePlugin, IOutputPlugin
 

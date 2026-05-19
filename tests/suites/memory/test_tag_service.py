@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from memory.tag_service import TagService
-from memory.types import TagInfo
 
 
 # ============================================================
@@ -81,7 +80,7 @@ class TestTagServiceInit:
 
     def test_创建tags目录(self, temp_dir: str) -> None:
         """初始化时应创建 tags 子目录。"""
-        svc = TagService(data_dir=temp_dir)
+        TagService(data_dir=temp_dir)
         tags_dir = Path(temp_dir) / "tags"
         assert tags_dir.exists()
         assert tags_dir.is_dir()

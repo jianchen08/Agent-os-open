@@ -20,7 +20,6 @@ import logging
 import struct
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sym_padding

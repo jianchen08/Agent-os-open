@@ -13,12 +13,35 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any, Callable, Awaitable
 
+from memory.constants import HistoryConfig
+
 logger = logging.getLogger(__name__)
+
+
+def _get_env_int(key: str, default: int) -> int:
+    """从环境变量读取整数值，失败时回退到默认值。
+
+    Args:
+        key: 环境变量名
+        default: 默认值
+
+    Returns:
+        环境变量解析后的整数值，或默认值
+    """
+    value = os.environ.get(key, "")
+    if not value:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        logger.warning("环境变量 %s='%s' 不是有效整数，使用默认值 %d", key, value, default)
+        return default
 
 
 class MessageEntry:
@@ -66,17 +89,21 @@ class HistoryBuffer:
 
     def __init__(
         self,
-        max_size: int = 1000,
+        max_size: int | None = None,
         enable_vector_search: bool = True,
         embedding_fn: Callable[[str], Awaitable[list[float]]] | None = None,
     ) -> None:
         """初始化历史缓冲区。
 
         Args:
-            max_size: 最大消息数量
+            max_size: 最大消息数量，None 时从环境变量或常量读取默认值
             enable_vector_search: 是否启用向量搜索
             embedding_fn: 异步嵌入计算函数
         """
+        if max_size is None:
+            max_size = _get_env_int(
+                HistoryConfig.ENV_KEY_MAX_SIZE, HistoryConfig.DEFAULT_MAX_SIZE,
+            )
         self.max_size = max_size
         self.enable_vector_search = enable_vector_search
         self._embedding_fn = embedding_fn
@@ -281,17 +308,27 @@ class ConversationHistory:
 
     def __init__(
         self,
-        max_tokens: int = 128000,
-        max_messages: int = 1000,
+        max_tokens: int | None = None,
+        max_messages: int | None = None,
         embedding_fn: Callable[[str], Awaitable[list[float]]] | None = None,
     ) -> None:
         """初始化对话历史管理器。
 
         Args:
-            max_tokens: 最大 token 数
-            max_messages: 最大消息数
+            max_tokens: 最大 token 数，None 时从环境变量或常量读取默认值
+            max_messages: 最大消息数，None 时从环境变量或常量读取默认值
             embedding_fn: 异步嵌入计算函数
         """
+        if max_messages is None:
+            max_messages = _get_env_int(
+                HistoryConfig.ENV_KEY_MAX_MESSAGES,
+                HistoryConfig.DEFAULT_MAX_MESSAGES,
+            )
+        if max_tokens is None:
+            max_tokens = _get_env_int(
+                HistoryConfig.ENV_KEY_MAX_TOKENS,
+                HistoryConfig.DEFAULT_MAX_TOKENS,
+            )
         self.buffer = HistoryBuffer(
             max_size=max_messages, embedding_fn=embedding_fn,
         )

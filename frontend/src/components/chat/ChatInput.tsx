@@ -712,7 +712,7 @@ export const ChatInput = ({
               <Button
                 variant="ghost"
                 size="icon"
-                className="text-muted-foreground hover:text-foreground hover:bg-muted h-8 w-8 rounded-lg"
+                className="text-muted-foreground hover:text-foreground hover:bg-muted h-11 w-11 rounded-lg sm:h-8 sm:w-8"
                 onClick={triggerFileSelect}
                 disabled={disabled || isExecuting}
                 title="添加附件"
@@ -751,7 +751,7 @@ export const ChatInput = ({
 
             {/* 模型名和 Token 统计 */}
             {modelName ? (
-              <div className="bg-primary/10 border-primary/20 flex h-8 items-center gap-2 rounded-lg border px-3 text-xs">
+              <div className="bg-primary/10 border-primary/20 hidden h-8 items-center gap-2 rounded-lg border px-3 text-xs sm:flex">
                 <Database className="text-primary h-3.5 w-3.5" />
                 <span className="text-primary font-semibold">{modelName}</span>
                 {maxTokens > 0 && (
@@ -788,7 +788,7 @@ export const ChatInput = ({
             <Button
               variant="destructive"
               size="icon"
-              className="h-8 w-8 rounded-lg"
+              className="h-11 w-11 rounded-lg sm:h-8 sm:w-8"
               onClick={onStopGenerate}
               title="停止生成"
               aria-label="停止生成"
@@ -800,7 +800,7 @@ export const ChatInput = ({
               variant="default"
               size="icon"
               className={cn(
-                'h-8 w-8 rounded-lg transition-all duration-200',
+                'h-11 w-11 rounded-lg transition-all duration-200 sm:h-8 sm:w-8',
                 canSend
                   ? 'bg-primary hover:bg-primary/90 shadow-sm'
                   : 'bg-muted text-muted-foreground',

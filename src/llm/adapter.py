@@ -251,6 +251,47 @@ class _BaseLiteLLMAdapter:
         """执行实际的 LLM API 调用，子类必须覆写。"""
         raise NotImplementedError
 
+    @staticmethod
+    def _ensure_minimax_role_safety(
+        model: str, messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """防御性兜底：确保 minimax 模型不会收到非首位 system 消息。
+
+        根因：MiniMax API 仅允许首位消息为 system role。管道中的
+        StreamRepetitionGuard、ThinkingTruncationGuard 等会注入 system 消息，
+        _normalize_messages_for_provider 的 Phase 1-4 已做转换，但极端边界
+        情况可能遗漏。此方法作为最后一道防线，在 adapter 层拦截。
+
+        Args:
+            model: LiteLLM 模型标识字符串（如 "minimax/MiniMax-M2.7"）
+            messages: 对话消息列表
+
+        Returns:
+            修正后的消息列表（原地修改 + 返回引用）
+        """
+        # 检测是否为 minimax 模型
+        if "minimax" not in model.lower():
+            return messages
+
+        needs_fix = False
+        for i, msg in enumerate(messages):
+            if i > 0 and msg.get("role") == "system":
+                needs_fix = True
+                break
+
+        if not needs_fix:
+            return messages
+
+        for i, msg in enumerate(messages):
+            if i > 0 and msg.get("role") == "system":
+                msg["role"] = "user"
+                msg.pop("name", None)
+                logger.warning(
+                    "[adapter] Minimax 兜底: 非首位 system→user idx=%d content=%s",
+                    i, str(msg.get("content", ""))[:100],
+                )
+        return messages
+
     async def completion(
         self,
         model: str,
@@ -262,6 +303,9 @@ class _BaseLiteLLMAdapter:
         **kwargs: Any,
     ) -> LLMResponse:
         """执行 LLM 调用，支持非流式和流式两种模式。"""
+        # 防御性兜底：确保 minimax 不会收到非法 system 消息
+        self._ensure_minimax_role_safety(model, messages)
+
         if stream:
             return await self._call_streaming(
                 model, messages, tools=tools, on_chunk=on_chunk, **kwargs
@@ -481,7 +525,6 @@ class _BaseLiteLLMAdapter:
                         _max_thinking_chars > 0
                         and thinking_len > _max_thinking_chars
                     ):
-                        thinking_truncated = True
                         logger.warning(
                             "[%s] 思考内容过长"
                             "(%d>%d chars)，截断",

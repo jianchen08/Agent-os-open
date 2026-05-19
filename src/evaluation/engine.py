@@ -614,9 +614,6 @@ class EvaluationEngine:
         _captured_pid: list[str] = [""]
 
         try:
-            import asyncio
-            import json
-            import re
 
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
@@ -885,7 +882,7 @@ class EvaluationEngine:
             "- issues: 逐条列出每个不通过项，包含文件路径和行号\n"
             "- suggestions: 针对每个 issue 给出可操作的修复建议\n"
             "- report_path: 将详细评估报告写入文件（如 "
-            f".ai_workspaces/eval_report_{metric_def.id}.md），填入相对路径\n"
+            f"eval_report_{metric_def.id}.md），填入相对路径\n"
             "- 如果评估通过，issues 和 suggestions 为空数组即可"
         )
 

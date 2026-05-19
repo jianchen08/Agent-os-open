@@ -5,7 +5,6 @@ import os
 import tempfile
 from unittest.mock import MagicMock
 
-import pytest
 
 from tools.builtin.playwright_test.screenshot import ScreenshotManager
 

@@ -45,6 +45,14 @@ export function InteractionCard({
   const [selectedOption, setSelectedOption] = useState<InteractionOption | null>(null)
   const isDone = interaction.status !== 'pending'
 
+  /**
+   * 文件审阅去重：当 interaction 携带 fileContents 时，
+   * 说明已有专属的 FileReviewTab（含审批按钮），避免在 InteractionCard 中重复渲染选项按钮。
+   */
+  const hasFileReviewTab = !!(
+    interaction.fileContents && Object.keys(interaction.fileContents).length > 0
+  )
+
   const handleTextSubmit = () => {
     const trimmed = textInput.trim()
     if (!trimmed) return
@@ -93,7 +101,7 @@ export function InteractionCard({
       className={`group mx-4 my-3 rounded-xl border transition-colors ${
         isDone
           ? 'border-border/50 bg-muted/30'
-          : 'border-status-info/40 bg-status-info/5 animate-pulse-subtle shadow-md shadow-status-info/10'
+          : 'border-[var(--badge-info-text)]/40 bg-[var(--badge-info-bg)] animate-pulse-subtle shadow-md shadow-[var(--badge-info-bg)]'
       }`}
     >
       {/* 标题区 */}
@@ -152,7 +160,7 @@ export function InteractionCard({
         )}
 
         {/* Choice 模式：选项按钮 + 自定义输入 */}
-        {interaction.mode === 'choice' && interaction.options && interaction.options.length > 0 && !isDone && (
+        {interaction.mode === 'choice' && interaction.options && interaction.options.length > 0 && !isDone && !hasFileReviewTab && (
           <div className="space-y-3">
             <div className="flex flex-wrap gap-2">
               {interaction.options.map((opt) => (

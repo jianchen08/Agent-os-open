@@ -48,8 +48,8 @@ const LoadingSkeleton: FC<{ className?: string }> = ({ className }) => (
 const ErrorDisplay: FC<{ message: string; className?: string }> = ({ message, className }) => (
   <div
     className={cn(
-      'mt-2 rounded-xl border border-status-error/30 bg-status-error/10',
-      'flex items-center gap-2 p-3 text-sm text-status-error',
+      'mt-2 rounded-xl border border-[var(--badge-error-text)]/30 bg-[var(--badge-error-bg)]',
+      'flex items-center gap-2 p-3 text-sm text-[var(--badge-error-text)]',
       className,
     )}
   >

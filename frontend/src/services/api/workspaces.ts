@@ -22,3 +22,44 @@ export async function getWorkspaceArtifacts(containerTaskId: string): Promise<an
 export async function getFileTree(containerTaskId: string): Promise<any> {
   return apiClient.get(`${BASE}/${containerTaskId}/file-tree`)
 }
+
+/** 创建文件或目录 */
+export async function createEntry(
+  containerTaskId: string,
+  path: string,
+  type: 'file' | 'directory',
+): Promise<any> {
+  return apiClient.post(`${BASE}/${containerTaskId}/create-entry`, { path, type })
+}
+
+/** 删除文件或目录 */
+export async function deleteEntry(
+  containerTaskId: string,
+  path: string,
+): Promise<any> {
+  return apiClient.delete(`${BASE}/${containerTaskId}/entries`, { data: { path } })
+}
+
+/** 重命名文件或目录 */
+export async function renameEntry(
+  containerTaskId: string,
+  oldPath: string,
+  newName: string,
+): Promise<any> {
+  return apiClient.post(`${BASE}/${containerTaskId}/rename-entry`, {
+    old_path: oldPath,
+    new_name: newName,
+  })
+}
+
+/** 移动文件或目录 */
+export async function moveEntry(
+  containerTaskId: string,
+  sourcePath: string,
+  destinationDir: string,
+): Promise<any> {
+  return apiClient.post(`${BASE}/${containerTaskId}/move-entry`, {
+    source_path: sourcePath,
+    destination_dir: destinationDir,
+  })
+}

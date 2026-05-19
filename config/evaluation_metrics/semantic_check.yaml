@@ -118,7 +118,7 @@ when_to_use:
   - 任何需要"理解内容 + 判断质量"的场景
 when_not_use:
   - 只需要格式验证（使用 format_valid）
-  - 只需要验证功能是否实现（使用 function_verify）
+  - 只需要验证功能是否实现（由 function_verifier_agent 在流程中执行）
   - 只需要简单的是/否判断（使用 Tool 类型指标）
 examples:
   - params:
@@ -133,7 +133,7 @@ examples:
 caveats:
   - 评估质量取决于任务目标描述是否清晰
   - LLM 判断有不确定性，评分仅供参考
-  - 评估的是内容质量，不验证功能正确性（功能验证请使用 function_verify）
+  - 评估的是内容质量，不验证功能正确性（功能验证由 function_verifier_agent 在流程中执行）
   - 长文本可能需要分段评估
 
 # ===== 依赖关系 =====

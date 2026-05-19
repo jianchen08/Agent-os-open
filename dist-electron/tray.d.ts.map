@@ -1,0 +1,1 @@
+{"version":3,"file":"tray.d.ts","sourceRoot":"","sources":["../electron/tray.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AAEH,OAAO,EAAE,IAAI,EAAqB,aAAa,EAAO,MAAM,UAAU,CAAC;AAiGvE;;;;;GAKG;AACH,wBAAgB,UAAU,CAAC,UAAU,EAAE,aAAa,GAAG,IAAI,CA8C1D;AAED;;GAEG;AACH,wBAAgB,WAAW,IAAI,IAAI,CAMlC"}

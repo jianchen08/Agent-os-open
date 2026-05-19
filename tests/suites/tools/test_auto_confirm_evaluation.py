@@ -9,14 +9,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from auto_confirm_runner import AutoConfirmNotifier
 from evaluation.expect import ExpectEvaluator
-from evaluation.types import ExpectCondition, ExpectSpec, MetricResult
+from evaluation.types import ExpectCondition, ExpectSpec
 
 
 # ── AutoConfirmNotifier 单元测试 ─────────────────────────

@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -21,12 +21,11 @@ import pytest
 
 from agents.context_builder import ContextBuilder
 from agents.types import AgentConfig, ContextConfig, ContextVarItem
-from memory.knowledge_service import KnowledgeService
-from memory.ports import IMemoryStore, IRetriever, ISemanticStorage
+from memory.ports import IRetriever, ISemanticStorage
 from memory.storage.json_store import JsonMemoryStore
 from memory.types import Episode, Knowledge, SearchResult
 from pipeline.plugin import PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys, create_initial_state
+from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.input.context_build import ContextBuildPlugin
 from plugins.input.knowledge_inject import KnowledgeInjectPlugin
 from plugins.input.memory_read import MemoryReadPlugin

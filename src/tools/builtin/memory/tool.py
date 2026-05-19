@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from core.results import ToolExecutionResult
-from memory.types import ContextRequest, Episode, Knowledge
+from memory.types import Episode, Knowledge
 from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
@@ -96,7 +96,11 @@ class MemoryTool(BuiltinTool):
         """获取工具定义"""
         return Tool(
             name="memory",
-            description="记忆工具：存储和检索知识、情景记忆，支持导入文本和文件知识",
+            description=(
+                "记忆工具：存储和检索知识、情景记忆，支持导入文本和文件知识。\n"
+                "⚠️ 重要：存储记忆时必须填写 tags 参数，用简洁的关键词标签标记内容分类和主题，"
+                "便于后续精准检索。系统会自动将当前 Agent 名称作为标签注入，无需手动添加。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -128,6 +132,15 @@ class MemoryTool(BuiltinTool):
                     "query": {
                         "type": "string",
                         "description": "检索查询（retrieve时使用）",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "标签列表（强烈建议填写）。用于标记内容分类和主题，"
+                            "支持后续按标签精准检索。例如：['coding_standards', 'python']、"
+                            "['bug_pattern', 'timeout']。系统会自动追加当前 Agent 名称作为标签。"
+                        ),
                     },
                     "filter": {
                         "type": "object",
@@ -185,7 +198,7 @@ class MemoryTool(BuiltinTool):
             category=ToolCategory.MEMORY,
             level=ToolLevel.SYSTEM,
             source=ToolSource.CODE,
-            injected_params=["session_id", "_session", "_memory_service"],
+            injected_params=["session_id", "_session", "_memory_service", "agent_config_id"],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
@@ -219,10 +232,14 @@ class MemoryTool(BuiltinTool):
             return create_failure_result(f"未知操作: {action}")
 
     async def _store(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """存储记忆"""
+        """存储记忆，自动将 agent_config_id 注入为标签"""
         content = inputs.get("content")
-        tags = inputs.get("tags", [])
+        tags = list(inputs.get("tags", []))
         memory_type = inputs.get("memory_type", "semantic")
+        agent_config_id = inputs.get("agent_config_id", "")
+
+        if agent_config_id and agent_config_id not in tags:
+            tags.append(agent_config_id)
 
         if not content:
             return create_failure_result("缺少 content 参数")
@@ -330,10 +347,14 @@ class MemoryTool(BuiltinTool):
         return content[:500] + "..."
 
     async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """导入文本知识"""
+        """导入文本知识，自动将 agent_config_id 注入为标签"""
         content = inputs.get("content")
         name = inputs.get("name")
-        tags = inputs.get("tags", [])
+        tags = list(inputs.get("tags", []))
+        agent_config_id = inputs.get("agent_config_id", "")
+
+        if agent_config_id and agent_config_id not in tags:
+            tags.append(agent_config_id)
 
         if not content:
             return create_failure_result("缺少 content 参数")
@@ -367,9 +388,13 @@ class MemoryTool(BuiltinTool):
             return create_failure_result(f"导入文本失败: {str(e)}")
 
     async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """导入文件知识"""
+        """导入文件知识，自动将 agent_config_id 注入为标签"""
         file_path = inputs.get("file_path")
-        tags = inputs.get("tags", [])
+        tags = list(inputs.get("tags", []))
+        agent_config_id = inputs.get("agent_config_id", "")
+
+        if agent_config_id and agent_config_id not in tags:
+            tags.append(agent_config_id)
 
         if not file_path:
             return create_failure_result("缺少 file_path 参数")

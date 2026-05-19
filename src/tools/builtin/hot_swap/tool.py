@@ -283,7 +283,6 @@ def _action_save_config_version(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        from pipeline.rollback import RollbackManager
 
         manager = _get_rollback_manager()
         version = manager.save_version(
@@ -331,7 +330,6 @@ def _action_rollback_config(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        from pipeline.rollback import RollbackManager
 
         manager = _get_rollback_manager()
         loop = _get_or_create_event_loop()
@@ -382,7 +380,6 @@ def _action_list_versions(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        from pipeline.rollback import RollbackManager
 
         manager = _get_rollback_manager()
         versions = manager.list_versions(config_id)

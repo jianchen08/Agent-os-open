@@ -119,7 +119,7 @@ class TestFindRelevantExperience:
         memory_service = _make_memory_service(retriever)
         applier = ExperienceApplier(memory_service=memory_service)
 
-        results = await applier.find_relevant_experience(
+        await applier.find_relevant_experience(
             intent="帮我分析数据",
             user_id="user1",
         )

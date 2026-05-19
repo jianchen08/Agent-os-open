@@ -79,9 +79,9 @@ export function ToolsPage() {
         <h1 className="ml-4 text-base font-semibold">工具管理</h1>
         <span className="text-muted-foreground ml-auto text-xs">共 {total} 个工具</span>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
         {/* 搜索和过滤 */}
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           <input
             type="text"
             placeholder="搜索工具..."
@@ -91,7 +91,7 @@ export function ToolsPage() {
               setPage(1)
             }}
             aria-label="搜索工具"
-            className="bg-background focus:ring-primary rounded-lg border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none"
+            className="bg-background focus:ring-primary w-full rounded-lg border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none sm:w-auto sm:flex-1"
           />
           <select
             value={filterCategory}
@@ -100,7 +100,7 @@ export function ToolsPage() {
               setPage(1)
             }}
             aria-label="按分类筛选"
-            className="bg-background rounded-lg border px-3 py-1.5 text-sm"
+            className="bg-background w-full rounded-lg border px-3 py-1.5 text-sm sm:w-auto"
           >
             <option value="">全部分类</option>
             <option value="file">文件</option>
@@ -119,7 +119,7 @@ export function ToolsPage() {
               setPage(1)
             }}
             aria-label="按来源筛选"
-            className="bg-background rounded-lg border px-3 py-1.5 text-sm"
+            className="bg-background w-full rounded-lg border px-3 py-1.5 text-sm sm:w-auto"
           >
             <option value="">全部来源</option>
             <option value="builtin">内置</option>
@@ -249,7 +249,7 @@ export function ToolsPage() {
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page <= 1}
-              className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+              className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
               aria-label="上一页"
             >
               上一页
@@ -260,7 +260,7 @@ export function ToolsPage() {
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={page >= totalPages}
-              className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+              className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
               aria-label="下一页"
             >
               下一页

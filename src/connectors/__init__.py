@@ -13,8 +13,16 @@
 - ConnectorState: 连接器状态枚举
 - ConnectorInfo: 连接器描述信息
 - CursorPosition: 光标位置
+- AdapterConfig: 适配器配置数据类
+- load_adapter_configs: 加载适配器配置
+- get_adapter_status_summary: 获取适配器状态摘要
 """
 
+from connectors.adapter_config import (
+    AdapterConfig,
+    get_adapter_status_summary,
+    load_adapter_configs,
+)
 from connectors.base import BaseConnector
 from connectors.degradation import DegradationManager
 from connectors.registry import ConnectorRegistry
@@ -34,6 +42,10 @@ __all__ = [
     "ConnectorRegistry",
     # 降级管理
     "DegradationManager",
+    # 适配器配置
+    "AdapterConfig",
+    "load_adapter_configs",
+    "get_adapter_status_summary",
     # 类型
     "ActionResult",
     "ConnectorAction",

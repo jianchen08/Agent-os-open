@@ -900,7 +900,19 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
           unreadCount: 0,
         })
       }
-      await pipelineStore.fetchMessages(effectivePipelineId, { threadId: state.currentSessionId })
+
+      // BUG-FIX-fix_20260515_streaming_interrupt:
+      // 问题根因: 切换标签/会话时 loadTabMessages 无条件调用 fetchMessages -> initFromAPI，
+      //          后端 API 返回的数据（可能是已完成状态）会覆盖正在流式传输的消息，
+      //          导致流式输出中断、内容丢失、状态错误。
+      // 修复方案: 管道正在流式传输时跳过 API 请求，保留本地的流式数据。
+      //          流式数据由 WebSocket 全局事件处理器持续更新，不受组件挂载/卸载影响。
+      //          切换回来时 activatePipeline 即可恢复显示，无需重新获取。
+      // 影响范围: 标签切换、会话切换时的流式输出连续性
+      // 修复日期: 2026-05-15
+      if (!pipelineStore.isStreaming(effectivePipelineId)) {
+        await pipelineStore.fetchMessages(effectivePipelineId, { threadId: state.currentSessionId })
+      }
 
       if (get().activeTabId === tabId) {
         pipelineStore.activatePipeline(effectivePipelineId)

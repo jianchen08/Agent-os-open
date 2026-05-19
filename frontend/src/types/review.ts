@@ -54,34 +54,74 @@ export interface ReviewFeedbackAnnotation {
   content: string
 }
 
-/** 差异行类型 */
+/** 制品类型 */
+export type ArtifactType =
+  | 'text'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'screenshot'
+  | 'file'
+
+/** 图片审阅结果 */
+export interface ImageReviewResult {
+  isValid: boolean
+  format: string
+  width: number
+  height: number
+  aspectRatio: number
+  exif: Record<string, any>
+  warnings: string[]
+  errors: string[]
+}
+
+/** 视频审阅结果 */
+export interface VideoReviewResult {
+  isValid: boolean
+  format: string
+  durationSeconds: number
+  width: number
+  height: number
+  fps: number
+  codec: string
+  warnings: string[]
+  errors: string[]
+}
+
+/** 媒体元数据 */
+export interface MediaMetadata {
+  type: 'image' | 'video'
+  imageResult?: ImageReviewResult
+  videoResult?: VideoReviewResult
+}
+
+/** 制品 */
+export interface Artifact {
+  id: string
+  type: ArtifactType
+  content: string
+  title?: string
+  metadata?: Record<string, any>
+  mediaMetadata?: MediaMetadata
+}
+
+/** Diff 行类型 */
 export type DiffLineType = 'unchanged' | 'added' | 'removed'
 
-/** 差异行 */
+/** Diff 行数据 */
 export interface DiffLine {
   type: DiffLineType
   content: string
   lineNumber: number
 }
 
-/** 批注类型 */
-export type AnnotationType = 'image_area' | 'video_timestamp' | 'text_selection'
-
-/** 图片区域定义 */
-export interface AnnotationArea {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-/** 审批批注 */
+/** 批注类型（用于图片区域标注和视频时间轴标注） */
 export interface Annotation {
   id: string
-  type: AnnotationType
-  area?: AnnotationArea
-  timestamp?: number
+  type: string
+  area?: { x: number; y: number; width: number; height: number }
   imageUrl?: string
+  timestamp?: number
   suggestion: string
   createdAt: string
 }

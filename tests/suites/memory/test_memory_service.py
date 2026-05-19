@@ -7,11 +7,10 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
-from memory.constants import Retrieval
 from memory.service import MemoryService
 from memory.types import (
     ChunkData,
@@ -378,7 +377,7 @@ class TestRetrieve:
         r = _make_retriever()
         r.retrieve = AsyncMock(return_value=[])
         svc = _make_service(retrievers={"tagwave": r})
-        results = await svc.retrieve(
+        await svc.retrieve(
             user_id="u1", inject_type="retrieval",
             retrieval_method="tagwave", query="测试",
         )
@@ -451,7 +450,7 @@ class TestSearch:
             SearchResult(id="1", content="c", score=0.9),
         ])
         svc = _make_service(retrievers={"vector": r})
-        result = await svc.search(user_id="u1", query="测试", memory_types=["episode"])
+        await svc.search(user_id="u1", query="测试", memory_types=["episode"])
         assert r.retrieve.call_count == 1
 
     @pytest.mark.asyncio

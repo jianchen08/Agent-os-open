@@ -118,23 +118,25 @@ class Scheduler:
         current_time = time.time()
 
         def fairness_key(t: TaskRequest) -> tuple:
-            # 1. 层级优先：L1 > L2 > L3（层级值越小越优先）
-            level_priority = t.agent_level.value
+            # 综合考虑：优先级、等待时间、负载均衡、执行时间
+            # 1. 优先级权重：使用非线性权重，提高高优先级任务的优先级
+            priority_weight = t.priority.value**1.5  # 非线性权重
 
-            # 2. 优先级权重：使用非线性权重，提高高优先级任务的优先级
-            priority_weight = t.priority.value ** 1.5
-
-            # 3. 等待时间：任务已经等待的时间，避免低优先级任务饥饿
+            # 2. 等待时间：任务已经等待的时间，避免低优先级任务饥饿
             wait_time = current_time - t.created_at
+            # 根据优先级调整等待时间的影响
             wait_time_factor = wait_time * (0.1 + (10 - t.priority.value) * 0.02)
 
-            # 4. 负载均衡：优先选择负载较低的层级
+            # 3. 负载均衡：优先选择负载较低的层级
             load_factor = level_loads[t.agent_level]
 
-            # 5. 执行时间：短任务优先，提高系统吞吐量
-            exec_time_factor = t.estimated_duration * (0.5 + (10 - t.priority.value) * 0.1)
+            # 4. 执行时间：短任务优先，提高系统吞吐量
+            # 根据优先级调整执行时间的影响
+            exec_time_factor = t.estimated_duration * (
+                0.5 + (10 - t.priority.value) * 0.1
+            )
 
-            return (level_priority, -priority_weight, -wait_time_factor, load_factor, exec_time_factor)
+            return (-priority_weight, -wait_time_factor, load_factor, exec_time_factor)
 
         tasks.sort(key=fairness_key)
         return tasks

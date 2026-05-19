@@ -61,7 +61,7 @@ export function DebugEvaluationMetricsPage() {
         <h1 className="ml-4 text-base font-semibold">评估指标</h1>
         <span className="text-muted-foreground ml-auto text-xs">共 {total} 个指标</span>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
         {/* 分类过滤 */}
         <div className="flex gap-2">
           <button

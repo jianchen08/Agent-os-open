@@ -5,7 +5,7 @@ from pipeline.plugin import IInputPlugin, ICorePlugin, IOutputPlugin, PluginCont
 from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
 from pipeline.chain import PluginChain
 from pipeline.engine import PipelineEngine
-from pipeline.registry import PluginRegistry, PipelineRegistry
+from pipeline.registry import PluginRegistry
 
 
 class MockInputPlugin(IInputPlugin):

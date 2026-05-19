@@ -53,6 +53,7 @@
 | `memory_context_service.py` | 记忆上下文服务（协调压缩和组装） | MemoryContextService |
 | `history_buffer.py` | 对话历史缓冲区 | MessageEntry, HistoryBuffer, ConversationHistory |
 | `variable_priority.py` | 变量优先级枚举 | VariablePriority |
+| `memory_metrics.py` | 记忆系统监控指标（检索延迟/命中率/存储容量） | MemoryMetrics |
 
 ### 子文件夹
 

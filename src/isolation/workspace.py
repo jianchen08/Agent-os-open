@@ -32,6 +32,37 @@ def get_workspace_config_root() -> str:
     return _DEFAULT_WORKSPACE_ROOT
 
 
+def get_isolation_level() -> str:
+    """从配置文件读取隔离级别，读取失败则返回默认值 container"""
+    try:
+        import yaml
+
+        if _config_path.exists():
+            with open(_config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            level = config.get("coordinator", {}).get("default_level")
+            if level:
+                return str(level)
+    except Exception as e:
+        logger.warning(f"读取隔离级别配置失败 | error={e}")
+    return "container"
+
+
+def resolve_container_workspace_path(workspace: str | None, task_id: str,
+                                     isolation_mode: str | None = None) -> str:
+    """纯路径计算：返回容器任务应使用的工作空间路径。
+
+    BUG-FIX-fix_20260519_container_workspace_path:
+    规则：
+    - 有 workspace + host 模式 → 返回 workspace（原空间）
+    - 其余所有情况 → 返回 ws_root/container_{task_id}（配置空间）
+    """
+    if workspace and (isolation_mode or get_isolation_level()) == "host":
+        return workspace
+    ws_root = get_workspace_config_root()
+    return f"{ws_root}/container_{task_id}"
+
+
 def _is_absolute_path(path_str: str) -> bool:
     """判断路径是否为绝对路径（兼容 Windows 和 Unix 风格）"""
     p = Path(path_str)

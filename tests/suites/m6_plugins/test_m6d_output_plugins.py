@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from pipeline.plugin import PluginContext
-from pipeline.types import ErrorPolicy, RouteSignal, StateKeys, create_initial_state
+from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.output.duplicate_check import DuplicateCheckPlugin
 from plugins.output.error_check import ErrorCheckPlugin
 from plugins.output.stop_check import StopCheckPlugin

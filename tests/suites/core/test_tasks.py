@@ -182,7 +182,6 @@ class TestStateMachine:
     def test_updated_at_changes(self) -> None:
         """转换后 updated_at 应被更新（由调用方负责）。"""
         task = TaskModel(status=TaskStatus.PENDING)
-        old_updated = task.updated_at
         # SimpleStateMachine 精简版只更新 status，不更新 updated_at
         # updated_at 由 TaskService._transition_with_callback 或 TaskStorage.update 管理
         self.sm.transition(task, TaskStatus.RUNNING)
@@ -366,7 +365,7 @@ class TestTaskService:
         child1 = self.service.create_task(
             title="Child 1", parent_task_id=parent.id
         )
-        child2 = self.service.create_task(
+        self.service.create_task(
             title="Child 2", parent_task_id=parent.id
         )
 

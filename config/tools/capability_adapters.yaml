@@ -86,11 +86,16 @@ adapters:
     default_backend: playwright_screenshot
     backends:
       # --- Playwright（全维度审查：快照 + JS注入 + 控制台）---
+      # BUG-FIX-fix_20260516_browser_state_not_persist:
+      # 问题根因: 使用 --isolated 标志导致浏览器状态仅保存在内存，每次启动都是全新会话
+      # 修复方案: 移除 --isolated，使用默认的 Persistent 模式，状态保存在磁盘
+      # 影响范围: design_review 适配器的所有浏览器操作
+      # 修复日期: 2026-05-16
       - name: playwright_screenshot
         priority: 1
         server:
           command: "npx.cmd"
-          args: ["-y", "@playwright/mcp@latest", "--caps=vision", "--isolated"]
+          args: ["-y", "@playwright/mcp@latest", "--caps=vision"]
         tool_mapping:
           navigate: "browser_navigate"
           snapshot: "browser_snapshot"

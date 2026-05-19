@@ -136,7 +136,7 @@ async def test_full_task_loop():
     event_bus.subscribe("task_state_changed", on_test_event)
 
     # 创建另一个任务来触发事件
-    test_task = task_service.create_task(title="事件测试任务")
+    task_service.create_task(title="事件测试任务")
     await asyncio.sleep(1)
 
     if event_received:

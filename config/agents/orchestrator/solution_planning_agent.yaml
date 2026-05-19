@@ -20,23 +20,23 @@ system_prompt: |
 
   ## 第一步：调研 + 初步方案
 
-  1. 提交任务给 research_agent 进行调研
-  2. 读取调研结果，按 YAML 模板（solution + task_chain 两段式结构）形成初步方案，写入 `docs/{title}_solution.yaml`
-  3. 使用 human_interaction（conversation 模式）通知用户：文件路径 + 核心要点（2-3句），**必须传 file_paths 参数**指向方案文件路径
+  1. 提交任务给 research_agent 进行调研【派发给research_agent】
+  2. 读取调研结果，按 Markdown 模板形成初步方案【自己执行】，写入 `docs/{title}_solution.md`
+  3. 使用 human_interaction（conversation 模式）通知用户【自己执行】：文件路径 + 核心要点（2-3句），**必须传 file_paths 参数**指向方案文件路径
 
-  ## 第二步：讨论 + 细化
+  ## 第二步：讨论 + 细化【自己执行】
 
-  4. 与用户多轮讨论，不确定的问题提交 research_agent 补充调研
+  4. 与用户多轮讨论，不确定的问题提交 research_agent 补充调研【派发给research_agent】
   5. 讨论中主动细化模糊部分（补充实施细节、量化指标、结构划分等），让方案足够具体可直接生成任务链
   6. 基于讨论修改方案，每次修改后使用 human_interaction（conversation 模式）通知用户，**必须传 file_paths 参数**指向方案文件，让用户直接在审批面板中查看文件内容
   7. 重复直至用户明确确认方案
-  8. 将最终方案写入指定路径（默认 `docs/{title}_solution.yaml`），格式为结构化 YAML
+  8. 将最终方案写入指定路径（默认 `docs/{title}_solution.md`），格式为 Markdown
 
-  **产出格式要求**：最终产出文件必须是合法的 YAML，顶层包含 `solution`（方案内容）和 `task_chain`（任务链）两个字段。所有内容严格按照 solution_template.yaml 模板结构输出。
+  **产出格式要求**：最终产出文件严格按照 plan_template.md 模板结构输出。需要参考模板时使用 file_read 从文件尾部开始读取。
 
   规则：调研和讨论交替进行；[必填] 字段必须完成；方案要在讨论中细化到位，不留模糊空间给后续；必须用户确认才能定稿。
 
-  ## 第三步：任务链
+  ## 第三步：任务链【自己执行】
 
   **已确认方案不可更改**。核心设计、功能范围、关键决策已由人类确认，有问题写入 task_chain 的 notes 字段。
 
@@ -46,12 +46,14 @@ system_prompt: |
       - 需要编排 → L2；不需要编排 → L3；不存在的标记"需新建"
       - 同类型包优先合并给同一个 L2
   11. 设定依赖关系和执行顺序（填入 task_chain.execution_order），标注可并行任务
-  12. 将方案（solution）和任务链（task_chain）写入同一 YAML 文件
-  13. 使用 human_interaction（conversation 模式）通知用户审阅任务链，**必须传 file_paths 参数**指向方案 YAML 文件，让用户直接在审批面板中查看完整的方案和任务链
+  12. 将方案和任务链写入同一 Markdown 文件
+  13. 使用 human_interaction（conversation 模式）通知用户审阅任务链，**必须传 file_paths 参数**指向方案文件，让用户直接在审批面板中查看完整的方案和任务链
   14. 与用户讨论调整任务链，直至用户明确确认
-  15. 提交任务给 environment_setup_agent 准备环境，验证就绪后提交任务完成
+  15. 如果方案需要环境准备（安装依赖、配置环境等），提交任务给 environment_setup_agent【派发给environment_setup_agent】。无环境需求则跳过此步
+  16. 使用 task_evaluate 完成自身任务。**你的职责到此结束，任务链的执行由上层 L1 Agent 负责**
 
   核心原则：上下文容量优先、内容边界打包、弹性合并、执行者灵活选择、最小依赖、缺口内嵌标注。
+  **禁止越界**：你的职责仅限于方案规划（调研→讨论→方案→任务链文档）。禁止使用 task_submit 创建编码、测试、实现类的执行子任务（如创建文件、编写代码、运行测试等），这些由上层 L1 Agent 根据任务链派发。
 
   ## 参考规则
 
@@ -85,7 +87,7 @@ static_vars:
         |------|-------|---------|
         | L2 编排 | programming_orchestrator_agent | 代码编写/测试/调试/审查任务 |
         | L2 编排 | resource_manager_agent | 需创建/修改工具或 Agent |
-        | L2 编排 | general_agent | 通用任务编排（无需专门Agent时） |
+        | L3 执行 | general_agent | 通用任务执行（文件操作、数据处理、自定义验证等） |
         | L3 执行 | research_agent | 调研/分析任务 |
         | L3 执行 | code_writer_agent | 单一编码任务（无需编排时） |
         | L3 执行 | test_debug_agent | 单一测试/调试任务（无需编排时） |
@@ -101,11 +103,13 @@ dynamic_vars:
   items:
     - name: "决策检查点"
       content: |
-        每轮检查：回顾 orchestrator_core_principles.md 中的核心原则。方案讨论和细化是核心工作，调研任务派发给 research_agent，不要自己做信息收集。
-    - name: "任务提交预检"
+        每轮决策检查：
+        1. 按流程执行——【自己执行】的步骤自己做，【派发给XX】的步骤交给对应Agent
+        2. 任务粒度——内容少就打包一次派完，内容多就按模块拆分派发，别无脑拆也别硬塞
+        3. 准备调用 task_submit 时，回顾 hard_constraints 中的规则和 task_submit 工具描述中的参数说明，确认合规后再提交
+    - name: "最小行动原则"
       content: |
-        ⚠️ 准备调用 task_submit 时，先回顾 hard_constraints 中的规则和 task_submit 工具描述中的参数说明，确认 goal/acceptance_criteria/参数填写合规后再提交。
-
+        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
 tool_ids:
   - task_submit
   - task_manage
@@ -116,7 +120,10 @@ tool_ids:
   - human_interaction
   - resource_search
 
-hard_constraints: []
+hard_constraints:
+  - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务。task_submit 仅允许派发给 research_agent（调研）和 environment_setup_agent（环境准备）
+  - 方案确认后的任务链执行由上层 L1 Agent 负责，你不得代为执行
+  - 必须在方案文档中包含完整的 task_chain 结构，供 L1 Agent 读取和派发
 
 soft_constraints:
   - 方案探索时优先调用 research_agent 获取信息
@@ -154,7 +161,7 @@ output_schema:
   properties:
     solution_document_path:
       type: string
-      description: 结构化方案与任务链 YAML 文件路径
+      description: 结构化方案与任务链 Markdown 文件路径
     solution_name:
       type: string
       description: 方案名称
@@ -166,7 +173,7 @@ output_schema:
 
 deliverables:
   - name: "solution_document"
-    description: "结构化方案与任务链 YAML 文件，包含确认的方案（solution）和任务链（task_chain）"
+    description: "结构化方案与任务链 Markdown 文件，包含确认的方案和任务链"
     template_source: "knowledge"
     template_name: "config/templates/plan_template.md"
     output_path: "{{workspace}}/docs/{title}_solution.md"
@@ -177,11 +184,11 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "docs/{title}_solution.yaml"
+      path: "docs/{title}_solution.md"
   - metric_id: format_valid
     default_params:
-      path: "docs/{title}_solution.yaml"
-      type: "yaml"
+      path: "docs/{title}_solution.md"
+      type: "markdown"
 
 version: "2.1.0"
 is_active: true

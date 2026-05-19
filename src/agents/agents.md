@@ -183,17 +183,6 @@ ToolCoordinator → 工具执行
 
 ### 文件清单（代码文件 - 具体接口）
 
-#### loop.py
-职责：Agent 主循环实现
-暴露接口：
-- `AgentLoop`：Agent 主循环类
-  - `__init__(context: AgentContext | None, config: AgentConfig | None, ...)`
-  - `async run(user_input: str) -> AgentResult`
-  - `async stream(user_input: str, stream_mode: str, ...) -> AsyncIterator`
-  - `async resume_from_interrupt(response: dict) -> AgentResult`
-  - `stop() -> None`
-  - `async cleanup() -> None`
-
 #### state.py
 职责：Agent 状态定义和管理
 暴露接口：
@@ -229,15 +218,6 @@ ToolCoordinator → 工具执行
 职责：Agent 上下文管理
 暴露接口：
 - `AgentContext`：上下文类，封装所有依赖
-
-#### interfaces.py
-职责：抽象接口定义
-暴露接口：
-- `IRetriever`：记忆检索器接口
-- `IEmbeddingService`：嵌入服务接口
-- `IUsageMonitor`：用量监控接口
-- `ITaskProgressManager`：任务进度管理器接口
-- `ICheckpointer`：检查点管理器接口
 
 #### registry.py
 职责：Agent 注册表
