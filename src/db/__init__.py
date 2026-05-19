@@ -1,7 +1,10 @@
 """
 数据库模块
 
-提供数据库连接、模型定义和仓储接口
+提供数据库连接、模型定义和仓储接口（非 ORM 存根）。
+
+所有 SQLAlchemy ORM 依赖已移除，使用纯 Python 存根替代，
+保持接口兼容，系统在无数据库环境下可降级运行。
 """
 
 from src.db.connection import (
@@ -42,7 +45,7 @@ __all__ = [
     "Session",
     "ExecutionRecord",
     "AgentConfig",
-    "Agent",  # 兼容别名
+    "Agent",
     "Workflow",
     "ToolLibrary",
     "EpisodesMemory",

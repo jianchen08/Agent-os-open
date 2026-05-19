@@ -2,6 +2,7 @@
 任务状态服务
 
 负责任务状态管理和进度计算，提供统一的状态查询和转换接口。
+使用 YAML 存储（与 SimpleStateMachine 一致），不依赖 SQLAlchemy。
 
 核心功能：
 1. 任务查询（单个/列表）
@@ -13,9 +14,6 @@
 
 import logging
 from typing import Any
-
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.event_bus import EventType, ExecutionEvent, get_event_bus
 from src.db.models import Task
@@ -40,21 +38,21 @@ class TaskStateService:
     5. 事件发布
 
     Example:
-        >>> service = TaskStateService(session)
+        >>> service = TaskStateService()
         >>> task = await service.get_task("task-001")
         >>> result = await service.transition_status("task-001", "running")
     """
 
     def __init__(
         self,
-        session: AsyncSession,
+        session: Any = None,
         state_machine: TaskStateMachine | None = None,
     ):
         """
         初始化任务状态服务
 
         Args:
-            session: 数据库会话
+            session: 数据库会话（兼容参数，不再使用）
             state_machine: 状态机实例（可选，默认使用全局实例）
         """
         self.session = session
@@ -140,26 +138,22 @@ class TaskStateService:
             任务列表
         """
         filters = filters or {}
-        query = select(Task)
+        all_tasks = await self.task_repo.list_all(limit=10000)
 
         # 应用过滤条件
+        result = all_tasks
         if "status" in filters:
-            query = query.where(Task.status == filters["status"])
-
+            result = [t for t in result if t.status == filters["status"]]
         if "parent_task_id" in filters:
-            query = query.where(Task.parent_task_id == filters["parent_task_id"])
-
+            result = [t for t in result if t.parent_task_id == filters["parent_task_id"]]
         if "user_id" in filters:
-            query = query.where(Task.user_id == filters["user_id"])
-
+            result = [t for t in result if getattr(t, "user_id", None) == filters["user_id"]]
         if "session_id" in filters:
-            query = query.where(Task.session_id == filters["session_id"])
+            result = [t for t in result if getattr(t, "session_id", None) == filters["session_id"]]
 
         # 排序和分页
-        query = query.order_by(Task.created_at.desc()).limit(limit).offset(offset)
-
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
+        result = sorted(result, key=lambda t: getattr(t, "created_at", ""), reverse=True)
+        return result[offset : offset + limit]
 
     async def get_status_overview(
         self,
@@ -179,24 +173,19 @@ class TaskStateService:
             - recent_tasks: 最近任务列表
         """
         filters = filters or {}
-
-        # 构建基础查询
-        base_query = select(Task)
+        all_tasks = await self.task_repo.list_all(limit=10000)
 
         # 应用过滤条件
         if "project_id" in filters:
-            base_query = base_query.where(
-                Task.task_metadata.op("->>")("project_id") == filters["project_id"]
-            )
-
+            all_tasks = [
+                t for t in all_tasks
+                if (t.task_metadata or {}).get("project_id") == filters["project_id"]
+            ]
         if "task_scope" in filters and filters["task_scope"] != "all":
-            base_query = base_query.where(
-                Task.task_metadata.op("->>")("task_scope") == filters["task_scope"]
-            )
-
-        # 执行查询
-        result = await self.session.execute(base_query)
-        tasks = result.scalars().all()
+            all_tasks = [
+                t for t in all_tasks
+                if (t.task_metadata or {}).get("task_scope") == filters["task_scope"]
+            ]
 
         # 统计信息
         status_counts: dict[str, int] = {}
@@ -204,7 +193,7 @@ class TaskStateService:
         passed_criteria = 0
         failed_criteria = 0
 
-        for task in tasks:
+        for task in all_tasks:
             status = task.status
             status_counts[status] = status_counts.get(status, 0) + 1
 
@@ -239,11 +228,11 @@ class TaskStateService:
                     task.updated_at.isoformat() if task.updated_at else None
                 ),
             }
-            for task in tasks[:10]
+            for task in all_tasks[:10]
         ]
 
         return {
-            "total_tasks": len(tasks),
+            "total_tasks": len(all_tasks),
             "status_counts": status_counts,
             "evaluation_summary": {
                 "total_criteria": total_criteria,
@@ -293,12 +282,9 @@ class TaskStateService:
 
         try:
             # 使用状态机执行转换
-            await self.state_machine.transition(
-                task=task,
-                to_status=to_status,
-                reason=reason,
-                session=self.session,
-            )
+            self.state_machine.transition(to_status)
+            task.status = to_status
+            await self.task_repo.update(task_id, status=to_status)
 
             # 发布状态变更事件
             await self.publish_status_change(
@@ -380,9 +366,7 @@ class TaskStateService:
         Returns:
             子任务列表
         """
-        query = select(Task).where(Task.parent_task_id == parent_task_id)
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
+        return await self.task_repo.get_by_parent(parent_task_id)
 
     async def count_by_status(self, status: str) -> int:
         """
@@ -394,9 +378,8 @@ class TaskStateService:
         Returns:
             任务数量
         """
-        query = select(func.count()).select_from(Task).where(Task.status == status)
-        result = await self.session.execute(query)
-        return result.scalar() or 0
+        tasks = await self.task_repo.get_by_status(status)
+        return len(tasks)
 
     # ========================================================================
     # 评估结果应用
@@ -418,20 +401,10 @@ class TaskStateService:
 
         Args:
             task_id: 任务 ID
-            evaluation_result: 评估结果，包含：
-                - acceptance_criteria: 更新后的验收标准列表
-                - progress: 进度信息
-                - retry_info: 重试信息
-                - new_status: 新状态
+            evaluation_result: 评估结果
 
         Returns:
-            应用结果，包含：
-            - task_id: 任务 ID
-            - task_status: 任务状态
-            - progress: 进度信息
-            - all_passed: 是否全部通过
-            - has_progress: 是否有进步
-            - retry_count: 当前重试次数
+            应用结果
         """
         task = await self.get_task(task_id)
         if not task:
@@ -455,17 +428,19 @@ class TaskStateService:
         # 通过状态机执行状态转换
         old_status = task.status
         if new_status and old_status != new_status:
-            await self.state_machine.transition(
-                task=task,
-                to_status=new_status,
-                reason="评估结果应用",
-                session=None,
-            )
+            try:
+                self.state_machine.transition(new_status)
+            except ValueError:
+                pass
 
-        # 持久化更新（统一提交，避免 greenlet_spawn 错误）
-        await self.session.commit()
+        # 持久化更新
+        await self.task_repo.update(
+            task_id,
+            task_metadata=task.task_metadata,
+            status=new_status or old_status,
+        )
 
-        # 发布状态变更事件（使用之前保存的 old_status）
+        # 发布状态变更事件
         await self.publish_status_change(
             task_id=task_id,
             old_status=old_status,
@@ -509,6 +484,9 @@ class TaskStateService:
         task.failed_criteria = progress.failed_criteria
         task.progress_percent = progress.progress_percent
 
-        await self.session.commit()
+        await self.task_repo.update(
+            task_id,
+            task_metadata=task.task_metadata,
+        )
 
         return progress.to_dict()

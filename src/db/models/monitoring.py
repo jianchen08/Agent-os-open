@@ -1,136 +1,81 @@
 """
-监控和用量统计模型
-"""
+监控和用量统计模型（非 ORM 存根）
 
+纯 Python 实现，替代 SQLAlchemy ORM 模型，保持字段兼容。
+"""
 import uuid
 from datetime import datetime
 from typing import Any
-
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    func,
-)
-from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.models.base import Base
 
 
 class MonitoringAlert(Base):
-    """监控告警表"""
+    """监控告警"""
 
-    __tablename__ = "monitoring_alerts"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str | None] = mapped_column(
-        String(36),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-    )
-    alert_type: Mapped[str] = mapped_column(
-        String(50), nullable=False, index=True
-    )  # usage, performance, error
-    level: Mapped[str] = mapped_column(
-        String(20), nullable=False, index=True
-    )  # info, warning, error, critical
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    usage_percent: Mapped[float | None] = mapped_column(Float)
-    threshold: Mapped[float | None] = mapped_column(Float)
-    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    acknowledged_by: Mapped[str | None] = mapped_column(String(36))
-    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    alert_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), onupdate=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id")
+        self.alert_type = kwargs.get("alert_type", "")
+        self.level = kwargs.get("level", "")
+        self.title = kwargs.get("title", "")
+        self.message = kwargs.get("message", "")
+        self.usage_percent = kwargs.get("usage_percent")
+        self.threshold = kwargs.get("threshold")
+        self.acknowledged = kwargs.get("acknowledged", False)
+        self.acknowledged_at = kwargs.get("acknowledged_at")
+        self.acknowledged_by = kwargs.get("acknowledged_by")
+        self.resolved = kwargs.get("resolved", False)
+        self.resolved_at = kwargs.get("resolved_at")
+        self.alert_metadata = kwargs.get("alert_metadata")
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.updated_at = kwargs.get("updated_at")
 
 
 class TaskQueueStats(Base):
-    """任务队列统计表"""
+    """任务队列统计"""
 
-    __tablename__ = "task_queue_stats"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
-    total_tasks: Mapped[int] = mapped_column(Integer, default=0)
-    pending_tasks: Mapped[int] = mapped_column(Integer, default=0)
-    running_tasks: Mapped[int] = mapped_column(Integer, default=0)
-    completed_tasks: Mapped[int] = mapped_column(Integer, default=0)
-    failed_tasks: Mapped[int] = mapped_column(Integer, default=0)
-    avg_wait_time: Mapped[float | None] = mapped_column(Float)  # 平均等待时间（秒）
-    avg_execution_time: Mapped[float | None] = mapped_column(
-        Float
-    )  # 平均执行时间（秒）
-    queue_depth: Mapped[int] = mapped_column(Integer, default=0)  # 队列深度
-    active_workers: Mapped[int] = mapped_column(Integer, default=0)  # 活跃工作者数量
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.timestamp = kwargs.get("timestamp", datetime.now())
+        self.total_tasks = kwargs.get("total_tasks", 0)
+        self.pending_tasks = kwargs.get("pending_tasks", 0)
+        self.running_tasks = kwargs.get("running_tasks", 0)
+        self.completed_tasks = kwargs.get("completed_tasks", 0)
+        self.failed_tasks = kwargs.get("failed_tasks", 0)
+        self.avg_wait_time = kwargs.get("avg_wait_time")
+        self.avg_execution_time = kwargs.get("avg_execution_time")
+        self.queue_depth = kwargs.get("queue_depth", 0)
+        self.active_workers = kwargs.get("active_workers", 0)
 
 
 class UsageRecord(Base):
-    """用量记录表"""
+    """用量记录"""
 
-    __tablename__ = "usage_records"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id"), index=True
-    )
-    session_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("sessions.id", ondelete="SET NULL"), index=True
-    )
-    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    model: Mapped[str] = mapped_column(String(100), nullable=False)
-    request_id: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id")
+        self.session_id = kwargs.get("session_id")
+        self.prompt_tokens = kwargs.get("prompt_tokens", 0)
+        self.completion_tokens = kwargs.get("completion_tokens", 0)
+        self.total_tokens = kwargs.get("total_tokens", 0)
+        self.model = kwargs.get("model", "")
+        self.request_id = kwargs.get("request_id")
+        self.created_at = kwargs.get("created_at", datetime.now())
 
 
 class UsageStatistics(Base):
-    """用量统计表"""
+    """用量统计"""
 
-    __tablename__ = "usage_statistics"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id"), index=True
-    )
-    period_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    period_start: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    total_requests: Mapped[int] = mapped_column(Integer, default=0)
-    model_stats: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    quota_limit: Mapped[int | None] = mapped_column(Integer)
-    quota_used_percent: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), onupdate=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id")
+        self.period_type = kwargs.get("period_type", "")
+        self.period_start = kwargs.get("period_start")
+        self.total_tokens = kwargs.get("total_tokens", 0)
+        self.total_requests = kwargs.get("total_requests", 0)
+        self.model_stats = kwargs.get("model_stats")
+        self.quota_limit = kwargs.get("quota_limit")
+        self.quota_used_percent = kwargs.get("quota_used_percent", 0.0)
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.updated_at = kwargs.get("updated_at")

@@ -4,6 +4,9 @@
 自动将 YAML 配置文件加载到数据库中。
 支持 Agent、Workflow 配置的同步。
 支持环境变量替换和 .env 文件加载。
+
+注意：使用仓储模式替代 SQLAlchemy 直接查询，
+模型类使用别名避免与 src.agents.types.AgentConfig 命名冲突。
 """
 
 import ast
@@ -14,11 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import ConfigNotFoundError, ConfigurationException, EnvVarNotFoundError
-from src.db.models import AgentConfig, ToolLibrary, Workflow
+from src.db.models.agent import AgentConfig as AgentConfigModel
+from src.db.models.tool import ToolLibrary
+from src.db.models.workflow import Workflow
+from src.db.repositories.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +189,7 @@ class ConfigLoader:
 
     async def load_agents(
         self,
-        session: AsyncSession,
+        session: Any = None,
         agents_dir: str = "agents",
         include_builtin: bool = True,
     ) -> list[str]:
@@ -193,7 +197,7 @@ class ConfigLoader:
         加载 Agent 配置到数据库
 
         Args:
-            session: 数据库会话
+            session: 数据库会话（降级模式下可为 None）
             agents_dir: Agent 配置目录（相对于 config_dir）
             include_builtin: 是否包含 config/agents/ 目录及其子目录
 
@@ -201,6 +205,7 @@ class ConfigLoader:
             加载的 Agent config_id 列表
         """
         loaded = []
+        repo: BaseRepository[AgentConfigModel] = BaseRepository(session, AgentConfigModel)
 
         # 收集所有配置目录
         config_paths = []
@@ -229,19 +234,16 @@ class ConfigLoader:
 
                     config_id = config["config_id"]
 
-                    # 检查是否已存在
-                    existing = await session.execute(
-                        select(AgentConfig).where(AgentConfig.config_id == config_id).limit(1)
-                    )
-                    agent = existing.scalar_one_or_none()
+                    # 使用仓储查询是否已存在
+                    agent = await repo.get_by(config_id=config_id)
 
                     if agent:
                         # 更新现有配置
-                        self._update_agent(agent, config)
+                        self._update_agent_model(agent, config)
                     else:
                         # 创建新配置
-                        agent = self._create_agent(config)
-                        session.add(agent)
+                        agent = self._create_agent_model(config)
+                        await repo.create(**agent.__dict__)
 
                     loaded.append(config_id)
 
@@ -254,23 +256,23 @@ class ConfigLoader:
                     logger.debug(f"加载 Agent 配置失败 {yaml_file}: {e}")
                     continue
 
-        await session.commit()
         return loaded
 
     async def load_workflows(
-        self, session: AsyncSession, workflows_dir: str = "workflows"
+        self, session: Any = None, workflows_dir: str = "workflows"
     ) -> list[str]:
         """
         加载工作流配置到数据库
 
         Args:
-            session: 数据库会话
+            session: 数据库会话（降级模式下可为 None）
             workflows_dir: 工作流配置目录
 
         Returns:
             加载的工作流 ID 列表
         """
         loaded = []
+        repo: BaseRepository[Workflow] = BaseRepository(session, Workflow)
         workflows_path = self._config_dir / workflows_dir
 
         if not workflows_path.exists():
@@ -284,11 +286,8 @@ class ConfigLoader:
 
                 workflow_id = config["id"]
 
-                # 检查是否已存在
-                existing = await session.execute(
-                    select(Workflow).where(Workflow.name == workflow_id)
-                )
-                workflow = existing.scalar_one_or_none()
+                # 使用仓储查询
+                workflow = await repo.get_by(name=workflow_id)
 
                 if workflow:
                     # 更新现有配置
@@ -296,7 +295,7 @@ class ConfigLoader:
                 else:
                     # 创建新配置
                     workflow = self._create_workflow(config)
-                    session.add(workflow)
+                    await repo.create(**workflow.__dict__)
 
                 loaded.append(workflow_id)
 
@@ -304,11 +303,10 @@ class ConfigLoader:
                 logger.debug(f"加载工作流配置失败 {yaml_file}: {e}")
                 continue
 
-        await session.commit()
         return loaded
 
     async def load_tools(
-        self, session: AsyncSession, tools_dir: str = "src/tools/builtin"
+        self, session: Any = None, tools_dir: str = "src/tools/builtin"
     ) -> list[str]:
         """
         加载工具到数据库
@@ -316,13 +314,14 @@ class ConfigLoader:
         扫描 Python 文件，提取带 @tool 装饰器的函数信息
 
         Args:
-            session: 数据库会话
+            session: 数据库会话（降级模式下可为 None）
             tools_dir: 工具目录
 
         Returns:
             加载的工具名称列表
         """
         loaded = []
+        repo: BaseRepository[ToolLibrary] = BaseRepository(session, ToolLibrary)
         tools_path = Path(tools_dir)
 
         if not tools_path.exists():
@@ -342,11 +341,8 @@ class ConfigLoader:
 
                 tool_name = tool_info["name"]
 
-                # 检查是否已存在
-                existing = await session.execute(
-                    select(ToolLibrary).where(ToolLibrary.name == tool_name).limit(1)
-                )
-                tool = existing.scalar_one_or_none()
+                # 使用仓储查询
+                tool = await repo.get_by(name=tool_name)
 
                 if tool:
                     # 更新现有工具
@@ -355,7 +351,7 @@ class ConfigLoader:
                     tool.schema = tool_info.get("schema")
                 else:
                     # 创建新工具
-                    tool = ToolLibrary(
+                    await repo.create(
                         name=tool_name,
                         description=tool_info.get("description"),
                         source_code=source_code,
@@ -363,7 +359,6 @@ class ConfigLoader:
                         status="active",
                         version="1.0.0",
                     )
-                    session.add(tool)
 
                 loaded.append(tool_name)
 
@@ -371,7 +366,6 @@ class ConfigLoader:
                 logger.debug(f"加载工具失败 {py_file}: {e}")
                 continue
 
-        await session.commit()
         return loaded
 
     def _extract_tool_info(
@@ -471,12 +465,12 @@ class ConfigLoader:
             "required": required,
         }
 
-    async def sync_all(self, session: AsyncSession) -> dict[str, list[str]]:
+    async def sync_all(self, session: Any = None) -> dict[str, list[str]]:
         """
         同步所有配置到数据库
 
         Args:
-            session: 数据库会话
+            session: 数据库会话（降级模式下可为 None）
 
         Returns:
             同步结果 {"agents": [...], "workflows": [...], "tools": [...]}
@@ -507,9 +501,9 @@ class ConfigLoader:
         except Exception:
             return None
 
-    def _create_agent(self, config: dict[str, Any]) -> AgentConfig:
-        """从配置创建 AgentConfig"""
-        return AgentConfig(
+    def _create_agent_model(self, config: dict[str, Any]) -> AgentConfigModel:
+        """从配置创建 AgentConfigModel"""
+        return AgentConfigModel(
             config_id=config["config_id"],
             name=config.get("name", config["config_id"]),
             description=config.get("description"),
@@ -520,7 +514,6 @@ class ConfigLoader:
             tool_ids=config.get("tool_ids", []),
             hard_constraints=config.get("hard_constraints", []),
             soft_constraints=config.get("soft_constraints", []),
-            # 四层提示词结构配置
             static_vars=config.get("static_vars", {}),
             dynamic_vars=config.get("dynamic_vars", {}),
             context_variables=config.get("context_variables", {}),
@@ -530,95 +523,99 @@ class ConfigLoader:
             is_active=config.get("is_active", True),
             max_iterations=config.get("max_iterations", 10),
             timeout_seconds=config.get("timeout_seconds", 300),
+            tags=config.get("tags", []),
+            agent_metadata=config.get("metadata", {}),
+            status=config.get("status", "active"),
         )
 
-    def _update_agent(self, agent: AgentConfig, config: dict[str, Any]) -> None:
-        """更新 AgentConfig"""
-        agent.name = config.get("name", agent.name)
-        agent.description = config.get("description", agent.description)
-        agent.agent_type = config.get("agent_type", agent.agent_type)
-        agent.model_name = config.get("model_name", agent.model_name)
-        agent.model_params = config.get("model_params", agent.model_params)
-        agent.system_prompt = config.get("system_prompt", agent.system_prompt)
-        agent.tool_ids = config.get("tool_ids", agent.tool_ids)
-        agent.hard_constraints = config.get("hard_constraints", agent.hard_constraints)
-        agent.soft_constraints = config.get("soft_constraints", agent.soft_constraints)
-        # 四层提示词结构配置
-        agent.static_vars = config.get("static_vars", agent.static_vars)
-        agent.dynamic_vars = config.get("dynamic_vars", agent.dynamic_vars)
-        agent.context_variables = config.get(
-            "context_variables", agent.context_variables
-        )
-        agent.input_schema = config.get("input_schema", agent.input_schema)
-        agent.output_schema = config.get("output_schema", agent.output_schema)
-        agent.version = config.get("version", agent.version)
-        agent.is_active = config.get("is_active", agent.is_active)
-        agent.max_iterations = config.get("max_iterations", agent.max_iterations)
-        agent.timeout_seconds = config.get("timeout_seconds", agent.timeout_seconds)
+    def _update_agent_model(
+        self, agent: AgentConfigModel, config: dict[str, Any]
+    ) -> None:
+        """更新 AgentConfigModel"""
+        if "name" in config:
+            agent.name = config["name"]
+        if "description" in config:
+            agent.description = config["description"]
+        if "agent_type" in config:
+            agent.agent_type = config["agent_type"]
+        if "model_name" in config:
+            agent.model_name = config["model_name"]
+        if "model_params" in config:
+            agent.model_params = config["model_params"]
+        if "system_prompt" in config:
+            agent.system_prompt = config["system_prompt"]
+        if "tool_ids" in config:
+            agent.tool_ids = config["tool_ids"]
+        if "hard_constraints" in config:
+            agent.hard_constraints = config["hard_constraints"]
+        if "soft_constraints" in config:
+            agent.soft_constraints = config["soft_constraints"]
+        if "static_vars" in config:
+            agent.static_vars = config["static_vars"]
+        if "dynamic_vars" in config:
+            agent.dynamic_vars = config["dynamic_vars"]
+        if "context_variables" in config:
+            agent.context_variables = config["context_variables"]
+        if "input_schema" in config:
+            agent.input_schema = config["input_schema"]
+        if "output_schema" in config:
+            agent.output_schema = config["output_schema"]
+        if "version" in config:
+            agent.version = config["version"]
+        if "is_active" in config:
+            agent.is_active = config["is_active"]
+        if "max_iterations" in config:
+            agent.max_iterations = config["max_iterations"]
+        if "timeout_seconds" in config:
+            agent.timeout_seconds = config["timeout_seconds"]
+        if "tags" in config:
+            agent.tags = config["tags"]
+        if "metadata" in config:
+            agent.agent_metadata = config["metadata"]
 
     def _create_workflow(self, config: dict[str, Any]) -> Workflow:
         """从配置创建 Workflow"""
-        metadata = config.get("metadata", {})
         return Workflow(
             name=config["id"],
-            description=metadata.get("description", config.get("description")),
-            type=metadata.get("category", "user_defined"),
-            source=metadata.get("source", "native"),
-            definition=config,
-            inputs_schema=self._build_schema(config.get("inputs", [])),
-            outputs_schema=self._build_schema(config.get("outputs", [])),
+            description=config.get("description"),
+            type=config.get("type", "user_defined"),
+            definition=config.get("definition", {}),
+            inputs_schema=config.get("inputs_schema"),
+            outputs_schema=config.get("outputs_schema"),
+            tags=config.get("tags", []),
             status=config.get("status", "active"),
         )
 
     def _update_workflow(self, workflow: Workflow, config: dict[str, Any]) -> None:
         """更新 Workflow"""
-        metadata = config.get("metadata", {})
-        workflow.description = metadata.get("description", config.get("description"))
-        workflow.type = metadata.get("category", workflow.type)
-        workflow.definition = config
-        workflow.inputs_schema = self._build_schema(config.get("inputs", []))
-        workflow.outputs_schema = self._build_schema(config.get("outputs", []))
-        workflow.status = config.get("status", workflow.status)
-
-    def _build_schema(self, items: list[dict]) -> dict[str, Any]:
-        """构建 JSON Schema"""
-        if not items:
-            return {}
-
-        properties = {}
-        required = []
-
-        for item in items:
-            if isinstance(item, dict):
-                name = item.get("name")
-                if name:
-                    properties[name] = {
-                        "type": item.get("type", "string"),
-                        "description": item.get("description", ""),
-                    }
-                    if item.get("required", False):
-                        required.append(name)
-
-        return {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        }
+        if "description" in config:
+            workflow.description = config["description"]
+        if "type" in config:
+            workflow.type = config["type"]
+        if "definition" in config:
+            workflow.definition = config["definition"]
+        if "inputs_schema" in config:
+            workflow.inputs_schema = config["inputs_schema"]
+        if "outputs_schema" in config:
+            workflow.outputs_schema = config["outputs_schema"]
+        if "tags" in config:
+            workflow.tags = config["tags"]
+        if "status" in config:
+            workflow.status = config["status"]
 
 
-# 便捷函数
-async def sync_configs(
-    session: AsyncSession, config_dir: str = "config"
+async def load_config_to_db(
+    session: Any = None, config_dir: str = "config"
 ) -> dict[str, list[str]]:
     """
-    同步配置文件到数据库
+    便捷函数：加载配置到数据库
 
     Args:
         session: 数据库会话
         config_dir: 配置目录
 
     Returns:
-        同步结果
+        加载结果
     """
-    loader = ConfigLoader(config_dir)
+    loader = ConfigLoader(config_dir=config_dir)
     return await loader.sync_all(session)

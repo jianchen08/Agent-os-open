@@ -1,232 +1,122 @@
 """
-记忆系统模型
-"""
+记忆系统模型（非 ORM 存根）
 
+纯 Python 实现，替代 SQLAlchemy ORM 模型，保持字段兼容。
+"""
 import uuid
 from datetime import datetime
 from typing import Any
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    func,
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 from src.db.models.base import Base
 
-# 向量维度常量
-VECTOR_DIMENSION = 1536  # OpenAI ada-002 嵌入维度
+VECTOR_DIMENSION = 1536
 
 
 class EpisodesMemory(Base):
     """情景记忆"""
 
-    __tablename__ = "episodes_memory"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=False, index=True
-    )
-    session_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("sessions.id", ondelete="SET NULL"), index=True
-    )
-    task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    intent_text: Mapped[str] = mapped_column(Text, nullable=False)
-    intent_vector: Mapped[list[float] | None] = mapped_column(Vector(VECTOR_DIMENSION), nullable=True)
-    plan_dag: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    execution_summary: Mapped[str | None] = mapped_column(Text)
-    evaluation_report: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    final_score: Mapped[float | None] = mapped_column(Float)
-    tags: Mapped[list[str] | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id", "")
+        self.session_id = kwargs.get("session_id")
+        self.task_id = kwargs.get("task_id")
+        self.intent_text = kwargs.get("intent_text", "")
+        self.intent_vector = kwargs.get("intent_vector")
+        self.plan_dag = kwargs.get("plan_dag")
+        self.execution_summary = kwargs.get("execution_summary")
+        self.evaluation_report = kwargs.get("evaluation_report")
+        self.final_score = kwargs.get("final_score")
+        self.tags = kwargs.get("tags")
+        self.created_at = kwargs.get("created_at", datetime.now())
 
 
 class SemanticMemory(Base):
     """语义记忆"""
 
-    __tablename__ = "semantic_memory"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=False, index=True
-    )
-    source_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    source_id: Mapped[str | None] = mapped_column(String(36))
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(VECTOR_DIMENSION), nullable=True)
-    memory_metadata: Mapped[dict[str, Any] | None] = mapped_column("extra_data", JSON)
-    # 标签（用于分类和检索）
-    tags: Mapped[list[str] | None] = mapped_column(
-        JSON,
-        default=list,
-        comment="标签列表（如'技术'、'业务'、'个人偏好'等）",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), onupdate=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id", "")
+        self.source_type = kwargs.get("source_type", "")
+        self.source_id = kwargs.get("source_id")
+        self.content = kwargs.get("content", "")
+        self.embedding = kwargs.get("embedding")
+        self.memory_metadata = kwargs.get("memory_metadata")
+        self.tags = kwargs.get("tags", [])
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.updated_at = kwargs.get("updated_at")
 
 
 class KnowledgeBase(Base):
     """外部知识库"""
 
-    __tablename__ = "knowledge_bases"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
-    type: Mapped[str] = mapped_column(String(50), default="document")
-    source_url: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(50), default="processing")
-    doc_count: Mapped[int] = mapped_column(Integer, default=0)
-    # 标签（用于分类和检索）
-    tags: Mapped[list[str] | None] = mapped_column(
-        JSON,
-        default=list,
-        comment="标签列表（如'API文档'、'教程'、'规范'等）",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), onupdate=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id", "")
+        self.name = kwargs.get("name", "")
+        self.description = kwargs.get("description")
+        self.type = kwargs.get("type", "document")
+        self.source_url = kwargs.get("source_url")
+        self.status = kwargs.get("status", "processing")
+        self.doc_count = kwargs.get("doc_count", 0)
+        self.tags = kwargs.get("tags", [])
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.updated_at = kwargs.get("updated_at")
 
 
 class Tag(Base):
-    """Tag 注册表
+    """Tag 注册表"""
 
-    存储所有 Tag 及其向量表示，用于 Tag 网络检索
-    """
-
-    __tablename__ = "tags"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(
-        String(255), unique=True, nullable=False, index=True
-    )
-    vector: Mapped[list[float] | None] = mapped_column(Vector(VECTOR_DIMENSION), nullable=True)
-    tag_type: Mapped[str] = mapped_column(String(50), default="auto")
-    frequency: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    memory_tags: Mapped[list["MemoryTag"]] = relationship(back_populates="tag")
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id")
+        self.name = kwargs.get("name", "")
+        self.vector = kwargs.get("vector")
+        self.tag_type = kwargs.get("tag_type", "auto")
+        self.frequency = kwargs.get("frequency", 0)
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.memory_tags = kwargs.get("memory_tags", [])
 
 
 class MemoryTag(Base):
-    """记忆-Tag 关联表"""
+    """记忆-Tag 关联"""
 
-    __tablename__ = "memory_tags"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    memory_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    memory_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    tag_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    weight: Mapped[float] = mapped_column(Float, default=1.0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    tag: Mapped["Tag"] = relationship(back_populates="memory_tags")
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id")
+        self.memory_id = kwargs.get("memory_id", "")
+        self.memory_type = kwargs.get("memory_type", "")
+        self.tag_id = kwargs.get("tag_id")
+        self.weight = kwargs.get("weight", 1.0)
+        self.created_at = kwargs.get("created_at", datetime.now())
+        self.tag = kwargs.get("tag")
 
 
 class TagCooccurrence(Base):
-    """Tag 共现关系表
+    """Tag 共现关系"""
 
-    存储 Tag 之间的共现关系，用于构建 Tag 网络和支持语义检索。
-    当两个 Tag 同时出现在同一记忆（episode/semantic）中时，记录共现关系。
-    """
-
-    __tablename__ = "tag_cooccurrences"
-
-    tag1_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
-    )
-    tag2_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
-    )
-    cooccurrence_count: Mapped[int] = mapped_column(
-        Integer, default=1, comment="共现次数"
-    )
-    last_updated: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), onupdate=func.now(), server_default=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.tag1_id = kwargs.get("tag1_id")
+        self.tag2_id = kwargs.get("tag2_id")
+        self.cooccurrence_count = kwargs.get("cooccurrence_count", 1)
+        self.last_updated = kwargs.get("last_updated", datetime.now())
 
 
 class MemoryChunk(Base):
-    """记忆分块表
+    """记忆分块"""
 
-    存储分层压缩后的记忆块，支持按执行者隔离。
-    每个 Agent 有独立的压缩上下文，避免不同 Agent 的记忆混淆。
-    """
-
-    __tablename__ = "memory_chunks"
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=False, index=True
-    )
-    session_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("sessions.id", ondelete="CASCADE"), index=True
-    )
-
-    # 执行者信息（与 ExecutionRecord 对齐，用于上下文隔离）
-    executor_type: Mapped[str | None] = mapped_column(
-        String(50),
-        nullable=True,
-        index=True,
-        comment="执行者类型: agent | tool | workflow",
-    )
-    executor_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True, comment="执行者 ID"
-    )
-    executor_name: Mapped[str | None] = mapped_column(
-        String(255), nullable=True, comment="执行者名称"
-    )
-
-    # 分层信息
-    layer: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(VECTOR_DIMENSION), nullable=True)
-    token_count: Mapped[int] = mapped_column(Integer, default=0)
-    start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    message_count: Mapped[int] = mapped_column(Integer, default=0)
-    graduated: Mapped[bool] = mapped_column(Boolean, default=False)
-    episode_id: Mapped[str | None] = mapped_column(
-        String(36),
-        ForeignKey("episodes_memory.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
-    chunk_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id", str(uuid.uuid4()))
+        self.user_id = kwargs.get("user_id", "")
+        self.session_id = kwargs.get("session_id")
+        self.executor_type = kwargs.get("executor_type")
+        self.executor_id = kwargs.get("executor_id")
+        self.executor_name = kwargs.get("executor_name")
+        self.layer = kwargs.get("layer", "")
+        self.content = kwargs.get("content", "")
+        self.embedding = kwargs.get("embedding")
+        self.token_count = kwargs.get("token_count", 0)
+        self.start_time = kwargs.get("start_time")
+        self.end_time = kwargs.get("end_time")
+        self.message_count = kwargs.get("message_count", 0)
+        self.graduated = kwargs.get("graduated", False)
+        self.episode_id = kwargs.get("episode_id")
+        self.chunk_metadata = kwargs.get("chunk_metadata")
+        self.created_at = kwargs.get("created_at", datetime.now())

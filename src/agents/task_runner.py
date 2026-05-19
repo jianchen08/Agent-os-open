@@ -30,9 +30,6 @@ import time
 from datetime import UTC
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.agents.types import AgentConfig, AgentLevel, AgentType
 from src.core.event_bus.types import EventFilter, EventType
 from src.core.states import ExecutionStatus

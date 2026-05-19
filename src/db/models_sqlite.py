@@ -1,32 +1,6 @@
 """
-SQLite 数据库模型定义
+SQLite 模型（已废弃）
 
-简化的SQLite兼容模型，避免循环导入问题
+原为 SQLAlchemy SQLite 模型，现已迁移至纯 Python 存根。
+此文件保留为空以兼容可能的导入。
 """
-
-import uuid
-from datetime import datetime
-
-from sqlalchemy import Boolean, DateTime, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-
-class Base(DeclarativeBase):
-    """模型基类"""
-
-
-class SQLiteUser(Base):
-    """简化的用户表（SQLite 兼容）"""
-
-    __tablename__ = "users"
-
-    id: Mapped[str] = mapped_column(
-        String(50), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    role: Mapped[str] = mapped_column(String(50), default="user")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.now
-    )
