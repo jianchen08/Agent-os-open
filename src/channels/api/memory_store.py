@@ -560,3 +560,7 @@ class MemoryStore:
     def is_token_revoked(self, token: str) -> bool:
         """检查 refresh token 是否已被撤销。"""
         return token in self.refresh_tokens
+
+
+# 模块级单例
+store = MemoryStore()

@@ -19,8 +19,8 @@ from channels.api.models import (
     TaskResponse,
     TaskSubmitResponse,
     TaskUpdate,
-    store,
 )
+from channels.api.memory_store import store
 
 logger = logging.getLogger(__name__)
 
