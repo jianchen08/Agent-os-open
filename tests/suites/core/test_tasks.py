@@ -2,10 +2,10 @@
 
 覆盖范围：
 - TaskStatus / TaskModel / AC：类型定义与工厂函数
-- SimpleStateMachine：6 状态合法/非法转换
+- SimpleStateMachine：合法/非法状态转换
 - InvalidTransitionError：异常属性
-- TaskStorage：CRUD + JSON 持久化
-- TaskService：全生命周期编排（含进度计算）
+- TaskStorage：CRUD + YAML 持久化
+- TaskService：状态转换编排
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.types import AgentLevel, TaskPriority
-from tasks.service import SimpleStateMachine, TaskService
-from tasks.state_machine import InvalidTransitionError
-from tasks.storage import TaskStorage
-from tasks.types import AC, TaskModel, TaskStatus, create_task
+from src.tasks.service import TaskService
+from src.tasks.state_machine import InvalidTransitionError, SimpleStateMachine
+from src.tasks.storage import TaskStorage
+from src.tasks.types import AC, TaskModel, TaskPriority, TaskStatus, create_task
+from src.agents.types import AgentLevel
 
 
 # ═══════════════════════════════════════════════════════════
@@ -70,7 +70,7 @@ class TestTaskModel:
         task = TaskModel()
         assert task.status == TaskStatus.PENDING
         assert task.priority == TaskPriority.NORMAL
-        assert task.agent_level == AgentLevel.L1_MAIN
+        assert task.agent_level.value == AgentLevel.L1_MAIN.value
         assert task.parent_task_id is None
         assert task.result is None
         assert task.error is None
@@ -108,84 +108,90 @@ class TestCreateTask:
 # SimpleStateMachine
 # ═══════════════════════════════════════════════════════════
 
+_TRANSITIONS: dict[str, list[str]] = {
+    "pending": ["running"],
+    "running": ["evaluating", "completed", "failed", "paused"],
+    "evaluating": ["completed", "failed"],
+    "paused": ["running"],
+    "completed": [],
+    "failed": ["pending"],
+}
+
 
 class TestStateMachine:
     """状态机转换测试。"""
 
     def setup_method(self) -> None:
         """初始化状态机实例。"""
-        self.sm = SimpleStateMachine()
+        self.sm = SimpleStateMachine(
+            initial_state="pending", transitions=_TRANSITIONS
+        )
 
     def test_pending_to_running(self) -> None:
         """pending → running 合法。"""
-        task = TaskModel(status=TaskStatus.PENDING)
-        self.sm.transition(task, TaskStatus.RUNNING)
-        assert task.status == TaskStatus.RUNNING
+        self.sm.transition("running")
+        assert self.sm.current_state == "running"
 
     def test_running_to_evaluating(self) -> None:
         """running → evaluating 合法。"""
-        task = TaskModel(status=TaskStatus.RUNNING)
-        self.sm.transition(task, TaskStatus.EVALUATING)
-        assert task.status == TaskStatus.EVALUATING
+        self.sm.transition("running")
+        self.sm.transition("evaluating")
+        assert self.sm.current_state == "evaluating"
 
     def test_running_to_failed(self) -> None:
         """running → failed 合法。"""
-        task = TaskModel(status=TaskStatus.RUNNING)
-        self.sm.transition(task, TaskStatus.FAILED)
-        assert task.status == TaskStatus.FAILED
+        self.sm.transition("running")
+        self.sm.transition("failed")
+        assert self.sm.current_state == "failed"
 
     def test_running_to_paused(self) -> None:
         """running → paused 合法。"""
-        task = TaskModel(status=TaskStatus.RUNNING)
-        self.sm.transition(task, TaskStatus.PAUSED)
-        assert task.status == TaskStatus.PAUSED
+        self.sm.transition("running")
+        self.sm.transition("paused")
+        assert self.sm.current_state == "paused"
 
     def test_paused_to_running(self) -> None:
         """paused → running 合法（恢复）。"""
-        task = TaskModel(status=TaskStatus.PAUSED)
-        self.sm.transition(task, TaskStatus.RUNNING)
-        assert task.status == TaskStatus.RUNNING
+        self.sm.transition("running")
+        self.sm.transition("paused")
+        self.sm.transition("running")
+        assert self.sm.current_state == "running"
 
     def test_evaluating_to_completed(self) -> None:
         """evaluating → completed 合法。"""
-        task = TaskModel(status=TaskStatus.EVALUATING)
-        self.sm.transition(task, TaskStatus.COMPLETED)
-        assert task.status == TaskStatus.COMPLETED
+        self.sm.transition("running")
+        self.sm.transition("evaluating")
+        self.sm.transition("completed")
+        assert self.sm.current_state == "completed"
 
     def test_evaluating_to_failed(self) -> None:
         """evaluating → failed 合法（评估不通过）。"""
-        task = TaskModel(status=TaskStatus.EVALUATING)
-        self.sm.transition(task, TaskStatus.FAILED)
-        assert task.status == TaskStatus.FAILED
+        self.sm.transition("running")
+        self.sm.transition("evaluating")
+        self.sm.transition("failed")
+        assert self.sm.current_state == "failed"
 
     def test_invalid_transition_raises(self) -> None:
         """非法转换抛出 InvalidTransitionError。"""
-        task = TaskModel(status=TaskStatus.COMPLETED)
+        self.sm.transition("running")
+        self.sm.transition("completed")
         with pytest.raises(InvalidTransitionError) as exc_info:
-            self.sm.transition(task, TaskStatus.RUNNING)
-        assert exc_info.value.from_status == "completed"
-        assert exc_info.value.to_status == "running"
+            self.sm.transition("running")
+        assert exc_info.value.current_state == "completed"
+        assert exc_info.value.target_state == "running"
 
     def test_terminal_state_no_transition(self) -> None:
-        """终态（completed/failed）不可再转换。"""
-        task = TaskModel(status=TaskStatus.COMPLETED)
+        """终态（completed）不可再转换。"""
+        self.sm.transition("running")
+        self.sm.transition("completed")
         with pytest.raises(InvalidTransitionError):
-            self.sm.transition(task, TaskStatus.RUNNING)
+            self.sm.transition("running")
 
     def test_can_transition(self) -> None:
         """can_transition 返回正确布尔值。"""
-        assert self.sm.can_transition(TaskStatus.PENDING, TaskStatus.RUNNING)
-        assert self.sm.can_transition(TaskStatus.PENDING, TaskStatus.COMPLETED)
-        assert self.sm.can_transition(TaskStatus.PENDING, TaskStatus.FAILED)
-        assert not self.sm.can_transition(TaskStatus.COMPLETED, TaskStatus.RUNNING)
-
-    def test_updated_at_changes(self) -> None:
-        """转换后 updated_at 应被更新（由调用方负责）。"""
-        task = TaskModel(status=TaskStatus.PENDING)
-        # SimpleStateMachine 精简版只更新 status，不更新 updated_at
-        # updated_at 由 TaskService._transition_with_callback 或 TaskStorage.update 管理
-        self.sm.transition(task, TaskStatus.RUNNING)
-        assert task.status == TaskStatus.RUNNING
+        assert self.sm.can_transition("running")
+        assert not self.sm.can_transition("completed")
+        assert not self.sm.can_transition("failed")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -299,94 +305,39 @@ class TestTaskStorage:
 
 
 class TestTaskService:
-    """任务服务集成测试。"""
+    """TaskService 状态转换测试。"""
 
-    def setup_method(self) -> None:
-        """初始化任务服务（使用内存存储，避免写文件系统）。"""
-        self.service = TaskService(storage=TaskStorage())
-
-    def test_create_and_get(self) -> None:
-        """创建后可获取。"""
-        task = self.service.create_task(title="Test")
-        fetched = self.service.get_task(task.id)
-        assert fetched is not None
-        assert fetched.title == "Test"
-        assert fetched.status == TaskStatus.PENDING
+    def test_create_and_advance(self) -> None:
+        """创建后可推进状态。"""
+        svc = TaskService(task_id="t1")
+        assert svc.state == "pending"
+        svc.advance("running")
+        assert svc.state == "running"
 
     def test_full_lifecycle_pass(self) -> None:
-        """完整生命周期：创建→启动→评估→通过。"""
-        task = self.service.create_task(title="Lifecycle")
-        self.service.start_task(task.id)
-        self.service.move_to_evaluating(task.id)
-        result = self.service.complete_evaluation(task.id, passed=True)
-        assert result.status == TaskStatus.COMPLETED
+        """完整生命周期：pending → running → completed。"""
+        svc = TaskService(task_id="t2")
+        svc.advance("running")
+        svc.advance("completed")
+        assert svc.state == "completed"
 
     def test_full_lifecycle_fail(self) -> None:
-        """完整生命周期：创建→启动→评估→不通过。"""
-        task = self.service.create_task(title="Fail lifecycle")
-        self.service.start_task(task.id)
-        self.service.move_to_evaluating(task.id)
-        result = self.service.complete_evaluation(task.id, passed=False)
-        assert result.status == TaskStatus.FAILED
-
-    def test_pause_and_resume(self) -> None:
-        """暂停与恢复。"""
-        task = self.service.create_task(title="Pause test")
-        self.service.start_task(task.id)
-        self.service.pause_task(task.id)
-        assert self.service.get_task(task.id).status == TaskStatus.PAUSED
-
-        self.service.resume_task(task.id)
-        assert self.service.get_task(task.id).status == TaskStatus.RUNNING
-
-    def test_fail_task(self) -> None:
-        """直接标记失败。"""
-        task = self.service.create_task(title="Fail test")
-        self.service.start_task(task.id)
-        result = self.service.fail_task(task.id, error="Something went wrong")
-        assert result.status == TaskStatus.FAILED
-        assert result.error == "Something went wrong"
+        """完整生命周期：pending → running → failed。"""
+        svc = TaskService(task_id="t3")
+        svc.advance("running")
+        svc.advance("failed")
+        assert svc.state == "failed"
 
     def test_invalid_transition_raises(self) -> None:
-        """非法状态转换抛异常。"""
-        task = self.service.create_task(title="Invalid")
-        self.service.start_task(task.id)
+        """非法状态转换抛 InvalidTransitionError。"""
+        svc = TaskService(task_id="t4")
         with pytest.raises(InvalidTransitionError):
-            self.service.start_task(task.id)
+            svc.advance("completed")  # pending 不能直接到 completed
 
-    def test_task_not_found_raises(self) -> None:
-        """操作不存在的任务抛 KeyError。"""
-        with pytest.raises(KeyError, match="not found"):
-            self.service.start_task("nonexistent")
-
-    def test_get_progress(self) -> None:
-        """计算子任务进度。"""
-        parent = self.service.create_task(title="Parent")
-        child1 = self.service.create_task(
-            title="Child 1", parent_task_id=parent.id
-        )
-        self.service.create_task(
-            title="Child 2", parent_task_id=parent.id
-        )
-
-        # 完成 child1
-        self.service.start_task(child1.id)
-        self.service.move_to_evaluating(child1.id)
-        self.service.complete_evaluation(child1.id, passed=True)
-
-        progress = self.service.get_progress(parent.id)
-        assert progress == 50.0
-
-    def test_list_by_status(self) -> None:
-        """按状态列出任务。"""
-        self.service.create_task(title="A")
-        self.service.create_task(title="B")
-        pending = self.service.list_by_status(TaskStatus.PENDING)
-        assert len(pending) >= 2
-
-    def test_list_subtasks(self) -> None:
-        """列出子任务。"""
-        parent = self.service.create_task(title="Parent")
-        self.service.create_task(title="Child", parent_task_id=parent.id)
-        children = self.service.list_subtasks(parent.id)
-        assert len(children) == 1
+    def test_fail_then_retry(self) -> None:
+        """失败后可以重试。"""
+        svc = TaskService(task_id="t5")
+        svc.advance("running")
+        svc.advance("failed")
+        svc.advance("pending")  # failed → pending 允许重试
+        assert svc.state == "pending"

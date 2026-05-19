@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -286,8 +286,6 @@ async def _try_revive_pipeline(
 
     try:
         from pipeline.engine import PipelineEngine
-        from pipeline.route import InputRouteTable, OutputRouteTable
-        from pipeline.registry import PluginRegistry
 
         input_route_table = provider.get("input_route_table") if provider else None
         output_route_table = provider.get("output_route_table") if provider else None

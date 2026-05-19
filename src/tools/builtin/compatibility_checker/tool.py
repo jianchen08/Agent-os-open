@@ -18,7 +18,7 @@ from tools.types import (
     create_success_result,
 )
 
-from .base import BuiltinTool
+from tools.builtin.base import BuiltinTool
 
 
 class CompatibilityCheckerTool(BuiltinTool):

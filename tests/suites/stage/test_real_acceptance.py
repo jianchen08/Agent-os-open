@@ -34,8 +34,8 @@ from pipeline.plugin import (
 )
 from pipeline.registry import PluginRegistry
 from pipeline.route import InputRouteEntry, InputRouteTable, OutputRouteEntry, OutputRouteTable
+from agents.types import AgentLevel
 from pipeline.types import (
-    AgentLevel,
     RouteSignal,
     StateKeys,
     create_initial_state,

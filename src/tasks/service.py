@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from src.tasks.state_machine import SimpleStateMachine, InvalidTransitionError
+from src.tasks.state_machine import SimpleStateMachine
 
 
 # 默认任务状态转换规则

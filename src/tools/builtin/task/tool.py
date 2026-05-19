@@ -1483,7 +1483,6 @@ class TaskTool(BuiltinTool):
                             for _tid, _ws_list in _conns.items():
                                 for _ws in _ws_list:
                                     try:
-                                        import json
                                         await _ws.send_json(_ws_payload)
                                     except Exception:
                                         pass

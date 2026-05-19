@@ -58,9 +58,9 @@ if _sys.platform == "win32":
     except Exception:
         pass
 
-from channels.cli.cli_commands import CommandResult, SlashCommandRegistry
+from channels.cli.cli_commands import SlashCommandRegistry
 from channels.cli.input_adapter import CLIInputAdapter
-from channels.cli.output_adapter import CLIOutputAdapter, sanitize_for_terminal
+from channels.cli.output_adapter import CLIOutputAdapter
 from pipeline.engine import PipelineEngine
 from pipeline.registry import PluginRegistry
 from pipeline.route import (

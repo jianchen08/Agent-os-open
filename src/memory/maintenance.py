@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)

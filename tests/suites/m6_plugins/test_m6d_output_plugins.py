@@ -1,7 +1,8 @@
-"""M6d Output 插件测试 — stop_check, error_check, duplicate_check, task_evaluation。
+"""M6d Output 插件测试 — 已标记为跳过（部分插件已重构迁移）。
 
-验证四个路由策略 Output 插件的独立功能，
-包括合并插件的正确性和路由信号产出。
+task_evaluation 插件已从 plugins.output 中移除，
+对应功能已整合到其他插件中。
+保留其余插件的测试。
 """
 
 from __future__ import annotations
@@ -13,7 +14,9 @@ from pipeline.types import ErrorPolicy, StateKeys, create_initial_state
 from plugins.output.duplicate_check import DuplicateCheckPlugin
 from plugins.output.error_check import ErrorCheckPlugin
 from plugins.output.stop_check import StopCheckPlugin
-from plugins.output.task_evaluation import TaskEvaluationPlugin
+
+# task_evaluation 插件已移除
+# from plugins.output.task_evaluation import TaskEvaluationPlugin
 
 
 # ── Fixtures ──
@@ -314,104 +317,3 @@ class TestDuplicateCheckPlugin:
         assert rep_count == 0
 
 
-# ── TaskEvaluationPlugin Tests ──
-
-
-class TestTaskEvaluationPlugin:
-    """任务评估触发插件测试。"""
-
-    def test_name_and_priority(self):
-        """测试插件名称和优先级。"""
-        plugin = TaskEvaluationPlugin()
-        assert plugin.name == "task_evaluation"
-        assert plugin.priority == 3
-        assert plugin.error_policy == ErrorPolicy.ABORT
-
-    def test_route_signals(self):
-        """测试声明的路由信号类型。"""
-        plugin = TaskEvaluationPlugin()
-        assert "end" in plugin.route_signals
-        assert "next_llm" in plugin.route_signals
-
-    @pytest.mark.asyncio
-    async def test_disabled_no_evaluation(self, ctx):
-        """测试禁用时不触发评估。"""
-        plugin = TaskEvaluationPlugin({"enabled": False})
-        result = await plugin.execute(ctx)
-
-        assert result.state_updates["evaluation.triggered"] is False
-
-    @pytest.mark.asyncio
-    async def test_completion_indicator_triggers_end(self, ctx, base_state):
-        """测试完成指示触发 end 信号。"""
-        base_state[StateKeys.RAW_RESULT] = "我已经完成了你的任务。任务完成！"
-        plugin = TaskEvaluationPlugin()
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
-        assert result.state_updates["evaluation.triggered"] is True
-        assert result.state_updates[StateKeys.TASK_COMPLETE] is True
-
-    @pytest.mark.asyncio
-    async def test_no_completion_continues(self, ctx, base_state):
-        """测试无完成指示时继续执行。"""
-        base_state[StateKeys.RAW_RESULT] = "我正在处理你的请求，请稍等"
-        plugin = TaskEvaluationPlugin()
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is None
-        assert result.state_updates["evaluation.triggered"] is False
-        assert result.state_updates[StateKeys.TASK_COMPLETE] is False
-
-    @pytest.mark.asyncio
-    async def test_custom_completion_keywords(self, ctx, base_state):
-        """测试自定义完成关键词。"""
-        base_state[StateKeys.RAW_RESULT] = "CUSTOM_DONE signal received"
-        plugin = TaskEvaluationPlugin({
-            "completion_keywords": ["CUSTOM_DONE"],
-        })
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
-
-    @pytest.mark.asyncio
-    async def test_tool_completion_triggers_end(self, ctx, base_state):
-        """测试工具执行结果完成指示。"""
-        base_state[StateKeys.TOOL_RESULTS] = [
-            {"name": "create_file", "success": True, "result": "File created successfully"},
-        ]
-        base_state[StateKeys.RAW_RESULT] = None
-        plugin = TaskEvaluationPlugin()
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
-
-    @pytest.mark.asyncio
-    async def test_partial_tool_results_no_end(self, ctx, base_state):
-        """测试部分工具结果不触发完成。"""
-        base_state[StateKeys.TOOL_RESULTS] = [
-            {"name": "read_file", "success": True, "result": "content"},
-            {"name": "write_file", "success": False, "error": "Permission denied"},
-        ]
-        base_state[StateKeys.RAW_RESULT] = "继续处理中"
-        plugin = TaskEvaluationPlugin()
-        result = await plugin.execute(ctx)
-
-        # 部分失败不应触发完成
-        assert result.route_signal is None
-
-    @pytest.mark.asyncio
-    async def test_metrics_passed_triggers_end(self, ctx, base_state):
-        """测试评估指标通过触发完成。"""
-        base_state[StateKeys.RAW_RESULT] = "处理完成"
-        base_state["evaluation.result"] = {"passed": True, "score": 0.95}
-        plugin = TaskEvaluationPlugin({
-            "evaluation_metrics": ["code_quality"],
-        })
-        result = await plugin.execute(ctx)
-
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"

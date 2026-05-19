@@ -9,10 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import time
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from tools.external.exceptions import (
     ConnectionError,
@@ -201,7 +200,7 @@ class ExternalToolAdapter(IExternalToolAdapter):
                 )
                 return result
 
-            except asyncio.TimeoutError as e:
+            except asyncio.TimeoutError:
                 last_error = ExternalTimeoutError(
                     message=f"操作 '{operation}' 超时 ({timeout}s)",
                     tool_name=self.name,

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from memory.ports import IMemoryStore
@@ -410,7 +410,6 @@ class PgVectorStore(IMemoryStore):
         Returns:
             搜索结果列表
         """
-        from sqlalchemy import text
 
         if not query.strip():
             return await self._fallback.search(query, user_id, limit, filters)

@@ -29,15 +29,9 @@ import uuid as _uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pipeline.chain import PluginChain
-from pipeline.plugin import (
-    IInputPlugin,
-    IOutputPlugin,
-    PluginContext,
-)
 from pipeline.registry import PipelineRegistry, PluginRegistry
 from pipeline.route import InputRouteTable, OutputRouteTable
-from pipeline.types import RouteSignal, StateKeys
+from pipeline.types import StateKeys
 
 # 从拆分模块重新导入，保持向后兼容
 from pipeline.engine_state import (  # noqa: F401

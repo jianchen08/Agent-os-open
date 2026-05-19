@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, Query, UploadFile, File, Form
 
 from channels.api.deps import require_auth
 from review.media_review_service import MediaReviewService
-from review.models import MediaReviewConfig
 from review.review_service import get_review_service
 
 logger = logging.getLogger(__name__)

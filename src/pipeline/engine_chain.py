@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 from pipeline.chain import PluginChain
 from pipeline.plugin import (
     IInputPlugin,
-    IOutputPlugin,
     PluginContext,
 )
 from pipeline.types import RouteSignal, StateKeys

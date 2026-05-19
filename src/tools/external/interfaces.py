@@ -14,8 +14,6 @@ from typing import Any
 
 from tools.external.types import (
     ExternalToolCapability,
-    ExternalToolConfig,
-    ExternalToolInfo,
     ExternalToolState,
     SandboxResourceLimits,
 )

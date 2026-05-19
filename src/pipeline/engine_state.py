@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextvars
 import copy as _copy
-import json as _json
 import logging
 
 logger = logging.getLogger(__name__)

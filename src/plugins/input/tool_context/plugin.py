@@ -29,7 +29,7 @@ import time
 from typing import Any
 
 from bridge.window_info import normalize_window_info
-from connectors.adapter_config import get_adapter_status_summary, load_adapter_configs
+from connectors.adapter_config import get_adapter_status_summary
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
 

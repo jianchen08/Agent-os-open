@@ -13,7 +13,6 @@ from tools.external.adapter import ExternalToolAdapter
 from tools.external.types import (
     ExternalToolCapability,
     ExternalToolConfig,
-    ProtocolType,
 )
 
 logger = logging.getLogger(__name__)

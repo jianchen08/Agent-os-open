@@ -15,7 +15,6 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from channels.api.deps import APIError
-from services.comfyui_history import GenerationStatus
 from services.comfyui_service import get_comfyui_service
 
 logger = logging.getLogger(__name__)

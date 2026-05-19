@@ -14,8 +14,6 @@ from tools.external.adapter import ExternalToolAdapter
 from tools.external.exceptions import ConfigError
 from tools.external.interfaces import IExternalToolConnection
 from tools.external.types import (
-    ExternalToolCapability,
-    ExternalToolConfig,
     ExternalToolInfo,
     ExternalToolState,
 )

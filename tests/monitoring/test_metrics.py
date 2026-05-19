@@ -106,7 +106,7 @@ class TestGetMetrics:
         # 至少应包含核心指标名（可能有前缀）
         assert "message_received" in result
         assert "message_processed" in result
-        assert "processing_time" in result
+        assert "processing_seconds" in result
         assert "active_sessions" in result
         assert "channel_status" in result
 

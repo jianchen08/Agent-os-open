@@ -16,7 +16,6 @@ import aiohttp
 from tools.external.exceptions import ConnectionError, ExternalTimeoutError
 from tools.external.interfaces import IExternalToolConnection
 from tools.external.types import (
-    AuthConfig,
     AuthType,
     ExternalToolConfig,
     ExternalToolState,

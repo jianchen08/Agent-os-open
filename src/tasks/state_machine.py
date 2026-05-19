@@ -93,3 +93,33 @@ class SimpleStateMachine:
         if not self.can_transition(target_state):
             raise InvalidTransitionError(self._current_state, target_state)
         self._current_state = target_state
+
+
+# ---------------------------------------------------------------------------
+# 向后兼容别名 & 工厂函数
+# ---------------------------------------------------------------------------
+
+# 旧代码中引用 TaskStateMachine，统一指向 SimpleStateMachine
+TaskStateMachine = SimpleStateMachine
+
+# 预定义的任务状态转换规则
+_TASK_TRANSITIONS: dict[str, list[str]] = {
+    "pending": ["scheduled", "running", "cancelled"],
+    "scheduled": ["running", "cancelled"],
+    "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled"],
+    "evaluating": ["completed", "failed", "running"],
+    "suspended": ["running", "cancelled", "timeout"],
+    "blocked": ["running", "cancelled", "failed"],
+    "completed": [],
+    "failed": ["pending"],  # 允许重试
+    "cancelled": [],
+    "timeout": ["running", "cancelled", "failed"],
+}
+
+
+def get_task_state_machine() -> SimpleStateMachine:
+    """获取预配置的任务状态机实例。"""
+    return SimpleStateMachine(
+        initial_state="pending",
+        transitions=_TASK_TRANSITIONS,
+    )

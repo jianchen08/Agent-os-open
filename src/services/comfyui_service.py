@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from connectors.creative.comfyui import ComfyUIConnector
 from tools.interfaces import ProgressCallback

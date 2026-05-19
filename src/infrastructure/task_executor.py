@@ -34,7 +34,6 @@ class TaskExecutorMixin:
         Args:
             task_data: 任务提交事件中的数据字典
         """
-        from pipeline.engine import PipelineEngine
 
         task_id = task_data.get("task_id", "unknown")
         target_id = task_data.get("target_id", "")

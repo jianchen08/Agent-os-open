@@ -13,11 +13,9 @@ from typing import Any
 from tools.external.adapter import ExternalToolAdapter
 from tools.external.config import ExternalToolConfigManager
 from tools.external.connection import ExternalToolConnection
-from tools.external.interfaces import IExternalToolConnection
 from tools.external.registry import ExternalToolRegistry
 from tools.external.sandbox import ExternalToolSandbox
 from tools.external.secrets import ExternalToolSecretManager
-from tools.external.types import ExternalToolState
 
 logger = logging.getLogger(__name__)
 
