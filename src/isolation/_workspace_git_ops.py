@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 # 排除的目录（不参与场景检测和大小计算）
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache"})
 _SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
+_WIN_RESERVED_NAMES = frozenset({
+    "nul", "NUL", "CON", "PRN", "AUX",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
 _SPARSE_THRESHOLD_BYTES = 50 * 1024 * 1024  # sparse checkout 大小阈值（50MB）
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
 _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
@@ -343,6 +348,8 @@ class _GitOpsMixin:
         count = 0
         for item in _src.rglob("*"):
             if not item.is_file():
+                continue
+            if item.name in _WIN_RESERVED_NAMES:
                 continue
             rel = item.relative_to(src)
             if any(p in skip for p in rel.parts):

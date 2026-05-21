@@ -375,6 +375,25 @@ class PipelineStreamBridge:
 
         _suspend_detected_at: float | None = None
 
+        # BUG-FIX-fix_20260521_stream_empty: pre-suspend 等待阶段
+        # 问题根因: 当 drain_loop 开始时引擎仍处于挂起状态（上层等待超时或竞态），
+        #   主循环的 suspend_check 会立即触发 break，导致输出为空。
+        # 修复方案: 在进入主循环前，如果引擎已挂起且队列为空，先等待引擎恢复，
+        #   最多等待 300 秒，防止无限阻塞。
+        _pre_wait_start = asyncio.get_event_loop().time()
+        while (
+            not engine_task.done()
+            and suspend_check is not None
+            and suspend_check()
+            and self._queue.empty()
+        ):
+            await asyncio.sleep(0.2)
+            if asyncio.get_event_loop().time() - _pre_wait_start > 300:
+                logger.warning(
+                    "drain_loop: pre-suspend wait 超时: pipeline=%s", self.pipeline_id[:12],
+                )
+                break
+
         # 2. 主循环：消费队列
         _chunk_count = 0
         while not engine_task.done() or not self._queue.empty():

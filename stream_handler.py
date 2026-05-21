@@ -345,11 +345,45 @@ async def _stream_wake_response(
     _long_wait = asyncio.create_task(asyncio.sleep(86400))
 
     try:
+        # BUG-FIX-fix_20260521_stream_empty: 等待引擎真正恢复后再开始 drain_loop
+        # 问题根因: send_pipeline_message 只是通过 _wake_event 唤醒 _handle_suspension_loop
+        #   的等待，但 engine.resume() 是异步执行的，需要时间。_stream_wake_response
+        #   立即开始 drain_loop 时 is_suspended 仍为 True，drain_loop 1秒后确认挂起
+        #   并 break，导致发送 0 chars 空内容。
+        # 修复方案: 在 drain_loop 前添加等待循环，轮询 engine.is_suspended 直到
+        #   引擎真正恢复（_suspended_state 被置 None），同时发送心跳保活防止前端超时。
+        _resume_wait_start = asyncio.get_event_loop().time()
+        _max_resume_wait = _call_timeout * 2 if _call_timeout else 300
+        _last_heartbeat = _resume_wait_start
+        while getattr(engine, "is_suspended", False):
+            await asyncio.sleep(0.2)
+            _now = asyncio.get_event_loop().time()
+            # 等待期间发送心跳保活，防止前端超时
+            if _now - _last_heartbeat > 5.0:
+                try:
+                    await bridge._send_event({
+                        "type": "stream_keepalive",
+                        "data": {
+                            "message_id": message_id,
+                            "pipeline_id": bridge.pipeline_id,
+                        },
+                    })
+                except Exception:
+                    pass
+                _last_heartbeat = _now
+            if _now - _resume_wait_start > _max_resume_wait:
+                logger.error(
+                    "[wake_response] 等待引擎恢复超时 (%ds): pipeline=%s",
+                    _max_resume_wait, pipeline_id[:12],
+                )
+                break
+
         logger.info(
-            "[wake_response] drain_loop 开始: pipeline=%s msg=%s is_suspended=%s queue_size=%d",
+            "[wake_response] drain_loop 开始: pipeline=%s msg=%s is_suspended=%s queue_size=%d resume_wait=%.1fs",
             pipeline_id[:12], message_id[:12],
             getattr(engine, "is_suspended", "?"),
             bridge._queue.qsize(),
+            asyncio.get_event_loop().time() - _resume_wait_start,
         )
         drain_result = await asyncio.wait_for(
             bridge.drain_loop(
