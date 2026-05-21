@@ -37,7 +37,8 @@ class StopCheckPlugin(IOutputPlugin):
     1. 用户请求停止 → should_stop == True
     2. 迭代上限检测 → iteration > max_iterations
     3. 执行超时检测 → elapsed > max_duration
-    4. 任务状态检测 → task 被删除/取消
+    4. task_evaluate 工具结果检测 → completed/failed
+    5. 任务状态检测 → task 被删除/取消/完成/失败
 
     优先级：1（系统级，最高优先级检查）
     错误策略：ABORT（停止判断异常必须终止管道）
@@ -162,11 +163,11 @@ class StopCheckPlugin(IOutputPlugin):
         if eval_stop:
             return eval_stop
 
-        # 5. 任务状态检测
+        # 5. 任务状态检测（state 缓存 + TaskService 实际查询）
         if self._check_task_status:
-            task_status = self._check_task_canceled(ctx)
+            task_status = self._check_task_terminal_status(ctx)
             if task_status:
-                logger.info("[%s] Task canceled: %s", self.name, task_status)
+                logger.info("[%s] Task terminal status detected: %s", self.name, task_status)
                 return {
                     "router.stop_reason": f"task_{task_status}",
                     "__route_signal__": RouteSignal(
@@ -220,18 +221,86 @@ class StopCheckPlugin(IOutputPlugin):
                 }
         return None
 
-    def _check_task_canceled(self, ctx: PluginContext) -> str:
-        """检查任务是否被取消或删除。
+    _TERMINAL_STATUSES = frozenset({"canceled", "deleted", "completed", "failed"})
+
+    def _check_task_terminal_status(self, ctx: PluginContext) -> str:
+        """检查任务是否已到达终态（取消/删除/完成/失败）。
+
+        两个检测路径：
+        1. 从 state["task_status"] 读取（由外部插件注入的缓存值）
+        2. 从 TaskService 查询任务的实际状态（兜底，防止 state 未被更新）
+
+        BUG-FIX-fix_20260522_stop_check_completed:
+        问题根因: 管道任务已到达终态（completed/failed），但 _check_task_canceled
+          只检查 canceled/deleted，不检查 completed/failed。且 state["task_status"]
+          从未被任何插件更新（task_event_receiver 只修改 user_input），
+          导致管道在任务完成后仍持续循环执行。
+        修复方案: 扩展终态检测范围包含 completed/failed，并新增从 TaskService
+          查询任务实际状态的兜底路径，确保无论 state 是否被更新都能检测到终态。
 
         Args:
             ctx: 插件执行上下文
 
         Returns:
-            任务状态字符串（如果被取消），空字符串表示正常运行
+            任务终态字符串，空字符串表示正常运行
         """
-        task_status = ctx.state.get("task_status", "")
-        if task_status in ("canceled", "deleted"):
-            return task_status
+        cached_status = ctx.state.get("task_status", "")
+        if cached_status in self._TERMINAL_STATUSES:
+            return cached_status
+
+        actual_status = self._check_task_actual_status(ctx)
+        if actual_status:
+            return actual_status
+
+        return ""
+
+    def _check_task_actual_status(self, ctx: PluginContext) -> str:
+        """从 TaskService 查询任务的实际状态。
+
+        当 state["task_status"] 未被更新时，通过查询 task_service 获取
+        任务的真实状态。为避免频繁数据库访问，每 3 次迭代查询一次。
+
+        Args:
+            ctx: 插件执行上下文
+
+        Returns:
+            任务终态字符串，空字符串表示正常运行或查询失败
+        """
+        iteration = ctx.state.get(StateKeys.ITERATION, 0)
+        if iteration % 3 != 0:
+            return ""
+
+        task_id = ctx.state.get("task_id", "")
+        if not task_id:
+            return ""
+
+        try:
+            task_service = ctx._services.get("task_service")
+            if task_service is None:
+                return ""
+
+            task = task_service.get_task(task_id)
+            if task is None:
+                return ""
+
+            status = task.status
+            if hasattr(status, "value"):
+                status = status.value
+            status = str(status)
+
+            if status in self._TERMINAL_STATUSES:
+                logger.info(
+                    "[%s] Task actual status is terminal: %s "
+                    "(task=%s, detected via task_service query, iter=%d)",
+                    self.name, status, task_id, iteration,
+                )
+                return status
+        except Exception as exc:
+            logger.debug(
+                "[%s] Failed to query task actual status: %s",
+                self.name, exc,
+            )
+
         return ""
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
