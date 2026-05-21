@@ -5,7 +5,7 @@
  */
 
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from 'lucide-react'
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
@@ -113,28 +113,9 @@ export const ThinkingDisplay: FC<{
   defaultExpanded?: boolean
 }> = ({ thinking, defaultExpanded = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
-  const userCollapsedRef = useRef(false)
 
   useEffect(() => {
-    if (thinking.isThinking && !userCollapsedRef.current) {
-      setExpanded(true)
-    }
-  }, [thinking.isThinking])
-
-  const handleToggle = useCallback(() => {
-    setExpanded((prev) => {
-      const next = !prev
-      if (!next) {
-        userCollapsedRef.current = true
-      }
-      return next
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!thinking.isThinking) {
-      userCollapsedRef.current = false
-    }
+    if (thinking.isThinking) setExpanded(true)
   }, [thinking.isThinking])
 
   return (

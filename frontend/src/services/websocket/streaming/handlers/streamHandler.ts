@@ -115,11 +115,54 @@ export function handleStreamStart(eventData: any) {
   // 修复方案: 如果 activePipelineId 与 pipelineId 不一致，更新 activePipelineId。
   //          这样 effectiveIsGenerating 能正确检测到当前管道的流式状态。
 
+  // BUG-FIX-fix_20260522_auto_switch_tab_on_submit:
+  // 问题根因: 上述修复无条件切换 activePipelineId，当子 Agent 开始流式输出时，
+  //          会将用户从主标签页强制跳转到子管道标签页，体验不佳。
+  // 修复方案: 在调用 activatePipeline 之前增加条件判断，仅在以下场景激活管道：
+  //          1. 当前没有活跃管道（首次初始化场景）
+  //          2. 用户当前正在查看的 tab 对应的 pipelineRunId 与 pipelineId 匹配
+  //          3. 用户已主动进入该管道的交互（interactionStore 中存在 entered 状态）
+  //          4. 用户在主 tab 且该 pipelineId 不属于任何子 tab（主管道自身的流式输出）
+  //          其他情况下不激活管道，让子管道的流式输出在后台进行。
+  // 影响范围: 提交任务后标签页自动跳转行为
+  // 修复日期: 2026-05-22
   if (currentActivePipelineId !== pipelineId) {
-    _debugLogger.info(
-      `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
-    )
-    pipelineStore.getState().activatePipeline(pipelineId)
+    const agentTabStore = useAgentTabStore.getState()
+    const activeTab = agentTabStore.getActiveTab()
+    const interactionStore = useInteractionStore.getState()
+
+    /** 判断是否应该自动激活该管道 */
+    const shouldActivatePipeline = (() => {
+      // 条件1：当前没有活跃管道（首次初始化场景），允许激活
+      if (!currentActivePipelineId) return true
+
+      // 条件2：当前活跃 tab 的 pipelineRunId 等于 pipelineId，用户已在查看该管道
+      if (activeTab?.pipelineRunId === pipelineId) return true
+
+      // 条件3：当前活跃 tab 通过 pipelineTabMap 映射到该 pipelineId
+      const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
+      if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
+
+      // 条件4：用户已主动进入该管道的交互（entered 状态）
+      if (interactionStore.getEnteredForPipeline(pipelineId)) return true
+
+      // 条件5：用户在主 tab 且该 pipelineId 不属于任何子 tab，
+      //        认为是主管道自身的流式输出，应激活
+      if (activeTab?.agentLevel === 1 && !tabIdForPipeline) return true
+
+      return false
+    })()
+
+    if (shouldActivatePipeline) {
+      _debugLogger.info(
+        `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
+      )
+      pipelineStore.getState().activatePipeline(pipelineId)
+    } else {
+      _debugLogger.info(
+        `[STREAM_START] skipping activatePipeline: user not viewing pipeline ${pipelineId.slice(0, 12)}, keeping activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
+      )
+    }
   }
 
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
