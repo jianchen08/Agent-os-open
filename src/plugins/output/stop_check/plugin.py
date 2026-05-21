@@ -37,7 +37,8 @@ class StopCheckPlugin(IOutputPlugin):
     1. 用户请求停止 → should_stop == True
     2. 迭代上限检测 → iteration > max_iterations
     3. 执行超时检测 → elapsed > max_duration
-    4. 任务状态检测 → task 被删除/取消
+    4. task_evaluate 工具结果检测 → completed/failed
+    5. 任务状态检测 → task 被删除/取消/完成/失败
 
     优先级：1（系统级，最高优先级检查）
     错误策略：ABORT（停止判断异常必须终止管道）
@@ -162,11 +163,11 @@ class StopCheckPlugin(IOutputPlugin):
         if eval_stop:
             return eval_stop
 
-        # 5. 任务状态检测
+        # 5. 任务状态检测（state 缓存 + TaskService 实际查询）
         if self._check_task_status:
-            task_status = self._check_task_canceled(ctx)
+            task_status = self._check_task_terminal_status(ctx)
             if task_status:
-                logger.info("[%s] Task canceled: %s", self.name, task_status)
+                logger.info("[%s] Task terminal status detected: %s", self.name, task_status)
                 return {
                     "router.stop_reason": f"task_{task_status}",
                     "__route_signal__": RouteSignal(
