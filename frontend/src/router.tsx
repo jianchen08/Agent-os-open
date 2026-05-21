@@ -22,11 +22,13 @@ import {
 import { ROUTES } from './constants/routes'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
+import { useTaskPolling } from './hooks/useTaskPolling'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
-import { startPendingStreamTimeout } from './services/websocket/streaming/chunkTimeout'
+import { startPendingStreamTimeout, clearChunkTimeout } from './services/websocket/streaming/chunkTimeout'
+import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
 import { useInteractionStore } from './stores/interactionStore'
@@ -186,6 +188,9 @@ function HomePage(): ReactNode {
   useConnectionStatus()
   useRealtimeEvents()
 
+  // 轮询长期任务状态，作为 WebSocket 断连时的 fallback
+  useTaskPolling()
+
   // Layout mode toggle
   // BUG-FIX-fix_20260513_workspace_two_clicks:
   // 问题根因: toggleMode 只切换 mode 字段，不同步 workspaceCollapsed，
@@ -248,9 +253,10 @@ function HomePage(): ReactNode {
     [activePipelineId, activeSessionId],
   )
 
-  /** 当前活跃会话的分页状态（从 pipelineMessageStore 读取） */
-  const hasMoreMessages = activeSessionId ? usePipelineMessageStore.getState().hasMoreOlder(activeSessionId) : false
-  const isLoadingMoreMessages = activeSessionId ? usePipelineMessageStore.getState().isLoadingOlderByPipeline[activeSessionId] ?? false : false
+  /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
+  const activeKey = activePipelineId || activeSessionId
+  const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
+  const isLoadingMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false)
 
   // ------------------------------------------
   // 初始化：加载会话列表
@@ -350,9 +356,16 @@ function HomePage(): ReactNode {
         listStore.renameSession(sid, params.content.slice(0, 50))
       }
 
-      const activePipelineId = usePipelineMessageStore.getState().activePipelineId
-      if (!activePipelineId) return
-      const existingMsgs = usePipelineMessageStore.getState().getMessages(activePipelineId)
+      // BUG-FIX-fix_20260520_task_submit_fail:
+      // 问题根因: 新会话首次发消息时后端尚未创建 pipeline，activePipelineId 为空，
+      //           导致 if (!activePipelineId) return 静默丢弃消息，用户看到"提交任务失败"。
+      // 修复方案: 以 activeSessionId 作为 fallback pipelineId，确保消息始终能写入本地状态
+      //           并通过 WebSocket 发送到后端。后端创建 pipeline 后会通过 WS 事件通知前端更新。
+      // 影响范围: 新会话首次消息发送
+      const pipelineStore = usePipelineMessageStore.getState()
+      const activePipelineId = pipelineStore.activePipelineId || sid
+
+      const existingMsgs = pipelineStore.getMessages(activePipelineId)
       const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
       const userMessage: Message = {
@@ -365,7 +378,7 @@ function HomePage(): ReactNode {
         sequence: nextSeq,
       }
 
-      usePipelineMessageStore.getState().addMessage(activePipelineId, userMessage)
+      pipelineStore.addMessage(activePipelineId, userMessage)
 
       const targetPipelineId = params.pipelineId || activePipelineId
       const enteredInteraction =
@@ -409,7 +422,14 @@ function HomePage(): ReactNode {
     }
     const currentPipelineId = usePipelineMessageStore.getState().activePipelineId
     if (currentPipelineId) {
+      // 刷写缓冲区中残留的 chunk，避免数据丢失
+      flushStreamChunkBuffer()
+      // 清理 chunkTimeout 计时器
+      clearChunkTimeout(currentPipelineId)
+      // 清理 streamingTabs（UI 层 streaming 状态）
       stopStreamingForTab(currentPipelineId)
+      // 清理消息层面的 streaming 状态，标记消息为 completed
+      usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
     }
   }, [stopStreamingForTab])
 

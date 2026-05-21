@@ -71,10 +71,19 @@ class _GitOpsMixin:
     - self._resource_merge: Any
     """
 
-    def _get_workspace_root(self) -> str:
-        """从配置中读取工作空间根目录，读取失败则使用全局默认值"""
+    def _get_workspace_root(self) -> Path:
+        """从配置中读取工作空间基目录，解析为绝对路径。
+
+        workspace.root 支持绝对路径和相对路径（相对于 CWD）。
+        返回的是所有工作空间（worktree/container）的父目录。
+        例如配置 root: "D:/myproject" 则返回 Path("D:/myproject")。
+        """
         from isolation.workspace import _DEFAULT_WORKSPACE_ROOT
-        return self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
+        raw = self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
+        p = Path(raw)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        return p.resolve()
 
     def _run_git(self, *args: str, cwd: Path, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
         """执行 git 命令（同步，使用 subprocess）"""
@@ -239,7 +248,10 @@ class _GitOpsMixin:
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
             try:
+                ws_root = self._get_workspace_root()
+                ws_root_name = ws_root.name + "/"
                 gitignore.write_text("\n".join([
+                    ws_root_name,
                     "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/",
                     "*.bak", "*.egg-info/", ".mypy_cache/",
                     "node_modules/", ".env", "*.log", ".tox/",
@@ -281,6 +293,27 @@ class _GitOpsMixin:
                 return None
 
         rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
+        if rc == 0 and status.strip():
+            commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
+            if commit_rc != 0:
+                self._remove_index_lock(cwd)
+                commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
+                if commit_rc != 0:
+                    return None
+            _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
+            return h.strip() if h else None
+        return None
+
+    def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:
+        """只提交已跟踪文件的修改，不添加未跟踪文件。返回 commit hash 或 None。"""
+        self._remove_index_lock(cwd)
+        rc, _, _ = self._run_git("add", "-u", cwd=cwd)
+        if rc != 0:
+            self._remove_index_lock(cwd)
+            rc, _, _ = self._run_git("add", "-u", cwd=cwd)
+            if rc != 0:
+                return None
+        rc, status, _ = self._run_git("status", "--porcelain", "-uno", cwd=cwd)
         if rc == 0 and status.strip():
             commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
             if commit_rc != 0:
@@ -422,7 +455,7 @@ class _GitOpsMixin:
         task_id = task_data.get("task_id", "")
         ws_root = self._get_workspace_root()
         if not workspace:
-            return "new_project", str(Path(ws_root) / task_id)
+            return "new_project", str(ws_root / task_id)
         path = Path(workspace)
         if not path.exists():
             return "new_project", str(path)

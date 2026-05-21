@@ -11,7 +11,8 @@
  */
 
 import { Bell, BellOff, ChevronDown, ChevronRight, X } from 'lucide-react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -60,6 +61,66 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   const executeAction = useNotificationStore((s) => s.executeAction)
 
   const unreadCount = useNotificationStore((s) => s.notifications.filter((n) => !n.isRead).length)
+
+  /** 触发按钮引用，用于计算面板定位 */
+  const triggerRef = useRef<HTMLButtonElement>(null)
+
+  /**
+   * BUG-FIX-fix_20260521_notification_scroll:
+   * 面板定位坐标（fixed 定位，通过 Portal 渲染到 body）
+   *
+   * 问题根因: ChatContainer 根元素有 overflow-hidden，通知面板使用 absolute top-full
+   *          向下展开时被裁剪，导致面板只有部分可见、无法滚动。
+   * 修复方案: 使用 createPortal 将面板渲染到 document.body，采用 fixed 定位，
+   *          根据 trigger 按钮的 getBoundingClientRect 计算面板坐标，
+   *          彻底脱离 ChatContainer 的 overflow-hidden 上下文。
+   * 影响范围: 通知中心面板的显示与滚动
+   * 修复日期: 2026-05-21
+   */
+  const [panelPosition, setPanelPosition] = useState({ top: 0, right: 0 })
+
+  /** 计算面板定位（面板打开时同步 trigger 按钮位置） */
+  useEffect(() => {
+    if (!isPanelOpen || !triggerRef.current) return
+
+    const updatePosition = () => {
+      if (!triggerRef.current) return
+      const rect = triggerRef.current.getBoundingClientRect()
+      setPanelPosition({
+        top: rect.bottom + 8,
+        right: window.innerWidth - rect.right,
+      })
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [isPanelOpen])
+
+  /** 面板 DOM 引用，用于点击外部关闭 */
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  /** 点击面板外部关闭面板 */
+  useEffect(() => {
+    if (!isPanelOpen) return
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      // 如果点击的是 trigger 按钮本身，由 togglePanel 处理
+      if (triggerRef.current?.contains(target)) return
+      // 如果点击在面板内部，不关闭
+      if (panelRef.current?.contains(target)) return
+      closePanel()
+    }
+
+    // 使用 mousedown 而非 click，避免拖拽选择文本时误触
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isPanelOpen, closePanel])
 
   /** 按优先级分组 */
   const groupedNotifications = useMemo(() => {
@@ -160,6 +221,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   /** 渲染通知触发按钮（带未读计数 badge） */
   const renderTrigger = () => (
     <Button
+      ref={triggerRef}
       variant="ghost"
       size="sm"
       className={cn('relative h-8 w-8 p-0 rounded-full', unreadCount > 0 && 'text-primary')}
@@ -266,16 +328,21 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
       {/* 通知触发按钮 */}
       {renderTrigger()}
 
-      {/* 通知中心面板 */}
-      {isPanelOpen && (
+      {/* 通知中心面板 - 通过 Portal 渲染到 body，避免被父容器 overflow-hidden 裁剪 */}
+      {isPanelOpen && createPortal(
         <div
+          ref={panelRef}
           className={cn(
-            'absolute top-full right-0 mt-2 w-96 max-h-[70vh]',
+            'fixed w-96 max-h-[70vh]',
             'bg-background border border-border rounded-xl shadow-xl',
-            'z-50 flex flex-col overflow-hidden',
+            'z-[9999] flex flex-col overflow-hidden',
             'animate-in slide-in-from-top-2 duration-200',
             className,
           )}
+          style={{
+            top: `${panelPosition.top}px`,
+            right: `${panelPosition.right}px`,
+          }}
           data-testid="notification-center-panel"
         >
           {/* 面板头部 */}
@@ -322,7 +389,8 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   )

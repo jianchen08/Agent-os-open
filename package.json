@@ -53,5 +53,8 @@
       "target": "AppImage",
       "icon": "frontend/public/icon.png"
     }
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
   }
 }

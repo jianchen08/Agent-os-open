@@ -72,6 +72,7 @@ class PlaywrightTestTool(BuiltinTool):
                             "screenshot_compare",
                             "save_state",
                             "restore_state",
+                            "evaluate",
                             "close",
                         ],
                         "description": "操作类型",
@@ -132,7 +133,7 @@ class PlaywrightTestTool(BuiltinTool):
                     },
                     "value": {
                         "type": "string",
-                        "description": "输入值（type 时为文本，select 时为选项值）",
+                        "description": "输入值（type 时为文本，select 时为选项值，evaluate 时为 JS 表达式）",
                     },
                     "target_selector": {
                         "type": "string",
@@ -216,6 +217,7 @@ class PlaywrightTestTool(BuiltinTool):
             "screenshot_compare": self._handle_screenshot_compare,
             "save_state": self._handle_save_state,
             "restore_state": self._handle_restore_state,
+            "evaluate": self._handle_evaluate,
             "close": self._handle_close,
         }
 
@@ -584,6 +586,48 @@ class PlaywrightTestTool(BuiltinTool):
         except Exception as e:
             logger.error(f"恢复浏览器状态失败: {e}")
             return create_failure_result(f"恢复浏览器状态失败: {str(e)}")
+
+    async def _handle_evaluate(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """处理 JS 表达式执行，提取页面元素文本和属性值"""
+        try:
+            session_id = inputs.get("session_id")
+            if not session_id:
+                return create_failure_result("session_id 是必填参数")
+
+            session = BrowserManager.get_session(session_id)
+            if not session:
+                return create_failure_result(f"会话不存在: {session_id}")
+
+            value = inputs.get("value")
+            if not value:
+                return create_failure_result("value 是必填参数，需提供 JS 表达式")
+
+            page = session.page
+            timeout = inputs.get("timeout", 30000)
+
+            # 执行 JS 表达式
+            js_result = await page.evaluate(value)
+
+            # 标准化返回值类型
+            result_type = type(js_result).__name__
+            if js_result is None:
+                result_value = None
+            elif isinstance(js_result, (list, dict)):
+                result_value = js_result
+            else:
+                result_value = str(js_result)
+
+            return create_success_result(data={
+                "session_id": session_id,
+                "expression": value,
+                "result": result_value,
+                "result_type": result_type,
+                "message": "JS 表达式执行成功",
+            })
+
+        except Exception as e:
+            logger.error(f"JS 表达式执行失败: {e}")
+            return create_failure_result(f"JS 表达式执行失败: {str(e)}")
 
     async def _handle_close(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理关闭浏览器"""

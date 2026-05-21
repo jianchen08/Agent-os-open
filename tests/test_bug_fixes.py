@@ -165,11 +165,17 @@ class TestBug4SilentExceptionLogging:
         )
 
     def test_task_worker_key_paths_no_silent_exceptions(self):
-        """BUG-4: task_worker.py 关键路径不应有静默 pass。"""
+        """BUG-4: task_worker.py 及其 Mixin 文件关键路径不应有静默 pass。"""
         tw_path = Path("src/infrastructure/task_worker.py")
         assert tw_path.exists(), f"文件不存在: {tw_path}"
 
         content = tw_path.read_text(encoding="utf-8")
+        # 合并 Mixin 文件内容一起检查
+        for mixin_name in ("task_notifier.py", "task_executor.py"):
+            mixin_path = Path(f"src/infrastructure/{mixin_name}")
+            if mixin_path.exists():
+                content += mixin_path.read_text(encoding="utf-8")
+
         # 验证修复后的 logger.warning 调用存在
         assert 'logger.warning("TaskWorker: ServiceProvider 注册失败' in content, (
             "ServiceProvider 注册失败的 logger.warning 不存在"

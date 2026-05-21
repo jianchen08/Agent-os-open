@@ -35,7 +35,6 @@ input_routes:
     target: core
     plugins:
       - message_inject
-      - task_event_receiver
       - tool_schema
       - param_inject
       - memory_read
@@ -53,7 +52,6 @@ input_routes:
     plugins:
       - message_inject
       - context_window_guard
-      - task_event_receiver
       - tool_schema
       - param_inject
       - memory_read
@@ -67,7 +65,6 @@ input_routes:
     target: core
     plugins:
       - message_inject
-      - task_event_receiver
       - tool_schema
       - param_inject
       - memory_read
@@ -107,9 +104,6 @@ plugins:
       enabled: true
       trigger_ratio: 0.6
       compression_model: minimax-m2.7
-  - name: task_event_receiver
-    config:
-      enabled: true
   - name: tool_schema
     config:
       enabled: true

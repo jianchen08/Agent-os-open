@@ -55,7 +55,7 @@ def _create_thread_with_messages(
     Returns:
         创建的线程 ID
     """
-    from channels.api.models import store
+    from channels.api.memory_store import store
 
     # 创建线程
     response = client.post(

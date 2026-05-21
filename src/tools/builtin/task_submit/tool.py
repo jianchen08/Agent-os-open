@@ -73,7 +73,16 @@ class TaskSubmitTool(BuiltinTool):
             return self._event_bus
         from infrastructure.service_provider import get_service_provider
         provider = get_service_provider()
-        bus = provider.get_or_create("event_bus", lambda: __import__("pipeline.event_bus", fromlist=["EventBus"]).EventBus())
+        # BUG-FIX-fix_20260521_event_bus_instance:
+        # 问题根因: 之前使用 pipeline.event_bus.EventBus 创建实例，
+        #          这是一个轻量级进程内总线，和 TaskOrchestrator/Scheduler
+        #          使用的 core.event_bus（InMemoryEventBus/RedisStreamsEventBus）
+        #          是完全不同的类和实例。事件发到 pipeline EventBus，
+        #          而 TaskOrchestrator 订阅的是 core EventBus，永远收不到。
+        # 修复方案: 使用 core.event_bus.get_event_bus() 获取核心事件总线单例，
+        #          与 TaskOrchestrator/Scheduler 共享同一实例。
+        from src.core.event_bus import get_event_bus as get_core_event_bus
+        bus = provider.get_or_create("event_bus", get_core_event_bus)
         if bus is not None:
             self._event_bus = bus
         return self._event_bus

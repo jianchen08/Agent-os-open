@@ -12,6 +12,52 @@ from unittest.mock import MagicMock
 import pytest
 
 from evaluation.engine import EvaluationEngine
+from evaluation.types import (
+    ExpectSpec,
+    MetricDefinition,
+    MetricType,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def metric_def():
+    """创建测试用指标定义。"""
+    return MetricDefinition(
+        id="test_metric",
+        name="测试指标",
+        description="测试指标描述",
+        metric_type=MetricType.AGENT,
+        evaluator_id="system_evaluator_agent",
+        expect=ExpectSpec(conditions=[]),
+    )
+
+
+@pytest.fixture
+def mock_agent_registry():
+    """创建 Mock Agent 注册表。"""
+    from tests.suites.conftest import MockAgentRegistry
+
+    agent_config = MagicMock()
+    agent_config.name = "evaluator_agent"
+    agent_config.config_id = "system_evaluator_agent"
+    return MockAgentRegistry(configs=[agent_config])
+
+
+@pytest.fixture
+def mock_pipeline_factory():
+    """创建 Mock 管道工厂。"""
+    factory = MagicMock()
+    mock_pipeline = MagicMock()
+    mock_result = MagicMock()
+    mock_result.output_text = '{"evaluation_result": {"passed": true, "score": 90, "feedback": "OK"}}'
+    mock_pipeline.run.return_value = mock_result
+    factory.create.return_value = mock_pipeline
+    return factory
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +225,7 @@ def test_find_agent_by_name_fallback(mock_agent_registry):
 
 @pytest.mark.core
 @pytest.mark.unit
-def test_find_agent_not_found(metric_def, mock_pipeline_factory):
+async def test_find_agent_not_found(metric_def, mock_pipeline_factory):
     """验证空注册表中查找 Agent 时抛出 RuntimeError。"""
     from tests.suites.conftest import MockAgentRegistry
 
@@ -192,7 +238,7 @@ def test_find_agent_not_found(metric_def, mock_pipeline_factory):
     )
 
     with pytest.raises(RuntimeError, match="not found in registry"):
-        engine._evaluate_agent(metric_def, {})
+        await engine._evaluate_agent(metric_def, {})
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +248,7 @@ def test_find_agent_not_found(metric_def, mock_pipeline_factory):
 
 @pytest.mark.core
 @pytest.mark.unit
-def test_evaluate_agent_pipeline_factory_none_raises(metric_def, mock_agent_registry):
+async def test_evaluate_agent_pipeline_factory_none_raises(metric_def, mock_agent_registry):
     """验证 pipeline_factory 为 None 时调用 Agent 评估器抛出 RuntimeError。"""
     loader = MagicMock()
     engine = EvaluationEngine(
@@ -212,12 +258,12 @@ def test_evaluate_agent_pipeline_factory_none_raises(metric_def, mock_agent_regi
     )
 
     with pytest.raises(RuntimeError, match="Agent evaluation requires pipeline_factory but it is None"):
-        engine._evaluate_agent(metric_def, {})
+        await engine._evaluate_agent(metric_def, {})
 
 
 @pytest.mark.core
 @pytest.mark.unit
-def test_evaluate_agent_registry_none_raises(metric_def, mock_pipeline_factory):
+async def test_evaluate_agent_registry_none_raises(metric_def, mock_pipeline_factory):
     """验证 agent_registry 为 None 时调用 Agent 评估器抛出 RuntimeError。"""
     loader = MagicMock()
     engine = EvaluationEngine(
@@ -227,12 +273,12 @@ def test_evaluate_agent_registry_none_raises(metric_def, mock_pipeline_factory):
     )
 
     with pytest.raises(RuntimeError, match="Agent evaluation requires agent_registry but it is None"):
-        engine._evaluate_agent(metric_def, {})
+        await engine._evaluate_agent(metric_def, {})
 
 
 @pytest.mark.core
 @pytest.mark.unit
-def test_evaluate_agent_not_found_raises(metric_def, mock_pipeline_factory):
+async def test_evaluate_agent_not_found_raises(metric_def, mock_pipeline_factory):
     """验证 Agent 在注册表中不存在时调用评估器抛出包含 evaluator_id 的 RuntimeError。"""
     from tests.suites.conftest import MockAgentRegistry
 
@@ -245,4 +291,4 @@ def test_evaluate_agent_not_found_raises(metric_def, mock_pipeline_factory):
     )
 
     with pytest.raises(RuntimeError, match=r"Agent 'system_evaluator_agent' not found in registry"):
-        engine._evaluate_agent(metric_def, {})
+        await engine._evaluate_agent(metric_def, {})

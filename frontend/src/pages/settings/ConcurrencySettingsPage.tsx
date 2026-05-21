@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   getConcurrencyConfig,
+  saveConcurrencyConfig,
   type ConcurrencyConfigResponse,
   type TaskConcurrencyConfig,
   type AgentConcurrencyConfig,
@@ -127,15 +128,18 @@ export function ConcurrencySettingsPage() {
     }))
   }, [])
 
-  // 暂不调用后端保存 API（如需可以对接）
-  const handleSave = useCallback(() => {
+  // 保存并发配置到后端
+  const handleSave = useCallback(async () => {
     setSaveState('saving')
-    // 模拟保存（后端并发配置更新 API 可后续对接）
-    setTimeout(() => {
+    try {
+      const saved = await saveConcurrencyConfig(config)
+      setConfig(saved)
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2000)
-    }, 500)
-  }, [])
+    } catch {
+      setSaveState('error')
+    }
+  }, [config])
 
   // 汇总并发数
   const totalMaxConcurrent =

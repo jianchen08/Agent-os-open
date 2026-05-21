@@ -8,6 +8,7 @@
 from infrastructure.concurrency import ConcurrencyController
 from infrastructure.db import close_engine, get_async_session, get_engine, init_db
 from infrastructure.error_policy import apply_error_policy
+from infrastructure.task_launcher import launch_task
 from infrastructure.execution_record_storage import (
     ExecutionRecordData,
     ExecutionRecordStorage,
@@ -43,4 +44,5 @@ __all__ = [
     "StatsCollector",
     "apply_error_policy",
     "create_message_id",
+    "launch_task",
 ]

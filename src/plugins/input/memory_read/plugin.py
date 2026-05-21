@@ -7,7 +7,8 @@
 构造函数只接受 config，由 build_plugin_registry 统一实例化。
 
 State 命名空间：
-    - memory.retrieved : 本插件写入的记忆检索结果
+    - memory.retrieved : 本插件写入的记忆检索结果。
+      首轮执行检索后写入 state，后续轮次检测到已有值则跳过检索直接复用（缓存语义）。
 """
 
 from __future__ import annotations
@@ -82,6 +83,12 @@ class MemoryReadPlugin(IInputPlugin):
 
         if not self._enabled_by_agent:
             return PluginResult(state_updates={"memory.retrieved": []})
+
+        # 缓存检测：首轮检索后结果写入 state，后续轮次直接复用
+        cached = ctx.state.get("memory.retrieved")
+        if cached is not None:
+            logger.debug("[%s] 复用首轮记忆检索缓存 | results=%d", self.name, len(cached))
+            return PluginResult(state_updates={"memory.retrieved": cached})
 
         # 从服务注册表获取 retriever
         try:

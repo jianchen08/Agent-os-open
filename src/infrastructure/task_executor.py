@@ -57,18 +57,53 @@ class TaskExecutorMixin:
         if task_service:
             try:
                 current_task = task_service.get_task(task_id)
-                if not (current_task and current_task.status.value == "running"):
+                if current_task and current_task.status.value == "running":
+                    logger.info("TaskWorker: task %s already running, skip start", task_id)
+                else:
+                    # BUG-FIX-fix_20260512_async_compat: start_task 现在是 async
                     await task_service.start_task(task_id)
                     logger.info("TaskWorker: task %s started", task_id)
             except Exception as e:
-                logger.error("TaskWorker: start_task failed for %s: %s", task_id, e)
+                logger.error("TaskWorker: failed to start task %s: %s", task_id, e)
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                await task_service.fail_task(task_id, f"启动失败: {e}")
                 return
 
-        # ── 2.5 解析工作空间 ──
-        explicit_workspace = task_data.get("workspace", "")
-        workspace = self._resolve_task_workspace(task_id, explicit_workspace or None)
+        # ── 3. 构建完整的 user_input ──
+        user_input = task_data.get("user_input", "")
+        description = task_data.get("description", "")
+        acceptance_criteria = task_data.get("acceptance_criteria", {})
+        explicit_workspace = task_data.get("workspace") or None
+        workspace = self._resolve_task_workspace(task_id, explicit_workspace)
+        task_data["_has_explicit_workspace"] = bool(explicit_workspace)
 
-        # ── 2.7 等待父容器工作空间就绪 ──
+        # HOST模式支持：将 isolation_level 传递给 lifecycle，用于工作空间创建决策
+        task_obj = self._task_service.get_task(task_id) if self._task_service else None
+
+        # ── 注入隔离模式配置 ──
+        # BUG-FIX-fix_20260519_container_workspace_path:
+        # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
+        if task_data.get("isolation_level"):
+            task_data["isolation_mode"] = task_data["isolation_level"]
+        elif task_obj and task_obj.metadata and task_obj.metadata.get("isolation_level"):
+            task_data["isolation_mode"] = task_obj.metadata["isolation_level"]
+        else:
+            try:
+                import yaml as _yaml
+                from pathlib import Path as _P
+                _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
+                if _iso_cfg_path.exists():
+                    _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
+                    task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
+            except Exception:
+                pass
+
+        if task_obj and task_obj.metadata:
+            iso_level = task_obj.metadata.get("isolation_level")
+            if iso_level:
+                task_data["isolation_level"] = iso_level
+
+        # ── 3.x.0 等待父容器工作空间就绪（解决竞态条件） ──
         await self._wait_for_parent_container(task_id, task_service)
 
         # ── 3.x 生命周期钩子：任务启动 + 工作空间状态注入 ──
@@ -78,22 +113,30 @@ class TaskExecutorMixin:
             try:
                 ws_meta = lifecycle.on_task_start(task_id, workspace, task_data)
                 workspace = ws_meta.get("path", workspace)
-                logger.info("TaskWorker: lifecycle on_task_start, task_id=%s, mode=%s", task_id, ws_meta.get("mode"))
+                logger.info(
+                    "TaskWorker: lifecycle on_task_start, task_id=%s, mode=%s",
+                    task_id, ws_meta.get("mode"),
+                )
             except Exception as e:
-                logger.error("TaskWorker: lifecycle on_task_start failed: task_id=%s, error=%s", task_id, e)
+                # BUG-FIX-fix_20260425_container_workspace_init:
+                # 容器子任务找不到容器工作空间等致命错误应直接 fail_task
+                logger.error(
+                    "TaskWorker: lifecycle on_task_start failed: task_id=%s, error=%s",
+                    task_id, e,
+                )
                 if task_service:
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(task_id, f"工作空间初始化失败: {e}")
                 return
 
         # ── 3.x 构建完整输入 ──
-        acceptance_criteria = task_data.get("acceptance_criteria", {})
-        full_input = self._build_full_task_input(
+        full_input = await self._build_full_task_input(
             task_id=task_id,
             task_data=task_data,
             workspace=workspace,
             ws_meta=ws_meta,
             acceptance_criteria=acceptance_criteria,
-            explicit_workspace=explicit_workspace,
+            explicit_workspace=explicit_workspace or "",
             task_service=task_service,
         )
 
@@ -111,9 +154,9 @@ class TaskExecutorMixin:
         # ── 5. 创建子 PipelineEngine 并执行 ──
         timer_manager = self._services.get("timer_manager")
         idle_timer_registered = False
+        _engine_task: asyncio.Task | None = None
         try:
             engine = self._create_pipeline_engine(existing_pipeline_id)
-            acceptance_criteria = self._normalize_acceptance_criteria_paths(acceptance_criteria, workspace)
 
             # 早期绑定 pipeline_run_id
             await self._bind_pipeline_run(task_id, engine._pipeline_id, task_service)
@@ -126,7 +169,7 @@ class TaskExecutorMixin:
                 task_id, timer_manager, task_service, terminal_evt,
             )
             if not idle_timer_registered and timer_manager:
-                return  # 注册失败，任务已被 fail
+                return
 
             # 构建执行参数
             pipeline_timeout = self._compute_pipeline_timeout(agent_config)
@@ -140,7 +183,6 @@ class TaskExecutorMixin:
             _bridge, _on_chunk = self._create_stream_bridge(task_id, engine._pipeline_id, task_service)
 
             # 执行管道
-            _engine_timed_out = False
             _engine_task = asyncio.create_task(
                 engine.run(
                     user_input="" if conversation_history else full_input,
@@ -155,6 +197,7 @@ class TaskExecutorMixin:
                     on_chunk=_on_chunk,
                 )
             )
+            pipeline_state: dict[str, Any] | None = None
             try:
                 if _bridge:
                     await asyncio.wait_for(
@@ -176,16 +219,28 @@ class TaskExecutorMixin:
                     await _engine_task
                 except (asyncio.CancelledError, Exception):
                     pass
-                await self._fail_task_and_cleanup(
-                    task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)",
-                    terminal_evt, timer_manager, idle_timer_registered,
-                )
+                if task_service:
+                    try:
+                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                        await task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
+                    except Exception:
+                        pass
+                evt = self._terminal_events.pop(task_id, None)
+                if evt is not None:
+                    evt.set()
+                self._active_tasks.discard(task_id)
+                self._idle_remind_counts.pop(task_id, None)
+                if idle_timer_registered and timer_manager:
+                    try:
+                        await timer_manager.cancel_timer(task_id)
+                    except Exception:
+                        pass
                 _cleanup_done = True
             finally:
                 if _bridge:
                     _bridge.stop()
 
-            if _engine_timed_out:
+            if _cleanup_done:
                 return
 
             # ── 管道挂起/恢复循环 ──
@@ -198,8 +253,30 @@ class TaskExecutorMixin:
             self._active_tasks.discard(task_id)
             logger.info("TaskWorker: pipeline completed for task %s", task_id)
 
+        except asyncio.CancelledError:
+            logger.info("TaskWorker: task %s cancelled, stopping engine", task_id)
+            if _engine_task is not None and not _engine_task.done():
+                _engine_task.cancel()
+                try:
+                    await _engine_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if _bridge:
+                try:
+                    _bridge.stop()
+                except Exception:
+                    pass
+            self._active_tasks.discard(task_id)
+            if idle_timer_registered and timer_manager:
+                try:
+                    await timer_manager.cancel_timer(task_id)
+                except Exception:
+                    pass
+            raise
+
         except Exception as exc:
             logger.error("TaskWorker: pipeline failed for task %s: %s", task_id, exc)
+            # ── 生命周期钩子：执行异常回滚 ──
             if lifecycle and ws_meta:
                 try:
                     lifecycle.on_task_failed(workspace, ws_meta)
@@ -210,12 +287,16 @@ class TaskExecutorMixin:
                     )
             if task_service:
                 try:
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(task_id, str(exc))
                 except Exception as fail_exc:
                     logger.error("TaskWorker: fail_task also failed: %s", fail_exc)
-            terminal_evt.set()
-            self._terminal_events.pop(task_id, None)
+            evt = self._terminal_events.pop(task_id, None)
+            if evt is not None:
+                evt.set()
+            # BUG-FIX: engine.run 异常后清理活跃任务集合，防止 idle 计时器误判
             self._active_tasks.discard(task_id)
+            # BUG-FIX: engine.run 异常后清理 idle_timer，防止计时器泄漏
             if idle_timer_registered and timer_manager:
                 try:
                     await timer_manager.cancel_timer(task_id)
@@ -228,20 +309,20 @@ class TaskExecutorMixin:
             task_id, task_service, pipeline_state, lifecycle, workspace, ws_meta,
             terminal_evt, timer_manager, idle_timer_registered,
         )
-        if _cleanup_done:
-            return
 
         # ── 6. 等待终态 Event ──
         terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)
         try:
             await asyncio.wait_for(terminal_evt.wait(), timeout=terminal_wait_timeout)
             logger.info("TaskWorker: task %s reached terminal state", task_id)
+            # lifecycle 钩子已移至 _on_task_state_changed → _handle_terminal_lifecycle
         except asyncio.TimeoutError:
             logger.warning(
                 "TaskWorker: task %s timed out waiting for terminal state", task_id,
             )
             if task_service:
                 try:
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(
                         task_id,
                         f"TaskWorker 等待终态超时({terminal_wait_timeout}s)",
@@ -256,6 +337,7 @@ class TaskExecutorMixin:
             if idle_timer_registered and timer_manager:
                 try:
                     await timer_manager.cancel_timer(task_id)
+                    logger.debug("TaskWorker: idle 计时器已取消: task_id=%s", task_id)
                 except Exception as e:
                     logger.warning(
                         "TaskWorker: 取消 idle 计时器失败: task_id=%s, error=%s",
@@ -275,50 +357,70 @@ class TaskExecutorMixin:
         )
         if not lifecycle:
             logger.error(
-                "TaskWorker: WorkspaceLifecycleManager 不可用: task_id=%s",
+                "TaskWorker: WorkspaceLifecycleManager 不可用，无法初始化容器空间: task_id=%s",
                 task_id,
             )
-            await task_service.fail_task(
-                task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用",
-            )
+            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+            await task_service.fail_task(task_id, "容器空间初始化失败：WorkspaceLifecycleManager 不可用")
             return
 
-        _RETRIES = 3
+        _CONTAINER_INIT_RETRIES = 3
         _init_ok = False
         _last_err: Exception | None = None
-        for _attempt in range(1, _RETRIES + 1):
+        for _attempt in range(1, _CONTAINER_INIT_RETRIES + 1):
             try:
-                container_ws = task.metadata.get("workspace") or None
+                # BUG-FIX-fix_20260518_container_ws_override:
+                # 问题根因: 容器任务读取自身 metadata 中的 workspace 覆盖子任务指定的值，
+                #          导致子任务在空目录执行。
+                # 修复方案: 优先使用 task_data 中子任务显式指定的 workspace。
+                explicit_ws = task_data.get("workspace") or None
+                container_ws = explicit_ws or task.metadata.get("workspace") or None
+                # BUG-FIX-fix_20260519_container_workspace_path:
+                # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
+                if "isolation_mode" not in task_data:
+                    _task_iso = task.metadata.get("isolation_level") if task and task.metadata else None
+                    if _task_iso:
+                        task_data["isolation_mode"] = _task_iso
+                    else:
+                        try:
+                            import yaml as _yaml
+                            from pathlib import Path as _P
+                            _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
+                            if _iso_cfg_path.exists():
+                                _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
+                                task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
+                        except Exception:
+                            pass
                 lifecycle.init_container_workspace(task_id, container_ws, task_data)
-                path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
-                if path:
-                    task.metadata["container_workspace"] = path
-                    await task_service.save_task(task)
+                container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
+                if container_workspace_path:
+                    task.metadata["container_workspace"] = container_workspace_path
+                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+                    await self._task_service.save_task(task)
                     logger.info(
-                        "TaskWorker: 容器空间已初始化: task_id=%s, ws=%s (attempt %d)",
-                        task_id, path, _attempt,
+                        "TaskWorker: 容器空间已初始化: task_id=%s, workspace=%s (attempt %d)",
+                        task_id, container_workspace_path, _attempt,
                     )
                     _init_ok = True
                     break
-                _last_err = RuntimeError(
-                    "init_container_workspace 成功但未返回有效 path",
-                )
+                else:
+                    _last_err = RuntimeError("init_container_workspace 成功但未返回有效 path")
             except Exception as e:
                 _last_err = e
                 logger.warning(
-                    "TaskWorker: 容器空间初始化失败 (attempt %d/%d): "
-                    "task_id=%s, error=%s",
-                    _attempt, _RETRIES, task_id, e,
+                    "TaskWorker: 容器空间初始化失败 (attempt %d/%d): task_id=%s, error=%s",
+                    _attempt, _CONTAINER_INIT_RETRIES, task_id, e,
                 )
 
         if not _init_ok:
             logger.error(
-                "TaskWorker: 容器空间初始化最终失败 (%d 次重试耗尽): task_id=%s",
-                _RETRIES, task_id,
+                "TaskWorker: 容器空间初始化最终失败 (%d 次重试耗尽): task_id=%s, error=%s",
+                _CONTAINER_INIT_RETRIES, task_id, _last_err,
             )
+            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
             await task_service.fail_task(
                 task_id,
-                f"容器空间初始化失败（{_RETRIES} 次重试耗尽）：{_last_err}",
+                f"容器空间初始化失败（{_CONTAINER_INIT_RETRIES} 次重试耗尽）：{_last_err}",
             )
 
     async def _load_agent_config(
@@ -328,8 +430,11 @@ class TaskExecutorMixin:
         if not target_id:
             logger.error("TaskWorker: task %s has no target_id, failing", task_id)
             if task_service:
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                 await task_service.fail_task(
-                    task_id, "任务缺少 target_id（目标 Agent），无法执行。",
+                    task_id,
+                    "任务缺少 target_id（目标 Agent），无法执行。"
+                    "请检查 task_submit 是否正确指定了 target_id。",
                 )
             return None
 
@@ -340,13 +445,15 @@ class TaskExecutorMixin:
         agent_config = agent_registry.get(target_id)
         if agent_config is None:
             logger.error(
-                "TaskWorker: agent '%s' not found, failing task %s",
+                "TaskWorker: agent '%s' not found in registry, failing task %s",
                 target_id, task_id,
             )
             if task_service:
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                 await task_service.fail_task(
                     task_id,
-                    f"目标 Agent '{target_id}' 未在系统中注册，无法执行任务。",
+                    f"目标 Agent '{target_id}' 未在系统中注册，无法执行任务。"
+                    f"请检查 task_submit 的 target_id 是否正确。",
                 )
             return None
 
@@ -355,7 +462,11 @@ class TaskExecutorMixin:
     async def _wait_for_parent_container(
         self, task_id: str, task_service: Any,
     ) -> None:
-        """等待父容器工作空间就绪（最多 30s）。"""
+        """等待父容器工作空间就绪（最多 30s）。
+
+        BUG-FIX-fix_20260425_container_workspace_race:
+        解决容器任务和子任务并行执行时的竞态条件。
+        """
         if not task_service:
             return
         _t = task_service.get_task(task_id)
@@ -365,19 +476,21 @@ class TaskExecutorMixin:
         if not (_parent and _parent.metadata.get("task_scope") == "container"):
             return
 
+        _WAIT_INTERVAL = 1.0
+        _WAIT_MAX = 30.0
         _waited = 0.0
-        while _waited < 30.0:
-            _p = task_service.get_task(_t.parent_task_id)
-            if _p and _p.metadata.get("container_workspace"):
+        while _waited < _WAIT_MAX:
+            _parent_refreshed = task_service.get_task(_t.parent_task_id)
+            if _parent_refreshed and _parent_refreshed.metadata.get("container_workspace"):
                 logger.info(
                     "TaskWorker: 父容器工作空间已就绪: parent=%s, waited=%.1fs",
                     _t.parent_task_id, _waited,
                 )
                 return
-            await asyncio.sleep(1.0)
-            _waited += 1.0
+            await asyncio.sleep(_WAIT_INTERVAL)
+            _waited += _WAIT_INTERVAL
         logger.warning(
-            "TaskWorker: 等待父容器工作空间超时(%.1fs): parent=%s",
+            "TaskWorker: 等待父容器工作空间超时(%.1fs): parent=%s, 继续执行",
             _waited, _t.parent_task_id,
         )
 
@@ -396,7 +509,7 @@ class TaskExecutorMixin:
         if existing_pipeline_id:
             engine._pipeline_id = existing_pipeline_id
             logger.info(
-                "TaskWorker: reusing pipeline_id %s (retry)",
+                "TaskWorker: reusing existing pipeline_id %s for task (retry)",
                 existing_pipeline_id,
             )
         return engine
@@ -404,15 +517,21 @@ class TaskExecutorMixin:
     async def _bind_pipeline_run(
         self, task_id: str, pipeline_id: str, task_service: Any,
     ) -> None:
-        """早期绑定 pipeline_run_id 到任务。"""
+        """早期绑定 pipeline_run_id 到任务。
+
+        BUG-FIX-fix_20260417_task_manage_records:
+        管道启动前立即绑定，确保运行中查询执行记录不为空。
+        """
         if not task_service:
             return
         try:
+            # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
             await task_service.bind_pipeline_run(task_id, pipeline_id)
             logger.info(
                 "TaskWorker: bound task %s to pipeline_run %s (early binding)",
                 task_id, pipeline_id,
             )
+            # 按根任务分组执行记录
             exec_storage = self._services.get("execution_record_storage")
             if exec_storage:
                 root_id = task_service.get_root_task_id(task_id)
@@ -432,6 +551,10 @@ class TaskExecutorMixin:
         terminal_evt: asyncio.Event,
     ) -> bool:
         """注册 idle 计时器。
+
+        BUG-FIX-fix_20260422_idle_timer_timing:
+        将 idle 计时器注册移到 engine.run() 之前，确保计时器只在
+        任务真正开始执行管道时才启动。
 
         Returns:
             True=成功注册或无需注册，False=注册失败（任务已 fail）
@@ -455,29 +578,27 @@ class TaskExecutorMixin:
             return True
         except Exception as e:
             logger.error(
-                "TaskWorker: 注册 idle 计时器失败: task_id=%s, error=%s",
+                "TaskWorker: 注册 idle 计时器失败，任务拒绝执行: task_id=%s, error=%s",
                 task_id, e,
             )
             if task_service:
-                await task_service.fail_task(
-                    task_id,
-                    f"idle计时器初始化失败，任务拒绝执行: {e}",
-                )
-            terminal_evt.set()
-            self._terminal_events.pop(task_id, None)
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                await task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
+            evt = self._terminal_events.pop(task_id, None)
+            if evt is not None:
+                evt.set()
             return False
 
     def _compute_pipeline_timeout(self, agent_config: Any) -> float:
         """计算管道执行超时时间（秒）。"""
         pipeline_timeout = float(self._config.get("pipeline_timeout", 1800))
+        # Agent-level timeout override: respect agent's own timeout_seconds setting
         if (
             agent_config
             and hasattr(agent_config, "timeout_seconds")
             and agent_config.timeout_seconds > 0
         ):
-            pipeline_timeout = max(
-                pipeline_timeout, float(agent_config.timeout_seconds),
-            )
+            pipeline_timeout = max(pipeline_timeout, float(agent_config.timeout_seconds))
         return pipeline_timeout
 
     async def _restore_conversation_history(
@@ -502,15 +623,20 @@ class TaskExecutorMixin:
                     msg["tool_call_id"] = r.tool_call_id
                 if r.tool_input:
                     msg["tool_input"] = r.tool_input
+                # 从 tool_calls_json 恢复 tool_calls（新格式）
                 if r.tool_calls_json:
                     try:
                         msg["tool_calls"] = json.loads(r.tool_calls_json)
                     except (json.JSONDecodeError, TypeError):
                         pass
                 conversation_history.append(msg)
+
+            # 旧记录没有 tool_calls_json，需要从 tool 记录反向重建
             _reconstruct_tool_calls(conversation_history)
+
             logger.info(
-                "TaskWorker: restored %d messages for retry pipeline=%s",
+                "TaskWorker: restored %d messages from pipeline records "
+                "for task (retry, pipeline=%s)",
                 len(conversation_history), existing_pipeline_id,
             )
             return conversation_history
@@ -532,34 +658,48 @@ class TaskExecutorMixin:
                 if _root_id:
                     _root_task = task_service.get_task(_root_id)
                     if _root_task:
-                        _rpid = getattr(
-                            _root_task, "parent_pipeline_id", "",
-                        ) or ""
-                        if _rpid and hasattr(
-                            _notifier, "get_thread_for_pipeline",
-                        ):
-                            _ws_thread_id = (
-                                _notifier.get_thread_for_pipeline(_rpid)
-                            )
+                        _root_pipeline_id = getattr(_root_task, "parent_pipeline_id", "") or ""
+                        if _root_pipeline_id and hasattr(_notifier, "get_thread_for_pipeline"):
+                            _ws_thread_id = _notifier.get_thread_for_pipeline(_root_pipeline_id)
                         logger.info(
-                            "TaskWorker lookup: root=%s rp=%s ws=%s",
-                            _root_id[:12], _rpid[:12],
+                            "TaskWorker lookup: root_id=%s root_pipeline=%s ws_thread=%s map_size=%d",
+                            _root_id[:12] if _root_id else "",
+                            _root_pipeline_id[:12] if _root_pipeline_id else "",
                             _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
+                            len(_notifier._pipeline_thread_map) if hasattr(_notifier, "_pipeline_thread_map") else -1,
                         )
             except Exception as _e:
                 logger.warning("TaskWorker lookup error: %s", _e)
 
+        _sub_pipeline_id = pipeline_id
         _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
+
+        # BUG-FIX-fix_20260514_sub_pipeline_register: 注册子管道的 pipeline_id 到 _pipeline_thread_map
+        # 问题根因: 主管道的 pipeline_id 在 start_server.py 中通过 register_pipeline_thread 注册了映射,
+        #           但子管道（由 TaskWorker._execute_background_task 创建）的 pipeline_id 从未注册。
+        #           当子Agent创建的子子任务通过 parent_pipeline_id 查找 _pipeline_thread_map 时,
+        #           如果 parent_pipeline_id 指向子管道（而非最顶层管道），查找失败，消息被静默丢弃。
+        # 修复方案: 将子管道的 pipeline_id 也注册到 _pipeline_thread_map，映射到同一个 ws_thread_id。
+        # 影响范围: 子Agent任务状态实时推送到前端的功能
+        # 修复日期: 2026-05-14
+        if _notifier and _ws_thread_id and hasattr(_notifier, "register_pipeline_thread"):
+            _notifier.register_pipeline_thread(_sub_pipeline_id, _ws_thread_id)
+            logger.info(
+                "TaskWorker: 注册子管道映射: sub_pipeline=%s ws_thread=%s",
+                _sub_pipeline_id[:12], _ws_thread_id[:12],
+            )
+
         if _notifier and _ws_thread_id:
             _sink = TargetedSink(_notifier, _ws_thread_id)
             _bridge = PipelineStreamBridge(
-                pipeline_id=pipeline_id,
+                pipeline_id=_sub_pipeline_id,
                 output_sink=_sink,
                 message_id=_sub_message_id,
             )
             logger.info(
-                "TaskWorker: 子管道桥接创建: sub=%s ws=%s",
-                pipeline_id[:12], _ws_thread_id[:12],
+                "TaskWorker: 子管道桥接创建: bridge_id=%d sub_pipeline=%s ws_thread=%s",
+                id(_bridge), _sub_pipeline_id[:12],
+                _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
             )
             return _bridge, _bridge.on_chunk
         return None, lambda chunk: None
@@ -574,10 +714,13 @@ class TaskExecutorMixin:
         """处理管道挂起/恢复循环。"""
         while engine.is_suspended:
             logger.info(
-                "TaskWorker: pipeline suspended for task %s, saving engine ref",
+                "TaskWorker: pipeline suspended for task %s (waiting for children), "
+                "saving engine reference",
                 task_id,
             )
             self._suspended_engines[task_id] = engine
+
+            # 注册 wake_event，由 _notify_suspended_pipelines 或 _try_resume_engine set
             wake_evt = asyncio.Event()
             self._wake_events[task_id] = wake_evt
 
@@ -592,7 +735,7 @@ class TaskExecutorMixin:
                     )
                 else:
                     logger.info(
-                        "TaskWorker: child task completed, resuming for task %s",
+                        "TaskWorker: child task completed, resuming pipeline for task %s",
                         task_id,
                     )
             except asyncio.TimeoutError:
@@ -604,20 +747,11 @@ class TaskExecutorMixin:
                 self._wake_events.pop(task_id, None)
 
             if not engine.is_suspended:
-                continue
-
-            child_notifications = self._build_child_notifications(
-                task_id, task_service,
-            )
-            if (
-                child_notifications
-                and hasattr(engine, "_suspended_state")
-                and engine._suspended_state
-            ):
-                orig = engine._suspended_state.get("user_input", "")
-                engine._suspended_state["user_input"] = (
-                    f"{child_notifications}\n\n{orig}".strip()
+                logger.info(
+                    "TaskWorker: engine already resumed for task %s (via send_pipeline_message), skipping",
+                    task_id,
                 )
+                continue
 
             try:
                 await engine.resume()
@@ -639,16 +773,24 @@ class TaskExecutorMixin:
     def cancel_pipeline(self, task_id: str) -> bool:
         """取消任务关联的运行中管道。
 
+        由 task_manage cancel 操作调用，强制停止 PipelineEngine。
+        清理所有相关资源（挂起引擎、计时器、事件）后取消 asyncio.Task。
+
         Args:
             task_id: 要取消的任务 ID
 
         Returns:
-            是否成功发起取消
+            是否成功发起取消（无运行中管道时返回 False）
         """
         bg_task = self._task_id_to_bg_task.get(task_id)
         if bg_task is None or bg_task.done():
+            logger.debug(
+                "TaskWorker.cancel_pipeline: no running pipeline for task %s",
+                task_id,
+            )
             return False
 
+        # 获取 pipeline_id 用于清理 services 中的引擎引用
         pipeline_id = None
         if self._task_service:
             try:
@@ -656,15 +798,12 @@ class TaskExecutorMixin:
                 if task:
                     pipeline_id = getattr(task, "pipeline_run_id", None)
             except Exception:
-                pass
+                logger.warning("TaskWorker: cancel_pipeline 获取 pipeline_id 失败: task_id=%s", task_id, exc_info=True)
 
         if pipeline_id:
-            for key in (
-                f"__suspended_engine_{pipeline_id}",
-                f"__running_engine_{pipeline_id}",
-                f"__pending_notifications_{pipeline_id}",
-            ):
-                self._services.pop(key, None)
+            self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+            self._services.pop(f"__running_engine_{pipeline_id}", None)
+            self._services.pop(f"__pending_notifications_{pipeline_id}", None)
 
         self._suspended_engines.pop(task_id, None)
         wake_evt = self._wake_events.pop(task_id, None)
@@ -695,7 +834,15 @@ class TaskExecutorMixin:
     ) -> str:
         """根据任务层级关系解析工作空间路径。
 
-        子任务继承父任务的工作空间，形成嵌套目录结构。
+        子任务继承父任务的工作空间，形成嵌套目录结构：
+        - 根任务: .ai_workspaces/{task_id}
+        - 子任务: {parent_resolved_workspace}/{task_id}
+
+        BUG-FIX-fix_20260419_workspace_inherit:
+        问题根因: TaskWorker 为每个子任务创建平级工作空间 .ai_workspaces/{task_id}，
+                 忽略了父任务的工作空间，导致子任务无法共享父任务的文件产出。
+        修复方案: 沿 parent_task_id 链向上追溯，从根任务向下逐层解析工作空间路径，
+                 确保子任务嵌套在父任务工作空间下。
 
         Args:
             task_id: 当前任务 ID
@@ -731,16 +878,14 @@ class TaskExecutorMixin:
         resolved: str | None = None
         for tid, tws in reversed(ancestor_chain):
             if resolved is None:
+                # 根任务：无父空间，直接解析
                 resolved = resolve_workspace(tid, tws, config_root=root)
             elif tid == task_id:
-                resolved = resolve_workspace(
-                    tid, task_workspace,
-                    parent_resolved_workspace=resolved,
-                )
+                # 当前任务：使用调用方传入的 task_workspace 参数
+                resolved = resolve_workspace(tid, task_workspace, parent_resolved_workspace=resolved)
             else:
-                resolved = resolve_workspace(
-                    tid, tws, parent_resolved_workspace=resolved,
-                )
+                # 中间祖先：使用其 metadata 中存储的 workspace 值
+                resolved = resolve_workspace(tid, tws, parent_resolved_workspace=resolved)
 
         return resolved or f"{root}/{task_id}"
 
@@ -749,5 +894,9 @@ class TaskExecutorMixin:
     # ───────────────────────────────────────────────────────────────────
 
     async def _check_stale_containers(self) -> None:
-        """容器终态检查（已禁用超时自动判定）。"""
+        """容器终态检查（已禁用超时自动判定）。
+
+        容器的完成/失败由主 Agent 通过 complete_container / fail_container 决定，
+        系统不做自动判定。
+        """
         return

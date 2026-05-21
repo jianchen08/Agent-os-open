@@ -107,7 +107,7 @@ for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!BACKEND_PORT! " ^| 
 
 :: ========== 启动前端 ==========
 echo [2/2] 启动前端开发服务器 (Vite :!FRONTEND_PORT!)...
-start "Agent OS Frontend - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& npm run dev -- --port !FRONTEND_PORT!"
+start "Agent OS Frontend - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& npx vite --port !FRONTEND_PORT!"
 
 :: ========== 等待前端就绪并打开浏览器 ==========
 echo [INFO] 等待前端服务就绪...

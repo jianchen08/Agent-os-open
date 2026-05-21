@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable
+from pathlib import Path
 from typing import Any, Callable
 
 from evaluation.expect import ExpectEvaluator
@@ -120,7 +121,6 @@ class EvaluationEngine:
         """
         config = config or EvaluationConfig()
 
-        # 确定要评估的指标列表
         if config.metric_ids:
             metrics_to_run = [
                 self._loader.get(mid)
@@ -129,6 +129,21 @@ class EvaluationEngine:
             ]
         else:
             metrics_to_run = list(self._loader.metrics.values())
+
+        # BUG-FIX-fix_20260521_eval_debug: 追踪评估指标加载情况
+        _dbg_path = Path(__file__).resolve().parent.parent.parent / "debug_eval_trace.log"
+        try:
+            with open(_dbg_path, "a", encoding="utf-8") as _df:
+                _df.write(f"\n=== evaluate() task={task_id} ===\n")
+                _df.write(f"metric_ids requested: {config.metric_ids}\n")
+                _df.write(f"loader metrics keys: {list(self._loader.metrics.keys())}\n")
+                _df.write(f"metrics_to_run count: {len(metrics_to_run)}\n")
+                for m in metrics_to_run:
+                    _df.write(f"  - {m.id}: type={m.metric_type.value}, evaluator_id={m.evaluator_id}\n")
+                if not metrics_to_run:
+                    _df.write("  NO METRICS LOADED!\n")
+        except Exception:
+            pass
 
         if not metrics_to_run:
             logger.warning("No metrics to evaluate for task %s", task_id)
@@ -661,6 +676,40 @@ class EvaluationEngine:
                 "final_output", raw_output
             )
             output_text = str(final_output) if final_output else ""
+
+            # BUG-FIX-fix_20260521_eval_output_debug: 写入文件级调试日志
+            _debug_path = Path(__file__).resolve().parent.parent.parent / "debug_eval_agent.log"
+            try:
+                import json as _json
+                _debug_data = {
+                    "metric_id": metric_def.id,
+                    "pipeline_id": _pipeline_run_id,
+                    "raw_result_type": type(raw_output).__name__,
+                    "raw_result_len": len(str(raw_output)),
+                    "raw_result_str": str(raw_output)[:3000],
+                    "final_output_type": type(final_output).__name__,
+                    "final_output_len": len(str(final_output)) if final_output else 0,
+                    "final_output_str": str(final_output)[:3000] if final_output else "",
+                    "output_text_len": len(output_text),
+                    "output_text_first500": output_text[:500],
+                    "pipeline_state_keys": list(pipeline_state.keys()) if isinstance(pipeline_state, dict) else "NOT_A_DICT",
+                }
+                with open(_debug_path, "a", encoding="utf-8") as _df:
+                    _df.write(f"\n=== {metric_def.id} @ {_pipeline_run_id} ===\n")
+                    _df.write(_json.dumps(_debug_data, ensure_ascii=False, indent=2))
+                    _df.write("\n")
+            except Exception as _de:
+                logger.warning("Debug log write failed: %s", _de)
+
+            logger.info(
+                "Agent evaluation raw output: metric=%s, pipeline=%s, "
+                "raw_result type=%s len=%d, final_output type=%s len=%d, "
+                "output_text len=%d first200=%s",
+                metric_def.id, _pipeline_run_id,
+                type(raw_output).__name__, len(str(raw_output)),
+                type(final_output).__name__, len(str(final_output)) if final_output else 0,
+                len(output_text), output_text[:200],
+            )
 
             eval_result = self._parse_evaluation_result(output_text)
             if eval_result is not None:

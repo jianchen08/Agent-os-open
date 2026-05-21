@@ -114,7 +114,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
 
         if event_bus is not None:
             try:
-                event_bus.subscribe("task_state_changed", self._on_state_changed)
+                event_bus.subscribe_simple("task_state_changed", self._on_state_changed)
                 self._subscribed = True
                 self._event_bus = event_bus
                 logger.info("[TaskEventReceiver] Subscribed to task_state_changed events")
@@ -127,34 +127,57 @@ class TaskEventReceiverPlugin(IInputPlugin):
         except KeyError:
             pass
 
-    async def _on_state_changed(self, data: dict[str, Any]) -> None:
+    async def _on_state_changed(self, event: Any) -> None:
         """处理任务状态变更事件。
 
         终态（completed/failed）时将事件排入待处理队列，
         在下一轮管道迭代时注入到主 Agent 对话中。
 
-        仅接收 parent_task_id 与当前管道 task_id 匹配的事件，
-        避免并行管道之间的事件交叉污染。
+        仅接收根任务（无 parent_task_id 且无 parent_pipeline_id）的终态事件，
+        子任务通知由 TaskWorker._notify_suspended_pipelines 统一处理。
 
         Args:
-            data: 事件数据，包含 task_id, old_status, new_status, task 等信息
+            event: ExecutionEvent 对象或原始 dict 数据
         """
+        data = event.data if hasattr(event, "data") else event
         new_status = data.get("new_status")
 
         if new_status not in ("completed", "failed"):
             return
 
         task = data.get("task")
+        task_id = data.get("task_id", "")
+
+        # BUG-FIX-fix_20260521_notification_route:
+        # 问题根因: _emit_state_change 的事件数据中不包含 task 对象（只有 task_id），
+        #   导致 task=None，parent_task_id 和 parent_pipeline_id 的过滤全部失效，
+        #   所有子任务终态事件都通过此插件注入到 user_input，与 _notify_suspended_pipelines
+        #   的 send_pipeline_message 形成重复通知。
+        # 修复方案: 当 task 为 None 时，通过 task_service 查找任务对象获取过滤字段。
+        if task is None and self._task_service and task_id:
+            try:
+                task = self._task_service.get_task(task_id)
+            except Exception:
+                pass
 
         if isinstance(task, dict):
             parent_id = task.get("parent_task_id", "")
+            ppl_id = task.get("parent_pipeline_id", "")
+            task_title = task.get("title", "未知任务")
+            task_error = task.get("error", "")
         elif task and hasattr(task, "parent_task_id"):
             parent_id = getattr(task, "parent_task_id", "") or ""
+            ppl_id = getattr(task, "parent_pipeline_id", "") or ""
+            task_title = getattr(task, "title", "未知任务")
+            task_error = getattr(task, "error", "") or ""
         else:
             parent_id = ""
+            ppl_id = ""
+            task_title = "未知任务"
+            task_error = ""
 
-        # 有父任务或父管道的任务，通知由 TaskWorker._notify_suspended_pipelines
-        # 通过管道级 inject_and_wake 统一处理，此处跳过以避免重复通知。
+        # 子任务通知由 TaskWorker._notify_suspended_pipelines 通过
+        # send_pipeline_message 统一注入，此处跳过以避免重复通知。
         if parent_id:
             logger.debug(
                 "[TaskEventReceiver] Skipping child task event: parent_id=%s (handled by TaskWorker)",
@@ -162,14 +185,6 @@ class TaskEventReceiverPlugin(IInputPlugin):
             )
             return
 
-        # 也检查 parent_pipeline_id：CLI 主 Agent 提交的子任务没有 parent_task_id，
-        # 但有 parent_pipeline_id，通知由 _notify_suspended_pipelines 的管道级机制处理。
-        if isinstance(task, dict):
-            ppl_id = task.get("parent_pipeline_id", "")
-        elif task and hasattr(task, "parent_pipeline_id"):
-            ppl_id = getattr(task, "parent_pipeline_id", "") or ""
-        else:
-            ppl_id = ""
         if ppl_id:
             logger.debug(
                 "[TaskEventReceiver] Skipping child task event: parent_pipeline_id=%s (handled by _notify_suspended_pipelines)",
@@ -177,19 +192,7 @@ class TaskEventReceiverPlugin(IInputPlugin):
             )
             return
 
-        task_id = data.get("task_id", "")
-
-        if isinstance(task, dict):
-            task_title = task.get("title", "未知任务")
-            task_error = task.get("error", "")
-        elif task and hasattr(task, "title"):
-            task_title = task.title
-            task_error = getattr(task, "error", "") or ""
-        else:
-            task_title = "未知任务"
-            task_error = ""
-
-        event = {
+        evt = {
             "type": "task_completed" if new_status == "completed" else "task_failed",
             "task_id": task_id,
             "title": task_title,
@@ -197,8 +200,8 @@ class TaskEventReceiverPlugin(IInputPlugin):
             "error": task_error,
             "parent_task_id": parent_id,
         }
-        self._pending_events.append(event)
-        logger.info("[TaskEventReceiver] Queued event: %s for task %s (%s)", event["type"], task_id, task_title)
+        self._pending_events.append(evt)
+        logger.info("[TaskEventReceiver] Queued event: %s for task %s (%s)", evt["type"], task_id, task_title)
 
     def shutdown(self) -> None:
         """关闭插件，取消订阅。"""

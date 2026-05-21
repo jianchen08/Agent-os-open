@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -27,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SUMMARY_MAX_LEN = 500
 _MAX_RECORDS_PER_FILE = 500
+
+
+def _fix_records_empty_flow(text: str) -> str:
+    """修复 YAML 中 records: [] 后追加序列项导致的解析错误。
+
+    旧版 _update_summary_in_file 写入 "records: []"，而 _append_record_to_file
+    追加 "- record_id: ..."，两者混合产生无效 YAML。将 "records: []" 替换为
+    "records:" 即可恢复正确格式。
+    """
+    return re.sub(r'^records:\s*\[\]\s*$', 'records:', text, flags=re.MULTILINE)
 
 
 @dataclass
@@ -231,8 +242,13 @@ class ExecutionRecordStorage:
 
         if not file_path.exists():
             file_path.parent.mkdir(parents=True, exist_ok=True)
+            # BUG-FIX-fix_yaml_records_parse_error:
+            # 问题根因: 使用 "records: []" (flow 空序列) 后再追加 "- record_id: ..."
+            #           会产生无效 YAML，导致 yaml.safe_load 抛出 ParserError，
+            #           重启后整个文件被跳过，summary 和 records 全部丢失。
+            # 修复方案: 使用 "records:" (block 序列头)，后续追加的 "- ..." 能正确解析。
             file_path.write_text(
-                new_summary_text + "\nrecords: []\n",
+                new_summary_text + "\nrecords:\n",
                 encoding="utf-8",
             )
             return
@@ -275,6 +291,10 @@ class ExecutionRecordStorage:
     def _load_pipeline_file(self, yaml_file: Path) -> None:
         try:
             text = yaml_file.read_text(encoding="utf-8")
+            # BUG-FIX-fix_yaml_records_parse_error:
+            # 修复已有的损坏文件：将 "records: []" 替换为 "records:"，
+            # 使后续追加的 "- record_id: ..." 序列项能被正确解析。
+            text = _fix_records_empty_flow(text)
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
                 return
@@ -317,6 +337,8 @@ class ExecutionRecordStorage:
         """
         try:
             text = yaml_file.read_text(encoding="utf-8")
+            # BUG-FIX-fix_yaml_records_parse_error: 同 _load_pipeline_file
+            text = _fix_records_empty_flow(text)
             data = yaml.safe_load(text)
             if not isinstance(data, dict):
                 return

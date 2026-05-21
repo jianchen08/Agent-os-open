@@ -9,6 +9,8 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -223,9 +225,10 @@ class _MergeOpsMixin:
         self._ensure_git_user(ws_path)
         self._git_add_commit_if_dirty(
             ws_path, "chore: auto commit before merge")
-        # BUG-FIX: 合并前提交项目根目录的脏文件，防止未提交修改被覆盖
+        # BUG-FIX: 合并前提交项目根目录已跟踪文件的修改
+        # 注意：只提交已跟踪文件的变更，不 add 未跟踪文件，避免污染项目
         self._ensure_git_user(proj_path)
-        self._git_add_commit_if_dirty(
+        self._git_add_tracked_and_commit(
             proj_path, "chore: auto-save before merge")
         # 获取项目根目录当前实际所在分支（不再硬找 main/master）
         rc, current_branch, _ = self._run_git(
@@ -271,14 +274,19 @@ class _MergeOpsMixin:
         changed_files: set[str] | None = None
         branch = ws_meta.get("branch", "") if ws_meta else ""
         project_root = ws_meta.get("project_root", "") if ws_meta else ""
+        # BUG-FIX-fix_20260521_copy_merge_overwrite:
+        # 保存 merge-base 信息供三路合并使用，避免整文件覆盖丢失已有改动
+        merge_base = ""
+        merge_proj_path: Path | None = None
         if branch and project_root:
-            proj_path = Path(project_root)
+            merge_proj_path = Path(project_root)
             rc, base, _ = self._run_git(
-                "merge-base", branch, "HEAD", cwd=proj_path)
+                "merge-base", branch, "HEAD", cwd=merge_proj_path)
             if rc == 0 and base.strip():
+                merge_base = base.strip()
                 rc2, diff_out, _ = self._run_git(
-                    "diff", "--name-only", base.strip(), branch,
-                    cwd=proj_path)
+                    "diff", "--name-only", merge_base, branch,
+                    cwd=merge_proj_path)
                 if rc2 == 0 and diff_out.strip():
                     changed_files = set(diff_out.strip().splitlines())
                     logger.info(
@@ -298,6 +306,20 @@ class _MergeOpsMixin:
                 continue
             target_file = dst / rel
             target_file.parent.mkdir(parents=True, exist_ok=True)
+            # BUG-FIX-fix_20260521_copy_merge_overwrite:
+            # 目标文件已存在且有三路合并所需信息时，尝试内容级合并。
+            # 三路合并失败（冲突或二进制文件）直接报错，不回退整文件覆盖。
+            if target_file.exists() and merge_base and merge_proj_path:
+                if self._try_three_way_merge(
+                        target_file, item, merge_base, rel_str, merge_proj_path):
+                    merged.append(str(rel))
+                    continue
+                logger.error(
+                    "[WorkspaceLifecycle] copy_merge: 三路合并失败，"
+                    "合并中止: %s", rel_str)
+                return {"success": False,
+                        "error": f"三路合并冲突，无法自动合并: {rel_str}",
+                        "method": "copy", "merged_files": merged}
             shutil.copy2(str(item), str(target_file))
             merged.append(str(rel))
         if merged:
@@ -308,6 +330,91 @@ class _MergeOpsMixin:
         logger.warning("[WorkspaceLifecycle] copy_merge: 未合并任何文件")
         return {"success": False, "error": "copy_merge 未合并任何文件",
                 "method": "copy", "merged_files": []}
+
+    def _try_three_way_merge(
+        self,
+        target_file: Path,
+        source_file: Path,
+        merge_base: str,
+        rel_str: str,
+        proj_path: Path,
+    ) -> bool:
+        """尝试使用 git merge-file 进行三路合并，避免整文件覆盖丢失已有改动。
+
+        BUG-FIX-fix_20260521_copy_merge_overwrite:
+        当多个 worktree 先后合并修改了同一文件的不同位置时，后合并的 worktree
+        的文件版本基于原始代码（merge-base），不包含先合并的改动。
+        使用 git merge-file 做内容级别的三路合并，保留所有改动。
+        冲突或二进制文件时返回 False，由调用方回退到整文件覆盖。
+
+        Args:
+            target_file: 目标文件路径（已存在，包含先前合并的改动）
+            source_file: 源文件路径（worktree 中的文件）
+            merge_base: merge-base commit hash
+            rel_str: 相对文件路径（用于 git show 获取 base 版本）
+            proj_path: 项目根目录路径（用于 git 命令的 cwd）
+
+        Returns:
+            True 表示三路合并成功，False 表示需要回退到整文件覆盖
+        """
+        # 获取 base 版本的文件内容（merge-base 时的原始版本）
+        # 使用二进制模式避免 text=True 导致的 UTF-8 解码损坏二进制/非UTF-8文件内容
+        try:
+            r = subprocess.run(
+                ["git", "show", f"{merge_base}:{rel_str}"],
+                cwd=str(proj_path), capture_output=True, timeout=30)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.debug(
+                "[WorkspaceLifecycle] 三路合并: git show base 执行失败: %s",
+                rel_str)
+            return False
+        if r.returncode != 0:
+            logger.debug(
+                "[WorkspaceLifecycle] 三路合并: git show base 失败 "
+                "(可能为新增文件): %s", rel_str)
+            return False
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                base_tmp = tmp / "base"
+                current_tmp = tmp / "current"
+
+                # 写入 base 版本（保持原始字节，不经过文本编解码）
+                base_tmp.write_bytes(r.stdout)
+                # 复制当前目标版本（可能已包含先前 worktree 的改动）
+                shutil.copy2(str(target_file), str(current_tmp))
+
+                # 执行三路合并：git merge-file <current> <base> <other>
+                # 成功返回 0，冲突返回正数（冲突数），错误返回负数（二进制等）
+                rc_merge, _, stderr = self._run_git(
+                    "merge-file", str(current_tmp), str(base_tmp),
+                    str(source_file), cwd=proj_path)
+
+                if rc_merge == 0:
+                    # 合并成功，将合并结果覆盖目标文件
+                    shutil.copy2(str(current_tmp), str(target_file))
+                    logger.info(
+                        "[WorkspaceLifecycle] 三路合并成功: %s", rel_str)
+                    return True
+
+                if rc_merge > 0:
+                    logger.warning(
+                        "[WorkspaceLifecycle] 三路合并冲突 "
+                        "(%d conflicts)，回退到整文件覆盖: %s",
+                        rc_merge, rel_str)
+                else:
+                    logger.warning(
+                        "[WorkspaceLifecycle] 三路合并失败 (rc=%d)，"
+                        "可能是二进制文件，回退到整文件覆盖: %s, stderr=%s",
+                        rc_merge, rel_str,
+                        stderr[:200] if stderr else "")
+                return False
+        except Exception as exc:
+            logger.warning(
+                "[WorkspaceLifecycle] 三路合并异常，回退到整文件覆盖: "
+                "%s, error=%s", rel_str, exc)
+            return False
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from tasks.types import TaskModel, TaskStatus
@@ -45,6 +45,8 @@ def _mock_task_service(tasks: dict[str, TaskModel] | None = None) -> MagicMock:
 
     svc.get_task.side_effect = get_task
     svc._storage = MagicMock()
+    svc.move_to_evaluating = AsyncMock()
+    svc.complete_evaluation = AsyncMock()
 
     def save(task: TaskModel) -> None:
         tasks[task.id] = task
@@ -106,7 +108,7 @@ class TestEvaluateSingle:
     """evaluate_single 操作测试。"""
 
     @patch("tasks.service.TaskService")
-    def test_evaluate_evaluating_task_pass(self, MockTS: MagicMock) -> None:
+    async def test_evaluate_evaluating_task_pass(self, MockTS: MagicMock) -> None:
         """评估 evaluating 状态任务通过。"""
         task = _make_task(status=TaskStatus.EVALUATING)
         completed_task = _make_task(status=TaskStatus.COMPLETED)
@@ -114,7 +116,7 @@ class TestEvaluateSingle:
         mock_svc.complete_evaluation.return_value = completed_task
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "evaluate_single",
             "task_id": "task_001",
         })
@@ -122,7 +124,7 @@ class TestEvaluateSingle:
         assert result["status"] == "completed"
 
     @patch("tasks.service.TaskService")
-    def test_evaluate_running_task_moves_to_evaluating(self, MockTS: MagicMock) -> None:
+    async def test_evaluate_running_task_moves_to_evaluating(self, MockTS: MagicMock) -> None:
         """running 状态任务先移入 evaluating。"""
         running_task = _make_task(status=TaskStatus.RUNNING)
         evaluating_task = _make_task(status=TaskStatus.EVALUATING)
@@ -136,7 +138,7 @@ class TestEvaluateSingle:
         mock_svc.complete_evaluation.side_effect = complete_evaluation
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "evaluate_single",
             "task_id": "task_001",
         })
@@ -144,7 +146,7 @@ class TestEvaluateSingle:
         mock_svc.move_to_evaluating.assert_called_once_with("task_001")
 
     @patch("tasks.service.TaskService")
-    def test_evaluate_with_result_text(self, MockTS: MagicMock) -> None:
+    async def test_evaluate_with_result_text(self, MockTS: MagicMock) -> None:
         """带执行结果的评估。"""
         task = _make_task(status=TaskStatus.EVALUATING)
         completed_task = _make_task(status=TaskStatus.COMPLETED)
@@ -152,7 +154,7 @@ class TestEvaluateSingle:
         mock_svc.complete_evaluation.return_value = completed_task
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "evaluate_single",
             "task_id": "task_001",
             "result": "任务执行结果",
@@ -160,12 +162,12 @@ class TestEvaluateSingle:
         assert result["success"] is True
 
     @patch("tasks.service.TaskService")
-    def test_evaluate_nonexistent_task(self, MockTS: MagicMock) -> None:
+    async def test_evaluate_nonexistent_task(self, MockTS: MagicMock) -> None:
         """评估不存在的任务。"""
         mock_svc = _mock_task_service()
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "evaluate_single",
             "task_id": "nonexistent",
         })
@@ -173,13 +175,13 @@ class TestEvaluateSingle:
         assert result["error_code"] == "TASK_NOT_FOUND"
 
     @patch("tasks.service.TaskService")
-    def test_evaluate_invalid_status(self, MockTS: MagicMock) -> None:
+    async def test_evaluate_invalid_status(self, MockTS: MagicMock) -> None:
         """评估不支持的状态。"""
         task = _make_task(status=TaskStatus.PENDING)
         mock_svc = _mock_task_service({"task_001": task})
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "evaluate_single",
             "task_id": "task_001",
         })
@@ -194,7 +196,7 @@ class TestAutoComplete:
     """auto_complete 操作测试。"""
 
     @patch("tasks.service.TaskService")
-    def test_auto_complete_running_task(self, MockTS: MagicMock) -> None:
+    async def test_auto_complete_running_task(self, MockTS: MagicMock) -> None:
         """自动完成 running 状态任务。"""
         running_task = _make_task(status=TaskStatus.RUNNING)
         evaluating_task = _make_task(status=TaskStatus.EVALUATING)
@@ -204,7 +206,7 @@ class TestAutoComplete:
         mock_svc.complete_evaluation.return_value = completed_task
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "auto_complete",
             "task_id": "task_001",
         })
@@ -212,13 +214,13 @@ class TestAutoComplete:
         mock_svc.move_to_evaluating.assert_called_once()
 
     @patch("tasks.service.TaskService")
-    def test_auto_complete_invalid_status(self, MockTS: MagicMock) -> None:
+    async def test_auto_complete_invalid_status(self, MockTS: MagicMock) -> None:
         """自动完成不支持的状态。"""
         task = _make_task(status=TaskStatus.PAUSED)
         mock_svc = _mock_task_service({"task_001": task})
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "auto_complete",
             "task_id": "task_001",
         })
@@ -226,12 +228,12 @@ class TestAutoComplete:
         assert result["error_code"] == "INVALID_STATUS"
 
     @patch("tasks.service.TaskService")
-    def test_auto_complete_nonexistent(self, MockTS: MagicMock) -> None:
+    async def test_auto_complete_nonexistent(self, MockTS: MagicMock) -> None:
         """自动完成不存在的任务。"""
         mock_svc = _mock_task_service()
         MockTS.return_value = mock_svc
 
-        result = task_evaluate_func({
+        result = await task_evaluate_func({
             "action": "auto_complete",
             "task_id": "nonexistent",
         })
@@ -245,20 +247,20 @@ class TestAutoComplete:
 class TestValidation:
     """参数校验测试。"""
 
-    def test_missing_action(self) -> None:
+    async def test_missing_action(self) -> None:
         """缺少 action。"""
-        result = task_evaluate_func({"task_id": "t1"})
+        result = await task_evaluate_func({"task_id": "t1"})
         assert result["success"] is False
         assert result["error_code"] == "MISSING_ACTION"
 
-    def test_missing_task_id(self) -> None:
+    async def test_missing_task_id(self) -> None:
         """缺少 task_id。"""
-        result = task_evaluate_func({"action": "evaluate_single"})
+        result = await task_evaluate_func({"action": "evaluate_single"})
         assert result["success"] is False
         assert result["error_code"] == "MISSING_TASK_ID"
 
-    def test_invalid_action(self) -> None:
+    async def test_invalid_action(self) -> None:
         """无效 action。"""
-        result = task_evaluate_func({"action": "invalid", "task_id": "t1"})
+        result = await task_evaluate_func({"action": "invalid", "task_id": "t1"})
         assert result["success"] is False
         assert result["error_code"] == "INVALID_ACTION"

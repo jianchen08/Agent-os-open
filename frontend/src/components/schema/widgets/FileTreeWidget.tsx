@@ -129,6 +129,10 @@ interface TreeWidgetConfig {
   data?: TreeNodeData[]
   /** 是否显示搜索框 */
   showSearch?: boolean
+  /** 是否显示状态筛选器（默认跟随 showStatus） */
+  showStatusFilter?: boolean
+  /** 默认筛选状态值（默认 'running'，空字符串表示显示全部） */
+  defaultStatusFilter?: string
   /** 是否显示启用/禁用开关（默认 true，workspace:// 数据源自动 false） */
   showEnabledToggle?: boolean
   /** 节点点击回调（用于外部处理节点点击事件） */
@@ -151,6 +155,79 @@ const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
   running: { icon: 'play', color: 'text-status-info', label: '运行中' },
   paused: { icon: 'pause', color: 'text-status-pending', label: '已暂停' },
 }
+
+/** 状态筛选选项（用于任务树状态筛选器） */
+const STATUS_FILTER_OPTIONS = [
+  { value: '', label: '全部' },
+  { value: 'running', label: '运行中' },
+  { value: 'in_progress', label: '进行中' },
+  { value: 'pending', label: '待处理' },
+  { value: 'completed', label: '已完成' },
+  { value: 'failed', label: '失败' },
+  { value: 'paused', label: '已暂停' },
+  { value: 'blocked', label: '已阻塞' },
+] as const
+
+/**
+ * 活跃状态集合（running/in_progress/pending/evaluating/planning）
+ *
+ * 用于默认筛选模式，仅显示正在执行的任务
+ */
+const ACTIVE_STATUSES_FOR_FILTER = new Set([
+  'running',
+  'in_progress',
+  'pending',
+  'evaluating',
+  'planning',
+])
+
+/**
+ * 递归按状态过滤树节点
+ *
+ * 过滤策略：保留自身或任意后代匹配状态的节点，保持树状结构不变。
+ * 容器节点（有子节点）只要有一个后代匹配就会被保留。
+ *
+ * @param nodes       - 原始节点数组
+ * @param statusValue - 目标状态值，空字符串表示不过滤，'__active__' 表示活跃状态集合
+ * @param statusField - 状态字段名
+ * @param childrenField - 子节点字段名
+ * @returns 过滤后的节点数组
+ */
+function filterNodesByStatus(
+  nodes: TreeNodeData[],
+  statusValue: string,
+  statusField: string,
+  childrenField: string,
+): TreeNodeData[] {
+  if (!statusValue) return nodes
+
+  const result: TreeNodeData[] = []
+
+  for (const node of nodes) {
+    const nodeStatus = String(getNodeField(node, statusField) ?? '')
+    const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
+    const filteredChildren = children
+      ? filterNodesByStatus(children, statusValue, statusField, childrenField)
+      : []
+
+    // 判断当前节点状态是否匹配
+    const statusMatch =
+      statusValue === '__active__'
+        ? ACTIVE_STATUSES_FOR_FILTER.has(nodeStatus)
+        : nodeStatus === statusValue
+
+    // 自身匹配 或 有匹配的后代 → 保留此节点（保持树结构）
+    if (statusMatch || filteredChildren.length > 0) {
+      result.push({
+        ...node,
+        [childrenField]: filteredChildren.length > 0 ? filteredChildren : children,
+      })
+    }
+  }
+
+  return result
+}
+
 
 /**
  * 从 props 中提取树形组件配置
@@ -444,6 +521,12 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const nodeChildrenField = config.nodeChildrenField ?? 'children'
   /** 是否显示搜索框 */
   const showSearch = config.showSearch ?? false
+
+  /** 是否显示状态筛选器（默认跟随 showStatus） */
+  const showStatusFilter = config.showStatusFilter ?? showStatus
+  /** 默认筛选状态值（默认 'running'，仅显示正在运行的任务） */
+  const defaultStatusFilterValue = config.defaultStatusFilter ?? 'running'
+
   /** 是否显示启用/禁用开关（workspace:// 数据源默认隐藏） */
   const ds = rawProps.dataSource as string | undefined
   const showEnabledToggle = config.showEnabledToggle ?? !(ds?.startsWith('workspace://'))
@@ -655,6 +738,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合（优先从 localStorage 恢复） */
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => restoredExpandedIds ?? new Set<string>())
+  /** 状态筛选值（默认 'running'，空字符串表示显示全部） */
+  const [statusFilter, setStatusFilter] = useState(defaultStatusFilterValue)
   /** 节点启用/禁用状态映射（true=启用，false=禁用） */
   const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>({})
   /** 已知的任务 ID 集合（用于检测新提交的任务并自动开启开关） */
@@ -833,9 +918,15 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 过滤 + 排序后的数据 */
   const filteredData = useMemo(() => {
-    const filtered = filterNodes(effectiveData, searchKeyword, nodeTitleField, nodeChildrenField)
-    return sortNodes(filtered, sortMode, nodeTitleField, nodeChildrenField)
-  }, [effectiveData, searchKeyword, sortMode, nodeTitleField, nodeChildrenField])
+    // 1. 按状态筛选（保持树结构）
+    const statusFiltered = showStatusFilter && statusFilter
+      ? filterNodesByStatus(effectiveData, statusFilter, nodeStatusField, nodeChildrenField)
+      : effectiveData
+    // 2. 按搜索关键词过滤
+    const keywordFiltered = filterNodes(statusFiltered, searchKeyword, nodeTitleField, nodeChildrenField)
+    // 3. 排序
+    return sortNodes(keywordFiltered, sortMode, nodeTitleField, nodeChildrenField)
+  }, [effectiveData, searchKeyword, sortMode, nodeTitleField, nodeChildrenField, showStatusFilter, statusFilter, nodeStatusField])
 
   /** 切换排序模式 */
   const handleSortToggle = useCallback(() => {
@@ -973,6 +1064,28 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       )}
 
       {/* 搜索框 + 排序 */}
+
+      {/* 状态筛选器 */}
+      {showStatusFilter && (
+        <div className="border-b px-3 py-2">
+          <div className="flex flex-wrap items-center gap-1">
+            {STATUS_FILTER_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setStatusFilter(opt.value)}
+                className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                  statusFilter === opt.value
+                    ? 'bg-primary/15 text-primary font-medium'
+                    : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {showSearch && (
         <div className="border-b px-3 py-2">
           <div className="flex items-center gap-2">

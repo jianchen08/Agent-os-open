@@ -59,10 +59,17 @@ async function loginAndWaitReady(page: Page): Promise<void> {
     expires_in: tokens.expires_in,
   });
 
-  // 3. page.reload() → 等待 [data-testid="chat-input-textarea"] 可见
-  console.log('🔄 步骤3: 刷新页面，等待聊天输入框可见');
+  // 3. page.reload() → 点击新会话 → 等待聊天输入框可见
+  console.log('🔄 步骤3: 刷新页面');
   await page.reload();
   await page.waitForLoadState('networkidle');
+
+  console.log('📝 步骤4: 点击新会话按钮');
+  const newSessionBtn = page.locator('main button', { hasText: '新会话' }).first();
+  await expect(newSessionBtn, '新会话按钮应可见').toBeVisible({ timeout: 10_000 });
+  await newSessionBtn.click();
+
+  console.log('⏳ 步骤5: 等待聊天输入框可见');
   await expect(
     page.locator('[data-testid="chat-input-textarea"]'),
     '聊天输入框应可见',

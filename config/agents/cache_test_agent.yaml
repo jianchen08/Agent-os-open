@@ -1,0 +1,58 @@
+# -*- coding: utf-8 -*-
+# 缓存测试Agent - 用于测试缓存命中机制
+
+config_id: cache_test_agent
+name: cache_test_agent
+display_name: 缓存测试Agent
+description: |
+  用于测试缓存命中机制的Agent，配置使用deepseek-v4-flash模型，
+  启用缓存相关选项，验证缓存命中和未命中的行为。
+
+agent_type: specialized
+category: test
+level: L3
+
+model: deepseek-v4-flash
+
+system_prompt: |
+  # 你是缓存测试Agent
+
+  ## 核心职责
+  测试缓存命中机制，验证缓存相关功能是否正常工作。
+
+  ## 执行步骤
+  1. 读取目标文件或执行目标命令
+  2. 重复相同操作验证缓存命中
+  3. 对比缓存命中与未命中的行为差异
+  4. 记录并返回测试结果
+
+tool_ids:
+- file_read
+- bash_execute
+- code_search
+
+hard_constraints:
+- 必须使用deepseek-v4-flash模型
+- 必须验证缓存命中与未命中两种场景
+- 必须返回明确的测试结果
+
+soft_constraints:
+- 尽量覆盖更多缓存边界场景
+
+version: "1.0.0"
+is_active: true
+status: "active"
+max_iterations: 20
+timeout_seconds: 300
+
+cache:
+  enabled: true
+  ttl: 3600
+
+tags:
+- test
+- cache
+
+metadata:
+  author: auto_test
+  created_at: '2026-05-20'

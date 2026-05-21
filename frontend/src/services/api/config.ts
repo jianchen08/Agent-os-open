@@ -368,6 +368,19 @@ export async function getConcurrencyConfig(
   }, options)
 }
 
+export async function saveConcurrencyConfig(
+  config: ConcurrencyConfigResponse,
+  options: RetryOptions = {},
+): Promise<ConcurrencyConfigResponse> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.put<ConcurrencyConfigResponse>(
+      API_ENDPOINTS.CONFIG.CONCURRENCY_UPDATE,
+      config,
+    )
+    return response.data
+  }, options)
+}
+
 export interface CostControlGlobalConfig {
   daily_token_limit: number
   monthly_token_limit: number

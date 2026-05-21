@@ -97,3 +97,30 @@ def minimax_config():
         ),
         "default_params": {"temperature": 0.7, "max_tokens": 8192},
     }
+
+
+# ---------------------------------------------------------------------------
+# 评估稳定性测试所需 fixture + MockAgentRegistry
+# ---------------------------------------------------------------------------
+
+
+class MockAgentRegistry:
+    """测试用 Agent 注册表 Mock。
+
+    模拟 agent_registry 的 get / list_all 接口，
+    支持按 config_id 和 name 查找。
+    """
+
+    def __init__(self, configs: list | None = None) -> None:
+        self._configs = configs or []
+
+    def get(self, config_id: str):
+        """按 config_id 查找 Agent 配置。"""
+        for cfg in self._configs:
+            if getattr(cfg, "config_id", None) == config_id:
+                return cfg
+        return None
+
+    def list_all(self) -> list:
+        """返回所有 Agent 配置。"""
+        return list(self._configs)

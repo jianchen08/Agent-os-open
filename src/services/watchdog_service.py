@@ -109,10 +109,10 @@ class WatchdogServiceManager:
     ):
         logger.info(f"任务管理器回调: 启动任务 {task_id} (项目: {project_id})")
 
-        from src.orchestration import schedule as schedule_task
+        from src.infrastructure.task_launcher import launch_task
 
         try:
-            schedule_result = await schedule_task(task_id)
+            schedule_result = await launch_task(task_id)
 
             if schedule_result.get("success"):
                 logger.info(f"任务 {task_id} 已通过统一调度入口启动")
@@ -163,7 +163,7 @@ class WatchdogServiceManager:
         if not self._pending_tasks:
             return {"processed": 0, "succeeded": 0, "failed": 0, "remaining": 0}
 
-        from src.orchestration import schedule as schedule_task
+        from src.infrastructure.task_launcher import launch_task
 
         processed = 0
         succeeded = 0
@@ -182,7 +182,7 @@ class WatchdogServiceManager:
                 continue
 
             try:
-                schedule_result = await schedule_task(task_id)
+                schedule_result = await launch_task(task_id)
                 if schedule_result.get("success"):
                     logger.info(f"待处理任务 {task_id} 已通过统一调度入口启动")
                     succeeded += 1

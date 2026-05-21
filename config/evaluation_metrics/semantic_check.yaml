@@ -7,7 +7,7 @@ name: 质量评估
 description: 对任意内容进行质量评估，包括结构完整性、内容准确性、逻辑连贯性、表达清晰度等，并给出改进建议
 
 # ===== 评估器配置 =====
-evaluator_id: evaluator_agent
+evaluator_id: general_agent
 evaluator_type: agent
 
 default_config:

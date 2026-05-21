@@ -106,7 +106,7 @@ TaskStateMachine = SimpleStateMachine
 _TASK_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["scheduled", "running", "cancelled"],
     "scheduled": ["running", "cancelled"],
-    "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled"],
+    "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled", "paused"],
     "evaluating": ["completed", "failed", "running"],
     "suspended": ["running", "cancelled", "timeout"],
     "blocked": ["running", "cancelled", "failed"],
@@ -114,6 +114,7 @@ _TASK_TRANSITIONS: dict[str, list[str]] = {
     "failed": ["pending"],  # 允许重试
     "cancelled": [],
     "timeout": ["running", "cancelled", "failed"],
+    "paused": ["pending", "running", "cancelled"],  # 暂停后可恢复或取消
 }
 
 

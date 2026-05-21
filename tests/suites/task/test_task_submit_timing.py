@@ -44,7 +44,7 @@ _MOCK_MODULES = [
     "src.db.repositories.execution_record_repo",
     "src.db.repositories.task_repo",
     "src.services.agent_call_recorder",
-    "src.orchestration",
+    "src.infrastructure.task_launcher",
     "src.agents.level_controller",
     "src.utils.message_id_helper",
     "src.tasks.dependency_validator",

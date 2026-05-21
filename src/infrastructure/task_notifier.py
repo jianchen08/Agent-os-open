@@ -21,49 +21,65 @@ class TaskNotifierMixin:
 
     提供 _on_task_state_changed、_handle_terminal_lifecycle、
     _notify_suspended_pipelines、_build_child_notifications、
-    _find_task_by_pipeline_id 等方法，
+    _find_task_by_pipeline_id、_send_sub_agent_created_event 等方法，
     由 TaskWorker 通过多继承组合使用。
     """
 
     async def _on_task_state_changed(self, event: Any) -> None:
-        """任务状态变更事件回调。
+        """处理任务状态变更事件，触发对应的 asyncio.Event。
 
-        监听 task_state_changed 事件，在子任务到达终态时通知父管道，
-        并通过 WebSocket 广播状态变更。
+        当 TaskService 的 on_state_change 回调 emit 了
+        task_state_changed 事件时，检查是否为终态，
+        如果是则 set 对应的 asyncio.Event。
 
         Args:
-            event: 事件对象，包含 data 字典（task_id, new_status, old_status 等）
+            event: 状态变更事件
         """
         data = event.data if hasattr(event, "data") else event
+        if not isinstance(data, dict):
+            return
+
         task_id = data.get("task_id", "")
         new_status = data.get("new_status", "")
 
-        if not task_id:
-            return
-
         if new_status in _TERMINAL_STATES:
             logger.info(
-                "TaskWorker: task %s reached terminal state: %s",
-                task_id, new_status,
+                "TaskWorker: 收到终态事件 | task=%s, status=%s, source=%s",
+                task_id, new_status, data.get("source", "unknown"),
             )
+            evt = self._terminal_events.get(task_id)
+            if evt is not None:
+                evt.set()
+                logger.debug(
+                    "TaskWorker: terminal event set for task %s (%s)",
+                    task_id, new_status,
+                )
 
-            # ── 终态生命周期处理（worktree 合并/清理） ──
+            # BUG-FIX-fix_20260510_notify_guard:
+            # 问题根因: _handle_terminal_lifecycle / _check_stale_containers 抛异常时
+            #   后续的 _notify_suspended_pipelines 不会被执行，导致上级管道永远收不到通知。
+            # 修复方案: 每个调用独立 try-except，确保通知逻辑不受其他钩子影响。
             try:
                 await self._handle_terminal_lifecycle(task_id, new_status)
             except Exception as exc:
-                logger.error(
-                    "TaskWorker: _handle_terminal_lifecycle failed: "
-                    "task=%s, status=%s, error=%s",
-                    task_id, new_status, exc,
+                logger.warning(
+                    "TaskWorker: _handle_terminal_lifecycle 失败(不影响通知): task=%s, error=%s",
+                    task_id, exc,
                 )
 
-            # ── 通知挂起的父管道 ──
+            try:
+                await self._check_stale_containers()
+            except Exception as exc:
+                logger.warning(
+                    "TaskWorker: _check_stale_containers 失败(不影响通知): error=%s",
+                    exc,
+                )
+
             try:
                 await self._notify_suspended_pipelines(task_id, new_status, data)
             except Exception as exc:
                 logger.error(
-                    "TaskWorker: _notify_suspended_pipelines 失败: "
-                    "task=%s, status=%s, error=%s",
+                    "TaskWorker: _notify_suspended_pipelines 失败: task=%s, status=%s, error=%s",
                     task_id, new_status, exc, exc_info=True,
                 )
 
@@ -96,10 +112,7 @@ class TaskNotifierMixin:
                 if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
                     await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
                 elif hasattr(_ws_notifier, "send_to_user"):
-                    _task_obj = _task_obj or (
-                        self._task_service.get_task(task_id)
-                        if self._task_service else None
-                    )
+                    _task_obj = _task_obj or (self._task_service.get_task(task_id) if self._task_service else None)
                     _uid = getattr(_task_obj, "user_id", "") or ""
                     if _uid:
                         await _ws_notifier.send_to_user(_uid, _ws_payload)
@@ -181,28 +194,7 @@ class TaskNotifierMixin:
         """
         from pipeline.message_bus import send_pipeline_message
 
-        # ── 1. 构造通知文本 ──
-        task_info = data.get("task", {})
-        if isinstance(task_info, dict):
-            title = task_info.get("title", task_id)
-            error = task_info.get("error", "")
-        else:
-            title = getattr(task_info, "title", task_id)
-            error = getattr(task_info, "error", "") or ""
-
-        if new_status == "completed":
-            notification = (
-                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
-                "请继续执行后续流程，提交下一个子任务。"
-            )
-        else:
-            err_hint = f": {error[:100]}" if error else ""
-            notification = (
-                f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
-                "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
-            )
-
-        # ── 2. 查找 parent_pipeline_id ──
+        # ── 1. 查找 parent_pipeline_id 并获取完整任务信息 ──
         parent_pipeline_id = None
         task_obj = None
         task_service = self._task_service
@@ -214,10 +206,54 @@ class TaskNotifierMixin:
             except Exception as exc:
                 logger.warning("TaskWorker: 获取任务信息失败: task=%s, error=%s", task_id, exc)
 
+        # ── 2. 构造通知文本（含重试信息） ──
+        task_info = data.get("task", {})
+        if isinstance(task_info, dict):
+            title = task_info.get("title", task_id)
+            error = task_info.get("error", "")
+        else:
+            title = getattr(task_info, "title", task_id)
+            error = getattr(task_info, "error", "") or ""
+
+        # BUG-FIX-fix_20260519_pipeline_retry:
+        # 问题根因: 通知文本中不包含 retry_count / max_retries 信息，
+        #   父管道 AI 无法区分首次失败还是重试失败，也不知道是否应继续重试。
+        # 修复方案: 从 task.metadata 读取重试计数，在通知中加入重试状态，
+        #   达到最大次数时明确告知 AI 放弃重试。
+        _task_meta = getattr(task_obj, "metadata", None) or {}
+        retry_count = _task_meta.get("retry_count", 0) if task_obj else 0
+        max_retries = _task_meta.get("max_retries", 3) if task_obj else 3
+
+        if new_status == "completed":
+            notification = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
+                "请继续执行后续流程，提交下一个子任务。"
+            )
+        else:
+            err_hint = f": {error[:100]}" if error else ""
+            if retry_count > 0 and retry_count >= max_retries:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
+                    f" (已达最大重试次数 {retry_count}/{max_retries}){err_hint}\n"
+                    "请放弃重试，考虑其他方案或标记任务失败。"
+                )
+            elif retry_count > 0:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
+                    f" (已重试 {retry_count}/{max_retries} 次){err_hint}\n"
+                    "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+                )
+            else:
+                notification = (
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                    "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+                )
+
         logger.info(
-            "TaskWorker: 通知查找开始: task=%s, status=%s, parent_pipeline=%s, parent_task=%s",
+            "TaskWorker: 通知查找开始: task=%s, status=%s, parent_pipeline=%s, parent_task=%s, retry=%d/%d",
             task_id, new_status, parent_pipeline_id,
             getattr(task_obj, "parent_task_id", None) if task_obj else None,
+            retry_count, max_retries,
         )
 
         if not parent_pipeline_id:
@@ -228,13 +264,36 @@ class TaskNotifierMixin:
             )
             return
 
-        # ── 3. 通过统一消息总线注入通知 ──
-        result = await send_pipeline_message(parent_pipeline_id, notification)
+        # ── 3. 查找父任务的 task_id，用于 revive 路径恢复正确的 agent_config ──
+        parent_task_id_for_revive = ""
+        if task_obj:
+            parent_task_id_for_revive = getattr(task_obj, "parent_task_id", "") or ""
+
+        # ── 4. 通过统一消息总线注入通知（唯一通知链路） ──
+        result = await send_pipeline_message(
+            parent_pipeline_id, notification,
+            task_id=parent_task_id_for_revive,
+        )
         if result.success:
             logger.info(
                 "TaskWorker: 通知已注入: pipeline=%s, task=%s, status=%s, method=%s",
                 parent_pipeline_id, task_id, new_status, result.method,
             )
+            # BUG-FIX-fix_20260521_notification_route:
+            # 问题根因: send_pipeline_message 通过 engine._wake_event 唤醒引擎，
+            #   但 TaskWorker._handle_suspension_loop 等待的是独立的 wake_evt，
+            #   两者是不同的 Event，导致 suspension_loop 超时后才触发 engine.resume()，
+            #   而 resume 会用 _build_child_notifications 重建通知（可能发给错误 agent）。
+            # 修复方案: 通知注入成功后，同步 set TaskWorker 的 wake_evt，
+            #   使 suspension_loop 立即感知子任务完成，跳过重复通知直接 resume。
+            if parent_task_id_for_revive:
+                wake_evt = self._wake_events.get(parent_task_id_for_revive)
+                if wake_evt is not None:
+                    wake_evt.set()
+                    logger.info(
+                        "TaskWorker: wake_evt set for parent task %s (single notification path)",
+                        parent_task_id_for_revive,
+                    )
         else:
             logger.warning(
                 "TaskWorker: 通知注入失败: pipeline=%s, task=%s, status=%s, error=%s",
@@ -262,7 +321,7 @@ class TaskNotifierMixin:
                 if getattr(task, "pipeline_run_id", None) == pipeline_id:
                     return task.id
         except Exception:
-            pass
+            logger.warning("TaskWorker: _find_task_by_pipeline_id 失败: pipeline_id=%s", pipeline_id, exc_info=True)
         return None
 
     def _build_child_notifications(self, parent_task_id: str, task_service: Any) -> str:

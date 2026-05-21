@@ -4,7 +4,7 @@
 - 有输出 → 转为 evaluating 并触发评估
 - 无输出 → 标记 failed（含精确错误诊断）
 
-从 task_executor.py 拆分而出，降低文件复杂度。
+从 task_worker.py 拆分而出，降低原文件复杂度。
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ class TaskPostPipelineMixin:
         """
         logger.info(
             "TaskWorker: task %s still RUNNING after pipeline exit, "
-            "has result → evaluating",
+            "has result output -> moving to evaluating",
             task_id,
         )
         if lifecycle:
@@ -104,32 +104,55 @@ class TaskPostPipelineMixin:
                 lifecycle.on_before_evaluate(workspace, ws_meta)
             except Exception as e:
                 logger.warning(
-                    "TaskWorker: lifecycle on_before_evaluate failed: "
-                    "task_id=%s, error=%s",
+                    "TaskWorker: lifecycle on_before_evaluate failed: task_id=%s, error=%s",
                     task_id, e,
                 )
-        self._terminal_events.pop(task_id, None)
+        evt = self._terminal_events.pop(task_id, None)
         try:
+            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
             await task_service.move_to_evaluating(task_id)
         except Exception as e:
             logger.warning(
-                "TaskWorker: move_to_evaluating failed for %s: %s",
+                "TaskWorker: move_to_evaluating failed for %s: %s, falling back to fail",
                 task_id, e,
             )
             try:
-                await task_service.fail_task(
-                    task_id, f"管道退出后状态转移失败: {e}",
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
+                await task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
+            except Exception as fail_exc:
+                logger.error(
+                    "TaskWorker: fallback fail_task also failed for %s: %s",
+                    task_id, fail_exc,
                 )
-            except Exception:
-                pass
-            await self._cleanup_post_pipeline(
-                task_id, terminal_evt, timer_manager, idle_timer_registered,
-            )
+            if evt is not None:
+                evt.set()
+            self._active_tasks.discard(task_id)
+            self._idle_remind_counts.pop(task_id, None)
+            if idle_timer_registered and timer_manager:
+                try:
+                    await timer_manager.cancel_timer(task_id)
+                except Exception:
+                    pass
             return
 
-        await self._cleanup_post_pipeline(
-            task_id, terminal_evt, timer_manager, idle_timer_registered,
-        )
+        # BUG-FIX-fix_20260510_evaluating_stuck:
+        # 问题根因: move_to_evaluating 后直接 return，任务卡在 EVALUATING
+        #   永远不会触发实际评估。Agent 已调用 task_evaluate 但评估未完成，
+        #   管道退出后 move_to_evaluating 只改了状态，没有任何后续机制
+        #   推进评估。唯一兜底是系统重启时的 _recover_evaluating_tasks。
+        # 修复方案: move_to_evaluating 成功后，调用 _rerun_evaluation
+        #   触发实际评估执行（复用系统重启恢复的逻辑）。
+        # 影响范围: 所有管道退出时任务仍有 result 但未到终态的场景
+        # 修复日期: 2026-05-10
+        if evt is not None:
+            evt.set()
+        self._active_tasks.discard(task_id)
+        self._idle_remind_counts.pop(task_id, None)
+        if idle_timer_registered and timer_manager:
+            try:
+                await timer_manager.cancel_timer(task_id)
+            except Exception:
+                pass
         refreshed_task = task_service.get_task(task_id)
         if refreshed_task is not None:
             try:
@@ -140,6 +163,7 @@ class TaskPostPipelineMixin:
                     task_id, rerun_exc,
                 )
                 try:
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(
                         task_id, f"管道退出后评估执行失败: {rerun_exc}",
                     )
@@ -155,32 +179,125 @@ class TaskPostPipelineMixin:
         timer_manager: Any,
         idle_timer_registered: bool,
     ) -> None:
-        """无输出 → 从管道状态构建精确错误信息并标记 failed。"""
-        error_msg = self._build_pipeline_exit_error(pipeline_state)
-        logger.warning(
-            "TaskWorker: task %s still RUNNING after pipeline exit → %s",
-            task_id, error_msg,
+        """无输出 → 从管道状态构建精确错误信息并标记 failed。
+
+        BUG-FIX: 中断恢复 - is_interrupted 时 reset_to_pending 而非 fail_task，
+        允许系统重启后自动恢复被中断的任务。
+        """
+        # 从 pipeline state 中提取完整诊断信息
+        iteration_count = pipeline_state.get("iteration", "?") if pipeline_state else "?"
+        max_iter = pipeline_state.get("max_iterations", "?") if pipeline_state else "?"
+        ended = pipeline_state.get("ended", "?") if pipeline_state else "?"
+        raw_error = pipeline_state.get("raw_error") if pipeline_state else None
+        llm_error_info = pipeline_state.get("llm_error_info") if pipeline_state else None
+        task_complete = pipeline_state.get("task_complete") if pipeline_state else None
+        error_analysis = pipeline_state.get("error_analysis") if pipeline_state else None
+        stop_reason = pipeline_state.get("router.stop_reason", "") if pipeline_state else ""
+
+        # 根据实际原因构建精确的错误信息
+        parts: list[str] = []
+        hit_max_iter = (
+            isinstance(iteration_count, int)
+            and isinstance(max_iter, int)
+            and iteration_count >= max_iter
         )
-        self._terminal_events.pop(task_id, None)
-        await task_service.fail_task(task_id, error_msg)
-        await self._cleanup_post_pipeline(
-            task_id, terminal_evt, timer_manager, idle_timer_registered,
+        state_is_empty = not pipeline_state
+        state_not_ended = (
+            isinstance(ended, bool) and not ended
         )
 
-    async def _cleanup_post_pipeline(
-        self,
-        task_id: str,
-        terminal_evt: Any,
-        timer_manager: Any,
-        idle_timer_registered: bool,
-    ) -> None:
-        """管道退出后的资源清理（状态重置、计时器取消）。"""
-        terminal_evt.set()
+        if raw_error:
+            # 管道内有明确错误（LLM 调用失败、工具异常等）
+            parts.append(f"管道异常退出: {raw_error}")
+            if llm_error_info:
+                etype = llm_error_info.get("error_type", "")
+                if etype:
+                    parts.append(f"错误类型={etype}")
+        elif stop_reason == "timeout":
+            parts.append("执行超时")
+        elif hit_max_iter:
+            # 确实是迭代耗尽
+            parts.append(
+                f"管道迭代耗尽"
+                f"({iteration_count}/{max_iter})"
+            )
+        elif state_is_empty or state_not_ended:
+            # pipeline_state 为空（进程被杀/重启导致 asyncio task 未完成）
+            # 或 ended=False（管道循环被外部中断，如 CancelledError 后进程退出）
+            parts.append(
+                f"管道被中断(可能原因: 进程重启或被强制终止)"
+                f"(iterations={iteration_count}/{max_iter},"
+                f" ended={ended})"
+            )
+        else:
+            # 其他未知原因
+            parts.append(
+                f"管道异常结束(iterations="
+                f"{iteration_count}/{max_iter})"
+            )
+
+        if error_analysis:
+            parts.append(f"错误分析: {error_analysis}")
+        if task_complete is False:
+            parts.append("Agent 标记任务未完成")
+
+        error_msg = (
+            "，".join(parts)
+            if parts
+            else "管道异常退出，Agent 未完成评估"
+        )
+
+        is_interrupted = state_is_empty or state_not_ended
+        logger.warning(
+            "TaskWorker: task %s still RUNNING "
+            "after pipeline exit. "
+            "iterations=%s/%s, ended=%s, "
+            "raw_error=%s, "
+            "has_result=False → %s",
+            task_id, iteration_count,
+            max_iter, ended,
+            raw_error or "(none)",
+            error_msg,
+        )
+        evt = self._terminal_events.pop(
+            task_id, None,
+        )
+
+        if is_interrupted and task_service:
+            try:
+                await task_service.reset_to_pending(task_id)
+                logger.info(
+                    "TaskWorker: task %s reset to pending for retry"
+                    " (pipeline was interrupted, likely process restart)",
+                    task_id,
+                )
+            except Exception as reset_exc:
+                logger.warning(
+                    "TaskWorker: reset_to_pending failed for %s: %s,"
+                    " falling back to fail_task",
+                    task_id, reset_exc,
+                )
+                await task_service.fail_task(
+                    task_id, error_msg,
+                )
+        else:
+            await task_service.fail_task(
+                task_id, error_msg,
+            )
+        if evt is not None:
+            evt.set()
+        # BUG-FIX: fail_task 后清理 idle 计时器
+        # 防止任务已标记 failed 但 idle 计时器
+        # 仍在 _active_tasks 检测中不断重建
         self._active_tasks.discard(task_id)
-        self._idle_remind_counts.pop(task_id, None)
+        self._idle_remind_counts.pop(
+            task_id, None,
+        )
         if idle_timer_registered and timer_manager:
             try:
-                await timer_manager.cancel_timer(task_id)
+                await timer_manager.cancel_timer(
+                    task_id,
+                )
             except Exception:
                 pass
 

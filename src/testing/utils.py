@@ -252,11 +252,12 @@ class TestEnvironmentManager:
                 "python",
                 "-m",
                 "uvicorn",
-                "src.api.main:app",
+                "channels.api.app:create_app()",
                 "--host",
                 "0.0.0.0",
                 "--port",
                 "8888",
+                "--factory",
             ]
 
             self.backend_process = subprocess.Popen(

@@ -235,7 +235,7 @@ class TestThreadHistoryPagination:
         self, count: int
     ) -> str:
         """创建线程并添加 MemoryStore 消息，返回 thread_id。"""
-        from channels.api.models import store
+        from channels.api.memory_store import store
 
         user = store.get_user_by_username("demo")
         assert user is not None

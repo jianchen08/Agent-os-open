@@ -397,6 +397,192 @@ async def update_user_settings(body: dict[str, Any] | None = None, _user: dict =
 monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"])
 
 
+def _get_token_usage() -> dict[str, Any]:
+    """获取全局 token 用量统计。
+
+    从 infrastructure 层获取真实数据，依次尝试：
+    1. ServiceProvider 中注册的 UsageMonitor
+    2. PerformanceMonitor 中的 LLM 统计
+    3. 零值兜底
+
+    Returns:
+        包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
+    """
+    # 策略 1：从 UsageMonitor 获取
+    try:
+        from infrastructure.service_provider import get_service_provider
+
+        provider = get_service_provider()
+        monitor = provider.get("usage_monitor")
+        if monitor is not None:
+            stats = monitor.get_statistics()
+            records = monitor.get_recent_records(limit=10000)
+            prompt_total = sum(r.prompt_tokens for r in records)
+            completion_total = sum(r.completion_tokens for r in records)
+            return {
+                "total_tokens": stats.total_tokens,
+                "prompt_tokens": prompt_total,
+                "completion_tokens": completion_total,
+                "request_count": stats.total_requests,
+            }
+    except Exception:
+        pass
+
+    # 策略 2：从 PerformanceMonitor 的 LLM 统计获取
+    try:
+        from infrastructure.service_provider import get_service_provider
+
+        provider = get_service_provider()
+        perf_monitor = provider.get("performance_monitor")
+        if perf_monitor is not None:
+            llm_stats = getattr(perf_monitor, "_llm_stats", {})
+            return {
+                "total_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "request_count": llm_stats.get("request_count", 0),
+            }
+    except Exception:
+        pass
+
+    # 策略 3：零值兜底
+    return {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "request_count": 0,
+    }
+
+
+def _get_cache_stats() -> dict[str, Any]:
+    """获取缓存命中率统计。
+
+    依次尝试：
+    1. ToolCache.get_cache_stats()
+    2. PerformanceMonitor._tool_stats 中的缓存数据
+    3. 零值兜底
+
+    Returns:
+        包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
+    """
+    # 策略 1：从 ToolCache 获取
+    try:
+        from infrastructure.service_provider import get_service_provider
+
+        provider = get_service_provider()
+        tool_cache = provider.get("tool_cache")
+        if tool_cache is not None and hasattr(tool_cache, "get_cache_stats"):
+            stats = tool_cache.get_cache_stats()
+            hits = stats.get("hits", 0)
+            misses = stats.get("misses", 0)
+            total = hits + misses
+            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
+            return {
+                "cache_hits": hits,
+                "cache_misses": misses,
+                "hit_rate": hit_rate,
+                "total_requests": total,
+            }
+    except Exception:
+        pass
+
+    # 策略 2：从 PerformanceMonitor 的工具统计获取
+    try:
+        from infrastructure.service_provider import get_service_provider
+
+        provider = get_service_provider()
+        perf_monitor = provider.get("performance_monitor")
+        if perf_monitor is not None:
+            tool_stats = getattr(perf_monitor, "_tool_stats", {})
+            hits = tool_stats.get("cache_hits", 0)
+            misses = tool_stats.get("cache_misses", 0)
+            total = hits + misses
+            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
+            return {
+                "cache_hits": hits,
+                "cache_misses": misses,
+                "hit_rate": hit_rate,
+                "total_requests": total,
+            }
+    except Exception:
+        pass
+
+    # 策略 3：零值兜底
+    return {
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "hit_rate": 0.0,
+        "total_requests": 0,
+    }
+
+
+@monitoring_router.get("", summary="获取监控汇总数据")
+async def get_monitoring_overview(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取所有监控数据的汇总视图。
+
+    Returns:
+        包含 system_metrics, task_statistics, token_usage, cache_stats 的字典
+    """
+    return {
+        "system_metrics": {
+            "cpu_usage": 0,
+            "memory": {
+                "total": 0,
+                "used": 0,
+                "available": 0,
+                "usage_percent": 0,
+            },
+            "disk": {
+                "mount_point": "/",
+                "total": 0,
+                "used": 0,
+                "free": 0,
+                "usage_percent": 0,
+            },
+            "uptime": 0,
+            "timestamp": "",
+        },
+        "task_statistics": {
+            "total": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+            "avg_duration": 0,
+            "success_rate": 0,
+        },
+        "token_usage": _get_token_usage(),
+        "cache_stats": _get_cache_stats(),
+    }
+
+
+@monitoring_router.get("/token-usage", summary="获取 Token 用量统计")
+async def get_token_usage(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """返回全局 token 使用统计。
+
+    Returns:
+        包含 total_tokens, prompt_tokens(input), completion_tokens(output),
+        request_count 的字典
+    """
+    return {"token_usage": _get_token_usage()}
+
+
+@monitoring_router.get("/cache-stats", summary="获取缓存命中率统计")
+async def get_cache_stats(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """返回缓存统计。
+
+    Returns:
+        包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
+    """
+    return {"cache_stats": _get_cache_stats()}
+
+
 @monitoring_router.get("/system/metrics", summary="获取系统指标")
 async def get_system_metrics(_user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {
@@ -417,7 +603,9 @@ async def get_system_metrics(_user: dict = Depends(require_auth)) -> dict[str, A
             },
             "uptime": 0,
             "timestamp": "",
-        }
+        },
+        "token_usage": _get_token_usage(),
+        "cache_stats": _get_cache_stats(),
     }
 
 

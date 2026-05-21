@@ -11,6 +11,7 @@ import os
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from infrastructure.session.models import SessionModel
@@ -563,4 +564,13 @@ class MemoryStore:
 
 
 # 模块级单例
-store = MemoryStore()
+# BUG-FIX-fix_chat_history_lost_on_restart:
+# 问题根因: MemoryStore 未传入 persist_dir，导致启动时不加载 data/api_store/store.json，
+#           重启后所有线程和会话数据丢失，前端读取不到历史会话记录。
+# 修复方案: 传入 persist_dir 指向 data/api_store/，使 _load_persisted_data() 在初始化时
+#           自动加载 store.json 中持久化的线程数据。
+# 影响范围: 启动后会话列表为空、历史消息不可加载。
+# 修复日期: 2026-05-20
+store = MemoryStore(
+    persist_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "api_store"),
+)

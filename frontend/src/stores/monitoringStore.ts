@@ -9,7 +9,7 @@ import * as monitoringApi from '@/services/api/monitoring'
 import { getSessionTotalTokenUsage } from '@/services/api/sessions'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import type { SessionTokenUsageResponse } from '@/services/api/sessions'
-import type { SystemMetrics, TaskInfo, TaskStatistics } from '@/types/monitoring'
+import type { CacheStats, SystemMetrics, TaskInfo, TaskStatistics, TokenUsage } from '@/types/monitoring'
 
 /**
  * 监控状态接口
@@ -25,6 +25,10 @@ interface MonitoringState {
   tokenUsage: SessionTokenUsageResponse | null
   /** 是否正在加载 Token 用量 */
   isLoadingTokenUsage: boolean
+  /** Token 使用统计（来自监控API） */
+  apiTokenUsage: TokenUsage | null
+  /** 缓存命中率统计 */
+  cacheStats: CacheStats | null
   /** 是否正在加载 */
   isLoading: boolean
   /** 错误信息 */
@@ -72,6 +76,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   recentTasks: [],
   tokenUsage: null,
   isLoadingTokenUsage: false,
+  apiTokenUsage: null,
+  cacheStats: null,
   isLoading: false,
   error: null,
   lastUpdated: null,
@@ -115,6 +121,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         metrics: data.metrics,
         statistics: data.statistics,
         recentTasks: data.recentTasks,
+        apiTokenUsage: data.tokenUsage,
+        cacheStats: data.cacheStats,
         isLoading: false,
         error: null,
         lastUpdated: getCurrentTimestamp(),
@@ -205,6 +213,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
       recentTasks: [],
       tokenUsage: null,
       isLoadingTokenUsage: false,
+      apiTokenUsage: null,
+      cacheStats: null,
       isLoading: false,
       error: null,
       lastUpdated: null,

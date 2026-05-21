@@ -23,11 +23,12 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from channels.api.app import create_app
 from channels.api.auth import verify_token
-from channels.api.models import store as api_store
+from channels.api.memory_store import store as api_store
 
 from src.pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
 
@@ -71,6 +72,26 @@ def create_combined_app() -> FastAPI:
         logger.info("管道引擎已就绪，WebSocket 将使用真实 AI 回复")
     else:
         logger.error("管道引擎未就绪！消息发送功能将不可用。请检查上方日志中的错误信息。")
+
+    @asynccontextmanager
+    async def _combined_lifespan(app: FastAPI):
+        """应用生命周期管理，替代已弃用的 on_event('startup')。
+
+        在应用启动时立即启动 TaskWorker，确保纯 API 场景下任务可正常执行。
+        """
+        global _task_worker_started
+        if not _task_worker_started:
+            tw = getattr(stream_handler, "_task_worker", None)
+            if tw and hasattr(tw, "start"):
+                try:
+                    await tw.start()
+                    _task_worker_started = True
+                    logger.info("TaskWorker started (app startup)")
+                except Exception as exc:
+                    logger.warning("TaskWorker start failed (app startup): %s", exc)
+        yield
+
+    app.router.lifespan_context = _combined_lifespan
 
     # WebSocket 连接管理
     active_connections: dict[str, list[WebSocket]] = {}

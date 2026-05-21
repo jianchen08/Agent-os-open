@@ -58,6 +58,8 @@ export function MonitoringPage() {
     metrics,
     statistics,
     recentTasks,
+    apiTokenUsage,
+    cacheStats,
     isLoading,
     error,
     lastUpdated,
@@ -180,6 +182,51 @@ export function MonitoringPage() {
                   {metrics.uptime ? formatUptime(metrics.uptime) : '--'}
                 </div>
               </div>
+            </div>
+          </section>
+        )}
+
+        {/* Token 统计 */}
+        {(apiTokenUsage || cacheStats) && (
+          <section>
+            <h2 className="mb-3 text-sm font-semibold">Token 统计</h2>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              {apiTokenUsage && (
+                <>
+                  <div className="rounded-lg border p-4">
+                    <div className="text-muted-foreground mb-1 text-xs">总 Token 使用量</div>
+                    <div className="text-xl font-semibold">
+                      {apiTokenUsage.total_tokens.toLocaleString()}
+                    </div>
+                    <div className="text-muted-foreground mt-1 text-xs">
+                      {apiTokenUsage.request_count.toLocaleString()} 次请求
+                    </div>
+                  </div>
+                  <div className="rounded-lg border p-4">
+                    <div className="text-muted-foreground mb-1 text-xs">输入 Token 数</div>
+                    <div className="text-xl font-semibold">
+                      {apiTokenUsage.prompt_tokens.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border p-4">
+                    <div className="text-muted-foreground mb-1 text-xs">输出 Token 数</div>
+                    <div className="text-xl font-semibold">
+                      {apiTokenUsage.completion_tokens.toLocaleString()}
+                    </div>
+                  </div>
+                </>
+              )}
+              {cacheStats && (
+                <div className="rounded-lg border p-4">
+                  <div className="text-muted-foreground mb-1 text-xs">缓存命中率</div>
+                  <div className="text-xl font-semibold">
+                    {cacheStats.hit_rate.toFixed(1)}%
+                  </div>
+                  <div className="text-muted-foreground mt-1 text-xs">
+                    命中 {cacheStats.cache_hits.toLocaleString()} / 未命中 {cacheStats.cache_misses.toLocaleString()} / 共 {cacheStats.total_requests.toLocaleString()} 次
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         )}

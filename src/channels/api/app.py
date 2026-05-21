@@ -221,6 +221,7 @@ def _register_routes(app: FastAPI) -> None:
         eval_metrics_alias_router,
         client_router,
         files_router,
+        task_phase_router,
     )
     from channels.api.routes_artifacts import (
         artifacts_router,
@@ -244,6 +245,7 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(eval_metrics_alias_router)
     app.include_router(client_router)
     app.include_router(files_router)
+    app.include_router(task_phase_router)
 
     # ---- 审批与工作空间路由（新增） ----
     app.include_router(artifacts_router)

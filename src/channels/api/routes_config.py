@@ -26,6 +26,8 @@ _CONFIG_SYSTEM_DIR = _PROJECT_ROOT / "config" / "system"
 
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _CONTEXT_WINDOW_YAML = _CONFIG_SYSTEM_DIR / "context_window_config.yaml"
+_API_YAML = _CONFIG_SYSTEM_DIR / "api_config.yaml"
+_CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +217,9 @@ def get_context_window_config() -> dict[str, Any]:
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
     budgets = data.get("budgets", {})
     return {
-        "max_context_length": 200000,
-        "reserved_system_messages": 3,
-        "reserved_recent_messages": 10,
+        "max_context_length": data.get("max_context_length", 200000),
+        "reserved_system_messages": data.get("reserved_system_messages", 3),
+        "reserved_recent_messages": data.get("reserved_recent_messages", 10),
         "summary_threshold": data.get("compress_trigger_ratio", 0.5),
         "budgets": budgets,
         "version": data.get("version", "2.0"),
@@ -229,6 +231,12 @@ def get_context_window_config() -> dict[str, Any]:
 @router.put("/context-window", summary="更新上下文窗口配置")
 def update_context_window_config(body: dict[str, Any]) -> dict[str, Any]:
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
+    if "max_context_length" in body:
+        data["max_context_length"] = body["max_context_length"]
+    if "reserved_system_messages" in body:
+        data["reserved_system_messages"] = body["reserved_system_messages"]
+    if "reserved_recent_messages" in body:
+        data["reserved_recent_messages"] = body["reserved_recent_messages"]
     if "summary_threshold" in body:
         data["compress_trigger_ratio"] = body["summary_threshold"]
     if "budgets" in body:
@@ -251,6 +259,8 @@ def reset_context_window_config() -> dict[str, Any]:
 
 @router.get("/api", summary="获取 API 配置")
 def get_api_config() -> dict[str, Any]:
+    if _API_YAML.exists():
+        return _read_yaml(_API_YAML)
     return {
         "endpoint": {
             "base_url": "http://localhost:8888",
@@ -269,7 +279,8 @@ def get_api_config() -> dict[str, Any]:
 
 @router.put("/api", summary="更新 API 配置")
 def save_api_config(body: dict[str, Any]) -> dict[str, Any]:
-    logger.info("API 配置更新请求（运行时参数，部分需重启生效）")
+    _write_yaml(_API_YAML, body)
+    logger.info("API 配置已更新")
     return body
 
 
@@ -279,6 +290,8 @@ def save_api_config(body: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/concurrency", summary="获取并发配置")
 def get_concurrency_config() -> dict[str, Any]:
+    if _CONCURRENCY_YAML.exists():
+        return _read_yaml(_CONCURRENCY_YAML)
     data = _read_yaml(_LLM_YAML)
     conc = data.get("concurrency", {})
     return {
@@ -304,9 +317,6 @@ def get_concurrency_config() -> dict[str, Any]:
     }
 
 
-_CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
-
-
 @router.put("/concurrency", summary="更新并发配置")
 def save_concurrency_config(body: dict[str, Any]) -> dict[str, Any]:
     _write_yaml(_CONCURRENCY_YAML, body)
@@ -323,15 +333,15 @@ _COST_CONTROL_YAML = _CONFIG_SYSTEM_DIR / "cost_control.yaml"
 _DEFAULT_COST_CONTROL: dict[str, Any] = {
     "enabled": True,
     "global_config": {
-        "daily_token_limit": 500000,
-        "monthly_token_limit": 10000000,
-        "per_task_token_limit": 100000,
-        "per_session_token_limit": 200000,
+        "daily_token_limit": 1000000,
+        "monthly_token_limit": 30000000,
+        "per_task_token_limit": 200000,
+        "per_session_token_limit": 500000,
     },
     "alerts": {
-        "warning_threshold": 0.8,
-        "critical_threshold": 0.95,
-        "exhausted_threshold": 1.0,
+        "warning_threshold": 70,
+        "critical_threshold": 90,
+        "exhausted_threshold": 100,
     },
     "protection": {
         "auto_save_at_warning": True,

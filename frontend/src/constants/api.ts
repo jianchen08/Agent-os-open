@@ -118,6 +118,8 @@ export const API_ENDPOINTS = {
     CONTEXT_WINDOW_RESET: '/api/v1/config/context-window/reset',
     /** 获取并发配置 */
     CONCURRENCY_GET: '/api/v1/config/concurrency',
+    /** 更新并发配置 */
+    CONCURRENCY_UPDATE: '/api/v1/config/concurrency',
     /** 获取成本控制配置 */
     COST_CONTROL_GET: '/api/v1/config/cost-control',
     /** 更新成本控制配置 */
@@ -212,11 +214,17 @@ export const API_ENDPOINTS = {
     TASK_LIST: '/api/v1/monitoring/tasks',
     /** 获取事件列表 */
     EVENT_LIST: '/api/v1/monitoring/events',
+    /** 获取 Token 使用统计 */
+    TOKEN_USAGE: '/api/v1/monitoring/token-usage',
+    /** 获取缓存命中率统计 */
+    CACHE_STATS: '/api/v1/monitoring/cache-stats',
   },
   /** 任务管理 - 对应后端 /api/v1/tasks/* */
   TASKS: {
     /** 获取任务列表 */
     LIST: '/api/v1/tasks',
+    /** 创建任务 */
+    CREATE: '/api/v1/tasks',
     /** 获取任务详情 */
     GET: (id: string) => `/api/v1/tasks/${id}`,
     /** 更新任务 */

@@ -11,7 +11,6 @@ Git 操作和合并操作方法，本文件仅保留业务编排层代码。
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +93,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         - 无 workspace → 在 ws_root 创建容器空间，空空间 + git init
         """
         isolation_mode = task_data.get("isolation_mode", "") or ""
-        ws_root = self._get_workspace_root()
+        ws_base = self._get_workspace_root()
 
         if workspace and isolation_mode == "host":
             path = Path(workspace)
@@ -102,7 +101,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             logger.info("[WorkspaceLifecycle] host模式复用原空间: task_id=%s, path=%s",
                         container_task_id, path)
         else:
-            path = Path(ws_root) / f"container_{container_task_id}"
+            path = ws_base / f"container_{container_task_id}"
             if not path.exists():
                 path.mkdir(parents=True, exist_ok=True)
                 if workspace:
@@ -222,42 +221,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             self._ws_meta_store[task_id] = meta
             return meta
-        # ── inherit_workspace_from：直接复制源目录文件到新目录 ──
-        # 跳过 git init / worktree add 等所有初始化步骤
-        if task_data.get("_inherit_workspace_resolved"):
-            ws_root = self._get_workspace_root()
-            target_dir = Path(ws_root) / task_id
-            source_dir = Path(workspace)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if source_dir.exists() and source_dir.is_dir():
-                skip = self._effective_skip_dirs()
-                copied = 0
-                for item in source_dir.rglob("*"):
-                    if not item.is_file():
-                        continue
-                    rel = item.relative_to(source_dir)
-                    if any(p in skip for p in rel.parts):
-                        continue
-                    if item.suffix in set({".bak", ".pyc", ".pyo"}):
-                        continue
-                    target = target_dir / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(item), str(target))
-                    copied += 1
-                logger.info(
-                    "[WorkspaceLifecycle] inherit: 复制完成 task_id=%s, "
-                    "source=%s, target=%s, files=%d",
-                    task_id, source_dir, target_dir, copied,
-                )
-            else:
-                logger.warning(
-                    "[WorkspaceLifecycle] inherit: 源目录不存在，创建空目录 "
-                    "task_id=%s, source=%s",
-                    task_id, source_dir,
-                )
-            meta = {"mode": "plain", "path": str(target_dir)}
-            self._ws_meta_store[task_id] = meta
-            return meta
 
         # ── Host isolation mode ──
         _isolation_mode = (task_data.get("isolation_mode", "")
@@ -286,7 +249,16 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 if not self._git_init_and_initial_commit(container_path, "chore: init container repo"):
                     raise RuntimeError(f"容器空间 git 初始化失败: {container_path}")
             self._ensure_git_user(container_path)
-            if self._guard_root_branch(container_path):
+            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=container_path)
+            if rc_head != 0:
+                logger.info(
+                    "[WorkspaceLifecycle] 容器空间 .git 存在但无提交，执行 initial commit: "
+                    "task_id=%s, path=%s", task_id, container_path)
+                if not self._git_init_and_initial_commit(
+                        container_path, "chore: init container repo"):
+                    raise RuntimeError(
+                        f"容器空间初始化失败（已有 .git 但无提交记录）: {container_path}")
+            elif self._guard_root_branch(container_path):
                 self._git_add_commit_if_dirty(container_path,
                                               f"chore: auto-save before subtask {task_id}")
             else:
@@ -350,8 +322,8 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         # 无显式 workspace 且无容器 → plain 模式：只创建目录，不做 git 操作
         has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
         if not has_explicit_workspace and not container_ws:
-            ws_root = self._get_workspace_root()
-            plain_path = Path(ws_root) / task_id
+            ws_base = self._get_workspace_root()
+            plain_path = ws_base / task_id
             plain_path.mkdir(parents=True, exist_ok=True)
             meta = {"mode": "plain", "path": str(plain_path)}
             self._ws_meta_store[task_id] = meta
@@ -367,7 +339,13 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                      "workspace=%s, root_path=%s",
                      task_id, scenario, workspace, root_path)
 
-        # 统一走 worktree：确保有 .git → 创建 worktree 分支隔离
+        ws_base = self._get_workspace_root()
+
+        # BUG-FIX-fix_20260521_existing_project_copy:
+        # 问题根因: existing_project 分支将整个项目复制到 .ai_workspaces/taskid_repo，
+        #          每次任务都复制一份完整项目，导致磁盘空间爆炸。
+        # 修复方案: 直接从目标项目（root_path）创建 worktree，
+        #          worktree 放在配置的工作空间基目录（ws_base）下，不复制文件。
         if not root_path.exists():
             root_path.mkdir(parents=True, exist_ok=True)
         if not (root_path / ".git").exists():
@@ -376,7 +354,17 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")
         else:
             self._ensure_git_user(root_path)
-            if self._guard_root_branch(root_path):
+            rc_head, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
+            if rc_head != 0:
+                logger.info(
+                    "[WorkspaceLifecycle] .git 存在但无提交，执行 initial commit: "
+                    "task_id=%s, path=%s", task_id, root_path)
+                if not self._git_init_and_initial_commit(
+                        root_path, "chore: initial project"):
+                    raise RuntimeError(
+                        f"项目空间初始化失败（已有 .git 但无提交记录）: "
+                        f"task_id={task_id}, path={root_path}")
+            elif self._guard_root_branch(root_path):
                 self._git_add_commit_if_dirty(
                     root_path,
                     f"chore: auto-save before worktree for task {task_id}")
@@ -387,8 +375,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     task_id)
 
         branch = f"task/{task_id}"
-        ws_root = self._get_workspace_root()
-        ws_dir = root_path / ws_root / _safe_ws_name(root_path.name, task_id)
+        ws_dir = ws_base / _safe_ws_name(root_path.name, task_id)
         project_size = self._calc_project_size(str(root_path), task_id)
         threshold = (self._config.get("workspace", {})
                      .get("sparse_threshold_mb", 50) * 1024 * 1024)
@@ -471,14 +458,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             ws_path = Path(workspace)
             if not ws_path.is_absolute():
                 ws_path = ws_path.resolve()
-            if ws_path.exists():
-                try:
-                    _force_rmtree(str(ws_path))
-                    result["dir_removed"] = True
-                    logger.info("[WorkspaceLifecycle] 已清理 plain 工作空间: %s", ws_path)
-                except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s",
-                                   workspace, e)
+            logger.info("[WorkspaceLifecycle] plain 模式保留工作空间目录: %s", ws_path)
 
         self._ws_meta_store.pop(task_id, None)
         logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s",

@@ -14,8 +14,4 @@
 - 应用服务：协调多个领域服务，面向用例
 """
 
-from src.services.app.task_app_service import TaskAppService
-
-__all__ = [
-    "TaskAppService",
-]
+__all__ = []

@@ -260,12 +260,23 @@ class Application:
             logger.warning("创建 execution_record_storage 服务失败: %s", exc)
 
         # ── 10. EventBus ─────────────────────────────────
+        # BUG-FIX-fix_20260521_event_bus_type_mismatch:
+        # 问题根因: 之前使用 pipeline.event_bus.EventBus 创建实例，这是轻量级实现，
+        #          没有 subscribe_simple 方法。TaskWorker.start() 调用 subscribe_simple
+        #          时抛出 AttributeError，异常被 lifespan try-except 静默捕获，
+        #          导致 TaskWorker 从未成功启动，任务一直 pending。
+        #          同时 pipeline.event_bus.EventBus 与 src.core.event_bus 全局单例
+        #          是不同的类和实例，发射者和接收者在不同 EventBus 上，事件无法送达。
+        # 修复方案: 使用 src.core.event_bus.get_event_bus() 获取核心事件总线全局单例，
+        #          确保 TaskWorker、TaskService、task_submit 等全部使用同一实例。
+        # 影响范围: 管道任务提交、TaskWorker 启动、事件总线通信
+        # 修复日期: 2026-05-21
         try:
-            from pipeline.event_bus import EventBus
+            from src.core.event_bus import get_event_bus
 
-            event_bus = EventBus()
+            event_bus = get_event_bus()
             services["event_bus"] = event_bus
-            logger.info("服务已创建: event_bus")
+            logger.info("服务已创建: event_bus (core singleton)")
         except Exception as exc:
             logger.warning("创建 event_bus 服务失败: %s", exc, exc_info=True)
 
@@ -636,11 +647,14 @@ class Application:
         event_bus = svc.get("event_bus")
         if not event_bus:
             logger.warning("services 中缺少 event_bus，尝试懒创建")
+            # BUG-FIX-fix_20260521_event_bus_type_mismatch:
+            # 与 build_services() 保持一致，使用 core event_bus 全局单例
             try:
-                from pipeline.event_bus import EventBus
-                event_bus = EventBus()
+                from src.core.event_bus import get_event_bus
+
+                event_bus = get_event_bus()
                 svc["event_bus"] = event_bus
-                logger.info("event_bus 懒创建成功")
+                logger.info("event_bus 懒创建成功 (core singleton)")
             except Exception as exc:
                 logger.error("event_bus 懒创建失败: %s", exc)
                 return None

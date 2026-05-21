@@ -49,9 +49,9 @@ def create_test_client():
     """
     from fastapi.testclient import TestClient
 
-    from src.api.main import app
+    from channels.api.app import create_app
 
-    return TestClient(app)
+    return TestClient(create_app())
 
 
 def create_async_test_client():

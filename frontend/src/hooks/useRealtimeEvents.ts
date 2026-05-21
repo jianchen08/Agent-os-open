@@ -218,7 +218,18 @@ export function useRealtimeEvents(): void {
       const newStatus = data.new_status as string | undefined
 
       if (taskId && newStatus) {
-        useLongTermTaskStore.getState().updateTask(taskId, { status: newStatus } as never)
+        // BUG-FIX-fix_20260521_task_realtime_render:
+        // 问题根因: updateTask 使用 .map() 仅更新已存在的任务，对于通过 task_submit 新创建、
+        //           尚未通过 fetchTasks() 加载到 store 的任务，状态更新被静默丢弃，
+        //           导致前端无法实时渲染新提交的任务。
+        // 修复方案: 先检查任务是否在 store 中，不存在则触发 fetchTasks() 全量刷新拉取新任务。
+        const store = useLongTermTaskStore.getState()
+        const exists = store.tasks.some((t: Record<string, unknown>) => t.id === taskId)
+        if (exists) {
+          store.updateTask(taskId, { status: newStatus } as never)
+        } else {
+          store.fetchTasks().catch(() => {})
+        }
       }
 
       bumpWorkspaceDataVersion()

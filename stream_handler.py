@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from fastapi import WebSocket
 
-from channels.api.models import store as api_store
+from channels.api.memory_store import store as api_store
 from src.pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
 
 from ws_handler import ws_interaction_notifier
@@ -197,6 +197,17 @@ def _init_pipeline_context() -> PipelineContext:
 
         # 创建管道引擎（通过 Application 容器）
         engine = _app.create_pipeline_engine(pipeline_config, plugin_registry)
+
+        # 注册路由表和插件注册表到 ServiceProvider，供 MessageBus 重建管道使用
+        try:
+            from infrastructure.service_provider import get_service_provider
+            _sp = get_service_provider()
+            _sp.register("input_route_table", pipeline_config.input_route_table)
+            _sp.register("output_route_table", pipeline_config.output_route_table)
+            _sp.register("plugin_registry", plugin_registry)
+            logger.info("路由表和插件注册表已注册到 ServiceProvider")
+        except Exception as exc:
+            logger.warning("注册路由表到 ServiceProvider 失败: %s", exc)
 
         # 初始化 TaskWorker（通过 Application 容器）
         try:

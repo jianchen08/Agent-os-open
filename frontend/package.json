@@ -24,8 +24,8 @@
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.4",
-    "@rolldown/binding-linux-x64-gnu": "^1.0.1",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "antd": "^5.24.0",
     "axios": "^1.13.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -58,7 +58,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "autoprefixer": "^10.4.22",
-    "esbuild": "^0.25.12",
+    "esbuild": "^0.28.0",
     "eslint": "^9.39.1",
     "eslint-import-resolver-typescript": "^4.4.4",
     "eslint-plugin-import-x": "^4.16.2",
@@ -71,10 +71,10 @@
     "tailwindcss": "^4.1.17",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.59.1",
-    "vite": "npm:rolldown-vite@7.2.5",
+    "vite": "^8.0.0",
     "vitest": "^4.0.15"
   },
   "overrides": {
-    "vite": "npm:rolldown-vite@7.2.5"
+    "vite": "^8.0.0"
   }
 }

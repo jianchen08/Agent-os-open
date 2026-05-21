@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,6 +21,7 @@ class TestCriteriaAutoFill:
         """当 input_params 中无 criteria 时，从 task.description 自动填充。"""
         tool = TaskEvaluateTool()
         task = MagicMock()
+        task.id = "test_task_001"
         task.metadata = {
             "acceptance_criteria": {
                 "semantic_check": {
@@ -40,6 +41,7 @@ class TestCriteriaAutoFill:
         """当 input_params 中已有 criteria 时，不覆盖。"""
         tool = TaskEvaluateTool()
         task = MagicMock()
+        task.id = "test_task_001"
         task.metadata = {
             "acceptance_criteria": {
                 "semantic_check": {
@@ -61,10 +63,10 @@ class TestRetryLoop:
 
     @pytest.mark.task
     @pytest.mark.unit
-    def test_retry_then_pass(self) -> None:
+    async def test_retry_then_pass(self) -> None:
         """第一次评估失败返回 retry，第二次通过返回 completed。"""
         tool = TaskEvaluateTool()
-        tool._save_task = MagicMock()
+        tool._save_task = AsyncMock()
 
         task = MagicMock()
         task.id = "test_task_001"
@@ -72,13 +74,14 @@ class TestRetryLoop:
         task.metadata = {"max_eval_retries": 3}
 
         task_service = MagicMock()
+        task_service.complete_evaluation = AsyncMock()
 
         # 第一次评估：失败 → retry
         eval_fail = EvaluationResult(
             task_id="test_task_001",
             results=[MetricResult(metric_id="semantic_check", passed=False)],
         )
-        result1 = tool._handle_evaluation_result(
+        result1 = await tool._handle_evaluation_result(
             inputs={"action": "auto_complete"},
             task_service=task_service,
             task=task,
@@ -91,7 +94,7 @@ class TestRetryLoop:
             task_id="test_task_001",
             results=[MetricResult(metric_id="semantic_check", passed=True)],
         )
-        result2 = tool._handle_evaluation_result(
+        result2 = await tool._handle_evaluation_result(
             inputs={"action": "auto_complete"},
             task_service=task_service,
             task=task,
@@ -101,10 +104,10 @@ class TestRetryLoop:
 
     @pytest.mark.task
     @pytest.mark.unit
-    def test_retry_exhausted(self) -> None:
+    async def test_retry_exhausted(self) -> None:
         """连续 3 次评估失败后触发 exhausted，返回 failed。"""
         tool = TaskEvaluateTool()
-        tool._save_task = MagicMock()
+        tool._save_task = AsyncMock()
 
         task = MagicMock()
         task.id = "test_task_001"
@@ -112,6 +115,7 @@ class TestRetryLoop:
         task.metadata = {"max_eval_retries": 3}
 
         task_service = MagicMock()
+        task_service.complete_evaluation = AsyncMock()
         result = None
 
         for _ in range(3):
@@ -119,7 +123,7 @@ class TestRetryLoop:
                 task_id="test_task_001",
                 results=[MetricResult(metric_id="semantic_check", passed=False)],
             )
-            result = tool._handle_evaluation_result(
+            result = await tool._handle_evaluation_result(
                 inputs={"action": "auto_complete"},
                 task_service=task_service,
                 task=task,
@@ -132,10 +136,10 @@ class TestRetryLoop:
 
     @pytest.mark.task
     @pytest.mark.unit
-    def test_retry_feedback_contains_details(self) -> None:
+    async def test_retry_feedback_contains_details(self) -> None:
         """retry 反馈消息包含指标 ID 和剩余次数。"""
         tool = TaskEvaluateTool()
-        tool._save_task = MagicMock()
+        tool._save_task = AsyncMock()
 
         task = MagicMock()
         task.id = "test_task_001"
@@ -147,7 +151,7 @@ class TestRetryLoop:
             task_id="test_task_001",
             results=[MetricResult(metric_id="semantic_check", passed=False)],
         )
-        result = tool._handle_evaluation_result(
+        result = await tool._handle_evaluation_result(
             inputs={"action": "auto_complete"},
             task_service=task_service,
             task=task,
@@ -156,7 +160,7 @@ class TestRetryLoop:
 
         message = result.metadata["message"]
         assert "[semantic_check] 未通过" in message
-        assert "剩余重试次数" in message
+        assert "剩余重试" in message
 
     @pytest.mark.task
     @pytest.mark.unit

@@ -403,7 +403,7 @@ class TrackPlugin(IOutputPlugin):
         """从变更的 user_input 中提取新注入的内容。
 
         常见注入模式：
-        - TaskEventReceiverPlugin 在前部追加 "[系统通知] ..."
+        - _notify_suspended_pipelines 通过 send_pipeline_message 注入子任务通知
         - MessageInjectPlugin 在前部追加消息
 
         提取策略：

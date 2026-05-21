@@ -297,48 +297,6 @@ export async function fetchTaskPhase(taskId: string): Promise<GetTaskPhaseRespon
 }
 
 /**
- * 完成准备阶段
- *
- * @param taskId 任务 ID
- * @param output 准备产物
- * @returns 完成响应
- */
-export async function completePreparePhase(
-  taskId: string,
-  output?: Record<string, unknown>,
-): Promise<{ taskId: string; currentPhase: TaskPhase }> {
-  const response = await apiClient.post<{
-    task_id: string
-    current_phase: TaskPhase
-  }>(API_ENDPOINTS.TASK_PHASES.COMPLETE_PREPARE(taskId), { output })
-  return {
-    taskId: response.data.task_id,
-    currentPhase: response.data.current_phase,
-  }
-}
-
-/**
- * 完成执行阶段
- *
- * @param taskId 任务 ID
- * @param output 执行产物
- * @returns 完成响应
- */
-export async function completeExecutePhase(
-  taskId: string,
-  output?: Record<string, unknown>,
-): Promise<{ taskId: string; currentPhase: TaskPhase }> {
-  const response = await apiClient.post<{
-    task_id: string
-    current_phase: TaskPhase
-  }>(API_ENDPOINTS.TASK_PHASES.COMPLETE_EXECUTE(taskId), output ? { output } : {})
-  return {
-    taskId: response.data.task_id,
-    currentPhase: response.data.current_phase,
-  }
-}
-
-/**
  * 获取阶段产物
  *
  * @param taskId 任务 ID
@@ -370,45 +328,6 @@ export async function fetchTaskACs(taskId: string): Promise<GetTaskACsResponse> 
     API_ENDPOINTS.TASK_EVALUATION.LIST(taskId),
   )
   return response.data
-}
-
-/**
- * 评估单个验收标准
- *
- * @param taskId 任务 ID
- * @param acId AC ID
- * @param evidence 证据（可选）
- * @returns 验收标准信息
- */
-export async function evaluateAC(
-  taskId: string,
-  acId: string,
-  evidence?: Record<string, unknown>,
-): Promise<AcceptanceCriterion> {
-  const response = await apiClient.post<{ acceptance_criterion: AcceptanceCriterion }>(
-    API_ENDPOINTS.TASK_EVALUATION.EVALUATE(taskId, acId),
-    evidence ? { evidence } : {},
-  )
-  return response.data.acceptance_criterion
-}
-
-/**
- * 评估所有验收标准
- *
- * @param taskId 任务 ID
- * @param parallel 是否并行评估
- * @returns 验收标准列表
- */
-export async function evaluateAllACs(
-  taskId: string,
-  parallel: boolean = true,
-): Promise<AcceptanceCriterion[]> {
-  const response = await apiClient.post<GetTaskACsResponse>(
-    API_ENDPOINTS.TASK_EVALUATION.EVALUATE_ALL(taskId),
-    null,
-    { params: { parallel } },
-  )
-  return response.data.acceptanceCriteria
 }
 
 /**

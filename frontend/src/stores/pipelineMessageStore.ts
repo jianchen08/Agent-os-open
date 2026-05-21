@@ -607,6 +607,15 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     }
 
     const fetchPromise = (async () => {
+      // 加载更早消息时，先设置 loading 状态（防重复请求 + 显示加载指示器）
+      if (options?.before_sequence !== undefined) {
+        set((state) => ({
+          isLoadingOlderByPipeline: {
+            ...state.isLoadingOlderByPipeline,
+            [pipelineId]: true,
+          },
+        }))
+      }
       try {
         const limit = options?.limit ?? 50
         // FIX: 自动从 pipelineSessionMap 查找 sessionId 作为 threadId fallback，子管道正确传 pipelineRunId

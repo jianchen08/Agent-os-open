@@ -14,8 +14,8 @@ from channels.api.deps import APIError, require_auth, validate_pagination
 from channels.api.models import (
     MemoryListResponse,
     MemoryResponse,
-    store,
 )
+from channels.api.memory_store import store
 
 logger = logging.getLogger(__name__)
 

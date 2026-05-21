@@ -7,28 +7,23 @@ export default defineConfig({
   forbidOnly: false,
   retries: 0,
   workers: 1,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [['list']],
   timeout: 180_000,
   use: {
     baseURL: 'http://localhost:5188',
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
-    screenshot: 'only-on-failure',
-    trace: 'on-first-retry',
+    screenshot: 'off',
+    trace: 'off',
   },
   projects: [
     {
       name: 'chromium',
       use: {
         browserName: 'chromium',
-        viewport: { width: 1280, height: 720 },
+        viewport: { width: 1920, height: 1080 },
         launchOptions: { args: ['--no-sandbox', '--disable-setuid-sandbox'] },
       },
     },
   ],
-  webServer: {
-    command: 'echo "Using existing dev server"',
-    port: 5188,
-    reuseExistingServer: true,
-  },
 });

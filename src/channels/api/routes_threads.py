@@ -54,9 +54,8 @@ from channels.api.models import (
     ThreadCreate,
     ThreadResponse,
     ThreadUpdate,
-    _parse_iso_time,
-    store,
 )
+from channels.api.memory_store import store, _parse_iso_time
 from infrastructure.execution_record_storage import ExecutionRecordStorage
 from infrastructure.service_provider import get_service_provider
 from infrastructure.session.models import SessionModel

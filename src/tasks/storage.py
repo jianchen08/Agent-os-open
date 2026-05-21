@@ -336,3 +336,106 @@ class TaskStorage:
                         pass
 
         return True
+
+    # ==================== API 路由层适配方法 ====================
+
+    async def list_all(
+        self,
+        limit: int = 100,
+        session_id: str | None = None,
+        reverse: bool = False,
+    ) -> list[TaskModel]:
+        """列出所有任务，支持会话过滤和排序。
+
+        Args:
+            limit: 返回数量上限。
+            session_id: 按会话 ID 筛选（匹配 metadata.session_id）。
+            reverse: 是否按创建时间倒序。
+
+        Returns:
+            符合条件的任务列表。
+        """
+        tasks = list(self._tasks.values())
+        if session_id:
+            tasks = [
+                t for t in tasks
+                if t.metadata.get("session_id") == session_id
+            ]
+        tasks.sort(key=lambda t: t.created_at, reverse=reverse)
+        return tasks[:limit]
+
+    def get_task(self, task_id: str) -> TaskModel | None:
+        """获取单个任务（别名方法，供 API 路由使用）。
+
+        Args:
+            task_id: 任务 ID。
+
+        Returns:
+            任务模型，不存在时返回 None。
+        """
+        return self._tasks.get(task_id)
+
+    async def delete_task(self, task_id: str) -> bool:
+        """删除任务（异步包装，供 API 路由使用）。
+
+        Args:
+            task_id: 任务 ID。
+
+        Returns:
+            是否删除成功。
+        """
+        return self.delete(task_id)
+
+    async def pause_task(self, task_id: str) -> None:
+        """暂停任务。
+
+        通过状态机校验转换合法性后更新状态。
+
+        Args:
+            task_id: 任务 ID。
+
+        Raises:
+            KeyError: 任务不存在。
+            InvalidTransitionError: 状态不允许暂停。
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        from tasks.state_machine import SimpleStateMachine, _TASK_TRANSITIONS
+        sm = SimpleStateMachine(
+            initial_state=task.status.value,
+            transitions=_TASK_TRANSITIONS,
+        )
+        sm.transition("paused")
+        task.status = TaskStatus.PAUSED
+        task.updated_at = datetime.now().isoformat()
+        self._persist_task(task)
+
+    async def resume_task(self, task_id: str) -> TaskModel:
+        """恢复暂停的任务。
+
+        将状态从 paused 转为 pending，通过状态机校验合法性。
+
+        Args:
+            task_id: 任务 ID。
+
+        Returns:
+            恢复后的任务模型。
+
+        Raises:
+            KeyError: 任务不存在。
+            InvalidTransitionError: 状态不允许恢复。
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        from tasks.state_machine import SimpleStateMachine, _TASK_TRANSITIONS
+        sm = SimpleStateMachine(
+            initial_state=task.status.value,
+            transitions=_TASK_TRANSITIONS,
+        )
+        sm.transition("pending")
+        task.status = TaskStatus.PENDING
+        task.updated_at = datetime.now().isoformat()
+        self._persist_task(task)
+        return task

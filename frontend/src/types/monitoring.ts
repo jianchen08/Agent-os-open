@@ -103,6 +103,48 @@ export interface TaskInfo {
 }
 
 /**
+ * Token 使用统计
+ */
+export interface TokenUsage {
+  /** 总 Token 使用量 */
+  total_tokens: number
+  /** 输入 Token 数 */
+  prompt_tokens: number
+  /** 输出 Token 数 */
+  completion_tokens: number
+  /** 请求次数 */
+  request_count: number
+}
+
+/**
+ * 缓存命中率统计
+ */
+export interface CacheStats {
+  /** 缓存命中次数 */
+  cache_hits: number
+  /** 缓存未命中次数 */
+  cache_misses: number
+  /** 命中率 (0-100) */
+  hit_rate: number
+  /** 总请求数 */
+  total_requests: number
+}
+
+/**
+ * Token 使用统计响应
+ */
+export interface TokenUsageResponse {
+  token_usage: TokenUsage
+}
+
+/**
+ * 缓存统计响应
+ */
+export interface CacheStatsResponse {
+  cache_stats: CacheStats
+}
+
+/**
  * 监控数据汇总
  */
 export interface MonitoringData {

@@ -78,7 +78,7 @@ export const MessageList = ({
       const atTop = scrollTop < 50
       isAtTopRef.current = atTop
 
-      if (atTop && hasMore && !isLoadingMore && onLoadMore && !isScrolling) {
+      if (atTop && hasMore && !isLoadingMore && onLoadMore) {
         onLoadMore()
       }
     },

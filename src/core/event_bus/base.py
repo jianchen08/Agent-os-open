@@ -555,11 +555,22 @@ class EventBusBase(abc.ABC):
         Returns:
             事件ID
         """
+        # BUG-FIX-fix_20260521_emit_normalize:
+        # 问题根因: emit("task.submitted") 中点号格式无法匹配 EventType.TASK_SUBMITTED
+        #          （值为 "task_submitted" 下划线格式），导致事件被当作 CUSTOM 处理，
+        #          而 TaskOrchestrator 订阅的是 EventFilter(event_types=[EventType.TASK_SUBMITTED])，
+        #          两者永远匹配不上，任务卡在 pending。
+        # 修复方案: 与 subscribe_simple() 保持对称，先尝试原值，再尝试归一化（点号→下划线），
+        #          最后才回退为 CUSTOM。
         try:
             event_enum = EventType(event_type)
         except ValueError:
-            event_enum = EventType.CUSTOM
-            data["custom_event_type"] = event_type
+            normalized = event_type.replace(".", "_")
+            try:
+                event_enum = EventType(normalized)
+            except ValueError:
+                event_enum = EventType.CUSTOM
+                data["custom_event_type"] = event_type
 
         return await self.publish(
             ExecutionEvent(

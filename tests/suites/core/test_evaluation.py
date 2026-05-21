@@ -318,49 +318,49 @@ class TestExpectEvaluator:
 class TestEvaluationEngine:
     """评估引擎测试。"""
 
-    def test_evaluate_single_tool_metric(self, loader: MetricLoader) -> None:
+    async def test_evaluate_single_tool_metric(self, loader: MetricLoader) -> None:
         """评估单个 tool 类型指标。"""
         engine = EvaluationEngine(loader=loader)
-        result = engine.evaluate_single(task_id="task_test", metric_id="bash_check")
+        result = await engine.evaluate_single(task_id="task_test", metric_id="bash_check")
         assert result.metric_id == "bash_check"
         assert result.passed is True  # Mock 返回成功
 
-    def test_evaluate_single_agent_metric(self, loader: MetricLoader) -> None:
+    async def test_evaluate_single_agent_metric(self, loader: MetricLoader) -> None:
         """评估单个 agent 类型指标。"""
         engine = EvaluationEngine(loader=loader)
-        result = engine.evaluate_single(task_id="task_test", metric_id="semantic_check")
+        result = await engine.evaluate_single(task_id="task_test", metric_id="semantic_check")
         assert result.metric_id == "semantic_check"
         assert result.passed is True  # Mock 返回通过
 
-    def test_evaluate_single_human_metric(self, loader: MetricLoader) -> None:
+    async def test_evaluate_single_human_metric(self, loader: MetricLoader) -> None:
         """评估单个 human 类型指标。"""
         engine = EvaluationEngine(loader=loader)
-        result = engine.evaluate_single(task_id="task_test", metric_id="human_review")
+        result = await engine.evaluate_single(task_id="task_test", metric_id="human_review")
         assert result.metric_id == "human_review"
         assert result.passed is True  # Mock 返回通过
 
-    def test_evaluate_nonexistent_metric(self, loader: MetricLoader) -> None:
+    async def test_evaluate_nonexistent_metric(self, loader: MetricLoader) -> None:
         """评估不存在的指标抛出 KeyError。"""
         engine = EvaluationEngine(loader=loader)
         with pytest.raises(KeyError):
-            engine.evaluate_single(task_id="task_test", metric_id="nonexistent")
+            await engine.evaluate_single(task_id="task_test", metric_id="nonexistent")
 
-    def test_evaluate_multiple_metrics(self, loader: MetricLoader) -> None:
+    async def test_evaluate_multiple_metrics(self, loader: MetricLoader) -> None:
         """评估多个指标。"""
         engine = EvaluationEngine(loader=loader)
         config = EvaluationConfig(
             metric_ids=["bash_check", "semantic_check"],
         )
-        result = engine.evaluate(task_id="task1", config=config)
+        result = await engine.evaluate(task_id="task1", config=config)
         assert len(result.results) == 2
         assert result.overall_passed is True
 
-    def test_evaluate_fail_fast(self, loader: MetricLoader) -> None:
+    async def test_evaluate_fail_fast(self, loader: MetricLoader) -> None:
         """fail_fast 配置生效。"""
         engine = EvaluationEngine(loader=loader)
 
         # 注册一个返回失败的评估器
-        def fail_evaluator(metric_def: MetricDefinition, params: dict) -> dict:
+        async def fail_evaluator(metric_def: MetricDefinition, params: dict, task_id: str = "") -> dict:
             return {"success": False, "data": {"exit_code": 1}}
 
         engine.register_evaluator(MetricType.TOOL, fail_evaluator)
@@ -369,31 +369,31 @@ class TestEvaluationEngine:
             metric_ids=["bash_check", "semantic_check"],
             fail_fast=True,
         )
-        result = engine.evaluate(task_id="task1", config=config)
+        result = await engine.evaluate(task_id="task1", config=config)
         # bash_check 失败后应停止，不评估 semantic_check
         assert len(result.results) == 1
         assert result.overall_passed is False
 
-    def test_custom_evaluator(self, loader: MetricLoader) -> None:
+    async def test_custom_evaluator(self, loader: MetricLoader) -> None:
         """自定义评估器函数生效。"""
         engine = EvaluationEngine(loader=loader)
 
         custom_called = False
 
-        def custom_eval(metric_def: MetricDefinition, params: dict) -> dict:
+        async def custom_eval(metric_def: MetricDefinition, params: dict, task_id: str = "") -> dict:
             nonlocal custom_called
             custom_called = True
             return {"success": True, "data": {"exit_code": 0}}
 
         engine.register_evaluator(MetricType.TOOL, custom_eval)
-        engine.evaluate_single(task_id="task_test", metric_id="bash_check")
+        await engine.evaluate_single(task_id="task_test", metric_id="bash_check")
         assert custom_called is True
 
-    def test_evaluate_all_when_no_metric_ids(self, loader: MetricLoader) -> None:
+    async def test_evaluate_all_when_no_metric_ids(self, loader: MetricLoader) -> None:
         """metric_ids 为空时评估所有已加载指标。"""
         engine = EvaluationEngine(loader=loader)
         config = EvaluationConfig(metric_ids=[])
-        result = engine.evaluate(task_id="task1", config=config)
+        result = await engine.evaluate(task_id="task1", config=config)
         assert len(result.results) == 3  # bash_check + semantic_check + human_review
 
 
@@ -458,10 +458,10 @@ class TestResultMapper:
 class TestEvaluationExecutor:
     """评估执行器测试。"""
 
-    def test_run_evaluation(self, loader: MetricLoader) -> None:
+    async def test_run_evaluation(self, loader: MetricLoader) -> None:
         """执行评估返回正确结果。"""
         executor = EvaluationExecutor(loader=loader)
-        result = executor.run_evaluation(
+        result = await executor.run_evaluation(
             task_id="task1",
             metric_ids=["bash_check"],
         )
@@ -469,24 +469,24 @@ class TestEvaluationExecutor:
         assert len(result.results) == 1
         assert result.overall_passed is True
 
-    def test_run_with_task_service(self, loader: MetricLoader) -> None:
+    async def test_run_with_task_service(self, loader: MetricLoader) -> None:
         """评估完成后回写任务状态。"""
         mock_service = MagicMock()
         executor = EvaluationExecutor(
             task_service=mock_service,
             loader=loader,
         )
-        executor.run_evaluation(
+        await executor.run_evaluation(
             task_id="task1",
             metric_ids=["bash_check"],
         )
         mock_service.complete_evaluation.assert_called_once_with("task1", True)
 
-    def test_run_evaluation_failed(self, loader: MetricLoader) -> None:
+    async def test_run_evaluation_failed(self, loader: MetricLoader) -> None:
         """评估失败时回写 failed 状态。"""
         engine = EvaluationEngine(loader=loader)
 
-        def fail_evaluator(metric_def: MetricDefinition, params: dict) -> dict:
+        async def fail_evaluator(metric_def: MetricDefinition, params: dict, task_id: str = "") -> dict:
             return {"success": False, "data": {"exit_code": 1}}
 
         engine.register_evaluator(MetricType.TOOL, fail_evaluator)
@@ -497,7 +497,7 @@ class TestEvaluationExecutor:
             loader=loader,
             engine=engine,
         )
-        result = executor.run_evaluation(
+        result = await executor.run_evaluation(
             task_id="task1",
             metric_ids=["bash_check"],
         )
@@ -538,7 +538,8 @@ class TestEvaluationResult:
         assert "1/2" in result.summary
 
     def test_compute_overall_empty(self) -> None:
-        """空结果 → overall_passed=True（all([]) == True）。"""
+        """空结果 → overall_passed=False（无指标时判定为不通过）。"""
         result = EvaluationResult(task_id="t1", results=[])
         result.compute_overall()
-        assert result.overall_passed is True
+        assert result.overall_passed is False
+        assert "无评估指标" in result.summary

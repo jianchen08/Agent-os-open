@@ -9,6 +9,7 @@ evaluating 任务重新激活、评估重跑、恢复参数构建。
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ class TaskRecoveryMixin:
                         task.id, f"评估恢复失败: {e}",
                     )
                 except Exception:
-                    pass
+                    logger.warning("TaskWorker: fail_task 也失败: task_id=%s", task.id, exc_info=True)
 
     async def _rerun_evaluation(self, task: Any) -> None:
         """为 evaluating 状态的任务重新运行评估。
@@ -239,19 +240,25 @@ class TaskRecoveryMixin:
                 task_id, passed=True, result={
                     "overall_passed": True,
                     "summary": result.summary,
+                    "recovered": True,
                     "metrics": [
-                        {"metric_id": m.metric_id, "passed": m.passed}
-                        for m in result.metric_results
+                        {
+                            "metric_id": r.metric_id,
+                            "passed": r.passed,
+                            "score": r.score,
+                            "message": r.message,
+                        }
+                        for r in result.results
                     ],
                 },
             )
         else:
-            # 收集失败指标信息
             failed_metrics = [
-                m.metric_id for m in result.metric_results if not m.passed
+                r.metric_id for r in result.results if not r.passed
             ]
-            logger.info(
-                "TaskWorker: 评估恢复完成（未通过）: task_id=%s, failed=%s",
+            logger.warning(
+                "TaskWorker: 评估恢复完成（未通过）: task_id=%s, "
+                "failed=%s",
                 task_id, failed_metrics,
             )
             # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
@@ -259,45 +266,75 @@ class TaskRecoveryMixin:
                 task_id, passed=False, result={
                     "overall_passed": False,
                     "summary": result.summary,
+                    "recovered": True,
                     "metrics": [
-                        {"metric_id": m.metric_id, "passed": m.passed}
-                        for m in result.metric_results
+                        {
+                            "metric_id": r.metric_id,
+                            "passed": r.passed,
+                            "score": r.score,
+                            "message": r.message,
+                            "error": r.error,
+                        }
+                        for r in result.results
                     ],
                 },
             )
 
     def _build_recovery_input_params(
-        self,
-        task: Any,
-        metric_ids: list[str],
-    ) -> dict[str, Any]:
+        self, task: Any, metric_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
         """为评估恢复构建 input_params。
 
-        从任务的 acceptance_criteria 中提取各指标的 input_params，
-        并注入工作空间路径。
-
-        Args:
-            task: 任务对象
-            metric_ids: 需要评估的指标 ID 列表
-
-        Returns:
-            {metric_id: {参数字典}} 的映射
+        从 task.metadata.acceptance_criteria 提取参数，
+        并注入 workspace 路径确保评估工具能正确访问文件。
         """
         metadata = task.metadata or {}
+        params: dict[str, dict[str, Any]] = {}
+
         ac = metadata.get("acceptance_criteria", {})
-        workspace = metadata.get("workspace", "")
+        if isinstance(ac, dict):
+            _non_param_keys = {
+                "expected_output", "pass_threshold", "description",
+            }
+            for metric_id, config in ac.items():
+                if isinstance(config, dict) and metric_id in metric_ids:
+                    if "input_params" in config:
+                        params[metric_id] = config["input_params"]
+                    else:
+                        params[metric_id] = {
+                            k: v for k, v in config.items()
+                            if k not in _non_param_keys
+                        }
 
-        result: dict[str, Any] = {}
-        for mid in metric_ids:
-            if mid in ac and isinstance(ac[mid], dict):
-                params = dict(ac[mid].get("input_params", {}))
-            else:
-                params = {}
+        # 解析 workspace
+        workspace_abs: str | None = None
+        ws_meta = metadata.get("ws_meta")
+        if ws_meta and isinstance(ws_meta, dict):
+            ws_path = ws_meta.get("path")
+            if ws_path:
+                p = Path(ws_path)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                workspace_abs = str(p)
 
-            # 注入工作空间路径（如果参数中有 path 字段）
-            if workspace and "path" not in params:
-                params["path"] = workspace
+        if not workspace_abs:
+            task_workspace = metadata.get("workspace")
+            if task_workspace:
+                workspace_abs = str(Path.cwd() / task_workspace)
 
-            result[mid] = params
+        # 注入 workspace 和 criteria
+        task_desc = ""
+        if hasattr(task, "description") and task.description:
+            task_desc = task.description
+        elif hasattr(task, "title") and task.title:
+            task_desc = task.title
 
-        return result
+        for metric_id in metric_ids:
+            p = params.get(metric_id, {})
+            if not p.get("criteria") and task_desc:
+                p.setdefault("criteria", task_desc)
+            if workspace_abs and "workspace" not in p:
+                p["workspace"] = workspace_abs
+            params[metric_id] = p
+
+        return params

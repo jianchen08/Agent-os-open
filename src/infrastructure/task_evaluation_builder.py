@@ -157,7 +157,7 @@ class TaskEvaluationBuilderMixin:
     # 任务执行输入构建
     # ───────────────────────────────────────────────────────────────────
 
-    def _build_full_task_input(
+    async def _build_full_task_input(
         self,
         task_id: str,
         task_data: dict[str, Any],
@@ -188,7 +188,11 @@ class TaskEvaluationBuilderMixin:
         description = task_data.get("description", "")
 
         # BUG-FIX-fix_20260421_goal_context_injection:
-        # 从 task.metadata 中提取 goal_context 并拼入 full_input
+        # 问题根因: task_submit 将 goal.context 存入 metadata["goal_context"]，
+        #          但 TaskWorker 构建 full_input 时未提取该字段，导致包含原始用户需求的
+        #          结构化上下文在传递中丢失，下游 Agent 只能看到简化的标题。
+        # 修复方案: 从 task.metadata 中提取 goal_context 并拼入 full_input。
+        # 影响范围: 所有通过 task_submit 提交且携带 goal.context 的任务
         goal_context = None
         if task_service:
             _task_obj = task_service.get_task(task_id)
@@ -203,6 +207,11 @@ class TaskEvaluationBuilderMixin:
             _task_for_retry_msg = task_service.get_task(task_id)
             if _task_for_retry_msg and _task_for_retry_msg.metadata:
                 retry_message = _task_for_retry_msg.metadata.get("retry_message")
+                if retry_message:
+                    # 读取后清除，避免重试后再读到旧消息
+                    _task_for_retry_msg.metadata.pop("retry_message", None)
+                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+                    await task_service.save_task(_task_for_retry_msg)
 
         full_input = user_input
         if description:
@@ -210,10 +219,7 @@ class TaskEvaluationBuilderMixin:
         if retry_message:
             full_input += f"\n\n[重试纠正信息]：{retry_message}"
         if goal_context:
-            full_input += (
-                f"\n\n上下文信息："
-                f"{json.dumps(goal_context, ensure_ascii=False, indent=2) if isinstance(goal_context, dict) else str(goal_context)}"
-            )
+            full_input += f"\n\n上下文信息：{json.dumps(goal_context, ensure_ascii=False, indent=2) if isinstance(goal_context, dict) else str(goal_context)}"
         if acceptance_criteria:
             acceptance_criteria = self._normalize_acceptance_criteria_paths(
                 acceptance_criteria, workspace,
