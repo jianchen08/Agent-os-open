@@ -95,16 +95,19 @@ class TaskReminder(IOutputPlugin):
             try:
                 _task_obj = task_service.get_task(task_id)
                 if _task_obj is None:
-                    logger.info(
-                        "TaskReminder[iter=%s][task=%s]: task not found, sending end signal",
-                        iteration, task_id,
-                    )
-                    return OutputResult(
-                        route_signal=RouteSignal(
-                            route_type="end",
-                            reason=f"task_reminder: task {task_id} no longer exists",
-                        ),
-                    )
+                    if task_id.startswith("__eval__"):
+                        pass
+                    else:
+                        logger.info(
+                            "TaskReminder[iter=%s][task=%s]: task not found, sending end signal",
+                            iteration, task_id,
+                        )
+                        return OutputResult(
+                            route_signal=RouteSignal(
+                                route_type="end",
+                                reason=f"task_reminder: task {task_id} no longer exists",
+                            ),
+                        )
             except Exception:
                 pass
 

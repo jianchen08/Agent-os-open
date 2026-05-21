@@ -87,11 +87,11 @@ static_vars:
         |------|-------|---------|
         | L2 编排 | programming_orchestrator_agent | 代码编写/测试/调试/审查任务 |
         | L2 编排 | resource_manager_agent | 需创建/修改工具或 Agent |
-        | L3 执行 | general_agent | 通用任务执行（文件操作、数据处理、自定义验证等） |
+        | L2 编排 | research_orchestrator_agent | 深度研究/复杂分析/多维度论证 |
+        | L2 编排 | general_agent | 通用任务编排（文件操作、数据处理、自定义验证等） |
         | L3 执行 | research_agent | 调研/分析任务 |
         | L3 执行 | code_writer_agent | 单一编码任务（无需编排时） |
         | L3 执行 | test_debug_agent | 单一测试/调试任务（无需编排时） |
-        | L3 执行 | novel_outline_agent | 网络小说大纲生成 |
         | 标记需新建 | — | 无匹配执行者时在任务链中标注 |
     - name: "方案与执行计划模板"
       type: "path"

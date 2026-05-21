@@ -131,6 +131,7 @@ tool_ids:
   - "file_write"
   - "memory"
   - "list_directory"
+  - "human_interaction"
 
 # 约束
 hard_constraints:
@@ -147,7 +148,7 @@ soft_constraints:
 deliverables:
   - name: "research_report"
     description: "深度研究报告，包含问题建模、多维度分析、方案论证、风险评估和结论建议"
-    output_path: "{{workspace}}/docs/{title}_research_report.md"
+    output_path: "{{workspace}}/docs/{title}_synthesis_report.md"
     type: "markdown"
     required: true
 
@@ -156,10 +157,10 @@ recommended_metrics:
   - metric_id: "file_check"
     default_params:
       action: "read"
-      path: "{{workspace}}/docs/{title}_research_report.md"
+      path: "{{workspace}}/docs/{title}_synthesis_report.md"
   - metric_id: "format_valid"
     default_params:
-      path: "{{workspace}}/docs/{title}_research_report.md"
+      path: "{{workspace}}/docs/{title}_synthesis_report.md"
       type: "markdown"
 
 # 输入输出 Schema
@@ -185,7 +186,7 @@ output_schema:
   properties:
     research_report_path:
       type: "string"
-      description: "研究报告文件路径"
+      description: "综合研究报告文件路径，格式: docs/{title}_synthesis_report.md"
     sub_task_count:
       type: "integer"
       description: "派发的子任务数量"

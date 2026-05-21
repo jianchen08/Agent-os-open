@@ -252,7 +252,6 @@ class ToolCore(ICorePlugin):
 
         func = self._get_tool(tool_name)
         if func is None:
-            # 尝试自动加载：从文件或数据库加载未注册的工具
             func = await self._try_auto_load_tool(tool_name)
 
         if func is None:

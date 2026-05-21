@@ -79,7 +79,15 @@ tool_ids:
 version: "2.0.0"
 is_active: true
 status: "active"
+max_iterations: 100
 max_reminders: 3
+timeout_seconds: 1200
+
+hard_constraints:
+  - "评估必须基于实际内容，禁止空洞评价"
+  - "评分必须有依据，反馈要具体"
+  - "通过条件要严格对照 criteria，不放宽也不加严"
+  - "必须输出 JSON 格式的评估结果"
 
 metadata:
   author: "System"

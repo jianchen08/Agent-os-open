@@ -34,6 +34,16 @@ where node >nul 2>&1 || (
     exit /b 1
 )
 
+:: ========== 检查 pip ==========
+python -m pip --version >nul 2>&1 || (
+    echo [ERROR] pip 未找到，请重新安装 Python 并确保勾选 pip
+    pause
+    exit /b 1
+)
+
+:: ========== 安装 Python 依赖 ==========
+call :install_python_deps
+
 :: ========== 确保 Docker 和 Redis 就绪 ==========
 call :ensure_docker_and_redis
 
@@ -151,6 +161,79 @@ echo ========================================
 echo.
 pause
 goto :eof
+
+
+:: ========== 子程序：安装 Python 依赖 ==========
+:install_python_deps
+if not exist "%ROOT%\requirements.txt" (
+    echo [WARN] requirements.txt 未找到，跳过依赖安装
+    exit /b 0
+)
+
+if exist "%ROOT%\.py_deps_installed" (
+    echo [OK] Python 依赖已安装（如需重装请删除 .py_deps_installed）
+    exit /b 0
+)
+
+echo.
+echo [INFO] ========================================
+echo [INFO] 首次运行，正在安装 Python 依赖...
+echo [INFO] 这可能需要几分钟，请耐心等待
+echo [INFO] ========================================
+echo.
+
+python -m pip install --upgrade pip --quiet >nul 2>&1
+
+echo [INFO] 执行: pip install -r requirements.txt
+python -m pip install -r "%ROOT%\requirements.txt" --disable-pip-version-check 2>"%ROOT%\pip_err.tmp"
+set "PIP_RC=!errorlevel!"
+if !PIP_RC! equ 0 (
+    del "%ROOT%\pip_err.tmp" 2>nul
+    echo. > "%ROOT%\.py_deps_installed"
+    echo [OK] Python 依赖安装完成
+    exit /b 0
+)
+
+echo [WARN] 安装失败（错误码: !PIP_RC!），正在尝试修复...
+
+if not exist "%ROOT%\pip_err.tmp" (
+    echo [WARN] Python 依赖安装失败
+    echo [INFO] 请手动执行: python -m pip install -r requirements.txt
+    echo [INFO] 将尝试继续启动...
+    exit /b 0
+)
+
+:: 策略1: 权限不足 → --user 模式（非虚拟环境下）
+findstr /r /i "PermissionError Access.is.denied" "%ROOT%\pip_err.tmp" >nul 2>&1
+if !errorlevel! equ 0 if not defined VIRTUAL_ENV (
+    echo [INFO] 检测到权限问题，使用 --user 模式重试...
+    python -m pip install -r "%ROOT%\requirements.txt" --user --disable-pip-version-check 2>nul
+    if !errorlevel! equ 0 (
+        del "%ROOT%\pip_err.tmp" 2>nul
+        echo. > "%ROOT%\.py_deps_installed"
+        echo [OK] Python 依赖安装完成（--user 模式）
+        exit /b 0
+    )
+)
+
+:: 策略2: SSL/网络问题 → 跳过证书验证
+findstr /r /i "SSL CERTIFICATE Could.not.fetch" "%ROOT%\pip_err.tmp" >nul 2>&1
+if !errorlevel! equ 0 (
+    echo [INFO] 检测到网络或 SSL 问题，跳过证书验证重试...
+    python -m pip install -r "%ROOT%\requirements.txt" --trusted-host pypi.org --trusted-host files.pythonhosted.org --disable-pip-version-check 2>nul
+    if !errorlevel! equ 0 (
+        del "%ROOT%\pip_err.tmp" 2>nul
+        echo. > "%ROOT%\.py_deps_installed"
+        echo [OK] Python 依赖安装完成（跳过 SSL 验证）
+        exit /b 0
+    )
+)
+
+del "%ROOT%\pip_err.tmp" 2>nul
+echo [WARN] Python 依赖自动安装失败
+echo [INFO] 请手动执行: python -m pip install -r requirements.txt
+echo [INFO] 将尝试继续启动...
+exit /b 0
 
 
 :: ========== 子程序：确保 Docker 和 Redis 就绪 ==========

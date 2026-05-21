@@ -313,6 +313,16 @@ class LLMCore(ICorePlugin):
                 # LLM 普通文本回复 -> append assistant 消息
                 history.append({"role": "assistant", "content": result_text})
 
+            _pipeline_id = ctx.state.get("pipeline_id", "?")
+            _iteration = ctx.state.get("iteration", -1)
+            logger.info(
+                "[%s] pipeline=%s iter=%d LLM returned: "
+                "text=%d chars, tool_calls=%d, thinking=%d chars",
+                self.name, _pipeline_id, _iteration,
+                len(result_text) if result_text else 0,
+                len(tool_calls) if tool_calls else 0,
+                len(thinking_text) if thinking_text else 0,
+            )
             return {
                 StateKeys.RAW_RESULT: result_text,
                 StateKeys.RAW_ERROR: None,

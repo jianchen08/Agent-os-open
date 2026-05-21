@@ -30,6 +30,55 @@ if ! command -v node &>/dev/null; then
     exit 1
 fi
 
+# ========== 检查 pip ==========
+if ! python -m pip --version &>/dev/null; then
+    echo "[ERROR] pip 未找到，请重新安装 Python 并确保包含 pip"
+    exit 1
+fi
+
+# ========== 安装 Python 依赖 ==========
+install_python_deps() {
+    if [ ! -f "$PROJECT_ROOT/requirements.txt" ]; then
+        echo "[WARN] requirements.txt 未找到，跳过依赖安装"
+        return 0
+    fi
+
+    if [ -f "$PROJECT_ROOT/.py_deps_installed" ]; then
+        echo "[OK] Python 依赖已安装（如需重装请删除 .py_deps_installed）"
+        return 0
+    fi
+
+    echo ""
+    echo "[INFO] ========================================"
+    echo "[INFO] 首次运行，正在安装 Python 依赖..."
+    echo "[INFO] 这可能需要几分钟，请耐心等待"
+    echo "[INFO] ========================================"
+    echo ""
+
+    python -m pip install --upgrade pip --quiet 2>/dev/null
+
+    echo "[INFO] 执行: pip install -r requirements.txt"
+    if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --disable-pip-version-check 2>/dev/null; then
+        touch "$PROJECT_ROOT/.py_deps_installed"
+        echo "[OK] Python 依赖安装完成"
+        return 0
+    fi
+
+    echo "[WARN] 安装失败，尝试 --user 模式..."
+    if python -m pip install -r "$PROJECT_ROOT/requirements.txt" --user --disable-pip-version-check 2>/dev/null; then
+        touch "$PROJECT_ROOT/.py_deps_installed"
+        echo "[OK] Python 依赖安装完成（--user 模式）"
+        return 0
+    fi
+
+    echo "[WARN] Python 依赖自动安装失败"
+    echo "[INFO] 请手动执行: python -m pip install -r requirements.txt"
+    echo "[INFO] 将尝试继续启动..."
+    return 0
+}
+
+install_python_deps
+
 # ========== 确保 Docker 和 Redis 就绪 ==========
 ensure_docker_and_redis() {
     if ! command -v docker &>/dev/null; then

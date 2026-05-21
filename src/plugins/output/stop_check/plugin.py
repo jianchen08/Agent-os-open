@@ -107,6 +107,18 @@ class StopCheckPlugin(IOutputPlugin):
         Returns:
             停止检查结果字典
         """
+        iteration = ctx.state.get(StateKeys.ITERATION, 0)
+        pipeline_id = ctx.state.get("pipeline_id", "?")
+        elapsed = time.monotonic() - self._start_time
+        raw_tc_count = len(ctx.state.get(StateKeys.RAW_TOOL_CALLS, []))
+        logger.info(
+            "[%s] pipeline=%s iter=%d max_iter=%d elapsed=%.1f/%d "
+            "raw_tool_calls=%d start_time=%.2f",
+            self.name, pipeline_id, iteration,
+            self._max_iterations, elapsed, self._max_duration,
+            raw_tc_count, self._start_time,
+        )
+
         # 1. 用户请求停止
         if ctx.state.get(StateKeys.SHOULD_STOP, False):
             logger.info("[%s] Stop requested by user", self.name)
@@ -118,7 +130,6 @@ class StopCheckPlugin(IOutputPlugin):
             }
 
         # 2. 迭代上限检测（-1 表示无限制）
-        iteration = ctx.state.get(StateKeys.ITERATION, 0)
         if self._max_iterations != -1 and iteration > self._max_iterations:
             logger.warning(
                 "[%s] Max iterations reached: %d > %d",
@@ -133,7 +144,6 @@ class StopCheckPlugin(IOutputPlugin):
             }
 
         # 3. 执行超时检测（-1 表示无限制）
-        elapsed = time.monotonic() - self._start_time
         if self._max_duration != -1 and elapsed > self._max_duration:
             logger.warning(
                 "[%s] Execution timeout: %.1f > %d seconds",
@@ -230,6 +240,10 @@ class StopCheckPlugin(IOutputPlugin):
         优先使用 Agent YAML 中配置的 max_iterations / timeout_seconds
         覆盖构造时的默认值。特殊值 -1 表示无限制。
 
+        BUG-FIX-fix_20260521_eval_timeout:
+        重置 _start_time，防止共享插件实例在子管道（如评估管道）中
+        因 elapsed 时间已超过 timeout_seconds 而误触发超时终止。
+
         Args:
             ctx: 插件执行上下文
         """
@@ -240,3 +254,8 @@ class StopCheckPlugin(IOutputPlugin):
         agent_timeout = ctx.state.get("timeout_seconds")
         if agent_timeout is not None:
             self._max_duration = agent_timeout
+
+        pipeline_id = ctx.state.get("pipeline_id", "")
+        if pipeline_id and pipeline_id != getattr(self, "_last_pipeline_id", None):
+            self._start_time = time.monotonic()
+            self._last_pipeline_id = pipeline_id

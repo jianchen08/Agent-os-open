@@ -86,8 +86,8 @@ system_prompt: |
   ### 任务失败处理与工作空间
 
   #### 工作空间生命周期（必知）
-  1. 每个任务启动时创建独立工作空间（worktree 隔离副本）
-  2. 任务完成 → 成果自动合并回主空间 → worktree 被清理删除
+  1. 每个任务启动时，系统基于 workspace 指定的目标项目创建隔离的 worktree 副本
+  2. 任务完成 → 成果自动合并回目标项目 → worktree 被清理删除
   3. 任务失败超限 → worktree 也被清理
   4. **worktree 一旦清理，路径不再存在，inherit_workspace_from 会报错**
 

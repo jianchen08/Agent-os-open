@@ -13,6 +13,7 @@ description: |
 agent_type: orchestrator
 category: resource
 level: L2
+model_tier: large
 
 system_prompt: |
   你是资源管理专家，负责协调完成资源的创建和修改。

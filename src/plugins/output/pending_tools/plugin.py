@@ -67,14 +67,25 @@ class PendingToolsOutput(IOutputPlugin):
             输出结果，包含路由信号（有工具调用时）或空结果（无工具调用时）
         """
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
+        pipeline_id = ctx.state.get("pipeline_id", "?")
+        iteration = ctx.state.get("iteration", -1)
+        raw_result = ctx.state.get(StateKeys.RAW_RESULT, "")
+        raw_result_preview = str(raw_result)[:200] if raw_result else "None"
 
         if not tool_calls:
+            has_key = StateKeys.RAW_TOOL_CALLS in ctx.state
+            logger.info(
+                "[%s] pipeline=%s iter=%d NO tool calls | "
+                "key_exists=%s raw_result=%s",
+                self.name, pipeline_id, iteration,
+                has_key, raw_result_preview,
+            )
             return OutputResult()
 
         tool_names = [tc.get("name", "unknown") for tc in tool_calls]
         logger.info(
-            "[%s] Detected %d pending tool call(s): %s",
-            self.name, len(tool_calls), tool_names,
+            "[%s] pipeline=%s iter=%d Detected %d pending tool call(s): %s",
+            self.name, pipeline_id, len(tool_calls), tool_names,
         )
 
         return OutputResult(

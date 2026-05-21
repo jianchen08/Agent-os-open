@@ -239,9 +239,9 @@ class TaskEvaluationBuilderMixin:
         # 注入场景化工作空间提示
         if ws_meta:
             _SCENE_PROMPTS = {
-                "plain": "你在一个临时工作目录中工作。使用相对路径。完成后直接调用 task_evaluate",
-                "worktree": "你在一个隔离的项目完整副本中工作。使用相对路径。修改不影响主项目。可运行 pytest/mypy/lint。评估通过后系统自动合并",
-                "shared": "你在父任务的工作空间中工作。使用相对路径。完成后直接调用 task_evaluate",
+                "plain": "你在临时工作目录中执行任务。使用相对路径。完成后直接调用 task_evaluate",
+                "worktree": "你在目标项目的隔离副本中执行任务。使用相对路径。修改不影响原始项目。可运行 pytest/mypy/lint。评估通过后系统自动合并回目标项目",
+                "shared": "你在父任务的空间中执行任务。使用相对路径。完成后直接调用 task_evaluate",
             }
             _scene_hint = _SCENE_PROMPTS.get(ws_meta.get("mode", ""))
             if _scene_hint:

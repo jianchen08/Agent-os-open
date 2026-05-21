@@ -252,6 +252,9 @@ class _GitOpsMixin:
                 ws_root_name = ws_root.name + "/"
                 gitignore.write_text("\n".join([
                     ws_root_name,
+                    "nul", "CON", "PRN", "AUX", "NUL",
+                    "COM1", "COM2", "COM3", "COM4", "COM5",
+                    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
                     "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/",
                     "*.bak", "*.egg-info/", ".mypy_cache/",
                     "node_modules/", ".env", "*.log", ".tox/",
@@ -267,8 +270,8 @@ class _GitOpsMixin:
                 if self._remove_index_lock(cwd):
                     rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
             if rc != 0:
-                logger.warning("[WorkspaceLifecycle] git add -A failed after retry: %s", stderr)
-                return False
+                logger.warning(
+                    "[WorkspaceLifecycle] git add -A failed (非致命，继续提交): %s", stderr)
 
         rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
         if rc != 0:

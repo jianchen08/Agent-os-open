@@ -116,7 +116,6 @@ class EvaluationExecutor:
             fail_fast=fail_fast,
         )
 
-        # BUG-FIX-fix_20260513_eval_blocking: evaluate() 现在是 async，需要 await
         result = await self._engine.evaluate(task_id=task_id, config=config)
 
         overall_passed = self._mapper.map_to_task_status(result)

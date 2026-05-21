@@ -8,10 +8,10 @@ workspace:
   # 所有任务的工作文件存放在此目录下
   # 支持绝对路径和相对路径（相对于项目根目录）
   # 示例：
-  #   - "D:/workspaces" (Windows 绝对路径)
+  #   - "D:/myproject" (Windows 绝对路径，直接在工作空间基目录下创建 worktree)
   #   - "/tmp/ai_workspaces" (Linux 绝对路径)
   #   - ".ai_workspaces" (相对路径，相对于项目根目录)
-  root: ".ai_workspaces"
+  root: "D:/myproject"
   nesting_mode: "shared"
   sparse_threshold_mb: 500
 

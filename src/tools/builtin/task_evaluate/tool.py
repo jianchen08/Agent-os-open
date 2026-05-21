@@ -209,6 +209,11 @@ class TaskEvaluateTool(BuiltinTool):
         action = inputs.get("action", "auto_complete")
         task_id = inputs.get("task_id")
 
+        logger.warning(
+            "[TRACE-EVAL] execute() ENTRY | action=%s | task_id=%s | input_keys=%s",
+            action, task_id, list(inputs.keys()),
+        )
+
         task_service = self._get_task_service()
         if task_service is None:
             return create_failure_result(
@@ -291,6 +296,14 @@ class TaskEvaluateTool(BuiltinTool):
         """
         metric_id = inputs.get("metric_id")
         task_id = task.id
+
+        logger.warning(
+            "[TRACE-EVAL] _evaluate_single ENTRY | task=%s | metric_id=%s | "
+            "metric_ids=%s | task_metadata_keys=%s",
+            task_id, metric_id,
+            self._get_metric_ids(task),
+            list(task.metadata.keys()) if hasattr(task, 'metadata') and task.metadata else "N/A",
+        )
 
         if not metric_id:
             return create_failure_result(
@@ -393,17 +406,11 @@ class TaskEvaluateTool(BuiltinTool):
         task_service: Any,
         task: Any,
     ) -> ToolExecutionResult:
-        """自动完成评估（评估任务提交时声明的所有指标）。
-
-        从 task.metadata 中提取 evaluation_metric_ids 和 acceptance_criteria，
-        只评估任务提交时声明的指标，不自动注入无关指标。
-        已通过的指标会自动跳过，只评估未通过的指标。
-
-        Args:
-            inputs: 工具输入参数
-            task_service: TaskService 实例
-            task: TaskModel 实例
-        """
+        """自动完成评估（评估任务提交时声明的所有指标）。"""
+        logger.warning(
+            "[TRACE-EVAL] _auto_complete ENTRY | task=%s | metric_ids=%s",
+            task.id, self._get_metric_ids(task),
+        )
         metric_ids = self._get_metric_ids(task)
         input_params = self._get_input_params(task)
 

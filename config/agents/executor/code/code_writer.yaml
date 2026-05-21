@@ -194,20 +194,15 @@ deliverables:
     output_path: "{{workspace}}/tests/"
     type: "code"
     required: true
-  - name: "code_review_report"
-    description: "代码审查报告"
-    output_path: "{{workspace}}/code_review_report.md"
-    type: "markdown"
-    required: false
 
 # 推荐评估指标
 recommended_metrics:
   - metric_id: file_check
     default_params:
-      path: "{{output_file}}"
+      path: "{{workspace}}/src/"
   - metric_id: format_valid
     default_params:
-      path: "{{output_file}}"
+      path: "{{workspace}}/src/"
       type: "python"
 
 # 运行配置

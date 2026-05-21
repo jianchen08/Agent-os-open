@@ -216,7 +216,14 @@ tool_ids:
   - memory
   - human_interaction
 
-hard_constraints: []
+hard_constraints:
+  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
+  - "必须输出验证报告 docs/verification_report.md"
+  - "评估通过才能结束任务"
+  - "验证报告必须包含需求核验清单和产出物验证清单"
+  - "同一问题修复最多 3 次，超过则标注为未解决，不继续重试"
+  - "修复后必须重新验证，不能假设修复成功"
+  - "功能验证必须优先派发给 function_verifier_agent，不得自行手动验证功能"
 
 soft_constraints:
   - 优先使用 function_verifier_agent 做动态验证

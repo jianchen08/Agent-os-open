@@ -274,7 +274,7 @@ recommended_metrics:
   - metric_id: file_check
     default_params:
       action: "read"
-      path: "{tool_id}.py"
+      path: "src/tools/builtin/{tool_id}.py"
   - metric_id: test_check
     default_params:
       requirement: "验证工具功能是否符合需求规格，能正确执行并返回预期结果"

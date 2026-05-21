@@ -591,6 +591,17 @@ class EvaluationEngine:
         Returns:
             评估输出字典
         """
+        print(f"[DEBUG _evaluate_agent] ENTRY: metric={metric_def.id} evaluator_id={metric_def.evaluator_id} task={task_id} pipeline_factory={self._pipeline_factory is not None} agent_registry={self._agent_registry is not None}")
+
+        _fp = Path(__file__).resolve().parent.parent.parent / "debug_eval_agent_entry.log"
+        try:
+            with open(_fp, "a", encoding="utf-8") as _f:
+                _f.write(f"\n=== _evaluate_agent called ===\n")
+                _f.write(f"metric={metric_def.id} evaluator_id={metric_def.evaluator_id} task={task_id}\n")
+                _f.write(f"pipeline_factory={self._pipeline_factory is not None} agent_registry={self._agent_registry is not None}\n")
+        except Exception:
+            pass
+
         evaluator_id = metric_def.evaluator_id
 
         if self._pipeline_factory is None:
@@ -676,30 +687,6 @@ class EvaluationEngine:
                 "final_output", raw_output
             )
             output_text = str(final_output) if final_output else ""
-
-            # BUG-FIX-fix_20260521_eval_output_debug: 写入文件级调试日志
-            _debug_path = Path(__file__).resolve().parent.parent.parent / "debug_eval_agent.log"
-            try:
-                import json as _json
-                _debug_data = {
-                    "metric_id": metric_def.id,
-                    "pipeline_id": _pipeline_run_id,
-                    "raw_result_type": type(raw_output).__name__,
-                    "raw_result_len": len(str(raw_output)),
-                    "raw_result_str": str(raw_output)[:3000],
-                    "final_output_type": type(final_output).__name__,
-                    "final_output_len": len(str(final_output)) if final_output else 0,
-                    "final_output_str": str(final_output)[:3000] if final_output else "",
-                    "output_text_len": len(output_text),
-                    "output_text_first500": output_text[:500],
-                    "pipeline_state_keys": list(pipeline_state.keys()) if isinstance(pipeline_state, dict) else "NOT_A_DICT",
-                }
-                with open(_debug_path, "a", encoding="utf-8") as _df:
-                    _df.write(f"\n=== {metric_def.id} @ {_pipeline_run_id} ===\n")
-                    _df.write(_json.dumps(_debug_data, ensure_ascii=False, indent=2))
-                    _df.write("\n")
-            except Exception as _de:
-                logger.warning("Debug log write failed: %s", _de)
 
             logger.info(
                 "Agent evaluation raw output: metric=%s, pipeline=%s, "
