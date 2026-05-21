@@ -54,6 +54,50 @@ _pipeline_ctx: PipelineContext | None = None
 _task_worker_started: bool = False
 
 
+def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
+    """通过 pipeline_run_id 查找关联任务的 agent_config。
+
+    子管道引擎完成 run() 后注册被清理，send_pipeline_message 走 _try_revive_pipeline
+    复活路径时，需要正确的 agent_config 才能使用子Agent而非主Agent。
+
+    查找链路: pipeline_run_id → task_service.find_by_pipeline → task.target_id → agent_registry.get
+
+    Args:
+        pipeline_id: 子管道的 pipeline_run_id
+
+    Returns:
+        对应的 AgentConfig 实例，未找到返回 None
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        _sp = get_service_provider()
+    except Exception:
+        return None
+
+    task_service = _sp.get("task_service") if _sp else None
+    agent_registry = _sp.get("agent_registry") if _sp else None
+    if not task_service or not agent_registry:
+        return None
+
+    try:
+        for task in task_service.list_all(limit=200):
+            if getattr(task, "pipeline_run_id", None) == pipeline_id:
+                target_id = getattr(task, "target_id", None)
+                if target_id:
+                    agent_config = agent_registry.get(target_id)
+                    if agent_config:
+                        logger.info(
+                            "[GlobalWS] 子管道 agent_config 解析成功: "
+                            "pipeline=%s task=%s target_id=%s",
+                            pipeline_id[:12], getattr(task, "id", "")[:12], target_id,
+                        )
+                        return agent_config
+    except Exception as exc:
+        logger.warning("[GlobalWS] 子管道 agent_config 解析失败: %s", exc)
+
+    return None
+
+
 def create_combined_app() -> FastAPI:
     """创建合并了 WebSocket 功能的 FastAPI 应用。
 
@@ -211,57 +255,54 @@ def create_combined_app() -> FastAPI:
                     _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])
 
-                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
-                    # 在创建新的流式任务前，取消该 thread_id 之前的旧任务，
-                    # 确保同一 thread_id 同时只有一个活跃的流式生成任务。
-                    _old_task = _thread_stream_tasks.get(thread_id)
-                    if _old_task and not _old_task.done():
-                        _old_stop = _thread_stop_events.get(thread_id)
-                        if _old_stop:
-                            _old_stop.set()
-                        _old_task.cancel()
-                    _thread_stop_events[thread_id] = _stop_evt
+                    # SIMPLIFY-fix_20260521: 统一消息推送链路。
+                    # 引擎挂起时 drain_loop 不再 break，原始 bridge 的 on_chunk 在引擎恢复后
+                    # 自动继续工作。因此不需要创建新 bridge 或启动唤醒路径，只需唤醒引擎即可。
+                    from pipeline.message_bus import _find_engine, send_pipeline_message
 
                     if _pipeline_id:
-                        from pipeline.message_bus import send_pipeline_message, _find_engine as _find_engine_for_sub
-                        _sub_eng, _sub_st = _find_engine_for_sub(_pipeline_id)
+                        # BUG-FIX-fix_20260522_sub_pipeline_agent_fallback:
+                        # 问题根因: 子管道引擎完成 run() 后注册被清理(_cleanup_run_loop)，
+                        #   _find_engine 返回 None，send_pipeline_message 走 _try_revive_pipeline
+                        #   路径复活引擎，但调用方未传 agent_config/task_id，导致复活时
+                        #   回退到主Agent(灵汐)配置，子Tab收到主Agent的回复。
+                        # 修复方案: 在 send_pipeline_message 之前预解析 agent_config，
+                        #   通过 pipeline_run_id 查找关联 Task 的 target_id(agent_id)，
+                        #   从 agent_registry 获取正确的 agent_config。
+                        _sub_agent_config = _resolve_sub_pipeline_agent_config(_pipeline_id)
+
+                        _sub_eng, _sub_st = _find_engine(_pipeline_id)
                         if _sub_eng and _sub_st == "suspended":
-                            _sub_bridge = PipelineStreamBridge(
-                                pipeline_id=_pipeline_id,
-                                output_sink=TargetedSink(ws_interaction_notifier, thread_id),
-                                message_id=_msg_id,
-                            )
-                            _sub_eng._saved_on_chunk = _sub_bridge.on_chunk
-                            _sub_eng._saved_streaming = True
-                            if _sub_eng._suspended_state is not None:
-                                _sub_eng._suspended_state["on_chunk"] = _sub_bridge.on_chunk
-                                _sub_eng._suspended_state["streaming"] = True
-                            sub_result = await send_pipeline_message(_pipeline_id, _user_content)
-                            if sub_result.success:
+                            # BUG-FIX-fix_20260521_suspended_engine_no_stream_start:
+                            # 唤醒挂起引擎后需要启动 drain_loop 发送流式响应。
+                            # 使用 _stream_wake_response（会注册 on_chunk 到引擎）。
+                            _thread_stop_events[thread_id] = _stop_evt
+                            if _pipeline_ctx and _pipeline_ctx.available:
                                 _stream_task = asyncio.create_task(
                                     _stream_wake_response(
                                         websocket, _user_content, _msg_id,
-                                        _stop_evt, _sub_eng, _pipeline_id,
-                                        thread_id=thread_id,
+                                        _stop_evt, _sub_eng, _pipeline_id, thread_id,
                                         ws_notifier=ws_interaction_notifier,
                                         conversation_history=_history,
-                                        pre_created_bridge=_sub_bridge,
                                     )
                                 )
                                 _thread_stream_tasks[thread_id] = _stream_task
-                                continue
-                        else:
-                            sub_result = await send_pipeline_message(_pipeline_id, _user_content)
-                            if sub_result.success:
-                                continue
+                            await send_pipeline_message(_pipeline_id, _user_content)
+                            continue
+                        sub_result = await send_pipeline_message(
+                            _pipeline_id, _user_content,
+                            agent_config=_sub_agent_config,
+                            conversation_history=_history if _history else None,
+                            streaming=True,
+                        )
+                        if sub_result.success:
+                            continue
                         await websocket.send_text(json.dumps({
                             "type": "pipeline_error",
                             "data": {"message_id": _msg_id, "error": f"子管道未找到: pipeline={_pipeline_id}", "pipeline_id": _pipeline_id},
                         }, ensure_ascii=False))
                         continue
 
-                    from pipeline.message_bus import _find_engine
-                    # 优先用 session 已有的 pipeline_id（创建会话时分配）
                     _sess = api_store.get_session(thread_id)
                     _main_pid = _sess.active_pipeline_id if _sess and _sess.active_pipeline_id else ""
                     if not _main_pid and _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
@@ -269,31 +310,32 @@ def create_combined_app() -> FastAPI:
                     _ex_eng, _eng_st = _find_engine(_main_pid) if _main_pid else (None, "")
 
                     if _ex_eng and _eng_st == "suspended":
-                        _wake_bridge = PipelineStreamBridge(
-                            pipeline_id=_main_pid,
-                            output_sink=TargetedSink(ws_interaction_notifier, thread_id),
-                            message_id=_msg_id,
-                        )
-                        _ex_eng._saved_on_chunk = _wake_bridge.on_chunk
-                        _ex_eng._saved_streaming = True
-                        if _ex_eng._suspended_state is not None:
-                            _ex_eng._suspended_state["on_chunk"] = _wake_bridge.on_chunk
-                            _ex_eng._suspended_state["streaming"] = True
-                        from pipeline.message_bus import send_pipeline_message
-                        inject_result = await send_pipeline_message(_main_pid, _user_content)
-                        if inject_result.success:
+                        # BUG-FIX-fix_20260521_suspended_engine_no_stream_start:
+                        # 问题根因: 唤醒挂起引擎后直接 continue，跳过了 drain_loop 启动。
+                        #           导致 stream_start 从未发送，前端等待超时。
+                        # 修复方案: 使用 _stream_wake_response 启动 drain_loop（会注册 on_chunk）。
+                        _thread_stop_events[thread_id] = _stop_evt
+                        if _pipeline_ctx and _pipeline_ctx.available:
                             _stream_task = asyncio.create_task(
                                 _stream_wake_response(
                                     websocket, _user_content, _msg_id,
-                                    _stop_evt, _ex_eng, _main_pid,
-                                    thread_id=thread_id,
+                                    _stop_evt, _ex_eng, _main_pid, thread_id,
                                     ws_notifier=ws_interaction_notifier,
                                     conversation_history=_history,
-                                    pre_created_bridge=_wake_bridge,
                                 )
                             )
                             _thread_stream_tasks[thread_id] = _stream_task
+                        await send_pipeline_message(_main_pid, _user_content)
                         continue
+
+                    # 引擎非挂起状态：取消旧任务，启动新的流式响应
+                    _old_task = _thread_stream_tasks.get(thread_id)
+                    if _old_task and not _old_task.done():
+                        _old_stop = _thread_stop_events.get(thread_id)
+                        if _old_stop:
+                            _old_stop.set()
+                        _old_task.cancel()
+                    _thread_stop_events[thread_id] = _stop_evt
 
                     if _pipeline_ctx and _pipeline_ctx.available:
                         _main_sink = TargetedSink(ws_interaction_notifier, thread_id)

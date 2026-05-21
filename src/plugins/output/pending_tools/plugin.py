@@ -85,7 +85,7 @@ class PendingToolsOutput(IOutputPlugin):
         tool_names = [tc.get("name", "unknown") for tc in tool_calls]
         logger.info(
             "[%s] pipeline=%s iter=%d Detected %d pending tool call(s): %s",
-            self.name, pipeline_id, len(tool_calls), tool_names,
+            self.name, pipeline_id, iteration, len(tool_calls), tool_names,
         )
 
         return OutputResult(

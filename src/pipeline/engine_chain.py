@@ -334,8 +334,9 @@ async def handle_no_route_signals(
             {"role": "user", "content": state["user_input"]}
         )
         engine._suspended_state = _safe_deepcopy(state)
+        # BUG-FIX-fix_20260521_on_chunk_missing:
+        # 恢复逻辑已内置到 _suspend_and_wait，无需再调用 _restore_suspended_state。
         await engine._suspend_and_wait(state)
-        _restore_suspended_state(engine, state)
         return "continue"
 
     # 无 route signals → 挂起等待下一条用户消息
@@ -348,7 +349,6 @@ async def handle_no_route_signals(
     state["user_input"] = ""
     engine._suspended_state = _safe_deepcopy(state)
     await engine._suspend_and_wait(state)
-    _restore_suspended_state(engine, state)
     return "continue"
 
 

@@ -45,11 +45,23 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "源文件或源目录路径（相对路径或绝对路径）",
+                        "description": "源文件或源目录路径（相对路径或绝对路径），与 copies 二选一",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "目标路径（相对路径或绝对路径）",
+                        "description": "目标路径（相对路径或绝对路径），与 copies 二选一",
+                    },
+                    "copies": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string"},
+                                "destination": {"type": "string"},
+                            },
+                            "required": ["source", "destination"],
+                        },
+                        "description": "批量复制列表（与 source/destination 二选一，优先使用 copies）",
                     },
                     "overwrite": {
                         "type": "boolean",
@@ -57,7 +69,7 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
                         "default": False,
                     },
                 },
-                "required": ["source", "destination"],
+                "required": [],
             },
             source=ToolSource.CODE,
             category=ToolCategory.FILE_SYSTEM,
@@ -71,6 +83,53 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
         """执行文件复制操作"""
         self._init_workspace(inputs)
 
+        # 优先使用 copies 批量参数
+        copies = inputs.get("copies")
+        if copies and isinstance(copies, list):
+            return await self._copy_files(inputs, copies)
+
+        # 单文件模式
+        return await self._copy_single(inputs)
+
+    async def _copy_files(self, inputs: dict[str, Any], copies: list[dict]) -> ToolResult:
+        """批量复制文件，每个独立返回结果"""
+        results = []
+        overwrite = inputs.get("overwrite", False)
+
+        for copy_item in copies:
+            source_str = copy_item.get("source")
+            dest_str = copy_item.get("destination")
+            file_inputs = {
+                "source": source_str,
+                "destination": dest_str,
+                "overwrite": overwrite,
+            }
+            result = await self._copy_single(file_inputs)
+            results.append({
+                "source": source_str,
+                "destination": dest_str,
+                "success": result.success,
+                "data": result.data if result.success else None,
+                "error": result.error if not result.success else None,
+            })
+
+        success_count = sum(1 for r in results if r["success"])
+        failed_count = len(results) - success_count
+
+        return create_success_result(
+            data={
+                "results": results,
+                "summary": {
+                    "total": len(results),
+                    "success": success_count,
+                    "failed": failed_count,
+                },
+            },
+            metadata={"action": "batch_copy_files"},
+        )
+
+    async def _copy_single(self, inputs: dict[str, Any]):
+        """复制单个文件"""
         try:
             source_str = inputs.get("source")
             dest_str = inputs.get("destination")

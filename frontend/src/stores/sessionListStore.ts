@@ -13,6 +13,7 @@ import {
 import { loggers } from '@/utils/logger'
 import { useAgentStore } from './agentStore'
 import { useAgentTabStore } from './agentTabStore'
+import { useLayoutModeStore } from './layoutModeStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
 import { useStreamingStore } from './streamingStore'
@@ -270,6 +271,16 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       } catch (error) {
         console.error('[setActiveSession] 加载会话数据失败:', error)
       }
+
+      // BUG-FIX-fix_20260521_tasklist_refresh:
+      // 问题根因: 切换会话时未调用 bumpWorkspaceDataVersion()，导致工作区组件
+      //          （包括 FileTreeWidget 渲染的任务列表）不会重新加载数据。
+      //          只有提交任务后 useRealtimeEvents 中才会触发刷新。
+      // 修复方案: 会话切换并加载数据后，主动触发工作区数据版本递增，通知所有依赖
+      //          workspaceRefreshKey 的组件重新加载对应会话的数据。
+      // 影响范围: 会话切换时的工作区（任务列表、文件树等）刷新行为
+      // 修复日期: 2026-05-21
+      useLayoutModeStore.getState().bumpWorkspaceDataVersion()
     }
   },
 

@@ -64,7 +64,12 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "文件路径（相对路径或绝对路径）",
+                        "description": "文件路径（相对路径或绝对路径），与 paths 二选一",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "批量读取文件路径列表（与 path 二选一，优先使用 paths）",
                     },
                     "fields": {
                         "type": "array",
@@ -89,7 +94,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         "不指定则返回完整内容。",
                     },
                 },
-                "required": ["path"],
+                "required": [],
             },
             source=ToolSource.CODE,
             category=ToolCategory.FILE,
@@ -101,7 +106,54 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         self._init_workspace(inputs)
         self.base_path = self._workspace
+
+        # 优先使用 paths 批量参数
+        paths = inputs.get("paths")
+        if paths and isinstance(paths, list):
+            return await self._read_files(inputs, paths)
+
+        # 单文件模式
         return await self._read_file(inputs)
+    
+    async def _read_files(self, inputs: dict[str, Any], paths: list[str]) -> ToolResult:
+        """批量读取文件，每个文件独立返回结果"""
+        results = []
+        fields = inputs.get("fields")
+        start_line = inputs.get("start_line")
+        end_line = inputs.get("end_line")
+        tail = inputs.get("tail")
+
+        for path_str in paths:
+            file_inputs = {
+                "path": path_str,
+                "fields": fields,
+                "start_line": start_line,
+                "end_line": end_line,
+                "tail": tail,
+            }
+            result = await self._read_file(file_inputs)
+            results.append({
+                "path": path_str,
+                "success": result.success,
+                "data": result.data if result.success else None,
+                "error": result.error if not result.success else None,
+            })
+        
+        # 汇总结果
+        success_count = sum(1 for r in results if r["success"])
+        failed_count = len(results) - success_count
+        
+        return create_success_result(
+            data={
+                "results": results,
+                "summary": {
+                    "total": len(results),
+                    "success": success_count,
+                    "failed": failed_count,
+                },
+            },
+            metadata={"action": "batch_read_files"},
+        )
 
     async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:
         try:

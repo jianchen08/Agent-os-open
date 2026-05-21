@@ -45,11 +45,23 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "源文件或源目录路径（相对路径或绝对路径）",
+                        "description": "源文件或源目录路径（相对路径或绝对路径），与 moves 二选一",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "目标路径（相对路径或绝对路径）",
+                        "description": "目标路径（相对路径或绝对路径），与 moves 二选一",
+                    },
+                    "moves": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string"},
+                                "destination": {"type": "string"},
+                            },
+                            "required": ["source", "destination"],
+                        },
+                        "description": "批量移动列表（与 source/destination 二选一，优先使用 moves）",
                     },
                     "overwrite": {
                         "type": "boolean",
@@ -57,7 +69,7 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
                         "default": False,
                     },
                 },
-                "required": ["source", "destination"],
+                "required": [],
             },
             source=ToolSource.CODE,
             category=ToolCategory.FILE_SYSTEM,
@@ -71,6 +83,53 @@ class MoveFileTool(BuiltinTool, WorkspaceAwareMixin):
         """执行文件移动操作"""
         self._init_workspace(inputs)
 
+        # 优先使用 moves 批量参数
+        moves = inputs.get("moves")
+        if moves and isinstance(moves, list):
+            return await self._move_files(inputs, moves)
+
+        # 单文件模式
+        return await self._move_single(inputs)
+
+    async def _move_files(self, inputs: dict[str, Any], moves: list[dict]) -> ToolResult:
+        """批量移动文件，每个独立返回结果"""
+        results = []
+        overwrite = inputs.get("overwrite", False)
+
+        for move_item in moves:
+            source_str = move_item.get("source")
+            dest_str = move_item.get("destination")
+            file_inputs = {
+                "source": source_str,
+                "destination": dest_str,
+                "overwrite": overwrite,
+            }
+            result = await self._move_single(file_inputs)
+            results.append({
+                "source": source_str,
+                "destination": dest_str,
+                "success": result.success,
+                "data": result.data if result.success else None,
+                "error": result.error if not result.success else None,
+            })
+
+        success_count = sum(1 for r in results if r["success"])
+        failed_count = len(results) - success_count
+
+        return create_success_result(
+            data={
+                "results": results,
+                "summary": {
+                    "total": len(results),
+                    "success": success_count,
+                    "failed": failed_count,
+                },
+            },
+            metadata={"action": "batch_move_files"},
+        )
+
+    async def _move_single(self, inputs: dict[str, Any]):
+        """移动单个文件"""
         try:
             source_str = inputs.get("source")
             dest_str = inputs.get("destination")

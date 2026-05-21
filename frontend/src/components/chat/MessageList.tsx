@@ -39,9 +39,8 @@ export const MessageList = ({
   searchQuery,
 }: ExtendedMessageListProps) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
-  const isUserScrolling = useRef(false)
+  const isNearBottom = useRef(true)
   const lastMessageCount = useRef(messages.length)
-  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
   const initialScrollDone = useRef(false)
@@ -61,19 +60,14 @@ export const MessageList = ({
   }, [])
 
   /**
-   * 处理用户滚动
+   * 处理滚动事件：检测是否在底部附近及是否在顶部（用于加载更多）
    */
   const handleScroll = useCallback(
-    (scrollTop: number, isScrolling: boolean) => {
-      if (isScrolling) {
-        isUserScrolling.current = true
-        if (scrollTimeoutRef.current) {
-          clearTimeout(scrollTimeoutRef.current)
-        }
-        scrollTimeoutRef.current = setTimeout(() => {
-          isUserScrolling.current = false
-        }, 500)
-      }
+    (e: Event) => {
+      const target = e.target as HTMLElement
+      const { scrollTop, scrollHeight, clientHeight } = target
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+      isNearBottom.current = distanceFromBottom <= 150
 
       const atTop = scrollTop < 50
       isAtTopRef.current = atTop
@@ -91,7 +85,7 @@ export const MessageList = ({
    * BUG-FIX-fix_20260513_msg_not_realtime:
    * 问题根因: 用户发送消息后 isUserScrolling 可能刚被 handleScroll 设为 true
    *          （滚动检测过于敏感），导致新消息不会触发自动滚动。
-   * 修复方案: 当检测到新消息且最后一条是 user 消息时，强制重置 isUserScrolling，
+   * 修复方案: 当检测到新消息且最后一条是 user 消息时，强制重置 isNearBottom，
    *          确保用户发送的消息始终能滚动到底部可见。
    * 影响范围: 用户发送消息后的自动滚动行为
    * 修复日期: 2026-05-13
@@ -102,9 +96,9 @@ export const MessageList = ({
 
     if (hasNewMessages) {
       if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
-        isUserScrolling.current = false
+        isNearBottom.current = true
       }
-      if (!isUserScrolling.current) {
+      if (isNearBottom.current) {
         requestAnimationFrame(() => {
           scrollToBottom('smooth')
         })
@@ -132,7 +126,7 @@ export const MessageList = ({
   }, [messages])
 
   useEffect(() => {
-    if (isGenerating && !isUserScrolling.current && messages.length > 0) {
+    if (isGenerating && isNearBottom.current && messages.length > 0) {
       requestAnimationFrame(() => {
         scrollToBottom('auto')
       })
@@ -153,7 +147,7 @@ export const MessageList = ({
     resizeObserverRef.current = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const newHeight = entry.contentRect.height
-        if (newHeight > lastHeight && !isUserScrolling.current) {
+        if (newHeight > lastHeight && isNearBottom.current) {
           lastHeight = newHeight
           scrollToBottom('auto')
         }
@@ -168,15 +162,6 @@ export const MessageList = ({
       }
     }
   }, [isGenerating, scrollToBottom])
-
-  /** 清理定时器 */
-  useEffect(() => {
-    return () => {
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current)
-      }
-    }
-  }, [])
 
   /**
    * 渲染单个消息项
@@ -289,14 +274,11 @@ export const MessageList = ({
           //          导致 Virtuoso 复用错误的 DOM 节点。加入 index 确保位置唯一性。
           return msg?.id ? `${msg.id}-${msg.role}-${index}` : `msg-${index}`
         }}
-        onScroll={(e) => {
-          const target = e.target as HTMLElement
-          handleScroll(target.scrollTop, true)
-        }}
+        onScroll={handleScroll}
         initialTopMostItemIndex={initialTopMostItemIndex}
         increaseViewportBy={{ top: 100, bottom: 300 }}
         alignToBottom={true}
-        followOutput={isGenerating || messages.length > 0 ? 'smooth' : false}
+        followOutput={isNearBottom.current ? 'smooth' : false}
         components={{
           Header: HeaderComponent,
           Footer: () => (

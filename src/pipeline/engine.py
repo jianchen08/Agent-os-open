@@ -385,12 +385,9 @@ class PipelineEngine:
                             await self._checkpoint_manager.save(_s_pid, state, phase="suspended")
                         except Exception as exc:
                             logger.debug("Checkpoint suspended-save failed: %s", exc)
-                    await self._suspend_and_wait(state)
-                    if self._suspended_state is not None:
-                        state["user_input"] = self._suspended_state.get("user_input", state.get("user_input", ""))
-                        state["messages"] = self._suspended_state.get("messages", state.get("messages", []))
-                        self._suspended_state = None
-                    else:
+                    # BUG-FIX-fix_20260521_on_chunk_missing:
+                    # 恢复逻辑已内置到 _suspend_and_wait，无需手动恢复。
+                    if not await self._suspend_and_wait(state):
                         break
                     logger.info("Pipeline woken up, resuming loop iteration")
                     state[StateKeys.CORE_TYPE] = "llm_call"
@@ -441,7 +438,7 @@ class PipelineEngine:
             state[StateKeys.ENDED] = True
             state[StateKeys.RAW_ERROR] = str(exc)
         finally:
-            self._cleanup_run_loop(
+            await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
                 _pipeline_id_token, _engine_reg_key,
             )
@@ -564,7 +561,7 @@ class PipelineEngine:
     # 挂起/恢复
     # ------------------------------------------------------------------
 
-    async def _suspend_and_wait(self, state: dict[str, Any]) -> None:
+    async def _suspend_and_wait(self, state: dict[str, Any]) -> bool:
         """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。
 
         管道挂起后不退出 _run_loop，而是 await 内部 _wake_event。
@@ -575,6 +572,13 @@ class PipelineEngine:
         - 无新通知：重新挂起等待，避免无意义的 LLM 调用循环
 
         挂起时记录 submitted_task_ids，供外部判断该管道等待哪些任务。
+
+        BUG-FIX-fix_20260521_on_chunk_missing:
+        唤醒后统一从 _suspended_state 恢复 state（含 on_chunk / streaming），
+        避免调用方遗漏恢复字段。
+
+        Returns:
+            True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
@@ -591,63 +595,84 @@ class PipelineEngine:
                 "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: pipeline=%s",
                 len(pending_notifications), pipeline_id,
             )
-            logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)
-            return
-
-        logger.info(
-            "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
-            pipeline_id, self._watching_task_ids,
-        )
-
-        max_wait_rounds = 50
-        for wait_round in range(max_wait_rounds):
-            self._wake_event = asyncio.Event()
-            self._services[f"__suspended_engine_{pipeline_id}"] = self
-            register_suspended_engine(pipeline_id, self)
-
-            try:
-                await asyncio.wait_for(self._wake_event.wait(), timeout=600)
-                break  # 被外部唤醒
-            except asyncio.TimeoutError:
-                # BUG-FIX-fix_20260519_pipeline_retry:
-                # 问题根因: 超时处理中先清除引擎注册(__suspended_engine_)再收集通知，
-                #   两步之间若有 send_pipeline_message 调用，_find_engine 通过 services
-                #   查不到引擎，通知可能走 _try_revive 路径而丢失。
-                # 修复方案: 先收集通知再清除注册，确保不遗漏超时窗口内的通知。
-                pending_notifications = self._services.pop(pending_key, [])
-                if self._pending_notifications:
-                    pending_notifications.extend(self._pending_notifications[:])
-                    self._pending_notifications.clear()
-
-                if pending_notifications:
-                    self._inject_notifications_to_suspended_state(pending_notifications)
-                    # 有通知时保留注册直到最终清理，避免唤醒前被其他路径回收
-                    logger.info(
-                        "[Engine] 管道超时后发现 %d 条通知，唤醒: pipeline=%s",
-                        len(pending_notifications), pipeline_id,
-                    )
-                    break
-
-                # 无通知，安全清除本轮注册（下一轮循环顶部会重新注册）
-                self._services.pop(f"__suspended_engine_{pipeline_id}", None)
-                unregister_suspended_engine(pipeline_id)
-                logger.info(
-                    "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
-                    "(round=%d/%d): pipeline=%s",
-                    wait_round + 1, max_wait_rounds, pipeline_id,
-                )
         else:
-            logger.warning(
-                "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
-                max_wait_rounds, pipeline_id,
+            # 无待处理通知，进入等待循环
+            logger.info(
+                "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
+                pipeline_id, self._watching_task_ids,
             )
+
+            max_wait_rounds = 50
+            for wait_round in range(max_wait_rounds):
+                self._wake_event = asyncio.Event()
+                self._services[f"__suspended_engine_{pipeline_id}"] = self
+                register_suspended_engine(pipeline_id, self)
+
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=600)
+                    break  # 被外部唤醒
+                except asyncio.TimeoutError:
+                    # BUG-FIX-fix_20260519_pipeline_retry:
+                    # 问题根因: 超时处理中先清除引擎注册(__suspended_engine_)再收集通知，
+                    #   两步之间若有 send_pipeline_message 调用，_find_engine 通过 services
+                    #   查不到引擎，通知可能走 _try_revive 路径而丢失。
+                    # 修复方案: 先收集通知再清除注册，确保不遗漏超时窗口内的通知。
+                    pending_notifications = self._services.pop(pending_key, [])
+                    if self._pending_notifications:
+                        pending_notifications.extend(self._pending_notifications[:])
+                        self._pending_notifications.clear()
+
+                    if pending_notifications:
+                        self._inject_notifications_to_suspended_state(pending_notifications)
+                        logger.info(
+                            "[Engine] 管道超时后发现 %d 条通知，唤醒: pipeline=%s",
+                            len(pending_notifications), pipeline_id,
+                        )
+                        break
+
+                    # 无通知，安全清除本轮注册（下一轮循环顶部会重新注册）
+                    self._services.pop(f"__suspended_engine_{pipeline_id}", None)
+                    unregister_suspended_engine(pipeline_id)
+                    logger.info(
+                        "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
+                        "(round=%d/%d): pipeline=%s",
+                        wait_round + 1, max_wait_rounds, pipeline_id,
+                    )
+            else:
+                logger.warning(
+                    "[Engine] 管道等待超过 %d 轮，强制唤醒: pipeline=%s",
+                    max_wait_rounds, pipeline_id,
+                )
 
         # 最终清理
         self._services.pop(f"__suspended_engine_{pipeline_id}", None)
         unregister_suspended_engine(pipeline_id)
         self._wake_event = None
         self._watching_task_ids = []
-        logger.info("[Engine] 管道被唤醒: pipeline=%s", pipeline_id)
+
+        # BUG-FIX-fix_20260521_on_chunk_missing:
+        # 唤醒后统一恢复 state，确保 on_chunk / streaming 等回调不会丢失。
+        # 之前三个调用路径各自手动恢复，路径1和路径2遗漏了 on_chunk，
+        # 导致 LLM 输出走错 bridge，前端一直显示"思考中"。
+        if self._suspended_state is not None:
+            state["user_input"] = self._suspended_state.get(
+                "user_input", state.get("user_input", ""),
+            )
+            state["messages"] = self._suspended_state.get(
+                "messages", state.get("messages", []),
+            )
+            if "on_chunk" in self._suspended_state:
+                state["on_chunk"] = self._suspended_state["on_chunk"]
+                self._saved_on_chunk = self._suspended_state["on_chunk"]
+            if "streaming" in self._suspended_state:
+                state["streaming"] = self._suspended_state["streaming"]
+                self._saved_streaming = self._suspended_state["streaming"]
+            self._suspended_state = None
+            logger.info("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
+            return True
+        else:
+            logger.info("[Engine] 管道被唤醒但无 suspended_state: pipeline=%s", pipeline_id)
+            return False
 
     def _inject_notifications_to_suspended_state(self, notifications: list[str]) -> None:
         """将通知消息注入到挂起状态中。"""

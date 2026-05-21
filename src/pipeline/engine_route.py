@@ -131,15 +131,10 @@ async def apply_route(
         engine._suspended_state = _safe_deepcopy(state)
         state[StateKeys.ENDED] = False
         logger.info("Route applied: wait, pipeline suspended")
-        await engine._suspend_and_wait(state)
-        if engine._suspended_state is not None:
-            state["user_input"] = engine._suspended_state.get(
-                "user_input", state.get("user_input", ""),
-            )
-            state["messages"] = engine._suspended_state.get(
-                "messages", state.get("messages", []),
-            )
-            engine._suspended_state = None
+        # BUG-FIX-fix_20260521_on_chunk_missing:
+        # 恢复逻辑已内置到 _suspend_and_wait，无需手动恢复。
+        restored = await engine._suspend_and_wait(state)
+        if restored:
             logger.info("Pipeline woken up from output wait, resetting CORE_TYPE to llm_call")
             state[StateKeys.CORE_TYPE] = "llm_call"
             return False

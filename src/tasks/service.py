@@ -15,12 +15,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.tasks.state_machine import InvalidTransitionError, SimpleStateMachine
+from src.tasks.state_machine import (
+    InvalidTransitionError,
+    SimpleStateMachine,
+    _TASK_TRANSITIONS,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# 默认任务状态转换规则
 DEFAULT_TASK_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["running"],
     "running": ["completed", "failed", "cancelled"],
@@ -255,6 +258,95 @@ class TaskService:
         return all_tasks[:limit]
 
     # ── 门面模式：状态操作 ──────────────────────────────────────
+
+    def can_transition(self, task_id: str, target_status: Any) -> bool:
+        """检查任务是否可以转换到目标状态。
+
+        BUG-FIX-fix_20260521_missing_method: 补充缺失的 can_transition 方法。
+        问题根因: TaskService 缺少此方法，导致 task_manage 调用时 AttributeError。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态（TaskStatus 枚举或字符串）
+
+        Returns:
+            是否允许状态转换
+        """
+        if self._storage is None:
+            return False
+
+        task = self._storage.get(task_id)
+        if task is None:
+            return False
+
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        target = target_status.value if hasattr(target_status, "value") else str(target_status)
+        allowed = _TASK_TRANSITIONS.get(current, [])
+        return target in allowed
+
+    def get_valid_transitions(self, task_id: str) -> list[str]:
+        """获取任务当前状态可转换的目标状态列表。
+
+        BUG-FIX-fix_20260521_missing_method: 补充缺失的 get_valid_transitions 方法。
+        问题根因: TaskService 缺少此方法，导致 task_manage 调用时 AttributeError。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            可转换的目标状态列表
+        """
+        if self._storage is None:
+            return []
+
+        task = self._storage.get(task_id)
+        if task is None:
+            return []
+
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        return _TASK_TRANSITIONS.get(current, [])
+
+    async def force_transition(self, task_id: str, target_status: Any) -> None:
+        """强制执行任务状态转换并持久化。
+
+        BUG-FIX-fix_20260521_missing_method: 补充缺失的 force_transition 方法。
+        问题根因: TaskService 缺少此方法，导致容器完成/失败/重试等操作 AttributeError。
+
+        与 start_task / complete_task 等具体方法不同，此方法接受任意 TaskStatus，
+        通过 _TASK_TRANSITIONS 校验合法性后执行转换。
+
+        Args:
+            task_id: 任务 ID
+            target_status: 目标状态（TaskStatus 枚举）
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 当前状态不允许转换到目标状态
+        """
+        if self._storage is None:
+            raise KeyError(f"任务不存在: {task_id}")
+
+        task = self._storage.get(task_id)
+        if task is None:
+            raise KeyError(f"任务不存在: {task_id}")
+
+        from tasks.types import TaskStatus
+
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        target = target_status.value if hasattr(target_status, "value") else str(target_status)
+
+        allowed = _TASK_TRANSITIONS.get(current, [])
+        if target not in allowed:
+            raise InvalidTransitionError(
+                current, target,
+                f"不允许从 '{current}' 转换到 '{target}'，合法目标: {allowed}",
+            )
+
+        task.status = TaskStatus(target)
+        task.updated_at = datetime.now().isoformat()
+        self._storage.save(task)
+
+        await self._emit_state_change(task_id, current, target)
 
     async def pause_task(self, task_id: str) -> None:
         """暂停任务。

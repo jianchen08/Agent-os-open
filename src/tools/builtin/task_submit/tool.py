@@ -477,17 +477,15 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 parent_task_id,
             )
 
-        # ── 子任务不能提交 workspace 参数 ──
-        # 子任务的工作空间由父任务链自动解析，LLM 显式指定会导致路径双重嵌套
+        # ── 子任务：清除自动注入的 workspace ──
+        # ParamInjectPlugin 会将当前管道的 workspace 注入所有工具调用，
+        # 但子任务的工作空间由父任务链自动解析，不能使用注入值，否则路径双重嵌套。
         if parent_task_id and inputs.get("workspace"):
-            logger.warning(
-                "[TaskSubmit] 子任务不能指定 workspace | parent_task_id=%s | workspace=%s",
-                parent_task_id, inputs.get("workspace"),
+            logger.info(
+                "[TaskSubmit] 子任务清除自动注入的 workspace | parent_task_id=%s | workspace=%s",
+                parent_task_id, inputs["workspace"],
             )
-            return create_failure_result(
-                error="子任务不能指定 workspace 参数，工作空间由父任务链自动解析",
-                error_code="CHILD_TASK_CANNOT_HAVE_WORKSPACE",
-            )
+            del inputs["workspace"]
 
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:

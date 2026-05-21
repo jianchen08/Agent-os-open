@@ -373,27 +373,6 @@ class PipelineStreamBridge:
         # 挂起超时检测需要独立追踪最后活跃时间
         _last_active = asyncio.get_event_loop().time() if call_timeout is not None else 0.0
 
-        _suspend_detected_at: float | None = None
-
-        # BUG-FIX-fix_20260521_stream_empty: pre-suspend 等待阶段
-        # 问题根因: 当 drain_loop 开始时引擎仍处于挂起状态（上层等待超时或竞态），
-        #   主循环的 suspend_check 会立即触发 break，导致输出为空。
-        # 修复方案: 在进入主循环前，如果引擎已挂起且队列为空，先等待引擎恢复，
-        #   最多等待 300 秒，防止无限阻塞。
-        _pre_wait_start = asyncio.get_event_loop().time()
-        while (
-            not engine_task.done()
-            and suspend_check is not None
-            and suspend_check()
-            and self._queue.empty()
-        ):
-            await asyncio.sleep(0.2)
-            if asyncio.get_event_loop().time() - _pre_wait_start > 300:
-                logger.warning(
-                    "drain_loop: pre-suspend wait 超时: pipeline=%s", self.pipeline_id[:12],
-                )
-                break
-
         # 2. 主循环：消费队列
         _chunk_count = 0
         while not engine_task.done() or not self._queue.empty():
@@ -402,25 +381,15 @@ class PipelineStreamBridge:
             except asyncio.TimeoutError:
                 now = asyncio.get_event_loop().time()
 
-                # 管道挂起且无更多 chunk → 结束流式输出
-                # 主管道挂起后 engine_task 不会 done，需要通过 suspend_check 检测。
-                # 延迟 1 秒确认挂起，避免在挂起过程中还有残留 chunk。
-                if (
+                # SIMPLIFY-fix_20260521: 引擎挂起时不再 break，改为继续等待。
+                # 引擎恢复后原始 bridge 的 on_chunk 会继续接收 chunk，
+                # drain_loop 自然继续消费，不需要独立的"唤醒路径"。
+                _is_suspended = (
                     not engine_task.done()
                     and self._queue.empty()
                     and suspend_check is not None
                     and suspend_check()
-                ):
-                    if _suspend_detected_at is None:
-                        _suspend_detected_at = now
-                    elif now - _suspend_detected_at > 1.0:
-                        logger.info(
-                            "drain_loop: 管道已挂起，结束流式输出: pipeline=%s chunks=%d",
-                            self.pipeline_id[:12], _chunk_count,
-                        )
-                        break
-                else:
-                    _suspend_detected_at = None
+                )
 
                 # 心跳保活
                 if heartbeat_callback is not None and now - last_keepalive > heartbeat_interval:

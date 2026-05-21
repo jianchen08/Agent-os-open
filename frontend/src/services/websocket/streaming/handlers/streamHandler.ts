@@ -101,6 +101,70 @@ export function handleStreamStart(eventData: any) {
   if (!messageId) return
 
   const threadId = eventData.data?._threadId || eventData._threadId
+
+  const currentActivePipelineId = pipelineStore.getState().activePipelineId
+  _debugLogger.info(
+    `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
+  )
+
+  // BUG-FIX-fix_20260521_stop_button_not_following_stream:
+  // 问题根因: 当用户发送消息时，如果 activePipelineId 为空，会使用 sid 作为 fallback 管道。
+  //          但后端处理消息后可能在另一个新创建的 pipeline 上触发流式输出。
+  //          这导致 activePipelineId 与 stream_start 中的 pipelineId 不一致，
+  //          effectiveIsGenerating 检测不到流式状态，停止按钮不显示。
+  // 修复方案: 如果 activePipelineId 与 pipelineId 不一致，更新 activePipelineId。
+  //          这样 effectiveIsGenerating 能正确检测到当前管道的流式状态。
+
+  // BUG-FIX-fix_20260522_auto_switch_tab_on_submit:
+  // 问题根因: 上述修复无条件切换 activePipelineId，当子 Agent 开始流式输出时，
+  //          会将用户从主标签页强制跳转到子管道标签页，体验不佳。
+  // 修复方案: 在调用 activatePipeline 之前增加条件判断，仅在以下场景激活管道：
+  //          1. 当前没有活跃管道（首次初始化场景）
+  //          2. 用户当前正在查看的 tab 对应的 pipelineRunId 与 pipelineId 匹配
+  //          3. 用户已主动进入该管道的交互（interactionStore 中存在 entered 状态）
+  //          4. 用户在主 tab 且该 pipelineId 不属于任何子 tab（主管道自身的流式输出）
+  //          其他情况下不激活管道，让子管道的流式输出在后台进行。
+  // 影响范围: 提交任务后标签页自动跳转行为
+  // 修复日期: 2026-05-22
+  if (currentActivePipelineId !== pipelineId) {
+    const agentTabStore = useAgentTabStore.getState()
+    const activeTab = agentTabStore.getActiveTab()
+    const interactionStore = useInteractionStore.getState()
+
+    /** 判断是否应该自动激活该管道 */
+    const shouldActivatePipeline = (() => {
+      // 条件1：当前没有活跃管道（首次初始化场景），允许激活
+      if (!currentActivePipelineId) return true
+
+      // 条件2：当前活跃 tab 的 pipelineRunId 等于 pipelineId，用户已在查看该管道
+      if (activeTab?.pipelineRunId === pipelineId) return true
+
+      // 条件3：当前活跃 tab 通过 pipelineTabMap 映射到该 pipelineId
+      const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
+      if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
+
+      // 条件4：用户已主动进入该管道的交互（entered 状态）
+      if (interactionStore.getEnteredForPipeline(pipelineId)) return true
+
+      // 条件5：用户在主 tab 且该 pipelineId 不属于任何子 tab，
+      //        认为是主管道自身的流式输出，应激活
+      if (activeTab?.agentLevel === 1 && !tabIdForPipeline) return true
+
+      return false
+    })()
+
+    if (shouldActivatePipeline) {
+      _debugLogger.info(
+        `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
+      )
+      pipelineStore.getState().activatePipeline(pipelineId)
+    } else {
+      _debugLogger.info(
+        `[STREAM_START] skipping activatePipeline: user not viewing pipeline ${pipelineId.slice(0, 12)}, keeping activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
+      )
+    }
+  }
+
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
   clearPendingStreamTimeout(pipelineId)
@@ -161,18 +225,44 @@ export function handleStreamEnd(eventData: any) {
 
   const pipelineId = resolvePipelineId(eventData)
   const threadId = eventData.data?._threadId || eventData._threadId
+  const messageId = extractMessageId(eventData)
+
+  // DEBUG: 调试日志
+  _debugLogger.info(
+    `[STREAM_END] pipelineId=${pipelineId?.slice(0, 12) || 'null'} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId?.slice(0, 12) || 'null'} activePipelineId=${pipelineStore.getState().activePipelineId?.slice(0, 12) || 'null'}`,
+  )
 
   if (pipelineId) {
     clearChunkTimeout(pipelineId)
     stopPipelineStreaming(pipelineId, threadId)
+    // BUG-FIX-fix_20260521_stop_button_not_cleared:
+    // 问题根因: 如果 stream_end 的 pipelineId 与 activePipelineId 不一致，
+    //          只清理 pipelineId 对应的 streamingTabs，但 activePipelineId 对应的可能没有清理。
+    // 修复方案: 同时清理 activePipelineId 对应的 streamingTabs。
+    const currentActivePipelineId = pipelineStore.getState().activePipelineId
+    if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
+      _debugLogger.info(
+        `[STREAM_END] also clearing activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
+      )
+      useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
+    }
   } else {
-    // FIX: pipeline_id 缺失时 warn 并 return
     _debugLogger.warn(
-      `[STREAM_END] pipeline_id missing, _threadId=%s msgId=%s`,
-      threadId?.slice(0, 12),
-      extractMessageId(eventData)?.slice(0, 12),
+      `[STREAM_END] pipeline_id missing, _threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId?.slice(0, 12) || 'null'}`,
     )
-    // 仍尝试用 threadId 清理 streamingStore tab 状态
+    // BUG-FIX-fix_20260521_stop_button_not_cleared:
+    // 问题根因: stream_end 事件中 pipelineId 解析失败时，只清理了 threadId 对应的 streamingTabs。
+    //          但 handleStreamStart 中已将 activePipelineId 设置为当时的 pipelineId。
+    //          如果 stream_end 的 pipelineId 缺失，streamingTabs[activePipelineId] 无法被清理。
+    // 修复方案: 同时清理 activePipelineId 对应的 streamingTabs。
+    const currentActivePipelineId = pipelineStore.getState().activePipelineId
+    if (currentActivePipelineId) {
+      _debugLogger.info(
+        `[STREAM_END] clearing via activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
+      )
+      clearChunkTimeout(currentActivePipelineId)
+      stopPipelineStreaming(currentActivePipelineId, threadId)
+    }
     if (threadId) {
       clearChunkTimeout(threadId)
       useStreamingStore.getState().setStreamingForTab(threadId, false)
@@ -185,7 +275,7 @@ export function handleStreamEnd(eventData: any) {
     useContextUsageStore.getState().updateUsage(pipelineId, usage)
   }
 
-  const messageId = extractMessageId(eventData)
+  // messageId 已在函数开头提取
   const fullContent = eventData?.full_content || eventData?.data?.full_content || eventData?.data?.final_content
   if (!messageId) return
 

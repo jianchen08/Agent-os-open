@@ -221,7 +221,12 @@ class TaskTool(BuiltinTool):
                     },
                     "task_id": {
                         "type": "string",
-                        "description": "任务ID，get/update/pause/resume/cancel/retry/delete/inject操作时必填",
+                        "description": "任务ID，get/update/pause/resume/cancel/retry/delete/inject操作时必填（与 task_ids 二选一）",
+                    },
+                    "task_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "批量任务ID列表（与 task_id 二选一，优先使用 task_ids）。适用于 pause/resume/cancel/retry/delete 操作",
                     },
                     "status": {
                         "type": "string",
@@ -343,6 +348,11 @@ class TaskTool(BuiltinTool):
                 error=str(e),
                 error_code="SERVICE_UNAVAILABLE",
             )
+
+        # 检查是否使用批量参数
+        task_ids = inputs.get("task_ids")
+        if task_ids and isinstance(task_ids, list) and action in ("pause", "resume", "cancel", "retry", "delete", "inject"):
+            return await self._batch_tasks(inputs, parent_agent_level)
 
         if action == "get":
             return await self._get_task(inputs, parent_agent_level)
@@ -594,6 +604,59 @@ class TaskTool(BuiltinTool):
                 error=f"获取任务状态失败: {str(e)}",
                 error_code="STATUS_FAILED",
             )
+
+    async def _batch_tasks(
+        self, inputs: dict[str, Any], parent_agent_level: int
+    ) -> ToolExecutionResult:
+        """批量任务操作，每个任务独立返回结果"""
+        action = inputs.get("action")
+        task_ids = inputs.get("task_ids", [])
+        results = []
+
+        for task_id in task_ids:
+            file_inputs = dict(inputs)
+            file_inputs["task_id"] = task_id
+            file_inputs.pop("task_ids", None)
+
+            if action == "pause":
+                result = await self._pause_task(file_inputs, parent_agent_level)
+            elif action == "resume":
+                result = await self._resume_task(file_inputs, parent_agent_level)
+            elif action == "cancel":
+                result = await self._cancel_task(file_inputs, parent_agent_level)
+            elif action == "retry":
+                result = await self._retry_task(file_inputs, parent_agent_level)
+            elif action == "delete":
+                result = await self._delete_task(file_inputs, parent_agent_level)
+            elif action == "inject":
+                result = await self._inject_task(file_inputs, parent_agent_level)
+            else:
+                result = create_failure_result(
+                    error=f"不支持的批量操作: {action}",
+                    error_code="INVALID_ACTION",
+                )
+
+            results.append({
+                "task_id": task_id,
+                "success": result.success,
+                "data": result.data if result.success else None,
+                "error": result.error if not result.success else None,
+            })
+
+        success_count = sum(1 for r in results if r["success"])
+        failed_count = len(results) - success_count
+
+        return create_success_result(
+            data={
+                "results": results,
+                "summary": {
+                    "total": len(results),
+                    "success": success_count,
+                    "failed": failed_count,
+                },
+            },
+            metadata={"action": f"batch_{action}"},
+        )
 
     async def _get_task(
         self, inputs: dict[str, Any], parent_agent_level: int

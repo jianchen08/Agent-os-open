@@ -213,6 +213,8 @@ export function FiveSpaceLayout({
     const targetSessionId = pipelineStore.pipelineSessionMap[pipelineRunId]
 
     if (targetSessionId && targetSessionId !== currentSid) {
+      // 切换前保存当前会话的 Tab 状态到 localStorage
+      useAgentTabStore.getState().saveCurrentTabs()
       const { useSessionListStore } = await import('@/stores/sessionListStore')
       await useSessionListStore.getState().setActiveSession(targetSessionId)
     }

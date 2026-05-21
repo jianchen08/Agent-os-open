@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 import { reportError } from '@/services/errorReporting'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAgentStore } from '@/stores/agentStore'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -151,9 +152,17 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   /**
    * 处理会话点击 - 设置活动会话并导航到会话页面
    * Requirements: Requirement 2 - 点击会话可以从其他页面跳转到对话页面
+   *
+   * BUG-FIX-fix_20260521_tasklist_refresh:
+   * 问题根因: 切换会话时未保存当前会话的 Tab 状态，导致标签数据丢失。
+   * 修复方案: 在切换前先调用 saveCurrentTabs() 持久化当前标签状态。
+   * 影响范围: 侧边栏会话切换时的标签状态保持
+   * 修复日期: 2026-05-21
    */
   const handleSessionClick = useCallback(
     async (sessionId: string) => {
+      // 切换前保存当前会话的 Tab 状态到 localStorage
+      useAgentTabStore.getState().saveCurrentTabs()
       await setActiveSession(sessionId)
       // 直接导航到会话页面，而不是主页
       navigate(`/session/${sessionId}`)

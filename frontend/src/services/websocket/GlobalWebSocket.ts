@@ -147,10 +147,7 @@ class GlobalWebSocketService {
           this._handleHeartbeatAck()
         }
         _wsLogger.debug(
-          '[WS_RAW] type=%s pipeline_id=%s message_id=%s',
-          data.type,
-          data.data?.pipeline_id?.slice(0, 12) || 'null',
-          data.data?.message_id?.slice(0, 12) || 'null',
+          `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
         )
         if (data.type) {
           this._emit(data.type, data)
