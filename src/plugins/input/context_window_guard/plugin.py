@@ -145,11 +145,19 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 快速截断：按 recent 预算从尾部截取，旧消息由 prompt_build 通过压缩块加载
         truncated = await self._try_fast_truncate(ctx, messages, context_window)
         if truncated is not None and len(truncated) < len(messages):
+            has_coverage = await self._check_compression_coverage(
+                ctx, messages, truncated,
+            )
+            if has_coverage:
+                logger.info(
+                    "[%s] 快速截断: %d -> %d 条消息",
+                    self.name, len(messages), len(truncated),
+                )
+                return PluginResult(state_updates={"messages": truncated})
             logger.info(
-                "[%s] 快速截断: %d -> %d 条消息",
+                "[%s] 快速截断跳过: 被截断的消息无压缩块覆盖, %d -> %d 条消息, 走完整压缩",
                 self.name, len(messages), len(truncated),
             )
-            return PluginResult(state_updates={"messages": truncated})
 
         service = self._get_memory_service(ctx)
         if not service:
@@ -164,6 +172,18 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         previous_l1 = await self._load_previous_l1(ctx)
         save_fn = await self._make_save_chunk_fn(ctx)
+
+        # BUG-FIX-fix_20260522_compression_no_signal:
+        # 通过 on_chunk 发送压缩进度，让前端知道系统正在工作
+        _on_chunk = ctx.state.get("on_chunk")
+        if _on_chunk:
+            try:
+                _on_chunk({
+                    "type": "compression_start",
+                    "pipeline_id": ctx.state.get("pipeline_id", ""),
+                })
+            except Exception:
+                pass
 
         compressed = await service.compress_messages(
             messages=messages,
@@ -257,6 +277,83 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return None
 
         return truncated
+
+    async def _check_compression_coverage(
+        self,
+        ctx: PluginContext,
+        original_messages: list[dict[str, Any]],
+        truncated_messages: list[dict[str, Any]],
+    ) -> bool:
+        """检查被截断掉的旧消息是否已被压缩块覆盖。
+
+        快速截断的安全前提是：被截掉的消息由 prompt_build 从 chunk_service 加载。
+        如果没有覆盖这些消息的压缩块，快速截断会导致消息丢失，应走完整压缩。
+
+        Args:
+            ctx: 插件上下文
+            original_messages: 截断前的完整消息列表
+            truncated_messages: 截断后的消息列表
+
+        Returns:
+            True 表示压缩块已覆盖被截断的消息，可以安全截断
+        """
+        try:
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            return False
+
+        from pipeline.types import StateKeys
+
+        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
+            return False
+
+        try:
+            chunks = await chunk_service.find_by_pipeline(
+                pipeline_run_id, "L1",
+            )
+        except Exception:
+            return False
+
+        if not chunks:
+            return False
+
+        # 计算被截断消息的序列范围
+        # 非 system 消息的计数作为序列号参考
+        non_system_original = [
+            m for m in original_messages if m.get("role") != "system"
+        ]
+        non_system_truncated = [
+            m for m in truncated_messages if m.get("role") != "system"
+        ]
+
+        # 如果截断后没有减少非 system 消息，说明没有实际截断
+        if len(non_system_truncated) >= len(non_system_original):
+            return True
+
+        # 被截断的消息数量
+        removed_count = len(non_system_original) - len(non_system_truncated)
+
+        # 检查已有压缩块是否覆盖了被截断的消息范围
+        # 压缩块的 sequence_start=1, sequence_end=N 表示覆盖了第1到第N条消息
+        # 如果所有块的覆盖范围 >= 被截断的消息数量，则认为覆盖
+        max_coverage = max(
+            (c.sequence_end - c.sequence_start + 1 for c in chunks),
+            default=0,
+        )
+
+        if max_coverage >= removed_count:
+            logger.debug(
+                "[%s] 压缩块覆盖检查通过: removed=%d, max_coverage=%d",
+                self.name, removed_count, max_coverage,
+            )
+            return True
+
+        logger.info(
+            "[%s] 压缩块覆盖不足: removed=%d, max_coverage=%d",
+            self.name, removed_count, max_coverage,
+        )
+        return False
 
     @staticmethod
     def _estimate_msg_tokens_simple(msg: dict[str, Any]) -> int:

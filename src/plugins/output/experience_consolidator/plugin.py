@@ -4,7 +4,7 @@
 触发条件：state 中 task_complete=True 或 execution_status="completed"。
 
 数据流：
-  ContextCompressPlugin 产出 ChunkData → 本插件读取 → 提炼 Knowledge → 存储
+  context_window_guard 产出 ChunkData → 本插件读取 → 提炼 Knowledge → 存储
 
 通过 ctx.get_service("chunk_service") 获取 ChunkService，
 通过 ctx.get_service("knowledge_service") 获取 KnowledgeService。
