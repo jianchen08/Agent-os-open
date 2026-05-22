@@ -51,12 +51,15 @@ export function handleToolStart(eventData: any) {
   }
 
   const finalCallId = callId || `call_${toolName}_${Date.now()}`
+  // BUG-FIX-fix_20260522_tool_order: 提取后端发送的 sequence 用于排序
+  const sequence = eventData.sequence ?? eventData.data?.sequence
   const newToolCall = {
     call_id: finalCallId, tool_name: toolName,
     tool_args: eventData.args || eventData.data?.args || {},
     status: 'running' as const, started_at: new Date().toISOString(),
+    sequence,
   }
-  const toolBlock = { type: 'tool_call' as const, toolCall: newToolCall, sourceId: messageId }
+  const toolBlock = { type: 'tool_call' as const, toolCall: newToolCall, sourceId: messageId, sequence }
 
   pipelineStore.getState().updateMessage(pipelineId, messageId, {
     toolCalls: [...existingCalls, newToolCall],

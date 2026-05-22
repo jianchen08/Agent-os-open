@@ -1,7 +1,8 @@
 """插件与管道路由注册表。
 
 PluginRegistry 管理管道内的插件注册，
-PipelineRegistry 提供跨管道路由能力（平权式）。
+PipelineRegistry 提供跨管道路由能力（平权式），
+EngineRegistry 统一管理引擎实例注册与查找（替代三级查找）。
 
 平权路由：管道之间平权，路由只是状态转移（A 的 state → B）。
 等待策略由插件决定，不在框架硬编码。
@@ -12,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from datetime import datetime
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from pipeline.plugin import (
     ICorePlugin,
@@ -25,9 +28,216 @@ from pipeline.types import StateKeys
 
 if TYPE_CHECKING:
     from pipeline.config_store import PipelineConfigStore
+    from pipeline.engine import PipelineEngine
     from pipeline.event_bus import EventBus
+    from pipeline.stream_bridge import PipelineStreamBridge
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 引擎注册条目与统一注册表（替代三级查找 + _pipeline_thread_map）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PipelineEntry:
+    """管道引擎注册条目。
+
+    封装 engine + bridge + thread_id + tags 的关联关系，
+    替代原先分散在 ServiceProvider 字符串 key、_GLOBAL_SUSPENDED_ENGINES、
+    _pipeline_thread_map 中的多套映射。
+
+    Attributes:
+        engine: PipelineEngine 实例
+        bridge: 当前活跃的 PipelineStreamBridge（可为 None）
+        thread_id: 对应的 WebSocket thread_id
+        tags: 通用关联标签（可扩展），如 {"task_id": "xxx"}
+        created_at: 条目创建时间
+    """
+
+    engine: Any  # PipelineEngine（用 Any 避免循环导入）
+    bridge: Any | None = None  # PipelineStreamBridge | None
+    thread_id: str = ""
+    tags: dict[str, str] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+class EngineRegistry:
+    """统一管道引擎注册表（单例）。
+
+    替代原先的三级查找（ServiceProvider.__running_engine_ +
+    _GLOBAL_SUSPENDED_ENGINES + ServiceProvider.__suspended_engine_）和
+    _pipeline_thread_map 映射表，提供统一的引擎注册、查找、bridge 管理接口。
+
+    查找逻辑从"查三个地方判断状态"变为一次 registry.get() 调用，
+    引擎状态从 entry.engine.is_suspended 属性读取。
+    """
+
+    _instance: ClassVar[EngineRegistry | None] = None
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def __init__(self) -> None:
+        self._engines: dict[str, PipelineEntry] = {}
+
+    @classmethod
+    def get_instance(cls) -> EngineRegistry:
+        """获取 EngineRegistry 单例。"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def register(
+        self,
+        pipeline_id: str,
+        engine: Any,
+        thread_id: str = "",
+        tags: dict[str, str] | None = None,
+    ) -> PipelineEntry:
+        """注册管道引擎实例。
+
+        Args:
+            pipeline_id: 管道 ID
+            engine: PipelineEngine 实例
+            thread_id: 关联的 WebSocket thread_id
+            tags: 关联标签，如 {"task_id": "xxx"}
+
+        Returns:
+            注册的 PipelineEntry
+        """
+        entry = PipelineEntry(
+            engine=engine,
+            thread_id=thread_id,
+            tags=tags or {},
+        )
+        self._engines[pipeline_id] = entry
+        logger.info(
+            "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d",
+            pipeline_id[:12], thread_id[:12] if thread_id else "",
+            getattr(engine, "is_suspended", "?"),
+            len(self._engines),
+        )
+        return entry
+
+    def unregister(self, pipeline_id: str) -> PipelineEntry | None:
+        """注销管道引擎实例。
+
+        Args:
+            pipeline_id: 管道 ID
+
+        Returns:
+            被移除的 PipelineEntry，不存在返回 None
+        """
+        entry = self._engines.pop(pipeline_id, None)
+        if entry is not None:
+            logger.info(
+                "[EngineRegistry] 注销引擎: pipeline=%s total=%d",
+                pipeline_id[:12], len(self._engines),
+            )
+        return entry
+
+    def get(self, pipeline_id: str) -> PipelineEntry | None:
+        """根据 pipeline_id 查找管道条目。
+
+        替代原先的三级查找逻辑，一次调用即可获取引擎和关联数据。
+        引擎状态通过 entry.engine.is_suspended 属性判断。
+
+        Args:
+            pipeline_id: 管道 ID
+
+        Returns:
+            PipelineEntry 实例，不存在返回 None
+        """
+        return self._engines.get(pipeline_id)
+
+    def get_bridge(self, pipeline_id: str) -> Any | None:
+        """获取管道的活跃 bridge。
+
+        Args:
+            pipeline_id: 管道 ID
+
+        Returns:
+            PipelineStreamBridge 实例，不存在返回 None
+        """
+        entry = self._engines.get(pipeline_id)
+        return entry.bridge if entry else None
+
+    def set_bridge(self, pipeline_id: str, bridge: Any) -> None:
+        """设置管道的活跃 bridge。
+
+        Args:
+            pipeline_id: 管道 ID
+            bridge: PipelineStreamBridge 实例
+        """
+        entry = self._engines.get(pipeline_id)
+        if entry:
+            entry.bridge = bridge
+
+    def update_thread_id(self, pipeline_id: str, thread_id: str) -> None:
+        """更新管道的 thread_id 映射。
+
+        替代 ws_handler._pipeline_thread_map 的注册功能。
+
+        Args:
+            pipeline_id: 管道 ID
+            thread_id: WebSocket thread_id
+        """
+        entry = self._engines.get(pipeline_id)
+        if entry:
+            entry.thread_id = thread_id
+
+    def get_thread_id(self, pipeline_id: str) -> str:
+        """根据 pipeline_id 查找对应的 ws_thread_id。
+
+        替代 ws_handler._pipeline_thread_map 的查询功能。
+
+        Args:
+            pipeline_id: 管道 ID
+
+        Returns:
+            对应的 ws_thread_id，未找到返回空字符串
+        """
+        entry = self._engines.get(pipeline_id)
+        return entry.thread_id if entry else ""
+
+    def find_by_tag(self, key: str, value: str) -> list[PipelineEntry]:
+        """按关联标签查找管道条目。
+
+        Args:
+            key: 标签键，如 "task_id"
+            value: 标签值
+
+        Returns:
+            匹配的 PipelineEntry 列表
+        """
+        return [
+            entry for entry in self._engines.values()
+            if entry.tags.get(key) == value
+        ]
+
+    def find_by_thread_id(self, thread_id: str) -> list[PipelineEntry]:
+        """根据 thread_id 反查所有关联的管道条目。
+
+        Args:
+            thread_id: WebSocket thread_id
+
+        Returns:
+            匹配的 PipelineEntry 列表
+        """
+        return [
+            entry for entry in self._engines.values()
+            if entry.thread_id == thread_id
+        ]
+
+    def all_entries(self) -> dict[str, PipelineEntry]:
+        """返回所有已注册的管道条目（只读快照）。"""
+        return dict(self._engines)
+
+
+def get_engine_registry() -> EngineRegistry:
+    """获取全局 EngineRegistry 单例的便捷函数。"""
+    return EngineRegistry.get_instance()
 
 
 @dataclass

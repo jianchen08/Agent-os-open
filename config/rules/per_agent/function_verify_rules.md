@@ -11,13 +11,20 @@
 
 ## 前端应用 / UI 组件
 
-- **主验证工具**：browser_test（浏览器自动化） + fetch（HTML 结构检查）
-- **验证策略分层**：
-  1. **结构层**（fetch）：页面是否包含预期 DOM 元素、表单字段
-  2. **行为层**（browser_test）：点击/输入后是否有正确响应、页面跳转、状态变化
-  3. **视觉层**（browser_test 截图）：关键页面截图对比
-  4. **console 层**（browser_test）：捕获 console 错误和警告
-- **browser_test 操作**：通过 MCP 协议连接 Playwright/Chrome DevTools 后端，支持导航、交互、截图、控制台捕获等完整浏览器自动化能力
+- **主验证工具**：playwright_test（浏览器自动化）
+- **工具获取方式**：通过 resource_search(resource_type="tool", query="playwright_test", mode="detailed") 搜索加载
+- **验证策略分层**（需要 playwright_test 支持）：
+  1. **行为层**：点击/输入后是否有正确响应、页面跳转、状态变化
+  2. **视觉层**（截图）：关键页面截图对比
+  3. **console 层**：捕获 console 错误和警告
+  4. **结构层**：页面是否包含预期 DOM 元素、表单字段
+- **playwright_test 不可用时的处理**：
+  1. **禁止降级到 fetch**：fetch 只能做 HTTP 请求，无法替代浏览器自动化验证前端交互行为，用 fetch 替代 playwright_test 做前端验证是不充分的验证
+  2. **必须如实报告**：在验证报告的 tool_capability_assessment 中明确说明：
+     - 哪些前端/UI内容**无法验证**（如按钮点击响应、页面渲染、交互行为）
+     - 需要什么工具才能完成验证（如需要 Playwright 浏览器自动化工具）
+     - 请求上级 Agent 或人类协助提供所需工具/环境
+  3. **可验证部分正常执行**：如果前端项目有后端 API，后端部分使用 fetch 正常验证
 
 ## CLI 工具 / 脚本
 
@@ -44,5 +51,6 @@
 
 ## 工具选择原则
 
-优先使用专用工具：fetch > curl，browser_test > 手写脚本。
-前端项目直接使用 browser_test 工具，无需手写脚本。
+- **后端/API**：优先使用专用工具（fetch > curl）
+- **前端/UI**：必须使用 playwright_test，通过 resource_search 加载。无法使用时禁止降级到 fetch，必须如实报告工具缺口
+- **前端验证通过条件**：可验证部分全部实际验证通过 + 不可验证部分有清晰说明和资源请求

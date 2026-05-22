@@ -138,13 +138,13 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
+    - name: "行为约束"
+      type: "rules"
     - name: "可扩展工具索引"
       content: |
         ## 可扩展工具索引
         以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
-        - enhanced_search: 在文件中搜索文本、代码或文件名
         - web_search: 搜索互联网信息
-        - yaml_validate: 验证YAML配置文件的格式和内容
         如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，工具将自动加载到当前会话，下一轮即可直接调用。
     - name: "工具代码模板"
       type: "path"
@@ -154,9 +154,8 @@ static_vars:
 dynamic_vars:
   enabled: true
   items:
-    - name: "最小行动原则"
-      content: |
-        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
+    - name: "当前时间"
+      type: "timestamp"
 
 tool_ids:
   - file_read
@@ -231,7 +230,6 @@ input_schema:
   required:
     - operation_type
     - requirements
-    - workspace
 
 output_schema:
   type: object
@@ -257,7 +255,7 @@ output_schema:
 version: "1.2.0"
 is_active: true
 status: "active"
-max_iterations: 500
+max_iterations: 200
 max_reminders: 3
 timeout_seconds: 2400
 
@@ -265,7 +263,7 @@ timeout_seconds: 2400
 deliverables:
   - name: "tool_code"
     description: "工具代码文件（写入工作空间）"
-    output_path: "{tool_id}.py"
+    output_path: "src/tools/builtin/{tool_id}.py"
     type: "code"
     required: true
 

@@ -1,7 +1,7 @@
-"""触发器管理器。
+﻿"""触发器管理器。
 
 管理触发器的注册、评估和执行，支持事件触发、条件触发和定时触发。
-通过 ServiceProvider 获取管道引擎实例，触发时使用 inject_and_wake 唤醒管道。
+通过 ServiceProvider 获取管道引擎实例，触发时使用 inject_message 唤醒管道。
 
 公共 API:
     TriggerManager: 触发器管理器类
@@ -332,7 +332,7 @@ class TriggerManager:
         """后台定期检查触发器并唤醒对应管道。
 
         每隔 _TRIGGER_CHECK_INTERVAL 秒检查一次所有定时/延迟/周期触发器，
-        到期的触发器通过管道的 inject_and_wake 接口注入消息并唤醒。
+        到期的触发器通过管道的 inject_message 接口注入消息并唤醒。
         """
         logger.info("[TriggerManager] 后台检查循环已启动")
         self._running = True

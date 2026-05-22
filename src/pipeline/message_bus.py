@@ -3,9 +3,10 @@
 所有"给管道发消息"的操作都通过 send_pipeline_message() 进行，
 不再由各调用方自行判断管道状态和选择注入方式。
 
-内部自动判断管道状态并选择最佳注入策略：
-1. 运行中引擎 → inject_notification()（下一轮迭代消费）
-2. 挂起引擎   → inject_and_wake()（立即唤醒）
+内部通过 EngineRegistry 一次查找引擎，并使用 engine.inject_message()
+统一注入，自动根据引擎状态选择注入路径：
+1. 运行中引擎 → inject_message() → notification 路径
+2. 挂起引擎   → inject_message() → wake 路径
 3. 无引擎+有历史 → 从历史重建引擎 + run()
 4. 无引擎+无历史 → 返回失败
 """
@@ -28,15 +29,14 @@ class InjectResult:
     method: str = ""
     pipeline_id: str = ""
     error: str = ""
+    bridge: Any = None  # 关联的 PipelineStreamBridge
 
 
 def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     """查找目标管道引擎实例。
 
-    按优先级从多个来源查找：
-    1. ServiceProvider 中的运行态引擎
-    2. 全局挂起引擎注册表
-    3. ServiceProvider 中的挂起态引擎
+    通过 EngineRegistry 一次查找。所有引擎在 _run_loop 启动和
+    _suspend_and_wait 挂起时已同时写入 EngineRegistry，无需旧路径回退。
 
     Args:
         pipeline_id: 目标管道 ID
@@ -45,84 +45,55 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
         (engine_instance, state) 元组，state 为 "running" 或 "suspended"；
         未找到返回 (None, "")
     """
-    try:
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-    except Exception:
-        provider = None
+    from pipeline.registry import get_engine_registry
 
-    running_key = f"__running_engine_{pipeline_id}"
-    if provider:
-        engine = provider.get(running_key)
-        if engine is not None:
-            # BUG-FIX-20260511: 引擎挂起时 __running_engine_ 注册未清除，
-            # 导致 _find_engine 错误返回 "running"，调用方走普通路径调用
-            # engine.run() 而非唤醒路径，重置 _suspended_state 丢失对话历史。
-            # 修复: 检查 is_suspended 属性，挂起时返回 "suspended"。
-            if getattr(engine, "is_suspended", False):
-                return engine, "suspended"
-            return engine, "running"
-
-    try:
-        from pipeline.engine import get_global_suspended_engine
-        engine = get_global_suspended_engine(pipeline_id)
-        if engine is not None:
-            return engine, "suspended"
-    except Exception:
-        pass
-
-    suspended_key = f"__suspended_engine_{pipeline_id}"
-    if provider:
-        engine = provider.get(suspended_key)
-        if engine is not None:
-            return engine, "suspended"
-
-    return None, ""
+    entry = get_engine_registry().get(pipeline_id)
+    if entry is None:
+        return None, ""
+    engine = entry.engine
+    if getattr(engine, "is_suspended", False):
+        return engine, "suspended"
+    return engine, "running"
 
 
-def _inject_notification_to_engine(engine: Any, msg: str) -> None:
-    """向运行中的管道引擎注入通知消息。
+def _update_bridge(pipeline_id: str, engine: Any, output_sink: Any) -> None:
+    """为管道创建或复用 bridge，并关联到 EngineRegistry。
 
-    直接操作引擎的 _pending_notifications 列表（线程安全追加），
-    若管道处于挂起状态则顺便唤醒。
+    当 output_sink 存在时，检查 EngineRegistry 中是否已有 bridge；
+    若无则新建 PipelineStreamBridge 并注册，同时将 bridge.on_chunk
+    设置到引擎的 _saved_on_chunk 和 _suspended_state 中。
 
     Args:
+        pipeline_id: 管道 ID
         engine: PipelineEngine 实例
-        msg: 通知消息文本
+        output_sink: IOutputSink 实例
     """
-    if not msg:
+    from pipeline.registry import get_engine_registry
+    from pipeline.stream_bridge import PipelineStreamBridge
+
+    registry = get_engine_registry()
+    entry = registry.get(pipeline_id)
+    if entry is None:
         return
-    engine._pending_notifications.append(msg)
-    logger.info(
-        "[MessageBus] 通知已入队 (queue=%d): %.80s",
-        len(engine._pending_notifications), msg,
-    )
-    if engine._wake_event is not None:
-        engine._wake_event.set()
+    bridge = entry.bridge
+    if bridge is None:
+        import uuid
 
-
-def _inject_and_wake_engine(engine: Any, user_input: str) -> None:
-    """向挂起的管道引擎注入消息并唤醒。
-
-    将 user_input 注入到引擎的 _suspended_state，
-    然后设置 _wake_event 唤醒管道。
-
-    Args:
-        engine: PipelineEngine 实例
-        user_input: 要注入的消息文本
-    """
-    if engine._suspended_state is not None and user_input:
-        orig = engine._suspended_state.get("user_input", "")
-        engine._suspended_state["user_input"] = user_input
-        _msgs = engine._suspended_state.get("messages", [])
-        _last = _msgs[-1] if _msgs else {}
-        _will_append = not (_last.get("role") == "user" and _last.get("content") == user_input)
-        if _will_append:
-            engine._suspended_state.setdefault("messages", []).append(
-                {"role": "user", "content": user_input}
-            )
-    if engine._wake_event is not None:
-        engine._wake_event.set()
+        bridge = PipelineStreamBridge(
+            pipeline_id=pipeline_id,
+            output_sink=output_sink,
+            message_id=f"msg_{uuid.uuid4().hex[:12]}",
+        )
+        registry.set_bridge(pipeline_id, bridge)
+    _set_streaming = getattr(engine, "set_streaming_context", None)
+    if _set_streaming:
+        _set_streaming(bridge.on_chunk, streaming=True)
+    else:
+        engine._saved_on_chunk = bridge.on_chunk
+        engine._saved_streaming = True
+    if getattr(engine, "_suspended_state", None) is not None:
+        engine._suspended_state["on_chunk"] = bridge.on_chunk
+        engine._suspended_state["streaming"] = True
 
 
 async def send_pipeline_message(
@@ -137,15 +108,15 @@ async def send_pipeline_message(
     conversation_history: list[dict] | None = None,
     streaming: bool = False,
     on_chunk: Callable | None = None,
+    output_sink: Any = None,
     **kwargs,
 ) -> InjectResult:
     """统一消息注入入口 — 所有外部调用方都使用此函数。
 
     自动判断管道状态并选择最佳注入策略：
-    1. 运行中引擎 → inject_notification()（下一轮迭代消费）
-    2. 挂起引擎   → inject_and_wake()（立即唤醒）
-    3. 无引擎+有历史 → 从历史重建引擎 + run()
-    4. 无引擎+无历史 → 返回 InjectResult(success=False)
+    1. 引擎存在（running/suspended） → engine.inject_message() 统一注入
+    2. 无引擎+有历史 → 从历史重建引擎 + run()
+    3. 无引擎+无历史 → 返回 InjectResult(success=False)
 
     Args:
         pipeline_id: 目标管道 ID
@@ -158,6 +129,7 @@ async def send_pipeline_message(
         conversation_history: 对话历史（仅 revive 场景需要）
         streaming: 是否流式输出（仅 revive 场景需要）
         on_chunk: 流式回调（仅 revive 场景需要）
+        output_sink: IOutputSink 实例，提供时自动创建/复用 bridge
 
     Returns:
         InjectResult 注入结果
@@ -170,27 +142,25 @@ async def send_pipeline_message(
 
     engine, state = _find_engine(pipeline_id)
 
-    if state == "running" and engine is not None:
+    if engine is not None:
         try:
-            _inject_notification_to_engine(engine, message)
+            engine.inject_message(message)
+            # 如果有 output_sink，尝试设置 bridge
+            if output_sink is not None:
+                _update_bridge(pipeline_id, engine, output_sink)
+            method = "wake" if state == "suspended" else "notification"
             logger.info(
-                "[MessageBus] 消息已注入运行中管道 | pipeline=%s | method=notification | preview=%.60s",
-                pipeline_id, message,
+                "[MessageBus] 消息已注入管道 | pipeline=%s | method=%s | preview=%.60s",
+                pipeline_id, method, message,
             )
-            return InjectResult(success=True, method="notification", pipeline_id=pipeline_id)
-        except Exception as exc:
-            logger.warning("[MessageBus] notification 注入失败: %s", exc)
-
-    if state == "suspended" and engine is not None:
-        try:
-            _inject_and_wake_engine(engine, message)
-            logger.info(
-                "[MessageBus] 消息已注入挂起管道并唤醒 | pipeline=%s | method=wake | preview=%.60s",
-                pipeline_id, message,
+            # 获取关联的 bridge 用于返回
+            from pipeline.registry import get_engine_registry
+            bridge = get_engine_registry().get_bridge(pipeline_id)
+            return InjectResult(
+                success=True, method=method, pipeline_id=pipeline_id, bridge=bridge,
             )
-            return InjectResult(success=True, method="wake", pipeline_id=pipeline_id)
         except Exception as exc:
-            logger.warning("[MessageBus] wake 注入失败: %s", exc)
+            logger.warning("[MessageBus] 消息注入失败: %s", exc)
 
     return await _try_revive_pipeline(
         pipeline_id, message,

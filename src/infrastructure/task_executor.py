@@ -28,6 +28,41 @@ class TaskExecutorMixin:
     idle 计时器相关方法由 TaskIdleTimerMixin 提供。
     """
 
+    def _resolve_isolation_mode(self, task_data: dict[str, Any], task_obj: Any = None) -> str:
+        """解析隔离级别，消除重复逻辑。"""
+        if task_data.get("isolation_level"):
+            return task_data["isolation_level"]
+        if task_obj and task_obj.metadata and task_obj.metadata.get("isolation_level"):
+            return task_obj.metadata["isolation_level"]
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _P
+            _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
+            if _iso_cfg_path.exists():
+                _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
+                return _iso_cfg.get("coordinator", {}).get("default_level", "")
+        except Exception:
+            pass
+        return ""
+
+    def _cleanup_task_resources(self, task_id: str, timer_manager: Any = None, idle_timer_registered: bool = False) -> None:
+        """统一清理任务资源，消除三处重复。"""
+        self._active_tasks.discard(task_id)
+        self._idle_remind_counts.pop(task_id, None)
+        if idle_timer_registered and timer_manager:
+            try:
+                asyncio.get_event_loop().create_task(timer_manager.cancel_timer(task_id))
+            except Exception:
+                pass
+
+    async def _cancel_engine_task(self, engine_task: asyncio.Task) -> None:
+        """统一取消引擎任务。"""
+        engine_task.cancel()
+        try:
+            await engine_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def _execute_background_task(self, task_data: dict[str, Any]) -> None:
         """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。
 
@@ -83,20 +118,7 @@ class TaskExecutorMixin:
         # ── 注入隔离模式配置 ──
         # BUG-FIX-fix_20260519_container_workspace_path:
         # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
-        if task_data.get("isolation_level"):
-            task_data["isolation_mode"] = task_data["isolation_level"]
-        elif task_obj and task_obj.metadata and task_obj.metadata.get("isolation_level"):
-            task_data["isolation_mode"] = task_obj.metadata["isolation_level"]
-        else:
-            try:
-                import yaml as _yaml
-                from pathlib import Path as _P
-                _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
-                if _iso_cfg_path.exists():
-                    _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
-                    task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
-            except Exception:
-                pass
+        task_data["isolation_mode"] = self._resolve_isolation_mode(task_data, task_obj)
 
         if task_obj and task_obj.metadata:
             iso_level = task_obj.metadata.get("isolation_level")
@@ -234,27 +256,16 @@ class TaskExecutorMixin:
                     task_id, pipeline_timeout,
                 )
                 _engine_timed_out = True
-                _engine_task.cancel()
-                try:
-                    await _engine_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                await self._cancel_engine_task(_engine_task)
                 if task_service:
                     try:
-                        # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                         await task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
                     except Exception:
                         pass
                 evt = self._terminal_events.pop(task_id, None)
                 if evt is not None:
                     evt.set()
-                self._active_tasks.discard(task_id)
-                self._idle_remind_counts.pop(task_id, None)
-                if idle_timer_registered and timer_manager:
-                    try:
-                        await timer_manager.cancel_timer(task_id)
-                    except Exception:
-                        pass
+                self._cleanup_task_resources(task_id, timer_manager, idle_timer_registered)
                 _cleanup_done = True
             finally:
                 if _bridge:
@@ -276,27 +287,17 @@ class TaskExecutorMixin:
         except asyncio.CancelledError:
             logger.info("TaskWorker: task %s cancelled, stopping engine", task_id)
             if _engine_task is not None and not _engine_task.done():
-                _engine_task.cancel()
-                try:
-                    await _engine_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                await self._cancel_engine_task(_engine_task)
             if _bridge:
                 try:
                     _bridge.stop()
                 except Exception:
                     pass
-            self._active_tasks.discard(task_id)
-            if idle_timer_registered and timer_manager:
-                try:
-                    await timer_manager.cancel_timer(task_id)
-                except Exception:
-                    pass
+            self._cleanup_task_resources(task_id, timer_manager, idle_timer_registered)
             raise
 
         except Exception as exc:
             logger.error("TaskWorker: pipeline failed for task %s: %s", task_id, exc)
-            # ── 生命周期钩子：执行异常回滚 ──
             if lifecycle and ws_meta:
                 try:
                     lifecycle.on_task_failed(workspace, ws_meta)
@@ -307,21 +308,13 @@ class TaskExecutorMixin:
                     )
             if task_service:
                 try:
-                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(task_id, str(exc))
                 except Exception as fail_exc:
                     logger.error("TaskWorker: fail_task also failed: %s", fail_exc)
             evt = self._terminal_events.pop(task_id, None)
             if evt is not None:
                 evt.set()
-            # BUG-FIX: engine.run 异常后清理活跃任务集合，防止 idle 计时器误判
-            self._active_tasks.discard(task_id)
-            # BUG-FIX: engine.run 异常后清理 idle_timer，防止计时器泄漏
-            if idle_timer_registered and timer_manager:
-                try:
-                    await timer_manager.cancel_timer(task_id)
-                except Exception:
-                    pass
+            self._cleanup_task_resources(task_id, timer_manager, idle_timer_registered)
             return
 
         # ── 5.5 检查任务是否已到达终态 ──
@@ -395,22 +388,8 @@ class TaskExecutorMixin:
                 # 修复方案: 优先使用 task_data 中子任务显式指定的 workspace。
                 explicit_ws = task_data.get("workspace") or None
                 container_ws = explicit_ws or task.metadata.get("workspace") or None
-                # BUG-FIX-fix_20260519_container_workspace_path:
-                # 优先使用 LLM 传入的 isolation_level，没有才用配置文件
                 if "isolation_mode" not in task_data:
-                    _task_iso = task.metadata.get("isolation_level") if task and task.metadata else None
-                    if _task_iso:
-                        task_data["isolation_mode"] = _task_iso
-                    else:
-                        try:
-                            import yaml as _yaml
-                            from pathlib import Path as _P
-                            _iso_cfg_path = _P("config/isolation/isolation_config.yaml")
-                            if _iso_cfg_path.exists():
-                                _iso_cfg = _yaml.safe_load(_iso_cfg_path.read_text(encoding="utf-8")) or {}
-                                task_data["isolation_mode"] = _iso_cfg.get("coordinator", {}).get("default_level", "")
-                        except Exception:
-                            pass
+                    task_data["isolation_mode"] = self._resolve_isolation_mode(task_data, task)
                 lifecycle.init_container_workspace(task_id, container_ws, task_data)
                 container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
                 if container_workspace_path:
@@ -670,8 +649,11 @@ class TaskExecutorMixin:
         self, task_id: str, pipeline_id: str, task_service: Any,
     ) -> tuple[PipelineStreamBridge | None, Any]:
         """创建子管道流式输出桥接。返回 (bridge, on_chunk_callback)。"""
+        from pipeline.registry import get_engine_registry
         _notifier = self._services.get("ws_interaction_notifier")
         _ws_thread_id = ""
+        _registry = get_engine_registry()
+
         if task_service and _notifier:
             try:
                 _root_id = task_service.get_root_task_id(task_id)
@@ -679,14 +661,13 @@ class TaskExecutorMixin:
                     _root_task = task_service.get_task(_root_id)
                     if _root_task:
                         _root_pipeline_id = getattr(_root_task, "parent_pipeline_id", "") or ""
-                        if _root_pipeline_id and hasattr(_notifier, "get_thread_for_pipeline"):
-                            _ws_thread_id = _notifier.get_thread_for_pipeline(_root_pipeline_id)
+                        if _root_pipeline_id:
+                            _ws_thread_id = _registry.get_thread_id(_root_pipeline_id)
                         logger.info(
-                            "TaskWorker lookup: root_id=%s root_pipeline=%s ws_thread=%s map_size=%d",
+                            "TaskWorker lookup: root_id=%s root_pipeline=%s ws_thread=%s",
                             _root_id[:12] if _root_id else "",
                             _root_pipeline_id[:12] if _root_pipeline_id else "",
                             _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
-                            len(_notifier._pipeline_thread_map) if hasattr(_notifier, "_pipeline_thread_map") else -1,
                         )
             except Exception as _e:
                 logger.warning("TaskWorker lookup error: %s", _e)
@@ -694,16 +675,11 @@ class TaskExecutorMixin:
         _sub_pipeline_id = pipeline_id
         _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
 
-        # BUG-FIX-fix_20260514_sub_pipeline_register: 注册子管道的 pipeline_id 到 _pipeline_thread_map
-        # 问题根因: 主管道的 pipeline_id 在 start_server.py 中通过 register_pipeline_thread 注册了映射,
-        #           但子管道（由 TaskWorker._execute_background_task 创建）的 pipeline_id 从未注册。
-        #           当子Agent创建的子子任务通过 parent_pipeline_id 查找 _pipeline_thread_map 时,
-        #           如果 parent_pipeline_id 指向子管道（而非最顶层管道），查找失败，消息被静默丢弃。
-        # 修复方案: 将子管道的 pipeline_id 也注册到 _pipeline_thread_map，映射到同一个 ws_thread_id。
-        # 影响范围: 子Agent任务状态实时推送到前端的功能
-        # 修复日期: 2026-05-14
-        if _notifier and _ws_thread_id and hasattr(_notifier, "register_pipeline_thread"):
-            _notifier.register_pipeline_thread(_sub_pipeline_id, _ws_thread_id)
+        # 注册子管道到 EngineRegistry
+        if _ws_thread_id:
+            _entry = _registry.get(_sub_pipeline_id)
+            if _entry:
+                _entry.thread_id = _ws_thread_id
             logger.info(
                 "TaskWorker: 注册子管道映射: sub_pipeline=%s ws_thread=%s",
                 _sub_pipeline_id[:12], _ws_thread_id[:12],
@@ -716,6 +692,10 @@ class TaskExecutorMixin:
                 output_sink=_sink,
                 message_id=_sub_message_id,
             )
+            # 注册 bridge 到 EngineRegistry
+            _entry = _registry.get(_sub_pipeline_id)
+            if _entry:
+                _entry.bridge = _bridge
             logger.info(
                 "TaskWorker: 子管道桥接创建: bridge_id=%d sub_pipeline=%s ws_thread=%s",
                 id(_bridge), _sub_pipeline_id[:12],
@@ -821,9 +801,8 @@ class TaskExecutorMixin:
                 logger.warning("TaskWorker: cancel_pipeline 获取 pipeline_id 失败: task_id=%s", task_id, exc_info=True)
 
         if pipeline_id:
-            self._services.pop(f"__suspended_engine_{pipeline_id}", None)
-            self._services.pop(f"__running_engine_{pipeline_id}", None)
-            self._services.pop(f"__pending_notifications_{pipeline_id}", None)
+            from pipeline.registry import get_engine_registry
+            get_engine_registry().unregister(pipeline_id)
 
         self._suspended_engines.pop(task_id, None)
         wake_evt = self._wake_events.pop(task_id, None)

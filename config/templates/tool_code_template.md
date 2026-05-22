@@ -64,7 +64,7 @@
 | `BuiltinTool` | `src/tools/builtin/base.py` | 内置工具基类，需实现 `get_tool_definition()` 和 `execute()` |
 | `Tool` | `src/tools/types.py` | 工具定义模型，包含 name、description、input_schema 等 |
 | `ToolResult` | `src/tools/types.py`（别名） | 工具执行结果，实际是 `ToolExecutionResult` |
-| `ToolCategory` | `src/tools/types.py` | 工具分类枚举：file/search/web/memory/task/system/execution/analysis/evaluation/agent/monitoring |
+| `ToolCategory` | `src/tools/types.py` | 工具分类枚举：file/file_system/search/web/memory/task/system/execution/analysis/evaluation/agent/monitoring |
 | `ToolLevel` | `src/tools/types.py` | 工具级别枚举：system/user/l1_only/l1_l2_only/all |
 | `ToolSource` | `src/tools/types.py` | 工具来源枚举：code/builtin/mcp/http/database |
 
@@ -457,14 +457,17 @@ tools（工具名精确匹配）> categories（分类匹配）> default（默认
 | ToolCategory 值 | isolation | execution | fallback | 说明 |
 |-----------------|-----------|-----------|----------|------|
 | `execution` | container | command_in_container | **deny** | 命令执行类，禁止降级 |
-| `network` | container | command_in_container | allow | 网络类 |
+| `web` | container | command_in_container | allow | Web 操作类 |
 | `file` | container | command_in_container | allow | 文件操作类 |
+| `file_system` | container | command_in_container | allow | 文件系统操作类（目录、复制、移动等） |
 | `search` | container | command_in_container | allow | 搜索类 |
 | `analysis` | container | command_in_container | allow | 分析类 |
 | `system` | **host** | host_direct | allow | 系统工具类 |
 | `evaluation` | container | command_in_container | allow | 评估类 |
 | `task` | **host** | host_direct | allow | 任务管理类 |
 | `memory` | **host** | host_direct | allow | 记忆类 |
+| `agent` | container | command_in_container | allow | Agent 调用类 |
+| `monitoring` | container | command_in_container | allow | 监控类 |
 
 #### 如何为新工具配置隔离
 

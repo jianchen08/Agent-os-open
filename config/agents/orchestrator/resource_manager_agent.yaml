@@ -64,7 +64,7 @@ system_prompt: |
   **轻量→完整升级条件**（满足任一则升级为完整模式转给 agent_maker/tool_maker）：
   - 修改过程中发现需要改 system_prompt（超过 2 行变更）
   - 涉及 deliverables 结构变化
-  - 涉及 team 字段变更
+  - 涉及 team 字段变更（此时应走团队变更流程）
   - 不确定修改是否符合模板规范时
 
   1. **确认目标**【自己执行】：resource_search 确认目标资源存在，获取文件路径
@@ -173,8 +173,11 @@ system_prompt: |
      - L2 的 team 列表 = 实际的 L3 config_id 列表
      - L2 的 system_prompt 中提到的成员 = team 列表
      - 每个 L3 的 tool_ids 中的工具确实存在
+     - **编排 Agent 引用校验**：L2 的 system_prompt 中引用的下级 Agent 名称（如 `xxx_agent`）必须与实际存在的 config_id（即对应 yaml 文件名去掉 `.yaml` 后缀）完全一致，逐个核对名称拼写
 
-  4. **task_evaluate 整体评估**
+  4. **重复文件检测**：使用 list_directory 检查 `config/agents/` 下各子目录，确认同一个 agent_id 没有出现在多个位置（如同时出现在 `config/agents/xxx_agent/agent.yaml` 和 `config/agents/<category>/xxx_agent.yaml`）。**注意：历史上曾出现过这种重复**，项目路径规范已明确要求使用扁平单文件结构（见下方路径规范），但旧文件可能残留。发现重复时，保留标准路径 `config/agents/<category>/<agent_id>.yaml`，删除非标准路径的文件。
+
+  5. **task_evaluate 整体评估**
      - 通过 → 完成
      - 不通过 → 按以下策略处理：
        - 配置格式/字段问题 → 自己 file_write 修复后重新评估
@@ -191,7 +194,7 @@ system_prompt: |
   3. [自动] 系统自动发现，无需修改 `__init__.py`
   4. [审查] ToolCategory 设置正确（对应 ToolCategory 枚举值）
   5. [可选] `config/isolation/isolation_policy.yaml`（如需特殊隔离策略）
-  6. [可选] `config/tools/tool_permissions.yaml`（如需权限控制）
+  6. [可选] `config/tools/builtin_tools_config.yaml`（如需权限控制，设置 permission_policies）
 
   ### Agent 创建时，必须验证以下产出：
   1. [必选] Agent 配置文件: `config/agents/{category}/{agent_id}.yaml`
@@ -217,6 +220,12 @@ system_prompt: |
   | Agent | config/agents/<category>/ | - |
 
   Agent 按类别存放：config/agents/executor/（执行器）、config/agents/orchestrator/（编排器）、config/agents/system/（系统级）。
+
+  **路径规范强制约束**：
+  - Agent 配置文件必须采用**扁平单文件结构**：`config/agents/<category>/<agent_id>.yaml`
+  - 禁止使用文件夹结构（如 `config/agents/<agent_id>/agent.yaml`）
+  - 每个 Agent 有且仅有一个对应的 yaml 文件，config_id 必须与文件名（去掉 .yaml 后缀）一致
+  - 创建时向 agent_maker 的 goal 中必须明确指定输出路径，格式为 `config/agents/<category>/<agent_id>.yaml`
 
   ## 任务分派
 
@@ -292,9 +301,12 @@ static_vars:
     - name: "项目路径映射"
       type: "reference"
       content: |
-        ## 项目目录结构
+        ## 项目目录结构（相对路径，以项目根目录为基准）
+
+        **注意**：以下路径均为相对路径，实际项目根目录以运行时 workspace 参数为准，禁止硬编码绝对路径。
+
         ```
-        D:/Jianguoyun/Agent os/
+        <project_root>/
         ├── config/
         │   ├── agents/
         │   │   ├── executor/          # 执行器 Agent
@@ -316,7 +328,7 @@ static_vars:
         └── mcp-servers/               # MCP 服务器
         ```
 
-        常用资源路径速查：
+        常用资源路径速查（均为相对路径）：
         - 调研 Agent 配置：config/agents/executor/generation/research_agent.yaml
         - 调研报告模板：config/templates/research_report_template.md
         - Agent 配置模板规范：config/templates/.agent_template_spec.yaml
@@ -324,7 +336,7 @@ static_vars:
         - 工具生成/修改 Agent：config/agents/executor/generation/tool_maker.yaml
         - Agent 生成/修改 Agent：config/agents/executor/generation/agent_maker.yaml
         - 隔离策略配置：config/isolation/isolation_policy.yaml
-        - 工具权限配置：config/tools/tool_permissions.yaml
+        - 工具权限配置：config/tools/builtin_tools_config.yaml
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:
@@ -460,10 +472,6 @@ max_iterations: 150
 max_reminders: 8
 timeout_seconds: 3600
 
-plugins:
-  disabled: []
-  enabled: {}
-
 tags:
   - orchestrator
   - resource
@@ -474,7 +482,7 @@ tags:
 metadata:
   author: System
   created_at: '2026-04-28'
-  updated_at: '2026-04-28'
+  updated_at: '2026-05-22'
   capabilities:
     - resource_generation
     - resource_modification

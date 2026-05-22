@@ -1,10 +1,11 @@
-"""TaskWorker 子任务守护相关逻辑单元测试。
+﻿"""TaskWorker 子任务守护相关逻辑单元测试。
 
 验证 TaskWorker 在管道挂起/唤醒场景中的行为：
 1. 管道挂起时保存 engine 引用
 2. 子任务终态时 resume 父任务管道
 3. idle 超时时有挂起管道的提醒逻辑（不直接 fail）
 4. idle 超时提醒次数限制
+5. 挂起管道等待活跃子任务时不计入提醒次数
 """
 
 from __future__ import annotations
@@ -82,10 +83,11 @@ class TestOnIdleTimeout:
         worker._on_idle_timeout("task-001")
 
     def test_suspended_engine_reminds_instead_of_fail(self, worker):
-        """有挂起管道时提醒而非 fail。"""
+        """有挂起管道且无活跃子任务时提醒而非 fail。"""
         task = MagicMock()
         task.status.value = "running"
         worker._task_service.get_task.return_value = task
+        worker._task_service.list_subtasks.return_value = []
 
         mock_engine = MagicMock()
         mock_engine.is_suspended = True
@@ -102,6 +104,7 @@ class TestOnIdleTimeout:
         task = MagicMock()
         task.status.value = "running"
         worker._task_service.get_task.return_value = task
+        worker._task_service.list_subtasks.return_value = []
 
         mock_engine = MagicMock()
         mock_engine.is_suspended = True
@@ -115,28 +118,122 @@ class TestOnIdleTimeout:
 
     def test_remind_limit_exceeded_then_fail(self, worker):
         """超过提醒次数后 fail。"""
+        import asyncio
+
         task = MagicMock()
         task.status.value = "running"
         worker._task_service.get_task.return_value = task
+        worker._task_service.list_subtasks.return_value = []
 
         mock_engine = MagicMock()
         mock_engine.is_suspended = True
         worker._suspended_engines["task-001"] = mock_engine
         worker._idle_remind_counts["task-001"] = 3
 
-        worker._on_idle_timeout("task-001")
+        async def _run():
+            worker._on_idle_timeout("task-001")
+            worker._task_service.fail_task.assert_called_once()
 
-        worker._task_service.fail_task.assert_called_once()
+        asyncio.run(_run())
 
     def test_no_suspended_engine_then_fail(self, worker):
         """没有挂起管道时直接 fail。"""
+        import asyncio
+
         task = MagicMock()
         task.status.value = "running"
         worker._task_service.get_task.return_value = task
 
+        async def _run():
+            worker._on_idle_timeout("task-001")
+            worker._task_service.fail_task.assert_called_once()
+
+        asyncio.run(_run())
+
+    def test_suspended_with_active_children_no_remind_count(self, worker):
+        """挂起管道且有活跃子任务时不计数 remind，直接重建 timer。"""
+        task = MagicMock()
+        task.status.value = "running"
+        worker._task_service.get_task.return_value = task
+
+        running_child = MagicMock()
+        running_child.status.value = "running"
+        worker._task_service.list_subtasks.return_value = [running_child]
+
+        mock_engine = MagicMock()
+        mock_engine.is_suspended = True
+        worker._suspended_engines["task-001"] = mock_engine
+
         worker._on_idle_timeout("task-001")
 
-        worker._task_service.fail_task.assert_called_once()
+        assert worker._idle_remind_counts.get("task-001") is None
+        worker._task_service.fail_task.assert_not_called()
+
+    def test_suspended_with_active_children_never_fails(self, worker):
+        """挂起管道且有活跃子任务时，反复 idle 超时也不会 fail。"""
+        task = MagicMock()
+        task.status.value = "running"
+        worker._task_service.get_task.return_value = task
+
+        running_child = MagicMock()
+        running_child.status.value = "running"
+        worker._task_service.list_subtasks.return_value = [running_child]
+
+        mock_engine = MagicMock()
+        mock_engine.is_suspended = True
+        worker._suspended_engines["task-001"] = mock_engine
+
+        for _ in range(10):
+            worker._on_idle_timeout("task-001")
+
+        assert worker._idle_remind_counts.get("task-001") is None
+        worker._task_service.fail_task.assert_not_called()
+
+    def test_suspended_children_finish_then_remind_starts(self, worker):
+        """子任务完成后开始正常计数 remind。"""
+        task = MagicMock()
+        task.status.value = "running"
+        worker._task_service.get_task.return_value = task
+
+        running_child = MagicMock()
+        running_child.status.value = "running"
+        completed_child = MagicMock()
+        completed_child.status.value = "completed"
+
+        mock_engine = MagicMock()
+        mock_engine.is_suspended = True
+        worker._suspended_engines["task-001"] = mock_engine
+
+        worker._task_service.list_subtasks.return_value = [running_child]
+        worker._on_idle_timeout("task-001")
+        assert worker._idle_remind_counts.get("task-001") is None
+
+        worker._task_service.list_subtasks.return_value = [completed_child]
+        worker._on_idle_timeout("task-001")
+        assert worker._idle_remind_counts.get("task-001") == 1
+
+    def test_suspended_mixed_children_status_counts_as_active(self, worker):
+        """子任务中有 pending 状态也算活跃，不计 remind。"""
+        task = MagicMock()
+        task.status.value = "running"
+        worker._task_service.get_task.return_value = task
+
+        completed_child = MagicMock()
+        completed_child.status.value = "completed"
+        pending_child = MagicMock()
+        pending_child.status.value = "pending"
+        worker._task_service.list_subtasks.return_value = [
+            completed_child, pending_child,
+        ]
+
+        mock_engine = MagicMock()
+        mock_engine.is_suspended = True
+        worker._suspended_engines["task-001"] = mock_engine
+
+        worker._on_idle_timeout("task-001")
+
+        assert worker._idle_remind_counts.get("task-001") is None
+        worker._task_service.fail_task.assert_not_called()
 
 
 # ── _get_pipeline_last_activity ──
@@ -413,7 +510,7 @@ class TestRaceConditionNotificationQueue:
     ):
         """父管道已挂起时，通知应直接注入而非入队。"""
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         worker._services["__suspended_engine_pipe-parent"] = mock_engine
 
         child_task = MagicMock()
@@ -437,7 +534,7 @@ class TestRaceConditionNotificationQueue:
             "child-002", "completed", data
         )
 
-        mock_engine.inject_and_wake.assert_called_once()
+        mock_engine.inject_message.assert_called_once()
         assert worker._services.get("__pending_notifications_pipe-parent") is None
 
     @pytest.mark.asyncio

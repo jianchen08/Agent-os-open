@@ -49,17 +49,26 @@ class WebSocketInteractionNotifier:
         记录 pipeline_id 与 WebSocket 连接 thread_id 的对应关系，
         以便子管道事件能直接路由到正确的 WebSocket 连接。
 
+        统一写入 EngineRegistry，不再维护旧的 _pipeline_thread_map。
+
         Args:
             pipeline_id: 主管道的 pipeline_id（engine._pipeline_id）
             thread_id: WebSocket 连接的 thread_id
         """
-        self._pipeline_thread_map[pipeline_id] = thread_id
+        from pipeline.registry import get_engine_registry
+        _registry = get_engine_registry()
+        _entry = _registry.get(pipeline_id)
+        if _entry:
+            _entry.thread_id = thread_id
+        else:
+            _registry.register(pipeline_id, None, thread_id=thread_id)
 
     def get_thread_for_pipeline(self, pipeline_id: str) -> str:
         """根据 pipeline_id 查找对应的 ws_thread_id。
 
         用于子管道（TaskWorker）向前端路由事件时，
         通过主管道的 pipeline_id 找到正确的 WebSocket thread_id。
+        统一从 EngineRegistry 查找。
 
         Args:
             pipeline_id: 主管道的 pipeline_id
@@ -67,7 +76,8 @@ class WebSocketInteractionNotifier:
         Returns:
             对应的 ws_thread_id，未找到则返回空字符串
         """
-        return self._pipeline_thread_map.get(pipeline_id, "")
+        from pipeline.registry import get_engine_registry
+        return get_engine_registry().get_thread_id(pipeline_id)
 
     def register(self, thread_id: str, websocket: WebSocket) -> None:
         if thread_id not in self._active_connections:
@@ -440,10 +450,8 @@ class WebSocketInteractionNotifier:
         return False
 
 
-# 全局 WebSocket 通知器实例
-_ws_interaction_notifier = WebSocketInteractionNotifier()
-
-
-
-# 模块级单例
+# BUG-FIX-fix_20260522_double_instance:
+# 之前有两个独立的 WebSocketInteractionNotifier 实例（_ws_interaction_notifier 和 ws_interaction_notifier），
+# 导致内部逻辑用 _ws_interaction_notifier 注册的连接，外部用 ws_interaction_notifier 发消息发不到。
+# 修复: 统一为一个实例。
 ws_interaction_notifier = WebSocketInteractionNotifier()

@@ -8,11 +8,19 @@
  * - 通知计数 badge
  * - 阻塞式通知模态框
  * - 全部已读 / 清空操作
+ *
+ * BUG-FIX-fix_20260522_notification_scroll_v2:
+ *   原方案使用 createPortal + fixed 定位渲染下拉面板，
+ *   但 body/#root 的 overflow: hidden 会拦截 wheel 事件，
+ *   导致面板内容无法滚动（单条长通知、多条通知列表均受影响）。
+ *   修复方案：改用 Radix Dialog 渲染为右侧滑出面板（Sheet 风格），
+ *   Radix Dialog 有独立的事件管理和 Portal 系统，
+ *   不受 body overflow: hidden 影响，滚动天然可靠。
  */
 
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Bell, BellOff, ChevronDown, ChevronRight, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useCallback, useMemo, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -20,11 +28,13 @@ import {
   DialogDescription,
   DialogFooter,
   DialogHeader,
+  DialogOverlay,
+  DialogPortal,
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { NOTIFICATION_PRIORITY_WEIGHT, PRIORITY_STYLES } from '@/types/notification'
+import { PRIORITY_STYLES } from '@/types/notification'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
@@ -62,65 +72,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
 
   const unreadCount = useNotificationStore((s) => s.notifications.filter((n) => !n.isRead).length)
 
-  /** 触发按钮引用，用于计算面板定位 */
   const triggerRef = useRef<HTMLButtonElement>(null)
-
-  /**
-   * BUG-FIX-fix_20260521_notification_scroll:
-   * 面板定位坐标（fixed 定位，通过 Portal 渲染到 body）
-   *
-   * 问题根因: ChatContainer 根元素有 overflow-hidden，通知面板使用 absolute top-full
-   *          向下展开时被裁剪，导致面板只有部分可见、无法滚动。
-   * 修复方案: 使用 createPortal 将面板渲染到 document.body，采用 fixed 定位，
-   *          根据 trigger 按钮的 getBoundingClientRect 计算面板坐标，
-   *          彻底脱离 ChatContainer 的 overflow-hidden 上下文。
-   * 影响范围: 通知中心面板的显示与滚动
-   * 修复日期: 2026-05-21
-   */
-  const [panelPosition, setPanelPosition] = useState({ top: 0, right: 0 })
-
-  /** 计算面板定位（面板打开时同步 trigger 按钮位置） */
-  useEffect(() => {
-    if (!isPanelOpen || !triggerRef.current) return
-
-    const updatePosition = () => {
-      if (!triggerRef.current) return
-      const rect = triggerRef.current.getBoundingClientRect()
-      setPanelPosition({
-        top: rect.bottom + 8,
-        right: window.innerWidth - rect.right,
-      })
-    }
-
-    updatePosition()
-    window.addEventListener('resize', updatePosition)
-    window.addEventListener('scroll', updatePosition, true)
-    return () => {
-      window.removeEventListener('resize', updatePosition)
-      window.removeEventListener('scroll', updatePosition, true)
-    }
-  }, [isPanelOpen])
-
-  /** 面板 DOM 引用，用于点击外部关闭 */
-  const panelRef = useRef<HTMLDivElement>(null)
-
-  /** 点击面板外部关闭面板 */
-  useEffect(() => {
-    if (!isPanelOpen) return
-
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as Node
-      // 如果点击的是 trigger 按钮本身，由 togglePanel 处理
-      if (triggerRef.current?.contains(target)) return
-      // 如果点击在面板内部，不关闭
-      if (panelRef.current?.contains(target)) return
-      closePanel()
-    }
-
-    // 使用 mousedown 而非 click，避免拖拽选择文本时误触
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [isPanelOpen, closePanel])
 
   /** 按优先级分组 */
   const groupedNotifications = useMemo(() => {
@@ -176,7 +128,6 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
             </DialogDescription>
           </DialogHeader>
 
-          {/* 进度条 */}
           {activeBlockingNotification.category === 'progress' &&
             activeBlockingNotification.progress != null && (
               <div className="py-2">
@@ -194,7 +145,6 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
               </div>
             )}
 
-          {/* 动作按钮 */}
           {activeBlockingNotification.actions && activeBlockingNotification.actions.length > 0 && (
             <div className="flex flex-wrap gap-2 py-2">
               {activeBlockingNotification.actions.map((action) => (
@@ -250,7 +200,6 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
 
     return (
       <div key={priority} className="mb-2">
-        {/* 分组标题栏 */}
         <button
           className={cn(
             'flex w-full items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium',
@@ -276,7 +225,6 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
           )}
         </button>
 
-        {/* 通知列表（折叠时只显示摘要行） */}
         {!collapsed ? (
           <div className="space-y-1.5 mt-1 ml-1">
             {items.map((notification) => (
@@ -292,7 +240,6 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
             ))}
           </div>
         ) : (
-          /* 折叠摘要 */
           items.length > 0 && (
             <div className="space-y-0.5 mt-1 ml-1">
               {items.slice(0, 2).map((notification) => (
@@ -322,76 +269,83 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
 
   return (
     <>
-      {/* 阻塞式通知模态框（全局层，不依赖面板状态） */}
       {renderBlockingDialog()}
 
-      {/* 通知触发按钮 */}
       {renderTrigger()}
 
-      {/* 通知中心面板 - 通过 Portal 渲染到 body，避免被父容器 overflow-hidden 裁剪 */}
-      {isPanelOpen && createPortal(
-        <div
-          ref={panelRef}
-          className={cn(
-            'fixed w-96 max-h-[70vh]',
-            'bg-background border border-border rounded-xl shadow-xl',
-            'z-[9999] flex flex-col overflow-hidden',
-            'animate-in slide-in-from-top-2 duration-200',
-            className,
-          )}
-          style={{
-            top: `${panelPosition.top}px`,
-            right: `${panelPosition.right}px`,
-          }}
-          data-testid="notification-center-panel"
-        >
-          {/* 面板头部 */}
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <div className="flex items-center gap-2">
-              <Bell className="h-4 w-4" />
-              <span className="text-sm font-semibold">通知中心</span>
-              {unreadCount > 0 && (
-                <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">
-                  {unreadCount}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              {hasNotifications && (
-                <>
-                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={markAllAsRead}>
-                    全部已读
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs text-destructive hover:text-destructive"
-                    onClick={clearAll}
-                  >
-                    清空
-                  </Button>
-                </>
-              )}
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={closePanel}>
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </div>
-
-          {/* 面板内容 */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-3">
-            {hasNotifications ? (
-              PRIORITY_ORDER.map(renderGroup)
-            ) : (
-              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                <BellOff className="h-8 w-8 mb-2 opacity-30" />
-                <p className="text-sm">暂无通知</p>
-              </div>
+      {/*
+        通知中心面板 - 使用 Radix Dialog 渲染为右侧滑出面板
+        BUG-FIX-fix_20260522_notification_scroll_v2:
+        使用 Radix Dialog 的 Portal + 事件管理系统替代自定义 createPortal，
+        解决 body overflow:hidden 导致的 wheel 事件拦截、面板无法滚动问题。
+        modal={false} 避免焦点陷阱，手动添加 overlay 实现点击外部关闭。
+      */}
+      <Dialog open={isPanelOpen} onOpenChange={(open) => { if (!open) closePanel() }} modal={false}>
+        <DialogPortal>
+          <div
+            className="fixed inset-0 z-40 bg-black/10"
+            onClick={closePanel}
+            data-testid="notification-overlay"
+          />
+          <DialogPrimitive.Content
+            className={cn(
+              'fixed right-0 top-0 bottom-0 z-50 w-[400px] max-w-[85vw]',
+              'bg-background border-l border-border shadow-2xl',
+              'flex flex-col h-full',
+              'data-[state=open]:animate-in data-[state=closed]:animate-out',
+              'data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right',
+              'duration-200',
+              'focus:outline-none',
+              className,
             )}
-          </div>
-        </div>,
-        document.body,
-      )}
+            onEscapeKeyDown={closePanel}
+            data-testid="notification-center-panel"
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+              <div className="flex items-center gap-2">
+                <Bell className="h-4 w-4" />
+                <span className="text-sm font-semibold">通知中心</span>
+                {unreadCount > 0 && (
+                  <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">
+                    {unreadCount}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1">
+                {hasNotifications && (
+                  <>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={markAllAsRead}>
+                      全部已读
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-destructive hover:text-destructive"
+                      onClick={clearAll}
+                    >
+                      清空
+                    </Button>
+                  </>
+                )}
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={closePanel}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto overscroll-contain p-3">
+              {hasNotifications ? (
+                PRIORITY_ORDER.map(renderGroup)
+              ) : (
+                <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                  <BellOff className="h-8 w-8 mb-2 opacity-30" />
+                  <p className="text-sm">暂无通知</p>
+                </div>
+              )}
+            </div>
+          </DialogPrimitive.Content>
+        </DialogPortal>
+      </Dialog>
     </>
   )
 }

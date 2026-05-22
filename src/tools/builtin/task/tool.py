@@ -1,4 +1,4 @@
-"""
+﻿"""
 任务管理工具
 
 暴露接口：
@@ -49,24 +49,6 @@ class TaskTool(BuiltinTool):
     def __init__(self) -> None:
         """初始化任务管理工具。"""
         self._task_service: TaskService | None = None
-        self._message_queue: Any = None
-
-    def _get_message_queue(self):
-        """获取全局 MessageQueue 实例。
-
-        通过 ServiceProvider 统一获取，兼容 ToolCore 注入和 sys 全局变量。
-
-        Returns:
-            MessageQueue 实例，获取失败时返回 None
-        """
-        if self._message_queue is not None:
-            return self._message_queue
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        mq = provider.get("message_queue")
-        if mq is not None:
-            self._message_queue = mq
-        return self._message_queue
 
     def _get_execution_record_storage(self):
         """获取全局 ExecutionRecordStorage 实例。
@@ -349,11 +331,6 @@ class TaskTool(BuiltinTool):
                 error="系统错误：parent_agent_level 未注入，无法确定调用者层级",
                 error_code="MISSING_INJECTED_PARAM",
             )
-
-        # ToolCore 通过 _SERVICE_INJECT_MAP 自动注入服务到 inputs，
-        # 在此捕获并缓存到实例属性，供后续 _get_message_queue() 使用
-        if inputs.get("_message_queue") and self._message_queue is None:
-            self._message_queue = inputs["_message_queue"]
 
         try:
             self._get_task_service()
@@ -1299,7 +1276,7 @@ class TaskTool(BuiltinTool):
 
         通过统一的 send_pipeline_message() 入口将消息投递到目标管道，
         由 pipeline 内部根据当前状态（运行中/挂起/未启动）自动选择
-        最优投递路径（双通道注入 / inject_and_wake / MessageQueue 兜底）。
+        最优投递路径（双通道注入 / inject_message）。
 
         Args:
             inputs: 工具输入参数，需包含 task_id 和 message
@@ -1371,6 +1348,7 @@ class TaskTool(BuiltinTool):
                 from pipeline.message_bus import send_pipeline_message
                 result = await send_pipeline_message(
                     target_pipeline_id, message,
+                    task_id=task_id,
                     metadata={
                         "source": "task_inject",
                         "injected_by": f"L{parent_agent_level}",

@@ -20,6 +20,7 @@ import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
 import { clearAllChunkTimeouts, clearChunkTimeout, clearUnifiedStreamTimeout, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout, startUnifiedStreamTimeout } from './chunkTimeout'
+import { markPipelineTerminated } from './handlers/utils'
 import {
   handleNewMessage,
   handleStreamChunk,
@@ -71,6 +72,13 @@ function _wrapWithTimeoutReset(event: string, handler: (data: any) => void): (da
       if (messageId) {
         resetChunkTimeout(pipelineId, messageId)
       }
+    }
+    // BUG-FIX-fix_20260522_stream_dup: 收到任何流式事件时取消ACK计时器，防止重试导致重复流
+    // 问题根因: ACK超时重试导致消息被发送3次（1原始+2重试），服务端产生3个并发流，chunk交错到达前端导致内容重复
+    // 修复方案: 在统一的超时重置包装器中，收到任何非终止流式事件时立即取消ACK重试计时器
+    const threadId = data.data?._threadId || data._threadId || data.thread_id || data.data?.thread_id
+    if (threadId) {
+      globalWS.clearPendingAckForThread(threadId)
     }
     handler(data)
   }
@@ -134,6 +142,23 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = handleSubAgentCreated
   _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
   _handlers[WS_SERVER_EVENTS.ITERATION] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.ITERATION, handleIteration)
+
+  _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = (eventData: any) => {
+    const status = eventData?.data?.status || eventData?.status
+    const pipelineId = resolvePipelineId(eventData)
+    const threadId = eventData?.data?.thread_id || eventData?.thread_id
+
+    if (status === 'suspended' && pipelineId) {
+      clearChunkTimeout(pipelineId)
+      markPipelineTerminated(pipelineId)
+      const pipelineStore = usePipelineMessageStore.getState()
+      pipelineStore.stopStreaming(pipelineId)
+      if (threadId && threadId !== pipelineId) {
+        useStreamingStore.getState().setStreamingForTab(threadId, false)
+      }
+      logger.info('[STATE_CHANGE] pipeline suspended → streaming cleaned: pipeline=%s', pipelineId)
+    }
+  }
 
   /** 处理管道接收确认事件 */
   _handlers[WS_SERVER_EVENTS.PIPELINE_RECEIVED] = (data: any) => {
@@ -241,6 +266,8 @@ export function initStreamingEvents(): void {
       pipelineStore.stopStreaming(pipelineId)
     }
     streamingStore.setStreamingForTab(pipelineId, false)
+    // BUG-FIX-fix_20260522: 标记管道已终止（chunk 超时），防止 ensureStreamingPlaceholder 重新启动
+    markPipelineTerminated(pipelineId)
   })
 }
 

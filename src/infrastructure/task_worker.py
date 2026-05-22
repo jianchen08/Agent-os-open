@@ -1,4 +1,4 @@
-"""后台任务执行器。
+﻿"""后台任务执行器。
 
 负责事件驱动的后台任务处理（如 task_submit 提交的子任务）。
 TaskWorker 只负责启动子管道，子管道中的 Agent 通过 task_evaluate
@@ -127,7 +127,7 @@ class TaskWorker(
 
     子任务完成通知采用单一机制：_on_task_state_changed 收到终态事件后，
     通过 _notify_suspended_pipelines 直接定位挂起的父管道并调用
-    inject_and_wake，同时 set _wake_events 唤醒 while 循环。
+    inject_message，同时 set _wake_events 唤醒 while 循环。
     无双重订阅，无竞态风险。
 
     Attributes:

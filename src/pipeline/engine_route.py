@@ -99,6 +99,19 @@ async def apply_route(
         return False
 
     elif route_type == "end":
+        _end_notifs = engine.consume_pending_notifications()
+        if _end_notifs:
+            _combined = "\n\n".join(_end_notifs)
+            state["user_input"] = _combined
+            state.setdefault("messages", []).append(
+                {"role": "user", "content": _combined}
+            )
+            state[StateKeys.CORE_TYPE] = "llm_call"
+            logger.info(
+                "[Engine] route=end 但有 %d 条待处理通知，取消结束: %s",
+                len(_end_notifs), route.reason,
+            )
+            return False
         state[StateKeys.ENDED] = True
         logger.info("Route applied: end, reason=%s", route.reason)
         return False

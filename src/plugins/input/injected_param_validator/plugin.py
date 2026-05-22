@@ -28,7 +28,6 @@ _KNOWN_INJECT_SOURCES: dict[str, str] = {
     "tool_record_id": "ToolCore 内部注入",
     "parent_agent_level": "TaskWorker 上下文注入",
     "_task_service": "ToolCore._SERVICE_INJECT_MAP",
-    "_message_queue": "ToolCore._SERVICE_INJECT_MAP",
     "_tool_registry": "ToolCore._SERVICE_INJECT_MAP",
     "_session": "ToolCore._SERVICE_INJECT_MAP",
     "_memory_service": "ToolCore._SERVICE_INJECT_MAP",

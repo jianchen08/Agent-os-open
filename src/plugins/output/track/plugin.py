@@ -404,7 +404,6 @@ class TrackPlugin(IOutputPlugin):
 
         常见注入模式：
         - _notify_suspended_pipelines 通过 send_pipeline_message 注入子任务通知
-        - MessageInjectPlugin 在前部追加消息
 
         提取策略：
         1. 若 previous 是 current 的后缀 → 返回前缀部分

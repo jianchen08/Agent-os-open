@@ -12,7 +12,6 @@ from plugins.input.isolation_guard.plugin import IsolationGuard
 from plugins.input.knowledge_inject.plugin import KnowledgeInjectPlugin
 from plugins.input.level_guard.plugin import LevelGuardPlugin
 from plugins.input.memory_read.plugin import MemoryReadPlugin
-from plugins.input.message_inject.plugin import MessageInjectPlugin
 from plugins.input.multimodal_preprocessor.plugin import MultimodalPreprocessor
 from plugins.input.param_inject.plugin import ParamInjectPlugin
 from plugins.input.pause_guard.plugin import PauseGuardPlugin
@@ -34,7 +33,6 @@ __all__ = [
     "KnowledgeInjectPlugin",
     "LevelGuardPlugin",
     "MemoryReadPlugin",
-    "MessageInjectPlugin",
     "MultimodalPreprocessor",
     "ParamInjectPlugin",
     "PauseGuardPlugin",

@@ -740,24 +740,32 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        # BUG-FIX-fix_20260512_task_status_realtime:
-        # 问题根因: 任务创建后未通过 WebSocket 广播 task_status_update 事件，
-        #   前端工作区任务列表无法实时感知新任务。
-        # 修复方案: 任务创建成功后直接通过 connection_manager 广播通知到所有前端连接。
+        # BUG-FIX-fix_20260522_task_status_realtime:
+        # 问题根因1: self._services 不存在，导致广播失败。
+        # 问题根因2: task.user_id 未被设置（create_task 不接受 user_id），
+        #            应用 inputs 中注入的 user_id。
+        # 修复方案: 直接 import ws_interaction_notifier 单例 + 使用 inputs["user_id"]。
         try:
-            from src.api.websocket.handler import connection_manager
-            await connection_manager.broadcast({
-                "type": "task_status_update",
-                "data": {
-                    "task_id": task.id,
-                    "old_status": "",
-                    "new_status": "pending",
-                },
-            })
-            logger.debug(
-                "[TaskSubmit] task_status_update 已广播 | task_id=%s | status=pending",
-                task.id,
-            )
+            _user_id = inputs.get("user_id", "") or ""
+            from ws_handler import ws_interaction_notifier as _ws_notifier
+            if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
+                await _ws_notifier.send_to_user(_user_id, {
+                    "type": "task_status_update",
+                    "data": {
+                        "task_id": task.id,
+                        "old_status": "",
+                        "new_status": "pending",
+                    },
+                })
+                logger.info(
+                    "[TaskSubmit] task_status_update 已广播 | task_id=%s | user=%s | status=pending",
+                    task.id, _user_id[:12],
+                )
+            else:
+                logger.warning(
+                    "[TaskSubmit] 跳过广播 | notifier=%s user=%s",
+                    bool(_ws_notifier), _user_id[:12] if _user_id else "(empty)",
+                )
         except Exception as _ws_exc:
             logger.warning(
                 "[TaskSubmit] task_status_update 广播失败 | task_id=%s | error=%s",
@@ -863,24 +871,30 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
         logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        # BUG-FIX-fix_20260512_task_status_realtime:
-        # 问题根因: 容器任务创建后未通过 WebSocket 广播 task_status_update 事件，
-        #   前端工作区任务列表无法实时感知新任务。
-        # 修复方案: 任务创建成功后直接通过 connection_manager 广播通知到所有前端连接。
+        # BUG-FIX-fix_20260522_task_status_realtime:
+        # 问题根因1: self._services 不存在，直接 import 单例。
+        # 问题根因2: task.user_id 未被设置，使用 inputs 中注入的 user_id。
         try:
-            from src.api.websocket.handler import connection_manager
-            await connection_manager.broadcast({
-                "type": "task_status_update",
-                "data": {
-                    "task_id": task.id,
-                    "old_status": "",
-                    "new_status": "pending",
-                },
-            })
-            logger.debug(
-                "[TaskSubmit] 容器 task_status_update 已广播 | task_id=%s | status=pending",
-                task.id,
-            )
+            _user_id = inputs.get("user_id", "") or ""
+            from ws_handler import ws_interaction_notifier as _ws_notifier
+            if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
+                await _ws_notifier.send_to_user(_user_id, {
+                    "type": "task_status_update",
+                    "data": {
+                        "task_id": task.id,
+                        "old_status": "",
+                        "new_status": "pending",
+                    },
+                })
+                logger.info(
+                    "[TaskSubmit] 容器 task_status_update 已广播 | task_id=%s | user=%s | status=pending",
+                    task.id, _user_id[:12],
+                )
+            else:
+                logger.warning(
+                    "[TaskSubmit] 容器跳过广播 | notifier=%s user=%s",
+                    bool(_ws_notifier), _user_id[:12] if _user_id else "(empty)",
+                )
         except Exception as _ws_exc:
             logger.warning(
                 "[TaskSubmit] 容器 task_status_update 广播失败 | task_id=%s | error=%s",

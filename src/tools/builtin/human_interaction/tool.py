@@ -119,7 +119,7 @@ class HumanInteractionTool(BuiltinTool):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。适用于：通知模式下将某个文件推送给用户查看、选择/对话模式下让用户审批文件变更。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -363,7 +363,6 @@ class HumanInteractionTool(BuiltinTool):
                 result = {
                     "status": "completed",
                     "response_type": resp_type,
-                    "conversation_mode": True,
                     "selected_option": None,
                 }
                 if feedback:

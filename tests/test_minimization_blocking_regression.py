@@ -1,4 +1,4 @@
-"""
+﻿"""
 回归测试：验证7个模块的最小化原则和阻塞问题修复未破坏现有功能。
 
 覆盖模块：
@@ -78,36 +78,36 @@ class TestPipelineEngineRegression:
         engine = self._make_engine()
         assert engine.is_suspended is False
 
-    def test_inject_and_wake_suspended_state(self) -> None:
-        """挂起状态下 inject_and_wake 应注入到 _suspended_state。"""
+    def test_inject_message_suspended_state(self) -> None:
+        """挂起状态下 inject_message 应注入到 _suspended_state。"""
         engine = self._make_engine()
         engine._suspended_state = {"user_input": "", "messages": []}
         engine._wake_event = asyncio.Event()
 
-        engine.inject_and_wake("子任务完成通知")
+        engine.inject_message("子任务完成通知")
 
         assert "子任务完成通知" in engine._suspended_state["user_input"]
         assert engine._suspended_state["messages"][-1]["content"] == "子任务完成通知"
         assert engine._wake_event.is_set()
 
-    def test_inject_and_wake_running_state_queues(self) -> None:
-        """运行状态下 inject_and_wake 应入队到 _pending_notifications。"""
+    def test_inject_message_running_state_queues(self) -> None:
+        """运行状态下 inject_message 应入队到 _pending_notifications。"""
         engine = self._make_engine()
         engine._suspended_state = None
         engine._wake_event = asyncio.Event()
 
-        engine.inject_and_wake("运行中通知")
+        engine.inject_message("运行中通知")
 
         assert "运行中通知" in engine._pending_notifications
         assert engine._wake_event.is_set()
 
-    def test_inject_and_wake_empty_input_ignored(self) -> None:
+    def test_inject_message_empty_input_ignored(self) -> None:
         """空输入应被忽略，不注入也不唤醒。"""
         engine = self._make_engine()
         engine._suspended_state = {"user_input": "", "messages": []}
         engine._wake_event = asyncio.Event()
 
-        engine.inject_and_wake("")
+        engine.inject_message("")
 
         assert engine._suspended_state["user_input"] == ""
         assert not engine._wake_event.is_set()

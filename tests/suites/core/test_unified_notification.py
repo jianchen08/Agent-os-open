@@ -1,6 +1,6 @@
-"""统一通知路径集成测试。
+﻿﻿﻿﻿"""统一通知路径集成测试。
 
-验证 inject_and_wake() 作为唯一通知入口在各种场景下的行为：
+验证 inject_message() 作为唯一通知入口在各种场景下的行为：
 - 挂起态注入 _suspended_state
 - 运行态入队 _pending_notifications
 - _run_loop 正确消费通知
@@ -30,7 +30,7 @@ def _make_engine(services: dict | None = None) -> PipelineEngine:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. inject_and_wake 单元测试
+# 1. inject_message 单元测试
 # ═══════════════════════════════════════════════════════════
 
 
@@ -47,7 +47,7 @@ class TestInjectAndWakeSuspended:
         }
         engine._wake_event = None
 
-        engine.inject_and_wake("子任务已完成")
+        engine.inject_message("子任务已完成")
 
         assert "子任务已完成" in engine._suspended_state["user_input"]
         assert "原始输入" in engine._suspended_state["user_input"]
@@ -66,7 +66,7 @@ class TestInjectAndWakeSuspended:
         }
         engine._wake_event = None
 
-        engine.inject_and_wake("新消息")
+        engine.inject_message("新消息")
 
         ui = engine._suspended_state["user_input"]
         assert ui.index("新消息") < ui.index("原始")
@@ -79,7 +79,7 @@ class TestInjectAndWakeSuspended:
         engine._wake_event = asyncio.Event()
         assert not engine._wake_event.is_set()
 
-        engine.inject_and_wake("唤醒")
+        engine.inject_message("唤醒")
 
         assert engine._wake_event.is_set()
 
@@ -90,7 +90,7 @@ class TestInjectAndWakeSuspended:
         engine._suspended_state = {"user_input": "", "messages": []}
         engine._wake_event = None
 
-        engine.inject_and_wake("测试消息")
+        engine.inject_message("测试消息")
 
         assert len(engine._pending_notifications) == 0
 
@@ -105,7 +105,7 @@ class TestInjectAndWakeRunning:
         engine._suspended_state = None
         engine._wake_event = None
 
-        engine.inject_and_wake("子任务通知")
+        engine.inject_message("子任务通知")
 
         assert len(engine._pending_notifications) == 1
         assert engine._pending_notifications[0] == "子任务通知"
@@ -117,9 +117,9 @@ class TestInjectAndWakeRunning:
         engine._suspended_state = None
         engine._wake_event = None
 
-        engine.inject_and_wake("消息1")
-        engine.inject_and_wake("消息2")
-        engine.inject_and_wake("消息3")
+        engine.inject_message("消息1")
+        engine.inject_message("消息2")
+        engine.inject_message("消息3")
 
         assert len(engine._pending_notifications) == 3
 
@@ -131,7 +131,7 @@ class TestInjectAndWakeRunning:
         engine._wake_event = asyncio.Event()
         assert not engine._wake_event.is_set()
 
-        engine.inject_and_wake("通知")
+        engine.inject_message("通知")
 
         assert engine._wake_event.is_set()
 
@@ -142,7 +142,7 @@ class TestInjectAndWakeRunning:
         engine._suspended_state = None
         engine._wake_event = None
 
-        engine.inject_and_wake("运行态消息")
+        engine.inject_message("运行态消息")
 
         assert engine._suspended_state is None
 
@@ -157,7 +157,7 @@ class TestInjectAndWakeEdgeCases:
         engine._suspended_state = {"user_input": "原始", "messages": []}
         engine._wake_event = None
 
-        engine.inject_and_wake("")
+        engine.inject_message("")
 
         assert engine._suspended_state["user_input"] == "原始"
         assert len(engine._pending_notifications) == 0
@@ -169,7 +169,7 @@ class TestInjectAndWakeEdgeCases:
         engine._suspended_state = {"user_input": "原始", "messages": []}
         engine._wake_event = None
 
-        engine.inject_and_wake(None)  # type: ignore
+        engine.inject_message(None)  # type: ignore
 
         assert engine._suspended_state["user_input"] == "原始"
 
@@ -180,7 +180,7 @@ class TestInjectAndWakeEdgeCases:
         engine._suspended_state = None
         engine._wake_event = None
 
-        engine.inject_and_wake("测试")
+        engine.inject_message("测试")
 
     @pytest.mark.asyncio
     async def test_suspended_state_empty_messages_list(self):
@@ -189,7 +189,7 @@ class TestInjectAndWakeEdgeCases:
         engine._suspended_state = {"user_input": "", "messages": []}
         engine._wake_event = None
 
-        engine.inject_and_wake("第一条")
+        engine.inject_message("第一条")
 
         assert len(engine._suspended_state["messages"]) == 1
 
@@ -200,23 +200,23 @@ class TestInjectAndWakeEdgeCases:
         engine._suspended_state = {"user_input": ""}
         engine._wake_event = None
 
-        engine.inject_and_wake("消息")
+        engine.inject_message("消息")
 
         assert "messages" in engine._suspended_state
         assert len(engine._suspended_state["messages"]) == 1
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. inject_and_wake 与 _suspend_and_wait 集成
+# 2. inject_message 与 _suspend_and_wait 集成
 # ═══════════════════════════════════════════════════════════
 
 
 class TestInjectAndWakeWithSuspend:
-    """inject_and_wake 与 _suspend_and_wait 的集成。"""
+    """inject_message 与 _suspend_and_wait 的集成。"""
 
     @pytest.mark.asyncio
     async def test_inject_wakes_suspended_engine(self):
-        """挂起中的引擎被 inject_and_wake 唤醒后应恢复执行。"""
+        """挂起中的引擎被 inject_message 唤醒后应恢复执行。"""
         services: dict = {"__test__": True}
         engine = _make_engine(services)
         pipeline_id = "test-wake-001"
@@ -230,16 +230,16 @@ class TestInjectAndWakeWithSuspend:
 
         async def delayed_wake():
             await asyncio.sleep(0.05)
-            engine.inject_and_wake("子任务完成了！")
+            engine.inject_message("子任务完成了！")
 
         asyncio.create_task(delayed_wake())
         await engine._suspend_and_wait(state)
 
-        assert "子任务完成了！" in engine._suspended_state.get("user_input", "")
+        assert "子任务完成了！" in state.get("user_input", "")
 
     @pytest.mark.asyncio
     async def test_run_loop_consumes_pending_notifications(self):
-        """运行态下 inject_and_wake 入队的消息在 _run_loop 中被消费。"""
+        """运行态下 inject_message 入队的消息在 _run_loop 中被消费。"""
         from pipeline.route import InputRouteEntry, InputRouteTable
         from pipeline.registry import PluginRegistry
         from pipeline.plugin import ICorePlugin, IOutputPlugin, OutputResult, PluginResult
@@ -327,7 +327,7 @@ class TestInjectAndWakeWithSuspend:
         }
 
         engine._suspended_state = None
-        engine.inject_and_wake("[系统通知] 子任务完成")
+        engine.inject_message("[系统通知] 子任务完成")
 
         result = await engine.run(initial_state)
 
@@ -414,12 +414,12 @@ class TestNotifySuspendedPipelines:
     """TaskWorker 通知链路集成测试。"""
 
     @pytest.mark.asyncio
-    async def test_notifies_suspended_engine_via_inject_and_wake(self):
-        """通过 parent_pipeline_id 找到挂起引擎后调用 inject_and_wake。"""
+    async def test_notifies_suspended_engine_via_inject_message(self):
+        """通过 parent_pipeline_id 找到挂起引擎后调用 inject_message。"""
         from infrastructure.task_worker import TaskWorker
 
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         services = {
             "__suspended_engine_parent-pipe-001": mock_engine,
             "task_service": MagicMock(),
@@ -447,18 +447,18 @@ class TestNotifySuspendedPipelines:
                 data={"task": {"title": "子任务A"}},
             )
 
-        mock_engine.inject_and_wake.assert_called_once()
-        call_arg = mock_engine.inject_and_wake.call_args[0][0]
+        mock_engine.inject_message.assert_called_once()
+        call_arg = mock_engine.inject_message.call_args[0][0]
         assert "子任务A" in call_arg
         assert "已完成" in call_arg
 
     @pytest.mark.asyncio
-    async def test_notifies_running_engine_via_inject_and_wake(self):
-        """运行中引擎也通过 inject_and_wake 通知（统一路径）。"""
+    async def test_notifies_running_engine_via_inject_message(self):
+        """运行中引擎也通过 inject_message 通知（统一路径）。"""
         from infrastructure.task_worker import TaskWorker
 
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         services = {
             "__running_engine_parent-pipe-002": mock_engine,
             "task_service": MagicMock(),
@@ -486,8 +486,8 @@ class TestNotifySuspendedPipelines:
                 data={"task": {"title": "子任务B", "error": "超时"}},
             )
 
-        mock_engine.inject_and_wake.assert_called_once()
-        call_arg = mock_engine.inject_and_wake.call_args[0][0]
+        mock_engine.inject_message.assert_called_once()
+        call_arg = mock_engine.inject_message.call_args[0][0]
         assert "子任务B" in call_arg
         assert "failed" in call_arg
 
@@ -533,7 +533,7 @@ class TestNotifySuspendedPipelines:
         from infrastructure.task_worker import TaskWorker
 
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         mock_engine._watching_task_ids = ["orphan-task-001"]
 
         services = {
@@ -558,7 +558,7 @@ class TestNotifySuspendedPipelines:
                 data={"task": {"title": "孤立任务"}},
             )
 
-        mock_engine.inject_and_wake.assert_called_once()
+        mock_engine.inject_message.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_notification_content_completed(self):
@@ -566,7 +566,7 @@ class TestNotifySuspendedPipelines:
         from infrastructure.task_worker import TaskWorker
 
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         services = {
             "__suspended_engine_pipe-c": mock_engine,
             "task_service": MagicMock(),
@@ -594,7 +594,7 @@ class TestNotifySuspendedPipelines:
                 data={"task": {"title": "测试任务"}},
             )
 
-        call_arg = mock_engine.inject_and_wake.call_args[0][0]
+        call_arg = mock_engine.inject_message.call_args[0][0]
         assert "✅" in call_arg
         assert "已完成" in call_arg
 
@@ -604,7 +604,7 @@ class TestNotifySuspendedPipelines:
         from infrastructure.task_worker import TaskWorker
 
         mock_engine = MagicMock()
-        mock_engine.inject_and_wake = MagicMock()
+        mock_engine.inject_message = MagicMock()
         services = {
             "__suspended_engine_pipe-f": mock_engine,
             "task_service": MagicMock(),
@@ -632,7 +632,7 @@ class TestNotifySuspendedPipelines:
                 data={"task": {"title": "失败任务", "error": "连接超时"}},
             )
 
-        call_arg = mock_engine.inject_and_wake.call_args[0][0]
+        call_arg = mock_engine.inject_message.call_args[0][0]
         assert "❌" in call_arg
         assert "failed" in call_arg
         assert "连接超时" in call_arg
@@ -666,7 +666,7 @@ class TestEndToEndNotification:
 
         async def simulate_child_completion():
             await asyncio.sleep(0.05)
-            engine.inject_and_wake(
+            engine.inject_message(
                 "[系统通知] 子任务 'E2E测试' (ID: child-e2e-001) 已完成 ✅\n"
                 "请继续执行后续流程。"
             )
@@ -686,8 +686,8 @@ class TestEndToEndNotification:
         engine = _make_engine(services)
         engine._suspended_state = None
 
-        engine.inject_and_wake("通知1")
-        engine.inject_and_wake("通知2")
+        engine.inject_message("通知1")
+        engine.inject_message("通知2")
 
         assert len(engine._pending_notifications) == 2
 
@@ -713,12 +713,12 @@ class TestEndToEndNotification:
         }
         engine._wake_event = asyncio.Event()
 
-        engine.inject_and_wake("挂起态通知")
+        engine.inject_message("挂起态通知")
         assert "挂起态通知" in engine._suspended_state["user_input"]
 
         engine._suspended_state = None
         engine._wake_event = asyncio.Event()
 
-        engine.inject_and_wake("运行态通知")
+        engine.inject_message("运行态通知")
         assert len(engine._pending_notifications) == 1
         assert engine._pending_notifications[0] == "运行态通知"

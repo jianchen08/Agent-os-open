@@ -268,38 +268,20 @@ async def handle_no_route_signals(
     state: dict[str, Any],
     core_type: str,
     iteration: int,
-) -> str | None:
-    """处理无路由信号时的后续逻辑。
-
-    返回值含义：
-    - "continue": 调用方应 continue 到下一轮迭代
-    - None: 调用方应 break 退出循环（不应到达此处，正常情况不会返回 None）
-
-    Args:
-        engine: PipelineEngine 实例
-        state: 管道状态字典
-        core_type: 当前核心类型
-        iteration: 当前迭代计数
-
-    Returns:
-        "continue" 表示应继续循环，None 表示无特殊操作
-    """
+) -> str:
+    """处理无路由信号时的后续逻辑，始终返回 "continue"。"""
     from pipeline.engine_state import _safe_deepcopy
 
-    if core_type == "tool_execute":
-        logger.debug("No route signals after tool execution, defaulting to next_llm")
-        state[StateKeys.CORE_TYPE] = "llm_call"
-        return None
-
-    if state.get("thinking_retry_needed"):
-        # 思考截断重试：丢弃本次输出，重新触发 LLM 调用
+    if core_type == "tool_execute" or state.get("thinking_retry_needed"):
+        if state.get("thinking_retry_needed"):
+            retry_count = state.get("thinking_retry_count", 0)
+            logger.info("Thinking truncated, retrying LLM call (retry=%d)", retry_count)
+        else:
+            logger.debug("No route signals after tool execution, defaulting to next_llm")
         state.pop("thinking_retry_needed", None)
         state[StateKeys.CORE_TYPE] = "llm_call"
-        retry_count = state.get("thinking_retry_count", 0)
-        logger.info("Thinking truncated, retrying LLM call (retry=%d)", retry_count)
-        return None
+        return "continue"
 
-    # ── 外部通知消费 ──
     notif_sources = await _collect_pending_notifications(engine, state)
 
     if notif_sources:
@@ -317,8 +299,6 @@ async def handle_no_route_signals(
         )
         return "continue"
 
-    # BUG-FIX-fix_20260509_trigger_pipeline_end:
-    # 管道即将结束前检查是否有活跃触发器
     _has_active_triggers = _check_active_triggers(state, engine._pipeline_id)
     if _has_active_triggers:
         logger.info(
@@ -330,23 +310,17 @@ async def handle_no_route_signals(
             "[系统提示] 管道已挂起，等待触发器唤醒。"
             "当触发器触发时会自动收到通知并继续执行。"
         )
-        state.setdefault("messages", []).append(
-            {"role": "user", "content": state["user_input"]}
+    else:
+        logger.info(
+            "No route signals after LLM response (iter=%d), "
+            "suspending pipeline to wait for next message.",
+            iteration,
         )
-        engine._suspended_state = _safe_deepcopy(state)
-        # BUG-FIX-fix_20260521_on_chunk_missing:
-        # 恢复逻辑已内置到 _suspend_and_wait，无需再调用 _restore_suspended_state。
-        await engine._suspend_and_wait(state)
-        return "continue"
+        state["user_input"] = ""
 
-    # 无 route signals → 挂起等待下一条用户消息
-    logger.info(
-        "No route signals after LLM response (iter=%d), "
-        "suspending pipeline to wait for next message.",
-        iteration,
+    state.setdefault("messages", []).append(
+        {"role": "user", "content": state["user_input"]}
     )
-    # BUG-FIX-fix_20260511_suspended_system_msg:
-    state["user_input"] = ""
     engine._suspended_state = _safe_deepcopy(state)
     await engine._suspend_and_wait(state)
     return "continue"
@@ -356,29 +330,8 @@ async def _collect_pending_notifications(
     engine: PipelineEngine,
     state: dict[str, Any],
 ) -> list[str]:
-    """异步收集待处理通知消息（两个来源合并）。"""
-    notif_sources: list[str] = []
-
-    # 来源1: message_bus 注入的通知消息
-    if engine._pending_notifications:
-        notif_sources.extend(engine._pending_notifications[:])
-        engine._pending_notifications.clear()
-
-    # 来源2: MessageQueue 兜底消息（inject 时引擎可能刚好在迭代间）
-    try:
-        _mq = engine._services.get("message_queue")
-        if _mq is not None:
-            _pid = state.get(StateKeys.PIPELINE_ID, "")
-            if _pid:
-                while True:
-                    _mq_msg = await _mq.pop(_pid)
-                    if _mq_msg is None:
-                        break
-                    notif_sources.append(_mq_msg.content)
-    except Exception as _mq_err:
-        logger.debug("[Engine] MessageQueue 兜底检查跳过: %s", _mq_err)
-
-    return notif_sources
+    """收集待处理通知消息。"""
+    return engine.consume_pending_notifications()
 
 
 def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bool:
@@ -399,7 +352,11 @@ def _restore_suspended_state(
     engine: PipelineEngine,
     state: dict[str, Any],
 ) -> None:
-    """从挂起状态恢复 user_input / messages / streaming 信息。"""
+    """从挂起状态恢复 user_input / messages / streaming 信息。
+
+    注意: 此函数仅用于外部需要手动恢复的场景。
+    _suspend_and_wait 内部已自带恢复逻辑，不需要调用此函数。
+    """
     if engine._suspended_state is not None:
         state["user_input"] = engine._suspended_state.get(
             "user_input", state.get("user_input", ""),
@@ -407,13 +364,11 @@ def _restore_suspended_state(
         state["messages"] = engine._suspended_state.get(
             "messages", state.get("messages", []),
         )
-        if "on_chunk" in engine._suspended_state:
-            state["on_chunk"] = engine._suspended_state["on_chunk"]
-            engine._saved_on_chunk = engine._suspended_state["on_chunk"]
-        if "streaming" in engine._suspended_state:
-            state["streaming"] = engine._suspended_state["streaming"]
-            engine._saved_streaming = engine._suspended_state["streaming"]
+        for _key in ("on_chunk", "streaming"):
+            if _key in engine._suspended_state:
+                state[_key] = engine._suspended_state[_key]
         engine._suspended_state = None
+        engine.save_streaming_context(state)
 
 
 async def run_post_end_output_chain(

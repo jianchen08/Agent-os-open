@@ -32,10 +32,17 @@ class TaskIdleTimerMixin:
         idle 计时器在管道运行全生命周期中持续监控：
         - 管道活跃时：通过 checkpoint 文件龄判断是否真正存活，
           存活则重建 timer 继续监控，死亡则标记 failed
-        - 管道挂起时：唤醒并提醒（最多 idle_remind_limit 次），超限则标记 failed
+        - 管道挂起时：
+          - 若有活跃子任务（running/pending/evaluating/scheduled），
+            重建 timer 继续等待，不计入提醒次数
+          - 若无活跃子任务，提醒并唤醒（最多 idle_remind_limit 次），超限则标记 failed
 
         BUG-FIX-fix_20260514_active_pipeline_deadlock:
         新增活跃管道存活检测，解决管道进程异常死亡后任务永远卡在 running 的问题。
+
+        BUG-FIX-fix_20260522_idle_suspended_children:
+        挂起管道等待子任务时，检查子任务是否仍在活跃运行。
+        活跃子任务存在时不计入 remind 次数，避免编排 Agent 被误杀。
 
         Args:
             task_id: 超时的任务ID
@@ -117,33 +124,53 @@ class TaskIdleTimerMixin:
                     task_id,
                 )
 
-        if task_id in self._suspended_engines and remind_count < idle_remind_limit:
-            self._idle_remind_counts[task_id] = remind_count + 1
-            logger.info(
-                "TaskWorker: idle 超时但有挂起管道，"
-                "提醒 #%d: task_id=%s",
-                remind_count + 1, task_id,
-            )
-            self._try_resume_engine(task_id)
+        if task_id in self._suspended_engines:
+            has_active_children = self._has_active_children(task_id)
 
-            # BUG-FIX-fix_20260422_idle_timer_reset:
-            # 提醒后重新创建计时器
-            timer_manager = self._services.get("timer_manager")
-            if timer_manager:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        self._recreate_idle_timer_async(
-                            task_id, timer_manager,
-                        ),
-                    )
-                except RuntimeError:
-                    logger.warning(
-                        "TaskWorker: no event loop to "
-                        "recreate idle timer: task_id=%s",
-                        task_id,
-                    )
-            return
+            if has_active_children:
+                logger.info(
+                    "TaskWorker: idle 超时但有挂起管道且子任务仍在运行，"
+                    "重建 timer 继续等待（不计入提醒次数）: task_id=%s",
+                    task_id,
+                )
+                timer_manager = self._services.get("timer_manager")
+                if timer_manager:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(
+                            self._recreate_idle_timer_async(
+                                task_id, timer_manager,
+                            ),
+                        )
+                    except RuntimeError:
+                        pass
+                return
+
+            if remind_count < idle_remind_limit:
+                self._idle_remind_counts[task_id] = remind_count + 1
+                logger.info(
+                    "TaskWorker: idle 超时但有挂起管道（无活跃子任务），"
+                    "提醒 #%d: task_id=%s",
+                    remind_count + 1, task_id,
+                )
+                self._try_resume_engine(task_id)
+
+                timer_manager = self._services.get("timer_manager")
+                if timer_manager:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(
+                            self._recreate_idle_timer_async(
+                                task_id, timer_manager,
+                            ),
+                        )
+                    except RuntimeError:
+                        logger.warning(
+                            "TaskWorker: no event loop to "
+                            "recreate idle timer: task_id=%s",
+                            task_id,
+                        )
+                return
 
         try:
             timer_mgr = self._services.get("timer_manager")
@@ -320,6 +347,37 @@ class TaskIdleTimerMixin:
                 "task_id=%s, error=%s",
                 task_id, e,
             )
+
+    def _has_active_children(self, task_id: str) -> bool:
+        """检查任务是否有仍在活跃状态的子任务。
+
+        在 _on_idle_timeout 中使用，判断挂起管道是否因等待活跃子任务而
+        处于合理等待状态。如果子任务仍在 running/pending/evaluating/scheduled，
+        说明父任务的"无活动"是预期行为，不应计入 idle remind 次数。
+
+        参考实现: TaskReminderPlugin._has_active_children
+
+        Args:
+            task_id: 父任务 ID
+
+        Returns:
+            True 表示有活跃子任务，False 表示无活跃子任务
+        """
+        task_service = self._task_service
+        if not task_service:
+            return False
+
+        try:
+            subtasks = task_service.list_subtasks(task_id)
+        except Exception:
+            return False
+
+        active_statuses = {"pending", "running", "evaluating", "scheduled"}
+        for st in subtasks:
+            status = st.status.value if hasattr(st.status, "value") else str(st.status)
+            if status in active_statuses:
+                return True
+        return False
 
     def _try_resume_engine(self, task_id: str) -> None:
         """通过标记和 wake_event 请求主循环执行 resume。

@@ -58,12 +58,22 @@ export interface MessageRenderContext {
  * 从 contentBlocks 构建渲染片段
  */
 function buildFragments(contentBlocks: ContentBlock[], messageId: string): RenderFragment[] {
+  // BUG-FIX-fix_20260522_tool_order: 按 sequence 排序，解决 WS 乱序导致工具卡片顺序错乱
+  const sorted = contentBlocks.map((b, i) => ({ block: b, idx: i }))
+  sorted.sort((a, b) => {
+    const sA = a.block.sequence ?? Number.MAX_SAFE_INTEGER
+    const sB = b.block.sequence ?? Number.MAX_SAFE_INTEGER
+    if (sA !== sB) return sA - sB
+    return a.idx - b.idx
+  })
+  const orderedBlocks = sorted.map((s) => s.block)
+
   const fragments: RenderFragment[] = []
-  const toolCallCount = contentBlocks.filter((b) => b.type === 'tool_call').length
+  const toolCallCount = orderedBlocks.filter((b) => b.type === 'tool_call').length
   let toolCallIndex = 0
 
-  for (let i = 0; i < contentBlocks.length; i++) {
-    const block = contentBlocks[i]
+  for (let i = 0; i < orderedBlocks.length; i++) {
+    const block = orderedBlocks[i]
     switch (block.type) {
       case 'thinking':
         if (block.thinking) {
@@ -131,12 +141,15 @@ export function buildContentBlocksFromMessage(
   messageId: string,
 ): ContentBlock[] {
   const blocks: ContentBlock[] = []
+  // BUG-FIX-fix_20260522_tool_order: 为每个 block 分配递增 sequence
+  let seq = 0
 
   if (thinking && (thinking.content.trim() || thinking.isThinking)) {
     blocks.push({
       type: 'thinking',
       thinking,
       sourceId: messageId,
+      sequence: seq++,
     })
   }
 
@@ -144,12 +157,18 @@ export function buildContentBlocksFromMessage(
   // 问题根因: toolCalls 放在 text 之前，导致回退路径渲染时工具参数显示在消息气泡外面
   // 修复方案: 调整为 thinking → text → toolCalls 的顺序，与流式构建顺序一致
   if (content && content.trim()) {
-    blocks.push({ type: 'text', text: content, sourceId: messageId })
+    blocks.push({ type: 'text', text: content, sourceId: messageId, sequence: seq++ })
   }
 
   if (toolCalls) {
     for (const tc of toolCalls) {
-      blocks.push({ type: 'tool_call', toolCall: tc, sourceId: messageId })
+      blocks.push({
+        type: 'tool_call',
+        toolCall: tc,
+        sourceId: messageId,
+        // BUG-FIX-fix_20260522_tool_order: 优先使用流式阶段后端分配的 sequence，避免覆盖正确序号
+        sequence: (tc as any).sequence ?? seq++,
+      })
     }
   }
 
@@ -209,7 +228,16 @@ export function reconcileContentBlocks(
     return block
   })
 
-  return reconciled
+  // BUG-FIX-fix_20260522_tool_order: 返回前按 sequence 排序，确保渲染顺序正确
+  // 使用与 buildFragments 一致的稳定排序模式：sequence 为主键，原数组索引为二级兜底
+  const indexed = reconciled.map((b, i) => ({ block: b, idx: i }))
+  indexed.sort((a, b) => {
+    const sA = a.block.sequence ?? Number.MAX_SAFE_INTEGER
+    const sB = b.block.sequence ?? Number.MAX_SAFE_INTEGER
+    if (sA !== sB) return sA - sB
+    return a.idx - b.idx
+  })
+  return indexed.map((s) => s.block)
 }
 
 /**

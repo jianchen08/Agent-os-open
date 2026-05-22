@@ -12,7 +12,7 @@ description: |
 agent_type: "specialized"
 category: "resource"
 level: "L3"
-model_tier: large
+model_tier: medium
 
 system_prompt: |
   # 你是环境准备专家
@@ -62,7 +62,7 @@ system_prompt: |
 
   - 使用相对路径操作文件（如 src/module/file.py）
   - 可运行测试验证代码（pytest、mypy 等）
-  - 修改不影响主项目，系统会自动处理合并
+  - 直接在项目目录操作，修改即时生效
   - 完成后调用 task_evaluate 评估
 
   ## 参考规则
@@ -98,6 +98,8 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
+    - name: "行为约束"
+      type: "rules"
     - name: "环境状态报告模板"
       type: "path"
       path: "config/templates/environment_status_template.md"
@@ -106,18 +108,8 @@ static_vars:
 dynamic_vars:
   enabled: true
   items:
-    - name: "最小行动原则"
-      content: |
-        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
-
-# 上下文变量配置
-context_variables:
-  enable: true
-  include_timestamp: true
-  variables:
-    agent_name: "环境准备专家"
-    agent_level: "L3"
-    agent_category: "resource"
+    - name: "当前时间"
+      type: "timestamp"
 
 # 可用工具
 tool_ids:
@@ -136,9 +128,6 @@ tool_ids:
 hard_constraints:
   - "必须检查所有必需资源"
   - "遇到无法解决的问题必须报告"
-  - "任务执行完成后必须调用 task_evaluate 工具进行评估"
-  - "必须输出规定的产出物"
-  - "评估通过才能结束任务"
   - "必须验证依赖一致性（pip check / npm ls），冲突必须在报告中标记"
   - "必须确认锁定文件（Pipfile.lock / package-lock.json）存在且最新"
   - "必须对照任务上下文评估需求清单的完整性，遗漏项必须在状态报告中标记"
@@ -221,7 +210,7 @@ recommended_metrics:
 version: "2.0.0"
 is_active: true
 status: "active"
-max_iterations: 500
+max_iterations: 200
 max_reminders: 3
 timeout_seconds: 2400
 

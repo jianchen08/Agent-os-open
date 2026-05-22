@@ -135,6 +135,8 @@ class PipelineStreamBridge:
         self.output_sink = output_sink
         self.message_id = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._sent_tool_starts: set[str] = set()
+        # BUG-FIX-fix_20260522_tool_order: 统一自增序号，text/tool 共用，确保前端按执行顺序渲染
+        self._seq: int = 0
 
         # 内部状态
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -234,12 +236,15 @@ class PipelineStreamBridge:
 
         if chunk_type == "text" and content:
             self._accumulated_content.append(content)
+            _text_seq = self._seq
+            self._seq += 1
             await self._send_event({
                 "type": "stream_chunk",
                 "data": {
                     "message_id": self.message_id,
                     "content": content,
                     "pipeline_id": self.pipeline_id,
+                    "sequence": _text_seq,
                 },
             })
 
@@ -247,11 +252,14 @@ class PipelineStreamBridge:
             self._thinking_content_parts.append(content)
             if not self._thinking_active:
                 self._thinking_active = True
+                _thinking_seq = self._seq
+                self._seq += 1
                 await self._send_event({
                     "type": "thinking_start",
                     "data": {
                         "message_id": self.message_id,
                         "pipeline_id": self.pipeline_id,
+                        "sequence": _thinking_seq,
                     },
                 })
             await self._send_event({
@@ -269,9 +277,11 @@ class PipelineStreamBridge:
         elif chunk_type == "tool_start":
             _call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
             self._sent_tool_starts.add(_call_id)
+            _seq = self._seq
+            self._seq += 1
             logger.info(
-                "tool_start: tool=%s call_id=%s pipeline=%s",
-                chunk.get('tool_name'), _call_id, self.pipeline_id[:12],
+                "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
+                chunk.get('tool_name'), _call_id, _seq, self.pipeline_id[:12],
             )
             await self._send_event({
                 "type": "tool_start",
@@ -280,6 +290,7 @@ class PipelineStreamBridge:
                     "tool_name": chunk.get("tool_name", "unknown"),
                     "args": chunk.get("args"),
                     "call_id": chunk.get("call_id"),
+                    "sequence": _seq,
                     "pipeline_id": self.pipeline_id,
                 },
             })
@@ -292,6 +303,8 @@ class PipelineStreamBridge:
                     chunk.get('tool_name'), self.pipeline_id[:12],
                 )
                 self._sent_tool_starts.add(_result_call_id)
+                _fixup_seq = self._seq
+                self._seq += 1
                 await self._send_event({
                     "type": "tool_start",
                     "data": {
@@ -299,6 +312,7 @@ class PipelineStreamBridge:
                         "tool_name": chunk.get("tool_name", "unknown"),
                         "args": None,
                         "call_id": chunk.get("call_id"),
+                        "sequence": _fixup_seq,
                         "pipeline_id": self.pipeline_id,
                     },
                 })
@@ -451,6 +465,23 @@ class PipelineStreamBridge:
                 break
 
             _chunk_type = chunk.get("type", "?")
+
+            if _chunk_type == "pipeline_suspended":
+                await self._close_thinking_if_active(None)
+                await self._send_event({
+                    "type": "state_change",
+                    "data": {
+                        "status": "suspended",
+                        "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
+                        "thread_id": self._thread_id or "",
+                    },
+                })
+                logger.info(
+                    "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
+                    self.pipeline_id[:12],
+                )
+                continue
+
             if _chunk_type in ("tool_start", "tool_result"):
                 logger.debug(
                     "drain: type=%s tool=%s pipeline=%s",

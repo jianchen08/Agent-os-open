@@ -7,6 +7,26 @@
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 
+// ── 管道终止标记：防止 ensureStreamingPlaceholder 在流式结束后重新启动 ──
+
+/** 记录已经终止的管道（stream_end / stream_error / chunk 超时 / new_message），防止 ensureStreamingPlaceholder 重新启动 */
+const _terminatedPipelines = new Set<string>()
+
+/** 标记管道已终止（stream_end / stream_error / chunk 超时 / new_message 时调用） */
+export function markPipelineTerminated(pipelineId: string): void {
+  _terminatedPipelines.add(pipelineId)
+}
+
+/** 清除管道终止标记（stream_start 时调用，表示新一轮流式开始） */
+export function clearPipelineTerminated(pipelineId: string): void {
+  _terminatedPipelines.delete(pipelineId)
+}
+
+/** 检查管道是否已终止 */
+export function isPipelineTerminated(pipelineId: string): boolean {
+  return _terminatedPipelines.has(pipelineId)
+}
+
 /**
  * 从事件数据中提取消息 ID
  *
@@ -63,7 +83,7 @@ export function startPipelineStreaming(
 export function stopPipelineStreaming(pipelineId: string, threadId?: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
 
-  // FIX: pipelineStore.stopStreaming 已清理 pipelineId 的 tab 状态，仅需额外清理 threadId
+  // pipelineStore.stopStreaming 已清理 pipelineId 的 tab 状态，仅需额外清理 threadId
   if (threadId && threadId !== pipelineId) {
     useStreamingStore.getState().setStreamingForTab(threadId, false)
   }
@@ -84,6 +104,12 @@ export function ensureStreamingPlaceholder(
   messageId: string,
   threadId?: string,
 ): void {
+  // BUG-FIX-fix_20260522: 如果管道已被终止（stream_end/chunk超时/stream_error/new_message），
+  // 不重新启动 streaming，防止停止按钮反复出现
+  if (isPipelineTerminated(pipelineId)) {
+    return
+  }
+
   startPipelineStreaming(pipelineId, messageId, threadId)
 
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)

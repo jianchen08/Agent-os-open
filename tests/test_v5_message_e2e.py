@@ -1,4 +1,4 @@
-"""
+﻿"""
 V5: 发送消息端到端链路验证
 
 覆盖后端数据流 + 前端显示逻辑 + 用户交互三个维度。
@@ -148,15 +148,15 @@ class TestBackendMessageDelivery:
         assert mock_engine._pending_notifications[0] == "test notification"
         mock_engine._wake_event.set.assert_called_once()
 
-    def test_inject_and_wake_engine(self):
+    def test_inject_message_engine(self):
         """验证向挂起引擎注入消息并唤醒。"""
-        from pipeline.message_bus import _inject_and_wake_engine
+        from pipeline.message_bus import _inject_message_engine
 
         mock_engine = MagicMock()
         mock_engine._suspended_state = {"user_input": "", "messages": []}
         mock_engine._wake_event = MagicMock()
 
-        _inject_and_wake_engine(mock_engine, "test message")
+        _inject_message_engine(mock_engine, "test message")
 
         assert mock_engine._suspended_state["user_input"] == "test message"
         msgs = mock_engine._suspended_state["messages"]
@@ -532,7 +532,7 @@ class TestLongContextPreservation:
 
     def test_message_bus_inject_preserves_existing_history(self):
         """验证消息注入不破坏已有历史。"""
-        from pipeline.message_bus import _inject_and_wake_engine
+        from pipeline.message_bus import _inject_message_engine
 
         mock_engine = MagicMock()
         existing_messages = [
@@ -545,7 +545,7 @@ class TestLongContextPreservation:
         }
         mock_engine._wake_event = MagicMock()
 
-        _inject_and_wake_engine(mock_engine, "New message")
+        _inject_message_engine(mock_engine, "New message")
 
         # 验证旧消息还在
         messages = mock_engine._suspended_state["messages"]

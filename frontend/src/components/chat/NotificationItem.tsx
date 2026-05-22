@@ -190,7 +190,7 @@ export function NotificationItemComponent({
 
         {/* 消息内容 */}
         {message && (
-          <div className="mt-2 text-sm text-muted-foreground pl-6">
+          <div className="mt-2 text-sm text-muted-foreground pl-6 max-h-[300px] overflow-y-auto overscroll-contain rounded">
             <MarkdownRenderer content={message} />
           </div>
         )}

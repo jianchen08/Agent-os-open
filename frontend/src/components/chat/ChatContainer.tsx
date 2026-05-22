@@ -260,18 +260,46 @@ export const ChatContainer = ({
    */
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
+  const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
   /**
-   * BUG-FIX-fix_20260509_tab_streaming: 根据 pipelineId 计算 isGenerating
+   * BUG-FIX-fix_20260522_send_button_stuck:
+   * 问题根因: effectiveIsGenerating 仅依赖 streamingTabs 单一数据源，
+   *          当 stream_end 处理异常（pipelineId 解析失败、drain_loop 异常退出等）
+   *          导致 streamingTabs 未被清理时，发送按钮状态无法恢复。
+   * 修复方案: 交叉校验 streamingTabs 和 pipelineMessageStore.streamingState，
+   *          使用 AND 逻辑确保两个数据源都确认流式状态才认为正在生成。
+   *          streamingState 由 pipelineStore.stopStreaming() 同步清理，
+   *          即使 streamingTabs 残留，也能正确恢复按钮状态。
    */
   const streamingTabs = useStreamingStore((s) => s.streamingTabs)
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  const streamingState = usePipelineMessageStore((s) => s.streamingState)
   const effectiveIsGenerating = useMemo(() => {
     if (activePipelineId) {
-      return streamingTabs[activePipelineId] ?? false
+      const fromTabs = streamingTabs[activePipelineId] ?? false
+      const fromState = streamingState[activePipelineId]?.isStreaming ?? false
+      return fromTabs && fromState
     }
     return false
-  }, [streamingTabs, activePipelineId])
+  }, [streamingTabs, activePipelineId, streamingState])
+
+  /**
+   * BUG-FIX-fix_20260522_send_button_stuck:
+   * 防御性清理：当 streamingTabs 残留了已不在 streamingState 中的条目时，
+   * 自动清除这些孤儿条目，确保 streamingTabs 与 streamingState 保持一致。
+   */
+  useEffect(() => {
+    const staleTabIds = Object.keys(streamingTabs).filter(
+      (tabId) => streamingTabs[tabId] && !streamingState[tabId]?.isStreaming,
+    )
+    if (staleTabIds.length > 0) {
+      const store = useStreamingStore.getState()
+      for (const tabId of staleTabIds) {
+        store.setStreamingForTab(tabId, false)
+      }
+    }
+  }, [streamingTabs, streamingState])
 
   /**
    * 根据当前模型名获取动态 context_window
@@ -435,8 +463,10 @@ export const ChatContainer = ({
         <ChatInput
           key={`input-${activeTabId || sessionId}`}
           draftKey={activeTabId || sessionId}
+          disabled={isSubTabFinished}
           isGenerating={effectiveIsGenerating}
           onSendMessage={(params) => {
+            if (isSubTabFinished) return
             if (isSubTabActive && activeTab?.pipelineRunId) {
               onSendMessage({ ...params, pipelineId: activeTab.pipelineRunId })
             } else {

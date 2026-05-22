@@ -16,7 +16,6 @@ model_name: minimax-m2.7
 agent_type: "specialized"
 category: "analysis"
 level: "L3"
-model_tier: small
 
 system_prompt: |
   # 你是调研专家
@@ -117,36 +116,11 @@ system_prompt: |
 
   调研过程中必须对每条信息来源进行等级评估，并在报告的所有关键发现、数据统计、参考来源中标注信源等级并在文档中说明信源等级的意义。
 
-  ### 信源等级定义
-
-  | 等级 | 标识 | 说明 | 典型来源 |
-  |------|------|------|----------|
-  | A 级 | 🟢 | 权威信源：官方一手资料 | 官方文档、源码仓库（GitHub 等）、ISO/IEEE 标准、政府/权威机构白皮书 |
-  | B 级 | 🔵 | 可靠信源：知名社区或行业专家 | Stack Overflow 高票回答、知名技术媒体/博客、行业报告、学术论文 |
-  | C 级 | 🟡 | 一般信源：未经充分验证的二手信息 | 个人博客、Reddit/HN 讨论、社交媒体观点 |
-  | D 级 | 🟠 | 低信度：无来源或未验证内容 | 转载文章（无原始链接）、AI 生成且未人工验证的内容 |
-
-  ### 评估规则
-
-  1. 引用多个来源时，以最低等级为准（保守原则）
-  2. 无法判断等级时默认标为 C 级
-  3. A/B 级可直接引用结论，C/D 级需交叉验证后使用
-  4. 调研结论的支撑信源中至少 50% 应为 A 级或 B 级（systematic/standard 模式）
-  5. **结论-来源绑定格式**：「结论内容」← 来源描述1[🟢A] + 来源描述2[🔵B]
+  信源等级的完整定义（🟢A/🔵B/🟡C/🟠D）和使用规则详见调研报告模板「信源等级说明」章节。
 
   ### 结论-来源强制绑定
 
-  报告中每条关键发现和建议都必须标注来源：
-
-  **格式**：
-  ```
-  ### 发现 N: {标题}
-  - **内容**: {结论内容}
-  - **来源**: {来源描述1}[🟢A] + {来源描述2}[🔵B]
-  - **信源等级**: {综合等级}
-  - **可信度**: 高/中/低
-  - **验证状态**: ✅已验证 / ⚠️部分验证 / ❌未验证
-  ```
+  报告中每条关键发现和建议都必须按调研报告模板「关键发现」章节的格式标注来源和信源等级。
 
   - systematic 模式：关键发现至少 2 个独立来源，验证状态必须为 ✅
   - standard 模式：关键发现至少 1 个来源，鼓励 2 个
@@ -196,6 +170,8 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
+    - name: "行为约束"
+      type: "rules"
     # 调研报告模板（从模板库加载）
     - name: "调研报告模板"
       type: "path"
@@ -205,9 +181,9 @@ static_vars:
 dynamic_vars:
   enabled: true
   items:
-    - name: "最小行动原则"
+    - name: "调研覆盖进度检查"
       content: |
-        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
+        每轮检查：research_questions 中的每个问题是否已有回答？任务要求的每个调研点是否都已覆盖？如果还有遗漏，继续收集补充。保持收集-写入循环节奏。
 
 # 可用工具
 tool_ids:
@@ -300,7 +276,6 @@ input_schema:
       default: "full"
   required:
     - "research_goal"
-    - "research_questions"
 
 output_schema:
   type: "object"
@@ -329,16 +304,12 @@ recommended_metrics:
       action: "read"
       path: "docs/{title}_research_report.md"
 
-#  - metric_id: quality_check
-#    default_params:
-#      path: "docs/{title}_research_report.md"
-#      type: "doc"
 # 元数据
 version: "3.0.0"
 is_active: true
 status: "active"
-max_iterations: 500
-max_reminders: 3
+max_iterations: 200
+max_reminders: 5
 timeout_seconds: 2400
 
 plugins:

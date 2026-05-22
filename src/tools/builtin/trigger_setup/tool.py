@@ -1,9 +1,9 @@
-"""
+﻿"""
 触发器设置工具
 
 通过 TriggerManager 注册触发器，支持延迟、定时、周期、事件和条件五种触发类型。
 周期触发和定时触发到期后，TriggerManager 的后台检查循环会通过管道的
-inject_and_wake 接口唤醒挂起的管道，注入预设消息。
+inject_message 接口唤醒挂起的管道，注入预设消息。
 
 暴露接口：
 - get_tool_definition() -> Tool：工具定义

@@ -365,7 +365,13 @@ function HomePage(): ReactNode {
       const pipelineStore = usePipelineMessageStore.getState()
       const activePipelineId = pipelineStore.activePipelineId || sid
 
-      const existingMsgs = pipelineStore.getMessages(activePipelineId)
+      // BUG-FIX-fix_20260522_subtab_msg_to_main_pipeline:
+      // 问题根因: 子Tab发消息时 params.pipelineId 是子管道ID，但 addMessage 始终用
+      //   activePipelineId（主管道），导致消息同时写入主管道的本地状态。
+      // 修复方案: 当 params.pipelineId 存在时（子Tab消息），用它作为本地写入目标。
+      const targetPipelineId = params.pipelineId || activePipelineId
+
+      const existingMsgs = pipelineStore.getMessages(targetPipelineId)
       const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
       const userMessage: Message = {
@@ -378,9 +384,7 @@ function HomePage(): ReactNode {
         sequence: nextSeq,
       }
 
-      pipelineStore.addMessage(activePipelineId, userMessage)
-
-      const targetPipelineId = params.pipelineId || activePipelineId
+      pipelineStore.addMessage(targetPipelineId, userMessage)
       const enteredInteraction =
         useInteractionStore.getState().getEnteredForPipeline(targetPipelineId) ||
         useInteractionStore.getState().getEnteredForPipeline(sid)
@@ -413,6 +417,8 @@ function HomePage(): ReactNode {
    * 停止生成
    *
    * BUG-FIX-fix_20260509_tab_streaming: 使用 activePipelineId 停止 streaming
+   * BUG-FIX-fix_20260522_stop_state_not_reset: currentPipelineId 为空时使用 sid 作为 fallback，
+   *   同时清理 sid 对应的 streamingTabs，避免残留状态导致停止按钮不消失、新消息无法发送。
    */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
@@ -420,15 +426,15 @@ function HomePage(): ReactNode {
     if (sid) {
       globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
     }
-    if (currentPipelineId) {
-      // 刷写缓冲区中残留的 chunk，避免数据丢失
+    const cleanupId = currentPipelineId || sid
+    if (cleanupId) {
       flushStreamChunkBuffer()
-      // 清理 chunkTimeout 计时器
-      clearChunkTimeout(currentPipelineId)
-      // 清理 streamingTabs（UI 层 streaming 状态）
-      stopStreamingForTab(currentPipelineId)
-      // 清理消息层面的 streaming 状态，标记消息为 completed
-      usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
+      clearChunkTimeout(cleanupId)
+      stopStreamingForTab(cleanupId)
+      usePipelineMessageStore.getState().stopStreaming(cleanupId)
+    }
+    if (sid && sid !== cleanupId) {
+      stopStreamingForTab(sid)
     }
   }, [stopStreamingForTab])
 

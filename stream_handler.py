@@ -85,7 +85,8 @@ class PipelineContext:
         self.app = app
         self._engines: dict[str, Any] = {}
         if engine is not None:
-            self._engines[engine.pipeline_id] = engine
+            engine._pipeline_id = ""
+            self.engine = engine
 
     def get_or_create_engine(self, pipeline_id: str) -> Any:
         """获取或创建指定 pipeline_id 的独立引擎实例。
@@ -320,8 +321,14 @@ async def _stream_wake_response(
         pre_created_bridge.pipeline_id[:12] if pre_created_bridge else "n/a",
     )
 
-    if ws_notifier and thread_id and hasattr(ws_notifier, "register_pipeline_thread"):
-        ws_notifier.register_pipeline_thread(pipeline_id, thread_id)
+    # 注册 pipeline_id → thread_id 映射到 EngineRegistry
+    from pipeline.registry import get_engine_registry
+    _registry = get_engine_registry()
+    _entry = _registry.get(pipeline_id)
+    if _entry:
+        _entry.thread_id = thread_id
+    else:
+        _registry.register(pipeline_id, engine, thread_id=thread_id)
 
     if pre_created_bridge is not None:
         bridge = pre_created_bridge
@@ -334,8 +341,7 @@ async def _stream_wake_response(
             output_sink=TargetedSink(ws_notifier, thread_id),
             message_id=message_id,
         )
-        engine._saved_on_chunk = bridge.on_chunk
-        engine._saved_streaming = True
+        engine.set_streaming_context(bridge.on_chunk, streaming=True)
         if engine._suspended_state is not None:
             engine._suspended_state["on_chunk"] = bridge.on_chunk
             engine._suspended_state["streaming"] = True
@@ -484,10 +490,14 @@ async def _stream_engine_response(
 
     conversation_history.append({"role": "user", "content": user_content})
 
-    # 确定 pipeline_id：优先沿用 session 已有的（创建会话时分配），
-    # 否则用 Engine 自身的。
+    # 确定 pipeline_id：
+    # - 如果 pre_created_bridge 已指定 pipeline_id（调用方明确路由），优先使用
+    # - 否则沿用 session 已有的（创建会话时分配），或用 Engine 自身的
     session = api_store.get_session(thread_id)
-    pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else ctx.engine.pipeline_id
+    if pre_created_bridge is not None and pre_created_bridge.pipeline_id:
+        pipeline_id = pre_created_bridge.pipeline_id
+    else:
+        pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else ctx.engine.pipeline_id
 
     # BUG-FIX-fix_20260513_pipeline_cross_talk:
     # 每个 pipeline_id 对应独立的引擎实例，确保管道之间状态完全隔离。
@@ -508,9 +518,14 @@ async def _stream_engine_response(
         session.register_pipeline(pipeline_id)
         api_store.set_session(thread_id, session)
 
-    _ws_notifier = ctx.services.get("ws_interaction_notifier") if ctx.services else None
-    if _ws_notifier:
-        _ws_notifier.register_pipeline_thread(pipeline_id, thread_id)
+    # 注册 pipeline_id → thread_id 映射到 EngineRegistry
+    from pipeline.registry import get_engine_registry
+    _registry = get_engine_registry()
+    _entry = _registry.get(pipeline_id)
+    if _entry:
+        _entry.thread_id = thread_id
+    else:
+        _registry.register(pipeline_id, engine, thread_id=thread_id)
 
     if ctx.services:
         _exec_storage = ctx.services.get("execution_record_storage")

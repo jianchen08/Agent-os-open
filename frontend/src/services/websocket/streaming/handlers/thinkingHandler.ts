@@ -63,7 +63,8 @@ export function handleThinkingStart(eventData: any) {
   }, THINKING_TIMEOUT_MS)
   _thinkingTimeoutMap.set(messageId, timer)
 
-  const thinkingBlock = { type: 'thinking' as const, thinking: { content: '', isThinking: true } as any, sourceId: messageId }
+  const sequence = eventData.sequence ?? eventData.data?.sequence
+  const thinkingBlock = { type: 'thinking' as const, thinking: { content: '', isThinking: true } as any, sourceId: messageId, sequence }
   const blocks = [...(msg.contentBlocks || []), thinkingBlock]
   pipelineStore.getState().updateMessage(pipelineId, messageId, {
     thinking: { content: '', isThinking: true },

@@ -3,11 +3,12 @@
  */
 import { reconcileContentBlocks } from '@/components/chat/hooks/useMessageRender'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useStreamingStore } from '@/stores/streamingStore'
 
 import { clearChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
-import { extractMessageId, stopPipelineStreaming } from './utils'
+import { extractMessageId, markPipelineTerminated, stopPipelineStreaming } from './utils'
 
 /**
  * 处理新消息事件
@@ -21,6 +22,17 @@ export function handleNewMessage(eventData: any) {
   if (pipelineId) {
     clearChunkTimeout(pipelineId)
     stopPipelineStreaming(pipelineId, threadId)
+    // BUG-FIX-fix_20260522: 标记管道已终止（new_message），防止 ensureStreamingPlaceholder 重新启动
+    markPipelineTerminated(pipelineId)
+    // BUG-FIX-fix_20260522_stream_end_over_cleanup:
+    // new_message 同样需要清理所有关联的 streamingTabs
+    const currentActivePipelineId = pipelineStore.getState().activePipelineId
+    if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
+      useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
+    }
+    if (threadId && threadId !== pipelineId) {
+      useStreamingStore.getState().setStreamingForTab(threadId, false)
+    }
   } else if (threadId) {
     // FIX: pipeline_id 缺失时仍清理 threadId 的 tab 状态
     clearChunkTimeout(threadId)

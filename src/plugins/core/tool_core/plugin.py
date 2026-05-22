@@ -166,7 +166,6 @@ class ToolCore(ICorePlugin):
     # 服务注入映射：tool_args 中的下划线前缀参数名 → ctx.get_service() 的 key
     _SERVICE_INJECT_MAP: dict[str, str] = {
         "_task_service": "task_service",
-        "_message_queue": "message_queue",
         "_tool_registry": "tool_registry",
         "_session": "db_session",
         "_memory_service": "memory_service",
@@ -216,7 +215,7 @@ class ToolCore(ICorePlugin):
 
         执行前自动将 services 中的依赖注入到 tool_args（仅注入
         工具尚未提供的下划线前缀参数），使工具函数能获取
-        TaskService、MessageQueue 等运行时依赖，无需 CLI 闭包包装。
+        TaskService 等运行时依赖，无需 CLI 闭包包装。
 
         执行完成后通过 on_chunk 发射 tool_result 事件，供 CLI 实时显示。
 

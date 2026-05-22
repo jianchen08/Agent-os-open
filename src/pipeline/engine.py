@@ -1,4 +1,4 @@
-"""管道引擎 — 核心循环和生命周期管理。
+﻿"""管道引擎 — 核心循环和生命周期管理。
 
 实现核心的 while 循环执行逻辑：
 输入路由 → Input 插件链 → Core 插件 → Output 插件链 → 输出路由仲裁 → apply_route，
@@ -29,21 +29,16 @@ import uuid as _uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pipeline.registry import PipelineRegistry, PluginRegistry
+from pipeline.registry import EngineRegistry, PipelineRegistry, PluginRegistry, get_engine_registry
 from pipeline.route import InputRouteTable, OutputRouteTable
 from pipeline.types import StateKeys
 
-# 从拆分模块重新导入，保持向后兼容
 from pipeline.engine_state import (  # noqa: F401
     _PipelineLogFilter,
     _current_pipeline_id,
-    _GLOBAL_SUSPENDED_ENGINES,
     _manual_copy_dict,
     _manual_copy_list,
     _safe_deepcopy,
-    get_global_suspended_engine,
-    register_suspended_engine,
-    unregister_suspended_engine,
 )
 from pipeline.engine_route import (  # noqa: F401
     apply_route,
@@ -115,11 +110,8 @@ class PipelineEngine:
         self._max_consecutive_core_errors: int = 3
         # 外部通知队列（线程安全）：终态通知在此排队，_run_loop 每轮迭代检查
         self._pending_notifications: list[str] = []
-        # BUG-FIX-fix_20260508_sub_pipeline_streaming:
-        # 保存流式回调和 streaming 标志，resume 时重新注入 _suspended_state。
-        # _safe_deepcopy 无法拷贝函数类型的 on_chunk，导致 resume 后流式输出丢失。
-        self._saved_streaming: bool = False
-        self._saved_on_chunk: Any = None
+        self._streaming_on_chunk: Any = None
+        self._streaming_flag: bool = False
 
     async def run(
         self,
@@ -155,35 +147,27 @@ class PipelineEngine:
         # BUG-FIX: 每次新 run() 调用重置挂起状态，防止引擎复用时旧状态泄漏。
         self._suspended_state = None
         self._wake_event = None
-        self._saved_streaming = False
-        self._saved_on_chunk = None
+        self._streaming_flag = False
+        self._streaming_on_chunk = None
         self._pending_notifications.clear()
 
         # BUG-FIX-fix_20260513_pipeline_cross_talk:
         # 清除旧 pipeline_id 的引擎注册残留
         if self._pipeline_id:
-            _old_running_key = f"__running_engine_{self._pipeline_id}"
-            _old_suspended_key = f"__suspended_engine_{self._pipeline_id}"
-            self._services.pop(_old_running_key, None)
-            self._services.pop(_old_suspended_key, None)
-            unregister_suspended_engine(self._pipeline_id)
+            get_engine_registry().unregister(self._pipeline_id)
 
         # pipeline_id 由引擎构造时确定，外部不可覆盖。
         extra_state["pipeline_id"] = self._pipeline_id
 
+        raw_state = None
         if initial_state is not None and user_input is None:
-            state: dict[str, Any] = {
-                **initial_state,
-                StateKeys.ITERATION: 0,
-                StateKeys.ENDED: False,
-            }
-            if StateKeys.PIPELINE_ID not in state:
-                state[StateKeys.PIPELINE_ID] = self._pipeline_id
-            return await self._run_loop(state, resumed=False)
+            raw_state = initial_state
+        elif isinstance(user_input, dict) and initial_state is None:
+            raw_state = user_input
 
-        if isinstance(user_input, dict) and initial_state is None:
-            state = {
-                **user_input,
+        if raw_state is not None:
+            state: dict[str, Any] = {
+                **raw_state,
                 StateKeys.ITERATION: 0,
                 StateKeys.ENDED: False,
             }
@@ -281,18 +265,11 @@ class PipelineEngine:
         self._consecutive_core_errors = 0
         # BUG-FIX-fix_20260508_sub_pipeline_streaming:
         if not resumed:
-            _on_chunk_val = state.get("on_chunk")
-            if _on_chunk_val is not None:
-                self._saved_on_chunk = _on_chunk_val
-                self._saved_streaming = state.get("streaming", True)
+            self.save_streaming_context(state)
         else:
-            # resume 时重新注入流式回调
-            if self._saved_on_chunk is not None and "on_chunk" not in state:
-                state["on_chunk"] = self._saved_on_chunk
-                state["streaming"] = self._saved_streaming
-        # 注册运行中的引擎引用
-        _engine_reg_key = f"__running_engine_{pipeline_run_id}"
-        self._services[_engine_reg_key] = self
+            self.restore_streaming_context(state)
+        # 注册运行中的引擎引用到 EngineRegistry
+        get_engine_registry().register(pipeline_run_id, self)
         try:
             self._setup_pipeline_logging(pipeline_run_id, resumed, _pipeline_loggers)
             if _pipeline_loggers:
@@ -337,10 +314,8 @@ class PipelineEngine:
                     except Exception as exc:
                         logger.debug("Checkpoint auto-save failed: %s", exc)
 
-                # BUG-FIX-fix_20260514_subtab_inject: 迭代开始时消费待处理通知
-                if self._pending_notifications:
-                    _iter_notifs = self._pending_notifications[:]
-                    self._pending_notifications.clear()
+                _iter_notifs = self.consume_pending_notifications()
+                if _iter_notifs:
                     _combined = "\n\n".join(_iter_notifs)
                     state["user_input"] = _combined
                     state.setdefault("messages", []).append(
@@ -367,16 +342,38 @@ class PipelineEngine:
 
                 # 6. target == "end"
                 if target == "end":
-                    if matched_entry and matched_entry.result:
-                        result_msg = matched_entry.format_result(state)
-                        state[StateKeys.RAW_RESULT] = result_msg
-                        logger.info("Input route end with result: %s", result_msg)
-                    state[StateKeys.ENDED] = True
-                    logger.info("Pipeline ended by input route (target=end)")
-                    break
+                    _end_notifs = self.consume_pending_notifications()
+                    if _end_notifs:
+                        _combined = "\n\n".join(_end_notifs)
+                        state["user_input"] = _combined
+                        state.setdefault("messages", []).append(
+                            {"role": "user", "content": _combined}
+                        )
+                        state[StateKeys.CORE_TYPE] = "llm_call"
+                        logger.info(
+                            "[Engine] target=end 但有 %d 条待处理通知，继续循环",
+                            len(_end_notifs),
+                        )
+                    else:
+                        if matched_entry and matched_entry.result:
+                            result_msg = matched_entry.format_result(state)
+                            state[StateKeys.RAW_RESULT] = result_msg
+                            logger.info("Input route end with result: %s", result_msg)
+                        state[StateKeys.ENDED] = True
+                        logger.info("Pipeline ended by input route (target=end)")
+                        break
 
                 # 7. target == "wait": 挂起
                 if target == "wait":
+                    _on_chunk_cb = state.get("on_chunk")
+                    if _on_chunk_cb:
+                        try:
+                            _on_chunk_cb({
+                                "type": "pipeline_suspended",
+                                "pipeline_id": state.get(StateKeys.PIPELINE_ID, ""),
+                            })
+                        except Exception:
+                            pass
                     self._suspended_state = _safe_deepcopy(state)
                     logger.info("Pipeline suspended by input route (target=wait), state saved")
                     if self._checkpoint_manager is not None:
@@ -410,10 +407,8 @@ class PipelineEngine:
                     if should_break:
                         break
                 else:
-                    # 无路由信号时的后续处理
-                    action = await handle_no_route_signals(self, state, core_type, iteration)
-                    if action == "continue":
-                        continue
+                    await handle_no_route_signals(self, state, core_type, iteration)
+                    continue
 
             # 管道结束后，再执行一次 Output 链
             if state.get(StateKeys.ENDED, False):
@@ -443,7 +438,7 @@ class PipelineEngine:
         finally:
             await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
-                _pipeline_id_token, _engine_reg_key,
+                _pipeline_id_token,
             )
 
         return state
@@ -568,7 +563,6 @@ class PipelineEngine:
         log_handler: logging.FileHandler | None,
         loggers: list[logging.Logger],
         pipeline_id_token: contextvars.Token,
-        engine_reg_key: str,
     ) -> None:
         """清理 _run_loop 的资源和注册。"""
         if log_handler:
@@ -576,8 +570,10 @@ class PipelineEngine:
             for _lg in loggers:
                 _lg.removeHandler(log_handler)
         _current_pipeline_id.reset(pipeline_id_token)
-        # 清理运行中引擎注册
-        self._services.pop(engine_reg_key, None)
+        # 清理 EngineRegistry 注册
+        _cp_pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
+        if _cp_pipeline_id:
+            get_engine_registry().unregister(_cp_pipeline_id)
         # 管道结束后自动清理旧检查点
         if self._checkpoint_manager is not None:
             try:
@@ -625,13 +621,8 @@ class PipelineEngine:
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
-        pending_key = f"__pending_notifications_{pipeline_id}"
 
-        # 消费子任务在父管道挂起前就已入队的通知（竞态修复）
-        pending_notifications = self._services.pop(pending_key, [])
-        if self._pending_notifications:
-            pending_notifications.extend(self._pending_notifications[:])
-            self._pending_notifications.clear()
+        pending_notifications = self.consume_pending_notifications()
         if pending_notifications:
             self._inject_notifications_to_suspended_state(pending_notifications)
             logger.info(
@@ -639,32 +630,24 @@ class PipelineEngine:
                 len(pending_notifications), pipeline_id,
             )
         else:
-            # 无待处理通知，进入等待循环
             logger.info(
                 "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
                 pipeline_id, self._watching_task_ids,
             )
-
             max_wait_rounds = 50
             for wait_round in range(max_wait_rounds):
                 self._wake_event = asyncio.Event()
-                self._services[f"__suspended_engine_{pipeline_id}"] = self
-                register_suspended_engine(pipeline_id, self)
-
+                _registry = get_engine_registry()
+                _entry = _registry.get(pipeline_id)
+                if _entry is not None:
+                    _entry.engine = self
+                else:
+                    _registry.register(pipeline_id, self)
                 try:
                     await asyncio.wait_for(self._wake_event.wait(), timeout=600)
-                    break  # 被外部唤醒
+                    break
                 except asyncio.TimeoutError:
-                    # BUG-FIX-fix_20260519_pipeline_retry:
-                    # 问题根因: 超时处理中先清除引擎注册(__suspended_engine_)再收集通知，
-                    #   两步之间若有 send_pipeline_message 调用，_find_engine 通过 services
-                    #   查不到引擎，通知可能走 _try_revive 路径而丢失。
-                    # 修复方案: 先收集通知再清除注册，确保不遗漏超时窗口内的通知。
-                    pending_notifications = self._services.pop(pending_key, [])
-                    if self._pending_notifications:
-                        pending_notifications.extend(self._pending_notifications[:])
-                        self._pending_notifications.clear()
-
+                    pending_notifications = self.consume_pending_notifications()
                     if pending_notifications:
                         self._inject_notifications_to_suspended_state(pending_notifications)
                         logger.info(
@@ -672,10 +655,6 @@ class PipelineEngine:
                             len(pending_notifications), pipeline_id,
                         )
                         break
-
-                    # 无通知，安全清除本轮注册（下一轮循环顶部会重新注册）
-                    self._services.pop(f"__suspended_engine_{pipeline_id}", None)
-                    unregister_suspended_engine(pipeline_id)
                     logger.info(
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
                         "(round=%d/%d): pipeline=%s",
@@ -687,16 +666,9 @@ class PipelineEngine:
                     max_wait_rounds, pipeline_id,
                 )
 
-        # 最终清理
-        self._services.pop(f"__suspended_engine_{pipeline_id}", None)
-        unregister_suspended_engine(pipeline_id)
         self._wake_event = None
         self._watching_task_ids = []
 
-        # BUG-FIX-fix_20260521_on_chunk_missing:
-        # 唤醒后统一恢复 state，确保 on_chunk / streaming 等回调不会丢失。
-        # 之前三个调用路径各自手动恢复，路径1和路径2遗漏了 on_chunk，
-        # 导致 LLM 输出走错 bridge，前端一直显示"思考中"。
         if self._suspended_state is not None:
             state["user_input"] = self._suspended_state.get(
                 "user_input", state.get("user_input", ""),
@@ -704,13 +676,11 @@ class PipelineEngine:
             state["messages"] = self._suspended_state.get(
                 "messages", state.get("messages", []),
             )
-            if "on_chunk" in self._suspended_state:
-                state["on_chunk"] = self._suspended_state["on_chunk"]
-                self._saved_on_chunk = self._suspended_state["on_chunk"]
-            if "streaming" in self._suspended_state:
-                state["streaming"] = self._suspended_state["streaming"]
-                self._saved_streaming = self._suspended_state["streaming"]
+            for _key in ("on_chunk", "streaming"):
+                if _key in self._suspended_state:
+                    state[_key] = self._suspended_state[_key]
             self._suspended_state = None
+            self.save_streaming_context(state)
             logger.info("[Engine] 管道被唤醒并恢复 state: pipeline=%s", pipeline_id)
             return True
         else:
@@ -736,24 +706,70 @@ class PipelineEngine:
         if self._wake_event is not None:
             self._wake_event.set()
 
-    def inject_and_wake(self, user_input: str) -> None:
-        """向管道注入消息并唤醒。
+    def consume_pending_notifications(self) -> list[str]:
+        """消费所有待处理通知，返回通知列表（可能为空）。
 
-        根据管道状态选择注入策略：
-        - 挂起态（_suspended_state 不为 None）：注入到 _suspended_state 并唤醒
-        - 运行态（_suspended_state 为 None）：入队到 _pending_notifications
+        统一的通知消费入口，所有需要读取 _pending_notifications 的地方
+        都应通过此方法，确保消费和清空是原子操作。
+        """
+        if not self._pending_notifications:
+            return []
+        notifs = self._pending_notifications[:]
+        self._pending_notifications.clear()
+        return notifs
+
+    def save_streaming_context(self, state: dict[str, Any]) -> None:
+        """从 state 保存流式上下文。"""
+        on_chunk = state.get("on_chunk")
+        if on_chunk is not None:
+            self._streaming_on_chunk = on_chunk
+            self._streaming_flag = state.get("streaming", True)
+
+    def restore_streaming_context(self, state: dict[str, Any]) -> None:
+        """恢复流式上下文到 state。"""
+        if self._streaming_on_chunk is not None and "on_chunk" not in state:
+            state["on_chunk"] = self._streaming_on_chunk
+            state["streaming"] = self._streaming_flag
+
+    def set_streaming_context(self, on_chunk: Any, streaming: bool = True) -> None:
+        """外部设置流式上下文（替代直接写 _saved_on_chunk）。"""
+        self._streaming_on_chunk = on_chunk
+        self._streaming_flag = streaming
+
+    def inject_message(self, message: str) -> None:
+        """统一消息注入入口，自动根据引擎状态选择注入方式。
+
+        替代原先的 _inject_notification_to_engine 和 _inject_message_engine
+        两个独立函数，外部调用方只需调此方法，引擎内部自动处理状态差异：
+        - 挂起态：写入 _suspended_state + 唤醒
+        - 运行态：写入 _pending_notifications
 
         Args:
-            user_input: 要注入的消息文本
+            message: 要注入的消息文本
         """
-        if not user_input:
+        if not message:
             return
-        if self._suspended_state is not None:
-            self._suspended_state["user_input"] = user_input
+        if self.is_suspended:
+            if self._suspended_state is not None:
+                existing = self._suspended_state.get("user_input", "")
+                self._suspended_state["user_input"] = f"{message}\n{existing}" if existing else message
+                self._suspended_state.setdefault("messages", []).append(
+                    {"role": "user", "content": message}
+                )
+            if self._wake_event is not None:
+                self._wake_event.set()
+            logger.info(
+                "[Engine] inject_message: 挂起态注入并唤醒: pipeline=%s preview=%.60s",
+                self._pipeline_id[:12], message,
+            )
         else:
-            self._pending_notifications.append(user_input)
-        if self._wake_event is not None:
-            self._wake_event.set()
+            self._pending_notifications.append(message)
+            if self._wake_event is not None:
+                self._wake_event.set()
+            logger.info(
+                "[Engine] inject_message: 运行态通知入队 (queue=%d): pipeline=%s preview=%.60s",
+                len(self._pending_notifications), self._pipeline_id[:12], message,
+            )
 
     async def save_checkpoint(self, phase: str = "manual") -> str | None:
         """保存管道检查点（委托到 pipeline.checkpoint）。"""

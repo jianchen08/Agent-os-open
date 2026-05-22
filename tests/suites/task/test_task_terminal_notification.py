@@ -1,16 +1,16 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """端到端测试：验证子任务终态通知父管道。
 
 覆盖场景：
-1. 子任务 completed → 父管道通过 inject_and_wake 收到通知
-2. 子任务 failed  → 父管道通过 inject_and_wake 收到通知
+1. 子任务 completed → 父管道通过 inject_message 收到通知
+2. 子任务 failed  → 父管道通过 inject_message 收到通知
 3. 子任务 completed → 父管道运行中，通过 inject_notification 收到通知
 4. 子任务 failed → 父管道不可达，级联失败到父任务
 5. 终态事件 _terminal_events 正确 set
 
 测试策略：
 - 纯 asyncio 驱动，不依赖 LLM API
-- Mock PipelineEngine 的 inject_and_wake / inject_notification
+- Mock PipelineEngine 的 inject_message / inject_notification
 - 通过 EventBus 连接 TaskService → TaskWorker → MockEngine
 """
 
@@ -42,9 +42,9 @@ def _setup_teardown():
 
 
 def _make_mock_engine():
-    """创建 mock PipelineEngine，记录 inject_and_wake / inject_notification 调用。"""
+    """创建 mock PipelineEngine，记录 inject_message / inject_notification 调用。"""
     engine = MagicMock()
-    engine.inject_and_wake = MagicMock()
+    engine.inject_message = MagicMock()
     engine.inject_notification = MagicMock()
     engine._watching_task_ids = []
     engine._wake_event = None
@@ -68,13 +68,13 @@ def _make_task_worker(services, event_bus):
 
 
 # ═══════════════════════════════════════════════════════════
-# Test 1: 子任务 completed → 父管道挂起中被 inject_and_wake
+# Test 1: 子任务 completed → 父管道挂起中被 inject_message
 # ═══════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
 async def test_child_completed_notifies_suspended_parent():
-    """子任务 completed 时，挂起的父管道应通过 inject_and_wake 被唤醒。"""
+    """子任务 completed 时，挂起的父管道应通过 inject_message 被唤醒。"""
     event_bus = EventBus()
     storage = TaskStorage(data_dir=str(TEST_DATA_DIR))
     svc = TaskService(storage=storage, event_bus=event_bus)
@@ -110,9 +110,9 @@ async def test_child_completed_notifies_suspended_parent():
     # 等待事件循环处理
     await asyncio.sleep(0.3)
 
-    # 验证父管道收到 inject_and_wake
-    mock_engine.inject_and_wake.assert_called_once()
-    call_args = mock_engine.inject_and_wake.call_args[0][0]
+    # 验证父管道收到 inject_message
+    mock_engine.inject_message.assert_called_once()
+    call_args = mock_engine.inject_message.call_args[0][0]
     assert "已完成" in call_args, f"通知内容应包含'已完成'，实际: {call_args}"
     assert child.id in call_args
     assert "✅" in call_args
@@ -121,13 +121,13 @@ async def test_child_completed_notifies_suspended_parent():
 
 
 # ═══════════════════════════════════════════════════════════
-# Test 2: 子任务 failed → 父管道挂起中被 inject_and_wake
+# Test 2: 子任务 failed → 父管道挂起中被 inject_message
 # ═══════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
 async def test_child_failed_notifies_suspended_parent():
-    """子任务 failed 时，挂起的父管道应通过 inject_and_wake 收到失败通知。"""
+    """子任务 failed 时，挂起的父管道应通过 inject_message 收到失败通知。"""
     event_bus = EventBus()
     storage = TaskStorage(data_dir=str(TEST_DATA_DIR))
     svc = TaskService(storage=storage, event_bus=event_bus)
@@ -157,8 +157,8 @@ async def test_child_failed_notifies_suspended_parent():
 
     await asyncio.sleep(0.3)
 
-    mock_engine.inject_and_wake.assert_called_once()
-    call_args = mock_engine.inject_and_wake.call_args[0][0]
+    mock_engine.inject_message.assert_called_once()
+    call_args = mock_engine.inject_message.call_args[0][0]
     assert "failed" in call_args or "❌" in call_args, f"通知内容应包含失败信息，实际: {call_args}"
     assert child.id in call_args
     assert "模拟执行失败" in call_args
@@ -202,9 +202,9 @@ async def test_child_completed_notifies_running_parent():
 
     await asyncio.sleep(0.3)
 
-    # 运行中的引擎应收到 inject_notification（不是 inject_and_wake）
+    # 运行中的引擎应收到 inject_notification（不是 inject_message）
     mock_engine.inject_notification.assert_called_once()
-    mock_engine.inject_and_wake.assert_not_called()
+    mock_engine.inject_message.assert_not_called()
     call_args = mock_engine.inject_notification.call_args[0][0]
     assert "已完成" in call_args
 
@@ -345,13 +345,13 @@ async def test_multiple_children_complete_sequentially():
     await asyncio.sleep(0.5)
 
     # 应收到 3 次通知
-    assert mock_engine.inject_and_wake.call_count == 3, (
-        f"应收到 3 次通知，实际: {mock_engine.inject_and_wake.call_count}"
+    assert mock_engine.inject_message.call_count == 3, (
+        f"应收到 3 次通知，实际: {mock_engine.inject_message.call_count}"
     )
 
     # 验证每次通知包含对应的 task_id
     for i, child in enumerate(children):
-        call_args = mock_engine.inject_and_wake.call_args_list[i][0][0]
+        call_args = mock_engine.inject_message.call_args_list[i][0][0]
         assert child.id in call_args, f"第 {i} 次通知应包含 task_id {child.id}"
 
     await worker.stop()

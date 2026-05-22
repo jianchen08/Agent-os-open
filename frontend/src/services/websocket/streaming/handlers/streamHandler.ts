@@ -19,7 +19,7 @@ import { clearChunkTimeout, clearUnifiedStreamTimeout, getChunkTimeoutMessageId,
 import { appendTextBlock, appendThinkingChunk } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
-import { ensureStreamingPlaceholder, extractMessageId, stopPipelineStreaming } from './utils'
+import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, markPipelineTerminated, stopPipelineStreaming } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -30,6 +30,7 @@ const _chunkBuffer = new Map<string, {
   chunks: string[]
   pipelineId: string
   messageId: string
+  firstSequence?: number
 }>()
 let _flushRafId: number | null = null
 
@@ -56,7 +57,7 @@ function _flushChunks(): void {
         contentBlocks: blocks,
       } as any)
     } else {
-      const blocks = appendTextBlock(msg.contentBlocks, combinedContent, entry.messageId)
+      const blocks = appendTextBlock(msg.contentBlocks, combinedContent, entry.messageId, entry.firstSequence)
       pipelineStore.getState().updateMessage(entry.pipelineId, entry.messageId, {
         contentBlocks: blocks,
         content: (msg.content || '') + combinedContent,
@@ -108,6 +109,9 @@ export function handleStreamStart(eventData: any) {
   _debugLogger.info(
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
   )
+
+  // BUG-FIX-fix_20260522: 新一轮流式开始，清除终止标记
+  clearPipelineTerminated(pipelineId)
 
   // BUG-FIX-fix_20260521_stop_button_not_following_stream:
   // 问题根因: 当用户发送消息时，如果 activePipelineId 为空，会使用 sid 作为 fallback 管道。
@@ -208,12 +212,13 @@ export function handleStreamChunk(eventData: any) {
   }
 
   // 缓冲 chunk，由 RAF 统一刷写到 store（合并同帧多个 chunk 为单次更新）
+  const sequence = eventData.sequence ?? eventData.data?.sequence
   const bufferKey = `${pipelineId}::${messageId}`
   const existing = _chunkBuffer.get(bufferKey)
   if (existing) {
     existing.chunks.push(content)
   } else {
-    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId })
+    _chunkBuffer.set(bufferKey, { chunks: [content], pipelineId, messageId, firstSequence: sequence })
   }
   _scheduleFlush()
 }
@@ -235,23 +240,19 @@ export function handleStreamEnd(eventData: any) {
   )
 
   if (pipelineId) {
+    // BUG-FIX-fix_20260522: 标记管道已终止，防止 ensureStreamingPlaceholder 重新启动
+    markPipelineTerminated(pipelineId)
     clearChunkTimeout(pipelineId)
     stopPipelineStreaming(pipelineId, threadId)
     // BUG-FIX-fix_20260522_stream_end_over_cleanup:
-    // 问题根因: 旧逻辑无条件清除 activePipelineId 的 streamingTabs，
-    //           当子管道 stream_end 到达时会误清除正在流式传输的父管道状态，
-    //           或父管道 stream_start 被后续子管道 stream_end 覆盖清除。
-    // 修复方案: 仅在 activePipelineId 没有独立 streaming 会话时才清理其 streamingTabs，
-    //           避免误伤拥有自己 streaming 会话的管道。
+    // stream_end 时需要确保所有关联的 streamingTabs 都被清理，
+    // 包括 pipelineId、threadId 和 activePipelineId。
     const currentActivePipelineId = pipelineStore.getState().activePipelineId
     if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
-      const activeStreaming = pipelineStore.getState().streamingState[currentActivePipelineId]
-      if (!activeStreaming?.isStreaming) {
-        _debugLogger.info(
-          `[STREAM_END] also clearing inactive activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
-        )
-        useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
-      }
+      useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
+    }
+    if (threadId && threadId !== pipelineId) {
+      useStreamingStore.getState().setStreamingForTab(threadId, false)
     }
   } else {
     _debugLogger.warn(
@@ -334,6 +335,8 @@ export function handleStreamError(eventData: any) {
   const threadId = eventData.data?._threadId || eventData._threadId
 
   if (pipelineId) {
+    // BUG-FIX-fix_20260522: 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
+    markPipelineTerminated(pipelineId)
     clearChunkTimeout(pipelineId)
     stopPipelineStreaming(pipelineId, threadId)
   } else if (threadId) {

@@ -239,16 +239,7 @@ class Application:
         logger.info("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
-        # ── 8. MessageQueue ──────────────────────────────
-        try:
-            from infrastructure.message_queue import MessageQueue
-
-            services["message_queue"] = MessageQueue()
-            logger.info("服务已创建: message_queue")
-        except Exception as exc:
-            logger.warning("创建 message_queue 服务失败: %s", exc)
-
-        # ── 9. ExecutionRecordStorage ────────────────────
+        # ── 8. ExecutionRecordStorage ────────────────────
         try:
             from infrastructure.execution_record_storage import ExecutionRecordStorage
 

@@ -488,7 +488,7 @@ class SlashCommandRegistry:
 
         # 服务状态
         svc_status: list[tuple[str, str]] = []
-        for name in ("tool_registry", "memory_store", "memory_service", "task_service", "message_queue"):
+        for name in ("tool_registry", "memory_store", "memory_service", "task_service"):
             svc = services.get(name)
             status = "[green]OK[/green]" if svc is not None else "[dim]--[/dim]"
             svc_status.append((name, status))
