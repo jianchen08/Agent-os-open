@@ -59,6 +59,8 @@ interface LongTermTaskActions {
   pauseTask: (taskId: string) => Promise<void>
   /** 恢复长期任务 */
   resumeTask: (taskId: string) => Promise<void>
+  /** 取消长期任务 */
+  cancelTask: (taskId: string, reason?: string) => Promise<void>
   /** 设置活跃任务 */
   setActiveTask: (taskId: string | null) => void
   /** 更新任务状态 */
@@ -162,6 +164,25 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
           }))
         } catch (error) {
           const errorMessage = getErrorMessage(error, '恢复长期任务失败')
+          set({ error: errorMessage })
+          throw new Error(errorMessage)
+        }
+      },
+
+      /**
+       * 取消长期任务
+       */
+      cancelTask: async (taskId: string, reason?: string) => {
+        set({ error: null })
+
+        try {
+          const updatedTask = await longTermTaskApi.cancelLongTermTask(taskId, reason)
+
+          set((state) => ({
+            tasks: state.tasks.map((task) => (task.id === taskId ? updatedTask : task)),
+          }))
+        } catch (error) {
+          const errorMessage = getErrorMessage(error, '取消长期任务失败')
           set({ error: errorMessage })
           throw new Error(errorMessage)
         }

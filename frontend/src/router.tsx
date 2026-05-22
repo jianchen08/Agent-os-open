@@ -27,7 +27,7 @@ import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
-import { startPendingStreamTimeout, clearChunkTimeout } from './services/websocket/streaming/chunkTimeout'
+import { clearChunkTimeout } from './services/websocket/streaming/chunkTimeout'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -402,7 +402,6 @@ function HomePage(): ReactNode {
             clientMessageId: userMessage.id,
           },
         )
-        startPendingStreamTimeout(targetPipelineId, sid)
       } catch {
         // WebSocket 发送失败时消息已添加到本地状态，重连后会自动重试
       }
@@ -417,10 +416,10 @@ function HomePage(): ReactNode {
    */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
-    if (sid) {
-      globalWS.sendCancel(sid)
-    }
     const currentPipelineId = usePipelineMessageStore.getState().activePipelineId
+    if (sid) {
+      globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
+    }
     if (currentPipelineId) {
       // 刷写缓冲区中残留的 chunk，避免数据丢失
       flushStreamChunkBuffer()

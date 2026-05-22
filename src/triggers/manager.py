@@ -348,7 +348,25 @@ class TriggerManager:
                     trigger = self._triggers.get(trigger_id)
                     if trigger is None:
                         continue
-                    await self._wake_pipeline(trigger)
+                    try:
+                        await self._wake_pipeline(trigger)
+                    except asyncio.CancelledError:
+                        # BUG-FIX-fix_20260522_trigger_cancelled_loop_exit:
+                        # 问题根因: _wake_pipeline 内部嵌套调用 send_pipeline_message →
+                        #   _try_revive_pipeline → engine.run()，如果其中某个引擎被取消，
+                        #   CancelledError 会冒泡到此处，再被外层 except CancelledError 捕获
+                        #   导致整个 _check_loop 永久退出，触发器系统彻底卡死。
+                        # 修复方案: 在 _wake_pipeline 调用处单独捕获 CancelledError，
+                        #   不让单个管道的取消影响触发器检查循环的持续运行。
+                        logger.warning(
+                            "[TriggerManager] _wake_pipeline 被取消，跳过当前触发器，继续循环: "
+                            "trigger=%s pipeline=%s",
+                            trigger.trigger_id, trigger.pipeline_id,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[TriggerManager] 唤醒管道异常: {e}", exc_info=True,
+                        )
 
             except asyncio.CancelledError:
                 break

@@ -237,6 +237,8 @@ export const API_ENDPOINTS = {
     PAUSE: (id: string) => `/api/v1/tasks/${id}/pause`,
     /** 恢复任务（级联子任务） */
     RESUME: (id: string) => `/api/v1/tasks/${id}/resume`,
+    /** 取消任务 */
+    CANCEL: (id: string) => `/api/v1/tasks/${id}/cancel`,
   },
   /** 任务执行闭环相关 - 对应后端 /api/v1/projects/* 和 /api/v1/tasks/* */
   PROJECTS: {

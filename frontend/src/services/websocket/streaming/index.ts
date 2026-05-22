@@ -19,7 +19,7 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
-import { clearAllChunkTimeouts, clearChunkTimeout, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout } from './chunkTimeout'
+import { clearAllChunkTimeouts, clearChunkTimeout, clearUnifiedStreamTimeout, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout, startUnifiedStreamTimeout } from './chunkTimeout'
 import {
   handleNewMessage,
   handleStreamChunk,
@@ -66,6 +66,7 @@ function _wrapWithTimeoutReset(event: string, handler: (data: any) => void): (da
   return (data: any) => {
     const pipelineId = resolvePipelineId(data)
     if (pipelineId) {
+      clearUnifiedStreamTimeout(pipelineId)
       const messageId = getChunkTimeoutMessageId(pipelineId) || data.message_id || data.data?.message_id
       if (messageId) {
         resetChunkTimeout(pipelineId, messageId)
@@ -133,6 +134,25 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = handleSubAgentCreated
   _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
   _handlers[WS_SERVER_EVENTS.ITERATION] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.ITERATION, handleIteration)
+
+  /** 处理管道接收确认事件 */
+  _handlers[WS_SERVER_EVENTS.PIPELINE_RECEIVED] = (data: any) => {
+    const pipelineId = resolvePipelineId(data)
+    const threadId = data.data?.thread_id || data.thread_id
+    if (!pipelineId) return
+
+    // 清除 ACK 重发计时器
+    if (threadId) {
+      globalWS.clearPendingAckForThread(threadId)
+    }
+
+    // 清除可能残留的统一超时
+    clearUnifiedStreamTimeout(pipelineId)
+
+    // 启动 120s 统一超时
+    const sessionId = data.data?.session_id || data.data?.thread_id || threadId || ''
+    startUnifiedStreamTimeout(pipelineId, sessionId)
+  }
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)

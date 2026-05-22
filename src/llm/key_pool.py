@@ -13,11 +13,70 @@ KeyPool 从 provider 的多个 key 中选"最空闲"的 key，
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import time as _time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# ---- Agent 层级优先级 ----
+
+_current_agent_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "agent_priority", default=99,
+)
+
+_LEVEL_PRIORITY_MAP: dict[str, int] = {
+    "L1": 1,
+    "L2": 2,
+    "L3": 3,
+}
+
+
+def set_agent_priority(agent_level: str | None) -> None:
+    """设置当前协程的 Agent 层级优先级。
+
+    Args:
+        agent_level: Agent 层级标识（L1/L2/L3），未知层级默认为 99。
+    """
+    priority = _LEVEL_PRIORITY_MAP.get(agent_level or "", 99)
+    _current_agent_priority.set(priority)
+
+
+def get_agent_priority() -> int:
+    """获取当前协程的 Agent 层级优先级。"""
+    return _current_agent_priority.get()
+
+
+class PrioritySemaphore:
+    """优先级信号量 — 高优先级请求优先获取许可。"""
+
+    def __init__(self, value: int = 1) -> None:
+        self._value = value
+        self._waiters: list[tuple[int, asyncio.Future]] = []
+
+    async def acquire(self) -> None:
+        """获取一个许可。高优先级（数值小）的请求优先获取。"""
+        priority = get_agent_priority()
+
+        if self._value > 0:
+            self._value -= 1
+            return
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._waiters.append((priority, fut))
+        self._waiters.sort(key=lambda x: x[0])
+        await fut
+
+    def release(self) -> None:
+        """释放一个许可。唤醒最高优先级的等待者。"""
+        if self._waiters:
+            _, fut = self._waiters.pop(0)
+            if not fut.done():
+                fut.set_result(None)
+        else:
+            self._value += 1
 
 
 @dataclass
@@ -41,15 +100,15 @@ class KeySlot:
     token_quota: int = 0
 
     # 运行时状态
-    _semaphore: asyncio.Semaphore | None = field(default=None, repr=False)
+    _semaphore: PrioritySemaphore | None = field(default=None, repr=False)
     _request_timestamps: list[float] = field(default_factory=list, repr=False)
     _tokens_used: int = 0
     _cooling_until: float = 0.0
     _rpm_overflows: int = 0  # 本地计数被 429 校准的次数
 
-    def _get_semaphore(self) -> asyncio.Semaphore:
+    def _get_semaphore(self) -> PrioritySemaphore:
         if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrent)
+            self._semaphore = PrioritySemaphore(self.max_concurrent)
         return self._semaphore
 
     def _reset_semaphore(self) -> None:
@@ -135,15 +194,7 @@ class KeySlot:
 
     async def acquire(self) -> None:
         """获取并发许可。"""
-        sem = self._get_semaphore()
-        try:
-            await sem.acquire()
-        except RuntimeError as e:
-            if "bound to a different event loop" in str(e).lower():
-                self._reset_semaphore()
-                await self._get_semaphore().acquire()
-            else:
-                raise
+        await self._get_semaphore().acquire()
 
     def release(self) -> None:
         """释放并发许可。"""

@@ -6,7 +6,7 @@
 事件分类：
 - 流式输出事件：stream_start / stream_chunk / stream_end / thinking_*
 - 工具执行事件：execution_start / execution_progress / execution_done
-- 管道状态事件：pipeline_start / pipeline_end / iteration_start / iteration_end
+- 管道状态事件：pipeline_received / pipeline_start / pipeline_end / iteration_start / iteration_end
 - 错误事件：plugin_error / pipeline_error
 - 控制事件：stop_generation / resume_action / connection_confirmation
 - ACK 事件：message_ack（前端确认收到关键消息）
@@ -131,6 +131,7 @@ class EventType(str, Enum):
     EXECUTION_DONE = "execution_done"
 
     # --- 管道状态事件 ---
+    PIPELINE_RECEIVED = "pipeline_received"
     PIPELINE_START = "pipeline_start"
     PIPELINE_END = "pipeline_end"
     ITERATION_START = "iteration_start"
@@ -433,6 +434,32 @@ class PipelineStartData:
             "agent_level": self.agent_level,
             "config": self.config,
         }
+
+
+@dataclass
+class PipelineReceivedData:
+    """pipeline_received 事件数据。
+
+    后端收到用户消息后立即发送，告知前端消息已进入处理管道。
+
+    Attributes:
+        pipeline_id: 管道 ID
+        thread_id: 线程 ID
+        user_message_id: 用户消息 ID
+    """
+
+    pipeline_id: str
+    thread_id: str = ""
+    user_message_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典，仅包含非空字段。"""
+        result: dict[str, Any] = {"pipeline_id": self.pipeline_id}
+        if self.thread_id:
+            result["thread_id"] = self.thread_id
+        if self.user_message_id:
+            result["user_message_id"] = self.user_message_id
+        return result
 
 
 @dataclass

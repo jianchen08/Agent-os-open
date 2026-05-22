@@ -15,18 +15,8 @@
 /** 超时间隔常量（60秒） */
 export const CHUNK_INTERVAL_TIMEOUT_MS = 60_000
 
-/**
- * 等待 stream_start 的超时时间（45秒）
- *
- * BUG-FIX-fix_20260512_pending_stream_timeout:
- * 问题根因: 用户发送消息后，如果后端 LLM API 卡住（如智谱 glm-5.1 无响应），
- *          后端不会发送 stream_start 事件，前端也没有超时检测，
- *          导致前端一直处于"等待"状态，用户无法得到任何反馈。
- * 修复方案: 发送消息后启动 pending 超时计时器，如果在 45 秒内没有收到
- *          stream_start（或任何流式事件），自动标记为超时并通知用户。
- *          收到 stream_start 时自动清除该计时器。
- */
-export const PENDING_STREAM_TIMEOUT_MS = 15_000
+/** 统一流式超时时间（120秒），收到 pipeline_received 后等待 stream_start 的最长时长 */
+const UNIFIED_STREAM_TIMEOUT_MS = 120_000
 
 interface ChunkTimeoutEntry {
   timer: ReturnType<typeof setTimeout>
@@ -35,12 +25,13 @@ interface ChunkTimeoutEntry {
 
 const _chunkTimeoutMap: Map<string, ChunkTimeoutEntry> = new Map()
 
-interface PendingStreamEntry {
+interface UnifiedStreamEntry {
   timer: ReturnType<typeof setTimeout>
+  pipelineId: string
   sessionId: string
 }
 
-const _pendingStreamMap: Map<string, PendingStreamEntry> = new Map()
+const _unifiedStreamMap: Map<string, UnifiedStreamEntry> = new Map()
 
 /**
  * 超时回调类型：超时触发时通知上层进行状态清理
@@ -68,49 +59,39 @@ export function onChunkTimeout(callback: ChunkTimeoutCallback): void {
 }
 
 /**
- * pending stream 超时回调：后端长时间未响应
- *
- * BUG-FIX-fix_20260513_chunk_timeout_cleanup:
- * 问题根因: 超时后只打 console.debug，不通知上层，导致用户无反馈、streaming 状态残留。
- * 修复方案: 通过回调通知上层处理超时状态清理。
- * 影响范围: 后端无响应时的用户体验
- * 修复日期: 2026-05-13
+ * 统一流式超时回调：收到 pipeline_received 后 120s 内无 stream_start
  */
-function _onPendingStreamTimeout(pipelineId: string): void {
-  const entry = _pendingStreamMap.get(pipelineId)
+function _onUnifiedStreamTimeout(pipelineId: string): void {
+  const entry = _unifiedStreamMap.get(pipelineId)
   if (!entry) return
-  _pendingStreamMap.delete(pipelineId)
+  _unifiedStreamMap.delete(pipelineId)
   console.debug(
-    `[chunkTimeout] pending stream 超时: pipelineId=${pipelineId}, 后端 ${PENDING_STREAM_TIMEOUT_MS / 1000}s 未发送 stream_start`,
+    `[chunkTimeout] 统一流式超时: pipelineId=${pipelineId}, ${UNIFIED_STREAM_TIMEOUT_MS / 1000}s 内未收到 stream_start`,
   )
-  // 通知上层处理超时状态清理
   _chunkTimeoutCallback?.({ pipelineId, messageId: '' })
 }
 
 /**
- * 启动"等待 stream_start"的超时计时器
- *
- * 用户发送消息后调用。如果在 PENDING_STREAM_TIMEOUT_MS 内没有收到
- * stream_start 事件（通过 clearPendingStreamTimeout 清除），
- * 则弹出超时通知提醒用户。
+ * 启动统一流式超时计时器（收到 pipeline_received 后调用）
  */
-export function startPendingStreamTimeout(pipelineId: string, sessionId: string): void {
-  clearPendingStreamTimeout(pipelineId)
-  const entry: PendingStreamEntry = {
-    timer: setTimeout(() => _onPendingStreamTimeout(pipelineId), PENDING_STREAM_TIMEOUT_MS),
+export function startUnifiedStreamTimeout(pipelineId: string, sessionId: string): void {
+  clearUnifiedStreamTimeout(pipelineId)
+  const entry: UnifiedStreamEntry = {
+    timer: setTimeout(() => _onUnifiedStreamTimeout(pipelineId), UNIFIED_STREAM_TIMEOUT_MS),
+    pipelineId,
     sessionId,
   }
-  _pendingStreamMap.set(pipelineId, entry)
+  _unifiedStreamMap.set(pipelineId, entry)
 }
 
 /**
- * 清除 pending stream 超时计时器（收到 stream_start 时调用）
+ * 清除统一流式超时计时器（收到 stream_start 时调用）
  */
-export function clearPendingStreamTimeout(pipelineId: string): void {
-  const entry = _pendingStreamMap.get(pipelineId)
+export function clearUnifiedStreamTimeout(pipelineId: string): void {
+  const entry = _unifiedStreamMap.get(pipelineId)
   if (entry) {
     clearTimeout(entry.timer)
-    _pendingStreamMap.delete(pipelineId)
+    _unifiedStreamMap.delete(pipelineId)
   }
 }
 
@@ -165,8 +146,8 @@ export function clearChunkTimeout(pipelineId: string): void {
 export function clearAllChunkTimeouts(): void {
   for (const [, entry] of _chunkTimeoutMap) clearTimeout(entry.timer)
   _chunkTimeoutMap.clear()
-  for (const [, entry] of _pendingStreamMap) clearTimeout(entry.timer)
-  _pendingStreamMap.clear()
+  for (const [, entry] of _unifiedStreamMap) clearTimeout(entry.timer)
+  _unifiedStreamMap.clear()
 }
 
 /**

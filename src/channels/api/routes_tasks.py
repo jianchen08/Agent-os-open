@@ -828,6 +828,98 @@ async def resume_task(
     }
 
 
+@router.post(
+    "/{task_id}/cancel",
+    summary="取消任务",
+)
+async def cancel_task(
+    task_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """取消指定任务，同时取消运行中的管道并级联取消所有子任务。
+
+    BUG-FIX-fix_20260522_cancel_task_cascade:
+    问题根因: REST API 层缺少 cancel 端点，前端无法通过 HTTP 接口取消任务。
+    修复方案: 参照 pause_task / resume_task 端点的实现模式，新增 cancel 端点，
+              执行三步操作：
+              1. 将任务状态设为 failed 并记录取消原因
+              2. 取消该任务关联的 PipelineEngine 协程（停止 LLM 调用）
+              3. 级联取消所有子任务
+    影响范围: 任务管理 API，取消功能端点。
+    修复日期: 2026-05-22
+
+    执行三步操作：
+    1. 将任务状态设为 failed（持久化到 YAML），记录取消原因
+    2. 取消该任务关联的 PipelineEngine 协程（真正停止 LLM 调用）
+    3. 级联取消所有子任务，避免子任务管道继续执行
+
+    Args:
+        task_id: 任务 ID
+        body: 可选请求体，包含 reason 字段（取消原因）
+        _user: 当前认证用户（由 Depends 注入）
+
+    Returns:
+        取消成功消息，包含级联取消的子任务数量
+
+    Raises:
+        APIError: TaskService 不可用 (503)、任务不存在 (404) 或状态不允许 (400)
+    """
+    task_service = _get_task_service()
+    if task_service is None:
+        raise APIError(
+            status_code=503,
+            error_code="TASK_003",
+            message="TaskService 不可用，无法取消任务",
+        )
+
+    # 获取任务并校验状态
+    task = task_service.get_task(task_id)
+    if task is None:
+        raise APIError(
+            status_code=404,
+            error_code="TASK_001",
+            message=f"任务不存在: {task_id}",
+        )
+
+    # 只有非终态任务可以取消（pending/running/paused/evaluating）
+    from tasks.types import TaskStatus
+
+    cancellable_statuses = {
+        TaskStatus.PENDING, TaskStatus.RUNNING,
+        TaskStatus.PAUSED, TaskStatus.EVALUATING,
+    }
+    if task.status not in cancellable_statuses:
+        raise APIError(
+            status_code=400,
+            error_code="TASK_002",
+            message=f"当前状态无法取消: {task.status.value}",
+        )
+
+    reason = (body or {}).get("reason", "用户请求取消")
+
+    # 步骤1: 将任务标记为 failed（记录取消原因）
+    await task_service.fail_task(task_id, reason=f"已取消: {reason}")
+
+    # 步骤2: 取消运行中的 PipelineEngine 协程
+    pipeline_cancelled = _cancel_running_pipeline(task_id)
+
+    # 步骤3: 级联取消所有子任务
+    cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
+
+    logger.info(
+        "用户 %s 取消任务 %s (pipeline_cancelled=%s, cascaded=%d)",
+        _user.get("username"), task_id, pipeline_cancelled, cascaded,
+    )
+    return {
+        "success": True,
+        "task_id": task_id,
+        "cancelled": True,
+        "message": "任务已取消",
+        "cascaded_subtasks": cascaded,
+    }
+
+
 async def _submit_task_event(task_id: str, task_service: Any) -> bool:
     """发布 task.submitted 事件，触发 TaskWorker 重新执行任务。
 

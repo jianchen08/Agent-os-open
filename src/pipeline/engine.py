@@ -430,6 +430,8 @@ class PipelineEngine:
                 ''.join(_traceback.format_stack()),
             )
             state[StateKeys.ENDED] = True
+            state[StateKeys.RAW_ERROR] = "Pipeline engine cancelled"
+            await self._mark_task_failed_on_engine_exit(state, "Pipeline engine cancelled")
         except Exception as exc:
             logger.error(
                 "Pipeline uncaught exception (iter=%d): %s",
@@ -437,6 +439,7 @@ class PipelineEngine:
             )
             state[StateKeys.ENDED] = True
             state[StateKeys.RAW_ERROR] = str(exc)
+            await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine exception: {exc}")
         finally:
             await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
@@ -518,6 +521,46 @@ class PipelineEngine:
                 })
             except Exception as exc:
                 logger.debug("on_chunk iteration emit failed: %s", exc)
+
+    async def _mark_task_failed_on_engine_exit(
+        self, state: dict[str, Any], reason: str,
+    ) -> None:
+        """引擎异常退出时，将关联的 running 任务标记为 failed。
+
+        BUG-FIX-fix_20260522_task_stuck_running:
+        问题根因: _run_loop 在 CancelledError/Exception 时只设了 state[ENDED]=True，
+                  不更新关联任务的 YAML 状态，导致引擎死了但任务仍为 status: running。
+        修复方案: 通过 pipeline_run_id 查找关联任务，调用 task_service.fail_task 标记失败。
+
+        Args:
+            state: 管道状态字典
+            reason: 失败原因
+        """
+        pipeline_run_id = state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_run_id:
+            return
+
+        task_service = self._services.get("task_service")
+        if task_service is None:
+            logger.debug(
+                "[Engine] 引擎异常退出但无 task_service，跳过任务状态清理: pipeline=%s",
+                pipeline_run_id[:12],
+            )
+            return
+
+        try:
+            for task in task_service.list_by_status("running"):
+                if getattr(task, "pipeline_run_id", None) == pipeline_run_id:
+                    await task_service.fail_task(task.id, reason=reason)
+                    logger.info(
+                        "[Engine] 已将关联任务标记为 failed: task=%s pipeline=%s reason=%s",
+                        task.id[:12], pipeline_run_id[:12], reason,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[Engine] 标记关联任务 failed 失败（非致命）: pipeline=%s err=%s",
+                pipeline_run_id[:12], exc,
+            )
 
     async def _cleanup_run_loop(
         self,

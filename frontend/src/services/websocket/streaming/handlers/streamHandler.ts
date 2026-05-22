@@ -15,7 +15,7 @@ import { loggers } from '@/utils/logger'
 
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
-import { clearChunkTimeout, clearPendingStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
+import { clearChunkTimeout, clearUnifiedStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
 import { appendTextBlock, appendThinkingChunk } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
@@ -169,9 +169,9 @@ export function handleStreamStart(eventData: any) {
 
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
-  clearPendingStreamTimeout(pipelineId)
+  clearUnifiedStreamTimeout(pipelineId)
   if (threadId && threadId !== pipelineId) {
-    clearPendingStreamTimeout(threadId)
+    clearUnifiedStreamTimeout(threadId)
   }
 
   if (threadId) {

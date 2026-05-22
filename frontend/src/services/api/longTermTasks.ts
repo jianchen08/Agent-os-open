@@ -106,6 +106,20 @@ export async function resumeLongTermTask(taskId: string): Promise<Task> {
 }
 
 /**
+ * 取消长期任务
+ *
+ * @param taskId 任务 ID
+ * @param reason 取消原因（可选）
+ * @returns 更新后的任务
+ */
+export async function cancelLongTermTask(taskId: string, reason?: string): Promise<Task> {
+  const response = await apiClient.post<Task>(`/api/v1/tasks/${taskId}/cancel`, {
+    reason: reason || '用户取消',
+  })
+  return response.data
+}
+
+/**
  * 删除长期任务
  */
 export async function deleteLongTermTask(taskId: string): Promise<void> {

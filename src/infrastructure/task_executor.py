@@ -182,6 +182,26 @@ class TaskExecutorMixin:
             # 创建流式输出桥接
             _bridge, _on_chunk = self._create_stream_bridge(task_id, engine._pipeline_id, task_service)
 
+            # 发送 pipeline_received 确认事件
+            if _bridge:
+                try:
+                    _thread_id = ""
+                    if hasattr(_bridge.output_sink, "_thread_id"):
+                        _thread_id = _bridge.output_sink._thread_id
+                    await _bridge._send_event({
+                        "type": "pipeline_received",
+                        "data": {
+                            "pipeline_id": engine._pipeline_id,
+                            "thread_id": _thread_id,
+                        },
+                    })
+                    logger.info(
+                        "pipeline_received 已发送: pipeline=%s thread=%s",
+                        engine._pipeline_id[:12], _thread_id[:12],
+                    )
+                except Exception as _e:
+                    logger.warning("pipeline_received 发送失败（不影响管道执行）: %s", _e)
+
             # 执行管道
             _engine_task = asyncio.create_task(
                 engine.run(

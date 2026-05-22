@@ -7,11 +7,15 @@
  * @module components/workspace/CodeEditor
  */
 
-import { Save, AlertTriangle, FileText } from 'lucide-react'
+import { Save, AlertTriangle, FileText, Eye, Pencil } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { cn } from '@/lib/utils'
+
+/** Markdown 扩展名集合 */
+const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
 
 /** 大文件阈值（1MB） */
 const LARGE_FILE_THRESHOLD = 1_000_000
@@ -179,6 +183,8 @@ export function CodeEditor({
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  /** 预览/编辑模式切换，默认预览模式 */
+  const [isPreview, setIsPreview] = useState(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const preRef = useRef<HTMLPreElement>(null)
 
@@ -189,6 +195,10 @@ export function CodeEditor({
 
   const language = useMemo(() => getLanguage(filePath), [filePath])
   const editable = useMemo(() => !readOnly && isEditable(filePath), [readOnly, filePath])
+  const isMarkdownFile = useMemo(() => {
+    const ext = extractExtension(filePath)
+    return MARKDOWN_EXTENSIONS.has(ext)
+  }, [filePath])
 
   const isLargeFile = useMemo(
     () => (size ?? initialContent.length) > LARGE_FILE_THRESHOLD,
@@ -282,7 +292,7 @@ export function CodeEditor({
     )
   }
 
-  // 只读模式：使用 SyntaxHighlighter 渲染
+  // 不可编辑文件：始终使用只读预览模式，不显示切换按钮
   if (!editable) {
     return (
       <div className={cn('flex h-full flex-col', className)}>
@@ -318,7 +328,7 @@ export function CodeEditor({
     )
   }
 
-  // 编辑模式：textarea + 语法高亮背景
+  // 可编辑文件：支持预览/编辑模式切换
   return (
     <div className={cn('flex h-full flex-col', className)}>
       {/* 工具栏 */}
@@ -327,7 +337,7 @@ export function CodeEditor({
           <FileText className="text-muted-foreground h-4 w-4" />
           <span className="text-foreground text-sm font-medium">
             {fileName}
-            {isDirty && <span className="text-amber-500 ml-0.5">*</span>}
+            {!isPreview && isDirty && <span className="text-amber-500 ml-0.5">*</span>}
           </span>
           <span className="text-muted-foreground text-xs lowercase">{language}</span>
         </div>
@@ -335,73 +345,133 @@ export function CodeEditor({
           {saveError && (
             <span className="text-destructive text-xs">{saveError}</span>
           )}
+          {/* 编辑模式下显示保存按钮 */}
+          {!isPreview && (
+            <button
+              onClick={handleSave}
+              disabled={!isDirty || isSaving}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors',
+                isDirty && !isSaving
+                  ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                  : 'bg-muted text-muted-foreground cursor-not-allowed',
+              )}
+              title="保存 (Ctrl+S)"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {isSaving ? '保存中...' : '保存'}
+            </button>
+          )}
+          {/* 预览/编辑切换按钮 */}
           <button
-            onClick={handleSave}
-            disabled={!isDirty || isSaving}
+            onClick={() => setIsPreview((prev) => !prev)}
             className={cn(
-              'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors',
-              isDirty && !isSaving
-                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                : 'bg-muted text-muted-foreground cursor-not-allowed',
+              'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+              !isPreview
+                ? 'bg-blue-600 text-white hover:bg-blue-700'
+                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
             )}
-            title="保存 (Ctrl+S)"
+            title={isPreview ? '切换到编辑模式' : '切换到预览模式'}
           >
-            <Save className="h-3.5 w-3.5" />
-            {isSaving ? '保存中...' : '保存'}
+            {!isPreview ? (
+              <>
+                <Eye className="h-3.5 w-3.5" />
+                <span>查看</span>
+              </>
+            ) : (
+              <>
+                <Pencil className="h-3.5 w-3.5" />
+                <span>编辑</span>
+              </>
+            )}
           </button>
         </div>
       </div>
 
-      {/* 编辑区域 */}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* 语法高亮底层（用于视觉参考，实际编辑在 textarea 上层） */}
-        <pre
-          ref={preRef}
-          className="pointer-events-none absolute inset-0 overflow-hidden p-4 text-sm"
-          style={{
-            background: 'var(--code-bg, #1e1e1e)',
-            color: 'var(--code-text, #d4d4d4)',
-            fontFamily:
-              'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-            fontSize: '0.8125rem',
-            lineHeight: '1.6',
-            margin: 0,
-            whiteSpace: 'pre-wrap',
-            wordWrap: 'break-word',
-          }}
-          aria-hidden="true"
-        >
-          <code>{localContent}</code>
-        </pre>
+      {/* 内容区域：根据模式切换渲染 */}
+      {isPreview ? (
+        /* 预览模式：Markdown 文件使用 LobeChatMarkdown 渲染，其他使用 SyntaxHighlighter */
+        isMarkdownFile ? (
+          <div className="prose prose-sm dark:prose-invert max-w-none min-h-0 flex-1 overflow-auto p-4">
+            <LobeChatMarkdown content={localContent} />
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <SyntaxHighlighter
+              language={language}
+              style={oneDark}
+              showLineNumbers={true}
+              wrapLongLines={true}
+              customStyle={{
+                margin: 0,
+                borderRadius: 0,
+                fontSize: '0.8125rem',
+                background: 'var(--code-bg, #1e1e1e)',
+                minHeight: '100%',
+              }}
+              codeTagProps={{
+                style: {
+                  fontFamily:
+                    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                },
+              }}
+            >
+              {localContent}
+            </SyntaxHighlighter>
+          </div>
+        )
+      ) : (
+        /* 编辑模式：textarea + 语法高亮背景 */
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          {/* 语法高亮底层（用于视觉参考，实际编辑在 textarea 上层） */}
+          <pre
+            ref={preRef}
+            className="pointer-events-none absolute inset-0 overflow-hidden p-4 text-sm"
+            style={{
+              background: 'var(--code-bg, #1e1e1e)',
+              color: 'var(--code-text, #d4d4d4)',
+              fontFamily:
+                'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+              fontSize: '0.8125rem',
+              lineHeight: '1.6',
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordWrap: 'break-word',
+            }}
+            aria-hidden="true"
+          >
+            <code>{localContent}</code>
+          </pre>
 
-        {/* 文本编辑区域 */}
-        <textarea
-          ref={textareaRef}
-          value={localContent}
-          onChange={handleChange}
-          onScroll={handleScroll}
-          className="absolute inset-0 h-full w-full resize-none p-4 text-sm"
-          style={{
-            background: 'transparent',
-            color: 'transparent',
-            caretColor: 'var(--code-text, #d4d4d4)',
-            fontFamily:
-              'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-            fontSize: '0.8125rem',
-            lineHeight: '1.6',
-            border: 'none',
-            outline: 'none',
-            whiteSpace: 'pre-wrap',
-            wordWrap: 'break-word',
-            overflow: 'auto',
-            margin: 0,
-          }}
-          spellCheck={false}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-        />
-      </div>
+          {/* 文本编辑区域 */}
+          <textarea
+            ref={textareaRef}
+            value={localContent}
+            onChange={handleChange}
+            onScroll={handleScroll}
+            className="absolute inset-0 h-full w-full resize-none p-4 text-sm"
+            style={{
+              background: 'transparent',
+              color: 'transparent',
+              caretColor: 'var(--code-text, #d4d4d4)',
+              fontFamily:
+                'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+              fontSize: '0.8125rem',
+              lineHeight: '1.6',
+              border: 'none',
+              outline: 'none',
+              whiteSpace: 'pre-wrap',
+              wordWrap: 'break-word',
+              overflow: 'auto',
+              margin: 0,
+            }}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+          />
+        </div>
+      )}
     </div>
   )
 }

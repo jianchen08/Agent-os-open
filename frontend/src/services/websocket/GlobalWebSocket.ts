@@ -33,8 +33,8 @@ const CONNECTION_TIMEOUT = 15_000
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
 const SEND_BUFFER_THRESHOLD = 1_000_000
 
-/** 发送确认超时：未收到 stream_start 则重发（5秒） */
-const SEND_ACK_TIMEOUT_MS = 5_000
+/** 发送确认超时：未收到 stream_start 则重发（10秒） */
+const SEND_ACK_TIMEOUT_MS = 10_000
 
 /** 最大发送重试次数 */
 const SEND_ACK_MAX_RETRIES = 2
@@ -286,8 +286,9 @@ class GlobalWebSocketService {
   }
 
   /** 取消生成 */
-  sendCancel(threadId: string, reason?: string): void {
-    this._send({ type: 'stop_generation', thread_id: threadId, reason })
+  // BUG-FIX: 增加 pipelineId 参数，避免停止按钮误取消其他管道
+  sendCancel(threadId: string, reason?: string, pipelineId?: string): void {
+    this._send({ type: 'stop_generation', thread_id: threadId, reason, pipeline_id: pipelineId })
   }
 
   /** 响应子 Agent 输入请求 */

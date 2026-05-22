@@ -380,3 +380,24 @@ export async function resumeTask(taskId: string): Promise<TaskPauseResumeRespons
   const response = await apiClient.post<TaskPauseResumeResponse>(API_ENDPOINTS.TASKS.RESUME(taskId))
   return response.data
 }
+
+/**
+ * 取消任务操作响应
+ */
+export interface CancelTaskResponse {
+  success: boolean
+  task_id: string
+  cancelled_count?: number
+  message: string
+}
+
+/**
+ * 取消任务
+ *
+ * @param taskId 任务 ID
+ * @returns 操作结果
+ */
+export async function cancelTask(taskId: string): Promise<CancelTaskResponse> {
+  const response = await apiClient.post<CancelTaskResponse>(API_ENDPOINTS.TASKS.CANCEL(taskId))
+  return response.data
+}

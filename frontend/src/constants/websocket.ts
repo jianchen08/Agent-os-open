@@ -177,6 +177,8 @@ export const WS_SERVER_EVENTS = {
   COST_UPDATE: 'cost_update',
   /** 流式保活（长时间操作期间由后端发送，防止 chunk 超时） */
   STREAM_KEEPALIVE: 'stream_keepalive',
+  /** 管道已接收到消息 */
+  PIPELINE_RECEIVED: 'pipeline_received',
   /** 迭代事件（管道引擎迭代开始/结束） */
   ITERATION: 'iteration',
 } as const

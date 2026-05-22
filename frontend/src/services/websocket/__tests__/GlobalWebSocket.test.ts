@@ -601,7 +601,97 @@ describe('GlobalWebSocketService', () => {
   })
 
   // ──────────────────────────────────────────────
-  // 7. useLayoutModeStore 同步测试
+  // 7. sendCancel pipelineId 参数测试
+  // ──────────────────────────────────────────────
+  describe('sendCancel - pipelineId 参数', () => {
+    /**
+     * 辅助函数：建立连接并返回最近一次 WS 实例
+     */
+    async function setupConnected() {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+      return { service, ws, disconnect }
+    }
+
+    /**
+     * 辅助函数：从 ws.send 的调用记录中提取所有已发送消息的解析结果
+     */
+    function getSentMessages(ws: MockWebSocketInstance) {
+      return ws.send.mock.calls.map((call: string[]) => {
+        try { return JSON.parse(call[0]) } catch { return null }
+      })
+    }
+
+    it('只传 threadId 时，消息格式向后兼容，pipeline_id 为 undefined', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendCancel('thread-abc')
+
+      const messages = getSentMessages(ws)
+      const cancelMsg = messages.find((m: any) => m?.type === 'stop_generation')
+
+      expect(cancelMsg).toBeDefined()
+      expect(cancelMsg.thread_id).toBe('thread-abc')
+      expect(cancelMsg.reason).toBeUndefined()
+      expect(cancelMsg.pipeline_id).toBeUndefined()
+
+      disconnect()
+    })
+
+    it('不传 pipelineId 时，消息中 pipeline_id 为 undefined', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendCancel('thread-123', 'user requested')
+
+      const messages = getSentMessages(ws)
+      const cancelMsg = messages.find((m: any) => m?.type === 'stop_generation')
+
+      expect(cancelMsg).toBeDefined()
+      expect(cancelMsg.thread_id).toBe('thread-123')
+      expect(cancelMsg.reason).toBe('user requested')
+      expect(cancelMsg.pipeline_id).toBeUndefined()
+
+      disconnect()
+    })
+
+    it('传入 pipelineId 时，消息中 pipeline_id 正确携带', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendCancel('thread-456', undefined, 'pipeline-xyz')
+
+      const messages = getSentMessages(ws)
+      const cancelMsg = messages.find((m: any) => m?.type === 'stop_generation')
+
+      expect(cancelMsg).toBeDefined()
+      expect(cancelMsg.thread_id).toBe('thread-456')
+      expect(cancelMsg.reason).toBeUndefined()
+      expect(cancelMsg.pipeline_id).toBe('pipeline-xyz')
+
+      disconnect()
+    })
+
+    it('传入 reason 和 pipelineId 时，两者都正确携带', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendCancel('thread-789', 'timeout exceeded', 'pipeline-abc')
+
+      const messages = getSentMessages(ws)
+      const cancelMsg = messages.find((m: any) => m?.type === 'stop_generation')
+
+      expect(cancelMsg).toBeDefined()
+      expect(cancelMsg.thread_id).toBe('thread-789')
+      expect(cancelMsg.reason).toBe('timeout exceeded')
+      expect(cancelMsg.pipeline_id).toBe('pipeline-abc')
+
+      disconnect()
+    })
+  })
+
+  // ──────────────────────────────────────────────
+  // 8. useLayoutModeStore 同步测试
   // ──────────────────────────────────────────────
   describe('状态同步到 store', () => {
     it('连接成功应更新 store 为 connected', async () => {

@@ -482,6 +482,46 @@ class TaskService:
 
         await self._emit_state_change(task_id, old_status, "failed")
 
+    async def cancel_task_cascade(self, task_id: str, reason: str = "") -> int:
+        """级联取消指定任务的所有子任务。
+
+        BUG-FIX-fix_20260522_cancel_task_cascade:
+        问题根因: TaskTool._cancel_task() 调用 service.cancel_task_cascade()，
+                  但 TaskService 中从未定义此方法，导致 AttributeError。
+        修复方案: 参照 fail_task() 的实现模式，遍历 storage 查找
+                  parent_task_id == task_id 的所有子任务，对每个子任务
+                  递归调用 fail_task，并递归处理更深层级。
+        影响范围: 任务取消功能，tool.py 和 routes_tasks.py 的 cancel 端点。
+        修复日期: 2026-05-22
+
+        Args:
+            task_id: 父任务 ID
+            reason: 取消原因
+
+        Returns:
+            被级联取消的子任务数量
+        """
+        if self._storage is None:
+            return 0
+
+        # 查找 parent_task_id == task_id 的所有直接子任务
+        subtasks = self._storage.list_by_parent(task_id)
+        cancelled_count = 0
+
+        for subtask in subtasks:
+            # 对每个子任务调用 fail_task 标记为失败
+            await self.fail_task(
+                subtask.id,
+                reason=f"父任务取消，级联取消: {reason}" if reason else "父任务取消，级联取消",
+            )
+            cancelled_count += 1
+
+            # 递归处理更深层级的子任务
+            deeper_count = await self.cancel_task_cascade(subtask.id, reason=reason)
+            cancelled_count += deeper_count
+
+        return cancelled_count
+
     async def complete_task(self, task_id: str) -> None:
         """将任务标记为完成。
 

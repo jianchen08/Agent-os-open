@@ -398,12 +398,21 @@ def create_combined_app() -> FastAPI:
                     _thread_stop_events.pop(thread_id, None)
 
                     # 2. 尝试查找并取消关联的管道引擎
-                    #    通过 _pipeline_thread_map 反查 pipeline_id，
-                    #    再通过 _find_engine 找到运行中的引擎进行取消。
+                    #    优先使用 pipeline_id 精确取消，不存在时回退到全量取消。
+                    # BUG-FIX-fix_20260522_stop_generation_pipeline:
+                    # 问题根因: 旧代码通过 _pipeline_thread_map 查找所有与 thread_id
+                    #           关联的管道并全部取消，导致同一会话中的所有管道（含子/父）
+                    #           都被误杀。
+                    # 修复方案:
+                    #   1. 优先从消息中读取 pipeline_id，仅取消指定管道（精确取消）
+                    #   2. 若 pipeline_id 不存在，保持原有全量取消逻辑（向后兼容）
+                    _pipeline_id = data.get("pipeline_id", "")
                     _all_pipeline_ids: set[str] = set()
                     try:
                         from pipeline.message_bus import _find_engine
-                        if hasattr(ws_interaction_notifier, "_pipeline_thread_map"):
+                        if _pipeline_id:
+                            _all_pipeline_ids.add(_pipeline_id)
+                        elif hasattr(ws_interaction_notifier, "_pipeline_thread_map"):
                             for _pid, _tid in ws_interaction_notifier._pipeline_thread_map.items():
                                 if _tid == thread_id:
                                     _all_pipeline_ids.add(_pid)
@@ -436,6 +445,13 @@ def create_combined_app() -> FastAPI:
                                             _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
                                             _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
                                             if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
+                                                # BUG-FIX-fix_20260522_stop_generation_pipeline:
+                                                #   在取消管道前先调用 fail_task 标记任务失败，
+                                                #   确保任务状态被正确更新，而非仅中断执行。
+                                                try:
+                                                    await _task_svc.fail_task(_active_tid, reason=f"用户取消: {data.get('reason', 'stop_generation')}")
+                                                except Exception as _ft_err:
+                                                    logger.warning("[GlobalWS] fail_task 失败(仍将继续取消): task=%s, err=%s", _active_tid[:12], _ft_err)
                                                 tw.cancel_pipeline(_active_tid)
                                                 logger.info("[GlobalWS] 已取消 TaskWorker 后台任务: task=%s", _active_tid[:12])
                                     except Exception:
@@ -501,6 +517,50 @@ def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
     raise RuntimeError(f"在端口 {start_port}-{start_port + 99} 范围内没有可用端口")
 
 
+def _cleanup_ghost_running_tasks() -> int:
+    """清理服务重启后残留的幽灵 running 任务。
+
+    BUG-FIX-fix_20260522_ghost_running_tasks:
+    问题根因: 后端重启后，磁盘上存在大量 status: running 的任务（引擎已死但 YAML 未更新），
+              新后端进程不会检查和清理这些幽灵任务，导致系统卡死。
+    修复方案: 在 uvicorn 启动前扫描 TaskStorage 中所有 running 任务，
+              全部标记为 failed（重启后引擎均不在内存中）。
+
+    Returns:
+        被清理的幽灵任务数量
+    """
+    try:
+        from tasks.storage import TaskStorage
+        from tasks.types import TaskStatus
+        _data_dir = str(Path(__file__).resolve().parent / "data" / "tasks")
+        storage = TaskStorage(data_dir=_data_dir)
+    except Exception as exc:
+        logger.warning("[Startup] 幽灵任务清理: 初始化 TaskStorage 失败: %s", exc)
+        return 0
+
+    ghost_tasks = storage.list_by_status(TaskStatus.RUNNING)
+    if not ghost_tasks:
+        return 0
+
+    cleaned = 0
+    for task in ghost_tasks:
+        try:
+            task.status = TaskStatus.FAILED
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            task.metadata["fail_reason"] = "服务重启后引擎状态丢失"
+            storage.save(task)
+            cleaned += 1
+        except Exception as exc:
+            logger.warning(
+                "[Startup] 幽灵任务清理失败: task=%s err=%s",
+                task.id[:12] if hasattr(task, "id") else "?", exc,
+            )
+
+    if cleaned > 0:
+        logger.info("[Startup] 已清理 %d 个幽灵 running 任务（标记为 failed）", cleaned)
+    return cleaned
+
+
 def main() -> None:
     """主函数，启动 uvicorn 服务器。
 
@@ -531,6 +591,9 @@ def main() -> None:
     logger.info("健康检查: http://localhost:%d/health", actual_port)
 
     os.environ["BACKEND_PORT"] = str(actual_port)
+
+    # 启动前清理幽灵 running 任务（引擎已死但 YAML 仍为 running）
+    _cleanup_ghost_running_tasks()
 
     app = create_combined_app()
     uvicorn.run(

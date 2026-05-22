@@ -183,6 +183,10 @@ class LLMCore(ICorePlugin):
             on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
+            from llm.key_pool import set_agent_priority
+            agent_level = ctx.state.get("agent_level", "L3")
+            set_agent_priority(agent_level)
+
             response: LLMResponse = await self._call_llm(
                 messages, ctx, stream=streaming, on_chunk=on_chunk
             )
