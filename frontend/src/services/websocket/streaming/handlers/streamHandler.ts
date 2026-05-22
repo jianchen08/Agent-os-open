@@ -237,16 +237,21 @@ export function handleStreamEnd(eventData: any) {
   if (pipelineId) {
     clearChunkTimeout(pipelineId)
     stopPipelineStreaming(pipelineId, threadId)
-    // BUG-FIX-fix_20260521_stop_button_not_cleared:
-    // 问题根因: 如果 stream_end 的 pipelineId 与 activePipelineId 不一致，
-    //          只清理 pipelineId 对应的 streamingTabs，但 activePipelineId 对应的可能没有清理。
-    // 修复方案: 同时清理 activePipelineId 对应的 streamingTabs。
+    // BUG-FIX-fix_20260522_stream_end_over_cleanup:
+    // 问题根因: 旧逻辑无条件清除 activePipelineId 的 streamingTabs，
+    //           当子管道 stream_end 到达时会误清除正在流式传输的父管道状态，
+    //           或父管道 stream_start 被后续子管道 stream_end 覆盖清除。
+    // 修复方案: 仅在 activePipelineId 没有独立 streaming 会话时才清理其 streamingTabs，
+    //           避免误伤拥有自己 streaming 会话的管道。
     const currentActivePipelineId = pipelineStore.getState().activePipelineId
     if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
-      _debugLogger.info(
-        `[STREAM_END] also clearing activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
-      )
-      useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
+      const activeStreaming = pipelineStore.getState().streamingState[currentActivePipelineId]
+      if (!activeStreaming?.isStreaming) {
+        _debugLogger.info(
+          `[STREAM_END] also clearing inactive activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
+        )
+        useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
+      }
     }
   } else {
     _debugLogger.warn(
