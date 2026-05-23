@@ -466,6 +466,7 @@ async def handle_stream_request(ctx: StreamContext) -> None:
         if ctx.bridge is not None:
             bridge = ctx.bridge
             bridge.pipeline_id = pipeline_id
+            bridge.reset_for_new_turn(message_id)
             if ctx.ws_notifier is not None:
                 bridge.output_sink = TargetedSink(ctx.ws_notifier, thread_id)
         else:

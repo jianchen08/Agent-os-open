@@ -169,6 +169,29 @@ class PipelineStreamBridge:
         """发送哨兵值 None 终止 drain_loop。"""
         self._queue.put_nowait(None)
 
+    def reset_for_new_turn(self, message_id: str | None = None) -> None:
+        """重置内部状态，为新的一轮对话做准备。
+
+        在引擎挂起后唤醒时调用，确保新 turn 的流式输出
+        不会包含上一 turn 的残留内容。
+
+        Args:
+            message_id: 新的消息 ID，不传则保留当前值
+        """
+        self._accumulated_content = []
+        self._thinking_content_parts = []
+        self._thinking_active = False
+        self._stream_started = False
+        self._sent_tool_starts = set()
+        self._seq = 0
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        if message_id:
+            self.message_id = message_id
+
     def _make_event(self, event_type: str, data: dict) -> dict:
         """构造事件字典，自动注入 pipeline_id 和 message_id。
 
@@ -385,15 +408,19 @@ class PipelineStreamBridge:
             except asyncio.TimeoutError:
                 now = asyncio.get_event_loop().time()
 
-                # SIMPLIFY-fix_20260521: 引擎挂起时不再 break，改为继续等待。
-                # 引擎恢复后原始 bridge 的 on_chunk 会继续接收 chunk，
-                # drain_loop 自然继续消费，不需要独立的"唤醒路径"。
                 _is_suspended = (
                     not engine_task.done()
                     and self._queue.empty()
                     and suspend_check is not None
                     and suspend_check()
                 )
+
+                if _is_suspended:
+                    logger.info(
+                        "drain_loop: engine suspended, ending stream: pipeline=%s chunks=%d",
+                        self.pipeline_id[:12], _chunk_count,
+                    )
+                    break
 
                 # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
                 if now - last_keepalive > heartbeat_interval:
