@@ -48,6 +48,12 @@ def get_agent_priority() -> int:
     return _current_agent_priority.get()
 
 
+def _priority_label(priority: int) -> str:
+    """将优先级数值转为可读的层级标签。"""
+    _reverse = {v: k for k, v in _LEVEL_PRIORITY_MAP.items()}
+    return _reverse.get(priority, f"P{priority}")
+
+
 class PrioritySemaphore:
     """优先级信号量 — 高优先级请求优先获取许可。"""
 
@@ -67,14 +73,28 @@ class PrioritySemaphore:
         fut: asyncio.Future = loop.create_future()
         self._waiters.append((priority, fut))
         self._waiters.sort(key=lambda x: x[0])
+
+        # 诊断日志：排队等待时打印优先级和等待队列状态
+        queue_desc = ",".join(
+            f"({p},{_priority_label(p)})" for p, _ in self._waiters
+        )
+        logger.info(
+            "[PrioritySemaphore] 排队等待 | level=%s priority=%d | waiters=%d | queue=[%s]",
+            _priority_label(priority), priority, len(self._waiters), queue_desc,
+        )
+
         await fut
 
     def release(self) -> None:
         """释放一个许可。唤醒最高优先级的等待者。"""
         if self._waiters:
-            _, fut = self._waiters.pop(0)
+            w_priority, fut = self._waiters.pop(0)
             if not fut.done():
                 fut.set_result(None)
+                logger.info(
+                    "[PrioritySemaphore] 唤醒等待者 | level=%s priority=%d | remaining_waiters=%d",
+                    _priority_label(w_priority), w_priority, len(self._waiters),
+                )
         else:
             self._value += 1
 

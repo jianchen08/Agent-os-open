@@ -479,6 +479,7 @@ class PipelineEngine:
                 "tools.builtin", "evaluation",
                 "llm.adapter", "llm.adapter._stream",
                 "triggers.manager",
+                "src.core.event_bus",
             ]:
                 _lg = logging.getLogger(_ln)
                 if _lg.level == logging.NOTSET:

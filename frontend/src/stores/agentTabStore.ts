@@ -302,10 +302,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         }
       })
     } else {
+      const mainPipelineId = getMainPipelineId(sessionId)
       const mainTab: AgentTab = {
         id: `main-${sessionId}`,
         agentId: '', agentName: '主Agent', agentLevel: 1,
-        taskId: undefined, parentRecordId: undefined, pipelineRunId: undefined,
+        taskId: undefined, parentRecordId: undefined,
+        pipelineRunId: mainPipelineId || undefined,
         path: ['主Agent'], status: 'running', hasUnread: false,
         canClose: false, messages: [],
       }
@@ -332,13 +334,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const cachedMessages: Record<string, any[]> = {}
 
     for (const tab of tabs) {
-      if (tab.agentLevel === 1) {
-        const msgs = pipelineStore.getMessages(currentSessionId)
-        if (msgs.length > 0) {
-          cachedMessages[tab.id] = msgs.slice(-MAX_CACHED_MESSAGES_PER_TAB)
-        }
-      } else if (tab.pipelineRunId) {
-        const msgs = pipelineStore.getMessages(tab.pipelineRunId)
+      const pid = tab.pipelineRunId
+      if (pid) {
+        const msgs = pipelineStore.getMessages(pid)
         if (msgs.length > 0) {
           cachedMessages[tab.id] = msgs.slice(-MAX_CACHED_MESSAGES_PER_TAB)
         }
@@ -474,10 +472,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     let pipelineId: string | null = null
     if (tab?.pipelineRunId) {
       pipelineId = tab.pipelineRunId
-    } else if (tab?.agentLevel === 1) {
-      pipelineId = get().currentSessionId
     } else {
-      // 通过 pipelineTabMap 反向查找 pipelineId
       for (const [pid, tid] of Object.entries(pipelineTabMap)) {
         if (tid === tabId) {
           pipelineId = pid
@@ -511,7 +506,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (!activeTabId || !currentSessionId) return []
     const tab = tabs.find((t) => t.id === activeTabId)
     if (!tab) return []
-    const pipelineId = tab.agentLevel === 1 ? currentSessionId : tab.pipelineRunId
+    const pipelineId = tab.pipelineRunId
     if (!pipelineId) return []
     return usePipelineMessageStore.getState().getMessages(pipelineId)
   },
@@ -665,51 +660,20 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (prevActiveTabId === tabId) return
 
     const pipelineStore = usePipelineMessageStore.getState()
-    if (tab.agentLevel === 1) {
-      const { currentSessionId } = get()
-      if (currentSessionId) {
-        // BUG-FIX-fix_20260513_main_tab_pipeline:
-        // 问题根因: 之前用 currentSessionId 激活管道，但主管道消息以 session.activePipelineId
-        //          为 key 存储在 pipelineMessageStore 中，两者不一致导致 pipelineMessages 读到空数组。
-        // 修复方案: 通过 getMainPipelineId() 获取实际的管道 ID 来激活。
-        // 影响范围: 从子 Tab 切换回主 Tab 时的消息显示
-        // 修复日期: 2026-05-13
-        const mainPipelineId = getMainPipelineId(currentSessionId)
-        if (mainPipelineId) {
-          pipelineStore.activatePipeline(mainPipelineId)
+    // 统一通过 tab.pipelineRunId 激活管道（主标签和子标签逻辑一致）
+    let effectivePipelineId = tab.pipelineRunId
+    if (!effectivePipelineId) {
+      for (const [pid, tid] of Object.entries(get().pipelineTabMap)) {
+        if (tid === tabId) {
+          effectivePipelineId = pid
+          break
         }
       }
+    }
+    if (effectivePipelineId) {
+      pipelineStore.activatePipeline(effectivePipelineId)
     } else {
-      // BUG-FIX-fix_20260523_tab_pipeline_msg:
-      // 问题根因: 当 tab.pipelineRunId 为空时（如从 localStorage 恢复），
-      //          fallback 到 tabId（格式为 sub-${parentId}），不会匹配任何 pipeline，
-      //          导致 activatePipeline 使用错误的 ID，消息无法显示。
-      // 修复方案: 从 pipelineTabMap 反向查找 pipelineId，确保使用正确的管道 ID。
-      //          若查找失败则跳过 activatePipeline，避免设置无效的 activePipelineId。
-      // 影响范围: 子 Tab 切换时的消息显示
-      // 修复日期: 2026-05-23
-      let effectivePipelineId = tab.pipelineRunId
-      if (!effectivePipelineId) {
-        for (const [pid, tid] of Object.entries(get().pipelineTabMap)) {
-          if (tid === tabId) {
-            effectivePipelineId = pid
-            break
-          }
-        }
-      }
-      if (effectivePipelineId) {
-        pipelineStore.activatePipeline(effectivePipelineId)
-      } else {
-        console.warn(`[AgentTabStore] switchToTab: 无法解析 pipelineId, tabId=${tabId}`)
-      }
-      // BUG-FIX-fix_20260512_msg_order:
-      // 问题根因: 缓存预填 initFromAPI 与异步 loadTabMessages 的 initFromAPI 之间存在竞争，
-      //          若两次 initFromAPI 之间有 WebSocket 事件到达，事件写入的数据会被第二次完全覆盖。
-      // 修复方案: 移除缓存预填，仅保留 activatePipeline 确保管道切换立即生效。
-      //          loadTabMessages 在后面会异步加载 API 数据并写入 pipelineMessageStore。
-      //          API 数据到达前，ChatContainer 已有 fallback 到 messages prop 的逻辑。
-      // 影响范围: Tab 切换时的消息显示
-      // 修复日期: 2026-05-12
+      console.warn(`[AgentTabStore] switchToTab: 无法解析 pipelineId, tabId=${tabId}`)
     }
 
     set({ activeTabId: tabId })

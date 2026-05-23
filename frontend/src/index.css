@@ -78,3 +78,13 @@ body {
     font-size: 14px;
   }
 }
+
+.scrollbar-transparent {
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-transparent::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.scrollbar-transparent::-webkit-scrollbar-track {
+  background: transparent;
+}

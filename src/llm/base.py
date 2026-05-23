@@ -218,15 +218,14 @@ class LLMClient(ABC):
             api_key: API 密钥
             api_base: API 基础 URL
             default_params: 默认参数
-            provider: 提供商名称（用于并发控制）
-            enable_concurrency_control: 是否启用并发控制
+            provider: 提供商名称（用于日志）
+            enable_concurrency_control: 已废弃，并发控制由 KeyPool PrioritySemaphore 统一管理
         """
         self.model_name = model_name
         self.api_key = api_key
         self.api_base = api_base
         self.default_params = default_params or {}
         self.provider = provider or self._detect_provider()
-        self.enable_concurrency_control = enable_concurrency_control
 
     def _detect_provider(self) -> str:
         """
@@ -341,20 +340,9 @@ class LLMClient(ABC):
         if check_budget:
             await self._check_budget_before_call(messages, task_id, session_id)
 
-        # 执行生成
+        # 执行生成（并发控制已由 KeyPool PrioritySemaphore 统一管理）
         try:
-            if self.enable_concurrency_control:
-                from src.llm.scheduler import get_llm_scheduler
-
-                scheduler = get_llm_scheduler()
-                response = await scheduler.call_with_semaphore(
-                    self.provider,
-                    self._generate_internal,
-                    messages,
-                    **kwargs,
-                )
-            else:
-                response = await self._generate_internal(messages, **kwargs)
+            response = await self._generate_internal(messages, **kwargs)
         except Exception as e:
             # 记录错误（包含请求ID）
             if msg_logger:
@@ -413,30 +401,13 @@ class LLMClient(ABC):
         accumulated = []
 
         try:
-            if self.enable_concurrency_control:
-                from src.llm.scheduler import get_llm_scheduler
-
-                scheduler = get_llm_scheduler()
-                await scheduler.acquire(self.provider)
-
-                try:
-                    async for chunk in self._stream_internal(messages, **kwargs):
-                        accumulated.append(chunk)
-                        if msg_logger:
-                            msg_logger.log_stream_chunk(
-                                self.model_name, chunk, accumulated="".join(accumulated)
-                            )
-                        yield chunk
-                finally:
-                    await scheduler.release(self.provider)
-            else:
-                async for chunk in self._stream_internal(messages, **kwargs):
-                    accumulated.append(chunk)
-                    if msg_logger:
-                        msg_logger.log_stream_chunk(
-                            self.model_name, chunk, accumulated="".join(accumulated)
-                        )
-                    yield chunk
+            async for chunk in self._stream_internal(messages, **kwargs):
+                accumulated.append(chunk)
+                if msg_logger:
+                    msg_logger.log_stream_chunk(
+                        self.model_name, chunk, accumulated="".join(accumulated)
+                    )
+                yield chunk
         except Exception as e:
             # 记录错误
             if msg_logger:
@@ -547,23 +518,11 @@ class LLMClient(ABC):
         if check_budget:
             await self._check_budget_before_call(messages, task_id, session_id)
 
-        # 执行生成
+        # 执行生成（并发控制已由 KeyPool PrioritySemaphore 统一管理）
         try:
-            if self.enable_concurrency_control:
-                from src.llm.scheduler import get_llm_scheduler
-
-                scheduler = get_llm_scheduler()
-                response = await scheduler.call_with_semaphore(
-                    self.provider,
-                    self._generate_with_tools_internal,
-                    messages,
-                    tools,
-                    **kwargs,
-                )
-            else:
-                response = await self._generate_with_tools_internal(
-                    messages, tools, **kwargs
-                )
+            response = await self._generate_with_tools_internal(
+                messages, tools, **kwargs
+            )
         except Exception as e:
             # 记录错误
             if msg_logger:

@@ -5,7 +5,7 @@
  * 用于获取预算状态、使用统计、成本配置等信息
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import {
   getBudgetStatus,
@@ -201,6 +201,15 @@ export function useBudgetStatus(
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: params 对象在 useCallback 依赖中，如果调用方传内联对象，
+  //          每次渲染产生新引用导致 fetchBudgetStatus 重建，触发 useEffect 无限循环。
+  // 修复方案: 使用 useRef 保存最新 params，useCallback 使用空依赖。
+  // 影响范围: useBudgetStatus hook 调用方
+  // 修复日期: 2026-05-23
+  const paramsRef = useRef(params)
+  useEffect(() => { paramsRef.current = params }, [params])
+
   /**
    * 获取预算状态
    */
@@ -208,7 +217,7 @@ export function useBudgetStatus(
     setIsLoading(true)
     setError(null)
     try {
-      const status = await getBudgetStatus(params)
+      const status = await getBudgetStatus(paramsRef.current)
       setBudgetStatus(status)
       return status
     } catch (err: unknown) {
@@ -218,7 +227,7 @@ export function useBudgetStatus(
     } finally {
       setIsLoading(false)
     }
-  }, [params])
+  }, [])
 
   useEffect(() => {
     if (autoFetch) {

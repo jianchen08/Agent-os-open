@@ -208,16 +208,29 @@ function HomePage(): ReactNode {
     }
   }, [rawToggleMode])
 
-  const {
-    sessions,
-    activeSessionId,
-    wsStatus,
-    isLoading: isSessionLoading,
-    connectWebSocket,
-    disconnectWebSocket,
-  } = useSessionStore()
-  const { createSession, setActiveSession, deleteSession, copySession, toggleSessionStar, toggleSessionPin, renameSession, fetchSessions } = useSessionListStore()
-  const { isStreaming, stopStreamingForTab, streamingTabs } = useStreamingStore()
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: useSessionStore()/useStreamingStore()/useSessionListStore() 无 selector 全量订阅，
+  //          流式输出期间 store 频繁更新导致 HomePage 全组件树级联重渲染。
+  // 修复方案: 改为精确 selector，只订阅需要的字段。
+  // 影响范围: HomePage 组件渲染性能
+  // 修复日期: 2026-05-23
+  const sessions = useSessionStore((s) => s.sessions)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const wsStatus = useSessionStore((s) => s.wsStatus)
+  const isSessionLoading = useSessionStore((s) => s.isLoading)
+  const connectWebSocket = useSessionStore((s) => s.connectWebSocket)
+  const disconnectWebSocket = useSessionStore((s) => s.disconnectWebSocket)
+  const createSession = useSessionListStore((s) => s.createSession)
+  const setActiveSession = useSessionListStore((s) => s.setActiveSession)
+  const deleteSession = useSessionListStore((s) => s.deleteSession)
+  const copySession = useSessionListStore((s) => s.copySession)
+  const toggleSessionStar = useSessionListStore((s) => s.toggleSessionStar)
+  const toggleSessionPin = useSessionListStore((s) => s.toggleSessionPin)
+  const renameSession = useSessionListStore((s) => s.renameSession)
+  const fetchSessions = useSessionListStore((s) => s.fetchSessions)
+  const isStreaming = useStreamingStore((s) => s.isStreaming)
+  const stopStreamingForTab = useStreamingStore((s) => s.stopStreamingForTab)
+  const streamingTabs = useStreamingStore((s) => s.streamingTabs)
 
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)

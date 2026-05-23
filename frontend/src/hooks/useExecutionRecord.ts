@@ -4,7 +4,7 @@
  * 用于查询单个或多个执行记录，支持缓存和批量查询
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActivityData } from '@/types/activity'
 import { apiClient } from '@/services/api'
 
@@ -280,8 +280,17 @@ export function useExecutionRecords(recordIds: string[]) {
   // 使用 useMemo 缓存 recordIds 的字符串表示
   const recordIdsKey = useMemo(() => recordIds.join(','), [recordIds])
 
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: recordIds 数组引用在 useEffect 依赖中，如果父组件传递内联数组，
+  //          每次渲染产生新引用导致 effect 无限触发。
+  // 修复方案: 使用 useRef 保存最新 recordIds，useEffect 只依赖稳定的 recordIdsKey。
+  // 影响范围: useExecutionRecords hook 调用方
+  // 修复日期: 2026-05-23
+  const recordIdsRef = useRef(recordIds)
+  useEffect(() => { recordIdsRef.current = recordIds }, [recordIds])
+
   useEffect(() => {
-    if (recordIds.length === 0) {
+    if (recordIdsRef.current.length === 0) {
       setRecords(new Map())
       setActivities(new Map())
       return
@@ -293,7 +302,7 @@ export function useExecutionRecords(recordIds: string[]) {
       setLoading(true)
 
       try {
-        const data = await fetchExecutionRecords(recordIds)
+        const data = await fetchExecutionRecords(recordIdsRef.current)
         if (!cancelled) {
           setRecords(data)
 
@@ -316,7 +325,7 @@ export function useExecutionRecords(recordIds: string[]) {
     return () => {
       cancelled = true
     }
-  }, [recordIdsKey, recordIds])
+  }, [recordIdsKey])
 
   return { records, activities, loading }
 }

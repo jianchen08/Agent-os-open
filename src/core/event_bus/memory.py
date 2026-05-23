@@ -229,16 +229,24 @@ class InMemoryEventBus(EventBusBase):
         Args:
             event: 执行事件
         """
+        matched_count = 0
+        total_count = len(self._subscriptions)
         for subscription in self._subscriptions.values():
             # 检查过滤器
             if subscription.filter and not subscription.filter.matches(event):
                 continue
 
+            matched_count += 1
             # 异步调用处理器
             try:
                 asyncio.create_task(self._safe_call(subscription.handler, event))
             except Exception as e:
                 logger.error(f"创建事件处理任务失败: {e}")
+
+        logger.info(
+            f"[InMemoryEventBus] 事件分发 | type={event.event_type.value} "
+            f"| matched={matched_count}/{total_count} | event_id={event.event_id}"
+        )
 
     async def _safe_call(
         self,
@@ -246,10 +254,20 @@ class InMemoryEventBus(EventBusBase):
         event: ExecutionEvent,
     ) -> None:
         """安全调用处理器"""
+        handler_name = getattr(handler, "__qualname__", None) or getattr(handler, "__name__", str(handler))
+        logger.info(
+            f"[InMemoryEventBus] 调用处理器 | handler={handler_name} "
+            f"| event_type={event.event_type.value} | event_id={event.event_id}"
+        )
         try:
             await handler(event)
         except Exception as e:
-            logger.error(f"事件处理器错误: {e}")
+            data_summary = str(event.data)[:200] if event.data else ""
+            logger.error(
+                f"[InMemoryEventBus] 处理器异常 | handler={handler_name} "
+                f"| event_type={event.event_type.value} | event_id={event.event_id} "
+                f"| data_summary={data_summary} | error={e}"
+            )
 
     def subscribe(
         self,
@@ -348,6 +366,31 @@ class InMemoryEventBus(EventBusBase):
     def clear_history(self) -> None:
         """清除历史"""
         self._history.clear()
+
+    def has_subscribers(self, event_type: str) -> bool:
+        """检查指定事件类型是否有订阅者。
+
+        通过归一化事件类型字符串（点号→下划线）与订阅过滤器的 event_types 匹配，
+        与 subscribe_simple / emit 的归一化逻辑保持一致。
+
+        Args:
+            event_type: 事件类型字符串（如 "task.submitted", "task_submitted"）
+
+        Returns:
+            是否存在匹配的订阅者
+        """
+        normalized = event_type.replace(".", "_")
+        for subscription in self._subscriptions.values():
+            if subscription.filter is None:
+                return True
+            if subscription.filter.event_types:
+                for et in subscription.filter.event_types:
+                    if et.value == normalized or et.value == event_type:
+                        return True
+            if subscription.filter.custom_event_types:
+                if event_type in subscription.filter.custom_event_types or normalized in subscription.filter.custom_event_types:
+                    return True
+        return False
 
     @property
     def subscriber_count(self) -> int:

@@ -85,6 +85,10 @@ class TaskSubmitTool(BuiltinTool):
         bus = provider.get_or_create("event_bus", get_core_event_bus)
         if bus is not None:
             self._event_bus = bus
+            logger.info(
+                "[TaskSubmit] 获取 EventBus | type=%s | id=%s",
+                type(bus).__name__, id(bus),
+            )
         return self._event_bus
 
     @staticmethod
@@ -490,6 +494,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             )
             del inputs["workspace"]
 
+        # BUG-FIX-fix_20260523_l2_isolation_override:
+        # 子任务无权决定隔离级别，由系统根据父任务链自动继承。
+        # LLM 可能传入 isolation_level="host"，导致子任务绕过沙箱隔离。
+        if parent_task_id and inputs.get("isolation_level"):
+            logger.info(
+                "[TaskSubmit] 子任务清除 LLM 传入的 isolation_level | parent_task_id=%s | isolation_level=%s",
+                parent_task_id, inputs["isolation_level"],
+            )
+            del inputs["isolation_level"]
+
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
             logger.warning(
@@ -699,6 +713,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             )
             no_subscriber_warning = "后台执行器(TaskWorker)暂未就绪，任务已创建并等待自动执行"
 
+        # 记录 emit 前的 EventBus 状态
+        logger.info(
+            "[TaskSubmit] 准备 emit | event_bus_type=%s | event_bus_id=%s "
+            "| has_subscribers=%s | subscriber_count=%s | task_id=%s",
+            type(event_bus).__name__, id(event_bus),
+            event_bus.has_subscribers("task.submitted") if hasattr(event_bus, 'has_subscribers') else "N/A",
+            getattr(event_bus, 'subscriber_count', "N/A"),
+            task.id,
+        )
+
         try:
             # Determine is_root: container sub-tasks (parent is container) get own workspace,
             # agent sub-tasks (parent is non_container) share parent workspace.
@@ -733,6 +757,10 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
             })
             logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
+            logger.info(
+                "[TaskSubmit] emit 完成 | event_bus_type=%s | event_bus_id=%s | task_id=%s",
+                type(event_bus).__name__, id(event_bus), task.id,
+            )
         except Exception as e:
             # emit 异常时不回滚任务：任务已持久化为 pending，TaskWorker 恢复机制可补偿
             logger.warning(

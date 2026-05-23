@@ -426,7 +426,7 @@ export function CodeEditor({
           {/* 语法高亮底层（用于视觉参考，实际编辑在 textarea 上层） */}
           <pre
             ref={preRef}
-            className="pointer-events-none absolute inset-0 overflow-hidden p-4 text-sm"
+            className="pointer-events-none absolute inset-0 scrollbar-transparent p-4 text-sm"
             style={{
               background: 'var(--code-bg, #1e1e1e)',
               color: 'var(--code-text, #d4d4d4)',
@@ -437,10 +437,12 @@ export function CodeEditor({
               margin: 0,
               whiteSpace: 'pre-wrap',
               wordWrap: 'break-word',
+              overflow: 'auto',
+              tabSize: 4,
             }}
             aria-hidden="true"
           >
-            <code>{localContent}</code>
+            {localContent}
           </pre>
 
           {/* 文本编辑区域 */}
@@ -464,6 +466,7 @@ export function CodeEditor({
               wordWrap: 'break-word',
               overflow: 'auto',
               margin: 0,
+              tabSize: 4,
             }}
             spellCheck={false}
             autoComplete="off"

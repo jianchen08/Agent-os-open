@@ -4,6 +4,7 @@
 定义事件类型、事件数据结构和过滤器
 """
 
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+_logger = logging.getLogger(__name__)
 
 
 class EventType(str, Enum):
@@ -187,22 +190,53 @@ class EventFilter:
     def matches(self, event: ExecutionEvent) -> bool:
         """检查事件是否匹配过滤器"""
         if self.event_types and event.event_type not in self.event_types:
+            _logger.debug(
+                "[EventFilter] 匹配失败 | reason=event_types "
+                "| event_type=%s | required=%s",
+                event.event_type.value,
+                [et.value for et in self.event_types],
+            )
             return False
 
         if self.custom_event_types:
             if event.event_type != EventType.CUSTOM:
+                _logger.debug(
+                    "[EventFilter] 匹配失败 | reason=not_custom "
+                    "| event_type=%s",
+                    event.event_type.value,
+                )
                 return False
             custom_type = event.data.get("custom_event_type", "")
             if custom_type not in self.custom_event_types:
+                _logger.debug(
+                    "[EventFilter] 匹配失败 | reason=custom_type_mismatch "
+                    "| custom_type=%s | required=%s",
+                    custom_type, self.custom_event_types,
+                )
                 return False
 
         if self.session_ids and event.session_id not in self.session_ids:
+            _logger.debug(
+                "[EventFilter] 匹配失败 | reason=session_id "
+                "| session_id=%s | required=%s",
+                event.session_id, self.session_ids,
+            )
             return False
 
         if self.min_priority and event.priority.value < self.min_priority.value:
+            _logger.debug(
+                "[EventFilter] 匹配失败 | reason=priority "
+                "| event_priority=%s | min_priority=%s",
+                event.priority.value, self.min_priority.value,
+            )
             return False
 
         if self.sources and event.source not in self.sources:
+            _logger.debug(
+                "[EventFilter] 匹配失败 | reason=source "
+                "| source=%s | required=%s",
+                event.source, self.sources,
+            )
             return False
 
         return True

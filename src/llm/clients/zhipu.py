@@ -63,7 +63,6 @@ class ZhipuClient(LLMClient):
             api_base or "https://open.bigmodel.cn/api/paas/v4",
             default_params,
             provider="zhipu",
-            enable_concurrency_control=enable_concurrency_control,
         )
 
         # 初始化智谱 SDK 客户端

@@ -208,7 +208,7 @@ core_plugins:
   tool_execute:
     class: plugins.core.tool_core.ToolCore
     config:
-      timeout: 120
+      timeout: 300
       result_format: "yaml"
       level_timeouts:
         "1": 3600
@@ -218,3 +218,8 @@ core_plugins:
         human_interaction: 1800
         task_evaluate: 1200
         bash_execute: 300
+        enhanced_search: 600
+        resource_search: 600
+        resource_merge: 600
+        file_write: 300
+        file_read: 300

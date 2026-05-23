@@ -150,9 +150,10 @@ export function handleStreamStart(eventData: any) {
       // 条件4：用户已主动进入该管道的交互（entered 状态）
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
 
-      // 条件5：用户在主 tab 且该 pipelineId 不属于任何子 tab，
-      //        认为是主管道自身的流式输出，应激活
-      if (activeTab?.agentLevel === 1 && !tabIdForPipeline) return true
+      // 条件5：该 pipeline 不属于任何已知子 Tab，说明是主管道的新一轮输出
+      // 后端可能为同一会话创建新 pipeline（如每轮对话新建），此时需要更新 activePipelineId
+      // 子 Agent 的 pipeline 会在创建子 Tab 时写入 pipelineTabMap，因此不在 map 中的都是主管道
+      if (!tabIdForPipeline) return true
 
       return false
     })()

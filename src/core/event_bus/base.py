@@ -12,6 +12,7 @@ from typing import Any
 from src.core.event_bus.types import (
     EventFilter,
     EventHandler,
+    EventPriority,
     EventType,
     ExecutionEvent,
 )
@@ -572,11 +573,29 @@ class EventBusBase(abc.ABC):
                 event_enum = EventType.CUSTOM
                 data["custom_event_type"] = event_type
 
+        data_summary = str(data)[:200] if data else ""
+        logger.info(
+            "[EventBus] emit | raw_type=%s | resolved_enum=%s "
+            "| session_id=%s | data_summary=%s",
+            event_type, event_enum.value, session_id, data_summary,
+        )
+
+        # BUG-FIX-fix_20260523_batch_event_lost:
+        # InMemoryEventBus 的批处理模式使用 call_later(0.1s) 延迟处理，
+        # 在 task_submit 的 await emit() 返回后，批处理定时器回调可能无法
+        # 在正确的事件循环上下文中执行，导致事件被静默丢弃。
+        # 修复：task_* 类事件直接走 _publish_direct，绕过批处理。
+        _normalized_type = event_type.replace(".", "_")
+        _priority = EventPriority.NORMAL
+        if _normalized_type.startswith("task"):
+            _priority = EventPriority.HIGH
+
         return await self.publish(
             ExecutionEvent(
                 event_type=event_enum,
                 session_id=session_id,
                 data=data,
+                priority=_priority,
             ),
             retry_count=retry_count,
         )

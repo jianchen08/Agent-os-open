@@ -202,7 +202,6 @@ class OpenAIClient(LLMClient):
             api_base,
             default_params,
             provider=detected_provider,
-            enable_concurrency_control=enable_concurrency_control,
         )
 
         # 构建 ChatOpenAI 参数

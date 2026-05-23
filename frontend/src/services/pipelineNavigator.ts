@@ -1,0 +1,167 @@
+/**
+ * 全局管道导航服务
+ *
+ * 在所有会话的所有管道中查找并跳转到目标管道。
+ * pipeline_id 是全局唯一的路由键，一个 pipeline_id 在整个前端窗口中
+ * 只对应一个标签页。
+ *
+ * 主管道和子管道没有区别，统一通过 pipeline_id 查找和跳转。
+ *
+ * 查找优先级：
+ * 1. 当前已加载的 pipelineSessionMap（内存中最快）
+ * 2. 所有会话的 Session.pipelineIds（前端已有数据）
+ * 3. 后端 API 重新拉取会话列表（兜底）
+ */
+
+import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionListStore } from '@/stores/sessionListStore'
+import type { AgentTab } from '@/types/task'
+
+/** 查找结果 */
+export interface PipelineLocation {
+  /** 管道所属会话 ID */
+  sessionId: string
+  /** 管道 ID */
+  pipelineId: string
+  /** 对应的 Tab ID（null 表示该会话尚未加载该管道的标签） */
+  tabId: string | null
+}
+
+/**
+ * 在所有会话中查找管道归属
+ *
+ * 查找优先级：
+ * 1. 当前已加载的 pipelineSessionMap（内存中最快）
+ * 2. 所有会话的 Session.pipelineIds（前端已有数据）
+ * 3. 后端 API 重新拉取会话列表（兜底）
+ *
+ * @param pipelineId - 目标管道 ID
+ * @returns 管道位置信息，找不到返回 null
+ */
+export async function findPipelineLocation(pipelineId: string): Promise<PipelineLocation | null> {
+  // 第一级：内存中的 pipelineSessionMap（最快）
+  const pipelineStore = usePipelineMessageStore.getState()
+  const cachedSessionId = pipelineStore.pipelineSessionMap[pipelineId]
+  if (cachedSessionId) {
+    const tabStore = useAgentTabStore.getState()
+    // 统一查找：先查 pipelineTabMap，再查 tab.pipelineRunId
+    const tabId = tabStore.pipelineTabMap[pipelineId]
+      || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
+      || null
+    return { sessionId: cachedSessionId, pipelineId, tabId }
+  }
+
+  // 第二级：遍历所有会话的 pipelineIds
+  const sessions = useSessionStore.getState().sessions
+  for (const session of sessions) {
+    if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
+      const tabStore = useAgentTabStore.getState()
+      const tabId = tabStore.pipelineTabMap[pipelineId]
+        || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
+        || null
+      return { sessionId: session.id, pipelineId, tabId }
+    }
+  }
+
+  // 第三级：重新拉取会话列表后再查找（兜底）
+  try {
+    await useSessionListStore.getState().fetchSessions({ background: true })
+    const refreshedSessions = useSessionStore.getState().sessions
+    for (const session of refreshedSessions) {
+      if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
+        return { sessionId: session.id, pipelineId, tabId: null }
+      }
+    }
+  } catch {
+    // 后端请求失败，忽略
+  }
+
+  return null
+}
+
+/**
+ * 全局导航到指定管道
+ *
+ * 统一逻辑：通过 pipeline_id 在所有会话的所有标签中查找，
+ * 找到了就跳转，没有就创建。主管道和子管道没有区别。
+ *
+ * @param pipelineId - 目标管道 ID
+ * @param options - 可选参数
+ * @returns 是否导航成功
+ */
+export async function navigateToPipeline(
+  pipelineId: string,
+  options?: {
+    agentName?: string
+    agentLevel?: 1 | 2 | 3
+    taskId?: string
+    status?: string
+  },
+): Promise<boolean> {
+  const { agentName = '子任务', agentLevel = 2, taskId, status = 'running' } = options || {}
+
+  const currentSid = useSessionStore.getState().activeSessionId
+  if (!currentSid) return false
+
+  // 快速检查：当前标签的 pipelineRunId 已经是目标管道，直接返回
+  const tabStore = useAgentTabStore.getState()
+  const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
+  if (activeTab?.pipelineRunId === pipelineId) {
+    return true
+  }
+
+  // 定位管道（找不到时降级到当前会话）
+  const location = await findPipelineLocation(pipelineId)
+  const targetSessionId = location?.sessionId || currentSid
+
+  // 如果在其他会话，先切换会话
+  if (location && targetSessionId !== currentSid) {
+    useAgentTabStore.getState().saveCurrentTabs()
+    await useSessionListStore.getState().setActiveSession(targetSessionId)
+    useAgentTabStore.getState().initSessionTabs(targetSessionId)
+  }
+
+  // 刷新 tabStore 引用（会话切换后状态已更新）
+  const currentTabStore = useAgentTabStore.getState()
+
+  // 统一查找已有标签：通过 pipelineRunId 匹配
+  const existingTab = currentTabStore.tabs.find((t) => t.pipelineRunId === pipelineId)
+  if (existingTab) {
+    currentTabStore.switchToTab(existingTab.id)
+    return true
+  }
+
+  // 创建新标签
+  const tabId = `sub-${pipelineId}`
+
+  const pipelineStore = usePipelineMessageStore.getState()
+  if (!pipelineStore.pipelines[pipelineId]) {
+    pipelineStore.registerPipeline({
+      pipelineId,
+      sessionId: targetSessionId,
+      level: agentLevel,
+      tabId,
+      agentName,
+      status: status as PipelineMeta['status'],
+      parentId: targetSessionId,
+      unreadCount: 0,
+    })
+  }
+
+  currentTabStore.openSubAgentTab({
+    agentId: taskId || pipelineId,
+    agentName,
+    parentRecordId: pipelineId,
+    agentLevel,
+    taskId,
+    status: status as AgentTab['status'],
+    setActive: true,
+    pipelineId,
+  })
+
+  currentTabStore.loadTabMessages(tabId, pipelineId)
+
+  return true
+}

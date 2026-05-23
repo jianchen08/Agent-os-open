@@ -40,7 +40,8 @@ export function AgentSelector({
   compact = false,
   className,
 }: AgentSelectorProps) {
-  const { agents, isLoading } = useAgentStore()
+  const agents = useAgentStore((s) => s.agents)
+  const isLoading = useAgentStore((s) => s.isLoading)
   const [isOpen, setIsOpen] = useState(false)
 
   const currentAgent = agents.find((a) => a.id === currentAgentId)

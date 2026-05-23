@@ -131,10 +131,16 @@ export const MessageItem = ({
     message.metadata?.type === 'system' ||
     message.metadata?.sender_type === 'system'
 
-  const { activeSessionId } = useSessionStore()
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: useSessionStore()/useAgentStore() 无 selector 全量订阅，
+  //          N 个 MessageItem 实例同时订阅，任何 store 变化触发所有实例重渲染。
+  // 修复方案: 改为精确 selector，只订阅需要的字段。
+  // 影响范围: 消息列表渲染性能
+  // 修复日期: 2026-05-23
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const isMessageStreaming = message.status === 'streaming'
 
-  const { agents } = useAgentStore()
+  const agents = useAgentStore((s) => s.agents)
   const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
 
   const hasPendingInteraction = useInteractionStore(

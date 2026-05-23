@@ -37,7 +37,6 @@ class ReasoningClient(LLMClient):
             api_base=api_base,
             default_params=default_params,
             provider=provider,
-            enable_concurrency_control=True,
         )
         self.reasoning_type = reasoning_type
         self._http_client = httpx.AsyncClient(

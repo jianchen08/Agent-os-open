@@ -201,6 +201,12 @@ class TaskWorker(
             sub1 = self._event_bus.subscribe_simple("task.submitted", self._on_task_submitted)
             sub2 = self._event_bus.subscribe_simple("task_state_changed", self._on_task_state_changed)
             self._sub_ids = [sub1, sub2]
+            logger.info(
+                "TaskWorker: 订阅完成 | sub1=%s | sub2=%s | event_bus_type=%s | event_bus_id=%s | total_subscribers=%s",
+                sub1, sub2,
+                type(self._event_bus).__name__, id(self._event_bus),
+                getattr(self._event_bus, 'subscriber_count', "N/A"),
+            )
 
         await self._recover_running_tasks()
         await self._recover_evaluating_tasks()
@@ -321,10 +327,20 @@ class TaskWorker(
         Args:
             event: 任务提交事件
         """
+        logger.info(
+            "TaskWorker: 收到事件 | event_type=%s | event_id=%s",
+            getattr(event, "event_type", "N/A"),
+            getattr(event, "event_id", "N/A"),
+        )
         if not self._running:
             return
         task_data = event.data if hasattr(event, "data") else event
         task_id = task_data.get("task_id", "unknown") if isinstance(task_data, dict) else "unknown"
+        logger.info(
+            "TaskWorker: 解析事件数据 | task_id=%s | data_keys=%s",
+            task_id,
+            list(task_data.keys()) if isinstance(task_data, dict) else "N/A",
+        )
 
         # BUG-FIX-fix_20260518_submitted_dedup: 事件级 set[str] 去重
         if task_id != "unknown":

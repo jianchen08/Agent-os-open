@@ -36,7 +36,8 @@ export function MainAgentSelector({
   onAgentChange,
   className,
 }: MainAgentSelectorProps) {
-  const { agents, isLoading } = useAgentStore()
+  const agents = useAgentStore((s) => s.agents)
+  const isLoading = useAgentStore((s) => s.isLoading)
   const [isOpen, setIsOpen] = useState(false)
 
   /** 只筛选主 Agent */

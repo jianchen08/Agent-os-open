@@ -44,7 +44,6 @@ class MockClient(LLMClient):
             api_base,
             default_params,
             provider=detected_provider,
-            enable_concurrency_control=enable_concurrency_control,
         )
 
     async def _generate_internal(
