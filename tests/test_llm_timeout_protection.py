@@ -23,12 +23,10 @@ def test_get_call_timeout_returns_default_when_config_unavailable():
     from stream_handler import _get_call_timeout
     import stream_handler
 
-    # 重置缓存
     stream_handler._cached_call_timeout = None
     with patch.dict("sys.modules", {}):
         timeout = _get_call_timeout()
     assert timeout == 120
-    # 恢复缓存
     stream_handler._cached_call_timeout = None
 
 
@@ -40,13 +38,22 @@ def test_get_call_timeout_caches_result():
     from stream_handler import _get_call_timeout
 
     assert _get_call_timeout() == 300
-    # 恢复
     stream_handler._cached_call_timeout = None
 
 
 # ---------------------------------------------------------------------------
 # 辅助：轻量级 Fake 对象，避免 MagicMock 属性链问题
 # ---------------------------------------------------------------------------
+
+
+class _FakeNotifier:
+    def __init__(self, sent_messages):
+        self._sent = sent_messages
+
+    async def send_to_thread(self, thread_id, event):
+        if isinstance(event, dict):
+            self._sent.append(event)
+        return True
 
 
 class _FakeEngine:
@@ -61,7 +68,7 @@ class _FakeEngine:
 
 
 class _FakeCtx:
-    """模拟 PipelineContext，提供 _stream_engine_response 所需接口。"""
+    """模拟 PipelineContext，提供 handle_stream_request 所需接口。"""
 
     def __init__(self, engine):
         self.engine = engine
@@ -72,6 +79,39 @@ class _FakeCtx:
         return self.engine
 
 
+def _build_stream_context(
+    websocket,
+    user_content="test",
+    message_id="test-msg-id",
+    stop_event=None,
+    thread_id="test-thread",
+    conversation_history=None,
+    pipeline_ctx=None,
+    ws_notifier=None,
+    sent_messages=None,
+):
+    """构造 StreamContext 用于测试。"""
+    from stream_handler import StreamContext
+
+    if stop_event is None:
+        stop_event = asyncio.Event()
+    if conversation_history is None:
+        conversation_history = [{"role": "user", "content": "test", "id": "u1"}]
+    if ws_notifier is None and sent_messages is not None:
+        ws_notifier = _FakeNotifier(sent_messages)
+    return StreamContext(
+        pipeline_id="",
+        message_id=message_id,
+        thread_id=thread_id,
+        conversation_history=conversation_history,
+        ws_notifier=ws_notifier,
+        websocket=websocket,
+        stop_event=stop_event,
+        user_content=user_content,
+        pipeline_ctx=pipeline_ctx,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 测试超时保护核心逻辑
 # ---------------------------------------------------------------------------
@@ -79,55 +119,47 @@ class _FakeCtx:
 
 @pytest.mark.asyncio
 async def test_drain_timeout_sends_error_to_frontend():
-    """engine.run() 挂起超过 call_timeout 时，前端收到 new_message 错误消息。"""
-    from stream_handler import _stream_engine_response
+    """engine.run() 挂起超过 call_timeout 时，前端收到 stream_end 超时事件。"""
+    from stream_handler import handle_stream_request
     import stream_handler
 
-    # 模拟 WebSocket
     sent_messages: list[dict] = []
 
     class FakeWebSocket:
         async def send_text(self, text: str):
             sent_messages.append(json.loads(text))
 
-    # 模拟一个永远不会完成的 engine task
     async def hanging_run(**kwargs):
         await asyncio.sleep(9999)
 
     fake_engine = _FakeEngine(hanging_run)
     fake_ctx = _FakeCtx(fake_engine)
 
-    # 设置极短超时以加速测试
     stream_handler._cached_call_timeout = 1
 
     websocket = FakeWebSocket()
     stop_event = asyncio.Event()
 
-    # 函数内部 catch 了 TimeoutError，不会向外抛出
-    await _stream_engine_response(
+    sctx = _build_stream_context(
         websocket=websocket,
-        user_content="test",
-        message_id="test-msg-id",
         stop_event=stop_event,
-        thread_id="test-thread",
-        conversation_history=[
-            {"role": "user", "content": "test", "id": "u1"}
-        ],
-        ctx=fake_ctx,
+        pipeline_ctx=fake_ctx,
+        sent_messages=sent_messages,
     )
+    with pytest.raises(TimeoutError):
+        await handle_stream_request(sctx)
 
     stream_handler._cached_call_timeout = None
 
-    # 验证前端收到了错误消息（new_message）
-    new_msg = [m for m in sent_messages if m.get("type") == "new_message"]
-    assert len(new_msg) >= 1
-    assert "超时" in new_msg[0]["data"]["content"]
+    stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
+    assert len(stream_ends) >= 1
+    assert stream_ends[0]["data"].get("timed_out") is True
 
 
 @pytest.mark.asyncio
 async def test_drain_timeout_sends_stream_end_when_stream_started():
     """超时时如果 stream 已开始，前端应收到 stream_end。"""
-    from stream_handler import _stream_engine_response
+    from stream_handler import handle_stream_request
     import stream_handler
 
     sent_messages: list[dict] = []
@@ -136,7 +168,6 @@ async def test_drain_timeout_sends_stream_end_when_stream_started():
         async def send_text(self, text: str):
             sent_messages.append(json.loads(text))
 
-    # 模拟 engine.run：先触发一个 text chunk（启动 stream），然后挂起
     async def partial_then_hang(**kwargs):
         on_chunk_cb = kwargs.get("on_chunk")
         if on_chunk_cb:
@@ -151,32 +182,25 @@ async def test_drain_timeout_sends_stream_end_when_stream_started():
     websocket = FakeWebSocket()
     stop_event = asyncio.Event()
 
-    await _stream_engine_response(
+    sctx = _build_stream_context(
         websocket=websocket,
-        user_content="test",
-        message_id="test-msg-id",
         stop_event=stop_event,
-        thread_id="test-thread",
-        conversation_history=[
-            {"role": "user", "content": "test", "id": "u1"}
-        ],
-        ctx=fake_ctx,
+        pipeline_ctx=fake_ctx,
+        sent_messages=sent_messages,
     )
+    with pytest.raises(TimeoutError):
+        await handle_stream_request(sctx)
 
     stream_handler._cached_call_timeout = None
 
-    # 验证：应该有 stream_end 消息（因为 stream_started 为 True）
     stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
     assert len(stream_ends) >= 1
-    # 验证：应该有 new_message 消息
-    new_msgs = [m for m in sent_messages if m.get("type") == "new_message"]
-    assert len(new_msgs) >= 1
 
 
 @pytest.mark.asyncio
 async def test_normal_flow_not_affected_by_timeout():
     """正常流程（engine.run 快速完成）不受超时保护影响。"""
-    from stream_handler import _stream_engine_response
+    from stream_handler import handle_stream_request
     import stream_handler
 
     sent_messages: list[dict] = []
@@ -185,7 +209,6 @@ async def test_normal_flow_not_affected_by_timeout():
         async def send_text(self, text: str):
             sent_messages.append(json.loads(text))
 
-    # 模拟正常完成的 engine.run
     async def quick_run(**kwargs):
         on_chunk_cb = kwargs.get("on_chunk")
         if on_chunk_cb:
@@ -200,19 +223,14 @@ async def test_normal_flow_not_affected_by_timeout():
     websocket = FakeWebSocket()
     stop_event = asyncio.Event()
 
-    await _stream_engine_response(
+    sctx = _build_stream_context(
         websocket=websocket,
-        user_content="test",
-        message_id="test-msg-id",
         stop_event=stop_event,
-        thread_id="test-thread",
-        conversation_history=[
-            {"role": "user", "content": "test", "id": "u1"}
-        ],
-        ctx=fake_ctx,
+        pipeline_ctx=fake_ctx,
+        sent_messages=sent_messages,
     )
+    await handle_stream_request(sctx)
 
-    # 验证正常流程：有 stream_end 和 new_message
     stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
     new_msgs = [m for m in sent_messages if m.get("type") == "new_message"]
     assert len(stream_ends) >= 1

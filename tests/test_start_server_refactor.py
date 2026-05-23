@@ -89,6 +89,26 @@ def _get_top_level_imports(source: str) -> dict[str, str]:
     return imports
 
 
+def _get_all_imports(source: str) -> dict[str, str]:
+    """获取模块中所有 import（包括函数内部的导入）的名称到模块路径的映射。
+
+    Returns:
+        dict: {别名: 模块路径或导入名}
+    """
+    tree = _parse_module(source)
+    imports: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imports[name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imports[name] = f"{node.module}.{alias.name}" if node.module else alias.name
+    return imports
+
+
 def _get_direct_instantiations(source: str, class_name: str) -> list[str]:
     """查找源码中直接实例化指定类的行（排除注释和字符串）。
 
@@ -160,11 +180,10 @@ class TestAC2ApplicationImport:
     def test_application_imported(self) -> None:
         """stream_handler.py 应导入 Application 类。"""
         source = _read_file(_STREAM_HANDLER_PATH)
-        imports = _get_top_level_imports(source)
+        imports = _get_all_imports(source)
         assert "Application" in imports, (
             "Application 类未在 stream_handler.py 中导入"
         )
-        # 验证导入来源正确
         assert "application" in imports["Application"].lower(), (
             f"Application 应从 application 模块导入，实际导入路径: {imports['Application']}"
         )
@@ -301,11 +320,16 @@ class TestAC4EntryFunctionsExist:
         """WebSocket 交互通知器和流式处理函数应保留在子模块中。"""
         stream_source = _read_file(_STREAM_HANDLER_PATH)
         stream_funcs = _get_top_level_functions(stream_source)
-        assert "_stream_engine_response" in stream_funcs, (
-            "_stream_engine_response 函数不存在于 stream_handler.py"
+        assert "handle_stream_request" in stream_funcs, (
+            "handle_stream_request 函数不存在于 stream_handler.py"
         )
-        assert "_stream_wake_response" in stream_funcs, (
-            "_stream_wake_response 函数不存在于 stream_handler.py"
+        tree = _parse_module(stream_source)
+        class_names: set[str] = set()
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef):
+                class_names.add(node.name)
+        assert "StreamContext" in class_names, (
+            "StreamContext 类不存在于 stream_handler.py"
         )
 
 

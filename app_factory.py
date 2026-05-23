@@ -39,7 +39,6 @@ from stream_handler import (
     PipelineContext,
     StreamContext,
     _init_pipeline_context,
-    _stream_engine_response,
     handle_stream_request,
 )
 from static_files import mount_media_static_files
@@ -372,12 +371,19 @@ def create_combined_app() -> FastAPI:
                             }, ensure_ascii=False))
                         except Exception:
                             pass
+                        _sctx = StreamContext(
+                            pipeline_id="",
+                            message_id=_msg_id,
+                            thread_id=thread_id,
+                            conversation_history=_history,
+                            ws_notifier=ws_interaction_notifier,
+                            websocket=websocket,
+                            stop_event=_stop_evt,
+                            user_content=_user_content,
+                            pipeline_ctx=_pipeline_ctx,
+                        )
                         _stream_task = asyncio.create_task(
-                            _stream_engine_response(
-                                websocket, _user_content, _msg_id,
-                                _stop_evt, thread_id, _history, _pipeline_ctx,
-                                ws_notifier=ws_interaction_notifier,
-                            )
+                            handle_stream_request(_sctx)
                         )
                         _thread_stream_tasks[thread_id] = _stream_task
                     else:

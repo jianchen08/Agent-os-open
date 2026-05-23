@@ -112,12 +112,6 @@ interface PipelineMessageState {
   /**
    * 将旧管道中最近的用户消息迁移到新管道
    *
-   * BUG-FIX-fix_20260523_pipeline_mismatch:
-   * 当 stream_start 中的 pipelineId 与用户消息写入的管道不一致时，
-   * 将旧管道中最近的用户消息复制到新管道，确保用户消息和助手响应在同一管道中显示。
-   */
-  migrateRecentUserMessages: (fromPipelineId: string, toPipelineId: string) => void
-
   /** 直接从 API 加载指定管道的历史消息 */
   fetchMessages: (
     pipelineId: string,
@@ -658,47 +652,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
   /**
    * 将旧管道中最近的用户消息迁移到新管道
    *
-   * BUG-FIX-fix_20260523_pipeline_mismatch:
-   * 问题根因: 用户消息写入 sid 管道（fallback），但后端创建新 pipeline 后
-   *          stream_start 激活了新管道，导致用户消息和助手消息不在同一管道。
-   * 修复方案: 将旧管道中最近的用户消息复制到新管道中。
-   *          使用 addMessage 的去重机制确保不会重复。
-   * 影响范围: 新会话首次消息发送、刷新页面后发送消息
-   * 修复日期: 2026-05-23
-   */
-  migrateRecentUserMessages: (fromPipelineId: string, toPipelineId: string) => {
-    // 同一管道无需迁移
-    if (fromPipelineId === toPipelineId) return
-
-    const fromMessages = get().messagesByPipeline[fromPipelineId] || []
-    if (fromMessages.length === 0) return
-
-    // 找到旧管道中最近的用户消息（可能有连续多条用户消息，都需要迁移）
-    // 从后往前找到所有连续的 user 消息
-    const userMessagesToMigrate: Message[] = []
-    for (let i = fromMessages.length - 1; i >= 0; i--) {
-      if (fromMessages[i].role === 'user') {
-        userMessagesToMigrate.unshift(fromMessages[i])
-      } else {
-        break
-      }
-    }
-
-    if (userMessagesToMigrate.length === 0) return
-
-    logger.info(
-      '[migrateRecentUserMessages] 迁移 %d 条用户消息: %s -> %s',
-      userMessagesToMigrate.length,
-      fromPipelineId?.slice(0, 12),
-      toPipelineId?.slice(0, 12),
-    )
-
-    // 使用 addMessage 逐条写入新管道（利用其去重机制）
-    for (const msg of userMessagesToMigrate) {
-      get().addMessage(toPipelineId, { ...msg })
-    }
-  },
-
   /**
    * 直接从 API 加载指定管道的历史消息
    *

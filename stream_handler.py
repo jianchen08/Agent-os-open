@@ -447,8 +447,8 @@ async def handle_stream_request(ctx: StreamContext) -> None:
     """统一的流式请求处理函数，合并了 engine_response / wake_response / drain_sub_bridge 三条路径。
 
     根据 ctx 中的参数自动判断路径：
-    1. 有 engine 且无 user_content → drain 路径（原 _drain_sub_bridge / _stream_wake_response）
-    2. 有 pipeline_ctx → 新引擎路径（原 _stream_engine_response）
+    1. 有 engine 且无 user_content → drain 路径
+    2. 有 pipeline_ctx → 新引擎路径
 
     所有路径共享：
     - drain_loop 消费
@@ -716,7 +716,7 @@ async def _run_drain_and_finalize(
     封装了管道引擎的 drain_loop 调用、超时处理、内容提取、
     conversation_history 同步和最终消息发送的完整流程。
 
-    此函数从 _stream_engine_response 中提取，覆盖以下逻辑：
+    此函数从 handle_stream_request 中提取，覆盖以下逻辑：
     - drain_loop 调用及超时处理（asyncio.TimeoutError + drain_result.timed_out）
     - 引擎结果提取（engine_task.result()）
     - 内容提取优先级：drain_accumulated > final_messages assistant > raw_result
@@ -830,63 +830,3 @@ async def _run_drain_and_finalize(
 
     return {"actual_content": actual_content, "result": result, "drain_result": drain_result}
 
-
-
-# ---------------------------------------------------------------------------
-# 流式响应主函数
-# ---------------------------------------------------------------------------
-
-
-async def _stream_wake_response(
-    websocket: WebSocket,
-    user_content: str,
-    message_id: str,
-    stop_event: asyncio.Event,
-    engine: Any,
-    pipeline_id: str,
-    thread_id: str = "",
-    ws_notifier: Any = None,
-    conversation_history: list[dict[str, Any]] | None = None,
-    pre_created_bridge: Any = None,
-) -> None:
-    """管道挂起唤醒后的流式响应（薄包装，委托给 handle_stream_request）。"""
-    ctx = StreamContext(
-        pipeline_id=pipeline_id,
-        message_id=message_id,
-        thread_id=thread_id,
-        engine=engine,
-        bridge=pre_created_bridge,
-        conversation_history=conversation_history,
-        ws_notifier=ws_notifier,
-        websocket=websocket,
-        stop_event=stop_event,
-        user_content=user_content,
-    )
-    await handle_stream_request(ctx)
-
-
-async def _stream_engine_response(
-    websocket: WebSocket,
-    user_content: str,
-    message_id: str,
-    stop_event: asyncio.Event,
-    thread_id: str,
-    conversation_history: list[dict[str, Any]],
-    ctx: PipelineContext,
-    ws_notifier: Any = None,
-    pre_created_bridge: Any = None,
-) -> None:
-    """通过管道引擎获取 AI 回复并以流式方式发送到 WebSocket（薄包装，委托给 handle_stream_request）。"""
-    sctx = StreamContext(
-        pipeline_id="",
-        message_id=message_id,
-        thread_id=thread_id,
-        bridge=pre_created_bridge,
-        conversation_history=conversation_history,
-        ws_notifier=ws_notifier,
-        websocket=websocket,
-        stop_event=stop_event,
-        user_content=user_content,
-        pipeline_ctx=ctx,
-    )
-    await handle_stream_request(sctx)
