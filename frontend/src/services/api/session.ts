@@ -21,6 +21,7 @@ import apiClient from '@/services/api/client'
 import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
 import { requestWithRetry } from '@/utils/retry'
 import type { Message, Session } from '@/types/models'
+import type { MessagePart } from '@/types/messageParts'
 import type { RetryOptions } from '@/utils/retry'
 // 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
 
@@ -187,6 +188,42 @@ function mapBackendMessageToMessage(
     }
   }
 
+  const parts: MessagePart[] = []
+  let seq = 0
+
+  if (thinking?.content?.trim()) {
+    parts.push({
+      type: 'thinking',
+      content: thinking.content,
+      state: 'done',
+      sequence: seq++,
+    })
+  }
+
+  if (backendMessage.content?.trim()) {
+    parts.push({
+      type: 'text',
+      content: backendMessage.content,
+      state: 'done',
+      sequence: seq++,
+    })
+  }
+
+  if (toolCalls && toolCalls.length > 0) {
+    for (const tc of toolCalls) {
+      parts.push({
+        type: 'tool_call',
+        callId: tc.call_id || '',
+        name: tc.tool_name || '',
+        args: tc.tool_args || {},
+        state: 'done',
+        result: tc.result,
+        error: tc.error,
+        sequence: seq++,
+      })
+    }
+  }
+
   return {
     id: backendMessage.id,
     sessionId: sessionId,
@@ -202,6 +239,7 @@ function mapBackendMessageToMessage(
     },
     toolCalls,
     thinking,
+    parts: parts.length > 0 ? parts : undefined,
   }
 }
 

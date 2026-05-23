@@ -29,13 +29,14 @@ class TaskPriority(IntEnum):
 class TaskStatus(Enum):
     """任务状态枚举。
 
-    6 种状态及其语义：
+    7 种状态及其语义：
     - pending: 已创建，等待执行
     - running: 正在执行
     - evaluating: 执行完成，正在评估
     - completed: 评估通过，任务完成
     - failed: 执行失败或评估不通过
     - paused: 暂停执行
+    - cancelled: 用户主动取消，终态不可恢复
     """
 
     PENDING = "pending"
@@ -44,6 +45,9 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
+    # BUG-FIX-fix_20260523_cancel_task: 状态机 state_machine.py 已定义 "cancelled" 状态转换，
+    # 但 TaskStatus 枚举缺少 CANCELLED 值，导致取消任务时无法设置正确的状态。
+    CANCELLED = "cancelled"
 
 
 @dataclass

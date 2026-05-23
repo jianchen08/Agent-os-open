@@ -704,7 +704,12 @@ def _cancel_child_pipelines(task_id: str, task_service: Any) -> int:
     """
     cancelled = 0
     try:
-        subtasks = task_service.list_subtasks(task_id)
+        # BUG-FIX-fix_20260523_cancel_task:
+        # 问题根因: task_service 是 TaskStorage 实例，没有 list_subtasks 方法（该方法属于 TaskService）。
+        # 修复方案: 改用 TaskStorage.list_by_parent(task_id) 获取子任务列表。
+        # 影响范围: 取消任务时级联取消子管道。
+        # 修复日期: 2026-05-23
+        subtasks = task_service.list_by_parent(task_id)
     except Exception:
         return 0
 

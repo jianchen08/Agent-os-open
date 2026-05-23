@@ -482,6 +482,41 @@ class TaskService:
 
         await self._emit_state_change(task_id, old_status, "failed")
 
+    # BUG-FIX-fix_20260523_cancel_task:
+    # 问题根因: cancel_task_cascade 复用 fail_task 将子任务状态设为 FAILED，
+    #           无法区分"用户主动取消"和"执行失败"，前端无法正确展示取消状态。
+    # 修复方案: 新增 cancel_task 方法，设置状态为 CANCELLED 而非 FAILED，
+    #           记录取消原因到 metadata["cancel_reason"]。
+    # 影响范围: 任务取消功能，routes_tasks.py 的 cancel 端点。
+    # 修复日期: 2026-05-23
+    async def cancel_task(self, task_id: str, reason: str = "") -> None:
+        """将任务标记为已取消。
+
+        与 fail_task 不同，此方法将状态设为 CANCELLED，
+        用于区分用户主动取消和任务执行失败。
+
+        Args:
+            task_id: 任务 ID
+            reason: 取消原因
+        """
+        if self._storage is None:
+            return
+
+        task = self._storage.get(task_id)
+        if task is None:
+            return
+
+        from tasks.types import TaskStatus
+
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        task.status = TaskStatus.CANCELLED
+        task.updated_at = datetime.now().isoformat()
+        if reason:
+            task.metadata["cancel_reason"] = reason
+        self._storage.save(task)
+
+        await self._emit_state_change(task_id, old_status, "cancelled")
+
     async def cancel_task_cascade(self, task_id: str, reason: str = "") -> int:
         """级联取消指定任务的所有子任务。
 
@@ -509,8 +544,9 @@ class TaskService:
         cancelled_count = 0
 
         for subtask in subtasks:
-            # 对每个子任务调用 fail_task 标记为失败
-            await self.fail_task(
+            # BUG-FIX-fix_20260523_cancel_task: 改用 cancel_task 替代 fail_task，
+            # 使子任务状态为 CANCELLED 而非 FAILED，与父任务保持一致。
+            await self.cancel_task(
                 subtask.id,
                 reason=f"父任务取消，级联取消: {reason}" if reason else "父任务取消，级联取消",
             )

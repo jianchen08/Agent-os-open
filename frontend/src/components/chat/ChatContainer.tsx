@@ -63,8 +63,12 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       }
     }
     const mergedContent = allContent.join('\n\n')
-    /** 合并多条 assistant 消息时，将它们的 parts[] 依次拼接 */
-    const mergedParts = group.flatMap((m) => m.parts || [])
+    /** 合并多条 assistant 消息时，将它们的 parts[] 依次拼接并重新分配 sequence */
+    let globalSeq = 0
+    const mergedParts = group.flatMap((m) => {
+      const rawParts = m.parts || []
+      return rawParts.map((p) => ({ ...p, sequence: globalSeq++ }))
+    })
     // BUG-FIX-fix_20260513_virtuoso_key_conflict:
     // 使用唯一的合成 ID（merged_{first.id}_{count}），保留原始 ID 到 _originalIds。
     const mergedId = `merged_${first.id}_${group.length}`
