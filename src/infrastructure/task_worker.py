@@ -1,4 +1,4 @@
-﻿"""后台任务执行器。
+"""后台任务执行器。
 
 负责事件驱动的后台任务处理（如 task_submit 提交的子任务）。
 TaskWorker 只负责启动子管道，子管道中的 Agent 通过 task_evaluate
@@ -287,21 +287,21 @@ class TaskWorker(
                     pass
         self._tasks.clear()
 
-        # 将仍在 running/pending 的任务标记为 failed
+        # BUG-FIX-fix_20260523_stop_state:
+        # 将仍在 running/pending 的任务标记为 paused（而非 failed），
+        # 以便重启后用户可通过前端 resume 或 agent retry 恢复执行。
         if self._task_service:
             try:
-                # 局部导入：避免模块级循环依赖
                 from tasks.types import TaskStatus
                 remaining_ids = list(self._terminal_events.keys())
                 for tid in remaining_ids:
                     try:
                         task = self._task_service.get_task(tid)
                         if task and (task.status == TaskStatus.RUNNING or task.status == TaskStatus.PENDING):
-                            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
-                            await self._task_service.fail_task(tid, "TaskWorker stopped, task forcibly terminated")
-                            logger.info("TaskWorker.stop: task %s marked as failed", tid)
+                            await self._task_service.pause_task(tid)
+                            logger.info("TaskWorker.stop: task %s marked as paused", tid)
                     except Exception as e:
-                        logger.warning("TaskWorker.stop: failed to update task %s: %s", tid, e)
+                        logger.warning("TaskWorker.stop: failed to pause task %s: %s", tid, e)
             except Exception as e:
                 logger.warning("TaskWorker.stop: failed to cleanup tasks: %s", e)
         self._terminal_events.clear()

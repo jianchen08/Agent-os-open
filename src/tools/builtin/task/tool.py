@@ -1,4 +1,4 @@
-﻿"""
+"""
 任务管理工具
 
 暴露接口：
@@ -1166,9 +1166,12 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            if task.status != TaskStatus.FAILED:
+            # BUG-FIX-fix_20260523_retry_paused:
+            # 支持 FAILED 和 PAUSED 两种状态的重试。
+            # PAUSED 来自 TaskWorker.stop() 暂停的任务（系统重启后恢复场景）。
+            if task.status not in (TaskStatus.FAILED, TaskStatus.PAUSED):
                 return create_failure_result(
-                    error=f"只有失败的任务才能重试，当前状态: {task.status.value}",
+                    error=f"只有失败或暂停的任务才能重试，当前状态: {task.status.value}",
                     error_code="INVALID_STATUS",
                 )
 
@@ -1205,7 +1208,7 @@ class TaskTool(BuiltinTool):
             # BUG-FIX-fix_20260519_pipeline_retry: 递增 retry_count 并写回 metadata
             task.metadata["retry_count"] = retry_count + 1
 
-            # 利用状态机从 failed -> pending
+            # 利用状态机从 failed/paused -> pending
             # BUG-FIX-fix_20260512_async_compat: force_transition 现在是 async
             await service.force_transition(task.id, TaskStatus.PENDING)
             task.error = None
@@ -1526,9 +1529,8 @@ class TaskTool(BuiltinTool):
                     }
                     _parent_pid = getattr(task, "parent_pipeline_id", "") or ""
                     _ws_tid = ""
-                    if _parent_pid:
-                        from pipeline.registry import get_engine_registry
-                        _ws_tid = get_engine_registry().get_thread_id(_parent_pid)
+                    if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
+                        _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
                     if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
                         await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
                         logger.debug("[TaskTool] task_deleted 已通过 send_to_thread 发送 | task_id=%s", task_id)

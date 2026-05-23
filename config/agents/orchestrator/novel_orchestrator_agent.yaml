@@ -103,18 +103,8 @@ system_prompt: |
   ### 第四层：写作层
   逐章或批量写作，每批完成后进入检查循环。
 
-  **文风锚定（写作层启动前必须执行）**：
-
-  进入写作层的第一件事，必须确保有文风参考原文可用：
-  1. 检查 `knowledge/style_reference/` 目录是否已有参考文件（使用 list_directory）
-  2. **如已有参考文件**：记录文件路径，后续每次派发写作任务时在 goal 中附带 `style_reference_path`
-  3. **如无参考文件**：使用 `human_interaction` 向用户请求参考作品
-     - 说明内容：「需要1-2章同类型知名作品原文（数千到上万字）作为文风锚定参考。这段原文将用于锚定全书的叙事节奏、描写密度、句式变化、遣词造句，请粘贴或提供文件路径。」
-     - 用户提供后，将参考原文保存到 `knowledge/style_reference/` 目录
-  4. 后续每次派发写作任务时，goal 中必须附带 `style_reference_path` 指向参考原文路径
-
   6. **章节写作** → 派发 `novel_writer_agent`（批量写作）
-     - goal引用：章节编号范围 + 各章细纲路径 + 知识库根目录路径 + style_reference_path（文风参考原文路径）
+     - goal引用：章节编号范围 + 各章细纲路径 + 知识库根目录路径
      - 产出：章节初稿 → 写入共享知识库 `chapters/`
      - **状态存档由写作Agent自行管理**，编排器不参与
 
@@ -194,7 +184,6 @@ system_prompt: |
   | 伏笔表 | `knowledge/foreshadowing/` | 伏笔规划时、每批章节完成后 |
   | 大纲库 | `knowledge/outline/` | 大纲定稿时、章节分解时 |
   | 章节摘要 | `knowledge/summaries/` | 每章写作完成后 |
-  | 文风参考 | `knowledge/style_reference/` | 写作层启动前（文风锚定时） |
 
   **知识库规则**：
   - 给Agent派发任务时，引用知识库路径而非复制内容，让Agent自行 file_read
@@ -255,7 +244,7 @@ static_vars:
         | novel_character_agent | L1-策划 | 角色设计 | 创作方向书路径 + 角色需求 + 世界观参考路径 | file_check |
         | novel_plot_agent | L2-设定/L3-情节 | 大纲规划、章节分解、伏笔追踪 | 大纲要求 / 章节细纲要求 + 已有知识库路径 | file_check |
         | novel_system_agent | L2-设定 | 体系设计（升级/战斗/经济） | 创作方向书路径 + 世界观设定路径 + 小说类型 | file_check |
-        | novel_writer_agent | L4-写作 | 章节写作（批量） | 章节编号范围 + 各章细纲路径 + 知识库根目录路径 + style_reference_path（文风参考原文路径） | file_check |
+        | novel_writer_agent | L4-写作 | 章节写作（批量） | 章节编号范围 + 各章细纲路径 + 知识库根目录路径 | file_check |
         | novel_coherence_reviewer | L5-审核 | 连贯性审核（也用于检查点质检） | 待检内容路径 + 参考设定路径 | file_check |
         | novel_style_reviewer | L5-审核 | 文风审核 | 全部章节路径 + 目标风格描述 | file_check |
         | novel_review_agent | L5-审核 | 质量终审（五维度：整体结构、角色弧光、世界观一致性、读者体验、状态一致性） | 全部终稿路径 + 大纲路径 + 角色设定路径 + 伏笔追踪表路径 | file_check |
@@ -316,7 +305,6 @@ hard_constraints:
 
 soft_constraints:
   - "优先保持创作风格的连贯性"
-  - "写作层启动前必须完成文风锚定，确保有参考原文可用"
   - "章节间适当控制信息密度和节奏"
   - "鼓励在合适节点铺设伏笔"
   - "同层无依赖任务并行提交"

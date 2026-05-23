@@ -104,7 +104,7 @@ TaskStateMachine = SimpleStateMachine
 
 # 预定义的任务状态转换规则
 _TASK_TRANSITIONS: dict[str, list[str]] = {
-    "pending": ["scheduled", "running", "cancelled"],
+    "pending": ["scheduled", "running", "cancelled", "paused"],
     "scheduled": ["running", "cancelled"],
     "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled", "paused"],
     "evaluating": ["completed", "failed", "running"],
