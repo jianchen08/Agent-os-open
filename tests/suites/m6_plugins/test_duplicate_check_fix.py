@@ -287,7 +287,7 @@ class TestSignatureFix:
         base_state[StateKeys.RAW_RESULT] = None
         base_state.setdefault("messages", [])
 
-        plugin = DuplicateCheckPlugin({"max_duplicate_calls": 1, "max_repetitive_output": 3})
+        plugin = DuplicateCheckPlugin({"max_duplicate_calls": 2, "hard_limit_intercepts": 4})
         r1 = await plugin.execute(ctx)
         base_state.update(r1.state_updates)
 
@@ -297,10 +297,11 @@ class TestSignatureFix:
         r2 = await plugin.execute(ctx)
         base_state.update(r2.state_updates)
         assert base_state.get("router.duplicate_count", 0) == 1
+        assert r2.route_signal is None
 
     @pytest.mark.asyncio
     async def test_different_commands_not_duplicate(self, ctx, base_state):
-        """测试不同命令连续调用不应累积重复计数。"""
+        """测试不同命令（arguments key）连续调用不应累积重复计数。"""
         commands = [
             '{"command":"grep -n Application stream_handler.py","timeout":10}',
             '{"command":"sed -n 155,175p stream_handler.py","timeout":10}',
@@ -313,6 +314,7 @@ class TestSignatureFix:
             ]
             base_state[StateKeys.RAW_RESULT] = None
             result = await plugin.execute(ctx)
+            base_state.update(result.state_updates)
         assert result.state_updates.get("router.duplicate_count", 0) == 0
 
 

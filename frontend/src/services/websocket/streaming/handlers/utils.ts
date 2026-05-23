@@ -10,26 +10,6 @@ import { useStreamingStore } from '@/stores/streamingStore'
 import { clearChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
-// ── 管道终止标记：防止 ensureStreamingPlaceholder 在流式结束后重新启动 ──
-
-/** 记录已经终止的管道（stream_end / stream_error / chunk 超时 / new_message），防止 ensureStreamingPlaceholder 重新启动 */
-const _terminatedPipelines = new Set<string>()
-
-/** 标记管道已终止（stream_end / stream_error / chunk 超时 / new_message 时调用） */
-export function markPipelineTerminated(pipelineId: string): void {
-  _terminatedPipelines.add(pipelineId)
-}
-
-/** 清除管道终止标记（stream_start 时调用，表示新一轮流式开始） */
-export function clearPipelineTerminated(pipelineId: string): void {
-  _terminatedPipelines.delete(pipelineId)
-}
-
-/** 检查管道是否已终止 */
-export function isPipelineTerminated(pipelineId: string): boolean {
-  return _terminatedPipelines.has(pipelineId)
-}
-
 /**
  * 从事件数据中提取消息 ID
  *
@@ -107,12 +87,6 @@ export function ensureStreamingPlaceholder(
   messageId: string,
   threadId?: string,
 ): void {
-  // BUG-FIX-fix_20260522: 如果管道已被终止（stream_end/chunk超时/stream_error/new_message），
-  // 不重新启动 streaming，防止停止按钮反复出现
-  if (isPipelineTerminated(pipelineId)) {
-    return
-  }
-
   startPipelineStreaming(pipelineId, messageId, threadId)
 
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
@@ -142,12 +116,11 @@ export function extractThreadId(eventData: any): string | undefined {
 }
 
 /**
- * 终止管道：封装 markPipelineTerminated + clearChunkTimeout + stopPipelineStreaming 三件套
+ * 终止管道：封装 clearChunkTimeout + stopPipelineStreaming
  *
  * 在 stream_end / stream_error / chunk超时 等终止场景中复用。
  */
 export function terminatePipeline(pipelineId: string, threadId?: string): void {
-  markPipelineTerminated(pipelineId)
   clearChunkTimeout(pipelineId)
   stopPipelineStreaming(pipelineId, threadId)
 }

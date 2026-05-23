@@ -33,18 +33,6 @@ const CONNECTION_TIMEOUT = 15_000
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
 const SEND_BUFFER_THRESHOLD = 1_000_000
 
-/** 发送确认超时：未收到 stream_start 则重发（10秒） */
-const SEND_ACK_TIMEOUT_MS = 10_000
-
-/** 最大发送重试次数 */
-const SEND_ACK_MAX_RETRIES = 2
-
-interface PendingAckEntry {
-  timer: ReturnType<typeof setTimeout>
-  retries: number
-  msg: PendingMessage
-}
-
 class GlobalWebSocketService {
   private ws: WebSocket | null = null
   private _status: ConnectionStatus = 'disconnected'
@@ -59,9 +47,6 @@ class GlobalWebSocketService {
 
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
-
-  /** 待确认的 user_input 消息：key 为 threadId */
-  private _pendingAcks: Map<string, PendingAckEntry> = new Map()
 
   /** 建立全局 WS 连接（登录后调用一次） */
   connect(token: string): void {
@@ -206,17 +191,6 @@ class GlobalWebSocketService {
     this._handlers.clear()
   }
 
-  /**
-   * 向指定会话发送用户输入（带发送确认机制）
-   *
-   * BUG-FIX-fix_20260523_ack_resend_dup:
-   * 问题根因: 未连接时 _send 将消息加入队列，但 ACK 超时重发也调用 _send 再次入队，
-   *          连接建立后 _flushQueue 将两条相同消息同时发出，后端处理两次产生重复响应。
-   * 修复方案: 仅在已连接状态下才启动 ACK 计时器。未连接时消息已在队列中，
-   *          _flushQueue 发送后会启动 ACK 计时器。
-   * 影响范围: WebSocket 未连接时的消息发送场景（刷新页面后立即发送）
-   * 修复日期: 2026-05-23
-   */
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
@@ -233,65 +207,7 @@ class GlobalWebSocketService {
       client_message_id: opts?.clientMessageId || '',
     }
 
-    // 先清除该线程之前的待确认（避免重复）
-    this._clearPendingAck(threadId)
-
-    // 发送消息
     this._send(msg)
-
-    // BUG-FIX-fix_20260523_ack_resend_dup:
-    // 仅在已连接状态下才启动 ACK 计时器。
-    // 未连接时消息已在队列中，_flushQueue 发送后会启动 ACK 计时器。
-    if (this._status === 'connected') {
-      this._startAckTimer(threadId, msg)
-    }
-  }
-
-  /** 清除指定线程的发送确认计时器（收到 stream_start 时调用） */
-  clearPendingAckForThread(threadId: string): void {
-    this._clearPendingAck(threadId)
-  }
-
-  /** 启动发送确认计时器：超时未收到响应则重发 */
-  private _startAckTimer(threadId: string, msg: PendingMessage): void {
-    const entry: PendingAckEntry = {
-      timer: setTimeout(() => {
-        this._onAckTimeout(threadId)
-      }, SEND_ACK_TIMEOUT_MS),
-      retries: 0,
-      msg,
-    }
-    this._pendingAcks.set(threadId, entry)
-  }
-
-  /** 发送确认超时：重发消息或放弃 */
-  private _onAckTimeout(threadId: string): void {
-    const entry = this._pendingAcks.get(threadId)
-    if (!entry) return
-
-    entry.retries++
-    if (entry.retries > SEND_ACK_MAX_RETRIES) {
-      console.warn('[GlobalWS] 发送确认超时，已达最大重试次数: threadId=%s', threadId)
-      this._pendingAcks.delete(threadId)
-      this._emit('_ack_exhausted', { threadId })
-      return
-    }
-
-    console.info('[GlobalWS] 发送确认超时，第 %d 次重发: threadId=%s', entry.retries, threadId)
-    this._send(entry.msg)
-
-    entry.timer = setTimeout(() => {
-      this._onAckTimeout(threadId)
-    }, SEND_ACK_TIMEOUT_MS)
-  }
-
-  /** 清除指定线程的发送确认计时器 */
-  private _clearPendingAck(threadId: string): void {
-    const entry = this._pendingAcks.get(threadId)
-    if (entry) {
-      clearTimeout(entry.timer)
-      this._pendingAcks.delete(threadId)
-    }
   }
 
   /** 发送审批决策 */
@@ -389,16 +305,6 @@ class GlobalWebSocketService {
     this._queue.push(msg)
   }
 
-  /**
-   * 刷写发送队列：连接建立后将队列中的消息逐条发送
-   *
-   * BUG-FIX-fix_20260523_ack_resend_dup:
-   * 问题根因: 原逻辑刷完队列后不启动 ACK 计时器，导致消息发出后无超时重发保护。
-   *          但 sendUserInput 中未连接时不启动计时器，所以需要在刷队后补启动。
-   * 修复方案: 发送完 user_input 类型消息后，启动对应的 ACK 计时器。
-   * 影响范围: WebSocket 重连后的消息发送确认
-   * 修复日期: 2026-05-23
-   */
   private _flushQueue(): void {
     if (!this.ws || this._status !== 'connected') return
     while (this._queue.length > 0) {
@@ -408,14 +314,6 @@ class GlobalWebSocketService {
       } catch {
         this._queue.unshift(msg)
         break
-      }
-
-      // BUG-FIX-fix_20260523_ack_resend_dup:
-      // user_input 消息发送成功后启动 ACK 计时器
-      // （sendUserInput 在未连接时不启动计时器，此处补启动）
-      if (msg.type === 'user_input' && msg.thread_id) {
-        // 如果该线程已有 ACK 计时器（例如之前已发送过），先清除再启动新的
-        this._startAckTimer(msg.thread_id as string, msg)
       }
     }
   }

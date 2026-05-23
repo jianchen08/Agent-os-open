@@ -30,15 +30,17 @@ from channels.api.app import create_app
 from channels.api.auth import verify_token
 from channels.api.memory_store import store as api_store
 
-from src.pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
+from src.pipeline.stream_bridge import TargetedSink
 
 from ws_handler import ws_interaction_notifier
 import stream_handler
 
 from stream_handler import (
     PipelineContext,
+    StreamContext,
     _init_pipeline_context,
     _stream_engine_response,
+    handle_stream_request,
 )
 from static_files import mount_media_static_files
 
@@ -96,50 +98,6 @@ async def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
 
     return None
 
-
-async def _drain_sub_bridge(
-    bridge: PipelineStreamBridge,
-    message_id: str,
-    pipeline_id: str,
-) -> None:
-    """消费子管道复活后的流式事件并发送到前端。
-
-    子管道通过 _try_revive_pipeline 复活后，引擎的 on_chunk 回调
-    写入 bridge 的内部队列。本函数启动 drain_loop 消费队列，
-    通过 TargetedSink → WebSocket 将流式事件发送到前端。
-
-    Args:
-        bridge: 预创建的 PipelineStreamBridge 实例
-        message_id: 本轮回复的消息 UUID
-        pipeline_id: 子管道 ID
-    """
-    _call_timeout = _get_call_timeout()
-    _long_wait = asyncio.create_task(asyncio.sleep(86400))
-
-    try:
-        drain_result = await asyncio.wait_for(
-            bridge.drain_loop(
-                _long_wait,
-                heartbeat_interval=5.0,
-                call_timeout=_call_timeout,
-            ),
-            timeout=_call_timeout * 50,
-        )
-
-        full_content = drain_result.get("accumulated_content", "")
-        await bridge._close_thinking_if_active(None)
-        await bridge._send_event({
-            "type": "stream_end",
-            "data": {
-                "message_id": message_id,
-                "full_content": full_content,
-                "pipeline_id": bridge.pipeline_id,
-            },
-        })
-    except Exception as exc:
-        logger.error("[drain_sub_bridge] 失败: pipeline=%s error=%s", pipeline_id[:12], exc)
-    finally:
-        _long_wait.cancel()
 
 
 def _get_call_timeout() -> float:
@@ -277,16 +235,6 @@ def create_combined_app() -> FastAPI:
                     continue
 
                 if msg_type == "user_input":
-                    # BUG-FIX-fix_20260523_pipeline_received_early:
-                    # 在处理 user_input 的最开始就回发 pipeline_received，
-                    # 确保前端 ACK 计时器被清除，避免重发导致重复注入。
-                    try:
-                        await websocket.send_text(json.dumps({
-                            "type": "pipeline_received",
-                            "data": {"thread_id": thread_id},
-                        }, ensure_ascii=False))
-                    except Exception:
-                        pass
                     # BUG-FIX-fix_20260511_task_worker_global_ws:
                     # 问题根因: /ws/chat 全局端点缺少 TaskWorker 懒启动逻辑，
                     #           导致通过全局 WS 提交的任务没有订阅者，
@@ -375,8 +323,24 @@ def create_combined_app() -> FastAPI:
                             pass
 
                         if _result.bridge is not None:
+                            from pipeline.registry import get_engine_registry
+                            _drain_engine = None
+                            try:
+                                _entry = get_engine_registry().get(_target_pid)
+                                if _entry:
+                                    _drain_engine = _entry.engine
+                            except Exception:
+                                pass
+                            _drain_ctx = StreamContext(
+                                pipeline_id=_target_pid,
+                                message_id=_msg_id,
+                                thread_id=thread_id,
+                                engine=_drain_engine,
+                                bridge=_result.bridge,
+                                ws_notifier=ws_interaction_notifier,
+                            )
                             _stream_task = asyncio.create_task(
-                                _drain_sub_bridge(_result.bridge, _msg_id, _target_pid),
+                                handle_stream_request(_drain_ctx),
                             )
                             _thread_stream_tasks[thread_id] = _stream_task
                         continue

@@ -106,6 +106,26 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         error: null,
       }))
 
+      if (newSession.activePipelineId) {
+        const pipelineStore = usePipelineMessageStore.getState()
+        pipelineStore.registerPipeline({
+          pipelineId: newSession.activePipelineId,
+          sessionId: newSession.id,
+          level: 1,
+          tabId: null,
+          agentName: '',
+          status: 'idle',
+          parentId: null,
+          unreadCount: 0,
+        })
+        pipelineStore.activatePipeline(newSession.activePipelineId)
+        logger.info(
+          '[createSession] pipeline registered: sessionId=%s pipelineId=%s',
+          newSession.id.slice(0, 12),
+          newSession.activePipelineId.slice(0, 12),
+        )
+      }
+
       return newSession
     } catch (error: any) {
       const errorMessage = error.message || '创建会话失败'

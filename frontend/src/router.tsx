@@ -267,7 +267,7 @@ function HomePage(): ReactNode {
   // 修复日期: 2026-05-23
   const routerMessages = usePipelineMessageStore(
     (s) => {
-      const pid = s.activePipelineId || activeSessionId
+      const pid = s.activePipelineId
       if (!pid) return EMPTY_MESSAGES
       return s.messagesByPipeline[pid] || EMPTY_MESSAGES
     },
@@ -284,7 +284,7 @@ function HomePage(): ReactNode {
   )
 
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
-  const activeKey = activePipelineId || activeSessionId
+  const activeKey = activePipelineId
   const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
   const isLoadingMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false)
 
@@ -386,14 +386,12 @@ function HomePage(): ReactNode {
         listStore.renameSession(sid, params.content.slice(0, 50))
       }
 
-      // BUG-FIX-fix_20260520_task_submit_fail:
-      // 问题根因: 新会话首次发消息时后端尚未创建 pipeline，activePipelineId 为空，
-      //           导致 if (!activePipelineId) return 静默丢弃消息，用户看到"提交任务失败"。
-      // 修复方案: 以 activeSessionId 作为 fallback pipelineId，确保消息始终能写入本地状态
-      //           并通过 WebSocket 发送到后端。后端创建 pipeline 后会通过 WS 事件通知前端更新。
-      // 影响范围: 新会话首次消息发送
       const pipelineStore = usePipelineMessageStore.getState()
-      const activePipelineId = pipelineStore.activePipelineId || sid
+      const activePipelineId = pipelineStore.activePipelineId
+      if (!activePipelineId) {
+        console.warn('[handleSendMessage] activePipelineId is null, skipping')
+        return
+      }
 
       // BUG-FIX-fix_20260522_subtab_msg_to_main_pipeline:
       // 问题根因: 子Tab发消息时 params.pipelineId 是子管道ID，但 addMessage 始终用
@@ -445,10 +443,6 @@ function HomePage(): ReactNode {
 
   /**
    * 停止生成
-   *
-   * BUG-FIX-fix_20260509_tab_streaming: 使用 activePipelineId 停止 streaming
-   * BUG-FIX-fix_20260522_stop_state_not_reset: currentPipelineId 为空时使用 sid 作为 fallback，
-   *   同时清理 sid 对应的 streamingTabs，避免残留状态导致停止按钮不消失、新消息无法发送。
    */
   const handleStopGenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
@@ -456,15 +450,11 @@ function HomePage(): ReactNode {
     if (sid) {
       globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
     }
-    const cleanupId = currentPipelineId || sid
-    if (cleanupId) {
+    if (currentPipelineId) {
       flushStreamChunkBuffer()
-      clearChunkTimeout(cleanupId)
-      stopStreamingForTab(cleanupId)
-      usePipelineMessageStore.getState().stopStreaming(cleanupId)
-    }
-    if (sid && sid !== cleanupId) {
-      stopStreamingForTab(sid)
+      clearChunkTimeout(currentPipelineId)
+      stopStreamingForTab(currentPipelineId)
+      usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
     }
   }, [stopStreamingForTab])
 

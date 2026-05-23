@@ -9,16 +9,13 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-
-import { clearUnifiedStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
+import { getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
-import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, extractThreadId, isPipelineTerminated, terminatePipeline } from './utils'
+import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -108,53 +105,20 @@ export function handleStreamStart(eventData: any) {
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
   )
 
-  // BUG-FIX-fix_20260522: 新一轮流式开始，清除终止标记
-  clearPipelineTerminated(pipelineId)
+  ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
-  // BUG-FIX-fix_20260521_stop_button_not_following_stream:
-  // 问题根因: 当用户发送消息时，如果 activePipelineId 为空，会使用 sid 作为 fallback 管道。
-  //          但后端处理消息后可能在另一个新创建的 pipeline 上触发流式输出。
-  //          这导致 activePipelineId 与 stream_start 中的 pipelineId 不一致，
-  //          effectiveIsGenerating 检测不到流式状态，停止按钮不显示。
-  // 修复方案: 如果 activePipelineId 与 pipelineId 不一致，更新 activePipelineId。
-  //          这样 effectiveIsGenerating 能正确检测到当前管道的流式状态。
-
-  // BUG-FIX-fix_20260522_auto_switch_tab_on_submit:
-  // 问题根因: 上述修复无条件切换 activePipelineId，当子 Agent 开始流式输出时，
-  //          会将用户从主标签页强制跳转到子管道标签页，体验不佳。
-  // 修复方案: 在调用 activatePipeline 之前增加条件判断，仅在以下场景激活管道：
-  //          1. 当前没有活跃管道（首次初始化场景）
-  //          2. 用户当前正在查看的 tab 对应的 pipelineRunId 与 pipelineId 匹配
-  //          3. 用户已主动进入该管道的交互（interactionStore 中存在 entered 状态）
-  //          4. 用户在主 tab 且该 pipelineId 不属于任何子 tab（主管道自身的流式输出）
-  //          其他情况下不激活管道，让子管道的流式输出在后台进行。
-  // 影响范围: 提交任务后标签页自动跳转行为
-  // 修复日期: 2026-05-22
   if (currentActivePipelineId !== pipelineId) {
     const agentTabStore = useAgentTabStore.getState()
     const activeTab = agentTabStore.getActiveTab()
     const interactionStore = useInteractionStore.getState()
 
-    /** 判断是否应该自动激活该管道 */
     const shouldActivatePipeline = (() => {
-      // 条件1：当前没有活跃管道（首次初始化场景），允许激活
       if (!currentActivePipelineId) return true
-
-      // 条件2：当前活跃 tab 的 pipelineRunId 等于 pipelineId，用户已在查看该管道
       if (activeTab?.pipelineRunId === pipelineId) return true
-
-      // 条件3：当前活跃 tab 通过 pipelineTabMap 映射到该 pipelineId
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
-
-      // 条件4：用户已主动进入该管道的交互（entered 状态）
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
-
-      // 条件5：该 pipeline 不属于任何已知子 Tab，说明是主管道的新一轮输出
-      // 后端可能为同一会话创建新 pipeline（如每轮对话新建），此时需要更新 activePipelineId
-      // 子 Agent 的 pipeline 会在创建子 Tab 时写入 pipelineTabMap，因此不在 map 中的都是主管道
       if (!tabIdForPipeline) return true
-
       return false
     })()
 
@@ -162,39 +126,12 @@ export function handleStreamStart(eventData: any) {
       _debugLogger.info(
         `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
       )
-
-      // BUG-FIX-fix_20260523_pipeline_mismatch:
-      // 问题根因: handleSendMessage 使用 activePipelineId || sid 作为 fallback 管道写入用户消息，
-      //          但后端可能创建新 pipeline（如 abc123），stream_start 中的 pipeline_id 为 abc123。
-      //          激活 abc123 后 UI 切换到新管道，但用户消息在旧管道中，导致消息不显示。
-      // 修复方案: 激活新管道前，将旧管道（sid fallback）中最近的用户消息迁移到新管道。
-      // 影响范围: 新会话首次消息发送、刷新页面后发送消息
-      // 修复日期: 2026-05-23
-      const sid = useSessionStore.getState().activeSessionId
-      const fromPipelineId = currentActivePipelineId || sid
-      if (fromPipelineId && fromPipelineId !== pipelineId) {
-        pipelineStore.getState().migrateRecentUserMessages(fromPipelineId, pipelineId)
-      }
-
       pipelineStore.getState().activatePipeline(pipelineId)
     } else {
       _debugLogger.info(
         `[STREAM_START] skipping activatePipeline: user not viewing pipeline ${pipelineId.slice(0, 12)}, keeping activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
       )
     }
-  }
-
-  ensureStreamingPlaceholder(pipelineId, messageId, threadId)
-
-  /** text part 延迟到 _flushChunks 中按需创建，确保 sequence 排在 thinking 之后 */
-
-  clearUnifiedStreamTimeout(pipelineId)
-  if (threadId && threadId !== pipelineId) {
-    clearUnifiedStreamTimeout(threadId)
-  }
-
-  if (threadId) {
-    globalWS.clearPendingAckForThread(threadId)
   }
 }
 
@@ -366,29 +303,8 @@ export function handleStreamError(eventData: any) {
 export function handleStreamKeepalive(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  if (isPipelineTerminated(pipelineId)) return
   const messageId = getChunkTimeoutMessageId(pipelineId)
   if (messageId) {
-    const store = pipelineStore.getState()
-    const msgs = store.getMessages(pipelineId)
-    const msg = msgs.find((m: any) => m.id === messageId)
-    if (msg?.parts?.length) {
-      const hasActive = msg.parts.some((p: any) => p.state === 'streaming' || p.state === 'calling')
-      if (!hasActive) {
-        terminatePipeline(pipelineId)
-        return
-      }
-      const allHaveContent = msg.parts.every((p: any) => {
-        if (p.type === 'text') return p.content && p.content.trim().length > 0
-        return true
-      })
-      if (allHaveContent) {
-        terminatePipeline(pipelineId)
-        store.finalizeMessage(pipelineId, messageId)
-        store.updateMessage(pipelineId, messageId, { status: 'completed' } as any)
-        return
-      }
-    }
     resetChunkTimeout(pipelineId, messageId)
   }
 }

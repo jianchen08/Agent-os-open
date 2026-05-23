@@ -9,10 +9,7 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-
-import { startUnifiedStreamTimeout, clearUnifiedStreamTimeout } from './chunkTimeout'
-import { markPipelineTerminated, terminatePipeline } from './handlers/utils'
+import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
 /** 重连后补漏轮询间隔（5秒） */
@@ -39,20 +36,8 @@ export function handleStateChange(eventData: any): void {
  */
 export function handlePipelineReceived(data: any): void {
   const pipelineId = resolvePipelineId(data)
-  const threadId = data.data?.thread_id || data.thread_id
-
-  // BUG-FIX-fix_20260523_ack_clear_without_pipeline_id:
-  // ACK 清除必须在 pipelineId 检查之前，因为早期 pipeline_received 可能只有 thread_id。
-  if (threadId) {
-    globalWS.clearPendingAckForThread(threadId)
-  }
 
   if (!pipelineId) return
-
-  clearUnifiedStreamTimeout(pipelineId)
-
-  const sessionId = data.data?.session_id || data.data?.thread_id || threadId || ''
-  startUnifiedStreamTimeout(pipelineId, sessionId)
 }
 
 /**
@@ -179,7 +164,6 @@ export function handleReconnected(): void {
         logger.warn('[streaming] 重连补漏无可用 sessionId，清理 streaming 状态: pipelineId=%s', pipelineId)
         pipelineStore.stopStreaming(pipelineId)
         streamingStore.setStreamingForTab(pipelineId, false)
-        markPipelineTerminated(pipelineId)
       }
     }
   }
@@ -269,6 +253,4 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
     pipelineStore.stopStreaming(pipelineId)
   }
   streamingStore.setStreamingForTab(pipelineId, false)
-  // BUG-FIX-fix_20260522: 标记管道已终止（chunk 超时），防止 ensureStreamingPlaceholder 重新启动
-  markPipelineTerminated(pipelineId)
 }

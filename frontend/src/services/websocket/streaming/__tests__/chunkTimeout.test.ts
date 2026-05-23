@@ -5,7 +5,6 @@
  * - resetChunkTimeout 启动计时器
  * - clearChunkTimeout 清除计时器
  * - 超时后触发回调通知
- * - 统一流式超时机制（pipeline_received → 120s → stream_start）
  * - clearAllChunkTimeouts 全量清理
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -66,41 +65,16 @@ describe('chunkTimeout', () => {
     })
   })
 
-  describe('unified stream timeout', () => {
-    it('超时后触发回调', () => {
-      const callback = vi.fn()
-      chunkTimeout.onChunkTimeout(callback)
-      chunkTimeout.startUnifiedStreamTimeout('pipe-1', 'sess-1')
-
-      vi.advanceTimersByTime(120_000)
-
-      expect(callback).toHaveBeenCalledWith({ pipelineId: 'pipe-1', messageId: '' })
-    })
-
-    it('clearUnifiedStreamTimeout 阻止超时触发', () => {
-      const callback = vi.fn()
-      chunkTimeout.onChunkTimeout(callback)
-      chunkTimeout.startUnifiedStreamTimeout('pipe-1', 'sess-1')
-      chunkTimeout.clearUnifiedStreamTimeout('pipe-1')
-
-      vi.advanceTimersByTime(120_000)
-
-      expect(callback).not.toHaveBeenCalled()
-    })
-  })
-
   describe('clearAllChunkTimeouts', () => {
     it('清除所有计时器', () => {
       const callback = vi.fn()
       chunkTimeout.onChunkTimeout(callback)
       chunkTimeout.resetChunkTimeout('pipe-1', 'msg-1')
       chunkTimeout.resetChunkTimeout('pipe-2', 'msg-2')
-      chunkTimeout.startUnifiedStreamTimeout('pipe-3', 'sess-1')
 
       chunkTimeout.clearAllChunkTimeouts()
 
       vi.advanceTimersByTime(chunkTimeout.CHUNK_INTERVAL_TIMEOUT_MS)
-      vi.advanceTimersByTime(120_000)
 
       expect(callback).not.toHaveBeenCalled()
       expect(chunkTimeout.getChunkTimeoutMessageId('pipe-1')).toBeNull()

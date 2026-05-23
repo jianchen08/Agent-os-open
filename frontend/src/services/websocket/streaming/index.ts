@@ -16,7 +16,7 @@
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
-import { clearAllChunkTimeouts, clearUnifiedStreamTimeout, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout } from './chunkTimeout'
+import { clearAllChunkTimeouts, getChunkTimeoutMessageId, onChunkTimeout, resetChunkTimeout } from './chunkTimeout'
 import {
   handleNewMessage,
   handleStreamChunk,
@@ -59,18 +59,10 @@ function _wrapWithTimeoutReset(event: string, handler: (data: any) => void): (da
   return (data: any) => {
     const pipelineId = resolvePipelineId(data)
     if (pipelineId) {
-      clearUnifiedStreamTimeout(pipelineId)
       const messageId = getChunkTimeoutMessageId(pipelineId) || data.message_id || data.data?.message_id
       if (messageId) {
         resetChunkTimeout(pipelineId, messageId)
       }
-    }
-    // BUG-FIX-fix_20260522_stream_dup: 收到任何流式事件时取消ACK计时器，防止重试导致重复流
-    // 问题根因: ACK超时重试导致消息被发送3次（1原始+2重试），服务端产生3个并发流，chunk交错到达前端导致内容重复
-    // 修复方案: 在统一的超时重置包装器中，收到任何非终止流式事件时立即取消ACK重试计时器
-    const threadId = data.data?._threadId || data._threadId || data.thread_id || data.data?.thread_id
-    if (threadId) {
-      globalWS.clearPendingAckForThread(threadId)
     }
     handler(data)
   }

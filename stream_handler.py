@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -399,6 +400,307 @@ async def _cancel_engine_task(engine_task: asyncio.Task) -> None:
         pass
 
 
+@dataclass
+class StreamContext:
+    """统一的流式请求上下文，合并了 engine_response / wake_response / drain_sub_bridge 三条路径的参数。"""
+
+    pipeline_id: str
+    message_id: str
+    thread_id: str
+    engine: Any = None
+    bridge: Any = None
+    conversation_history: list[dict[str, Any]] | None = None
+    ws_notifier: Any = None
+    websocket: Any = None
+    stop_event: asyncio.Event | None = None
+    agent_config: Any = None
+    workspace: str = ""
+    task_id: str = ""
+    user_content: str = ""
+    pipeline_ctx: Any = None
+
+
+async def _create_engine_tracker(engine: Any) -> asyncio.Task:
+    """为运行中/挂起的引擎创建一个可完成的 tracker task。
+
+    替代 asyncio.sleep(86400)，通过轮询引擎状态实现确定性退出：
+    引擎完成当前轮次或挂起后，tracker task 自然完成，
+    drain_loop 的 while not engine_task.done() 条件立即满足。
+
+    Returns:
+        asyncio.Task，引擎不再产出 chunk 时自动 done
+    """
+    async def _poll():
+        while True:
+            is_running = getattr(engine, 'is_running', False)
+            is_suspended = getattr(engine, 'is_suspended', False)
+            if not is_running and not is_suspended:
+                break
+            if is_suspended:
+                break
+            await asyncio.sleep(0.2)
+
+    return asyncio.create_task(_poll())
+
+
+async def handle_stream_request(ctx: StreamContext) -> None:
+    """统一的流式请求处理函数，合并了 engine_response / wake_response / drain_sub_bridge 三条路径。
+
+    根据 ctx 中的参数自动判断路径：
+    1. 有 engine 且无 user_content → drain 路径（原 _drain_sub_bridge / _stream_wake_response）
+    2. 有 pipeline_ctx → 新引擎路径（原 _stream_engine_response）
+
+    所有路径共享：
+    - drain_loop 消费
+    - 结果提取 + conversation_history 同步
+    - new_message 发送
+    - 取消/超时/异常处理
+    """
+    pipeline_id = ctx.pipeline_id
+    message_id = ctx.message_id
+    thread_id = ctx.thread_id
+    engine_task: asyncio.Task | None = None
+
+    _call_timeout = _get_call_timeout()
+
+    if ctx.engine is not None and ctx.user_content:
+        from pipeline.engine import _current_pipeline_id
+        _current_pipeline_id.set(pipeline_id)
+        logger.info(
+            "[handle_stream] wake 路径: pipeline=%s msg=%s",
+            pipeline_id[:12], message_id[:12],
+        )
+        engine = ctx.engine
+        _register_pipeline_thread(pipeline_id, engine, thread_id)
+
+        if ctx.bridge is not None:
+            bridge = ctx.bridge
+            bridge.pipeline_id = pipeline_id
+            if ctx.ws_notifier is not None:
+                bridge.output_sink = TargetedSink(ctx.ws_notifier, thread_id)
+        else:
+            bridge = PipelineStreamBridge(
+                pipeline_id=pipeline_id,
+                output_sink=TargetedSink(ctx.ws_notifier, thread_id),
+                message_id=message_id,
+            )
+            engine.set_streaming_context(bridge.on_chunk, streaming=True)
+            if engine._suspended_state is not None:
+                engine._suspended_state["on_chunk"] = bridge.on_chunk
+                engine._suspended_state["streaming"] = True
+
+        engine_tracker = await _create_engine_tracker(engine)
+        try:
+            drain_result = await asyncio.wait_for(
+                bridge.drain_loop(
+                    engine_tracker,
+                    heartbeat_interval=5.0,
+                    suspend_check=lambda: getattr(engine, "is_suspended", False),
+                    call_timeout=_call_timeout,
+                ),
+                timeout=_call_timeout * 10,
+            )
+
+            full_content = drain_result.get("accumulated_content", "")
+            logger.info(
+                "[handle_stream] wake drain 完成: pipeline=%s content=%d chars",
+                pipeline_id[:12], len(full_content),
+            )
+
+            await bridge.send_new_message(full_content, sequence=1)
+
+            if ctx.conversation_history is not None:
+                engine_messages = None
+                if getattr(engine, "_suspended_state", None) is not None:
+                    engine_messages = engine._suspended_state.get("messages")
+                if engine_messages is None and hasattr(engine, "_state"):
+                    engine_messages = getattr(engine, "_state", {}).get("messages")
+                if engine_messages:
+                    _sync_conversation_history(ctx.conversation_history, engine_messages)
+                elif full_content:
+                    _sync_conversation_history(
+                        ctx.conversation_history, [],
+                        fallback_content=full_content, fallback_id=message_id,
+                    )
+
+        except Exception as exc:
+            logger.error("[handle_stream] wake 路径失败: %s", exc)
+            try:
+                await bridge._send_event({
+                    "type": "stream_end",
+                    "data": {
+                        "message_id": message_id,
+                        "full_content": "",
+                        "pipeline_id": bridge.pipeline_id,
+                        "error": str(exc),
+                    },
+                })
+            except Exception:
+                pass
+        finally:
+            engine_tracker.cancel()
+
+    elif ctx.engine is not None and ctx.bridge is not None and not ctx.user_content:
+        logger.info(
+            "[handle_stream] drain 路径: pipeline=%s msg=%s",
+            pipeline_id[:12], message_id[:12],
+        )
+        bridge = ctx.bridge
+        engine = ctx.engine
+        engine_tracker = await _create_engine_tracker(engine)
+        try:
+            drain_result = await asyncio.wait_for(
+                bridge.drain_loop(
+                    engine_tracker,
+                    heartbeat_interval=5.0,
+                    call_timeout=_call_timeout,
+                ),
+                timeout=_call_timeout * 10,
+            )
+            full_content = drain_result.get("accumulated_content", "")
+            logger.info(
+                "[handle_stream] drain 完成: pipeline=%s content=%d chars",
+                pipeline_id[:12], len(full_content),
+            )
+            await bridge.send_new_message(full_content, sequence=1)
+        except Exception as exc:
+            logger.error("[handle_stream] drain 路径失败: pipeline=%s error=%s", pipeline_id[:12], exc)
+        finally:
+            engine_tracker.cancel()
+
+    elif ctx.pipeline_ctx is not None and ctx.user_content:
+        logger.info(
+            "[handle_stream] engine 路径: pipeline=%s msg=%s",
+            pipeline_id[:12], message_id[:12],
+        )
+        pctx = ctx.pipeline_ctx
+        conversation_history = ctx.conversation_history or []
+        conversation_history.append({"role": "user", "content": ctx.user_content})
+
+        session = api_store.get_session(thread_id)
+        if ctx.bridge is not None and ctx.bridge.pipeline_id:
+            pipeline_id = ctx.bridge.pipeline_id
+        else:
+            pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else pctx.engine.pipeline_id
+
+        engine = pctx.get_or_create_engine(pipeline_id)
+
+        if ctx.bridge is not None:
+            bridge = ctx.bridge
+            bridge.pipeline_id = pipeline_id
+        else:
+            bridge = PipelineStreamBridge(
+                pipeline_id=pipeline_id,
+                output_sink=TargetedSink(ctx.ws_notifier, thread_id),
+                message_id=message_id,
+            )
+
+        if session:
+            session.register_pipeline(pipeline_id)
+            api_store.set_session(thread_id, session)
+
+        _register_pipeline_thread(pipeline_id, engine, thread_id)
+
+        if pctx.services:
+            _exec_storage = pctx.services.get("execution_record_storage")
+            if _exec_storage is not None:
+                try:
+                    _exec_storage.update_summary(pipeline_id, {"thread_id": thread_id})
+                except Exception as _exc:
+                    logger.warning("写入管道 thread_id 失败: %s", _exc)
+
+        _resolved_agent_config = pctx.agent_config
+        if session and getattr(session, "agent_id", None):
+            try:
+                _agent_registry = pctx.services.get("agent_registry") if pctx.services else None
+                if _agent_registry:
+                    _direct_agent_config = _agent_registry.get(session.agent_id)
+                    if _direct_agent_config:
+                        _resolved_agent_config = _direct_agent_config
+                        logger.info(
+                            "子管道使用 session 指定的 agent: agent_id=%s, pipeline=%s",
+                            session.agent_id, pipeline_id[:12],
+                        )
+            except Exception:
+                pass
+
+        try:
+            engine_task = asyncio.create_task(
+                engine.run(
+                    user_input=ctx.user_content,
+                    agent_config=_resolved_agent_config,
+                    conversation_history=conversation_history[:-1],
+                    streaming=True,
+                    on_chunk=bridge.on_chunk,
+                    auto_approve=True,
+                    interaction_mode="auto",
+                )
+            )
+
+            async def _heartbeat():
+                try:
+                    await asyncio.wait_for(
+                        ctx.ws_notifier.send_to_thread(
+                            thread_id,
+                            {"type": "heartbeat_ack", "data": {"server_time": datetime.now(timezone.utc).isoformat()}},
+                        ),
+                        timeout=3.0,
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass
+
+            await _run_drain_and_finalize(
+                bridge=bridge,
+                engine_task=engine_task,
+                conversation_history=conversation_history,
+                message_id=message_id,
+                pipeline_id=pipeline_id,
+                call_timeout=_call_timeout,
+                suspend_check=lambda: getattr(engine, "is_suspended", False),
+                heartbeat_callback=_heartbeat,
+            )
+
+            if ctx.stop_event and ctx.stop_event.is_set():
+                logger.info("流式生成被用户中断: message_id=%s", message_id)
+
+        except asyncio.CancelledError:
+            logger.info("流式任务被取消: message_id=%s", message_id)
+            bridge.stop()
+            if engine_task is not None and not engine_task.done():
+                await _cancel_engine_task(engine_task)
+            raise
+
+        except TimeoutError:
+            raise
+
+        except Exception as exc:
+            logger.error("管道引擎执行失败: %s", exc, exc_info=True)
+            if engine_task is not None and not engine_task.done():
+                await _cancel_engine_task(engine_task)
+            try:
+                await bridge._send_event({
+                    "type": "stream_error",
+                    "data": {
+                        "message_id": message_id,
+                        "pipeline_id": bridge.pipeline_id,
+                        "error": str(exc),
+                    },
+                })
+            except Exception:
+                pass
+            try:
+                error_content = f"抱歉，处理你的消息时出现错误：{exc}"
+                await bridge.send_new_message(error_content, sequence=1)
+            except Exception:
+                pass
+    else:
+        logger.warning(
+            "[handle_stream] 无法识别路径: engine=%s bridge=%s user_content=%s pipeline_ctx=%s",
+            ctx.engine is not None, ctx.bridge is not None,
+            bool(ctx.user_content), ctx.pipeline_ctx is not None,
+        )
+
+
 async def _run_drain_and_finalize(
     bridge: Any,
     engine_task: asyncio.Task,
@@ -547,144 +849,20 @@ async def _stream_wake_response(
     conversation_history: list[dict[str, Any]] | None = None,
     pre_created_bridge: Any = None,
 ) -> None:
-    """管道挂起唤醒后的流式响应。
-
-    管道被 send_pipeline_message 唤醒后，需要新的流式桥接来捕获
-    后续的 LLM 输出并发送到前端。本函数使用预创建的 PipelineStreamBridge，
-    其 on_chunk 已在唤醒引擎之前注入到引擎的 _saved_on_chunk。
-
-    Args:
-        websocket: WebSocket 连接实例
-        user_content: 用户消息文本
-        message_id: 本轮回复的消息 UUID
-        stop_event: 取消事件
-        engine: 已唤醒的 PipelineEngine 实例
-        pipeline_id: 管道 ID
-        thread_id: WebSocket 连接的 thread_id
-        ws_notifier: WebSocketInteractionNotifier 实例
-        conversation_history: 对话历史列表（会被就地更新），用于追加唤醒轮的 assistant 回复
-        pre_created_bridge: 在唤醒引擎之前预创建的 StreamBridge 实例
-    """
-    from pipeline.engine import _current_pipeline_id
-    _current_pipeline_id.set(pipeline_id)
-    logger.info(
-        "[wake_response] 开始: pipeline=%s thread_id=%s msg=%s pre_bridge=%s bridge_pid=%s",
-        pipeline_id[:12], (thread_id or "")[:12], message_id[:12],
-        "yes" if pre_created_bridge else "no",
-        pre_created_bridge.pipeline_id[:12] if pre_created_bridge else "n/a",
+    """管道挂起唤醒后的流式响应（薄包装，委托给 handle_stream_request）。"""
+    ctx = StreamContext(
+        pipeline_id=pipeline_id,
+        message_id=message_id,
+        thread_id=thread_id,
+        engine=engine,
+        bridge=pre_created_bridge,
+        conversation_history=conversation_history,
+        ws_notifier=ws_notifier,
+        websocket=websocket,
+        stop_event=stop_event,
+        user_content=user_content,
     )
-
-    # 注册 pipeline_id → thread_id 映射到 EngineRegistry
-    _register_pipeline_thread(pipeline_id, engine, thread_id)
-
-    if pre_created_bridge is not None:
-        bridge = pre_created_bridge
-        bridge.pipeline_id = pipeline_id
-        if ws_notifier is not None:
-            bridge.output_sink = TargetedSink(ws_notifier, thread_id)
-    else:
-        bridge = PipelineStreamBridge(
-            pipeline_id=pipeline_id,
-            output_sink=TargetedSink(ws_notifier, thread_id),
-            message_id=message_id,
-        )
-        engine.set_streaming_context(bridge.on_chunk, streaming=True)
-        if engine._suspended_state is not None:
-            engine._suspended_state["on_chunk"] = bridge.on_chunk
-            engine._suspended_state["streaming"] = True
-
-    _call_timeout = _get_call_timeout()
-    _long_wait = asyncio.create_task(asyncio.sleep(86400))
-
-    try:
-        # SIMPLIFY-fix_20260521: 移除了等待循环。
-        # drain_loop 已不再在引擎挂起时 break，因此无需在此等待引擎恢复。
-        logger.info(
-            "[wake_response] drain_loop 开始: pipeline=%s msg=%s is_suspended=%s queue_size=%d",
-            pipeline_id[:12], message_id[:12],
-            getattr(engine, "is_suspended", "?"),
-            bridge._queue.qsize(),
-        )
-        drain_result = await asyncio.wait_for(
-            bridge.drain_loop(
-                _long_wait,
-                heartbeat_interval=5.0,
-                suspend_check=lambda: getattr(engine, "is_suspended", False),
-                call_timeout=_call_timeout,
-            ),
-            # BUG-FIX-fix_20260523_timeout_too_large:
-            # 问题根因: _call_timeout * 50 默认120s时为6000s（100分钟），过长。
-            # 修复方案: 改为 _call_timeout * 10（默认20分钟），仍留有足够余量。
-            timeout=_call_timeout * 10,
-        )
-
-        full_content = drain_result.get("accumulated_content", "")
-        logger.info(
-            "[wake_response] drain_loop 完成: pipeline=%s content=%d chars timed_out=%s",
-            pipeline_id[:12], len(full_content), drain_result.get("timed_out"),
-        )
-
-        # BUG-FIX-fix_20260523_double_stream_end:
-        # 问题根因: drain_loop 内部已发送 stream_end（正常退出第500行、超时退出第444行），
-        #   _stream_wake_response 不需要再额外发送，否则前端收到两个 stream_end。
-        # 修复方案: 删除此处重复的 stream_end 发送，仅保留 new_message。
-        # 注意: _close_thinking_if_active 也已由 drain_loop 内部第498行调用。
-
-        # BUG-FIX-20260515: 发送 new_message 更新前端
-        # 始终通过 bridge.send_new_message 发送，
-        # 该方法内部有空内容保底逻辑（使用 _accumulated_content）。
-        await bridge.send_new_message(full_content, sequence=1)
-
-        # BUG-FIX-20260511: 唤醒路径需要从引擎内部状态同步 conversation_history
-        # 问题根因: 引擎内部维护 state["messages"]（含完整对话历史），
-        # 但 _stream_wake_response 完成后 conversation_history（外部变量）
-        # 没有同步，导致下一轮消息传给引擎时历史不完整。
-        # 修复方案: 从引擎的 _suspended_state 或当前运行状态获取完整 messages，
-        # 过滤掉内部 system 消息后同步到 conversation_history。
-        if conversation_history is not None:
-            engine_messages = None
-            if getattr(engine, "_suspended_state", None) is not None:
-                engine_messages = engine._suspended_state.get("messages")
-            if engine_messages is None and hasattr(engine, "_state"):
-                engine_messages = getattr(engine, "_state", {}).get("messages")
-            if engine_messages:
-                _sync_conversation_history(conversation_history, engine_messages)
-                logger.info(
-                    "唤醒路径同步 conversation_history: 从引擎同步 %d 条消息 "
-                    "(原始 %d 条), history_len=%d",
-                    len([
-                        m for m in engine_messages
-                        if isinstance(m, dict) and m.get("role") in _VALID_ROLES
-                    ]),
-                    len(engine_messages), len(conversation_history),
-                )
-            elif full_content:
-                _sync_conversation_history(
-                    conversation_history, [],
-                    fallback_content=full_content, fallback_id=message_id,
-                )
-                logger.info(
-                    "唤醒路径追加 assistant 消息: history_len=%d, content_len=%d",
-                    len(conversation_history), len(full_content),
-                )
-
-    except Exception as exc:
-        logger.error("唤醒流式响应失败: %s", exc)
-        try:
-            await bridge._send_event({
-                "type": "stream_end",
-                "data": {
-                    "message_id": message_id,
-                    "full_content": "",
-                    "pipeline_id": bridge.pipeline_id,
-                    "error": str(exc),
-                },
-            })
-        except Exception:
-            pass
-    finally:
-        _long_wait.cancel()
-
+    await handle_stream_request(ctx)
 
 
 async def _stream_engine_response(
@@ -698,183 +876,17 @@ async def _stream_engine_response(
     ws_notifier: Any = None,
     pre_created_bridge: Any = None,
 ) -> None:
-    """通过管道引擎获取 AI 回复并以流式方式发送到 WebSocket。
-
-    使用 PipelineStreamBridge 桥接引擎回调与前端 WebSocket 协议，
-    将同步 on_chunk 事件转换为异步流式消息发送。
-
-    流程：
-    1. 创建 PipelineStreamBridge，桥接引擎回调与 WebSocket 输出
-    2. 调用 engine.run() 执行管道，通过 bridge.on_chunk 接收事件
-    3. 通过 _run_drain_and_finalize 消费事件队列、提取结果并同步历史
-    4. 处理取消和异常情况
-
-    Args:
-        websocket: WebSocket 连接实例
-        user_content: 用户发送的原始文本
-        message_id: 本轮回复的消息 UUID
-        stop_event: 用于取消流式生成的事件对象
-        thread_id: 当前线程/会话 ID
-        conversation_history: 对话历史列表（会被就地更新）
-        ctx: 管道上下文
-        ws_notifier: WebSocketInteractionNotifier 实例
-        pre_created_bridge: 预创建的 StreamBridge 实例
-    """
-    engine_task: asyncio.Task | None = None
-
-    conversation_history.append({"role": "user", "content": user_content})
-
-    # 确定 pipeline_id：
-    # - 如果 pre_created_bridge 已指定 pipeline_id（调用方明确路由），优先使用
-    # - 否则沿用 session 已有的（创建会话时分配），或用 Engine 自身的
-    session = api_store.get_session(thread_id)
-    if pre_created_bridge is not None and pre_created_bridge.pipeline_id:
-        pipeline_id = pre_created_bridge.pipeline_id
-    else:
-        pipeline_id = session.active_pipeline_id if session and session.active_pipeline_id else ctx.engine.pipeline_id
-
-    # BUG-FIX-fix_20260513_pipeline_cross_talk:
-    # 每个 pipeline_id 对应独立的引擎实例，确保管道之间状态完全隔离。
-    engine = ctx.get_or_create_engine(pipeline_id)
-
-    # 用统一的 pipeline_id 创建或更新 Bridge
-    if pre_created_bridge is not None:
-        bridge = pre_created_bridge
-        bridge.pipeline_id = pipeline_id
-    else:
-        bridge = PipelineStreamBridge(
-            pipeline_id=pipeline_id,
-            output_sink=TargetedSink(ws_notifier, thread_id),
-            message_id=message_id,
-        )
-
-    if session:
-        session.register_pipeline(pipeline_id)
-        api_store.set_session(thread_id, session)
-
-    # 注册 pipeline_id → thread_id 映射到 EngineRegistry
-    _register_pipeline_thread(pipeline_id, engine, thread_id)
-
-    if ctx.services:
-        _exec_storage = ctx.services.get("execution_record_storage")
-        if _exec_storage is not None:
-            try:
-                _exec_storage.update_summary(pipeline_id, {"thread_id": thread_id})
-            except Exception as _exc:
-                logger.warning("写入管道 thread_id 失败: %s", _exc)
-
-    # BUG-FIX-fix_20260516_direct_pipeline_agent_routing:
-    # 问题根因: 子管道（sub pipeline）发送消息时，engine.run() 始终使用
-    #   ctx.agent_config（主管道的主agent），完全忽略 session 的 agent_id
-    #   （子管道关联的agent），导致消息被路由到错误的agent。
-    # 修复方案: 优先从 session.agent_id 解析 agent_config，
-    #   找不到时回退到 ctx.agent_config。
-    _resolved_agent_config = ctx.agent_config
-    if session and getattr(session, "agent_id", None):
-        try:
-            _agent_registry = ctx.services.get("agent_registry") if ctx.services else None
-            if _agent_registry:
-                _direct_agent_config = _agent_registry.get(session.agent_id)
-                if _direct_agent_config:
-                    _resolved_agent_config = _direct_agent_config
-                    logger.info(
-                        "子管道使用 session 指定的 agent: agent_id=%s, pipeline=%s",
-                        session.agent_id, pipeline_id[:12],
-                    )
-        except Exception:
-            pass
-
-    try:
-        # 启动管道引擎（异步），通过 bridge.on_chunk 接收流式事件
-        engine_task = asyncio.create_task(
-            engine.run(
-                user_input=user_content,
-                agent_config=_resolved_agent_config,
-                conversation_history=conversation_history[:-1],
-                streaming=True,
-                on_chunk=bridge.on_chunk,
-                auto_approve=True,
-                interaction_mode="auto",
-            )
-        )
-
-        # 心跳回调：通过 WebSocket 发送心跳保活消息
-        async def _heartbeat():
-            """发送心跳确认消息，防止前端连接超时。"""
-            try:
-                await asyncio.wait_for(
-                    ws_notifier.send_to_thread(
-                        thread_id,
-                        {"type": "heartbeat_ack", "data": {"server_time": datetime.now(timezone.utc).isoformat()}},
-                    ),
-                    timeout=3.0,
-                )
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-        # 通过 _run_drain_and_finalize 消费事件队列、提取结果并同步历史
-        _call_timeout = _get_call_timeout()
-        await _run_drain_and_finalize(
-            bridge=bridge,
-            engine_task=engine_task,
-            conversation_history=conversation_history,
-            message_id=message_id,
-            pipeline_id=pipeline_id,
-            call_timeout=_call_timeout,
-            suspend_check=lambda: getattr(engine, "is_suspended", False),
-            heartbeat_callback=_heartbeat,
-        )
-
-        # 检查是否被中断
-        if stop_event.is_set():
-            logger.info("流式生成被用户中断: message_id=%s", message_id)
-
-    except asyncio.CancelledError:
-        """流式任务被取消（用户中断或连接断开）。"""
-        logger.info("流式任务被取消: message_id=%s", message_id)
-        bridge.stop()
-        # BUG-FIX-fix_engine_task_orphan:
-        # 问题根因: 取消 _stream_engine_response 时，内部的 engine_task 不会被自动取消。
-        #   导致旧引擎任务仍在共享的 ctx.engine 上运行，新消息启动的新 engine.run() 与之并发，
-        #   引擎内部状态（_pipeline_id、_suspended_state 等）被污染，表现为"消息延迟一轮"。
-        # 修复方案: 在 CancelledError 中显式取消 engine_task 并等待其退出。
-        # 影响范围: 用户快速连续发送消息、发送新消息取消旧回复的场景。
-        # 修复日期: 2026-05-08
-        if engine_task is not None and not engine_task.done():
-            await _cancel_engine_task(engine_task)
-        # drain_loop 已发送 stream_end，此处不再重复发送
-        raise
-
-    except TimeoutError:
-        """引擎执行超时，由 _run_drain_and_finalize 抛出。"""
-        raise
-
-    except Exception as exc:
-        """管道引擎执行出错。"""
-        # BUG-FIX-stream_error-on-exception:
-        # 问题: drain_loop 完成后，后续代码（如 send_new_message）抛异常时，
-        #   前端不会收到 stream_error 事件，导致流式状态可能无法正确结束。
-        # 修复: 在 send_new_message 之前先发送 stream_error 事件，确保前端
-        #   知道管道已出错，能正确清理 streamingTabs 中的残留状态。
-        # 修复日期: 2026-05-13
-        logger.error("管道引擎执行失败: %s", exc, exc_info=True)
-        if engine_task is not None and not engine_task.done():
-            await _cancel_engine_task(engine_task)
-        # 先发送 stream_error 事件，通知前端管道出错
-        try:
-            await bridge._send_event({
-                "type": "stream_error",
-                "data": {
-                    "message_id": message_id,
-                    "pipeline_id": bridge.pipeline_id,
-                    "error": str(exc),
-                },
-            })
-        except Exception:
-            pass
-        # 再发送错误消息作为最终回复
-        try:
-            error_content = f"抱歉，处理你的消息时出现错误：{exc}"
-            await bridge.send_new_message(error_content, sequence=1)
-        except Exception:
-            pass
+    """通过管道引擎获取 AI 回复并以流式方式发送到 WebSocket（薄包装，委托给 handle_stream_request）。"""
+    sctx = StreamContext(
+        pipeline_id="",
+        message_id=message_id,
+        thread_id=thread_id,
+        bridge=pre_created_bridge,
+        conversation_history=conversation_history,
+        ws_notifier=ws_notifier,
+        websocket=websocket,
+        stop_event=stop_event,
+        user_content=user_content,
+        pipeline_ctx=ctx,
+    )
+    await handle_stream_request(sctx)

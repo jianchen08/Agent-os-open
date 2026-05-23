@@ -360,8 +360,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
         current_signatures = []
         for tc in tool_calls:
             name = tc.get("name", "")
-            args = tc.get("args", {})
-            sig = hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()[:8]  # noqa: S324
+            raw_args = tc.get("args") or tc.get("arguments", {})
+            if isinstance(raw_args, str):
+                sig = hashlib.md5(f"{name}:{raw_args}".encode()).hexdigest()[:8]  # noqa: S324
+            else:
+                sig = hashlib.md5(f"{name}:{sorted(raw_args.items())}".encode()).hexdigest()[:8]  # noqa: S324
             current_signatures.append(sig)
 
         current_sig = ",".join(current_signatures)
