@@ -337,6 +337,7 @@ def create_combined_app() -> FastAPI:
                                 engine=_drain_engine,
                                 bridge=_result.bridge,
                                 ws_notifier=ws_interaction_notifier,
+                                user_content=_user_content,
                             )
                             _stream_task = asyncio.create_task(
                                 handle_stream_request(_drain_ctx),

@@ -421,24 +421,14 @@ class StreamContext:
 
 
 async def _create_engine_tracker(engine: Any) -> asyncio.Task:
-    """为运行中/挂起的引擎创建一个可完成的 tracker task。
-
-    替代 asyncio.sleep(86400)，通过轮询引擎状态实现确定性退出：
-    引擎完成当前轮次或挂起后，tracker task 自然完成，
-    drain_loop 的 while not engine_task.done() 条件立即满足。
-
-    Returns:
-        asyncio.Task，引擎不再产出 chunk 时自动 done
-    """
     async def _poll():
+        await asyncio.sleep(0.5)
         while True:
             is_running = getattr(engine, 'is_running', False)
             is_suspended = getattr(engine, 'is_suspended', False)
             if not is_running and not is_suspended:
                 break
-            if is_suspended:
-                break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3)
 
     return asyncio.create_task(_poll())
 
