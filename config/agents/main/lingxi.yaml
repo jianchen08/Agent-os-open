@@ -235,12 +235,8 @@ static_vars:
         如果需要上述扩展工具，必须先调用 resource_search 加载，加载成功后下一轮才能调用。
 
     - name: "用户信息"
-      type: "routed"
-      route_key: "user_id"
-      routes:
-        "_default":
-          type: "path"
-          path: "config/users/default/profile.md"
+      type: "path"
+      path: "config/users/default/profile.md"
 
 # 动态变量（每轮变化，实时生成）
 dynamic_vars:

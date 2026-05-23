@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import uuid
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from infrastructure.session.models import SessionModel
+
+_log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -121,8 +124,8 @@ class MemoryStore:
                     last_active_at=_parse_iso_time(tdata.get("updated_at", "")),
                     metadata=tdata.get("metadata", {}),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            _log.error("持久化数据加载失败: %s [path=%s]", e, path, exc_info=True)
         else:
             # 从已加载的 threads 中构建用户线程索引
             self._rebuild_user_thread_index()
@@ -136,19 +139,19 @@ class MemoryStore:
         path = self._persist_file()
         if not path:
             return
-        try:
-            data = {"threads": self.threads}
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            if os.path.exists(path):
-                os.replace(tmp_path, path)
-            else:
-                os.rename(tmp_path, path)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("持久化保存失败: %s [path=%s]", e, path)
+        with self._persist_lock:
+            try:
+                data = {"threads": self.threads}
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp_path = path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                if os.path.exists(path):
+                    os.replace(tmp_path, path)
+                else:
+                    os.rename(tmp_path, path)
+            except Exception as e:
+                _log.warning("持久化保存失败: %s [path=%s]", e, path)
 
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         """根据用户名查找用户。"""

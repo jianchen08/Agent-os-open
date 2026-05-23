@@ -37,6 +37,10 @@ class ChunkMetadata:
     status: ChunkStatus = ChunkStatus.ACTIVE
     executor_id: str | None = None
     executor_type: str | None = None
+    review_status: str = "pending"       # "pending" 或 "reviewed"
+    execution_anchors: list[dict] | None = None  # 执行过程锚点
+    sequence_start: int | None = None    # 覆盖的 sequence 范围
+    sequence_end: int | None = None
 
 
 @dataclass

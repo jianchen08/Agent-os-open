@@ -1,7 +1,6 @@
 /**
  * 新消息事件处理器
  */
-import { reconcileContentBlocks } from '@/components/chat/hooks/useMessageRender'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 
@@ -10,9 +9,62 @@ import { resolvePipelineId } from '../router'
 import { extractMessageId, extractThreadId, terminatePipeline } from './utils'
 
 /**
+ * 从 API 事件数据中为消息构建 parts[] 数组
+ *
+ * 当消息尚无 parts 时，根据 content / thinking / toolCalls 构建。
+ *
+ * @param content - 消息文本内容
+ * @param thinking - 思考块数据
+ * @param toolCalls - 工具调用列表
+ * @returns 构建好的 parts 数组
+ */
+function buildPartsFromApiData(
+  content: string | undefined,
+  thinking: any,
+  toolCalls: any[] | undefined,
+): any[] {
+  const parts: any[] = []
+
+  if (thinking?.content && thinking.content.trim()) {
+    parts.push({
+      type: 'thinking',
+      thinking: { content: thinking.content.trim(), isThinking: false },
+      state: 'done',
+    })
+  }
+
+  if (content && content.trim()) {
+    parts.push({ type: 'text', text: content.trim(), state: 'done' })
+  }
+
+  if (toolCalls && toolCalls.length > 0) {
+    for (const tc of toolCalls) {
+      parts.push({ type: 'tool_call', toolCall: tc, state: 'done' })
+    }
+  }
+
+  return parts
+}
+
+/**
+ * 将消息中所有 streaming 状态的 parts 标记为 done
+ *
+ * @param msg - 消息对象
+ * @returns 更新后的 parts 数组
+ */
+function finalizeStreamingParts(msg: any): any[] {
+  return (msg.parts || []).map((p: any) =>
+    p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+  )
+}
+
+/**
  * 处理新消息事件
  *
- * 采用与 handleStreamEnd 相同的 hasTextBlocks 逻辑。
+ * 流程：
+ * 1. 终止管道并清理流式状态
+ * 2. 若消息已有 parts 且有文本内容，仅更新 status 并将 streaming parts 改为 done
+ * 3. 若消息无 parts 或无文本内容，从 API 数据构建 parts[]
  */
 export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
@@ -50,37 +102,23 @@ export function handleNewMessage(eventData: any) {
   const existing = msgs.find((m: any) => m.id === messageId)
   if (!existing) return
 
-  if ((existing as any)._reconciled) {
+  // 基于 parts[] 判断消息是否已有文本内容
+  const existingParts = (existing as any).parts || []
+  const hasTextParts = existingParts.some((p: any) => p.type === 'text' && p.text?.trim())
+
+  if (hasTextParts) {
+    // 已有文本 parts，仅更新 status 并将 streaming parts 改为 done
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
-    } as any)
-  } else if (finalContent) {
-    const ft = existing.thinking ? { ...existing.thinking, isThinking: false } : undefined
-    const existingBlocks = existing.contentBlocks || []
-    const hasTextBlocks = existingBlocks.some((b: any) => b.type === 'text' && b.text?.trim())
-
-    let rb: any[]
-    if (hasTextBlocks) {
-      rb = existingBlocks.map((block: any) => {
-        if (block.type === 'thinking' && block.thinking) {
-          return { ...block, thinking: { ...block.thinking, isThinking: false } }
-        }
-        return block
-      })
-    } else {
-      rb = reconcileContentBlocks(existingBlocks, finalContent, existing.toolCalls, ft, messageId)
-    }
-
-    pipelineStore.getState().updateMessage(pipelineId, messageId, {
-      status: 'completed',
-      content: finalContent,
-      contentBlocks: rb,
-      _reconciled: true,
-      ...(ft ? { thinking: ft } : {}),
+      parts: finalizeStreamingParts(existing),
     } as any)
   } else {
+    // 无文本 parts，从 API 数据构建 parts[]
+    const builtParts = buildPartsFromApiData(finalContent, data?.thinking, data?.toolCalls)
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
+      ...(finalContent ? { content: finalContent } : {}),
+      ...(builtParts.length > 0 ? { parts: builtParts } : {}),
     } as any)
   }
 }

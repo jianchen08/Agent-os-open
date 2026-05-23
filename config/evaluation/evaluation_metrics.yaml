@@ -262,37 +262,4 @@ metrics:
       required: [output]
     tags: [semantic, intent, match, hallucination]
 
-  # ========== 人工审核 ==========
-  - name: human_review
-    description: 人工审核（审批/复核）
-    category: human
-    evaluator_type: human
-    evaluator_id: human_evaluator
-    level: 4  # 人工层级（最高）
-    includes: []  # 独立指标
-    requires: []  # 无前置依赖（但通常在其他评估后）
-    input_schema:
-      type: object
-      properties:
-        title:
-          type: string
-          description: 审核标题
-        description:
-          type: string
-          description: 审核说明
-        type:
-          type: string
-          enum: [approval, review]
-          description: 审核类型
-          default: approval
-        checklist:
-          type: array
-          items:
-            type: string
-          description: 检查清单（type=review 时使用）
-        timeout_hours:
-          type: number
-          description: 超时时间（小时）
-          default: 24
-      required: [title]
-    tags: [human, approval, review]
+

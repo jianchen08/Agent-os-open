@@ -84,6 +84,11 @@ vi.mock('@/constants/websocket', () => ({
     SUB_AGENT_COMPLETED: 'sub_agent_completed',
     WORKFLOW_STEP_UPDATE: 'workflow_step_update',
   },
+  WebSocketStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+  },
 }))
 
 // ---------------------------------------------------------------------------

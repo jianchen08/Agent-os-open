@@ -7,7 +7,7 @@
 from typing import Any, Protocol
 from uuid import UUID
 
-from src.auth.exceptions import (
+from src.core.exceptions.auth import (
     InvalidCredentialsError,
     UserExistsError,
     UserInactiveError,

@@ -149,3 +149,15 @@ export type {
   ActivityAction,
   ActivityCardProps,
 } from './activity'
+
+// 导出统一消息 Part 类型
+export type {
+  MessagePart,
+  TextPart,
+  ThinkingPart,
+  ToolCallPart,
+  SystemPart,
+  PartState,
+  ToolCallPartState,
+  SystemLevel,
+} from './messageParts'

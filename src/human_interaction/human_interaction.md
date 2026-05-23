@@ -165,4 +165,4 @@ Agent -> request_interaction() -> 自动审批判断 -> WebSocket 推送 -> 用�
 - 覆盖率要求：核心逻辑 >= 85%
 
 ## 实现
--> 见代码文件：src/core/human_interaction/
+-> 见代码文件：src/human_interaction/

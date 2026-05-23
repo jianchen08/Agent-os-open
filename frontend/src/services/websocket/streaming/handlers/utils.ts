@@ -129,7 +129,6 @@ export function ensureStreamingPlaceholder(
     parentId: null,
     sequence: nextSeq,
     status: 'streaming',
-    contentBlocks: [],
   } as any)
 }
 
@@ -154,13 +153,20 @@ export function terminatePipeline(pipelineId: string, threadId?: string): void {
 }
 
 /**
- * 清理消息的 thinking 状态（将 isThinking 设为 false）
+ * 清理消息中 streaming 状态的 parts（将 state 设为 done）
  *
- * 返回浅拷贝，不修改原始消息对象。如果 thinking 已经不是 isThinking，直接返回原对象。
+ * 返回浅拷贝，不修改原始消息对象。如果 parts 无 streaming 状态，直接返回原对象。
  */
-export function clearThinkingState(msg: any): any {
-  if (msg.thinking?.isThinking) {
-    return { ...msg, thinking: { ...msg.thinking, isThinking: false } }
+export function clearStreamingParts(msg: any): any {
+  const parts = msg.parts || []
+  const hasStreaming = parts.some((p: any) => p.state === 'streaming')
+  if (hasStreaming) {
+    return {
+      ...msg,
+      parts: parts.map((p: any) =>
+        p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+      ),
+    }
   }
   return msg
 }

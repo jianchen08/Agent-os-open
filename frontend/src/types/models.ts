@@ -250,6 +250,8 @@ export interface Message {
   toolCalls?: MessageToolCall[]
   /** 有序内容块列表（新模式，按 sequence 顺序排列，优先于 content + toolCalls） */
   contentBlocks?: ContentBlock[]
+  /** 统一 Part 列表（最终模式，按 sequence 排序，优先于 contentBlocks 和 content+toolCalls+thinking） */
+  parts?: import('./messageParts').MessagePart[]
   /** 消息类型（可选，用于任务消息） */
   messageType?:
     | 'text' // 文本消息（默认）

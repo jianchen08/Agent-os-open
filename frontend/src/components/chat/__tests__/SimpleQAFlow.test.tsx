@@ -9,17 +9,17 @@
  * 3. 空消息处理：stream_start → stream_end（无 chunk）
  * 4. 流式中断：stream_start → stream_chunk → stream_error
  *
- * 所有测试通过构造 Message 对象（含 contentBlocks），
+ * 所有测试通过构造 Message 对象（含 parts[]），
  * 使用 renderHook 测试 useMessageRender hook 的输出。
  */
 
 import { act } from '@testing-library/react'
 import {
-  createMockContentBlock,
   createMockMessage,
+  createTextPart,
+  createThinkingPart,
   renderUseMessageRender,
 } from './testUtils'
-import type { ContentBlock, Message } from '@/types/models'
 
 // ============================================================
 // Mock 外部依赖
@@ -43,48 +43,6 @@ vi.mock('@/utils/toolCardRegistry', () => ({
 }))
 
 // ============================================================
-// 辅助函数
-// ============================================================
-
-/**
- * 从 chunks 构建 contentBlocks（模拟流式事件累积后的消息状态）
- *
- * @param chunks - 累积的文本片段
- * @param messageId - 消息 ID
- * @returns ContentBlock 数组
- */
-function buildStreamContentBlocks(chunks: string[], messageId: string): ContentBlock[] {
-  const text = chunks.join('')
-  if (!text) return []
-  return [createMockContentBlock('text', { text, sourceId: messageId })]
-}
-
-/**
- * 构建思考+文本混合的 contentBlocks
- */
-function buildThinkingAndTextBlocks(
-  thinkingContent: string,
-  textContent: string,
-  messageId: string,
-): ContentBlock[] {
-  const blocks: ContentBlock[] = []
-  if (thinkingContent) {
-    blocks.push(
-      createMockContentBlock('thinking', {
-        thinking: { content: thinkingContent, isThinking: false },
-        sourceId: messageId,
-      }),
-    )
-  }
-  if (textContent) {
-    blocks.push(
-      createMockContentBlock('text', { text: textContent, sourceId: messageId }),
-    )
-  }
-  return blocks
-}
-
-// ============================================================
 // 测试套件
 // ============================================================
 
@@ -95,17 +53,16 @@ describe('AC-1g: 简单问答流程', () => {
   describe('流式文本渲染', () => {
     it('应正确渲染 stream_start → stream_chunk × 2 → stream_end 的完整文本', async () => {
       // 模拟事件序列: stream_start → stream_chunk('你') → stream_chunk('好') → stream_end
-      // 流式结束后消息包含完整文本 contentBlocks
+      // 流式结束后消息包含完整文本 parts[]
       const messageId = 'msg-stream-1'
       const threadId = 'thread-1'
 
       // 构造流式结束后的消息状态
-      const contentBlocks = buildStreamContentBlocks(['你', '好'], messageId)
       const message = createMockMessage({
         id: messageId,
         sessionId: threadId,
         content: '你好',
-        contentBlocks,
+        parts: [createTextPart('你好', 1)],
       })
 
       const { result } = await renderUseMessageRender(message, {
@@ -121,7 +78,7 @@ describe('AC-1g: 简单问答流程', () => {
       // 验证内容完整
       if (fragments[0].type === 'text') {
         expect(fragments[0].content).toBe('你好')
-        expect(fragments[0].key).toContain(messageId)
+        expect(fragments[0].key).toContain('part-text')
         expect(fragments[0].isLast).toBe(true)
       }
 
@@ -133,11 +90,10 @@ describe('AC-1g: 简单问答流程', () => {
       const messageId = 'msg-stream-2'
 
       // 流式中（只有部分 chunk 到达）
-      const contentBlocks = buildStreamContentBlocks(['你'], messageId)
       const message = createMockMessage({
         id: messageId,
         content: '你',
-        contentBlocks,
+        parts: [createTextPart('你', 1, 'streaming')],
         status: 'streaming',
       })
 
@@ -160,14 +116,10 @@ describe('AC-1g: 简单问答流程', () => {
       const messageId = 'msg-stream-3'
 
       // 多个 chunk 合并后
-      const contentBlocks = buildStreamContentBlocks(
-        ['第一段', '第二段', '第三段'],
-        messageId,
-      )
       const message = createMockMessage({
         id: messageId,
         content: '第一段第二段第三段',
-        contentBlocks,
+        parts: [createTextPart('第一段第二段第三段', 1)],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -188,12 +140,13 @@ describe('AC-1g: 简单问答流程', () => {
 
       // 模拟: thinking_start → thinking_chunk('分析中') → thinking_end →
       //       stream_start → stream_chunk('回答') → stream_end
-      const contentBlocks = buildThinkingAndTextBlocks('分析中', '回答', messageId)
       const message = createMockMessage({
         id: messageId,
         content: '回答',
-        thinking: { content: '分析中', isThinking: false },
-        contentBlocks,
+        parts: [
+          createThinkingPart('分析中', 1),
+          createTextPart('回答', 2),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -208,7 +161,7 @@ describe('AC-1g: 简单问答流程', () => {
       // 验证 thinking 片段内容
       if (fragments[0].type === 'thinking') {
         expect(fragments[0].thinking.content).toBe('分析中')
-        expect(fragments[0].key).toContain(messageId)
+        expect(fragments[0].key).toContain('part-thinking')
       }
 
       // 验证 text 片段内容
@@ -220,17 +173,14 @@ describe('AC-1g: 简单问答流程', () => {
     it('流式过程中 thinking 片段的 isThinking 状态应正确', async () => {
       const messageId = 'msg-think-2'
 
-      const contentBlocks = buildThinkingAndTextBlocks('正在分析...', '回答内容', messageId)
-      // 流式思考中
-      contentBlocks[0] = createMockContentBlock('thinking', {
-        thinking: { content: '正在分析...', isThinking: true },
-        sourceId: messageId,
-      })
-
+      // 流式思考中（state 为 streaming）
       const message = createMockMessage({
         id: messageId,
         content: '回答内容',
-        contentBlocks,
+        parts: [
+          createThinkingPart('正在分析...', 1, 'streaming'),
+          createTextPart('回答内容', 2),
+        ],
         status: 'streaming',
       })
 
@@ -249,17 +199,10 @@ describe('AC-1g: 简单问答流程', () => {
     it('仅有 thinking 没有 text 时只渲染 thinking 片段', async () => {
       const messageId = 'msg-think-3'
 
-      const contentBlocks: ContentBlock[] = [
-        createMockContentBlock('thinking', {
-          thinking: { content: '纯思考', isThinking: false },
-          sourceId: messageId,
-        }),
-      ]
-
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [createThinkingPart('纯思考', 1)],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -276,11 +219,11 @@ describe('AC-1g: 简单问答流程', () => {
     it('stream_start → stream_end（无 chunk）不应崩溃', async () => {
       const messageId = 'msg-empty-1'
 
-      // 无 chunk，contentBlocks 为空
+      // 无 chunk，parts 为空
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: [],
+        parts: [],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -293,18 +236,11 @@ describe('AC-1g: 简单问答流程', () => {
     it('仅空白文本不应产生 text 片段', async () => {
       const messageId = 'msg-empty-2'
 
-      // 空白文本（buildFragments 会过滤 trim() 为空的文本）
-      const contentBlocks = [
-        createMockContentBlock('text', {
-          text: '   ',
-          sourceId: messageId,
-        }),
-      ]
-
+      // 空白文本（buildFragmentsFromParts 会过滤 trim() 为空的文本）
       const message = createMockMessage({
         id: messageId,
         content: '   ',
-        contentBlocks,
+        parts: [createTextPart('   ', 1)],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -313,13 +249,12 @@ describe('AC-1g: 简单问答流程', () => {
       expect(result.current.fragments).toEqual([])
     })
 
-    it('空 contentBlocks 且无 content/toolCalls/thinking 不应崩溃', async () => {
+    it('parts 为 undefined 时不应崩溃', async () => {
       const messageId = 'msg-empty-3'
 
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: undefined,
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -337,11 +272,10 @@ describe('AC-1g: 简单问答流程', () => {
 
       // 流式中断：chunk 到达后出错
       // 消息保留已到达的文本 + 错误信息
-      const contentBlocks = buildStreamContentBlocks(['部分内容'], messageId)
       const message = createMockMessage({
         id: messageId,
         content: '部分内容',
-        contentBlocks,
+        parts: [createTextPart('部分内容', 1)],
         status: 'streaming',
       })
 
@@ -364,11 +298,10 @@ describe('AC-1g: 简单问答流程', () => {
       const messageId = 'msg-error-2'
 
       // 错误后流式结束
-      const contentBlocks = buildStreamContentBlocks(['部分内容'], messageId)
       const message = createMockMessage({
         id: messageId,
         content: '部分内容',
-        contentBlocks,
+        parts: [createTextPart('部分内容', 1)],
         status: 'completed',
       })
 
@@ -387,19 +320,18 @@ describe('AC-1g: 简单问答流程', () => {
       expect(result.current.isStreaming).toBe(false)
     })
 
-    it('fragment 的 key 应包含 messageId 用于 React 追踪', async () => {
+    it('fragment 的 key 应包含 part 索引用于 React 追踪', async () => {
       const messageId = 'msg-key-1'
-      const contentBlocks = buildStreamContentBlocks(['内容'], messageId)
       const message = createMockMessage({
         id: messageId,
         content: '内容',
-        contentBlocks,
+        parts: [createTextPart('内容', 1)],
       })
 
       const { result } = await renderUseMessageRender(message)
 
       for (const fragment of result.current.fragments) {
-        expect(fragment.key).toContain(messageId)
+        expect(fragment.key).toContain('part-text')
       }
     })
   })
@@ -408,31 +340,18 @@ describe('AC-1g: 简单问答流程', () => {
   // 测试 5: fragments 顺序与事件顺序一致
   // ----------------------------------------------------------
   describe('fragments 顺序一致性', () => {
-    it('多片段顺序应与 contentBlocks 顺序一致', async () => {
+    it('多片段顺序应与 parts[] 顺序一致', async () => {
       const messageId = 'msg-order-1'
 
       // 构造 thinking → text → text 顺序
-      const contentBlocks: ContentBlock[] = [
-        createMockContentBlock('thinking', {
-          thinking: { content: '思考1', isThinking: false },
-          sourceId: messageId,
-        }),
-        createMockContentBlock('text', {
-          text: '文本1',
-          sourceId: messageId,
-          sequence: 1,
-        }),
-        createMockContentBlock('text', {
-          text: '文本2',
-          sourceId: messageId,
-          sequence: 2,
-        }),
-      ]
-
       const message = createMockMessage({
         id: messageId,
         content: '文本1文本2',
-        contentBlocks,
+        parts: [
+          createThinkingPart('思考1', 1),
+          createTextPart('文本1', 2),
+          createTextPart('文本2', 3),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -453,7 +372,7 @@ describe('AC-1g: 简单问答流程', () => {
     it('非最后一条消息 isStreaming 应为 false', async () => {
       const message = createMockMessage({
         content: '你好',
-        contentBlocks: [createMockContentBlock('text', { text: '你好' })],
+        parts: [createTextPart('你好', 1)],
       })
 
       const { result } = await renderUseMessageRender(message, {
@@ -468,7 +387,7 @@ describe('AC-1g: 简单问答流程', () => {
       const message = createMockMessage({
         role: 'user',
         content: '你好',
-        contentBlocks: [createMockContentBlock('text', { text: '你好' })],
+        parts: [createTextPart('你好', 1)],
       })
 
       const { result } = await renderUseMessageRender(message, {
@@ -483,7 +402,7 @@ describe('AC-1g: 简单问答流程', () => {
       const message = createMockMessage({
         role: 'assistant',
         content: '你好',
-        contentBlocks: [createMockContentBlock('text', { text: '你好' })],
+        parts: [createTextPart('你好', 1)],
       })
 
       const { result } = await renderUseMessageRender(message, {
@@ -494,12 +413,12 @@ describe('AC-1g: 简单问答流程', () => {
       expect(result.current.isStreaming).toBe(true)
     })
 
-    it('contentBlocks 更新后 fragments 应随之更新', async () => {
+    it('parts 更新后 fragments 应随之更新', async () => {
       // 初始消息
       const message1 = createMockMessage({
         id: 'msg-update-1',
         content: '你好',
-        contentBlocks: [createMockContentBlock('text', { text: '你好' })],
+        parts: [createTextPart('你好', 1)],
       })
 
       const { result, rerender } = await renderUseMessageRender(message1, {
@@ -516,7 +435,7 @@ describe('AC-1g: 简单问答流程', () => {
       const message2 = createMockMessage({
         id: 'msg-update-1',
         content: '你好世界',
-        contentBlocks: [createMockContentBlock('text', { text: '你好世界' })],
+        parts: [createTextPart('你好世界', 1)],
       })
 
       await act(async () => {

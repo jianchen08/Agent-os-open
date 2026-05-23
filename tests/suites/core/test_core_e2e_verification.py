@@ -561,25 +561,6 @@ class TestRegion4TaskInteraction:
         assert HumanInteractionService is not None
         assert InteractionMode is not None
 
-    def test_core_human_interaction_interfaces(self):
-        """core.human_interaction 接口和模型可导入。"""
-        from core.human_interaction.interfaces import IInteractionNotifier
-        from core.human_interaction.models import InteractionRequest
-        assert IInteractionNotifier is not None
-        assert InteractionRequest is not None
-
-    def test_websocket_notifier_file_exists(self):
-        """WebSocketNotifier 文件存在且结构完整。"""
-        notifier_path = ROOT_DIR / "src" / "core" / "human_interaction" / "websocket_notifier.py"
-        assert notifier_path.exists(), "websocket_notifier.py 文件不存在"
-
-        content = notifier_path.read_text(encoding="utf-8")
-        assert "WebSocketInteractionNotifier" in content
-        assert "notify_request" in content
-        assert "notify_cancel" in content
-        assert "notify_timeout" in content
-        assert "IInteractionNotifier" in content
-
     def test_inject_route_defined(self):
         """inject 相关 API 路由已定义。"""
         routes_path = ROOT_DIR / "src" / "channels" / "api" / "routes_missing.py"

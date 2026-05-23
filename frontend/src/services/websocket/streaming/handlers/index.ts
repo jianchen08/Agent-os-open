@@ -7,4 +7,4 @@ export { handleStreamEnd, handleStreamError, handleStreamKeepalive, handleStream
 export { handleThinkingEnd, handleThinkingChunk, handleThinkingStart } from './thinkingHandler'
 export { handleToolResult, handleToolStart } from './toolHandler'
 export { handleIteration } from './iterationHandler'
-export { extractMessageId, ensureStreamingPlaceholder, startPipelineStreaming, stopPipelineStreaming, extractThreadId, terminatePipeline, clearThinkingState, resolveRequiredPipelineId } from './utils'
+export { extractMessageId, ensureStreamingPlaceholder, startPipelineStreaming, stopPipelineStreaming, extractThreadId, terminatePipeline, clearStreamingParts, resolveRequiredPipelineId } from './utils'

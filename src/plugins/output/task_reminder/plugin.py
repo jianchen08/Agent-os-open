@@ -166,7 +166,7 @@ class TaskReminder(IOutputPlugin):
 
         if has_tool_calls:
             logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, has tool_calls (len=%d)",
+                "TaskReminder[iter=%s][task=%s]: skip, has tool calls (len=%d)",
                 iteration, task_id, len(raw_tool_calls),
             )
             return OutputResult()
@@ -218,13 +218,19 @@ class TaskReminder(IOutputPlugin):
             return OutputResult()
 
         reminder_count = state.get("evaluate_reminder_count", 0)
+        # BUG-FIX: 提醒耗尽后发送 end 信号，防止管道无限挂起
         if reminder_count >= self._max_reminders:
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached "
-                "(%d >= %d), no more reminders",
+                "(%d >= %d), sending end signal to prevent infinite loop",
                 iteration, task_id, reminder_count, self._max_reminders,
             )
-            return OutputResult()
+            return OutputResult(
+                route_signal=RouteSignal(
+                    route_type="end",
+                    reason=f"task_reminder: max_reminders reached ({reminder_count}/{self._max_reminders}), task may be stuck",
+                ),
+            )
 
         reminder_message = self._build_reminder(state, reminder_count)
 

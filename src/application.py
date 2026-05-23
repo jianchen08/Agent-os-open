@@ -250,6 +250,27 @@ class Application:
         except Exception as exc:
             logger.warning("创建 execution_record_storage 服务失败: %s", exc)
 
+        # ── 9. MemoryMaintenanceService ─────────────────
+        try:
+            from memory.maintenance import MemoryMaintenanceService
+
+            _maintenance_config = self._load_maintenance_config()
+            _maintenance_service = MemoryMaintenanceService(
+                storage=services.get("execution_record_storage"),
+                chunk_db=services.get("chunk_service"),
+                knowledge_service=getattr(
+                    memory_service, "_knowledge_service", None
+                ) if memory_service else None,
+                config=_maintenance_config,
+                memory_service=memory_service,
+            )
+            services["maintenance_service"] = _maintenance_service
+            # 注册维护触发器
+            _maintenance_service.register_triggers()
+            logger.info("服务已创建: maintenance_service (enabled=%s)", _maintenance_config.get("enabled", False))
+        except Exception as exc:
+            logger.warning("创建 maintenance_service 服务失败: %s", exc)
+
         # ── 10. EventBus ─────────────────────────────────
         # BUG-FIX-fix_20260521_event_bus_type_mismatch:
         # 问题根因: 之前使用 pipeline.event_bus.EventBus 创建实例，这是轻量级实现，
@@ -702,3 +723,20 @@ class Application:
     def get_service(self, name: str, *, default: Any = None) -> Any | None:
         """获取已注册的服务实例。"""
         return self.services.get(name, default)
+
+    def _load_maintenance_config(self) -> dict[str, Any]:
+        """从 memory_storage.yaml 加载维护配置。
+
+        Returns:
+            维护配置字典
+        """
+        config_path = self.project_root / "config" / "system" / "memory_storage.yaml"
+        if not config_path.exists():
+            return {}
+        try:
+            import yaml
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            return data.get("maintenance", {}) if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.warning("加载维护配置失败: %s", exc)
+            return {}

@@ -114,11 +114,6 @@ class TestInterfaceSignatureMatch:
 class TestPipelineContextImports:
     """验证 stream_handler._init_pipeline_context 涉及的关键导入正常。"""
 
-    def test_websocket_notifier_importable(self):
-        """验证 websocket_notifier 本身可被导入。"""
-        from src.core.human_interaction.websocket_notifier import WebSocketInteractionNotifier
-        assert WebSocketInteractionNotifier is not None
-
     def test_build_services_import_chain(self):
         """验证 build_services 调用链中的关键导入。"""
         from application import Application

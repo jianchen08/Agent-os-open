@@ -851,13 +851,11 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         pipeline_id = inputs.get("pipeline_id")
         if pipeline_id:
             try:
-                # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
                 await task_service.bind_pipeline_run(task.id, pipeline_id)
                 logger.info(
                     "[TaskSubmit] 容器任务已绑定管道 | task_id=%s | pipeline_id=%s",
                     task.id, pipeline_id,
                 )
-                # 按根任务分组执行记录
                 exec_storage = self._get_execution_record_storage()
                 if exec_storage:
                     root_id = task_service.get_root_task_id(task.id)

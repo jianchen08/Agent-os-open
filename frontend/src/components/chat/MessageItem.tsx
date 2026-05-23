@@ -336,17 +336,8 @@ export const MessageItem = ({
                 MessageContentRenderer 对空 fragments 返回 null，
                 但气泡 div 仍渲染（带 padding、背景色、圆角），显示为空的小条条。
                 修复方案: 非流式且无内容时跳过整个气泡渲染。 */}
-            {!isMessageStreaming && isAssistant && renderContext.fragments.length === 0 && !message.toolCalls?.length ? null : (
-            <div
-              className={cn(
-                'overflow-hidden',
-                isSystemMessage
-                  ? 'w-full border-l-4 border-status-warning/40'
-                  : isUser
-                    ? 'max-w-full'
-                    : 'w-full',
-              )}
-              style={{
+            {(() => {
+              const bubbleStyle = {
                 backgroundColor: isUser ? 'var(--bubble-user-bg)' : 'var(--bubble-ai-bg)',
                 color: isUser ? 'var(--bubble-user-text)' : 'var(--bubble-ai-text)',
                 borderRadius: isSystemMessage
@@ -369,33 +360,56 @@ export const MessageItem = ({
                   : isUser
                     ? 'var(--bubble-user-padding, 0.625rem 1rem)'
                     : 'var(--bubble-ai-padding, 0.75rem 1rem)',
-              }}
-            >
-              {isAssistant && renderContext.fragments.length === 0 ? (
-                isMessageStreaming ? (
-                  <div className="flex items-center gap-2">
-                    {hasPendingInteraction ? (
-                      <>
-                        <MessageSquare className="h-4 w-4 text-status-info" />
-                        <span className="text-sm text-status-info">等待用户响应...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span className="text-sm">思考中...</span>
-                      </>
-                    )}
+              }
+              const bubbleCls = cn(
+                'overflow-hidden',
+                isSystemMessage
+                  ? 'w-full border-l-4 border-status-warning/40'
+                  : isUser
+                    ? 'max-w-full'
+                    : 'w-full',
+              )
+
+              if (isUser) {
+                const userContent = renderContext.displayContent || message.content
+                if (!userContent) return null
+                return (
+                  <div className={bubbleCls} style={bubbleStyle}>
+                    <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
                   </div>
-                ) : null
-              ) : (
-                <MessageContentRenderer
-                  fragments={renderContext.fragments}
-                  isStreaming={isMessageStreaming}
-                  searchQuery={searchQuery}
-                />
-              )}
-            </div>
-            )}
+                )
+              }
+
+              if (!isMessageStreaming && renderContext.fragments.length === 0 && !message.toolCalls?.length) return null
+
+              return (
+                <div className={bubbleCls} style={bubbleStyle}>
+                  {renderContext.fragments.length === 0 ? (
+                    isMessageStreaming ? (
+                      <div className="flex items-center gap-2">
+                        {hasPendingInteraction ? (
+                          <>
+                            <MessageSquare className="h-4 w-4 text-status-info" />
+                            <span className="text-sm text-status-info">等待用户响应...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <span className="text-sm">思考中...</span>
+                          </>
+                        )}
+                      </div>
+                    ) : null
+                  ) : (
+                    <MessageContentRenderer
+                      fragments={renderContext.fragments}
+                      isStreaming={isMessageStreaming}
+                      searchQuery={searchQuery}
+                    />
+                  )}
+                </div>
+              )
+            })()}
           </>
         )}
 

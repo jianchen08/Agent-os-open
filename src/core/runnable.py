@@ -4,7 +4,6 @@
 暴露接口：
 - create_tool_runnable(name: str, description: str, handler: ToolHandler, input_schema: dict[str, Any] | None) -> ToolRunnable：create_tool_runnable功能
 - create_agent_runnable(name: str, description: str, agent_config: dict[str, Any] | None) -> AgentRunnable：create_agent_runnable功能
-- create_workflow_runnable(name: str, description: str, workflow_id: str) -> WorkflowRunnable：create_workflow_runnable功能
 - compose_sequence() -> CompositeRunnable：compose_sequence功能
 - compose_parallel() -> CompositeRunnable：compose_parallel功能
 - invoke(self, input: str | dict[str, Any], config: RunnableConfig | None) -> Any：invoke功能
@@ -18,8 +17,6 @@
 - get_metadata(self) -> RunnableMetadata：get_metadata功能
 - bind_agent_loop(self, agent_loop: Any) -> 'AgentRunnable'：bind_agent_loop功能
 - get_metadata(self) -> RunnableMetadata：get_metadata功能
-- bind_executor(self, executor: Any, workflow: Any) -> 'WorkflowRunnable'：bind_executor功能
-- get_metadata(self) -> RunnableMetadata：get_metadata功能
 - RunnableType：RunnableType类
 - RunnableStatus：RunnableStatus类
 - RunnableMetadata：RunnableMetadata类
@@ -27,7 +24,6 @@
 - YamlRunnable：YamlRunnable类
 - ToolRunnable：ToolRunnable类
 - AgentRunnable：AgentRunnable类
-- WorkflowRunnable：WorkflowRunnable类
 - CompositeRunnable：CompositeRunnable类
 """
 
@@ -54,7 +50,6 @@ class RunnableType(str, Enum):
 
     TOOL = "tool"
     AGENT = "agent"
-    WORKFLOW = "workflow"
     COMPOSITE = "composite"
 
 
@@ -379,72 +374,6 @@ class AgentRunnable(YamlRunnable):
 
 
 # ============================================
-# 工作流 Runnable
-# ============================================
-
-
-class WorkflowRunnable(YamlRunnable):
-    """
-    工作流 Runnable
-
-    将工作流包装为 Runnable，支持：
-    - YAML/字典输入
-    - 管道组合
-    - 与 Tool/Agent 任意组合
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        workflow_id: str,
-        workflow_executor: Any | None = None,
-    ):
-        """初始化工作流 Runnable"""
-        self.name = name
-        self.description = description
-        self.workflow_id = workflow_id
-        self._workflow_executor = workflow_executor
-        self._workflow: Any | None = None
-
-    async def _aexecute(self, input: dict[str, Any]) -> Any:
-        """异步执行工作流"""
-        if self._workflow_executor is None:
-            raise ValueError("WorkflowExecutor 未初始化")
-
-        if self._workflow is None:
-            raise ValueError("Workflow 未加载")
-
-        # 执行工作流
-        result = await self._workflow_executor.execute(
-            workflow=self._workflow,
-            inputs=input,
-        )
-
-        return {
-            "success": result.success,
-            "outputs": result.outputs,
-            "error": result.error,
-            "duration_ms": result.duration_ms,
-        }
-
-    def get_metadata(self) -> RunnableMetadata:
-        """获取元数据"""
-        return RunnableMetadata(
-            name=self.name,
-            description=self.description,
-            runnable_type=RunnableType.WORKFLOW,
-            extra={"workflow_id": self.workflow_id},
-        )
-
-    def bind_executor(self, executor: Any, workflow: Any) -> "WorkflowRunnable":
-        """绑定执行器和工作流"""
-        self._workflow_executor = executor
-        self._workflow = workflow
-        return self
-
-
-# ============================================
 # 组合 Runnable
 # ============================================
 
@@ -539,19 +468,6 @@ def create_agent_runnable(
         name=name,
         description=description,
         agent_config=agent_config,
-    )
-
-
-def create_workflow_runnable(
-    name: str,
-    description: str,
-    workflow_id: str,
-) -> WorkflowRunnable:
-    """创建工作流 Runnable"""
-    return WorkflowRunnable(
-        name=name,
-        description=description,
-        workflow_id=workflow_id,
     )
 
 

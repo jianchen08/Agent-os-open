@@ -4,7 +4,6 @@
  * 性能优化：stream_chunk 事件通过 RAF 批处理合并同一帧内的多个 chunk，
  * 将 N 次 Zustand 更新压缩为 1 次，显著降低流式输出期间的 UI 卡顿。
  */
-import { reconcileContentBlocks } from '@/components/chat/hooks/useMessageRender'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useInteractionStore } from '@/stores/interactionStore'
@@ -17,10 +16,9 @@ import { loggers } from '@/utils/logger'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
 import { clearUnifiedStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
-import { appendTextBlock, appendThinkingChunk } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
-import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, extractThreadId, terminatePipeline } from './utils'
+import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, extractThreadId, isPipelineTerminated, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -35,7 +33,10 @@ const _chunkBuffer = new Map<string, {
 }>()
 let _flushRafId: number | null = null
 
-/** 将缓冲区的 chunk 合并后一次性写入 store */
+/**
+ * 将缓冲区的 chunk 合并后一次性写入 store。
+ * 通过 parts[] 路径写入：找到 streaming 状态的 text part 并追加内容。
+ */
 function _flushChunks(): void {
   _flushRafId = null
   if (_chunkBuffer.size === 0) return
@@ -47,22 +48,18 @@ function _flushChunks(): void {
     const combinedContent = entry.chunks.join('')
     if (!combinedContent) continue
 
-    const msgs = pipelineStore.getState().getMessages(entry.pipelineId)
-    const msg = msgs.find((m: any) => m.id === entry.messageId)
-    if (!msg) continue
-
-    if ((msg as any).thinking?.isThinking) {
-      const blocks = appendThinkingChunk(msg.contentBlocks, combinedContent)
-      pipelineStore.getState().updateMessage(entry.pipelineId, entry.messageId, {
-        thinking: { content: ((msg as any).thinking.content || '') + combinedContent, isThinking: true },
-        contentBlocks: blocks,
-      } as any)
-    } else {
-      const blocks = appendTextBlock(msg.contentBlocks, combinedContent, entry.messageId, entry.firstSequence)
-      pipelineStore.getState().updateMessage(entry.pipelineId, entry.messageId, {
-        contentBlocks: blocks,
-        content: (msg.content || '') + combinedContent,
-      } as any)
+    let partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
+    if (partIndex < 0) {
+      pipelineStore.getState().appendPart(entry.pipelineId, entry.messageId, {
+        type: 'text',
+        content: '',
+        state: 'streaming',
+        sequence: entry.firstSequence ?? Date.now(),
+      })
+      partIndex = pipelineStore.getState().findStreamingPartIndex(entry.pipelineId, entry.messageId)
+    }
+    if (partIndex >= 0) {
+      pipelineStore.getState().appendToPart(entry.pipelineId, entry.messageId, partIndex, combinedContent)
     }
   }
 }
@@ -188,6 +185,8 @@ export function handleStreamStart(eventData: any) {
 
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
+  /** text part 延迟到 _flushChunks 中按需创建，确保 sequence 排在 thinking 之后 */
+
   clearUnifiedStreamTimeout(pipelineId)
   if (threadId && threadId !== pipelineId) {
     clearUnifiedStreamTimeout(threadId)
@@ -216,7 +215,7 @@ export function handleStreamChunk(eventData: any) {
   if (!messageId) return
 
   // 确保目标消息存在（chunk 先于 start 到达时自动创建占位符）
-  let msgs = pipelineStore.getState().getMessages(pipelineId)
+  const msgs = pipelineStore.getState().getMessages(pipelineId)
   const existingMsg = msgs.find((m: any) => m.id === messageId)
   if (!existingMsg) {
     _debugLogger.warn(
@@ -295,44 +294,15 @@ export function handleStreamEnd(eventData: any) {
   }
 
   // messageId 已在函数开头提取
-  const fullContent = eventData?.full_content || eventData?.data?.full_content || eventData?.data?.final_content
   if (!messageId) return
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  if (!msg) return
-
-  const finalContent = fullContent || msg.content || ''
-  const finalThinking = (msg as any).thinking
-    ? { ...(msg as any).thinking, isThinking: false }
-    : undefined
-
-  const existingBlocks = msg.contentBlocks || []
-  const hasTextBlocks = existingBlocks.some((b: any) => b.type === 'text' && b.text?.trim())
-
-  let finalBlocks: any[]
-  if (hasTextBlocks) {
-    finalBlocks = existingBlocks.map((block: any) => {
-      if (block.type === 'thinking' && block.thinking) {
-        return { ...block, thinking: { ...block.thinking, isThinking: false } }
-      }
-      return block
-    })
-  } else if (finalContent.trim()) {
-    finalBlocks = reconcileContentBlocks(
-      existingBlocks, finalContent, (msg as any).toolCalls, finalThinking, messageId,
-    )
-  } else {
-    finalBlocks = existingBlocks
-  }
-
+  // 标记消息状态为完成
   pipelineStore.getState().updateMessage(pipelineId, messageId, {
     status: 'completed',
-    content: finalContent,
-    contentBlocks: finalBlocks,
-    _reconciled: true,
-    ...(finalThinking ? { thinking: finalThinking } : {}),
   } as any)
+
+  /** 完成 parts[] 中所有 part 的状态 */
+  pipelineStore.getState().finalizeMessage(pipelineId, messageId)
 }
 
 /**
@@ -359,6 +329,24 @@ export function handleStreamError(eventData: any) {
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'error',
     } as any)
+
+    // 将所有 streaming 状态的 part 标记为 done/error
+    const store = pipelineStore.getState()
+    const msg = store.getMessages(pipelineId)?.find((m: any) => m.id === messageId)
+    if (msg?.parts) {
+      msg.parts.forEach((p: any, i: number) => {
+        if (p.type === 'text' || p.type === 'thinking') {
+          if (p.state === 'streaming') {
+            store.updatePart(pipelineId, messageId, i, { state: 'done' })
+          }
+        }
+        if (p.type === 'tool_call') {
+          if (p.state === 'streaming' || p.state === 'calling') {
+            store.updatePart(pipelineId, messageId, i, { state: 'error' })
+          }
+        }
+      })
+    }
   }
 
   const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
@@ -377,8 +365,29 @@ export function handleStreamError(eventData: any) {
 export function handleStreamKeepalive(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
+  if (isPipelineTerminated(pipelineId)) return
   const messageId = getChunkTimeoutMessageId(pipelineId)
   if (messageId) {
+    const store = pipelineStore.getState()
+    const msgs = store.getMessages(pipelineId)
+    const msg = msgs.find((m: any) => m.id === messageId)
+    if (msg?.parts?.length) {
+      const hasActive = msg.parts.some((p: any) => p.state === 'streaming' || p.state === 'calling')
+      if (!hasActive) {
+        terminatePipeline(pipelineId)
+        return
+      }
+      const allHaveContent = msg.parts.every((p: any) => {
+        if (p.type === 'text') return p.content && p.content.trim().length > 0
+        return true
+      })
+      if (allHaveContent) {
+        terminatePipeline(pipelineId)
+        store.finalizeMessage(pipelineId, messageId)
+        store.updateMessage(pipelineId, messageId, { status: 'completed' } as any)
+        return
+      }
+    }
     resetChunkTimeout(pipelineId, messageId)
   }
 }

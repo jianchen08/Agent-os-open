@@ -1,5 +1,0 @@
-# 无效 Agent 配置 — 错误的 level 值（用于测试错误处理）
-config_id: "bad_level_agent"
-name: "层级错误Agent"
-agent_type: "specialized"
-level: "L5"

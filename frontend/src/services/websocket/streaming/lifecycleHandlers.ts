@@ -104,17 +104,19 @@ export function handleReconnected(): void {
 
   logger.info('[streaming] WS 重连，开始补偿遗漏消息，streaming 管道数=%d', Object.keys(streamingState).length)
 
-  // 遍历所有管道消息，将 isThinking=true 的消息强制清理
+  // 遍历所有管道消息，将 parts 中 state='streaming' 的 thinking part 强制清理为 done
   const messagesByPipeline = pipelineStore.messagesByPipeline
   for (const [pipelineId, messages] of Object.entries(messagesByPipeline)) {
-    const stuckMessages = messages.filter(
-      (m: any) => m.thinking?.isThinking || (m.contentBlocks || []).some((b: any) => b.type === 'thinking' && b.thinking?.isThinking),
+    const stuckMessages = (messages as any[]).filter(
+      (m: any) => (m.parts || []).some((p: any) => p.type === 'thinking' && p.state === 'streaming'),
     )
     for (const msg of stuckMessages) {
-      logger.info('[streaming] 重连清理残留 thinking: pipelineId=%s messageId=%s', pipelineId, (msg as any).id)
-      pipelineStore.updateMessage(pipelineId, (msg as any).id, {
-        thinking: { ...(msg as any).thinking, isThinking: false },
-      } as any)
+      logger.info('[streaming] 重连清理残留 streaming thinking part: pipelineId=%s messageId=%s', pipelineId, msg.id)
+      // 将所有 streaming 状态的 parts 改为 done
+      const updatedParts = (msg.parts as any[]).map((p: any) =>
+        p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+      )
+      pipelineStore.updateMessage(pipelineId, msg.id, { parts: updatedParts } as any)
     }
   }
 
@@ -209,18 +211,25 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
     const msgs = pipelineStore.getMessages(pipelineId)
     const msg = msgs.find((m: any) => m.id === messageId)
     if (msg) {
+      // 基于 parts[] 检查消息是否有实际内容
       const hasContent = !!(msg as any).content?.trim()
-        || (msg.contentBlocks || []).some((b: any) => b.type === 'text' && b.text?.trim())
+        || (msg.parts || []).some((p: any) => p.type === 'text' && p.text?.trim())
+
+      // 将所有 streaming 状态的 parts 改为 done
+      const finalizeParts = (m: any): any[] =>
+        (m.parts || []).map((p: any) =>
+          p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+        )
 
       if (hasContent) {
         pipelineStore.updateMessage(pipelineId, messageId, {
           status: 'completed',
-          ...((msg as any).thinking?.isThinking ? { thinking: { ...(msg as any).thinking, isThinking: false } } : {}),
+          parts: finalizeParts(msg),
         } as any)
       } else {
         pipelineStore.updateMessage(pipelineId, messageId, {
           status: 'error',
-          ...((msg as any).thinking?.isThinking ? { thinking: { ...(msg as any).thinking, isThinking: false } } : {}),
+          parts: finalizeParts(msg),
         } as any)
         useNotificationStore.getState().addNotification({
           title: '响应超时',
@@ -236,9 +245,14 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
     const msgs = pipelineStore.getMessages(pipelineId)
     const streamingMsg = msgs.find((m: any) => m.status === 'streaming' || m.status === 'pending')
     if (streamingMsg) {
+      // 将所有 streaming 状态的 parts 改为 done
+      const finalizeParts = (m: any): any[] =>
+        (m.parts || []).map((p: any) =>
+          p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+        )
       pipelineStore.updateMessage(pipelineId, (streamingMsg as any).id, {
         status: 'error',
-        ...((streamingMsg as any).thinking?.isThinking ? { thinking: { ...(streamingMsg as any).thinking, isThinking: false } } : {}),
+        parts: finalizeParts(streamingMsg),
       } as any)
     }
     useNotificationStore.getState().addNotification({

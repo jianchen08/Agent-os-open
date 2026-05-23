@@ -26,8 +26,8 @@ import {
   createStreamChunkEvent,
   createStreamEndEvent,
   createMockMessage,
-  createMockContentBlock,
-  createMockToolCall,
+  createTextPart,
+  createToolCallPart,
 } from './testUtils'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { PendingInteraction } from '@/stores/interactionStore'
@@ -55,6 +55,7 @@ vi.mock('lucide-react', () => {
     'CheckCircle2',
     'Sparkles',
     'Target',
+    'X',
   ]
   const m: Record<string, any> = {}
   for (const name of icons) {
@@ -141,6 +142,11 @@ vi.mock('@/constants/websocket', () => ({
     SUB_AGENT_COMPLETED: 'sub_agent_completed',
     INTERACTION_REQUEST: 'interaction_request',
     WORKFLOW_STEP_UPDATE: 'workflow_step_update',
+  },
+  WebSocketStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
   },
 }))
 
@@ -743,9 +749,7 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       const textMsg = createMockMessage({
         id: 'msg-text-1',
         content: '我来帮你处理这个任务。',
-        contentBlocks: [
-          createMockContentBlock('text', { text: '我来帮你处理这个任务。' }),
-        ],
+        parts: [createTextPart('我来帮你处理这个任务。', 1)],
       })
 
       // 2. 工具调用
@@ -774,13 +778,12 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       const toolMsg = createMockMessage({
         id: 'msg-tool-1',
         content: '',
-        contentBlocks: [
-          createMockContentBlock('tool_call', {
-            toolCall: createMockToolCall({
-              call_id: 'exec-mixed-1',
-              tool_name: 'analyze',
-              status: 'completed',
-            }),
+        parts: [
+          createToolCallPart({
+            callId: 'exec-mixed-1',
+            name: 'analyze',
+            state: 'done',
+            sequence: 1,
           }),
         ],
       })
@@ -817,9 +820,7 @@ describe('MultiRoundInteractionFlow — AC-1j: 多轮交互流程', () => {
       const followUpMsg = createMockMessage({
         id: 'msg-text-2',
         content: '好的，我继续处理。',
-        contentBlocks: [
-          createMockContentBlock('text', { text: '好的，我继续处理。' }),
-        ],
+        parts: [createTextPart('好的，我继续处理。', 1)],
       })
 
       // 验证事件顺序

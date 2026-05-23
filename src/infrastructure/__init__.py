@@ -8,7 +8,6 @@
 from infrastructure.concurrency import ConcurrencyController
 from infrastructure.db import close_engine, get_async_session, get_engine, init_db
 from infrastructure.error_policy import apply_error_policy
-from infrastructure.task_launcher import launch_task
 from infrastructure.execution_record_storage import (
     ExecutionRecordData,
     ExecutionRecordStorage,
@@ -22,6 +21,12 @@ from infrastructure.scheduler import (
 )
 from infrastructure.stats import StatsCollector
 from pipeline.types import ErrorPolicy
+
+
+def launch_task(*args, **kwargs):
+    """延迟导入 launch_task，避免在模块加载时触发已移除的 src.db 依赖。"""
+    from infrastructure.task_launcher import launch_task as _launch_task
+    return _launch_task(*args, **kwargs)
 
 __all__ = [
     "close_engine",

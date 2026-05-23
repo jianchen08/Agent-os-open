@@ -7,22 +7,18 @@
  * 1. 文本+工具+文本 顺序
  * 2. 思考+工具+文本 混合顺序
  * 3. 多工具调用顺序
- * 4. 动态 contentBlocks 更新
+ * 4. 动态 parts 更新
  * 5. isLast 标记正确性
  * 6. 流式输出时顺序不变
- * 7. 空 contentBlocks 降级
+ * 7. 空 parts 处理
  */
 
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRender } from '@/components/chat/hooks/useMessageRender'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
-import type {
-  ContentBlock,
-  Message,
-  MessageToolCall,
-  ThinkingContent,
-} from '@/types/models'
+import type { Message, MessageToolCall } from '@/types/models'
+import type { MessagePart } from '@/types/messageParts'
 
 // ---------------------------------------------------------------------------
 //  Mock: activityConverter（useMessageRender 内部依赖）
@@ -63,49 +59,30 @@ function createMessage(overrides: Partial<Message> = {}): Message {
   }
 }
 
-/** 创建 text ContentBlock */
-function textBlock(text: string, sourceId = 'msg-1'): ContentBlock {
-  return { type: 'text', text, sourceId }
+/** 创建文本 Part */
+function textPart(content: string, sequence: number = 1): MessagePart {
+  return { type: 'text', content, state: 'done', sequence }
 }
 
-/** 创建 thinking ContentBlock */
-function thinkingBlock(content: string, sourceId = 'msg-1'): ContentBlock {
-  return {
-    type: 'thinking',
-    thinking: { content, isThinking: false },
-    sourceId,
-  }
+/** 创建思考 Part */
+function thinkingPart(content: string, sequence: number = 1): MessagePart {
+  return { type: 'thinking', content, state: 'done', sequence }
 }
 
-/** 创建 tool_call ContentBlock */
-function toolCallBlock(
+/** 创建工具调用 Part */
+function toolCallPart(
   callId: string,
-  toolName: string,
-  status: MessageToolCall['status'] = 'completed',
-): ContentBlock {
+  name: string,
+  state: 'streaming' | 'calling' | 'done' | 'error' | 'cancelled' = 'done',
+  sequence: number = 1,
+): MessagePart {
   return {
     type: 'tool_call',
-    toolCall: {
-      call_id: callId,
-      tool_name: toolName,
-      tool_args: {},
-      status,
-    },
-    sourceId: 'msg-1',
-  }
-}
-
-/** 创建 MessageToolCall（用于降级测试） */
-function createToolCall(
-  callId: string,
-  toolName: string,
-  status: MessageToolCall['status'] = 'completed',
-): MessageToolCall {
-  return {
-    call_id: callId,
-    tool_name: toolName,
-    tool_args: {},
-    status,
+    callId,
+    name,
+    args: {},
+    state,
+    sequence,
   }
 }
 
@@ -127,12 +104,12 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   // 1. 文本+工具+文本 顺序
   // -----------------------------------------------------------------------
   describe('文本+工具+文本 顺序', () => {
-    it('contentBlocks: text → tool_call → text 时 fragments 顺序一致', () => {
+    it('parts: text → tool_call → text 时 fragments 顺序一致', () => {
       const message = createMessage({
-        contentBlocks: [
-          textBlock('分析中'),
-          toolCallBlock('tc-1', 'read_file'),
-          textBlock('完成'),
+        parts: [
+          textPart('分析中', 1),
+          toolCallPart('tc-1', 'read_file', 'done', 2),
+          textPart('完成', 3),
         ],
       })
 
@@ -144,12 +121,12 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       expect(types).toEqual(['text', 'tool_call', 'text'])
     })
 
-    it('fragments 内容与 contentBlocks 对应', () => {
+    it('fragments 内容与 parts 对应', () => {
       const message = createMessage({
-        contentBlocks: [
-          textBlock('分析中'),
-          toolCallBlock('tc-1', 'read_file'),
-          textBlock('完成'),
+        parts: [
+          textPart('分析中', 1),
+          toolCallPart('tc-1', 'read_file', 'done', 2),
+          textPart('完成', 3),
         ],
       })
 
@@ -171,13 +148,13 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   // 2. 思考+工具+文本 混合顺序
   // -----------------------------------------------------------------------
   describe('思考+工具+文本 混合顺序', () => {
-    it('contentBlocks: thinking → text → tool_call → text 时顺序一致', () => {
+    it('parts: thinking → text → tool_call → text 时顺序一致', () => {
       const message = createMessage({
-        contentBlocks: [
-          thinkingBlock('让我想想...'),
-          textBlock('使用工具分析'),
-          toolCallBlock('tc-1', 'search'),
-          textBlock('结果如下'),
+        parts: [
+          thinkingPart('让我想想...', 1),
+          textPart('使用工具分析', 2),
+          toolCallPart('tc-1', 'search', 'done', 3),
+          textPart('结果如下', 4),
         ],
       })
 
@@ -191,9 +168,9 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
     it('thinking fragment 包含思考内容', () => {
       const message = createMessage({
-        contentBlocks: [
-          thinkingBlock('分析问题中...'),
-          textBlock('结论'),
+        parts: [
+          thinkingPart('分析问题中...', 1),
+          textPart('结论', 2),
         ],
       })
 
@@ -215,10 +192,10 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   describe('多工具调用顺序', () => {
     it('三个 tool_call 的 index 和 total 正确', () => {
       const message = createMessage({
-        contentBlocks: [
-          toolCallBlock('tc-1', 'read_file'),
-          toolCallBlock('tc-2', 'write_file'),
-          toolCallBlock('tc-3', 'execute'),
+        parts: [
+          toolCallPart('tc-1', 'read_file', 'done', 1),
+          toolCallPart('tc-2', 'write_file', 'done', 2),
+          toolCallPart('tc-3', 'execute', 'done', 3),
         ],
       })
 
@@ -240,14 +217,14 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       }
     })
 
-    it('tool_call 顺序与 contentBlocks 中出现顺序一致', () => {
+    it('tool_call 顺序与 parts 中出现顺序一致', () => {
       const message = createMessage({
-        contentBlocks: [
-          textBlock('准备中'),
-          toolCallBlock('tc-a', 'tool_a'),
-          textBlock('中间'),
-          toolCallBlock('tc-b', 'tool_b'),
-          textBlock('结束'),
+        parts: [
+          textPart('准备中', 1),
+          toolCallPart('tc-a', 'tool_a', 'done', 2),
+          textPart('中间', 3),
+          toolCallPart('tc-b', 'tool_b', 'done', 4),
+          textPart('结束', 5),
         ],
       })
 
@@ -276,18 +253,18 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 4. 动态 contentBlocks 更新
+  // 4. 动态 parts 更新
   // -----------------------------------------------------------------------
-  describe('动态 contentBlocks 更新', () => {
-    it('contentBlocks 增长时 fragments 数量同步增长', () => {
-      const initialBlocks: ContentBlock[] = [textBlock('分析中')]
+  describe('动态 parts 更新', () => {
+    it('parts 增长时 fragments 数量同步增长', () => {
+      const initialParts: MessagePart[] = [textPart('分析中', 1)]
 
       const { result, rerender } = renderHook(
-        ({ blocks }) =>
+        ({ parts }: { parts: MessagePart[] }) =>
           useMessageRender({
-            message: createMessage({ contentBlocks: blocks }),
+            message: createMessage({ parts }),
           }),
-        { initialProps: { blocks: initialBlocks } },
+        { initialProps: { parts: initialParts } },
       )
 
       // 初始 1 个 fragment
@@ -298,28 +275,28 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       })
 
       // 追加一个 tool_call
-      const updatedBlocks: ContentBlock[] = [
-        textBlock('分析中'),
-        toolCallBlock('tc-1', 'search'),
+      const updatedParts: MessagePart[] = [
+        textPart('分析中', 1),
+        toolCallPart('tc-1', 'search', 'done', 2),
       ]
-      rerender({ blocks: updatedBlocks })
+      rerender({ parts: updatedParts })
 
       expect(result.current.fragments).toHaveLength(2)
       expect(result.current.fragments[0]).toMatchObject({ type: 'text' })
       expect(result.current.fragments[1]).toMatchObject({ type: 'tool_call' })
     })
 
-    it('contentBlocks 从 2 个增长到 4 个时顺序不变', () => {
+    it('parts 从 2 个增长到 4 个时顺序不变', () => {
       const { result, rerender } = renderHook(
-        ({ blocks }) =>
+        ({ parts }: { parts: MessagePart[] }) =>
           useMessageRender({
-            message: createMessage({ contentBlocks: blocks }),
+            message: createMessage({ parts }),
           }),
         {
           initialProps: {
-            blocks: [
-              textBlock('第一步'),
-              toolCallBlock('tc-1', 'tool_a'),
+            parts: [
+              textPart('第一步', 1),
+              toolCallPart('tc-1', 'tool_a', 'done', 2),
             ],
           },
         },
@@ -331,11 +308,11 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       ])
 
       rerender({
-        blocks: [
-          textBlock('第一步'),
-          toolCallBlock('tc-1', 'tool_a'),
-          textBlock('中间步骤'),
-          toolCallBlock('tc-2', 'tool_b'),
+        parts: [
+          textPart('第一步', 1),
+          toolCallPart('tc-1', 'tool_a', 'done', 2),
+          textPart('中间步骤', 3),
+          toolCallPart('tc-2', 'tool_b', 'done', 4),
         ],
       })
 
@@ -354,10 +331,10 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   describe('isLast 标记正确性', () => {
     it('最后一个 text fragment 的 isLast = true', () => {
       const message = createMessage({
-        contentBlocks: [
-          textBlock('第一段'),
-          toolCallBlock('tc-1', 'search'),
-          textBlock('第二段'),
+        parts: [
+          textPart('第一段', 1),
+          toolCallPart('tc-1', 'search', 'done', 2),
+          textPart('第二段', 3),
         ],
       })
 
@@ -384,7 +361,7 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
     it('仅有 text 时最后一个 isLast = true', () => {
       const message = createMessage({
-        contentBlocks: [textBlock('内容')],
+        parts: [textPart('内容', 1)],
       })
 
       const { result } = renderHook(() =>
@@ -399,7 +376,7 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
     it('无 text 时无 isLast=true 的 fragment', () => {
       const message = createMessage({
-        contentBlocks: [toolCallBlock('tc-1', 'tool')],
+        parts: [toolCallPart('tc-1', 'tool', 'done', 1)],
       })
 
       const { result } = renderHook(() =>
@@ -417,12 +394,12 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   // 6. 流式输出时顺序不变
   // -----------------------------------------------------------------------
   describe('流式输出时顺序不变', () => {
-    it('isStreaming=true 时 contentBlocks 持续追加顺序正确', () => {
+    it('isStreaming=true 时 parts 持续追加顺序正确', () => {
       const { result, rerender } = renderHook(
-        ({ blocks, isGenerating }) =>
+        ({ parts, isGenerating }: { parts: MessagePart[]; isGenerating: boolean }) =>
           useMessageRender({
             message: createMessage({
-              contentBlocks: blocks,
+              parts,
               role: 'assistant',
             }),
             isLast: true,
@@ -430,7 +407,7 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
           }),
         {
           initialProps: {
-            blocks: [textBlock('开始')],
+            parts: [textPart('开始', 1)],
             isGenerating: true,
           },
         },
@@ -442,7 +419,7 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
       // 第二轮：追加 tool_call
       rerender({
-        blocks: [textBlock('开始'), toolCallBlock('tc-1', 'search')],
+        parts: [textPart('开始', 1), toolCallPart('tc-1', 'search', 'done', 2)],
         isGenerating: true,
       })
       expect(extractFragmentTypes(result.current.fragments)).toEqual([
@@ -452,10 +429,10 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
       // 第三轮：追加 text
       rerender({
-        blocks: [
-          textBlock('开始'),
-          toolCallBlock('tc-1', 'search'),
-          textBlock('结果'),
+        parts: [
+          textPart('开始', 1),
+          toolCallPart('tc-1', 'search', 'done', 2),
+          textPart('结果', 3),
         ],
         isGenerating: true,
       })
@@ -467,10 +444,10 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
 
       // 结束流
       rerender({
-        blocks: [
-          textBlock('开始'),
-          toolCallBlock('tc-1', 'search'),
-          textBlock('结果'),
+        parts: [
+          textPart('开始', 1),
+          toolCallPart('tc-1', 'search', 'done', 2),
+          textPart('结果', 3),
         ],
         isGenerating: false,
       })
@@ -479,22 +456,24 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 7. 空 contentBlocks 降级
+  // 7. 空 parts 处理
   // -----------------------------------------------------------------------
-  describe('空 contentBlocks 降级', () => {
-    it('无 contentBlocks 时从 content + toolCalls 构建', () => {
+  describe('空 parts 处理', () => {
+    it('parts 包含 thinking + tool_call + text 时 fragments 正确构建', () => {
       const message = createMessage({
         content: '这是纯文本内容',
-        toolCalls: [createToolCall('tc-1', 'search')],
-        thinking: { content: '思考中', isThinking: false },
-        // 不设置 contentBlocks
+        parts: [
+          thinkingPart('思考中', 1),
+          toolCallPart('tc-1', 'search', 'done', 2),
+          textPart('这是纯文本内容', 3),
+        ],
       })
 
       const { result } = renderHook(() =>
         useMessageRender({ message }),
       )
 
-      // buildContentBlocksFromMessage: thinking → toolCalls → content
+      // parts 直接构建 fragments: thinking → tool_call → text
       const types = extractFragmentTypes(result.current.fragments)
       expect(types).toEqual(['thinking', 'tool_call', 'text'])
 
@@ -511,27 +490,23 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       }
     })
 
-    it('空 contentBlocks 数组也走降级路径', () => {
+    it('空 parts 数组返回空 fragments', () => {
       const message = createMessage({
         content: '文本',
-        contentBlocks: [], // 空数组
+        parts: [],
       })
 
       const { result } = renderHook(() =>
         useMessageRender({ message }),
       )
 
-      // buildContentBlocksFromMessage 从 content 构建
-      expect(result.current.fragments).toHaveLength(1)
-      expect(result.current.fragments[0]).toMatchObject({
-        type: 'text',
-        content: '文本',
-      })
+      expect(result.current.fragments).toHaveLength(0)
     })
 
-    it('仅有 content 无 toolCalls 时降级为单个 text', () => {
+    it('仅有 text part 时返回单个 text fragment', () => {
       const message = createMessage({
         content: '纯文本消息',
+        parts: [textPart('纯文本消息', 1)],
       })
 
       const { result } = renderHook(() =>
@@ -546,12 +521,12 @@ describe('MessageOrderVerification — AC-1b: 消息渲染顺序正确', () => {
       })
     })
 
-    it('仅有 toolCalls 无 content 时降级为 tool_call fragments', () => {
+    it('仅有 tool_call parts 时返回 tool_call fragments', () => {
       const message = createMessage({
         content: '',
-        toolCalls: [
-          createToolCall('tc-1', 'tool_a'),
-          createToolCall('tc-2', 'tool_b'),
+        parts: [
+          toolCallPart('tc-1', 'tool_a', 'done', 1),
+          toolCallPart('tc-2', 'tool_b', 'done', 2),
         ],
       })
 

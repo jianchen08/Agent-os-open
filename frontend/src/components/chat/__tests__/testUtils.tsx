@@ -14,6 +14,7 @@ import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { SubAgentCardProps } from '@/components/chat/SubAgentCard'
 import type { ActivityCardProps, ActivityData  } from '@/types/activity'
 import type { ContentBlock, Message, MessageToolCall, ThinkingContent } from '@/types/models'
+import type { MessagePart, PartState, ToolCallPartState } from '@/types/messageParts'
 import type { RenderOptions } from '@testing-library/react'
 
 // ============================================================
@@ -387,6 +388,7 @@ export function createMockToolCall(overrides?: Partial<MessageToolCall>): Messag
  * @param blockType - 内容块类型
  * @param overrides - 部分覆盖默认内容块属性
  * @returns ContentBlock 对象
+ * @deprecated 请使用 createTextPart / createThinkingPart / createToolCallPart 代替
  */
 export function createMockContentBlock(
   blockType: 'text' | 'tool_call' | 'thinking',
@@ -412,6 +414,75 @@ export function createMockContentBlock(
   }
 
   return { ...base, ...overrides }
+}
+
+// ============================================================
+// MessagePart 工厂函数（新模型，替代 ContentBlock）
+// ============================================================
+
+/**
+ * 创建文本 Part
+ *
+ * @param content - 文本内容
+ * @param sequence - 序号（默认 1）
+ * @param state - Part 状态（默认 'done'）
+ * @returns TextPart 对象
+ */
+export function createTextPart(
+  content: string,
+  sequence: number = 1,
+  state: PartState = 'done',
+): MessagePart {
+  return { type: 'text', content, state, sequence }
+}
+
+/**
+ * 创建思考 Part
+ *
+ * @param content - 思考内容
+ * @param sequence - 序号（默认 1）
+ * @param state - Part 状态（默认 'done'）
+ * @returns ThinkingPart 对象
+ */
+export function createThinkingPart(
+  content: string,
+  sequence: number = 1,
+  state: PartState = 'done',
+): MessagePart {
+  return { type: 'thinking', content, state, sequence }
+}
+
+/**
+ * 创建工具调用 Part
+ *
+ * @param overrides - 部分覆盖工具调用 Part 属性
+ * @returns ToolCallPart 对象
+ */
+export function createToolCallPart(overrides: {
+  callId: string
+  name: string
+  args?: Record<string, unknown>
+  state?: ToolCallPartState
+  result?: unknown
+  error?: string
+  durationMs?: number
+  sequence?: number
+  progress?: number
+  currentStep?: string
+}): MessagePart {
+  return {
+    type: 'tool_call',
+    callId: overrides.callId,
+    name: overrides.name,
+    args: overrides.args ?? {},
+    state: overrides.state ?? 'done',
+    result: overrides.result,
+    error: overrides.error,
+    durationMs: overrides.durationMs,
+    sequence: overrides.sequence ?? 1,
+    progress: overrides.progress,
+    currentStep: overrides.currentStep,
+  }
 }
 
 // ============================================================

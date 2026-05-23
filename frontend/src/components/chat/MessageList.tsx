@@ -44,8 +44,6 @@ export const MessageList = ({
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
   const initialScrollDone = useRef(false)
-  const isAtTopRef = useRef(false)
-
   /**
    * 滚动到底部
    */
@@ -60,7 +58,8 @@ export const MessageList = ({
   }, [])
 
   /**
-   * 处理滚动事件：检测是否在底部附近及是否在顶部（用于加载更多）
+   * 处理滚动事件：仅检测是否在底部附近
+   * 顶部加载更多由 Virtuoso 的 startReached 回调处理，比 scrollTop 判断更可靠。
    */
   const handleScroll = useCallback(
     (e: Event) => {
@@ -68,15 +67,8 @@ export const MessageList = ({
       const { scrollTop, scrollHeight, clientHeight } = target
       const distanceFromBottom = scrollHeight - scrollTop - clientHeight
       isNearBottom.current = distanceFromBottom <= 150
-
-      const atTop = scrollTop < 50
-      isAtTopRef.current = atTop
-
-      if (atTop && hasMore && !isLoadingMore && onLoadMore) {
-        onLoadMore()
-      }
     },
-    [hasMore, isLoadingMore, onLoadMore],
+    [],
   )
 
   /**
@@ -113,16 +105,15 @@ export const MessageList = ({
    * 问题根因: 流式输出期间，工具调用完成后新文本追加到最后一条消息，
    *          消息数量不变，上面只监听 messages.length，无法检测到内容变化，
    *          导致新内容渲染了但视图不滚动，用户看到 UI 卡住。
-   * 修复方案: 额外监听最后一条消息的 contentBlocks 长度变化，
-   *          当内容块增加时（如工具卡片后新增文本块），触发滚动到底部。
+   * 修复方案: 额外监听最后一条消息的 parts 长度和 content 长度变化，
+   *          当内容增加时（如工具卡片后新增文本块），触发滚动到底部。
    */
   const lastMessageContentSignature = useMemo(() => {
     if (messages.length === 0) return ''
     const last = messages[messages.length - 1]
-    const blockCount = last.contentBlocks?.length ?? 0
+    const partsCount = last.parts?.length || 0
     const contentLen = last.content?.length ?? 0
-    const toolCallCount = last.toolCalls?.length ?? 0
-    return `${blockCount}-${contentLen}-${toolCallCount}`
+    return `${partsCount}-${contentLen}`
   }, [messages])
 
   useEffect(() => {
@@ -269,12 +260,13 @@ export const MessageList = ({
         itemContent={renderItem}
         computeItemKey={(index) => {
           const msg = messages[index]
-          // BUG-FIX-fix_20260513_virtuoso_key_conflict:
-          // 问题根因: 仅用 msg.id-role 作为 key，合并消息的 id 可能与原始消息冲突，
-          //          导致 Virtuoso 复用错误的 DOM 节点。加入 index 确保位置唯一性。
-          return msg?.id ? `${msg.id}-${msg.role}-${index}` : `msg-${index}`
+          // 仅用 msg.id 作为 key，去掉 index 和 role，
+          // 让 Virtuoso 在 prepend 新消息后能正确复用 DOM 节点，避免不必要的重渲染。
+          return msg?.id ?? `msg-${index}`
         }}
         onScroll={handleScroll}
+        /** 滚动到顶部时触发加载更多，替代 handleScroll 中的 scrollTop < 50 判断，更可靠 */
+        startReached={onLoadMore}
         initialTopMostItemIndex={initialTopMostItemIndex}
         increaseViewportBy={{ top: 100, bottom: 300 }}
         alignToBottom={true}

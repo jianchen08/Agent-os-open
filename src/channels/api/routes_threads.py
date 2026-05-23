@@ -958,79 +958,92 @@ def list_messages(
         ).model_dump()
 
     thread = store.get_thread(thread_id)
-    if thread is None:
+
+    if thread is not None:
+        # thread 存在，走正常路径（session → pipeline_ids → exec_storage → fallback）
+        logger.info(
+            "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
+            thread_id[:12] if thread_id else "?",
+            (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
+            "yes" if exec_storage else "None",
+        )
+
+        session = _ensure_session(thread_id)
+        logger.info(
+            "[list_messages] session=%s pipeline_ids=%s",
+            "yes" if session else "None",
+            session.pipeline_ids if session else "N/A",
+        )
+
+        pipeline_ids: list[str] = []
+        if session and session.pipeline_ids:
+            pipeline_ids = list(session.pipeline_ids)
+        elif exec_storage and session:
+            pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
+
+        if exec_storage and pipeline_ids:
+            try:
+                all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+            except Exception:
+                logger.warning("批量查询管道执行记录失败")
+                all_records = []
+
+            if all_records:
+                all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
+                return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
+
+        # BUG-FIX-fix_20260513_fallback_no_mutation:
+        # Fallback: pipeline_ids 为空时，直接用 thread_id 作为 pipeline_run_id 尝试加载
+        if exec_storage and not pipeline_ids:
+            try:
+                records = exec_storage.list_by_pipeline(thread_id)
+                if records:
+                    records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+                    all_msgs = [_record_to_message_response(r, thread_id) for r in records]
+                    return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
+            except Exception:
+                logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
+
+        # 最终 Fallback: 从 MemoryStore 的 _messages 读取
+        raw_msgs = store.get_messages(thread_id, limit=100000)
+        if raw_msgs["messages"]:
+            fallback_msgs = []
+            for m in raw_msgs["messages"]:
+                fallback_msgs.append(MessageResponse(
+                    id=m.get("id", ""),
+                    thread_id=thread_id,
+                    role=m.get("role", "user"),
+                    content=m.get("content", ""),
+                    timestamp=m.get("timestamp", ""),
+                    sequence=m.get("sequence", 0),
+                ))
+            return _paginate_messages(fallback_msgs, limit, before_sequence, after_sequence)
+
+        return _paginate_messages([], limit, before_sequence, after_sequence)
+
+    else:
+        # BUG-FIX-fix_20260523_restart_404:
+        # 问题根因: 后端重启后 MemoryStore 中线程数据丢失（_load_persisted_data 静默失败），
+        #           list_messages 直接返回 404，但 YAML 执行记录仍存在。
+        # 修复方案: thread 不存在时，尝试用 thread_id 从 ExecutionRecordStorage 恢复消息。
+        # 修复日期: 2026-05-23
+        if exec_storage:
+            try:
+                records = exec_storage.list_by_pipeline(thread_id)
+                if records:
+                    records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+                    msgs = [_record_to_message_response(r, thread_id) for r in records]
+                    return MessageListResponse(
+                        messages=msgs, total=len(msgs), has_more=False,
+                    ).model_dump()
+            except Exception:
+                logger.warning("线程不存在，尝试用 thread_id 恢复消息失败: %s", thread_id)
+
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
             message="线程不存在",
         )
-
-    # DEBUG: 诊断历史消息不显示问题
-    logger.info(
-        "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
-        thread_id[:12] if thread_id else "?",
-        (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
-        "yes" if exec_storage else "None",
-    )
-
-    session = _ensure_session(thread_id)
-    logger.info(
-        "[list_messages] session=%s pipeline_ids=%s",
-        "yes" if session else "None",
-        session.pipeline_ids if session else "N/A",
-    )
-
-    pipeline_ids: list[str] = []
-    if session and session.pipeline_ids:
-        pipeline_ids = list(session.pipeline_ids)
-    elif exec_storage and session:
-        pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
-
-    if exec_storage and pipeline_ids:
-        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
-        try:
-            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
-        except Exception:
-            logger.warning("批量查询管道执行记录失败")
-            all_records = []
-
-        if all_records:
-            all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
-            return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
-
-    # BUG-FIX-fix_20260513_fallback_no_mutation:
-    # Fallback: pipeline_ids 为空时，直接用 thread_id 作为 pipeline_run_id 尝试加载
-    # 只做只读查询返回消息，不修改 session 状态，不污染 pipeline_ids。
-    # 管道映射的恢复由 _get_pipeline_ids_for_thread 负责，不应由 fallback 代劳。
-    if exec_storage and not pipeline_ids:
-        try:
-            records = exec_storage.list_by_pipeline(thread_id)
-            if records:
-                records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-                all_msgs = [_record_to_message_response(r, thread_id) for r in records]
-                return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
-        except Exception:
-            logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
-
-    # 最终 Fallback: 从 MemoryStore 的 _messages 读取
-    # 当 ExecutionRecordStorage 无记录时（测试环境、旧数据），
-    # 回退到 MemoryStore 内存中的消息。
-    raw_msgs = store.get_messages(thread_id, limit=100000)
-    if raw_msgs["messages"]:
-        # 将 MemoryStore 的简单 dict 转换为 MessageResponse 格式
-        fallback_msgs = []
-        for m in raw_msgs["messages"]:
-            fallback_msgs.append(MessageResponse(
-                id=m.get("id", ""),
-                thread_id=thread_id,
-                role=m.get("role", "user"),
-                content=m.get("content", ""),
-                timestamp=m.get("timestamp", ""),
-                sequence=m.get("sequence", 0),
-            ))
-        return _paginate_messages(fallback_msgs, limit, before_sequence, after_sequence)
-
-    return _paginate_messages([], limit, before_sequence, after_sequence)
 
 
 @router.get(

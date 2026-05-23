@@ -11,19 +11,19 @@
  *
  * 测试策略：
  * - 使用 renderHook 测试 useMessageRender hook 的输出
- * - 通过构造不同阶段的 Message 对象（含 contentBlocks）模拟状态转换
+ * - 通过构造不同阶段的 Message 对象（含 parts[]）模拟状态转换
  * - 验证 fragments 的 type、index、total 属性
  * - 验证 ActivityCard 的 status 属性变化
  */
 
 import { act } from '@testing-library/react'
 import {
-  createMockContentBlock,
   createMockMessage,
-  createMockToolCall,
+  createToolCallPart,
+  createTextPart,
+  createThinkingPart,
   renderUseMessageRender,
 } from './testUtils'
-import type { ContentBlock, Message, MessageToolCall } from '@/types/models'
 
 // ============================================================
 // Mock 外部依赖
@@ -53,38 +53,6 @@ vi.mock('@/utils/toolCardRegistry', () => ({
 }))
 
 // ============================================================
-// 辅助函数
-// ============================================================
-
-/**
- * 构造包含工具调用的 contentBlocks
- */
-function buildToolCallContentBlocks(
-  toolCall: MessageToolCall,
-  messageId: string,
-): ContentBlock[] {
-  return [createMockContentBlock('tool_call', { toolCall, sourceId: messageId })]
-}
-
-/**
- * 构造文本+工具调用混合的 contentBlocks
- */
-function buildMixedContentBlocks(
-  items: Array<{ type: 'text'; text: string } | { type: 'tool_call'; toolCall: MessageToolCall }>,
-  messageId: string,
-): ContentBlock[] {
-  return items.map((item) => {
-    if (item.type === 'text') {
-      return createMockContentBlock('text', { text: item.text, sourceId: messageId })
-    }
-    return createMockContentBlock('tool_call', {
-      toolCall: item.toolCall,
-      sourceId: messageId,
-    })
-  })
-}
-
-// ============================================================
 // 测试套件
 // ============================================================
 
@@ -96,20 +64,19 @@ describe('AC-1h: 工具调用流程', () => {
     it('execution_start → execution_progress → execution_done 应产生 tool_call 类型片段', async () => {
       const messageId = 'msg-tool-1'
 
-      // 模拟 execution_done 后的消息状态
-      const toolCall = createMockToolCall({
-        call_id: 'exec-search-1',
-        tool_name: 'search',
-        status: 'completed',
-        progress: 100,
-        result: { answer: '搜索结果' },
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-search-1',
+            name: 'search',
+            state: 'done',
+            progress: 100,
+            result: { answer: '搜索结果' },
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -138,19 +105,19 @@ describe('AC-1h: 工具调用流程', () => {
     it('工具调用运行中状态应为 running', async () => {
       const messageId = 'msg-tool-2'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-search-2',
-        tool_name: 'search',
-        status: 'running',
-        progress: 50,
-        currentStep: '搜索中',
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-search-2',
+            name: 'search',
+            state: 'calling',
+            progress: 50,
+            currentStep: '搜索中',
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -168,17 +135,17 @@ describe('AC-1h: 工具调用流程', () => {
     it('工具调用初始状态应为 pending', async () => {
       const messageId = 'msg-tool-3'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-search-3',
-        tool_name: 'search',
-        status: 'pending',
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-search-3',
+            name: 'search',
+            state: 'streaming',
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -192,18 +159,18 @@ describe('AC-1h: 工具调用流程', () => {
     it('工具调用失败状态应为 failed', async () => {
       const messageId = 'msg-tool-4'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-search-4',
-        tool_name: 'search',
-        status: 'failed',
-        error: '连接超时',
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-search-4',
+            name: 'search',
+            state: 'error',
+            error: '连接超时',
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -224,32 +191,25 @@ describe('AC-1h: 工具调用流程', () => {
     it('两个工具调用应按序渲染，index 和 total 正确', async () => {
       const messageId = 'msg-multi-1'
 
-      const toolCall1 = createMockToolCall({
-        call_id: 'exec-search-1',
-        tool_name: 'search',
-        status: 'completed',
-        result: { items: ['结果1', '结果2'] },
-      })
-
-      const toolCall2 = createMockToolCall({
-        call_id: 'exec-analyze-1',
-        tool_name: 'analyze',
-        status: 'completed',
-        result: { summary: '分析完成' },
-      })
-
-      const contentBlocks = buildMixedContentBlocks(
-        [
-          { type: 'tool_call', toolCall: toolCall1 },
-          { type: 'tool_call', toolCall: toolCall2 },
-        ],
-        messageId,
-      )
-
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-search-1',
+            name: 'search',
+            state: 'done',
+            result: { items: ['结果1', '结果2'] },
+            sequence: 1,
+          }),
+          createToolCallPart({
+            callId: 'exec-analyze-1',
+            name: 'analyze',
+            state: 'done',
+            result: { summary: '分析完成' },
+            sequence: 2,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -276,24 +236,16 @@ describe('AC-1h: 工具调用流程', () => {
       }
     })
 
-    it('工具调用的 key 应包含 call_id 以区分不同工具', async () => {
+    it('工具调用的 key 应包含 callId 以区分不同工具', async () => {
       const messageId = 'msg-multi-2'
-
-      const toolCall1 = createMockToolCall({ call_id: 'call-a', tool_name: 'tool-a' })
-      const toolCall2 = createMockToolCall({ call_id: 'call-b', tool_name: 'tool-b' })
-
-      const contentBlocks = buildMixedContentBlocks(
-        [
-          { type: 'tool_call', toolCall: toolCall1 },
-          { type: 'tool_call', toolCall: toolCall2 },
-        ],
-        messageId,
-      )
 
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({ callId: 'call-a', name: 'tool-a', sequence: 1 }),
+          createToolCallPart({ callId: 'call-b', name: 'tool-b', sequence: 2 }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -315,26 +267,20 @@ describe('AC-1h: 工具调用流程', () => {
     it('text → tool_call → text 交替顺序应正确', async () => {
       const messageId = 'msg-mixed-1'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-search-m1',
-        tool_name: 'search',
-        status: 'completed',
-        result: '搜索结果',
-      })
-
-      const contentBlocks = buildMixedContentBlocks(
-        [
-          { type: 'text', text: '使用搜索' },
-          { type: 'tool_call', toolCall },
-          { type: 'text', text: '根据结果' },
-        ],
-        messageId,
-      )
-
       const message = createMockMessage({
         id: messageId,
         content: '使用搜索根据结果',
-        contentBlocks,
+        parts: [
+          createTextPart('使用搜索', 1),
+          createToolCallPart({
+            callId: 'exec-search-m1',
+            name: 'search',
+            state: 'done',
+            result: '搜索结果',
+            sequence: 2,
+          }),
+          createTextPart('根据结果', 3),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -368,25 +314,19 @@ describe('AC-1h: 工具调用流程', () => {
     it('thinking → tool_call → text 混合应正确', async () => {
       const messageId = 'msg-mixed-2'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-tool-m2',
-        tool_name: 'analyze',
-        status: 'completed',
-      })
-
-      const contentBlocks: ContentBlock[] = [
-        createMockContentBlock('thinking', {
-          thinking: { content: '需要分析数据', isThinking: false },
-          sourceId: messageId,
-        }),
-        createMockContentBlock('tool_call', { toolCall, sourceId: messageId }),
-        createMockContentBlock('text', { text: '分析完成', sourceId: messageId }),
-      ]
-
       const message = createMockMessage({
         id: messageId,
         content: '分析完成',
-        contentBlocks,
+        parts: [
+          createThinkingPart('需要分析数据', 1),
+          createToolCallPart({
+            callId: 'exec-tool-m2',
+            name: 'analyze',
+            state: 'done',
+            sequence: 2,
+          }),
+          createTextPart('分析完成', 3),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -401,32 +341,26 @@ describe('AC-1h: 工具调用流程', () => {
     it('多个工具调用穿插文本应正确', async () => {
       const messageId = 'msg-mixed-3'
 
-      const toolCall1 = createMockToolCall({
-        call_id: 'call-1',
-        tool_name: 'search',
-        status: 'completed',
-      })
-      const toolCall2 = createMockToolCall({
-        call_id: 'call-2',
-        tool_name: 'translate',
-        status: 'completed',
-      })
-
-      const contentBlocks = buildMixedContentBlocks(
-        [
-          { type: 'text', text: '开始' },
-          { type: 'tool_call', toolCall: toolCall1 },
-          { type: 'text', text: '中间' },
-          { type: 'tool_call', toolCall: toolCall2 },
-          { type: 'text', text: '结束' },
-        ],
-        messageId,
-      )
-
       const message = createMockMessage({
         id: messageId,
         content: '开始中间结束',
-        contentBlocks,
+        parts: [
+          createTextPart('开始', 1),
+          createToolCallPart({
+            callId: 'call-1',
+            name: 'search',
+            state: 'done',
+            sequence: 2,
+          }),
+          createTextPart('中间', 3),
+          createToolCallPart({
+            callId: 'call-2',
+            name: 'translate',
+            state: 'done',
+            sequence: 4,
+          }),
+          createTextPart('结束', 5),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -461,19 +395,19 @@ describe('AC-1h: 工具调用流程', () => {
       const messageId = 'msg-progress-1'
 
       // 模拟进度 30% 的状态
-      const toolCall30 = createMockToolCall({
-        call_id: 'exec-progress-1',
-        tool_name: 'search',
-        status: 'running',
-        progress: 30,
-        currentStep: '搜索中',
-      })
-
-      const contentBlocks30 = buildToolCallContentBlocks(toolCall30, messageId)
       const message30 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: contentBlocks30,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-1',
+            name: 'search',
+            state: 'calling',
+            progress: 30,
+            currentStep: '搜索中',
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -490,19 +424,19 @@ describe('AC-1h: 工具调用流程', () => {
       }
 
       // 更新到 80% 进度
-      const toolCall80 = createMockToolCall({
-        call_id: 'exec-progress-1',
-        tool_name: 'search',
-        status: 'running',
-        progress: 80,
-        currentStep: '分析中',
-      })
-
-      const contentBlocks80 = buildToolCallContentBlocks(toolCall80, messageId)
       const message80 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: contentBlocks80,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-1',
+            name: 'search',
+            state: 'calling',
+            progress: 80,
+            currentStep: '分析中',
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -525,20 +459,20 @@ describe('AC-1h: 工具调用流程', () => {
     it('进度完成后 progress 应为 100 且 status 为 completed', async () => {
       const messageId = 'msg-progress-2'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-progress-2',
-        tool_name: 'search',
-        status: 'completed',
-        progress: 100,
-        result: { found: true },
-        duration_ms: 1500,
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-2',
+            name: 'search',
+            state: 'done',
+            progress: 100,
+            result: { found: true },
+            durationMs: 1500,
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -555,18 +489,18 @@ describe('AC-1h: 工具调用流程', () => {
       const messageId = 'msg-progress-3'
 
       // 0% - 初始执行
-      const toolCall0 = createMockToolCall({
-        call_id: 'exec-progress-3',
-        tool_name: 'search',
-        status: 'running',
-        progress: 0,
-      })
-
-      const contentBlocks0 = buildToolCallContentBlocks(toolCall0, messageId)
       const message0 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: contentBlocks0,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-3',
+            name: 'search',
+            state: 'calling',
+            progress: 0,
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -582,17 +516,19 @@ describe('AC-1h: 工具调用流程', () => {
       }
 
       // 更新到 30%
-      const toolCall30 = createMockToolCall({
-        call_id: 'exec-progress-3',
-        tool_name: 'search',
-        status: 'running',
-        progress: 30,
-        currentStep: '搜索中',
-      })
       const message30 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: buildToolCallContentBlocks(toolCall30, messageId),
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-3',
+            name: 'search',
+            state: 'calling',
+            progress: 30,
+            currentStep: '搜索中',
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -605,17 +541,19 @@ describe('AC-1h: 工具调用流程', () => {
       }
 
       // 更新到 80%
-      const toolCall80 = createMockToolCall({
-        call_id: 'exec-progress-3',
-        tool_name: 'search',
-        status: 'running',
-        progress: 80,
-        currentStep: '分析中',
-      })
       const message80 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: buildToolCallContentBlocks(toolCall80, messageId),
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-3',
+            name: 'search',
+            state: 'calling',
+            progress: 80,
+            currentStep: '分析中',
+            sequence: 1,
+          }),
+        ],
         status: 'streaming',
       })
 
@@ -628,17 +566,19 @@ describe('AC-1h: 工具调用流程', () => {
       }
 
       // 完成 100%
-      const toolCall100 = createMockToolCall({
-        call_id: 'exec-progress-3',
-        tool_name: 'search',
-        status: 'completed',
-        progress: 100,
-        result: { done: true },
-      })
       const message100 = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks: buildToolCallContentBlocks(toolCall100, messageId),
+        parts: [
+          createToolCallPart({
+            callId: 'exec-progress-3',
+            name: 'search',
+            state: 'done',
+            progress: 100,
+            result: { done: true },
+            sequence: 1,
+          }),
+        ],
         status: 'completed',
       })
 
@@ -661,17 +601,17 @@ describe('AC-1h: 工具调用流程', () => {
     it('execution_cancelled 应导致 cancelled 状态', async () => {
       const messageId = 'msg-cancel-1'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-cancel-1',
-        tool_name: 'long_task',
-        status: 'cancelled' as MessageToolCall['status'],
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-cancel-1',
+            name: 'long_task',
+            state: 'cancelled',
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)
@@ -690,20 +630,20 @@ describe('AC-1h: 工具调用流程', () => {
     it('tool_call 片段的 activity 应包含工具名和结果', async () => {
       const messageId = 'msg-detail-1'
 
-      const toolCall = createMockToolCall({
-        call_id: 'exec-detail-1',
-        tool_name: 'web_search',
-        tool_args: { query: 'React Testing Library' },
-        status: 'completed',
-        result: { items: ['结果1', '结果2'] },
-        duration_ms: 2300,
-      })
-
-      const contentBlocks = buildToolCallContentBlocks(toolCall, messageId)
       const message = createMockMessage({
         id: messageId,
         content: '',
-        contentBlocks,
+        parts: [
+          createToolCallPart({
+            callId: 'exec-detail-1',
+            name: 'web_search',
+            args: { query: 'React Testing Library' },
+            state: 'done',
+            result: { items: ['结果1', '结果2'] },
+            durationMs: 2300,
+            sequence: 1,
+          }),
+        ],
       })
 
       const { result } = await renderUseMessageRender(message)

@@ -255,6 +255,24 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     if (saved) {
+      // BUG-FIX-fix_20260523_tab_pipeline_msg:
+      // 问题根因: 从 localStorage 恢复子 Tab 时，tab.pipelineRunId 可能为空，
+      //          导致后续 registerPipeline 和 loadTabMessages 被跳过，子 Tab 消息不显示。
+      // 修复方案: 在 set() 之前从 pipelineTabMap 反向查找 pipelineId，重建 pipelineRunId。
+      //          避免直接修改已存入 store 的对象引用，遵循 Zustand 不可变更新原则。
+      // 影响范围: 页面刷新后子 Tab 的消息恢复
+      // 修复日期: 2026-05-23
+      for (const tab of saved.tabs) {
+        if (tab.agentLevel !== 1 && !tab.pipelineRunId) {
+          for (const [pid, tid] of Object.entries(saved.pipelineTabMap || {})) {
+            if (tid === tab.id) {
+              tab.pipelineRunId = pid
+              break
+            }
+          }
+        }
+      }
+
       set({
         currentSessionId: sessionId,
         tabs: saved.tabs,
@@ -662,8 +680,28 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         }
       }
     } else {
-      const effectivePipelineId = tab.pipelineRunId || tabId
-      pipelineStore.activatePipeline(effectivePipelineId)
+      // BUG-FIX-fix_20260523_tab_pipeline_msg:
+      // 问题根因: 当 tab.pipelineRunId 为空时（如从 localStorage 恢复），
+      //          fallback 到 tabId（格式为 sub-${parentId}），不会匹配任何 pipeline，
+      //          导致 activatePipeline 使用错误的 ID，消息无法显示。
+      // 修复方案: 从 pipelineTabMap 反向查找 pipelineId，确保使用正确的管道 ID。
+      //          若查找失败则跳过 activatePipeline，避免设置无效的 activePipelineId。
+      // 影响范围: 子 Tab 切换时的消息显示
+      // 修复日期: 2026-05-23
+      let effectivePipelineId = tab.pipelineRunId
+      if (!effectivePipelineId) {
+        for (const [pid, tid] of Object.entries(get().pipelineTabMap)) {
+          if (tid === tabId) {
+            effectivePipelineId = pid
+            break
+          }
+        }
+      }
+      if (effectivePipelineId) {
+        pipelineStore.activatePipeline(effectivePipelineId)
+      } else {
+        console.warn(`[AgentTabStore] switchToTab: 无法解析 pipelineId, tabId=${tabId}`)
+      }
       // BUG-FIX-fix_20260512_msg_order:
       // 问题根因: 缓存预填 initFromAPI 与异步 loadTabMessages 的 initFromAPI 之间存在竞争，
       //          若两次 initFromAPI 之间有 WebSocket 事件到达，事件写入的数据会被第二次完全覆盖。
@@ -895,7 +933,21 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId)
     if (!tab || !state.currentSessionId) return
 
-    const effectivePipelineId = pipelineRunId || tab.pipelineRunId
+    // BUG-FIX-fix_20260523_tab_pipeline_msg:
+    // 问题根因: 当 tab.pipelineRunId 为空时，无法获取正确的管道 ID，
+    //          导致 loadTabMessages 直接 return，子 Tab 消息不加载。
+    // 修复方案: 从 pipelineTabMap 反向查找 pipelineId 作为 fallback。
+    // 影响范围: 子 Tab 消息加载
+    // 修复日期: 2026-05-23
+    let effectivePipelineId = pipelineRunId || tab.pipelineRunId
+    if (!effectivePipelineId) {
+      for (const [pid, tid] of Object.entries(state.pipelineTabMap)) {
+        if (tid === tabId) {
+          effectivePipelineId = pid
+          break
+        }
+      }
+    }
     if (!effectivePipelineId) return
 
     set((s) => ({

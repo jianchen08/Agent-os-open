@@ -11,6 +11,7 @@ import { loggers } from '@/utils/logger'
 import { retry, isRetryableError } from '@/utils/retry'
 import { useStreamingStore } from './streamingStore'
 import type { Message } from '@/types/models'
+import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 
 const logger = loggers.sessionStore
 
@@ -122,6 +123,23 @@ interface PipelineMessageState {
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => Promise<void>
+
+  // ==================== Parts 统一修改方法 ====================
+
+  /** 追加一个新 Part 到指定消息 */
+  appendPart: (pipelineId: string, messageId: string, part: MessagePart) => void
+  /** 更新指定消息的某个 Part（按 partIndex 精确定位） */
+  updatePart: (pipelineId: string, messageId: string, partIndex: number, updates: Partial<MessagePart>) => void
+  /** 向指定 Part 追加文本内容（用于流式增量） */
+  appendToPart: (pipelineId: string, messageId: string, partIndex: number, content: string) => void
+  /** 结束消息流式状态：所有 Part.state = 'done', 消息 status = 'completed' */
+  finalizeMessage: (pipelineId: string, messageId: string) => void
+  /** 获取指定消息中最后一个指定类型的 Part 的 index */
+  findLastPartIndex: (pipelineId: string, messageId: string, type: MessagePart['type']) => number
+  /** 获取指定消息中 state='streaming' 的最后一个 Part 的 index */
+  findStreamingPartIndex: (pipelineId: string, messageId: string) => number
+  /** 获取指定消息中指定 callId 的 tool_call Part 的 index */
+  findToolCallPartIndex: (pipelineId: string, messageId: string, callId: string) => number
 }
 
 /**
@@ -282,12 +300,23 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         }
       }
 
+      // 同步更新 bottomCursor
+      const newBottomCursors = { ...state.bottomCursorsByPipeline }
+      const newSeq = message.sequence
+      if (newSeq != null) {
+        const currentBottom = newBottomCursors[pipelineId] ?? 0
+        if (newSeq > currentBottom) {
+          newBottomCursors[pipelineId] = newSeq
+        }
+      }
+
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
           [pipelineId]: updatedMessages,
         },
         pipelines: newPipelines,
+        bottomCursorsByPipeline: newBottomCursors,
       }
     })
   },
@@ -550,7 +579,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
       const merged = [...newMsgs, ...existing]
       merged.sort(compareMessages)
-      const topCursor = sorted[0].sequence ?? 0
+      const topCursor = merged[0].sequence ?? 0
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
@@ -685,8 +714,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       return
     }
 
-    // 并发去重：如果该 pipelineId 已有正在进行的请求，直接复用该 Promise
-    const existingFetch = _fetchingPipelines.get(pipelineId)
+    // 并发去重：按方向区分 key，避免向上翻页和向下补漏互相阻塞
+    const dedupeKey = options?.before_sequence !== undefined
+      ? `${pipelineId}::older`
+      : options?.after_sequence !== undefined
+        ? `${pipelineId}::newer`
+        : `${pipelineId}::init`
+    const existingFetch = _fetchingPipelines.get(dedupeKey)
     if (existingFetch) {
       return existingFetch
     }
@@ -750,14 +784,187 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         }
       } finally {
         // 请求完成后从去重映射中移除
-        _fetchingPipelines.delete(pipelineId)
+        _fetchingPipelines.delete(dedupeKey)
       }
     })()
 
     // 记录正在进行的请求
-    _fetchingPipelines.set(pipelineId, fetchPromise)
+    _fetchingPipelines.set(dedupeKey, fetchPromise)
 
     return fetchPromise
+  },
+
+  // ==================== Parts 统一修改方法 ====================
+
+  /**
+   * 追加一个新 Part 到指定消息
+   */
+  appendPart: (pipelineId: string, messageId: string, part: MessagePart) => {
+    set((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId]
+      if (!pipelineMessages) return state
+      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+      if (msgIndex < 0) return state
+      const msg = pipelineMessages[msgIndex]
+      const updatedMessages = [...pipelineMessages]
+      updatedMessages[msgIndex] = {
+        ...msg,
+        parts: [...(msg.parts || []), part],
+        _lastUpdated: Date.now(),
+      }
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
+        },
+      }
+    })
+  },
+
+  /**
+   * 更新指定消息的某个 Part（按 partIndex 精确定位）
+   */
+  updatePart: (pipelineId: string, messageId: string, partIndex: number, updates: Partial<MessagePart>) => {
+    set((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId]
+      if (!pipelineMessages) return state
+      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+      if (msgIndex < 0) return state
+      const msg = pipelineMessages[msgIndex]
+      const parts = msg.parts || []
+      if (partIndex < 0 || partIndex >= parts.length) return state
+      const updatedParts = [...parts]
+      updatedParts[partIndex] = { ...updatedParts[partIndex], ...updates } as MessagePart
+      const updatedMessages = [...pipelineMessages]
+      updatedMessages[msgIndex] = {
+        ...msg,
+        parts: updatedParts,
+        _lastUpdated: Date.now(),
+      }
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
+        },
+      }
+    })
+  },
+
+  /**
+   * 向指定 Part 追加文本内容（用于流式增量）
+   */
+  appendToPart: (pipelineId: string, messageId: string, partIndex: number, content: string) => {
+    set((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId]
+      if (!pipelineMessages) return state
+      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+      if (msgIndex < 0) return state
+      const msg = pipelineMessages[msgIndex]
+      const parts = msg.parts || []
+      if (partIndex < 0 || partIndex >= parts.length) return state
+      const part = parts[partIndex]
+      // 只有 text 和 thinking 类型支持追加
+      if (part.type !== 'text' && part.type !== 'thinking') return state
+      const updatedParts = [...parts]
+      updatedParts[partIndex] = {
+        ...part,
+        content: (part as { content: string }).content + content,
+      } as MessagePart
+      const updatedMessages = [...pipelineMessages]
+      updatedMessages[msgIndex] = {
+        ...msg,
+        parts: updatedParts,
+        _lastUpdated: Date.now(),
+      }
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
+        },
+      }
+    })
+  },
+
+  /**
+   * 结束消息流式状态：所有 Part.state = 'done', 消息 status = 'completed'
+   */
+  finalizeMessage: (pipelineId: string, messageId: string) => {
+    set((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId]
+      if (!pipelineMessages) return state
+      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+      if (msgIndex < 0) return state
+      const msg = pipelineMessages[msgIndex]
+      const parts = msg.parts || []
+      const finalizedParts = parts.map((p) => {
+        if (p.type === 'text' || p.type === 'thinking') {
+          return { ...p, state: 'done' as const } as MessagePart
+        }
+        if (p.type === 'tool_call') {
+          return {
+            ...p,
+            state: (p.state === 'error' ? 'error' : 'done') as ('done' | 'error'),
+          } as MessagePart
+        }
+        return p
+      })
+      const updatedMessages = [...pipelineMessages]
+      updatedMessages[msgIndex] = {
+        ...msg,
+        parts: finalizedParts,
+        status: 'completed',
+        _lastUpdated: Date.now(),
+      }
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
+        },
+      }
+    })
+  },
+
+  /**
+   * 获取指定消息中最后一个指定类型的 Part 的 index
+   */
+  findLastPartIndex: (pipelineId: string, messageId: string, type: MessagePart['type']) => {
+    const state = get()
+    const pipelineMessages = state.messagesByPipeline[pipelineId]
+    if (!pipelineMessages) return -1
+    const msg = pipelineMessages.find((m) => m.id === messageId)
+    if (!msg || !msg.parts) return -1
+    for (let i = msg.parts.length - 1; i >= 0; i--) {
+      if (msg.parts[i].type === type) return i
+    }
+    return -1
+  },
+
+  /**
+   * 获取指定消息中 state='streaming' 的最后一个 Part 的 index
+   */
+  findStreamingPartIndex: (pipelineId: string, messageId: string) => {
+    const state = get()
+    const pipelineMessages = state.messagesByPipeline[pipelineId]
+    if (!pipelineMessages) return -1
+    const msg = pipelineMessages.find((m) => m.id === messageId)
+    if (!msg || !msg.parts) return -1
+    for (let i = msg.parts.length - 1; i >= 0; i--) {
+      const p = msg.parts[i]
+      if ((p.type === 'text' || p.type === 'thinking') && p.state === 'streaming') return i
+    }
+    return -1
+  },
+
+  /**
+   * 获取指定消息中指定 callId 的 tool_call Part 的 index
+   */
+  findToolCallPartIndex: (pipelineId: string, messageId: string, callId: string) => {
+    const state = get()
+    const pipelineMessages = state.messagesByPipeline[pipelineId]
+    if (!pipelineMessages) return -1
+    const msg = pipelineMessages.find((m) => m.id === messageId)
+    if (!msg || !msg.parts) return -1
+    return msg.parts.findIndex((p) => p.type === 'tool_call' && (p as ToolCallPart).callId === callId)
   },
 
 }))

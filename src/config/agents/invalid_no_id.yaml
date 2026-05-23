@@ -1,4 +1,0 @@
-# 无效 Agent 配置 — 缺少 config_id（用于测试错误处理）
-name: "无效Agent"
-agent_type: "specialized"
-level: "L3"

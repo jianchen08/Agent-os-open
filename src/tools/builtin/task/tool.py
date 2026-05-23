@@ -1452,10 +1452,15 @@ class TaskTool(BuiltinTool):
                     container_workspace=container_workspace,
                 )
 
-                # 清理容器自身的管道执行文件
+                # BUG-FIX-fix_20260523_container_pipeline_cleanup:
+                # 问题根因: 容器任务的 pipeline_run_id 是父管道的 ID（由 bind_pipeline_run 绑定），
+                #           _cleanup_pipeline_file 会误删父管道的 YAML 记录文件，导致父管道历史消息丢失。
+                # 修复方案: 容器任务不清理管道文件。容器是任务分组机制，自身不执行管道，
+                #           其 pipeline_run_id 指向父管道，清理会影响父管道数据。
+                #           只有容器下级的子任务才能被级联删除并清理各自的管道文件。
+                # 影响范围: task_manage delete 对容器任务的清理逻辑
+                # 修复日期: 2026-05-23
                 pipeline_cleaned = False
-                if task.pipeline_run_id:
-                    pipeline_cleaned = self._cleanup_pipeline_file(task.pipeline_run_id)
 
                 result_data: dict[str, Any] = {
                     "task_id": task_id,

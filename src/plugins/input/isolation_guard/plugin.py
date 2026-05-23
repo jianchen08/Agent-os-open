@@ -260,11 +260,7 @@ class IsolationGuard(IInputPlugin):
             return False
 
         try:
-            from src.core.human_interaction.models import (
-                InteractionRequest,
-                InteractionSource,
-                Priority,
-            )
+            from human_interaction.models import Priority
 
             # 构建审批描述
             args_preview = ""
@@ -287,24 +283,24 @@ class IsolationGuard(IInputPlugin):
             task_id = ctx.state.get(StateKeys.TASK_ID) or ""
             session_id = ctx.state.get("session_id")
 
-            request = InteractionRequest.create_approval_request(
+            request_id = await human_svc.create_choice_request(
+                session_id=session_id or task_id,
                 thread_id=task_id,
+                tab_id="security_approval",
                 title=f"安全审批: {tool_name}",
                 description=description,
-                operation=f"host_tool:{tool_name}",
-                risk_level=int(decision.risk_score * 10),
-                source=InteractionSource.TOOL_CALL,
-                source_id="isolation_guard",
+                options=[
+                    {"id": "approve", "label": "批准执行", "description": "允许在 HOST 模式下执行此工具", "is_default": True},
+                    {"id": "deny", "label": "拒绝执行", "description": "阻止此工具执行", "is_destructive": True},
+                ],
+                timeout_seconds=120,
                 priority=Priority.HIGH if decision.risk_score >= 0.8 else Priority.NORMAL,
-                timeout=120.0,
-                data={"tool_name": tool_name, "tool_args": tool_args},
-                session_id=session_id,
+                agent_id="isolation_guard",
             )
 
-            request_id = await human_svc.request_interaction(request)
-            response = await human_svc.wait_for_response(request_id, timeout=120.0)
+            response = await human_svc.wait_for_choice(request_id, timeout=120.0)
 
-            return response.is_approved
+            return response.get("response_type") == "approved"
 
         except Exception as e:
             logger.error(

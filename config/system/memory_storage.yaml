@@ -145,25 +145,30 @@ health_check:
 # ========== 记忆维护配置 ==========
 maintenance:
   # 是否启用自动维护
-  enabled: false
+  enabled: true
 
-  # 过期记忆清理间隔（秒），默认 1 小时
-  cleanup_interval: 3600
+  # 复盘配置
+  review:
+    # 复盘触发条件（满足任一即触发）
+    trigger:
+      min_records: 500            # 积累 500 条新执行记录后触发
+      max_interval: 604800        # 或最迟 7 天触发一次
+    # 骨架预算：占上下文窗口的百分比
+    skeleton_budget_percent: 15   # 15% 的上下文用于骨架
+    # 128K 上下文 -> 19,200 token -> ~1,280 条记录骨架
+    # 32K 上下文 -> 4,800 token -> ~320 条记录骨架
+    records_per_skeleton_token: 15  # 每条执行记录在骨架中约占 15 token
+    # 单次复盘最大执行记录数（防止一次处理太多）
+    max_records_per_review: 2000
 
-  # 相似记忆合并间隔（秒），默认 24 小时
-  merge_interval: 86400
-
-  # 孤立 Tag 清理间隔（秒），默认 6 小时
-  tag_cleanup_interval: 21600
-
-  # 索引重建间隔（秒），默认 7 天
-  rebuild_index_interval: 604800
-
-  # 相似记忆合并阈值（余弦相似度）
-  merge_similarity_threshold: 0.95
-
-  # Tag 频率低于此值视为孤立 Tag
-  orphan_tag_threshold: 0
+  # 清理配置
+  cleanup:
+    # 清理触发条件
+    check_interval: 86400        # 每天巡检一次
+    # 清理条件
+    min_age_days: 30             # 至少 30 天才考虑清理
+    capacity_pressure_threshold: 0.8  # 容量使用率 > 80% 时提前清理
+    early_cleanup_age_days: 7    # 容量紧张时，7 天以上的已复盘数据可清理
 
 # ========== 监控配置 ==========
 monitoring:

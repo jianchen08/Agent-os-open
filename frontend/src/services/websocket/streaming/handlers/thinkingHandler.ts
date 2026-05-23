@@ -1,18 +1,20 @@
 /**
  * 思考事件处理器（start / chunk / end）
+ *
+ * 所有 thinking 数据统一走 parts[] 路径，不再维护旧的
+ * msg.thinking / msg.contentBlocks 兼容字段。
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 
 import { resetChunkTimeout } from '../chunkTimeout'
-import { appendThinkingChunk, endThinkingBlock } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
 import { extractMessageId } from './utils'
 
 const _debugLogger = loggers.websocket
 
-/** thinking 专属超时（30秒）：超时后自动清理 isThinking 状态 */
+/** thinking 专属超时（30秒）：超时后自动将 part 状态置为 done 并追加提示 */
 const THINKING_TIMEOUT_MS = 30_000
 
 /** 管理所有活跃的 thinking 超时计时器 */
@@ -30,7 +32,7 @@ function clearThinkingTimeout(messageId: string): void {
 }
 
 /**
- * 处理思考开始事件
+ * 处理思考开始事件：追加一个新的 thinking part
  */
 export function handleThinkingStart(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
@@ -40,45 +42,44 @@ export function handleThinkingStart(eventData: any) {
 
   resetChunkTimeout(pipelineId, messageId)
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  if (!msg) return
-
-  if ((msg as any).thinking?.isThinking) return
-  if ((msg.contentBlocks || []).some((b: any) => b.type === 'thinking' && b.thinking?.isThinking)) return
+  // 若已存在 streaming 状态的 thinking part，直接跳过
+  const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
+  if (partIndex >= 0) {
+    const msgs = pipelineStore.getState().getMessages(pipelineId)
+    const msg = msgs.find((m: any) => m.id === messageId)
+    const existing = (msg?.parts?.[partIndex] as any)
+    if (existing?.state === 'streaming') return
+  }
 
   // 清除旧的 thinking 超时（如有），启动新的
   clearThinkingTimeout(messageId)
   const timer = setTimeout(() => {
     _thinkingTimeoutMap.delete(messageId)
     _debugLogger.warn('[thinkingHandler] thinking 超时，自动清理: messageId=%s', messageId)
-    // 自动清理 isThinking 状态并显示超时提示
-    const currentMsgs = pipelineStore.getState().getMessages(pipelineId)
-    const currentMsg = currentMsgs.find((m: any) => m.id === messageId)
-    if (currentMsg && (currentMsg as any).thinking?.isThinking) {
-      pipelineStore.getState().updateMessage(pipelineId, messageId, {
-        thinking: { ...(currentMsg as any).thinking, content: ((currentMsg as any).thinking.content || '') + '\n\n⏱ 思考超时，请尝试重新发送', isThinking: false },
-      } as any)
+    // 超时后将 part 状态置为 done 并追加提示文本
+    const idx = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
+    if (idx >= 0) {
+      pipelineStore.getState().appendToPart(pipelineId, messageId, idx, '\n\n⏱ 思考超时，请尝试重新发送')
+      pipelineStore.getState().updatePart(pipelineId, messageId, idx, { state: 'done' })
     }
   }, THINKING_TIMEOUT_MS)
   _thinkingTimeoutMap.set(messageId, timer)
 
-  const sequence = eventData.sequence ?? eventData.data?.sequence
-  const thinkingBlock = { type: 'thinking' as const, thinking: { content: '', isThinking: true } as any, sourceId: messageId, sequence }
-  const blocks = [...(msg.contentBlocks || []), thinkingBlock]
-  pipelineStore.getState().updateMessage(pipelineId, messageId, {
-    thinking: { content: '', isThinking: true },
-    contentBlocks: blocks,
-  } as any)
+  // 通过 parts[] 统一方法追加 thinking part
+  pipelineStore.getState().appendPart(pipelineId, messageId, {
+    type: 'thinking',
+    content: '',
+    state: 'streaming',
+    sequence: eventData.data?.sequence ?? Date.now(),
+  })
 }
 
 /**
- * 处理思考块事件
+ * 处理思考块事件：向最后一个 thinking part 追加内容
  */
 export function handleThinkingChunk(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) {
-    // FIX: pipeline_id 缺失时记录 warn
     _debugLogger.warn(
       `[THINKING_CHUNK] pipeline_id missing, _threadId=%s msgId=%s`,
       eventData.data?._threadId?.slice(0, 12),
@@ -95,19 +96,15 @@ export function handleThinkingChunk(eventData: any) {
   // 收到 chunk，清除 thinking 超时（后端仍在响应）
   clearThinkingTimeout(messageId)
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  if (!(msg as any)?.thinking) return
-
-  const blocks = appendThinkingChunk(msg.contentBlocks, chunk)
-  pipelineStore.getState().updateMessage(pipelineId, messageId, {
-    thinking: { content: ((msg as any).thinking.content || '') + chunk, isThinking: true },
-    contentBlocks: blocks,
-  } as any)
+  // 通过 parts[] 统一方法向最后一个 thinking part 追加内容
+  const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
+  if (partIndex >= 0) {
+    pipelineStore.getState().appendToPart(pipelineId, messageId, partIndex, chunk)
+  }
 }
 
 /**
- * 处理思考结束事件
+ * 处理思考结束事件：将最后一个 thinking part 状态置为 done
  */
 export function handleThinkingEnd(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
@@ -118,13 +115,12 @@ export function handleThinkingEnd(eventData: any) {
   // 收到 end，清除 thinking 超时
   clearThinkingTimeout(messageId)
 
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  if (!(msg as any)?.thinking) return
-
-  const blocks = endThinkingBlock(msg.contentBlocks)
-  pipelineStore.getState().updateMessage(pipelineId, messageId, {
-    thinking: { content: (msg as any).thinking.content || '', isThinking: false },
-    contentBlocks: blocks,
-  } as any)
+  // 通过 parts[] 统一方法将 thinking part 状态置为 done
+  const partIndex = pipelineStore.getState().findLastPartIndex(pipelineId, messageId, 'thinking')
+  if (partIndex >= 0) {
+    pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, {
+      state: 'done',
+      durationMs: eventData.data?.duration_ms,
+    })
+  }
 }

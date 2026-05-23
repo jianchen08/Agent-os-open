@@ -5,12 +5,14 @@
  */
 
 import { memo } from 'react'
+import { AlertCircle, AlertTriangle, Info } from 'lucide-react'
 import ActivityCard from '@/components/chat/ActivityCard'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
 import { ThinkingDisplay } from '@/components/chat/ThinkingDisplay'
 import { cn } from '@/lib/utils'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
+import type { SystemLevel } from '@/types/messageParts'
 import type { ReactNode } from 'react'
 
 /**
@@ -18,6 +20,39 @@ import type { ReactNode } from 'react'
  * 注意：需要安装依赖 @lobehub/ui 和 motion
  */
 const USE_LOBECHAT_MARKDOWN = true
+
+/**
+ * System notification style mapping by level
+ */
+const SYSTEM_LEVEL_STYLES: Record<SystemLevel, { container: string; icon: string; text: string }> = {
+  info: {
+    container:
+      'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
+    icon: 'text-blue-500 dark:text-blue-400',
+    text: 'text-blue-800 dark:text-blue-200',
+  },
+  warning: {
+    container:
+      'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',
+    icon: 'text-yellow-500 dark:text-yellow-400',
+    text: 'text-yellow-800 dark:text-yellow-200',
+  },
+  error: {
+    container:
+      'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800',
+    icon: 'text-red-500 dark:text-red-400',
+    text: 'text-red-800 dark:text-red-200',
+  },
+}
+
+/**
+ * System notification icon mapping by level
+ */
+const SYSTEM_LEVEL_ICONS: Record<SystemLevel, React.ElementType> = {
+  info: Info,
+  warning: AlertTriangle,
+  error: AlertCircle,
+}
 
 /**
  * 消息内容渲染器 Props
@@ -116,6 +151,23 @@ function renderFragment(
     case 'tool_call':
       return renderToolCall ? renderToolCall(fragment) : DefaultToolCallRenderer(fragment)
 
+    case 'system': {
+      const styles = SYSTEM_LEVEL_STYLES[fragment.level]
+      const IconComponent = SYSTEM_LEVEL_ICONS[fragment.level]
+      return (
+        <div
+          key={fragment.key}
+          className={cn(
+            'flex items-start gap-2 rounded-md border px-3 py-2 text-sm',
+            styles.container,
+          )}
+        >
+          <IconComponent className={cn('mt-0.5 h-4 w-4 shrink-0', styles.icon)} />
+          <span className={cn('leading-relaxed', styles.text)}>{fragment.content}</span>
+        </div>
+      )
+    }
+
     default:
       return null
   }
@@ -203,6 +255,11 @@ export const MessageContentRenderer = memo(MessageContentRendererBase, (prev, ne
     if (prevFragment.type === 'thinking' && nextFragment.type === 'thinking') {
       if (prevFragment.thinking.content !== nextFragment.thinking.content) return false
       if (prevFragment.thinking.isThinking !== nextFragment.thinking.isThinking) return false
+    }
+
+    if (prevFragment.type === 'system' && nextFragment.type === 'system') {
+      if (prevFragment.content !== nextFragment.content) return false
+      if (prevFragment.level !== nextFragment.level) return false
     }
   }
 

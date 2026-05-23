@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,45 @@ MAX_FILE_SIZE = 2 * 1024 * 1024
 BINARY_SNIFF_SIZE = 8192
 
 
+def _try_match_value(actual_val: Any, filter_val: str) -> bool:
+    """尝试将筛选字符串值与实际值匹配，支持数字自动转换。
+
+    比较策略：
+    1. 字符串直接比较
+    2. 若实际值为 int/float，尝试将筛选值转为数字后比较
+    3. 若实际值为 bool，转换为布尔值比较
+
+    Args:
+        actual_val: 列表项中的实际值
+        filter_val: 筛选条件中的字符串值
+
+    Returns:
+        是否匹配
+    """
+    # 字符串直接比较
+    if str(actual_val) == filter_val:
+        return True
+
+    # 数字类型自动转换比较
+    if isinstance(actual_val, bool):
+        # bool 必须在 int 之前判断，因为 bool 是 int 的子类
+        return filter_val.lower() in ("true", "1") if actual_val else filter_val.lower() in ("false", "0")
+
+    if isinstance(actual_val, int):
+        try:
+            return actual_val == int(filter_val)
+        except (ValueError, TypeError):
+            pass
+
+    if isinstance(actual_val, float):
+        try:
+            return actual_val == float(filter_val)
+        except (ValueError, TypeError):
+            pass
+
+    return False
+
+
 class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
     """文件读取工具
 
@@ -58,7 +98,8 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             "不适用场景：需要写入文件（使用 file_write）、列出目录（使用 list_directory）、"
             "搜索文件内容（使用 enhanced_search）。"
             "fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。"
-            "例如：fields=['id', 'name'] 只返回这两个字段。",
+            "例如：fields=['id', 'name'] 只返回这两个字段。"
+            "支持列表筛选：fields=['records{type=error}'] 从列表中按条件筛选。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -75,7 +116,11 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "要读取的字段列表（仅支持 YAML/JSON 文件）。"
-                        "例如：['id', 'name']。支持嵌套字段，用点号分隔。"
+                        "例如：['id', 'name']。支持嵌套字段，用点号分隔，"
+                        "如 'summary.total_tokens'。"
+                        "支持列表筛选语法：'records{record_id=xxx}' 按条件从列表中筛选，"
+                        "筛选后可接 '.field' 取子字段，如 'records{iteration=13}.thinking_content'。"
+                        "多条匹配返回列表，单条匹配返回对象。"
                         "不指定则返回完整内容。",
                     },
                     "start_line": {
@@ -437,23 +482,153 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             metadata={"action": "read_file_fields", "fields": fields},
         )
 
-    def _get_nested_field(self, data: dict[str, Any], field: str) -> Any:
-        keys = field.split(".")
-        current = data
-        for key in keys:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
+    @staticmethod
+    def _parse_field_path(field: str) -> list[tuple]:
+        """将字段路径字符串解析为操作序列。
+
+        支持两种路径段：
+        - 普通键访问：'key' → ("key", "key")
+        - 列表筛选：'key{filter_key=filter_val}' → ("filter", "key", "filter_key", "filter_val")
+
+        示例：
+            'records{record_id=abc}.thinking_content' 解析为：
+            [("filter", "records", "record_id", "abc"), ("key", "thinking_content")]
+
+            'summary.total' 解析为：
+            [("key", "summary"), ("key", "total")]
+
+        Args:
+            field: 字段路径字符串，支持点号分隔和 {key=value} 筛选语法
+
+        Returns:
+            操作序列列表，每个元素为元组：
+            - ("key", key_name) 表示普通键访问
+            - ("filter", list_key, filter_key, filter_val) 表示列表筛选
+        """
+        # 匹配两种模式：key{filter} 或 纯 key
+        pattern = r'([^.{}]+)\{([^}=]+)=([^}]+)\}|([^.{}]+)'
+        segments: list[tuple] = []
+        for match in re.finditer(pattern, field):
+            if match.group(1):
+                # key{filter_key=filter_val} 模式
+                list_key = match.group(1)
+                filter_key = match.group(2)
+                filter_val = match.group(3)
+                segments.append(("filter", list_key, filter_key, filter_val))
+            elif match.group(4):
+                # 纯 key 模式
+                segments.append(("key", match.group(4)))
+        return segments
+
+    @staticmethod
+    def _resolve_segment(current: Any, seg: tuple) -> Any:
+        """执行单个路径段操作，支持键访问和列表筛选。
+
+        对于 filter 段，在列表中按 key=value 筛选：
+        - 筛选值会尝试与列表项中的实际值进行类型匹配（数字自动转换）
+        - 多条匹配返回列表，单条匹配返回对象，无匹配返回 None
+
+        Args:
+            current: 当前数据对象（dict / list / 其他）
+            seg: 路径段元组，来自 _parse_field_path 的输出
+
+        Returns:
+            解析后的值：普通访问返回对应值，筛选返回匹配项（对象或列表）
+        """
+        if seg[0] == "key":
+            # 普通键访问：从字典中取值
+            key = seg[1]
+            if isinstance(current, dict):
+                return current.get(key)
+            # 当 current 是列表时（上一段筛选返回了多条），对每个元素取子字段
+            if isinstance(current, list):
+                results = []
+                for item in current:
+                    if isinstance(item, dict) and key in item:
+                        results.append(item[key])
+                return results if results else None
+            return None
+
+        if seg[0] == "filter":
+            # 列表筛选：在指定列表中按 key=value 过滤
+            _, list_key, filter_key, filter_val = seg
+
+            # 先获取列表
+            if isinstance(current, dict):
+                target_list = current.get(list_key)
             else:
+                return None
+
+            if not isinstance(target_list, list):
+                return None
+
+            # 在列表中筛选匹配项，支持数字值自动转换
+            matched = []
+            for item in target_list:
+                if not isinstance(item, dict):
+                    continue
+                actual_val = item.get(filter_key)
+                if actual_val is None:
+                    continue
+                # 尝试将筛选值转换为与实际值相同的类型进行比较
+                if _try_match_value(actual_val, filter_val):
+                    matched.append(item)
+
+            if len(matched) == 0:
+                return None
+            elif len(matched) == 1:
+                return matched[0]
+            else:
+                return matched
+
+        return None
+
+    def _get_nested_field(self, data: dict[str, Any], field: str) -> Any:
+        """根据字段路径从嵌套数据中获取值。
+
+        支持两种语法：
+        - 普通点号分隔：'summary.total_tokens' → 逐层字典访问
+        - 列表筛选：'records{record_id=abc}.thinking' → 先按条件筛选列表再取子字段
+
+        不含 {} 的路径走原有简单逻辑，含 {} 的路径走新的解析逻辑。
+
+        Args:
+            data: 解析后的 YAML/JSON 数据字典
+            field: 字段路径字符串
+
+        Returns:
+            字段对应的值，未找到返回 None
+        """
+        # 不含筛选语法 {} 时，走原有简单逻辑，保证向后兼容
+        if "{" not in field:
+            keys = field.split(".")
+            current: Any = data
+            for key in keys:
+                if isinstance(current, dict) and key in current:
+                    current = current[key]
+                else:
+                    return None
+            return current
+
+        # 含筛选语法 {} 时，走新的路径解析逻辑
+        segments = self._parse_field_path(field)
+        current: Any = data
+        for seg in segments:
+            current = self._resolve_segment(current, seg)
+            if current is None:
                 return None
         return current
 
     def _set_nested_field(
         self, data: dict[str, Any], field: str, value: Any
     ) -> None:
-        keys = field.split(".")
-        current = data
-        for key in keys[:-1]:
-            if key not in current:
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = value
+        """将值设置到结果字典中，使用原始字段路径作为键。
+
+        直接用原始 field 字符串作为扁平键存储，避免列表筛选路径无法还原为嵌套结构的问题。
+
+        Args:
+            data: 结果字典
+            field: 字段路径字符串（作为存储键）
+            value: 要存储的值
+        """
+        data[field] = value

@@ -1,9 +1,6 @@
 import { create } from 'zustand'
-import { loggers } from '@/utils/logger'
 import { usePipelineMessageStore } from './pipelineMessageStore'
-import type { Message, MessageToolCall, ThinkingStep, ToolCallStatus } from '@/types/models'
-
-const logger = loggers.sessionStore
+import type { MessageToolCall, ThinkingStep } from '@/types/models'
 
 interface StreamingState {
   /** @deprecated 使用 isTabStreaming 替代，保留用于向后兼容 */
@@ -87,142 +84,52 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
   },
 
   /**
-   * 停止所有 streaming 状态，清理 pipelineMessageStore 中残留的 streaming/thinking 消息
+   * 停止所有 streaming 状态，清理 streamingTabs 和 refreshingMessageId
+   * Part 状态由 finalizeMessage 统一处理
    */
   stopStreaming: () => {
-    const pipelineStore = usePipelineMessageStore.getState()
-
-    // 遍历所有管道，清理 streaming 和 thinking 状态
-    const updatedMessagesByPipeline = { ...pipelineStore.messagesByPipeline }
-    for (const pipelineId of Object.keys(updatedMessagesByPipeline)) {
-      const pipelineMessages = updatedMessagesByPipeline[pipelineId]
-      const needsUpdate = pipelineMessages.some(
-        (m) => m.status === 'streaming' || m.thinking?.isThinking,
-      )
-
-      if (needsUpdate) {
-        updatedMessagesByPipeline[pipelineId] = pipelineMessages.map((message) => {
-          const updates: Partial<Message> = {}
-
-          if (message.status === 'streaming') {
-            updates.status = 'completed'
-          }
-
-          if (message.thinking?.isThinking) {
-            updates.thinking = {
-              ...message.thinking,
-              isThinking: false,
-            }
-          }
-
-          // 清理 contentBlocks 中残留的 thinking block
-          if ((message.contentBlocks || []).some((b: any) => b.type === 'thinking' && b.thinking?.isThinking)) {
-            updates.contentBlocks = (message.contentBlocks || []).map((b: any) => {
-              if (b.type === 'thinking' && b.thinking?.isThinking) {
-                return { ...b, thinking: { ...b.thinking, isThinking: false } }
-              }
-              return b
-            })
-          }
-
-          if (Object.keys(updates).length > 0) {
-            return { ...message, ...updates }
-          }
-          return message
-        })
-      }
-    }
-
-    usePipelineMessageStore.setState({ messagesByPipeline: updatedMessagesByPipeline })
     set({ isStreaming: false, refreshingMessageId: null, streamingTabs: {} })
   },
 
   /**
-   * 结束指定管道中消息的思考状态
+   * 结束指定管道中消息的思考状态，将 thinking Part 标记为 done
    */
   endThinking: (pipelineId: string, messageId: string, durationMs?: number) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      if (!message.thinking) {
-        return state
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        thinking: {
-          ...message.thinking,
-          isThinking: false,
-          durationMs,
-        },
-      }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    const store = usePipelineMessageStore.getState()
+    const partIndex = store.findLastPartIndex(pipelineId, messageId, 'thinking')
+    if (partIndex >= 0) {
+      store.updatePart(pipelineId, messageId, partIndex, {
+        state: 'done',
+        durationMs,
+      } as any)
+    }
   },
 
   /**
-   * 更新指定管道中消息的思考步骤
+   * 更新指定管道中消息的思考步骤，通过 Parts 体系更新 thinking Part 的 steps
    */
   updateThinkingStep: (pipelineId: string, messageId: string, step: ThinkingStep) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      const thinking = message.thinking || {
-        content: '',
-        isThinking: false,
-      }
-      const steps = thinking.steps || []
-
-      const stepIndex = steps.findIndex((s) => s.id === step.id)
-      let updatedSteps: ThinkingStep[]
-
-      if (stepIndex >= 0) {
-        updatedSteps = [...steps]
-        updatedSteps[stepIndex] = step
-      } else {
-        updatedSteps = [...steps, step]
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        thinking: {
-          ...thinking,
+    const store = usePipelineMessageStore.getState()
+    const partIndex = store.findLastPartIndex(pipelineId, messageId, 'thinking')
+    if (partIndex >= 0) {
+      const msg = store.messagesByPipeline[pipelineId]?.find((m) => m.id === messageId)
+      const part = msg?.parts?.[partIndex] as any
+      if (part) {
+        const steps = part.steps || []
+        const stepIdx = steps.findIndex((s: any) => s.id === step.id)
+        const updatedSteps = stepIdx >= 0
+          ? steps.map((s: any, i: number) => (i === stepIdx ? step : s))
+          : [...steps, step]
+        store.updatePart(pipelineId, messageId, partIndex, {
           steps: updatedSteps,
           currentStepIndex: updatedSteps.length - 1,
-        },
+        } as any)
       }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    }
   },
 
   /**
-   * 向指定管道的消息添加工具调用
+   * 向指定管道的消息追加工具调用 Part
    */
   addToolCallToMessage: (
     pipelineId: string,
@@ -230,53 +137,19 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     toolCall: MessageToolCall,
     parentId?: string,
   ) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        // BUG-FIX-fix_20260513_ai_msg_duplicate:
-        // 问题根因: 直接用 setState 创建消息，绕过了 addMessage 的 ID 去重逻辑，
-        //          如果 handleStreamStart 已创建同 ID 消息，会导致重复。
-        // 修复方案: 不在此处创建消息占位，直接返回 state 不做修改。
-        //          handleStreamStart 应先于 tool_start 到达，如果 tool_start 先到达说明时序异常。
-        // 影响范围: 工具调用与流式消息的时序竞争场景
-        // 修复日期: 2026-05-13
-        logger.warn(
-          '消息不存在，跳过工具调用添加 | messageId:',
-          messageId,
-          'toolCall:',
-          toolCall.call_id,
-        )
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      const existingToolCalls = message.toolCalls || []
-
-      if (existingToolCalls.some((tc) => tc.call_id === toolCall.call_id)) {
-        return state
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        toolCalls: [...existingToolCalls, toolCall],
-        // BUG-FIX: 如果消息没有 parentId 但传入了 parentId，更新它
-        ...(parentId && !message.parentId ? { parentId } : {}),
-      }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    const store = usePipelineMessageStore.getState()
+    store.appendPart(pipelineId, messageId, {
+      type: 'tool_call',
+      callId: toolCall.call_id || (toolCall as any).id || '',
+      name: toolCall.tool_name || (toolCall as any).name || '',
+      args: toolCall.tool_args || (toolCall as any).args || {},
+      state: toolCall.status === 'completed' ? 'done' : toolCall.status === 'failed' ? 'error' : 'calling',
+      sequence: toolCall.sequence ?? Date.now(),
+    } as any)
   },
 
   /**
-   * 更新指定管道中消息的工具调用
+   * 更新指定管道中消息的工具调用 Part 状态
    */
   updateToolCallInMessage: (
     pipelineId: string,
@@ -284,68 +157,20 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     callId: string,
     updates: Partial<MessageToolCall>,
   ) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === callId)
-
-      if (toolCallIndex < 0) {
-        const newToolCall: MessageToolCall = {
-          call_id: callId,
-          tool_name: ((updates as Record<string, unknown>).tool_name as string) || callId,
-          tool_args:
-            ((updates as Record<string, unknown>).tool_args as Record<string, unknown>) || {},
-          status:
-            ((updates as Record<string, unknown>)
-              .status as ToolCallStatus) || 'completed',
-          result: (updates as Record<string, unknown>).result,
-          error: (updates as Record<string, unknown>).error as string | undefined,
-          duration_ms: (updates as Record<string, unknown>).duration_ms as number | undefined,
-          completed_at: new Date().toISOString(),
-        }
-        const updatedMessages = [...pipelineMessages]
-        updatedMessages[messageIndex] = {
-          ...message,
-          toolCalls: [...toolCalls, newToolCall],
-        }
-        return {
-          messagesByPipeline: {
-            ...state.messagesByPipeline,
-            [pipelineId]: updatedMessages,
-          },
-        }
-      }
-
-      const updatedToolCalls = [...toolCalls]
-      updatedToolCalls[toolCallIndex] = {
-        ...updatedToolCalls[toolCallIndex],
-        ...updates,
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        toolCalls: updatedToolCalls,
-      }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    const store = usePipelineMessageStore.getState()
+    const partIndex = store.findToolCallPartIndex(pipelineId, messageId, callId)
+    if (partIndex >= 0) {
+      store.updatePart(pipelineId, messageId, partIndex, {
+        state: updates.status === 'completed' ? 'done' : updates.status === 'failed' ? 'error' : 'calling',
+        result: updates.result,
+        error: updates.error,
+        durationMs: updates.duration_ms,
+      } as any)
+    }
   },
 
   /**
-   * 更新指定管道中消息的工具调用进度
+   * 更新指定管道中消息的工具调用进度，通过 Parts 体系更新 tool_call Part
    */
   updateToolCallProgress: (
     pipelineId: string,
@@ -355,47 +180,19 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     currentStep?: string,
     estimatedRemainingMs?: number,
   ) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
-
-      if (toolCallIndex < 0) {
-        return state
-      }
-
-      const updatedToolCalls = [...toolCalls]
-      updatedToolCalls[toolCallIndex] = {
-        ...updatedToolCalls[toolCallIndex],
+    const store = usePipelineMessageStore.getState()
+    const partIndex = store.findToolCallPartIndex(pipelineId, messageId, toolCallId)
+    if (partIndex >= 0) {
+      store.updatePart(pipelineId, messageId, partIndex, {
         progress: Math.min(100, Math.max(0, progress)),
         currentStep,
         estimatedRemainingMs,
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        toolCalls: updatedToolCalls,
-      }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+      } as any)
+    }
   },
 
   /**
-   * 追加工具调用输出到指定管道的消息
+   * 追加工具调用输出到指定管道消息的 tool_call Part
    */
   appendToolCallOutput: (
     pipelineId: string,
@@ -403,41 +200,15 @@ export const useStreamingStore = create<StreamingState>()((set, get) => ({
     toolCallId: string,
     output: string,
   ) => {
-    usePipelineMessageStore.setState((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
-      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-
-      if (messageIndex < 0) {
-        return state
-      }
-
-      const message = pipelineMessages[messageIndex]
-      const toolCalls = message.toolCalls || []
-      const toolCallIndex = toolCalls.findIndex((tc) => tc.call_id === toolCallId)
-
-      if (toolCallIndex < 0) {
-        return state
-      }
-
-      const updatedToolCalls = [...toolCalls]
-      const existingPartialOutput = updatedToolCalls[toolCallIndex].partialOutput || []
-      updatedToolCalls[toolCallIndex] = {
-        ...updatedToolCalls[toolCallIndex],
+    const store = usePipelineMessageStore.getState()
+    const partIndex = store.findToolCallPartIndex(pipelineId, messageId, toolCallId)
+    if (partIndex >= 0) {
+      const msg = store.messagesByPipeline[pipelineId]?.find((m) => m.id === messageId)
+      const part = msg?.parts?.[partIndex] as any
+      const existingPartialOutput = part?.partialOutput || []
+      store.updatePart(pipelineId, messageId, partIndex, {
         partialOutput: [...existingPartialOutput, output],
-      }
-
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[messageIndex] = {
-        ...message,
-        toolCalls: updatedToolCalls,
-      }
-
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+      } as any)
+    }
   },
 }))

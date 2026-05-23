@@ -177,6 +177,8 @@ class LLMResponse:
         usage: token 用量信息
         stream_repetition: 流式输出是否被检测为重复而截断
         thinking_truncated: 思考内容是否因过长被截断
+        stream_truncated: 流式响应是否被 API 侧超时异常截断
+            （如推理模型 thinking 正常但正文极少 token 后 SSE 超时）
     """
 
     text: str | None = None

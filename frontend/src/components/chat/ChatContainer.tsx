@@ -8,7 +8,6 @@
 
 import { Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
-import { buildContentBlocksFromMessage } from '@/components/chat/hooks/useMessageRender'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -33,8 +32,8 @@ const EMPTY_MESSAGES: Message[] = []
 /**
  * 合并连续的 assistant 消息
  *
- * 将多个连续的 assistant 消息合并为一条，整合 content、thinking、toolCalls 和 contentBlocks。
- * 单条 assistant 消息若缺少 contentBlocks，也会自动补建。
+ * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
+ * 单条 assistant 消息也创建新对象引用，确保 Virtuoso 检测到变化。
  */
 function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
@@ -51,79 +50,30 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
     while (i < messages.length && messages[i].role === 'assistant') { i++ }
     const group = messages.slice(groupStart, i)
     if (group.length === 1) {
-      const single = group[0]
-      if (!single.contentBlocks || single.contentBlocks.length === 0) {
-        result.push({
-          ...single,
-          contentBlocks: buildContentBlocksFromMessage(single.content, single.toolCalls, single.thinking, single.id),
-        })
-      } else {
-        // BUG-FIX-fix_20260510_tool_display_streaming: 创建新对象引用，确保 Virtuoso 检测到变化
-        // 问题根因: 单条 assistant 消息有 contentBlocks 时直接 push 原引用，在 Virtuoso 虚拟滚动环境中，
-        //          即使 pipelineMessageStore.updateMessage 创建了新的消息对象，但 mergeConsecutiveAssistantMessages
-        //          的 useMemo 可能因 pipelineMessages 引用比较不敏感而返回缓存的旧数组（含旧对象引用），
-        //          导致下游组件无法检测到 toolCalls/contentBlocks 的变化。
-        // 修复方案: 始终创建新的消息对象引用，确保 Virtuoso 的 data 数组项是新的引用。
-        result.push({ ...single })
-      }
+      // 创建新对象引用，确保 Virtuoso 检测到变化
+      result.push({ ...group[0] })
       continue
     }
     const first = group[0]
-    const allToolCalls: Message['toolCalls'] = []
+    /** 合并所有文本内容 */
     const allContent: string[] = []
-    const interleavedBlocks: Message['contentBlocks'] = []
-    const seenCallIds = new Set<string>()
     for (const m of group) {
-      // BUG-FIX-fix_20260522_merge_use_contentblocks:
-      // 优先使用消息自身的 contentBlocks（保留了流式阶段的正确交错顺序和 sequence），
-      // 仅在 contentBlocks 不可用时回退到 thinking/content/toolCalls 固定顺序重建。
-      if (m.contentBlocks && m.contentBlocks.length > 0) {
-        for (const block of m.contentBlocks) {
-          if (block.type === 'tool_call' && block.toolCall?.call_id) {
-            if (seenCallIds.has(block.toolCall.call_id)) continue
-            seenCallIds.add(block.toolCall.call_id)
-            allToolCalls.push(block.toolCall)
-          }
-          interleavedBlocks.push({ ...block, sourceId: block.sourceId || m.id })
-        }
-        if (m.content && m.content.trim()) {
-          allContent.push(m.content.trim())
-        }
-      } else {
-        if (m.thinking?.content && m.thinking.content.trim()) {
-          interleavedBlocks.push({ type: 'thinking', thinking: { content: m.thinking.content.trim(), isThinking: false }, sourceId: m.id })
-        }
-        if (m.content && m.content.trim()) {
-          allContent.push(m.content.trim())
-          interleavedBlocks.push({ type: 'text', text: m.content.trim(), sourceId: m.id })
-        }
-        if (m.toolCalls && m.toolCalls.length > 0) {
-          for (const tc of m.toolCalls) {
-            if (tc.call_id && seenCallIds.has(tc.call_id)) continue
-            if (tc.call_id) seenCallIds.add(tc.call_id)
-            allToolCalls.push(tc)
-            interleavedBlocks.push({ type: 'tool_call', toolCall: tc, sourceId: m.id })
-          }
-        }
+      if (m.content && m.content.trim()) {
+        allContent.push(m.content.trim())
       }
     }
     const mergedContent = allContent.join('\n\n')
-    const mergedThinking = interleavedBlocks.filter(b => b.type === 'thinking').map(b => (b as any).thinking?.content || '').filter(Boolean).join('\n\n')
+    /** 合并多条 assistant 消息时，将它们的 parts[] 依次拼接 */
+    const mergedParts = group.flatMap((m) => m.parts || [])
     // BUG-FIX-fix_20260513_virtuoso_key_conflict:
-    // 问题根因: 合并后的消息使用 first.id，与 Virtuoso computeItemKey 中的 msg.id 冲突，
-    //          导致虚拟列表复用错误的 DOM 节点，渲染异常。
-    // 修复方案: 使用唯一的合成 ID（merged_{first.id}_{count}），保留原始 ID 到 _originalIds。
-    // 影响范围: 连续 assistant 消息合并后的渲染
-    // 修复日期: 2026-05-13
+    // 使用唯一的合成 ID（merged_{first.id}_{count}），保留原始 ID 到 _originalIds。
     const mergedId = `merged_${first.id}_${group.length}`
     result.push({
       ...first,
       id: mergedId,
       _originalIds: group.map(m => m.id),
       content: mergedContent,
-      thinking: mergedThinking ? { content: mergedThinking, isThinking: false } : undefined,
-      toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-      contentBlocks: interleavedBlocks,
+      parts: mergedParts.length > 0 ? mergedParts : undefined,
     })
   }
   return result
@@ -281,15 +231,13 @@ export const ChatContainer = ({
   /**
    * 当前标签对应管道是否正在流式输出
    *
-   * 逻辑：当前标签 → activePipelineId → streamingState[pipelineId].isStreaming
-   * 唯一数据源：pipelineMessageStore.streamingState
+   * 逻辑：当前标签 → 标签的 pipelineRunId → streamingState[pipelineId].isStreaming
+   * 子标签直接用 tab.pipelineRunId，主标签用 pipelineMessageStore.activePipelineId。
    */
-  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  const pipelineActiveId = usePipelineMessageStore((s) => s.activePipelineId)
   const streamingState = usePipelineMessageStore((s) => s.streamingState)
-  const effectiveIsGenerating = useMemo(() => {
-    if (!activePipelineId) return false
-    return streamingState[activePipelineId]?.isStreaming ?? false
-  }, [activePipelineId, streamingState])
+  const currentTabPipelineId = activeTab?.pipelineRunId || pipelineActiveId
+  const effectiveIsGenerating = streamingState[currentTabPipelineId]?.isStreaming ?? false
 
   /**
    * 根据当前模型名获取动态 context_window
@@ -301,7 +249,7 @@ export const ChatContainer = ({
    *
    * 每个管道（pipelineId）独立维护自己的 usage 数据。
    */
-  const currentPipelineId = activePipelineId || ''
+  const currentPipelineId = currentTabPipelineId || ''
   const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
   const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
 
@@ -312,21 +260,19 @@ export const ChatContainer = ({
   /**
    * 根据当前激活管道获取消息列表
    *
-   * BUG-FIX-fix_20260512_msg_disappear:
-   * 问题根因: 之前 pipelineMessages 为空时直接用 EMPTY_MESSAGES，
-   *          但 messages prop（来自 sessionStore）可能已有数据。
-   *          页面刷新后 pipelineMessageStore 异步加载，
-   *          在加载完成前用户看到空白聊天界面。
-   * 修复方案: pipelineMessages 为空时 fallback 到 messages prop，
-   *          确保 sessionStore 先加载的消息也能正常显示。
-   *          同时将 messages 加入 useMemo 依赖，确保 prop 更新时重新计算。
+   * BUG-FIX-fix_20260523_tab_pipeline_msg:
+   * 问题根因: pipelineMessages 与 messages prop 读取同一数据源
+   *          （activePipelineId || sid），两者完全重复，fallback 无意义。
+   * 修复方案: 优先使用 pipelineMessages（已在 selector 中处理 sid fallback），
+   *          当管道尚未激活或消息尚未加载时，保留 messages prop 作为过渡数据显示，
+   *          避免异步加载期间用户看到空白消息列表。
    * 影响范围: 聊天消息列表显示
-   * 修复日期: 2026-05-12
+   * 修复日期: 2026-05-23
    */
   const activeMessages = useMemo(() => {
     const source = pipelineMessages.length > 0
       ? pipelineMessages
-      : (messages && messages.length > 0 ? messages : EMPTY_MESSAGES)
+      : messages
     const filtered = source.filter((m: any) => m.role !== 'tool')
     return mergeConsecutiveAssistantMessages(filtered)
   }, [pipelineMessages, messages])

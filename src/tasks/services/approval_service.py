@@ -27,13 +27,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.event_bus import EventType, ExecutionEvent, get_event_bus
-from src.core.human_interaction.models import (
-    ApprovalOption,
-    InteractionRequest,
-    InteractionSource,
-    Priority,
-)
-from src.core.human_interaction.service import get_human_interaction_service
+from human_interaction.models import Priority
+from human_interaction.service import get_human_interaction_service
 from src.core.states import ExecutionStatus
 from src.db.models import Task
 from src.db.session_manager import managed_session
@@ -94,49 +89,37 @@ class TaskApprovalService:
                 )
 
             approval_options = [
-                ApprovalOption(
-                    id=self.ACTION_MANUAL_PASS_CRITERIA,
-                    label="人工通过评估指标",
-                    description="让失败的评估指标通过，继续评估流程",
-                    is_default=True,
-                ),
-                ApprovalOption(
-                    id=self.ACTION_ADJUST_CRITERIA,
-                    label="调整标准后重试",
-                    description="重置重试次数，继续执行任务",
-                ),
-                ApprovalOption(
-                    id=self.ACTION_CANCEL_TASK,
-                    label="取消任务",
-                    description="终止任务执行",
-                    is_destructive=True,
-                ),
+                {
+                    "id": self.ACTION_MANUAL_PASS_CRITERIA,
+                    "label": "人工通过评估指标",
+                    "description": "让失败的评估指标通过，继续评估流程",
+                    "is_default": True,
+                },
+                {
+                    "id": self.ACTION_ADJUST_CRITERIA,
+                    "label": "调整标准后重试",
+                    "description": "重置重试次数，继续执行任务",
+                },
+                {
+                    "id": self.ACTION_CANCEL_TASK,
+                    "label": "取消任务",
+                    "description": "终止任务执行",
+                    "is_destructive": True,
+                },
             ]
 
-            request = InteractionRequest.create_approval_request(
+            request_id = await self._interaction_service.create_choice_request(
+                session_id=task_id,
                 thread_id=thread_id or task_id,
+                tab_id="task_approval",
                 title=f"任务审批: {task.title}",
                 description=f"任务评估失败，需要人工决策\n\n原因: {reason}",
-                operation="task_approval",
-                risk_level=6,
                 options=approval_options,
-                source=InteractionSource.TASK_APPROVAL,
-                source_id=task_id,
+                timeout_seconds=600,
                 priority=Priority.HIGH,
-                timeout=600.0,
-                data={
-                    "task_id": task_id,
-                    "failed_criteria": failed_criteria or [],
-                    "task_info": {
-                        "title": task.title,
-                        "description": task.description,
-                        "retry_count": task.retry_count,
-                        "continuation_count": task.continuation_count,
-                    },
-                },
+                agent_id=task_id,
+                file_contents=None,
             )
-
-            request_id = await self._interaction_service.request_interaction(request)
 
             logger.info(
                 f"[TaskApprovalService] 审批请求已创建 | "

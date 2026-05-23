@@ -224,20 +224,34 @@ def apply_agent_model_override(
     if llm_call is None:
         return
 
-    # Router 模式：只需切换路由别名，不重建插件
+    # BUG-FIX-fix_20260523_provider_mismatch:
+    # 问题根因: Router 模式下切换模型时，仅更新了 _model 和 _context_window，
+    # 未同步更新 _provider 和 _api_base。当 research_agent 指定 minimax-m2.7 时，
+    # _provider 仍为上一个模型的 zhipu_coding，导致：
+    #   1. normalize_messages_for_provider 使用错误的 provider 参数
+    #   2. MiniMax 专属的 system 消息修复逻辑被跳过
+    #   3. 日志中 provider/api_base 信息误导排查
+    # 修复方案: 使用 get_llm_core_config 获取完整模型配置，同步更新所有字段。
     if getattr(llm_call, "_use_router", False):
         llm_call._model = model_id
-        # 更新 context_window（从 model_loader 读取）
-        model_loader = services.get("model_loader") if services else None
-        if model_loader:
-            conf = model_loader.get_model_config(model_id)
-            if conf:
-                llm_call._provider = conf.get("provider", llm_call._provider)
-                llm_call._context_window = conf.get("context_window")
+        _resolved_loader = services.get("model_loader") if services else None
+        if _resolved_loader is None:
+            try:
+                from config.models import get_model_config_loader
+                _resolved_loader = get_model_config_loader()
+            except Exception:
+                _resolved_loader = None
+        if _resolved_loader:
+            llm_conf = _resolved_loader.get_llm_core_config(model_id)
+            if llm_conf:
+                llm_call._provider = llm_conf.get("provider", llm_call._provider)
+                llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
+                llm_call._context_window = llm_conf.get("context_window")
         logger.info(
-            "[apply_agent_model_override] Router 模式切换模型: %s (provider=%s, context_window=%s)",
+            "[apply_agent_model_override] Router 模式切换模型: %s (provider=%s, api_base=%s, context_window=%s)",
             model_id,
             llm_call._provider,
+            llm_call._api_base,
             llm_call._context_window,
         )
         return

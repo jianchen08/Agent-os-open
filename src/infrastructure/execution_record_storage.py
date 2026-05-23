@@ -105,6 +105,9 @@ class PipelineRunSummary:
     final_output: str = ""
     error: str | None = None
 
+    review_status: str = "pending"       # "pending" 或 "reviewed"
+    reviewed_at: str | None = None       # 复盘完成时间
+
     created_at: str = ""
 
     def __post_init__(self) -> None:

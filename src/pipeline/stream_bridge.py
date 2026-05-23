@@ -211,15 +211,18 @@ class PipelineStreamBridge:
         _threadId 仅作为辅助路由信息。
         """
         self._stream_started = True
+        _start_seq = self._seq
+        self._seq += 1
         logger.info(
-            "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s",
+            "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s seq=%d",
             self.message_id[:12], self.pipeline_id[:12],
             getattr(self.output_sink, 'sink_id', '?'), type(self.output_sink).__name__,
+            _start_seq,
         )
         success = await self._send_event(self._make_event("stream_start", {
             "message_id": self.message_id,
             "pipeline_id": self.pipeline_id,
-            # _threadId 仅作为辅助路由信息，前端不应依赖此字段
+            "sequence": _start_seq,
             "_threadId": getattr(self.output_sink, '_thread_id', None),
         }))
         logger.info(
@@ -274,6 +277,12 @@ class PipelineStreamBridge:
             await self._close_thinking_if_active(chunk.get("duration_ms"))
 
         elif chunk_type == "tool_start":
+            await self._close_thinking_if_active(None)
+            _pending_text = "".join(self._accumulated_content)
+            if _pending_text:
+                await self._send_event(self._make_event("stream_end", {
+                    "full_content": _pending_text,
+                }))
             _call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
             self._sent_tool_starts.add(_call_id)
             _seq = self._seq
@@ -312,6 +321,8 @@ class PipelineStreamBridge:
                 "duration_ms": chunk.get("duration_ms"),
                 "call_id": chunk.get("call_id"),
             }))
+            self._accumulated_content = []
+            await self._send_stream_start()
 
         elif chunk_type == "iteration":
             # 迭代开始时关闭旧的 thinking
