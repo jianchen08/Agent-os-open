@@ -245,11 +245,28 @@ function HomePage(): ReactNode {
    *          store 更新时组件自动重渲染。
    */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: zustand selector 缺少自定义 equality 函数，流式输出期间每个 chunk
+  //          都产生新的数组引用，导致 HomePage 全组件树级联重渲染，超出 React 更新深度限制。
+  // 修复方案: 添加与 ChatContainer 一致的自定义 equality 函数，逐项比较数组引用，
+  //          仅当数组内容真正变化时才触发重渲染。
+  // 影响范围: HomePage 组件及整个聊天页面渲染性能
+  // 修复日期: 2026-05-23
   const routerMessages = usePipelineMessageStore(
     (s) => {
       const pid = s.activePipelineId || activeSessionId
       if (!pid) return EMPTY_MESSAGES
       return s.messagesByPipeline[pid] || EMPTY_MESSAGES
+    },
+    (a, b) => {
+      if (a === b) return true
+      if (!Array.isArray(a) || !Array.isArray(b)) return false
+      if (a.length !== b.length) return false
+      if (a.length === 0 && b.length === 0) return true
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false
+      }
+      return true
     },
   )
 

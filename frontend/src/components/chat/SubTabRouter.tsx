@@ -51,23 +51,36 @@ export function SubTabRouter({ sessionId: _sessionId }: SubTabRouterProps) {
 
   const addNotification = useNotificationStore((s) => s.addNotification)
 
+  /** 已注册的 pipeline 集合，避免重复注册导致循环 */
+  const registeredPipelines = useRef<Set<string>>(new Set())
+
   /**
    * 流式消息路由守卫
    *
    * 监听 pipelineTabMap 变化，验证所有 Tab 都有有效的映射。
    * 发现孤儿 Tab（有 parentRecordId 但无 pipeline 映射）时发出警告。
+   *
+   * BUG-FIX-fix_20260523_max_update_depth:
+   * 问题根因: effect 内调用 registerPipelineTab 修改了 pipelineTabMap，
+   *          而 pipelineTabMap 又在依赖数组中，形成 effect → 修改依赖 → 重触发 → 无限循环。
+   * 修复方案: 从依赖数组移除 pipelineTabMap，使用 useRef 跟踪已注册的 pipeline，
+   *          避免重复注册，打破循环。
+   * 影响范围: SubTabRouter 组件渲染稳定性
+   * 修复日期: 2026-05-23
    */
   useEffect(() => {
     for (const tab of tabs) {
       if (tab.agentLevel !== 1 && tab.parentRecordId && tab.pipelineRunId) {
-        const mappedTabId = getTabIdByPipeline(tab.pipelineRunId)
-        if (!mappedTabId) {
-          // 管道映射缺失，重新注册
-          registerPipelineTab(tab.pipelineRunId, tab.id)
+        if (!registeredPipelines.current.has(tab.pipelineRunId)) {
+          const mappedTabId = getTabIdByPipeline(tab.pipelineRunId)
+          if (!mappedTabId) {
+            registeredPipelines.current.add(tab.pipelineRunId)
+            registerPipelineTab(tab.pipelineRunId, tab.id)
+          }
         }
       }
     }
-  }, [tabs, pipelineTabMap, getTabIdByPipeline, registerPipelineTab])
+  }, [tabs, getTabIdByPipeline, registerPipelineTab])
 
   /**
    * 消息缓冲区：Tab 切换时暂存消息

@@ -199,9 +199,15 @@ class IsolationExecutor:
         """
         start = time.monotonic()
         try:
+            # BUG-FIX-fix_20260523_tool_blocking:
+            # 与 tool_core/plugin.py 同步修复，async工具统一通过线程执行，
+            # 防止同步阻塞操作卡死主事件循环、超时机制失效。
             if inspect.iscoroutinefunction(tool_func):
                 result = await asyncio.wait_for(
-                    tool_func(tool_args), timeout=timeout,
+                    asyncio.to_thread(
+                        lambda f=tool_func, a=tool_args: asyncio.run(f(a)),
+                    ),
+                    timeout=timeout,
                 )
             else:
                 result = await asyncio.wait_for(

@@ -283,9 +283,19 @@ class ToolCore(ICorePlugin):
             )
 
         try:
+            # BUG-FIX-fix_20260523_tool_blocking:
+            # 问题根因: async工具（如enhanced_search）内部执行同步阻塞操作（rglob/read_text），
+            #   直接await会在主事件循环中运行，阻塞整个循环。
+            #   导致: 1) drain_loop/WebSocket无法推送事件，前端卡死
+            #         2) asyncio.wait_for的定时器回调无法执行，超时机制完全失效
+            # 修复方案: 所有工具（同步+异步）统一通过asyncio.to_thread在线程中执行。
+            #   异步工具通过asyncio.run()创建独立事件循环，隔离阻塞操作。
+            #   主事件循环保持空闲，可正常处理超时定时器和其他异步任务。
             if inspect.iscoroutinefunction(func):
                 raw_result = await asyncio.wait_for(
-                    func(tool_args),
+                    asyncio.to_thread(
+                        lambda fa=func, ta=tool_args: asyncio.run(fa(ta)),
+                    ),
                     timeout=timeout,
                 )
             else:

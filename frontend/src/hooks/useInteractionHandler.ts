@@ -10,13 +10,12 @@ import { useNavigate } from 'react-router-dom'
 import { ROUTES } from '@/constants/routes'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { useAgentTabStore } from '@/stores/agentTabStore'
+import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { registerFileReview } from '@/stores/fileReviewRegistry'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
@@ -267,11 +266,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
       const currentSid = useSessionStore.getState().activeSessionId
       if (!currentSid) return
 
-      // BUG-FIX-fix_20260512_conversation_enter_no_response:
-      // 问题根因: 点击"进入对话"时只做前端状态变更，不发送 interaction_response，
-      //          后端 wait_for_choice 永久阻塞，管道无法挂起等待用户消息。
-      // 修复方案: 在跳转前发送 interaction_response(type=approved) 解除后端阻塞，
-      //          后端返回 user_arrived → 管道走 wait 路由挂起 → 等用户发消息再唤醒。
+      // 发送 interaction_response(type=approved) 解除后端阻塞，
+      // 后端返回 user_arrived → 管道走 wait 路由挂起 → 等用户发消息再唤醒。
       await globalWS.sendInteractionResponse(currentSid, requestId, {
         responseType: 'approved',
         feedback: '用户已进入对话标签页',
@@ -293,63 +289,19 @@ export function useInteractionHandler(sessionId: string | undefined) {
         navigate(ROUTES.HOME, { replace: true })
       }
 
-      // BUG-FIX-fix_20260522_conversation_wrong_session:
-      // 问题根因: 交互请求来自会话 A 的管道，但用户当前正在查看会话 B。
-      //          navigateToTab 只在当前会话的 tabs 中查找，找不到就创建新标签，
-      //          导致同一管道出现重复标签。
-      // 修复方案: 先判断交互所属会话是否与当前会话一致，不一致则先切换会话，
-      //          再在正确的会话标签列表中查找或创建标签。
-      if (interactionSessionId && interactionSessionId !== currentSid) {
-        const sessions = useSessionStore.getState().sessions
-        if (sessions.some((s) => s.id === interactionSessionId)) {
-          await useSessionListStore.getState().setActiveSession(interactionSessionId)
-          useAgentTabStore.getState().initSessionTabs(interactionSessionId)
-        }
+      // 解析 agentLevel
+      let agentLevel: 1 | 2 | 3 = 2
+      if (agentLevelStr) {
+        const upper = agentLevelStr.toUpperCase()
+        if (upper === 'L1' || upper === '1') agentLevel = 1
+        else if (upper === 'L3' || upper === '3') agentLevel = 3
       }
 
-      const tabStore = useAgentTabStore.getState()
-      const effectiveSid = useSessionStore.getState().activeSessionId || currentSid
-      const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
-
-      const isAlreadyThere = activeTab && (
-        (activeTab.agentLevel === 1 && threadId === effectiveSid)
-        || activeTab.pipelineRunId === threadId
-        || activeTab.parentRecordId === threadId
-      )
-      if (isAlreadyThere) return
-
-      const isMainPipeline = threadId === effectiveSid
-      if (isMainPipeline) {
-        const mainTab = tabStore.tabs.find((t) => t.agentLevel === 1)
-        if (mainTab) tabStore.switchToTab(mainTab.id)
-        return
-      }
-
-      const findByPipeline = tabStore.getTabIdByPipeline(threadId)
-      const findByRunId = tabStore.tabs.find((t) => t.pipelineRunId === threadId)
-      const findByParent = tabStore.tabs.find((t) => t.parentRecordId === threadId && t.agentLevel !== 1)
-
-      const targetTab =
-        (findByPipeline && tabStore.tabs.some((t) => t.id === findByPipeline)) ? findByPipeline
-        : findByRunId ? findByRunId.id
-        : findByParent ? findByParent.id
-        : null
-
-      if (targetTab) {
-        tabStore.switchToTab(targetTab)
-      } else {
-        const newTabId = `sub-${threadId}`
-        tabStore.openSubAgentTab({
-          agentId: threadId,
-          agentName: title || '对话',
-          parentRecordId: threadId,
-          agentLevel: 2,
-          status: 'running',
-          setActive: true,
-          pipelineId: threadId,
-        })
-        tabStore.loadTabMessages(newTabId, threadId)
-      }
+      // 使用全局管道导航服务跳转（自动处理跨会话查找和标签创建）
+      await navigateToPipeline(threadId, {
+        agentName: title || '对话',
+        agentLevel,
+      })
     },
     [markEntered, navigate],
   )

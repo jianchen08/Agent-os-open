@@ -239,9 +239,19 @@ export const ChatContainer = ({
    * 子标签直接用 tab.pipelineRunId，主标签用 pipelineMessageStore.activePipelineId。
    */
   const pipelineActiveId = usePipelineMessageStore((s) => s.activePipelineId)
-  const streamingState = usePipelineMessageStore((s) => s.streamingState)
   const currentTabPipelineId = activeTab?.pipelineRunId || pipelineActiveId
-  const effectiveIsGenerating = streamingState[currentTabPipelineId]?.isStreaming ?? false
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: streamingState 是对象，全量订阅导致任何 pipeline 的 streaming 状态变化
+  //          都会触发组件重渲染，配合其他 effect 可能产生无限循环。
+  // 修复方案: 改为精确选择器，只订阅当前 Tab 对应 pipeline 的 isStreaming 布尔值。
+  // 影响范围: ChatContainer 渲染性能，减少不必要的重渲染
+  // 修复日期: 2026-05-23
+  const effectiveIsGenerating = usePipelineMessageStore(
+    (s) => {
+      const pid = activeTab?.pipelineRunId || s.activePipelineId
+      return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
+    }
+  )
 
   /**
    * 根据当前模型名获取动态 context_window

@@ -25,7 +25,7 @@ import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { schemaRegistry } from '@/services/schema/registry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { useAgentTabStore } from '@/stores/agentTabStore'
+import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
 import { getFileEditorData, registerFileEditor, removeFileEditorData } from '@/stores/fileEditorRegistry'
@@ -42,6 +42,7 @@ import { FileReviewTab } from '../review/FileReviewTab'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
 import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance, WorkspaceTab } from '@/types/layout'
+import type { AgentTab } from '@/types/task'
 
 /** Props for the FiveSpaceLayout component */
 export interface FiveSpaceLayoutProps {
@@ -168,25 +169,32 @@ export function FiveSpaceLayout({
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
+  // BUG-FIX-fix_20260523_max_update_depth:
+  // 问题根因: effect 内调用 setSidebarCollapsed(true) 修改了 sidebarCollapsed，
+  //          而 sidebarCollapsed 又在依赖数组中，形成 effect → 修改依赖 → 重触发 → 无限循环。
+  // 修复方案: 从依赖数组移除 sidebarCollapsed，改用 useUIStore.getState() 读取当前值，
+  //          打破循环。
+  // 影响范围: FiveSpaceLayout 移动端初始化逻辑
+  // 修复日期: 2026-05-23
   useEffect(() => {
-    if (!mobileInitRef.current && isMobile && !sidebarCollapsed) {
-      mobileInitRef.current = true
-      useUIStore.getState().setSidebarCollapsed(true)
+    if (!mobileInitRef.current && isMobile) {
+      const currentCollapsed = useUIStore.getState().sidebarCollapsed
+      if (!currentCollapsed) {
+        mobileInitRef.current = true
+        useUIStore.getState().setSidebarCollapsed(true)
+      }
     }
-  }, [isMobile, sidebarCollapsed])
+  }, [isMobile])
 
   const toggleWorkspaceFullscreen = useCallback(() => setWorkspaceFullscreen((prev) => !prev), [])
 
   /**
    * 处理任务树节点点击（对话按钮）。
    *
-   * 正确流程：
+   * 通过全局管道导航服务（pipelineNavigator）实现跨会话跳转：
    * 1. 获取节点的 pipelineRunId（核心标识）
-   * 2. 通过 pipelineRunId 从 pipelineSessionMap 间接查找所属会话
-   *    （Task → pipeline_run_id → Session.pipeline_ids → Session.id，间接关联）
-   * 3. 如果属于其他会话 → 先切换会话
-   * 4. 用 pipelineRunId 查找是否已有对应标签 → 已有则切换
-   * 5. 没有 → 创建新标签（以 pipelineRunId 为标识）并打开
+   * 2. navigateToPipeline 在所有会话中查找管道归属并跳转
+   * 3. 如果在其他会话 → 自动保存当前 Tab → 切换会话 → 创建/激活标签
    *
    * @param node - 被点击的树节点数据
    */
@@ -206,54 +214,12 @@ export function FiveSpaceLayout({
       else if (agentLevelStr === 'L3' || agentLevelStr === '3') agentLevel = 3
     }
 
-    const currentSid = useSessionStore.getState().activeSessionId
-
-    const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
-    const pipelineStore = usePipelineMessageStore.getState()
-    const targetSessionId = pipelineStore.pipelineSessionMap[pipelineRunId]
-
-    if (targetSessionId && targetSessionId !== currentSid) {
-      // 切换前保存当前会话的 Tab 状态到 localStorage
-      useAgentTabStore.getState().saveCurrentTabs()
-      const { useSessionListStore } = await import('@/stores/sessionListStore')
-      await useSessionListStore.getState().setActiveSession(targetSessionId)
-    }
-
-    const effectiveSid = targetSessionId || currentSid || ''
-    if (!pipelineStore.pipelines[pipelineRunId]) {
-      pipelineStore.registerPipeline({
-        pipelineId: pipelineRunId,
-        sessionId: effectiveSid,
-        level: agentLevel,
-        tabId: null,
-        agentName: title,
-        status: 'running',
-        parentId: effectiveSid,
-        unreadCount: 0,
-      })
-    }
-
-    const agentTabStore = useAgentTabStore.getState()
-    const tabId = `sub-${pipelineRunId}`
-
-    const existingTab = agentTabStore.tabs.find((t) => t.id === tabId)
-    if (existingTab) {
-      agentTabStore.switchToTab(tabId)
-      return
-    }
-
-    agentTabStore.openSubAgentTab({
-      agentId: taskId,
+    await navigateToPipeline(pipelineRunId, {
       agentName: title,
-      parentRecordId: pipelineRunId,
       agentLevel,
       taskId,
       status: (node.status as AgentTab['status']) ?? 'running',
-      setActive: true,
-      pipelineId: pipelineRunId,
     })
-
-    agentTabStore.loadTabMessages(tabId, pipelineRunId)
   }, [activeSessionId])
 
   // Build dynamic dock items with execution status

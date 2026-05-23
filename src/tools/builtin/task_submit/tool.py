@@ -122,9 +122,10 @@ class TaskSubmitTool(BuiltinTool):
                             "description": {
                                 "type": "string",
                                 "description": (
-                                    "任务描述。只写'要达成什么目标和结果'，"
+                                    "任务描述。只写目标、背景和要求，"
                                     "禁止写执行步骤、工具选择、流程顺序等执行细节。"
-                                    "下级Agent有自己的完整工作流，会自行决定怎么做。"
+                                    "如实传递用户明确说明的要求，禁止添加主观判断。"
+                                    "如果当前会话有相关的历史任务产出物，必须附上文件路径，避免重复工作。"
                                     "正确示例：'实现用户登录API，支持邮箱+密码登录，返回JWT token'。"
                                     "错误示例：'先用file_write创建login.py，再写LoginService类，"
                                     "然后用bash_execute安装依赖，最后用test工具测试'"
