@@ -161,6 +161,8 @@ class ChunkService:
     ) -> list[ChunkData]:
         """按管道运行 ID 查找压缩块。
 
+        cache miss 时从磁盘懒加载该 pipeline 的所有块。
+
         Args:
             pipeline_run_id: 管道运行 ID
             layer: 分层标识过滤（可选）
@@ -172,10 +174,69 @@ class ChunkService:
             chunk for chunk in self._cache.values()
             if chunk.pipeline_run_id == pipeline_run_id
         ]
+        if not results:
+            results = self._lazy_load_pipeline(pipeline_run_id)
         if layer:
             results = [c for c in results if c.layer == layer]
         results.sort(key=lambda x: x.created_at)
         return results
+
+    def _lazy_load_pipeline(self, pipeline_run_id: str) -> list[ChunkData]:
+        """从磁盘懒加载指定 pipeline 的压缩块到缓存。
+
+        当 find_by_pipeline 在缓存中找不到时调用，
+        扫描磁盘 JSON 文件，只加载匹配 pipeline_run_id 的块。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            加载到的压缩块列表
+        """
+        loaded: list[ChunkData] = []
+        for f in self._chunks_dir.glob("*.json"):
+            chunk_id = f.stem
+            if chunk_id in self._cache:
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                chunk = ChunkData.from_dict(data)
+                if chunk.pipeline_run_id == pipeline_run_id:
+                    self._cache[chunk.id] = chunk
+                    loaded.append(chunk)
+            except Exception:
+                pass
+        if loaded:
+            logger.info(
+                "[ChunkService] 懒加载 | pipeline=%s | loaded=%d",
+                pipeline_run_id, len(loaded),
+            )
+        return loaded
+
+    async def evict_pipeline(self, pipeline_run_id: str) -> int:
+        """从内存缓存中移除指定管道的所有压缩块。
+
+        磁盘文件和 PG 向量索引不受影响，仅释放内存。
+        下次需要时可通过 load() 从磁盘重新加载。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+
+        Returns:
+            移除的块数量
+        """
+        to_remove = [
+            cid for cid, chunk in self._cache.items()
+            if chunk.pipeline_run_id == pipeline_run_id
+        ]
+        for cid in to_remove:
+            del self._cache[cid]
+        if to_remove:
+            logger.info(
+                "[ChunkService] 已释放管道缓存 | pipeline=%s | count=%d",
+                pipeline_run_id, len(to_remove),
+            )
+        return len(to_remove)
 
     async def find_by_user(self, user_id: str, limit: int = 20) -> list[ChunkData]:
         """按用户 ID 查找压缩块。

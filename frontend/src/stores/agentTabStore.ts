@@ -361,6 +361,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
   /**
    * 移除 Agent Tab
+   *
+   * BUG-FIX-fix_20260523_removetab_pipeline_map:
+   * 问题根因: removeTab 不清理 pipelineTabMap 中指向被移除 tab 的映射，
+   *          而 closeTab 会清理，导致 pipelineTabMap 可能留下指向不存在 tabId 的脏映射。
+   * 修复方案: 在 removeTab 中添加 pipelineTabMap 的清理逻辑，与 closeTab 保持一致。
+   * 影响范围: Tab 移除后的 pipeline 映射一致性
+   * 修复日期: 2026-05-23
    */
   removeTab: (tabId) => {
     set((state) => {
@@ -368,6 +375,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       const newUnreadCounts = { ...state.unreadCounts }
 
       delete newUnreadCounts[tabId]
+
+      // 清理指向该 Tab 的 pipeline 映射
+      const newPipelineTabMap = { ...state.pipelineTabMap }
+      for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
+        if (tid === tabId) {
+          delete newPipelineTabMap[pid]
+        }
+      }
 
       let newActiveTabId = state.activeTabId
       if (state.activeTabId === tabId) {
@@ -379,6 +394,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         tabs: newTabs,
         activeTabId: newActiveTabId,
         unreadCounts: newUnreadCounts,
+        pipelineTabMap: newPipelineTabMap,
       }
     })
     get().saveCurrentTabs()

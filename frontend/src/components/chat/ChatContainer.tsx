@@ -16,7 +16,6 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
@@ -75,19 +74,36 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
     const interleavedBlocks: Message['contentBlocks'] = []
     const seenCallIds = new Set<string>()
     for (const m of group) {
-      if (m.thinking?.content && m.thinking.content.trim()) {
-        interleavedBlocks.push({ type: 'thinking', thinking: { content: m.thinking.content.trim(), isThinking: false }, sourceId: m.id })
-      }
-      if (m.content && m.content.trim()) {
-        allContent.push(m.content.trim())
-        interleavedBlocks.push({ type: 'text', text: m.content.trim(), sourceId: m.id })
-      }
-      if (m.toolCalls && m.toolCalls.length > 0) {
-        for (const tc of m.toolCalls) {
-          if (tc.call_id && seenCallIds.has(tc.call_id)) continue
-          if (tc.call_id) seenCallIds.add(tc.call_id)
-          allToolCalls.push(tc)
-          interleavedBlocks.push({ type: 'tool_call', toolCall: tc, sourceId: m.id })
+      // BUG-FIX-fix_20260522_merge_use_contentblocks:
+      // 优先使用消息自身的 contentBlocks（保留了流式阶段的正确交错顺序和 sequence），
+      // 仅在 contentBlocks 不可用时回退到 thinking/content/toolCalls 固定顺序重建。
+      if (m.contentBlocks && m.contentBlocks.length > 0) {
+        for (const block of m.contentBlocks) {
+          if (block.type === 'tool_call' && block.toolCall?.call_id) {
+            if (seenCallIds.has(block.toolCall.call_id)) continue
+            seenCallIds.add(block.toolCall.call_id)
+            allToolCalls.push(block.toolCall)
+          }
+          interleavedBlocks.push({ ...block, sourceId: block.sourceId || m.id })
+        }
+        if (m.content && m.content.trim()) {
+          allContent.push(m.content.trim())
+        }
+      } else {
+        if (m.thinking?.content && m.thinking.content.trim()) {
+          interleavedBlocks.push({ type: 'thinking', thinking: { content: m.thinking.content.trim(), isThinking: false }, sourceId: m.id })
+        }
+        if (m.content && m.content.trim()) {
+          allContent.push(m.content.trim())
+          interleavedBlocks.push({ type: 'text', text: m.content.trim(), sourceId: m.id })
+        }
+        if (m.toolCalls && m.toolCalls.length > 0) {
+          for (const tc of m.toolCalls) {
+            if (tc.call_id && seenCallIds.has(tc.call_id)) continue
+            if (tc.call_id) seenCallIds.add(tc.call_id)
+            allToolCalls.push(tc)
+            interleavedBlocks.push({ type: 'tool_call', toolCall: tc, sourceId: m.id })
+          }
         }
       }
     }
@@ -263,43 +279,17 @@ export const ChatContainer = ({
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
   /**
-   * BUG-FIX-fix_20260522_send_button_stuck:
-   * 问题根因: effectiveIsGenerating 仅依赖 streamingTabs 单一数据源，
-   *          当 stream_end 处理异常（pipelineId 解析失败、drain_loop 异常退出等）
-   *          导致 streamingTabs 未被清理时，发送按钮状态无法恢复。
-   * 修复方案: 交叉校验 streamingTabs 和 pipelineMessageStore.streamingState，
-   *          使用 AND 逻辑确保两个数据源都确认流式状态才认为正在生成。
-   *          streamingState 由 pipelineStore.stopStreaming() 同步清理，
-   *          即使 streamingTabs 残留，也能正确恢复按钮状态。
+   * 当前标签对应管道是否正在流式输出
+   *
+   * 逻辑：当前标签 → activePipelineId → streamingState[pipelineId].isStreaming
+   * 唯一数据源：pipelineMessageStore.streamingState
    */
-  const streamingTabs = useStreamingStore((s) => s.streamingTabs)
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
   const streamingState = usePipelineMessageStore((s) => s.streamingState)
   const effectiveIsGenerating = useMemo(() => {
-    if (activePipelineId) {
-      const fromTabs = streamingTabs[activePipelineId] ?? false
-      const fromState = streamingState[activePipelineId]?.isStreaming ?? false
-      return fromTabs && fromState
-    }
-    return false
-  }, [streamingTabs, activePipelineId, streamingState])
-
-  /**
-   * BUG-FIX-fix_20260522_send_button_stuck:
-   * 防御性清理：当 streamingTabs 残留了已不在 streamingState 中的条目时，
-   * 自动清除这些孤儿条目，确保 streamingTabs 与 streamingState 保持一致。
-   */
-  useEffect(() => {
-    const staleTabIds = Object.keys(streamingTabs).filter(
-      (tabId) => streamingTabs[tabId] && !streamingState[tabId]?.isStreaming,
-    )
-    if (staleTabIds.length > 0) {
-      const store = useStreamingStore.getState()
-      for (const tabId of staleTabIds) {
-        store.setStreamingForTab(tabId, false)
-      }
-    }
-  }, [streamingTabs, streamingState])
+    if (!activePipelineId) return false
+    return streamingState[activePipelineId]?.isStreaming ?? false
+  }, [activePipelineId, streamingState])
 
   /**
    * 根据当前模型名获取动态 context_window

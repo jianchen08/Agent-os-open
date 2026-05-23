@@ -53,7 +53,7 @@ _pipeline_ctx: PipelineContext | None = None
 _task_worker_started: bool = False
 
 
-def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
+async def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
     """通过 pipeline_run_id 查找关联任务的 agent_config。
 
     子管道引擎完成 run() 后注册被清理，send_pipeline_message 走 _try_revive_pipeline
@@ -79,7 +79,7 @@ def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
         return None
 
     try:
-        for task in task_service.list_all(limit=200):
+        for task in await task_service.list_all(limit=200):
             if getattr(task, "pipeline_run_id", None) == pipeline_id:
                 target_id = getattr(task, "target_id", None)
                 if target_id:
@@ -277,6 +277,16 @@ def create_combined_app() -> FastAPI:
                     continue
 
                 if msg_type == "user_input":
+                    # BUG-FIX-fix_20260523_pipeline_received_early:
+                    # 在处理 user_input 的最开始就回发 pipeline_received，
+                    # 确保前端 ACK 计时器被清除，避免重发导致重复注入。
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "pipeline_received",
+                            "data": {"thread_id": thread_id},
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
                     # BUG-FIX-fix_20260511_task_worker_global_ws:
                     # 问题根因: /ws/chat 全局端点缺少 TaskWorker 懒启动逻辑，
                     #           导致通过全局 WS 提交的任务没有订阅者，
@@ -324,7 +334,7 @@ def create_combined_app() -> FastAPI:
 
                     if _raw_pipeline_id:
                         _target_pid = _raw_pipeline_id
-                        _agent_config = _resolve_sub_pipeline_agent_config(_target_pid)
+                        _agent_config = await _resolve_sub_pipeline_agent_config(_target_pid)
                     else:
                         _sess = api_store.get_session(thread_id)
                         _target_pid = _sess.active_pipeline_id if _sess and _sess.active_pipeline_id else ""
@@ -336,6 +346,7 @@ def create_combined_app() -> FastAPI:
                     _sink = TargetedSink(ws_interaction_notifier, thread_id) if _pipeline_ctx and _pipeline_ctx.available else None
 
                     # 统一路径：一次调用搞定消息投递 + 流式输出
+                    logger.info("[GlobalWS] send_pipeline_message: target_pid=%s sink=%s thread=%s", _target_pid[:12] if _target_pid else "EMPTY", _sink is not None, thread_id[:12])
                     _result = await send_pipeline_message(
                         _target_pid, _user_content,
                         output_sink=_sink,
@@ -343,19 +354,26 @@ def create_combined_app() -> FastAPI:
                         conversation_history=_history if _history else None,
                         streaming=True,
                     )
+                    logger.info("[GlobalWS] send_pipeline_message result: success=%s method=%s has_bridge=%s", _result.success, _result.method, _result.bridge is not None)
 
-                    if _result.success and _result.method in ("notification", "wake"):
-                        # running/suspended 路径：消息已注入，bridge 已由 message_bus 管理
-                        # 如果有 bridge，启动 drain_loop
-                        if _result.bridge is not None:
-                            _stream_task = asyncio.create_task(
-                                _drain_sub_bridge(_result.bridge, _msg_id, _target_pid),
-                            )
-                            _thread_stream_tasks[thread_id] = _stream_task
-                        continue
+                    if _result.success:
+                        # BUG-FIX-fix_20260523_pipeline_received_missing:
+                        # 问题根因: send_pipeline_message 成功后没有回发 pipeline_received，
+                        #   前端 ACK 计时器 10 秒超时后重发消息，导致重复注入。
+                        #   后端虽然正常输出，但前端已放弃等待，表现为"前端一点反应都没有"。
+                        # 修复方案: 在消息注入成功后立即回发 pipeline_received 确认事件。
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "pipeline_received",
+                                "data": {
+                                    "pipeline_id": _target_pid,
+                                    "thread_id": thread_id,
+                                    "message_id": _msg_id,
+                                },
+                            }, ensure_ascii=False))
+                        except Exception:
+                            pass
 
-                    if _result.success and _result.method == "revive":
-                        # 复活路径：引擎已创建并开始运行
                         if _result.bridge is not None:
                             _stream_task = asyncio.create_task(
                                 _drain_sub_bridge(_result.bridge, _msg_id, _target_pid),
@@ -379,6 +397,17 @@ def create_combined_app() -> FastAPI:
                     _thread_stop_events[thread_id] = _stop_evt
 
                     if _pipeline_ctx and _pipeline_ctx.available:
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "pipeline_received",
+                                "data": {
+                                    "pipeline_id": _pipeline_ctx.engine.pipeline_id if _pipeline_ctx.engine else "",
+                                    "thread_id": thread_id,
+                                    "message_id": _msg_id,
+                                },
+                            }, ensure_ascii=False))
+                        except Exception:
+                            pass
                         _stream_task = asyncio.create_task(
                             _stream_engine_response(
                                 websocket, _user_content, _msg_id,

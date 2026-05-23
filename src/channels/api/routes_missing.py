@@ -625,8 +625,133 @@ async def get_task_statistics(_user: dict = Depends(require_auth)) -> dict[str, 
 
 
 @monitoring_router.get("/tasks", summary="获取监控任务列表")
-async def get_monitoring_tasks(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
+async def get_monitoring_tasks(
+    page: int = Query(default=1, ge=1, description="页码（从1开始）"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    status: str | None = Query(default=None, description="按状态筛选"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取监控任务列表，合并 MemoryStore 和 TaskStorage 数据源。
+
+    BUG-FIX-fix_20260523_monitoring_tasks_empty:
+    问题根因: 原实现是占位代码，始终返回空列表 {"items": [], "total": 0}，
+             导致前端 DebugTasksPage 和 MonitoringPage 任务列表不显示。
+    修复方案: 参照 routes_tasks.py 的 list_tasks 端点，从 MemoryStore 和
+              TaskStorage 两个数据源合并任务数据，支持 page/page_size 分页
+              和 status 筛选，返回前端 monitoring.ts TaskInfo 格式的数据。
+    影响范围: 前端 DebugTasksPage 和 MonitoringPage 任务列表显示。
+    修复日期: 2026-05-23
+
+    Args:
+        page: 页码（从1开始）
+        page_size: 每页数量
+        status: 可选状态筛选（pending/running/completed/failed/cancelled）
+        _user: 认证用户
+
+    Returns:
+        包含 items、total、page、page_size 的字典
+    """
+    from channels.api.memory_store import store
+    from channels.api.routes_tasks import _get_task_service
+
+    # 监控页面状态映射：将后端特殊状态映射为前端 TaskInfo 兼容的状态值
+    # 注意：monitoring TaskInfo 使用 'running' 而非 'in_progress'
+    _MONITORING_STATUS_MAP: dict[str, str] = {
+        "evaluating": "running",
+        "paused": "pending",
+        "queued": "pending",
+    }
+
+    def _to_monitoring_status(raw: str) -> str:
+        """将后端状态映射为前端监控页面兼容的状态。"""
+        return _MONITORING_STATUS_MAP.get(raw, raw)
+
+    def _taskmodel_to_monitoring_dict(tm: Any) -> dict[str, Any]:
+        """将 TaskModel dataclass 转为字典（保留原始状态值，不做 in_progress 映射）。"""
+        from dataclasses import asdict
+
+        d = asdict(tm)
+        # 提取枚举的原始字符串值
+        raw_status = tm.status.value if hasattr(tm.status, "value") else str(tm.status)
+        d["status"] = raw_status
+        if hasattr(tm, "priority") and hasattr(tm.priority, "value"):
+            d["priority"] = tm.priority.value
+        return d
+
+    # 参数映射: page/page_size → offset/limit
+    offset = (page - 1) * page_size
+    limit = page_size
+
+    # ── 数据源1: MemoryStore（API 创建的任务） ──
+    tasks: list[dict[str, Any]] = store.get_user_tasks(_user["sub"])
+
+    # ── 数据源2: TaskStorage（管道引擎创建的任务，YAML 持久化） ──
+    task_service = _get_task_service()
+    if task_service is not None:
+        try:
+            ts_tasks = await task_service.list_all(limit=1000)
+            api_ids = {t["id"] for t in tasks}
+            for tm in ts_tasks:
+                if tm.id not in api_ids:
+                    tasks.append(_taskmodel_to_monitoring_dict(tm))
+        except Exception as exc:
+            logger.warning(
+                "monitoring/tasks: 从 TaskStorage 加载任务失败: %s", exc,
+            )
+
+    # ── 转换为前端 TaskInfo 格式并筛选 ──
+    items_all: list[dict[str, Any]] = []
+    for t in tasks:
+        raw_status = t.get("status", "pending")
+        mapped_status = _to_monitoring_status(raw_status)
+
+        # 状态筛选（筛选在映射后的状态上进行）
+        if status and mapped_status != status:
+            continue
+
+        # 计算执行时长（毫秒）
+        duration: int | None = None
+        started = t.get("started_at")
+        completed = t.get("completed_at")
+        if started and completed:
+            try:
+                from datetime import datetime as _dt
+
+                s = _dt.fromisoformat(started)
+                c = _dt.fromisoformat(completed)
+                duration = int((c - s).total_seconds() * 1000)
+            except (ValueError, TypeError):
+                pass
+
+        # 构建前端 monitoring.ts TaskInfo 格式
+        item = {
+            "id": t["id"],
+            "intent": t.get("title", ""),
+            "name": t.get("title", ""),
+            "status": mapped_status,
+            "created_at": t.get("created_at", ""),
+            "started_at": started,
+            "completed_at": completed,
+            "agent_id": t.get("agent_id") or t.get("metadata", {}).get("target_id"),
+            "error": t.get("error"),
+            "duration": duration,
+            "current_step": t.get("current_step"),
+            "progress": t.get("progress"),
+        }
+        items_all.append(item)
+
+    # 按创建时间降序排序（最新的在前）
+    items_all.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    total = len(items_all)
+    page_items = items_all[offset : offset + limit]
+
+    return {
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @monitoring_router.get("/events", summary="获取事件列表")

@@ -509,29 +509,41 @@ def delete_thread(
 
     _recovered_user_ids.discard(_user["sub"])
 
+    # BUG-FIX-fix_20260523_delete_cascade_pipeline:
+    # 问题根因: 收集关联管道时用 task.parent_pipeline_id == thread_id 匹配任务，
+    #           但任务的 parent_pipeline_id 是管道运行ID（如 062a5cb305a8），
+    #           而非 thread_id（如 2ce301ecf37a），导致任务管道未被收集。
+    #           同理 _pipeline_root_map 仅匹配 root_id == thread_id，遗漏子管道。
+    # 修复方案: 迭代式收集，以 all_pipeline_ids 中每个 ID 匹配，直到不动点；
+    #           去掉多余的 _cancel_pipeline_recursive（删除会话直接清数据即可），
+    #           仅保留 task_worker.cancel_pipeline 停止后台进程。
+    # 修复日期: 2026-05-23
     exec_storage = _get_execution_record_storage()
     all_pipeline_ids = set(pipeline_ids)
+    prev_size = 0
 
-    if exec_storage:
-        for child_id, root_id in list(exec_storage._pipeline_root_map.items()):
-            if root_id == thread_id:
-                all_pipeline_ids.add(child_id)
+    while len(all_pipeline_ids) > prev_size:
+        prev_size = len(all_pipeline_ids)
 
-    try:
-        provider = get_service_provider()
-        task_service = provider.get("task_service")
-        if task_service:
-            all_tasks = list(task_service._storage._tasks.values())
-            for task in all_tasks:
-                if task.parent_pipeline_id == thread_id:
-                    all_pipeline_ids.add(task.id)
-                    if task.pipeline_run_id:
-                        all_pipeline_ids.add(task.pipeline_run_id)
-                    for sub in task_service._storage.list_subtasks(task.id):
-                        if sub.pipeline_run_id:
-                            all_pipeline_ids.add(sub.pipeline_run_id)
-    except Exception:
-        pass
+        if exec_storage:
+            for child_id, root_id in list(exec_storage._pipeline_root_map.items()):
+                if root_id in all_pipeline_ids or root_id == thread_id:
+                    all_pipeline_ids.add(child_id)
+
+        try:
+            provider = get_service_provider()
+            task_service = provider.get("task_service")
+            if task_service:
+                for task in task_service._storage._tasks.values():
+                    if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+                        all_pipeline_ids.add(task.id)
+                        if task.pipeline_run_id:
+                            all_pipeline_ids.add(task.pipeline_run_id)
+                        for sub in task_service._storage.list_subtasks(task.id):
+                            if sub.pipeline_run_id:
+                                all_pipeline_ids.add(sub.pipeline_run_id)
+        except Exception:
+            pass
 
     if exec_storage:
         for pid in all_pipeline_ids:
@@ -556,23 +568,12 @@ def delete_thread(
         provider = get_service_provider()
         task_service = provider.get("task_service")
         if task_service:
-            all_tasks = list(task_service._storage._tasks.values())
-            related_tasks = [
-                t for t in all_tasks
-                if t.parent_pipeline_id in all_pipeline_ids
-                or t.pipeline_run_id in all_pipeline_ids
-                or t.parent_pipeline_id == thread_id
-            ]
-            for task in related_tasks:
-                try:
-                    task_service._cancel_pipeline_recursive(task.id)
-                except Exception:
-                    pass
-            for task in related_tasks:
-                try:
-                    task_service._storage.delete(task.id)
-                except Exception:
-                    logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
+            for task in list(task_service._storage._tasks.values()):
+                if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
+                    try:
+                        task_service._storage.delete(task.id)
+                    except Exception:
+                        logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
     except Exception:
         logger.warning("清理关联任务失败", exc_info=True)
 

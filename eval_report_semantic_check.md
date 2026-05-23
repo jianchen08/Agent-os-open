@@ -1,96 +1,64 @@
-# resource_manager_agent 修复质量评估报告
+# 编排Agent下级Agent引用名一致性评估报告
 
-**评估时间**: 2026-05-22
-**评估文件**: config/agents/orchestrator/resource_manager_agent.yaml
-**对比基线**: config/agents/orchestrator/resource_manager_agent.yaml.bak
+## 评估标准
+编排Agent中所有下级Agent引用名必须与 executor/generation/ 目录下的实际文件名完全一致，不能有遗漏的不匹配引用。未被引用的现有文件（novel_planner_agent、novel_system_agent）需要有明确的处理结论。
 
----
+## executor/generation/ 目录实际文件（排除 .bak）
 
-## 评估标准与逐项结论
+| 序号 | 文件名 | 被编排Agent引用? | 引用方 |
+|------|--------|-----------------|--------|
+| 1 | agent_maker.yaml | 未被任何编排Agent引用 | - |
+| 2 | novel_character_agent.yaml | 是 | novel_orchestrator_agent |
+| 3 | novel_coherence_reviewer.yaml | 是 | novel_orchestrator_agent |
+| 4 | novel_planner_agent.yaml | 未被任何编排Agent引用 | - |
+| 5 | novel_plot_agent.yaml | 是 | novel_orchestrator_agent |
+| 6 | novel_style_reviewer.yaml | 是 | novel_orchestrator_agent |
+| 7 | novel_system_agent.yaml | 未被任何编排Agent引用 | - |
+| 8 | novel_worldbuilding_agent.yaml | 是 | novel_orchestrator_agent |
+| 9 | novel_writer_agent.yaml | 是 | novel_orchestrator_agent |
+| 10 | research_agent.yaml | 是 | research_orchestrator_agent, solution_planning_agent |
+| 11 | tool_maker.yaml | 未被任何编排Agent引用 | - |
 
-### 标准一：不再硬编码绝对路径，改为相对路径或动态引用 - PASS
+## novel_orchestrator_agent.yaml 引用分析（共8个Agent）
 
-**评估方法**: 全文搜索绝对路径模式（以 / 或盘符开头的路径）
+| 引用名 | executor/generation/ 中是否存在 | 状态 |
+|--------|-------------------------------|------|
+| novel_worldbuilding_agent | 存在 | 匹配 |
+| novel_character_agent | 存在 | 匹配 |
+| novel_plot_agent | 存在 | 匹配 |
+| novel_writer_agent | 存在 | 匹配 |
+| novel_coherence_reviewer | 存在 | 匹配 |
+| novel_style_reviewer | 存在 | 匹配 |
+| novel_continuity_agent | 不存在 | 不匹配 |
+| novel_review_agent | 不存在 | 不匹配 |
 
-**发现**:
-- 文件中所有路径均为相对路径或动态引用：
-  - 第274行: 模板动态引用
-  - 第294行: config/templates/resource_generation_report_template.md - 相对路径
-  - 第297行: config/templates/.agent_template_spec.yaml - 相对路径
-  - 第300行: config/templates/_template_spec.md - 相对路径
-  - 第306行: 使用占位符表示项目根
-  - 第453行: 模板变量动态引用
-- 第303行明确声明：以下路径均为相对路径，实际项目根目录以运行时 workspace 参数为准，禁止硬编码绝对路径。
+## 发现的问题
 
-**结论**: 全文无绝对路径硬编码，路径规范良好，满足要求。
+### 问题1: 引用了不存在的Agent文件（严重）
+文件: config/agents/orchestrator/novel_orchestrator_agent.yaml
 
----
+1. 第38/81/116/240行 - 引用 novel_continuity_agent（伏笔与连续性管理），但 executor/generation/ 中无对应配置文件。该Agent在流水线L3-情节层和L4-写作层中被使用，属于核心流程节点。
 
-### 标准二：明确约束 Agent 配置只能放 config/agents/<category>/<agent_id>.yaml 扁平结构，禁止文件夹结构 - PASS
+2. 第39/126-128/241行 - 引用 novel_review_agent（质量审核），但 executor/generation/ 中无对应配置文件。该Agent在流水线L5-审核层（终审环节）中被使用，是流水线终点前的关键节点。
 
-**评估位置**: 第224-228行，路径规范强制约束 章节
+注: 文件头部注释（第4-6行）已标注这两个Agent缺失，但仅标注了"需创建"，未实际创建，属于悬空引用。
 
-**具体内容（第224-228行）**:
-- Agent 配置文件必须采用扁平单文件结构：config/agents/<category>/<agent_id>.yaml
-- 禁止使用文件夹结构（如 config/agents/<agent_id>/agent.yaml）
-- 每个 Agent 有且仅有一个对应的 yaml 文件，config_id 必须与文件名（去掉 .yaml 后缀）一致
-- 创建时向 agent_maker 的 goal 中必须明确指定输出路径，格式为 config/agents/<category>/<agent_id>.yaml
+### 问题2: 现有文件未被编排引用且缺乏明确处理结论
+文件: config/agents/orchestrator/novel_orchestrator_agent.yaml 第7行
 
-**结论**: 以独立的路径规范强制约束小节明确声明了扁平结构要求，同时给出了禁止的文件夹结构示例，且要求 config_id 与文件名一致，约束充分、无歧义。
+1. novel_planner_agent.yaml - 文件头部注释仅写道"未被编排引用的现有文件"，未给出处理结论（是应集成到编排流程中？还是废弃？还是作为独立Agent使用？）。
 
----
+2. novel_system_agent.yaml - 同上，仅有"未被编排引用"的描述，无处理结论。
 
-### 标准三：Phase 4 审查增加重复文件检测 - PASS
-
-**评估位置**: 第178行，Phase 4 审查评估的第4步（新增）
-
-**diff 验证**: 对比 .bak 文件，原 Phase 4 共4步（step 4 为 task_evaluate 整体评估），现扩展为5步，在 step 4 位置插入了重复文件检测步骤，原 step 4 顺延为 step 5。
-
-**新增内容（第178行）**:
-4. 重复文件检测：使用 list_directory 检查 config/agents/ 下各子目录，确认同一个 agent_id 没有出现在多个位置（如同时出现在 config/agents/xxx_agent/agent.yaml 和 config/agents/<category>/xxx_agent.yaml）。发现重复时，保留标准路径 config/agents/<category>/<agent_id>.yaml，删除非标准路径的文件。
-
-**结论**: 重复文件检测已作为独立步骤加入 Phase 4 审查流程，明确了检测方法（list_directory）、检测范围（config/agents/ 下各子目录）、判定规则（同 agent_id 不得出现在多个位置）和处理策略（保留标准路径、删除非标准路径）。
-
----
-
-### 标准四：一致性校验增加编排Agent引用的下级名称与实际文件名的匹配验证 - PASS
-
-**评估位置**: 第176行，Phase 4 一致性校验中新增条目
-
-**diff 验证**: 对比 .bak 文件，原一致性校验（step 3）仅包含3条检查项：
-1. L2 的 team 列表 = 实际的 L3 config_id 列表
-2. L2 的 system_prompt 中提到的成员 = team 列表
-3. 每个 L3 的 tool_ids 中的工具确实存在
-
-现新增第4条 编排 Agent 引用校验。
-
-**新增内容（第176行）**:
-- 编排 Agent 引用校验：L2 的 system_prompt 中引用的下级 Agent 名称（如 xxx_agent）必须与实际存在的 config_id（即对应 yaml 文件名去掉 .yaml 后缀）完全一致，逐个核对名称拼写
-
-**结论**: 一致性校验已增加编排 Agent 引用的下级名称与实际文件名的匹配验证，校验规则明确（名称拼写必须完全一致），且说明了 config_id 与文件名的对应关系。
-
----
-
-## 差异总览
-
-| 变更位置 | 变更类型 | 对应标准 |
-|----------|---------|---------|
-| 第176行（一致性校验 step 3） | 新增 编排 Agent 引用校验 条目 | 标准四 |
-| 第178行（Phase 4 step 4） | 新增 重复文件检测 步骤 | 标准三 |
-| 原第177行 -> 新第180行 | step 编号顺延（4->5） | 衔接变更 |
-
-共 2 处实质新增，1 处编号调整，无其他无关变更。
-
----
+### 问题3: 额外未被引用的文件
+1. agent_maker.yaml - 存在于 executor/generation/ 但未被任何编排Agent引用，且在文件头部注释中也未提及。
+2. tool_maker.yaml - 同上。
 
 ## 评估结论
 
-| 评估标准 | 结果 | 说明 |
+| 评估维度 | 得分 | 说明 |
 |----------|------|------|
-| (1) 不再硬编码绝对路径 | PASS | 全文均为相对路径或动态引用 |
-| (2) 扁平结构约束 | PASS | 独立章节明确约束，含禁止示例 |
-| (3) Phase 4 重复文件检测 | PASS | 新增独立 step，方法、范围、处理策略完整 |
-| (4) 编排Agent引用匹配验证 | PASS | 一致性校验新增条目，规则明确无歧义 |
-
-**总体评分**: 100/100
-**评估结果**: 全部通过
+| 引用名与实际文件一致性 | 25/50 | 8个引用中有2个（25%）指向不存在的文件 |
+| 未引用文件的处理结论 | 10/30 | 指定的2个文件仅被标注"未被引用"，无明确处理结论 |
+| 额外未引用文件处理 | 10/20 | agent_maker、tool_maker完全未被提及 |
+| 总分 | 45/100 | 不通过 |

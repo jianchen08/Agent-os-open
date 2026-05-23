@@ -774,7 +774,7 @@ class TaskExecutorMixin:
         """取消任务关联的运行中管道。
 
         由 task_manage cancel 操作调用，强制停止 PipelineEngine。
-        清理所有相关资源（挂起引擎、计时器、事件）后取消 asyncio.Task。
+        通过 EngineRegistry 查找引擎并唤醒，再取消 asyncio.Task。
 
         Args:
             task_id: 要取消的任务 ID
@@ -782,15 +782,6 @@ class TaskExecutorMixin:
         Returns:
             是否成功发起取消（无运行中管道时返回 False）
         """
-        bg_task = self._task_id_to_bg_task.get(task_id)
-        if bg_task is None or bg_task.done():
-            logger.debug(
-                "TaskWorker.cancel_pipeline: no running pipeline for task %s",
-                task_id,
-            )
-            return False
-
-        # 获取 pipeline_id 用于清理 services 中的引擎引用
         pipeline_id = None
         if self._task_service:
             try:
@@ -802,7 +793,14 @@ class TaskExecutorMixin:
 
         if pipeline_id:
             from pipeline.registry import get_engine_registry
-            get_engine_registry().unregister(pipeline_id)
+            registry = get_engine_registry()
+            entry = registry.get(pipeline_id)
+            if entry is not None and entry.engine is not None:
+                try:
+                    entry.engine.wake()
+                except Exception:
+                    pass
+            registry.unregister(pipeline_id)
 
         self._suspended_engines.pop(task_id, None)
         wake_evt = self._wake_events.pop(task_id, None)
@@ -817,12 +815,28 @@ class TaskExecutorMixin:
         if evt is not None:
             evt.set()
 
-        bg_task.cancel()
+        bg_task = self._task_id_to_bg_task.get(task_id)
+        cancelled_any = False
+        if bg_task is not None and not bg_task.done():
+            bg_task.cancel()
+            cancelled_any = True
+
+        if not cancelled_any:
+            from pipeline.registry import get_engine_registry as _get_reg
+            entries = _get_reg().find_by_tag("task_id", task_id)
+            for _e in entries:
+                try:
+                    _e.engine.wake()
+                except Exception:
+                    pass
+                if not cancelled_any:
+                    cancelled_any = True
+
         logger.info(
-            "TaskWorker.cancel_pipeline: cancelled pipeline for task %s",
-            task_id,
+            "TaskWorker.cancel_pipeline: task=%s pipeline=%s cancelled=%s",
+            task_id, pipeline_id[:12] if pipeline_id else "none", cancelled_any,
         )
-        return True
+        return cancelled_any
 
     # ───────────────────────────────────────────────────────────────────
     # 工作空间解析

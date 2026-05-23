@@ -15,8 +15,9 @@ import { registerFileReview } from '@/stores/fileReviewRegistry'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useStreamingStore } from '@/stores/streamingStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
@@ -281,26 +282,43 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
       if (!threadId) return
 
-      // 进入对话后管道挂起等待用户输入，清除 streaming 状态恢复发送按钮
-      const streamingStore = useStreamingStore.getState()
-      streamingStore.stopStreamingForTab(threadId)
-      streamingStore.stopStreamingForTab(currentSid)
-
-      const tabStore = useAgentTabStore.getState()
-      const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
-
-      const isAlreadyThere = activeTab && (
-        (activeTab.agentLevel === 1 && threadId === currentSid)
-        || activeTab.pipelineRunId === threadId
-        || activeTab.parentRecordId === threadId
-      )
-      if (isAlreadyThere) return
+      // 进入对话后管道挂起等待用户输入，清理当前活跃管道的流式状态以恢复发送按钮
+      const pipelineStore = usePipelineMessageStore.getState()
+      const activePid = pipelineStore.activePipelineId
+      if (activePid && pipelineStore.streamingState[activePid]?.isStreaming) {
+        pipelineStore.stopStreaming(activePid)
+      }
 
       if (window.location.pathname !== ROUTES.HOME) {
         navigate(ROUTES.HOME, { replace: true })
       }
 
-      const isMainPipeline = threadId === currentSid
+      // BUG-FIX-fix_20260522_conversation_wrong_session:
+      // 问题根因: 交互请求来自会话 A 的管道，但用户当前正在查看会话 B。
+      //          navigateToTab 只在当前会话的 tabs 中查找，找不到就创建新标签，
+      //          导致同一管道出现重复标签。
+      // 修复方案: 先判断交互所属会话是否与当前会话一致，不一致则先切换会话，
+      //          再在正确的会话标签列表中查找或创建标签。
+      if (interactionSessionId && interactionSessionId !== currentSid) {
+        const sessions = useSessionStore.getState().sessions
+        if (sessions.some((s) => s.id === interactionSessionId)) {
+          await useSessionListStore.getState().setActiveSession(interactionSessionId)
+          useAgentTabStore.getState().initSessionTabs(interactionSessionId)
+        }
+      }
+
+      const tabStore = useAgentTabStore.getState()
+      const effectiveSid = useSessionStore.getState().activeSessionId || currentSid
+      const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
+
+      const isAlreadyThere = activeTab && (
+        (activeTab.agentLevel === 1 && threadId === effectiveSid)
+        || activeTab.pipelineRunId === threadId
+        || activeTab.parentRecordId === threadId
+      )
+      if (isAlreadyThere) return
+
+      const isMainPipeline = threadId === effectiveSid
       if (isMainPipeline) {
         const mainTab = tabStore.tabs.find((t) => t.agentLevel === 1)
         if (mainTab) tabStore.switchToTab(mainTab.id)

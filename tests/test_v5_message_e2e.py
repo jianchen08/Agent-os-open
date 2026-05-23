@@ -1,4 +1,4 @@
-﻿"""
+"""
 V5: 发送消息端到端链路验证
 
 覆盖后端数据流 + 前端显示逻辑 + 用户交互三个维度。
@@ -949,14 +949,16 @@ class TestWSInteractionNotifier:
         assert notifier._global_connections["user_123"] is new_ws
 
     def test_register_pipeline_thread_mapping(self):
-        """验证 pipeline_thread_map 正确建立映射。"""
-        from ws_handler import WebSocketInteractionNotifier
+        """验证 EngineRegistry 正确建立 pipeline -> thread 映射。"""
+        from pipeline.registry import get_engine_registry
 
-        notifier = WebSocketInteractionNotifier()
-        notifier.register_pipeline_thread("pipeline_abc", "thread_xyz")
-
-        assert notifier.get_thread_for_pipeline("pipeline_abc") == "thread_xyz"
-        assert notifier.get_thread_for_pipeline("nonexistent") == ""
+        _registry = get_engine_registry()
+        _registry.register("pipeline_abc", None, thread_id="thread_xyz")
+        try:
+            assert _registry.get_thread_id("pipeline_abc") == "thread_xyz"
+            assert _registry.get_thread_id("nonexistent") == ""
+        finally:
+            _registry.unregister("pipeline_abc")
 
     @pytest.mark.asyncio
     async def test_send_to_thread_success(self):

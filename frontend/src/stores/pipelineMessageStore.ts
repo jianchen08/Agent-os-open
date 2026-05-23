@@ -108,6 +108,15 @@ interface PipelineMessageState {
   /** 判断指定管道是否还有更早的消息 */
   hasMoreOlder: (pipelineId: string) => boolean
 
+  /**
+   * 将旧管道中最近的用户消息迁移到新管道
+   *
+   * BUG-FIX-fix_20260523_pipeline_mismatch:
+   * 当 stream_start 中的 pipelineId 与用户消息写入的管道不一致时，
+   * 将旧管道中最近的用户消息复制到新管道，确保用户消息和助手响应在同一管道中显示。
+   */
+  migrateRecentUserMessages: (fromPipelineId: string, toPipelineId: string) => void
+
   /** 直接从 API 加载指定管道的历史消息 */
   fetchMessages: (
     pipelineId: string,
@@ -324,7 +333,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       updatedMessages[messageIndex] = {
         ...updatedMessages[messageIndex],
         ...partial,
-      }
+        // BUG-FIX-fix_20260522_msg_disappear: 记录消息最后更新时间，防止 initFromAPI 覆盖近期 WS 更新
+        _lastUpdated: Date.now(),
+      } as Message
 
       return {
         messagesByPipeline: {
@@ -415,7 +426,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId]
 
+      logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
+        pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
+
       let finalMessages: Message[]
+      // BUG-FIX-fix_20260522_msg_disappear: 跟踪被保留的本地消息数量
+      let preservedCount = 0
 
       if (existing && existing.length > 0) {
         // BUG-FIX-fix_20260515_long_context_message_loss:
@@ -432,6 +448,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
 
         // 逐条过滤旧消息：仅在指纹匹配且新消息列表中确实存在对应条目时才移除旧消息
         const matchedApiIds = new Set<string>()
+        // BUG-FIX-fix_20260522_msg_disappear: 记录因近期 WS 更新被保护的本地消息对应的 API 消息 ID
+        const excludedApiIds = new Set<string>()
         const preserved = existing.filter((localMsg) => {
           // streaming 消息始终保留（API 可能还没有这条消息）
           if (localMsg.status === 'streaming') {
@@ -446,20 +464,43 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           const unmatched = candidates.find((c) => !matchedApiIds.has(c.id))
           if (unmatched) {
             matchedApiIds.add(unmatched.id)
+
+            // BUG-FIX-fix_20260522_msg_disappear: 保护近期通过 WS 更新的消息不被 API 空内容覆盖
+            const localUpdated = (localMsg as Message & { _lastUpdated?: number })._lastUpdated
+            if (localUpdated && Date.now() - localUpdated < 5000) {
+              const localLen = (localMsg.content || '').length
+              const apiLen = (unmatched.content || '').length
+              if (apiLen < localLen * 0.5) {
+                excludedApiIds.add(unmatched.id)
+                return true // 保留本地版本，排除对应 API 消息
+              }
+            }
+
             return false // 这条旧消息被新 API 消息替代
           }
           return true // API 消息已全部匹配完毕，保留旧消息
         })
 
+        // BUG-FIX-fix_20260522_msg_disappear: 排除被本地版本保护的 API 消息，避免重复
+        const filteredSorted = excludedApiIds.size > 0
+          ? sorted.filter((m) => !excludedApiIds.has(m.id))
+          : sorted
+
+        preservedCount = preserved.length
+
         if (preserved.length > 0) {
-          finalMessages = [...sorted, ...preserved]
+          finalMessages = [...filteredSorted, ...preserved]
           finalMessages.sort(compareMessages)
         } else {
-          finalMessages = sorted
+          finalMessages = filteredSorted
         }
       } else {
         finalMessages = sorted
       }
+
+      // BUG-FIX-fix_20260522_msg_disappear: 诊断日志，记录合并结果
+      logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d preserved=%d',
+        pipelineId?.slice(0, 12), finalMessages.length, preservedCount)
 
       const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
       const bottomCursor = finalMessages.length > 0
@@ -583,6 +624,50 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    */
   hasMoreOlder: (pipelineId: string) => {
     return get().hasMoreOlderByPipeline[pipelineId] ?? false
+  },
+
+  /**
+   * 将旧管道中最近的用户消息迁移到新管道
+   *
+   * BUG-FIX-fix_20260523_pipeline_mismatch:
+   * 问题根因: 用户消息写入 sid 管道（fallback），但后端创建新 pipeline 后
+   *          stream_start 激活了新管道，导致用户消息和助手消息不在同一管道。
+   * 修复方案: 将旧管道中最近的用户消息复制到新管道中。
+   *          使用 addMessage 的去重机制确保不会重复。
+   * 影响范围: 新会话首次消息发送、刷新页面后发送消息
+   * 修复日期: 2026-05-23
+   */
+  migrateRecentUserMessages: (fromPipelineId: string, toPipelineId: string) => {
+    // 同一管道无需迁移
+    if (fromPipelineId === toPipelineId) return
+
+    const fromMessages = get().messagesByPipeline[fromPipelineId] || []
+    if (fromMessages.length === 0) return
+
+    // 找到旧管道中最近的用户消息（可能有连续多条用户消息，都需要迁移）
+    // 从后往前找到所有连续的 user 消息
+    const userMessagesToMigrate: Message[] = []
+    for (let i = fromMessages.length - 1; i >= 0; i--) {
+      if (fromMessages[i].role === 'user') {
+        userMessagesToMigrate.unshift(fromMessages[i])
+      } else {
+        break
+      }
+    }
+
+    if (userMessagesToMigrate.length === 0) return
+
+    logger.info(
+      '[migrateRecentUserMessages] 迁移 %d 条用户消息: %s -> %s',
+      userMessagesToMigrate.length,
+      fromPipelineId?.slice(0, 12),
+      toPipelineId?.slice(0, 12),
+    )
+
+    // 使用 addMessage 逐条写入新管道（利用其去重机制）
+    for (const msg of userMessagesToMigrate) {
+      get().addMessage(toPipelineId, { ...msg })
+    }
   },
 
   /**

@@ -7,6 +7,9 @@
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 
+import { clearChunkTimeout } from '../chunkTimeout'
+import { resolvePipelineId } from '../router'
+
 // ── 管道终止标记：防止 ensureStreamingPlaceholder 在流式结束后重新启动 ──
 
 /** 记录已经终止的管道（stream_end / stream_error / chunk 超时 / new_message），防止 ensureStreamingPlaceholder 重新启动 */
@@ -128,4 +131,50 @@ export function ensureStreamingPlaceholder(
     status: 'streaming',
     contentBlocks: [],
   } as any)
+}
+
+/**
+ * 从事件数据中提取 threadId
+ *
+ * 统一处理 `eventData.data?._threadId || eventData._threadId` 模式。
+ */
+export function extractThreadId(eventData: any): string | undefined {
+  return eventData.data?._threadId || eventData._threadId
+}
+
+/**
+ * 终止管道：封装 markPipelineTerminated + clearChunkTimeout + stopPipelineStreaming 三件套
+ *
+ * 在 stream_end / stream_error / chunk超时 等终止场景中复用。
+ */
+export function terminatePipeline(pipelineId: string, threadId?: string): void {
+  markPipelineTerminated(pipelineId)
+  clearChunkTimeout(pipelineId)
+  stopPipelineStreaming(pipelineId, threadId)
+}
+
+/**
+ * 清理消息的 thinking 状态（将 isThinking 设为 false）
+ *
+ * 返回浅拷贝，不修改原始消息对象。如果 thinking 已经不是 isThinking，直接返回原对象。
+ */
+export function clearThinkingState(msg: any): any {
+  if (msg.thinking?.isThinking) {
+    return { ...msg, thinking: { ...msg.thinking, isThinking: false } }
+  }
+  return msg
+}
+
+/**
+ * 解析 pipelineId 并执行空值守卫 + warn 日志
+ *
+ * 返回 null 表示 pipelineId 为空，调用方应跳过处理。
+ */
+export function resolveRequiredPipelineId(eventData: any, context: string): string | null {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    console.warn(`[streaming] ${context}: pipelineId 为空，跳过事件`)
+    return null
+  }
+  return pipelineId
 }

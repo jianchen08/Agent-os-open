@@ -59,7 +59,7 @@ class HumanInteractionTool(BuiltinTool):
         """获取工具定义"""
         return Tool(
             name="human_interaction",
-            description="与用户交互。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页；通知模式：非阻塞推送信息。",
+            description="与用户交互。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页；通知模式：非阻塞推送信息。注意：使用 file_paths 展示文件时必须使用 choice 或 conversation 模式，不能使用 notification 模式。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -119,7 +119,7 @@ class HumanInteractionTool(BuiltinTool):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -455,9 +455,6 @@ class HumanInteractionTool(BuiltinTool):
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
-        file_paths_list = inputs.get("file_paths")
-        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
-
         try:
             request_id = await service.send_notification(
                 session_id=pipeline_id,
@@ -467,7 +464,6 @@ class HumanInteractionTool(BuiltinTool):
                 priority=priority,
                 progress=progress,
                 agent_id=pipeline_id,
-                file_contents=file_contents,
             )
 
             return create_success_result(

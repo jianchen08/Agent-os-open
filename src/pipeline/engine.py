@@ -1,4 +1,4 @@
-﻿"""管道引擎 — 核心循环和生命周期管理。
+"""管道引擎 — 核心循环和生命周期管理。
 
 实现核心的 while 循环执行逻辑：
 输入路由 → Input 插件链 → Core 插件 → Output 插件链 → 输出路由仲裁 → apply_route，
@@ -268,8 +268,11 @@ class PipelineEngine:
             self.save_streaming_context(state)
         else:
             self.restore_streaming_context(state)
-        # 注册运行中的引擎引用到 EngineRegistry
-        get_engine_registry().register(pipeline_run_id, self)
+        _reg_tags: dict[str, str] = {}
+        _reg_task_id = state.get("task_id")
+        if _reg_task_id:
+            _reg_tags["task_id"] = _reg_task_id
+        get_engine_registry().register(pipeline_run_id, self, tags=_reg_tags or None)
         try:
             self._setup_pipeline_logging(pipeline_run_id, resumed, _pipeline_loggers)
             if _pipeline_loggers:
@@ -574,6 +577,13 @@ class PipelineEngine:
         _cp_pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         if _cp_pipeline_id:
             get_engine_registry().unregister(_cp_pipeline_id)
+            # 释放 chunk_service 内存缓存
+            try:
+                _cs = self._service_provider.get_service("chunk_service")
+                if _cs:
+                    await _cs.evict_pipeline(_cp_pipeline_id)
+            except Exception:
+                pass
         # 管道结束后自动清理旧检查点
         if self._checkpoint_manager is not None:
             try:
@@ -655,6 +665,12 @@ class PipelineEngine:
                             len(pending_notifications), pipeline_id,
                         )
                         break
+                    if self._check_children_terminal(state):
+                        logger.info(
+                            "[Engine] 管道超时后发现子任务已终态，唤醒: pipeline=%s",
+                            pipeline_id,
+                        )
+                        break
                     logger.info(
                         "[Engine] 管道等待超时(600s)无新通知，重新挂起 "
                         "(round=%d/%d): pipeline=%s",
@@ -696,6 +712,45 @@ class PipelineEngine:
                 self._suspended_state.setdefault("messages", []).append(
                     {"role": "user", "content": notif}
                 )
+
+    def _check_children_terminal(self, state: dict[str, Any]) -> bool:
+        """检查 submitted_task_ids 中的子任务是否全部已到达终态。
+
+        当管道因 child_task_guard 挂起时，submitted_task_ids 记录了活跃子任务。
+        如果所有子任务都已完成/失败/取消，管道应自动唤醒继续执行，
+        而不是无限等待。
+        """
+        task_ids = state.get("submitted_task_ids", [])
+        if not task_ids:
+            return False
+
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            task_service = provider.get("task_service")
+            if task_service is None:
+                return False
+        except Exception:
+            return False
+
+        terminal_statuses = {"completed", "failed", "cancelled"}
+
+        for tid in task_ids:
+            try:
+                task = task_service.get_task(tid)
+                if task is None:
+                    continue
+                status = task.status.value if hasattr(task.status, "value") else str(task.status)
+                if status not in terminal_statuses:
+                    return False
+            except Exception:
+                return False
+
+        logger.info(
+            "[Engine] 所有子任务已终态: pipeline=%s task_ids=%s",
+            state.get(StateKeys.PIPELINE_ID, ""), task_ids,
+        )
+        return True
 
     def wake(self) -> None:
         """唤醒挂起的管道（不注入消息）。

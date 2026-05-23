@@ -145,19 +145,30 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 快速截断：按 recent 预算从尾部截取，旧消息由 prompt_build 通过压缩块加载
         truncated = await self._try_fast_truncate(ctx, messages, context_window)
         if truncated is not None and len(truncated) < len(messages):
-            has_coverage = await self._check_compression_coverage(
+            coverage_info = await self._check_compression_coverage(
                 ctx, messages, truncated,
             )
-            if has_coverage:
+            if coverage_info["fully_covered"]:
                 logger.info(
                     "[%s] 快速截断: %d -> %d 条消息",
                     self.name, len(messages), len(truncated),
                 )
                 return PluginResult(state_updates={"messages": truncated})
-            logger.info(
-                "[%s] 快速截断跳过: 被截断的消息无压缩块覆盖, %d -> %d 条消息, 走完整压缩",
-                self.name, len(messages), len(truncated),
-            )
+            if coverage_info["covered_count"] > 0:
+                # 增量压缩：已有块覆盖了部分消息，只压缩未覆盖的部分
+                messages = self._trim_covered_messages(
+                    messages, coverage_info["covered_count"],
+                )
+                logger.info(
+                    "[%s] 增量压缩: 已有块覆盖 %d 条，待压缩 %d 条",
+                    self.name, coverage_info["covered_count"],
+                    sum(1 for m in messages if m.get("role") != "system"),
+                )
+            else:
+                logger.info(
+                    "[%s] 快速截断跳过: 被截断的消息无压缩块覆盖, %d -> %d 条消息, 走完整压缩",
+                    self.name, len(messages), len(truncated),
+                )
 
         service = self._get_memory_service(ctx)
         if not service:
@@ -283,11 +294,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
         ctx: PluginContext,
         original_messages: list[dict[str, Any]],
         truncated_messages: list[dict[str, Any]],
-    ) -> bool:
+    ) -> dict[str, Any]:
         """检查被截断掉的旧消息是否已被压缩块覆盖。
-
-        快速截断的安全前提是：被截掉的消息由 prompt_build 从 chunk_service 加载。
-        如果没有覆盖这些消息的压缩块，快速截断会导致消息丢失，应走完整压缩。
 
         Args:
             ctx: 插件上下文
@@ -295,31 +303,29 @@ class ContextWindowGuardPlugin(IInputPlugin):
             truncated_messages: 截断后的消息列表
 
         Returns:
-            True 表示压缩块已覆盖被截断的消息，可以安全截断
+            {"fully_covered": bool, "covered_count": int}
         """
         try:
             chunk_service = ctx.get_service("chunk_service")
         except (KeyError, AttributeError):
-            return False
+            return {"fully_covered": False, "covered_count": 0}
 
         from pipeline.types import StateKeys
 
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         if not pipeline_run_id:
-            return False
+            return {"fully_covered": False, "covered_count": 0}
 
         try:
             chunks = await chunk_service.find_by_pipeline(
                 pipeline_run_id, "L1",
             )
         except Exception:
-            return False
+            return {"fully_covered": False, "covered_count": 0}
 
         if not chunks:
-            return False
+            return {"fully_covered": False, "covered_count": 0}
 
-        # 计算被截断消息的序列范围
-        # 非 system 消息的计数作为序列号参考
         non_system_original = [
             m for m in original_messages if m.get("role") != "system"
         ]
@@ -327,33 +333,50 @@ class ContextWindowGuardPlugin(IInputPlugin):
             m for m in truncated_messages if m.get("role") != "system"
         ]
 
-        # 如果截断后没有减少非 system 消息，说明没有实际截断
         if len(non_system_truncated) >= len(non_system_original):
-            return True
+            return {"fully_covered": True, "covered_count": len(non_system_original)}
 
-        # 被截断的消息数量
         removed_count = len(non_system_original) - len(non_system_truncated)
 
-        # 检查已有压缩块是否覆盖了被截断的消息范围
-        # 压缩块的 sequence_start=1, sequence_end=N 表示覆盖了第1到第N条消息
-        # 如果所有块的覆盖范围 >= 被截断的消息数量，则认为覆盖
+        # 已有块的最大覆盖范围
         max_coverage = max(
-            (c.sequence_end - c.sequence_start + 1 for c in chunks),
+            (c.sequence_end for c in chunks if c.sequence_end),
             default=0,
         )
 
         if max_coverage >= removed_count:
-            logger.debug(
-                "[%s] 压缩块覆盖检查通过: removed=%d, max_coverage=%d",
-                self.name, removed_count, max_coverage,
-            )
-            return True
+            return {"fully_covered": True, "covered_count": removed_count}
 
         logger.info(
             "[%s] 压缩块覆盖不足: removed=%d, max_coverage=%d",
             self.name, removed_count, max_coverage,
         )
-        return False
+        return {"fully_covered": False, "covered_count": max_coverage}
+
+    @staticmethod
+    def _trim_covered_messages(
+        messages: list[dict[str, Any]],
+        covered_count: int,
+    ) -> list[dict[str, Any]]:
+        """裁剪已被压缩块覆盖的消息，只保留未覆盖的部分用于增量压缩。
+
+        Args:
+            messages: 原始消息列表
+            covered_count: 已被压缩块覆盖的非 system 消息数量
+
+        Returns:
+            裁剪后的消息列表（system 消息保留 + 未覆盖的非 system 消息）
+        """
+        result: list[dict[str, Any]] = []
+        non_system_seen = 0
+        for m in messages:
+            if m.get("role") == "system":
+                result.append(m)
+            else:
+                non_system_seen += 1
+                if non_system_seen > covered_count:
+                    result.append(m)
+        return result
 
     @staticmethod
     def _estimate_msg_tokens_simple(msg: dict[str, Any]) -> int:
@@ -539,15 +562,20 @@ class ContextWindowGuardPlugin(IInputPlugin):
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         session_id = ctx.state.get("context.session_id", "")
         context_window = ctx.state.get("context_window", 0)
+        _bg_earliest = ""
 
         async def save_fn(old_msgs, comp_result):
-            """保存压缩块到 ChunkService。
+            """保存压缩块到 ChunkService，返回更新后的背景信息供下一批使用。
 
-            保存两个 chunk：L1 和 L2（各自独立可检索）。
+            保存后从 chunk_service 重新加载所有 L1 块，保持与 prompt_build
+            一致的背景信息视图。
 
             Args:
                 old_msgs: 被压缩的原始消息列表
                 comp_result: {"l1": str, "l2": str, "keywords": list}
+
+            Returns:
+                更新后的 previous_l1 背景（最早+最新块的拼接）
             """
             if isinstance(comp_result, str):
                 comp_result = {"l1": comp_result, "l2": "", "keywords": []}
@@ -608,6 +636,18 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 self.name, l1_id, len(l1_content),
                 len(l2_content), len(keywords),
             )
+
+            # 返回更新后的背景：最早(_bg_earliest) + 最新(l1_content)
+            # 下一批用这个作为 previous_l1，与 _load_previous_l1 逻辑一致
+            nonlocal _bg_earliest
+            if not _bg_earliest and l1_content:
+                _bg_earliest = l1_content
+            if _bg_earliest and l1_content and _bg_earliest != l1_content:
+                updated_bg = _bg_earliest + "\n\n---\n\n" + l1_content
+            else:
+                updated_bg = l1_content or _bg_earliest
+
+            return updated_bg
 
         return save_fn
 

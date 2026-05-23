@@ -785,6 +785,70 @@ class TestWorkspaceServiceRegression:
         assert result["items"] == []
         assert result["total"] == 0
 
+    def test_scan_directory_handles_oserror(self):
+        """_scan_directory 遇到 OSError 时应安全返回空列表而非抛出异常。
+
+        验证修复: os.listdir 的异常捕获从 PermissionError 扩展为 (PermissionError, OSError)。
+        """
+        from unittest.mock import patch
+        from workspace.workspace_service import WorkspaceService
+
+        service = WorkspaceService()
+
+        with patch("os.listdir", side_effect=OSError("Windows 设备路径错误")):
+            nodes = service._scan_directory("C:\\some\\path", "C:\\some\\path")
+            assert nodes == []
+
+    def test_scan_directory_handles_permission_error(self):
+        """_scan_directory 遇到 PermissionError 时应安全返回空列表（回归测试）。"""
+        from unittest.mock import patch
+        from workspace.workspace_service import WorkspaceService
+
+        service = WorkspaceService()
+
+        with patch("os.listdir", side_effect=PermissionError("权限不足")):
+            nodes = service._scan_directory("/root/secret", "/root/secret")
+            assert nodes == []
+
+    def test_scan_directory_skips_windows_device_path(self):
+        """_scan_directory 应跳过以 \\\\.\\ 开头的 Windows 设备路径。
+
+        验证修复: os.path.isdir 对设备路径可能返回 True 导致递归异常。
+        """
+        import shutil
+        import tempfile
+        from unittest.mock import patch
+        from workspace.workspace_service import WorkspaceService
+
+        tmp = tempfile.mkdtemp(prefix="ws_device_test_")
+        try:
+            (Path(tmp) / "normal.txt").write_text("ok", encoding="utf-8")
+            (Path(tmp) / "subdir").mkdir()
+
+            service = WorkspaceService()
+
+            # 模拟 os.path.join 生成一个设备路径前缀的 full_path
+            # 通过在遍历过程中让某个 entry 的 full_path 以 \\\\.\\ 开头
+            original_join = os.path.join
+
+            def mock_join(path, entry):
+                if entry == "device_entry":
+                    return "\\\\.\\COM1"
+                return original_join(path, entry)
+
+            # 模拟 listdir 返回包含设备路径的条目
+            with patch("os.listdir", return_value=["normal.txt", "subdir", "device_entry"]):
+                with patch("os.path.join", side_effect=mock_join):
+                    nodes = service._scan_directory(tmp, tmp)
+
+            names = [n.name for n in nodes]
+            assert "normal.txt" in names
+            assert "subdir" in names
+            # device_entry 应被跳过，不在结果中
+            assert "device_entry" not in names
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 # ============================================================
 # Test: 路径穿越综合安全测试

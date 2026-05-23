@@ -29,7 +29,6 @@ class WebSocketInteractionNotifier:
 
     def __init__(self, auto_confirm_delay: float = 600.0) -> None:
         self._active_connections: dict[str, list[WebSocket]] = {}
-        self._pipeline_thread_map: dict[str, str] = {}
         self._auto_confirm_delay = auto_confirm_delay
         self._service = None
         self._fallback_tasks: set[asyncio.Task] = set()
@@ -41,43 +40,6 @@ class WebSocketInteractionNotifier:
 
     def set_service(self, service) -> None:
         self._service = service
-
-    def register_pipeline_thread(self, pipeline_id: str, thread_id: str) -> None:
-        """注册 pipeline_id 到 ws_thread_id 的映射。
-
-        当主管道通过 _stream_engine_response 创建时调用，
-        记录 pipeline_id 与 WebSocket 连接 thread_id 的对应关系，
-        以便子管道事件能直接路由到正确的 WebSocket 连接。
-
-        统一写入 EngineRegistry，不再维护旧的 _pipeline_thread_map。
-
-        Args:
-            pipeline_id: 主管道的 pipeline_id（engine._pipeline_id）
-            thread_id: WebSocket 连接的 thread_id
-        """
-        from pipeline.registry import get_engine_registry
-        _registry = get_engine_registry()
-        _entry = _registry.get(pipeline_id)
-        if _entry:
-            _entry.thread_id = thread_id
-        else:
-            _registry.register(pipeline_id, None, thread_id=thread_id)
-
-    def get_thread_for_pipeline(self, pipeline_id: str) -> str:
-        """根据 pipeline_id 查找对应的 ws_thread_id。
-
-        用于子管道（TaskWorker）向前端路由事件时，
-        通过主管道的 pipeline_id 找到正确的 WebSocket thread_id。
-        统一从 EngineRegistry 查找。
-
-        Args:
-            pipeline_id: 主管道的 pipeline_id
-
-        Returns:
-            对应的 ws_thread_id，未找到则返回空字符串
-        """
-        from pipeline.registry import get_engine_registry
-        return get_engine_registry().get_thread_id(pipeline_id)
 
     def register(self, thread_id: str, websocket: WebSocket) -> None:
         if thread_id not in self._active_connections:
@@ -302,134 +264,40 @@ class WebSocketInteractionNotifier:
                 "[WSNotifier] 已取消自动确认回退 | request_id=%s", request_id,
             )
 
-    async def notify_cancel(
-        self, request_id: str, reason: str | None = None, thread_id: str = ""
-    ) -> bool:
-        payload = json.dumps({
-            "type": "interaction_cancelled",
-            "data": {"request_id": request_id, "reason": reason},
-        }, ensure_ascii=False)
+    async def _send_event_to_thread(self, thread_id: str, event_data: dict) -> bool:
+        """统一发送事件到 thread_id 关联的连接，先活跃连接再全局连接。
 
-        # BUG-FIX-fix_20260512_interaction_card_not_showing:
-        # 回退到 _global_connections，与 notify_request 保持一致
-        conns = self._active_connections.get(thread_id, [])
-        if conns:
-            for ws in conns:
-                try:
-                    await ws.send_text(payload)
-                except Exception:
-                    pass
-            return True
-
-        for user_id, ws in list(self._global_connections.items()):
-            try:
-                await ws.send_text(payload)
-                return True
-            except Exception:
-                self._global_connections.pop(user_id, None)
-        return True
-
-    async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
-        payload = json.dumps({
-            "type": "interaction_timeout",
-            "data": {"request_id": request_id},
-        }, ensure_ascii=False)
-
-        # BUG-FIX-fix_20260512_interaction_card_not_showing:
-        # 回退到 _global_connections，与 notify_request 保持一致
-        conns = self._active_connections.get(thread_id, [])
-        if conns:
-            for ws in conns:
-                try:
-                    await ws.send_text(payload)
-                except Exception:
-                    pass
-            return True
-
-        for user_id, ws in list(self._global_connections.items()):
-            try:
-                await ws.send_text(payload)
-                return True
-            except Exception:
-                self._global_connections.pop(user_id, None)
-        return True
-
-    async def notify_timeout_reminder(
-        self, request_id, remaining_seconds, thread_id="", **kw
-    ) -> bool:
-        payload = json.dumps({
-            "type": "interaction_timeout_reminder",
-            "data": {
-                "request_id": request_id,
-                "remaining_seconds": remaining_seconds,
-            },
-        }, ensure_ascii=False)
-
-        # BUG-FIX-fix_20260512_interaction_card_not_showing:
-        # 回退到 _global_connections，与 notify_request 保持一致
-        conns = self._active_connections.get(thread_id, [])
-        if conns:
-            for ws in conns:
-                try:
-                    await ws.send_text(payload)
-                except Exception:
-                    pass
-            return True
-
-        for user_id, ws in list(self._global_connections.items()):
-            try:
-                await ws.send_text(payload)
-                return True
-            except Exception:
-                self._global_connections.pop(user_id, None)
-        return True
-
-    async def notify_conversation_start(
-        self, thread_id, tab_id, title, **kw
-    ) -> bool:
-        return True
-
-    async def send_to_thread(self, thread_id: str, event_data: dict) -> bool:
-        """向指定 thread_id 的最新活跃 WebSocket 连接发送事件。
-
-        优先查找 _active_connections（per-session 连接），
-        若无则回退到 _global_connections（全局单连接）。
-
-        只发送到第一个成功的连接，避免多个连接导致消息重复。
-        发送失败的连接会被清理出活跃列表。
+        封装完整的发送逻辑：先查 _active_connections 发给所有活跃连接，
+        失败则回退到 _global_connections。发送失败的连接会被清理。
 
         Args:
             thread_id: 目标会话的 thread_id
-            event_data: 完整的事件字典
+            event_data: 完整的事件字典（将被 json.dumps 序列化）
 
         Returns:
-            是否成功发送
+            是否成功发送到至少一个连接
         """
         conns = self._active_connections.get(thread_id, [])
         if conns:
             payload = json.dumps(event_data, ensure_ascii=False)
             stale: list = []
+            sent_any = False
             for ws in conns:
                 try:
                     await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
-                    return True
+                    sent_any = True
                 except (asyncio.TimeoutError, Exception):
                     stale.append(ws)
             if stale:
                 self._active_connections[thread_id] = [
                     c for c in conns if c not in stale
                 ]
-                # 清理 stale 后重新尝试发送到同 thread_id 的剩余活跃连接
-                remaining = self._active_connections.get(thread_id, [])
-                for ws in remaining:
-                    try:
-                        await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
-                        return True
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                if not remaining:
+                if not self._active_connections[thread_id]:
                     self._active_connections.pop(thread_id, None)
+            if sent_any:
+                return True
 
+        # 回退全局连接
         for user_id, ws in list(self._global_connections.items()):
             try:
                 await asyncio.wait_for(
@@ -440,14 +308,64 @@ class WebSocketInteractionNotifier:
             except (asyncio.TimeoutError, Exception):
                 self._global_connections.pop(user_id, None)
 
-        logger.warning(
-            "send_to_thread: 无活跃连接: thread_id=%s type=%s active=%s global=%s",
-            thread_id[:12] if thread_id else "(empty)",
-            event_data.get("type", "?"),
-            {k[:12]: len(v) for k, v in self._active_connections.items()},
-            list(self._global_connections.keys()),
-        )
         return False
+
+    async def send_to_thread(self, thread_id: str, event_data: dict) -> bool:
+        """向指定 thread_id 的最新活跃 WebSocket 连接发送事件。
+
+        优先查找 _active_connections（per-session 连接），
+        若无则回退到 _global_connections（全局单连接）。
+
+        Args:
+            thread_id: 目标会话的 thread_id
+            event_data: 完整的事件字典
+
+        Returns:
+            是否成功发送
+        """
+        ok = await self._send_event_to_thread(thread_id, event_data)
+        if not ok:
+            logger.warning(
+                "send_to_thread: 无活跃连接: thread_id=%s type=%s active=%s global=%s",
+                thread_id[:12] if thread_id else "(empty)",
+                event_data.get("type", "?"),
+                {k[:12]: len(v) for k, v in self._active_connections.items()},
+                list(self._global_connections.keys()),
+            )
+        return ok
+
+    async def notify_cancel(
+        self, request_id: str, reason: str | None = None, thread_id: str = ""
+    ) -> bool:
+        """通知前端交互请求已取消。"""
+        return await self._send_event_to_thread(thread_id, {
+            "type": "interaction_cancelled",
+            "data": {"request_id": request_id, "reason": reason},
+        })
+
+    async def notify_timeout(self, request_id: str, thread_id: str = "") -> bool:
+        """通知前端交互请求已超时。"""
+        return await self._send_event_to_thread(thread_id, {
+            "type": "interaction_timeout",
+            "data": {"request_id": request_id},
+        })
+
+    async def notify_timeout_reminder(
+        self, request_id, remaining_seconds, thread_id="", **kw
+    ) -> bool:
+        """通知前端交互请求即将超时。"""
+        return await self._send_event_to_thread(thread_id, {
+            "type": "interaction_timeout_reminder",
+            "data": {
+                "request_id": request_id,
+                "remaining_seconds": remaining_seconds,
+            },
+        })
+
+    async def notify_conversation_start(
+        self, thread_id, tab_id, title, **kw
+    ) -> bool:
+        return True
 
 
 # BUG-FIX-fix_20260522_double_instance:

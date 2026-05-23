@@ -107,8 +107,9 @@ class TaskNotifierMixin:
             if _ws_notifier:
                 _parent_pid = getattr(_task_obj, "parent_pipeline_id", "") or ""
                 _ws_tid = ""
-                if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
-                    _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
+                if _parent_pid:
+                    from pipeline.registry import get_engine_registry
+                    _ws_tid = get_engine_registry().get_thread_id(_parent_pid)
                 if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
                     await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
                 elif hasattr(_ws_notifier, "send_to_user"):
@@ -422,11 +423,9 @@ class TaskNotifierMixin:
             }
 
             _ws_tid = ""
-            if (
-                _parent_pipeline_id_ws
-                and hasattr(_ws_notifier, "get_thread_for_pipeline")
-            ):
-                _ws_tid = _ws_notifier.get_thread_for_pipeline(
+            if _parent_pipeline_id_ws:
+                from pipeline.registry import get_engine_registry
+                _ws_tid = get_engine_registry().get_thread_id(
                     _parent_pipeline_id_ws,
                 )
 

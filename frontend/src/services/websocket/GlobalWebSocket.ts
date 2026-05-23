@@ -206,7 +206,17 @@ class GlobalWebSocketService {
     this._handlers.clear()
   }
 
-  /** 向指定会话发送用户输入（带发送确认机制） */
+  /**
+   * 向指定会话发送用户输入（带发送确认机制）
+   *
+   * BUG-FIX-fix_20260523_ack_resend_dup:
+   * 问题根因: 未连接时 _send 将消息加入队列，但 ACK 超时重发也调用 _send 再次入队，
+   *          连接建立后 _flushQueue 将两条相同消息同时发出，后端处理两次产生重复响应。
+   * 修复方案: 仅在已连接状态下才启动 ACK 计时器。未连接时消息已在队列中，
+   *          _flushQueue 发送后会启动 ACK 计时器。
+   * 影响范围: WebSocket 未连接时的消息发送场景（刷新页面后立即发送）
+   * 修复日期: 2026-05-23
+   */
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
@@ -229,8 +239,12 @@ class GlobalWebSocketService {
     // 发送消息
     this._send(msg)
 
-    // 启动发送确认计时器
-    this._startAckTimer(threadId, msg)
+    // BUG-FIX-fix_20260523_ack_resend_dup:
+    // 仅在已连接状态下才启动 ACK 计时器。
+    // 未连接时消息已在队列中，_flushQueue 发送后会启动 ACK 计时器。
+    if (this._status === 'connected') {
+      this._startAckTimer(threadId, msg)
+    }
   }
 
   /** 清除指定线程的发送确认计时器（收到 stream_start 时调用） */
@@ -259,13 +273,13 @@ class GlobalWebSocketService {
     if (entry.retries > SEND_ACK_MAX_RETRIES) {
       console.warn('[GlobalWS] 发送确认超时，已达最大重试次数: threadId=%s', threadId)
       this._pendingAcks.delete(threadId)
+      this._emit('_ack_exhausted', { threadId })
       return
     }
 
     console.info('[GlobalWS] 发送确认超时，第 %d 次重发: threadId=%s', entry.retries, threadId)
     this._send(entry.msg)
 
-    // 重启计时器
     entry.timer = setTimeout(() => {
       this._onAckTimeout(threadId)
     }, SEND_ACK_TIMEOUT_MS)
@@ -321,6 +335,17 @@ class GlobalWebSocketService {
 
   // ── 内部方法 ──
 
+  /**
+   * 发送消息（立即发送或加入队列）
+   *
+   * BUG-FIX-fix_20260523_queue_dup:
+   * 问题根因: ACK 超时重发或网络抖动时，相同消息可能多次入队，
+   *          _flushQueue 将多条相同消息同时发出。
+   * 修复方案: 入队前检查队列中是否已有相同 thread_id + type + client_message_id 的消息，
+   *          避免重复入队。
+   * 影响范围: 所有通过 WebSocket 发送的消息
+   * 修复日期: 2026-05-23
+   */
   private _send(msg: PendingMessage): void {
     if (this._status === 'connected' && this.ws) {
       try {
@@ -328,18 +353,52 @@ class GlobalWebSocketService {
         // 发送前检查缓冲区，超过阈值则延迟发送避免积压
         if (this.ws.bufferedAmount > SEND_BUFFER_THRESHOLD) {
           console.warn('[GlobalWS] bufferedAmount 超过阈值，消息入队延迟发送')
-          this._queue.push(msg)
+          this._enqueueIfNotDuplicate(msg)
           return
         }
         this.ws.send(payload)
       } catch {
-        this._queue.push(msg)
+        this._enqueueIfNotDuplicate(msg)
       }
     } else {
-      this._queue.push(msg)
+      this._enqueueIfNotDuplicate(msg)
     }
   }
 
+  /**
+   * 将消息加入发送队列（带去重检查）
+   *
+   * BUG-FIX-fix_20260523_queue_dup:
+   * 通过 thread_id + type + client_message_id 三元组判断是否重复，
+   * 避免同一消息多次入队导致连接后重复发送。
+   */
+  private _enqueueIfNotDuplicate(msg: PendingMessage): void {
+    const isDuplicate = this._queue.some((queued) =>
+      queued.type === msg.type
+      && queued.thread_id === msg.thread_id
+      && (queued as any).client_message_id === (msg as any).client_message_id
+    )
+    if (isDuplicate) {
+      console.info(
+        '[GlobalWS] 去重: 跳过重复入队 type=%s thread_id=%s',
+        msg.type,
+        (msg.thread_id as string)?.slice(0, 12),
+      )
+      return
+    }
+    this._queue.push(msg)
+  }
+
+  /**
+   * 刷写发送队列：连接建立后将队列中的消息逐条发送
+   *
+   * BUG-FIX-fix_20260523_ack_resend_dup:
+   * 问题根因: 原逻辑刷完队列后不启动 ACK 计时器，导致消息发出后无超时重发保护。
+   *          但 sendUserInput 中未连接时不启动计时器，所以需要在刷队后补启动。
+   * 修复方案: 发送完 user_input 类型消息后，启动对应的 ACK 计时器。
+   * 影响范围: WebSocket 重连后的消息发送确认
+   * 修复日期: 2026-05-23
+   */
   private _flushQueue(): void {
     if (!this.ws || this._status !== 'connected') return
     while (this._queue.length > 0) {
@@ -349,6 +408,14 @@ class GlobalWebSocketService {
       } catch {
         this._queue.unshift(msg)
         break
+      }
+
+      // BUG-FIX-fix_20260523_ack_resend_dup:
+      // user_input 消息发送成功后启动 ACK 计时器
+      // （sendUserInput 在未连接时不启动计时器，此处补启动）
+      if (msg.type === 'user_input' && msg.thread_id) {
+        // 如果该线程已有 ACK 计时器（例如之前已发送过），先清除再启动新的
+        this._startAckTimer(msg.thread_id as string, msg)
       }
     }
   }

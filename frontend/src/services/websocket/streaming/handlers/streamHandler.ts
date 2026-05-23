@@ -10,16 +10,17 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
-import { clearChunkTimeout, clearUnifiedStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
+import { clearUnifiedStreamTimeout, getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
 import { appendTextBlock, appendThinkingChunk } from '../contentBlocks'
 import { resolvePipelineId } from '../router'
 
-import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, markPipelineTerminated, stopPipelineStreaming } from './utils'
+import { clearPipelineTerminated, ensureStreamingPlaceholder, extractMessageId, extractThreadId, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -103,7 +104,7 @@ export function handleStreamStart(eventData: any) {
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
-  const threadId = eventData.data?._threadId || eventData._threadId
+  const threadId = extractThreadId(eventData)
 
   const currentActivePipelineId = pipelineStore.getState().activePipelineId
   _debugLogger.info(
@@ -163,6 +164,20 @@ export function handleStreamStart(eventData: any) {
       _debugLogger.info(
         `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
       )
+
+      // BUG-FIX-fix_20260523_pipeline_mismatch:
+      // 问题根因: handleSendMessage 使用 activePipelineId || sid 作为 fallback 管道写入用户消息，
+      //          但后端可能创建新 pipeline（如 abc123），stream_start 中的 pipeline_id 为 abc123。
+      //          激活 abc123 后 UI 切换到新管道，但用户消息在旧管道中，导致消息不显示。
+      // 修复方案: 激活新管道前，将旧管道（sid fallback）中最近的用户消息迁移到新管道。
+      // 影响范围: 新会话首次消息发送、刷新页面后发送消息
+      // 修复日期: 2026-05-23
+      const sid = useSessionStore.getState().activeSessionId
+      const fromPipelineId = currentActivePipelineId || sid
+      if (fromPipelineId && fromPipelineId !== pipelineId) {
+        pipelineStore.getState().migrateRecentUserMessages(fromPipelineId, pipelineId)
+      }
+
       pipelineStore.getState().activatePipeline(pipelineId)
     } else {
       _debugLogger.info(
@@ -208,7 +223,7 @@ export function handleStreamChunk(eventData: any) {
       `[STREAM_CHUNK] msg not found, auto-creating placeholder: pipeline=%s msgId=%s totalMsgs=%d`,
       pipelineId?.slice(0, 12), messageId?.slice(0, 12), msgs.length,
     )
-    ensureStreamingPlaceholder(pipelineId, messageId, eventData.data?._threadId || eventData._threadId)
+    ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
   }
 
   // 缓冲 chunk，由 RAF 统一刷写到 store（合并同帧多个 chunk 为单次更新）
@@ -231,7 +246,7 @@ export function handleStreamEnd(eventData: any) {
   flushStreamChunkBuffer()
 
   const pipelineId = resolvePipelineId(eventData)
-  const threadId = eventData.data?._threadId || eventData._threadId
+  const threadId = extractThreadId(eventData)
   const messageId = extractMessageId(eventData)
 
   // DEBUG: 调试日志
@@ -241,9 +256,7 @@ export function handleStreamEnd(eventData: any) {
 
   if (pipelineId) {
     // BUG-FIX-fix_20260522: 标记管道已终止，防止 ensureStreamingPlaceholder 重新启动
-    markPipelineTerminated(pipelineId)
-    clearChunkTimeout(pipelineId)
-    stopPipelineStreaming(pipelineId, threadId)
+    terminatePipeline(pipelineId, threadId)
     // BUG-FIX-fix_20260522_stream_end_over_cleanup:
     // stream_end 时需要确保所有关联的 streamingTabs 都被清理，
     // 包括 pipelineId、threadId 和 activePipelineId。
@@ -268,11 +281,9 @@ export function handleStreamEnd(eventData: any) {
       _debugLogger.info(
         `[STREAM_END] clearing via activePipelineId=${currentActivePipelineId.slice(0, 12)}`,
       )
-      clearChunkTimeout(currentActivePipelineId)
-      stopPipelineStreaming(currentActivePipelineId, threadId)
+      terminatePipeline(currentActivePipelineId, threadId)
     }
     if (threadId) {
-      clearChunkTimeout(threadId)
       useStreamingStore.getState().setStreamingForTab(threadId, false)
     }
     return
@@ -332,15 +343,12 @@ export function handleStreamError(eventData: any) {
   flushStreamChunkBuffer()
 
   const pipelineId = resolvePipelineId(eventData)
-  const threadId = eventData.data?._threadId || eventData._threadId
+  const threadId = extractThreadId(eventData)
 
   if (pipelineId) {
     // BUG-FIX-fix_20260522: 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
-    markPipelineTerminated(pipelineId)
-    clearChunkTimeout(pipelineId)
-    stopPipelineStreaming(pipelineId, threadId)
+    terminatePipeline(pipelineId, threadId)
   } else if (threadId) {
-    clearChunkTimeout(threadId)
     useStreamingStore.getState().stopStreamingForTab(threadId)
   }
 

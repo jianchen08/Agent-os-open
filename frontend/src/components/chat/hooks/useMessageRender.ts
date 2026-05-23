@@ -59,10 +59,12 @@ export interface MessageRenderContext {
  */
 function buildFragments(contentBlocks: ContentBlock[], messageId: string): RenderFragment[] {
   // BUG-FIX-fix_20260522_tool_order: 按 sequence 排序，解决 WS 乱序导致工具卡片顺序错乱
+  // BUG-FIX-fix_20260522_block_sort_fallback: 用数组索引替代 MAX_SAFE_INTEGER 作为 fallback，
+  //   避免 sequence 缺失的 block 被推到所有有 sequence 的 block 之后
   const sorted = contentBlocks.map((b, i) => ({ block: b, idx: i }))
   sorted.sort((a, b) => {
-    const sA = a.block.sequence ?? Number.MAX_SAFE_INTEGER
-    const sB = b.block.sequence ?? Number.MAX_SAFE_INTEGER
+    const sA = a.block.sequence ?? a.idx
+    const sB = b.block.sequence ?? b.idx
     if (sA !== sB) return sA - sB
     return a.idx - b.idx
   })
@@ -205,8 +207,10 @@ export function reconcileContentBlocks(
   const textBlocks = existingBlocks.filter((b) => b.type === 'text')
   if (textBlocks.length === 0) {
     if (finalContent?.trim()) {
+      // BUG-FIX-fix_20260522_reconcile_text_seq: 为新建的 text block 分配 sequence=0，
+      //   确保排序时不会因缺少 sequence 被推到底部
       return [
-        { type: 'text', text: finalContent, sourceId: messageId },
+        { type: 'text', text: finalContent, sourceId: messageId, sequence: 0 },
         ...existingBlocks,
       ]
     }
@@ -229,11 +233,11 @@ export function reconcileContentBlocks(
   })
 
   // BUG-FIX-fix_20260522_tool_order: 返回前按 sequence 排序，确保渲染顺序正确
-  // 使用与 buildFragments 一致的稳定排序模式：sequence 为主键，原数组索引为二级兜底
+  // BUG-FIX-fix_20260522_block_sort_fallback: 用数组索引替代 MAX_SAFE_INTEGER 作为 fallback
   const indexed = reconciled.map((b, i) => ({ block: b, idx: i }))
   indexed.sort((a, b) => {
-    const sA = a.block.sequence ?? Number.MAX_SAFE_INTEGER
-    const sB = b.block.sequence ?? Number.MAX_SAFE_INTEGER
+    const sA = a.block.sequence ?? a.idx
+    const sB = b.block.sequence ?? b.idx
     if (sA !== sB) return sA - sB
     return a.idx - b.idx
   })

@@ -10,17 +10,16 @@
  * - 全部已读 / 清空操作
  *
  * BUG-FIX-fix_20260522_notification_scroll_v2:
- *   原方案使用 createPortal + fixed 定位渲染下拉面板，
- *   但 body/#root 的 overflow: hidden 会拦截 wheel 事件，
- *   导致面板内容无法滚动（单条长通知、多条通知列表均受影响）。
- *   修复方案：改用 Radix Dialog 渲染为右侧滑出面板（Sheet 风格），
- *   Radix Dialog 有独立的事件管理和 Portal 系统，
- *   不受 body overflow: hidden 影响，滚动天然可靠。
+ *   根因：body/#root 的 overflow:hidden 导致浏览器合成器线程
+ *   在处理真实鼠标滚轮时直接消费掉事件，不生成 JS wheel 事件。
+ *   修复：面板打开时临时将 body overflow 改为 'visible'，
+ *   同时阻止 wheel 事件冒泡到 body，防止触发页面抖动。
+ *   面板关闭时恢复原始 overflow 值。
  */
 
-import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Bell, BellOff, ChevronDown, ChevronRight, X } from 'lucide-react'
-import { useCallback, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -28,8 +27,6 @@ import {
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogOverlay,
-  DialogPortal,
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
@@ -39,7 +36,6 @@ import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'
 
-/** 优先级分组标签 */
 const PRIORITY_LABELS: Record<NotificationPriority, { label: string; emoji: string }> = {
   critical: { label: '紧急', emoji: '🔴' },
   high: { label: '重要', emoji: '🟠' },
@@ -47,11 +43,9 @@ const PRIORITY_LABELS: Record<NotificationPriority, { label: string; emoji: stri
   low: { label: '低优先', emoji: '⚪' },
 }
 
-/** 优先级排序顺序（用于分组渲染） */
 const PRIORITY_ORDER: NotificationPriority[] = ['critical', 'high', 'normal', 'low']
 
 export interface NotificationCenterProps {
-  /** 自定义类名 */
   className?: string
 }
 
@@ -73,6 +67,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   const unreadCount = useNotificationStore((s) => s.notifications.filter((n) => !n.isRead).length)
 
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   /** 按优先级分组 */
   const groupedNotifications = useMemo(() => {
@@ -88,10 +83,8 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
     return groups
   }, [notifications])
 
-  /** 是否有通知 */
   const hasNotifications = notifications.length > 0
 
-  /** 处理通知点击（标记已读） */
   const handleNotificationClick = useCallback(
     (notification: NotificationItem) => {
       if (!notification.isRead) {
@@ -101,13 +94,72 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
     [markAsRead],
   )
 
-  /** 处理动作执行 */
   const handleAction = useCallback(
     (notificationId: string, action: NotificationAction) => {
       executeAction(notificationId, action)
     },
     [executeAction],
   )
+
+  /**
+   * 面板打开时：临时解除 body overflow:hidden + 阻止 wheel 冒泡
+   * 面板关闭时：恢复 body 原始 overflow
+   *
+   * 这是解决滚轮无法滚动的关键修复：
+   * 浏览器合成器线程看到 body overflow:hidden 后会直接消费真实滚轮事件，
+   * 不会传递到 JS 层。临时改为 overflow:visible 后合成器允许事件传递。
+   * 同时阻止 wheel 冒泡，防止页面内容跟着滚动。
+   */
+  useEffect(() => {
+    if (!isPanelOpen) return
+
+    const originalOverflow = document.body.style.overflow
+    const originalRootOverflow = document.documentElement.style.overflow
+
+    document.body.style.overflow = 'visible'
+    document.documentElement.style.overflow = 'visible'
+
+    const stopWheelPropagation = (e: WheelEvent) => {
+      if (panelRef.current?.contains(e.target as Node)) {
+        e.stopPropagation()
+      }
+    }
+
+    document.addEventListener('wheel', stopWheelPropagation, true)
+
+    return () => {
+      document.body.style.overflow = originalOverflow
+      document.documentElement.style.overflow = originalRootOverflow
+      document.removeEventListener('wheel', stopWheelPropagation, true)
+    }
+  }, [isPanelOpen])
+
+  /** 点击面板外部关闭 */
+  useEffect(() => {
+    if (!isPanelOpen) return
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (triggerRef.current?.contains(target)) return
+      if (panelRef.current?.contains(target)) return
+      closePanel()
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isPanelOpen, closePanel])
+
+  /** ESC 关闭面板 */
+  useEffect(() => {
+    if (!isPanelOpen) return
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closePanel()
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [isPanelOpen, closePanel])
 
   /** 渲染阻塞式通知模态框 */
   const renderBlockingDialog = () => {
@@ -270,35 +322,30 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
   return (
     <>
       {renderBlockingDialog()}
-
       {renderTrigger()}
 
-      {/*
-        通知中心面板 - 使用 Radix Dialog 渲染为右侧滑出面板
-        BUG-FIX-fix_20260522_notification_scroll_v2:
-        使用 Radix Dialog 的 Portal + 事件管理系统替代自定义 createPortal，
-        解决 body overflow:hidden 导致的 wheel 事件拦截、面板无法滚动问题。
-        modal={false} 避免焦点陷阱，手动添加 overlay 实现点击外部关闭。
-      */}
-      <Dialog open={isPanelOpen} onOpenChange={(open) => { if (!open) closePanel() }} modal={false}>
-        <DialogPortal>
+      {isPanelOpen && createPortal(
+        <>
           <div
-            className="fixed inset-0 z-40 bg-black/10"
+            className="fixed inset-0 bg-black/10"
+            style={{ zIndex: 9998 }}
             onClick={closePanel}
             data-testid="notification-overlay"
           />
-          <DialogPrimitive.Content
+          <div
+            ref={panelRef}
             className={cn(
-              'fixed right-0 top-0 bottom-0 z-50 w-[400px] max-w-[85vw]',
+              'fixed right-0 top-0',
               'bg-background border-l border-border shadow-2xl',
-              'flex flex-col h-full',
-              'data-[state=open]:animate-in data-[state=closed]:animate-out',
-              'data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right',
-              'duration-200',
-              'focus:outline-none',
+              'flex flex-col',
               className,
             )}
-            onEscapeKeyDown={closePanel}
+            style={{
+              zIndex: 9999,
+              width: '400px',
+              maxWidth: '85vw',
+              height: '100vh',
+            }}
             data-testid="notification-center-panel"
           >
             <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
@@ -333,7 +380,11 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto overscroll-contain p-3">
+            <div
+              className="flex-1 overflow-y-auto p-3"
+              style={{ minHeight: 0 }}
+              data-testid="notification-scroll-area"
+            >
               {hasNotifications ? (
                 PRIORITY_ORDER.map(renderGroup)
               ) : (
@@ -343,9 +394,10 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
                 </div>
               )}
             </div>
-          </DialogPrimitive.Content>
-        </DialogPortal>
-      </Dialog>
+          </div>
+        </>,
+        document.body,
+      )}
     </>
   )
 }

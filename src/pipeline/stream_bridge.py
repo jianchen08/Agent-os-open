@@ -169,6 +169,22 @@ class PipelineStreamBridge:
         """发送哨兵值 None 终止 drain_loop。"""
         self._queue.put_nowait(None)
 
+    def _make_event(self, event_type: str, data: dict) -> dict:
+        """构造事件字典，自动注入 pipeline_id 和 message_id。
+
+        使用 setdefault 避免覆盖调用方显式传入的值。
+
+        Args:
+            event_type: 事件类型字符串
+            data: 事件的 data 字段内容
+
+        Returns:
+            完整的事件字典 {"type": ..., "data": ...}
+        """
+        data.setdefault("pipeline_id", self.pipeline_id)
+        data.setdefault("message_id", self.message_id)
+        return {"type": event_type, "data": data}
+
     async def _send_event(self, event: dict) -> bool:
         """通过 output_sink 发送事件，记录发送失败日志。
 
@@ -188,21 +204,24 @@ class PipelineStreamBridge:
         return success
 
     async def _send_stream_start(self) -> None:
-        """发送 stream_start 事件，通知前端开始接收流式输出。"""
+        """发送 stream_start 事件，通知前端开始接收流式输出。
+
+        BUG-FIX-fix_20260523_pipeline_id_in_events:
+        确保 stream_start 事件中 pipeline_id 始终存在，
+        _threadId 仅作为辅助路由信息。
+        """
         self._stream_started = True
         logger.info(
             "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s",
             self.message_id[:12], self.pipeline_id[:12],
             getattr(self.output_sink, 'sink_id', '?'), type(self.output_sink).__name__,
         )
-        success = await self._send_event({
-            "type": "stream_start",
-            "data": {
-                "message_id": self.message_id,
-                "pipeline_id": self.pipeline_id,
-                "_threadId": self.output_sink._thread_id if hasattr(self.output_sink, '_thread_id') else None,
-            },
-        })
+        success = await self._send_event(self._make_event("stream_start", {
+            "message_id": self.message_id,
+            "pipeline_id": self.pipeline_id,
+            # _threadId 仅作为辅助路由信息，前端不应依赖此字段
+            "_threadId": getattr(self.output_sink, '_thread_id', None),
+        }))
         logger.info(
             "DEBUG _send_stream_start result: success=%s msg=%s pipeline=%s",
             success, self.message_id[:12], self.pipeline_id[:12],
@@ -216,14 +235,9 @@ class PipelineStreamBridge:
         """
         if self._thinking_active:
             self._thinking_active = False
-            await self._send_event({
-                "type": "thinking_end",
-                "data": {
-                    "message_id": self.message_id,
-                    "duration_ms": duration_ms,
-                    "pipeline_id": self.pipeline_id,
-                },
-            })
+            await self._send_event(self._make_event("thinking_end", {
+                "duration_ms": duration_ms,
+            }))
 
     async def _handle_chunk(self, chunk: dict) -> None:
         """处理单个 chunk 事件，转换为前端协议格式并发送。
@@ -238,15 +252,10 @@ class PipelineStreamBridge:
             self._accumulated_content.append(content)
             _text_seq = self._seq
             self._seq += 1
-            await self._send_event({
-                "type": "stream_chunk",
-                "data": {
-                    "message_id": self.message_id,
-                    "content": content,
-                    "pipeline_id": self.pipeline_id,
-                    "sequence": _text_seq,
-                },
-            })
+            await self._send_event(self._make_event("stream_chunk", {
+                "content": content,
+                "sequence": _text_seq,
+            }))
 
         elif chunk_type == "thinking" and content:
             self._thinking_content_parts.append(content)
@@ -254,22 +263,12 @@ class PipelineStreamBridge:
                 self._thinking_active = True
                 _thinking_seq = self._seq
                 self._seq += 1
-                await self._send_event({
-                    "type": "thinking_start",
-                    "data": {
-                        "message_id": self.message_id,
-                        "pipeline_id": self.pipeline_id,
-                        "sequence": _thinking_seq,
-                    },
-                })
-            await self._send_event({
-                "type": "thinking_chunk",
-                "data": {
-                    "message_id": self.message_id,
-                    "content": content,
-                    "pipeline_id": self.pipeline_id,
-                },
-            })
+                await self._send_event(self._make_event("thinking_start", {
+                    "sequence": _thinking_seq,
+                }))
+            await self._send_event(self._make_event("thinking_chunk", {
+                "content": content,
+            }))
 
         elif chunk_type == "thinking_end":
             await self._close_thinking_if_active(chunk.get("duration_ms"))
@@ -283,17 +282,12 @@ class PipelineStreamBridge:
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
                 chunk.get('tool_name'), _call_id, _seq, self.pipeline_id[:12],
             )
-            await self._send_event({
-                "type": "tool_start",
-                "data": {
-                    "message_id": self.message_id,
-                    "tool_name": chunk.get("tool_name", "unknown"),
-                    "args": chunk.get("args"),
-                    "call_id": chunk.get("call_id"),
-                    "sequence": _seq,
-                    "pipeline_id": self.pipeline_id,
-                },
-            })
+            await self._send_event(self._make_event("tool_start", {
+                "tool_name": chunk.get("tool_name", "unknown"),
+                "args": chunk.get("args"),
+                "call_id": chunk.get("call_id"),
+                "sequence": _seq,
+            }))
 
         elif chunk_type == "tool_result":
             _result_call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
@@ -305,42 +299,27 @@ class PipelineStreamBridge:
                 self._sent_tool_starts.add(_result_call_id)
                 _fixup_seq = self._seq
                 self._seq += 1
-                await self._send_event({
-                    "type": "tool_start",
-                    "data": {
-                        "message_id": self.message_id,
-                        "tool_name": chunk.get("tool_name", "unknown"),
-                        "args": None,
-                        "call_id": chunk.get("call_id"),
-                        "sequence": _fixup_seq,
-                        "pipeline_id": self.pipeline_id,
-                    },
-                })
-            await self._send_event({
-                "type": "tool_result",
-                "data": {
-                    "message_id": self.message_id,
+                await self._send_event(self._make_event("tool_start", {
                     "tool_name": chunk.get("tool_name", "unknown"),
-                    "success": chunk.get("success", True),
-                    "result": chunk.get("result"),
-                    "duration_ms": chunk.get("duration_ms"),
+                    "args": None,
                     "call_id": chunk.get("call_id"),
-                    "pipeline_id": self.pipeline_id,
-                },
-            })
+                    "sequence": _fixup_seq,
+                }))
+            await self._send_event(self._make_event("tool_result", {
+                "tool_name": chunk.get("tool_name", "unknown"),
+                "success": chunk.get("success", True),
+                "result": chunk.get("result"),
+                "duration_ms": chunk.get("duration_ms"),
+                "call_id": chunk.get("call_id"),
+            }))
 
         elif chunk_type == "iteration":
             # 迭代开始时关闭旧的 thinking
             await self._close_thinking_if_active(None)
-            await self._send_event({
-                "type": "iteration",
-                "data": {
-                    "message_id": self.message_id,
-                    "iteration": chunk.get("iteration", 0),
-                    "max_iterations": chunk.get("max_iterations", 0),
-                    "pipeline_id": self.pipeline_id,
-                },
-            })
+            await self._send_event(self._make_event("iteration", {
+                "iteration": chunk.get("iteration", 0),
+                "max_iterations": chunk.get("max_iterations", 0),
+            }))
 
     async def drain_loop(
         self,
@@ -405,21 +384,18 @@ class PipelineStreamBridge:
                     and suspend_check()
                 )
 
-                # 心跳保活
-                if heartbeat_callback is not None and now - last_keepalive > heartbeat_interval:
+                # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
+                if now - last_keepalive > heartbeat_interval:
                     last_keepalive = now
+                    # 仅在 heartbeat_callback 有值时调用回调
+                    if heartbeat_callback is not None:
+                        try:
+                            await heartbeat_callback()
+                        except Exception:
+                            pass
+                    # keepalive 事件始终发送，防止前端因长时间无 chunk 而超时
                     try:
-                        await heartbeat_callback()
-                    except Exception:
-                        pass
-                    try:
-                        await self._send_event({
-                            "type": "stream_keepalive",
-                            "data": {
-                                "message_id": self.message_id,
-                                "pipeline_id": self.pipeline_id,
-                            },
-                        })
+                        await self._send_event(self._make_event("stream_keepalive", {}))
                     except Exception:
                         pass
 
@@ -438,15 +414,10 @@ class PipelineStreamBridge:
                             await self._close_thinking_if_active(None)
                             full_content = "".join(self._accumulated_content)
                             try:
-                                await self._send_event({
-                                    "type": "stream_end",
-                                    "data": {
-                                        "message_id": self.message_id,
-                                        "full_content": full_content,
-                                        "pipeline_id": self.pipeline_id,
-                                        "timed_out": True,
-                                    },
-                                })
+                                await self._send_event(self._make_event("stream_end", {
+                                    "full_content": full_content,
+                                    "timed_out": True,
+                                }))
                             except Exception as _send_err:
                                 logger.debug("超时 stream_end 发送失败: %s", _send_err)
                             return {
@@ -468,14 +439,15 @@ class PipelineStreamBridge:
 
             if _chunk_type == "pipeline_suspended":
                 await self._close_thinking_if_active(None)
-                await self._send_event({
-                    "type": "state_change",
-                    "data": {
-                        "status": "suspended",
-                        "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
-                        "thread_id": self._thread_id or "",
-                    },
-                })
+                await self._send_event(self._make_event("state_change", {
+                    "status": "suspended",
+                    "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
+                    # BUG-FIX-fix_20260523_thread_id_attr:
+                    # 问题根因: self._thread_id 在 PipelineStreamBridge 上不存在（仅在 TargetedSink 上），
+                    #   管道挂起时访问该属性会抛出 AttributeError。
+                    # 修复方案: 使用 getattr 从 output_sink 安全获取 _thread_id。
+                    "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
+                }))
                 logger.info(
                     "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
                     self.pipeline_id[:12],
@@ -496,14 +468,9 @@ class PipelineStreamBridge:
 
         # 4. 发送 stream_end
         full_content = "".join(self._accumulated_content)
-        _end_ok = await self._send_event({
-            "type": "stream_end",
-            "data": {
-                "message_id": self.message_id,
-                "full_content": full_content,
-                "pipeline_id": self.pipeline_id,
-            },
-        })
+        _end_ok = await self._send_event(self._make_event("stream_end", {
+            "full_content": full_content,
+        }))
         logger.info(
             "drain_loop: stream_end %s: msg=%s pipeline=%s content=%d chars chunks=%d/%d",
             "OK" if _end_ok else "FAILED",
@@ -545,14 +512,10 @@ class PipelineStreamBridge:
                     self.pipeline_id[:12],
                 )
 
-        await self._send_event({
-            "type": "new_message",
-            "data": {
-                "id": self.message_id,
-                "role": "assistant",
-                "content": effective_content,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "sequence": sequence,
-                "pipeline_id": self.pipeline_id,
-            },
-        })
+        await self._send_event(self._make_event("new_message", {
+            "id": self.message_id,
+            "role": "assistant",
+            "content": effective_content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sequence": sequence,
+        }))

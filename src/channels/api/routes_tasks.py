@@ -688,6 +688,34 @@ def _cancel_running_pipeline(task_id: str) -> bool:
         return False
 
 
+def _cancel_child_pipelines(task_id: str, task_service: Any) -> int:
+    """递归取消任务及其所有子任务的运行中管道。
+
+    cancel_task_cascade 只将子任务状态标记为 failed，
+    不会取消子任务关联的 PipelineEngine。此函数补充这一缺失，
+    确保级联取消时所有子管道也被停止。
+
+    Args:
+        task_id: 父任务 ID
+        task_service: TaskService 实例
+
+    Returns:
+        成功取消的管道数量
+    """
+    cancelled = 0
+    try:
+        subtasks = task_service.list_subtasks(task_id)
+    except Exception:
+        return 0
+
+    for subtask in subtasks:
+        if _cancel_running_pipeline(subtask.id):
+            cancelled += 1
+        cancelled += _cancel_child_pipelines(subtask.id, task_service)
+
+    return cancelled
+
+
 @router.post(
     "/{task_id}/pause",
     summary="暂停任务",
@@ -901,11 +929,12 @@ async def cancel_task(
     # 步骤1: 将任务标记为 failed（记录取消原因）
     await task_service.fail_task(task_id, reason=f"已取消: {reason}")
 
-    # 步骤2: 取消运行中的 PipelineEngine 协程
-    pipeline_cancelled = _cancel_running_pipeline(task_id)
-
-    # 步骤3: 级联取消所有子任务
+    # 步骤2: 级联取消所有子任务
     cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
+
+    # 步骤3: 取消父任务及其所有子任务的运行中管道
+    pipeline_cancelled = _cancel_running_pipeline(task_id)
+    _cancel_child_pipelines(task_id, task_service)
 
     logger.info(
         "用户 %s 取消任务 %s (pipeline_cancelled=%s, cascaded=%d)",

@@ -1276,7 +1276,7 @@ class TaskTool(BuiltinTool):
 
         通过统一的 send_pipeline_message() 入口将消息投递到目标管道，
         由 pipeline 内部根据当前状态（运行中/挂起/未启动）自动选择
-        最优投递路径（双通道注入 / inject_message）。
+        最优投递路径（双通道注入 / inject_and_wake）。
 
         Args:
             inputs: 工具输入参数，需包含 task_id 和 message
@@ -1526,8 +1526,9 @@ class TaskTool(BuiltinTool):
                     }
                     _parent_pid = getattr(task, "parent_pipeline_id", "") or ""
                     _ws_tid = ""
-                    if _parent_pid and hasattr(_ws_notifier, "get_thread_for_pipeline"):
-                        _ws_tid = _ws_notifier.get_thread_for_pipeline(_parent_pid)
+                    if _parent_pid:
+                        from pipeline.registry import get_engine_registry
+                        _ws_tid = get_engine_registry().get_thread_id(_parent_pid)
                     if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
                         await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
                         logger.debug("[TaskTool] task_deleted 已通过 send_to_thread 发送 | task_id=%s", task_id)

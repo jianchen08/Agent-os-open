@@ -227,6 +227,12 @@ class WorkspaceService:
         except Exception:
             return set()
 
+    _WINDOWS_RESERVED_NAMES = frozenset({
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    })
+
     def _scan_directory(
         self,
         path: str,
@@ -249,17 +255,37 @@ class WorkspaceService:
             return []
 
         nodes: list[FileTreeNode] = []
+        # BUG-FIX-fix_20260523_001: 扩展异常捕获范围
+        # 问题根因: os.listdir 在 Windows 上对特殊设备路径可能抛出 OSError
+        #           而非 PermissionError，导致未捕获异常向上传播，API 返回 500。
+        # 修复方案: 同时捕获 PermissionError 和 OSError，确保任何文件系统级别的
+        #           访问错误都能被安全处理。
         try:
             entries = sorted(os.listdir(path))
-        except PermissionError:
+        except (PermissionError, OSError):
             return []
 
         for entry in entries:
             if entry.startswith(".") or entry == "__pycache__":
                 continue
 
+            stem = entry.split(".")[0].upper()
+            if stem in self._WINDOWS_RESERVED_NAMES:
+                continue
+
             full_path = os.path.join(path, entry)
-            rel_path = os.path.relpath(full_path, base_path)
+
+            # BUG-FIX-fix_20260523_001: 过滤 Windows 设备路径
+            # 问题根因: Windows 上 os.path.isdir 对设备路径（如 \\.\xxx）可能返回
+            #           True，导致递归调用 _scan_directory 时传入无效路径引发异常。
+            # 修复方案: 在 isdir 检查前，过滤以 \\.\ 开头的设备路径，跳过这些条目。
+            if full_path.startswith("\\\\.\\"):
+                continue
+
+            try:
+                rel_path = os.path.relpath(full_path, base_path)
+            except ValueError:
+                continue
 
             if os.path.isdir(full_path):
                 children = self._scan_directory(

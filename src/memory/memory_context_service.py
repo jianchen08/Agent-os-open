@@ -346,22 +346,50 @@ class MemoryContextService:
             len(old_blocks) // 2,
         )
 
-        # 压缩新消息 → L1 + L2 + keywords 三元组
-        comp_result = await self._build_compression_content(
-            old_msgs, context_window, budgets, previous_l1,
-        )
-        if not comp_result:
+        # 按压缩模型上下文窗口比例计算分片数
+        # 每片大小不超过 context_window * batch_ratio，超出则均分
+        old_tokens = sum(self._estimate_msg_tokens(m) for m in old_msgs)
+        batch_ratio = 0.5
+        batch_budget = int(context_window * batch_ratio)
+        num_batches = max(1, -(-old_tokens // batch_budget))  # ceil division
+
+        any_success = False
+        current_previous_l1 = previous_l1
+
+        for batch_idx in range(num_batches):
+            start = batch_idx * len(old_msgs) // num_batches
+            end = (batch_idx + 1) * len(old_msgs) // num_batches
+            batch = old_msgs[start:end]
+            if not batch:
+                continue
+
+            logger.info(
+                "[MemoryContextService] 分批压缩 %d/%d: %d 条消息",
+                batch_idx + 1, num_batches, len(batch),
+            )
+
+            comp_result = await self._build_compression_content(
+                batch, context_window, budgets, current_previous_l1,
+            )
+            if not comp_result:
+                logger.warning(
+                    "[MemoryContextService] 第 %d 批压缩失败", batch_idx + 1,
+                )
+                continue
+
+            if save_chunk_fn:
+                try:
+                    updated_bg = await save_chunk_fn(batch, comp_result)
+                    if updated_bg:
+                        current_previous_l1 = updated_bg
+                except Exception as exc:
+                    logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
+
+            any_success = True
+
+        if not any_success:
             return None
 
-        # 持久化
-        if save_chunk_fn:
-            try:
-                await save_chunk_fn(old_msgs, comp_result)
-            except Exception as exc:
-                logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
-
-        # 压缩内容已通过 save_chunk_fn 保存到 chunk_service，
-        # prompt_build 会从 chunk_service 统一加载，不在消息列表中重复返回
         return pure_system_msgs + recent_msgs
 
     def _downgrade_blocks_if_needed(

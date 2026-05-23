@@ -84,7 +84,7 @@ class ChildTaskGuard(IOutputPlugin):
 
         task_id = state.get("task_id")
         pipeline_id = state.get("pipeline_id", "")
-        has_active = self._has_active_children(pipeline_id, task_id, ctx)
+        has_active, active_ids = self._get_active_children(pipeline_id, task_id, ctx)
 
         if not has_active:
             logger.debug(
@@ -93,8 +93,6 @@ class ChildTaskGuard(IOutputPlugin):
             )
             return OutputResult()
 
-        # 只在 LLM 纯文本输出时挂起。tool_execute 阶段不挂起，
-        # 否则 LLM 没机会看到工具结果就被挂起了。
         if core_type != "llm_call":
             logger.debug(
                 "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
@@ -103,14 +101,6 @@ class ChildTaskGuard(IOutputPlugin):
             )
             return OutputResult()
 
-        # BUG-FIX-fix_20260506_child_task_guard_main_pipeline: 去掉 task_id is None 跳过逻辑
-        # 问题根因: CLI 主管道不传 task_id（为 None），导致 child_task_guard 不挂起，
-        # 管道在子任务完成前就退出，子任务完成通知无处可送（引擎已注销）。
-        # 修复方案: 无论是 CLI 主管道还是子任务管道，只要有活跃子任务就应挂起等待。
-        # 影响范围: CLI 交互模式和 run_single 模式的子任务提交流程
-        # 修复日期: 2026-05-06
-
-        # LLM 输出了新的 tool_call 时不挂起（Agent 还在工作）
         if state.get("raw_tool_calls"):
             logger.debug(
                 "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
@@ -121,11 +111,12 @@ class ChildTaskGuard(IOutputPlugin):
 
         logger.info(
             "ChildTaskGuard[iter=%s][pipeline=%s]: ACTIVE children found (%s), "
-            "suspending pipeline (wait signal)",
+            "suspending pipeline (wait signal), child_ids=%s",
             iteration, pipeline_id[:8] if pipeline_id else "none", core_type,
+            active_ids,
         )
         return OutputResult(
-            state_updates={},
+            state_updates={"submitted_task_ids": active_ids},
             route_signal=RouteSignal(
                 route_type="wait",
                 reason=f"child_task_guard: active children during {core_type}",
@@ -133,44 +124,48 @@ class ChildTaskGuard(IOutputPlugin):
             skip_remaining=True,
         )
 
-    def _has_active_children(
+    def _get_active_children(
         self, pipeline_id: str, task_id: str | None, ctx: PluginContext,
-    ) -> bool:
+    ) -> tuple[bool, list[str]]:
         """通过 parent_pipeline_id 或 parent_task_id 检查是否有活跃子任务。
 
         主路径：用当前 pipeline_id 查找 parent_pipeline_id 匹配的活跃子任务，
         统一 CLI 主管道和子任务管道两种场景。
         回退：用 task_id 查找子任务（兼容旧数据）。
+
+        Returns:
+            (has_active, active_child_ids) 元组
         """
         task_service = self._get_task_service(ctx)
         if task_service is None:
-            return False
+            return False, []
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
+        seen_ids: set[str] = set()
 
-        # 主路径：通过 parent_pipeline_id 查询
         if pipeline_id:
             try:
                 from tasks.types import TaskStatus as TS
                 for status_val in (TS.RUNNING, TS.PENDING, TS.EVALUATING):
                     for t in task_service.list_by_status(status_val):
                         if getattr(t, "parent_pipeline_id", None) == pipeline_id:
-                            return True
+                            seen_ids.add(t.id)
             except Exception as exc:
                 logger.warning("ChildTaskGuard: list_by_status query failed: %s", exc)
 
-        # 回退：通过 parent_task_id 查询（兼容旧任务无 parent_pipeline_id）
         if task_id:
             try:
                 subtasks = task_service.list_subtasks(task_id)
                 for st in subtasks:
                     status = st.status.value if hasattr(st.status, "value") else str(st.status)
                     if status in active_statuses:
-                        return True
+                        seen_ids.add(st.id)
             except Exception as exc:
                 logger.warning("ChildTaskGuard: list_subtasks failed: %s", exc)
 
-        return False
+        if seen_ids:
+            return True, list(seen_ids)
+        return False, []
 
     def _get_task_service(self, ctx: PluginContext) -> Any:
         """获取 TaskService 实例。

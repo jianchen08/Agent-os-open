@@ -6,7 +6,7 @@
  */
 
 import { MoreHorizontal, Pencil, Copy, Star, Pin, Trash2 } from 'lucide-react'
-import { lazy, Suspense, useEffect, useState, useCallback, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { ChatContainer } from './components/chat/ChatContainer'
 import { AppHeader } from './components/layout/AppHeader'
@@ -42,6 +42,8 @@ import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { Message } from './types/models'
 import type { ReactNode } from 'react'
+
+const EMPTY_MESSAGES: Message[] = []
 
 const ModulesSettingsPage = lazy(() =>
   import('@/pages/settings/ModulesSettingsPage').then((m) => ({ default: m.ModulesSettingsPage })),
@@ -234,23 +236,21 @@ function HomePage(): ReactNode {
   }, [])
 
   /**
-   * 当前活跃会话的消息列表（从 pipelineMessageStore 读取）
+   * 当前活跃会话的消息列表（从 pipelineMessageStore 响应式读取）
    *
-   * BUG-FIX-fix_20260513_msg_not_realtime:
-   * 问题根因: useMemo 只依赖 activeSessionId，但内部用 session ID 而非 pipeline ID
-   *          作为 getMessages 的 key，导致在主管道场景下永远返回空数组。
-   * 修复方案: 改用 activePipelineId 作为主要查询 key，并添加为依赖项，
-   *          确保管道切换时重新计算消息列表。
-   * 影响范围: ChatContainer 接收的 messages prop
-   * 修复日期: 2026-05-13
+   * BUG-FIX-fix_20260522_msg_disappear:
+   * 问题根因: useMemo 内部使用 getState().getMessages() 直接读取快照，
+   *          不是响应式 selector，WS 事件更新 store 后组件不会重新渲染。
+   * 修复方案: 改为响应式 selector，直接订阅 messagesByPipeline 变化，
+   *          store 更新时组件自动重渲染。
    */
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
-  const activeMessages = useMemo(
-    () => {
-      const pid = activePipelineId || activeSessionId
-      return pid ? usePipelineMessageStore.getState().getMessages(pid) : []
+  const routerMessages = usePipelineMessageStore(
+    (s) => {
+      const pid = s.activePipelineId || activeSessionId
+      if (!pid) return EMPTY_MESSAGES
+      return s.messagesByPipeline[pid] || EMPTY_MESSAGES
     },
-    [activePipelineId, activeSessionId],
   )
 
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
@@ -569,11 +569,11 @@ function HomePage(): ReactNode {
   const chatContent = activeSessionId ? (
     <ChatContainer
       sessionId={activeSessionId}
-      messages={activeMessages}
+      messages={routerMessages}
       isLoading={isSessionLoading}
       // NOTE: ChatContainer 内部使用 effectiveIsGenerating (基于 activePipelineId)
       // 此 prop 仅作兼容保留，实际不影响输入框状态
-      isGenerating={activeSessionId ? (streamingTabs[usePipelineMessageStore.getState().activePipelineId || ''] ?? false) : false}
+      isGenerating={false}
       modelName={modelName}
       onSendMessage={handleSendMessage}
       onStopGenerate={handleStopGenerate}
