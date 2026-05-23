@@ -171,15 +171,24 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
 
       /**
        * 取消长期任务
+       *
+       * BUG-FIX-fix_20260523_cancel_task:
+       * 问题根因: 原代码将后端响应当作完整 Task 直接替换 store 中的任务，
+       *           但后端返回的是 TaskResponse（字段有限），导致 title/goal 等字段丢失。
+       * 修复方案: 将后端响应与现有任务数据合并，保留原有字段，仅更新变更的字段。
+       * 影响范围: 前端取消任务功能。
+       * 修复日期: 2026-05-23
        */
       cancelTask: async (taskId: string, reason?: string) => {
         set({ error: null })
 
         try {
-          const updatedTask = await longTermTaskApi.cancelLongTermTask(taskId, reason)
+          const responseData = await longTermTaskApi.cancelLongTermTask(taskId, reason)
 
           set((state) => ({
-            tasks: state.tasks.map((task) => (task.id === taskId ? updatedTask : task)),
+            tasks: state.tasks.map((task) =>
+              task.id === taskId ? { ...task, ...responseData, status: 'cancelled' as const } : task
+            ),
           }))
         } catch (error) {
           const errorMessage = getErrorMessage(error, '取消长期任务失败')

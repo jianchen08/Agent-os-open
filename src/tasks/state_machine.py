@@ -107,7 +107,7 @@ _TASK_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["scheduled", "running", "cancelled", "paused"],
     "scheduled": ["running", "cancelled"],
     "running": ["evaluating", "completed", "failed", "suspended", "blocked", "cancelled", "paused"],
-    "evaluating": ["completed", "failed", "running"],
+    "evaluating": ["completed", "failed", "running", "cancelled"],
     "suspended": ["running", "cancelled", "timeout"],
     "blocked": ["running", "cancelled", "failed"],
     "completed": [],

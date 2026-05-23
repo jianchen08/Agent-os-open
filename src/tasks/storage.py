@@ -439,3 +439,65 @@ class TaskStorage:
         task.updated_at = datetime.now().isoformat()
         self._persist_task(task)
         return task
+
+    # BUG-FIX-fix_20260523_cancel_task:
+    # 问题根因: routes_tasks.py 的 cancel 端点通过 _get_task_service() 获取 TaskStorage 实例，
+    #           但 TaskStorage 缺少 cancel_task 和 cancel_task_cascade 方法，
+    #           导致取消操作调用 fail_task (也不存在于 TaskStorage) 或直接报 AttributeError。
+    # 修复方案: 参照 pause_task/resume_task 的模式，在 TaskStorage 中添加 cancel_task 和
+    #           cancel_task_cascade 方法，设置状态为 CANCELLED 并持久化。
+    # 影响范围: 任务取消功能，routes_tasks.py 的 cancel 端点。
+    # 修复日期: 2026-05-23
+    async def cancel_task(self, task_id: str, reason: str = "") -> None:
+        """取消任务，将状态设为 CANCELLED。
+
+        通过状态机校验转换合法性后更新状态。
+
+        Args:
+            task_id: 任务 ID
+            reason: 取消原因
+
+        Raises:
+            KeyError: 任务不存在
+            InvalidTransitionError: 状态不允许取消
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        from tasks.state_machine import SimpleStateMachine, _TASK_TRANSITIONS
+        sm = SimpleStateMachine(
+            initial_state=task.status.value,
+            transitions=_TASK_TRANSITIONS,
+        )
+        sm.transition("cancelled")
+        task.status = TaskStatus.CANCELLED
+        task.updated_at = datetime.now().isoformat()
+        if reason:
+            task.metadata["cancel_reason"] = reason
+        self._persist_task(task)
+
+    async def cancel_task_cascade(self, task_id: str, reason: str = "") -> int:
+        """级联取消指定任务的所有子任务。
+
+        将所有子任务状态设为 CANCELLED 并递归处理更深层级。
+
+        Args:
+            task_id: 父任务 ID
+            reason: 取消原因
+
+        Returns:
+            被级联取消的子任务数量
+        """
+        subtasks = self.list_by_parent(task_id)
+        cancelled_count = 0
+
+        for subtask in subtasks:
+            await self.cancel_task(
+                subtask.id,
+                reason=f"父任务取消，级联取消: {reason}" if reason else "父任务取消，级联取消",
+            )
+            cancelled_count += 1
+            deeper_count = await self.cancel_task_cascade(subtask.id, reason=reason)
+            cancelled_count += deeper_count
+
+        return cancelled_count

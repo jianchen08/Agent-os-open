@@ -931,8 +931,13 @@ async def cancel_task(
 
     reason = (body or {}).get("reason", "用户请求取消")
 
-    # 步骤1: 将任务标记为 failed（记录取消原因）
-    await task_service.fail_task(task_id, reason=f"已取消: {reason}")
+    # BUG-FIX-fix_20260523_cancel_task:
+    # 问题根因: 原代码调用 fail_task 将状态设为 FAILED，无法区分"取消"和"失败"。
+    # 修复方案: 改用 cancel_task 方法，将状态设为 CANCELLED。
+    # 影响范围: 任务取消功能，前端状态展示。
+    # 修复日期: 2026-05-23
+    # 步骤1: 将任务标记为 cancelled（记录取消原因）
+    await task_service.cancel_task(task_id, reason=f"已取消: {reason}")
 
     # 步骤2: 级联取消所有子任务
     cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
@@ -945,6 +950,26 @@ async def cancel_task(
         "用户 %s 取消任务 %s (pipeline_cancelled=%s, cascaded=%d)",
         _user.get("username"), task_id, pipeline_cancelled, cascaded,
     )
+
+    # BUG-FIX-fix_20260523_cancel_task:
+    # 问题根因: 原返回格式为 {success, task_id, cancelled, message, cascaded_subtasks}，
+    #           但前端 cancelLongTermTask 将响应当作 Task 对象直接替换 store 中的任务，
+    #           导致任务数据被损坏（字段缺失）。
+    # 修复方案: 获取更新后的任务数据，使用 _task_to_response 格式化后返回 Task 对象格式。
+    # 影响范围: 前端取消任务后的数据展示。
+    # 修复日期: 2026-05-23
+    updated_task = task_service.get_task(task_id)
+    if updated_task is not None:
+        from dataclasses import asdict as _asdict
+        task_dict = _asdict(updated_task)
+        raw_status = updated_task.status.value if hasattr(updated_task.status, "value") else str(updated_task.status)
+        task_dict["status"] = _map_status_for_api(raw_status)
+        if hasattr(updated_task, "priority") and hasattr(updated_task.priority, "value"):
+            task_dict["priority"] = updated_task.priority.value
+        if hasattr(updated_task, "agent_level") and hasattr(updated_task.agent_level, "value"):
+            task_dict["agent_level"] = updated_task.agent_level.value
+        return _task_to_response(task_dict)
+
     return {
         "success": True,
         "task_id": task_id,

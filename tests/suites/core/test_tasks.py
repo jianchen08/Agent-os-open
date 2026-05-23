@@ -31,10 +31,11 @@ class TestTaskStatus:
     """TaskStatus 枚举测试。"""
 
     def test_six_states(self) -> None:
-        """6 种状态全部存在。"""
-        assert len(TaskStatus) == 6
+        """7 种状态全部存在。"""
+        assert len(TaskStatus) == 7
         assert TaskStatus.PENDING.value == "pending"
         assert TaskStatus.COMPLETED.value == "completed"
+        assert TaskStatus.CANCELLED.value == "cancelled"
 
     def test_from_value(self) -> None:
         """从字符串值反序列化。"""

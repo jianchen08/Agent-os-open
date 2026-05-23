@@ -108,12 +108,20 @@ export async function resumeLongTermTask(taskId: string): Promise<Task> {
 /**
  * 取消长期任务
  *
+ * BUG-FIX-fix_20260523_cancel_task:
+ * 问题根因: 原函数将后端响应当作完整 Task 对象返回，但后端 cancel 端点
+ *           返回的是 TaskResponse 格式（字段有限），store 直接替换导致任务数据丢失。
+ * 修复方案: 返回后端响应（可能是 TaskResponse 或 fallback dict），
+ *           由 store 层负责合并更新而非完整替换。
+ * 影响范围: 前端取消任务功能。
+ * 修复日期: 2026-05-23
+ *
  * @param taskId 任务 ID
  * @param reason 取消原因（可选）
- * @returns 更新后的任务
+ * @returns 后端响应数据（包含 id 和 status 等字段）
  */
-export async function cancelLongTermTask(taskId: string, reason?: string): Promise<Task> {
-  const response = await apiClient.post<Task>(`/api/v1/tasks/${taskId}/cancel`, {
+export async function cancelLongTermTask(taskId: string, reason?: string): Promise<Partial<Task>> {
+  const response = await apiClient.post<Partial<Task>>(`/api/v1/tasks/${taskId}/cancel`, {
     reason: reason || '用户取消',
   })
   return response.data
@@ -150,12 +158,18 @@ export function taskToProject(task: Task) {
  * 映射 Task 状态到 Project 状态
  */
 function mapTaskStatusToProjectStatus(status: TaskStatus): string {
-  const statusMap: Record<TaskStatus, string> = {
+  const statusMap: Record<string, string> = {
     pending: 'planning',
     in_progress: 'running',
+    running: 'running',
+    evaluating: 'running',
+    scheduled: 'planning',
     blocked: 'paused',
+    suspended: 'paused',
     completed: 'completed',
     failed: 'failed',
+    cancelled: 'failed',
+    timeout: 'failed',
   }
 
   return statusMap[status] || 'planning'
