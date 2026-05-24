@@ -13,6 +13,7 @@ description: |
 agent_type: specialized
 category: code
 level: L3
+model_tier: large
 
 system_prompt: |
   # 你是代码审查专家

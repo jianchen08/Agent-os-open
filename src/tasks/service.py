@@ -478,6 +478,14 @@ class TaskService:
         task.updated_at = datetime.now().isoformat()
         if reason:
             task.metadata["fail_reason"] = reason
+            # BUG-FIX-fix_20260524_error_not_propagated:
+            # 问题根因: fail_task 只将失败原因写入 metadata["fail_reason"]，
+            #   不写入 task.error 字段。前端和 API 读取 task.error 展示错误信息，
+            #   导致任务失败后前端看不到失败原因，状态显示不完整。
+            # 修复方案: 同时写入 task.error 字段，确保前端能正确展示失败原因。
+            # 影响范围: 所有调用 fail_task 的场景（管道异常、超时、工作空间失败等）。
+            # 修复日期: 2026-05-24
+            task.error = reason
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "failed")
@@ -607,7 +615,29 @@ class TaskService:
         if passed:
             await self.complete_task(task_id)
         else:
-            await self.fail_task(task_id)
+            # BUG-FIX-fix_20260524_error_not_propagated:
+            # 问题根因: complete_evaluation 评估不通过时调用 fail_task(task_id) 不传 reason，
+            #   导致任务被标记为 FAILED 但没有任何失败原因记录（error 和 metadata 都为空）。
+            # 修复方案: 从 result 中提取失败摘要作为 reason，确保有可追溯的失败原因。
+            # 影响范围: task_evaluate 工具评估不通过时的任务状态。
+            # 修复日期: 2026-05-24
+            _eval_reason = ""
+            if isinstance(result, dict):
+                summary = result.get("summary", "")
+                if summary:
+                    _eval_reason = f"评估未通过: {summary}"
+                else:
+                    failed_metrics = []
+                    for m in result.get("metrics", []):
+                        if isinstance(m, dict) and not m.get("passed", True):
+                            mid = m.get("metric_id", "unknown")
+                            msg = m.get("message", m.get("error", ""))
+                            failed_metrics.append(f"{mid}: {msg}" if msg else mid)
+                    if failed_metrics:
+                        _eval_reason = f"评估未通过: {', '.join(failed_metrics)}"
+            if not _eval_reason:
+                _eval_reason = "评估未通过"
+            await self.fail_task(task_id, reason=_eval_reason)
 
     async def reset_to_pending(self, task_id: str) -> None:
         """将任务重置为 pending 状态（用于恢复/重试）。
