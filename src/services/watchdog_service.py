@@ -109,13 +109,34 @@ class WatchdogServiceManager:
     ):
         logger.info(f"任务管理器回调: 启动任务 {task_id} (项目: {project_id})")
 
-        from src.infrastructure.task_launcher import launch_task
+        from infrastructure.service_provider import get_service_provider
 
         try:
-            schedule_result = await launch_task(task_id)
+            task_worker = get_service_provider().get("task_worker")
+            if not task_worker:
+                return {
+                    "status": "failed",
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "message": "后台执行器不可用",
+                    "error": "task_worker not available",
+                }
 
-            if schedule_result.get("success"):
-                logger.info(f"任务 {task_id} 已通过统一调度入口启动")
+            task_service = self._task_service
+            task_obj = task_service.get_task(task_id) if task_service else None
+            task_data = {
+                "task_id": task_id,
+                "target_type": getattr(task_obj, "target_type", "agent") or "agent" if task_obj else "agent",
+                "target_id": task_obj.metadata.get("target_id", "") if task_obj and task_obj.metadata else "",
+                "user_input": getattr(task_obj, "title", "") or "" if task_obj else "",
+                "description": getattr(task_obj, "description", "") or "" if task_obj else "",
+                "acceptance_criteria": task_obj.metadata.get("acceptance_criteria", {}) if task_obj and task_obj.metadata else {},
+                "workspace": task_obj.metadata.get("workspace", "") if task_obj and task_obj.metadata else "",
+            }
+
+            success = task_worker.submit_task(task_data)
+            if success:
+                logger.info(f"任务 {task_id} 已提交到后台执行器")
                 return {
                     "status": "success",
                     "task_id": task_id,
@@ -123,14 +144,12 @@ class WatchdogServiceManager:
                     "message": "任务已成功启动",
                 }
             else:
-                error = schedule_result.get("error", "未知错误")
-                logger.warning(f"任务 {task_id} 启动失败: {error}")
                 return {
                     "status": "failed",
                     "task_id": task_id,
                     "project_id": project_id,
-                    "message": f"任务启动失败: {error}",
-                    "error": error,
+                    "message": "后台执行器拒绝提交",
+                    "error": "submit_task returned False",
                 }
 
         except Exception as e:
@@ -163,17 +182,18 @@ class WatchdogServiceManager:
         if not self._pending_tasks:
             return {"processed": 0, "succeeded": 0, "failed": 0, "remaining": 0}
 
-        from src.infrastructure.task_launcher import launch_task
+        from infrastructure.service_provider import get_service_provider
 
         processed = 0
         succeeded = 0
         failed = 0
         still_pending = []
 
+        task_worker = get_service_provider().get("task_worker")
+
         for pending_task in self._pending_tasks:
             processed += 1
             task_id = pending_task["task_id"]
-            pending_task["project_id"]
 
             retry_count = pending_task.get("retry_count", 0)
             if retry_count >= 3:
@@ -182,8 +202,10 @@ class WatchdogServiceManager:
                 continue
 
             try:
-                schedule_result = await launch_task(task_id)
-                if schedule_result.get("success"):
+                if not task_worker:
+                    raise RuntimeError("task_worker not available")
+                success = task_worker.submit_task({"task_id": task_id})
+                if success:
                     logger.info(f"待处理任务 {task_id} 已通过统一调度入口启动")
                     succeeded += 1
                 else:

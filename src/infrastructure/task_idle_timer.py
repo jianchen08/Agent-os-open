@@ -47,6 +47,7 @@ class TaskIdleTimerMixin:
         Args:
             task_id: 超时的任务ID
         """
+        ctx = self._contexts.get(task_id)
         task_service = self._task_service
         if not task_service:
             logger.warning(
@@ -72,19 +73,20 @@ class TaskIdleTimerMixin:
                 " 状态: task_id=%s, status=%s",
                 task_id, status_str,
             )
-            self._active_tasks.discard(task_id)
-            self._idle_remind_counts.pop(task_id, None)
+            if ctx:
+                ctx.active = False
+                ctx.idle_remind_count = 0
             self._cancel_idle_timer_async(task_id)
             return
 
         idle_remind_limit = _IDLE_REMIND_LIMIT
-        remind_count = self._idle_remind_counts.get(task_id, 0)
+        remind_count = ctx.idle_remind_count if ctx else 0
 
         # BUG-FIX-fix_20260514_active_pipeline_deadlock:
         # 原逻辑: 管道活跃时直接取消 timer → 管道死亡后无检测机制 → 任务永远卡在 running
         # 新逻辑: 管道活跃时通过 checkpoint 文件龄判断是否真正存活，
         #         存活则重建 timer 继续监控，死亡则标记任务 failed
-        if task_id in self._active_tasks:
+        if ctx and ctx.active:
             timer_manager = self._services.get("timer_manager")
             idle_threshold = (
                 getattr(timer_manager, "idle_threshold", 300)
@@ -124,7 +126,7 @@ class TaskIdleTimerMixin:
                     task_id,
                 )
 
-        if task_id in self._suspended_engines:
+        if ctx and ctx.suspended_engine is not None:
             has_active_children = self._has_active_children(task_id)
 
             if has_active_children:
@@ -147,7 +149,7 @@ class TaskIdleTimerMixin:
                 return
 
             if remind_count < idle_remind_limit:
-                self._idle_remind_counts[task_id] = remind_count + 1
+                ctx.idle_remind_count = remind_count + 1
                 logger.info(
                     "TaskWorker: idle 超时但有挂起管道（无活跃子任务），"
                     "提醒 #%d: task_id=%s",
@@ -192,11 +194,9 @@ class TaskIdleTimerMixin:
                 "TaskWorker: 任务 idle 超时，已标记 failed: "
                 "task_id=%s", task_id,
             )
-            self._active_tasks.discard(task_id)
-            self._idle_remind_counts.pop(task_id, None)
-            evt = self._terminal_events.pop(task_id, None)
-            if evt is not None:
-                evt.set()
+            if ctx:
+                ctx.set_terminal()
+                ctx.cleanup(timer_mgr)
         except Exception as e:
             logger.error(
                 "TaskWorker: idle 超时处理失败: "
@@ -323,10 +323,10 @@ class TaskIdleTimerMixin:
                             "status=%s",
                             task_id, status,
                         )
-                        self._active_tasks.discard(task_id)
-                        self._idle_remind_counts.pop(
-                            task_id, None,
-                        )
+                        ctx = self._contexts.get(task_id)
+                        if ctx:
+                            ctx.active = False
+                            ctx.idle_remind_count = 0
                         return
             try:
                 await timer_manager.cancel_timer(task_id)
@@ -384,20 +384,18 @@ class TaskIdleTimerMixin:
 
         idle 超时回调是同步的，不能直接 await engine.resume()。
         旧方案通过 asyncio.create_task fire-and-forget 执行 resume，
-        存在竞态和异常静默问题。新方案标记 _resume_requested 并
+        存在竞态和异常静默问题。新方案标记 resume_requested 并
         直接 set wake_event，由主循环统一执行 resume，
         保证 engine 操作的串行性。
 
         Args:
             task_id: 挂起管道对应的任务 ID
         """
-        if task_id not in self._suspended_engines:
+        ctx = self._contexts.get(task_id)
+        if not ctx or ctx.suspended_engine is None:
             return
 
-        self._resume_requested[task_id] = True
+        ctx.resume_requested = True
         logger.debug("TaskWorker: resume requested for task %s", task_id)
 
-        # 直接 set wake_event 唤醒 while 循环，无需发虚假事件
-        wake_evt = self._wake_events.get(task_id)
-        if wake_evt is not None:
-            wake_evt.set()
+        ctx.wake_event.set()

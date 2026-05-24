@@ -22,12 +22,6 @@ from infrastructure.scheduler import (
 from infrastructure.stats import StatsCollector
 from pipeline.types import ErrorPolicy
 
-
-def launch_task(*args, **kwargs):
-    """延迟导入 launch_task，避免在模块加载时触发已移除的 src.db 依赖。"""
-    from infrastructure.task_launcher import launch_task as _launch_task
-    return _launch_task(*args, **kwargs)
-
 __all__ = [
     "close_engine",
     "ConcurrencyController",
@@ -46,5 +40,4 @@ __all__ = [
     "StatsCollector",
     "apply_error_policy",
     "create_message_id",
-    "launch_task",
 ]

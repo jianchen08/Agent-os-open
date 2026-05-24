@@ -29,7 +29,6 @@ class ToolExecutionResult(ExecutionResult[Any]):
     兼容属性（用于向后兼容旧的 ToolResult）：
     - data: 等同于 output
     - duration: duration_ms 转换为秒
-    - result: 等同于 output（废弃）
 
     Attributes:
         tool_name: 工具名称
@@ -60,11 +59,6 @@ class ToolExecutionResult(ExecutionResult[Any]):
         if self.duration_ms is not None:
             return self.duration_ms / 1000.0
         return 0.0
-
-    @property
-    def result(self) -> Any | None:
-        """兼容旧字段名（已废弃），等同于 output"""
-        return self.output
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典"""

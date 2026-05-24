@@ -170,16 +170,6 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
         """检查评估是否有错误"""
         return self.status == EvaluationStatus.ERROR or self.error is not None
 
-    @property
-    def executed_at(self) -> "datetime | None":
-        """兼容旧字段名"""
-        return self.completed_at
-
-    @executed_at.setter
-    def executed_at(self, value: "datetime | None") -> None:
-        """设置执行时间（兼容旧代码）"""
-        self.completed_at = value
-
     def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         # 处理 status 字段（可能是枚举或字符串）

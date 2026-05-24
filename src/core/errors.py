@@ -110,58 +110,58 @@ class ErrorCode(str, Enum):
     # ============================================================================
 
     # 认证错误 (AUTH_*) - 兼容旧版
-    AUTH_001 = "AUTH_001"  # 用户名或密码错误
-    AUTH_002 = "AUTH_002"  # 登录已过期
-    AUTH_003 = "AUTH_003"  # 登录已过期
-    AUTH_004 = "AUTH_004"  # 请重新登录
-    AUTH_005 = "AUTH_005"  # 您已在其他设备登出
-    AUTH_006 = "AUTH_006"  # 权限不足
-    AUTH_007 = "AUTH_007"  # 登录尝试次数过多
-    AUTH_008 = "AUTH_008"  # 用户名已被注册
-    AUTH_009 = "AUTH_009"  # 邮箱已被注册
+    AUTH_001 = "AUTH_001"
+    AUTH_002 = "AUTH_002"
+    AUTH_003 = "AUTH_003"
+    AUTH_004 = "AUTH_004"
+    AUTH_005 = "AUTH_005"
+    AUTH_006 = "AUTH_006"
+    AUTH_007 = "AUTH_007"
+    AUTH_008 = "AUTH_008"
+    AUTH_009 = "AUTH_009"
 
     # 任务错误 (TASK_*) - 兼容旧版
-    TASK_001 = "TASK_001"  # 任务不存在
-    TASK_002 = "TASK_002"  # 状态不允许操作
-    TASK_003 = "TASK_003"  # 任务执行中
-    TASK_004 = "TASK_004"  # 任务执行超时
-    TASK_005 = "TASK_005"  # 任务执行失败
-    TASK_006 = "TASK_006"  # 任务参数错误
-    TASK_007 = "TASK_007"  # 系统繁忙
-    TASK_008 = "TASK_008"  # 前置任务未完成
+    TASK_001 = "TASK_001"
+    TASK_002 = "TASK_002"
+    TASK_003 = "TASK_003"
+    TASK_004 = "TASK_004"
+    TASK_005 = "TASK_005"
+    TASK_006 = "TASK_006"
+    TASK_007 = "TASK_007"
+    TASK_008 = "TASK_008"
 
     # 工具错误 (TOOL_*) - 兼容旧版
-    TOOL_001 = "TOOL_001"  # 工具不存在
-    TOOL_002 = "TOOL_002"  # 工具参数错误
-    TOOL_003 = "TOOL_003"  # 工具执行失败
-    TOOL_004 = "TOOL_004"  # 工具不可用
-    TOOL_005 = "TOOL_005"  # 无法生成工具
-    TOOL_006 = "TOOL_006"  # 工具版本冲突
-    TOOL_007 = "TOOL_007"  # 工具依赖冲突
+    TOOL_001 = "TOOL_001"
+    TOOL_002 = "TOOL_002"
+    TOOL_003 = "TOOL_003"
+    TOOL_004 = "TOOL_004"
+    TOOL_005 = "TOOL_005"
+    TOOL_006 = "TOOL_006"
+    TOOL_007 = "TOOL_007"
 
     # 系统错误 (SYS_*) - 兼容旧版
-    SYS_001 = "SYS_001"  # 系统繁忙
-    SYS_002 = "SYS_002"  # 服务不可用
-    SYS_003 = "SYS_003"  # 请求超时
-    SYS_004 = "SYS_004"  # 系统繁忙
-    SYS_005 = "SYS_005"  # 系统繁忙
-    SYS_006 = "SYS_006"  # AI服务不可用
-    SYS_007 = "SYS_007"  # 请求过于频繁
-    SYS_008 = "SYS_008"  # 请求内容过大
+    SYS_001 = "SYS_001"
+    SYS_002 = "SYS_002"
+    SYS_003 = "SYS_003"
+    SYS_004 = "SYS_004"
+    SYS_005 = "SYS_005"
+    SYS_006 = "SYS_006"
+    SYS_007 = "SYS_007"
+    SYS_008 = "SYS_008"
 
     # 验证错误 (VAL_*) - 兼容旧版
-    VAL_001 = "VAL_001"  # 缺少必要参数
-    VAL_002 = "VAL_002"  # 参数格式错误
-    VAL_003 = "VAL_003"  # 参数超出范围
-    VAL_004 = "VAL_004"  # 请求格式错误
-    VAL_005 = "VAL_005"  # 不支持的文件格式
+    VAL_001 = "VAL_001"
+    VAL_002 = "VAL_002"
+    VAL_003 = "VAL_003"
+    VAL_004 = "VAL_004"
+    VAL_005 = "VAL_005"
 
     # 记忆错误 (MEM_*) - 兼容旧版
-    MEM_001 = "MEM_001"  # 记忆未找到
-    MEM_002 = "MEM_002"  # 记忆检索失败
-    MEM_003 = "MEM_003"  # 记忆格式错误
-    MEM_004 = "MEM_004"  # 记忆冲突
-    MEM_005 = "MEM_005"  # 无权访问记忆
+    MEM_001 = "MEM_001"
+    MEM_002 = "MEM_002"
+    MEM_003 = "MEM_003"
+    MEM_004 = "MEM_004"
+    MEM_005 = "MEM_005"
 
 
 # ============================================================================
@@ -422,16 +422,6 @@ SUGGESTED_ACTIONS: dict[str, str] = {
     # ============================================================================
     # 兼容旧版错误码建议操作
     # ============================================================================
-    # 认证错误
-    ErrorCode.AUTH_001: "请检查用户名和密码",
-    ErrorCode.AUTH_002: "请重新登录",
-    ErrorCode.AUTH_003: "请重新登录",
-    ErrorCode.AUTH_004: "请重新登录",
-    ErrorCode.AUTH_005: "请重新登录",
-    ErrorCode.AUTH_006: "您没有权限执行此操作",
-    ErrorCode.AUTH_007: "请稍后再试",
-    ErrorCode.AUTH_008: "请使用其他用户名",
-    ErrorCode.AUTH_009: "请使用其他邮箱",
     # 任务错误
     ErrorCode.TASK_001: "请确认任务是否存在",
     ErrorCode.TASK_002: "请检查任务当前状态",
@@ -441,35 +431,6 @@ SUGGESTED_ACTIONS: dict[str, str] = {
     ErrorCode.TASK_006: "请检查任务参数",
     ErrorCode.TASK_007: "请稍后提交",
     ErrorCode.TASK_008: "请先完成前置任务",
-    # 工具错误
-    ErrorCode.TOOL_001: "请确认工具名称是否正确",
-    ErrorCode.TOOL_002: "请检查工具参数格式",
-    ErrorCode.TOOL_003: "请重试或联系管理员",
-    ErrorCode.TOOL_004: "请稍后重试",
-    ErrorCode.TOOL_005: "请检查工具描述",
-    ErrorCode.TOOL_006: "请刷新页面",
-    ErrorCode.TOOL_007: "请检查工具依赖",
-    # 系统错误
-    ErrorCode.SYS_001: "请稍后重试",
-    ErrorCode.SYS_002: "请稍后重试",
-    ErrorCode.SYS_003: "请重试",
-    ErrorCode.SYS_004: "请稍后重试",
-    ErrorCode.SYS_005: "请稍后重试",
-    ErrorCode.SYS_006: "请稍后重试",
-    ErrorCode.SYS_007: "请稍后重试",
-    ErrorCode.SYS_008: "请减少请求内容",
-    # 验证错误
-    ErrorCode.VAL_001: "请提供所有必需参数",
-    ErrorCode.VAL_002: "请检查参数格式",
-    ErrorCode.VAL_003: "请检查参数范围",
-    ErrorCode.VAL_004: "请检查请求格式",
-    ErrorCode.VAL_005: "请使用支持的文件格式",
-    # 记忆错误
-    ErrorCode.MEM_001: "请确认记忆是否存在",
-    ErrorCode.MEM_002: "请重试",
-    ErrorCode.MEM_003: "请检查记忆格式",
-    ErrorCode.MEM_004: "请刷新后重试",
-    ErrorCode.MEM_005: "请确认访问权限",
 }
 
 

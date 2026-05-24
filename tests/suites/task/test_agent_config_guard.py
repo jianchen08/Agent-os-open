@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from tools.builtin.task_submit import TaskSubmitTool
+from infrastructure.task_context import TaskExecutionContext
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -47,6 +48,8 @@ def task_worker():
     from infrastructure.task_worker import TaskWorker
 
     task_service = MagicMock()
+    task_service.fail_task = AsyncMock()
+    task_service.get_task = MagicMock(return_value=None)
     return TaskWorker(
         task_service=task_service,
         plugin_registry=MagicMock(),
@@ -194,7 +197,7 @@ class TestTaskWorkerAgentConfigGuard:
         mock_task.metadata = {"task_scope": "non_container"}
         task_worker._task_service.get_task.return_value = mock_task
 
-        await task_worker._execute_background_task(task_data)
+        await task_worker._execute_background_task(task_data, TaskExecutionContext("task_empty_target"))
 
         task_worker._task_service.fail_task.assert_called_once()
         call_args = task_worker._task_service.fail_task.call_args
@@ -217,7 +220,7 @@ class TestTaskWorkerAgentConfigGuard:
         mock_registry.get.return_value = None
         task_worker._services["agent_registry"] = mock_registry
 
-        await task_worker._execute_background_task(task_data)
+        await task_worker._execute_background_task(task_data, TaskExecutionContext("task_missing_agent"))
 
         task_worker._task_service.fail_task.assert_called_once()
         call_args = task_worker._task_service.fail_task.call_args

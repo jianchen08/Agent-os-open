@@ -1215,33 +1215,31 @@ class TaskTool(BuiltinTool):
             # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
             await service.save_task(task)
 
-            # 发出 task.submitted 事件，触发 TaskWorker 重新执行
+            # 通过 task_worker 直接提交任务，触发重新执行
             execution_warning = None
             target_id = task.metadata.get("target_id", "")
             if target_id:
                 try:
                     from infrastructure.service_provider import get_service_provider
-                    provider = get_service_provider()
-                    event_bus = provider.get("event_bus")
-                    if event_bus is not None:
-                        if hasattr(event_bus, 'has_subscribers') and not event_bus.has_subscribers("task.submitted"):
-                            execution_warning = "后台执行器(TaskWorker)未启动，任务已重置为pending但不会自动执行"
+                    task_worker = get_service_provider().get("task_worker")
+                    if task_worker:
+                        if not task_worker.submit_task({
+                            "task_id": task.id,
+                            "target_type": task.target_type or "agent",
+                            "target_id": target_id,
+                            "user_input": task.title,
+                            "description": task.description,
+                            "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
+                            "workspace": task.metadata.get("workspace", ""),
+                        }):
+                            execution_warning = "后台执行器未启动，任务已重置为pending但不会自动执行"
                         else:
-                            await event_bus.emit("task.submitted", {
-                                "task_id": task.id,
-                                "target_type": task.target_type or "agent",
-                                "target_id": target_id,
-                                "user_input": task.title,
-                                "description": task.description,
-                                "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
-                                "workspace": task.metadata.get("workspace", ""),
-                            })
-                            logger.info("[TaskTool] retry 已发出 task.submitted 事件: task_id=%s", task_id)
+                            logger.info("[TaskTool] retry 已通过 task_worker 提交任务: task_id=%s", task_id)
                     else:
-                        execution_warning = "EventBus 不可用，任务已重置为pending但不会自动执行"
-                except Exception as emit_exc:
-                    logger.warning("[TaskTool] retry 发出 task.submitted 失败: %s", emit_exc)
-                    execution_warning = f"事件发送失败: {emit_exc}"
+                        execution_warning = "后台执行器不可用，任务已重置为pending但不会自动执行"
+                except Exception as submit_exc:
+                    logger.warning("[TaskTool] retry 提交任务失败: %s", submit_exc)
+                    execution_warning = f"任务提交失败: {submit_exc}"
 
             result_data = {
                 "task_id": task_id,

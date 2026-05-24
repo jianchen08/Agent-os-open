@@ -380,38 +380,18 @@ if defined OLD_PROJECT_ROOT (
 if not defined OLD_BACKEND_PORT goto :skip_stop_backend
 set "KILLED_BACKEND=0"
 for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_BACKEND_PORT! " ^| findstr "LISTENING"') do (
-    if defined OLD_BACKEND_PID (
-        if "%%p"=="!OLD_BACKEND_PID!" (
-            echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
-            taskkill /F /PID %%p >nul 2>&1
-            set "KILLED_BACKEND=1"
-        ) else (
-            echo [WARN] 端口 !OLD_BACKEND_PORT! 上的进程已变更（旧PID=!OLD_BACKEND_PID!，当前PID=%%p），跳过关闭
-        )
-    ) else (
-        echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
-        taskkill /F /PID %%p >nul 2>&1
-        set "KILLED_BACKEND=1"
-    )
+    echo [INFO] 关闭旧后端进程 PID=%%p 端口 !OLD_BACKEND_PORT!
+    taskkill /F /PID %%p >nul 2>&1
+    set "KILLED_BACKEND=1"
 )
 :skip_stop_backend
 
 if not defined OLD_FRONTEND_PORT goto :skip_stop_frontend
 set "KILLED_FRONTEND=0"
 for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!OLD_FRONTEND_PORT! " ^| findstr "LISTENING"') do (
-    if defined OLD_FRONTEND_PID (
-        if "%%p"=="!OLD_FRONTEND_PID!" (
-            echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
-            taskkill /F /PID %%p >nul 2>&1
-            set "KILLED_FRONTEND=1"
-        ) else (
-            echo [WARN] 端口 !OLD_FRONTEND_PORT! 上的进程已变更（旧PID=!OLD_FRONTEND_PID!，当前PID=%%p），跳过关闭
-        )
-    ) else (
-        echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
-        taskkill /F /PID %%p >nul 2>&1
-        set "KILLED_FRONTEND=1"
-    )
+    echo [INFO] 关闭旧前端进程 PID=%%p 端口 !OLD_FRONTEND_PORT!
+    taskkill /F /PID %%p >nul 2>&1
+    set "KILLED_FRONTEND=1"
 )
 :skip_stop_frontend
 

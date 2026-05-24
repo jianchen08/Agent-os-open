@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,10 +24,13 @@ _DEFAULT_CORS_ORIGINS = ["*"]
 _start_time: float = 0.0
 
 
-def create_app() -> FastAPI:
+def create_app(lifespan: Any = None) -> FastAPI:
     """创建并配置 FastAPI 应用实例。
 
     注册所有路由、添加 CORS 中间件、错误处理器和健康检查端点。
+
+    Args:
+        lifespan: 可选的 ASGI lifespan 上下文管理器
 
     Returns:
         配置好的 FastAPI 应用实例
@@ -35,6 +39,7 @@ def create_app() -> FastAPI:
     _start_time = time.time()
 
     app = FastAPI(
+        lifespan=lifespan,
         title="Agent OS API",
         version="1.0.0",
         description=(

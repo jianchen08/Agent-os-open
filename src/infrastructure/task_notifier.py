@@ -47,9 +47,9 @@ class TaskNotifierMixin:
                 "TaskWorker: 收到终态事件 | task=%s, status=%s, source=%s",
                 task_id, new_status, data.get("source", "unknown"),
             )
-            evt = self._terminal_events.get(task_id)
-            if evt is not None:
-                evt.set()
+            ctx = self._contexts.get(task_id)
+            if ctx is not None:
+                ctx.terminal_event.set()
                 logger.debug(
                     "TaskWorker: terminal event set for task %s (%s)",
                     task_id, new_status,
@@ -84,10 +84,8 @@ class TaskNotifierMixin:
                 )
 
         # BUG-FIX-fix_20260512_task_status_realtime:
-        # 问题根因: task_state_changed 事件仅在后端 EventBus 内部流转，
-        #   从未被转发到 WebSocket，前端无法实时感知任务状态变更。
-        # 修复方案: 在状态变更时通过 connection_manager 广播
-        #   task_status_update 事件到所有活跃的 WebSocket 连接。
+        # 状态变更时通过 send_frontend_event 统一出口发送
+        # task_status_update 到前端 WebSocket。
         try:
             _task_obj = data.get("task")
             if not _task_obj and self._task_service:
@@ -95,28 +93,20 @@ class TaskNotifierMixin:
                     _task_obj = self._task_service.get_task(task_id)
                 except Exception:
                     pass
-            _ws_payload = {
-                "type": "task_status_update",
-                "data": {
-                    "task_id": task_id,
-                    "old_status": data.get("old_status", ""),
-                    "new_status": new_status,
-                },
-            }
-            _ws_notifier = self._services.get("ws_interaction_notifier")
-            if _ws_notifier:
-                _parent_pid = getattr(_task_obj, "parent_pipeline_id", "") or ""
-                _ws_tid = ""
-                if _parent_pid:
-                    from pipeline.registry import get_engine_registry
-                    _ws_tid = get_engine_registry().get_thread_id(_parent_pid)
-                if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
-                    await _ws_notifier.send_to_thread(_ws_tid, _ws_payload)
-                elif hasattr(_ws_notifier, "send_to_user"):
-                    _task_obj = _task_obj or (self._task_service.get_task(task_id) if self._task_service else None)
-                    _uid = getattr(_task_obj, "user_id", "") or ""
-                    if _uid:
-                        await _ws_notifier.send_to_user(_uid, _ws_payload)
+            _parent_pid = getattr(_task_obj, "parent_pipeline_id", "") or ""
+            if _parent_pid:
+                from pipeline.stream_bridge import send_frontend_event
+                await send_frontend_event(
+                    _parent_pid,
+                    {
+                        "type": "task_status_update",
+                        "data": {
+                            "task_id": task_id,
+                            "old_status": data.get("old_status", ""),
+                            "new_status": new_status,
+                        },
+                    },
+                )
             logger.debug(
                 "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
                 task_id, data.get("old_status", ""), new_status,
@@ -264,23 +254,39 @@ class TaskNotifierMixin:
             retry_count, max_retries,
         )
 
-        if not parent_pipeline_id:
-            logger.warning(
-                "TaskWorker: parent_pipeline_id 为空，无法通知父管道（旧任务不再支持扫描模式）: "
-                "task=%s, status=%s",
-                task_id, new_status,
-            )
-            return
-
         # ── 3. 查找父任务的 task_id，用于 revive 路径恢复正确的 agent_config ──
         parent_task_id_for_revive = ""
         if task_obj:
             parent_task_id_for_revive = getattr(task_obj, "parent_task_id", "") or ""
 
         # ── 4. 通过统一消息总线注入通知（唯一通知链路） ──
+        try:
+            from pipeline.registry import get_engine_registry
+            _reg = get_engine_registry()
+            _entry = _reg.get(parent_pipeline_id)
+            logger.info(
+                "TaskWorker: 发送通知前检查引擎注册表 | parent_pipeline=%s | entry=%s | engine=%s | suspended=%s",
+                parent_pipeline_id[:12],
+                "found" if _entry else "NOT_FOUND",
+                "yes" if (_entry and _entry.engine) else "no",
+                str(getattr(_entry.engine, "is_suspended", "N/A")) if (_entry and _entry.engine) else "N/A",
+            )
+        except Exception as _reg_exc:
+            logger.warning("TaskWorker: 引擎注册表查询失败: %s", _reg_exc)
+
+        logger.info(
+            "TaskWorker: 调用 send_pipeline_message | pipeline=%s | parent_task=%s | notification_len=%d",
+            parent_pipeline_id[:12], parent_task_id_for_revive[:12] if parent_task_id_for_revive else "(none)",
+            len(notification),
+        )
         result = await send_pipeline_message(
             parent_pipeline_id, notification,
             task_id=parent_task_id_for_revive,
+        )
+        logger.info(
+            "TaskWorker: send_pipeline_message 返回 | success=%s | method=%s | error=%s | pipeline=%s",
+            result.success, result.method, result.error[:100] if result.error else "",
+            result.pipeline_id[:12] if result.pipeline_id else "",
         )
         if result.success:
             logger.info(
@@ -288,42 +294,27 @@ class TaskNotifierMixin:
                 parent_pipeline_id, task_id, new_status, result.method,
             )
 
-            # ── 5. 通过 WebSocket 直接发送系统通知气泡到前端 ──
-            # 通知文本已通过 send_pipeline_message 注入引擎供 LLM 处理，
-            # 但前端还需要一个独立的消息气泡来渲染系统通知（如任务完成/失败）。
-            # 由于管道挂起后 drain_loop 已结束，无法通过 bridge 传递，
-            # 因此直接通过 ws_interaction_notifier 发送 system_notification 事件。
+            # ── 5. 通过统一出口发送系统通知气泡到前端 ──
             try:
-                _ws_notifier = self._services.get("ws_interaction_notifier")
-                if _ws_notifier and parent_pipeline_id:
-                    from pipeline.registry import get_engine_registry
-                    _thread_id = get_engine_registry().get_thread_id(parent_pipeline_id)
-                    _level = "info"
-                    if new_status != "completed":
-                        _level = "warning"
-                    _sys_payload = {
-                        "type": "system_notification",
-                        "data": {
-                            "content": notification,
-                            "level": _level,
-                            "notificationType": "task_notification",
-                            "pipeline_id": parent_pipeline_id,
+                if parent_pipeline_id:
+                    from pipeline.stream_bridge import send_frontend_event
+                    _level = "info" if new_status == "completed" else "warning"
+                    await send_frontend_event(
+                        parent_pipeline_id,
+                        {
+                            "type": "system_notification",
+                            "data": {
+                                "content": notification,
+                                "level": _level,
+                                "notificationType": "task_notification",
+                                "pipeline_id": parent_pipeline_id,
+                            },
                         },
-                    }
-                    if _thread_id and hasattr(_ws_notifier, "send_to_thread"):
-                        await _ws_notifier.send_to_thread(_thread_id, _sys_payload)
-                        logger.info(
-                            "TaskWorker: system_notification 已发送: pipeline=%s, thread=%s, status=%s",
-                            parent_pipeline_id[:12], _thread_id[:12], new_status,
-                        )
-                    else:
-                        _uid = getattr(task_obj, "user_id", "") or "" if task_obj else ""
-                        if _uid and hasattr(_ws_notifier, "send_to_user"):
-                            await _ws_notifier.send_to_user(_uid, _sys_payload)
-                            logger.info(
-                                "TaskWorker: system_notification 已广播(user): task=%s, status=%s",
-                                task_id, new_status,
-                            )
+                    )
+                    logger.info(
+                        "TaskWorker: system_notification 已发送: pipeline=%s, status=%s",
+                        parent_pipeline_id[:12], new_status,
+                    )
             except Exception as _ws_exc:
                 logger.warning(
                     "TaskWorker: system_notification 发送失败(不影响通知注入): error=%s",
@@ -331,12 +322,18 @@ class TaskNotifierMixin:
                 )
 
             if parent_task_id_for_revive:
-                wake_evt = self._wake_events.get(parent_task_id_for_revive)
-                if wake_evt is not None:
-                    wake_evt.set()
+                parent_ctx = self._contexts.get(parent_task_id_for_revive)
+                if parent_ctx is not None:
+                    parent_ctx.wake_event.set()
                     logger.info(
                         "TaskWorker: wake_evt set for parent task %s (single notification path)",
                         parent_task_id_for_revive,
+                    )
+                else:
+                    logger.info(
+                        "TaskWorker: wake_evt 未找到 | parent_task=%s | "
+                        "（可能是非阻塞通知或 wake_evt 尚未注册）",
+                        parent_task_id_for_revive[:12],
                     )
         else:
             logger.warning(
@@ -426,8 +423,7 @@ class TaskNotifierMixin:
             task_data: 任务提交事件数据
         """
         try:
-            _ws_notifier = self._services.get("ws_interaction_notifier")
-            if not _ws_notifier or not target_id:
+            if not target_id:
                 return
 
             task_service = self._task_service
@@ -465,32 +461,23 @@ class TaskNotifierMixin:
                 },
             }
 
-            _ws_tid = ""
             if _parent_pipeline_id_ws:
-                from pipeline.registry import get_engine_registry
-                _ws_tid = get_engine_registry().get_thread_id(
+                from pipeline.stream_bridge import send_frontend_event
+                await send_frontend_event(
                     _parent_pipeline_id_ws,
+                    _ws_event_data,
                 )
-
-            if _ws_tid and hasattr(_ws_notifier, "send_to_thread"):
-                await _ws_notifier.send_to_thread(_ws_tid, _ws_event_data)
+                logger.info(
+                    "TaskWorker: sub_agent_created 事件已发送: "
+                    "task_id=%s, agent=%s, pipeline=%s",
+                    task_id, target_id, pipeline_id,
+                )
             else:
                 logger.warning(
                     "TaskWorker: sub_agent_created 无法路由: "
-                    "parent_pipeline=%s thread_id=%s",
-                    (
-                        _parent_pipeline_id_ws[:12]
-                        if _parent_pipeline_id_ws
-                        else "(empty)"
-                    ),
-                    _ws_tid[:12] if _ws_tid else "(empty)",
+                    "parent_pipeline=%s",
+                    "(empty)",
                 )
-
-            logger.info(
-                "TaskWorker: sub_agent_created 事件已发送: "
-                "task_id=%s, agent=%s, pipeline=%s",
-                task_id, target_id, pipeline_id,
-            )
         except Exception as _ws_err:
             logger.warning(
                 "TaskWorker: 发送 sub_agent_created 事件失败: "

@@ -273,6 +273,11 @@ class PipelineStreamBridge:
         """
         chunk_type = chunk.get("type", "text")
         content = chunk.get("content", "")
+        logger.debug(
+            "_handle_chunk: type=%s content_len=%d pipeline=%s msg=%s",
+            chunk_type, len(content) if content else 0,
+            self.pipeline_id[:12], self.message_id[:12],
+        )
 
         if chunk_type == "text" and content:
             self._accumulated_content.append(content)
@@ -507,6 +512,12 @@ class PipelineStreamBridge:
                 )
 
             _chunk_count += 1
+            logger.info(
+                "drain_loop chunk #%d: type=%s content_len=%d pipeline=%s",
+                _chunk_count, _chunk_type,
+                len(chunk.get("content", "")) if chunk.get("content") else 0,
+                self.pipeline_id[:12],
+            )
             await self._handle_chunk(chunk)
 
         # 3. 管道结束后关闭可能仍活跃的 thinking
@@ -565,3 +576,52 @@ class PipelineStreamBridge:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sequence": sequence,
         }))
+
+
+# ---------------------------------------------------------------------------
+# 模块级统一出口函数
+# ---------------------------------------------------------------------------
+
+async def send_frontend_event(
+    pipeline_id: str,
+    event: dict,
+) -> bool:
+    """通过统一出口发送前端事件（基于管道ID查找）。
+
+    通过 pipeline_id 从 EngineRegistry 获取已有 bridge，直接用其
+    output_sink 发送事件。无 bridge 时回退到从 ServiceProvider
+    获取 notifier + 从 registry 获取 thread_id 创建临时 sink。
+
+    Args:
+        pipeline_id: 管道 ID，所有前端推送都通过管道ID标识
+        event: 要发送的事件字典，格式 {"type": ..., "data": ...}
+
+    Returns:
+        发送成功返回 True，失败返回 False
+    """
+    if not pipeline_id:
+        return False
+
+    from pipeline.registry import get_engine_registry
+    registry = get_engine_registry()
+
+    bridge = registry.get_bridge(pipeline_id)
+    if bridge is not None:
+        return await bridge._send_event(event)
+
+    entry = registry.get(pipeline_id)
+    if entry is None or not entry.thread_id:
+        return False
+
+    try:
+        from infrastructure.service_provider import get_service_provider
+        _sp = get_service_provider()
+        _notifier = _sp.get("ws_interaction_notifier") if _sp else None
+    except Exception:
+        _notifier = None
+
+    if not _notifier:
+        return False
+
+    sink = TargetedSink(_notifier, entry.thread_id)
+    return await sink.send_event(event)

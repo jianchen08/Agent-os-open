@@ -27,7 +27,7 @@ class TaskRecoveryMixin:
         """恢复残留的 running 和 pending 任务。
 
         Worker 启动时扫描所有 status=running 和 status=pending 的任务，
-        running 任务先重置为 pending，然后统一通过 task.submitted 事件触发执行。
+        running 任务先重置为 pending，然后统一通过 submit_task 触发执行。
         跳过容器任务（task_scope=container）。
         """
         if not self._task_service:
@@ -56,10 +56,7 @@ class TaskRecoveryMixin:
                     "TaskWorker: 恢复任务失败: task_id=%s, error=%s", task.id, e,
                 )
 
-        # 2. 所有 pending 任务统一通过 task.submitted 事件触发
-        if not self._event_bus:
-            return
-
+        # 2. 所有 pending 任务统一通过 submit_task 触发
         recovered = 0
         pending_tasks = self._task_service.list_by_status(TaskStatus.PENDING)
         for task in pending_tasks:
@@ -69,7 +66,7 @@ class TaskRecoveryMixin:
             if not task.metadata.get("target_id"):
                 continue
             try:
-                await self._event_bus.emit("task.submitted", {
+                self.submit_task({
                     "task_id": task.id,
                     "target_type": task.target_type or "agent",
                     "target_id": task.metadata.get("target_id", ""),

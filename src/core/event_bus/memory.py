@@ -26,6 +26,18 @@ from src.core.event_bus.types import (
 
 logger = logging.getLogger(__name__)
 
+_DEBUG_LOG_FILE = "debug_event_delivery.log"
+
+
+def _debug_log(msg: str) -> None:
+    """写入调试日志到专用文件，避免被控制台输出截断。"""
+    import datetime
+    try:
+        with open(_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
+    except Exception:
+        pass
+
 
 class InMemoryEventBus(EventBusBase):
     """
@@ -93,11 +105,12 @@ class InMemoryEventBus(EventBusBase):
         Returns:
             事件 ID
         """
-        # 对于高优先级事件，直接处理
+        _debug_log(f"publish | event_type={event.event_type.value} | priority={event.priority.value} | HIGH_threshold={EventPriority.HIGH.value}")
         if event.priority.value >= EventPriority.HIGH.value:
+            _debug_log(f"publish -> _publish_direct (HIGH priority)")
             return await self._publish_direct(event)
 
-        # 对于普通优先级事件，使用批处理
+        _debug_log(f"publish -> _publish_batch (normal priority)")
         return await self._publish_batch(event)
 
     async def _publish_direct(self, event: ExecutionEvent) -> str:
@@ -110,20 +123,18 @@ class InMemoryEventBus(EventBusBase):
         Returns:
             事件 ID
         """
+        _debug_log(f"_publish_direct | event_type={event.event_type.value} | event_id={event.event_id}")
         start_time = time.time()
         success = False
 
         try:
-            # 生成消息 ID
             self._message_counter += 1
             message_id = (
                 f"{int(event.timestamp.timestamp() * 1000)}-{self._message_counter}"
             )
 
-            # 保存到历史
             self._history.append(event)
 
-            # 通知所有匹配的订阅者
             await self._notify_subscribers(event)
 
             logger.debug(
@@ -229,15 +240,17 @@ class InMemoryEventBus(EventBusBase):
         Args:
             event: 执行事件
         """
+        _debug_log(f"_notify_subscribers | event_type={event.event_type.value} | subs={len(self._subscriptions)} | event_id={event.event_id}")
         matched_count = 0
         total_count = len(self._subscriptions)
-        for subscription in self._subscriptions.values():
-            # 检查过滤器
+        for sub_id, subscription in self._subscriptions.items():
             if subscription.filter and not subscription.filter.matches(event):
+                _debug_log(f"  SKIP sub={sub_id} | filter_types={[t.value for t in (subscription.filter.event_types or [])]} | event_type={event.event_type.value}")
                 continue
 
             matched_count += 1
-            # 异步调用处理器
+            handler_name = getattr(subscription.handler, "__qualname__", None) or getattr(subscription.handler, "__name__", str(subscription.handler))
+            _debug_log(f"  MATCH sub={sub_id} | handler={handler_name} | event_type={event.event_type.value}")
             try:
                 asyncio.create_task(self._safe_call(subscription.handler, event))
             except Exception as e:

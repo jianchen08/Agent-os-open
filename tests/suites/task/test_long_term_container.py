@@ -342,12 +342,13 @@ class TestWorkerSkipsLongTerm:
         executed = False
         original_execute = worker._execute_background_task
 
-        async def spy_execute(task_data):
+        async def spy_execute(task_data, ctx=None):
             nonlocal executed
             executed = True
-            return await original_execute(task_data)
+            return await original_execute(task_data, ctx or TaskExecutionContext(task_data.get("task_id", "")))
 
         worker._execute_background_task = spy_execute
+        from infrastructure.task_context import TaskExecutionContext
         await worker._execute_background_task({
             "task_id": long_task.id,
         })

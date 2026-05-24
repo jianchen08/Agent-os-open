@@ -32,9 +32,8 @@ class TaskPostPipelineMixin:
         lifecycle: Any,
         workspace: str,
         ws_meta: dict,
-        terminal_evt: Any,
+        ctx: Any,
         timer_manager: Any,
-        idle_timer_registered: bool,
     ) -> None:
         """管道退出后检查任务状态，处理 evaluating 或 failed 转换。
 
@@ -49,9 +48,8 @@ class TaskPostPipelineMixin:
             lifecycle: 工作空间生命周期管理器
             workspace: 工作空间路径
             ws_meta: 工作空间元数据
-            terminal_evt: 终态事件
+            ctx: 任务执行上下文（TaskExecutionContext）
             timer_manager: 计时器管理器
-            idle_timer_registered: 是否已注册 idle 计时器
         """
         if not task_service:
             return
@@ -69,12 +67,12 @@ class TaskPostPipelineMixin:
         if task_result:
             await self._transition_to_evaluating(
                 task_id, task_service, lifecycle, workspace, ws_meta,
-                terminal_evt, timer_manager, idle_timer_registered,
+                ctx, timer_manager,
             )
         else:
             await self._fail_after_pipeline_exit(
                 task_id, task_service, pipeline_state,
-                terminal_evt, timer_manager, idle_timer_registered,
+                ctx, timer_manager,
             )
 
     async def _transition_to_evaluating(
@@ -84,9 +82,8 @@ class TaskPostPipelineMixin:
         lifecycle: Any,
         workspace: str,
         ws_meta: dict,
-        terminal_evt: Any,
+        ctx: Any,
         timer_manager: Any,
-        idle_timer_registered: bool,
     ) -> None:
         """有输出 → 转为 evaluating 并触发评估。
 
@@ -107,7 +104,6 @@ class TaskPostPipelineMixin:
                     "TaskWorker: lifecycle on_before_evaluate failed: task_id=%s, error=%s",
                     task_id, e,
                 )
-        evt = self._terminal_events.pop(task_id, None)
         try:
             # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
             await task_service.move_to_evaluating(task_id)
@@ -124,15 +120,8 @@ class TaskPostPipelineMixin:
                     "TaskWorker: fallback fail_task also failed for %s: %s",
                     task_id, fail_exc,
                 )
-            if evt is not None:
-                evt.set()
-            self._active_tasks.discard(task_id)
-            self._idle_remind_counts.pop(task_id, None)
-            if idle_timer_registered and timer_manager:
-                try:
-                    await timer_manager.cancel_timer(task_id)
-                except Exception:
-                    pass
+            ctx.set_terminal()
+            ctx.cleanup(timer_manager)
             return
 
         # BUG-FIX-fix_20260510_evaluating_stuck:
@@ -144,15 +133,8 @@ class TaskPostPipelineMixin:
         #   触发实际评估执行（复用系统重启恢复的逻辑）。
         # 影响范围: 所有管道退出时任务仍有 result 但未到终态的场景
         # 修复日期: 2026-05-10
-        if evt is not None:
-            evt.set()
-        self._active_tasks.discard(task_id)
-        self._idle_remind_counts.pop(task_id, None)
-        if idle_timer_registered and timer_manager:
-            try:
-                await timer_manager.cancel_timer(task_id)
-            except Exception:
-                pass
+        ctx.set_terminal()
+        ctx.cleanup(timer_manager)
         refreshed_task = task_service.get_task(task_id)
         if refreshed_task is not None:
             try:
@@ -175,9 +157,8 @@ class TaskPostPipelineMixin:
         task_id: str,
         task_service: Any,
         pipeline_state: dict | None,
-        terminal_evt: Any,
+        ctx: Any,
         timer_manager: Any,
-        idle_timer_registered: bool,
     ) -> None:
         """无输出 → 从管道状态构建精确错误信息并标记 failed。
 
@@ -259,9 +240,6 @@ class TaskPostPipelineMixin:
             raw_error or "(none)",
             error_msg,
         )
-        evt = self._terminal_events.pop(
-            task_id, None,
-        )
 
         if is_interrupted and task_service:
             try:
@@ -284,22 +262,11 @@ class TaskPostPipelineMixin:
             await task_service.fail_task(
                 task_id, error_msg,
             )
-        if evt is not None:
-            evt.set()
         # BUG-FIX: fail_task 后清理 idle 计时器
         # 防止任务已标记 failed 但 idle 计时器
-        # 仍在 _active_tasks 检测中不断重建
-        self._active_tasks.discard(task_id)
-        self._idle_remind_counts.pop(
-            task_id, None,
-        )
-        if idle_timer_registered and timer_manager:
-            try:
-                await timer_manager.cancel_timer(
-                    task_id,
-                )
-            except Exception:
-                pass
+        # 仍在检测中不断重建
+        ctx.set_terminal()
+        ctx.cleanup(timer_manager)
 
     def _build_pipeline_exit_error(self, pipeline_state: dict | None) -> str:
         """从管道状态构建精确的错误信息。

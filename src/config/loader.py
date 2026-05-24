@@ -2,7 +2,7 @@
 配置文件加载器
 
 自动将 YAML 配置文件加载到数据库中。
-支持 Agent、Workflow 配置的同步。
+支持 Agent 配置的同步。
 支持环境变量替换和 .env 文件加载。
 
 注意：使用仓储模式替代 SQLAlchemy 直接查询，
@@ -21,7 +21,6 @@ import yaml
 from src.core.exceptions import ConfigNotFoundError, ConfigurationException, EnvVarNotFoundError
 from src.db.models.agent import AgentConfig as AgentConfigModel
 from src.db.models.tool import ToolLibrary
-from src.db.models.workflow import Workflow
 from src.db.repositories.base import BaseRepository
 
 logger = logging.getLogger(__name__)
@@ -258,53 +257,6 @@ class ConfigLoader:
 
         return loaded
 
-    async def load_workflows(
-        self, session: Any = None, workflows_dir: str = "workflows"
-    ) -> list[str]:
-        """
-        加载工作流配置到数据库
-
-        Args:
-            session: 数据库会话（降级模式下可为 None）
-            workflows_dir: 工作流配置目录
-
-        Returns:
-            加载的工作流 ID 列表
-        """
-        loaded = []
-        repo: BaseRepository[Workflow] = BaseRepository(session, Workflow)
-        workflows_path = self._config_dir / workflows_dir
-
-        if not workflows_path.exists():
-            return loaded
-
-        for yaml_file in workflows_path.rglob("*.yaml"):
-            try:
-                config = self._load_yaml(yaml_file)
-                if not config or "id" not in config:
-                    continue
-
-                workflow_id = config["id"]
-
-                # 使用仓储查询
-                workflow = await repo.get_by(name=workflow_id)
-
-                if workflow:
-                    # 更新现有配置
-                    self._update_workflow(workflow, config)
-                else:
-                    # 创建新配置
-                    workflow = self._create_workflow(config)
-                    await repo.create(**workflow.__dict__)
-
-                loaded.append(workflow_id)
-
-            except Exception as e:
-                logger.debug(f"加载工作流配置失败 {yaml_file}: {e}")
-                continue
-
-        return loaded
-
     async def load_tools(
         self, session: Any = None, tools_dir: str = "src/tools/builtin"
     ) -> list[str]:
@@ -473,11 +425,10 @@ class ConfigLoader:
             session: 数据库会话（降级模式下可为 None）
 
         Returns:
-            同步结果 {"agents": [...], "workflows": [...], "tools": [...]}
+            同步结果 {"agents": [...], "tools": [...]}
         """
         return {
             "agents": await self.load_agents(session),
-            "workflows": await self.load_workflows(session),
             "tools": await self.load_tools(session),
         }
 
@@ -572,36 +523,6 @@ class ConfigLoader:
             agent.tags = config["tags"]
         if "metadata" in config:
             agent.agent_metadata = config["metadata"]
-
-    def _create_workflow(self, config: dict[str, Any]) -> Workflow:
-        """从配置创建 Workflow"""
-        return Workflow(
-            name=config["id"],
-            description=config.get("description"),
-            type=config.get("type", "user_defined"),
-            definition=config.get("definition", {}),
-            inputs_schema=config.get("inputs_schema"),
-            outputs_schema=config.get("outputs_schema"),
-            tags=config.get("tags", []),
-            status=config.get("status", "active"),
-        )
-
-    def _update_workflow(self, workflow: Workflow, config: dict[str, Any]) -> None:
-        """更新 Workflow"""
-        if "description" in config:
-            workflow.description = config["description"]
-        if "type" in config:
-            workflow.type = config["type"]
-        if "definition" in config:
-            workflow.definition = config["definition"]
-        if "inputs_schema" in config:
-            workflow.inputs_schema = config["inputs_schema"]
-        if "outputs_schema" in config:
-            workflow.outputs_schema = config["outputs_schema"]
-        if "tags" in config:
-            workflow.tags = config["tags"]
-        if "status" in config:
-            workflow.status = config["status"]
 
 
 async def load_config_to_db(

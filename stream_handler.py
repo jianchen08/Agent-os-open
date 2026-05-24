@@ -466,7 +466,23 @@ async def handle_stream_request(ctx: StreamContext) -> None:
         if ctx.bridge is not None:
             bridge = ctx.bridge
             bridge.pipeline_id = pipeline_id
-            bridge.reset_for_new_turn(message_id)
+            # BUG-FIX-fix_20260524_msg_render:
+            # 问题根因: 无条件调用 bridge.reset_for_new_turn() 会清空 bridge 内部 queue。
+            #   在 revive 路径中，engine.run() 已在 send_pipeline_message 内同步 await
+            #   完成，LLM 输出的 chunks 已在 queue 中。reset 会清空它们，导致
+            #   drain_loop 消费不到任何 chunk，前端无渲染。
+            # 修复方案: 只在引擎仍处于活跃状态（running 或 suspended）时才 reset；
+            #   对已完成的引擎（revive 路径）跳过 reset，保留 queue 中的 chunks。
+            # 影响范围: handle_stream_request 分支 1（有 engine 且有 user_content）。
+            # 修复日期: 2026-05-24
+            _is_engine_active = getattr(engine, 'is_running', False) or getattr(engine, 'is_suspended', False)
+            if _is_engine_active:
+                bridge.reset_for_new_turn(message_id)
+            else:
+                logger.info(
+                    "[handle_stream] 引擎已完成，跳过 reset 保留已有 chunks: pipeline=%s",
+                    pipeline_id[:12],
+                )
             if ctx.ws_notifier is not None:
                 bridge.output_sink = TargetedSink(ctx.ws_notifier, thread_id)
         else:
@@ -530,6 +546,24 @@ async def handle_stream_request(ctx: StreamContext) -> None:
                 pass
         finally:
             engine_tracker.cancel()
+            # BUG-FIX-fix_20260524_msg_render:
+            # 问题根因: revive 路径的引擎 run() 完成后仍然留在 EngineRegistry 中，
+            #   下次消息会通过 _find_engine 找到这个已完成的引擎（Bug 3 修复前），
+            #   对其调用 inject_message 无效，消息丢失。
+            # 修复方案: 在 finally 块中，如果引擎已完成（不是 running 也不是 suspended），
+            #   从 EngineRegistry 注销，确保下次消息走正确的路径。
+            # 影响范围: handle_stream_request 分支 1 的 revive 路径。
+            # 修复日期: 2026-05-24
+            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
+                try:
+                    from pipeline.registry import get_engine_registry
+                    get_engine_registry().unregister(pipeline_id)
+                    logger.info(
+                        "[handle_stream] 已清理完成的引擎: pipeline=%s",
+                        pipeline_id[:12],
+                    )
+                except Exception:
+                    pass
 
     elif ctx.engine is not None and ctx.bridge is not None and not ctx.user_content:
         logger.info(
@@ -690,6 +724,71 @@ async def handle_stream_request(ctx: StreamContext) -> None:
             ctx.engine is not None, ctx.bridge is not None,
             bool(ctx.user_content), ctx.pipeline_ctx is not None,
         )
+
+
+async def run_stream_session(
+    *,
+    pipeline_id: str,
+    message_id: str,
+    thread_id: str,
+    bridge: Any = None,
+    user_content: str = "",
+    ws_notifier: Any = None,
+    conversation_history: list[dict[str, Any]] | None = None,
+    pipeline_ctx: Any = None,
+    stop_event: asyncio.Event | None = None,
+    agent_config: Any = None,
+    workspace: str = "",
+    task_id: str = "",
+) -> asyncio.Task:
+    """创建并启动流式会话任务（层2 统一入口）。
+
+    封装 StreamContext 构建、引擎查找和 handle_stream_request 调用，
+    使 app_factory.py 只需一行调用即可启动流式会话。
+
+    Args:
+        pipeline_id: 管道 ID
+        message_id: 消息 UUID
+        thread_id: WebSocket 线程 ID
+        bridge: PipelineStreamBridge 实例（可选）
+        user_content: 用户输入内容
+        ws_notifier: WebSocket 通知器
+        conversation_history: 对话历史
+        pipeline_ctx: PipelineContext 实例（fallback 路径使用）
+        stop_event: 停止事件
+        agent_config: Agent 配置
+        workspace: 工作目录
+        task_id: 关联任务 ID
+
+    Returns:
+        已启动的 asyncio.Task
+    """
+    engine = None
+    if bridge is not None and pipeline_id:
+        try:
+            from pipeline.registry import get_engine_registry
+            _entry = get_engine_registry().get(pipeline_id)
+            if _entry:
+                engine = _entry.engine
+        except Exception:
+            pass
+
+    ctx = StreamContext(
+        pipeline_id=pipeline_id,
+        message_id=message_id,
+        thread_id=thread_id,
+        engine=engine,
+        bridge=bridge,
+        conversation_history=conversation_history,
+        ws_notifier=ws_notifier,
+        stop_event=stop_event,
+        agent_config=agent_config,
+        workspace=workspace,
+        task_id=task_id,
+        user_content=user_content,
+        pipeline_ctx=pipeline_ctx,
+    )
+    return asyncio.create_task(handle_stream_request(ctx))
 
 
 async def _run_drain_and_finalize(

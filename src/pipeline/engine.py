@@ -112,6 +112,7 @@ class PipelineEngine:
         self._pending_notifications: list[str] = []
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
+        self._running: bool = False
 
     async def run(
         self,
@@ -257,6 +258,7 @@ class PipelineEngine:
         """
         _pipeline_log_handler = None
         _pipeline_loggers: list[logging.Logger] = []
+        self._running = True
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
         # BUG-FIX-fix_20260513_pipeline_cross_talk:
         self._pipeline_id = pipeline_run_id
@@ -440,6 +442,7 @@ class PipelineEngine:
             state[StateKeys.RAW_ERROR] = str(exc)
             await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine exception: {exc}")
         finally:
+            self._running = False
             await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
                 _pipeline_id_token,
@@ -604,6 +607,11 @@ class PipelineEngine:
         return self._pipeline_id
 
     @property
+    def is_running(self) -> bool:
+        """管道是否正在运行（非挂起、非完成）。"""
+        return self._running
+
+    @property
     def is_suspended(self) -> bool:
         """管道是否处于暂停状态。"""
         return self._suspended_state is not None
@@ -633,6 +641,7 @@ class PipelineEngine:
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
+        self._running = False
 
         pending_notifications = self.consume_pending_notifications()
         if pending_notifications:
@@ -686,6 +695,7 @@ class PipelineEngine:
 
         self._wake_event = None
         self._watching_task_ids = []
+        self._running = True
 
         if self._suspended_state is not None:
             state["user_input"] = self._suspended_state.get(

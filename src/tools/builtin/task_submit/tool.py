@@ -26,18 +26,16 @@ logger = logging.getLogger(__name__)
 class TaskSubmitTool(BuiltinTool):
     """任务提交工具。
 
-    负责创建任务并通过 EventBus 发布 task.submitted 事件，
-    由 TaskWorker 订阅事件并触发后台执行。
+    负责创建任务并通过 TaskWorker 提交后台执行。
 
     依赖：
     - TaskService：任务创建与存储（JSON 文件存储）
-    - EventBus：事件发布（task.submitted）
+    - TaskWorker：后台任务执行器
     """
 
     def __init__(self) -> None:
         """初始化任务提交工具"""
         self._task_service: Any = None
-        self._event_bus: Any = None
 
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
@@ -60,36 +58,6 @@ class TaskSubmitTool(BuiltinTool):
         if service is not None:
             self._task_service = service
         return self._task_service
-
-    def _get_event_bus(self) -> Any:
-        """获取共享的 EventBus 实例。
-
-        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
-
-        Returns:
-            EventBus 实例，获取失败时返回 None
-        """
-        if self._event_bus is not None:
-            return self._event_bus
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        # BUG-FIX-fix_20260521_event_bus_instance:
-        # 问题根因: 之前使用 pipeline.event_bus.EventBus 创建实例，
-        #          这是一个轻量级进程内总线，和 TaskOrchestrator/Scheduler
-        #          使用的 core.event_bus（InMemoryEventBus/RedisStreamsEventBus）
-        #          是完全不同的类和实例。事件发到 pipeline EventBus，
-        #          而 TaskOrchestrator 订阅的是 core EventBus，永远收不到。
-        # 修复方案: 使用 core.event_bus.get_event_bus() 获取核心事件总线单例，
-        #          与 TaskOrchestrator/Scheduler 共享同一实例。
-        from src.core.event_bus import get_event_bus as get_core_event_bus
-        bus = provider.get_or_create("event_bus", get_core_event_bus)
-        if bus is not None:
-            self._event_bus = bus
-            logger.info(
-                "[TaskSubmit] 获取 EventBus | type=%s | id=%s",
-                type(bus).__name__, id(bus),
-            )
-        return self._event_bus
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -688,86 +656,50 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="TASK_CREATE_FAILED",
             )
 
-        # ── 7. 发布事件（BUG-FIX-P3：EventBus 不可用或失败时回滚任务） ──
-        event_bus = self._get_event_bus()
-        if event_bus is None:
-            logger.error("[TaskSubmit] EventBus 不可用，回滚任务 %s", task.id)
-            try:
-                task_service._storage.delete(task.id)
-            except Exception as del_e:
-                logger.error("[TaskSubmit] 回滚失败（_storage.delete）: %s", del_e)
+        # ── 7. 提交到后台执行器 ──
+        from infrastructure.service_provider import get_service_provider
+        task_worker = get_service_provider().get("task_worker")
+        if not task_worker:
+            task_service._storage.delete(task.id)
             return create_failure_result(
-                error="任务提交失败：EventBus 不可用，无法触发后台执行",
-                error_code="EVENT_BUS_UNAVAILABLE",
+                error="后台执行器不可用，任务提交失败",
+                error_code="SUBMIT_FAILED",
             )
 
-        # BUG-FIX-C3-revised：检查是否有订阅者。
-        # 原逻辑会在无订阅者时回滚（删除）任务，导致 TaskWorker 启动时序问题下任务丢失。
-        # 修复：无订阅者时仅记录警告，保留任务为 pending 状态。
-        # TaskWorker.start() → _recover_running_tasks() 会扫描 pending 任务并重新触发执行。
-        no_subscriber_warning = None
-        if hasattr(event_bus, 'has_subscribers') and not event_bus.has_subscribers("task.submitted"):
-            logger.warning(
-                "[TaskSubmit] 无订阅者: task.submitted, 任务 %s 将保持 pending 状态等待 TaskWorker 恢复",
-                task.id,
-            )
-            no_subscriber_warning = "后台执行器(TaskWorker)暂未就绪，任务已创建并等待自动执行"
+        is_root = True
+        if parent_task_id and task_service:
+            try:
+                parent_task = task_service.get_task(parent_task_id)
+                if parent_task and parent_task.metadata:
+                    parent_scope = parent_task.metadata.get("task_scope", "non_container")
+                    if parent_scope != "container":
+                        is_root = False
+            except Exception:
+                pass
 
-        # 记录 emit 前的 EventBus 状态
-        logger.info(
-            "[TaskSubmit] 准备 emit | event_bus_type=%s | event_bus_id=%s "
-            "| has_subscribers=%s | subscriber_count=%s | task_id=%s",
-            type(event_bus).__name__, id(event_bus),
-            event_bus.has_subscribers("task.submitted") if hasattr(event_bus, 'has_subscribers') else "N/A",
-            getattr(event_bus, 'subscriber_count', "N/A"),
-            task.id,
-        )
-
-        try:
-            # Determine is_root: container sub-tasks (parent is container) get own workspace,
-            # agent sub-tasks (parent is non_container) share parent workspace.
+        if _inherit_resolved:
             is_root = True
-            if parent_task_id and task_service:
-                try:
-                    parent_task = task_service.get_task(parent_task_id)
-                    if parent_task and parent_task.metadata:
-                        parent_scope = parent_task.metadata.get("task_scope", "non_container")
-                        if parent_scope != "container":
-                            is_root = False
-                except Exception:
-                    pass
 
-            # 继承工作空间时强制 is_root=True：
-            # 继承的任务需要自己的独立工作空间，不能共享父任务空间
-            if _inherit_resolved:
-                is_root = True
-
-            await event_bus.emit("task.submitted", {
-                "task_id": task.id,
-                "target_type": target_type,
-                "target_id": target_id,
-                "user_input": goal.get("title", ""),
-                "description": description or goal.get("description", ""),
-                "acceptance_criteria": acceptance_criteria,
-                "workspace": workspace,
-                "priority": inputs.get("priority", 5),
-                "is_root": is_root,
-                "_has_explicit_workspace": bool(workspace),
-                "_inherit_workspace_resolved": _inherit_resolved,
-                "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
-            })
-            logger.info("[TaskSubmit] 事件已发布 | task_id=%s", task.id)
-            logger.info(
-                "[TaskSubmit] emit 完成 | event_bus_type=%s | event_bus_id=%s | task_id=%s",
-                type(event_bus).__name__, id(event_bus), task.id,
+        task_data = {
+            "task_id": task.id,
+            "target_type": target_type,
+            "target_id": target_id,
+            "user_input": goal.get("title", ""),
+            "description": description or goal.get("description", ""),
+            "acceptance_criteria": acceptance_criteria,
+            "workspace": workspace,
+            "priority": inputs.get("priority", 5),
+            "is_root": is_root,
+            "_has_explicit_workspace": bool(workspace),
+            "_inherit_workspace_resolved": _inherit_resolved,
+            "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
+        }
+        if not task_worker.submit_task(task_data):
+            task_service._storage.delete(task.id)
+            return create_failure_result(
+                error="后台执行器未启动，任务提交失败",
+                error_code="SUBMIT_FAILED",
             )
-        except Exception as e:
-            # emit 异常时不回滚任务：任务已持久化为 pending，TaskWorker 恢复机制可补偿
-            logger.warning(
-                "[TaskSubmit] EventBus emit 失败, 任务 %s 保持 pending 等待恢复: %s",
-                task.id, e,
-            )
-            no_subscriber_warning = f"事件发布异常，任务已创建等待自动恢复: {e}"
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
@@ -818,8 +750,6 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "在此期间请不要再调用任何工具（包括 task_manage），直接输出纯文本等待即可。"
             ),
         }
-        if no_subscriber_warning:
-            result_data["warning"] = no_subscriber_warning
 
         return create_success_result(
             data=result_data,
@@ -930,29 +860,20 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 task.id, _ws_exc,
             )
 
-        # BUG-FIX-fix_20260425_container_workspace_race:
-        # 问题根因: 容器任务不发布 task.submitted 事件，TaskWorker 不会收到通知，
-        #           因此不会调用 _execute_background_task 中的 init_container_workspace。
-        #           子任务提交后找不到容器工作空间 → 初始化失败。
-        # 修复方案: 容器任务也发布 task.submitted 事件，TaskWorker 会跳过业务逻辑执行，
-        #           但会执行容器工作空间初始化（mkdir + git init）。
-        event_bus = self._get_event_bus()
-        if event_bus:
-            try:
-                await event_bus.emit("task.submitted", {
-                    "task_id": task.id,
-                    "target_type": None,
-                    "target_id": None,
-                    "user_input": goal.get("title", ""),
-                    "description": description or goal.get("description", ""),
-                    "acceptance_criteria": {},
-                    "workspace": inputs.get("workspace"),
-                    "parent_task_id": None,
-                    "is_root": True,
-                })
-                logger.info("[TaskSubmit] 容器任务事件已发布 | task_id=%s", task.id)
-            except Exception as exc:
-                logger.warning("[TaskSubmit] 容器任务事件发布失败 | task_id=%s | error=%s", task.id, exc)
+        from infrastructure.service_provider import get_service_provider
+        task_worker = get_service_provider().get("task_worker")
+        if task_worker:
+            task_worker.submit_task({
+                "task_id": task.id,
+                "target_type": None,
+                "target_id": None,
+                "user_input": goal.get("title", ""),
+                "description": description or goal.get("description", ""),
+                "acceptance_criteria": {},
+                "workspace": inputs.get("workspace"),
+                "parent_task_id": None,
+                "is_root": True,
+            })
 
         # BUG-FIX-fix_20260519_container_workspace_path:
         # 路径计算逻辑集中在 isolation.workspace 模块。

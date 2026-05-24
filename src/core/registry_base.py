@@ -28,8 +28,6 @@
 - BaseRegistry：BaseRegistry类
 - SimpleRegistry：SimpleRegistry类
 - CachedFactory：CachedFactory类
-- SingletonRegistry：SingletonRegistry类
-- SingletonCachedFactory：SingletonCachedFactory类
 """
 
 from __future__ import annotations

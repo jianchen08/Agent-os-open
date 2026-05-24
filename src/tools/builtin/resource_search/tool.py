@@ -4,8 +4,6 @@
 暴露接口：
 - get_tool_definition() -> Tool：get_tool_definition功能
 - ResourceSearchTool：ResourceSearchTool类
-- WorkflowRegistry：WorkflowRegistry类
-- WorkflowWrapper：WorkflowWrapper类
 """
 
 import logging
@@ -43,7 +41,6 @@ class ResourceSearchTool:
         self,
         agent_registry=None,
         tool_registry=None,
-        workflow_registry=None,
         skill_registry=None,
         search_engine=None,
         dynamic_tool_injector=None,
@@ -55,7 +52,6 @@ class ResourceSearchTool:
         Args:
             agent_registry: Agent 注册表
             tool_registry: 工具注册表
-            workflow_registry: 工作流注册表
             skill_registry: Skill 注册表
             search_engine: 搜索引擎（MemoryService 实例或创建函数）
             dynamic_tool_injector: 动态工具注入回调函数，签名为 async (tool_name: str) -> bool
@@ -63,7 +59,6 @@ class ResourceSearchTool:
         """
         self.agent_registry = agent_registry
         self.tool_registry = tool_registry
-        self.workflow_registry = workflow_registry
         self.skill_registry = skill_registry
         self._search_engine = search_engine
         self._dynamic_tool_injector = dynamic_tool_injector
@@ -512,61 +507,6 @@ class ResourceSearchTool:
 
             self.tool_registry = get_global_tool_registry_sync()
         return self.tool_registry
-
-    def _get_workflow_registry(self):
-        """获取 Workflow 注册表（延迟加载）"""
-        if self.workflow_registry is None:
-            try:
-                from db.models import Workflow
-            except ImportError:
-                Workflow = None
-
-            if Workflow is None:
-                logger.debug("[resource_search] db.models.Workflow 不可用，跳过工作流注册表加载")
-                return None
-
-            from sqlalchemy import select
-
-            from infrastructure.db import get_async_session
-
-            class WorkflowRegistry:
-                """工作流注册表包装器"""
-
-                async def list_all(self):
-                    """获取所有工作流"""
-                    async for session in get_async_session():
-                        stmt = select(Workflow).where(Workflow.status == "active")
-                        result = await session.execute(stmt)
-                        workflows = result.scalars().all()
-
-                        class WorkflowWrapper:
-                            """工作流包装器"""
-
-                            def __init__(self, db_workflow):
-                                self.id = db_workflow.id
-                                self.metadata = type(
-                                    "Metadata",
-                                    (),
-                                    {
-                                        "name": db_workflow.name,
-                                        "description": db_workflow.description or "",
-                                        "tags": db_workflow.tags or [],
-                                        "category": None,
-                                        "level": "user",
-                                    },
-                                )()
-                                self.nodes = db_workflow.definition.get("nodes", [])
-                                # BUG-FIX-fix_20260316: 添加 inputs 属性
-                                # 问题根因: WorkflowWrapper 缺少 inputs 属性，导致详细模式无法返回工作流输入定义
-                                # 修复方案: 从 workflow.definition 中提取 inputs
-                                self.inputs = db_workflow.definition.get("inputs", {})
-
-                        return [WorkflowWrapper(wf) for wf in workflows]
-
-                    return []
-
-            self.workflow_registry = WorkflowRegistry()
-        return self.workflow_registry
 
     async def _search_agents(
         self,
@@ -1017,63 +957,6 @@ class ResourceSearchTool:
             logger.debug(f"[resource_search] YAML 配置搜索工具失败: {e}")
             return [], [], []
 
-    async def _search_workflows(
-        self,
-        query: str,
-        category: str | None,
-        level: str,
-        limit: int,
-        detailed: bool = False,
-        exact: bool = False,
-    ) -> tuple[list[str], list[str], list[str], list[dict]]:
-        """搜索工作流"""
-        workflow_registry = self._get_workflow_registry()
-        if not workflow_registry:
-            return [], [], [], []
-
-        ids = []
-        names = []
-        descriptions = []
-        inputs_list = []
-        query_lower = query.lower()
-
-        if detailed and exact:
-            limit = 1
-
-        for workflow in await workflow_registry.list_all():
-            if level != "all":
-                wf_level = getattr(workflow.metadata, "level", "user")
-                if wf_level != level:
-                    continue
-
-            if category:
-                wf_category = getattr(workflow.metadata, "category", None)
-                if wf_category != category:
-                    continue
-
-            if self._match_query(
-                query_lower,
-                workflow.metadata.name,
-                workflow.metadata.description,
-                workflow.metadata.tags,
-                exact,
-                resource_id=query if exact else None,
-                workflow_id=workflow.id,
-            ):
-                ids.append(workflow.id)
-                names.append(workflow.metadata.name)
-                descriptions.append(workflow.metadata.description)
-
-                if detailed:
-                    inputs_list.append(workflow.inputs or {})
-                else:
-                    inputs_list.append({})
-
-                if len(names) >= limit:
-                    break
-
-        return ids, names, descriptions, inputs_list
-
     def _match_query(
         self,
         query_lower: str,
@@ -1081,13 +964,9 @@ class ResourceSearchTool:
         description: str,
         tags: list[str],
         exact: bool = False,
-        resource_id: str | None = None,
-        workflow_id: str | None = None,
     ) -> bool:
         """匹配查询关键词"""
         if exact:
-            if resource_id and workflow_id:
-                return resource_id == workflow_id
             if query_lower:
                 return query_lower == name.lower()
             return True

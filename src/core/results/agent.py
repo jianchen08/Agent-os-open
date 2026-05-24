@@ -8,15 +8,12 @@ Agent 执行结果
 - AgentExecutionResult：AgentExecutionResult类
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import Field
 
 from core.results.base import ExecutionResult
 from core.results.tool_call import ToolCallRecord
-
-if TYPE_CHECKING:
-    pass
 
 
 class AgentExecutionResult(ExecutionResult[str]):

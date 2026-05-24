@@ -51,9 +51,20 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     if entry is None:
         return None, ""
     engine = entry.engine
+
+    # BUG-FIX-fix_20260524_msg_render:
+    # 问题根因: 引擎 run() 完成后既不是 running 也不是 suspended（已完成状态），
+    #   但函数仍然返回 (engine, "running")，导致后续对死引擎调用 inject_message 无效，
+    #   消息丢失且不触发 revive 路径。
+    # 修复方案: 增加 running/suspended 状态检查，仅当引擎真正处于活跃状态时才返回；
+    #   对已完成的引擎返回 (None, "") 让消息走 revive 路径。
+    # 影响范围: 所有消息注入路径（send_pipeline_message 中 _find_engine 调用）。
+    # 修复日期: 2026-05-24
     if getattr(engine, "is_suspended", False):
         return engine, "suspended"
-    return engine, "running"
+    if getattr(engine, "is_running", False):
+        return engine, "running"
+    return None, ""
 
 
 def _update_bridge(pipeline_id: str, engine: Any, output_sink: Any) -> None:
@@ -144,8 +155,11 @@ async def send_pipeline_message(
 
     if engine is not None:
         try:
+            logger.info(
+                "[MessageBus] 引擎存在，调用 inject_message | pipeline=%s | state=%s | msg_len=%d",
+                pipeline_id[:12], state, len(message),
+            )
             engine.inject_message(message)
-            # 如果有 output_sink，尝试设置 bridge
             if output_sink is not None:
                 _update_bridge(pipeline_id, engine, output_sink)
             method = "wake" if state == "suspended" else "notification"
@@ -162,16 +176,36 @@ async def send_pipeline_message(
         except Exception as exc:
             logger.warning("[MessageBus] 消息注入失败: %s", exc)
 
-    return await _try_revive_pipeline(
+    logger.info(
+        "[MessageBus] 引擎未找到，尝试 revive | pipeline=%s | task_id=%s",
+        pipeline_id[:12], task_id[:12] if task_id else "(none)",
+    )
+
+    revive_bridge = None
+    if output_sink is not None:
+        from pipeline.stream_bridge import PipelineStreamBridge
+        revive_bridge = PipelineStreamBridge(
+            pipeline_id=pipeline_id,
+            output_sink=output_sink,
+        )
+
+    revive_result = await _try_revive_pipeline(
         pipeline_id, message,
         agent_config=agent_config,
         workspace=workspace,
         task_id=task_id,
         conversation_history=conversation_history,
-        streaming=streaming,
-        on_chunk=on_chunk,
+        streaming=streaming or (revive_bridge is not None),
+        on_chunk=revive_bridge.on_chunk if revive_bridge else on_chunk,
         **kwargs,
     )
+
+    if revive_result.success and revive_bridge is not None:
+        from pipeline.registry import get_engine_registry
+        get_engine_registry().set_bridge(pipeline_id, revive_bridge)
+        revive_result.bridge = revive_bridge
+
+    return revive_result
 
 
 async def _try_revive_pipeline(
@@ -281,19 +315,43 @@ async def _try_revive_pipeline(
         )
         new_engine._pipeline_id = pipeline_id
 
-        await new_engine.run(
-            user_input=message,
-            agent_config=agent_config,
-            conversation_history=conversation_history,
-            task_id=task_id,
-            workspace=workspace,
-            project_root="",
-            allow_default_fallback=_allow_default_fallback,
-            streaming=streaming,
-            on_chunk=on_chunk or (lambda chunk: None),
+        # BUG-FIX-fix_20260524_msg_render:
+        # 问题根因: _try_revive_pipeline 创建新引擎后未注册到 EngineRegistry，
+        #   导致 app_factory.py 中 get_engine_registry().get(_target_pid) 返回 None，
+        #   _drain_engine 为 None，后续 handle_stream_request 无法找到引擎，
+        #   消息发送后前端无渲染。
+        # 修复方案: 在 await engine.run() 之前，将引擎注册到 EngineRegistry，
+        #   使 app_factory.py 能正确获取引擎实例。
+        # 影响范围: revive 路径（重启后发送消息）。
+        # 修复日期: 2026-05-24
+        from pipeline.registry import get_engine_registry
+        get_engine_registry().register(pipeline_id, new_engine)
+        logger.info("[MessageBus] 管道复活: 引擎已注册到 EngineRegistry: pipeline=%s", pipeline_id[:12])
+
+        # BUG-FIX-fix_20260524_deadlock:
+        # 问题根因: await engine.run() 在消息处理后引擎会进入 suspended 状态，
+        #   run() 方法不会返回而是进入 _wake_event.wait() 等待循环。
+        #   这导致 _try_revive_pipeline 永远阻塞，send_pipeline_message 不返回，
+        #   app_factory.py 中的 drain_loop 永远不启动。
+        # 修复方案: 用 asyncio.create_task 异步启动 engine.run()，
+        #   _try_revive_pipeline 立即返回，让 app_factory.py 启动 drain_loop。
+        #   engine.run() 在后台执行，通过 on_chunk 回调将 LLM 输出发送到 bridge。
+        import asyncio
+        asyncio.create_task(
+            new_engine.run(
+                user_input=message,
+                agent_config=agent_config,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                workspace=workspace,
+                project_root="",
+                allow_default_fallback=_allow_default_fallback,
+                streaming=streaming,
+                on_chunk=on_chunk or (lambda chunk: None),
+            )
         )
 
-        logger.info("[MessageBus] 管道复活完成: pipeline=%s", pipeline_id)
+        logger.info("[MessageBus] 管道复活已启动(异步): pipeline=%s", pipeline_id[:12])
         return InjectResult(success=True, method="revive", pipeline_id=pipeline_id)
 
     except Exception as exc:

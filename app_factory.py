@@ -37,9 +37,8 @@ import stream_handler
 
 from stream_handler import (
     PipelineContext,
-    StreamContext,
     _init_pipeline_context,
-    handle_stream_request,
+    run_stream_session,
 )
 from static_files import mount_media_static_files
 
@@ -48,6 +47,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+_fh = logging.FileHandler("debug_eventbus.log", encoding="utf-8", mode="w")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logging.getLogger().addHandler(_fh)
+
 logger = logging.getLogger(__name__)
 
 _pipeline_ctx: PipelineContext | None = None
@@ -122,9 +127,8 @@ def create_combined_app() -> FastAPI:
         配置好的 FastAPI 应用实例
     """
     global _pipeline_ctx
-    app = create_app()
 
-    # 初始化管道引擎上下文
+    # 初始化管道引擎上下文（需要在创建 lifespan 之前完成，因为 lifespan 中要用到 _task_worker）
     _pipeline_ctx = _init_pipeline_context()
     if _pipeline_ctx.available:
         logger.info("管道引擎已就绪，WebSocket 将使用真实 AI 回复")
@@ -146,10 +150,19 @@ def create_combined_app() -> FastAPI:
                     _task_worker_started = True
                     logger.info("TaskWorker started (app startup)")
                 except Exception as exc:
-                    logger.warning("TaskWorker start failed (app startup): %s", exc)
+                    logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
         yield
 
-    app.router.lifespan_context = _combined_lifespan
+    # BUG-FIX-fix_20260524_lifespan_not_called:
+    # 问题根因: 之前使用 app.router.lifespan_context = _combined_lifespan 设置 lifespan，
+    #          但这种方式在当前 FastAPI 版本中不会生效，uvicorn 启动时不会调用 lifespan。
+    #          导致 TaskWorker.start() 从未被调用，task.submitted 事件无人监听，
+    #          任务永远停留在 pending 状态。
+    # 修复方案: 将 lifespan 作为参数传递给 FastAPI() 构造函数（通过 create_app(lifespan=...)），
+    #          确保 uvicorn 在应用启动时正确调用 lifespan 上下文管理器。
+    # 影响范围: 所有通过前端提交的子任务（task_submit）
+    # 修复日期: 2026-05-24
+    app = create_app(lifespan=_combined_lifespan)
 
     # WebSocket 连接管理
     active_connections: dict[str, list[WebSocket]] = {}
@@ -293,7 +306,6 @@ def create_combined_app() -> FastAPI:
                     _sink = TargetedSink(ws_interaction_notifier, thread_id) if _pipeline_ctx and _pipeline_ctx.available else None
 
                     # 统一路径：一次调用搞定消息投递 + 流式输出
-                    logger.info("[GlobalWS] send_pipeline_message: target_pid=%s sink=%s thread=%s", _target_pid[:12] if _target_pid else "EMPTY", _sink is not None, thread_id[:12])
                     _result = await send_pipeline_message(
                         _target_pid, _user_content,
                         output_sink=_sink,
@@ -301,7 +313,6 @@ def create_combined_app() -> FastAPI:
                         conversation_history=_history if _history else None,
                         streaming=True,
                     )
-                    logger.info("[GlobalWS] send_pipeline_message result: success=%s method=%s has_bridge=%s", _result.success, _result.method, _result.bridge is not None)
 
                     if _result.success:
                         # BUG-FIX-fix_20260523_pipeline_received_missing:
@@ -322,25 +333,13 @@ def create_combined_app() -> FastAPI:
                             pass
 
                         if _result.bridge is not None:
-                            from pipeline.registry import get_engine_registry
-                            _drain_engine = None
-                            try:
-                                _entry = get_engine_registry().get(_target_pid)
-                                if _entry:
-                                    _drain_engine = _entry.engine
-                            except Exception:
-                                pass
-                            _drain_ctx = StreamContext(
+                            _stream_task = await run_stream_session(
                                 pipeline_id=_target_pid,
                                 message_id=_msg_id,
                                 thread_id=thread_id,
-                                engine=_drain_engine,
                                 bridge=_result.bridge,
-                                ws_notifier=ws_interaction_notifier,
                                 user_content=_user_content,
-                            )
-                            _stream_task = asyncio.create_task(
-                                handle_stream_request(_drain_ctx),
+                                ws_notifier=ws_interaction_notifier,
                             )
                             _thread_stream_tasks[thread_id] = _stream_task
                         continue
@@ -372,19 +371,15 @@ def create_combined_app() -> FastAPI:
                             }, ensure_ascii=False))
                         except Exception:
                             pass
-                        _sctx = StreamContext(
+                        _stream_task = await run_stream_session(
                             pipeline_id="",
                             message_id=_msg_id,
                             thread_id=thread_id,
                             conversation_history=_history,
                             ws_notifier=ws_interaction_notifier,
-                            websocket=websocket,
                             stop_event=_stop_evt,
                             user_content=_user_content,
                             pipeline_ctx=_pipeline_ctx,
-                        )
-                        _stream_task = asyncio.create_task(
-                            handle_stream_request(_sctx)
                         )
                         _thread_stream_tasks[thread_id] = _stream_task
                     else:

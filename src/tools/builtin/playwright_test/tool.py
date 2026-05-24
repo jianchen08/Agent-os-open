@@ -603,7 +603,6 @@ class PlaywrightTestTool(BuiltinTool):
                 return create_failure_result("value 是必填参数，需提供 JS 表达式")
 
             page = session.page
-            timeout = inputs.get("timeout", 30000)
 
             # 执行 JS 表达式
             js_result = await page.evaluate(value)

@@ -225,8 +225,8 @@ async def test_4_task_submit():
     logger.info("测试 4: 任务提交")
     logger.info("=" * 60)
 
-    if not importlib.util.find_spec("tasks.services.submission"):
-        logger.warning("⚠️ 测试 4 跳过: TaskSubmissionService 导入失败")
+    if not importlib.util.find_spec("tasks.service"):
+        logger.warning("⚠️ 测试 4 跳过: TaskService 导入失败")
         return True
 
     try:

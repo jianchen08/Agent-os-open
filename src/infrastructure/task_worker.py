@@ -24,6 +24,7 @@ from infrastructure.task_executor import TaskExecutorMixin
 from infrastructure.task_idle_timer import TaskIdleTimerMixin
 from infrastructure.task_notifier import TaskNotifierMixin
 from infrastructure.task_post_pipeline import TaskPostPipelineMixin
+from infrastructure.task_context import TaskExecutionContext
 from infrastructure.task_recovery import TaskRecoveryMixin
 
 logger = logging.getLogger(__name__)
@@ -122,13 +123,12 @@ class TaskWorker(
 ):
     """后台任务执行器。
 
-    监听 EventBus 上的 task.submitted 事件，当收到新任务时
-    创建 PipelineEngine 实例执行子任务。
+    通过 submit_task() 接收任务提交，创建 PipelineEngine 实例执行子任务。
+    每个任务有独立的 TaskExecutionContext，支持异步并行执行。
 
-    子任务完成通知采用单一机制：_on_task_state_changed 收到终态事件后，
+    子任务完成通知：_on_task_state_changed 收到终态事件后，
     通过 _notify_suspended_pipelines 直接定位挂起的父管道并调用
-    inject_message，同时 set _wake_events 唤醒 while 循环。
-    无双重订阅，无竞态风险。
+    inject_message，同时 set ctx.wake_event 唤醒 while 循环。
 
     Attributes:
         _task_service: 任务服务实例
@@ -136,12 +136,10 @@ class TaskWorker(
         _input_route_table: 输入路由表
         _output_route_table: 输出路由表
         _services: 共享服务字典
-        _event_bus: 事件总线
+        _event_bus: 事件总线（仅用于 task_state_changed）
         _running: 是否正在运行
         _tasks: 后台协程集合
-        _terminal_events: task_id → asyncio.Event 的映射
-        _suspended_engines: task_id → 挂起的 PipelineEngine
-        _wake_events: task_id → asyncio.Event，管道挂起等待唤醒信号
+        _contexts: task_id → TaskExecutionContext 映射
     """
 
     def __init__(
@@ -163,25 +161,22 @@ class TaskWorker(
         self._config = config or {}
         self._running: bool = False
         self._tasks: set[asyncio.Task] = set()
-        self._terminal_events: dict[str, asyncio.Event] = {}
-        self._suspended_engines: dict[str, Any] = {}
-        self._idle_remind_counts: dict[str, int] = {}
-        self._resume_requested: dict[str, bool] = {}
-        # parent_task_id → Event，_notify_suspended_pipelines 成功后 set
-        self._wake_events: dict[str, asyncio.Event] = {}
+        self._contexts: dict[str, TaskExecutionContext] = {}
         self._last_container_check: float = 0.0
-        self._active_tasks: set[str] = set()
-        self._task_id_to_bg_task: dict[str, asyncio.Task] = {}
-        # BUG-FIX-fix_20260518_submitted_dedup: 事件级去重集合，防止重复 task.submitted 并发调度
-        self._submitted_task_ids: set[str] = set()
         # BUG-FIX-fix_20260520_subscribe_args: 保存 subscribe_simple 返回的订阅 ID，用于 unsubscribe
         self._sub_ids: list[str] = []
+        # BUG-FIX-fix_20260524_submit_task_loop:
+        # submit_task 可能从工作线程（asyncio.to_thread + asyncio.run）调用，
+        # asyncio.create_task 会在临时事件循环上创建任务，循环关闭后任务丢失。
+        # 保存主事件循环引用，确保任务创建在正确的循环上。
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
         """启动后台任务监听，并恢复残留的 running 任务。"""
         if self._running:
             return
         self._running = True
+        self._main_loop = asyncio.get_running_loop()
 
         # 通过 ServiceProvider 注册全局引用，供 task_manage cancel 调用
         try:
@@ -198,12 +193,11 @@ class TaskWorker(
         #          EventBus 内部 _notify_subscribers 调用 str() 时静默失败，事件无人处理，任务永远 pending。
         # 修复方案: 使用 subscribe_simple() 替代 subscribe()，自动解析事件类型并创建 EventFilter。
         if self._event_bus:
-            sub1 = self._event_bus.subscribe_simple("task.submitted", self._on_task_submitted)
-            sub2 = self._event_bus.subscribe_simple("task_state_changed", self._on_task_state_changed)
-            self._sub_ids = [sub1, sub2]
+            sub_id = self._event_bus.subscribe_simple("task_state_changed", self._on_task_state_changed)
+            self._sub_ids = [sub_id]
             logger.info(
-                "TaskWorker: 订阅完成 | sub1=%s | sub2=%s | event_bus_type=%s | event_bus_id=%s | total_subscribers=%s",
-                sub1, sub2,
+                "TaskWorker: 订阅完成 | sub=%s | event_bus_type=%s | event_bus_id=%s | total_subscribers=%s",
+                sub_id,
                 type(self._event_bus).__name__, id(self._event_bus),
                 getattr(self._event_bus, 'subscriber_count', "N/A"),
             )
@@ -269,10 +263,10 @@ class TaskWorker(
             self._sub_ids.clear()
 
         if self._tasks:
-            # 等待已提交的 asyncio.Task 开始执行，确保 _terminal_events 已注册
+            # 等待已提交的 asyncio.Task 开始执行，确保 _contexts 已注册
             await asyncio.sleep(0.1)
 
-        pending = list(self._terminal_events.values())
+        pending = [ctx.terminal_event for ctx in self._contexts.values()]
         if pending:
             logger.info("TaskWorker: waiting for %d pending task(s) to finish...", len(pending))
             stop_wait_timeout = self._config.get("stop_wait_timeout", 600)
@@ -299,7 +293,7 @@ class TaskWorker(
         if self._task_service:
             try:
                 from tasks.types import TaskStatus
-                remaining_ids = list(self._terminal_events.keys())
+                remaining_ids = list(self._contexts.keys())
                 for tid in remaining_ids:
                     try:
                         task = self._task_service.get_task(tid)
@@ -310,59 +304,84 @@ class TaskWorker(
                         logger.warning("TaskWorker.stop: failed to pause task %s: %s", tid, e)
             except Exception as e:
                 logger.warning("TaskWorker.stop: failed to cleanup tasks: %s", e)
-        self._terminal_events.clear()
-        self._wake_events.clear()
-        self._task_id_to_bg_task.clear()
+        self._contexts.clear()
 
         logger.info("TaskWorker stopped")
 
-    async def _on_task_submitted(self, event: Any) -> None:
-        """处理任务提交事件。
+    def submit_task(self, task_data: dict[str, Any]) -> bool:
+        """提交任务到后台执行（替代 EventBus 的直接调用接口）。
 
-        BUG-FIX-fix_20260516_double_dispatch:
-        问题根因: _on_task_submitted 没有去重，同一 task_id 收到两次 task.submitted 事件时
-                 会创建两个并发协程，两个协程都尝试 create_timer 导致 ValueError。
-        修复方案: 创建前检查 _task_id_to_bg_task，已有未完成的同 task_id 协程则跳过。
+        多个任务可并行调用，每个任务有独立的 TaskExecutionContext。
 
         Args:
-            event: 任务提交事件
+            task_data: 任务数据字典，可包含 _prepared_context
+
+        Returns:
+            True=成功创建后台协程, False=重复提交或未启动
         """
-        logger.info(
-            "TaskWorker: 收到事件 | event_type=%s | event_id=%s",
-            getattr(event, "event_type", "N/A"),
-            getattr(event, "event_id", "N/A"),
-        )
         if not self._running:
-            return
-        task_data = event.data if hasattr(event, "data") else event
-        task_id = task_data.get("task_id", "unknown") if isinstance(task_data, dict) else "unknown"
-        logger.info(
-            "TaskWorker: 解析事件数据 | task_id=%s | data_keys=%s",
-            task_id,
-            list(task_data.keys()) if isinstance(task_data, dict) else "N/A",
-        )
+            logger.warning("TaskWorker: 未启动，拒绝提交 | task=%s", task_data.get("task_id"))
+            return False
 
-        # BUG-FIX-fix_20260518_submitted_dedup: 事件级 set[str] 去重
-        if task_id != "unknown":
-            if task_id in self._submitted_task_ids:
-                logger.info(
-                    "TaskWorker: 跳过重复调度 | task_id=%s (事件级去重命中)", task_id,
-                )
-                return
-            self._submitted_task_ids.add(task_id)
+        task_id = task_data.get("task_id", "")
+        if not task_id or task_id == "unknown":
+            return False
 
-        # 去重：已有同 task_id 的运行中协程则跳过
-        if task_id != "unknown":
-            existing = self._task_id_to_bg_task.get(task_id)
-            if existing is not None and not existing.done():
-                logger.info(
-                    "TaskWorker: 跳过重复调度 | task_id=%s (已有运行中协程)", task_id,
-                )
-                self._submitted_task_ids.discard(task_id)
-                return
+        # 去重
+        ctx = self._contexts.get(task_id)
+        if ctx and ctx.bg_task and not ctx.bg_task.done():
+            logger.info("TaskWorker: 跳过重复提交 | task=%s", task_id)
+            return True
 
-        logger.info("TaskWorker received task: %s", task_id)
+        # 创建独立上下文
+        context = TaskExecutionContext(task_id)
+
+        # 如果携带了准备上下文，填充
+        prepared = task_data.get("_prepared_context")
+        if prepared:
+            context.workspace = prepared.get("workspace", "")
+            context.ws_meta = prepared.get("ws_meta", {})
+            context.full_input = prepared.get("full_input", "")
+            context.isolation_mode = prepared.get("isolation_mode", "")
+            context.has_explicit_workspace = prepared.get("has_explicit_workspace", False)
+            context.agent_config_validated = prepared.get("agent_config_validated", False)
+
+        self._contexts[task_id] = context
+
+        async def _run_and_cleanup(td, ctx):
+            try:
+                await self._execute_background_task(td, ctx)
+            except Exception as e:
+                logger.error("TaskWorker: 执行失败 | task=%s | error=%s", td.get("task_id"), e)
+            finally:
+                self._contexts.pop(td.get("task_id"), None)
+
+        # BUG-FIX-fix_20260524_submit_task_loop:
+        # ToolCore 通过 asyncio.to_thread + asyncio.run 在工作线程执行工具，
+        # 导致 submit_task 可能从非主事件循环的线程调用。
+        # asyncio.create_task 会在当前线程的临时事件循环上创建任务，
+        # asyncio.run 结束后临时循环关闭，任务被丢弃。
+        # 修复：检测是否在主循环线程中，若不在则用 call_soon_threadsafe 调度。
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            logger.error("TaskWorker: 主事件循环不可用 | task=%s", task_id)
+            self._contexts.pop(task_id, None)
+            return False
+
+        def _create_task_on_main_loop():
+            bg_task = loop.create_task(_run_and_cleanup(task_data, context))
+            self._tasks.add(bg_task)
+            context.bg_task = bg_task
+            bg_task.add_done_callback(lambda t: self._tasks.discard(t))
+
         try:
-            await self._execute_background_task(task_data)
-        except Exception as e:
-            logger.error("TaskWorker: _execute_background_task error | task=%s | error=%s", task_id, e)
+            running_loop = asyncio.get_running_loop()
+            if running_loop is loop:
+                _create_task_on_main_loop()
+            else:
+                loop.call_soon_threadsafe(_create_task_on_main_loop)
+        except RuntimeError:
+            loop.call_soon_threadsafe(_create_task_on_main_loop)
+
+        logger.info("TaskWorker: 后台任务已创建 | task=%s | 并行任务数=%d", task_id, len(self._contexts))
+        return True

@@ -980,19 +980,7 @@ async def cancel_task(
 
 
 async def _submit_task_event(task_id: str, task_service: Any) -> bool:
-    """发布 task.submitted 事件，触发 TaskWorker 重新执行任务。
-
-    从 TaskService 获取任务的完整信息，构建事件数据，
-    通过 EventBus 发布 task.submitted 事件。
-    TaskWorker 订阅该事件后会创建后台协程执行 PipelineEngine。
-
-    Args:
-        task_id: 任务 ID
-        task_service: TaskService 实例
-
-    Returns:
-        是否成功发布了事件
-    """
+    """通过 task_worker 直接提交任务事件。"""
     try:
         task = task_service.get_task(task_id)
         if task is None:
@@ -1000,30 +988,22 @@ async def _submit_task_event(task_id: str, task_service: Any) -> bool:
 
         metadata = task.metadata or {}
         from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-
-        event_bus = provider.get("event_bus")
-        if event_bus is None:
-            logger.warning("_submit_task_event: EventBus 不可用")
+        task_worker = get_service_provider().get("task_worker")
+        if not task_worker:
+            logger.warning("_submit_task_event: task_worker 不可用")
             return False
 
-        # BUG-FIX-fix_20260513_submit_event_async:
-        # 问题根因: _submit_task_event 是同步函数，使用已弃用的 asyncio.get_event_loop()
-        #           和 ensure_future，在 async 上下文中可能不可靠
-        # 修复方案: 改为 async 函数，直接 await event_bus.emit
-        await event_bus.emit("task.submitted", {
+        return task_worker.submit_task({
             "task_id": task.id,
             "target_type": task.target_type or "agent",
             "target_id": metadata.get("target_id", ""),
-            "user_input": task.title,
-            "description": task.description,
+            "user_input": task.title or "",
+            "description": task.description or "",
             "acceptance_criteria": metadata.get("acceptance_criteria", {}),
             "workspace": metadata.get("workspace", ""),
         })
-
-        return True
     except Exception as exc:
-        logger.warning("_submit_task_event: 发布事件失败: task_id=%s, error=%s", task_id, exc)
+        logger.warning("_submit_task_event: 提交任务失败: task_id=%s, error=%s", task_id, exc)
         return False
 
 
