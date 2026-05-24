@@ -130,7 +130,8 @@ export const MessageItem = ({
     message.role === 'system' ||
     message.metadata?.record_type === 'system' ||
     message.metadata?.type === 'system' ||
-    message.metadata?.sender_type === 'system'
+    message.metadata?.sender_type === 'system' ||
+    (message.role === 'user' && message.content?.trimStart().startsWith('[系统通知]'))
 
   // BUG-FIX-fix_20260523_max_update_depth:
   // 问题根因: useSessionStore()/useAgentStore() 无 selector 全量订阅，

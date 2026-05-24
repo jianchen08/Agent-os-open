@@ -58,36 +58,28 @@ def _map_status_for_api(status: str) -> str:
 
 
 def _get_task_service() -> Any:
-    """获取全局 TaskStorage 实例（YAML 文件持久化）。
+    """获取全局 TaskService 实例。
 
-    BUG-FIX-fix_20260506_007: 补充从 TaskStorage 获取管道引擎创建的任务
-    问题根因: routes_tasks.py 只查询 api_store（内存 dict），
-              管道引擎通过 TaskStorage → YAML 文件管理任务，
-              两者完全独立，导致 API 返回空列表
-    修复方案: 合并 api_store 和 TaskStorage 的数据源
-
-    BUG-FIX-task_service_init:
-    问题根因: 旧代码使用 tasks.service.TaskService() 无参构造，
-              但该类要求必传 task_id 参数，导致 TypeError 被静默捕获，
-              _get_task_service() 永远返回 None，TaskStorage 层完全不可用。
-    修复方案: 直接实例化 TaskStorage（无需必传参数），
-              TaskStorage 已添加 list_all/get_task/delete_task/pause_task/resume_task 等方法。
+    BUG-FIX-fix_20260524_task_service_type_mismatch:
+    问题根因: 旧代码注册 TaskStorage 作为 "task_service"，导致其他模块通过
+              ServiceProvider 获取到 TaskStorage 实例而非 TaskService，
+              缺少 start_task/fail_task/get_task/bind_pipeline_run 等方法，
+              引发 AttributeError 或状态不同步。
+    修复方案: 使用 TaskService 替代 TaskStorage，与 task_submit/task_manage 保持一致。
+              TaskService 内部持有 TaskStorage 实例，通过门面模式提供完整 API。
+    影响范围: 所有通过 ServiceProvider 获取 task_service 的模块。
+    修复日期: 2026-05-24
     """
     try:
         from infrastructure.service_provider import get_service_provider
-        from pathlib import Path
         provider = get_service_provider()
         return provider.get_or_create(
             "task_service",
-            lambda: __import__(
-                "tasks.storage", fromlist=["TaskStorage"]
-            ).TaskStorage(
-                data_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "tasks"),
-            ),
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
         )
     except Exception as exc:
         logger.warning(
-            "_get_task_service: TaskStorage 初始化失败，将返回 None | error=%s",
+            "_get_task_service: TaskService 初始化失败，将返回 None | error=%s",
             exc,
         )
         return None

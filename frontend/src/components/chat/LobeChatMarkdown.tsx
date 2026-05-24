@@ -9,7 +9,7 @@
 
 import { ConfigProvider, Markdown } from '@lobehub/ui'
 import { motion } from 'motion/react'
-import { useMemo, useRef, type FC, type ReactNode } from 'react'
+import { type FC, type ReactNode } from 'react'
 
 import './LobeChatMarkdown.css'
 
@@ -23,13 +23,17 @@ interface LobeChatMarkdownProps {
 /**
  * LobeChat Markdown 渲染组件
  *
- * BUG-FIX-fix_20260507_markdown_streaming_freeze:
- * 问题根因: @lobehub/ui 的 Markdown 组件在 enableStream 从 true 切换到 false 时
- *          内部流式状态未正确重置，导致组件停止响应后续内容更新。
- *          具体场景：工具调用完成后，旧文本片段的 isLast 变为 false，
- *          enableStream 随之变为 false，Markdown 组件冻结。
- * 修复方案: 当 isStreaming 从 true 变为 false 时，通过改变 key 强制重建组件，
- *          丢弃残留的流式内部状态。同时始终以非流式模式渲染已完成的内容。
+ * BUG-FIX-fix_20260524_stream_duplicate:
+ * 问题根因: @lobehub/ui 的 Markdown 组件在 enableStream={true} 时会在内部再做一次
+ *          字符级流式动画（streamSmoothingPreset），与 streamHandler 的 RAF 批处理
+ *          （60fps 增量更新）叠加，导致每个字符/词被渲染两次——一次是 RAF 更新的
+ *          实际内容，一次是内部平滑动画的重放内容。
+ *          症状：流式输出时文本逐字重复（如"房间里房间里"），刷新后正常。
+ * 修复方案: 显式传 enableStream={false}（@lobehub/ui 默认值为 true，不传等于开启），
+ *          由 RAF 批处理提供流式视觉效果，不使用内部流式动画。
+ *          同时移除不再需要的 key/ref/streamSmoothingPreset 逻辑。
+ * 影响范围: 流式输出期间的文本渲染
+ * 修复日期: 2026-05-24
  */
 export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
   content,
@@ -37,33 +41,15 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
   onDoubleClick,
   children,
 }) => {
-  const wasStreamingRef = useRef(false)
-  const streamEndedKeyRef = useRef(0)
-
-  if (isStreaming) {
-    wasStreamingRef.current = true
-  } else if (wasStreamingRef.current) {
-    wasStreamingRef.current = false
-    streamEndedKeyRef.current += 1
-  }
-
-  const markdownKey = useMemo(() => {
-    return isStreaming ? 'streaming' : `static-${streamEndedKeyRef.current}`
-  }, [isStreaming])
-
   return (
     <ConfigProvider motion={motion}>
       <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
         {children ?? (
-          <Markdown
-            key={markdownKey}
-            variant="chat"
-            enableStream={isStreaming}
-            streamSmoothingPreset="balanced"
-          >
+          <Markdown variant="chat" enableStream={false}>
             {content}
           </Markdown>
         )}
+        {isStreaming && <span className="md-cursor" />}
       </div>
     </ConfigProvider>
   )

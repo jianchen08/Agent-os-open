@@ -255,21 +255,17 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     if (saved) {
-      // BUG-FIX-fix_20260523_tab_pipeline_msg:
-      // 问题根因: 从 localStorage 恢复子 Tab 时，tab.pipelineRunId 可能为空，
-      //          导致后续 registerPipeline 和 loadTabMessages 被跳过，子 Tab 消息不显示。
-      // 修复方案: 在 set() 之前从 pipelineTabMap 反向查找 pipelineId，重建 pipelineRunId。
-      //          避免直接修改已存入 store 的对象引用，遵循 Zustand 不可变更新原则。
-      // 影响范围: 页面刷新后子 Tab 的消息恢复
-      // 修复日期: 2026-05-23
+      // 所有 Tab 统一从 pipelineTabMap 反向查找补全 pipelineRunId
+      const restoredPipelineTabMap = { ...(saved.pipelineTabMap || {}) }
       for (const tab of saved.tabs) {
-        if (tab.agentLevel !== 1 && !tab.pipelineRunId) {
-          for (const [pid, tid] of Object.entries(saved.pipelineTabMap || {})) {
-            if (tid === tab.id) {
-              tab.pipelineRunId = pid
-              break
-            }
+        if (!tab.pipelineRunId) {
+          for (const [pid, tid] of Object.entries(restoredPipelineTabMap)) {
+            if (tid === tab.id) { tab.pipelineRunId = pid; break }
           }
+        }
+        // 主/子 Tab 统一注册到 pipelineTabMap（确保 streamHandler 路由一致）
+        if (tab.pipelineRunId && !restoredPipelineTabMap[tab.pipelineRunId]) {
+          restoredPipelineTabMap[tab.pipelineRunId] = tab.id
         }
       }
 
@@ -280,7 +276,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         tabMessages: {},
         tabMessagesLoading: {},
         unreadCounts: {},
-        pipelineTabMap: saved.pipelineTabMap || {},
+        pipelineTabMap: restoredPipelineTabMap,
       })
 
       const pipelineStore = usePipelineMessageStore.getState()
@@ -318,6 +314,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         tabMessages: {},
         tabMessagesLoading: {},
         unreadCounts: {},
+        pipelineTabMap: mainPipelineId ? { [mainPipelineId]: mainTab.id } : {},
       })
     }
   },

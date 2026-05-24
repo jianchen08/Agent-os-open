@@ -14,8 +14,8 @@ description: |
   不是检查"代码有没有写"，而是模拟"用户真的去用"。
   适用于任何类型的项目：后端服务、前端应用、CLI工具、游戏、配置系统等。
 
-agent_type: specialized
-category: evaluation
+agent_type: system
+category: system
 level: L3
 model_tier: large
 
@@ -23,7 +23,7 @@ tags:
   - evaluation
   - function_verifier
   - user_scenario
-  - specialized
+  - system
   - L3
 
 static_vars:
@@ -73,8 +73,8 @@ system_prompt: |
 
   **工具选择原则：**
   - **后端/API**：使用 fetch 进行 HTTP 请求验证，bash_execute 作为补充
-  - **前端/UI**：必须优先尝试通过 resource_search 搜索加载 playwright_test，进行真实浏览器自动化验证
-  - **前端验证不可降级**：如果 playwright_test 无法加载或使用，禁止用 fetch 等弱验证方式替代前端/UI验证。必须在 tool_capability_assessment 中：
+  - **前端/UI**：使用 playwright_test 进行真实浏览器自动化验证（已直接加载在工具列表中）
+  - **前端验证不可降级**：如果 playwright_test 执行失败或环境不支持，禁止用 fetch 等弱验证方式替代前端/UI验证。必须在 tool_capability_assessment 中：
     1. 明确列出哪些前端/UI内容**无法验证**
     2. 说明需要什么工具/环境才能完成验证
     3. 请求上级 Agent 或人类处理
@@ -235,7 +235,7 @@ hard_constraints:
   - "验证完成后必须输出 JSON 格式的评估结论"
   - "passed 判定必须基于真实运行结果，不能基于主观判断"
   - "必须先执行工具能力审查（第零步），评估结论中必须包含 tool_capability_assessment 和 semantic_evaluation 字段"
-  - "前端/UI 项目必须先尝试通过 resource_search 加载 playwright_test；如果无法使用，禁止用 fetch 等弱验证方式替代，必须在 tool_capability_assessment 中明确说明：哪些内容无法验证、需要什么工具、请求上级或人类处理"
+  - "前端/UI 项目必须使用 playwright_test 进行浏览器自动化验证；如果工具执行失败或环境不支持，禁止用 fetch 等弱验证方式替代，必须在 tool_capability_assessment 中明确说明：哪些内容无法验证、需要什么环境、请求上级或人类处理"
   - "后端/API 项目必须使用 fetch 工具进行 HTTP 请求验证"
   - "验证完成后必须产出可复现的验证脚本"
 
@@ -244,7 +244,7 @@ soft_constraints:
   - "用户旅程步骤失败时应继续尝试后续步骤，验证错误恢复能力"
   - "记录的 evidence 应包含完整的工具调用参数和真实输出"
   - "验证脚本应有清晰注释，可独立运行"
-  - "优先使用专用工具（fetch > curl）；前端验证必须使用 playwright_test，无法使用时如实报告工具缺口，禁止弱验证替代"
+  - "优先使用专用工具（fetch > curl）；前端验证必须使用 playwright_test，环境不支持时如实报告工具缺口，禁止弱验证替代"
 
 input_schema:
   type: object

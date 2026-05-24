@@ -517,7 +517,17 @@ class ResourceSearchTool:
         detailed: bool = False,
         exact: bool = False,
     ) -> tuple[list[str], list[str], list[str], list[dict]]:
-        """搜索 Agent，返回名称、描述、config_id、详情。"""
+        """搜索 Agent，返回名称、描述、config_id、详情。
+
+        当 query 为空或通配符（"*"、"all"、"所有"等）时，直接返回所有 agent（受 limit 限制）。
+        否则调用 _match_query 进行子串/分词匹配。
+        """
+        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
+        # 问题根因: _match_query 只支持子串匹配，LLM 用模糊查询（"所有agent"、"team"）无法匹配
+        # 修复方案: 空查询/通配符时直接返回所有 agent，不走 _match_query
+        # 影响范围: resource_search 工具的 agent 搜索功能
+        # 修复日期: 2026-05-24
+
         agent_registry = self._get_agent_registry()
         if not agent_registry:
             return [], [], [], []
@@ -531,6 +541,10 @@ class ResourceSearchTool:
         if detailed and exact:
             limit = 1
 
+        # 判断是否为通配符/空查询，如果是则直接匹配所有 agent
+        wildcard_patterns = {"*", "all", "所有", "全部", "any"}
+        is_wildcard = (not query_lower) or (query_lower.strip() in wildcard_patterns)
+
         for agent_config in agent_registry.list_all():
             if level != "all":
                 agent_level = getattr(agent_config, "level", "user")
@@ -543,15 +557,20 @@ class ResourceSearchTool:
                     continue
 
             config_id = getattr(agent_config, "config_id", "")
-            matched = self._match_query(
-                query_lower,
-                agent_config.name,
-                agent_config.description,
-                agent_config.tags,
-                exact,
-            )
-            if not matched and config_id and query_lower in config_id.lower():
+
+            # 通配符/空查询直接匹配，否则走 _match_query
+            if is_wildcard:
                 matched = True
+            else:
+                matched = self._match_query(
+                    query_lower,
+                    agent_config.name,
+                    agent_config.description,
+                    agent_config.tags,
+                    exact,
+                )
+                if not matched and config_id and query_lower in config_id.lower():
+                    matched = True
             if matched:
                 names.append(agent_config.name)
                 descriptions.append(agent_config.description)
@@ -965,24 +984,62 @@ class ResourceSearchTool:
         tags: list[str],
         exact: bool = False,
     ) -> bool:
-        """匹配查询关键词"""
+        """匹配查询关键词
+
+        支持三种匹配模式：
+        1. exact 模式：精确匹配 name（完全相等）
+        2. 通配符模式：query 为 "*"、"all"、"所有" 等通配符时直接返回 True
+        3. 分词匹配模式：将 query 按空格/逗号分词，任一关键词命中即算匹配
+
+        匹配字段包括 name、description、tags，任一字段命中即返回 True。
+        """
+        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
+        # 问题根因: _match_query 只支持子串匹配，不支持模糊/通配符查询
+        # 修复方案: 添加通配符支持和分词匹配
+        # 影响范围: resource_search 工具的 agent 搜索功能
+        # 修复日期: 2026-05-24
+
+        # exact 模式保持原有行为不变
         if exact:
             if query_lower:
                 return query_lower == name.lower()
             return True
 
+        # 空查询视为匹配所有
         if not query_lower:
             return True
 
-        if query_lower in name.lower():
+        # 通配符支持："*"、"all"、"所有"、"全部" 等直接返回 True
+        wildcard_patterns = {"*", "all", "所有", "全部", "any"}
+        if query_lower.strip() in wildcard_patterns:
             return True
 
-        if description and query_lower in description.lower():
-            return True
+        name_lower = name.lower()
+        desc_lower = (description or "").lower()
+        tags_lower = [tag.lower() for tag in tags]
 
-        for tag in tags:
-            if query_lower in tag.lower():
+        # 先尝试完整子串匹配（保持原有行为）
+        if query_lower in name_lower:
+            return True
+        if query_lower in desc_lower:
+            return True
+        for tag in tags_lower:
+            if query_lower in tag:
                 return True
+
+        # 分词匹配：将 query 按空格和逗号分词，任一关键词命中即算匹配
+        keywords = [kw.strip() for kw in query_lower.replace(",", " ").split() if kw.strip()]
+        for keyword in keywords:
+            # 通配符关键词也直接匹配
+            if keyword in wildcard_patterns:
+                return True
+            if keyword in name_lower:
+                return True
+            if keyword in desc_lower:
+                return True
+            for tag in tags_lower:
+                if keyword in tag:
+                    return True
 
         return False
 

@@ -442,7 +442,11 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         """
         try:
             from tasks.service import TaskService
-            task_service = self._services.get("task_service") or TaskService()
+            from infrastructure.service_provider import get_service_provider
+            _provider = get_service_provider()
+            task_service = self._services.get("task_service") or _provider.get_or_create(
+                "task_service", lambda: TaskService(event_bus=_provider.get("event_bus")),
+            )
 
             from infrastructure.task_worker import TaskWorker
             import yaml as _yaml

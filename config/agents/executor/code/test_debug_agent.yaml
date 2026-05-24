@@ -36,13 +36,47 @@ tags:
 static_vars:
   enabled: true
   items:
+    - name: "行为约束"
+      type: "rules"
+    - name: "工具输出优化技能"
+      type: "path"
+      path: "skills/skill-tool-output-optimize/SKILL.md"
     - name: "测试代码模板"
       type: "path"
       path: "config/templates/test_code_template.md"
+    - name: "前端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        frontend:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/frontend_rules.md"
+    - name: "后端开发规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        backend:
+          type: "path"
+          path: "config/rules/backend_rules.md"
+        fullstack:
+          type: "path"
+          path: "config/rules/backend_rules.md"
+    - name: "测试规范"
+      type: "routed"
+      route_key: "coding_domain"
+      routes:
+        _default:
+          type: "path"
+          path: "config/rules/testing_rules.md"
 
 dynamic_vars:
   enabled: true
   items:
+    - name: "当前时间"
+      type: "timestamp"
     - name: "最小行动原则"
       content: |
         每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
@@ -118,6 +152,13 @@ system_prompt: |
      - 添加回归测试防止同类问题复发
      - 如果仍有失败 → 回到步骤 1（同方向最多 3 次，超过则切换假设）
 
+  5. **修复熔断机制**
+     当同一模块的 bug 在完整调试流程中被打回超过 3 次仍未解决时，触发熔断：
+     - **立即停止调试**，不再尝试修复
+     - 将熔断报告写入 `docs/process/circuit_breaker_report.md`，内容包含：(1) 模块名 (2) 已尝试的修复方向和失败原因 (3) 该模块的已知问题清单 (4) 怀疑的架构根因（如职责不清、隐式耦合、状态管理混乱）
+     - 调用 task_evaluate 标记熔断状态，由上级决定是否进行架构审查
+     - **禁止继续调试**
+
   ### 第五步：输出结果
   - 确认所有测试通过、覆盖率达标
   - 确认无残留诊断代码
@@ -143,7 +184,7 @@ system_prompt: |
 
   ## 成功标准
 
-  - ✅ 所有测试通过，覆盖率达到标
+  - ✅ 所有测试通过，覆盖率达到标准
   - ✅ Bug 修复后在完整系统中不再出现
   - ✅ 有回归测试防止问题复发
   - ✅ 无残留临时诊断代码
@@ -188,13 +229,13 @@ hard_constraints:
   - "代码必须可运行，必须通过语法检查"
   - "调试阶段（复现与追踪）禁止修改代码，只能加诊断标记"
   - "必须在完整系统中验证修复，不能只依赖隔离测试"
-  - "同一方向尝试 3 次无效后必须强制切换假设"
   - "修复后必须移除所有临时诊断代码"
   - "如果输入包含 state_machine，必须覆盖所有状态和转换（state_coverage=100%，transition_coverage=100%）"
   - "如果输入包含 AC，每个 must 级别的 AC 必须有对应测试"
   - "Bug 修复任务必须先写失败测试再调试修复"
   - "必须先搜索现有测试文件，有现成测试时优先复用和补充，禁止跳过现有测试另起炉灶"
   - "API 端点测试必须覆盖 2xx 和 4xx 场景，必须进行 Schema 校验"
+  - "同一模块 bug 反复修复超过 3 次仍未解决时，必须触发修复熔断：停止调试，将熔断报告写入 docs/process/ 并调用 task_evaluate 标记"
 
 soft_constraints:
   - "测试命名应清晰表达测试意图"

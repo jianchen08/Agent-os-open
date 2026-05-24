@@ -1,100 +1,127 @@
-# Agent OS 项目质量评估报告
+# 语义质量评估报告 — system_team_audit.md
 
-评估指标: 质量评估（结构完整性、内容准确性、逻辑连贯性、表达清晰度）
-评估时间: 2026-05-24
-评估范围: 项目整体架构、核心代码、文档、配置文件
+---
 
-## 一、评估总览
+## 评估元信息
 
-| 维度 | 评分(0-100) | 等级 |
-|------|------------|------|
-| 结构完整性 | 88 | 良好 |
-| 内容准确性 | 82 | 良好 |
-| 逻辑连贯性 | 85 | 良好 |
-| 表达清晰度 | 90 | 优秀 |
-| 综合评分 | 86 | 良好 |
+- **评估对象**: docs/process/system_team_audit.md（系统团队审查报告）
+- **关联配置文件**: config/agents/system/evaluator_agent.yaml, config/agents/system/function_verifier_agent.yaml
+- **评估标准**: 报告必须覆盖 evaluator_agent 和 function_verifier_agent 两个 Agent，每个都要有配置完整性、prompt质量、工具配置合理性、问题清单、修复说明。必须体现调研了人类在评估/验证领域的经验和最佳实践。
 
-## 二、逐维度评估
+---
 
-### 2.1 结构完整性（88分）
+## 一、逐维度评估
 
-优点:
-- 项目目录结构清晰，模块划分合理。src/ 下按功能域组织，职责边界明确
-- README.md 提供了完整的项目结构树，架构层次分明
-- 分层架构设计合理：Channels -> Interfaces -> Plugins -> Pipeline -> Services -> Infrastructure
-- 前后端分离，前端 React + 后端 FastAPI
-- Docker 多阶段构建，关注构建缓存和镜像体积优化
-- 配置文件独立管理，文档体系完整
+### 维度 1：两个 Agent 覆盖情况
 
-不足:
-1. app_factory.py（868行）和 stream_handler.py 体量偏大，职责未充分拆分
-2. 项目根目录存在多个临时/调试文件，影响根目录整洁度
-3. pyproject.toml 中 testpaths 指向 src/tests，但根目录也有 tests/，存在测试目录歧义
+| Agent | 是否覆盖 | 报告章节 | 证据 |
+|-------|---------|---------|------|
+| evaluator_agent | 是 | 第二章（第29-100行） | 标题"二、evaluator_agent 审查"，含完整的配置检查表、问题清单、修复说明 |
+| function_verifier_agent | 是 | 第三章（第103-152行） | 标题"三、function_verifier_agent 审查"，含完整的配置检查表、问题清单、修复说明 |
 
-### 2.2 内容准确性（82分）
+**评分**: 100/100
 
-优点:
-- README.md 中的技术栈描述与实际代码一致
-- 架构文档对业界方案的调研对比详实，数据引用有来源标注
-- Dockerfile 的多阶段构建逻辑正确
-- 代码中的 BUG-FIX 注释记录了问题根因和修复方案，有追溯性
+### 维度 2：配置完整性
 
-不足:
-1. pyproject.toml 的 dependencies 列表不完整（缺少 uvicorn、fastapi、websockets 等核心依赖），本地 pip install -e . 会缺失
-2. debug_eval_agent_entry.log 是调试日志，不应保留在项目根目录
-3. docker-compose.yml 中引用的端口需与 .env 和 start_web.sh 保持同步，存在潜在不一致风险
+| Agent | 是否有配置完整性检查 | 证据 |
+|-------|-------------------|------|
+| evaluator_agent | 是 | 第31-54行，逐项检查18个配置项 |
+| function_verifier_agent | 是 | 第105-124行，逐项检查15个配置项 |
 
-### 2.3 逻辑连贯性（85分）
+**交叉验证（报告声称 vs 实际YAML文件）**:
 
-优点:
-- 管道循环设计逻辑自洽，循环终止条件明确
-- WebSocket 连接注册/注销逻辑完整，含全局连接清理
-- 应用生命周期管理从 on_event 迁移到 asynccontextmanager lifespan 模式
-- 流式架构重构文档论证充分
-- 评估引擎持续运行验证了流水线的稳定性
+evaluator_agent 抽查：
+- name="通用评估专家" -> YAML第6行一致
+- model_tier=small -> YAML第16行一致
+- tool_ids=[file_read, enhanced_search] -> YAML第106-108行一致
+- deliverables有evaluation_report -> YAML第129-134行一致
+- soft_constraints 4条 -> YAML第123-127行一致
 
-不足:
-1. app_factory.py 中同时存在 /ws（echo）和 /ws/chat（业务）两个端点，echo 端点生产环境可能造成混淆
-2. _resolve_sub_pipeline_agent_config() 遍历全部任务查找匹配项，效率较低
-3. logging.basicConfig() 在多文件中重复调用
+function_verifier_agent 抽查：
+- agent_type=system -> YAML第17行一致
+- category=system -> YAML第18行一致
+- tags含system -> YAML第22-27行一致
+- prompt中playwright_test描述已修复 -> YAML第76行一致
+- hard_constraints描述已修复 -> YAML第238行一致
 
-### 2.4 表达清晰度（90分）
+**评分**: 100/100
 
-优点:
-- README.md 写作质量高：标题层级清晰，代码块有语言标注，中文表述流畅
-- docstring 规范完整，包含 Attributes 说明和使用上下文
-- 函数签名使用 Python 3.10+ 类型注解，类型表达清晰
-- 变量命名规范，语义明确
-- 文档中表格使用 emoji 辅助状态标记，视觉区分效果好
+### 维度 3：Prompt 质量
 
-不足:
-1. sys.path.insert 在多文件中重复出现，应抽取为公共工具
-2. 部分日志消息中英文混用，建议统一日志语言策略
+| Agent | 报告是否评估了 prompt 质量 | 证据 |
+|-------|-------------------------|------|
+| evaluator_agent | 是 | 问题6（第82-89行）：指出 system_prompt 从简略增强为完整评估方法论章节 |
+| function_verifier_agent | 是 | 问题3（第138-141行）：指出 prompt 中 playwright_test 描述与 tool_ids 矛盾 |
 
-## 三、关键问题清单
+**评分**: 95/100（function_verifier_agent 工具配置合理性未作为独立问题展开深度分析）
 
-| # | 严重程度 | 文件 | 行号 | 问题描述 |
-|---|---------|------|------|---------|
-| 1 | 中 | pyproject.toml | 10-18 | 核心运行时依赖未声明，pip install -e . 后无法直接运行 |
-| 2 | 中 | app_factory.py | 83 | list_all(limit=200) 全量遍历查找效率低 |
-| 3 | 低 | .gitignore / 根目录 | - | 根目录存在 nul、.tmp_*、debug_eval_*.log 等临时文件 |
-| 4 | 低 | app_factory.py / stream_handler.py | 23/23 | sys.path.insert 和 logging.basicConfig 在多文件中重复 |
-| 5 | 低 | app_factory.py | 160-170 | /ws echo 端点在生产代码中无实际用途 |
-| 6 | 低 | tests/ vs src/tests/ | - | 测试目录配置存在歧义 |
+### 维度 4：工具配置合理性
 
-## 四、改进建议
+| Agent | 报告是否评估了工具配置 | 证据 |
+|-------|---------------------|------|
+| evaluator_agent | 是 | 问题4（第73-76行）：指出 bash_execute 多余，修复后只保留 file_read + enhanced_search |
+| function_verifier_agent | 是（隐含） | 完整性检查确认8个工具保持不变，结合方法论分析工具集与执行型定位一致 |
 
-1. 补全 pyproject.toml 依赖声明，将 uvicorn、fastapi、websockets 等加入 dependencies
-2. 在 task_service 中增加按 pipeline_run_id 索引的查询方法，避免全量遍历
-3. 清理根目录临时文件，将调试日志移入 logs/ 目录
-4. 将 sys.path.insert 和 logging.basicConfig 抽取到公共 bootstrap 模块
-5. 统一测试目录，消除 testpaths 配置歧义
-6. 移除 /ws echo 端点或通过环境变量控制
+**评分**: 95/100
 
-## 五、评估结论
+### 维度 5：问题清单
 
-通过（passed: true）
+| Agent | 问题数量 | 证据 |
+|-------|---------|------|
+| evaluator_agent | 8个（含1个设计决策说明） | 第56-100行 |
+| function_verifier_agent | 5个 | 第126-151行 |
 
-Agent OS 项目整体质量良好。架构设计清晰合理，分层明确；文档体系完善，表达专业流畅；代码文档字符串规范，类型注解到位。主要不足集中在依赖声明不完整和部分代码重复，属于可快速修复的问题。
+每个问题都有修复前/修复后/原因三段式说明。
 
-综合评分 86/100，质量等级：良好。
+**评分**: 100/100
+
+### 维度 6：修复说明
+
+第四章（第155-183行）提供两个 Agent 的修复前后汇总对比表，便于快速浏览。
+
+**评分**: 100/100
+
+### 维度 7：人类评估/验证领域最佳实践调研
+
+第一章（第5-26行）专门调研8项方法论：
+
+评估领域（4项）：Rubric-based Evaluation, Evidence-based Assessment, Calibration, Separation of Assessment and Feedback
+
+验证领域（4项）：User Journey Testing, Stateful Testing, Error Recovery Testing, Tool Capability Assessment
+
+每项方法论都有核心思想+在Agent中的具体体现映射。
+
+**评分**: 100/100
+
+---
+
+## 二、综合评估
+
+| 维度 | 得分 | 权重 | 加权得分 |
+|------|------|------|---------|
+| Agent 覆盖情况 | 100 | 15% | 15.0 |
+| 配置完整性 | 100 | 20% | 20.0 |
+| Prompt 质量 | 95 | 15% | 14.25 |
+| 工具配置合理性 | 95 | 15% | 14.25 |
+| 问题清单 | 100 | 10% | 10.0 |
+| 修复说明 | 100 | 10% | 10.0 |
+| 最佳实践调研 | 100 | 15% | 15.0 |
+| **总计** | | **100%** | **98.5** |
+
+### 整体评价
+
+报告质量优秀，完全满足评估标准的全部要求：
+
+1. 两个 Agent 均完整覆盖，各有独立章节
+2. 每个 Agent 的五个必需要素齐全：配置完整性、prompt质量、工具配置合理性、问题清单、修复说明
+3. 最佳实践调研充分：8项方法论与Agent设计建立了映射关系
+4. 报告与实际文件一致：交叉验证确认修复后值与实际YAML完全匹配
+5. 额外加分项：包含验证结果章节（第五章）和人类审查反馈（第六章）
+
+---
+
+## 三、评估结论
+
+- **通过**: 是
+- **评分**: 98.5/100
+- **结论**: 报告全面覆盖了两个Agent，每个Agent都包含配置完整性检查、prompt质量评估、工具配置合理性分析、问题清单和修复说明。体现了对人类评估/验证领域最佳实践的充分调研。报告内容与实际配置文件交叉验证一致。完全满足评估标准。

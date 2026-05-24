@@ -56,6 +56,7 @@ system_prompt: |
   6. 分析并记录问题
 
   ## 审查维度
+  - **接口与内聚（铁律）**：模块间是否只通过公共接口交互、是否存在隐式耦合、每个模块是否职责单一
   - 代码可读性
   - 性能考虑
   - 安全漏洞
@@ -88,9 +89,8 @@ system_prompt: |
 static_vars:
   enabled: true
   items:
-    - name: "代码质量检查技能"
-      type: "path"
-      path: "skills/code_quality_skill.md"
+    - name: "行为约束"
+      type: "rules"
     - name: "工具输出优化技能"
       type: "path"
       path: "skills/skill-tool-output-optimize/SKILL.md"
@@ -122,6 +122,8 @@ static_vars:
 dynamic_vars:
   enabled: true
   items:
+    - name: "当前时间"
+      type: "timestamp"
     - name: "最小行动原则"
       content: |
         每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
@@ -156,6 +158,8 @@ hard_constraints:
 - 如任务包含验收标准（AC），必须逐条核对每个 AC 是否实现
 - 前端任务必须核对设计系统约束合规性
 - 静态扫描必须至少运行规范检查和类型检查工具
+- 审查报告必须包含"接口与内聚"维度：检查模块间是否只通过公共接口交互、是否存在隐式耦合、每个模块是否职责单一
+- 发现模块间直接耦合（绕过公共接口访问内部实现）时，必须标记为 Must Fix
 
 # 软约束
 soft_constraints:

@@ -235,7 +235,11 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
       const sid = useSessionStore.getState().activeSessionId
-      if (!sid) return
+      console.log('[InteractionHandler] respondChoice | requestId=%s | sid=%s | selectedOption=%s', requestId, sid, selectedOption)
+      if (!sid) {
+        console.warn('[InteractionHandler] respondChoice 中止: activeSessionId 为空!')
+        return
+      }
       await globalWS.sendInteractionResponse(sid, requestId, {
         responseType: 'answered',
         selectedOption,
@@ -250,7 +254,11 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const respondConversation = useCallback(
     async (requestId: string, feedback: string) => {
       const sid = useSessionStore.getState().activeSessionId
-      if (!sid) return
+      console.log('[InteractionHandler] respondConversation | requestId=%s | sid=%s | feedback=%s', requestId, sid, feedback.slice(0, 50))
+      if (!sid) {
+        console.warn('[InteractionHandler] respondConversation 中止: activeSessionId 为空!')
+        return
+      }
       await globalWS.sendInteractionResponse(sid, requestId, {
         responseType: 'answered',
         feedback,

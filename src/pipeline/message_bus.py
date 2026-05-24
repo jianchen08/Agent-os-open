@@ -67,6 +67,32 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     return None, ""
 
 
+async def _auto_complete_interaction(pipeline_id: str) -> None:
+    """自动完成管道的 pending conversation 模式交互请求。
+
+    当引擎处于 running 状态且阻塞在 human_interaction (conversation 模式) 的
+    wait_for_choice() 上时，新消息通过 notification 路径注入后无法被消费，
+    因为 _run_loop 卡在 execute_core_plugin 中。通过自动完成交互请求，
+    工具返回 conversation_mode=True，管道挂起后立即发现 notification 并唤醒。
+
+    Args:
+        pipeline_id: 管道 ID
+    """
+    try:
+        from human_interaction import get_human_interaction_service
+        service = get_human_interaction_service()
+        if service is None:
+            return
+        count = await service.auto_complete_conversation_for_pipeline(pipeline_id)
+        if count > 0:
+            logger.info(
+                "[MessageBus] 自动完成 %d 个 conversation 交互 | pipeline=%s",
+                count, pipeline_id[:12],
+            )
+    except Exception as exc:
+        logger.debug("[MessageBus] 自动完成交互检查失败（可忽略）: %s", exc)
+
+
 def _update_bridge(pipeline_id: str, engine: Any, output_sink: Any) -> None:
     """为管道创建或复用 bridge，并关联到 EngineRegistry。
 
@@ -162,6 +188,8 @@ async def send_pipeline_message(
             engine.inject_message(message)
             if output_sink is not None:
                 _update_bridge(pipeline_id, engine, output_sink)
+            if state == "running":
+                await _auto_complete_interaction(pipeline_id)
             method = "wake" if state == "suspended" else "notification"
             logger.info(
                 "[MessageBus] 消息已注入管道 | pipeline=%s | method=%s | preview=%.60s",

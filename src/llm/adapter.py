@@ -422,10 +422,9 @@ class _BaseLiteLLMAdapter:
         stream_usage: dict[str, Any] | None = None
         _stream_start: float = _time.monotonic()
 
-        # 流式超时：只检测首个 chunk（连接是否建立）
-        # 后续 chunk 不加超时，连接断了 HTTP 层会自动报错
+        # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        kwargs.pop("inter_chunk_timeout", None)  # 兼容旧调用
+        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 120))
 
         stream_repetition = False
         thinking_truncated = False
@@ -617,8 +616,29 @@ class _BaseLiteLLMAdapter:
             # 处理首个 chunk
             await _process_chunk(chunk)
 
-            # 后续 chunk：不加超时，由 HTTP 层处理连接断开
-            async for chunk in aiter:
+            # 后续 chunk：带 inter-chunk 超时，防止连接僵死
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        aiter.__anext__(), timeout=inter_chunk_timeout
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] STREAM TIMEOUT: inter-chunk 超时 (%.0fs)"
+                        " model=%s chunks_received=%d",
+                        type(self).__name__, inter_chunk_timeout, model,
+                        len(result_parts) + len(thinking_parts),
+                    )
+                    raise litellm.Timeout(
+                        message=(
+                            "Stream inter-chunk timeout:"
+                            f" no data for {inter_chunk_timeout:.0f}s"
+                        ),
+                        model=model,
+                        llm_provider="zai",
+                    )
                 if await _process_chunk(chunk):
                     break
         finally:

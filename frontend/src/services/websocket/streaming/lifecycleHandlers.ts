@@ -260,6 +260,16 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
  *
  * 通过统一流式路径（bridge on_chunk → drain_loop → WebSocket）发送，
  * 将系统通知作为独立消息添加到管道消息列表中渲染。
+ *
+ * BUG-FIX-fix_20260524_duplicate_notification:
+ * 问题根因: task_notifier 同时通过两条路径发送同一通知：
+ *          1) send_pipeline_message → 注入为 role:'user' 消息（后端管道记录，前端已过滤）
+ *          2) send_frontend_event → system_notification WS事件（实时显示为系统气泡）
+ *          导致用户看到两条一模一样的通知，气泡样式不同（用户气泡 vs 系统气泡）。
+ * 修复方案: ChatContainer 过滤后端注入的 [系统通知] user 消息；
+ *          此处仅保留 system 消息自身去重（防止 WS 事件重复发送）。
+ * 影响范围: 任务完成/失败通知的显示
+ * 修复日期: 2026-05-24
  */
 export function handleSystemNotification(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
@@ -272,9 +282,32 @@ export function handleSystemNotification(eventData: any): void {
 
   const pipelineStore = usePipelineMessageStore.getState()
 
+  const existingMsgs = pipelineStore.getMessages(pipelineId)
+  const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1
+  const dedupPrefix = content.substring(0, 60)
+  const alreadyExists = existingMsgs.some((m: any) => {
+    if (m.role === 'system') {
+      const mContent = m.content || ''
+      if (mContent && mContent.includes(dedupPrefix)) return true
+      const parts = m.parts || []
+      if (parts.some((p: any) => p.type === 'system' && (p.content || '').includes(dedupPrefix))) return true
+    }
+    return false
+  })
+
+  if (alreadyExists) {
+    loggers.sessionStore.info(
+      '[handleSystemNotification] dedup: skipping duplicate notification: pipeline=%s prefix=%.30s',
+      pipelineId?.slice(0, 12), dedupPrefix,
+    )
+    return
+  }
+
   pipelineStore.addMessage(pipelineId, {
     role: 'system',
     content,
+    sequence: nextSeq,
+    timestamp: new Date().toISOString(),
     parts: [
       {
         type: 'system',

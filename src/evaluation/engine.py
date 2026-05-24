@@ -447,9 +447,12 @@ class EvaluationEngine:
             if not exec_storage:
                 return
             from tasks.service import TaskService
-            ts = provider.get("task_service")
+            ts = provider.get_or_create(
+                "task_service",
+                lambda: TaskService(),
+            )
             if ts is None:
-                ts = TaskService()
+                return
             root_id = ts.get_root_task_id(task_id)
             if root_id:
                 exec_storage.register_pipeline(pipeline_id, root_id)
@@ -1016,8 +1019,14 @@ def _resolve_eval_project_root(
         return None
 
     try:
-        from tasks.service import TaskService
-        ts = TaskService()
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        ts = provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+        )
+        if ts is None:
+            return None
         task = ts.get_task(task_id)
         if task and task.metadata:
             ws = task.metadata.get("workspace")

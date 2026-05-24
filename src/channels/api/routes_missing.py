@@ -201,7 +201,9 @@ def _get_task_service() -> Any:
         provider = get_service_provider()
         return provider.get_or_create(
             "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
+                event_bus=provider.get("event_bus"),
+            ),
         )
     except Exception:
         return None
@@ -1357,9 +1359,50 @@ task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"])
 async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """获取任务当前执行阶段。
 
+    根据任务实际状态映射到前端阶段概念：
+    - pending/scheduled/paused → prepare (准备阶段)
+    - running → execute (执行阶段)
+    - evaluating → evaluate (评估阶段)
+    - completed/failed/cancelled/timeout → 终态，使用最后已知阶段
+
     Returns:
         {taskId, currentPhase, phaseStatus}
     """
+    # BUG-FIX-fix_20260524_phase_api_hardcode:
+    # 问题根因: get_task_phase 硬编码返回 currentPhase="prepare" 和 phaseStatus="pending"，
+    #           无论任务实际处于什么状态，前端始终显示"准备阶段"。
+    # 修复方案: 从 TaskService 读取实际任务状态，映射到正确的阶段和阶段状态。
+    # 影响范围: 前端任务详情页的阶段显示。
+    # 修复日期: 2026-05-24
+    _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {
+        "pending": ("prepare", "pending"),
+        "scheduled": ("prepare", "pending"),
+        "paused": ("prepare", "pending"),
+        "running": ("execute", "running"),
+        "suspended": ("execute", "running"),
+        "blocked": ("execute", "running"),
+        "evaluating": ("evaluate", "running"),
+        "completed": ("evaluate", "completed"),
+        "failed": ("execute", "failed"),
+        "cancelled": ("prepare", "failed"),
+        "timeout": ("execute", "failed"),
+    }
+
+    task_service = _get_task_service()
+    if task_service:
+        try:
+            task = task_service.get_task(task_id)
+            if task:
+                status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+                phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
+                return {
+                    "taskId": task_id,
+                    "currentPhase": phase,
+                    "phaseStatus": phase_status,
+                }
+        except Exception:
+            pass
+
     return {
         "taskId": task_id,
         "currentPhase": "prepare",

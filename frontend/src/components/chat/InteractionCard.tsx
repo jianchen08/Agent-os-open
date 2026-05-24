@@ -37,10 +37,6 @@ export function InteractionCard({
   const [textInput, setTextInput] = useState('')
   const isDone = interaction.status !== 'pending'
 
-  const hasFileReviewTab = !!(
-    interaction.fileContents && Object.keys(interaction.fileContents).length > 0
-  )
-
   const handleTextSubmit = () => {
     const trimmed = textInput.trim()
     if (!trimmed) return
@@ -119,7 +115,7 @@ export function InteractionCard({
         )}
 
         {/* Choice 模式：快捷按钮（填入输入框）+ 文本输入 + 发送 */}
-        {interaction.mode === 'choice' && !isDone && !hasFileReviewTab && (
+        {interaction.mode === 'choice' && !isDone && (
           <div className="space-y-3">
             {interaction.options && interaction.options.length > 0 && (
               <div className="flex flex-wrap gap-2">

@@ -25,6 +25,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleRespondChoice = useCallback(
     async (requestId: string, optionId: string) => {
+      console.log('[InteractionPanel] handleRespondChoice | requestId=%s | optionId=%s | submittingId=%s', requestId, optionId, submittingId)
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       dismissInteraction(requestId)
@@ -39,6 +40,7 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
 
   const handleRespondText = useCallback(
     async (requestId: string, text: string) => {
+      console.log('[InteractionPanel] handleRespondText | requestId=%s | text=%s | submittingId=%s', requestId, text.slice(0, 30), submittingId)
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       dismissInteraction(requestId)

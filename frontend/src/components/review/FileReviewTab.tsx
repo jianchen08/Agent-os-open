@@ -11,7 +11,7 @@
  *   - Conversation 模式下全屏展示文件，对话在 Chat 面板进行
  */
 
-import { MessageSquare, CheckCircle2, XCircle, Quote, X, FileText, Code2, File, Pencil, Eye, Save, Trash2, Send } from 'lucide-react'
+import { MessageSquare, Quote, X, FileText, Code2, File, Pencil, Eye, Save, Trash2, Send } from 'lucide-react'
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { cn } from '@/lib/utils'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
@@ -27,14 +27,8 @@ export interface FileReviewTabProps {
   mode: 'choice' | 'conversation'
   /** 交互标题 */
   title: string
-  /** 管道 ID（用于发送消息） */
-  pipelineId: string
-  /** 选项列表（choice 模式） */
-  options?: Array<{ id: string; label: string }>
   /** 回调：发送对话消息（引用文字到 Chat 面板） */
   onSendMessage: (message: string, quotedText?: string, quotedFile?: string) => void
-  /** 回调：提交审批结果 */
-  onSubmitReview: (requestId: string, response: 'approved' | 'denied', feedback?: string) => void
   /** 回调：文件内容被编辑 */
   onFileContentChange?: (filePath: string, newContent: string) => void
   /** 回调：保存文件内容到后端 */
@@ -224,9 +218,7 @@ export function FileReviewTab({
   requestId,
   mode,
   title,
-  options,
   onSendMessage,
-  onSubmitReview,
   onFileContentChange,
   onSaveFile,
 }: FileReviewTabProps) {
@@ -268,9 +260,6 @@ export function FileReviewTab({
 
   // 已保存的批注列表
   const [annotations, setAnnotations] = useState<SavedAnnotation[]>([])
-
-  // Choice 模式审批
-  const [feedbackText, setFeedbackText] = useState('')
 
   // 文字选中处理
   const justSelectedRef = useRef(false)
@@ -491,14 +480,6 @@ export function FileReviewTab({
       setTimeout(() => setSaveMessage(null), 2000)
     }
   }, [activeFilePath, editableContents, onSaveFile])
-
-  const handleApprove = useCallback(() => {
-    onSubmitReview(requestId, 'approved', feedbackText.trim() || undefined)
-  }, [requestId, feedbackText, onSubmitReview])
-
-  const handleDeny = useCallback(() => {
-    onSubmitReview(requestId, 'denied', feedbackText.trim() || undefined)
-  }, [requestId, feedbackText, onSubmitReview])
 
   // Escape 关闭浮动按钮和批注气泡
   useEffect(() => {
@@ -722,45 +703,6 @@ export function FileReviewTab({
         </div>
       )}
 
-      {/* ── 底部：Choice 模式审批操作栏 ── */}
-      {mode === 'choice' && (
-        <div className="relative z-10 flex shrink-0 flex-col gap-2 border-t border-border bg-muted/20 px-4 py-3">
-          <textarea
-            value={feedbackText}
-            onChange={(e) => setFeedbackText(e.target.value)}
-            placeholder="审批备注（可选）..."
-            rows={2}
-            className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/50 focus:ring-1 focus:ring-ring"
-          />
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {options?.map((option) => (
-              <button
-                key={option.id}
-                onClick={() => onSendMessage(option.label)}
-                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent"
-              >
-                {option.label}
-              </button>
-            ))}
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                onClick={handleApprove}
-                className="flex items-center gap-1.5 rounded-md bg-green-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-green-700"
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                通过
-              </button>
-              <button
-                onClick={handleDeny}
-                className="flex items-center gap-1.5 rounded-md bg-red-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-700"
-              >
-                <XCircle className="h-4 w-4" />
-                驳回
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

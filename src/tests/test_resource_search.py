@@ -263,3 +263,120 @@ class TestEmptyQuery:
         result = await tool.execute({"resource_type": "tool", "query": "", "mode": "simple"})
         assert result.success is True
         assert result.data.get("tool_c", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# BUG-FIX 测试：agent 通配符/模糊查询修复 (fix_20260524_resource_search_agent)
+# ---------------------------------------------------------------------------
+
+class TestAgentWildcardSearchFix:
+    """验证 resource_search 搜索 agent 时通配符和模糊查询的修复效果。"""
+
+    @pytest.mark.asyncio
+    async def test_wildcard_star_returns_all_agents(self):
+        """query='*' 应返回所有 agent"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "*", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_wildcard_all_returns_all_agents(self):
+        """query='all' 应返回所有 agent"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "all", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_wildcard_chinese_returns_all_agents(self):
+        """query='所有' 应返回所有 agent"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "所有", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_wildcard_chinese_all_returns_all_agents(self):
+        """query='全部' 应返回所有 agent"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "全部", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_query_agent_match(self):
+        """模糊查询 'agent' 应匹配 agent 名称中包含 'agent' 的资源"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "agent", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_all_agents(self):
+        """空 query 应返回所有 agent"""
+        tool = _make_tool(agent_registry=_mock_agent_registry())
+        result = await tool.execute({"resource_type": "agent", "query": "", "mode": "simple"})
+        assert result.success is True
+        assert result.data.get("agent_c", 0) >= 1
+
+
+class TestMatchQueryWildcardFix:
+    """验证 _match_query 通配符和分词匹配的修复效果。"""
+
+    def test_wildcard_star(self):
+        """query='*' 应匹配任意资源"""
+        tool = _make_tool()
+        assert tool._match_query("*", "any_name", "any_desc", [], exact=False) is True
+
+    def test_wildcard_all(self):
+        """query='all' 应匹配任意资源"""
+        tool = _make_tool()
+        assert tool._match_query("all", "any_name", "any_desc", [], exact=False) is True
+
+    def test_wildcard_chinese(self):
+        """query='所有' 应匹配任意资源"""
+        tool = _make_tool()
+        assert tool._match_query("所有", "any_name", "any_desc", [], exact=False) is True
+
+    def test_wildcard_chinese_all(self):
+        """query='全部' 应匹配任意资源"""
+        tool = _make_tool()
+        assert tool._match_query("全部", "any_name", "any_desc", [], exact=False) is True
+
+    def test_wildcard_any(self):
+        """query='any' 应匹配任意资源"""
+        tool = _make_tool()
+        assert tool._match_query("any", "any_name", "any_desc", [], exact=False) is True
+
+    def test_tokenized_match_name(self):
+        """分词匹配：query='所有 agent' 中 'agent' 命中 name"""
+        tool = _make_tool()
+        assert tool._match_query("所有 agent", "code_reviewer_agent", "desc", [], exact=False) is True
+
+    def test_tokenized_match_description(self):
+        """分词匹配：query='通用 编码' 中 '通用' 命中 description"""
+        tool = _make_tool()
+        assert tool._match_query("通用 编码", "agent_name", "通用智能体", [], exact=False) is True
+
+    def test_tokenized_match_tag(self):
+        """分词匹配：query='team coding' 中 'coding' 命中 tags"""
+        tool = _make_tool()
+        assert tool._match_query("team coding", "agent_name", "desc", ["coding", "general"], exact=False) is True
+
+    def test_tokenized_wildcard_keyword(self):
+        """分词匹配：query='team all' 中 'all' 是通配符，应匹配"""
+        tool = _make_tool()
+        assert tool._match_query("team all", "agent_name", "desc", [], exact=False) is True
+
+    def test_exact_mode_unchanged(self):
+        """exact 模式不受通配符影响"""
+        tool = _make_tool()
+        assert tool._match_query("*", "some_name", "desc", [], exact=True) is False
+        assert tool._match_query("all", "some_name", "desc", [], exact=True) is False
+
+    def test_exact_mode_still_works(self):
+        """exact 模式仍然精确匹配 name"""
+        tool = _make_tool()
+        assert tool._match_query("file_read", "file_read", "desc", [], exact=True) is True
+        assert tool._match_query("file_read", "file_write", "desc", [], exact=True) is False

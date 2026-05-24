@@ -204,7 +204,8 @@ function mapBackendMessageToMessage(
     backendMessage.role === 'system' ||
     metadata?.record_type === 'system' ||
     metadata?.type === 'system' ||
-    metadata?.sender_type === 'system'
+    metadata?.sender_type === 'system' ||
+    backendMessage.content?.trimStart().startsWith('[系统通知]')
 
   if (backendMessage.content?.trim()) {
     if (isSystemMsg) {

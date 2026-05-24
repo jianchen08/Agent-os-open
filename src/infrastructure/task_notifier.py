@@ -321,34 +321,6 @@ class TaskNotifierMixin:
                     _ws_exc,
                 )
 
-            # ── 6. 持久化系统通知为执行记录，确保刷新后可恢复 ──
-            try:
-                if parent_pipeline_id:
-                    from infrastructure.execution_record_storage import ExecutionRecordData
-                    _exec_storage = self._services.get("execution_record_storage")
-                    if _exec_storage:
-                        _existing_records = _exec_storage.list_by_pipeline(parent_pipeline_id)
-                        _max_seq = max((r.sequence for r in _existing_records), default=0) if _existing_records else 0
-                        _level = "info" if new_status == "completed" else "warning"
-                        _sys_record = ExecutionRecordData(
-                            pipeline_run_id=parent_pipeline_id,
-                            type="system",
-                            name=_level,
-                            content=notification,
-                            sequence=_max_seq + 1,
-                            tool_input={"notificationType": "task_notification"},
-                        )
-                        _exec_storage.save(_sys_record)
-                        logger.info(
-                            "TaskWorker: system_notification 已持久化: pipeline=%s seq=%d",
-                            parent_pipeline_id[:12], _sys_record.sequence,
-                        )
-            except Exception as _persist_exc:
-                logger.warning(
-                    "TaskWorker: system_notification 持久化失败(不影响运行时): error=%s",
-                    _persist_exc,
-                )
-
             if parent_task_id_for_revive:
                 parent_ctx = self._contexts.get(parent_task_id_for_revive)
                 if parent_ctx is not None:

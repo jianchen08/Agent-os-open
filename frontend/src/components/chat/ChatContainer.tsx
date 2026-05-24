@@ -164,6 +164,9 @@ export const ChatContainer = ({
   const closeTab = useAgentTabStore((s) => s.closeTab)
   const initSessionTabs = useAgentTabStore((s) => s.initSessionTabs)
 
+  /** 当前激活 Tab（提前计算，供 pipelineMessages 选择器使用） */
+  const activeTab = tabs.find((t) => t.id === activeTabId)
+
   /**
    * 从 pipelineMessageStore 获取当前激活管道的消息
    *
@@ -177,9 +180,9 @@ export const ChatContainer = ({
    */
   const pipelineMessages = usePipelineMessageStore(
     (s) => {
-      const activeId = s.activePipelineId
-      if (!activeId) return EMPTY_MESSAGES
-      return s.messagesByPipeline[activeId] ?? EMPTY_MESSAGES
+      const effectiveId = activeTab?.pipelineRunId || s.activePipelineId
+      if (!effectiveId) return EMPTY_MESSAGES
+      return s.messagesByPipeline[effectiveId] ?? EMPTY_MESSAGES
     },
     (a, b) => {
       if (a === b) return true
@@ -226,10 +229,7 @@ export const ChatContainer = ({
     }
   }, [sessionId, initSessionTabs])
 
-  /**
-   * 判断是否为子 Tab（L2/L3）激活状态
-   */
-  const activeTab = tabs.find((t) => t.id === activeTabId)
+  /** 判断是否为子 Tab（L2/L3）激活状态 */
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
 
@@ -288,7 +288,15 @@ export const ChatContainer = ({
     const source = pipelineMessages.length > 0
       ? pipelineMessages
       : messages
-    const filtered = source.filter((m: any) => m.role !== 'tool')
+    const filtered = source.filter((m: any) => {
+      if (m.role === 'tool') return false
+      // BUG-FIX-fix_20260524_duplicate_notification:
+      // 过滤后端注入的 [系统通知] 开头的 user 消息，
+      // 这类通知已通过 WS system_notification 实时显示为 system 气泡，
+      // 后端同时将其注入为 user 消息供 AI 查看，无需在前端重复展示。
+      if (m.role === 'user' && (m.content || '').trimStart().startsWith('[系统通知]')) return false
+      return true
+    })
     return mergeConsecutiveAssistantMessages(filtered)
   }, [pipelineMessages, messages])
 

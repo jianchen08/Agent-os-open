@@ -9,6 +9,7 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
@@ -114,21 +115,22 @@ export function handleStreamStart(eventData: any) {
 
     const shouldActivatePipeline = (() => {
       if (!currentActivePipelineId) return true
+      // BUG-FIX-fix_20260524_cross_session_stream:
+      // 问题根因: 用户在会话A发送消息后快速切换到会话B，会话A的 stream_start 事件到达时，
+      //          shouldActivatePipeline 未检查管道是否属于当前活跃会话，导致 activePipelineId
+      //          被错误切换回会话A的管道，会话A的消息渲染在会话B的界面中。
+      // 修复方案: 在所有激活判断之前增加会话边界检查，管道不属于当前会话时禁止自动激活。
+      // 影响范围: 跨会话切换时的流式消息渲染
+      // 修复日期: 2026-05-24
+      const pipelineMeta = pipelineStore.getState().pipelines[pipelineId]
+      const activeSessionId = useSessionStore.getState().activeSessionId
+      if (pipelineMeta?.sessionId && activeSessionId && pipelineMeta.sessionId !== activeSessionId) {
+        return false
+      }
       if (activeTab?.pipelineRunId === pipelineId) return true
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
-      // BUG-FIX-fix_20260524_auto_tab_switch:
-      // 问题根因: 子 Agent 开始流式输出时，如果其 Tab 尚未注册到 pipelineTabMap
-      //          （与 sub_agent_created 事件的时序竞争），tabIdForPipeline 为 null，
-      //          导致 shouldActivatePipeline 返回 true，自动激活子管道，
-      //          用户看到的内容从主 Agent 对话突然变为子 Agent 对话。
-      // 修复方案: 管道无 Tab 映射时，仅主管道（level 1）自动激活，子管道不自动激活。
-      // 影响范围: 子 Agent 流式输出期间的消息显示
-      // 修复日期: 2026-05-24
-      if (!tabIdForPipeline) {
-        return pipelineStore.getState().pipelines[pipelineId]?.level === 1
-      }
       return false
     })()
 

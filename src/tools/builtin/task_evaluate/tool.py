@@ -89,9 +89,14 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error_code": "INVALID_ACTION", "error": f"不支持的操作: {action}"}
 
     try:
-        from tasks.service import TaskService
-
-        task_service = TaskService()
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        task_service = provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
+        )
+        if task_service is None:
+            return {"success": False, "error_code": "SERVICE_UNAVAILABLE", "error": "TaskService 不可用"}
     except Exception:
         return {"success": False, "error_code": "SERVICE_UNAVAILABLE", "error": "TaskService 不可用"}
 

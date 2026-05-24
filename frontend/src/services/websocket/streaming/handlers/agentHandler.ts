@@ -10,8 +10,8 @@ const _debugLogger = loggers.websocket
 /**
  * 处理子 Agent 创建事件
  *
- * FIX: 子 Agent 创建时同时注册 pipelineMessageStore 的管道元数据，
- * 避免 stream_start 虽调用 addMessage 但管道元数据缺失导致 chunk 无法正确路由。
+ * 统一流程：注册映射 → 创建 Tab → 注册管道元数据
+ * 主/子管道无区别，均通过 pipeline_id 路由。
  */
 export function handleSubAgentCreated(eventData: any) {
   const data = eventData.data || eventData
@@ -26,7 +26,20 @@ export function handleSubAgentCreated(eventData: any) {
   if (!taskId || !pipelineId) return
 
   const tabId = `sub-${parentId || taskId}`
-  useAgentTabStore.getState().registerPipelineTab(pipelineId, tabId)
+  const agentTabStore = useAgentTabStore.getState()
+
+  // 注册映射 + 创建 Tab + 注册管道元数据（三步合一）
+  agentTabStore.registerPipelineTab(pipelineId, tabId)
+  agentTabStore.openSubAgentTab({
+    agentId: taskId,
+    agentName,
+    parentRecordId: parentId || taskId,
+    agentLevel: 2,
+    taskId,
+    status: 'running',
+    setActive: false,
+    pipelineId,
+  })
 
   const state = pipelineStore.getState()
   if (!state.pipelines[pipelineId]) {

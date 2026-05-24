@@ -831,12 +831,40 @@ class PipelineEngine:
             )
         else:
             self._pending_notifications.append(message)
+            self._try_cancel_pending_interaction()
             if self._wake_event is not None:
                 self._wake_event.set()
             logger.info(
                 "[Engine] inject_message: 运行态通知入队 (queue=%d): pipeline=%s preview=%.60s",
                 len(self._pending_notifications), self._pipeline_id[:12], message,
             )
+
+    def _try_cancel_pending_interaction(self) -> None:
+        """尝试取消当前管道关联的 pending human_interaction 请求。
+
+        当新消息通过 notification 路径注入时，引擎可能正卡在
+        human_interaction 工具的 wait_for_choice() 上。此方法
+        通过取消 pending 请求来解除阻塞，使 _run_loop 能进入
+        下一轮迭代消费 notification。
+
+        BUG-FIX-fix_20260524_notification_stuck_by_human_interaction:
+        问题根因: human_interaction 工具通过 asyncio.Event.wait() 阻塞 _run_loop，
+          导致新消息的 notification 无法被消费，前端无限等待。
+        修复方案: inject_message 时自动取消 pending 交互请求，解除工具阻塞。
+        """
+        try:
+            from human_interaction import get_human_interaction_service
+            svc = get_human_interaction_service()
+            if svc is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        svc.cancel_pending_for_thread(self._pipeline_id)
+                    )
+                except RuntimeError:
+                    pass
+        except ImportError:
+            pass
 
     async def save_checkpoint(self, phase: str = "manual") -> str | None:
         """保存管道检查点（委托到 pipeline.checkpoint）。"""

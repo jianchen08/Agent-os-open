@@ -212,6 +212,15 @@ system_prompt: |
   3. 执行自动格式化（如适用）
   4. 检查子任务评估结果，未通过时附带评估失败报告和代码 diff，要求定向修复
 
+  **A1.5 架构审批（仅迁移/重构任务）**
+  - 当 code_writer_agent 的任务涉及迁移旧代码或大规模重构时，code_writer_agent 会产出架构审查报告（`docs/process/architecture_review_report.md`）并通过 task_evaluate 等待审批
+  - 编排器收到架构审查报告后，必须：
+    1. 使用 file_read 读取架构审查报告
+    2. 评估架构变更范围和风险
+    3. 通过 human_interaction 向用户确认架构变更方案
+    4. 用户确认后，重新提交编码任务给 code_writer_agent（inherit_workspace_from 保留已有工作空间），让其实施编码
+  - **架构审批未通过时**：将审批意见反馈给 code_writer_agent 重新梳理架构，最多重试 2 次
+
   **A2. 代码审查（可选，仅复杂任务）**【派发给code_reviewer_agent】
   - 仅在任务满足 code_reviewer_agent 使用条件时执行（见"何时使用 code_reviewer_agent"）
   - 审查只做一轮，不回环：
@@ -254,6 +263,12 @@ system_prompt: |
 
   **C1. 调试修复**【派发给test_debug_agent】
   1. 通过 task_submit 提交给 test_debug_agent（4阶段调试工作流），priority=7
+  2. 如果 test_debug_agent 触发修复熔断（产出 `docs/process/circuit_breaker_report.md`），编排器必须：
+     - 使用 file_read 读取熔断报告
+     - 评估是否需要进行架构审查，以下情况必须触发架构审查：同一模块多次出现不同 bug、模块职责不清、隐式耦合严重
+     - 需要架构审查时：通过 human_interaction 向用户报告熔断情况和建议，等待用户决策
+     - 不需要架构审查时：可降低优先级或接受风险，继续推进
+  3. 熔断处理后不再回退 test_debug_agent 继续调试
 
   **C2. 功能验证**（C1 通过后执行）【派发给function_verifier_agent】
   1. 确认 C1 修复任务已完成且评估通过
@@ -346,7 +361,7 @@ static_vars:
         |------|-------|------|------------|-----------|----------|
         | 编码 | code_writer_agent | 代码编写专家 | 需求描述 + 要达成的功能目标 + 技术栈上下文 | src/**/*.py | file_check, format_valid |
         | 测试调试 | test_debug_agent | 测试与调试专家（含API测试） | 测试/调试目标 + 要验证的功能点。Bug修复附加：错误描述+复现步骤 | tests/**/*.py + src/**/*.py | file_check, test_check |
-        | 审查 | code_reviewer_agent | 静态扫描 + 代码审查（**可选**） | 待审查的文件/模块范围 + 审查关注点。仅在复杂任务时使用 | review_report.md | file_check, semantic_check |
+        | 审查 | code_reviewer_agent | 静态扫描 + 代码审查（**可选**） | 待审查的文件/模块范围 + 审查关注点 + **必须包含接口与内聚维度审查**。仅在复杂任务时使用 | review_report.md | file_check, semantic_check |
         | 环境 | environment_setup_agent | 环境准备专家 | 需要准备的环境目标 + 项目技术栈 | reports/*_environment_status.md | file_check, format_valid |
         | 功能验证 | function_verifier_agent | 功能验证专家。**必须包含语义评估**：评估者需说明(1)验证Agent做了什么、(2)验证行为与用户真实使用是否一致、(3)是否使用了用户真实场景去验证 | 需求描述 + 要验证的功能点 + 期望达成的结果 + 用户真实使用场景 | function_verify_report.md + verify_reproduce.py | file_check, semantic_check |
     - name: "工具输出优化技能"
@@ -382,6 +397,7 @@ tool_ids:
   - task_manage
   - task_evaluate
   - resource_search
+  - file_read
   - memory
 
 hard_constraints:
@@ -394,6 +410,8 @@ hard_constraints:
   - 需求结构化时必须执行模块归属分析，按模块分组 AC，明确模块间接口和依赖方向
   - 涉及多模块的任务必须按模块拆分为独立子任务，每个子任务只负责一个模块
   - 任务完成后必须审查子任务产出中有价值的领域知识（技术陷阱、模块设计要点、项目约定），使用 memory 工具存储到知识库
+  - 迁移/重构任务收到 code_writer_agent 的架构审查报告后，必须通过 human_interaction 向用户确认架构方案后才能继续编码
+  - test_debug_agent 触发修复熔断后，必须读取熔断报告并决策（架构审查/降级/接受风险），禁止忽略熔断信号继续回退调试
 
 soft_constraints:
   - 优先复用现有 Agent，避免重复创建

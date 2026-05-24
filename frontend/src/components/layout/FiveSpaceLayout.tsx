@@ -377,18 +377,6 @@ export function FiveSpaceLayout({
             }
           }
         }
-        const handleSubmitReview = (requestId: string, response: 'approved' | 'denied', feedback?: string) => {
-          // BUG-FIX-fix_20260511_interaction_response_lost:
-          // 问题根因: reviewData.pipelineId 可能为空，且不是 WebSocket 连接池的 key
-          // 修复方案: 优先使用 sessionId 或当前活跃会话 ID
-          const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
-          if (sid) {
-            globalWS.sendInteractionResponse(sid, requestId, {
-              responseType: response,
-              feedback: feedback || '',
-            })
-          }
-        }
         const handleOpenFolder = async () => {
           const containerId = reviewData.containerTaskId
           if (!containerId) return
@@ -433,10 +421,7 @@ export function FiveSpaceLayout({
               requestId={reviewData.requestId}
               mode={reviewData.mode}
               title={reviewData.title}
-              pipelineId={reviewData.pipelineId}
-              options={reviewData.options}
               onSendMessage={handleSendMessage}
-              onSubmitReview={handleSubmitReview}
               onSaveFile={handleSaveFile}
             />
           </div>

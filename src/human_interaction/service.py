@@ -285,13 +285,25 @@ class HumanInteractionService(IHumanInteractionService):
         timeout = timeout or msg_data.get("timeout_seconds") or self._default_timeout
 
         try:
+            logger.info(
+                "[HumanInteraction] wait_for_choice() 开始等待 | request_id=%s | timeout=%s",
+                request_id, timeout,
+            )
             await asyncio.wait_for(event.wait(), timeout=timeout)
+            logger.info(
+                "[HumanInteraction] wait_for_choice() 被唤醒 | request_id=%s",
+                request_id,
+            )
         except TimeoutError:
             await self._handle_timeout(request_id)
             raise InteractionTimeoutError(request_id, timeout) from None
 
         response = self._responses.get(request_id)
         if not response:
+            logger.error(
+                "[HumanInteraction] wait_for_choice() 被唤醒但无 response | request_id=%s",
+                request_id,
+            )
             raise InteractionTimeoutError(request_id, timeout)
 
         resp_data = response.get("message_data", {})
@@ -326,6 +338,11 @@ class HumanInteractionService(IHumanInteractionService):
                   后端走不到 user_arrived 分支，管道无法正确挂起。
         修复方案: 兼容嵌套和扁平两种数据格式；保留 approved 类型不做转换。
         """
+        logger.info(
+            "[HumanInteraction] respond() 入口 | request_id=%s | resp_data keys=%s",
+            request_id, list(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data).__name__,
+        )
+
         inner = resp_data.get("response") or resp_data
         if not isinstance(inner, dict):
             inner = resp_data
@@ -334,6 +351,11 @@ class HumanInteractionService(IHumanInteractionService):
         selected_option = inner.get("selected_option") or inner.get("selectedOption") or resp_data.get("selected_option") or resp_data.get("selectedOption")
         feedback = inner.get("feedback") or resp_data.get("feedback")
         answers = inner.get("answers") or resp_data.get("answers")
+
+        logger.info(
+            "[HumanInteraction] respond() 解析结果 | request_id=%s | response_type=%s | selected_option=%s | feedback=%s",
+            request_id, response_type, selected_option, (feedback or "")[:50],
+        )
 
         return await self.submit_response(
             request_id=request_id,
@@ -355,7 +377,7 @@ class HumanInteractionService(IHumanInteractionService):
         """提交响应。"""
         request_record = self._requests.get(request_id)
         if not request_record:
-            logger.warning("[HumanInteraction] 请求不存在 | request_id=%s", request_id)
+            logger.warning("[HumanInteraction] 请求不存在 | request_id=%s | 已知 requests=%s", request_id, list(self._requests.keys())[-5:])
             return False
 
         if request_record.get("status") != InteractionStatus.PENDING.value:
@@ -389,8 +411,13 @@ class HumanInteractionService(IHumanInteractionService):
         msg_data["responded_at"] = now
 
         async with self._lock:
-            if request_id in self._pending_events:
+            event_exists = request_id in self._pending_events
+            if event_exists:
                 self._pending_events[request_id].set()
+            logger.info(
+                "[HumanInteraction] Event.set() | request_id=%s | event_exists=%s | pending_events_count=%d",
+                request_id, event_exists, len(self._pending_events),
+            )
             if request_id in self._timeout_tasks:
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]
@@ -457,6 +484,81 @@ class HumanInteractionService(IHumanInteractionService):
             request_id, reason,
         )
         return True
+
+    async def auto_complete_conversation_for_pipeline(self, pipeline_id: str) -> int:
+        """自动完成指定管道的 pending conversation 模式交互请求。
+
+        当用户通过聊天框发消息时，如果引擎正阻塞在 human_interaction
+        (conversation 模式) 的 wait_for_choice() 上，_run_loop 无法进入
+        下一轮迭代消费 _pending_notifications。通过自动完成交互请求，
+        工具返回 conversation_mode=True，管道正确挂起后立即被通知唤醒。
+
+        仅自动完成 conversation 模式（用户发消息 = 已到达对话页面），
+        不触碰 choice 模式（需要用户显式选择选项）。
+
+        Args:
+            pipeline_id: 管道 ID（对应 request 中的 session_id）
+
+        Returns:
+            被自动完成的请求数量
+        """
+        completed = 0
+        for request_id, record in list(self._requests.items()):
+            if record.get("status") != InteractionStatus.PENDING.value:
+                continue
+            if record.get("session_id") != pipeline_id:
+                continue
+            msg_data = record.get("message_data", {})
+            if msg_data.get("interaction_mode") != InteractionMode.CONVERSATION.value:
+                continue
+            try:
+                await self.submit_response(
+                    request_id=request_id,
+                    response_type=ResponseType.APPROVED.value,
+                )
+                completed += 1
+                logger.info(
+                    "[HumanInteraction] 自动完成 conversation 请求 | "
+                    "request_id=%s | pipeline_id=%s",
+                    request_id, pipeline_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[HumanInteraction] 自动完成失败 | request_id=%s | error=%s",
+                    request_id, exc,
+                )
+        return completed
+
+    async def cancel_pending_for_thread(self, thread_id: str, reason: str = "new_message_arrived") -> int:
+        """取消指定 thread 关联的所有 pending 交互请求。
+
+        当用户通过聊天框发送新消息时，如果引擎正在等待 human_interaction 响应，
+        需要取消 pending 请求以解除 _run_loop 的阻塞，让新消息能被消费。
+
+        Args:
+            thread_id: 线程/管道 ID
+            reason: 取消原因
+
+        Returns:
+            被取消的请求数量
+        """
+        cancelled = 0
+        for request_id, record in list(self._requests.items()):
+            if record.get("status") != InteractionStatus.PENDING.value:
+                continue
+            record_thread = record.get("thread_id") or record.get("session_id") or ""
+            if record_thread != thread_id:
+                continue
+            try:
+                await self.cancel_request(request_id, reason=reason)
+                cancelled += 1
+                logger.info(
+                    "[HumanInteraction] 取消 pending 请求（新消息到达）| request_id=%s | thread_id=%s",
+                    request_id, thread_id,
+                )
+            except Exception:
+                pass
+        return cancelled
 
     async def get_request(self, request_id: str) -> dict[str, Any] | None:
         """获取请求详情。"""
