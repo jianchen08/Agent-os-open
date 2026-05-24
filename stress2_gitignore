@@ -1,0 +1,317 @@
+# ============================================================
+# 综合性 .gitignore 配置
+# 覆盖：Python、Node.js、Java、IDE、操作系统 等常见忽略规则
+# ============================================================
+
+# ========================
+# 操作系统生成文件
+# ========================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ========================
+# Python
+# ========================
+
+# 字节码 / 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 分发 / 打包
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# 单元测试 / 覆盖率
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# 虚拟环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# Ruff
+.ruff_cache/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# ========================
+# Node.js
+# ========================
+
+# 依赖
+node_modules/
+jspm_packages/
+bower_components/
+
+# 构建输出
+lib-cov/
+.grunt/
+.lock-wscript/
+.node_repl_history/
+*.tsbuildinfo
+
+# 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 包管理锁文件（按需取消注释）
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# 环境变量
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Next.js
+.next/
+out/
+
+# Nuxt.js
+.nuxt/
+dist/
+
+# VuePress
+.vuepress/dist
+
+# Gatsby
+.cache/
+public/
+
+# ========================
+# Java
+# ========================
+
+# 编译文件
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+
+# Gradle
+.gradle/
+build/
+!src/**/build/
+
+# IntelliJ IDEA (部分)
+*.iml
+*.iws
+*.ipr
+
+# Eclipse
+.project
+.classpath
+.settings/
+*.launch
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# ========================
+# IDE / 编辑器配置
+# ========================
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains IDEs (IntelliJ / PyCharm / WebStorm / etc.)
+.idea/
+*.swp
+*.swo
+*~
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+*.tmlanguage.cache
+*.tmPreferences.cache
+*.stTheme.cache
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+Session.vim
+Sessionx.vim
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+auto-save-list
+tramp
+.\#*
+org-ID-locations
+*_archive
+
+# ========================
+# 通用日志与临时文件
+# ========================
+
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.cache
+*.pid
+*.seed
+*.pid.lock
+
+# ========================
+# 安全与敏感文件
+# ========================
+
+# 密钥与证书
+*.pem
+*.key
+*.cert
+*.p12
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*.ppk
+
+# 环境配置
+.env
+.env.*
+!.env.example
+
+# ========================
+# 其他常见忽略规则
+# ========================
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+*.sql.bak
+
+# 压缩文件
+*.7z
+*.rar
+*.zip
+*.gz
+*.tar
+*.tgz
+
+# 大文件 / 二进制
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.obj
+*.o
+*.a
