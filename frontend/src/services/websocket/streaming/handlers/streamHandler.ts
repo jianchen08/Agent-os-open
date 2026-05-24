@@ -118,7 +118,17 @@ export function handleStreamStart(eventData: any) {
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
-      if (!tabIdForPipeline) return true
+      // BUG-FIX-fix_20260524_auto_tab_switch:
+      // 问题根因: 子 Agent 开始流式输出时，如果其 Tab 尚未注册到 pipelineTabMap
+      //          （与 sub_agent_created 事件的时序竞争），tabIdForPipeline 为 null，
+      //          导致 shouldActivatePipeline 返回 true，自动激活子管道，
+      //          用户看到的内容从主 Agent 对话突然变为子 Agent 对话。
+      // 修复方案: 管道无 Tab 映射时，仅主管道（level 1）自动激活，子管道不自动激活。
+      // 影响范围: 子 Agent 流式输出期间的消息显示
+      // 修复日期: 2026-05-24
+      if (!tabIdForPipeline) {
+        return pipelineStore.getState().pipelines[pipelineId]?.level === 1
+      }
       return false
     })()
 
