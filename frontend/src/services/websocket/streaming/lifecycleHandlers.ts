@@ -254,3 +254,36 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
   }
   streamingStore.setStreamingForTab(pipelineId, false)
 }
+
+/**
+ * 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知）
+ *
+ * 通过统一流式路径（bridge on_chunk → drain_loop → WebSocket）发送，
+ * 将系统通知作为独立消息添加到管道消息列表中渲染。
+ */
+export function handleSystemNotification(eventData: any): void {
+  const pipelineId = resolvePipelineId(eventData)
+  const data = eventData?.data || eventData
+  const content = data?.content || ''
+  const level = data?.level || 'info'
+  const notificationType = data?.notificationType || ''
+
+  if (!pipelineId || !content) return
+
+  const pipelineStore = usePipelineMessageStore.getState()
+
+  pipelineStore.addMessage(pipelineId, {
+    role: 'system',
+    content,
+    parts: [
+      {
+        type: 'system',
+        content,
+        level: level as any,
+        notificationType,
+        sequence: 0,
+      },
+    ],
+    status: 'completed',
+  } as any)
+}

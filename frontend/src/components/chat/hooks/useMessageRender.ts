@@ -116,10 +116,11 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
     const part = sorted[i]
     switch (part.type) {
       case 'text': {
-        if (part.content && part.content.trim()) {
+        const textContent = part.content || (part as any).text || ''
+        if (textContent && textContent.trim()) {
           fragments.push({
             type: 'text',
-            content: part.content,
+            content: textContent,
             key: `part-text-${i}`,
             sourceId: message.id,
             isLast: false,
@@ -395,7 +396,7 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
     message.parts && message.parts.length > 0
       ? message.parts
           .filter((p) => p.type === 'text')
-          .map((p) => (p as { content: string }).content)
+          .map((p) => (p as { content: string; text?: string }).content || (p as { content: string; text?: string }).text || '')
           .join('') || message.content
       : versionContent ?? message.content
 

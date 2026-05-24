@@ -480,14 +480,22 @@ class PipelineStreamBridge:
                 await self._send_event(self._make_event("state_change", {
                     "status": "suspended",
                     "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
-                    # BUG-FIX-fix_20260523_thread_id_attr:
-                    # 问题根因: self._thread_id 在 PipelineStreamBridge 上不存在（仅在 TargetedSink 上），
-                    #   管道挂起时访问该属性会抛出 AttributeError。
-                    # 修复方案: 使用 getattr 从 output_sink 安全获取 _thread_id。
                     "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
                 }))
                 logger.info(
                     "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
+                    self.pipeline_id[:12],
+                )
+                continue
+
+            if _chunk_type == "system":
+                await self._send_event(self._make_event("system_notification", {
+                    "content": chunk.get("content", ""),
+                    "level": chunk.get("level", "info"),
+                    "notificationType": chunk.get("notificationType", ""),
+                }))
+                logger.debug(
+                    "drain_loop: system_notification sent: pipeline=%s",
                     self.pipeline_id[:12],
                 )
                 continue

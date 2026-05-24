@@ -32,7 +32,7 @@ import {
   handleToolStart,
   handleIteration,
 } from './handlers'
-import { handleChunkTimeout, handlePipelineReceived, handleReconnected, handleStateChange } from './lifecycleHandlers'
+import { handleChunkTimeout, handlePipelineReceived, handleReconnected, handleStateChange, handleSystemNotification } from './lifecycleHandlers'
 import { resolvePipelineId } from './router'
 
 /** 终止事件：这些事件由 handler 自行清理超时，不需要集中重置 */
@@ -91,6 +91,7 @@ export function initStreamingEvents(): void {
 
   _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = handleStateChange
   _handlers[WS_SERVER_EVENTS.PIPELINE_RECEIVED] = handlePipelineReceived
+  _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = handleSystemNotification
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)

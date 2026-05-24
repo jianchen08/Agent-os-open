@@ -157,6 +157,8 @@ export const WS_SERVER_EVENTS = {
   SUB_AGENT_WAITING_INPUT: 'sub_agent_waiting_input',
   /** 子 Agent 完成 - Phase 5 */
   SUB_AGENT_COMPLETED: 'sub_agent_completed',
+  /** 系统通知（任务完成/失败等，通过统一流式路径发送） */
+  SYSTEM_NOTIFICATION: 'system_notification',
   /** Agent 层级变更 - Phase 5 */
   AGENT_LEVEL_CHANGED: 'agent_level_changed',
   /** 消息删除通知 */

@@ -71,6 +71,7 @@ class TaskExecutorMixin:
         """
 
         task_id = task_data.get("task_id", "unknown")
+        logger.info("TaskWorker: _execute_background_task 开始 | task=%s", task_id)
         target_id = task_data.get("target_id", "")
         task_service = self._task_service
         _cleanup_done = False
@@ -438,7 +439,14 @@ class TaskExecutorMixin:
             return None
 
         agent_registry = self._services.get("agent_registry")
+        logger.info(
+            "TaskWorker: _load_agent_config | task=%s, target=%s, registry=%s, keys=%s",
+            task_id, target_id,
+            type(agent_registry).__name__ if agent_registry else "None",
+            list(self._services.keys())[:10] if self._services else "empty",
+        )
         if not agent_registry:
+            logger.error("TaskWorker: agent_registry not found in services!")
             return None
 
         agent_config = agent_registry.get(target_id)

@@ -186,16 +186,14 @@ class TaskNotifierMixin:
             )
 
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
-        """子任务到达终态时，通过统一消息总线通知父管道。
-
-        构造通知文本后，查找 parent_pipeline_id，
-        调用 send_pipeline_message() 完成消息注入。
-        send_pipeline_message 内部自动判断管道状态（运行中/挂起/需复活）
-        并选择最佳注入策略，无需调用方关心具体路径。
-        """
+        """子任务到达终态时，通过统一消息总线通知父管道。"""
         from pipeline.message_bus import send_pipeline_message
 
-        # ── 1. 查找 parent_pipeline_id 并获取完整任务信息 ──
+        logger.info(
+            "TaskWorker: _notify_suspended_pipelines 开始 | task=%s, status=%s",
+            task_id, new_status,
+        )
+
         parent_pipeline_id = None
         task_obj = None
         task_service = self._task_service
@@ -206,6 +204,15 @@ class TaskNotifierMixin:
                     parent_pipeline_id = getattr(task_obj, "parent_pipeline_id", None)
             except Exception as exc:
                 logger.warning("TaskWorker: 获取任务信息失败: task=%s, error=%s", task_id, exc)
+
+        logger.info(
+            "TaskWorker: 通知查找结果 | task=%s, parent_pipeline=%s, has_task_obj=%s",
+            task_id, parent_pipeline_id, task_obj is not None,
+        )
+
+        if not parent_pipeline_id:
+            logger.info("TaskWorker: 无父管道，跳过通知 | task=%s", task_id)
+            return
 
         # ── 2. 构造通知文本（含重试信息） ──
         task_info = data.get("task", {})
@@ -280,13 +287,49 @@ class TaskNotifierMixin:
                 "TaskWorker: 通知已注入: pipeline=%s, task=%s, status=%s, method=%s",
                 parent_pipeline_id, task_id, new_status, result.method,
             )
-            # BUG-FIX-fix_20260521_notification_route:
-            # 问题根因: send_pipeline_message 通过 engine._wake_event 唤醒引擎，
-            #   但 TaskWorker._handle_suspension_loop 等待的是独立的 wake_evt，
-            #   两者是不同的 Event，导致 suspension_loop 超时后才触发 engine.resume()，
-            #   而 resume 会用 _build_child_notifications 重建通知（可能发给错误 agent）。
-            # 修复方案: 通知注入成功后，同步 set TaskWorker 的 wake_evt，
-            #   使 suspension_loop 立即感知子任务完成，跳过重复通知直接 resume。
+
+            # ── 5. 通过 WebSocket 直接发送系统通知气泡到前端 ──
+            # 通知文本已通过 send_pipeline_message 注入引擎供 LLM 处理，
+            # 但前端还需要一个独立的消息气泡来渲染系统通知（如任务完成/失败）。
+            # 由于管道挂起后 drain_loop 已结束，无法通过 bridge 传递，
+            # 因此直接通过 ws_interaction_notifier 发送 system_notification 事件。
+            try:
+                _ws_notifier = self._services.get("ws_interaction_notifier")
+                if _ws_notifier and parent_pipeline_id:
+                    from pipeline.registry import get_engine_registry
+                    _thread_id = get_engine_registry().get_thread_id(parent_pipeline_id)
+                    _level = "info"
+                    if new_status != "completed":
+                        _level = "warning"
+                    _sys_payload = {
+                        "type": "system_notification",
+                        "data": {
+                            "content": notification,
+                            "level": _level,
+                            "notificationType": "task_notification",
+                            "pipeline_id": parent_pipeline_id,
+                        },
+                    }
+                    if _thread_id and hasattr(_ws_notifier, "send_to_thread"):
+                        await _ws_notifier.send_to_thread(_thread_id, _sys_payload)
+                        logger.info(
+                            "TaskWorker: system_notification 已发送: pipeline=%s, thread=%s, status=%s",
+                            parent_pipeline_id[:12], _thread_id[:12], new_status,
+                        )
+                    else:
+                        _uid = getattr(task_obj, "user_id", "") or "" if task_obj else ""
+                        if _uid and hasattr(_ws_notifier, "send_to_user"):
+                            await _ws_notifier.send_to_user(_uid, _sys_payload)
+                            logger.info(
+                                "TaskWorker: system_notification 已广播(user): task=%s, status=%s",
+                                task_id, new_status,
+                            )
+            except Exception as _ws_exc:
+                logger.warning(
+                    "TaskWorker: system_notification 发送失败(不影响通知注入): error=%s",
+                    _ws_exc,
+                )
+
             if parent_task_id_for_revive:
                 wake_evt = self._wake_events.get(parent_task_id_for_revive)
                 if wake_evt is not None:

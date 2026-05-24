@@ -34,7 +34,7 @@ function buildPartsFromApiData(
   }
 
   if (content && content.trim()) {
-    parts.push({ type: 'text', text: content.trim(), state: 'done' })
+    parts.push({ type: 'text', content: content.trim(), state: 'done' })
   }
 
   if (toolCalls && toolCalls.length > 0) {
@@ -104,7 +104,7 @@ export function handleNewMessage(eventData: any) {
 
   // 基于 parts[] 判断消息是否已有文本内容
   const existingParts = (existing as any).parts || []
-  const hasTextParts = existingParts.some((p: any) => p.type === 'text' && p.text?.trim())
+  const hasTextParts = existingParts.some((p: any) => p.type === 'text' && (p.text || p.content)?.trim())
 
   if (hasTextParts) {
     // 已有文本 parts，仅更新 status 并将 streaming parts 改为 done

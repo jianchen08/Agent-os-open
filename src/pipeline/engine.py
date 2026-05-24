@@ -327,6 +327,7 @@ class PipelineEngine:
                     state[StateKeys.CORE_TYPE] = "llm_call"
                     state.pop("raw_result", None)
                     state.pop("error_analysis", None)
+
                     logger.info(
                         "[Engine] 迭代 %d 开始时消费 %d 条待处理通知，注入 state",
                         iteration, len(_iter_notifs),
