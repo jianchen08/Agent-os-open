@@ -5,7 +5,7 @@
  */
 
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
@@ -114,9 +114,7 @@ export const ThinkingDisplay: FC<{
 }> = ({ thinking, defaultExpanded = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
-  useEffect(() => {
-    if (thinking.isThinking) setExpanded(true)
-  }, [thinking.isThinking])
+
 
   return (
     <div className="border-border/50 bg-background/60 my-2 overflow-hidden rounded-lg border">

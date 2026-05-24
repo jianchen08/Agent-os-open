@@ -200,13 +200,29 @@ function mapBackendMessageToMessage(
     })
   }
 
+  const isSystemMsg =
+    backendMessage.role === 'system' ||
+    metadata?.record_type === 'system' ||
+    metadata?.type === 'system' ||
+    metadata?.sender_type === 'system'
+
   if (backendMessage.content?.trim()) {
-    parts.push({
-      type: 'text',
-      content: backendMessage.content,
-      state: 'done',
-      sequence: seq++,
-    })
+    if (isSystemMsg) {
+      parts.push({
+        type: 'system',
+        content: backendMessage.content,
+        level: (metadata?.notification_level as any) || 'info',
+        notificationType: (metadata?.notification_type as string) || 'task_notification',
+        sequence: seq++,
+      })
+    } else {
+      parts.push({
+        type: 'text',
+        content: backendMessage.content,
+        state: 'done',
+        sequence: seq++,
+      })
+    }
   }
 
   if (toolCalls && toolCalls.length > 0) {

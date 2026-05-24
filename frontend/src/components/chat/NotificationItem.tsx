@@ -58,6 +58,8 @@ export interface NotificationItemProps {
   onAction?: (notificationId: string, action: NotificationAction) => void
   /** 自定义类名 */
   className?: string
+  /** 是否关联人类交互（由 NotificationCenter 传入） */
+  hasInteraction?: boolean
 }
 
 /** 格式化时间 */
@@ -80,6 +82,7 @@ export function NotificationItemComponent({
   onDismiss,
   onAction,
   className,
+  hasInteraction = false,
 }: NotificationItemProps) {
   const { id, title, message, priority, category, progress, isBlocking, isRead, timestamp, actions } = notification
 
@@ -112,7 +115,8 @@ export function NotificationItemComponent({
     return (
       <div
         className={cn(
-          'flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg cursor-pointer',
+          'flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg',
+          hasInteraction ? 'cursor-pointer hover:bg-accent/60' : 'cursor-default',
           'hover:bg-muted/50 transition-colors',
           !isRead && 'font-medium',
           className,
@@ -122,6 +126,9 @@ export function NotificationItemComponent({
       >
         <IconComponent className={cn('h-3.5 w-3.5 flex-shrink-0', style.text)} />
         <span className="truncate flex-1">{title}</span>
+        {hasInteraction && (
+          <span className="text-[10px] text-primary font-medium shrink-0">点击处理</span>
+        )}
         <span className="text-xs text-muted-foreground flex-shrink-0">{formatTime(timestamp)}</span>
       </div>
     )
@@ -137,6 +144,7 @@ export function NotificationItemComponent({
         !isRead && 'border-l-4',
         style.pulse && 'animate-pulse-subtle',
         isRead && 'opacity-70',
+        hasInteraction && 'cursor-pointer hover:shadow-md',
         className,
       )}
       onClick={handleClick}
@@ -245,6 +253,13 @@ export function NotificationItemComponent({
             >
               确认继续
             </Button>
+          </div>
+        )}
+
+        {/* 人类交互提示 */}
+        {hasInteraction && !isBlocking && (
+          <div className="mt-2 pl-6">
+            <span className="text-xs text-primary font-medium">💬 点击打开交互面板</span>
           </div>
         )}
       </div>

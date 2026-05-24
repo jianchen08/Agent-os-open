@@ -654,6 +654,15 @@ def _record_to_message_response(
             except (_json.JSONDecodeError, TypeError):
                 pass
 
+    elif record.type == "system":
+        metadata = {
+            "record_type": "system",
+            "type": "system",
+            "sender_type": "system",
+            "notification_level": record.name or "info",
+            "notification_type": (record.tool_input or {}).get("notificationType", "task_notification") if isinstance(record.tool_input, dict) else "task_notification",
+        }
+
     elif record.type == "tool":
         tool_call_id = record.tool_call_id
         if record.tool_input and isinstance(record.tool_input, dict):

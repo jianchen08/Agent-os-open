@@ -127,6 +127,7 @@ export const MessageItem = ({
   const isTool = message.role === 'tool'
 
   const isSystemMessage =
+    message.role === 'system' ||
     message.metadata?.record_type === 'system' ||
     message.metadata?.type === 'system' ||
     message.metadata?.sender_type === 'system'

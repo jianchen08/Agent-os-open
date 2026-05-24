@@ -123,7 +123,7 @@ function renderFragment(
     case 'thinking':
       return (
         <div key={fragment.key}>
-          <ThinkingDisplay thinking={fragment.thinking} defaultExpanded={fragment.thinking.isThinking} />
+          <ThinkingDisplay thinking={fragment.thinking} />
         </div>
       )
 

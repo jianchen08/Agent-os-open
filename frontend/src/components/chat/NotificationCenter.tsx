@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
@@ -90,8 +91,19 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
       if (!notification.isRead) {
         markAsRead(notification.id)
       }
+      const sourceId = (notification as any).sourceId as string | undefined
+      if (sourceId) {
+        const interaction = useInteractionStore
+          .getState()
+          .pendingInteractions.find((i) => i.requestId === sourceId)
+        if (interaction && interaction.status === 'pending') {
+          useInteractionStore.getState().setGlobalOpenRequestId(sourceId)
+          closePanel()
+          return
+        }
+      }
     },
-    [markAsRead],
+    [markAsRead, closePanel],
   )
 
   const handleAction = useCallback(
@@ -287,6 +299,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
                 onClick={handleNotificationClick}
                 onDismiss={dismissNotification}
                 onAction={handleAction}
+                hasInteraction={!!(notification as any).sourceId}
                 className="group"
               />
             ))}
@@ -302,6 +315,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
                   onClick={handleNotificationClick}
                   onDismiss={dismissNotification}
                   onAction={handleAction}
+                  hasInteraction={!!(notification as any).sourceId}
                 />
               ))}
               {items.length > 2 && (

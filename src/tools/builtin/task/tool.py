@@ -1042,8 +1042,7 @@ class TaskTool(BuiltinTool):
     ) -> ToolExecutionResult:
         """取消任务。
 
-        将任务状态设为 failed 并记录取消原因。
-        注意：TaskStatus 中没有 cancelled 状态，使用 failed 替代。
+        将任务状态设为 CANCELLED 并记录取消原因，同时级联取消所有子任务。
 
         Args:
             inputs: 工具输入参数
@@ -1092,9 +1091,12 @@ class TaskTool(BuiltinTool):
             reason = inputs.get("reason", "用户请求取消")
             old_status = task.status.value
 
-            # 通过 fail_task 设置为 failed 状态
-            # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
-            await service.fail_task(task_id, error=f"已取消: {reason}")
+            # BUG-FIX-fix_20260524_cancel_task_status:
+            # 问题根因: 使用 fail_task 将状态设为 FAILED，无法区分"取消"和"失败"。
+            # 修复方案: 改用 cancel_task 方法，将状态设为 CANCELLED。
+            # 影响范围: Tool 层取消任务的状态。
+            # 修复日期: 2026-05-24
+            await service.cancel_task(task_id, reason=f"已取消: {reason}")
 
             # BUG-FIX-fix_20260514_cancel_cascade:
             # 级联取消所有子任务，避免子任务管道继续执行
@@ -1105,7 +1107,7 @@ class TaskTool(BuiltinTool):
                 "task_id": task_id,
                 "cancelled": True,
                 "old_status": old_status,
-                "new_status": TaskStatus.FAILED.value,
+                "new_status": TaskStatus.CANCELLED.value,
                 "reason": reason,
             }
             if cascaded > 0:

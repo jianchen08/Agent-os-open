@@ -33,13 +33,34 @@ class IOutputSink(Protocol):
         ...
 
 
+class _DeadCheckable(Protocol):
+    """支持连接死亡检测的 sink 协议。
+
+    注意: 使用 hasattr 而非 isinstance 进行运行时检查，
+    因为 unittest.mock 创建的 spec 对象可能无法通过
+    runtime_checkable Protocol 的 isinstance 检查。
+    """
+
+    @property
+    def is_dead(self) -> bool:
+        """返回 sink 是否已死亡（连续推送失败超过阈值）。"""
+        ...
+
 
 class TargetedSink:
     """定向输出目标，按 thread_id 直接路由事件到对应 WebSocket 连接。
 
     路由失败时记录错误并返回 False，不广播。
     广播是消息串扰的根因，已被删除。
+
+    BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
+    增加连续失败检测：当连续推送失败超过阈值时标记 sink 为 dead，
+    上层 drain_loop 检测到 dead 后会提前发送 stream_end 并退出，
+    避免前端因收不到 stream_end 而无限等待。
     """
+
+    # 连续推送失败超过此阈值时标记 sink 为 dead
+    _MAX_CONSECUTIVE_FAILURES: int = 5
 
     def __init__(self, notifier: Any, thread_id: str) -> None:
         """初始化定向输出目标。
@@ -51,16 +72,26 @@ class TargetedSink:
         self._notifier = notifier
         self._thread_id = thread_id
         self._fail_count: int = 0
+        self._is_dead: bool = False
 
     @property
     def sink_id(self) -> str:
         """返回定向发送标识。"""
         return f"targeted:{self._thread_id or 'no-thread'}"
 
+    @property
+    def is_dead(self) -> bool:
+        """返回 sink 是否已死亡（连续推送失败超过阈值）。
+
+        当 is_dead 为 True 时，上层应停止尝试发送并尽早发送 stream_end 保底事件。
+        """
+        return self._is_dead
+
     async def send_event(self, event: dict) -> bool:
         """直接路由事件到指定 thread_id 的 WebSocket 连接。
 
         路由失败时记录错误，不广播。广播会导致消息串扰。
+        连续失败超过阈值时标记 sink 为 dead。
 
         Args:
             event: 要发送的事件字典
@@ -77,11 +108,14 @@ class TargetedSink:
                     event.get("type", "?"),
                     (event.get("data", {}).get("pipeline_id") or "?")[:12],
                 )
+            self._check_dead()
             return False
 
         try:
             ok = await self._notifier.send_to_thread(self._thread_id, event)
             if ok:
+                # 发送成功时重置失败计数
+                self._fail_count = 0
                 return True
             self._fail_count += 1
             if self._fail_count <= 3:
@@ -92,6 +126,7 @@ class TargetedSink:
                     event.get("type", "?"),
                     (event.get("data", {}).get("pipeline_id") or "?")[:12],
                 )
+            self._check_dead()
             return False
         except Exception:
             self._fail_count += 1
@@ -102,7 +137,19 @@ class TargetedSink:
                 event.get("type", "?"),
                 exc_info=True,
             )
+            self._check_dead()
             return False
+
+    def _check_dead(self) -> None:
+        """检查连续失败次数是否超过阈值，超过则标记 sink 为 dead。"""
+        if not self._is_dead and self._fail_count >= self._MAX_CONSECUTIVE_FAILURES:
+            self._is_dead = True
+            logger.warning(
+                "TargetedSink: 连续推送失败 %d 次，标记 sink 为 dead: "
+                "thread_id=%s（前端可能已断开连接）",
+                self._fail_count,
+                self._thread_id[:12] if self._thread_id else "(empty)",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +258,20 @@ class PipelineStreamBridge:
     async def _send_event(self, event: dict) -> bool:
         """通过 output_sink 发送事件，记录发送失败日志。
 
+        BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
+        当 output_sink 是 TargetedSink 且已被标记为 dead 时，
+        跳过发送并直接返回 False，避免无意义的推送尝试。
+
         Args:
             event: 要发送的事件字典
 
         Returns:
             发送成功返回 True，失败返回 False
         """
+        # 检查 sink 是否已死亡（连续推送失败超过阈值）
+        if getattr(self.output_sink, 'is_dead', False) is True:
+            return False
+
         success = await self.output_sink.send_event(event)
         if not success:
             logger.debug(
@@ -408,6 +463,33 @@ class PipelineStreamBridge:
         # 2. 主循环：消费队列
         _chunk_count = 0
         while not engine_task.done() or not self._queue.empty():
+            # BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
+            # 检测 sink 是否已死亡（连续推送失败超过阈值），
+            # 如果 dead 则提前发送 stream_end 保底事件并退出循环，
+            # 避免前端因收不到 stream_end 而无限等待。
+            if getattr(self.output_sink, 'is_dead', False) is True:
+                logger.warning(
+                    "drain_loop: sink 已 dead（前端连接丢失），提前终止流式输出: "
+                    "pipeline=%s chunks=%d",
+                    self.pipeline_id[:12], _chunk_count,
+                )
+                await self._close_thinking_if_active(None)
+                full_content = "".join(self._accumulated_content)
+                # sink 已 dead，stream_end 大概率也发不出去，但仍尝试发送
+                try:
+                    await self.output_sink.send_event(self._make_event("stream_end", {
+                        "full_content": full_content,
+                        "connection_lost": True,
+                    }))
+                except Exception:
+                    pass
+                return {
+                    "accumulated_content": full_content,
+                    "thinking_content_parts": list(self._thinking_content_parts),
+                    "connection_lost": True,
+                    "timed_out": False,
+                }
+
             try:
                 chunk = await asyncio.wait_for(self._queue.get(), timeout=0.1)
             except asyncio.TimeoutError:

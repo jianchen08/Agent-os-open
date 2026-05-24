@@ -50,7 +50,14 @@ class TaskExecutorMixin:
         """统一取消引擎任务。"""
         engine_task.cancel()
         try:
-            await engine_task
+            # BUG-FIX-fix_20260524_cancel_engine_task:
+            # 问题根因: 当外层 bg_task 被取消时，await engine_task 会立即抛出 CancelledError，
+            #           导致不等待引擎真正停止就返回，引擎可能仍在内存中继续运行。
+            # 修复方案: 使用 asyncio.shield 保护 await，确保即使外层任务被取消，
+            #           也能等待引擎任务完成清理。
+            # 影响范围: 所有任务的取消流程。
+            # 修复日期: 2026-05-24
+            await asyncio.shield(engine_task)
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -374,7 +381,9 @@ class TaskExecutorMixin:
                 container_workspace_path = lifecycle._ws_meta_store.get(task_id, {}).get("path", "")
                 if container_workspace_path:
                     task.metadata["container_workspace"] = container_workspace_path
-                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
+                    ws_meta = lifecycle._ws_meta_store.get(task_id)
+                    if ws_meta:
+                        task.metadata["ws_meta"] = ws_meta
                     await self._task_service.save_task(task)
                     logger.info(
                         "TaskWorker: 容器空间已初始化: task_id=%s, workspace=%s (attempt %d)",
@@ -767,12 +776,22 @@ class TaskExecutorMixin:
         Returns:
             是否成功发起取消（无运行中管道时返回 False）
         """
+        # BUG-FIX-fix_20260524_cancel_container_pipeline:
+        # 问题根因: 容器任务的 pipeline_run_id 是父管道的 ID，
+        #           cancel_pipeline(container_task_id) 会错误地注销父管道引擎。
+        # 修复方案: 容器任务没有自己的管道引擎，跳过 pipeline_id 查找和引擎注销，
+        #           直接进入 context/bg_task 取消逻辑。
+        # 影响范围: 容器任务取消流程。
+        # 修复日期: 2026-05-24
         pipeline_id = None
+        is_container = False
         if self._task_service:
             try:
                 task = self._task_service.get_task(task_id)
                 if task:
-                    pipeline_id = getattr(task, "pipeline_run_id", None)
+                    is_container = task.metadata.get("task_scope") == "container"
+                    if not is_container:
+                        pipeline_id = getattr(task, "pipeline_run_id", None)
             except Exception:
                 logger.warning("TaskWorker: cancel_pipeline 获取 pipeline_id 失败: task_id=%s", task_id, exc_info=True)
 

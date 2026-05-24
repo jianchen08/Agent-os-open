@@ -91,7 +91,11 @@ export const AgentTabBar: React.FC<AgentTabBarProps> = ({
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2">
       {/* Tab 列表 */}
-      <div className="scrollbar-hide flex flex-1 items-center gap-1.5 overflow-x-auto">
+      <div
+        ref={scrollContainerRef}
+        onWheel={handleWheel}
+        className="scrollbar-hide flex flex-1 items-center gap-1.5 overflow-x-auto"
+      >
         {tabs.map((tab) => (
           <AgentTabItem
             key={tab.id}

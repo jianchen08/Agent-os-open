@@ -62,6 +62,8 @@ export interface PendingInteraction {
 interface InteractionState {
   /** 待处理交互列表 */
   pendingInteractions: PendingInteraction[]
+  /** 全局浮层中打开的交互请求 ID */
+  globalOpenRequestId: string | null
 
   /** 添加待处理交互 */
   addInteraction: (data: Omit<PendingInteraction, 'status'>) => void
@@ -77,10 +79,13 @@ interface InteractionState {
   getPendingForThread: (threadId: string) => PendingInteraction[]
   /** 按 pipelineId 获取已进入但未响应的交互 */
   getEnteredForPipeline: (pipelineId: string) => PendingInteraction | undefined
+  /** 打开全局交互浮层 */
+  setGlobalOpenRequestId: (id: string | null) => void
 }
 
 export const useInteractionStore = create<InteractionState>()((set, get) => ({
   pendingInteractions: [],
+  globalOpenRequestId: null,
 
   addInteraction: (data) => {
     set((state) => {
@@ -172,5 +177,9 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
           i.threadId === pipelineId ||
           i.agentId === pipelineId),
     )
+  },
+
+  setGlobalOpenRequestId: (id) => {
+    set({ globalOpenRequestId: id })
   },
 }))

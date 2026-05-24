@@ -464,23 +464,19 @@ function sortNodes(
   titleField: string,
   childrenField: string,
 ): TreeNodeData[] {
-  if (mode === 'none') return nodes
-
   const sorted = [...nodes].sort((a, b) => {
     const titleA = String(getNodeField(a, titleField) ?? '').toLowerCase()
     const titleB = String(getNodeField(b, titleField) ?? '').toLowerCase()
     const childrenA = getNodeField(a, childrenField) as TreeNodeData[] | undefined
     const childrenB = getNodeField(b, childrenField) as TreeNodeData[] | undefined
-    const isDirA = Array.isArray(childrenA) && childrenA.length > 0
-    const isDirB = Array.isArray(childrenB) && childrenB.length > 0
+    const isDirA = Array.isArray(childrenA)
+    const isDirB = Array.isArray(childrenB)
 
-    if (mode === 'type') {
-      if (isDirA !== isDirB) return isDirA ? -1 : 1
-      return titleA.localeCompare(titleB)
-    }
+    if (isDirA !== isDirB) return isDirA ? -1 : 1
 
     const cmp = titleA.localeCompare(titleB)
-    return mode === 'name-desc' ? -cmp : cmp
+    if (mode === 'name-desc') return -cmp
+    return cmp
   })
 
   return sorted.map((node) => {

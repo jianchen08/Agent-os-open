@@ -10,6 +10,7 @@ Git 操作和合并操作方法，本文件仅保留业务编排层代码。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -120,7 +121,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 "branch": "main", "project_root": str(path),
                 "is_container_workspace": True}
         self._ws_meta_store[container_task_id] = meta
-        self._persist_ws_meta(container_task_id)
         logger.info("[WorkspaceLifecycle] 容器空间已初始化: task_id=%s, path=%s",
                      container_task_id, path)
         return meta
@@ -394,7 +394,19 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
     # ── ws_meta 持久化与恢复 ────────────────────────────────────
 
     def _persist_ws_meta(self, task_id: str):
-        """将 ws_meta 持久化到 task.metadata["ws_meta"]"""
+        """将 ws_meta 持久化到 task.metadata["ws_meta"]
+
+        BUG-FIX-fix_20260524_save_task_not_awaited:
+        问题根因: _persist_ws_meta 是同步方法，但 self._task_tree.save_task(task) 是
+                  async 方法（TaskService.save_task），直接调用 async 函数不 await
+                  会导致 RuntimeWarning，协程也不会实际执行，ws_meta 无法持久化。
+        修复方案: 使用 asyncio.create_task 在当前运行的事件循环中调度协程。
+                  由于 _persist_ws_meta 的调用者（init_container_workspace / on_task_start）
+                  都在 async 上下文中被调用（_handle_container_task / _execute_background_task），
+                  asyncio.get_running_loop() 一定能获取到事件循环。
+        影响范围: ws_meta 持久化到 task.metadata 的可靠性。
+        修复日期: 2026-05-24
+        """
         meta = self._ws_meta_store.get(task_id)
         if not meta:
             return
@@ -402,10 +414,27 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             task = self._task_tree.get_task(task_id)
             if task and task.metadata is not None:
                 task.metadata["ws_meta"] = meta
-                self._task_tree.save_task(task)
+                coro = self._task_tree.save_task(task)
+                try:
+                    loop = asyncio.get_running_loop()
+                    t = loop.create_task(coro)
+                    t.add_done_callback(self._log_persist_failure)
+                except RuntimeError:
+                    logger.warning(
+                        "[WorkspaceLifecycle] _persist_ws_meta: 无运行中的事件循环, task_id=%s",
+                        task_id,
+                    )
         except Exception as e:
             logger.warning("[WorkspaceLifecycle] _persist_ws_meta 失败: task_id=%s, error=%s",
                            task_id, e)
+
+    @staticmethod
+    def _log_persist_failure(fut: asyncio.Task) -> None:
+        """记录 create_task 调度的 save_task 协程异常。"""
+        try:
+            fut.result()
+        except Exception as exc:
+            logger.warning("[WorkspaceLifecycle] save_task 协程执行失败: %s", exc)
 
     def restore_ws_meta(self, task_id: str):
         """从 task.metadata["ws_meta"] 恢复到 ws_meta_store"""

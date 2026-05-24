@@ -4,7 +4,7 @@
  * 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附
  */
 
-import React from 'react'
+import React, { useCallback } from 'react'
 import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */
@@ -32,6 +32,14 @@ export function WorkspacePanel({
 }: WorkspacePanelProps) {
   const activeTab = tabs.find((t) => t.isActive)
 
+  const handleTabWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault()
+      el.scrollLeft += e.deltaY
+    }
+  }, [])
+
   if (tabs.length === 0) {
     return (
       <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
@@ -43,7 +51,7 @@ export function WorkspacePanel({
   return (
     <div className="flex h-full flex-col">
       {/* Tab 栏 */}
-      <div className="border-border flex flex-shrink-0 items-center overflow-x-auto border-b">
+      <div onWheel={handleTabWheel} className="border-border flex flex-shrink-0 items-center overflow-x-auto border-b">
         {tabs.map((tab) => (
           <div
             key={tab.id}

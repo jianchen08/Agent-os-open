@@ -942,8 +942,19 @@ async def cancel_task(
     # 步骤2: 级联取消所有子任务
     cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
 
-    # 步骤3: 取消父任务及其所有子任务的运行中管道
-    pipeline_cancelled = _cancel_running_pipeline(task_id)
+    # 步骤3: 取消运行中管道
+    # BUG-FIX-fix_20260524_cancel_container_task_route:
+    # 问题根因: 对容器任务调用 _cancel_running_pipeline(task_id) 会误操作父管道，
+    #           因为容器任务的 pipeline_run_id 指向父管道。
+    # 修复方案: 如果是容器任务，跳过 _cancel_running_pipeline，
+    #           只执行 _cancel_child_pipelines 来取消子任务的管道。
+    # 影响范围: API 层取消容器任务的流程。
+    # 修复日期: 2026-05-24
+    is_container = task.metadata.get("task_scope") == "container"
+    if is_container:
+        pipeline_cancelled = False
+    else:
+        pipeline_cancelled = _cancel_running_pipeline(task_id)
     _cancel_child_pipelines(task_id, task_service)
 
     logger.info(

@@ -19,6 +19,7 @@ import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
+import { GlobalInteractionOverlay } from './GlobalInteractionOverlay'
 import { InteractionPanel } from './InteractionPanel'
 import { MessageList } from './MessageList'
 import { NotificationCenter } from './NotificationCenter'
@@ -400,6 +401,9 @@ export const ChatContainer = ({
       <ErrorBoundary>
         <InteractionPanel sessionId={sessionId} />
       </ErrorBoundary>
+
+      {/* 全局交互浮层（从通知中心点击打开） */}
+      <GlobalInteractionOverlay />
 
       {/* 活跃投票面板 */}
       <ActiveVotingPanels sessionId={sessionId} />

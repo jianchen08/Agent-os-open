@@ -285,5 +285,12 @@ export function handleSystemNotification(eventData: any): void {
       },
     ],
     status: 'completed',
+    metadata: {
+      record_type: 'system',
+      type: 'system',
+      sender_type: 'system',
+      notification_level: level,
+      notification_type: notificationType,
+    },
   } as any)
 }
