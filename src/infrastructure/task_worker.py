@@ -362,21 +362,7 @@ class TaskWorker(
                 return
 
         logger.info("TaskWorker received task: %s", task_id)
-        bg_task = asyncio.create_task(self._execute_background_task(task_data))
-        logger.info(
-            "TaskWorker: create_task done | task=%s | bg_task=%s | done=%s",
-            task_id, id(bg_task), bg_task.done(),
-        )
-        self._tasks.add(bg_task)
-        bg_task.add_done_callback(self._tasks.discard)
-        if task_id != "unknown":
-            self._task_id_to_bg_task[task_id] = bg_task
-            bg_task.add_done_callback(lambda t, tid=task_id: (
-                self._task_id_to_bg_task.pop(tid, None),
-                self._submitted_task_ids.discard(tid),
-            ))
-        await asyncio.sleep(0)
-        logger.info(
-            "TaskWorker: after sleep(0) | task=%s | bg_task.done=%s | bg_task.cancelled=%s",
-            task_id, bg_task.done(), bg_task.cancelled(),
-        )
+        try:
+            await self._execute_background_task(task_data)
+        except Exception as e:
+            logger.error("TaskWorker: _execute_background_task error | task=%s | error=%s", task_id, e)
