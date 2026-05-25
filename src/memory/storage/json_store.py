@@ -17,13 +17,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from memory.ports import IEpisodeStorage, IMemoryStore, ISemanticStorage
+from memory.ports import IEpisodeStorage, IMemoryStore, IRetriever, ISemanticStorage
 from memory.types import Episode, Knowledge, MemoryType, SearchResult
 
 logger = logging.getLogger(__name__)
 
 
-class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
+class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage, IRetriever):
     """JSON 文件记忆存储。
 
     实现三个存储接口：IMemoryStore、IEpisodeStorage、ISemanticStorage。
@@ -398,6 +398,46 @@ class JsonMemoryStore(IMemoryStore, IEpisodeStorage, ISemanticStorage):
 
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:limit]
+
+    # ============================================
+    # IRetriever 接口实现
+    # ============================================
+
+    async def retrieve(
+        self,
+        query: str,
+        user_id: str | None = None,
+        top_k: int = 5,
+        memory_type: str = "semantic",
+        filters: dict[str, Any] | None = None,
+    ) -> list[SearchResult]:
+        """检索相关记忆（IRetriever 接口实现）。
+
+        将 IRetriever 接口参数映射到已有的 search() 方法：
+        - top_k → limit
+        - memory_type 注入到 filters 中
+        - 委托给 self.search()
+
+        Args:
+            query: 查询文本
+            user_id: 用户 ID
+            top_k: 返回数量
+            memory_type: 记忆类型
+            filters: 额外过滤条件
+
+        Returns:
+            搜索结果列表
+        """
+        merged_filters = dict(filters) if filters else {}
+        if "memory_type" not in merged_filters:
+            merged_filters["memory_type"] = memory_type
+        return await self.search(
+            query=query,
+            user_id=user_id,
+            limit=top_k,
+            filters=merged_filters,
+        )
+
 
     @staticmethod
     def _compute_keyword_score(query: str, texts: list[str]) -> float:

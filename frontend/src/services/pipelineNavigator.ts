@@ -116,11 +116,16 @@ export async function navigateToPipeline(
   const location = await findPipelineLocation(pipelineId)
   const targetSessionId = location?.sessionId || currentSid
 
-  // 如果在其他会话，先切换会话
+  // 如果在其他会话，先切换会话（校验目标会话确实存在，避免 pipelineSessionMap 映射到错误会话）
   if (location && targetSessionId !== currentSid) {
-    useAgentTabStore.getState().saveCurrentTabs()
-    await useSessionListStore.getState().setActiveSession(targetSessionId)
-    useAgentTabStore.getState().initSessionTabs(targetSessionId)
+    const sessions = useSessionStore.getState().sessions
+    const sessionExists = sessions.some(s => s.id === targetSessionId)
+    if (sessionExists) {
+      useAgentTabStore.getState().saveCurrentTabs()
+      await useSessionListStore.getState().setActiveSession(targetSessionId)
+      useAgentTabStore.getState().initSessionTabs(targetSessionId)
+    }
+    // session 不存在时留在当前会话继续创建标签
   }
 
   // 刷新 tabStore 引用（会话切换后状态已更新）

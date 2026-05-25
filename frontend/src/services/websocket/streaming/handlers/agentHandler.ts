@@ -3,6 +3,7 @@
  */
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { loggers } from '@/utils/logger'
 
 const _debugLogger = loggers.websocket
@@ -43,9 +44,16 @@ export function handleSubAgentCreated(eventData: any) {
 
   const state = pipelineStore.getState()
   if (!state.pipelines[pipelineId]) {
+    // sessionId 优先级：后端明确提供 → 父管道的会话映射 → 当前活跃会话
+    // 不使用 _threadId（后端连接管理标识，可能与前端 session.id 不一致）
+    const sessionId =
+      data.sessionId
+      || state.pipelineSessionMap[parentId || state.activePipelineId || '']
+      || useSessionStore.getState().activeSessionId
+      || ''
     state.registerPipeline({
       pipelineId,
-      sessionId: data.sessionId || eventData.data?._threadId || eventData._threadId || '',
+      sessionId,
       level: 2,
       tabId,
       agentName,

@@ -26,7 +26,7 @@ class BrowserSession:
         browser: Any,
         context: Any,
         page: Any,
-        playwright: Any = None,  # BUG-FIX: 存储 playwright 实例引用，用于生命周期管理
+        playwright: Any = None,
     ):
         self.session_id = session_id
         self.browser_type = browser_type
@@ -73,6 +73,51 @@ class BrowserSession:
             logger.error(f"获取会话 {self.session_id} 状态失败: {e}")
             return {"success": False, "error": str(e)}
 
+    def is_browser_connected(self) -> bool:
+        """
+        检查浏览器进程是否仍然连接。
+
+        通过 Playwright 的 browser.is_connected() 检查底层 CDP 连接状态。
+        当浏览器进程崩溃或被强制关闭时，返回 False。
+
+        Returns:
+            True 如果浏览器连接正常，False 否之
+        """
+        try:
+            if self.browser is None:
+                return False
+            return self.browser.is_connected()
+        except Exception:
+            return False
+
+    async def check_cdp_health(self) -> tuple[bool, str]:
+        """
+        通过实际 CDP 操作检查连接健康状态。
+
+        执行一个轻量级的 page.evaluate 调用来验证 CDP transport 是否可用。
+        这比仅检查 is_connected() 更可靠，因为它实际发送了一条 CDP 消息。
+
+        Returns:
+            (is_healthy, error_message): 健康状态和错误信息
+        """
+        try:
+            if self.page is None:
+                return False, "页面对象为 None"
+            if self.page.is_closed():
+                return False, "页面已关闭"
+            # 实际执行一个 CDP 命令来验证 transport
+            await self.page.evaluate("1 + 1")
+            return True, ""
+        except Exception as e:
+            error_msg = str(e)
+            if "NoneType" in error_msg and "send" in error_msg:
+                return False, f"CDP transport 已断开（浏览器进程可能已崩溃）: {error_msg}"
+            if "Target closed" in error_msg or "Target page" in error_msg:
+                return False, f"浏览器目标已关闭: {error_msg}"
+            if "Connection closed" in error_msg:
+                return False, f"CDP 连接已断开: {error_msg}"
+            return False, f"CDP 健康检查失败: {error_msg}"
+
     async def cleanup(self):
         """清理会话资源"""
         try:
@@ -91,7 +136,6 @@ class BrowserSession:
                     await self.browser.close()
                 except Exception:
                     pass
-            # BUG-FIX: 关闭 playwright 实例，释放资源
             if self.playwright:
                 try:
                     await self.playwright.stop()
@@ -145,7 +189,7 @@ class BrowserManager:
             tuple[session_id, session_info]
         """
         try:
-            from playwright.async_api import async_playwright  # BUG-FIX: 使用 async_api 替代 sync_api
+            from playwright.async_api import async_playwright
 
             # 自动恢复逻辑：当 auto_persist=True 且用户未显式提供 storage_state 时，
             # 尝试从默认状态目录加载最新的状态文件
@@ -171,7 +215,7 @@ class BrowserManager:
             browser_launcher = browser_map.get(browser_type, browser_map["chromium"])
 
             # 构建启动参数
-            options = {
+            options: dict[str, Any] = {
                 "headless": headless,
                 "slow_mo": slow_mo,
             }
@@ -190,10 +234,59 @@ class BrowserManager:
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
+            # === 关键修复：启动后立即进行 CDP 健康检查 ===
+            # 导航到 about:blank 验证 CDP transport 是否真正可用。
+            # 如果浏览器进程因缺少系统库等原因立即崩溃，
+            # page.goto() 会抛出 NoneType send 错误，在此处捕获可给出明确诊断。
+            try:
+                await page.goto("about:blank", timeout=10000)
+            except Exception as health_check_error:
+                error_msg = str(health_check_error)
+                logger.error(f"浏览器启动后 CDP 健康检查失败: {health_check_error}")
+
+                # 清理已创建的资源
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
+
+                # 根据错误类型给出针对性提示
+                if "NoneType" in error_msg and "send" in error_msg:
+                    raise RuntimeError(
+                        "浏览器启动后 CDP 连接立即断开，通常是因为浏览器进程缺少系统依赖库。"
+                        "请运行以下命令安装依赖：\n"
+                        "  python3 -m playwright install-deps chromium\n"
+                        "或手动安装：sudo apt-get install -y libnspr4 libnss3 libasound2\n"
+                        f"原始错误: {error_msg}"
+                    )
+                if "Target" in error_msg and ("closed" in error_msg.lower()):
+                    raise RuntimeError(
+                        "浏览器进程在启动后立即退出，可能原因：\n"
+                        "1. 缺少系统依赖库（运行 python3 -m playwright install-deps chromium）\n"
+                        "2. 系统资源不足\n"
+                        "3. 沙箱环境限制（可尝试 headless=True 或 launch_options 中添加 '--no-sandbox'）\n"
+                        f"原始错误: {error_msg}"
+                    )
+                raise RuntimeError(
+                    f"浏览器启动后健康检查失败: {health_check_error}"
+                )
+
             # 设置 console 监听
             console_messages: list[dict[str, Any]] = []
 
-            def console_handler(msg):
+            def console_handler(msg: Any) -> None:
                 console_messages.append({
                     "type": msg.type,
                     "text": msg.text,
@@ -209,7 +302,7 @@ class BrowserManager:
                 browser=browser,
                 context=context,
                 page=page,
-                playwright=playwright,  # BUG-FIX: 传递 playwright 实例引用
+                playwright=playwright,
             )
             session.console_messages = console_messages
             session._console_handler = console_handler
@@ -231,7 +324,19 @@ class BrowserManager:
 
         except ImportError as e:
             raise ImportError(f"Playwright 未安装: {e}")
+        except RuntimeError:
+            raise  # 重新抛出上面已包装的 RuntimeError
         except Exception as e:
+            error_msg = str(e)
+            # 检测 Playwright 的 TargetClosedError（浏览器启动即崩溃）
+            if "Target" in error_msg and ("closed" in error_msg.lower() or "Close" in error_msg):
+                raise RuntimeError(
+                    "浏览器启动失败（进程立即退出），通常是因为缺少系统依赖库。\n"
+                    "请运行以下命令安装依赖：\n"
+                    "  python3 -m playwright install-deps chromium\n"
+                    "或手动安装：sudo apt-get install -y libnspr4 libnss3 libasound2\n"
+                    f"原始错误: {error_msg}"
+                )
             raise RuntimeError(f"创建浏览器会话失败: {e}")
 
     @classmethod

@@ -16,6 +16,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
+from src.memory.compressor.models import MemoryExtraction, PreservedZone
+
 logger = logging.getLogger(__name__)
 
 # 层级名称映射（向后兼容）
@@ -176,6 +178,76 @@ class ContextCompressor:
 }}
 ```"""
 
+    # 保留区提取模板：从完整上下文中重新识别保留区内容
+    PRESERVED_PROMPT = """## 任务
+从以下完整上下文中提取「保留区」信息。保留区存储的是对话中最关键、必须始终保留的信息。
+
+## 提取规则
+- **user_requirements**：用户的原始需求和核心指令，保留用户的原话要点
+- **key_decisions**：已做出的关键决策及其理由（只保留最终决策，不含讨论过程）
+- **execution_plan**：当前执行计划，只保留最新版本（覆盖旧版本）
+- **constraints**：当前活跃的约束条件和技术限制
+- **pending_tasks**：尚未完成的任务及其状态
+- 每个字段如果没有对应内容，填空字符串 ""
+- 内容要精炼，只保留最关键的信息，避免冗余
+
+## 旧保留区（可能需要更新）
+{old_preserved}
+
+## 背景信息（前次压缩摘要）
+{previous_l1}
+
+## 当前用户消息
+{user_message}
+
+## 对话历史
+{messages}
+
+## 输出格式
+严格输出以下 JSON，不要输出任何其他内容。
+
+```json
+{{
+  "user_requirements": "用户的原始需求和指令",
+  "key_decisions": "关键决策记录",
+  "execution_plan": "当前执行计划",
+  "constraints": "活跃约束条件",
+  "pending_tasks": "未完成任务状态"
+}}
+```"""
+
+    # 长期记忆提取模板：从对话中提取可长期保存的记忆
+    MEMORY_EXTRACTION_PROMPT = """## 任务
+从以下对话中提取值得长期保存的记忆信息。这些信息将写入持久化记忆系统。
+
+## 提取规则
+- **user_profile_updates**：用户偏好、习惯、工作方式等个人信息更新（如"用户喜欢用 TypeScript"、"用户是前端开发者"）
+- **project_knowledge_updates**：项目相关的知识更新（如技术栈选择、架构决策、目录结构等）
+- **experience_updates**：本次对话中的经验教训（如踩过的坑、找到的解决方案、验证过的最佳实践等）
+- 有值就填，没值就填空字符串 ""
+- 只提取本次对话中新发现的信息，不要重复已有信息
+- 每类信息用简洁的分条格式，每条一行
+
+## 背景信息（前次压缩摘要）
+{previous_l1}
+
+## 当前用户消息
+{user_message}
+
+## 对话历史
+{messages}
+
+## 输出格式
+严格输出以下 JSON，不要输出任何其他内容。
+
+```json
+{{
+  "user_profile_updates": "用户偏好/习惯更新，无则填空字符串",
+  "project_knowledge_updates": "项目知识更新，无则填空字符串",
+  "experience_updates": "经验教训更新，无则填空字符串"
+}}
+```"""
+
     def __init__(
         self,
         llm_call_fn: Callable[[str], Awaitable[str]] | None = None,
@@ -308,6 +380,162 @@ class ContextCompressor:
         except Exception as e:
             logger.error("[ContextCompressor] 一次性压缩失败 | error=%s", e)
             raise RuntimeError(f"压缩失败: {e}") from e
+
+
+    async def extract_preserved(
+        self,
+        messages: list[dict[str, Any]],
+        previous_l1: str = "",
+        user_message: str = "",
+        old_preserved: str = "",
+    ) -> "PreservedZone":
+        """从完整上下文中提取保留区信息。
+
+        保留区每轮从完整上下文（旧保留区 + 压缩块 + 当前对话）中重新识别提取，
+        内容刷新到最新状态，覆盖旧保留区。
+
+        Args:
+            messages: 对话消息列表
+            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
+            user_message: 当前用户消息
+            old_preserved: 旧保留区内容（JSON 字符串或纯文本）
+
+        Returns:
+            PreservedZone 实例，异常时返回空实例
+        """
+        if not messages:
+            return PreservedZone()
+
+        messages_text = self._format_messages(messages)
+
+        # 提取用户消息（如果未显式传入）
+        if not user_message:
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    user_message = msg.get("content", "")
+                    break
+
+        old_preserved_section = (
+            old_preserved if old_preserved and old_preserved.strip() else "（无旧保留区）"
+        )
+        previous_l1_section = (
+            previous_l1 if previous_l1 and previous_l1.strip() else "（无前次压缩摘要）"
+        )
+
+        prompt = self.PRESERVED_PROMPT.format(
+            old_preserved=old_preserved_section,
+            previous_l1=previous_l1_section,
+            user_message=user_message or "（无明确用户消息）",
+            messages=messages_text,
+        )
+
+        try:
+            response = await self._call_llm(prompt)
+            if not response or not response.strip():
+                logger.warning("[ContextCompressor] 保留区提取：LLM 返回空响应")
+                return PreservedZone()
+
+            raw_json = self._extract_json(response)
+            if not raw_json or not raw_json.strip():
+                logger.warning("[ContextCompressor] 保留区提取：JSON 提取结果为空")
+                return PreservedZone()
+
+            import json
+
+            try:
+                parsed = json.loads(raw_json)
+            except json.JSONDecodeError as je:
+                logger.warning(
+                    "[ContextCompressor] 保留区提取：JSON 解析失败: %s | raw_json 前 200 字符: %s",
+                    je,
+                    raw_json[:200],
+                )
+                return PreservedZone()
+
+            return PreservedZone(
+                user_requirements=str(parsed.get("user_requirements", "") or ""),
+                key_decisions=str(parsed.get("key_decisions", "") or ""),
+                execution_plan=str(parsed.get("execution_plan", "") or ""),
+                constraints=str(parsed.get("constraints", "") or ""),
+                pending_tasks=str(parsed.get("pending_tasks", "") or ""),
+            )
+
+        except Exception as e:
+            logger.error("[ContextCompressor] 保留区提取失败 | error=%s", e)
+            return PreservedZone()
+
+    async def extract_long_term_memory(
+        self,
+        messages: list[dict[str, Any]],
+        previous_l1: str = "",
+        user_message: str = "",
+    ) -> "MemoryExtraction":
+        """从对话中提取可长期保存的记忆项。
+
+        有值就填，没值就空，不做去重判断。调用方负责将提取结果写入 memory 工具存储。
+
+        Args:
+            messages: 对话消息列表
+            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
+            user_message: 当前用户消息
+
+        Returns:
+            MemoryExtraction 实例，异常时返回空实例
+        """
+        if not messages:
+            return MemoryExtraction()
+
+        messages_text = self._format_messages(messages)
+
+        # 提取用户消息（如果未显式传入）
+        if not user_message:
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    user_message = msg.get("content", "")
+                    break
+
+        previous_l1_section = (
+            previous_l1 if previous_l1 and previous_l1.strip() else "（无前次压缩摘要）"
+        )
+
+        prompt = self.MEMORY_EXTRACTION_PROMPT.format(
+            previous_l1=previous_l1_section,
+            user_message=user_message or "（无明确用户消息）",
+            messages=messages_text,
+        )
+
+        try:
+            response = await self._call_llm(prompt)
+            if not response or not response.strip():
+                logger.warning("[ContextCompressor] 长期记忆提取：LLM 返回空响应")
+                return MemoryExtraction()
+
+            raw_json = self._extract_json(response)
+            if not raw_json or not raw_json.strip():
+                logger.warning("[ContextCompressor] 长期记忆提取：JSON 提取结果为空")
+                return MemoryExtraction()
+
+            import json
+
+            try:
+                parsed = json.loads(raw_json)
+            except json.JSONDecodeError as je:
+                logger.warning(
+                    "[ContextCompressor] 长期记忆提取：JSON 解析失败: %s | raw_json 前 200 字符: %s",
+                    je,
+                    raw_json[:200],
+                )
+                return MemoryExtraction()
+
+            return MemoryExtraction(
+                user_profile_updates=str(parsed.get("user_profile_updates", "") or ""),
+                project_knowledge_updates=str(parsed.get("project_knowledge_updates", "") or ""),
+                experience_updates=str(parsed.get("experience_updates", "") or ""),
+            )
+
+        except Exception as e:
+            logger.error("[ContextCompressor] 长期记忆提取失败 | error=%s", e)
+            return MemoryExtraction()
 
     async def progressive_compress(
         self,

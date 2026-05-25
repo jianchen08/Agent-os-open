@@ -29,6 +29,8 @@ from .models import (
     CompressionReport,
     CompressionResult,
     ContentRef,
+    MemoryExtraction,
+    PreservedZone,
 )
 from .reader import ContextReader
 from .store import LayeredContextStore, create_layered_store_for_model
@@ -64,6 +66,8 @@ __all__ = [
     "CompressionResult",
     "CompressionReport",
     "ChunkMetadataStore",
+    "PreservedZone",
+    "MemoryExtraction",
     "ContextWriter",
     "ContextReader",
 ]
