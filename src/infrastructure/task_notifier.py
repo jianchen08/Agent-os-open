@@ -118,11 +118,10 @@ class TaskNotifierMixin:
             )
 
     async def _handle_terminal_lifecycle(self, task_id: str, new_status: str) -> None:
-        """终态时触发 worktree 合并/清理（仅 worktree 模式）。
+        """终态时处理 worktree 回滚（仅 worktree 模式的 failed 状态）。
 
-        BUG-FIX-fix_20260513_merge_verify:
-        合并失败时不再仅 log warning，而是将任务标记为 failed，
-        避免任务显示 completed 但实际文件丢失。
+        合并前置策略：worktree 合并已在 task_evaluate._complete_task 中完成，
+        此处不再执行合并操作。仅处理 failed 状态的回滚清理。
         """
         lifecycle = self._services.get("workspace_lifecycle_manager")
         if not lifecycle:
@@ -133,7 +132,6 @@ class TaskNotifierMixin:
         if not ws_meta:
             return
 
-        # 仅 worktree 模式需要合并+清理，plain/shared 模式无 worktree
         if ws_meta.get("mode") != "worktree":
             return
 
@@ -143,29 +141,10 @@ class TaskNotifierMixin:
 
         try:
             if new_status == "completed":
-                result = lifecycle.on_eval_passed(task_id, workspace, ws_meta)
-                if result.get("success"):
-                    logger.info("TaskWorker: worktree 合并+清理成功: task_id=%s", task_id)
-                else:
-                    error_msg = (
-                        f"worktree 合并失败，文件未成功同步到项目空间: "
-                        f"{result.get('error', 'unknown')}"
-                    )
-                    if result.get("verify_error"):
-                        error_msg += f" | 验证详情: {result['verify_error']}"
-                    logger.error(
-                        "TaskWorker: %s: task_id=%s, worktree 保留在: %s",
-                        error_msg, task_id, workspace,
-                    )
-                    task_service = self._task_service
-                    if task_service:
-                        try:
-                            await task_service.fail_task(task_id, error_msg)
-                        except Exception as fail_err:
-                            logger.warning(
-                                "TaskWorker: fail_task 也失败: task_id=%s, error=%s",
-                                task_id, fail_err,
-                            )
+                logger.info(
+                    "TaskWorker: worktree 合并已在评估阶段完成: task_id=%s",
+                    task_id,
+                )
             elif new_status == "failed":
                 lifecycle.on_eval_failed(task_id, workspace, ws_meta)
                 logger.info("TaskWorker: worktree 评估失败处理完成: task_id=%s", task_id)

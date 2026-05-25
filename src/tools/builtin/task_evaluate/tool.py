@@ -332,11 +332,19 @@ class TaskEvaluateTool(BuiltinTool):
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
+
+            # BUG-FIX: 将 summary 注入到单指标评估参数中
+            single_params: dict[str, dict[str, Any]] = {}
+            summary_from_input = inputs.get("summary", "")
+            if summary_from_input:
+                single_params[metric_id] = {"summary": summary_from_input}
+
             # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
             result = await asyncio.wait_for(
                 executor.run_evaluation(
                     task_id=task_id,
                     metric_ids=[metric_id],
+                    input_params=single_params,
                     skip_state_update=True,
                 ),
                 timeout=timeout,
@@ -457,6 +465,14 @@ class TaskEvaluateTool(BuiltinTool):
                     "results": [],
                 })(),
             )
+
+        # BUG-FIX: 将 Agent 提交的 summary 注入到每个评估指标的参数中，
+        # 确保评估 Agent 能看到任务执行摘要。
+        summary_from_input = inputs.get("summary", "")
+        if summary_from_input:
+            for mid, p in input_params.items():
+                if not p.get("summary"):
+                    p["summary"] = summary_from_input
 
         logger.info(
             "[TaskEvaluate] 自动评估 | task_id=%s | total=%d | "
@@ -619,6 +635,10 @@ class TaskEvaluateTool(BuiltinTool):
     ) -> ToolExecutionResult:
         """评估通过，完成任务。
 
+        合并前置策略：对于 worktree 模式的任务，在标记 completed 之前先执行合并，
+        合并成功才变更状态，合并失败则标记为 failed。
+        非 worktree 模式直接完成。
+
         TaskService.on_state_change 回调会自动发送终态通知。
 
         Args:
@@ -632,20 +652,34 @@ class TaskEvaluateTool(BuiltinTool):
         if task.status == TaskStatus.COMPLETED:
             logger.info("[TaskEvaluate] 任务 %s 已完成，跳过状态回写", task.id)
         elif task.status == TaskStatus.FAILED:
-            # 评估通过但任务已被标记失败（如 idle 超时），恢复为完成
             logger.warning(
                 "[TaskEvaluate] 任务 %s 已失败但评估通过，尝试恢复为完成", task.id,
             )
             try:
                 eval_data = self._build_result_data(eval_result)
-                # BUG-FIX-fix_20260512_async_compat: recover_to_completed 现在是 async
                 await task_service.recover_to_completed(task.id, result=eval_data)
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
         else:
+            merge_error = self._try_merge_before_complete(task)
+            if merge_error:
+                logger.error(
+                    "[TaskEvaluate] worktree 合并失败，任务标记为 failed: "
+                    "task_id=%s, error=%s",
+                    task.id, merge_error,
+                )
+                try:
+                    eval_data = self._build_result_data(eval_result)
+                    await task_service.complete_evaluation(
+                        task.id, passed=False, result=eval_data)
+                except Exception as e:
+                    logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
+                return create_failure_result(
+                    error=f"worktree 合并失败: {merge_error}",
+                    metadata={"task_failed": True},
+                )
             try:
                 eval_data = self._build_result_data(eval_result)
-                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
                 await task_service.complete_evaluation(task.id, passed=True, result=eval_data)
             except Exception as e:
                 logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
@@ -662,6 +696,55 @@ class TaskEvaluateTool(BuiltinTool):
                 "message": "评估通过，任务已完成",
             },
         )
+
+    def _try_merge_before_complete(self, task: Any) -> str | None:
+        """在标记 completed 之前尝试 worktree 合并（合并前置）。
+
+        仅 worktree 模式需要合并，其他模式直接返回 None 表示无需合并。
+        合并成功返回 None，合并失败返回错误信息字符串。
+
+        Args:
+            task: TaskModel 实例
+
+        Returns:
+            None 表示合并成功或不需要合并，str 表示合并失败原因
+        """
+        metadata = task.metadata if task.metadata else {}
+        ws_meta = metadata.get("ws_meta")
+        if not ws_meta or not isinstance(ws_meta, dict):
+            return None
+        if ws_meta.get("mode") != "worktree":
+            return None
+
+        workspace = ws_meta.get("path", "")
+        if not workspace:
+            return None
+
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        services = provider.get("services")
+        if not services:
+            return None
+        lifecycle = services.get("workspace_lifecycle_manager")
+        if not lifecycle:
+            return None
+
+        lifecycle.restore_ws_meta(task.id)
+        result = lifecycle.on_eval_passed(task.id, workspace, ws_meta)
+        if result.get("success"):
+            conflict_files = result.get("conflict_files", [])
+            if conflict_files:
+                logger.warning(
+                    "[TaskEvaluate] worktree 合并完成但有冲突文件: "
+                    "task_id=%s, conflicts=%s",
+                    task.id, conflict_files,
+                )
+            return None
+
+        error_parts = [result.get("error", "unknown")]
+        if result.get("verify_error"):
+            error_parts.append(f"验证详情: {result['verify_error']}")
+        return ", ".join(error_parts)
 
     async def _fail_task(
         self,

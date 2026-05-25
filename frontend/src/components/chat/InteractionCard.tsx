@@ -14,8 +14,15 @@
 import { ArrowRight, Check, Loader2, MessageSquare, X } from 'lucide-react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { MarkdownRenderer } from './markdown/MarkdownRenderer'
-import type { PendingInteraction } from '@/stores/interactionStore'
+import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 
 export interface InteractionCardProps {
   interaction: PendingInteraction
@@ -35,6 +42,7 @@ export function InteractionCard({
   isSubmitting,
 }: InteractionCardProps) {
   const [textInput, setTextInput] = useState('')
+  const [detailOption, setDetailOption] = useState<InteractionOption | null>(null)
   const isDone = interaction.status !== 'pending'
 
   const handleTextSubmit = () => {
@@ -125,10 +133,23 @@ export function InteractionCard({
                     variant="outline"
                     size="sm"
                     disabled={isSubmitting}
-                    onClick={() => setTextInput((prev) => prev ? prev : opt.label)}
+                    onClick={() => {
+                      if (opt.description) {
+                        setDetailOption(opt)
+                      } else {
+                        onRespondChoice(interaction.requestId, opt.id, opt.label)
+                      }
+                    }}
                     className="text-sm"
                   >
-                    {opt.label}
+                    <span className="flex flex-col items-start gap-0.5">
+                      <span>{opt.label}</span>
+                      {opt.description && (
+                        <span className="text-xs text-muted-foreground line-clamp-1 text-left">
+                          {opt.description}
+                        </span>
+                      )}
+                    </span>
                   </Button>
                 ))}
               </div>
@@ -220,6 +241,49 @@ export function InteractionCard({
         )}
 
       </div>
+
+      {/* 选项详情弹窗 */}
+      <Dialog
+        open={!!detailOption}
+        onOpenChange={(open) => !open && setDetailOption(null)}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{detailOption?.label}</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto overscroll-contain">
+            {detailOption?.description && (
+              <MarkdownRenderer content={detailOption.description} />
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDetailOption(null)}
+              disabled={isSubmitting}
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              disabled={isSubmitting}
+              onClick={() => {
+                if (detailOption) {
+                  onRespondChoice(detailOption.id)
+                  setDetailOption(null)
+                }
+              }}
+            >
+              {isSubmitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                '确认选择'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

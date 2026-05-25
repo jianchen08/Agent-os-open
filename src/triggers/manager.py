@@ -1,4 +1,4 @@
-﻿"""触发器管理器。
+"""触发器管理器。
 
 管理触发器的注册、评估和执行，支持事件触发、条件触发和定时触发。
 通过 ServiceProvider 获取管道引擎实例，触发时使用 inject_message 唤醒管道。
@@ -11,6 +11,8 @@
 import asyncio
 import datetime
 import logging
+import threading
+import time
 from typing import Any
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
@@ -35,8 +37,9 @@ class TriggerManager:
     def __init__(self) -> None:
         """初始化管理器。"""
         self._triggers: dict[str, TriggerConfig] = {}
-        self._check_task: asyncio.Task | None = None
+        self._check_thread: threading.Thread | None = None
         self._running = False
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
@@ -313,6 +316,19 @@ class TriggerManager:
         trigger.status = TriggerStatus.CANCELLED
         return True
 
+    def set_main_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """设置主事件循环引用。
+
+        当触发器注册发生在 asyncio.run() 创建的临时事件循环中时，
+        _ensure_check_loop 需要通过主循环的 call_soon_threadsafe
+        将检查任务调度到主循环上执行，避免临时循环关闭后任务被取消。
+
+        Args:
+            loop: 应用主事件循环
+        """
+        self._main_loop = loop
+        logger.info("[TriggerManager] 主事件循环已设置")
+
     def start_check_loop(self) -> None:
         """启动后台触发器检查循环。
 
@@ -323,24 +339,29 @@ class TriggerManager:
     def stop_check_loop(self) -> None:
         """停止后台触发器检查循环。"""
         self._running = False
-        if self._check_task is not None and not self._check_task.done():
-            self._check_task.cancel()
-            self._check_task = None
-            logger.info("[TriggerManager] 后台检查循环已停止")
+        self._check_thread = None
+        logger.info("[TriggerManager] 后台检查循环已停止")
 
-    async def _check_loop(self) -> None:
-        """后台定期检查触发器并唤醒对应管道。
+    def _check_loop_sync(self) -> None:
+        """后台定期检查触发器，到期后通过 send_pipeline_message 注入消息。
 
-        每隔 _TRIGGER_CHECK_INTERVAL 秒检查一次所有定时/延迟/周期触发器，
-        到期的触发器通过管道的 inject_message 接口注入消息并唤醒。
+        使用独立线程 + time.sleep，不依赖任何事件循环。
+        send_pipeline_message 内部自动处理管道所有状态（运行中/挂起/已关闭）。
+
+        BUG-FIX-fix_20260525_trigger_check_loop_temp_event_loop:
+        问题根因: 之前 _check_loop 是 async task，由 trigger_setup 工具
+          在 asyncio.to_thread + asyncio.run() 创建的临时事件循环上启动。
+          工具返回后临时循环关闭，_check_loop 被取消，触发器永远不会触发。
+        修复方案: 改为 threading.Thread + time.sleep，完全独立于事件循环。
         """
-        logger.info("[TriggerManager] 后台检查循环已启动")
+        logger.info("[TriggerManager] 后台检查循环已启动(线程)")
         self._running = True
 
         while self._running:
+            time.sleep(_TRIGGER_CHECK_INTERVAL)
+            if not self._running:
+                break
             try:
-                await asyncio.sleep(_TRIGGER_CHECK_INTERVAL)
-
                 now = datetime.datetime.now(datetime.UTC)
                 fired_ids = self.check_scheduled(now)
 
@@ -348,44 +369,35 @@ class TriggerManager:
                     trigger = self._triggers.get(trigger_id)
                     if trigger is None:
                         continue
+                    if not trigger.pipeline_id or not trigger.message:
+                        continue
                     try:
-                        await self._wake_pipeline(trigger)
-                    except asyncio.CancelledError:
-                        # BUG-FIX-fix_20260522_trigger_cancelled_loop_exit:
-                        # 问题根因: _wake_pipeline 内部嵌套调用 send_pipeline_message →
-                        #   _try_revive_pipeline → engine.run()，如果其中某个引擎被取消，
-                        #   CancelledError 会冒泡到此处，再被外层 except CancelledError 捕获
-                        #   导致整个 _check_loop 永久退出，触发器系统彻底卡死。
-                        # 修复方案: 在 _wake_pipeline 调用处单独捕获 CancelledError，
-                        #   不让单个管道的取消影响触发器检查循环的持续运行。
-                        logger.warning(
-                            "[TriggerManager] _wake_pipeline 被取消，跳过当前触发器，继续循环: "
-                            "trigger=%s pipeline=%s",
-                            trigger.trigger_id, trigger.pipeline_id,
-                        )
+                        self._inject_trigger_message(trigger)
                     except Exception as e:
                         logger.error(
-                            f"[TriggerManager] 唤醒管道异常: {e}", exc_info=True,
+                            f"[TriggerManager] 注入消息异常: {e}", exc_info=True,
                         )
 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"[TriggerManager] 检查循环异常: {e}", exc_info=True)
 
         self._running = False
-        logger.info("[TriggerManager] 后台检查循环已退出")
+        logger.info("[TriggerManager] 后台检查循环已退出(线程)")
 
-    async def _wake_pipeline(self, trigger: TriggerConfig) -> None:
-        """通过统一消息入口唤醒挂起的管道。
+    def _inject_trigger_message(self, trigger: TriggerConfig) -> None:
+        """构造触发消息并通过 send_pipeline_message 统一注入。
+
+        只需要 pipeline_id 和 message，所有状态处理由 send_pipeline_message 完成。
 
         Args:
             trigger: 已触发的触发器配置
         """
-        if not trigger.pipeline_id or not trigger.message:
-            logger.debug(
-                f"[TriggerManager] 触发器 {trigger.trigger_id} "
-                f"无 pipeline_id 或 message，跳过唤醒"
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            logger.warning(
+                "[TriggerManager] 主事件循环不可用，跳过: "
+                "trigger=%s pipeline=%s",
+                trigger.trigger_id, trigger.pipeline_id,
             )
             return
 
@@ -403,38 +415,42 @@ class TriggerManager:
                 "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
             )
 
-        try:
-            from pipeline.message_bus import send_pipeline_message
-            result = await send_pipeline_message(
+        from pipeline.message_bus import send_pipeline_message
+        future = asyncio.run_coroutine_threadsafe(
+            send_pipeline_message(
                 trigger.pipeline_id, fire_info,
                 metadata={"source": "trigger", "trigger_id": trigger.trigger_id},
-            )
+            ),
+            loop,
+        )
+        try:
+            result = future.result(timeout=30)
             if result.success:
                 logger.info(
-                    f"[TriggerManager] 已通过统一入口唤醒管道 {trigger.pipeline_id} "
-                    f"(trigger={trigger.trigger_id}, method={result.method}, "
-                    f"fire_count={trigger.fire_count})"
+                    "[TriggerManager] 消息已注入: pipeline=%s method=%s "
+                    "trigger=%s fire_count=%d",
+                    trigger.pipeline_id, result.method,
+                    trigger.trigger_id, trigger.fire_count,
                 )
             else:
                 logger.warning(
-                    f"[TriggerManager] 管道 {trigger.pipeline_id} 未找到 "
-                    f"(trigger={trigger.trigger_id}): {result.error}"
+                    "[TriggerManager] 消息注入失败: pipeline=%s trigger=%s error=%s",
+                    trigger.pipeline_id, trigger.trigger_id, result.error,
                 )
         except Exception as e:
             logger.error(
-                f"[TriggerManager] 唤醒管道异常: pipeline={trigger.pipeline_id}, "
-                f"trigger={trigger.trigger_id}, error={e}"
+                "[TriggerManager] 消息注入异常: pipeline=%s trigger=%s error=%s",
+                trigger.pipeline_id, trigger.trigger_id, e,
             )
 
     def _ensure_check_loop(self) -> None:
-        """确保后台检查循环正在运行。"""
-        if self._check_task is not None and not self._check_task.done():
+        """确保后台检查线程正在运行。"""
+        if self._check_thread is not None and self._check_thread.is_alive():
             return
-        try:
-            loop = asyncio.get_running_loop()
-            self._check_task = loop.create_task(self._check_loop())
-        except RuntimeError:
-            logger.debug("[TriggerManager] 无运行中的事件循环，检查循环将在首次注册时启动")
+        self._check_thread = threading.Thread(
+            target=self._check_loop_sync, daemon=True, name="trigger-check",
+        )
+        self._check_thread.start()
 
     def _check_stop_conditions(self, trigger: TriggerConfig, now: datetime.datetime | None = None) -> bool:
         """检查触发器是否仍满足继续触发的条件。

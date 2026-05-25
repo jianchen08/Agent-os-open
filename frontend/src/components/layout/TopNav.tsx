@@ -369,7 +369,12 @@ export const TopNav = memo<TopNavProps>(({ isMobile = false }) => {
               )}
             </div>
           ) : (
-            <Button variant="outline" size="sm" className="rounded-xl">
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-xl"
+              onClick={() => navigate(ROUTES.LOGIN)}
+            >
               登录
             </Button>
           )}

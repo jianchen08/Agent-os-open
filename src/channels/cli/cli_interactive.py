@@ -59,6 +59,14 @@ class CLIInteractiveMixin:
             if hasattr(self._task_worker, "start"):
                 await self._task_worker.start()
                 logger.info("Task worker started")
+
+        try:
+            from triggers.manager import get_trigger_manager
+            import asyncio as _asyncio
+            get_trigger_manager().set_main_loop(_asyncio.get_running_loop())
+        except Exception:
+            pass
+
         logger.info(
             "[STARTUP] TaskWorker start: %.2fs",
             _time.monotonic() - _run_t2,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from pathlib import Path
 from typing import Any, ClassVar
 
 from tools.builtin.base import BuiltinTool
@@ -395,10 +396,13 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
         }
         """
         try:
-            # 启动进程
+            # 启动进程（传入项目根路径下的 logs/bash 作为日志目录）
+            project_root = getattr(self, "_project_root", None)
+            bash_log_dir = Path(project_root) / "logs" / "bash" if project_root else None
             pid, log_file = await self.process_manager.start_process(
                 command=command,
                 working_dir=working_dir,
+                log_dir=bash_log_dir,
             )
 
             # 等待进程完成或超时

@@ -151,6 +151,14 @@ def create_combined_app() -> FastAPI:
                     logger.info("TaskWorker started (app startup)")
                 except Exception as exc:
                     logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
+
+        try:
+            from triggers.manager import get_trigger_manager
+            import asyncio
+            get_trigger_manager().set_main_loop(asyncio.get_running_loop())
+        except Exception as exc:
+            logger.debug("TriggerManager set_main_loop skipped: %s", exc)
+
         yield
 
     # BUG-FIX-fix_20260524_lifespan_not_called:

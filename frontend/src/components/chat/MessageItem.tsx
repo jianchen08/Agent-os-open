@@ -330,7 +330,7 @@ export const MessageItem = ({
               content={message.content}
               onSave={handleSaveEdit}
               onCancel={handleCancelEdit}
-              disabled={_isRetrying}
+              disabled={false}
             />
           </div>
         ) : (

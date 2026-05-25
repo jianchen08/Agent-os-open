@@ -291,13 +291,24 @@ class ToolCore(ICorePlugin):
             # 修复方案: 所有工具（同步+异步）统一通过asyncio.to_thread在线程中执行。
             #   异步工具通过asyncio.run()创建独立事件循环，隔离阻塞操作。
             #   主事件循环保持空闲，可正常处理超时定时器和其他异步任务。
-            if inspect.iscoroutinefunction(func):
+            #
+            # BUG-FIX-fix_20260525_human_interaction_cross_loop:
+            # 问题根因: human_interaction 内部使用 asyncio.Event.wait() 等待前端响应，
+            #   asyncio.to_thread + asyncio.run() 创建了独立事件循环，
+            #   Event.set() 在主事件循环中调用，无法唤醒独立循环中的 Event.wait()。
+            #   导致 human_interaction 永远等到 tool_core 的 wait_for 超时才返回。
+            # 修复方案: 对 human_interaction 这类纯异步（无阻塞操作）的工具，
+            #   直接 await 执行，不经过 to_thread。
+            _is_human_interaction = (tool_name == "human_interaction")
+            if inspect.iscoroutinefunction(func) and not _is_human_interaction:
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(
                         lambda fa=func, ta=tool_args: asyncio.run(fa(ta)),
                     ),
                     timeout=timeout,
                 )
+            elif inspect.iscoroutinefunction(func) and _is_human_interaction:
+                raw_result = await asyncio.wait_for(func(tool_args), timeout=timeout)
             else:
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(func, tool_args),
@@ -531,8 +542,8 @@ class ToolCore(ICorePlugin):
                 if schema_default is not None:
                     timeout = schema_default
 
-            # 优先通过隔离执行器执行
-            if self._isolation_executor is not None:
+            # 优先通过隔离执行器执行（human_interaction 除外，需在主事件循环 await）
+            if self._isolation_executor is not None and tool_name != "human_interaction":
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
                 func = self._get_tool(tool_name)

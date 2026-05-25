@@ -32,6 +32,7 @@ import { getFileEditorData, registerFileEditor, removeFileEditorData } from '@/s
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { useInteractionStore } from '@/stores/interactionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { AppHeader } from './AppHeader'
 import { DockBar } from './DockBar'
@@ -249,7 +250,7 @@ export function FiveSpaceLayout({
           indicatorColor: 'var(--accent-waiting, #f59e0b)',
           isActive: true,
           onClick: () => {
-            // Could open execution details in workspace panel
+            navigateToPipeline(execution.id)
           },
         })
       }
@@ -266,7 +267,7 @@ export function FiveSpaceLayout({
         badgeCount: 1,
         isActive: true,
         onClick: () => {
-          // Could focus the interaction panel
+          useInteractionStore.getState().setGlobalOpenRequestId(interaction.id)
         },
       })
     }

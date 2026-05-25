@@ -293,6 +293,7 @@ class _MergeOpsMixin:
                         "[WorkspaceLifecycle] copy_merge: 检测到 %d 个实际修改的文件",
                         len(changed_files))
         merged: list[str] = []
+        conflict_files: list[str] = []
         for item in src.rglob("*"):
             if not item.is_file():
                 continue
@@ -308,25 +309,40 @@ class _MergeOpsMixin:
             target_file.parent.mkdir(parents=True, exist_ok=True)
             # BUG-FIX-fix_20260521_copy_merge_overwrite:
             # 目标文件已存在且有三路合并所需信息时，尝试内容级合并。
-            # 三路合并失败（冲突或二进制文件）直接报错，不回退整文件覆盖。
+            # 三路合并冲突时保留冲突标记写入目标文件，不中止合并。
+            # 二进制文件等无法合并的情况才整文件覆盖。
             if target_file.exists() and merge_base and merge_proj_path:
-                if self._try_three_way_merge(
-                        target_file, item, merge_base, rel_str, merge_proj_path):
+                merge_result = self._try_three_way_merge(
+                    target_file, item, merge_base, rel_str, merge_proj_path)
+                if merge_result == "success":
                     merged.append(str(rel))
                     continue
-                logger.error(
-                    "[WorkspaceLifecycle] copy_merge: 三路合并失败，"
-                    "合并中止: %s", rel_str)
-                return {"success": False,
-                        "error": f"三路合并冲突，无法自动合并: {rel_str}",
-                        "method": "copy", "merged_files": merged}
+                if merge_result == "conflict":
+                    # 冲突已写入目标文件，记录冲突但继续合并其他文件
+                    merged.append(str(rel))
+                    conflict_files.append(str(rel))
+                    logger.warning(
+                        "[WorkspaceLifecycle] copy_merge: 文件冲突已保留标记: %s",
+                        rel_str)
+                    continue
+                # "fail"：二进制文件等无法三路合并，整文件覆盖
+                logger.warning(
+                    "[WorkspaceLifecycle] copy_merge: 三路合并失败，整文件覆盖: %s",
+                    rel_str)
             shutil.copy2(str(item), str(target_file))
             merged.append(str(rel))
         if merged:
             self._ensure_git_user(dst)
             self._run_git("add", "-A", cwd=dst)
-            self._git_add_commit_if_dirty(dst, f"merge: copy_merge ({len(merged)} files)")
-            return {"success": True, "action": "merged", "method": "copy", "merged_files": merged}
+            commit_msg = f"merge: copy_merge ({len(merged)} files)"
+            if conflict_files:
+                commit_msg += f" ({len(conflict_files)} conflicts)"
+            self._git_add_commit_if_dirty(dst, commit_msg)
+            result = {"success": True, "action": "merged",
+                      "method": "copy", "merged_files": merged}
+            if conflict_files:
+                result["conflict_files"] = conflict_files
+            return result
         logger.warning("[WorkspaceLifecycle] copy_merge: 未合并任何文件")
         return {"success": False, "error": "copy_merge 未合并任何文件",
                 "method": "copy", "merged_files": []}
@@ -338,14 +354,16 @@ class _MergeOpsMixin:
         merge_base: str,
         rel_str: str,
         proj_path: Path,
-    ) -> bool:
+    ) -> str:
         """尝试使用 git merge-file 进行三路合并，避免整文件覆盖丢失已有改动。
 
         BUG-FIX-fix_20260521_copy_merge_overwrite:
         当多个 worktree 先后合并修改了同一文件的不同位置时，后合并的 worktree
         的文件版本基于原始代码（merge-base），不包含先合并的改动。
         使用 git merge-file 做内容级别的三路合并，保留所有改动。
-        冲突或二进制文件时返回 False，由调用方回退到整文件覆盖。
+
+        改进：冲突时不再返回失败，而是将带冲突标记的内容写入目标文件，
+        返回 "conflict" 让调用方知道存在冲突但文件已写入。
 
         Args:
             target_file: 目标文件路径（已存在，包含先前合并的改动）
@@ -355,7 +373,9 @@ class _MergeOpsMixin:
             proj_path: 项目根目录路径（用于 git 命令的 cwd）
 
         Returns:
-            True 表示三路合并成功，False 表示需要回退到整文件覆盖
+            "success" 表示三路合并成功（无冲突）
+            "conflict" 表示存在冲突，带冲突标记的内容已写入目标文件
+            "fail" 表示无法合并（二进制文件等），需调用方处理
         """
         # 获取 base 版本的文件内容（merge-base 时的原始版本）
         # 使用二进制模式避免 text=True 导致的 UTF-8 解码损坏二进制/非UTF-8文件内容
@@ -367,12 +387,12 @@ class _MergeOpsMixin:
             logger.debug(
                 "[WorkspaceLifecycle] 三路合并: git show base 执行失败: %s",
                 rel_str)
-            return False
+            return "fail"
         if r.returncode != 0:
             logger.debug(
                 "[WorkspaceLifecycle] 三路合并: git show base 失败 "
                 "(可能为新增文件): %s", rel_str)
-            return False
+            return "fail"
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -396,25 +416,29 @@ class _MergeOpsMixin:
                     shutil.copy2(str(current_tmp), str(target_file))
                     logger.info(
                         "[WorkspaceLifecycle] 三路合并成功: %s", rel_str)
-                    return True
+                    return "success"
 
                 if rc_merge > 0:
+                    # 冲突：将带冲突标记的内容写入目标文件，继续合并其他文件
+                    shutil.copy2(str(current_tmp), str(target_file))
                     logger.warning(
                         "[WorkspaceLifecycle] 三路合并冲突 "
-                        "(%d conflicts)，回退到整文件覆盖: %s",
+                        "(%d conflicts)，已保留冲突标记到目标文件: %s",
                         rc_merge, rel_str)
-                else:
-                    logger.warning(
-                        "[WorkspaceLifecycle] 三路合并失败 (rc=%d)，"
-                        "可能是二进制文件，回退到整文件覆盖: %s, stderr=%s",
-                        rc_merge, rel_str,
-                        stderr[:200] if stderr else "")
-                return False
+                    return "conflict"
+
+                # rc_merge < 0：二进制文件等无法合并的情况
+                logger.warning(
+                    "[WorkspaceLifecycle] 三路合并失败 (rc=%d)，"
+                    "可能是二进制文件: %s, stderr=%s",
+                    rc_merge, rel_str,
+                    stderr[:200] if stderr else "")
+                return "fail"
         except Exception as exc:
             logger.warning(
-                "[WorkspaceLifecycle] 三路合并异常，回退到整文件覆盖: "
+                "[WorkspaceLifecycle] 三路合并异常: "
                 "%s, error=%s", rel_str, exc)
-            return False
+            return "fail"
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 

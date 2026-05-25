@@ -17,6 +17,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { useState } from 'react'
+import { MarkdownRenderer } from '@/components/chat/markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
@@ -179,8 +180,8 @@ const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
 
       case 'markdown':
         return (
-          <div className="bg-muted/30 prose prose-sm dark:prose-invert max-w-none rounded p-2 text-xs">
-            {content}
+          <div className="bg-muted/30 max-w-none rounded p-2 text-xs">
+            <MarkdownRenderer content={content} />
           </div>
         )
 

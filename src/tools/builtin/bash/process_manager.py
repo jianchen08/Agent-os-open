@@ -44,7 +44,10 @@ class ProcessManager:
     def __init__(self, log_dir: Path | None = None):
         """初始化进程管理器"""
         self.log_dir = log_dir or Path("logs/bash")
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning(f"日志目录创建失败（不影响命令执行） | dir={self.log_dir}")
 
         # 活跃进程映射: pid -> ProcessInfo
         self.active_processes: dict[int, ProcessInfo] = {}
@@ -74,24 +77,31 @@ class ProcessManager:
         return f"bash_{timestamp}_{base_cmd}_{hash_suffix}.log"
 
     def _write_log_header(self, log_file: Path, command: str, pid: int):
-        """写入日志头部"""
-        header = [
-            "# Bash Command Log",
-            f"# Command: {command}",
-            f"# PID: {pid}",
-            f"# Started: {datetime.now(UTC).isoformat()}",
-            f"# Platform: {platform.system()}",
-            f"# {'='*50}",
-            "",
-        ]
-        with open(log_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(header))
+        """写入日志头部（容错：日志写入失败不影响命令执行）"""
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            header = [
+                "# Bash Command Log",
+                f"# Command: {command}",
+                f"# PID: {pid}",
+                f"# Started: {datetime.now(UTC).isoformat()}",
+                f"# Platform: {platform.system()}",
+                f"# {'='*50}",
+                "",
+            ]
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(header))
+        except OSError as e:
+            logger.warning(f"日志头部写入失败（不影响命令执行） | file={log_file} | error={e}")
 
     def _append_to_log(self, log_file: Path, content: str):
-        """追加内容到日志"""
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_file, "a", encoding="utf-8", errors="replace") as f:
-            f.write(content)
+        """追加内容到日志（容错：日志写入失败不影响命令执行）"""
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "a", encoding="utf-8", errors="replace") as f:
+                f.write(content)
+        except OSError as e:
+            logger.warning(f"日志追加写入失败（不影响命令执行） | file={log_file} | error={e}")
 
     def _read_log_lines(self, log_file: Path) -> list[str]:
         """读取日志所有行"""
@@ -106,16 +116,26 @@ class ProcessManager:
         except Exception:
             return []
 
+    def _ensure_log_dir(self, log_dir: Path) -> Path:
+        """确保日志目录存在，返回绝对路径"""
+        resolved = log_dir.resolve()
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning(f"日志目录创建失败（不影响命令执行） | dir={resolved}")
+        return resolved
+
     async def start_process(
         self,
         command: str,
         working_dir: str | None = None,
         env: dict[str, str] | None = None,
+        log_dir: Path | None = None,
     ) -> tuple[int, Path]:
         """启动新进程"""
-        # 生成日志文件
+        effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
         log_filename = self._generate_log_filename(command)
-        log_file = self.log_dir / log_filename
+        log_file = effective_log_dir / log_filename
 
         merged_env = {**os.environ, **(env or {})}
         is_windows = platform.system() == "Windows"

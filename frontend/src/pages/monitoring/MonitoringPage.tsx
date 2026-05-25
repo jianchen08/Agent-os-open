@@ -113,7 +113,7 @@ export function MonitoringPage() {
           </button>
         </div>
       </header>
-      <main className="space-y-6 p-3 sm:p-6">
+      <main className="flex-1 space-y-6 overflow-y-auto p-3 sm:p-6">
         {/* 错误提示 */}
         {error && (
           <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>
