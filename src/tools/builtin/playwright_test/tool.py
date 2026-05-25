@@ -231,6 +231,49 @@ class PlaywrightTestTool(BuiltinTool):
             logger.error(f"Playwright 测试工具执行失败: {e}")
             return create_failure_result(str(e))
 
+    def _validate_session_page(self, session_id: str) -> tuple[Any, Any]:
+        """
+        验证会话和页面健康状态。
+
+        检查会话是否存在、page 是否为 None、page 是否已关闭。
+        当浏览器进程崩溃或 CDP 连接断开时，page 对象可能变为无效，
+        后续操作（如 goto）会在 Playwright 内部 CDP transport 层抛出
+        'NoneType' object has no attribute 'send' 错误。
+        此方法在操作前提前检测并给出明确错误信息。
+
+        Returns:
+            tuple[BrowserSession, Page]: 验证通过的会话和页面对象
+
+        Raises:
+            ValueError: 会话不存在、page 为 None 或 page 已关闭
+        """
+        session = BrowserManager.get_session(session_id)
+        if not session:
+            raise ValueError(f"会话不存在: {session_id}")
+
+        page = session.page
+        if page is None:
+            raise ValueError(
+                f"会话 {session_id} 的页面对象为 None，浏览器可能未正确启动。"
+                f"请重新创建会话。"
+            )
+
+        try:
+            if page.is_closed():
+                raise ValueError(
+                    f"会话 {session_id} 的页面已关闭，请重新创建会话。"
+                )
+        except Exception as e:
+            # page.is_closed() 本身可能因 CDP 连接断开而失败
+            if isinstance(e, ValueError):
+                raise
+            raise ValueError(
+                f"会话 {session_id} 的页面连接已断开（CDP 错误），"
+                f"请重新创建会话。原始错误: {e}"
+            )
+
+        return session, page
+
     async def _handle_browser_launch(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理浏览器启动"""
         try:
@@ -266,6 +309,20 @@ class PlaywrightTestTool(BuiltinTool):
             # 存储会话
             self._sessions[session_id] = session_info
 
+            # 验证会话页面可用（防止浏览器启动后立即崩溃的情况）
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                # 启动后页面不可用，清理会话并返回错误
+                logger.warning(f"浏览器启动后页面不可用: {e}")
+                await BrowserManager.close_session(session_id)
+                if session_id in self._sessions:
+                    del self._sessions[session_id]
+                return create_failure_result(
+                    f"浏览器启动后页面不可用: {e}。"
+                    f"可能是浏览器依赖缺失，请运行 'playwright install-deps' 安装系统依赖。"
+                )
+
             # 构建返回信息
             message = f"{browser} 浏览器会话已创建"
             restored_state = session_info.get("restored_state")
@@ -295,9 +352,11 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
 
-            session = BrowserManager.get_session(session_id)
-            if not session:
-                return create_failure_result(f"会话不存在: {session_id}")
+            # 验证会话和页面健康状态
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                return create_failure_result(str(e))
 
             url = inputs.get("url")
             if not url:
@@ -305,8 +364,6 @@ class PlaywrightTestTool(BuiltinTool):
 
             wait_until = inputs.get("wait_until", "load")
             timeout = inputs.get("timeout", 30000)
-
-            page = session.page
 
             # 导航到目标 URL
             response = await page.goto(url, wait_until=wait_until, timeout=timeout)
@@ -323,9 +380,18 @@ class PlaywrightTestTool(BuiltinTool):
                 "load_state": wait_until,
                 "message": "页面导航成功",
             })
+        except ValueError:
+            raise  # 让上层的 except 接管 ValueError
         except Exception as e:
             logger.error(f"页面导航失败: {e}")
-            return create_failure_result(f"页面导航失败: {str(e)}")
+            # 检测 CDP 连接断开的情况，给出明确提示
+            error_msg = str(e)
+            if "NoneType" in error_msg and "send" in error_msg:
+                return create_failure_result(
+                    f"页面导航失败: CDP 连接已断开，浏览器进程可能已崩溃。"
+                    f"请关闭当前会话并重新创建。原始错误: {error_msg}"
+                )
+            return create_failure_result(f"页面导航失败: {error_msg}")
 
     async def _handle_interact(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理元素交互"""
@@ -334,9 +400,11 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
 
-            session = BrowserManager.get_session(session_id)
-            if not session:
-                return create_failure_result(f"会话不存在: {session_id}")
+            # 验证会话和页面健康状态
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                return create_failure_result(str(e))
 
             action_type = inputs.get("action_type")
             if not action_type:
@@ -346,7 +414,6 @@ class PlaywrightTestTool(BuiltinTool):
             if not selector:
                 return create_failure_result("selector 是必填参数")
 
-            page = session.page
             timeout = inputs.get("timeout", 30000)
 
             # 等待元素出现
@@ -397,6 +464,8 @@ class PlaywrightTestTool(BuiltinTool):
             result["element_enabled"] = await locator.is_enabled()
 
             return create_success_result(data=result)
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"元素交互失败: {e}")
             return create_failure_result(f"元素交互失败: {str(e)}")
@@ -408,9 +477,11 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
 
-            session = BrowserManager.get_session(session_id)
-            if not session:
-                return create_failure_result(f"会话不存在: {session_id}")
+            # 验证会话和页面健康状态
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                return create_failure_result(str(e))
 
             filter_type = inputs.get("filter_type", "all")
             assert_absent = inputs.get("assert_absent", [])
@@ -433,19 +504,21 @@ class PlaywrightTestTool(BuiltinTool):
                 "errors": [],
             }
 
-            # 检查不应存在的错误
-            error_types = {"error", "exception", "warning"}
+            # 检查不应存在的消息类型
+            # assert_absent 是一个消息类型列表（如 ["error", "exception"]），
+            # 表示这些类型的消息不应出现在捕获的 console 中
             if assert_absent:
+                absent_types_lower = {t.lower() for t in assert_absent}
                 for msg in console_messages:
-                    if msg.get("type") in error_types:
-                        for absent_type in assert_absent:
-                            if absent_type.lower() in msg.get("type", "").lower():
-                                assertion_results["passed"] = False
-                                assertion_results["errors"].append(
-                                    f"断言失败: 不应存在的 {absent_type} 消息: {msg.get('text')}"
-                                )
+                    msg_type_lower = msg.get("type", "").lower()
+                    # 检查消息类型是否在 absent 列表中
+                    if msg_type_lower in absent_types_lower:
+                        assertion_results["passed"] = False
+                        assertion_results["errors"].append(
+                            f"断言失败: 不应存在的 {msg_type_lower} 消息: {msg.get('text', '')}"
+                        )
 
-            # 检查必须存在的消息
+            # 检查必须存在的消息关键词
             if assert_present:
                 present_found = {keyword: False for keyword in assert_present}
                 for msg in console_messages:
@@ -471,6 +544,8 @@ class PlaywrightTestTool(BuiltinTool):
                 "filter_type": filter_type,
                 "total_messages": len(console_messages),
             })
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"console 捕获失败: {e}")
             return create_failure_result(f"console 捕获失败: {str(e)}")
@@ -482,17 +557,17 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
 
-            session = BrowserManager.get_session(session_id)
-            if not session:
-                return create_failure_result(f"会话不存在: {session_id}")
+            # 验证会话和页面健康状态
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                return create_failure_result(str(e))
 
             screenshot_action = inputs.get("screenshot_action", "full_page")
             selector = inputs.get("selector")
             baseline_path = inputs.get("baseline_path")
             output_path = inputs.get("output_path")
             threshold = inputs.get("threshold", 0.1)
-
-            page = session.page
 
             if screenshot_action == "full_page":
                 result = await ScreenshotManager.capture_full_page(page, output_path)
@@ -527,6 +602,8 @@ class PlaywrightTestTool(BuiltinTool):
                 })
             else:
                 return create_failure_result(result.get("error", "截图操作失败"))
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"截图对比失败: {e}")
             return create_failure_result(f"截图对比失败: {str(e)}")
@@ -568,10 +645,12 @@ class PlaywrightTestTool(BuiltinTool):
             headless = inputs.get("headless", True)
 
             # 创建新会话并恢复状态
+            # 注意：auto_persist=False 防止自动加载旧状态覆盖用户指定的 state_path
             session_id, session_info = await BrowserManager.create_session(
                 browser_type=browser,
                 headless=headless,
                 storage_state=state_path,
+                auto_persist=False,
             )
 
             # 存储会话
@@ -594,15 +673,15 @@ class PlaywrightTestTool(BuiltinTool):
             if not session_id:
                 return create_failure_result("session_id 是必填参数")
 
-            session = BrowserManager.get_session(session_id)
-            if not session:
-                return create_failure_result(f"会话不存在: {session_id}")
+            # 验证会话和页面健康状态
+            try:
+                session, page = self._validate_session_page(session_id)
+            except ValueError as e:
+                return create_failure_result(str(e))
 
             value = inputs.get("value")
             if not value:
                 return create_failure_result("value 是必填参数，需提供 JS 表达式")
-
-            page = session.page
 
             # 执行 JS 表达式
             js_result = await page.evaluate(value)
@@ -624,6 +703,8 @@ class PlaywrightTestTool(BuiltinTool):
                 "message": "JS 表达式执行成功",
             })
 
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"JS 表达式执行失败: {e}")
             return create_failure_result(f"JS 表达式执行失败: {str(e)}")
