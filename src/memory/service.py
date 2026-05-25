@@ -23,6 +23,7 @@ from memory.types import (
     Episode,
     InjectType,
     Knowledge,
+    MemoryType,
     RetrievalMethod,
     SearchResult,
 )
@@ -408,16 +409,25 @@ class MemoryService:
         """全量注入 - 直接返回筛选后的所有结果。"""
         retriever = self._retrievers.get("vector")
         if not retriever:
-            return []
+            # 检索器不可用时，服务层兜底返回所有知识
+            return await self._service_layer_fallback(
+                user_id, filter.get("memory_type", "semantic"), None, top_k,
+            )
 
         memory_type = filter.get("memory_type", "semantic")
-        return await retriever.retrieve(
+        results = await retriever.retrieve(
             query="",
             user_id=user_id,
             top_k=top_k,
             memory_type=memory_type,
             filters=filter,
         )
+        # 检索器返回空时也尝试兜底
+        if not results:
+            return await self._service_layer_fallback(
+                user_id, memory_type, None, top_k,
+            )
+        return results
 
     async def _retrieve_summary(
         self,
@@ -433,6 +443,88 @@ class MemoryService:
 
         # 摘要生成需要 embedding_service，当前 MVP 直接返回检索结果
         return results
+
+    async def _service_layer_fallback(
+        self,
+        user_id: str | None,
+        memory_type: str,
+        query: str | None,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """服务层兜底检索：当所有 IRetriever 都不可用时，直接从服务层数据搜索。
+
+        确保即使降级模式（无注入检索器），store 的数据也能被 retrieve 找到。
+        同时覆盖 episode（内存降级）和 semantic（存储或内存降级）两种路径。
+
+        Args:
+            user_id: 用户 ID
+            memory_type: 记忆类型 (semantic/episode)
+            query: 查询文本，为 None 时返回全量
+            top_k: 返回数量上限
+
+        Returns:
+            搜索结果列表
+        """
+        results: list[SearchResult] = []
+
+        # 语义记忆路径
+        if memory_type in ("semantic", "all"):
+            try:
+                if query:
+                    # 有关键词查询 → 委托给 KnowledgeService.search()
+                    knowledge_results = await self._knowledge_service.search(
+                        user_id=user_id or "",
+                        query=query,
+                        top_k=top_k,
+                    )
+                    results.extend(knowledge_results)
+                else:
+                    # 无查询（full 注入）→ 直接列出所有知识
+                    all_kn = await self._knowledge_service._get_all_knowledge(
+                        user_id or "",
+                    )
+                    for kn in all_kn[:top_k]:
+                        results.append(SearchResult(
+                            id=kn.id,
+                            content=kn.content,
+                            score=1.0,
+                            memory_type=MemoryType.SEMANTIC,
+                            metadata=kn.extra_data,
+                        ))
+            except Exception as e:
+                logger.warning("[MemoryService] 知识服务兜底检索失败: %s", e)
+
+        # 情景记忆路径：委托给 EpisodeService 的内存数据
+        if memory_type in ("episode", "all") and self._episode_service:
+            try:
+                episodes_data = await self._episode_service.list_episodes(
+                    user_id=user_id or "",
+                    page_size=top_k,
+                )
+                for ep_dict in episodes_data.get("items", []):
+                    content = ep_dict.get("execution_summary") or ep_dict.get("intent_text", "")
+                    if not query or (query and query.lower() in content.lower()):
+                        results.append(SearchResult(
+                            id=ep_dict.get("id", ""),
+                            content=content,
+                            score=1.0 if not query else 0.5,
+                            memory_type=MemoryType.EPISODE,
+                            metadata={"tags": ep_dict.get("tags", [])},
+                        ))
+            except Exception as e:
+                logger.warning("[MemoryService] 情景记忆兜底检索失败: %s", e)
+
+        # 兜底命中统计
+        if results:
+            self._retrieval_stats["fallback_hits"] += 1
+            logger.debug(
+                "[MemoryService] 服务层兜底检索 | query=%s | results=%d",
+                query[:30] if query else "None", len(results),
+            )
+        else:
+            self._retrieval_stats["misses"] += 1
+
+        return results[:top_k]
 
     async def _retrieve_by_method(
         self,
@@ -465,15 +557,20 @@ class MemoryService:
 
         method_name = retrieval_method.value
 
-        # 向量检索不可用时回退到关键词检索
+        # 向量检索配置检查：仅在未注入 vector 检索器时才降级
         if method_name == "vector" and not self._vector_search_enabled:
-            if self._fallback_to_keyword:
-                logger.debug("[MemoryService] 向量检索未启用，回退到关键词检索")
+            if self._retrievers.get("vector"):
+                # 有注入的 vector 检索器 → 直接使用，忽略配置标志
+                pass
+            elif self._fallback_to_keyword:
+                logger.debug("[MemoryService] 向量检索未启用且回退到关键词检索")
                 method_name = "keyword"
                 retrieval_method = RetrievalMethod.KEYWORD
             else:
-                self._retrieval_stats["misses"] += 1
-                return []
+                # 向量禁用且不回退 → 服务层兜底
+                return await self._service_layer_fallback(
+                    user_id, memory_type, query, top_k,
+                )
 
         retriever = self._retrievers.get(method_name)
         if not retriever:
@@ -488,11 +585,15 @@ class MemoryService:
                     retriever = keyword_retriever
                     self._retrieval_stats["fallback_hits"] += 1
                 else:
-                    self._retrieval_stats["misses"] += 1
-                    return []
+                    # 所有检索器都不可用 → 服务层兜底：直接搜索 KnowledgeService
+                    return await self._service_layer_fallback(
+                        user_id, memory_type, query, top_k,
+                    )
             else:
-                self._retrieval_stats["misses"] += 1
-                return []
+                # keyword 检索器也不可用 → 服务层兜底
+                return await self._service_layer_fallback(
+                    user_id, memory_type, query, top_k,
+                )
 
         try:
             results = await retriever.retrieve(
