@@ -28,6 +28,8 @@ export interface ToolCardConfig {
   buildActions?: (toolCall: MessageToolCall) => ActivityAction[]
   /** 自定义样式类名 */
   className?: string
+  /** 运行状态的自定义颜色（CSS 色值），用于区分阻塞等待用户的工具 */
+  runningColor?: string
 }
 
 /**
@@ -87,6 +89,10 @@ export function enhanceActivityWithToolConfig(
 
   if (config.className) {
     enhanced.customClassName = config.className
+  }
+
+  if (config.runningColor) {
+    enhanced.customColor = config.runningColor
   }
 
   return enhanced
@@ -605,6 +611,16 @@ registerToolCard({
     return details
   },
   buildActions: buildDefaultActions,
+})
+
+/**
+ * human_interaction 工具卡片配置
+ *
+ * 运行状态使用主色（primary），视觉上区分阻塞等待用户的交互工具与普通执行工具
+ */
+registerToolCard({
+  name: 'human_interaction',
+  runningColor: 'hsl(var(--primary))',
 })
 
 export default registry
