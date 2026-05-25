@@ -22,9 +22,23 @@ test.describe.configure({ timeout: 120_000 });
 // ─── 登录辅助函数（复用 message-render-e2e.spec.ts 模式）────────────
 
 async function loginAndWaitReady(page: Page): Promise<void> {
-  console.log('🔐 步骤1: POST /api/v1/auth/login 获取 token');
+  // 0. 先尝试注册测试用户（如已存在则忽略）
+  console.log('📝 步骤0: 尝试注册测试用户');
+  const registerResp = await page.request.post(`${API_BASE}/api/v1/auth/register`, {
+    data: {
+      username: TEST_USER.username,
+      password: TEST_USER.password,
+      email: 'e2e@test.com',
+    },
+  });
+  if (registerResp.ok()) {
+    console.log('✅ 测试用户注册成功');
+  } else {
+    console.log(`ℹ️ 注册返回 ${registerResp.status()}（用户可能已存在，继续登录）`);
+  }
 
   // 1. POST /api/v1/auth/login → 获取 access_token/refresh_token
+  console.log('🔐 步骤1: POST /api/v1/auth/login 获取 token');
   const loginResp = await page.request.post(`${API_BASE}/api/v1/auth/login`, {
     data: { username: TEST_USER.username, password: TEST_USER.password },
   });

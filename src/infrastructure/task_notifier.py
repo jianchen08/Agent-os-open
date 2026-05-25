@@ -261,6 +261,7 @@ class TaskNotifierMixin:
         result = await send_pipeline_message(
             parent_pipeline_id, notification,
             task_id=parent_task_id_for_revive,
+            metadata={"source": "system"},
         )
         logger.info(
             "TaskWorker: send_pipeline_message 返回 | success=%s | method=%s | error=%s | pipeline=%s",

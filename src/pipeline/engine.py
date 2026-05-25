@@ -803,7 +803,7 @@ class PipelineEngine:
         self._streaming_on_chunk = on_chunk
         self._streaming_flag = streaming
 
-    def inject_message(self, message: str) -> None:
+    def inject_message(self, message: str, *, source: str = "user") -> None:
         """统一消息注入入口，自动根据引擎状态选择注入方式。
 
         替代原先的 _inject_notification_to_engine 和 _inject_message_engine
@@ -813,6 +813,9 @@ class PipelineEngine:
 
         Args:
             message: 要注入的消息文本
+            source: 消息来源，"user" 表示用户主动消息（默认），
+                    "system" 表示系统通知（触发器、子任务完成等）。
+                    系统通知不会取消正在等待的 human_interaction 交互请求。
         """
         if not message:
             return
@@ -826,17 +829,18 @@ class PipelineEngine:
             if self._wake_event is not None:
                 self._wake_event.set()
             logger.info(
-                "[Engine] inject_message: 挂起态注入并唤醒: pipeline=%s preview=%.60s",
-                self._pipeline_id[:12], message,
+                "[Engine] inject_message: 挂起态注入并唤醒: pipeline=%s source=%s preview=%.60s",
+                self._pipeline_id[:12], source, message,
             )
         else:
             self._pending_notifications.append(message)
-            self._try_cancel_pending_interaction()
+            if source == "user":
+                self._try_cancel_pending_interaction()
             if self._wake_event is not None:
                 self._wake_event.set()
             logger.info(
-                "[Engine] inject_message: 运行态通知入队 (queue=%d): pipeline=%s preview=%.60s",
-                len(self._pending_notifications), self._pipeline_id[:12], message,
+                "[Engine] inject_message: 运行态通知入队 (queue=%d): pipeline=%s source=%s preview=%.60s",
+                len(self._pending_notifications), self._pipeline_id[:12], source, message,
             )
 
     def _try_cancel_pending_interaction(self) -> None:

@@ -185,10 +185,11 @@ async def send_pipeline_message(
                 "[MessageBus] 引擎存在，调用 inject_message | pipeline=%s | state=%s | msg_len=%d",
                 pipeline_id[:12], state, len(message),
             )
-            engine.inject_message(message)
+            msg_source = (metadata or {}).get("source", "user")
+            engine.inject_message(message, source=msg_source)
             if output_sink is not None:
                 _update_bridge(pipeline_id, engine, output_sink)
-            if state == "running":
+            if state == "running" and msg_source == "user":
                 await _auto_complete_interaction(pipeline_id)
             method = "wake" if state == "suspended" else "notification"
             logger.info(
