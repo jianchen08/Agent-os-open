@@ -1,0 +1,476 @@
+{
+  "total": 78,
+  "passed": 78,
+  "failed": 0,
+  "pass_rate": "100.0%",
+  "details": {
+    "HTML结构::DOCTYPE声明": {
+      "category": "HTML结构",
+      "name": "DOCTYPE声明",
+      "status": "PASS",
+      "detail": "HTML5文档类型"
+    },
+    "HTML结构::UTF-8编码": {
+      "category": "HTML结构",
+      "name": "UTF-8编码",
+      "status": "PASS",
+      "detail": "UTF-8字符编码"
+    },
+    "HTML结构::中文语言": {
+      "category": "HTML结构",
+      "name": "中文语言",
+      "status": "PASS",
+      "detail": "zh-CN语言设置"
+    },
+    "HTML结构::页面标题": {
+      "category": "HTML结构",
+      "name": "页面标题",
+      "status": "PASS",
+      "detail": "陈健 - AI Agent工程师简历"
+    },
+    "HTML结构::内嵌CSS": {
+      "category": "HTML结构",
+      "name": "内嵌CSS",
+      "status": "PASS",
+      "detail": "CSS在<style>标签中"
+    },
+    "HTML结构::内嵌JS": {
+      "category": "HTML结构",
+      "name": "内嵌JS",
+      "status": "PASS",
+      "detail": "JS在<script>标签中"
+    },
+    "HTML结构::无外部CSS文件": {
+      "category": "HTML结构",
+      "name": "无外部CSS文件",
+      "status": "PASS",
+      "detail": "纯内嵌，无外部CSS依赖"
+    },
+    "照片::照片标签存在": {
+      "category": "照片",
+      "name": "照片标签存在",
+      "status": "PASS",
+      "detail": "img.photo标签存在"
+    },
+    "照片::Base64内嵌": {
+      "category": "照片",
+      "name": "Base64内嵌",
+      "status": "PASS",
+      "detail": "data:image/jpeg, 数据长度115895字符"
+    },
+    "照片::圆形裁剪": {
+      "category": "照片",
+      "name": "圆形裁剪",
+      "status": "PASS",
+      "detail": "border-radius: 50%"
+    },
+    "照片::照片尺寸": {
+      "category": "照片",
+      "name": "照片尺寸",
+      "status": "PASS",
+      "detail": "100 x 100 px"
+    },
+    "可编辑::可编辑元素数量": {
+      "category": "可编辑",
+      "name": "可编辑元素数量",
+      "status": "PASS",
+      "detail": "共 53 个contenteditable元素"
+    },
+    "可编辑::姓名可编辑": {
+      "category": "可编辑",
+      "name": "姓名可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::职位可编辑": {
+      "category": "可编辑",
+      "name": "职位可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::联系方式可编辑": {
+      "category": "可编辑",
+      "name": "联系方式可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::项目经历可编辑": {
+      "category": "可编辑",
+      "name": "项目经历可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::工作经历可编辑": {
+      "category": "可编辑",
+      "name": "工作经历可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::教育背景可编辑": {
+      "category": "可编辑",
+      "name": "教育背景可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::技能可编辑": {
+      "category": "可编辑",
+      "name": "技能可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::自我评价可编辑": {
+      "category": "可编辑",
+      "name": "自我评价可编辑",
+      "status": "PASS",
+      "detail": "已标记contenteditable"
+    },
+    "可编辑::hover编辑样式": {
+      "category": "可编辑",
+      "name": "hover编辑样式",
+      "status": "PASS",
+      "detail": "hover显示虚线边框"
+    },
+    "可编辑::focus编辑样式": {
+      "category": "可编辑",
+      "name": "focus编辑样式",
+      "status": "PASS",
+      "detail": "focus高亮显示"
+    },
+    "PDF导出::按钮存在": {
+      "category": "PDF导出",
+      "name": "按钮存在",
+      "status": "PASS",
+      "detail": "文本: ⬇ 导出PDF"
+    },
+    "PDF导出::exportPDF函数": {
+      "category": "PDF导出",
+      "name": "exportPDF函数",
+      "status": "PASS",
+      "detail": "PDF导出函数已定义"
+    },
+    "PDF导出::html2pdf库": {
+      "category": "PDF导出",
+      "name": "html2pdf库",
+      "status": "PASS",
+      "detail": "引入html2pdf.js"
+    },
+    "PDF导出::html2pdf CDN": {
+      "category": "PDF导出",
+      "name": "html2pdf CDN",
+      "status": "PASS",
+      "detail": "版本: 0.10.1"
+    },
+    "PDF导出::A4格式": {
+      "category": "PDF导出",
+      "name": "A4格式",
+      "status": "PASS",
+      "detail": "jsPDF format=a4"
+    },
+    "PDF导出::纵向布局": {
+      "category": "PDF导出",
+      "name": "纵向布局",
+      "status": "PASS",
+      "detail": "portrait纵向"
+    },
+    "导出状态::printing CSS类": {
+      "category": "导出状态",
+      "name": "printing CSS类",
+      "status": "PASS",
+      "detail": ".printing类定义"
+    },
+    "导出状态::隐藏工具栏": {
+      "category": "导出状态",
+      "name": "隐藏工具栏",
+      "status": "PASS",
+      "detail": "导出时toolbar隐藏"
+    },
+    "导出状态::去除编辑样式": {
+      "category": "导出状态",
+      "name": "去除编辑样式",
+      "status": "PASS",
+      "detail": "导出时去除outline和background"
+    },
+    "导出状态::导出前添加类": {
+      "category": "导出状态",
+      "name": "导出前添加类",
+      "status": "PASS",
+      "detail": "导出前body.classList.add('printing')"
+    },
+    "导出状态::导出后移除类": {
+      "category": "导出状态",
+      "name": "导出后移除类",
+      "status": "PASS",
+      "detail": "导出后body.classList.remove('printing')"
+    },
+    "内容完整性::区块: 项目经历": {
+      "category": "内容完整性",
+      "name": "区块: 项目经历",
+      "status": "PASS",
+      "detail": "出现2次"
+    },
+    "内容完整性::区块: 工作经历": {
+      "category": "内容完整性",
+      "name": "区块: 工作经历",
+      "status": "PASS",
+      "detail": "出现2次"
+    },
+    "内容完整性::区块: 教育背景": {
+      "category": "内容完整性",
+      "name": "区块: 教育背景",
+      "status": "PASS",
+      "detail": "出现2次"
+    },
+    "内容完整性::区块: 技能": {
+      "category": "内容完整性",
+      "name": "区块: 技能",
+      "status": "PASS",
+      "detail": "出现2次"
+    },
+    "内容完整性::区块: 自我评价": {
+      "category": "内容完整性",
+      "name": "区块: 自我评价",
+      "status": "PASS",
+      "detail": "出现2次"
+    },
+    "内容完整性::姓名": {
+      "category": "内容完整性",
+      "name": "姓名",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::职位": {
+      "category": "内容完整性",
+      "name": "职位",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::手机号": {
+      "category": "内容完整性",
+      "name": "手机号",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::邮箱": {
+      "category": "内容完整性",
+      "name": "邮箱",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::项目: 灵汐Agent系统": {
+      "category": "内容完整性",
+      "name": "项目: 灵汐Agent系统",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::项目: 太阳能吸波器": {
+      "category": "内容完整性",
+      "name": "项目: 太阳能吸波器",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::项目: 光学陀螺仪": {
+      "category": "内容完整性",
+      "name": "项目: 光学陀螺仪",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::公司: 振华集团": {
+      "category": "内容完整性",
+      "name": "公司: 振华集团",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::公司: 托克逊": {
+      "category": "内容完整性",
+      "name": "公司: 托克逊",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::学历: 国防科技大学": {
+      "category": "内容完整性",
+      "name": "学历: 国防科技大学",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::学历: 湖南工业大学": {
+      "category": "内容完整性",
+      "name": "学历: 湖南工业大学",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: Python": {
+      "category": "内容完整性",
+      "name": "技能: Python",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: React": {
+      "category": "内容完整性",
+      "name": "技能: React",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: TypeScript": {
+      "category": "内容完整性",
+      "name": "技能: TypeScript",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: FastAPI": {
+      "category": "内容完整性",
+      "name": "技能: FastAPI",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: Docker": {
+      "category": "内容完整性",
+      "name": "技能: Docker",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "内容完整性::技能: Multi-Agent": {
+      "category": "内容完整性",
+      "name": "技能: Multi-Agent",
+      "status": "PASS",
+      "detail": "内容存在"
+    },
+    "A4排版::A4宽度": {
+      "category": "A4排版",
+      "name": "A4宽度",
+      "status": "PASS",
+      "detail": "resume-page: width:210mm"
+    },
+    "A4排版::A4高度": {
+      "category": "A4排版",
+      "name": "A4高度",
+      "status": "PASS",
+      "detail": "resume-page: min-height:297mm"
+    },
+    "A4排版::@page设置": {
+      "category": "A4排版",
+      "name": "@page设置",
+      "status": "PASS",
+      "detail": "@page { size:A4; margin:0 }"
+    },
+    "A4排版::打印色彩保留": {
+      "category": "A4排版",
+      "name": "打印色彩保留",
+      "status": "PASS",
+      "detail": "print-color-adjust: exact"
+    },
+    "设计风格::深蓝主色": {
+      "category": "设计风格",
+      "name": "深蓝主色",
+      "status": "PASS",
+      "detail": "#1a2a4a 用于标题、边框"
+    },
+    "设计风格::藏青渐变": {
+      "category": "设计风格",
+      "name": "藏青渐变",
+      "status": "PASS",
+      "detail": "#2c3e6b 用于toolbar背景"
+    },
+    "设计风格::蓝色强调": {
+      "category": "设计风格",
+      "name": "蓝色强调",
+      "status": "PASS",
+      "detail": "#2980d4 用于section边框、链接"
+    },
+    "设计风格::渐变效果": {
+      "category": "设计风格",
+      "name": "渐变效果",
+      "status": "PASS",
+      "detail": "toolbar和按钮渐变"
+    },
+    "设计风格::阴影效果": {
+      "category": "设计风格",
+      "name": "阴影效果",
+      "status": "PASS",
+      "detail": "卡片阴影"
+    },
+    "设计风格::圆角设计": {
+      "category": "设计风格",
+      "name": "圆角设计",
+      "status": "PASS",
+      "detail": "按钮、照片圆角"
+    },
+    "设计风格::过渡动画": {
+      "category": "设计风格",
+      "name": "过渡动画",
+      "status": "PASS",
+      "detail": "交互过渡效果"
+    },
+    "设计风格::中文字体": {
+      "category": "设计风格",
+      "name": "中文字体",
+      "status": "PASS",
+      "detail": "微软雅黑优先"
+    },
+    "自动保存::localStorage": {
+      "category": "自动保存",
+      "name": "localStorage",
+      "status": "PASS",
+      "detail": "使用localStorage"
+    },
+    "自动保存::自动保存": {
+      "category": "自动保存",
+      "name": "自动保存",
+      "status": "PASS",
+      "detail": "编辑时自动保存"
+    },
+    "自动保存::数据恢复": {
+      "category": "自动保存",
+      "name": "数据恢复",
+      "status": "PASS",
+      "detail": "刷新后恢复"
+    },
+    "自动保存::防抖300ms": {
+      "category": "自动保存",
+      "name": "防抖300ms",
+      "status": "PASS",
+      "detail": "300ms防抖处理"
+    },
+    "工具栏::工具栏": {
+      "category": "工具栏",
+      "name": "工具栏",
+      "status": "PASS",
+      "detail": "顶部工具栏"
+    },
+    "工具栏::标题": {
+      "category": "工具栏",
+      "name": "标题",
+      "status": "PASS",
+      "detail": "简历编辑器标题"
+    },
+    "工具栏::编辑提示": {
+      "category": "工具栏",
+      "name": "编辑提示",
+      "status": "PASS",
+      "detail": "点击任意文本即可直接编辑"
+    },
+    "工具栏::fixed定位": {
+      "category": "工具栏",
+      "name": "fixed定位",
+      "status": "PASS",
+      "detail": "工具栏固定顶部"
+    },
+    "补充场景::PDF导出失败恢复": {
+      "category": "补充场景",
+      "name": "PDF导出失败恢复",
+      "status": "PASS",
+      "detail": ".catch()中恢复printing类和按钮状态"
+    },
+    "补充场景::失败后按钮恢复": {
+      "category": "补充场景",
+      "name": "失败后按钮恢复",
+      "status": "PASS",
+      "detail": "catch中恢复按钮文本和disabled状态"
+    },
+    "补充场景::单文件独立性": {
+      "category": "补充场景",
+      "name": "单文件独立性",
+      "status": "PASS",
+      "detail": "仅CDN引用: ['https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js']"
+    }
+  }
+}
