@@ -7,6 +7,8 @@
 """
 
 import asyncio
+import logging
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -39,6 +41,97 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     def __init__(self, base_path: str | None = None):
         """初始化文件写入工具"""
         self.base_path = Path(base_path) if base_path else Path.cwd()
+        self._logger = logging.getLogger(__name__)
+
+    # ------------------------------------------------------------------
+    # 路径安全校验
+    # ------------------------------------------------------------------
+
+    # 空字节及控制字符（除常见空白符外）
+    _NULL_BYTE_RE = re.compile(r'[\x00]')
+    _CONTROL_CHAR_RE = re.compile(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+    @classmethod
+    def _validate_path_security(cls, path_str: str) -> tuple[bool, str]:
+        """对原始路径字符串做安全预检。
+
+        Returns:
+            (is_safe, message) — is_safe=False 表示必须拒绝；
+            is_safe=True 但 message 非空表示 WARNING。
+        """
+        # 1) 空字节：严格禁止
+        if cls._NULL_BYTE_RE.search(path_str):
+            return False, "路径包含空字节(\\0)，已拦截"
+
+        # 2) 控制字符：严格禁止
+        if cls._CONTROL_CHAR_RE.search(path_str):
+            return False, "路径包含非法控制字符，已拦截"
+
+        # 3) 路径穿越检测：../ 或 ..\ 模式
+        #    先统一为 / 再匹配，避免大小写/斜杠差异绕过
+        normalized = path_str.replace("\\", "/")
+        # 匹配 ../ 或开头 ./.. 或 /..  或 ..\（已在上方统一为 /）
+        if re.search(r'(?:^|/)\.\.(?:/|$)', normalized):
+            return False, "路径包含穿越序列(../)，已拦截"
+
+        return True, ""
+
+    def _resolve_and_check(self, path_str: str) -> tuple[Path | None, str | None]:
+        """解析路径并执行 workspace 白名单检查。
+
+        Returns:
+            (resolved_path, error_message)
+            - resolved_path 为 None 表示应拒绝，error_message 为原因
+            - resolved_path 非空 表示路径安全可用
+        """
+        resolved = self.resolve_path(path_str)
+
+        # workspace 白名单：解析后的路径必须在 workspace 内
+        # 也允许绝对路径写入（向后兼容），但对相对路径穿越严格限制
+        original = Path(path_str)
+        if not original.is_absolute():
+            try:
+                resolved.relative_to(self._workspace.resolve())
+            except ValueError:
+                return None, (
+                    f"路径解析后超出 workspace 范围: "
+                    f"{resolved} 不在 {self._workspace.resolve()} 内"
+                )
+
+        # 可疑路径 warning（不阻止，仅记录日志）
+        self._warn_suspicious_path(path_str, resolved)
+
+        return resolved, None
+
+    def _warn_suspicious_path(self, path_str: str, resolved: Path) -> None:
+        """对可疑路径输出 WARNING 日志（不阻止操作）。"""
+        warnings: list[str] = []
+        normalized = path_str.replace("\\", "/")
+
+        # 检查是否指向常见敏感目录
+        sensitive_prefixes = [
+            "/etc/", "/usr/", "/bin/", "/sbin/", "/var/",
+            "/boot/", "/dev/", "/proc/", "/sys/", "/root/",
+            "C:/Windows/", "C:/Program Files/",
+        ]
+        for prefix in sensitive_prefixes:
+            if normalized.lower().startswith(prefix.lower()):
+                warnings.append(f"写入路径指向系统目录: {prefix}")
+                break
+
+        # 检查隐藏文件/目录
+        if any(part.startswith(".") and part not in (".", "..") for part in Path(path_str).parts):
+            warnings.append("路径包含隐藏文件/目录")
+
+        # 检查写入 workspace 外的绝对路径
+        if Path(path_str).is_absolute():
+            try:
+                resolved.relative_to(self._workspace.resolve())
+            except ValueError:
+                warnings.append(f"绝对路径不在 workspace 内: {resolved}")
+
+        for w in warnings:
+            self._logger.warning("file_write 可疑路径警告 [%s]: %s", w, path_str)
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -110,6 +203,16 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行工具"""
         self._init_workspace(inputs)
+
+        # ---- 路径安全预检（所有 action 共享） ----
+        path_str = inputs.get("path", "")
+        if path_str:
+            is_safe, msg = self._validate_path_security(path_str)
+            if not is_safe:
+                return create_failure_result(
+                    error=f"路径安全校验失败: {msg}",
+                    error_code="PATH_SECURITY_VIOLATION",
+                )
 
         action = inputs.get("action")
 
@@ -185,7 +288,9 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self.resolve_path(path_str)
+            path, path_err = self._resolve_and_check(path_str)
+            if path_err:
+                return create_failure_result(error=path_err, error_code="PATH_SECURITY_VIOLATION")
             display_path = self._format_output_path(path, path_str)
 
             # 无行号参数：全量写入
@@ -312,7 +417,9 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
             if new_str is None:
                 new_str = ""
 
-            path = self.resolve_path(path_str)
+            path, path_err = self._resolve_and_check(path_str)
+            if path_err:
+                return create_failure_result(error=path_err, error_code="PATH_SECURITY_VIOLATION")
             display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
@@ -399,7 +506,9 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self.resolve_path(path_str)
+            path, path_err = self._resolve_and_check(path_str)
+            if path_err:
+                return create_failure_result(error=path_err, error_code="PATH_SECURITY_VIOLATION")
             display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
@@ -489,7 +598,9 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="MISSING_END_LINE",
                 )
 
-            path = self.resolve_path(path_str)
+            path, path_err = self._resolve_and_check(path_str)
+            if path_err:
+                return create_failure_result(error=path_err, error_code="PATH_SECURITY_VIOLATION")
             display_path = self._format_output_path(path, path_str)
 
             # 文件必须存在
@@ -588,7 +699,9 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="MISSING_CONTENT",
                 )
 
-            path = self.resolve_path(path_str)
+            path, path_err = self._resolve_and_check(path_str)
+            if path_err:
+                return create_failure_result(error=path_err, error_code="PATH_SECURITY_VIOLATION")
             display_path = self._format_output_path(path, path_str)
 
             # 如果文件不存在，创建新文件（等同于全量写入）
