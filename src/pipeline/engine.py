@@ -319,6 +319,16 @@ class PipelineEngine:
                     except Exception as exc:
                         logger.debug("Checkpoint auto-save failed: %s", exc)
 
+                # 主动重置 idle timer：每轮迭代开始时重置，
+                # 表示上一轮迭代已完成（含 Agent thinking），防止被误判为 idle
+                _task_worker = self._services.get("task_worker")
+                _task_id_for_reset = state.get("task_id")
+                if _task_worker and _task_id_for_reset:
+                    try:
+                        await _task_worker.reset_idle_timer(_task_id_for_reset)
+                    except Exception as _reset_exc:
+                        logger.debug("idle timer reset failed (non-critical): %s", _reset_exc)
+
                 _iter_notifs = self.consume_pending_notifications()
                 if _iter_notifs:
                     _combined = "\n\n".join(_iter_notifs)

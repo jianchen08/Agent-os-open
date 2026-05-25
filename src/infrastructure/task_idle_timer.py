@@ -399,3 +399,40 @@ class TaskIdleTimerMixin:
         logger.debug("TaskWorker: resume requested for task %s", task_id)
 
         ctx.wake_event.set()
+
+    async def reset_idle_timer(self, task_id: str) -> None:
+        """主动重置 idle 计时器。
+
+        在管道每轮迭代完成时调用，确保 Agent 即使长时间 thinking，
+        只要完成了迭代就会重置定时器，避免被误判为 idle 超时。
+
+        机制：取消当前计时器并重新创建，等同于重新开始 idle 倒计时。
+
+        Args:
+            task_id: 任务 ID
+        """
+        timer_manager = self._services.get("timer_manager")
+        if not timer_manager:
+            return
+
+        ctx = self._contexts.get(task_id)
+        if not ctx:
+            return
+
+        try:
+            await timer_manager.cancel_timer(task_id)
+            await timer_manager.create_timer(
+                task_id=task_id,
+                timeout=float(timer_manager.idle_threshold),
+                callback=lambda tid=task_id: self._on_idle_timeout(tid),
+            )
+            logger.debug(
+                "TaskWorker: idle timer 主动重置: task_id=%s",
+                task_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "TaskWorker: idle timer 重置失败（非致命）: "
+                "task_id=%s, error=%s",
+                task_id, e,
+            )

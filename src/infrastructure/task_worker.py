@@ -170,6 +170,8 @@ class TaskWorker(
         # asyncio.create_task 会在临时事件循环上创建任务，循环关闭后任务丢失。
         # 保存主事件循环引用，确保任务创建在正确的循环上。
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # 注册自身到 services，供 PipelineEngine 通过 services 访问 idle timer reset
+        self._services["task_worker"] = self
 
     async def start(self) -> None:
         """启动后台任务监听，并恢复残留的 running 任务。"""

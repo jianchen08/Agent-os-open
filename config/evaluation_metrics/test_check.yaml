@@ -12,7 +12,7 @@ evaluator_type: tool
 default_config:
   action: execute
   command: pytest
-  timeout: 120
+  timeout: 300
 
 # ===== 预期输入定义 =====
 # Agent 在提交任务时需要提供的参数
@@ -34,7 +34,7 @@ expected_input:
       type: integer
       description: "超时时间（秒）"
       required: false
-      default: 120
+      default: 300
 
 # ===== 预期输出定义 =====
 # 对应 bash_execute 工具的返回结构
@@ -105,7 +105,7 @@ input_schema:
     timeout:
       type: integer
       description: "超时时间（秒）"
-      default: 120
+      default: 300
     working_dir:
       type: string
       description: "工作目录"
