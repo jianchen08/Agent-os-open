@@ -33,8 +33,13 @@ import type { CSSProperties, FC, ReactNode } from 'react'
 
 /**
  * 获取状态对应的主题 CSS 变量色值
+ * @param status 活动状态
+ * @param customRunningColor 自定义运行颜色（用于阻塞型工具如 human_interaction）
  */
-function getStatusThemeVars(status: ActivityStatus): {
+function getStatusThemeVars(
+  status: ActivityStatus,
+  customRunningColor?: string,
+): {
   color: string
   border: string
   bg: string
@@ -75,7 +80,19 @@ function getStatusThemeVars(status: ActivityStatus): {
       shadow: 'none',
     },
   }
-  return varsMap[status] || varsMap.pending
+
+  const result = varsMap[status] || varsMap.pending
+
+  if (status === 'running' && customRunningColor) {
+    return {
+      color: customRunningColor,
+      border: customRunningColor,
+      bg: `color-mix(in srgb, ${customRunningColor} 8%, transparent)`,
+      shadow: `0 0 8px color-mix(in srgb, ${customRunningColor} 15%, transparent)`,
+    }
+  }
+
+  return result
 }
 
 /**
@@ -240,13 +257,20 @@ const ActivityCard: FC<ActivityCardProps> = ({
     onHeaderClick?.()
   }
 
-  const themeVars = getStatusThemeVars(activity.status)
+  const themeVars = getStatusThemeVars(activity.status, activity.customColor)
 
   /** 卡片容器样式 */
   const cardStyle: CSSProperties = {
     borderColor: themeVars.border,
     backgroundColor: themeVars.bg,
-    ...(activity.status === 'running' ? { animation: 'card-breathe 2s ease-in-out infinite' } : {}),
+    ...(activity.status === 'running'
+      ? {
+          animation: 'card-breathe 2s ease-in-out infinite',
+          ...(activity.customColor
+            ? { '--card-breathe-color': activity.customColor } as CSSProperties
+            : {}),
+        }
+      : {}),
     ...style,
   }
 
