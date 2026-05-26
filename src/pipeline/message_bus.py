@@ -143,22 +143,46 @@ async def send_pipeline_message(
         return InjectResult(success=False, error="message 不能为空", method="failed")
 
     _msg_source = (metadata or {}).get("source", "user")
-    _event_sink = output_sink or _create_sink(pipeline_id)
 
-    if _msg_source != "user" and _event_sink is not None:
+    _event_sink = output_sink
+    if _event_sink is None:
         try:
-            _level = "info" if _msg_source in ("system", "trigger") else "warning"
-            await _event_sink.send_event({
-                "type": "system_notification",
-                "data": {
-                    "content": message,
-                    "level": _level,
-                    "notificationType": f"{_msg_source}_notification",
-                    "pipeline_id": pipeline_id,
-                },
-            })
+            from pipeline.registry import get_engine_registry as _greg
+            _e = _greg().get(pipeline_id)
+            if _e and _e.bridge and getattr(_e.bridge, "output_sink", None):
+                _event_sink = _e.bridge.output_sink
         except Exception:
             pass
+    if _event_sink is None:
+        _event_sink = _create_sink(pipeline_id)
+
+    if _msg_source != "user":
+        if _event_sink is None:
+            logger.warning(
+                "[MessageBus] system_notification SKIP: no sink | pipeline=%s source=%s",
+                pipeline_id[:12], _msg_source,
+            )
+        else:
+            try:
+                _level = "info" if _msg_source in ("system", "trigger") else "warning"
+                await _event_sink.send_event({
+                    "type": "system_notification",
+                    "data": {
+                        "content": message,
+                        "level": _level,
+                        "notificationType": f"{_msg_source}_notification",
+                        "pipeline_id": pipeline_id,
+                    },
+                })
+                logger.info(
+                    "[MessageBus] system_notification SENT | pipeline=%s source=%s",
+                    pipeline_id[:12], _msg_source,
+                )
+            except Exception as _sn_err:
+                logger.warning(
+                    "[MessageBus] system_notification FAILED | pipeline=%s source=%s error=%s",
+                    pipeline_id[:12], _msg_source, _sn_err,
+                )
 
     engine, state = _find_engine(pipeline_id)
 
@@ -555,7 +579,8 @@ def _create_sink(pipeline_id: str) -> Any | None:
             return None
 
         return TargetedSink(notifier, thread_id)
-    except Exception:
+    except Exception as _cs_err:
+        logger.warning("[MessageBus] _create_sink FAILED: pipeline=%s error=%s", pipeline_id[:12], _cs_err)
         return None
 
 
