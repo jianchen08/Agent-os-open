@@ -32,12 +32,75 @@ export function handleStateChange(eventData: any): void {
 }
 
 /**
- * 处理 PIPELINE_RECEIVED 事件
+ * 处理 PIPELINE_RECEIVED 事件（非用户消息注入）
+ *
+ * 当后端通过管道注入非用户来源的消息（如任务触发、定时器等）时，
+ * 创建一个 system 角色的消息气泡显示在聊天界面中。
+ * 若 source === 'user' 则跳过（前端已在 handleSendMessage 中创建了用户消息气泡）。
+ * 包含基于 content 前缀的去重逻辑，防止重复创建相同内容的系统消息。
  */
 export function handlePipelineReceived(data: any): void {
   const pipelineId = resolvePipelineId(data)
-
   if (!pipelineId) return
+
+  const payload = data?.data || data
+  const content = payload?.content || ''
+  const source = payload?.source || ''
+
+  // 用户消息已由 handleSendMessage 处理，此处跳过
+  if (source === 'user') return
+
+  // 无内容则无需创建气泡
+  if (!content) return
+
+  const pipelineStore = usePipelineMessageStore.getState()
+
+  // 去重：检查管道中是否已存在相同 content 前缀的 system 消息
+  const existingMsgs = pipelineStore.getMessages(pipelineId)
+  const dedupPrefix = content.substring(0, 60)
+  const alreadyExists = existingMsgs.some((m: any) => {
+    if (m.role === 'system') {
+      const mContent = m.content || ''
+      if (mContent && mContent.includes(dedupPrefix)) return true
+      const parts = m.parts || []
+      if (parts.some((p: any) => p.type === 'system' && (p.content || '').includes(dedupPrefix))) return true
+    }
+    return false
+  })
+
+  if (alreadyExists) {
+    loggers.sessionStore.info(
+      '[handlePipelineReceived] dedup: skipping duplicate inject: pipeline=%s prefix=%.30s',
+      pipelineId.slice(0, 12), dedupPrefix,
+    )
+    return
+  }
+
+  // 计算下一个 sequence
+  const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1
+
+  pipelineStore.addMessage(pipelineId, {
+    role: 'system',
+    content,
+    sequence: nextSeq,
+    timestamp: new Date().toISOString(),
+    status: 'completed',
+    parts: [
+      {
+        type: 'system',
+        content,
+        level: 'info',
+        notificationType: 'pipeline_inject',
+        sequence: 0,
+      },
+    ],
+    metadata: {
+      record_type: 'system',
+      type: 'system',
+      sender_type: 'system',
+      source,
+    },
+  } as any)
 }
 
 /**

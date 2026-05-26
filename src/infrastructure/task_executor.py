@@ -46,21 +46,6 @@ class TaskExecutorMixin:
             pass
         return ""
 
-    async def _cancel_engine_task(self, engine_task: asyncio.Task) -> None:
-        """统一取消引擎任务。"""
-        engine_task.cancel()
-        try:
-            # BUG-FIX-fix_20260524_cancel_engine_task:
-            # 问题根因: 当外层 bg_task 被取消时，await engine_task 会立即抛出 CancelledError，
-            #           导致不等待引擎真正停止就返回，引擎可能仍在内存中继续运行。
-            # 修复方案: 使用 asyncio.shield 保护 await，确保即使外层任务被取消，
-            #           也能等待引擎任务完成清理。
-            # 影响范围: 所有任务的取消流程。
-            # 修复日期: 2026-05-24
-            await asyncio.shield(engine_task)
-        except (asyncio.CancelledError, Exception):
-            pass
-
     async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:
         """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。
 
@@ -71,9 +56,21 @@ class TaskExecutorMixin:
 
         task_id = task_data.get("task_id", "unknown")
         logger.info("TaskWorker: _execute_background_task 开始 | task=%s", task_id)
+
+        # 从 services / 注入参数获取 WS 上下文
+        _notifier = self._services.get("ws_interaction_notifier")
+        _ws_thread_id = ""
+        _parent_pipeline_id = task_data.get("pipeline_id", "")
+
+        # 尝试从注册表获取当前管道的 thread_id
+        if _parent_pipeline_id:
+            from pipeline.registry import get_engine_registry
+            _entry = get_engine_registry().get(_parent_pipeline_id)
+            if _entry:
+                _ws_thread_id = _entry.thread_id or ""
+
         target_id = task_data.get("target_id", "")
         task_service = self._task_service
-        _cleanup_done = False
 
         # ── 0. 容器任务处理 ──
         if task_service:
@@ -174,105 +171,60 @@ class TaskExecutorMixin:
             if _task_for_id and _task_for_id.pipeline_run_id:
                 existing_pipeline_id = _task_for_id.pipeline_run_id
 
-        # ── 5. 创建子 PipelineEngine 并执行 ──
+        # ── 5. 注册管道 + 发送任务输入 ──
         timer_manager = self._services.get("timer_manager")
-        _engine_task: asyncio.Task | None = None
         try:
-            engine = self._create_pipeline_engine(existing_pipeline_id)
+            from pipeline.registry import get_engine_registry
 
-            # 早期绑定 pipeline_run_id
-            await self._bind_pipeline_run(task_id, engine._pipeline_id, task_service)
+            _registry = get_engine_registry()
 
-            # 子任务启动通知
-            await self._send_sub_agent_created_event(task_id, target_id, engine._pipeline_id, task_data)
+            _reg_result = _registry.register_pipeline(
+                pipeline_id=existing_pipeline_id or "",
+                thread_id=_ws_thread_id or "",
+                tags={"mode": "interactive", "task_id": task_id, "parent_pipeline": _parent_pipeline_id or ""},
+                input_route_table=self._input_route_table,
+                output_route_table=self._output_route_table,
+                plugin_registry=self._plugin_registry,
+                services=self._services,
+            )
+            if not _reg_result:
+                logger.error("TaskWorker: 管道注册失败 task=%s", task_id)
+                return
 
-            # 注册 idle 计时器
+            engine = _reg_result.engine
+            pipeline_id = engine._pipeline_id
+
+            await self._bind_pipeline_run(task_id, pipeline_id, task_service)
+            await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
+
             ctx.idle_timer_registered = await self._register_idle_timer(
                 task_id, timer_manager, task_service, ctx,
             )
             if not ctx.idle_timer_registered and timer_manager:
                 return
 
-            # 构建执行参数
-            pipeline_timeout = self._compute_pipeline_timeout(agent_config)
-            ctx.active = True
             project_root = ws_meta.get("project_root", workspace) if ws_meta else workspace
-
-            # 重试时从管道执行记录恢复对话历史
             conversation_history = await self._restore_conversation_history(existing_pipeline_id)
 
-            # 创建流式输出桥接
-            _bridge, _on_chunk = self._create_stream_bridge(task_id, engine._pipeline_id, task_service)
+            from pipeline.message_bus import send_pipeline_message
+            from pipeline.stream_bridge import TargetedSink
 
-            # 发送 pipeline_received 确认事件
-            if _bridge:
-                try:
-                    _thread_id = ""
-                    if hasattr(_bridge.output_sink, "_thread_id"):
-                        _thread_id = _bridge.output_sink._thread_id
-                    await _bridge._send_event({
-                        "type": "pipeline_received",
-                        "data": {
-                            "pipeline_id": engine._pipeline_id,
-                            "thread_id": _thread_id,
-                        },
-                    })
-                    logger.info(
-                        "pipeline_received 已发送: pipeline=%s thread=%s",
-                        engine._pipeline_id[:12], _thread_id[:12],
-                    )
-                except Exception as _e:
-                    logger.warning("pipeline_received 发送失败（不影响管道执行）: %s", _e)
-
-            # 执行管道
-            _engine_task = asyncio.create_task(
-                engine.run(
-                    user_input="" if conversation_history else full_input,
-                    agent_config=agent_config,
-                    conversation_history=conversation_history,
-                    task_id=task_id,
-                    acceptance_criteria=acceptance_criteria,
-                    workspace=workspace,
-                    project_root=project_root,
-                    allow_default_fallback=False,
-                    streaming=True,
-                    on_chunk=_on_chunk,
-                )
+            _sink = TargetedSink(_notifier, _ws_thread_id) if _notifier else None
+            _msg_result = await send_pipeline_message(
+                pipeline_id, "" if conversation_history else full_input,
+                output_sink=_sink,
+                agent_config=agent_config,
+                conversation_history=conversation_history,
+                task_id=task_id,
+                workspace=project_root,
+                streaming=True,
+                thread_id=_ws_thread_id or "",
             )
-            pipeline_state: dict[str, Any] | None = None
-            try:
-                if _bridge:
-                    await asyncio.wait_for(
-                        _bridge.drain_loop(_engine_task), timeout=pipeline_timeout,
-                    )
-                    pipeline_state = _engine_task.result() if _engine_task.done() else {}
-                else:
-                    pipeline_state = await asyncio.wait_for(
-                        _engine_task, timeout=pipeline_timeout,
-                    )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "TaskWorker: pipeline hard timeout for task %s (%ds)",
-                    task_id, pipeline_timeout,
-                )
-                _engine_timed_out = True
-                await self._cancel_engine_task(_engine_task)
-                if task_service:
-                    try:
-                        await task_service.fail_task(task_id, f"Pipeline execution hard timeout ({pipeline_timeout}s)")
-                    except Exception:
-                        pass
-                ctx.set_terminal()
-                ctx.cleanup(timer_manager)
-                _cleanup_done = True
-            finally:
-                if _bridge:
-                    _bridge.stop()
 
-            if _cleanup_done:
+            if not _msg_result.success:
+                logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
                 return
 
-            # ── 管道挂起/恢复循环 ──
             await self._handle_suspension_loop(
                 engine, task_id, task_service, ctx,
                 child_wait_timeout=self._config.get("child_wait_timeout", 600),
@@ -283,14 +235,7 @@ class TaskExecutorMixin:
             logger.info("TaskWorker: pipeline completed for task %s", task_id)
 
         except asyncio.CancelledError:
-            logger.info("TaskWorker: task %s cancelled, stopping engine", task_id)
-            if _engine_task is not None and not _engine_task.done():
-                await self._cancel_engine_task(_engine_task)
-            if _bridge:
-                try:
-                    _bridge.stop()
-                except Exception:
-                    pass
+            logger.info("TaskWorker: task %s cancelled", task_id)
             ctx.cleanup(timer_manager)
             raise
 
@@ -315,7 +260,7 @@ class TaskExecutorMixin:
 
         # ── 5.5 检查任务是否已到达终态 ──
         await self._check_post_pipeline_state(
-            task_id, task_service, pipeline_state, lifecycle, workspace, ws_meta,
+            task_id, task_service, None, lifecycle, workspace, ws_meta,
             ctx, timer_manager,
         )
 
@@ -489,26 +434,6 @@ class TaskExecutorMixin:
             _waited, _t.parent_task_id,
         )
 
-    def _create_pipeline_engine(self, existing_pipeline_id: str | None) -> Any:
-        """创建 PipelineEngine 实例，可选复用已有 pipeline_id。"""
-        from pipeline.engine import PipelineEngine
-
-        checkpoint_mgr = self._services.get("checkpoint_manager")
-        engine = PipelineEngine(
-            input_route_table=self._input_route_table,
-            output_route_table=self._output_route_table,
-            plugin_registry=self._plugin_registry,
-            services=self._services,
-            checkpoint_manager=checkpoint_mgr,
-        )
-        if existing_pipeline_id:
-            engine._pipeline_id = existing_pipeline_id
-            logger.info(
-                "TaskWorker: reusing existing pipeline_id %s for task (retry)",
-                existing_pipeline_id,
-            )
-        return engine
-
     async def _bind_pipeline_run(
         self, task_id: str, pipeline_id: str, task_service: Any,
     ) -> None:
@@ -638,65 +563,6 @@ class TaskExecutorMixin:
                 "TaskWorker: failed to restore pipeline history: %s", exc,
             )
             return None
-
-    def _create_stream_bridge(
-        self, task_id: str, pipeline_id: str, task_service: Any,
-    ) -> tuple[PipelineStreamBridge | None, Any]:
-        """创建子管道流式输出桥接。返回 (bridge, on_chunk_callback)。"""
-        from pipeline.registry import get_engine_registry
-        _notifier = self._services.get("ws_interaction_notifier")
-        _ws_thread_id = ""
-        _registry = get_engine_registry()
-
-        if task_service and _notifier:
-            try:
-                _root_id = task_service.get_root_task_id(task_id)
-                if _root_id:
-                    _root_task = task_service.get_task(_root_id)
-                    if _root_task:
-                        _root_pipeline_id = getattr(_root_task, "parent_pipeline_id", "") or ""
-                        if _root_pipeline_id:
-                            _ws_thread_id = _registry.get_thread_id(_root_pipeline_id)
-                        logger.info(
-                            "TaskWorker lookup: root_id=%s root_pipeline=%s ws_thread=%s",
-                            _root_id[:12] if _root_id else "",
-                            _root_pipeline_id[:12] if _root_pipeline_id else "",
-                            _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
-                        )
-            except Exception as _e:
-                logger.warning("TaskWorker lookup error: %s", _e)
-
-        _sub_pipeline_id = pipeline_id
-        _sub_message_id = f"sub_{task_id}_{_uuid.uuid4().hex[:8]}"
-
-        # 注册子管道到 EngineRegistry
-        if _ws_thread_id:
-            _entry = _registry.get(_sub_pipeline_id)
-            if _entry:
-                _entry.thread_id = _ws_thread_id
-            logger.info(
-                "TaskWorker: 注册子管道映射: sub_pipeline=%s ws_thread=%s",
-                _sub_pipeline_id[:12], _ws_thread_id[:12],
-            )
-
-        if _notifier and _ws_thread_id:
-            _sink = TargetedSink(_notifier, _ws_thread_id)
-            _bridge = PipelineStreamBridge(
-                pipeline_id=_sub_pipeline_id,
-                output_sink=_sink,
-                message_id=_sub_message_id,
-            )
-            # 注册 bridge 到 EngineRegistry
-            _entry = _registry.get(_sub_pipeline_id)
-            if _entry:
-                _entry.bridge = _bridge
-            logger.info(
-                "TaskWorker: 子管道桥接创建: bridge_id=%d sub_pipeline=%s ws_thread=%s",
-                id(_bridge), _sub_pipeline_id[:12],
-                _ws_thread_id[:12] if _ws_thread_id else "EMPTY",
-            )
-            return _bridge, _bridge.on_chunk
-        return None, lambda chunk: None
 
     async def _handle_suspension_loop(
         self,

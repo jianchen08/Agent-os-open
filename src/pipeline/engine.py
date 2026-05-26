@@ -113,6 +113,8 @@ class PipelineEngine:
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
         self._running: bool = False
+        self._preserved_bridge: Any = None
+        self._preserved_drain_task: Any = None
 
     async def run(
         self,
@@ -152,10 +154,20 @@ class PipelineEngine:
         self._streaming_on_chunk = None
         self._pending_notifications.clear()
 
-        # BUG-FIX-fix_20260513_pipeline_cross_talk:
-        # 清除旧 pipeline_id 的引擎注册残留
+        # 保留当前 entry 中的 bridge 和 drain_task 引用，
+        # 避免下面 _run_loop register 时丢失 idle 阶段绑定的流式桥接。
+        _preserved_bridge = None
+        _preserved_drain_task = None
         if self._pipeline_id:
-            get_engine_registry().unregister(self._pipeline_id)
+            _old_entry = get_engine_registry().get(self._pipeline_id)
+            if _old_entry is not None:
+                _preserved_bridge = _old_entry.bridge
+                _preserved_drain_task = _old_entry.drain_task
+                # BUG-FIX-fix_20260513_pipeline_cross_talk:
+                # 清除旧 pipeline_id 的引擎注册残留（保留 bridge）
+                get_engine_registry().unregister(self._pipeline_id)
+        self._preserved_bridge = _preserved_bridge
+        self._preserved_drain_task = _preserved_drain_task
 
         # pipeline_id 由引擎构造时确定，外部不可覆盖。
         extra_state["pipeline_id"] = self._pipeline_id
@@ -274,7 +286,13 @@ class PipelineEngine:
         _reg_task_id = state.get("task_id")
         if _reg_task_id:
             _reg_tags["task_id"] = _reg_task_id
-        get_engine_registry().register(pipeline_run_id, self, tags=_reg_tags or None)
+        _reg_entry = get_engine_registry().register(pipeline_run_id, self, tags=_reg_tags or None)
+        if self._preserved_bridge is not None and _reg_entry.bridge is None:
+            _reg_entry.bridge = self._preserved_bridge
+        if self._preserved_drain_task is not None and _reg_entry.drain_task is None:
+            _reg_entry.drain_task = self._preserved_drain_task
+        self._preserved_bridge = None
+        self._preserved_drain_task = None
         try:
             self._setup_pipeline_logging(pipeline_run_id, resumed, _pipeline_loggers)
             if _pipeline_loggers:
@@ -294,8 +312,8 @@ class PipelineEngine:
                 state[StateKeys.ITERATION] = state.get(StateKeys.ITERATION, 0) + 1
                 iteration = state[StateKeys.ITERATION]
 
-                # 安全阀
-                if iteration > self.max_iterations:
+                # 安全阀（-1 表示无限制）
+                if self.max_iterations > 0 and iteration > self.max_iterations:
                     logger.warning("Pipeline exceeded %d iterations, forcing end", self.max_iterations)
                     state[StateKeys.ENDED] = True
                     break
@@ -493,6 +511,7 @@ class PipelineEngine:
                 "tools.builtin", "evaluation",
                 "llm.adapter", "llm.adapter._stream",
                 "triggers.manager",
+                "pipeline.message_bus",
                 "src.core.event_bus",
             ]:
                 _lg = logging.getLogger(_ln)
@@ -708,6 +727,21 @@ class PipelineEngine:
         self._running = True
 
         if self._suspended_state is not None:
+            # BUG-FIX-fix_20260525_idle_wake_empty_llm:
+            # 安全网: 唤醒后检查 suspended_state 中是否有实质性内容。
+            # 如果 user_input 为空，说明唤醒原因不是真实用户输入或系统通知，
+            # 而是 engine.resume() 或其他机制直接取走了旧 state。
+            # 此时应丢弃唤醒，返回 False 让 _run_loop 结束。
+            _pending_input = self._suspended_state.get("user_input", "").strip()
+            if not _pending_input:
+                logger.info(
+                    "[Engine] 管道唤醒但 suspended_state 无新内容，"
+                    "丢弃唤醒: pipeline=%s",
+                    pipeline_id,
+                )
+                self._suspended_state = None
+                return False
+
             state["user_input"] = self._suspended_state.get(
                 "user_input", state.get("user_input", ""),
             )

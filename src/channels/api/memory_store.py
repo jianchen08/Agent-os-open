@@ -71,6 +71,13 @@ class MemoryStore:
         self._messages: dict[str, list[dict[str, Any]]] = {}
         self._persist_dir = persist_dir
         self._persist_lock = threading.Lock()
+        # BUG-FIX-fix_20260525_store_data_loss:
+        # 问题根因: _load_persisted_data 解析 store.json 失败后，内存中 threads 为空，
+        #           后续 _save_persisted_data 将空数据写入文件，覆盖磁盘上的原始数据，导致会话全部丢失。
+        # 修复方案: 增加 _load_failed 标志位，加载失败时设为 True，_save_persisted_data 检查此标志并拒绝写入。
+        # 影响范围: store.json 文件损坏或格式异常时的数据保护。
+        # 修复日期: 2026-05-25
+        self._load_failed: bool = False
 
         self._create_default_users()
         self._load_persisted_data()
@@ -126,7 +133,15 @@ class MemoryStore:
                 )
         except Exception as e:
             _log.error("持久化数据加载失败: %s [path=%s]", e, path, exc_info=True)
+            # BUG-FIX-fix_20260525_store_data_loss:
+            # 问题根因: 加载失败后 _load_failed 未设置，_save_persisted_data 仍会写入空数据。
+            # 修复方案: 在 except 分支设置 _load_failed = True，阻止后续写入。
+            # 影响范围: store.json 解析异常时的数据保护。
+            # 修复日期: 2026-05-25
+            self._load_failed = True
         else:
+            # 加载成功，清除失败标志
+            self._load_failed = False
             # 从已加载的 threads 中构建用户线程索引
             self._rebuild_user_thread_index()
 
@@ -136,11 +151,36 @@ class MemoryStore:
         只持久化 threads 数据。SessionModel 在加载时从 thread 字段自动派生。
         消息数据由管道执行记录（YAML）独立管理。
         """
+        # BUG-FIX-fix_20260525_store_data_loss:
+        # 问题根因: 加载失败后内存 threads 为空，_save_persisted_data 仍将空数据写入文件，
+        #           覆盖磁盘上尚存的原始数据，导致所有会话记录丢失。
+        # 修复方案: 检查 _load_failed 标志，若加载曾失败则拒绝写入，防止覆盖。
+        # 影响范围: 所有触发持久化的操作（创建/更新/删除线程等）。
+        # 修复日期: 2026-05-25
+        if self._load_failed:
+            _log.error("持久化数据加载曾失败，禁止写入以防止覆盖旧数据。请手动检查 store.json 是否损坏。")
+            return
+
         path = self._persist_file()
         if not path:
             return
         with self._persist_lock:
             try:
+                # BUG-FIX-fix_20260525_store_data_loss:
+                # 问题根因: 写入 store.json 过程中若发生异常（如磁盘满、进程崩溃），
+                #           可能导致文件损坏或变为空文件，且无可恢复的备份。
+                # 修复方案: 每次写入前将旧的 store.json 备份为 store.json.bak，
+                #           确保即使写入失败也能从备份恢复。
+                # 影响范围: 所有持久化写入操作。
+                # 修复日期: 2026-05-25
+                if path and os.path.exists(path):
+                    backup_path = path + ".bak"
+                    try:
+                        import shutil
+                        shutil.copy2(path, backup_path)
+                    except Exception:
+                        _log.warning("备份 store.json 失败，继续写入")
+
                 data = {"threads": self.threads}
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 tmp_path = path + ".tmp"

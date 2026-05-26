@@ -24,11 +24,16 @@ class TaskRecoveryMixin:
     """
 
     async def _recover_running_tasks(self) -> None:
-        """恢复残留的 running 和 pending 任务。
+        """恢复残留的 running、pending 和 paused 任务。
 
-        Worker 启动时扫描所有 status=running 和 status=pending 的任务，
-        running 任务先重置为 pending，然后统一通过 submit_task 触发执行。
+        Worker 启动时扫描所有 status=running、status=pending 和 status=paused 的任务，
+        running/paused 任务先重置为 pending，然后统一通过 submit_task 触发执行。
         跳过容器任务（task_scope=container）。
+
+        BUG-FIX-fix_20260525_paused_recovery:
+            Worker stop() 会将 RUNNING/PENDING 任务标记为 PAUSED（见 task_worker.py L292-306），
+            但旧版 _recover_running_tasks 只恢复 RUNNING 和 PENDING，遗漏了 PAUSED 状态，
+            导致 stop→start 后 PAUSED 任务永远无法恢复。修复：增加对 PAUSED 任务的恢复。
         """
         if not self._task_service:
             return
@@ -46,7 +51,6 @@ class TaskRecoveryMixin:
                 )
                 continue
             try:
-                # BUG-FIX-fix_20260512_async_compat: reset_to_pending 现在是 async
                 await self._task_service.reset_to_pending(task.id)
                 logger.info(
                     "TaskWorker: 恢复 running → pending: task_id=%s", task.id,
@@ -54,6 +58,26 @@ class TaskRecoveryMixin:
             except Exception as e:
                 logger.warning(
                     "TaskWorker: 恢复任务失败: task_id=%s, error=%s", task.id, e,
+                )
+
+        # 1.5. paused 任务重置为 pending（stop→start 后 RUNNING/PENDING 被标记为 PAUSED）
+        paused_tasks = self._task_service.list_by_status(TaskStatus.PAUSED)
+        for task in paused_tasks:
+            task_scope = task.metadata.get("task_scope", "non_container")
+            if task_scope == "container":
+                logger.debug(
+                    "TaskWorker: 跳过容器任务恢复(paused): task_id=%s", task.id,
+                )
+                continue
+            try:
+                await self._task_service.reset_to_pending(task.id)
+                logger.info(
+                    "TaskWorker: 恢复 paused → pending: task_id=%s", task.id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "TaskWorker: 恢复 paused 任务失败: task_id=%s, error=%s",
+                    task.id, e,
                 )
 
         # 2. 所有 pending 任务统一通过 submit_task 触发

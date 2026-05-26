@@ -239,6 +239,8 @@ class TaskNotifierMixin:
             parent_task_id_for_revive = getattr(task_obj, "parent_task_id", "") or ""
 
         # ── 4. 通过统一消息总线注入通知（唯一通知链路） ──
+        # 系统通知气泡由 send_pipeline_message 内部统一发送，
+        # 不需要在此处单独调用 send_frontend_event。
         try:
             from pipeline.registry import get_engine_registry
             _reg = get_engine_registry()
@@ -273,33 +275,6 @@ class TaskNotifierMixin:
                 "TaskWorker: 通知已注入: pipeline=%s, task=%s, status=%s, method=%s",
                 parent_pipeline_id, task_id, new_status, result.method,
             )
-
-            # ── 5. 通过统一出口发送系统通知气泡到前端 ──
-            try:
-                if parent_pipeline_id:
-                    from pipeline.stream_bridge import send_frontend_event
-                    _level = "info" if new_status == "completed" else "warning"
-                    await send_frontend_event(
-                        parent_pipeline_id,
-                        {
-                            "type": "system_notification",
-                            "data": {
-                                "content": notification,
-                                "level": _level,
-                                "notificationType": "task_notification",
-                                "pipeline_id": parent_pipeline_id,
-                            },
-                        },
-                    )
-                    logger.info(
-                        "TaskWorker: system_notification 已发送: pipeline=%s, status=%s",
-                        parent_pipeline_id[:12], new_status,
-                    )
-            except Exception as _ws_exc:
-                logger.warning(
-                    "TaskWorker: system_notification 发送失败(不影响通知注入): error=%s",
-                    _ws_exc,
-                )
 
             if parent_task_id_for_revive:
                 parent_ctx = self._contexts.get(parent_task_id_for_revive)

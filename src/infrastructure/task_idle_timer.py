@@ -150,12 +150,43 @@ class TaskIdleTimerMixin:
 
             if remind_count < idle_remind_limit:
                 ctx.idle_remind_count = remind_count + 1
+                timer_mgr_for_threshold = self._services.get("timer_manager")
+                _threshold = (
+                    getattr(timer_mgr_for_threshold, "idle_threshold", 300)
+                    if timer_mgr_for_threshold else 300
+                )
                 logger.info(
                     "TaskWorker: idle 超时但有挂起管道（无活跃子任务），"
                     "提醒 #%d: task_id=%s",
                     remind_count + 1, task_id,
                 )
-                self._try_resume_engine(task_id)
+                # BUG-FIX-fix_20260525_idle_wake_empty_llm:
+                # 问题根因: _try_resume_engine 通过 ctx.wake_event 唤醒
+                #   _handle_suspension_loop，后者调用 engine.resume()
+                #   创建新的 _run_loop。但 _suspended_state 中的 user_input
+                #   为空，导致 LLM 被空内容调用，每 idle_threshold 秒
+                #   产生一次无意义的 AI 回复。
+                # 修复方案: 改用 engine.inject_message() 注入系统提醒消息，
+                #   通过 PipelineEngine 内部的 _wake_event 唤醒 _suspend_and_wait，
+                #   使 _run_loop 获得有意义的 user_input 再调用 LLM。
+                engine = ctx.suspended_engine
+                # BUG-FIX-fix_20260525_realtime_render:
+                # 统一走 send_pipeline_message，确保 drain_loop 启动推送数据到前端
+                try:
+                    from pipeline.message_bus import send_pipeline_message
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(send_pipeline_message(
+                        engine.pipeline_id,
+                        f"[系统提醒] 管道已空闲超过 {_threshold} 秒（第 {remind_count + 1}/{idle_remind_limit} 次）。"
+                        f"如果没有待处理任务，请告知用户并结束。",
+                        metadata={"source": "system"},
+                    ))
+                except Exception:
+                    engine.inject_message(
+                        f"[系统提醒] 管道已空闲超过 {_threshold} 秒（第 {remind_count + 1}/{idle_remind_limit} 次）。"
+                        f"如果没有待处理任务，请告知用户并结束。",
+                        source="system",
+                    )
 
                 timer_manager = self._services.get("timer_manager")
                 if timer_manager:

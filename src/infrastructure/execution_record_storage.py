@@ -257,13 +257,19 @@ class ExecutionRecordStorage:
             return
 
         text = file_path.read_text(encoding="utf-8")
-        marker = "\nrecords:"
-        marker_idx = text.find(marker)
-        if marker_idx == -1:
+        # BUG-FIX-fix_20260525_records_truncated_by_summary:
+        # 问题根因: 使用 text.find("\nrecords:") 搜索，如果任何 record 的
+        #   content/thinking_content 包含 "\nrecords:" 模式，会匹配到错误位置，
+        #   导致 _update_summary_in_file 截断 records 段。
+        # 修复方案: 使用正则匹配文件顶层的 "records:" 行（行首无缩进），
+        #   排除 record 内容中的嵌套匹配。
+        _records_marker = re.search(r'^records:', text, re.MULTILINE)
+        if _records_marker is None:
             logger.warning("YAML 文件格式异常，无法定位 records 段: %s", file_path.name)
             return
-
-        new_text = new_summary_text + text[marker_idx:]
+        marker_idx = _records_marker.start()
+        # 保留 records: 及其后面的所有内容
+        new_text = new_summary_text + "\n" + text[marker_idx:]
         file_path.write_text(new_text, encoding="utf-8")
 
     def _detect_active_part(

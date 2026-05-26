@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
-from src.memory.compressor.models import MemoryExtraction, PreservedZone
+from memory.compressor.models import MemoryExtraction, PreservedZone
 
 logger = logging.getLogger(__name__)
 

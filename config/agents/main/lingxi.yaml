@@ -305,7 +305,7 @@ output_schema: null
 version: "1.0.0"
 is_active: true
 status: "active"
-max_iterations: 150
+max_iterations: -1
 max_reminders: 10
 timeout_seconds: -1
 

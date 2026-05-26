@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import uuid
 import threading
 import time
 from dataclasses import dataclass, field
@@ -57,9 +58,13 @@ class PipelineEntry:
 
     engine: Any  # PipelineEngine（用 Any 避免循环导入）
     bridge: Any | None = None  # PipelineStreamBridge | None
+    drain_task: Any | None = None  # asyncio.Task | None — 后台 drain_loop 任务引用
     thread_id: str = ""
     tags: dict[str, str] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+
+
+MAX_TAGS_PER_PIPELINE = 8
 
 
 class EngineRegistry:
@@ -97,6 +102,10 @@ class EngineRegistry:
     ) -> PipelineEntry:
         """注册管道引擎实例。
 
+        如果同 pipeline_id 已有 entry，保留其 bridge 和 drain_task，
+        避免引擎 run() 开头 unregister + _run_loop register 的过程中
+        丢失已绑定的流式桥接。
+
         Args:
             pipeline_id: 管道 ID
             engine: PipelineEngine 实例
@@ -106,19 +115,150 @@ class EngineRegistry:
         Returns:
             注册的 PipelineEntry
         """
+        existing = self._engines.get(pipeline_id)
         entry = PipelineEntry(
             engine=engine,
             thread_id=thread_id,
             tags=tags or {},
         )
+        if existing is not None:
+            entry.bridge = existing.bridge
+            entry.drain_task = existing.drain_task
         self._engines[pipeline_id] = entry
         logger.info(
-            "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d",
+            "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d preserved_bridge=%s",
             pipeline_id[:12], thread_id[:12] if thread_id else "",
             getattr(engine, "is_suspended", "?"),
             len(self._engines),
+            entry.bridge is not None,
         )
         return entry
+
+    def register_pipeline(
+        self,
+        *,
+        pipeline_id: str = "",
+        thread_id: str = "",
+        tags: dict[str, str] | None = None,
+        input_route_table: Any = None,
+        output_route_table: Any = None,
+        plugin_registry: Any = None,
+        services: dict[str, Any] | None = None,
+    ) -> PipelineEntry | None:
+        """创建管道引擎并注册到 Registry。
+
+        统一的引擎创建入口，替代 task_executor._create_pipeline_engine、
+        PipelineContext.get_or_create_engine、message_bus 中的直接构造。
+        内部创建 PipelineEngine 实例并注册。
+
+        Args:
+            pipeline_id: 指定 ID，空则自动生成
+            thread_id: WebSocket 线程 ID
+            tags: 关联标签，如 {"task_id": "xxx", "mode": "interactive"}
+            input_route_table: 输入路由表
+            output_route_table: 输出路由表
+            plugin_registry: 插件注册表
+            services: 服务容器
+
+        Returns:
+            PipelineEntry，创建失败返回 None
+
+        Raises:
+            ValueError: 标签数量超过 MAX_TAGS_PER_PIPELINE
+        """
+        if tags and len(tags) > MAX_TAGS_PER_PIPELINE:
+            raise ValueError(
+                f"标签数量超过限制: {len(tags)} > {MAX_TAGS_PER_PIPELINE}"
+            )
+
+        if pipeline_id and pipeline_id in self._engines:
+            return self._engines[pipeline_id]
+
+        if not input_route_table or not output_route_table or not plugin_registry:
+            logger.warning(
+                "[EngineRegistry] register_pipeline FAILED: irt=%s ort=%s pr=%s pid=%s",
+                bool(input_route_table), bool(output_route_table), bool(plugin_registry),
+                pipeline_id[:12] if pipeline_id else "",
+            )
+            return None
+
+        from pipeline.engine import PipelineEngine
+
+        svc = services or {}
+        checkpoint_mgr = svc.get("checkpoint_manager") if svc else None
+
+        engine = PipelineEngine(
+            input_route_table=input_route_table,
+            output_route_table=output_route_table,
+            plugin_registry=plugin_registry,
+            services=svc,
+            checkpoint_manager=checkpoint_mgr,
+        )
+
+        if pipeline_id:
+            engine._pipeline_id = pipeline_id
+
+        logger.info("[EngineRegistry] register_pipeline: pid=%s tid=%s", engine._pipeline_id[:12], thread_id[:12] if thread_id else "")
+        return self.register(engine._pipeline_id, engine, thread_id=thread_id, tags=tags)
+
+    def revive_pipeline(
+        self,
+        pipeline_id: str,
+        *,
+        thread_id: str = "",
+        tags: dict[str, str] | None = None,
+        input_route_table: Any = None,
+        output_route_table: Any = None,
+        plugin_registry: Any = None,
+        services: dict[str, Any] | None = None,
+    ) -> PipelineEntry | None:
+        """从历史记录恢复管道引擎。
+
+        当引擎不在 Registry 中时，尝试从持久化存储加载历史记录，
+        创建新 PipelineEngine 并注册。用于重启后恢复、超时清理后恢复。
+
+        Args:
+            pipeline_id: 管道 ID
+            thread_id: WebSocket 线程 ID
+            tags: 关联标签
+            input_route_table: 输入路由表
+            output_route_table: 输出路由表
+            plugin_registry: 插件注册表
+            services: 服务容器
+
+        Returns:
+            PipelineEntry，恢复失败返回 None
+        """
+        if pipeline_id in self._engines:
+            return self._engines[pipeline_id]
+
+        if not input_route_table or not output_route_table or not plugin_registry:
+            logger.warning(
+                "[EngineRegistry] revive_pipeline 缺少必要参数: pipeline=%s",
+                pipeline_id[:12],
+            )
+            return None
+
+        from pipeline.engine import PipelineEngine
+
+        svc = services or {}
+        checkpoint_mgr = svc.get("checkpoint_manager") if svc else None
+
+        engine = PipelineEngine(
+            input_route_table=input_route_table,
+            output_route_table=output_route_table,
+            plugin_registry=plugin_registry,
+            services=svc,
+            checkpoint_manager=checkpoint_mgr,
+        )
+        engine._pipeline_id = pipeline_id
+
+        logger.info(
+            "[EngineRegistry] 管道恢复: 创建新引擎 pipeline=%s thread=%s",
+            pipeline_id[:12], thread_id[:12] if thread_id else "",
+        )
+
+        return self.register(pipeline_id, engine, thread_id=thread_id, tags=tags)
 
     def unregister(self, pipeline_id: str) -> PipelineEntry | None:
         """注销管道引擎实例。
@@ -174,6 +314,78 @@ class EngineRegistry:
         if entry:
             entry.bridge = bridge
 
+    def cancel_drain_task(self, pipeline_id: str) -> None:
+        """取消管道的后台 drain_loop 任务。
+
+        先通过 bridge.stop() 发送哨兵值立即终止 drain_loop，
+        再取消 asyncio.Task 确保协程退出。
+        供 stop_generation 等外部场景即时停止流式输出。
+
+        Args:
+            pipeline_id: 管道 ID
+        """
+        entry = self._engines.get(pipeline_id)
+        if entry is None:
+            return
+        if entry.bridge is not None:
+            entry.bridge.stop()
+        if entry.drain_task is not None and not entry.drain_task.done():
+            entry.drain_task.cancel()
+        entry.drain_task = None
+
+    def ensure_bridge(
+        self,
+        pipeline_id: str,
+        sink: Any,
+        *,
+        auto_start_drain: bool = False,
+        engine: Any = None,
+        engine_task: Any = None,
+    ) -> Any | None:
+        """确保管道有活跃的 bridge，无则创建，有则复用并 reset。
+
+        统一管理 bridge 的生命周期，消除 message_bus 和 task_executor
+        中重复的 bridge 创建/复用逻辑。
+
+        Args:
+            pipeline_id: 管道 ID
+            sink: IOutputSink 实例
+            auto_start_drain: 是否自动启动后台 drain_loop
+            engine: PipelineEngine 实例（auto_start_drain=True 时需要）
+            engine_task: 引擎异步 Task（可选，用于 drain_loop 跟踪）
+
+        Returns:
+            PipelineStreamBridge 实例，失败返回 None
+        """
+        entry = self._engines.get(pipeline_id)
+        if not entry:
+            return None
+
+        bridge = entry.bridge
+        if bridge is None:
+            from pipeline.stream_bridge import PipelineStreamBridge
+            bridge = PipelineStreamBridge(
+                pipeline_id=pipeline_id,
+                output_sink=sink,
+            )
+            entry.bridge = bridge
+        else:
+            # 停止旧 drain task：先发哨兵值立即终止 drain_loop，
+            # 再取消 asyncio.Task 确保协程退出，避免双消费者竞争。
+            if entry.drain_task is not None and not entry.drain_task.done():
+                bridge.stop()
+                entry.drain_task.cancel()
+                entry.drain_task = None
+            bridge.reset_for_new_turn(
+                message_id=f"msg_{uuid.uuid4().hex[:12]}"
+            )
+
+        if auto_start_drain and engine is not None:
+            from pipeline.message_bus import _start_bg_drain
+            _start_bg_drain(pipeline_id, bridge, engine, engine_task)
+
+        return bridge
+
     def update_thread_id(self, pipeline_id: str, thread_id: str) -> None:
         """更新管道的 thread_id 映射。
 
@@ -201,19 +413,28 @@ class EngineRegistry:
         entry = self._engines.get(pipeline_id)
         return entry.thread_id if entry else ""
 
-    def find_by_tag(self, key: str, value: str) -> list[PipelineEntry]:
+    def find_by_tag(self, *args: str) -> list[PipelineEntry]:
         """按关联标签查找管道条目。
 
+        支持单标签和多标签查询：
+        - find_by_tag("task_id", "task-1")
+        - find_by_tag("task_id", "task-1", "mode", "interactive")
+
         Args:
-            key: 标签键，如 "task_id"
-            value: 标签值
+            args: key-value 对，必须成对出现。
 
         Returns:
             匹配的 PipelineEntry 列表
+
+        Raises:
+            ValueError: 参数数量不为偶数
         """
+        if len(args) % 2 != 0:
+            raise ValueError("find_by_tag 参数必须为 key-value 对，如 find_by_tag('k', 'v') 或 find_by_tag('k1', 'v1', 'k2', 'v2')")
+        pairs = [(args[i], args[i + 1]) for i in range(0, len(args), 2)]
         return [
             entry for entry in self._engines.values()
-            if entry.tags.get(key) == value
+            if all(entry.tags.get(k) == v for k, v in pairs)
         ]
 
     def find_by_thread_id(self, thread_id: str) -> list[PipelineEntry]:

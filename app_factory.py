@@ -38,7 +38,6 @@ import stream_handler
 from stream_handler import (
     PipelineContext,
     _init_pipeline_context,
-    run_stream_session,
 )
 from static_files import mount_media_static_files
 
@@ -153,6 +152,14 @@ def create_combined_app() -> FastAPI:
                     logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
 
         try:
+            from pipeline.message_bus import restore_pipelines_on_startup
+            count = await restore_pipelines_on_startup()
+            if count:
+                logger.info("启动恢复: 已恢复 %d 个管道", count)
+        except Exception as exc:
+            logger.debug("restore_pipelines_on_startup skipped: %s", exc)
+
+        try:
             from triggers.manager import get_trigger_manager
             import asyncio
             get_trigger_manager().set_main_loop(asyncio.get_running_loop())
@@ -208,15 +215,6 @@ def create_combined_app() -> FastAPI:
 
         await websocket.accept()
         ws_interaction_notifier.register_global(user_id, websocket)
-
-        # BUG-FIX-fix_20260512_stop_generation_global_ws:
-        # 问题根因: /ws/chat 全局端点的 stop_generation 处理只发送假的 stopped 状态，
-        #           没有实际取消流式任务和管道引擎运行，导致前端点击停止按钮后
-        #           后端继续生成并消耗资源。
-        # 修复方案: 添加 thread_id → (stream_task, stop_event) 追踪字典，
-        #           在创建流式任务时存储引用，在 stop_generation 时实际取消。
-        _thread_stream_tasks: dict[str, asyncio.Task] = {}
-        _thread_stop_events: dict[str, asyncio.Event] = {}
 
         try:
             await websocket.send_text(json.dumps({
@@ -287,7 +285,6 @@ def create_combined_app() -> FastAPI:
                     _msg_id = uuid.uuid4().hex[:12]
                     _client_msg_id = msg_data.get("client_message_id", "")
                     _pipeline_id = msg_data.get("pipeline_id", "")
-                    _stop_evt = asyncio.Event()
                     _history = conversation_histories.get(thread_id, [])
 
                     # SIMPLIFY-fix_20260522_unified_pipeline_routing:
@@ -313,88 +310,51 @@ def create_combined_app() -> FastAPI:
                     # 创建 output_sink
                     _sink = TargetedSink(ws_interaction_notifier, thread_id) if _pipeline_ctx and _pipeline_ctx.available else None
 
-                    # 统一路径：一次调用搞定消息投递 + 流式输出
+                    _registry = get_engine_registry()
+
+                    if not _target_pid or not _registry.get(_target_pid):
+                        _sess = api_store.get_session(thread_id)
+                        _new_pid = _target_pid or ""
+                        if not _new_pid and _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
+                            _new_pid = _pipeline_ctx.engine.pipeline_id
+                        if not _registry.get(_new_pid):
+                            _provider = None
+                            try:
+                                from infrastructure.service_provider import get_service_provider
+                                _provider = get_service_provider()
+                            except Exception:
+                                pass
+                            _reg_result = _registry.register_pipeline(
+                                pipeline_id=_new_pid,
+                                thread_id=thread_id,
+                                tags={"mode": "interactive", "channel": "ws", "session_id": thread_id},
+                                input_route_table=_provider.get("input_route_table") if _provider else None,
+                                output_route_table=_provider.get("output_route_table") if _provider else None,
+                                plugin_registry=_provider.get("plugin_registry") if _provider else None,
+                                services=_provider._services if _provider else {},
+                            )
+                            if _reg_result:
+                                _target_pid = _reg_result.engine.pipeline_id
+                                if _sess and not _sess.active_pipeline_id:
+                                    _sess.active_pipeline_id = _target_pid
+
                     _result = await send_pipeline_message(
                         _target_pid, _user_content,
                         output_sink=_sink,
                         agent_config=_agent_config,
                         conversation_history=_history if _history else None,
                         streaming=True,
+                        message_id=_msg_id,
+                        thread_id=thread_id,
                     )
 
                     if _result.success:
-                        # BUG-FIX-fix_20260523_pipeline_received_missing:
-                        # 问题根因: send_pipeline_message 成功后没有回发 pipeline_received，
-                        #   前端 ACK 计时器 10 秒超时后重发消息，导致重复注入。
-                        #   后端虽然正常输出，但前端已放弃等待，表现为"前端一点反应都没有"。
-                        # 修复方案: 在消息注入成功后立即回发 pipeline_received 确认事件。
-                        try:
-                            await websocket.send_text(json.dumps({
-                                "type": "pipeline_received",
-                                "data": {
-                                    "pipeline_id": _target_pid,
-                                    "thread_id": thread_id,
-                                    "message_id": _msg_id,
-                                },
-                            }, ensure_ascii=False))
-                        except Exception:
-                            pass
-
-                        if _result.bridge is not None:
-                            _stream_task = await run_stream_session(
-                                pipeline_id=_target_pid,
-                                message_id=_msg_id,
-                                thread_id=thread_id,
-                                bridge=_result.bridge,
-                                user_content=_user_content,
-                                ws_notifier=ws_interaction_notifier,
-                            )
-                            _thread_stream_tasks[thread_id] = _stream_task
                         continue
 
-                    if _raw_pipeline_id:
-                        await websocket.send_text(json.dumps({
-                            "type": "stream_error",
-                            "data": {"message_id": _msg_id, "error": "子管道不可用，任务可能已结束", "pipeline_id": _raw_pipeline_id},
-                        }, ensure_ascii=False))
-                        continue
-
-                    _old_task = _thread_stream_tasks.get(thread_id)
-                    if _old_task and not _old_task.done():
-                        _old_stop = _thread_stop_events.get(thread_id)
-                        if _old_stop:
-                            _old_stop.set()
-                        _old_task.cancel()
-                    _thread_stop_events[thread_id] = _stop_evt
-
-                    if _pipeline_ctx and _pipeline_ctx.available:
-                        try:
-                            await websocket.send_text(json.dumps({
-                                "type": "pipeline_received",
-                                "data": {
-                                    "pipeline_id": _pipeline_ctx.engine.pipeline_id if _pipeline_ctx.engine else "",
-                                    "thread_id": thread_id,
-                                    "message_id": _msg_id,
-                                },
-                            }, ensure_ascii=False))
-                        except Exception:
-                            pass
-                        _stream_task = await run_stream_session(
-                            pipeline_id="",
-                            message_id=_msg_id,
-                            thread_id=thread_id,
-                            conversation_history=_history,
-                            ws_notifier=ws_interaction_notifier,
-                            stop_event=_stop_evt,
-                            user_content=_user_content,
-                            pipeline_ctx=_pipeline_ctx,
-                        )
-                        _thread_stream_tasks[thread_id] = _stream_task
-                    else:
-                        await websocket.send_text(json.dumps({
-                            "type": "stream_error",
-                            "data": {"message_id": _msg_id, "error": "管道引擎未初始化", "pipeline_id": ""},
-                        }, ensure_ascii=False))
+                    await websocket.send_text(json.dumps({
+                        "type": "stream_error",
+                        "data": {"message_id": _msg_id, "error": _result.error or "管道不可用", "pipeline_id": _target_pid},
+                    }, ensure_ascii=False))
                     continue
                 elif msg_type == "interaction_response":
                     resp_data = msg_data.get("data", {}) if isinstance(msg_data.get("data"), dict) else msg_data
@@ -420,19 +380,7 @@ def create_combined_app() -> FastAPI:
                     #   5. 发送 state_change 回前端
                     logger.info("[GlobalWS] 用户请求停止生成: thread_id=%s user=%s", thread_id[:12], user_id[:12])
 
-                    # 1. 设置 stop_event 并取消流式任务
-                    _stop_evt = _thread_stop_events.get(thread_id)
-                    if _stop_evt:
-                        _stop_evt.set()
-                    _stream_task = _thread_stream_tasks.get(thread_id)
-                    if _stream_task and not _stream_task.done():
-                        _stream_task.cancel()
-                        try:
-                            await _stream_task
-                        except asyncio.CancelledError:
-                            pass
-                    _thread_stream_tasks.pop(thread_id, None)
-                    _thread_stop_events.pop(thread_id, None)
+                    # 1. 通过 Registry 取消关联管道的 drain_task
 
                     # 2. 尝试查找并取消关联的管道引擎
                     #    优先使用 pipeline_id 精确取消，不存在时回退到全量取消。
@@ -443,17 +391,20 @@ def create_combined_app() -> FastAPI:
                     # 修复方案:
                     #   1. 优先从消息中读取 pipeline_id，仅取消指定管道（精确取消）
                     #   2. 若 pipeline_id 不存在，保持原有全量取消逻辑（向后兼容）
+                    #   3. 通过 EngineRegistry.cancel_drain_task 即时停止后台 drain
                     _pipeline_id = msg_data.get("pipeline_id", "")
                     _all_pipeline_ids: set[str] = set()
                     try:
                         from pipeline.message_bus import _find_engine
+                        from pipeline.registry import get_engine_registry as _get_reg
                         if _pipeline_id:
                             _all_pipeline_ids.add(_pipeline_id)
                         elif not _pipeline_id:
-                            from pipeline.registry import get_engine_registry
-                            for _entry in get_engine_registry().find_by_thread_id(thread_id):
+                            for _entry in _get_reg().find_by_thread_id(thread_id):
                                 _all_pipeline_ids.add(_entry.engine.pipeline_id)
                         for _pid in _all_pipeline_ids:
+                            # 即时停止后台 drain_loop（bridge.stop 哨兵 + task.cancel）
+                            _get_reg().cancel_drain_task(_pid)
                             _eng, _st = _find_engine(_pid)
                             if _eng:
                                 # 取消引擎的挂起状态

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -64,6 +65,8 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
         return engine, "suspended"
     if getattr(engine, "is_running", False):
         return engine, "running"
+    if not getattr(engine, "_run_started", False):
+        return engine, "idle"
     return None, ""
 
 
@@ -93,46 +96,6 @@ async def _auto_complete_interaction(pipeline_id: str) -> None:
         logger.debug("[MessageBus] 自动完成交互检查失败（可忽略）: %s", exc)
 
 
-def _update_bridge(pipeline_id: str, engine: Any, output_sink: Any) -> None:
-    """为管道创建或复用 bridge，并关联到 EngineRegistry。
-
-    当 output_sink 存在时，检查 EngineRegistry 中是否已有 bridge；
-    若无则新建 PipelineStreamBridge 并注册，同时将 bridge.on_chunk
-    设置到引擎的 _saved_on_chunk 和 _suspended_state 中。
-
-    Args:
-        pipeline_id: 管道 ID
-        engine: PipelineEngine 实例
-        output_sink: IOutputSink 实例
-    """
-    from pipeline.registry import get_engine_registry
-    from pipeline.stream_bridge import PipelineStreamBridge
-
-    registry = get_engine_registry()
-    entry = registry.get(pipeline_id)
-    if entry is None:
-        return
-    bridge = entry.bridge
-    if bridge is None:
-        import uuid
-
-        bridge = PipelineStreamBridge(
-            pipeline_id=pipeline_id,
-            output_sink=output_sink,
-            message_id=f"msg_{uuid.uuid4().hex[:12]}",
-        )
-        registry.set_bridge(pipeline_id, bridge)
-    _set_streaming = getattr(engine, "set_streaming_context", None)
-    if _set_streaming:
-        _set_streaming(bridge.on_chunk, streaming=True)
-    else:
-        engine._saved_on_chunk = bridge.on_chunk
-        engine._saved_streaming = True
-    if getattr(engine, "_suspended_state", None) is not None:
-        engine._suspended_state["on_chunk"] = bridge.on_chunk
-        engine._suspended_state["streaming"] = True
-
-
 async def send_pipeline_message(
     pipeline_id: str,
     message: str,
@@ -146,6 +109,8 @@ async def send_pipeline_message(
     streaming: bool = False,
     on_chunk: Callable | None = None,
     output_sink: Any = None,
+    message_id: str = "",
+    thread_id: str = "",
     **kwargs,
 ) -> InjectResult:
     """统一消息注入入口 — 所有外部调用方都使用此函数。
@@ -177,45 +142,126 @@ async def send_pipeline_message(
     if not message:
         return InjectResult(success=False, error="message 不能为空", method="failed")
 
+    _msg_source = (metadata or {}).get("source", "user")
+    _event_sink = output_sink or _create_sink(pipeline_id)
+
+    if _msg_source != "user" and _event_sink is not None:
+        try:
+            _level = "info" if _msg_source in ("system", "trigger") else "warning"
+            await _event_sink.send_event({
+                "type": "system_notification",
+                "data": {
+                    "content": message,
+                    "level": _level,
+                    "notificationType": f"{_msg_source}_notification",
+                    "pipeline_id": pipeline_id,
+                },
+            })
+        except Exception:
+            pass
+
     engine, state = _find_engine(pipeline_id)
 
     if engine is not None:
         try:
-            logger.info(
-                "[MessageBus] 引擎存在，调用 inject_message | pipeline=%s | state=%s | msg_len=%d",
-                pipeline_id[:12], state, len(message),
-            )
+            logger.info("[MessageBus] inject ENTER | pipeline=%s state=%s", pipeline_id[:12], state)
+
+            if state == "idle":
+                _sink = output_sink or _create_sink(pipeline_id)
+                if _sink is not None:
+                    from pipeline.registry import get_engine_registry
+                    _registry = get_engine_registry()
+                    bridge = _registry.ensure_bridge(pipeline_id, _sink)
+                    _on_chunk = bridge.on_chunk if bridge else lambda chunk: None
+                    engine_task = asyncio.create_task(
+                        engine.run(
+                            user_input=message,
+                            agent_config=agent_config,
+                            conversation_history=conversation_history or [],
+                            task_id=task_id,
+                            workspace=workspace,
+                            project_root="",
+                            streaming=True,
+                            on_chunk=_on_chunk,
+                        )
+                    )
+                    _start_bg_drain(pipeline_id, bridge, engine, engine_task=engine_task)
+                    logger.info("[MessageBus] idle engine started | pipeline=%s", pipeline_id[:12])
+                    if _msg_source == "user" and _event_sink is not None:
+                        try:
+                            await _event_sink.send_event({
+                                "type": "pipeline_received",
+                                "data": {
+                                    "pipeline_id": pipeline_id,
+                                    "thread_id": thread_id,
+                                    "message_id": message_id,
+                                    "content": message,
+                                    "source": _msg_source,
+                                },
+                            })
+                        except Exception:
+                            pass
+                    return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
+                return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
+
             msg_source = (metadata or {}).get("source", "user")
             engine.inject_message(message, source=msg_source)
-            if output_sink is not None:
-                _update_bridge(pipeline_id, engine, output_sink)
+            method = "wake" if state == "suspended" else "notification"
+
+            from pipeline.registry import get_engine_registry
+            registry = get_engine_registry()
+            bridge = registry.get_bridge(pipeline_id)
+            if state == "suspended":
+                _sink = output_sink or _create_sink(pipeline_id)
+                if _sink is not None:
+                    bridge = registry.ensure_bridge(
+                        pipeline_id, _sink,
+                        auto_start_drain=True,
+                        engine=engine,
+                    )
+                    logger.info("[MessageBus] ensure_bridge for suspended | pipeline=%s has_bridge=%s", pipeline_id[:12], bridge is not None)
+                else:
+                    logger.warning("[MessageBus] FAILED to create sink for suspended | pipeline=%s", pipeline_id[:12])
+
             if state == "running" and msg_source == "user":
                 await _auto_complete_interaction(pipeline_id)
-            method = "wake" if state == "suspended" else "notification"
+
             logger.info(
-                "[MessageBus] 消息已注入管道 | pipeline=%s | method=%s | preview=%.60s",
-                pipeline_id, method, message,
+                "[MessageBus] 消息已注入 | pipeline=%s method=%s",
+                pipeline_id[:12], method,
             )
-            # 获取关联的 bridge 用于返回
-            from pipeline.registry import get_engine_registry
-            bridge = get_engine_registry().get_bridge(pipeline_id)
+            if _msg_source == "user" and _event_sink is not None:
+                try:
+                    await _event_sink.send_event({
+                        "type": "pipeline_received",
+                        "data": {
+                            "pipeline_id": pipeline_id,
+                            "thread_id": thread_id,
+                            "message_id": message_id,
+                            "content": message,
+                            "source": _msg_source,
+                        },
+                    })
+                except Exception:
+                    pass
             return InjectResult(
                 success=True, method=method, pipeline_id=pipeline_id, bridge=bridge,
             )
         except Exception as exc:
             logger.warning("[MessageBus] 消息注入失败: %s", exc)
 
-    logger.info(
-        "[MessageBus] 引擎未找到，尝试 revive | pipeline=%s | task_id=%s",
-        pipeline_id[:12], task_id[:12] if task_id else "(none)",
+    logger.warning(
+        "[MessageBus] 引擎未找到，尝试 revive | pipeline=%s",
+        pipeline_id[:12],
     )
 
     revive_bridge = None
-    if output_sink is not None:
+    _revive_sink = output_sink or _create_sink(pipeline_id)
+    if _revive_sink is not None:
         from pipeline.stream_bridge import PipelineStreamBridge
         revive_bridge = PipelineStreamBridge(
             pipeline_id=pipeline_id,
-            output_sink=output_sink,
+            output_sink=_revive_sink,
         )
 
     revive_result = await _try_revive_pipeline(
@@ -233,6 +279,21 @@ async def send_pipeline_message(
         from pipeline.registry import get_engine_registry
         get_engine_registry().set_bridge(pipeline_id, revive_bridge)
         revive_result.bridge = revive_bridge
+
+    if _msg_source == "user" and _event_sink is not None and revive_result.success:
+        try:
+            await _event_sink.send_event({
+                "type": "pipeline_received",
+                "data": {
+                    "pipeline_id": pipeline_id,
+                    "thread_id": thread_id,
+                    "message_id": message_id,
+                    "content": message,
+                    "source": _msg_source,
+                },
+            })
+        except Exception:
+            pass
 
     return revive_result
 
@@ -318,44 +379,32 @@ async def _try_revive_pipeline(
             )
 
     try:
-        from pipeline.engine import PipelineEngine
+        from pipeline.registry import get_engine_registry
+
+        _registry = get_engine_registry()
 
         input_route_table = provider.get("input_route_table") if provider else None
         output_route_table = provider.get("output_route_table") if provider else None
         plugin_registry = provider.get("plugin_registry") if provider else None
-
-        if not input_route_table or not output_route_table or not plugin_registry:
-            logger.warning("[MessageBus] 缺少路由表或插件注册表，无法重建管道: pipeline=%s", pipeline_id)
-            return InjectResult(
-                success=False,
-                error="缺少路由表或插件注册表",
-                method="failed",
-                pipeline_id=pipeline_id,
-            )
-
         services = provider._services if provider else {}
 
-        new_engine = PipelineEngine(
+        entry = _registry.revive_pipeline(
+            pipeline_id,
             input_route_table=input_route_table,
             output_route_table=output_route_table,
             plugin_registry=plugin_registry,
             services=services,
-            checkpoint_manager=services.get("checkpoint_manager"),
         )
-        new_engine._pipeline_id = pipeline_id
+        if entry is None:
+            logger.warning("[MessageBus] 管道恢复失败（缺少必要参数）: pipeline=%s", pipeline_id[:12])
+            return InjectResult(
+                success=False,
+                error="管道恢复失败",
+                method="failed",
+                pipeline_id=pipeline_id,
+            )
 
-        # BUG-FIX-fix_20260524_msg_render:
-        # 问题根因: _try_revive_pipeline 创建新引擎后未注册到 EngineRegistry，
-        #   导致 app_factory.py 中 get_engine_registry().get(_target_pid) 返回 None，
-        #   _drain_engine 为 None，后续 handle_stream_request 无法找到引擎，
-        #   消息发送后前端无渲染。
-        # 修复方案: 在 await engine.run() 之前，将引擎注册到 EngineRegistry，
-        #   使 app_factory.py 能正确获取引擎实例。
-        # 影响范围: revive 路径（重启后发送消息）。
-        # 修复日期: 2026-05-24
-        from pipeline.registry import get_engine_registry
-        get_engine_registry().register(pipeline_id, new_engine)
-        logger.info("[MessageBus] 管道复活: 引擎已注册到 EngineRegistry: pipeline=%s", pipeline_id[:12])
+        new_engine = entry.engine
 
         # BUG-FIX-fix_20260524_deadlock:
         # 问题根因: await engine.run() 在消息处理后引擎会进入 suspended 状态，
@@ -366,7 +415,7 @@ async def _try_revive_pipeline(
         #   _try_revive_pipeline 立即返回，让 app_factory.py 启动 drain_loop。
         #   engine.run() 在后台执行，通过 on_chunk 回调将 LLM 输出发送到 bridge。
         import asyncio
-        asyncio.create_task(
+        engine_task = asyncio.create_task(
             new_engine.run(
                 user_input=message,
                 agent_config=agent_config,
@@ -379,6 +428,11 @@ async def _try_revive_pipeline(
                 on_chunk=on_chunk or (lambda chunk: None),
             )
         )
+
+        # BUG-FIX-fix_20260525_realtime_render:
+        # revive 路径也需要 drain_loop 消费队列推送到前端
+        if revive_bridge is not None:
+            _start_bg_drain(pipeline_id, revive_bridge, new_engine, engine_task)
 
         logger.info("[MessageBus] 管道复活已启动(异步): pipeline=%s", pipeline_id[:12])
         return InjectResult(success=True, method="revive", pipeline_id=pipeline_id)
@@ -478,3 +532,162 @@ def _load_agent_config(task_id: str, provider: Any) -> Any | None:
         pass
 
     return None
+
+
+def _create_sink(pipeline_id: str) -> Any | None:
+    """从 registry 获取 thread_id 创建 TargetedSink。"""
+    try:
+        from pipeline.registry import get_engine_registry
+        from pipeline.stream_bridge import TargetedSink
+
+        registry = get_engine_registry()
+        entry = registry.get(pipeline_id)
+        thread_id = entry.thread_id if entry else ""
+        if not thread_id:
+            logger.warning("[MessageBus] _create_sink: no thread_id | pipeline=%s entry=%s", pipeline_id[:12], entry is not None)
+            return None
+
+        from infrastructure.service_provider import get_service_provider
+        sp = get_service_provider()
+        notifier = sp.get("ws_interaction_notifier") if sp else None
+        if not notifier:
+            logger.warning("[MessageBus] _create_sink: no notifier | pipeline=%s sp=%s", pipeline_id[:12], sp is not None)
+            return None
+
+        return TargetedSink(notifier, thread_id)
+    except Exception:
+        return None
+
+
+def _start_bg_drain(
+    pipeline_id: str,
+    bridge: Any,
+    engine: Any,
+    engine_task: asyncio.Task | None = None,
+) -> None:
+    """后台启动 drain_loop 消费 bridge 队列，推送事件到前端。
+
+    创建 drain 任务并将 asyncio.Task 引用存入 EngineRegistry，
+    供 ensure_bridge 复用 bridge 时取消旧 drain，以及
+    stop_generation 场景即时停止流式输出。
+    """
+    async def _engine_tracker() -> None:
+        await asyncio.sleep(0.5)
+        while True:
+            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
+                break
+            await asyncio.sleep(0.3)
+
+    tracker = engine_task or asyncio.create_task(_engine_tracker())
+
+    async def _drain_and_cleanup() -> None:
+        try:
+            result = await bridge.drain_loop(
+                tracker,
+                heartbeat_interval=5.0,
+                suspend_check=lambda: getattr(engine, "is_suspended", False),
+            )
+            content = result.get("accumulated_content", "")
+            if content:
+                await bridge.send_new_message(content, sequence=1)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("[MessageBus] bg drain 异常: pipeline=%s error=%s", pipeline_id[:12], exc)
+        finally:
+            if engine_task is None:
+                tracker.cancel()
+            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
+                try:
+                    from pipeline.registry import get_engine_registry
+                    reg = get_engine_registry()
+                    # 清理 drain_task 引用（仅当仍是自身时）
+                    entry = reg.get(pipeline_id)
+                    if entry and entry.drain_task is asyncio.current_task():
+                        entry.drain_task = None
+                    reg.unregister(pipeline_id)
+                except Exception:
+                    pass
+            else:
+                # 引擎仍在运行/挂起，仅清理 drain_task 引用
+                try:
+                    from pipeline.registry import get_engine_registry
+                    entry = get_engine_registry().get(pipeline_id)
+                    if entry and entry.drain_task is asyncio.current_task():
+                        entry.drain_task = None
+                except Exception:
+                    pass
+
+    task = asyncio.create_task(_drain_and_cleanup())
+    # 将 drain task 引用存入 EngineRegistry，供外部取消
+    try:
+        from pipeline.registry import get_engine_registry
+        entry = get_engine_registry().get(pipeline_id)
+        if entry:
+            entry.drain_task = task
+    except Exception:
+        pass
+
+
+async def restore_pipelines_on_startup() -> int:
+    """应用启动时恢复 running/pending 状态的管道。
+
+    从持久化存储加载未完成的任务，为每个任务创建引擎并注册到 Registry，
+    使 send_pipeline_message 能直接找到引擎而无需走 revive 路径。
+
+    Returns:
+        恢复的管道数量
+    """
+    try:
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+    except Exception:
+        logger.warning("[MessageBus] restore_pipelines_on_startup: ServiceProvider 不可用")
+        return 0
+
+    task_service = provider.get("task_service") if provider else None
+    if not task_service:
+        logger.info("[MessageBus] restore_pipelines_on_startup: task_service 不可用，跳过")
+        return 0
+
+    restored = 0
+    for status in ("running", "pending"):
+        try:
+            tasks = task_service.list_tasks(status=status) if hasattr(task_service, "list_tasks") else []
+        except Exception:
+            tasks = []
+
+        for task in tasks:
+            pipeline_id = task.get("pipeline_id") if isinstance(task, dict) else getattr(task, "pipeline_id", None)
+            if not pipeline_id:
+                continue
+
+            from pipeline.registry import get_engine_registry
+            registry = get_engine_registry()
+
+            if registry.get(pipeline_id):
+                continue
+
+            input_route_table = provider.get("input_route_table") if provider else None
+            output_route_table = provider.get("output_route_table") if provider else None
+            plugin_registry = provider.get("plugin_registry") if provider else None
+            services = provider._services if provider else {}
+
+            entry = registry.revive_pipeline(
+                pipeline_id,
+                input_route_table=input_route_table,
+                output_route_table=output_route_table,
+                plugin_registry=plugin_registry,
+                services=services,
+                tags={"mode": "interactive", "task_id": task.get("task_id", "") if isinstance(task, dict) else getattr(task, "task_id", ""), "source": "startup_restore"},
+            )
+            if entry:
+                restored += 1
+                logger.info(
+                    "[MessageBus] 启动恢复: pipeline=%s status=%s",
+                    pipeline_id[:12], status,
+                )
+
+    if restored:
+        logger.info("[MessageBus] restore_pipelines_on_startup 完成: 恢复 %d 个管道", restored)
+    return restored

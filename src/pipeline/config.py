@@ -364,14 +364,16 @@ def build_plugin_registry(
         try:
             plugin_cls = _resolve_plugin_class(plugin_conf)
             if plugin_cls is None:
-                logger.warning("Plugin config missing 'class' or 'name' field, skipping")
-                continue
+                raise ImportError(
+                    f"Plugin '{plugin_id}' could not be resolved: "
+                    "config must specify 'class' or 'name'"
+                )
             plugin_instance: IPlugin = plugin_cls(config=plugin_config)
             registry.register(plugin_instance)
             plugin_cls.register_types(type_slot)
             logger.info("Plugin loaded: %s", plugin_id)
-        except Exception as exc:
-            logger.warning("Failed to load plugin '%s': %s", plugin_id, exc)
+        except Exception:
+            raise
 
     # 注册核心插件
     for core_type, core_conf in config.core_plugins.items():
@@ -445,7 +447,9 @@ def build_plugin_registry(
             plugin_cls.register_types(type_slot)
             logger.info("Core plugin loaded: %s (core_type=%s)", class_path, core_type)
         except Exception as exc:
-            logger.error("Failed to load core plugin '%s': %s", class_path, exc)
+            raise ImportError(
+                f"Core plugin '{core_type}' (class={class_path}) failed to load: {exc}"
+            ) from exc
 
     # 将共享的 type_slot 附加到 registry，供下游使用
     registry.plugin_types = type_slot  # type: ignore[attr-defined]

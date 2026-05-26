@@ -12,17 +12,8 @@
 - 四层架构组装由上层代码处理
 """
 
+# 直接导入：无外部依赖问题的模块（仅依赖标准库）
 from .config import CompressionConfig, ContextBudget, load_context_window_config
-from .core import (
-    LAYER_NAME_MAP,
-    LAYER_NAME_MAP_REVERSE,
-    ContextCompressor,
-    normalize_layer_name,
-)
-from .db import MemoryChunkDB
-from .metadata_store import ChunkMetadataStore
-
-# 新的存取分离架构
 from .models import (
     ChunkMetadata,
     ChunkStatus,
@@ -32,10 +23,35 @@ from .models import (
     MemoryExtraction,
     PreservedZone,
 )
-from .reader import ContextReader
-from .store import LayeredContextStore, create_layered_store_for_model
-from .structured import StructuredCompressor
-from .writer import ContextWriter
+
+
+def __getattr__(name):
+    """延迟导入子模块，避免 eager import 触发外部依赖链"""
+    _lazy = {
+        # core
+        "ContextCompressor": ".core",
+        "normalize_layer_name": ".core",
+        "LAYER_NAME_MAP": ".core",
+        "LAYER_NAME_MAP_REVERSE": ".core",
+        # db
+        "MemoryChunkDB": ".db",
+        # metadata_store
+        "ChunkMetadataStore": ".metadata_store",
+        # reader
+        "ContextReader": ".reader",
+        # store
+        "LayeredContextStore": ".store",
+        "create_layered_store_for_model": ".store",
+        # structured
+        "StructuredCompressor": ".structured",
+        # writer
+        "ContextWriter": ".writer",
+    }
+    if name in _lazy:
+        import importlib
+        module = importlib.import_module(_lazy[name], __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # 配置

@@ -1,14 +1,17 @@
 """测试 LLM 调用超时保护机制。
 
-验证 BUG-FIX-fix_20260506_llm_timeout：当 engine.run() 挂起时，
-asyncio.wait_for 超时保护能正确触发，发送错误消息给前端。
+验证 BUG-FIX-fix_20260506_llm_timeout：当 LLM 长时间无响应时，
+PipelineStreamBridge.drain_loop 的 call_timeout 超时保护能正确触发，
+发送 stream_end(timed_out=True) 事件给前端。
+
+新架构中超时保护在 drain_loop 内部实现（stream_bridge.py），
+通过 call_timeout 参数控制 LLM 活动超时检测。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -42,198 +45,165 @@ def test_get_call_timeout_caches_result():
 
 
 # ---------------------------------------------------------------------------
-# 辅助：轻量级 Fake 对象，避免 MagicMock 属性链问题
+# 辅助：轻量级 Fake Sink，收集 drain_loop 发送的所有事件
 # ---------------------------------------------------------------------------
 
 
-class _FakeNotifier:
-    def __init__(self, sent_messages):
-        self._sent = sent_messages
+class _FakeSink:
+    """模拟 IOutputSink，收集发送的事件到列表中供断言检查。"""
 
-    async def send_to_thread(self, thread_id, event):
-        if isinstance(event, dict):
-            self._sent.append(event)
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    @property
+    def sink_id(self) -> str:
+        """返回测试用 sink 标识。"""
+        return "fake:test-sink"
+
+    async def send_event(self, event: dict) -> bool:
+        """记录发送的事件，始终返回成功。"""
+        self.events.append(event)
         return True
 
 
-class _FakeEngine:
-    """模拟 PipelineEngine，使用真实 async 函数替代 MagicMock。"""
-
-    def __init__(self, run_fn):
-        self.pipeline_id = "test-pipeline"
-        self._run_fn = run_fn
-
-    async def run(self, **kwargs):
-        return await self._run_fn(**kwargs)
-
-
-class _FakeCtx:
-    """模拟 PipelineContext，提供 handle_stream_request 所需接口。"""
-
-    def __init__(self, engine):
-        self.engine = engine
-        self.agent_config = MagicMock()
-        self.services: dict = {}
-
-    def get_or_create_engine(self, pipeline_id: str):
-        return self.engine
-
-
-def _build_stream_context(
-    websocket,
-    user_content="test",
-    message_id="test-msg-id",
-    stop_event=None,
-    thread_id="test-thread",
-    conversation_history=None,
-    pipeline_ctx=None,
-    ws_notifier=None,
-    sent_messages=None,
-):
-    """构造 StreamContext 用于测试。"""
-    from stream_handler import StreamContext
-
-    if stop_event is None:
-        stop_event = asyncio.Event()
-    if conversation_history is None:
-        conversation_history = [{"role": "user", "content": "test", "id": "u1"}]
-    if ws_notifier is None and sent_messages is not None:
-        ws_notifier = _FakeNotifier(sent_messages)
-    return StreamContext(
-        pipeline_id="",
-        message_id=message_id,
-        thread_id=thread_id,
-        conversation_history=conversation_history,
-        ws_notifier=ws_notifier,
-        websocket=websocket,
-        stop_event=stop_event,
-        user_content=user_content,
-        pipeline_ctx=pipeline_ctx,
-    )
-
-
 # ---------------------------------------------------------------------------
-# 测试超时保护核心逻辑
+# 测试超时保护核心逻辑（drain_loop + call_timeout）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_drain_timeout_sends_error_to_frontend():
-    """engine.run() 挂起超过 call_timeout 时，前端收到 stream_end 超时事件。"""
-    from stream_handler import handle_stream_request
-    import stream_handler
+    """drain_loop 在 LLM 无活动超过 call_timeout 时发送 stream_end(timed_out=True)。
 
-    sent_messages: list[dict] = []
+    模拟场景：engine_task 一直运行但 bridge 队列无新 chunk，
+    drain_loop 超时退出并通知前端。
+    """
+    from pipeline.stream_bridge import PipelineStreamBridge
 
-    class FakeWebSocket:
-        async def send_text(self, text: str):
-            sent_messages.append(json.loads(text))
+    sink = _FakeSink()
+    bridge = PipelineStreamBridge(
+        pipeline_id="test-timeout-pipeline",
+        output_sink=sink,
+        message_id="test-timeout-msg",
+    )
 
-    async def hanging_run(**kwargs):
+    # 创建一个永不结束的 engine_task（模拟 LLM 挂起）
+    async def _hang_forever():
         await asyncio.sleep(9999)
 
-    fake_engine = _FakeEngine(hanging_run)
-    fake_ctx = _FakeCtx(fake_engine)
+    engine_task = asyncio.create_task(_hang_forever())
 
-    stream_handler._cached_call_timeout = 1
+    try:
+        # call_timeout=1 秒，drain_loop 应在约 1 秒后超时退出
+        result = await bridge.drain_loop(
+            engine_task,
+            heartbeat_interval=5.0,
+            call_timeout=1,
+        )
 
-    websocket = FakeWebSocket()
-    stop_event = asyncio.Event()
+        # 验证 drain_loop 返回结果标记超时
+        assert result.get("timed_out") is True
 
-    sctx = _build_stream_context(
-        websocket=websocket,
-        stop_event=stop_event,
-        pipeline_ctx=fake_ctx,
-        sent_messages=sent_messages,
-    )
-    with pytest.raises(TimeoutError):
-        await handle_stream_request(sctx)
-
-    stream_handler._cached_call_timeout = None
-
-    stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
-    assert len(stream_ends) >= 1
-    assert stream_ends[0]["data"].get("timed_out") is True
+        # 验证前端收到了 stream_end 事件且标记 timed_out
+        stream_ends = [e for e in sink.events if e.get("type") == "stream_end"]
+        assert len(stream_ends) >= 1
+        assert stream_ends[0]["data"].get("timed_out") is True
+    finally:
+        engine_task.cancel()
+        try:
+            await engine_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.mark.asyncio
 async def test_drain_timeout_sends_stream_end_when_stream_started():
-    """超时时如果 stream 已开始，前端应收到 stream_end。"""
-    from stream_handler import handle_stream_request
-    import stream_handler
+    """超时时如果 stream 已开始（已有 chunk 输出），前端仍应收到 stream_end。
 
-    sent_messages: list[dict] = []
+    模拟场景：LLM 输出部分内容后挂起，drain_loop 超时退出，
+    前端应收到包含已累积内容的 stream_end 事件。
+    """
+    from pipeline.stream_bridge import PipelineStreamBridge
 
-    class FakeWebSocket:
-        async def send_text(self, text: str):
-            sent_messages.append(json.loads(text))
+    sink = _FakeSink()
+    bridge = PipelineStreamBridge(
+        pipeline_id="test-partial-pipeline",
+        output_sink=sink,
+        message_id="test-partial-msg",
+    )
 
-    async def partial_then_hang(**kwargs):
-        on_chunk_cb = kwargs.get("on_chunk")
-        if on_chunk_cb:
-            on_chunk_cb({"type": "text", "content": "开始回复..."})
+    # 模拟部分输出后挂起：先注入 chunk，然后永不结束
+    async def _partial_then_hang():
+        bridge.on_chunk({"type": "text", "content": "开始回复..."})
         await asyncio.sleep(9999)
 
-    fake_engine = _FakeEngine(partial_then_hang)
-    fake_ctx = _FakeCtx(fake_engine)
+    engine_task = asyncio.create_task(_partial_then_hang())
 
-    stream_handler._cached_call_timeout = 1
+    try:
+        # call_timeout=1 秒
+        result = await bridge.drain_loop(
+            engine_task,
+            heartbeat_interval=5.0,
+            call_timeout=1,
+        )
 
-    websocket = FakeWebSocket()
-    stop_event = asyncio.Event()
+        # 验证 drain_loop 返回结果标记超时且包含已累积内容
+        assert result.get("timed_out") is True
+        assert "开始回复..." in result.get("accumulated_content", "")
 
-    sctx = _build_stream_context(
-        websocket=websocket,
-        stop_event=stop_event,
-        pipeline_ctx=fake_ctx,
-        sent_messages=sent_messages,
-    )
-    with pytest.raises(TimeoutError):
-        await handle_stream_request(sctx)
-
-    stream_handler._cached_call_timeout = None
-
-    stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
-    assert len(stream_ends) >= 1
+        # 验证前端收到了 stream_end 事件
+        stream_ends = [e for e in sink.events if e.get("type") == "stream_end"]
+        assert len(stream_ends) >= 1
+    finally:
+        engine_task.cancel()
+        try:
+            await engine_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.mark.asyncio
 async def test_normal_flow_not_affected_by_timeout():
-    """正常流程（engine.run 快速完成）不受超时保护影响。"""
-    from stream_handler import handle_stream_request
-    import stream_handler
+    """正常流程（engine_task 快速完成并输出内容）不受 call_timeout 影响。
 
-    sent_messages: list[dict] = []
+    模拟场景：LLM 正常输出内容并完成，drain_loop 正常退出，
+    stream_end 不包含 timed_out 标记。
+    """
+    from pipeline.stream_bridge import PipelineStreamBridge
 
-    class FakeWebSocket:
-        async def send_text(self, text: str):
-            sent_messages.append(json.loads(text))
-
-    async def quick_run(**kwargs):
-        on_chunk_cb = kwargs.get("on_chunk")
-        if on_chunk_cb:
-            on_chunk_cb({"type": "text", "content": "正常回复"})
-        return {"messages": [], "raw_result": "正常回复内容"}
-
-    fake_engine = _FakeEngine(quick_run)
-    fake_ctx = _FakeCtx(fake_engine)
-
-    stream_handler._cached_call_timeout = 120
-
-    websocket = FakeWebSocket()
-    stop_event = asyncio.Event()
-
-    sctx = _build_stream_context(
-        websocket=websocket,
-        stop_event=stop_event,
-        pipeline_ctx=fake_ctx,
-        sent_messages=sent_messages,
+    sink = _FakeSink()
+    bridge = PipelineStreamBridge(
+        pipeline_id="test-normal-pipeline",
+        output_sink=sink,
+        message_id="test-normal-msg",
     )
-    await handle_stream_request(sctx)
 
-    stream_ends = [m for m in sent_messages if m.get("type") == "stream_end"]
-    new_msgs = [m for m in sent_messages if m.get("type") == "new_message"]
-    assert len(stream_ends) >= 1
-    assert len(new_msgs) >= 1
+    # 模拟正常 LLM 流程：输出内容后完成
+    async def _quick_complete():
+        bridge.on_chunk({"type": "text", "content": "正常回复内容"})
+        # engine_task 结束后 drain_loop 应正常退出
 
-    stream_handler._cached_call_timeout = None
+    engine_task = asyncio.create_task(_quick_complete())
+
+    try:
+        # call_timeout=120 秒（远大于测试时间，不应触发）
+        result = await bridge.drain_loop(
+            engine_task,
+            heartbeat_interval=5.0,
+            call_timeout=120,
+        )
+
+        # 验证 drain_loop 正常完成，未超时
+        assert result.get("timed_out") is False
+        assert "正常回复内容" in result.get("accumulated_content", "")
+
+        # 验证前端收到了 stream_end 事件且未标记超时
+        stream_ends = [e for e in sink.events if e.get("type") == "stream_end"]
+        assert len(stream_ends) >= 1
+        assert stream_ends[0]["data"].get("timed_out") is not True
+    finally:
+        engine_task.cancel()
+        try:
+            await engine_task
+        except asyncio.CancelledError:
+            pass

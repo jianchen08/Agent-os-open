@@ -415,11 +415,26 @@ class TriggerManager:
                 "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
             )
 
+        # ★ 获取 output_sink 以确保前端能收到事件
+        _output_sink = None
+        try:
+            from pipeline.registry import get_engine_registry
+            _reg = get_engine_registry()
+            _entry = _reg.get(trigger.pipeline_id)
+            if _entry and _entry.bridge:
+                _output_sink = _entry.bridge.output_sink
+            if _output_sink is None:
+                from pipeline.message_bus import _create_sink
+                _output_sink = _create_sink(trigger.pipeline_id)
+        except Exception:
+            pass
+
         from pipeline.message_bus import send_pipeline_message
         future = asyncio.run_coroutine_threadsafe(
             send_pipeline_message(
                 trigger.pipeline_id, fire_info,
                 metadata={"source": "trigger", "trigger_id": trigger.trigger_id},
+                output_sink=_output_sink,
             ),
             loop,
         )

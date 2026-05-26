@@ -743,7 +743,14 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
         last_active_at=_parse_iso_time(updated_at) if updated_at else None,
         metadata=thread.get("metadata"),
     )
-    store.sessions[thread_id] = session
+    # BUG-FIX-fix_20260525_store_data_loss:
+    # 问题根因: _ensure_session 从 thread 数据恢复 session 后，直接赋值 store.sessions[thread_id] = session，
+    #           仅更新了内存中的 sessions 字典，未同步 pipeline_ids 到 thread 字典，也未触发 _save_persisted_data，
+    #           导致恢复后的 session 数据在下次重启时再次丢失。
+    # 修复方案: 改用 store.set_session()，该方法会自动将 pipeline_ids 同步到 thread 字典并调用 _save_persisted_data。
+    # 影响范围: 所有通过 _ensure_session 恢复 session 的场景（消息查询、线程详情等）。
+    # 修复日期: 2026-05-25
+    store.set_session(thread_id, session)
     return session
 
 
