@@ -170,12 +170,12 @@ class TrackPlugin(IOutputPlugin):
             usage: Token 用量字典
         """
         try:
-            _notifier = ctx.get_service("ws_interaction_notifier")
+            from ws_handler import ws_interaction_notifier as _notifier
             if _notifier:
                 _thread_id = ctx.state.get("thread_id", "")
                 if _thread_id:
-                    from pipeline.stream_bridge import WebSocketSink
-                    _sink = WebSocketSink(_notifier, _thread_id)
+                    from pipeline.stream_bridge import TargetedSink
+                    _sink = TargetedSink(_notifier, _thread_id)
                     await _sink.send_event({
                         "type": "cost_update",
                         "data": {

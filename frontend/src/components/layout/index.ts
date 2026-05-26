@@ -3,7 +3,6 @@
  */
 
 // 五渲染空间核心布局
-export { MainLayout } from './MainLayout'
 export { FiveSpaceLayout } from './FiveSpaceLayout'
 export type { FiveSpaceLayoutProps } from './FiveSpaceLayout'
 export { FloatingWindowManager } from './FloatingWindowManager'

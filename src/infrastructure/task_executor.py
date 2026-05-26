@@ -259,10 +259,35 @@ class TaskExecutorMixin:
             return
 
         # ── 5.5 检查任务是否已到达终态 ──
-        await self._check_post_pipeline_state(
-            task_id, task_service, None, lifecycle, workspace, ws_meta,
-            ctx, timer_manager,
-        )
+        # BUG-FIX-fix_20260526_status_revert:
+        # 问题根因: send_pipeline_message 异步启动管道(engine.run 在后台执行)，
+        #   _handle_suspension_loop 在引擎未挂起时直接跳过 while 循环，
+        #   然后 _check_post_pipeline_state 收到 pipeline_state=None，
+        #   判定为"被中断"将任务 reset_to_pending (running→pending)，
+        #   导致前端显示"准备阶段"但管道已在执行。
+        # 修复方案: 仅当引擎不在运行/挂起状态时才执行状态检查。
+        #   引擎仍在运行说明管道尚未完成，不应做 post-pipeline 处理。
+        _engine_still_active = False
+        try:
+            from pipeline.registry import get_engine_registry
+            _reg = get_engine_registry()
+            _entry = _reg.find_by_tag("task_id", task_id)
+            if _entry:
+                _e = _entry[0].engine
+                _engine_still_active = getattr(_e, 'is_running', False) or getattr(_e, 'is_suspended', False)
+        except Exception:
+            pass
+
+        if not _engine_still_active:
+            await self._check_post_pipeline_state(
+                task_id, task_service, None, lifecycle, workspace, ws_meta,
+                ctx, timer_manager,
+            )
+        else:
+            logger.info(
+                "TaskWorker: 跳过 post-pipeline 检查（引擎仍在运行）| task=%s",
+                task_id,
+            )
 
         # ── 6. 等待终态 Event ──
         terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)

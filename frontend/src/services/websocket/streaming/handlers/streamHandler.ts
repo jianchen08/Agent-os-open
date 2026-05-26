@@ -114,7 +114,6 @@ export function handleStreamStart(eventData: any) {
     const interactionStore = useInteractionStore.getState()
 
     const shouldActivatePipeline = (() => {
-      if (!currentActivePipelineId) return true
       // BUG-FIX-fix_20260524_cross_session_stream:
       // 问题根因: 用户在会话A发送消息后快速切换到会话B，会话A的 stream_start 事件到达时，
       //          shouldActivatePipeline 未检查管道是否属于当前活跃会话，导致 activePipelineId
@@ -131,6 +130,22 @@ export function handleStreamStart(eventData: any) {
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
+      // BUG-FIX-fix_20260526_sub_agent_auto_activate:
+      // 问题根因: 原逻辑 if (!currentActivePipelineId) return true 导致子Agent管道在无活跃管道时
+      //          无条件自动激活，任务提交后子Agent流式输出即弹出对应管道标签。
+      //          即使 pipelineMeta 为 null（事件乱序），pipelineTabMap 中已有映射说明
+      //          该管道是子Agent创建的，也不应自动激活。
+      // 修复方案: 无活跃管道时，仅当管道确认为主管道（无 tab 映射且无 level>=2 元数据）才自动激活；
+      //          子Agent管道必须通过用户点击对话按钮或人类交互工具触发才会激活。
+      // 影响范围: 子Agent管道标签的自动弹出行为
+      // 修复日期: 2026-05-26
+      if (!currentActivePipelineId) {
+        const hasTabMapping = !!agentTabStore.getTabIdByPipeline(pipelineId)
+        const isSubAgentPipeline = hasTabMapping || (pipelineMeta && pipelineMeta.level > 1)
+        if (!isSubAgentPipeline) {
+          return true
+        }
+      }
       return false
     })()
 

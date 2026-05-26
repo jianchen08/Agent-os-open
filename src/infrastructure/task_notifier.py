@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_STATES = frozenset({"completed", "failed"})
 
+_STATUS_TO_PHASE: dict[str, str] = {
+    "pending": "prepare",
+    "scheduled": "prepare",
+    "paused": "prepare",
+    "running": "execute",
+    "suspended": "execute",
+    "evaluating": "evaluate",
+    "completed": "prepare",
+    "failed": "prepare",
+    "cancelled": "prepare",
+    "timeout": "execute",
+}
+
 
 class TaskNotifierMixin:
     """通知与事件处理混入类。
@@ -106,6 +119,7 @@ class TaskNotifierMixin:
                         "task_id": task_id,
                         "old_status": data.get("old_status", ""),
                         "new_status": new_status,
+                        "current_phase": _STATUS_TO_PHASE.get(new_status, "prepare"),
                     },
                 })
 

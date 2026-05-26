@@ -696,9 +696,7 @@ async def send_frontend_event(
         return False
 
     try:
-        from infrastructure.service_provider import get_service_provider
-        _sp = get_service_provider()
-        _notifier = _sp.get("ws_interaction_notifier") if _sp else None
+        from ws_handler import ws_interaction_notifier as _notifier
     except Exception:
         _notifier = None
 

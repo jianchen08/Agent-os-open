@@ -31,8 +31,7 @@ def _get_tool_registry() -> Any:
 
 
 def _tool_to_response(tool: Any) -> ToolResponse:
-    """将 Tool 对象转为 ToolResponse。"""
-    # 提取参数 schema
+    """将 Tool 对象转为 ToolResponse，完整映射前端展示所需的全部字段。"""
     parameters: dict[str, Any] = {}
     if hasattr(tool, "parameters") and tool.parameters:
         if hasattr(tool.parameters, "properties"):
@@ -43,7 +42,6 @@ def _tool_to_response(tool: Any) -> ToolResponse:
         elif isinstance(tool.parameters, dict):
             parameters = tool.parameters
 
-    # 提取枚举值
     category = (
         tool.category.value
         if hasattr(tool, "category") and hasattr(tool.category, "value")
@@ -60,6 +58,8 @@ def _tool_to_response(tool: Any) -> ToolResponse:
         else str(getattr(tool, "level", "all"))
     )
 
+    dangerous_operations = getattr(tool, "dangerous_operations", [])
+
     return ToolResponse(
         name=getattr(tool, "name", ""),
         description=getattr(tool, "description", ""),
@@ -68,6 +68,14 @@ def _tool_to_response(tool: Any) -> ToolResponse:
         level=level,
         status="active",
         parameters=parameters,
+        when_to_use=getattr(tool, "when_to_use", []),
+        when_not_to_use=getattr(tool, "when_not_to_use", []),
+        caveats=getattr(tool, "caveats", []),
+        input_schema=getattr(tool, "input_schema", None),
+        output_schema=getattr(tool, "output_schema", None),
+        version=getattr(tool, "version", "1.0.0"),
+        tags=getattr(tool, "tags", []),
+        requires_approval=bool(dangerous_operations),
     )
 
 

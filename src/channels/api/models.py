@@ -217,7 +217,7 @@ class TaskEvaluateResponse(BaseModel):
 # ============================================================
 
 class ToolResponse(BaseModel):
-    """工具响应模型。"""
+    """工具响应模型，包含工具的完整信息供前端展示。"""
     name: str
     description: str = ""
     category: str = ""
@@ -225,6 +225,14 @@ class ToolResponse(BaseModel):
     level: str = "all"
     status: str = "active"
     parameters: dict[str, Any] = Field(default_factory=dict)
+    when_to_use: list[str] = Field(default_factory=list)
+    when_not_to_use: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    version: str = ""
+    tags: list[str] = Field(default_factory=list)
+    requires_approval: bool = False
 
 
 class ToolListResponse(BaseModel):

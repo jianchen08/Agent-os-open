@@ -30,12 +30,11 @@ def _notify_session_update(thread_id: str, action: str) -> None:
     try:
         import asyncio
 
-        from infrastructure.service_provider import get_service_provider
-        from pipeline.stream_bridge import WebSocketSink
+        from pipeline.stream_bridge import TargetedSink
+        from ws_handler import ws_interaction_notifier
 
-        _notifier = get_service_provider().get("ws_interaction_notifier")
-        if _notifier and thread_id:
-            _sink = WebSocketSink(_notifier, thread_id)
+        if ws_interaction_notifier and thread_id:
+            _sink = TargetedSink(ws_interaction_notifier, thread_id)
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 asyncio.ensure_future(_sink.send_event({

@@ -3,9 +3,7 @@
 
 重构说明：
 - 状态机逻辑已迁移到 state_machine.py
-- 本模块包含 TaskService，支持两种使用模式：
-  1. 门面模式（task_id=None）：单例，提供全部任务的 CRUD 和状态操作，供 API 层使用
-  2. 单任务模式（task_id 指定）：包装单个任务的状态机，向后兼容旧代码
+- 本模块包含 TaskService，提供全部任务的 CRUD 和状态操作。
 """
 
 from __future__ import annotations
@@ -17,20 +15,10 @@ from typing import Any
 
 from src.tasks.state_machine import (
     InvalidTransitionError,
-    SimpleStateMachine,
     _TASK_TRANSITIONS,
 )
 
 logger = logging.getLogger(__name__)
-
-
-DEFAULT_TASK_TRANSITIONS: dict[str, list[str]] = {
-    "pending": ["running"],
-    "running": ["completed", "failed", "cancelled"],
-    "completed": [],
-    "failed": ["pending"],
-    "cancelled": [],
-}
 
 
 def _default_data_dir() -> str:
@@ -45,13 +33,11 @@ def _default_data_dir() -> str:
 class TaskService:
     """任务服务类。
 
-    支持两种使用模式：
-    1. 门面模式（task_id=None）：单例，提供全部任务的 CRUD 和状态操作，供 API 层使用
-    2. 单任务模式（task_id 指定）：包装单个任务的状态机，向后兼容旧 api/routes/tasks.py
+    门面模式服务，提供全部任务的 CRUD 和状态操作。
 
     Args:
-        task_id: 任务 ID（指定时进入单任务模式）
-        initial_state: 初始状态（单任务模式使用，默认 pending）
+        task_id: 任务 ID（保留参数，兼容外部调用签名）
+        initial_state: 初始状态（已弃用，保留参数签名兼容）
         event_bus: 可选的事件总线实例，用于发布任务状态变更事件
         data_dir: YAML 存储目录（门面模式使用，None 时自动推断）
     """
@@ -66,12 +52,6 @@ class TaskService:
         self.task_id = task_id
         self._event_bus = event_bus
 
-        # 单任务状态机（向后兼容：旧 api/routes/tasks.py 逐任务创建）
-        self._state_machine = SimpleStateMachine(
-            initial_state=initial_state,
-            transitions=DEFAULT_TASK_TRANSITIONS,
-        )
-
         # 门面模式的存储层（仅 task_id=None 时初始化）
         self._storage: Any = None
         if task_id is None:
@@ -79,24 +59,6 @@ class TaskService:
 
             _dir = data_dir or _default_data_dir()
             self._storage = TaskStorage(data_dir=_dir)
-
-    # ── 旧接口（单任务模式向后兼容）──────────────────────────────
-
-    @property
-    def state(self) -> str:
-        """获取当前任务状态（单任务模式）。"""
-        return self._state_machine.current_state
-
-    def advance(self, target_state: str) -> None:
-        """推进任务到目标状态（单任务模式）。
-
-        Args:
-            target_state: 目标状态。
-
-        Raises:
-            InvalidTransitionError: 当状态转换不被允许时。
-        """
-        self._state_machine.transition(target_state)
 
     # ── 门面模式：创建方法 ──────────────────────────────────────
 

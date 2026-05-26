@@ -559,7 +559,14 @@ def _load_agent_config(task_id: str, provider: Any) -> Any | None:
 
 
 def _create_sink(pipeline_id: str) -> Any | None:
-    """从 registry 获取 thread_id 创建 TargetedSink。"""
+    """从 registry 获取 thread_id 创建 TargetedSink。
+
+    BUG-FIX-fix_20260526_sink_notifier:
+    问题根因: 原代码通过 service_provider.get("ws_interaction_notifier") 获取 notifier，
+      但 ws_interaction_notifier 是 ws_handler.py 中的全局单例，从未注册到 service_provider。
+      导致 _create_sink 永远返回 None，所有 system_notification 无法推送。
+    修复方案: 直接 import ws_handler.ws_interaction_notifier 全局单例。
+    """
     try:
         from pipeline.registry import get_engine_registry
         from pipeline.stream_bridge import TargetedSink
@@ -571,14 +578,12 @@ def _create_sink(pipeline_id: str) -> Any | None:
             logger.warning("[MessageBus] _create_sink: no thread_id | pipeline=%s entry=%s", pipeline_id[:12], entry is not None)
             return None
 
-        from infrastructure.service_provider import get_service_provider
-        sp = get_service_provider()
-        notifier = sp.get("ws_interaction_notifier") if sp else None
-        if not notifier:
-            logger.warning("[MessageBus] _create_sink: no notifier | pipeline=%s sp=%s", pipeline_id[:12], sp is not None)
+        from ws_handler import ws_interaction_notifier
+        if not ws_interaction_notifier:
+            logger.warning("[MessageBus] _create_sink: notifier is None | pipeline=%s", pipeline_id[:12])
             return None
 
-        return TargetedSink(notifier, thread_id)
+        return TargetedSink(ws_interaction_notifier, thread_id)
     except Exception as _cs_err:
         logger.warning("[MessageBus] _create_sink FAILED: pipeline=%s error=%s", pipeline_id[:12], _cs_err)
         return None

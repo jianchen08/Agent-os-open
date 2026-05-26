@@ -726,6 +726,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "task_id": task.id,
                         "old_status": "",
                         "new_status": "pending",
+                        "current_phase": "prepare",
                     },
                 })
                 logger.info(
@@ -854,6 +855,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "task_id": task.id,
                         "old_status": "",
                         "new_status": "pending",
+                        "current_phase": "prepare",
                     },
                 })
                 logger.info(
@@ -1049,6 +1051,12 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         # 存储执行者信息
         if inputs.get("target_id"):
             metadata["target_id"] = inputs["target_id"]
+
+        # BUG-FIX-fix_20260526_missing_user_id:
+        # task_notifier 通过 task.metadata["user_id"] 推送状态变更，
+        # 不存 user_id 导致所有状态推送静默失败。
+        if inputs.get("user_id"):
+            metadata["user_id"] = inputs["user_id"]
 
         # 存储任务角色标记（用于容器完成条件判断）
         # 可选值：solution_planning、final_validation
