@@ -323,6 +323,8 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         5. 通过 EventBus 发布 task.submitted 事件
         6. 返回提交结果
         """
+        import time as _time
+        _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
         goal = inputs.get("goal")
         if isinstance(goal, str):
@@ -656,6 +658,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="TASK_CREATE_FAILED",
             )
 
+        _t_create = _time.monotonic()
+        logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
+
         # ── 7. 提交到后台执行器 ──
         from infrastructure.service_provider import get_service_provider
         task_worker = get_service_provider().get("task_worker")
@@ -701,6 +706,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 error_code="SUBMIT_FAILED",
             )
 
+        _t_submit = _time.monotonic()
+        logger.info("[TaskSubmit] PERF | submit_task=%.1fms | total=%.1fms", (_t_submit - _t_create) * 1000, (_t_submit - _t0) * 1000)
+
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
         # BUG-FIX-fix_20260522_task_status_realtime:
@@ -734,6 +742,9 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                 "[TaskSubmit] task_status_update 广播失败 | task_id=%s | error=%s",
                 task.id, _ws_exc,
             )
+
+        _t_ws = _time.monotonic()
+        logger.info("[TaskSubmit] PERF | ws_broadcast=%.1fms | total=%.1fms", (_t_ws - _t_submit) * 1000, (_t_ws - _t0) * 1000)
 
         result_data = {
             "task_id": task.id,

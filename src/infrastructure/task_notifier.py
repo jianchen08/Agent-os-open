@@ -83,30 +83,32 @@ class TaskNotifierMixin:
                     task_id, new_status, exc, exc_info=True,
                 )
 
-        # BUG-FIX-fix_20260512_task_status_realtime:
-        # 状态变更时通过 send_frontend_event 统一出口发送
-        # task_status_update 到前端 WebSocket。
+        # BUG-FIX-fix_20260526_status_push:
+        # 任务状态变更统一通过 ws_interaction_notifier 推送给用户。
+        # 不管是顶层任务还是子任务，状态变了就推。
         try:
+            from ws_handler import ws_interaction_notifier as _notifier
             _task_obj = data.get("task")
             if not _task_obj and self._task_service:
                 try:
                     _task_obj = self._task_service.get_task(task_id)
                 except Exception:
                     pass
-            _parent_pid = getattr(_task_obj, "parent_pipeline_id", "") or ""
-            if _parent_pid:
-                from pipeline.stream_bridge import send_frontend_event
-                await send_frontend_event(
-                    _parent_pid,
-                    {
-                        "type": "task_status_update",
-                        "data": {
-                            "task_id": task_id,
-                            "old_status": data.get("old_status", ""),
-                            "new_status": new_status,
-                        },
+
+            _user_id = ""
+            if _task_obj and hasattr(_task_obj, "metadata") and _task_obj.metadata:
+                _user_id = _task_obj.metadata.get("user_id", "")
+
+            if _notifier and _user_id:
+                await _notifier.send_to_user(_user_id, {
+                    "type": "task_status_update",
+                    "data": {
+                        "task_id": task_id,
+                        "old_status": data.get("old_status", ""),
+                        "new_status": new_status,
                     },
-                )
+                })
+
             logger.debug(
                 "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
                 task_id, data.get("old_status", ""), new_status,

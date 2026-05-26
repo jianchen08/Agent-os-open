@@ -290,8 +290,20 @@ class _GitOpsMixin:
         return True
 
     def _git_add_commit_if_dirty(self, cwd: Path, message: str) -> str | None:
-        """暂存并提交变更（如果有），返回 commit hash 或 None"""
+        """暂存并提交变更（如果有），返回 commit hash 或 None。
+
+        BUG-FIX-fix_20260526_slow_git_add:
+        问题根因: 原代码无条件执行 git add -A（遍历整个项目添加所有文件到 index），
+          即使项目无任何变更也要等待 add 完成，大项目耗时 5-15s。
+        修复方案: 先用 git status --porcelain 检查是否有变更，无变更直接返回。
+          有变更时才执行 git add -A + commit。
+        影响范围: 所有触发 _git_add_commit_if_dirty 的场景（任务启动前 auto-save）。
+        """
         self._remove_index_lock(cwd)
+
+        rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
+        if rc != 0 or not status.strip():
+            return None
 
         rc, _, _ = self._run_git("add", "-A", cwd=cwd)
         if rc != 0:
@@ -300,17 +312,14 @@ class _GitOpsMixin:
             if rc != 0:
                 return None
 
-        rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
-        if rc == 0 and status.strip():
+        commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
+        if commit_rc != 0:
+            self._remove_index_lock(cwd)
             commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
             if commit_rc != 0:
-                self._remove_index_lock(cwd)
-                commit_rc, _, _ = self._run_git("commit", "-m", message, cwd=cwd)
-                if commit_rc != 0:
-                    return None
-            _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
-            return h.strip() if h else None
-        return None
+                return None
+        _, h, _ = self._run_git("rev-parse", "HEAD", cwd=cwd)
+        return h.strip() if h else None
 
     def _git_add_tracked_and_commit(self, cwd: Path, message: str) -> str | None:
         """只提交已跟踪文件的修改，不添加未跟踪文件。返回 commit hash 或 None。"""
