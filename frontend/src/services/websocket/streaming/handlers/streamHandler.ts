@@ -147,6 +147,16 @@ export function handleStreamStart(eventData: any) {
       if (!currentActivePipelineId) {
         return true
       }
+      const activeSessId = useSessionStore.getState().activeSessionId
+      const currentPipelineSession = pipelineStore.getState().pipelineSessionMap[currentActivePipelineId]
+      const isSameSession = threadId && (
+        threadId === activeSessId
+        || threadId === currentPipelineSession
+      )
+      const isCurrentStreaming = pipelineStore.getState().streamingState[currentActivePipelineId]?.isStreaming
+      if (isSameSession && !isCurrentStreaming) {
+        return true
+      }
       return false
     })()
 
