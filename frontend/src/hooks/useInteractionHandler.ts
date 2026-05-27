@@ -19,6 +19,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
+import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
@@ -174,6 +175,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
           })
         }
         layoutStore.setActiveTab(tabId)
+        useLayoutModeStore.getState().setMode('five-space')
+        useUIStore.getState().setWorkspaceCollapsed(false)
       }
     }
 

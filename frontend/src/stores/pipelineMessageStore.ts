@@ -473,10 +473,14 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         // BUG-FIX-fix_20260522_msg_disappear: 记录因近期 WS 更新被保护的本地消息对应的 API 消息 ID
         const excludedApiIds = new Set<string>()
         const preserved = existing.filter((localMsg) => {
-          // streaming 消息始终保留（API 可能还没有这条消息）
           if (localMsg.status === 'streaming') {
             const apiIds = new Set(sorted.map((m) => m.id))
-            return !apiIds.has(localMsg.id)
+            if (apiIds.has(localMsg.id)) return false
+            if (localMsg.sequence != null) {
+              const dupSeq = sorted.find((m) => m.sequence === localMsg.sequence && m.role === localMsg.role)
+              if (dupSeq) return false
+            }
+            return true
           }
 
           const fp = makeMessageFingerprint(localMsg)

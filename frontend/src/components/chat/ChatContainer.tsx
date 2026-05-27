@@ -307,7 +307,12 @@ export const ChatContainer = ({
       seenSystemContents.add(contentPrefix)
       return true
     })
-    return mergeConsecutiveAssistantMessages(deduped)
+    const result = mergeConsecutiveAssistantMessages(deduped)
+    if (result.length > 0) {
+      const ids = result.map((m: any) => `${m.role[0]}${(m.sequence ?? '?')}`).join(',')
+      console.log('[activeMessages]', result.length, 'msgs:', ids, 'source:', pipelineMessages.length > 0 ? 'pipeline' : 'props')
+    }
+    return result
   }, [pipelineMessages, messages])
 
   /**
