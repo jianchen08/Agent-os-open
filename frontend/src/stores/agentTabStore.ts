@@ -798,8 +798,26 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       const existingTab = state.tabs.find((t) => t.id === tabId)
 
       if (existingTab) {
+        const oldPipelineId = existingTab.pipelineRunId
+        const updatedTab: AgentTab = {
+          ...existingTab,
+          status,
+          pipelineRunId: pipelineId || existingTab.pipelineRunId,
+          agentName: agentName || existingTab.agentName,
+          taskId: taskId || existingTab.taskId,
+          agentLevel: agentLevel || existingTab.agentLevel,
+        }
+        const tabsUpdate = state.tabs.map((t) => (t.id === tabId ? updatedTab : t))
+        const mapUpdate = { ...state.pipelineTabMap }
+        if (pipelineId) {
+          mapUpdate[pipelineId] = tabId
+        }
+        if (oldPipelineId && oldPipelineId !== pipelineId && mapUpdate[oldPipelineId] === tabId) {
+          delete mapUpdate[oldPipelineId]
+        }
         return {
-          tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
+          tabs: tabsUpdate,
+          pipelineTabMap: mapUpdate,
         }
       }
 
