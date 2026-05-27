@@ -343,10 +343,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       }
 
       if (messageIndex < 0) {
-        // FIX: 找不到消息时打印 warn 日志以便排查
+        const storeIds = pipelineMessages.map((m) => m.id?.slice(0, 12)).join(',')
+        const streamState = get().streamingState[pipelineId]
         logger.warn(
-          `[updateMessage] message not found: pipelineId=%s messageId=%s totalMsgs=%d`,
+          `[updateMessage] message not found: pipelineId=%s messageId=%s totalMsgs=%d storeIds=[%s] streaming=%s`,
           pipelineId?.slice(0, 12), messageId?.slice(0, 12), pipelineMessages.length,
+          storeIds, streamState ? `yes(${streamState.messageId?.slice(0, 12)})` : 'no',
         )
         return state
       }
