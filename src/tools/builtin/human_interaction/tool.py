@@ -10,7 +10,6 @@
 import asyncio
 from asyncio import CancelledError
 import logging
-from pathlib import Path
 from typing import Any
 
 from human_interaction import (

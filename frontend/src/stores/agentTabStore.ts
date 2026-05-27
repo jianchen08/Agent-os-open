@@ -797,6 +797,14 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       const path = ['主Agent', agentName]
       const existingTab = state.tabs.find((t) => t.id === tabId)
 
+      // BUG-FIX-fix_20260528_tab_pipeline_mapping:
+      // 问题根因: 父Agent连续派生多个子Agent时，相同 parentRecordId 复用同一个 Tab，
+      //          但 existingTab 分支只更新 status，不更新 pipelineRunId，
+      //          导致 Tab 指向旧管道，switchToTab 激活错误的管道。
+      // 修复方案: existingTab 分支同步更新 pipelineRunId/agentName/taskId/agentLevel，
+      //          并清理旧 pipelineTabMap 映射，防止残留映射干扰路由。
+      // 影响范围: 多轮子Agent派生场景下的Tab→Pipeline映射准确性
+      // 修复日期: 2026-05-28
       if (existingTab) {
         const oldPipelineId = existingTab.pipelineRunId
         const updatedTab: AgentTab = {
