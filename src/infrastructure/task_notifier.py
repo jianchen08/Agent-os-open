@@ -114,6 +114,12 @@ class TaskNotifierMixin:
 
             _mapped_status = _BACKEND_TO_FRONTEND_STATUS.get(new_status, new_status)
 
+            _task_error = ""
+            if _task_obj:
+                _task_error = getattr(_task_obj, "error", "") or ""
+            elif data.get("error"):
+                _task_error = data["error"]
+
             if _notifier and _user_id:
                 await _notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
@@ -122,6 +128,7 @@ class TaskNotifierMixin:
                         "old_status": _BACKEND_TO_FRONTEND_STATUS.get(data.get("old_status", ""), data.get("old_status", "")),
                         "new_status": _mapped_status,
                         "current_phase": _STATUS_TO_PHASE.get(new_status, "prepare"),
+                        "error": _task_error,
                     },
                 })
 

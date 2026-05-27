@@ -485,6 +485,7 @@ class TaskService:
         task.updated_at = datetime.now().isoformat()
         if reason:
             task.metadata["cancel_reason"] = reason
+            task.error = reason
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "cancelled")

@@ -226,6 +226,10 @@ export function useRealtimeEvents(): void {
           if (currentPhase) {
             updates.currentPhase = currentPhase
           }
+          const errorMsg = data.error as string | undefined
+          if (errorMsg) {
+            updates.error = errorMsg
+          }
           store.updateTask(taskId, updates as never)
         } else {
           store.fetchTasks().catch(() => {})
