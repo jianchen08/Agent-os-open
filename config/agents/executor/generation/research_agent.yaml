@@ -22,7 +22,7 @@ system_prompt: |
 
   你是一个通用的**调研Agent**，负责严格按照调研报告模板结构执行调研任务，并将最终调研内容保存到验收标准中指定路径的 Markdown 文件。
 
-  **输出文件命名规则**：文件保存到 docs/ 目录下，文件名格式为 `docs/{调研主题关键词}_research_report.md`。具体输出路径以任务验收标准（acceptance_criteria）中 file_check 的 path 为准。
+  **输出文件命名规则**：文件保存到 docs/ 目录下。具体输出路径以任务验收标准（acceptance_criteria）中 file_check 的 path 为准。如果验收标准未指定路径，默认使用 `docs/{调研主题关键词}_research_report.md`。
 
   ## 核心职责
 
@@ -293,7 +293,7 @@ deliverables:
     description: "调研报告文件"
     template_source: "knowledge"
     template_name: "config/templates/research_report_template.md"
-    output_path: "{{workspace}}/docs/{title}_research_report.md"
+    output_path: "{{workspace}}/docs/{title}.md"
     type: "markdown"
     required: true
 

@@ -1,7 +1,7 @@
 """维护管理 API 路由。
 
 提供手动触发复盘的接口。
-通过管道消息注入机制触发复盘，与定时触发使用相同的管道执行路径。
+通过管道引擎注册复盘管道，再用消息注入触发执行。
 """
 
 from __future__ import annotations
@@ -17,30 +17,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/maintenance", tags=["维护管理"])
 
+REVIEW_AGENT_ID = "review_agent"
+
 
 class ReviewTriggerRequest(BaseModel):
     """手动触发复盘请求。"""
 
     force: bool = Field(default=False, description="是否强制触发")
-    pipeline_id: str = Field(default="", description="目标管道 ID，为空则自动查找")
     model_config = {"extra": "ignore"}
-
-
-def _find_active_pipeline() -> str:
-    """从引擎注册表中查找一个活跃的管道 ID。
-
-    Returns:
-        管道 ID，未找到返回空字符串
-    """
-    try:
-        from pipeline.registry import get_engine_registry
-        registry = get_engine_registry()
-        entries = registry.list_all() if hasattr(registry, "list_all") else []
-        if entries:
-            return entries[0] if isinstance(entries[0], str) else entries[0].get("id", "")
-    except Exception:
-        pass
-    return ""
 
 
 def _get_maintenance_service() -> Any:
@@ -61,14 +45,62 @@ def _get_maintenance_service() -> Any:
         return None
 
 
+async def _start_review_pipeline(force: bool) -> dict[str, Any]:
+    """注册复盘管道并通过消息注入触发执行。
+
+    流程与 TaskExecutor 一致：
+    1. 从 AgentRegistry 获取 review_agent 配置
+    2. 通过 EngineRegistry 注册管道
+    3. 用 send_pipeline_message 注入复盘上下文
+
+    Args:
+        force: 是否强制触发
+
+    Returns:
+        执行结果
+    """
+    from pipeline.message_bus import send_pipeline_message
+    from pipeline.registry import get_engine_registry
+    from agents.agent_registry import get_agent_registry
+    from config.agent_loader import load_agent_config
+
+    agent_config = load_agent_config(REVIEW_AGENT_ID)
+    if agent_config is None:
+        agent_config = get_agent_registry().get(REVIEW_AGENT_ID)
+    if agent_config is None:
+        return {"status": "error", "message": f"Agent '{REVIEW_AGENT_ID}' 配置不存在"}
+
+    registry = get_engine_registry()
+    entry = registry.register_pipeline(
+        tags={"source": "manual_review", "force": str(force)},
+    )
+    pipeline_id = entry.engine.pipeline_id
+
+    result = await send_pipeline_message(
+        pipeline_id,
+        "[手动触发复盘] 请分析最近的管道执行记录，产出经验和改进建议。",
+        agent_config=agent_config,
+        metadata={"source": "manual_review", "force": force},
+    )
+
+    if result.success:
+        return {
+            "status": "submitted",
+            "message": "复盘任务已通过管道提交",
+            "pipeline_id": pipeline_id,
+            "method": result.method,
+        }
+    return {"status": "error", "message": f"管道注入失败: {result.error}"}
+
+
 @router.post("/review", summary="手动触发复盘")
 async def trigger_review(
     body: ReviewTriggerRequest | None = None,
 ) -> dict[str, Any]:
     """手动触发复盘。
 
-    通过 send_pipeline_message 向管道注入复盘指令，
-    由管道中的 Agent 执行复盘任务。完成后自动通知结果。
+    注册复盘 Agent 管道并通过消息注入触发执行。
+    完成后自动通过管道输出通知用户。
 
     Args:
         body: 复盘触发请求
@@ -77,20 +109,13 @@ async def trigger_review(
         复盘任务提交结果
     """
     force = body.force if body else False
-    pipeline_id = body.pipeline_id if body else ""
 
     maintenance_service = _get_maintenance_service()
     if maintenance_service is None:
-        return {
-            "status": "error",
-            "message": "MaintenanceService 不可用",
-        }
+        return {"status": "error", "message": "MaintenanceService 不可用"}
 
     if getattr(maintenance_service, "_review_running", False):
-        return {
-            "status": "already_running",
-            "message": "复盘正在执行中",
-        }
+        return {"status": "already_running", "message": "复盘正在执行中"}
 
     if not force and not maintenance_service.should_trigger_review():
         pending = maintenance_service._get_review_engine()._count_pending_records()
@@ -99,39 +124,17 @@ async def trigger_review(
             "message": f"未满足复盘触发条件，当前待复盘记录 {pending} 条",
         }
 
-    if not pipeline_id:
-        pipeline_id = _find_active_pipeline()
+    maintenance_service._review_running = True
 
-    if pipeline_id:
+    async def _run() -> None:
+        """异步执行复盘管道。"""
         try:
-            from pipeline.message_bus import send_pipeline_message
-            result = await send_pipeline_message(
-                pipeline_id,
-                "[手动触发] 请执行复盘任务，分析最近的管道执行记录，产出经验和改进建议。",
-                metadata={"source": "manual_review", "force": force},
-            )
-            if result.success:
-                return {
-                    "status": "submitted",
-                    "message": "复盘任务已通过管道提交，完成后将通过消息通知",
-                    "pipeline_id": pipeline_id,
-                    "method": result.method,
-                }
-            logger.warning("管道消息注入失败: %s", result.error)
+            await _start_review_pipeline(force)
         except Exception as exc:
-            logger.warning("管道消息注入异常: %s", exc)
+            logger.error("[手动复盘] 复盘管道执行失败: %s", exc)
+        finally:
+            maintenance_service._review_running = False
 
-    async def _run_review_direct() -> None:
-        """管道不可用时降级直接执行复盘。"""
-        try:
-            await maintenance_service.trigger_review(force=force)
-            logger.info("手动触发的复盘任务已完成（直接执行）")
-        except Exception as exc:
-            logger.error("手动触发的复盘任务执行失败: %s", exc)
+    asyncio.create_task(_run())
 
-    asyncio.create_task(_run_review_direct())
-
-    return {
-        "status": "submitted",
-        "message": "复盘任务已提交（直接执行），完成后将通过消息通知",
-    }
+    return {"status": "submitted", "message": "复盘任务已通过管道提交"}
