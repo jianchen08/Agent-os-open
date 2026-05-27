@@ -102,18 +102,15 @@ export function handleNewMessage(eventData: any) {
   const existing = msgs.find((m: any) => m.id === messageId)
   if (!existing) return
 
-  // 基于 parts[] 判断消息是否已有文本内容
   const existingParts = (existing as any).parts || []
   const hasTextParts = existingParts.some((p: any) => p.type === 'text' && (p.text || p.content)?.trim())
 
   if (hasTextParts) {
-    // 已有文本 parts，仅更新 status 并将 streaming parts 改为 done
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
       parts: finalizeStreamingParts(existing),
     } as any)
   } else {
-    // 无文本 parts，从 API 数据构建 parts[]
     const builtParts = buildPartsFromApiData(finalContent, data?.thinking, data?.toolCalls)
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',

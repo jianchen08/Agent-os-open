@@ -259,15 +259,11 @@ export function handleStreamEnd(eventData: any) {
     useContextUsageStore.getState().updateUsage(pipelineId, usage)
   }
 
-  // messageId 已在函数开头提取
   if (!messageId) return
 
-  // 标记消息状态为完成
   pipelineStore.getState().updateMessage(pipelineId, messageId, {
     status: 'completed',
   } as any)
-
-  /** 完成 parts[] 中所有 part 的状态 */
   pipelineStore.getState().finalizeMessage(pipelineId, messageId)
 }
 

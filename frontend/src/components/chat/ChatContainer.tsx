@@ -288,16 +288,26 @@ export const ChatContainer = ({
     const source = pipelineMessages.length > 0
       ? pipelineMessages
       : messages
-    const filtered = source.filter((m: any) => {
-      if (m.role === 'tool') return false
-      // BUG-FIX-fix_20260524_duplicate_notification:
-      // 过滤后端注入的 [系统通知] 开头的 user 消息，
-      // 这类通知已通过 WS system_notification 实时显示为 system 气泡，
-      // 后端同时将其注入为 user 消息供 AI 查看，无需在前端重复展示。
-      if (m.role === 'user' && (m.content || '').trimStart().startsWith('[系统通知]')) return false
+    const mapped = source
+      .filter((m: any) => {
+        if (m.role === 'tool') return false
+        return true
+      })
+      .map((m: any) => {
+        if (m.role === 'user' && (m.content || '').trimStart().startsWith('[系统通知]')) {
+          return { ...m, role: 'system' }
+        }
+        return m
+      })
+    const seenSystemContents = new Set<string>()
+    const deduped = mapped.filter((m: any) => {
+      if (m.role !== 'system') return true
+      const contentPrefix = (m.content || '').trimStart().slice(0, 50)
+      if (seenSystemContents.has(contentPrefix)) return false
+      seenSystemContents.add(contentPrefix)
       return true
     })
-    return mergeConsecutiveAssistantMessages(filtered)
+    return mergeConsecutiveAssistantMessages(deduped)
   }, [pipelineMessages, messages])
 
   /**
