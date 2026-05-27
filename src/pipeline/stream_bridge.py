@@ -88,9 +88,9 @@ class TargetedSink:
         return self._is_dead
 
     async def send_event(self, event: dict) -> bool:
-        """直接路由事件到指定 thread_id 的 WebSocket 连接。
+        """通过 WebSocket 推送事件。
 
-        路由失败时记录错误，不广播。广播会导致消息串扰。
+        事件中已包含 pipeline_id，前端按 pipeline_id 路由。
         连续失败超过阈值时标记 sink 为 dead。
 
         Args:
@@ -99,15 +99,8 @@ class TargetedSink:
         Returns:
             发送成功返回 True，失败返回 False
         """
-        if not self._thread_id:
-            if self._fail_count < 1:
-                logger.warning(
-                    "TargetedSink: thread_id 为空，通过全局连接广播 type=%s pipeline=%s",
-                    event.get("type", "?"),
-                    (event.get("data", {}).get("pipeline_id") or "?")[:12],
-                )
         try:
-            ok = await self._notifier.send_to_thread(self._thread_id or "", event)
+            ok = await self._notifier.send_to_thread(self._thread_id, event)
             if ok:
                 self._fail_count = 0
                 return True

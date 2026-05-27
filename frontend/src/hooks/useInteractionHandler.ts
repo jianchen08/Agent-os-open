@@ -19,6 +19,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
+import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
@@ -40,11 +41,14 @@ async function parseInteractionEvent(
   const filePaths = inner.file_paths as string[] | undefined
   let fileContents: Record<string, string> | undefined
   if (filePaths && filePaths.length > 0) {
-    const layoutStore = useLayoutModeStore.getState()
-    const wsTab = layoutStore.workspaceTabs.find(
-      (t) => t.dataSource && t.dataSource.startsWith('workspace://'),
-    )
-    const containerId = wsTab?.dataSource?.replace('workspace://', '').split('/')[0] || ''
+    const containerId = useWorkspaceStore.getState().activeWorkspaceId
+      || (() => {
+        const layoutStore = useLayoutModeStore.getState()
+        const wsTab = layoutStore.workspaceTabs.find(
+          (t) => t.dataSource && t.dataSource.startsWith('workspace://'),
+        )
+        return wsTab?.dataSource?.replace('workspace://', '').split('/')[0] || ''
+      })()
     if (containerId) {
       const contents: Record<string, string> = {}
       await Promise.all(
