@@ -565,14 +565,14 @@ def _create_sink(pipeline_id: str) -> Any | None:
         registry = get_engine_registry()
         entry = registry.get(pipeline_id)
         thread_id = entry.thread_id if entry else ""
-        if not thread_id:
-            logger.warning("[MessageBus] _create_sink: no thread_id | pipeline=%s entry=%s", pipeline_id[:12], entry is not None)
-            return None
 
         from ws_handler import ws_interaction_notifier
         if not ws_interaction_notifier:
             logger.warning("[MessageBus] _create_sink: notifier is None | pipeline=%s", pipeline_id[:12])
             return None
+
+        if not thread_id:
+            logger.warning("[MessageBus] _create_sink: no thread_id, using empty (will broadcast) | pipeline=%s", pipeline_id[:12])
 
         return TargetedSink(ws_interaction_notifier, thread_id)
     except Exception as _cs_err:

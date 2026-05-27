@@ -101,6 +101,16 @@ export function handleStreamStart(eventData: any) {
 
   const threadId = extractThreadId(eventData)
 
+  const pipelineState = pipelineStore.getState()
+  if (!pipelineState.pipelines[pipelineId]) {
+    const sessionId = threadId || useSessionStore.getState().activeSessionId || ''
+    pipelineState.registerPipeline({ pipelineId, sessionId })
+    _debugLogger.info(
+      `[STREAM_START] auto-registered unknown pipeline: pipelineId=%s sessionId=%s`,
+      pipelineId.slice(0, 12), sessionId?.slice(0, 12) || 'null',
+    )
+  }
+
   const currentActivePipelineId = pipelineStore.getState().activePipelineId
   _debugLogger.info(
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,

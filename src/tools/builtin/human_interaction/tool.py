@@ -10,6 +10,7 @@
 import asyncio
 from asyncio import CancelledError
 import logging
+from pathlib import Path
 from typing import Any
 
 from human_interaction import (
@@ -173,6 +174,26 @@ class HumanInteractionTool(BuiltinTool):
         except (ValueError, TypeError):
             val = 1
         return f"L{val}"
+
+    @staticmethod
+    def _read_file_contents(
+        file_paths: list[str] | None,
+        workspace: str | None = None,
+    ) -> dict[str, str] | None:
+        """读取文件路径列表对应的文件内容"""
+        if not file_paths:
+            return None
+        contents: dict[str, str] = {}
+        for fp in file_paths[:10]:
+            try:
+                p = Path(fp)
+                if not p.is_absolute() and workspace:
+                    p = Path(workspace) / p
+                if p.exists() and p.is_file() and p.stat().st_size <= 2 * 1024 * 1024:
+                    contents[fp] = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        return contents if contents else None
 
     async def _execute_choice_mode(
         self,

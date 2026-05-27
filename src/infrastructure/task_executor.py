@@ -59,6 +59,12 @@ class TaskExecutorMixin:
 
         # 从 services / 注入参数获取 WS 上下文
         _notifier = self._services.get("ws_interaction_notifier")
+        if not _notifier:
+            try:
+                from ws_handler import ws_interaction_notifier as _global_notifier
+                _notifier = _global_notifier
+            except Exception:
+                pass
         _ws_thread_id = ""
         _parent_pipeline_id = task_data.get("pipeline_id", "")
 
@@ -203,7 +209,6 @@ class TaskExecutorMixin:
             if not ctx.idle_timer_registered and timer_manager:
                 return
 
-            project_root = ws_meta.get("project_root", workspace) if ws_meta else workspace
             conversation_history = await self._restore_conversation_history(existing_pipeline_id)
 
             from pipeline.message_bus import send_pipeline_message
@@ -216,7 +221,7 @@ class TaskExecutorMixin:
                 agent_config=agent_config,
                 conversation_history=conversation_history,
                 task_id=task_id,
-                workspace=project_root,
+                workspace=workspace,
                 streaming=True,
                 thread_id=_ws_thread_id or "",
             )

@@ -100,29 +100,23 @@ class TargetedSink:
             发送成功返回 True，失败返回 False
         """
         if not self._thread_id:
-            self._fail_count += 1
-            if self._fail_count <= 3:
-                logger.error(
-                    "TargetedSink: thread_id 为空，事件丢失 #%d type=%s pipeline=%s",
-                    self._fail_count,
+            if self._fail_count < 1:
+                logger.warning(
+                    "TargetedSink: thread_id 为空，通过全局连接广播 type=%s pipeline=%s",
                     event.get("type", "?"),
                     (event.get("data", {}).get("pipeline_id") or "?")[:12],
                 )
-            self._check_dead()
-            return False
-
         try:
-            ok = await self._notifier.send_to_thread(self._thread_id, event)
+            ok = await self._notifier.send_to_thread(self._thread_id or "", event)
             if ok:
-                # 发送成功时重置失败计数
                 self._fail_count = 0
                 return True
             self._fail_count += 1
             if self._fail_count <= 3:
                 logger.error(
-                    "TargetedSink: 定向推送失败 #%d thread_id=%s type=%s pipeline=%s",
+                    "TargetedSink: 推送失败 #%d thread_id=%s type=%s pipeline=%s",
                     self._fail_count,
-                    self._thread_id[:12],
+                    (self._thread_id or "(empty)")[:12],
                     event.get("type", "?"),
                     (event.get("data", {}).get("pipeline_id") or "?")[:12],
                 )
@@ -133,7 +127,7 @@ class TargetedSink:
             logger.error(
                 "TargetedSink: 推送异常 #%d thread_id=%s type=%s err=%s",
                 self._fail_count,
-                self._thread_id[:12],
+                (self._thread_id or "(empty)")[:12],
                 event.get("type", "?"),
                 exc_info=True,
             )
