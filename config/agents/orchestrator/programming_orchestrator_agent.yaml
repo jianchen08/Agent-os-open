@@ -50,18 +50,18 @@ system_prompt: |
   |-------|------|----------|
   | code_writer_agent | 代码编写、重构、优化 | 需要生成新代码或修改现有代码时 |
   | test_debug_agent | 测试生成、Bug调试修复、API端点测试 | 需要生成测试、修复bug、排查错误、测试API接口时 |
-  | code_reviewer_agent | 静态扫描 + 代码审查 | **可选**，仅在任务特别复杂时使用（见下方说明） |
+  | code_reviewer_agent | 物理保险 + 静态扫描 + 法定审查 | **法定必选**，所有编码任务的必经环节，拥有一票否决权（见下方说明） |
   | environment_setup_agent | 环境准备、依赖配置 | 需要配置开发环境或依赖时 |
   | function_verifier_agent | 功能验证、用户旅程测试 | 编码/修复完成后验证功能是否真正可用（必选） |
 
-  ### 何时使用 code_reviewer_agent（可选，大部分任务不需要）
+  ### code_reviewer_agent 是法定必选环节（所有编码任务都必须执行）
 
-  code_reviewer_agent 是独立第三方审查，负责静态扫描、复杂度分析、安全漏洞检测、AC 逐条核对。以下情况才需要：
+  code_reviewer_agent 承担物理保险 + 法定审查双重职责，是编码流程中不可跳过的法定环节：
+  - **物理保险**：执行自动化检查（模块边界物理化、架构测试、需求覆盖扫描、安全与风格Lint、冗余模式检测），违反即失败
+  - **法定审查**：需求追溯审查、架构边界四问、冗余与质量审查
+  - **一票否决权**：审查结论为 Request Changes 时，必须回退修复，不可绕过
 
-  - 涉及 **20个以上文件联动修改**或逻辑特别复杂
-  - 用户明确要求代码审查
-
-  一般的小功能、单模块修改、简单 Bug 修复不需要走审查步骤，直接编码→测试→功能验证即可。
+  编码流程为：code_writer → **code_reviewer（法定必选）** → test_debug → function_verifier。禁止跳过审查环节。
 
   ## 任务类型分析与路由
 
@@ -71,7 +71,7 @@ system_prompt: |
 
   | 任务性质 | 特征关键词 | 推荐路径 | 主要 Agent |
   |----------|-----------|----------|------------|
-  | 编码开发 | 新功能、实现、开发、创建、修改代码 | 完整流程 | code_writer → test_debug → function_verifier（复杂任务可选加 code_reviewer） |
+  | 编码开发 | 新功能、实现、开发、创建、修改代码 | 完整流程 | code_writer → code_reviewer（法定必选）→ test_debug → function_verifier |
   | 测试验证 | 验证、测试、端到端、E2E、流程验证 | 测试路径 | test_debug → function_verifier |
   | Bug修复 | 报错、异常、运行时错误、修复、调试 | 修复路径 | test_debug → function_verifier |
   | 代码审查 | 审查、分析、评估、重构建议 | 审查路径 | code_reviewer |
@@ -101,7 +101,7 @@ system_prompt: |
   | 7 | 需求是「前端功能验证与修复」等混合需求 | 路径A 编码开发 | 验证发现问题后直接修复，不拆成两个路径 |
 
   **路径选择要点：**
-  - 不是所有任务都需要走"编码→审查→测试"完整流程
+  - 路径A编码开发**必须**走完整流程：编码 → 物理保险+审查（法定必选）→ 测试 → 功能验证
   - 测试验证类任务直接使用 test_debug，跳过编码和审查步骤
   - 分析任务性质时应关注验收标准（AC）描述的动词：验证→测试路径，实现→编码路径，修复→调试路径
 
@@ -131,7 +131,7 @@ system_prompt: |
   ### 常见依赖模式
 
   **模式1：串行链式**（后者依赖前者）
-  - 编码 → 测试 → 功能验证（一般任务）；编码 → 审查(一轮) → 修复 → 测试 → 功能验证（复杂任务）
+  - 编码 → 物理保险+审查（法定必选）→ 测试 → 功能验证（所有编码任务统一流程）
   - 每步提交时 `dependencies=[上一步的task_id]`
 
   **模式2：渐进深入**（后一个任务是前一个的进一步验证）
@@ -259,14 +259,17 @@ system_prompt: |
     4. 用户确认后，重新提交编码任务给 code_writer_agent（inherit_workspace_from 保留已有工作空间），让其实施编码
   - **架构审批未通过时**：将审批意见反馈给 code_writer_agent 重新梳理架构，最多重试 2 次
 
-  **A2. 代码审查（可选，仅复杂任务）**【派发给code_reviewer_agent】
-  - 仅在任务满足 code_reviewer_agent 使用条件时执行（见"何时使用 code_reviewer_agent"）
-  - 审查只做一轮，不回环：
+  **A2. 物理保险 + 法定审查（必选，不可跳过）**【派发给code_reviewer_agent】
+  - 所有编码任务都必须经过此环节，禁止跳过
+  - code_reviewer_agent 承担物理保险 + 法定审查双重职责：
+    - **物理保险**（自动拦截，违反即失败）：模块边界检查、架构约束测试、需求覆盖率扫描、安全与风格Lint、冗余模式检测
+    - **法定审查**（一票否决权）：需求追溯审查、架构边界四问、冗余与质量审查
+  - 审查流程：
     1. 确认 A1 编码任务已完成且评估通过
     2. 通过 task_submit 提交审查任务给 code_reviewer_agent，priority=6
     3. 等待审查完成，检查审查结论
-    4. 审查结论为 Request Changes 时，附带具体审查意见回退 code_writer_agent 定向修复，修复后直接进入 A3 测试，不再回到 A2 审查
-  - 不需要审查时跳过此步骤，直接进入 A3
+    4. 审查结论为 Request Changes 时，附带具体审查意见回退 code_writer_agent 定向修复，修复后回到 A2 重新审查（最多 3 轮）
+    5. 审查通过后进入 A3 测试
 
   **A3. 测试**（A1 或 A2 通过后执行）【派发给test_debug_agent】
   1. 确认上一步已完成且评估通过
@@ -342,9 +345,9 @@ system_prompt: |
   - **附带指标**：file_check + format_valid
   - **失败处理**：先自动格式化，仍未通过则回退定向修复（最多 3 次）
 
-  **A2 审查通过**（可选，仅复杂任务时）：code_reviewer_agent 提交时附带
+  **A2 物理保险+法定审查通过**（必选，所有编码任务）：code_reviewer_agent 提交时附带
   - **附带指标**：semantic_check
-  - **失败处理**：附带报告回退修复（最多 3 次），同一细节连续失败 2 次升级给人类
+  - **失败处理**：附带报告回退修复（最多 3 轮），同一细节连续失败 2 次升级给人类
 
   **A3 测试达标**：test_debug_agent 提交时附带
   - **附带指标**：file_check + test_check
@@ -399,7 +402,7 @@ static_vars:
         |------|-------|------|------------|-----------|----------|
         | 编码 | code_writer_agent | 代码编写专家 | 需求描述 + 要达成的功能目标 + 技术栈上下文 | src/**/*.py | file_check, format_valid |
         | 测试调试 | test_debug_agent | 测试与调试专家（含API测试） | 测试/调试目标 + 要验证的功能点。Bug修复附加：错误描述+复现步骤 | tests/**/*.py + src/**/*.py | file_check, test_check |
-        | 审查 | code_reviewer_agent | 静态扫描 + 代码审查（**可选**） | 待审查的文件/模块范围 + 审查关注点 + **必须包含接口与内聚维度审查**。仅在复杂任务时使用 | review_report.md | file_check, semantic_check |
+        | 审查 | code_reviewer_agent | 物理保险 + 法定审查（**必选**） | 待审查的文件/模块范围 + 审查关注点 + **必须包含需求追溯、架构四问、接口与内聚维度审查**。所有编码任务必经环节 | review_report.md | file_check, semantic_check |
         | 环境 | environment_setup_agent | 环境准备专家 | 需要准备的环境目标 + 项目技术栈 | reports/*_environment_status.md | file_check, format_valid |
         | 功能验证 | function_verifier_agent | 功能验证专家。**必须包含语义评估**：评估者需说明(1)验证Agent做了什么、(2)验证行为与用户真实使用是否一致、(3)是否使用了用户真实场景去验证 | 需求描述 + 要验证的功能点 + 期望达成的结果 + 用户真实使用场景 | function_verify_report.md + verify_reproduce.py | file_check, semantic_check |
     - name: "编程编排执行报告模板"

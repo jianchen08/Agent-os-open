@@ -152,57 +152,50 @@ async def get_file_tree(
 @workspaces_router.get("/{container_task_id}/file-content", summary="读取文件内容")
 async def get_file_content(
     container_task_id: str,
-    path: str = Query(..., description="文件在工作空间中的相对路径"),
+    path: str = Query(..., description="文件路径（绝对路径或相对路径）"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    """读取工作空间中指定文件的内容。
+    """读取指定文件的内容。
 
-    通过容器任务的 metadata.ws_meta.path 定位工作空间根目录，
-    然后拼接相对路径读取文件内容。限制只读取文本文件，最大 1MB。
+    优先通过 container_task_id 解析工作空间根路径（兼容文件树点击场景），
+    解析失败时直接按传入的路径读取（兼容交互场景的绝对路径）。
 
     Args:
-        container_task_id: 容器任务 ID
-        path: 文件相对路径
+        container_task_id: 容器任务 ID（传入 _local 等非任务 ID 时忽略）
+        path: 文件路径（绝对路径或相对于工作空间的相对路径）
         _user: 已认证用户信息
 
     Returns:
         包含 success、content、path、size 的字典
     """
-    # 1. 解析工作空间根路径
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
-    if not workspace_path_str:
-        return {
-            "success": False,
-            "message": "未找到工作空间路径",
-        }
+    full_path = Path(path).resolve()
 
-    workspace_path = Path(workspace_path_str).resolve()
+    if not full_path.is_absolute() or not full_path.exists():
+        workspace_path_str = await _resolve_workspace_path(container_task_id)
+        if workspace_path_str:
+            full_path = (Path(workspace_path_str) / path).resolve()
 
-    # 2. 拼接完整路径并做安全检查（防止路径穿越）
-    full_path = (workspace_path / path).resolve()
-    if not str(full_path).startswith(str(workspace_path)):
-        return {
-            "success": False,
-            "message": "路径超出工作空间范围",
-        }
-
-    # 3. 检查文件存在且为普通文件
     if not full_path.is_file():
         return {
             "success": False,
             "message": f"文件不存在或不是普通文件: {path}",
         }
 
-    # 4. 检查文件大小（限制 1MB）
-    MAX_SIZE = 1 * 1024 * 1024  # 1MB
+    cwd = Path.cwd().resolve()
+    if not str(full_path).startswith(str(cwd)):
+        return {
+            "success": False,
+            "message": "路径超出工作目录范围",
+        }
+
+    MAX_SIZE = 10 * 1024 * 1024
     file_size = full_path.stat().st_size
     if file_size > MAX_SIZE:
         return {
             "success": False,
-            "message": f"文件过大（{file_size} 字节），超过 1MB 限制",
+            "message": f"文件过大（{file_size} 字节），超过 10MB 限制",
         }
 
-    # 5. 读取文件内容
     try:
         content = full_path.read_text(encoding="utf-8", errors="replace")
         return {
@@ -212,7 +205,7 @@ async def get_file_content(
             "size": file_size,
         }
     except Exception as e:
-        logger.warning("读取工作空间文件失败: %s | path=%s", e, path)
+        logger.warning("读取文件失败: %s | path=%s", e, path)
         return {
             "success": False,
             "message": f"读取文件失败: {e}",
@@ -601,7 +594,6 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
         if not task:
             return None
 
-        # 安全提取 metadata.ws_meta.path
         _metadata = getattr(task, "metadata", None) or {}
         _ws_meta = _metadata.get("ws_meta", {}) or {}
         return _ws_meta.get("path")

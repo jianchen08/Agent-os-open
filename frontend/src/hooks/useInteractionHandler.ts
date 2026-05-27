@@ -19,13 +19,13 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
-import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 /**
  * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
  * 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容
+ * API 已改造为 fallback 到 cwd，不再依赖 container_task_id
  */
 async function parseInteractionEvent(
   data: Record<string, unknown>,
@@ -37,38 +37,27 @@ async function parseInteractionEvent(
 
   const rawAgentLevel = (inner.agent_level as string || '').toUpperCase()
 
-  /** 从 file_paths 列表通过 API 拉取文件内容 */
   const filePaths = inner.file_paths as string[] | undefined
   let fileContents: Record<string, string> | undefined
   if (filePaths && filePaths.length > 0) {
-    const containerId = useWorkspaceStore.getState().activeWorkspaceId
-      || (() => {
-        const layoutStore = useLayoutModeStore.getState()
-        const wsTab = layoutStore.workspaceTabs.find(
-          (t) => t.dataSource && t.dataSource.startsWith('workspace://'),
-        )
-        return wsTab?.dataSource?.replace('workspace://', '').split('/')[0] || ''
-      })()
-    if (containerId) {
-      const contents: Record<string, string> = {}
-      await Promise.all(
-        filePaths.map(async (filePath) => {
-          try {
-            const resp = await apiClient.get(
-              `/api/v1/workspaces/${containerId}/file-content`,
-              { params: { path: filePath } },
-            )
-            if (resp.data?.success) {
-              contents[filePath] = resp.data.content ?? ''
-            }
-          } catch {
-            // 单个文件拉取失败不阻塞整体流程
+    const contents: Record<string, string> = {}
+    await Promise.all(
+      filePaths.map(async (filePath) => {
+        try {
+          const resp = await apiClient.get(
+            `/api/v1/workspaces/_local/file-content`,
+            { params: { path: filePath } },
+          )
+          if (resp.data?.success) {
+            contents[filePath] = resp.data.content ?? ''
           }
-        }),
-      )
-      if (Object.keys(contents).length > 0) {
-        fileContents = contents
-      }
+        } catch {
+          // 单个文件失败不阻塞整体
+        }
+      }),
+    )
+    if (Object.keys(contents).length > 0) {
+      fileContents = contents
     }
   }
 

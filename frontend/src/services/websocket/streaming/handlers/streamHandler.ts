@@ -136,6 +136,15 @@ export function handleStreamStart(eventData: any) {
       if (pipelineMeta?.sessionId && activeSessionId && pipelineMeta.sessionId !== activeSessionId) {
         return false
       }
+      // BUG-FIX-fix_20260528_cross_pipeline_jump:
+      // 兜底保护：管道元数据未注册时（sub_agent_created 和 stream_start 竞态），
+      // 通过 pipelineSessionMap 查找归属会话，不属于当前会话则禁止激活。
+      if (!pipelineMeta && activeSessionId) {
+        const pipelineSession = pipelineStore.getState().pipelineSessionMap[pipelineId]
+        if (pipelineSession && pipelineSession !== activeSessionId) {
+          return false
+        }
+      }
       if (activeTab?.pipelineRunId === pipelineId) return true
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
