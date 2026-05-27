@@ -221,7 +221,13 @@ export function FiveSpaceLayout({
       taskId,
       status: (node.status as AgentTab['status']) ?? 'running',
     })
-  }, [activeSessionId])
+
+    if (isMobile) {
+      setMobileWorkspaceOpen(false)
+      setWorkspaceFullscreen(false)
+      setWorkspaceCollapsed(true)
+    }
+  }, [activeSessionId, isMobile])
 
   // Build dynamic dock items with execution status
   const enrichedDockItems = useMemo(() => {
@@ -251,6 +257,11 @@ export function FiveSpaceLayout({
           isActive: true,
           onClick: () => {
             navigateToPipeline(execution.id)
+            if (isMobile) {
+              setMobileWorkspaceOpen(false)
+              setWorkspaceFullscreen(false)
+              setWorkspaceCollapsed(true)
+            }
           },
         })
       }

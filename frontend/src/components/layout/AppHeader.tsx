@@ -10,7 +10,7 @@
  * - 布局切换按钮只显示图标
  */
 
-import { PanelLeftClose, PanelLeftOpen, LayoutGrid, Menu, LogOut, User } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, LayoutGrid, Menu, LogOut } from 'lucide-react'
 import React from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -18,7 +18,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ROUTES } from '@/constants/routes'
@@ -129,6 +128,11 @@ export function AppHeader({
 
         {extraRight}
 
+        {/* 移动端主题快速切换 —— 直接显示在顶部栏 */}
+        <div className="md:hidden">
+          <ThemeButton onClick={() => onShowThemePanel(true)} />
+        </div>
+
         {/* 布局切换按钮 */}
         <button
           onClick={onToggleMode}
@@ -174,10 +178,6 @@ export function AppHeader({
                   {item.label}
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => onShowThemePanel(true)}>
-                主题设置
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
