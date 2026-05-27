@@ -646,7 +646,7 @@ class EvaluationEngine:
 
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
-                _captured_pid[0] = engine._pipeline_id
+                _captured_pid[0] = engine.pipeline_id
                 from pathlib import Path
                 project_root = _resolve_eval_project_root(
                     task_id, params,
@@ -660,7 +660,7 @@ class EvaluationEngine:
                 # 评估管道创建后立即注册到根任务子目录
                 # 确保即使管道运行异常，记录文件也会分组（与 task_worker 对主管道的做法一致）
                 EvaluationEngine._pre_register_eval_pipeline(
-                    engine._pipeline_id, task_id,
+                    engine.pipeline_id, task_id,
                 )
 
                 state = await engine.run(

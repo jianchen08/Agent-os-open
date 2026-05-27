@@ -10,7 +10,6 @@
 import asyncio
 from asyncio import CancelledError
 import logging
-from pathlib import Path
 from typing import Any
 
 from human_interaction import (
@@ -166,6 +165,15 @@ class HumanInteractionTool(BuiltinTool):
         else:
             return create_failure_result(error=f"不支持的交互模式: {mode}")
 
+    def _parse_agent_level(self, inputs: dict[str, Any]) -> str:
+        """从输入参数中解析代理层级标识"""
+        raw = inputs.get("parent_agent_level", 1)
+        try:
+            val = int(str(raw).upper().lstrip("L"))
+        except (ValueError, TypeError):
+            val = 1
+        return f"L{val}"
+
     async def _execute_choice_mode(
         self,
         inputs: dict[str, Any],
@@ -182,15 +190,7 @@ class HumanInteractionTool(BuiltinTool):
 
         priority = Priority(priority_str) if priority_str in [p.value for p in Priority] else Priority.NORMAL
 
-        file_paths_list = inputs.get("file_paths")
-        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
-
-        agent_level_raw = inputs.get("parent_agent_level", 1)
-        try:
-            agent_level_val = int(str(agent_level_raw).upper().lstrip("L"))
-        except (ValueError, TypeError):
-            agent_level_val = 1
-        agent_level_str = f"L{agent_level_val}"
+        agent_level_str = self._parse_agent_level(inputs)
 
         request_id: str | None = None
         try:
@@ -204,7 +204,7 @@ class HumanInteractionTool(BuiltinTool):
                 questions=questions,
                 timeout_seconds=timeout_seconds,
                 priority=priority,
-                file_contents=file_contents,
+                file_paths=inputs.get("file_paths"),
                 user_id=None,
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
@@ -214,12 +214,18 @@ class HumanInteractionTool(BuiltinTool):
                 request_id, timeout=timeout_seconds,
             )
 
-            result = {
+            selected_id = response.get("selected_option")
+            result: dict[str, Any] = {
                 "status": "completed",
                 "response_type": response.get("response_type"),
             }
-            if response.get("selected_option"):
-                result["selected_option"] = response["selected_option"]
+            if selected_id:
+                result["selected_option"] = selected_id
+                if isinstance(options, list):
+                    for opt in options:
+                        if isinstance(opt, dict) and opt.get("id") == selected_id:
+                            result["selected_option_label"] = opt.get("label", selected_id)
+                            break
             if response.get("answers"):
                 result["answers"] = response["answers"]
             if response.get("feedback"):
@@ -258,8 +264,6 @@ class HumanInteractionTool(BuiltinTool):
                 "[HumanInteractionTool] 交互拒绝 | "
                 "request_id=%s", e.request_id,
             )
-            # BUG-FIX: 明确设置 selected_option="reject"，确保评估系统能
-            # 显式判定为不通过，而非依赖字段缺失隐式判定。
             return create_success_result(
                 data={
                     "status": "denied",
@@ -274,7 +278,6 @@ class HumanInteractionTool(BuiltinTool):
                 "request_id=%s",
                 request_id,
             )
-            # 清理残留请求，防止堆积
             if request_id:
                 try:
                     await service.cancel_request(
@@ -310,15 +313,7 @@ class HumanInteractionTool(BuiltinTool):
         suggestions = inputs.get("suggestions")
         timeout_seconds = inputs.get("timeout_seconds", 86400)
 
-        file_paths_list = inputs.get("file_paths")
-        file_contents = self._read_file_contents(file_paths_list, inputs) if file_paths_list else None
-
-        agent_level_raw = inputs.get("parent_agent_level", 1)
-        try:
-            agent_level_val = int(str(agent_level_raw).upper().lstrip("L"))
-        except (ValueError, TypeError):
-            agent_level_val = 1
-        agent_level_str = f"L{agent_level_val}"
+        agent_level_str = self._parse_agent_level(inputs)
 
         request_id: str | None = None
         try:
@@ -330,7 +325,7 @@ class HumanInteractionTool(BuiltinTool):
                 description=description,
                 initial_message=initial_message,
                 suggestions=suggestions,
-                file_contents=file_contents,
+                file_paths=inputs.get("file_paths"),
                 user_id=None,
                 agent_id=pipeline_id,
                 agent_level=agent_level_str,
@@ -343,10 +338,6 @@ class HumanInteractionTool(BuiltinTool):
             resp_type = response.get("response_type", "")
             feedback = response.get("feedback", "")
 
-            # BUG-FIX: 对话模式不应被评估系统视为"通过"。
-            # 对话模式仅表示用户到达了对话页面，不包含审批决策。
-            # 通过设置 conversation_mode=True 且不设置 selected_option，
-            # 确保 YAML 中的 data.selected_option == "approve" 条件无法满足。
             if resp_type == "approved":
                 result = {
                     "status": "user_arrived",
@@ -416,7 +407,6 @@ class HumanInteractionTool(BuiltinTool):
                 "request_id=%s",
                 request_id,
             )
-            # 清理残留请求，防止堆积
             if request_id:
                 try:
                     await service.cancel_request(
@@ -447,6 +437,12 @@ class HumanInteractionTool(BuiltinTool):
         pipeline_id: str,
     ) -> ToolExecutionResult:
         """执行通知模式，非阻塞发送通知后立即返回。"""
+        if inputs.get("file_paths"):
+            return create_failure_result(
+                error="通知模式不支持 file_paths 参数，请使用 choice 或 conversation 模式",
+                error_code="INVALID_PARAMS",
+            )
+
         title = inputs.get("title", "")
         description = inputs.get("description", "")
         initial_message = inputs.get("initial_message")
@@ -487,56 +483,6 @@ class HumanInteractionTool(BuiltinTool):
                 error_code="INTERACTION_FAILED",
             )
 
-    def _read_file_contents(
-        self, file_paths: list[str], inputs: dict[str, Any],
-    ) -> dict[str, str]:
-        """读取文件路径列表对应的文件内容，用于在审批面板中展示。
-
-        BUG-FIX-fix_20260511_file_not_found: 使用 workspace 解析相对路径。
-        问题根因: LLM 传入的 file_paths 可能是相对路径，直接 os.path.exists
-                  基于进程 CWD 查找，而非任务工作空间，导致文件找不到。
-        修复方案: 从 inputs 中获取 workspace，将相对路径解析为绝对路径后再读取。
-        影响范围: 审批面板中展示的文件内容。
-        """
-        result: dict[str, str] = {}
-        if not file_paths:
-            return result
-
-        workspace = inputs.get("workspace", "")
-        workspace_path = Path(workspace) if workspace else None
-
-        max_files = 10
-        max_size = 2 * 1024 * 1024
-        for raw_path in file_paths[:max_files]:
-            try:
-                p = Path(raw_path)
-                if not p.is_absolute() and workspace_path:
-                    resolved = (workspace_path / p).resolve()
-                else:
-                    resolved = p.resolve()
-
-                if not resolved.exists():
-                    result[raw_path] = f"[读取失败: 文件不存在]"
-                    continue
-                if not resolved.is_file():
-                    result[raw_path] = f"[读取失败: 路径不是文件]"
-                    continue
-                file_size = resolved.stat().st_size
-                if file_size > max_size:
-                    result[raw_path] = f"[文件过大: {file_size // (1024*1024)}MB，超过2MB限制]"
-                    continue
-                try:
-                    result[raw_path] = resolved.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    result[raw_path] = resolved.read_text(encoding="gbk", errors="ignore")
-            except Exception as e:
-                result[raw_path] = f"[读取失败: {str(e)}]"
-        if len(file_paths) > max_files:
-            logger.warning(
-                "[HumanInteractionTool] file_paths 超过最大数量限制 | "
-                "count=%d | max=%d", len(file_paths), max_files,
-            )
-        return result
 
 
 def create_human_interaction_tool(

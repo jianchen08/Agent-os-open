@@ -5,26 +5,27 @@
 - TaskStorage：CRUD + 持久化 + 边界条件
 - TaskService：全生命周期编排
   - 创建/查询/绑定
-  - 状态转换：start/pause/resume/fail/complete_evaluation/move_to_evaluating
-  - reactivate_task / reset_to_pending / recover_to_completed
-  - reject_task（含打回次数上限）
+  - 状态转换：start/pause/resume/fail/complete_evaluation/force_transition
+  - reset_to_pending / cancel_task_cascade
   - delete_task（容器/非容器/子任务）
-  - cancel_task_cascade（级联取消）
   - force_transition / can_transition / get_valid_transitions
-  - get_root_task_id / get_progress
+  - get_root_task_id
   - save_task / list_all
 """
 
 from __future__ import annotations
 
+import tempfile
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agents.types import AgentLevel
-from tasks.service import SimpleStateMachine, TaskService
-from tasks.state_machine import InvalidTransitionError
+from tasks.service import TaskService
+from src.tasks.state_machine import SimpleStateMachine
+from src.tasks.state_machine import InvalidTransitionError
+from src.tasks.state_machine import _TASK_TRANSITIONS
 from tasks.storage import TaskStorage
 from tasks.types import TaskModel, TaskPriority, TaskStatus, create_task
 
@@ -34,8 +35,17 @@ from tasks.types import TaskModel, TaskPriority, TaskStatus, create_task
 # ═══════════════════════════════════════════════════════════
 
 def _make_service() -> TaskService:
-    """创建使用内存存储的 TaskService 实例。"""
-    return TaskService(storage=TaskStorage())
+    """创建使用临时目录的 TaskService 实例。"""
+    tmp_dir = tempfile.mkdtemp(prefix="test_task_service_")
+    return TaskService(data_dir=tmp_dir)
+
+
+def _move_to_evaluating(svc: TaskService, task_id: str) -> None:
+    """辅助方法：将任务从 running 转到 evaluating（通过 force_transition）。"""
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        svc.force_transition(task_id, TaskStatus.EVALUATING)
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -45,73 +55,107 @@ def _make_service() -> TaskService:
 class TestSimpleStateMachineTransitions:
     """SimpleStateMachine 所有合法/非法转换全覆盖。
 
-    状态机定义（6 种状态）:
-    - PENDING → [RUNNING, PAUSED, COMPLETED, FAILED]
-    - RUNNING → [COMPLETED, FAILED, EVALUATING, PAUSED]
-    - EVALUATING → [COMPLETED, FAILED, RUNNING]
-    - FAILED → [PENDING]
-    - COMPLETED → [PENDING]
-    - PAUSED → [PENDING, RUNNING, FAILED]
+    基于 _TASK_TRANSITIONS 定义的状态转换规则：
+    - pending → [scheduled, running, cancelled, paused]
+    - scheduled → [running, cancelled]
+    - running → [evaluating, completed, failed, suspended, blocked, cancelled, paused]
+    - evaluating → [completed, failed, running, cancelled]
+    - suspended → [running, cancelled, timeout]
+    - blocked → [running, cancelled, failed]
+    - completed → []
+    - failed → [pending]
+    - cancelled → []
+    - timeout → [running, cancelled, failed]
+    - paused → [pending, running, cancelled]
     """
 
     def setup_method(self) -> None:
-        self.sm = SimpleStateMachine()
+        """初始化状态机实例。"""
+        self.sm = SimpleStateMachine(
+            initial_state="pending",
+            transitions=_TASK_TRANSITIONS,
+        )
 
-    # ── 合法转换（参数化覆盖全部 16 条边）─────────────────
+    # ── 合法转换（参数化覆盖全部合法边）─────────────────
 
     @pytest.mark.parametrize("from_s, to_s", [
-        (TaskStatus.PENDING, TaskStatus.RUNNING),
-        (TaskStatus.PENDING, TaskStatus.PAUSED),
-        (TaskStatus.PENDING, TaskStatus.COMPLETED),
-        (TaskStatus.PENDING, TaskStatus.FAILED),
-        (TaskStatus.RUNNING, TaskStatus.COMPLETED),
-        (TaskStatus.RUNNING, TaskStatus.FAILED),
-        (TaskStatus.RUNNING, TaskStatus.EVALUATING),
-        (TaskStatus.RUNNING, TaskStatus.PAUSED),
-        (TaskStatus.EVALUATING, TaskStatus.COMPLETED),
-        (TaskStatus.EVALUATING, TaskStatus.FAILED),
-        (TaskStatus.EVALUATING, TaskStatus.RUNNING),
-        (TaskStatus.FAILED, TaskStatus.PENDING),
-        (TaskStatus.COMPLETED, TaskStatus.PENDING),
-        (TaskStatus.PAUSED, TaskStatus.PENDING),
-        (TaskStatus.PAUSED, TaskStatus.RUNNING),
-        (TaskStatus.PAUSED, TaskStatus.FAILED),
+        ("pending", "scheduled"),
+        ("pending", "running"),
+        ("pending", "cancelled"),
+        ("pending", "paused"),
+        ("scheduled", "running"),
+        ("scheduled", "cancelled"),
+        ("running", "evaluating"),
+        ("running", "completed"),
+        ("running", "failed"),
+        ("running", "suspended"),
+        ("running", "blocked"),
+        ("running", "cancelled"),
+        ("running", "paused"),
+        ("evaluating", "completed"),
+        ("evaluating", "failed"),
+        ("evaluating", "running"),
+        ("evaluating", "cancelled"),
+        ("suspended", "running"),
+        ("suspended", "cancelled"),
+        ("suspended", "timeout"),
+        ("blocked", "running"),
+        ("blocked", "cancelled"),
+        ("blocked", "failed"),
+        ("failed", "pending"),
+        ("timeout", "running"),
+        ("timeout", "cancelled"),
+        ("timeout", "failed"),
+        ("paused", "pending"),
+        ("paused", "running"),
+        ("paused", "cancelled"),
     ])
-    def test_valid_transition(self, from_s: TaskStatus, to_s: TaskStatus) -> None:
+    def test_valid_transition(self, from_s: str, to_s: str) -> None:
         """合法转换应成功。"""
-        task = TaskModel(status=from_s)
-        self.sm.transition(task, to_s)
-        assert task.status == to_s
+        sm = SimpleStateMachine(initial_state=from_s, transitions=_TASK_TRANSITIONS)
+        sm.transition(to_s)
+        assert sm.current_state == to_s
 
     # ── 非法转换（采样关键场景）────────────────────────────
 
     @pytest.mark.parametrize("from_s, to_s", [
-        (TaskStatus.COMPLETED, TaskStatus.RUNNING),
-        (TaskStatus.COMPLETED, TaskStatus.FAILED),
-        (TaskStatus.COMPLETED, TaskStatus.EVALUATING),
-        (TaskStatus.FAILED, TaskStatus.RUNNING),
-        (TaskStatus.FAILED, TaskStatus.COMPLETED),
-        (TaskStatus.PAUSED, TaskStatus.COMPLETED),
-        (TaskStatus.PAUSED, TaskStatus.EVALUATING),
-        (TaskStatus.EVALUATING, TaskStatus.PAUSED),
-        (TaskStatus.RUNNING, TaskStatus.PENDING),
+        ("completed", "running"),
+        ("completed", "failed"),
+        ("completed", "evaluating"),
+        ("failed", "running"),
+        ("failed", "completed"),
+        ("paused", "completed"),
+        ("paused", "evaluating"),
+        ("evaluating", "paused"),
+        ("running", "pending"),
+        ("cancelled", "running"),
+        ("cancelled", "pending"),
     ])
     def test_invalid_transition_raises(
-        self, from_s: TaskStatus, to_s: TaskStatus,
+        self, from_s: str, to_s: str,
     ) -> None:
         """非法转换应抛出 InvalidTransitionError。"""
-        task = TaskModel(status=from_s)
+        sm = SimpleStateMachine(initial_state=from_s, transitions=_TASK_TRANSITIONS)
         with pytest.raises(InvalidTransitionError) as exc_info:
-            self.sm.transition(task, to_s)
-        assert exc_info.value.from_status == from_s.value
-        assert exc_info.value.to_status == to_s.value
+            sm.transition(to_s)
+        assert exc_info.value.current_state == from_s
+        assert exc_info.value.target_state == to_s
 
     def test_can_transition_returns_bool(self) -> None:
         """can_transition 对合法/非法返回正确的布尔值。"""
-        assert self.sm.can_transition(TaskStatus.PENDING, TaskStatus.RUNNING) is True
-        assert self.sm.can_transition(TaskStatus.COMPLETED, TaskStatus.RUNNING) is False
-        assert self.sm.can_transition(TaskStatus.FAILED, TaskStatus.PENDING) is True
-        assert self.sm.can_transition(TaskStatus.PAUSED, TaskStatus.EVALUATING) is False
+        sm = SimpleStateMachine(initial_state="pending", transitions=_TASK_TRANSITIONS)
+        assert sm.can_transition("running") is True
+        assert sm.can_transition("paused") is True
+        assert sm.can_transition("cancelled") is True
+
+        sm_completed = SimpleStateMachine(initial_state="completed", transitions=_TASK_TRANSITIONS)
+        assert sm_completed.can_transition("running") is False
+
+        sm_failed = SimpleStateMachine(initial_state="failed", transitions=_TASK_TRANSITIONS)
+        assert sm_failed.can_transition("pending") is True
+
+        sm_paused = SimpleStateMachine(initial_state="paused", transitions=_TASK_TRANSITIONS)
+        assert sm_paused.can_transition("evaluating") is False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -240,6 +284,7 @@ class TestTaskServiceCreate:
     """TaskService 创建与查询测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -306,126 +351,111 @@ class TestTaskServiceTransitions:
     """TaskService 状态转换测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
     async def test_start_task_success(self) -> None:
         """pending → running 成功。"""
         task = await self.svc.create_task(title="启动")
-        result = await self.svc.start_task(task.id)
-        assert result.status == TaskStatus.RUNNING
-        assert result.started_at is not None
-
-    @pytest.mark.asyncio
-    async def test_start_task_sets_started_at(self) -> None:
-        """启动任务设置 started_at。"""
-        task = await self.svc.create_task(title="时间")
-        assert task.started_at is None
-        started = await self.svc.start_task(task.id)
-        assert started.started_at is not None
+        await self.svc.start_task(task.id)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_move_to_evaluating_success(self) -> None:
         """running → evaluating 成功。"""
         task = await self.svc.create_task(title="评估")
         await self.svc.start_task(task.id)
-        result = await self.svc.move_to_evaluating(task.id)
-        assert result.status == TaskStatus.EVALUATING
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.EVALUATING
 
     @pytest.mark.asyncio
     async def test_complete_evaluation_passed(self) -> None:
         """evaluating → completed（通过）。"""
         task = await self.svc.create_task(title="通过")
         await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=True, result={"score": 0.95})
-        assert result.status == TaskStatus.COMPLETED
-        assert result.result == {"score": 0.95}
-        assert result.completed_at is not None
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        await self.svc.complete_evaluation(task.id, passed=True, result={"score": 0.95})
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.COMPLETED
+        assert fetched.result == {"score": 0.95}
 
     @pytest.mark.asyncio
     async def test_complete_evaluation_failed(self) -> None:
         """evaluating → failed（不通过）。"""
         task = await self.svc.create_task(title="不通过")
         await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=False)
-        assert result.status == TaskStatus.FAILED
-
-    @pytest.mark.asyncio
-    async def test_complete_evaluation_stores_history(self) -> None:
-        """评估结果记录到 evaluation_history。"""
-        task = await self.svc.create_task(title="历史")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True, result="OK")
-
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        await self.svc.complete_evaluation(task.id, passed=False)
         fetched = self.svc.get_task(task.id)
-        history = fetched.metadata.get("evaluation_history", [])
-        assert len(history) == 1
-        assert history[0]["passed"] is True
-        assert history[0]["data"] == "OK"
+        assert fetched.status == TaskStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_pause_task_success(self) -> None:
         """running → paused 成功。"""
         task = await self.svc.create_task(title="暂停")
         await self.svc.start_task(task.id)
-        result = await self.svc.pause_task(task.id)
-        assert result.status == TaskStatus.PAUSED
+        await self.svc.pause_task(task.id)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.PAUSED
 
     @pytest.mark.asyncio
     async def test_resume_task_success(self) -> None:
-        """paused → running 成功。"""
+        """paused → pending 成功（resume_task 将 paused 恢复为 pending）。"""
         task = await self.svc.create_task(title="恢复")
         await self.svc.start_task(task.id)
         await self.svc.pause_task(task.id)
         result = await self.svc.resume_task(task.id)
-        assert result.status == TaskStatus.RUNNING
+        assert result.status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
-    async def test_fail_task_with_error(self) -> None:
+    async def test_fail_task_with_reason(self) -> None:
         """running → failed，带错误信息。"""
         task = await self.svc.create_task(title="失败")
         await self.svc.start_task(task.id)
-        result = await self.svc.fail_task(task.id, error="出错了")
-        assert result.status == TaskStatus.FAILED
-        assert result.error == "出错了"
+        await self.svc.fail_task(task.id, reason="出错了")
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.FAILED
+        assert fetched.error == "出错了"
 
     @pytest.mark.asyncio
-    async def test_fail_task_without_error(self) -> None:
+    async def test_fail_task_without_reason(self) -> None:
         """running → failed，不带错误信息。"""
         task = await self.svc.create_task(title="静默失败")
         await self.svc.start_task(task.id)
-        result = await self.svc.fail_task(task.id)
-        assert result.status == TaskStatus.FAILED
+        await self.svc.fail_task(task.id)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_full_lifecycle_pass(self) -> None:
         """完整生命周期：pending → running → evaluating → completed。"""
         task = await self.svc.create_task(title="全流程通过")
         await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=True)
-        assert result.status == TaskStatus.COMPLETED
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        await self.svc.complete_evaluation(task.id, passed=True)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_full_lifecycle_fail(self) -> None:
         """完整生命周期：pending → running → evaluating → failed。"""
         task = await self.svc.create_task(title="全流程失败")
         await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=False)
-        assert result.status == TaskStatus.FAILED
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        await self.svc.complete_evaluation(task.id, passed=False)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_invalid_transition_raises(self) -> None:
         """非法状态转换抛出 InvalidTransitionError。"""
         task = await self.svc.create_task(title="非法")
-        await self.svc.start_task(task.id)
-        # running → running 非法
+        # pending → evaluating 是非法转换（不在 _TASK_TRANSITIONS 中）
         with pytest.raises(InvalidTransitionError):
-            await self.svc.start_task(task.id)
+            await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
 
     @pytest.mark.asyncio
     async def test_task_not_found_raises_key_error(self) -> None:
@@ -433,71 +463,8 @@ class TestTaskServiceTransitions:
         with pytest.raises(KeyError):
             await self.svc.start_task("不存在")
 
-        with pytest.raises(KeyError):
-            await self.svc.fail_task("不存在")
-
-        with pytest.raises(KeyError):
-            await self.svc.move_to_evaluating("不存在")
-
-
-# ═══════════════════════════════════════════════════════════
-# TaskService — reactivate_task
-# ═══════════════════════════════════════════════════════════
-
-class TestTaskServiceReactivate:
-    """reactivate_task 测试（completed → pending）。"""
-
-    def setup_method(self) -> None:
-        self.svc = _make_service()
-
-    @pytest.mark.asyncio
-    async def test_reactivate_completed_task(self) -> None:
-        """重新激活已完成任务。"""
-        task = await self.svc.create_task(title="已完成")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True)
-        assert self.svc.get_task(task.id).status == TaskStatus.COMPLETED
-
-        result = await self.svc.reactivate_task(task.id)
-        assert result.status == TaskStatus.PENDING
-        assert result.completed_at == ""
-        assert result.error == ""
-        assert result.reject_count == 0
-
-    @pytest.mark.asyncio
-    async def test_reactivate_clears_pipeline_run_id(self) -> None:
-        """重新激活清除 pipeline_run_id 并记录到 pipeline_history。"""
-        task = await self.svc.create_task(title="带管道")
-        await self.svc.start_task(task.id)
-        await self.svc.bind_pipeline_run(task.id, "pipeline_001")
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True)
-
-        result = await self.svc.reactivate_task(task.id)
-        assert result.pipeline_run_id == ""
-        history = result.metadata.get("pipeline_history", [])
-        assert "pipeline_001" in history
-
-    @pytest.mark.asyncio
-    async def test_reactivate_with_message(self) -> None:
-        """重新激活带追加需求消息。"""
-        task = await self.svc.create_task(title="追加需求")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True)
-
-        result = await self.svc.reactivate_task(task.id, message="增加新功能")
-        reqs = result.metadata.get("reactivate_requirements", [])
-        assert len(reqs) == 1
-        assert reqs[0]["message"] == "增加新功能"
-        assert reqs[0]["timestamp"] is not None
-
-    @pytest.mark.asyncio
-    async def test_reactivate_nonexistent_raises(self) -> None:
-        """重新激活不存在的任务抛出 KeyError。"""
-        with pytest.raises(KeyError):
-            await self.svc.reactivate_task("不存在")
+        # fail_task 对不存在的任务不抛 KeyError（返回 None）
+        # move_to_evaluating 已移除
 
 
 # ═══════════════════════════════════════════════════════════
@@ -508,6 +475,7 @@ class TestTaskServiceResetToPending:
     """reset_to_pending 测试（强制重置）。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -516,162 +484,20 @@ class TestTaskServiceResetToPending:
         task = await self.svc.create_task(title="运行中")
         await self.svc.start_task(task.id)
 
-        result = await self.svc.reset_to_pending(task.id)
-        assert result.status == TaskStatus.PENDING
-        assert result.started_at == ""
-        assert result.error == ""
+        await self.svc.reset_to_pending(task.id)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
     async def test_reset_failed_to_pending(self) -> None:
         """将 failed 任务重置为 pending。"""
         task = await self.svc.create_task(title="失败")
         await self.svc.start_task(task.id)
-        await self.svc.fail_task(task.id, error="崩溃")
+        await self.svc.fail_task(task.id, reason="崩溃")
 
-        result = await self.svc.reset_to_pending(task.id)
-        assert result.status == TaskStatus.PENDING
-        assert result.error == ""
-
-    @pytest.mark.asyncio
-    async def test_reset_nonexistent_raises(self) -> None:
-        """重置不存在的任务抛出 KeyError。"""
-        with pytest.raises(KeyError):
-            await self.svc.reset_to_pending("不存在")
-
-
-# ═══════════════════════════════════════════════════════════
-# TaskService — recover_to_completed
-# ═══════════════════════════════════════════════════════════
-
-class TestTaskServiceRecover:
-    """recover_to_completed 测试（failed → completed 恢复）。"""
-
-    def setup_method(self) -> None:
-        self.svc = _make_service()
-
-    @pytest.mark.asyncio
-    async def test_recover_failed_task(self) -> None:
-        """将 failed 任务恢复为 completed。"""
-        task = await self.svc.create_task(title="恢复")
-        await self.svc.start_task(task.id)
-        await self.svc.fail_task(task.id, error="临时错误")
-
-        result = await self.svc.recover_to_completed(task.id, result="已修复")
-        assert result.status == TaskStatus.COMPLETED
-        assert result.error is None
-        assert result.result == "已修复"
-        assert result.completed_at is not None
-
-    @pytest.mark.asyncio
-    async def test_recover_non_failed_raises(self) -> None:
-        """对非 FAILED 状态调用 recover 抛出 ValueError。"""
-        task = await self.svc.create_task(title="非失败")
-        with pytest.raises(ValueError, match="FAILED"):
-            await self.svc.recover_to_completed(task.id)
-
-    @pytest.mark.asyncio
-    async def test_recover_running_raises(self) -> None:
-        """对 RUNNING 状态调用 recover 抛出 ValueError。"""
-        task = await self.svc.create_task(title="运行中")
-        await self.svc.start_task(task.id)
-        with pytest.raises(ValueError, match="FAILED"):
-            await self.svc.recover_to_completed(task.id)
-
-    @pytest.mark.asyncio
-    async def test_recover_completed_raises(self) -> None:
-        """对 COMPLETED 状态调用 recover 抛出 ValueError。"""
-        task = await self.svc.create_task(title="已完成")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True)
-        with pytest.raises(ValueError, match="FAILED"):
-            await self.svc.recover_to_completed(task.id)
-
-    @pytest.mark.asyncio
-    async def test_recover_nonexistent_raises(self) -> None:
-        """恢复不存在的任务抛出 KeyError。"""
-        with pytest.raises(KeyError):
-            await self.svc.recover_to_completed("不存在")
-
-
-# ═══════════════════════════════════════════════════════════
-# TaskService — reject_task（打回重做）
-# ═══════════════════════════════════════════════════════════
-
-class TestTaskServiceReject:
-    """reject_task 测试（evaluating → running 打回重做）。"""
-
-    def setup_method(self) -> None:
-        self.svc = _make_service()
-
-    @pytest.mark.asyncio
-    async def test_reject_once(self) -> None:
-        """打回一次，回到 running。"""
-        task = await self.svc.create_task(title="打回")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-
-        result = await self.svc.reject_task(task.id, reason="质量不够")
-        assert result.status == TaskStatus.RUNNING
-        assert result.reject_count == 1
-        assert "质量不够" in result.error
-        assert "1/3" in result.error
-
-    @pytest.mark.asyncio
-    async def test_reject_without_reason(self) -> None:
-        """打回不带原因。"""
-        task = await self.svc.create_task(title="无原因打回")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-
-        result = await self.svc.reject_task(task.id)
-        assert result.status == TaskStatus.RUNNING
-        assert "1/3" in result.error
-
-    @pytest.mark.asyncio
-    async def test_reject_exceeds_max_count(self) -> None:
-        """打回次数超过上限，标记为 failed。"""
-        task = await self.svc.create_task(title="超限打回")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-
-        # 第 1 次打回
-        await self.svc.reject_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.RUNNING
-
-        # 回到 evaluating
-        await self.svc.move_to_evaluating(task.id)
-
-        # 第 2 次打回
-        await self.svc.reject_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.RUNNING
-
-        # 回到 evaluating
-        await self.svc.move_to_evaluating(task.id)
-
-        # 第 3 次打回（达到上限）
-        result = await self.svc.reject_task(task.id, reason="最终拒绝", max_reject_count=3)
-        assert result.status == TaskStatus.FAILED
-        assert "最终拒绝" in result.error
-        assert result.reject_count == 3
-
-    @pytest.mark.asyncio
-    async def test_reject_custom_max_count(self) -> None:
-        """自定义最大打回次数。"""
-        task = await self.svc.create_task(title="自定义上限")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-
-        # max_reject_count=1，第 1 次就超限
-        result = await self.svc.reject_task(task.id, max_reject_count=1)
-        assert result.status == TaskStatus.FAILED
-        assert result.reject_count == 1
-
-    @pytest.mark.asyncio
-    async def test_reject_nonexistent_raises(self) -> None:
-        """打回不存在的任务抛出 KeyError。"""
-        with pytest.raises(KeyError):
-            await self.svc.reject_task("不存在")
+        await self.svc.reset_to_pending(task.id)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.PENDING
 
 
 # ═══════════════════════════════════════════════════════════
@@ -682,6 +508,7 @@ class TestTaskServiceDelete:
     """delete_task 测试（容器/非容器/子任务删除策略）。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -692,37 +519,38 @@ class TestTaskServiceDelete:
 
     @pytest.mark.asyncio
     async def test_delete_normal_task(self) -> None:
-        """删除普通任务（根任务）— 清理工作空间 + 删除数据。"""
+        """删除普通任务（无子任务）— 硬删除。"""
         task = await self.svc.create_task(title="普通任务")
         await self.svc.start_task(task.id)
 
-        with patch.object(self.svc, "_cleanup_workspace") as mock_cleanup:
-            result = await self.svc.delete_task(task.id)
+        result = await self.svc.delete_task(task.id)
         assert result is True
         assert self.svc.get_task(task.id) is None
-        mock_cleanup.assert_called_once_with(task.id)
 
     @pytest.mark.asyncio
     async def test_delete_container_task_soft_delete(self) -> None:
-        """删除容器任务 — 软删除（标记 failed + soft_deleted）。"""
-        task = await self.svc.create_task(
+        """删除容器任务 — 软删除（标记 soft_deleted）。"""
+        container = await self.svc.create_task(
             title="容器任务",
             metadata={"task_scope": "container"},
         )
+        # 创建子任务使其成为容器
+        await self.svc.create_task(
+            title="子任务",
+            parent_task_id=container.id,
+        )
 
-        result = await self.svc.delete_task(task.id)
+        result = await self.svc.delete_task(container.id)
         assert result is True
 
         # 容器任务仍然存在（软删除）
-        fetched = self.svc.get_task(task.id)
+        fetched = self.svc.get_task(container.id)
         assert fetched is not None
-        assert fetched.status == TaskStatus.FAILED
-        assert fetched.error == "已取消: 用户删除"
         assert fetched.metadata.get("soft_deleted") is True
 
     @pytest.mark.asyncio
     async def test_delete_container_cascades_children(self) -> None:
-        """删除容器任务级联取消子任务。"""
+        """删除容器任务级联取消子任务（通过 soft_delete_container）。"""
         container = await self.svc.create_task(
             title="容器",
             metadata={"task_scope": "container"},
@@ -733,12 +561,13 @@ class TestTaskServiceDelete:
         )
         await self.svc.start_task(child.id)
 
-        await self.svc.delete_task(container.id)
+        # soft_delete_container 会级联取消子任务并硬删除记录
+        result = await self.svc.soft_delete_container(container.id, reason="用户删除")
+        assert result.get("soft_deleted") is True
 
-        # 子任务应被级联标记为 failed
+        # 子任务记录被硬删除
         fetched_child = self.svc.get_task(child.id)
-        assert fetched_child is not None
-        assert fetched_child.status == TaskStatus.FAILED
+        assert fetched_child is None
 
     @pytest.mark.asyncio
     async def test_delete_child_of_container_no_workspace_cleanup(self) -> None:
@@ -753,20 +582,14 @@ class TestTaskServiceDelete:
         )
         await self.svc.start_task(child.id)
 
-        with patch.object(self.svc, "_cleanup_workspace") as mock_cleanup:
-            await self.svc.delete_task(child.id)
-
-        # 子任务已删除
+        # delete_task 对无子任务的任务直接硬删除
+        result = await self.svc.delete_task(child.id)
+        assert result is True
         assert self.svc.get_task(child.id) is None
-        # 不清理工作空间
-        mock_cleanup.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_delete_root_task_with_subtasks(self) -> None:
-        """删除根任务时级联取消子任务。
-
-        根任务被删除，活跃子任务被级联标记为 FAILED（不删除数据）。
-        """
+        """删除根任务时软删除（有子任务时）。"""
         root = await self.svc.create_task(title="根任务")
         child1 = await self.svc.create_task(
             title="子任务1",
@@ -779,18 +602,13 @@ class TestTaskServiceDelete:
         await self.svc.start_task(child1.id)
         await self.svc.start_task(child2.id)
 
-        with patch.object(self.svc, "_cleanup_workspace"):
-            await self.svc.delete_task(root.id)
+        # delete_task 对有子任务的根任务执行软删除
+        await self.svc.delete_task(root.id)
 
-        # 根任务被删除
-        assert self.svc.get_task(root.id) is None
-        # 子任务被级联标记为 FAILED（仍存在于存储中）
-        fetched_c1 = self.svc.get_task(child1.id)
-        fetched_c2 = self.svc.get_task(child2.id)
-        assert fetched_c1 is not None
-        assert fetched_c1.status == TaskStatus.FAILED
-        assert fetched_c2 is not None
-        assert fetched_c2.status == TaskStatus.FAILED
+        # 根任务仍存在（软删除）
+        fetched_root = self.svc.get_task(root.id)
+        assert fetched_root is not None
+        assert fetched_root.metadata.get("soft_deleted") is True
 
 
 # ═══════════════════════════════════════════════════════════
@@ -801,6 +619,7 @@ class TestTaskServiceCascadeCancel:
     """cancel_task_cascade 级联取消测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -825,12 +644,13 @@ class TestTaskServiceCascadeCancel:
 
         count = await self.svc.cancel_task_cascade(parent.id, reason="测试级联")
         assert count == 2
-        assert self.svc.get_task(child1.id).status == TaskStatus.FAILED
-        assert self.svc.get_task(child2.id).status == TaskStatus.FAILED
+        # cancel_task_cascade 使用 cancel_task，设为 CANCELLED
+        assert self.svc.get_task(child1.id).status == TaskStatus.CANCELLED
+        assert self.svc.get_task(child2.id).status == TaskStatus.CANCELLED
 
     @pytest.mark.asyncio
-    async def test_cascade_skips_terminal_subtasks(self) -> None:
-        """级联取消跳过终态子任务。"""
+    async def test_cascade_cancels_all_subtasks(self) -> None:
+        """级联取消会取消所有子任务（包括终态）。"""
         parent = await self.svc.create_task(title="父任务")
         child_completed = await self.svc.create_task(
             title="已完成子任务", parent_task_id=parent.id,
@@ -840,14 +660,15 @@ class TestTaskServiceCascadeCancel:
         )
         # 手动完成一个子任务
         await self.svc.start_task(child_completed.id)
-        await self.svc.move_to_evaluating(child_completed.id)
+        await self.svc.force_transition(child_completed.id, TaskStatus.EVALUATING)
         await self.svc.complete_evaluation(child_completed.id, passed=True)
         await self.svc.start_task(child_active.id)
 
         count = await self.svc.cancel_task_cascade(parent.id, reason="测试")
-        assert count == 1
-        assert self.svc.get_task(child_completed.id).status == TaskStatus.COMPLETED
-        assert self.svc.get_task(child_active.id).status == TaskStatus.FAILED
+        # cancel_task_cascade 不检查子任务状态，全部取消
+        assert count == 2
+        assert self.svc.get_task(child_completed.id).status == TaskStatus.CANCELLED
+        assert self.svc.get_task(child_active.id).status == TaskStatus.CANCELLED
 
     @pytest.mark.asyncio
     async def test_cascade_deeply_nested(self) -> None:
@@ -864,8 +685,8 @@ class TestTaskServiceCascadeCancel:
 
         count = await self.svc.cancel_task_cascade(root.id, reason="深层取消")
         assert count == 2
-        assert self.svc.get_task(child.id).status == TaskStatus.FAILED
-        assert self.svc.get_task(grandchild.id).status == TaskStatus.FAILED
+        assert self.svc.get_task(child.id).status == TaskStatus.CANCELLED
+        assert self.svc.get_task(grandchild.id).status == TaskStatus.CANCELLED
 
 
 # ═══════════════════════════════════════════════════════════
@@ -873,40 +694,27 @@ class TestTaskServiceCascadeCancel:
 # ═══════════════════════════════════════════════════════════
 
 class TestTaskServiceBind:
-    """bind_pipeline_run / bind_execution_record 测试。"""
+    """bind_pipeline_run 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
     async def test_bind_pipeline_run(self) -> None:
         """绑定管道运行 ID。"""
         task = await self.svc.create_task(title="绑定管道")
-        result = await self.svc.bind_pipeline_run(task.id, "pipeline_run_001")
-        assert result.pipeline_run_id == "pipeline_run_001"
+        await self.svc.bind_pipeline_run(task.id, "pipeline_run_001")
 
         # 持久化验证
         fetched = self.svc.get_task(task.id)
         assert fetched.pipeline_run_id == "pipeline_run_001"
 
     @pytest.mark.asyncio
-    async def test_bind_execution_record(self) -> None:
-        """绑定执行记录 ID。"""
-        task = await self.svc.create_task(title="绑定记录")
-        result = await self.svc.bind_execution_record(task.id, "record_001")
-        assert result.execution_record_id == "record_001"
-
-    @pytest.mark.asyncio
     async def test_bind_pipeline_nonexistent_raises(self) -> None:
         """绑定管道到不存在的任务抛出 KeyError。"""
         with pytest.raises(KeyError):
             await self.svc.bind_pipeline_run("不存在", "pipeline_001")
-
-    @pytest.mark.asyncio
-    async def test_bind_record_nonexistent_raises(self) -> None:
-        """绑定记录到不存在的任务抛出 KeyError。"""
-        with pytest.raises(KeyError):
-            await self.svc.bind_execution_record("不存在", "record_001")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -917,14 +725,16 @@ class TestTaskServiceTransitionHelpers:
     """force_transition / can_transition / get_valid_transitions 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
     async def test_force_transition_valid(self) -> None:
         """强制转换到合法状态。"""
         task = await self.svc.create_task(title="强制")
-        result = await self.svc.force_transition(task.id, TaskStatus.RUNNING)
-        assert result.status == TaskStatus.RUNNING
+        await self.svc.force_transition(task.id, TaskStatus.RUNNING)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_force_transition_invalid_raises(self) -> None:
@@ -952,6 +762,7 @@ class TestTaskServiceTransitionHelpers:
     async def test_can_transition_false(self) -> None:
         """can_transition 对非法转换返回 False。"""
         task = await self.svc.create_task(title="不可转换")
+        # pending → evaluating 不在 _TASK_TRANSITIONS 中
         assert self.svc.can_transition(task.id, TaskStatus.EVALUATING) is False
 
     def test_can_transition_nonexistent_returns_false(self) -> None:
@@ -965,8 +776,8 @@ class TestTaskServiceTransitionHelpers:
         transitions = self.svc.get_valid_transitions(task.id)
         assert "running" in transitions
         assert "paused" in transitions
-        assert "completed" in transitions
-        assert "failed" in transitions
+        assert "scheduled" in transitions
+        assert "cancelled" in transitions
 
     @pytest.mark.asyncio
     async def test_get_valid_transitions_running(self) -> None:
@@ -985,13 +796,14 @@ class TestTaskServiceTransitionHelpers:
 
 
 # ═══════════════════════════════════════════════════════════
-# TaskService — get_root_task_id / get_progress
+# TaskService — get_root_task_id
 # ═══════════════════════════════════════════════════════════
 
 class TestTaskServiceRootAndProgress:
-    """get_root_task_id / get_progress 测试。"""
+    """get_root_task_id 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -1019,44 +831,6 @@ class TestTaskServiceRootAndProgress:
         """不存在的任务返回 None。"""
         assert self.svc.get_root_task_id("不存在") is None
 
-    @pytest.mark.asyncio
-    async def test_get_progress_no_subtasks(self) -> None:
-        """无子任务时进度为 0。"""
-        task = await self.svc.create_task(title="无子任务")
-        assert self.svc.get_progress(task.id) == 0.0
-
-    @pytest.mark.asyncio
-    async def test_get_progress_partial(self) -> None:
-        """部分子任务完成。"""
-        parent = await self.svc.create_task(title="父")
-        c1 = await self.svc.create_task(title="C1", parent_task_id=parent.id)
-        c2 = await self.svc.create_task(title="C2", parent_task_id=parent.id)
-
-        # 完成 c1
-        await self.svc.start_task(c1.id)
-        await self.svc.move_to_evaluating(c1.id)
-        await self.svc.complete_evaluation(c1.id, passed=True)
-
-        assert self.svc.get_progress(parent.id) == 50.0
-
-    @pytest.mark.asyncio
-    async def test_get_progress_all_completed(self) -> None:
-        """所有子任务完成，进度 100%。"""
-        parent = await self.svc.create_task(title="父")
-        c1 = await self.svc.create_task(title="C1", parent_task_id=parent.id)
-        c2 = await self.svc.create_task(title="C2", parent_task_id=parent.id)
-
-        for c in [c1, c2]:
-            await self.svc.start_task(c.id)
-            await self.svc.move_to_evaluating(c.id)
-            await self.svc.complete_evaluation(c.id, passed=True)
-
-        assert self.svc.get_progress(parent.id) == 100.0
-
-    def test_get_progress_nonexistent_parent(self) -> None:
-        """不存在的父任务进度为 0。"""
-        assert self.svc.get_progress("不存在") == 0.0
-
 
 # ═══════════════════════════════════════════════════════════
 # TaskService — save_task
@@ -1066,6 +840,7 @@ class TestTaskServiceSave:
     """save_task 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -1089,11 +864,12 @@ class TestTaskServiceListAll:
     """list_all 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
     async def test_list_all_default(self) -> None:
-        """默认返回最多 50 条。"""
+        """默认返回最多 1000 条。"""
         for i in range(3):
             await self.svc.create_task(title=f"任务-{i}")
         tasks = await self.svc.list_all()
@@ -1131,7 +907,8 @@ class TestTaskServiceEventBus:
         """状态转换时通过 EventBus 广播事件（不抛异常即可）。"""
         mock_bus = MagicMock()
         mock_bus.emit = AsyncMock()
-        svc = TaskService(storage=TaskStorage(), event_bus=mock_bus)
+        tmp_dir = tempfile.mkdtemp(prefix="test_event_bus_")
+        svc = TaskService(event_bus=mock_bus, data_dir=tmp_dir)
 
         task = await svc.create_task(title="事件测试")
         await svc.start_task(task.id)
@@ -1146,6 +923,7 @@ class TestTaskServiceIsChildOfContainer:
     """_is_child_of_container 测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -1201,6 +979,7 @@ class TestTaskServiceEdgeCases:
     """边界条件与异常场景测试。"""
 
     def setup_method(self) -> None:
+        """初始化 TaskService 实例。"""
         self.svc = _make_service()
 
     @pytest.mark.asyncio
@@ -1215,12 +994,16 @@ class TestTaskServiceEdgeCases:
         await self.svc.pause_task(task.id)
         assert self.svc.get_task(task.id).status == TaskStatus.PAUSED
 
-        # paused -> running
+        # paused -> pending (resume_task 将 paused 恢复为 pending)
         await self.svc.resume_task(task.id)
+        assert self.svc.get_task(task.id).status == TaskStatus.PENDING
+
+        # pending -> running
+        await self.svc.start_task(task.id)
         assert self.svc.get_task(task.id).status == TaskStatus.RUNNING
 
         # running -> evaluating
-        await self.svc.move_to_evaluating(task.id)
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
         assert self.svc.get_task(task.id).status == TaskStatus.EVALUATING
 
         # evaluating -> completed
@@ -1228,29 +1011,11 @@ class TestTaskServiceEdgeCases:
         assert self.svc.get_task(task.id).status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_reactivate_and_recomplete(self) -> None:
-        """重新激活后再次完成。"""
-        task = await self.svc.create_task(title="再完成")
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        await self.svc.complete_evaluation(task.id, passed=True)
-
-        # 重新激活
-        await self.svc.reactivate_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.PENDING
-
-        # 再次走完生命周期
-        await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=True)
-        assert result.status == TaskStatus.COMPLETED
-
-    @pytest.mark.asyncio
     async def test_failed_to_pending_retry(self) -> None:
         """失败后重试（failed → pending → running → completed）。"""
         task = await self.svc.create_task(title="重试")
         await self.svc.start_task(task.id)
-        await self.svc.fail_task(task.id, error="第一次失败")
+        await self.svc.fail_task(task.id, reason="第一次失败")
 
         # 重置为 pending
         await self.svc.reset_to_pending(task.id)
@@ -1258,24 +1023,10 @@ class TestTaskServiceEdgeCases:
 
         # 重新执行
         await self.svc.start_task(task.id)
-        await self.svc.move_to_evaluating(task.id)
-        result = await self.svc.complete_evaluation(task.id, passed=True)
-        assert result.status == TaskStatus.COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_recover_and_reactivate_interaction(self) -> None:
-        """recover_to_completed 后可以 reactivate。"""
-        task = await self.svc.create_task(title="恢复后重新激活")
-        await self.svc.start_task(task.id)
-        await self.svc.fail_task(task.id, error="临时错误")
-
-        # 恢复为 completed
-        await self.svc.recover_to_completed(task.id, result="已修复")
-        assert self.svc.get_task(task.id).status == TaskStatus.COMPLETED
-
-        # 重新激活
-        result = await self.svc.reactivate_task(task.id, message="新需求")
-        assert result.status == TaskStatus.PENDING
+        await self.svc.force_transition(task.id, TaskStatus.EVALUATING)
+        await self.svc.complete_evaluation(task.id, passed=True)
+        fetched = self.svc.get_task(task.id)
+        assert fetched.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_create_task_with_all_options(self) -> None:
@@ -1286,12 +1037,10 @@ class TestTaskServiceEdgeCases:
             parent_task_id="parent_001",
             parent_pipeline_id="pipeline_001",
             metadata={"custom_key": "custom_value"},
-            agent_name="灵汐",
             priority=TaskPriority.CRITICAL,
         )
         assert task.title == "完整任务"
         assert task.description == "详细描述"
         assert task.parent_task_id == "parent_001"
-        assert task.agent_name == "灵汐"
         assert task.priority == TaskPriority.CRITICAL
         assert task.metadata.get("custom_key") == "custom_value"

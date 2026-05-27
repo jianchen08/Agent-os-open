@@ -150,7 +150,7 @@ const SessionItem = memo<SessionItemProps>(
           <div
             className={cn(
               'ml-1 flex-shrink-0 transition-opacity duration-150',
-              isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+              isActive ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100',
             )}
           >
             <DropdownMenu>
@@ -286,8 +286,10 @@ export const SessionList = memo<SessionListProps>(
       const sortByUpdatedAt = (a: Session, b: Session): number =>
         new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
 
+      const pinned = sessions.filter((s) => s.pinned)
+
       return {
-        pinnedSessions: sessions.filter((s) => s.pinned).sort(sortByUpdatedAt),
+        pinnedSessions: pinned.sort(sortByUpdatedAt),
         normalSessions: sessions.filter((s) => !s.pinned).sort(sortByUpdatedAt),
       }
     }, [sessions])

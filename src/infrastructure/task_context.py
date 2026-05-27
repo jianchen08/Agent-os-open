@@ -85,7 +85,7 @@ class TaskExecutionContext:
                 pass
         if task_service and self.task_id:
             try:
-                task_service._storage.delete(self.task_id)
+                task_service.hard_delete_sync(self.task_id)
             except Exception:
                 pass
         self.cleanup()

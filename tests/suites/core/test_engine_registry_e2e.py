@@ -70,6 +70,7 @@ class FakeSink:
 class FakeEngine:
     def __init__(self, pipeline_id: str = "", suspended: bool = False):
         self.is_suspended = suspended
+        self.is_running = not suspended
         self._pipeline_id = pipeline_id
         self._pending_notifications: list[str] = []
         self._wake_event: asyncio.Event | None = None
@@ -81,7 +82,7 @@ class FakeEngine:
         self._saved_on_chunk = None
         self._saved_streaming = False
 
-    def inject_message(self, msg: str) -> None:
+    def inject_message(self, msg: str, *, source: str = "user") -> None:
         if not msg:
             return
         if self.is_suspended:

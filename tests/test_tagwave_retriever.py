@@ -19,6 +19,11 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.skip(
+    reason="memory.tagwave_retriever 模块已不存在，"
+           "TagWaveRetriever 已被替换为 memory.wave_retriever.WaveRetriever（API完全不同）"
+)
+
 
 # ---------------------------------------------------------------------------
 # 辅助：构造测试数据

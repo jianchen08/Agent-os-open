@@ -98,7 +98,7 @@ class IHumanInteractionService(ABC):
         priority: Priority = Priority.NORMAL,
         user_id: str | None = None,
         agent_id: str | None = None,
-        file_contents: dict[str, str] | None = None,
+        file_paths: list[str] | None = None,
         agent_level: str | None = None,
     ) -> str:
         """创建选择模式请求"""
@@ -116,7 +116,7 @@ class IHumanInteractionService(ABC):
         suggestions: list[str] | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
-        file_contents: dict[str, str] | None = None,
+        file_paths: list[str] | None = None,
         agent_level: str | None = None,
     ) -> str:
         """创建对话模式请求"""
@@ -185,6 +185,21 @@ class IHumanInteractionService(ABC):
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """获取交互历史"""
+        ...
+
+    @abstractmethod
+    async def auto_complete_conversation_for_pipeline(self, pipeline_id: str) -> int:
+        """自动完成指定管道的 pending conversation 模式交互请求"""
+        ...
+
+    @abstractmethod
+    async def cancel_pending_for_thread(self, thread_id: str, reason: str = "new_message_arrived") -> int:
+        """取消指定 thread 关联的所有 pending 交互请求"""
+        ...
+
+    @abstractmethod
+    async def wait_for_conversation_arrival(self, request_id: str, timeout: float = 86400.0) -> dict[str, Any]:
+        """等待用户到达对话页面"""
         ...
 
     @abstractmethod

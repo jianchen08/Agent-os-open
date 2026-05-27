@@ -90,7 +90,6 @@ if not exist "frontend\node_modules" (
 
 :: ========== 启动后端 ==========
 echo [1/2] 启动后端服务器 (FastAPI + WebSocket :!BACKEND_PORT!)...
-set "VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!"
 start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python app_factory.py"
 
 :: ========== 等待后端就绪 ==========
@@ -117,7 +116,7 @@ for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!BACKEND_PORT! " ^| 
 
 :: ========== 启动前端 ==========
 echo [2/2] 启动前端开发服务器 (Vite :!FRONTEND_PORT!)...
-start "Agent OS Frontend - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=http://localhost:!BACKEND_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& npx vite --port !FRONTEND_PORT!"
+start "Agent OS Frontend - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=&& set _AO_PROJECT_ID=!PROJECT_ID!&& npx vite --host 0.0.0.0 --port !FRONTEND_PORT!"
 
 :: ========== 等待前端就绪并打开浏览器 ==========
 echo [INFO] 等待前端服务就绪...

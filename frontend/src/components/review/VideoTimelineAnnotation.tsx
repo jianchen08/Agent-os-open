@@ -264,7 +264,7 @@ export function VideoTimelineAnnotation({
                   {idx + 1}
                 </div>
                 {/* 悬停提示 */}
-                <div className="absolute top-full mt-1 hidden w-32 rounded bg-black/80 p-1 text-[10px] text-white group-hover:block z-10">
+                <div className="absolute top-full mt-1 block md:hidden md:group-hover:block w-32 rounded bg-black/80 p-1 text-[10px] text-white z-10">
                   <div className="font-medium">{formatTime(a.timestamp ?? 0)}</div>
                   <div className="truncate">{a.suggestion}</div>
                 </div>

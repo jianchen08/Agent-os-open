@@ -187,7 +187,7 @@ export function NotificationItemComponent({
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 w-6 p-0 rounded-full opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity"
+              className="h-6 w-6 p-0 rounded-full opacity-100 md:opacity-0 md:group-hover:opacity-100 hover:opacity-100 transition-opacity"
               onClick={handleDismiss}
               aria-label="忽略通知"
             >

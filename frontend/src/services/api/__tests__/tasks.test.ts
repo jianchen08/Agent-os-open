@@ -266,7 +266,7 @@ describe('任务管理 API', () => {
         data: {
           task_id: 'task-1',
           current_phase: 'execute' as TaskPhase,
-          task_status: 'in_progress',
+          task_status: 'running',
           phases: {
             prepare: {
               status: 'completed',
@@ -311,7 +311,7 @@ describe('任务管理 API', () => {
         data: {
           task_id: 'task-1',
           current_phase: 'execute' as TaskPhase,
-          task_status: 'in_progress',
+          task_status: 'running',
           completed_at: '2024-01-01T00:10:00Z',
         },
         status: 200,

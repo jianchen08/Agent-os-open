@@ -349,7 +349,7 @@ export const ChatContainer = ({
         return true
       }
 
-      if (message.toolCalls?.some((tool) => tool.tool_name?.toLowerCase().includes(query))) {
+      if (message.parts?.some((part) => part.type === 'tool_call' && (part as any).name?.toLowerCase().includes(query))) {
         return true
       }
 

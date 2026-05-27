@@ -5,20 +5,12 @@
  * 主页包含完整的聊天界面：左侧会话列表 + 右侧聊天区域。
  */
 
-import { MoreHorizontal, Pencil, Copy, Star, Pin, Trash2 } from 'lucide-react'
 import { lazy, Suspense, useEffect, useState, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { ChatContainer } from './components/chat/ChatContainer'
 import { AppHeader } from './components/layout/AppHeader'
 import { FiveSpaceLayout } from './components/layout/FiveSpaceLayout'
-import { Button } from './components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from './components/ui/dropdown-menu'
+import { SessionList } from './components/session/SessionList'
 import { ROUTES } from './constants/routes'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
@@ -228,9 +220,7 @@ function HomePage(): ReactNode {
   const toggleSessionPin = useSessionListStore((s) => s.toggleSessionPin)
   const renameSession = useSessionListStore((s) => s.renameSession)
   const fetchSessions = useSessionListStore((s) => s.fetchSessions)
-  const isStreaming = useStreamingStore((s) => s.isStreaming)
   const stopStreamingForTab = useStreamingStore((s) => s.stopStreamingForTab)
-  const streamingTabs = useStreamingStore((s) => s.streamingTabs)
 
   /** 侧边栏是否折叠 (from global UI store, shared with AppHeader) */
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
@@ -418,7 +408,7 @@ function HomePage(): ReactNode {
         useInteractionStore.getState().getEnteredForPipeline(sid)
       if (enteredInteraction) {
         globalWS.sendInteractionResponse(sid, enteredInteraction.requestId, {
-          responseType: 'approved',
+          response_type: 'approved',
           feedback: '用户已到达对话页面',
         })
         useInteractionStore.getState().markResponded(enteredInteraction.requestId)
@@ -469,9 +459,6 @@ function HomePage(): ReactNode {
     navigate(ROUTES.LOGIN)
   }, [logout, navigate, disconnectWebSocket])
 
-  /** WebSocket 连接状态 */
-  const isWsConnected = wsStatus === 'connected'
-
   // ---- Render sidebar content (shared between layouts) ----
   const sidebarContent = (
     <>
@@ -484,104 +471,20 @@ function HomePage(): ReactNode {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {sessions.length === 0 ? (
-          <div className="text-muted-foreground p-4 text-center text-sm">
-            暂无会话
-            <br />
-            <span className="text-xs">点击上方按钮创建</span>
-          </div>
-        ) : (
-          sessions.map((session) => (
-            <div
-              key={session.id}
-              className={`group relative flex items-center transition-colors ${
-                activeSessionId === session.id
-                  ? 'bg-accent text-accent-foreground font-medium'
-                  : 'hover:bg-accent/50 text-foreground/80'
-              }`}
-            >
-              <div
-                onClick={() => handleSelectSession(session.id)}
-                className="min-w-0 flex-1 cursor-pointer truncate px-3 py-2.5 text-sm"
-                title={session.title}
-              >
-                {session.title}
-              </div>
-              <div
-                className={`ml-1 mr-1 flex flex-shrink-0 items-center gap-0.5 transition-opacity ${
-                  activeSessionId === session.id
-                    ? 'opacity-100'
-                    : 'opacity-0 group-hover:opacity-100'
-                }`}
-              >
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-muted-foreground hover:text-foreground rounded p-0.5 transition-colors"
-                      aria-label="更多操作"
-                    >
-                      <MoreHorizontal className="h-3.5 w-3.5" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-[140px]">
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        const newTitle = window.prompt('重命名会话', session.title)
-                        if (newTitle?.trim()) {
-                          renameSession(session.id, newTitle.trim())
-                        }
-                      }}
-                    >
-                      <Pencil className="mr-2 h-3.5 w-3.5" /> 重命名
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        copySession(session.id)
-                      }}
-                    >
-                      <Copy className="mr-2 h-3.5 w-3.5" /> 复制
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        toggleSessionStar(session.id)
-                      }}
-                    >
-                      <Star className="mr-2 h-3.5 w-3.5" />
-                      {session.starred ? '取消星标' : '星标'}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        toggleSessionPin(session.id)
-                      }}
-                    >
-                      <Pin className="mr-2 h-3.5 w-3.5" />
-                      {session.pinned ? '取消置顶' : '置顶会话'}
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (window.confirm('确定要删除此会话吗？')) {
-                          deleteSession(session.id).catch(() => {})
-                        }
-                      }}
-                      className="text-destructive focus:text-destructive"
-                    >
-                      <Trash2 className="mr-2 h-3.5 w-3.5" /> 删除
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
+      <SessionList
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        deletingSessionIds={new Set<string>()}
+        onSessionClick={handleSelectSession}
+        onDeleteSession={(id) => { if (window.confirm('确定要删除此会话吗？')) deleteSession(id).catch(() => {}) }}
+        onEditSession={(session) => {
+          const newTitle = window.prompt('重命名会话', session.title)
+          if (newTitle?.trim()) renameSession(session.id, newTitle.trim())
+        }}
+        onCopySession={(session) => copySession(session.id)}
+        onStarSession={(id) => toggleSessionStar(id)}
+        onPinSession={(id) => toggleSessionPin(id)}
+      />
     </>
   )
 

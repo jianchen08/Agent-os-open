@@ -713,28 +713,16 @@ class TestTaskSubmitToolGoalParsing:
 # =====================================================================
 
 
-def _make_human_interaction_tool(
-    session_id="session-001",
-    thread_id="thread-001",
-    tab_id="tab-001",
-):
+def _make_human_interaction_tool(pipeline_id="pipeline-001"):
     """创建 HumanInteractionTool 实例。
 
     Args:
-        session_id: 会话 ID
-        thread_id: 线程 ID
-        tab_id: 标签页 ID
+        pipeline_id: 管道 ID
 
     Returns:
         HumanInteractionTool 实例
     """
-    return HumanInteractionTool(
-        user_id="user-001",
-        session_id=session_id,
-        thread_id=thread_id,
-        tab_id=tab_id,
-        agent_id="agent-001",
-    )
+    return HumanInteractionTool(pipeline_id=pipeline_id)
 
 
 def _mock_interaction_service():
@@ -750,10 +738,8 @@ def _mock_interaction_service():
         "selected_option": {"id": "opt-1", "label": "确认"},
     })
     service.create_conversation_request = AsyncMock(return_value="req-002")
-    service.wait_for_conversation_arrival = AsyncMock(return_value={
-        "status": "arrived",
-        "request_id": "req-002",
-    })
+    service.send_notification = AsyncMock(return_value="req-003")
+    service.cancel_request = AsyncMock()
     return service
 
 
@@ -788,7 +774,7 @@ class TestHumanInteractionToolValidation:
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({"title": "测试"})
 
         assert result.success is False
@@ -799,15 +785,15 @@ class TestHumanInteractionToolValidation:
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({"mode": "choice"})
 
         # title 默认为空字符串，不会阻止执行
         assert result.success is True
 
     async def test_missing_context_info_returns_error(self):
-        """测试缺少 session_id/thread_id/tab_id 时返回缺少上下文错误"""
-        tool = HumanInteractionTool(user_id="user-001")
+        """测试缺少 pipeline_id 时返回缺少上下文错误"""
+        tool = HumanInteractionTool()
 
         result = await tool.execute({
             "mode": "choice",
@@ -815,14 +801,14 @@ class TestHumanInteractionToolValidation:
         })
 
         assert result.success is False
-        assert "上下文" in result.error
+        assert "pipeline_id" in result.error
 
     async def test_unsupported_mode_returns_error(self):
         """测试不支持的 mode 时返回错误"""
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({"mode": "unsupported_mode", "title": "测试"})
 
         assert result.success is False
@@ -837,7 +823,7 @@ class TestHumanInteractionToolChoiceMode:
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "choice",
                 "title": "确认操作",
@@ -859,7 +845,7 @@ class TestHumanInteractionToolChoiceMode:
             side_effect=InteractionTimeoutError(request_id="req-timeout", timeout=300)
         )
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "choice",
                 "title": "超时测试",
@@ -878,7 +864,7 @@ class TestHumanInteractionToolChoiceMode:
             side_effect=InteractionCancelledError(request_id="req-cancel", reason="用户取消")
         )
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "choice",
                 "title": "取消测试",
@@ -896,7 +882,7 @@ class TestHumanInteractionToolChoiceMode:
             side_effect=InteractionDeniedError(request_id="req-deny", reason="用户拒绝")
         )
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "choice",
                 "title": "拒绝测试",
@@ -915,8 +901,12 @@ class TestHumanInteractionToolConversationMode:
         """测试 conversation 模式成功返回到达信息"""
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
+        service.wait_for_choice = AsyncMock(return_value={
+            "response_type": "approved",
+            "feedback": "",
+        })
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "conversation",
                 "title": "技术讨论",
@@ -925,44 +915,42 @@ class TestHumanInteractionToolConversationMode:
             })
 
         assert result.success is True
-        assert result.output["status"] == "arrived"
+        assert result.output["status"] == "user_arrived"
         # 验证 service 方法被正确调用
         service.create_conversation_request.assert_awaited_once()
-        service.wait_for_conversation_arrival.assert_awaited_once()
+        service.wait_for_choice.assert_awaited_once()
 
     async def test_conversation_mode_exception(self):
         """测试 conversation 模式异常返回失败结果"""
         tool = _make_human_interaction_tool()
         service = _mock_interaction_service()
-        service.wait_for_conversation_arrival = AsyncMock(
+        service.wait_for_choice = AsyncMock(
             side_effect=RuntimeError("连接失败")
         )
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "conversation",
                 "title": "异常测试",
             })
 
         assert result.success is False
-        assert "对话模式执行失败" in result.error
+        assert "人类交互执行失败" in result.error
 
 
 class TestHumanInteractionToolContextFallback:
     """HumanInteractionTool 上下文回退测试"""
 
     async def test_context_from_inputs_fallback(self):
-        """测试构造函数无上下文时从 inputs 参数获取"""
-        tool = HumanInteractionTool(user_id="user-001")
+        """测试构造函数无 pipeline_id 时从 inputs 参数获取"""
+        tool = HumanInteractionTool()
         service = _mock_interaction_service()
 
-        with patch("tools.builtin.human_interaction.get_human_interaction_service", return_value=service):
+        with patch("tools.builtin.human_interaction.tool.get_human_interaction_service", return_value=service):
             result = await tool.execute({
                 "mode": "choice",
                 "title": "从 inputs 获取上下文",
-                "session_id": "session-from-inputs",
-                "thread_id": "thread-from-inputs",
-                "tab_id": "tab-from-inputs",
+                "pipeline_id": "pipeline-from-inputs",
             })
 
         assert result.success is True

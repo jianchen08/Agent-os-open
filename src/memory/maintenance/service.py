@@ -134,6 +134,10 @@ class MemoryMaintenanceService:
             "total_pipelines_cleaned": 0,
         }
 
+        # 并发控制：防止复盘重复触发
+        self._review_running: bool = False
+        self.on_review_completed: Any = None  # 复盘完成后的回调
+
         # 延迟初始化子引擎（避免循环导入，按需创建）
         self._review_engine: Any | None = None
         self._cleanup_engine: Any | None = None
@@ -321,14 +325,29 @@ class MemoryMaintenanceService:
 
         # 独立判断：是否需要复盘
         if self.should_trigger_review():
-            review_result = await self._get_review_engine().review_execution_history()
-            results["tasks"]["review"] = review_result
-            # 同步统计
-            now_review = review_result.get("reviewed_at") or datetime.now(UTC).isoformat()
-            self._stats["last_review_at"] = now_review
-            self._stats["review_count"] += 1
-            self._stats["total_pipelines_reviewed"] += review_result.get("pipelines_reviewed", 0)
-            self._stats["total_experiences_saved"] += review_result.get("experiences_saved", 0)
+            # 并发保护：避免复盘重复执行
+            if self._review_running:
+                logger.warning("[Maintenance] 复盘正在运行中，跳过本次触发")
+                results["tasks"]["review"] = {"status": "already_running"}
+            else:
+                self._review_running = True
+                try:
+                    review_result = await self._get_review_engine().review_execution_history()
+                    results["tasks"]["review"] = review_result
+                    # 同步统计
+                    now_review = review_result.get("reviewed_at") or datetime.now(UTC).isoformat()
+                    self._stats["last_review_at"] = now_review
+                    self._stats["review_count"] += 1
+                    self._stats["total_pipelines_reviewed"] += review_result.get("pipelines_reviewed", 0)
+                    self._stats["total_experiences_saved"] += review_result.get("experiences_saved", 0)
+                    # 复盘完成后执行回调
+                    if self.on_review_completed is not None:
+                        try:
+                            self.on_review_completed(review_result)
+                        except Exception:
+                            logger.exception("[Maintenance] 复盘回调执行异常")
+                finally:
+                    self._review_running = False
 
         # 独立判断：是否需要清理
         if self.should_trigger_cleanup():
@@ -347,6 +366,36 @@ class MemoryMaintenanceService:
 
         logger.info("[Maintenance] 维护巡检完成")
         return results
+
+    # ============================================
+    # 手动触发复盘
+    # ============================================
+
+    async def trigger_review(self, force: bool = False) -> dict[str, Any]:
+        """手动触发复盘（供 API 和工具调用）。
+
+        Args:
+            force: 是否强制触发（忽略触发条件检查）
+
+        Returns:
+            复盘结果字典
+        """
+        if not force:
+            # 检查触发条件
+            if not self.should_trigger_review():
+                pending_count = self._get_review_engine()._count_pending_records()
+                return {
+                    "status": "skipped",
+                    "reason": "未满足复盘触发条件",
+                    "pending_records": pending_count,
+                }
+
+        # 满足条件或强制触发，执行维护
+        maintenance_result = await self.run_maintenance()
+        return maintenance_result.get("tasks", {}).get("review", {
+            "status": "skipped",
+            "reason": "维护巡检未执行复盘",
+        })
 
     # ============================================
     # 统计

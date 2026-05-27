@@ -143,7 +143,7 @@ class TestRejectTask:
         但 TaskStateMachine（state_machine.py 中定义）支持。
         reject_task 需要使用支持该转换的状态机。
         """
-        from tasks.service import SimpleStateMachine
+        from tasks.state_machine import SimpleStateMachine
         from tasks.types import TaskModel, TaskStatus
 
         # 创建支持 evaluating → running 的自定义状态机

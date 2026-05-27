@@ -1,7 +1,7 @@
 """基于字典的内存存储，支持 JSON 文件持久化。
 
 从 channels.api.models 中提取的 MemoryStore 类，
-管理用户、线程、消息、任务、记忆和会话6种资源。
+管理用户、线程、消息、记忆和会话5种资源。
 """
 
 from __future__ import annotations
@@ -39,14 +39,13 @@ def _parse_iso_time(s: str) -> float:
 class MemoryStore:
     """基于字典的内存存储，支持 JSON 文件持久化。
 
-    存储用户、线程、任务等数据。初始化时创建演示用户 demo/demo123。
+    存储用户、线程等数据。初始化时创建演示用户 demo/demo123。
     当指定 persist_dir 时，线程和会话数据会自动持久化到 JSON 文件。
     消息数据仅存储在管道执行记录（YAML）中，不在本 store 中保存。
 
     Attributes:
         users: 用户存储字典，key 为用户名
         threads: 线程存储字典，key 为线程 ID
-        tasks: 任务存储字典，key 为任务 ID
         memories: 记忆存储字典，key 为记忆 ID
         refresh_tokens: refresh token 黑名单（已登出的 token）
         sessions: SessionModel 桥接映射
@@ -60,7 +59,6 @@ class MemoryStore:
         """
         self.users: dict[str, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
-        self.tasks: dict[str, dict[str, Any]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
         self.refresh_tokens: set[str] = set()
         self.sessions: dict[str, SessionModel] = {}
@@ -463,78 +461,6 @@ class MemoryStore:
             关联的 SessionModel，不存在则返回 None
         """
         return self.sessions.get(thread_id)
-
-    # ---- Task 存储操作 ----
-
-    def create_task(
-        self,
-        user_id: str,
-        title: str,
-        description: str | None = None,
-        agent_id: str | None = None,
-        priority: int = 5,
-        tags: list[str] | None = None,
-        input_data: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """创建新任务。"""
-        task_id = uuid.uuid4().hex[:12]
-        now = _now_iso()
-        task = {
-            "id": task_id,
-            "title": title,
-            "description": description or "",
-            "status": "pending",
-            "priority": priority,
-            "agent_id": agent_id,
-            "thread_id": None,
-            "created_by": user_id,
-            "tags": tags or [],
-            "input_data": input_data or {},
-            "result": None,
-            "created_at": now,
-            "updated_at": now,
-        }
-        self.tasks[task_id] = task
-        return task
-
-    def get_task(
-        self, task_id: str,
-    ) -> dict[str, Any] | None:
-        """获取任务详情。"""
-        return self.tasks.get(task_id)
-
-    def get_user_tasks(self, user_id: str) -> list[dict[str, Any]]:
-        """获取用户的所有任务。"""
-        return [
-            t for t in self.tasks.values()
-            if t.get("created_by") == user_id
-        ]
-
-    def get_all_tasks(self) -> list[dict[str, Any]]:
-        """获取所有任务。"""
-        return list(self.tasks.values())
-
-    def update_task(self, task_id: str, **kwargs: Any) -> dict[str, Any] | None:
-        """更新任务字段。"""
-        task = self.tasks.get(task_id)
-        if task is None:
-            return None
-        allowed_keys = {
-            "title", "description", "status",
-            "priority", "tags", "result", "thread_id",
-        }
-        for key, value in kwargs.items():
-            if key in allowed_keys and value is not None:
-                task[key] = value
-        task["updated_at"] = _now_iso()
-        return task
-
-    def delete_task(self, task_id: str) -> bool:
-        """删除任务。"""
-        if task_id not in self.tasks:
-            return False
-        del self.tasks[task_id]
-        return True
 
     # ---- Memory 存储操作 ----
 

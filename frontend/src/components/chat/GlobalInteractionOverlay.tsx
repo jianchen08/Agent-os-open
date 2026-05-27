@@ -53,13 +53,13 @@ export function GlobalInteractionOverlay() {
   }, [setGlobalOpenRequestId])
 
   const handleRespondChoice = useCallback(
-    async (optionId: string) => {
+    async (optionId: string, optionLabel?: string) => {
       if (!interaction) return
       if (submittingId && submittingId !== interaction.requestId) return
       setSubmittingId(interaction.requestId)
       dismissInteraction(interaction.requestId)
       try {
-        await respondChoice(interaction.requestId, optionId)
+        await respondChoice(interaction.requestId, optionLabel || optionId)
       } finally {
         setSubmittingId(null)
       }

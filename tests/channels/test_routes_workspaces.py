@@ -344,7 +344,7 @@ class TestRenameEntry:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["new_path"] == "sub/file_b.py"
+        assert Path(data["new_path"]).as_posix() == "sub/file_b.py"
         assert not old.exists()
         assert (subdir / "file_b.py").is_file()
 
@@ -432,7 +432,7 @@ class TestMoveEntry:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["destination_path"] == "target_dir/file.txt"
+        assert Path(data["destination_path"]).as_posix() == "target_dir/file.txt"
         assert not src.exists()
         assert (dest_dir / "file.txt").read_text(encoding="utf-8") == "move me"
 
@@ -653,7 +653,7 @@ class TestWorkspaceServiceRegression:
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
-        ws = asyncio.get_event_loop().run_until_complete(
+        ws = asyncio.new_event_loop().run_until_complete(
             service.get_or_create_workspace("task-001")
         )
         assert ws is not None
@@ -665,7 +665,7 @@ class TestWorkspaceServiceRegression:
         import asyncio
         from workspace.workspace_service import WorkspaceService
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.new_event_loop()
         service = WorkspaceService()
         ws1 = loop.run_until_complete(service.get_or_create_workspace("task-002"))
         ws2 = loop.run_until_complete(service.get_or_create_workspace("task-002"))
@@ -677,7 +677,7 @@ class TestWorkspaceServiceRegression:
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
-        ws = asyncio.get_event_loop().run_until_complete(
+        ws = asyncio.new_event_loop().run_until_complete(
             service.get_or_create_workspace(
                 "task-003",
                 session_id="sess-001",
@@ -704,7 +704,7 @@ class TestWorkspaceServiceRegression:
             (Path(tmp) / "dir1").mkdir()
             (Path(tmp) / "dir1" / "file2.txt").write_text("hello", encoding="utf-8")
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.new_event_loop()
             service = WorkspaceService()
             # 先创建 workspace 以便 get_file_tree 更新缓存
             loop.run_until_complete(service.get_or_create_workspace("tree-task"))
@@ -779,7 +779,7 @@ class TestWorkspaceServiceRegression:
         from workspace.workspace_service import WorkspaceService
 
         service = WorkspaceService()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.new_event_loop().run_until_complete(
             service.list_artifacts_by_workspace("nonexistent-task")
         )
         assert result["items"] == []

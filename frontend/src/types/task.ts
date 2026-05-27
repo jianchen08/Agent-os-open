@@ -27,16 +27,13 @@ export type ProjectStatus =
 /**
  * 任务状态
  *
- * 与后端 ExecutionStatus 对齐。
- * 后端 running/evaluating 通过 API 映射层转为 in_progress，
- * 前端也接受原始值作为兼容别名。
+ * 与后端 ExecutionStatus 完全对齐，前后端统一字段。
  */
 export type TaskStatus =
   | 'pending' // 待执行
-  | 'in_progress' // 执行中（后端 running/evaluating 映射为此值）
-  | 'running' // [兼容] 后端原始值，等价于 in_progress
-  | 'evaluating' // [兼容] 后端原始值，等价于 in_progress
-  | 'scheduled' // [兼容] 后端原始值，等价于 pending
+  | 'running' // 执行中
+  | 'evaluating' // 评估中
+  | 'scheduled' // 已调度
   | 'completed' // 已完成
   | 'failed' // 已失败
   | 'blocked' // 已阻塞

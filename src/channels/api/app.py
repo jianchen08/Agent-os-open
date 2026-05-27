@@ -262,3 +262,8 @@ def _register_routes(app: FastAPI) -> None:
     from channels.api.routes_comfyui import router as comfyui_router
 
     app.include_router(comfyui_router)
+
+    # ---- 维护管理路由 ----
+    from channels.api.routes_maintenance import router as maintenance_router
+
+    app.include_router(maintenance_router)

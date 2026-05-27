@@ -178,7 +178,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
       data: {
         id: 'task-1',
         title: '长期任务',
-        status: 'in_progress',
+        status: 'running',
         tags: ['long-term'],
         created_at: '2026-05-14T00:00:00Z',
         updated_at: '2026-05-14T01:00:00Z',
@@ -195,7 +195,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
 
     // 验证使用的是 PATCH
     expect(mockPatch).toHaveBeenCalledWith('/api/v1/tasks/task-1', {
-      status: 'in_progress',
+      status: 'running',
     })
     // 验证没有使用 PUT
     expect(mockPut).not.toHaveBeenCalled()
@@ -207,7 +207,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
       data: {
         id: 'task-1',
         title: '长期任务',
-        status: 'in_progress',
+        status: 'running',
         tags: ['long-term'],
         created_at: '2026-05-14T00:00:00Z',
         updated_at: '2026-05-14T01:00:00Z',
@@ -223,7 +223,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
       data: {
         id: 'task-1',
         title: '长期任务',
-        status: 'in_progress',
+        status: 'running',
         tags: ['long-term', 'auto-execute'],
         created_at: '2026-05-14T00:00:00Z',
         updated_at: '2026-05-14T02:00:00Z',
@@ -319,11 +319,11 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
-    await longTermTasksApi.fetchLongTermTasks({ status: 'in_progress' as any })
+    await longTermTasksApi.fetchLongTermTasks({ status: 'running' as any })
 
     const callUrl = mockGet.mock.calls[0][0] as string
 
-    expect(callUrl).toContain('status=in_progress')
+    expect(callUrl).toContain('status=running')
   })
 
   it('应正确解包后端 {items, total} 并过滤长期任务', async () => {
@@ -333,7 +333,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
           {
             id: 'task-1',
             title: '长期任务A',
-            status: 'in_progress',
+            status: 'running',
             tags: ['long-term', 'auto-execute'],
             created_at: '2026-05-14T00:00:00Z',
           },

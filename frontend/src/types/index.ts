@@ -5,7 +5,6 @@
 // 导出模型类型
 export type {
   ApprovalRequest,
-  ContentBlock,
   Message,
   MessageRole,
   RiskLevel,

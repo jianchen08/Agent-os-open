@@ -161,11 +161,9 @@ class TaskIdleTimerMixin:
                     remind_count + 1, task_id,
                 )
                 # BUG-FIX-fix_20260525_idle_wake_empty_llm:
-                # 问题根因: _try_resume_engine 通过 ctx.wake_event 唤醒
-                #   _handle_suspension_loop，后者调用 engine.resume()
-                #   创建新的 _run_loop。但 _suspended_state 中的 user_input
-                #   为空，导致 LLM 被空内容调用，每 idle_threshold 秒
-                #   产生一次无意义的 AI 回复。
+                # 问题根因: 直接通过 engine.resume() 恢复管道时，
+                #   _suspended_state 中的 user_input 为空，
+                #   导致 LLM 被空内容调用。
                 # 修复方案: 改用 engine.inject_message() 注入系统提醒消息，
                 #   通过 PipelineEngine 内部的 _wake_event 唤醒 _suspend_and_wait，
                 #   使 _run_loop 获得有意义的 user_input 再调用 LLM。

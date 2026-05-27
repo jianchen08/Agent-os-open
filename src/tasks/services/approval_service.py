@@ -83,9 +83,9 @@ class TaskApprovalService:
                 return {"error": "任务不存在", "error_code": "TASK_NOT_FOUND"}
 
             if task.status != ExecutionStatus.BLOCKED.value:
-                logger.warning(
-                    f"[TaskApprovalService] 任务状态不是 blocked | "
-                    f"task_id={task_id} | status={task.status}"
+                logger.error(
+                    "[TaskApprovalService] 任务状态不是 blocked | "
+                    "task_id=%s | status=%s", task_id, task.status
                 )
 
             approval_options = [
@@ -118,12 +118,12 @@ class TaskApprovalService:
                 timeout_seconds=600,
                 priority=Priority.HIGH,
                 agent_id=task_id,
-                file_contents=None,
+                file_paths=None,
             )
 
             logger.info(
-                f"[TaskApprovalService] 审批请求已创建 | "
-                f"task_id={task_id} | request_id={request_id}"
+                "[TaskApprovalService] 审批请求已创建 | "
+                "task_id=%s | request_id=%s", task_id, request_id
             )
 
             return {
@@ -265,13 +265,12 @@ class TaskApprovalService:
         await session.commit()
 
         logger.info(
-            f"[TaskApprovalService] 评估指标已人工通过 | "
-            f"task_id={task.id} | user_id={user_id} | "
-            f"passed_criteria={passed_criteria_ids}"
+            "[TaskApprovalService] 评估指标已人工通过 | "
+            "task_id=%s | user_id=%s | passed_criteria=%s",
+            task.id, user_id, passed_criteria_ids
         )
 
-        # 触发评估流程
-        # 使用 EvaluationService 应用评估结果
+        # 触发评估流程（延迟导入避免与 evaluation_service 循环依赖）
         from src.tasks.services.evaluation_service import EvaluationService
 
         evaluation_service = EvaluationService(session=session)
@@ -321,8 +320,8 @@ class TaskApprovalService:
         await session.commit()
 
         logger.info(
-            f"[TaskApprovalService] 任务调整标准后重试 | "
-            f"task_id={task.id} | user_id={user_id}"
+            "[TaskApprovalService] 任务调整标准后重试 | "
+            "task_id=%s | user_id=%s", task.id, user_id
         )
 
         return {
@@ -353,8 +352,8 @@ class TaskApprovalService:
         await session.commit()
 
         logger.info(
-            f"[TaskApprovalService] 任务已取消 | "
-            f"task_id={task.id} | user_id={user_id}"
+            "[TaskApprovalService] 任务已取消 | "
+            "task_id=%s | user_id=%s", task.id, user_id
         )
 
         return {

@@ -141,7 +141,7 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
             }}
             className={cn(
               'flex h-4 w-4 items-center justify-center rounded',
-              'opacity-0 transition-opacity group-hover:opacity-100',
+              'opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity',
               'hover:bg-destructive/20 text-muted-foreground hover:text-destructive',
             )}
             title="关闭 Tab"

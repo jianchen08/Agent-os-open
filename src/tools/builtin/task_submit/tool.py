@@ -665,7 +665,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         from infrastructure.service_provider import get_service_provider
         task_worker = get_service_provider().get("task_worker")
         if not task_worker:
-            task_service._storage.delete(task.id)
+            await task_service.hard_delete(task.id)
             return create_failure_result(
                 error="后台执行器不可用，任务提交失败",
                 error_code="SUBMIT_FAILED",
@@ -700,7 +700,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
         }
         if not task_worker.submit_task(task_data):
-            task_service._storage.delete(task.id)
+            await task_service.hard_delete(task.id)
             return create_failure_result(
                 error="后台执行器未启动，任务提交失败",
                 error_code="SUBMIT_FAILED",

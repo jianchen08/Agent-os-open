@@ -1307,7 +1307,7 @@ class TestMediaReviewAPI:
                 },
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.get(f"/api/v1/reviews/{review.id}/media-metadata")
         assert response.status_code == 200
@@ -1326,7 +1326,7 @@ class TestMediaReviewAPI:
                 tab_id="tab2", title="空审批",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.get(f"/api/v1/reviews/{review.id}/media-metadata")
         assert response.status_code == 200
@@ -1357,7 +1357,7 @@ class TestMediaReviewAPI:
                 tab_id="tab3", title="附件测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1381,7 +1381,7 @@ class TestMediaReviewAPI:
                 tab_id="tab4", title="附件审阅测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1409,7 +1409,7 @@ class TestMediaReviewAPI:
                 tab_id="tab5", title="附件不审阅测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1434,7 +1434,7 @@ class TestMediaReviewAPI:
                 tab_id="tab6", title="缺少路径测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1459,7 +1459,7 @@ class TestMediaReviewAPI:
                 tab_id="tab7", title="推断类型测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1483,7 +1483,7 @@ class TestMediaReviewAPI:
                 tab_id="tab8", title="未知类型测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         response = client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1510,7 +1510,7 @@ class TestMediaReviewAPI:
                 tab_id="tab9", title="元数据更新测试",
             )
 
-        review = asyncio.get_event_loop().run_until_complete(_create())
+        review = asyncio.new_event_loop().run_until_complete(_create())
 
         client.post(
             f"/api/v1/reviews/{review.id}/attachments",
@@ -1524,7 +1524,7 @@ class TestMediaReviewAPI:
         async def _get():
             return await rs.get_review(review.id)
 
-        updated_review = asyncio.get_event_loop().run_until_complete(_get())
+        updated_review = asyncio.new_event_loop().run_until_complete(_get())
         assert "media_files" in updated_review.metadata
         assert len(updated_review.metadata["media_files"]) == 1
         assert "media_review_results" in updated_review.metadata

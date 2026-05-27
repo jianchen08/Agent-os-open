@@ -20,7 +20,7 @@ import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
 import { requestWithRetry } from '@/utils/retry'
-import type { Message, Session } from '@/types/models'
+import type { Message, MessageToolCall, Session } from '@/types/models'
 import type { MessagePart } from '@/types/messageParts'
 import type { RetryOptions } from '@/utils/retry'
 // 注意：GetMessagesResponse已被BackendMessagesListResponse替代，用于直接映射后端响应
@@ -153,7 +153,7 @@ function mapBackendMessageToMessage(
     } as Message
   }
 
-  let toolCalls: Message['toolCalls']
+  let toolCalls: MessageToolCall[] | undefined
   if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
     toolCalls = backendMessage.toolCalls.map((tc) => ({
       call_id: (tc.call_id || tc.callId || tc.tool_call_id || '') as string,
@@ -254,7 +254,6 @@ function mapBackendMessageToMessage(
       ...backendMessage.metadata,
       ...(backendMessage.agentName ? { agentName: backendMessage.agentName } : {}),
     },
-    toolCalls,
     thinking,
     parts: parts.length > 0 ? parts : undefined,
   }
@@ -264,7 +263,7 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
   return requestWithRetry(async () => {
     // 只获取主管道会话（session_type=main_pipeline），过滤子任务管道
     const response = await apiClient.get<any>(API_ENDPOINTS.THREADS.LIST, {
-      params: { session_type: 'main_pipeline' },
+      params: { session_type: 'main_pipeline', limit: 100 },
     })
 
     // BUG-FIX-fix_20260513_sessions_empty: 后端返回 {threads: [...], total: N} 格式，非纯数组

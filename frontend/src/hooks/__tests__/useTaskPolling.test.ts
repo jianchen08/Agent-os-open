@@ -107,7 +107,7 @@ describe('useTaskPolling - 核心轮询逻辑', () => {
 
   describe('轮询启动与定时调用', () => {
     it('启动后应按设定间隔调用 fetchTasks', () => {
-      mockStoreState.tasks = [makeTask('1', 'in_progress')]
+      mockStoreState.tasks = [makeTask('1', 'running')]
 
       const controller = createPollingController({ interval: 3000 })
       controller.start()
@@ -148,7 +148,7 @@ describe('useTaskPolling - 核心轮询逻辑', () => {
     })
 
     it('部分任务仍在进行中时不应停止', () => {
-      mockStoreState.tasks = [makeTask('1', 'completed'), makeTask('2', 'in_progress')]
+      mockStoreState.tasks = [makeTask('1', 'completed'), makeTask('2', 'running')]
 
       const controller = createPollingController({ interval: 3000 })
       controller.start()
@@ -189,7 +189,7 @@ describe('useTaskPolling - 核心轮询逻辑', () => {
 
   describe('定时器清理', () => {
     it('调用 stop 后应清除定时器，不再调用 fetchTasks', () => {
-      mockStoreState.tasks = [makeTask('1', 'in_progress')]
+      mockStoreState.tasks = [makeTask('1', 'running')]
 
       const controller = createPollingController({ interval: 3000 })
       controller.start()
@@ -225,7 +225,7 @@ describe('useTaskPolling - 终态判断辅助函数', () => {
   it('cancelled 是终态', () => expect(isTerminal('cancelled')).toBe(true))
   it('timeout 是终态', () => expect(isTerminal('timeout')).toBe(true))
   it('pending 不是终态', () => expect(isTerminal('pending')).toBe(false))
-  it('in_progress 不是终态', () => expect(isTerminal('in_progress')).toBe(false))
+  it('running 不是终态', () => expect(isTerminal('running')).toBe(false))
   it('running 不是终态', () => expect(isTerminal('running')).toBe(false))
   it('blocked 不是终态', () => expect(isTerminal('blocked')).toBe(false))
   it('suspended 不是终态', () => expect(isTerminal('suspended')).toBe(false))

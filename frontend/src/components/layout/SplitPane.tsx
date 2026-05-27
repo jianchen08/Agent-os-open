@@ -135,7 +135,7 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
             'absolute top-1/2 -translate-x-1/2 -translate-y-1/2',
             'glass-panel h-8 w-8 rounded-lg',
             'flex items-center justify-center',
-            'opacity-0 transition-opacity group-hover:opacity-100',
+            'opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity',
             'hover:bg-surface/80',
           )}
           title={isRightCollapsed ? '展开执行图' : '折叠执行图'}

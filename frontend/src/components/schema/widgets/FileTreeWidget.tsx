@@ -146,7 +146,7 @@ interface TreeWidgetConfig {
 /** 默认状态配置映射 */
 const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
   pending: { icon: 'clock', color: 'text-status-warning', label: '待处理' },
-  in_progress: { icon: 'loader', color: 'text-status-info', label: '进行中' },
+  running: { icon: 'loader', color: 'text-status-info', label: '进行中' },
   completed: { icon: 'check', color: 'text-status-success', label: '已完成' },
   failed: { icon: 'x-circle', color: 'text-status-error', label: '失败' },
   blocked: { icon: 'ban', color: 'text-status-running', label: '已阻塞' },
@@ -160,7 +160,6 @@ const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
 const STATUS_FILTER_OPTIONS = [
   { value: '', label: '全部' },
   { value: 'running', label: '运行中' },
-  { value: 'in_progress', label: '进行中' },
   { value: 'pending', label: '待处理' },
   { value: 'completed', label: '已完成' },
   { value: 'failed', label: '失败' },
@@ -169,13 +168,12 @@ const STATUS_FILTER_OPTIONS = [
 ] as const
 
 /**
- * 活跃状态集合（running/in_progress/pending/evaluating/planning）
+ * 活跃状态集合（running/pending/evaluating/planning）
  *
  * 用于默认筛选模式，仅显示正在执行的任务
  */
 const ACTIVE_STATUSES_FOR_FILTER = new Set([
   'running',
-  'in_progress',
   'pending',
   'evaluating',
   'planning',
@@ -1292,7 +1290,7 @@ function TreeNode({
   const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
 
   /** 当前节点是否启用（由后端任务状态驱动） */
-  const ACTIVE_STATUSES = new Set(['running', 'pending', 'in_progress', 'evaluating', 'planning'])
+  const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating', 'planning'])
   const isEnabled = ACTIVE_STATUSES.has(status ?? '')
   const isToggling = togglingIds.has(nodeId)
 

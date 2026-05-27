@@ -6,12 +6,53 @@
 
 import asyncio
 import os
+import time
 from datetime import timedelta
 from typing import Any
 
-from src.memory.storage import CacheManager
-
 from .redis_manager import get_redis_manager
+
+
+class CacheManager:
+    """简单内存缓存管理器，支持 TTL。"""
+
+    def __init__(self, default_ttl: int | None = None):
+        self._cache: dict[str, Any] = {}
+        self._ttl: dict[str, float] = {}
+        self._default_ttl = default_ttl
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, key: str) -> Any:
+        if key in self._cache:
+            if key in self._ttl and time.time() > self._ttl[key]:
+                del self._cache[key]
+                del self._ttl[key]
+                self._misses += 1
+                return None
+            self._hits += 1
+            return self._cache[key]
+        self._misses += 1
+        return None
+
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        self._cache[key] = value
+        effective_ttl = ttl if ttl is not None else self._default_ttl
+        if effective_ttl is not None:
+            self._ttl[key] = time.time() + effective_ttl
+
+    def delete(self, key: str) -> bool:
+        existed = key in self._cache
+        self._cache.pop(key, None)
+        self._ttl.pop(key, None)
+        return existed
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._ttl.clear()
+
+    def stats(self) -> dict[str, Any]:
+        return {"hits": self._hits, "misses": self._misses, "size": len(self._cache)}
 
 
 class MultiLevelCache:

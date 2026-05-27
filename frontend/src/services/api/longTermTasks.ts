@@ -99,7 +99,7 @@ export async function pauseLongTermTask(taskId: string): Promise<Task> {
  */
 export async function resumeLongTermTask(taskId: string): Promise<Task> {
   const response = await apiClient.patch<Task>(`/api/v1/tasks/${taskId}`, {
-    status: 'in_progress',
+    status: 'running',
   })
 
   return response.data
@@ -160,7 +160,7 @@ export function taskToProject(task: Task) {
 function mapTaskStatusToProjectStatus(status: TaskStatus): string {
   const statusMap: Record<string, string> = {
     pending: 'planning',
-    in_progress: 'running',
+    running: 'running',
     running: 'running',
     evaluating: 'running',
     scheduled: 'planning',

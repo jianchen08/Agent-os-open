@@ -2,7 +2,7 @@
 
 根因分析测试：Minimax API 不允许非首位 system role 消息。
 管道中 StreamRepetitionGuard、ThinkingTruncationGuard 等会注入 system 消息，
-_normalize_messages_for_provider 需要确保所有非首位 system→user 转换。
+normalize_messages_for_provider 需要确保所有非首位 system→user 转换。
 
 验收标准：
 - 首位 system 消息保留
@@ -15,25 +15,17 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock, patch
 
-from plugins.core.llm_core.plugin import LLMCore
+from plugins.core.llm_core._message_normalizer import normalize_messages_for_provider
 
 
-def _make_minimax_core() -> LLMCore:
-    """创建最小化 minimax LLMCore 实例（绕过 __init__ 避免依赖 litellm）。"""
-    core = object.__new__(LLMCore)
-    core._provider = "minimax"
-    core._model = "MiniMax-M2.7"
-    core._config = {}
-    return core
+def _normalize_minimax(messages):
+    """以 minimax provider 调用 normalize_messages_for_provider。"""
+    return normalize_messages_for_provider(messages, provider="minimax", name="test")
 
 
-def _make_openai_core() -> LLMCore:
-    """创建 openai provider 实例（对照组）。"""
-    core = object.__new__(LLMCore)
-    core._provider = "openai"
-    core._model = "gpt-4"
-    core._config = {}
-    return core
+def _normalize_openai(messages):
+    """以 openai provider 调用 normalize_messages_for_provider（对照组）。"""
+    return normalize_messages_for_provider(messages, provider="openai", name="test")
 
 
 class TestMinimaxSystemRoleNormalize:
@@ -41,25 +33,23 @@ class TestMinimaxSystemRoleNormalize:
 
     def test_first_system_message_preserved(self) -> None:
         """首位 system 消息应保留为 system 角色。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "You are a helpful assistant."
 
     def test_non_first_system_converted_to_user(self) -> None:
         """非首位 system 消息（如 StreamRepetitionGuard 注入）应被转换为 user 角色。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "[StreamRepetitionGuard] 检测到重复"},
             {"role": "user", "content": "Continue"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         # 所有非首位消息不应有 system 角色
         for i, m in enumerate(result[1:], start=1):
@@ -72,7 +62,6 @@ class TestMinimaxSystemRoleNormalize:
 
     def test_multiple_system_messages_all_converted(self) -> None:
         """所有非首位 system 消息都应被转换，无论数量多少。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "Main system prompt"},
             {"role": "system", "content": "Guard 1 warning"},
@@ -81,7 +70,7 @@ class TestMinimaxSystemRoleNormalize:
             {"role": "assistant", "content": "Hi"},
             {"role": "system", "content": "Guard 3 truncation"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         assert all(m["role"] != "system" for m in result[1:]), (
             f"仍有非首位 system: {[(i, m['role']) for i, m in enumerate(result) if m.get('role') == 'system']}"
@@ -89,30 +78,27 @@ class TestMinimaxSystemRoleNormalize:
 
     def test_no_system_messages_at_all(self) -> None:
         """没有 system 消息时应正常处理不报错。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert all(m["role"] != "system" for m in result)
 
     def test_only_system_messages_first_kept_rest_converted(self) -> None:
         """只有 system 消息时首位保留，其余全部转换。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "Prompt 1"},
             {"role": "system", "content": "Prompt 2"},
             {"role": "system", "content": "Prompt 3"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         assert result[1]["role"] == "user"
         assert result[2]["role"] == "user"
 
     def test_system_in_tool_calls_context(self) -> None:
         """system 消息混在 tool_calls 上下文中应被正确处理。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Use tool"},
@@ -129,13 +115,12 @@ class TestMinimaxSystemRoleNormalize:
             {"role": "system", "content": "[TaskReminder] do something"},
             {"role": "assistant", "content": "Done"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         assert all(m["role"] != "system" for m in result[1:])
 
     def test_thinking_truncation_guard_system_converted(self) -> None:
         """ThinkingTruncationGuard 注入的 system 消息应被转换。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Think deeply"},
@@ -145,7 +130,7 @@ class TestMinimaxSystemRoleNormalize:
                 "content": "[ThinkingTruncationGuard] 思考内容过长已截断",
             },
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "system"
         assert all(m["role"] != "system" for m in result[1:])
         # 检查转换后的消息保留了原始 content
@@ -155,31 +140,28 @@ class TestMinimaxSystemRoleNormalize:
 
     def test_non_minimax_provider_system_untouched(self) -> None:
         """非 minimax provider 不应修改 system 消息角色。"""
-        core = _make_openai_core()
         messages = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Additional context"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_openai(messages)
         # OpenAI 支持多条 system 消息，不应修改
         assert result[0]["role"] == "system"
         assert result[2]["role"] == "system"
 
     def test_empty_messages_list(self) -> None:
         """空消息列表应正常返回。"""
-        core = _make_minimax_core()
-        result = core._normalize_messages_for_provider([])
+        result = _normalize_minimax([])
         assert result == []
 
     def test_converted_messages_have_no_name_field(self) -> None:
         """转换后的 user 消息不应有 name 字段（MiniMax 要求 user 消息 name 一致）。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System", "name": "sys"},
             {"role": "system", "content": "Guard", "name": "guard"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         # 首位 system 保留 name（由后续 Phase 处理）
         assert result[0]["role"] == "system"
         # 转换后的 user 不应有 name
@@ -297,21 +279,19 @@ class TestMinimaxPhase0OrphanToolResult:
 
     def test_orphan_tool_result_removed(self) -> None:
         """前面没有 assistant(tool_calls) 的 tool result 应被移除。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Hello"},
             {"role": "tool", "tool_call_id": "orphan_1", "content": "orphan result"},
             {"role": "assistant", "content": "Hi"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         # orphan tool result 应被移除
         tool_msgs = [m for m in result if m.get("role") == "tool"]
         assert len(tool_msgs) == 0, f"孤立 tool result 应被清理，但仍剩 {len(tool_msgs)} 条"
 
     def test_valid_tool_result_kept(self) -> None:
         """有效的 tool result（前面有 assistant(tool_calls)）应被保留。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Use tool"},
@@ -326,14 +306,13 @@ class TestMinimaxPhase0OrphanToolResult:
             },
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         tool_msgs = [m for m in result if m.get("role") == "tool"]
         assert len(tool_msgs) == 1, "有效 tool result 应被保留"
         assert tool_msgs[0]["tool_call_id"] == "call_1"
 
     def test_mixed_orphan_and_valid_tool_results(self) -> None:
         """混合场景：孤立 tool 被清理，有效 tool 被保留。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "tool", "tool_call_id": "orphan_1", "content": "orphan"},
@@ -351,7 +330,7 @@ class TestMinimaxPhase0OrphanToolResult:
             {"role": "user", "content": "Next"},
             {"role": "tool", "tool_call_id": "orphan_2", "content": "another orphan"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         tool_msgs = [m for m in result if m.get("role") == "tool"]
         # 只有 call_valid 的 tool result 应保留
         assert len(tool_msgs) == 1
@@ -363,7 +342,6 @@ class TestMinimaxPhase2RelocateIntruders:
 
     def test_system_between_assistant_tool_calls_and_tool_relocated(self) -> None:
         """system 消息夹在 assistant(tool_calls) 和 tool result 之间应被移到 tool 组之后。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Go"},
@@ -379,7 +357,7 @@ class TestMinimaxPhase2RelocateIntruders:
             {"role": "system", "content": "[TaskReminder] injected"},
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         # 找到 assistant(tool_calls) 的位置
         assistant_idx = None
         for i, m in enumerate(result):
@@ -400,7 +378,6 @@ class TestMinimaxPhase2RelocateIntruders:
 
     def test_user_between_assistant_tool_calls_and_tool_kept(self) -> None:
         """user 消息夹在中间也应被重定位到 tool 组之后。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Go"},
@@ -416,7 +393,7 @@ class TestMinimaxPhase2RelocateIntruders:
             {"role": "user", "content": "Intruder"},
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         # assistant 后面紧跟 tool
         assistant_idx = next(
             i for i, m in enumerate(result)
@@ -437,14 +414,13 @@ class TestMinimaxPhase5SafetyNet:
         模拟：构造一条在 Phase 1-4 理论上不会遗漏的简单场景，
         验证 Phase 5 作为安全网存在。
         """
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Missed by earlier phases"},
             {"role": "assistant", "content": "Hi"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         # 绝对不能有非首位 system
         for i, m in enumerate(result):
             if i > 0:
@@ -458,7 +434,6 @@ class TestMinimaxToolContentCleanup:
 
     def test_tool_content_null_bytes_removed(self) -> None:
         """tool result 中的 null 字符应被移除。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {
@@ -472,14 +447,13 @@ class TestMinimaxToolContentCleanup:
             },
             {"role": "tool", "tool_call_id": "c1", "content": "result\x00with\x00nulls"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         tool_msg = next(m for m in result if m.get("role") == "tool")
         assert "\x00" not in tool_msg["content"], "null 字符应被移除"
         assert "resultwithnulls" == tool_msg["content"]
 
     def test_tool_content_truncated_at_8000(self) -> None:
         """tool result 超过 8000 字符应被截断。"""
-        core = _make_minimax_core()
         long_content = "A" * 10000
         messages = [
             {"role": "system", "content": "System"},
@@ -494,7 +468,7 @@ class TestMinimaxToolContentCleanup:
             },
             {"role": "tool", "tool_call_id": "c1", "content": long_content},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         tool_msg = next(m for m in result if m.get("role") == "tool")
         assert len(tool_msg["content"]) < 8100, (
             f"超长 tool content 应被截断，实际长度={len(tool_msg['content'])}"
@@ -510,16 +484,14 @@ class TestMinimaxProviderCaseSensitivity:
 
         注意: 当前实现使用 == 'minimax' 精确匹配，大写不会匹配。
         """
-        core = object.__new__(LLMCore)
-        core._provider = "Minimax"  # 大写 M
-        core._model = "MiniMax-M2.7"
-        core._config = {}
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Guard"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = normalize_messages_for_provider(
+            messages, provider="Minimax", name="test"
+        )
         # 大写 'Minimax' 不匹配 'minimax'，所以不应转换
         assert result[2]["role"] == "system", (
             "大写 provider 不应触发 MiniMax 专有修正"
@@ -527,12 +499,12 @@ class TestMinimaxProviderCaseSensitivity:
 
 
 class TestCallLlmActiveFix:
-    """_call_llm 中的 MiniMax 主动修复（_normalize 之后第二道防线）。"""
+    """_call_llm 中的 MiniMax 主动修复（normalize 之后第二道防线）。"""
 
     def test_active_fix_catches_leaked_system(self) -> None:
-        """_call_llm 内的主动修复应捕获 _normalize 遗漏的 system 消息。
+        """_call_llm 内的主动修复应捕获 normalize 遗漏的 system 消息。
 
-        模拟 _normalize 返回仍有非首位 system 的场景（极端情况），
+        模拟 normalize 返回仍有非首位 system 的场景（极端情况），
         验证 _call_llm 中的主动修复逻辑。
         """
         import asyncio
@@ -582,8 +554,10 @@ class TestCallLlmActiveFix:
             {"role": "system", "content": "Leaked system msg"},
         ]
 
-        # 通过 _normalize 先看结果
-        normalized = core._normalize_messages_for_provider(list(messages))
+        # 通过 normalize 先看结果
+        normalized = normalize_messages_for_provider(
+            list(messages), provider="minimax", name="test"
+        )
         # Phase 1+5 应该已经处理了，但验证双重保险
         assert all(m["role"] != "system" for m in normalized[1:]), (
             "normalize 后不应有非首位 system"
@@ -591,11 +565,10 @@ class TestCallLlmActiveFix:
 
 
 class TestMinimaxNormalizeIdempotency:
-    """验证 _normalize_messages_for_provider 的幂等性：多次调用结果一致。"""
+    """验证 normalize_messages_for_provider 的幂等性：多次调用结果一致。"""
 
     def test_double_normalize_same_result(self) -> None:
         """连续两次 normalize 应产生相同结果。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Hello"},
@@ -603,8 +576,8 @@ class TestMinimaxNormalizeIdempotency:
             {"role": "assistant", "content": "Hi"},
             {"role": "system", "content": "[Guard2] reminder"},
         ]
-        result1 = core._normalize_messages_for_provider(messages)
-        result2 = core._normalize_messages_for_provider(result1)
+        result1 = _normalize_minimax(messages)
+        result2 = _normalize_minimax(result1)
         # 两次结果的角色序列应一致
         roles1 = [m["role"] for m in result1]
         roles2 = [m["role"] for m in result2]
@@ -614,13 +587,12 @@ class TestMinimaxNormalizeIdempotency:
 
     def test_normalize_preserves_content_integrity(self) -> None:
         """normalize 后所有消息的 content 应保持不变。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "system", "content": "Original system prompt"},
             {"role": "user", "content": "User message"},
             {"role": "system", "content": "[StreamRepetitionGuard] detected"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         contents = [m.get("content", "") for m in result]
         assert "Original system prompt" in contents
         assert "User message" in contents
@@ -632,25 +604,22 @@ class TestMinimaxSingleMessage:
 
     def test_single_system_message_preserved(self) -> None:
         """只有一条 system 消息应保留不变。"""
-        core = _make_minimax_core()
         messages = [{"role": "system", "content": "Only system"}]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result == [{"role": "system", "content": "Only system"}]
 
     def test_single_user_message_preserved(self) -> None:
         """只有一条 user 消息应保留不变。"""
-        core = _make_minimax_core()
         messages = [{"role": "user", "content": "Only user"}]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result == [{"role": "user", "content": "Only user"}]
 
     def test_single_system_at_non_first_position(self) -> None:
         """首位 user + 第二位 system，system 应被转换。"""
-        core = _make_minimax_core()
         messages = [
             {"role": "user", "content": "First"},
             {"role": "system", "content": "Second"},
         ]
-        result = core._normalize_messages_for_provider(messages)
+        result = _normalize_minimax(messages)
         assert result[0]["role"] == "user"
         assert result[1]["role"] == "user", "非首位 system 应转为 user"

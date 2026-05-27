@@ -196,10 +196,10 @@ class EngineRegistry:
         )
 
         if pipeline_id:
-            engine._pipeline_id = pipeline_id
+            engine.pipeline_id = pipeline_id
 
-        logger.info("[EngineRegistry] register_pipeline: pid=%s tid=%s", engine._pipeline_id[:12], thread_id[:12] if thread_id else "")
-        return self.register(engine._pipeline_id, engine, thread_id=thread_id, tags=tags)
+        logger.info("[EngineRegistry] register_pipeline: pid=%s tid=%s", engine.pipeline_id[:12], thread_id[:12] if thread_id else "")
+        return self.register(engine.pipeline_id, engine, thread_id=thread_id, tags=tags)
 
     def revive_pipeline(
         self,
@@ -251,7 +251,7 @@ class EngineRegistry:
             services=svc,
             checkpoint_manager=checkpoint_mgr,
         )
-        engine._pipeline_id = pipeline_id
+        engine.pipeline_id = pipeline_id
 
         logger.info(
             "[EngineRegistry] 管道恢复: 创建新引擎 pipeline=%s thread=%s",

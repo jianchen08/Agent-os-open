@@ -115,16 +115,18 @@ class ReviewEngine:
 
         # Phase 3+4：逐批复盘
         all_experiences: list[dict[str, Any]] = []
-        all_agent_reviews: dict[str, Any] = {}
-        all_system_reviews: list[dict[str, Any]] = []
+        all_action_items: list[dict[str, Any]] = []
+
+        existing_experiences = await self._load_existing_experiences()
 
         for batch_idx, batch in enumerate(batches):
             try:
-                batch_result = await self._review_batch(batch, batch_idx)
+                batch_result = await self._review_batch(
+                    batch, batch_idx, existing_experiences,
+                )
                 if batch_result:
                     all_experiences.extend(batch_result.get("experiences", []))
-                    all_agent_reviews.update(batch_result.get("agent_reviews", {}))
-                    all_system_reviews.extend(batch_result.get("system_reviews", []))
+                    all_action_items.extend(batch_result.get("action_items", []))
             except Exception as e:
                 logger.warning(
                     "[Maintenance] 复盘批次 %d 失败: %s", batch_idx, e,
@@ -132,10 +134,11 @@ class ReviewEngine:
                 result["errors"].append(f"batch_{batch_idx}: {e}")
 
         # Phase 5：存储产出到 Knowledge
-        saved_count = await self._save_review_outputs(
-            all_experiences, all_agent_reviews, all_system_reviews,
+        saved_counts = await self._save_review_outputs(
+            all_experiences, all_action_items,
         )
-        result["experiences_saved"] = saved_count
+        result["experiences_saved"] = saved_counts.get("experiences", 0)
+        result["action_items_saved"] = saved_counts.get("action_items", 0)
 
         # Phase 5：标记已复盘
         reviewed_count = 0
@@ -263,7 +266,10 @@ class ReviewEngine:
     # ============================================
 
     async def _review_batch(
-        self, batch: list[Any], batch_idx: int,
+        self,
+        batch: list[Any],
+        batch_idx: int,
+        existing_experiences: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """对一批管道执行复盘。
 
@@ -276,9 +282,10 @@ class ReviewEngine:
         Args:
             batch: 一批 PipelineRunSummary
             batch_idx: 批次索引
+            existing_experiences: 之前复盘产出的经验列表
 
         Returns:
-            复盘产出字典（含 experiences、agent_reviews、system_reviews）
+            复盘产出字典（含 experiences、action_items）
         """
         # 加载 records 并生成骨架和锚点
         skeletons: dict[str, list[str]] = {}
@@ -292,7 +299,9 @@ class ReviewEngine:
             anchors[p.run_id] = self._generate_anchors(records)
 
         # 组装复盘上下文
-        review_context = self._build_review_context(batch, skeletons, anchors)
+        review_context = self._build_review_context(
+            batch, skeletons, anchors, existing_experiences,
+        )
 
         # 尝试通过 pipeline_engine 启动复盘管道
         if self._pipeline_engine is not None:
@@ -442,15 +451,17 @@ class ReviewEngine:
         batch: list[Any],
         skeletons: dict[str, list[str]],
         anchors: dict[str, list[dict]],
+        existing_experiences: list[dict[str, Any]] | None = None,
     ) -> str:
         """组装复盘上下文文本。
 
-        将骨架和锚点格式化为复盘 Agent 可读的文本。
+        将骨架、锚点和已有经验格式化为复盘 Agent 可读的文本。
 
         Args:
             batch: 一批 PipelineRunSummary
             skeletons: 管道骨架映射
             anchors: 管道锚点映射
+            existing_experiences: 之前复盘产出的经验列表
 
         Returns:
             格式化的复盘上下文文本
@@ -479,6 +490,19 @@ class ReviewEngine:
                         f"  [{a['iteration']}] {a['anchor_type']}: {a['reason']}"
                     )
                 parts.append("")
+
+        # 已有经验（供 LLM 判断是否需要升格为 action_item）
+        if existing_experiences:
+            parts.append("=== 已有经验（供参考） ===")
+            for exp in existing_experiences:
+                agent_id = exp.get("agent_id", "")
+                content = exp.get("content", "")
+                parts.append(f"  [{agent_id}] {content[:100]}")
+            parts.append("")
+            parts.append(
+                "注意：如果上述经验对应的问题仍在出现，"
+                "说明仅靠检索注入不够有效，请产出 action_item 而非重复存入 experience。"
+            )
 
         return "\n".join(parts)
 
@@ -536,6 +560,12 @@ class ReviewEngine:
     def _parse_review_output(self, output: str) -> dict[str, Any]:
         """解析复盘 Agent 的 JSON 输出。
 
+        期望格式：
+        {
+            "experiences": [{"agent_id": "...", "content": "...", "tags": [...]}],
+            "action_items": [{"agent_id": "...", "content": "...", "tags": [...]}]
+        }
+
         Args:
             output: Agent 输出的 JSON 文本
 
@@ -543,21 +573,17 @@ class ReviewEngine:
             解析后的复盘产出字典
         """
         try:
-            # 尝试从输出中提取 JSON
             json_start = output.find("{")
             json_end = output.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 json_str = output[json_start:json_end]
-                return json.loads(json_str)
+                parsed = json.loads(json_str)
+                if "experiences" in parsed or "action_items" in parsed:
+                    return parsed
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # 解析失败，返回空结果
-        return {
-            "experiences": [],
-            "agent_reviews": {},
-            "system_reviews": [],
-        }
+        return {"experiences": [], "action_items": []}
 
     # ============================================
     # 规则复盘（降级方案）
@@ -572,7 +598,8 @@ class ReviewEngine:
     ) -> dict[str, Any]:
         """纯规则复盘（降级方案，不调用 LLM）。
 
-        基于锚点分析自动产出经验和改进建议。
+        只产出 action_item（改进建议），不产出 experience。
+        有价值的经验需要 LLM 洞察，纯统计描述对 Agent 无用。
 
         Args:
             batch: 一批 PipelineRunSummary
@@ -583,10 +610,8 @@ class ReviewEngine:
         Returns:
             规则复盘产出字典
         """
-        experiences: list[dict[str, Any]] = []
-        system_reviews: list[dict[str, Any]] = []
+        action_items: list[dict[str, Any]] = []
 
-        # 统计锚点模式
         error_count = 0
         recovery_count = 0
         heavy_planning_count = 0
@@ -604,37 +629,40 @@ class ReviewEngine:
                 elif a["anchor_type"] == "batch_operation":
                     batch_op_count += 1
 
-        # 基于锚点模式生成经验
-        if error_count > 0 and recovery_count > 0:
-            experiences.append({
+        if error_count > recovery_count:
+            action_items.append({
                 "agent_id": "__system__",
-                "content": f"在 {len(batch)} 条管道中发现 {error_count} 次错误，"
-                           f"其中 {recovery_count} 次成功恢复。"
-                           "建议：加强操作前的前置条件检查。",
+                "content": (
+                    f"在 {len(batch)} 条管道中发现 {error_count} 次错误，"
+                    f"仅 {recovery_count} 次成功恢复。"
+                    "建议加强操作前的预检查机制"
+                ),
                 "tags": ["error_recovery", "auto_review"],
             })
 
-        if heavy_planning_count > len(batch) * 2:
-            experiences.append({
-                "agent_id": "__system__",
-                "content": f"频繁的深度思考（{heavy_planning_count} 次），"
-                           "可能存在任务拆分不合理或决策路径复杂的问题。"
-                           "建议：优化任务分解策略。",
-                "tags": ["heavy_planning", "auto_review"],
-            })
-
         if batch_op_count > 0:
-            experiences.append({
+            action_items.append({
                 "agent_id": "__system__",
-                "content": f"发现 {batch_op_count} 次批量操作，"
-                           "建议：批量操作前增加预检查步骤。",
+                "content": (
+                    f"发现 {batch_op_count} 次批量操作，"
+                    "建议在批量操作前增加预检查步骤"
+                ),
                 "tags": ["batch_operation", "auto_review"],
             })
 
+        if heavy_planning_count > len(batch) * 2:
+            action_items.append({
+                "agent_id": "__system__",
+                "content": (
+                    f"频繁的深度思考（{heavy_planning_count} 次），"
+                    "可能存在任务拆分不合理的问题，建议优化任务分解策略"
+                ),
+                "tags": ["heavy_planning", "auto_review"],
+            })
+
         return {
-            "experiences": experiences,
-            "agent_reviews": {},
-            "system_reviews": system_reviews,
+            "experiences": [],
+            "action_items": action_items,
         }
 
     # ============================================
@@ -644,20 +672,18 @@ class ReviewEngine:
     async def _save_review_outputs(
         self,
         experiences: list[dict[str, Any]],
-        agent_reviews: dict[str, Any],
-        system_reviews: list[dict[str, Any]],
-    ) -> int:
+        action_items: list[dict[str, Any]],
+    ) -> dict[str, int]:
         """将复盘产出存储到 Knowledge。
 
         Args:
             experiences: 经验列表
-            agent_reviews: Agent 改进建议
-            system_reviews: 系统改进建议
+            action_items: 改进建议列表
 
         Returns:
-            保存的知识条目数
+            各类保存数量 {"experiences": N, "action_items": N}
         """
-        saved = 0
+        counts: dict[str, int] = {"experiences": 0, "action_items": 0}
 
         # 存储经验
         for exp in experiences:
@@ -671,78 +697,54 @@ class ReviewEngine:
                         "agent_id": exp.get("agent_id", ""),
                     },
                 )
-                saved += 1
+                counts["experiences"] += 1
             except Exception as e:
                 logger.warning("[Maintenance] 存储经验失败: %s", e)
 
-        # 存储 Agent 改进建议
-        for agent_id, review in agent_reviews.items():
-            try:
-                issues = review.get("issues", [])
-                if issues:
-                    content = f"Agent {agent_id} 改进建议：\n"
-                    for issue in issues:
-                        content += f"- {issue.get('pattern', '')}: {issue.get('suggestion', '')}\n"
-                    await self._knowledge_service.create_knowledge(
-                        user_id="system",
-                        content=content,
-                        source_type="review",
-                        extra_data={"agent_id": agent_id},
-                    )
-                    saved += 1
-            except Exception as e:
-                logger.warning(
-                    "[Maintenance] 存储 Agent 改进建议失败 | agent=%s | error=%s",
-                    agent_id, e,
-                )
-
-        # 存储系统改进建议
-        for sys_review in system_reviews:
+        # 存储改进建议
+        for item in action_items:
             try:
                 await self._knowledge_service.create_knowledge(
                     user_id="system",
-                    content=sys_review.get("suggestion", ""),
-                    source_type="system_review",
-                    extra_data={"issue": sys_review.get("issue", "")},
+                    content=item.get("content", ""),
+                    source_type="action_item",
+                    extra_data={
+                        "tags": item.get("tags", []),
+                        "agent_id": item.get("agent_id", ""),
+                    },
                 )
-                saved += 1
+                counts["action_items"] += 1
             except Exception as e:
-                logger.warning("[Maintenance] 存储系统改进建议失败: %s", e)
+                logger.warning("[Maintenance] 存储改进建议失败: %s", e)
 
         # 存储复盘报告摘要
-        if experiences or agent_reviews or system_reviews:
+        if experiences or action_items:
             try:
-                report = self._build_review_report(
-                    experiences, agent_reviews, system_reviews,
-                )
+                report = self._build_review_report(experiences, action_items)
                 await self._knowledge_service.create_knowledge(
                     user_id="system",
                     content=report,
                     source_type="review_report",
                     extra_data={
                         "experience_count": len(experiences),
-                        "agent_count": len(agent_reviews),
-                        "system_review_count": len(system_reviews),
+                        "action_item_count": len(action_items),
                     },
                 )
-                saved += 1
             except Exception as e:
                 logger.warning("[Maintenance] 存储复盘报告失败: %s", e)
 
-        return saved
+        return counts
 
     def _build_review_report(
         self,
         experiences: list[dict[str, Any]],
-        agent_reviews: dict[str, Any],
-        system_reviews: list[dict[str, Any]],
+        action_items: list[dict[str, Any]],
     ) -> str:
         """构建复盘报告文本。
 
         Args:
             experiences: 经验列表
-            agent_reviews: Agent 改进建议
-            system_reviews: 系统改进建议
+            action_items: 改进建议列表
 
         Returns:
             格式化的复盘报告文本
@@ -755,21 +757,45 @@ class ReviewEngine:
                 parts.append(f"  - {exp.get('content', '')[:100]}")
             parts.append("")
 
-        if agent_reviews:
-            parts.append("Agent 改进建议:")
-            for agent_id, review in agent_reviews.items():
-                parts.append(f"  {agent_id}:")
-                for issue in review.get("issues", []):
-                    parts.append(f"    - {issue.get('pattern', '')}")
-            parts.append("")
-
-        if system_reviews:
-            parts.append("系统改进建议:")
-            for sr in system_reviews:
-                parts.append(f"  - {sr.get('issue', '')}: {sr.get('suggestion', '')}")
+        if action_items:
+            parts.append(f"改进建议 ({len(action_items)} 条):")
+            for item in action_items:
+                agent_id = item.get("agent_id", "")
+                parts.append(f"  [{agent_id}] {item.get('content', '')[:100]}")
             parts.append("")
 
         return "\n".join(parts)
+
+    # ============================================
+    # 加载已有经验
+    # ============================================
+
+    async def _load_existing_experiences(
+        self,
+    ) -> list[dict[str, Any]]:
+        """从 Knowledge 加载之前复盘产出的经验列表。
+
+        Returns:
+            经验列表（每条含 agent_id、content、tags）
+        """
+        if self._knowledge_service is None:
+            return []
+        try:
+            results = await self._knowledge_service.search(
+                query="", source_type="experience", limit=50,
+            )
+            experiences = []
+            for r in results:
+                metadata = r.metadata if hasattr(r, "metadata") else {}
+                experiences.append({
+                    "agent_id": metadata.get("agent_id", ""),
+                    "content": r.content if hasattr(r, "content") else str(r),
+                    "tags": metadata.get("tags", []),
+                })
+            return experiences
+        except Exception as e:
+            logger.debug("[Maintenance] 加载已有经验失败（非致命）: %s", e)
+            return []
 
     # ============================================
     # 复盘标记
@@ -837,11 +863,10 @@ class ReviewEngine:
             {pipeline_id: records},
         )
 
-        # 存储
+        # 存储产出
         await self._save_review_outputs(
             review_result.get("experiences", []),
-            review_result.get("agent_reviews", {}),
-            review_result.get("system_reviews", []),
+            review_result.get("action_items", []),
         )
 
         # 标记已复盘

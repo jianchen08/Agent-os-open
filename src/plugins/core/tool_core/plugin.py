@@ -527,10 +527,13 @@ class ToolCore(ICorePlugin):
                 tool_args = {}
 
             # 允许工具通过 timeout_seconds 参数覆盖默认超时
+            # human_interaction 除外：它内部自行管理超时（wait_for_choice），
+            # 外层必须使用 _tool_timeouts 中配置的固定值（1800s），避免 LLM 传入的
+            # 小 timeout_seconds 导致 asyncio.wait_for 先于内部超时杀掉工具。
             timeout = self._default_timeout
             if tool_name in self._tool_timeouts:
                 timeout = self._tool_timeouts[tool_name]
-            if isinstance(tool_args, dict) and "timeout_seconds" in tool_args:
+            if tool_name != "human_interaction" and isinstance(tool_args, dict) and "timeout_seconds" in tool_args:
                 try:
                     requested = float(tool_args["timeout_seconds"])
                     if requested > 0:

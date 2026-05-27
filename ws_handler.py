@@ -109,21 +109,13 @@ class WebSocketInteractionNotifier:
                 "tab_id": msg_data.get("tab_id", ""),
                 "agent_id": msg_data.get("agent_id", ""),
                 "pipeline_id": record.get("message_data", {}).get("pipeline_id", ""),
-                "file_contents": msg_data.get("file_contents"),
+                "file_paths": msg_data.get("file_paths"),
                 "progress": msg_data.get("progress"),
                 "agent_level": msg_data.get("agent_level"),
                 "session_id": record.get("session_id", ""),
             },
         }
 
-        # BUG-FIX-fix_20260512_interaction_card_not_showing:
-        # 问题根因: notify_request 只查找 _active_connections（per-session 连接），
-        #           前端使用 GlobalWebSocket 注册在 _global_connections 中，
-        #           导致交互请求消息永远到不了前端，卡片不显示。
-        #           后端桌面通知（DesktopInteractionNotifier）独立于 WebSocket，
-        #           所以声音和 OS 通知正常。
-        # 修复方案: 优先 _active_connections，失败时回退到 _global_connections，
-        #           与 send_to_thread 方法保持一致。
         payload = json.dumps(payload_obj, ensure_ascii=False)
         sent = False
         if conns:

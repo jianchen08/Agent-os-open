@@ -55,18 +55,15 @@ export function startPipelineStreaming(
 }
 
 /**
- * 统一停止管道流式状态（pipelineStore + streamingStore）
- *
- * pipelineStore.stopStreaming 内部已调用 streamingStore.setStreamingForTab(pipelineId, false)，
- * 此处仅额外清理 threadId 对应的 tab 状态。
+ * 停止管道流式传输，同步清理 streamingStore 的 tab 状态
  *
  * @param pipelineId - 管道 ID（唯一路由键）
  * @param threadId - 可选的会话 ID，用于清理 streamingStore tab 配对
  */
 export function stopPipelineStreaming(pipelineId: string, threadId?: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
+  useStreamingStore.getState().setStreamingForTab(pipelineId, false)
 
-  // pipelineStore.stopStreaming 已清理 pipelineId 的 tab 状态，仅需额外清理 threadId
   if (threadId && threadId !== pipelineId) {
     useStreamingStore.getState().setStreamingForTab(threadId, false)
   }

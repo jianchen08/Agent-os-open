@@ -92,8 +92,8 @@ def resolve_view_mode(
 
     # 2. 根据制品类型推断
     target_type: str | None = None
-    if artifact_types:
-        target_type = artifact_types[0] if artifact_types else None
+    if artifact_types is not None and len(artifact_types) > 0:
+        target_type = artifact_types[0]
     elif first_artifact_type:
         target_type = first_artifact_type
 

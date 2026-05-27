@@ -293,8 +293,7 @@ done
 
 # ========== 启动前端 ==========
 echo "[2/2] 启动前端开发服务器 (Vite :$FRONTEND_PORT)..."
-export VITE_API_BASE_URL="http://localhost:$BACKEND_PORT"
-cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx vite --port "$FRONTEND_PORT" &
+cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 # 等待前端就绪并打开浏览器

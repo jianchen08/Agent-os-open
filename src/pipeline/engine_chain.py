@@ -51,7 +51,7 @@ async def execute_input_chain(
     if not input_plugins:
         return
 
-    input_ctx = PluginContext(state=state, config={}, _services=engine._services)
+    input_ctx = PluginContext(state=state, config={}, _services=engine.services)
     input_chain = PluginChain(input_plugins)
     await input_chain.execute(input_ctx)
     logger.debug("Input chain completed")
@@ -77,7 +77,7 @@ async def execute_core_plugin(
         logger.warning("No core plugin registered for type: %s", core_type)
         return
 
-    core_ctx = PluginContext(state=state, config={}, _services=engine._services)
+    core_ctx = PluginContext(state=state, config={}, _services=engine.services)
     # Core plugin retry with exponential backoff
     max_core_retries = getattr(core_plugin, "max_retries", 3)
     core_retry_delay = getattr(core_plugin, "retry_delay", 1.0)
@@ -90,7 +90,7 @@ async def execute_core_plugin(
             if isinstance(core_result, dict):
                 state.update(core_result)
             logger.debug("Core plugin executed: core_type=%s", core_type)
-            engine._consecutive_core_errors = 0
+            engine.consecutive_core_errors = 0
             break  # success, exit retry loop
         except Exception as exc:
             _handle_core_error(
@@ -170,11 +170,11 @@ def _handle_core_error(
     should_count = core_type == "llm_call" and not is_transient and not is_fixable
 
     if should_count:
-        engine._consecutive_core_errors += 1
-        if engine._consecutive_core_errors >= engine._max_consecutive_core_errors:
+        engine.consecutive_core_errors += 1
+        if engine.consecutive_core_errors >= engine.max_consecutive_core_errors:
             logger.error(
                 "Pipeline force-ending: %d consecutive core errors",
-                engine._consecutive_core_errors,
+                engine.consecutive_core_errors,
             )
             state[StateKeys.ENDED] = True
     else:
@@ -245,7 +245,7 @@ async def execute_output_chain(
     plugin_names = [getattr(p, "name", type(p).__name__) for p in output_plugins]
     logger.debug("Output plugins for core_type=%s: %s", core_type, plugin_names)
 
-    output_ctx = PluginContext(state=state, config={}, _services=engine._services)
+    output_ctx = PluginContext(state=state, config={}, _services=engine.services)
     output_chain = PluginChain(output_plugins)
     output_results = await output_chain.execute(output_ctx)
     for result in output_results:
@@ -270,8 +270,6 @@ async def handle_no_route_signals(
     iteration: int,
 ) -> str:
     """处理无路由信号时的后续逻辑，始终返回 "continue"。"""
-    from pipeline.engine_state import _safe_deepcopy
-
     if core_type == "tool_execute" or state.get("thinking_retry_needed"):
         if state.get("thinking_retry_needed"):
             retry_count = state.get("thinking_retry_count", 0)
@@ -299,7 +297,7 @@ async def handle_no_route_signals(
         )
         return "continue"
 
-    _has_active_triggers = _check_active_triggers(state, engine._pipeline_id)
+    _has_active_triggers = _check_active_triggers(state, engine.pipeline_id)
     if _has_active_triggers:
         logger.info(
             "[Engine] 管道即将结束但存在活跃触发器，"
@@ -321,8 +319,7 @@ async def handle_no_route_signals(
     state.setdefault("messages", []).append(
         {"role": "user", "content": state["user_input"]}
     )
-    engine._suspended_state = _safe_deepcopy(state)
-    await engine._suspend_and_wait(state)
+    await engine.suspend_and_wait(state)
     return "continue"
 
 
@@ -348,29 +345,6 @@ def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bo
         return False
 
 
-def _restore_suspended_state(
-    engine: PipelineEngine,
-    state: dict[str, Any],
-) -> None:
-    """从挂起状态恢复 user_input / messages / streaming 信息。
-
-    注意: 此函数仅用于外部需要手动恢复的场景。
-    _suspend_and_wait 内部已自带恢复逻辑，不需要调用此函数。
-    """
-    if engine._suspended_state is not None:
-        state["user_input"] = engine._suspended_state.get(
-            "user_input", state.get("user_input", ""),
-        )
-        state["messages"] = engine._suspended_state.get(
-            "messages", state.get("messages", []),
-        )
-        for _key in ("on_chunk", "streaming"):
-            if _key in engine._suspended_state:
-                state[_key] = engine._suspended_state[_key]
-        engine._suspended_state = None
-        engine.save_streaming_context(state)
-
-
 async def run_post_end_output_chain(
     engine: PipelineEngine,
     state: dict[str, Any],
@@ -388,7 +362,7 @@ async def run_post_end_output_chain(
     if not output_plugins:
         return
     try:
-        output_ctx = PluginContext(state=state, config={}, _services=engine._services)
+        output_ctx = PluginContext(state=state, config={}, _services=engine.services)
         output_chain = PluginChain(output_plugins)
         await output_chain.execute(output_ctx)
     except Exception as exc:

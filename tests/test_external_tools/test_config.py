@@ -290,4 +290,5 @@ class TestConfigDir:
     def test_default_config_dir(self) -> None:
         """默认配置目录为 config/external_tools。"""
         mgr = ExternalToolConfigManager()
-        assert str(mgr.config_dir).endswith("config/external_tools")
+        config_str = str(mgr.config_dir).replace("\\", "/")
+        assert config_str.endswith("config/external_tools")

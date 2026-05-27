@@ -53,7 +53,7 @@ export interface PendingInteraction {
   reviewRequestId?: string
   /** 关联制品 ID 列表（仅审批场景有值） */
   artifactIds?: string[]
-  /** 文件内容映射（由 file_paths 参数自动读取） */
+  /** 文件内容映射（由前端通过 file-content API 拉取） */
   fileContents?: Record<string, string>
   /** 所属会话 ID */
   sessionId?: string

@@ -45,23 +45,29 @@ class GlobalWebSocketService {
   private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
   private _disposed: boolean = false
 
-  private _connectTimer: ReturnType<typeof setTimeout> | null = null
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** 建立全局 WS 连接（登录后调用一次） */
+  /**
+   * 建立全局 WS 连接（登录后调用一次）
+   *
+   * BUG-FIX-fix_20260527_ws_dup_connect:
+   * 问题根因: connect() 使用 50ms setTimeout 延迟实际连接，导致幂等检查失效。
+   *          React StrictMode 下 useEffect 执行两次，两次 connect() 调用都在 setTimeout
+   *          触发前通过检查，最终建立两条 WebSocket 连接，触发后端踢掉旧连接的连锁反应，
+   *          导致 _status 事件频繁触发、组件级联重渲染、页面卡顿。
+   * 修复方案: 移除 setTimeout 延迟，直接同步调用 _doConnect()，使幂等检查（connecting 状态判断）
+   *          在同一事件循环内生效，确保相同 token 的重复调用被正确拦截。
+   * 影响范围: GlobalWebSocket 连接建立流程
+   * 修复日期: 2026-05-27
+   */
   connect(token: string): void {
     if (this._disposed) return
     if (this._status === 'connected' && this._token === token) return
-    if (this._status === 'connecting' && this._token === token && this._connectTimer) return
+    if (this._status === 'connecting' && this._token === token) return
 
     this._token = token
     this._status = 'connecting'
     this._clearTimers()
-
-    if (this._connectTimer) {
-      clearTimeout(this._connectTimer)
-      this._connectTimer = null
-    }
 
     if (this.ws) {
       this.ws.onclose = null
@@ -72,10 +78,7 @@ class GlobalWebSocketService {
       this.ws = null
     }
 
-    this._connectTimer = setTimeout(() => {
-      this._connectTimer = null
-      this._doConnect()
-    }, 50)
+    this._doConnect()
   }
 
   /** 实际建立 WebSocket 连接 */

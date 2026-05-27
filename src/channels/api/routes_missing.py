@@ -684,18 +684,14 @@ async def get_monitoring_tasks(
     offset = (page - 1) * page_size
     limit = page_size
 
-    # ── 数据源1: MemoryStore（API 创建的任务） ──
-    tasks: list[dict[str, Any]] = store.get_user_tasks(_user["sub"])
+    tasks: list[dict[str, Any]] = []
 
-    # ── 数据源2: TaskStorage（管道引擎创建的任务，YAML 持久化） ──
     task_service = _get_task_service()
     if task_service is not None:
         try:
             ts_tasks = await task_service.list_all(limit=1000)
-            api_ids = {t["id"] for t in tasks}
             for tm in ts_tasks:
-                if tm.id not in api_ids:
-                    tasks.append(_taskmodel_to_monitoring_dict(tm))
+                tasks.append(_taskmodel_to_monitoring_dict(tm))
         except Exception as exc:
             logger.warning(
                 "monitoring/tasks: 从 TaskStorage 加载任务失败: %s", exc,

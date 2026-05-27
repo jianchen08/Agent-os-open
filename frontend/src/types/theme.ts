@@ -119,7 +119,7 @@ export interface BubbleColors {
 /** 任务状态颜色 */
 export interface TaskColors {
   pending: string
-  in_progress: string
+  running: string
   completed: string
   failed: string
   blocked: string

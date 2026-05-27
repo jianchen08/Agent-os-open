@@ -4,7 +4,6 @@
 暴露接口：
 - to_int(cls, priority: str) -> int：to_int功能
 - to_str(cls, priority: int) -> str：to_str功能
-- MessageType：MessageType类
 - Timeout：Timeout类
 - Retry：Retry类
 - CostControl：CostControl类
@@ -28,24 +27,6 @@ FALLBACK_AGENT_NAME = "回滚管理助手"
 
 DEFAULT_SESSION_TITLE = "新会话"
 DEFAULT_THREAD_STATE = "idle"
-
-# =============================================================================
-# 消息类型常量
-# =============================================================================
-
-
-class MessageType:
-    """消息类型常量"""
-
-    USER_INPUT = "user_input"
-    AI_RESPONSE = "ai_response"
-    AGENT_THINK = "agent_think"
-    ASSISTANT = "assistant"
-    LLM_RESPONSE = "llm_response"
-    TOOL_CALL = "tool_call"
-    SYSTEM = "system"
-    UNKNOWN = "unknown"
-
 
 # =============================================================================
 # 超时和重试常量

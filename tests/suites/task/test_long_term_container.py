@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tasks.service import SimpleStateMachine, TaskService
+from tasks.service import TaskService
 from tasks.storage import TaskStorage
 from tasks.types import TaskStatus
 from tools.builtin.task_submit import TaskSubmitTool
@@ -29,7 +29,6 @@ def _make_svc(data_dir: Path | None = None) -> TaskService:
     """创建测试用 TaskService（内存或文件存储）。"""
     svc = TaskService.__new__(TaskService)
     svc._storage = TaskStorage(data_dir=data_dir)
-    svc._state_machine = SimpleStateMachine()
     svc._progress = None
     svc._scheduler = None
     svc._concurrency = None

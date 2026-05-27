@@ -9,6 +9,7 @@
  */
 
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
+import type { MessagePart } from '@/types/messageParts'
 
 /**
  * 消息响应类型（数据库驱动增强）
@@ -166,6 +167,60 @@ export function toMessage(
     }))
   }
 
+  // 构建 parts[]：参照 session.ts 中 mapBackendMessageToMessage 的 parts 构建逻辑
+  const parts: MessagePart[] = []
+  let seq = 0
+
+  if (thinking?.content?.trim()) {
+    parts.push({
+      type: 'thinking',
+      content: thinking.content,
+      state: 'done',
+      sequence: seq++,
+    })
+  }
+
+  const isSystemMsg =
+    role === 'system' ||
+    metadata?.record_type === 'system' ||
+    metadata?.type === 'system' ||
+    metadata?.sender_type === 'system' ||
+    content?.trimStart().startsWith('[系统通知]')
+
+  if (content?.trim()) {
+    if (isSystemMsg) {
+      parts.push({
+        type: 'system',
+        content,
+        level: (metadata?.notification_level as any) || 'info',
+        notificationType: (metadata?.notification_type as string) || 'task_notification',
+        sequence: seq++,
+      })
+    } else {
+      parts.push({
+        type: 'text',
+        content,
+        state: 'done',
+        sequence: seq++,
+      })
+    }
+  }
+
+  if (toolCalls && toolCalls.length > 0) {
+    for (const tc of toolCalls) {
+      parts.push({
+        type: 'tool_call',
+        callId: tc.call_id || '',
+        name: tc.tool_name || '',
+        args: tc.tool_args || {},
+        state: 'done',
+        result: tc.result,
+        error: tc.error,
+        sequence: seq++,
+      })
+    }
+  }
+
   return {
     id,
     sessionId,
@@ -176,9 +231,9 @@ export function toMessage(
     timestamp,
     agentId,
     thinking,
-    toolCalls,
-    // segments 不再使用
+    // toolCalls 已迁移到 parts[]，不再单独赋值
     metadata: raw.metadata as Record<string, unknown> | undefined,
+    parts: parts.length > 0 ? parts : undefined,
   }
 }
 

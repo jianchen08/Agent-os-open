@@ -372,7 +372,7 @@ export function FiveSpaceLayout({
             const sid = reviewData.sessionId || useSessionStore.getState().activeSessionId || reviewData.pipelineId
             if (sid) {
               globalWS.sendInteractionResponse(sid, reviewData.requestId, {
-                responseType: 'approved',
+                response_type: 'approved',
                 feedback: message,
               })
             }

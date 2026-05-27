@@ -217,7 +217,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                 />
 
                 {/* 悬停遮罩 */}
-                <div className="absolute inset-0 flex items-end bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity group-hover:opacity-100">
+                <div className="absolute inset-0 flex items-end bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                   <div className="flex w-full items-center justify-between p-3">
                     <span className="truncate text-sm text-white">
                       {image.title}

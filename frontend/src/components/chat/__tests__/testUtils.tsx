@@ -13,7 +13,7 @@ import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { SubAgentCardProps } from '@/components/chat/SubAgentCard'
 import type { ActivityCardProps, ActivityData  } from '@/types/activity'
-import type { ContentBlock, Message, MessageToolCall, ThinkingContent } from '@/types/models'
+import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, PartState, ToolCallPartState } from '@/types/messageParts'
 import type { RenderOptions } from '@testing-library/react'
 
@@ -382,42 +382,8 @@ export function createMockToolCall(overrides?: Partial<MessageToolCall>): Messag
   }
 }
 
-/**
- * 创建模拟内容块
- *
- * @param blockType - 内容块类型
- * @param overrides - 部分覆盖默认内容块属性
- * @returns ContentBlock 对象
- * @deprecated 请使用 createTextPart / createThinkingPart / createToolCallPart 代替
- */
-export function createMockContentBlock(
-  blockType: 'text' | 'tool_call' | 'thinking',
-  overrides?: Partial<ContentBlock>,
-): ContentBlock {
-  const base: ContentBlock = { type: blockType }
-
-  switch (blockType) {
-    case 'text':
-      base.text = '示例文本'
-      break
-    case 'thinking': {
-      const thinking: ThinkingContent = {
-        content: '思考内容',
-        isThinking: false,
-      }
-      base.thinking = thinking
-      break
-    }
-    case 'tool_call':
-      base.toolCall = createMockToolCall()
-      break
-  }
-
-  return { ...base, ...overrides }
-}
-
 // ============================================================
-// MessagePart 工厂函数（新模型，替代 ContentBlock）
+// MessagePart 工厂函数（统一渲染模型）
 // ============================================================
 
 /**

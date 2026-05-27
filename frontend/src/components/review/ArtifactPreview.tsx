@@ -249,7 +249,7 @@ function ImagePreview({
         />
 
         {/* 悬浮操作层 */}
-        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-0 transition-all group-hover:bg-black/30 group-hover:opacity-100">
+        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-100 md:opacity-0 transition-all md:group-hover:bg-black/30 md:group-hover:opacity-100">
           <button
             className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-foreground shadow hover:bg-white transition-colors"
             onClick={() => setShowLightbox(true)}

@@ -195,7 +195,7 @@ function FilePreviewCard({
       <Button
         variant="ghost"
         size="sm"
-        className="h-6 w-6 p-0 rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+        className="h-6 w-6 p-0 rounded-full opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"
         onClick={onRemove}
         disabled={item.status === 'uploading'}
         aria-label={`移除 ${item.file.name}`}

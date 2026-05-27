@@ -473,11 +473,9 @@ class TestSuspendAndWaitPendingNotifications:
 
     @pytest.mark.asyncio
     async def test_pending_notifications_consumed_on_suspend(self):
-        """管道挂起时自动消费子任务在挂起前入队的通知。"""
+        """管道挂起时自动消费在挂起前入队的通知。"""
         from pipeline.engine import PipelineEngine
 
-        # 注意：空 dict 是 falsy，services or {} 会创建新 dict，
-        # 所以必须用非空 dict 确保 engine 使用同一个引用
         services: dict[str, Any] = {"__test__": True}
         engine = PipelineEngine(
             input_route_table=MagicMock(),
@@ -487,13 +485,11 @@ class TestSuspendAndWaitPendingNotifications:
         )
         pipeline_id = "test-pipe-123"
 
-        # 预设 pending notifications（模拟子任务在管道挂起前失败）
-        services[f"__pending_notifications_{pipeline_id}"] = [
+        engine._pending_notifications = [
             "[系统通知] 子任务 'A' failed",
             "[系统通知] 子任务 'B' completed",
         ]
 
-        # 设置 _suspended_state（在 _run_loop 中由 target=="wait" 设置）
         engine._suspended_state = {
             StateKeys.PIPELINE_ID: pipeline_id,
             "user_input": "原始输入",
@@ -505,13 +501,10 @@ class TestSuspendAndWaitPendingNotifications:
             "submitted_task_ids": ["child-a", "child-b"],
         }
 
-        # _suspend_and_wait 应立即唤醒（因为 pending notifications）
         await engine._suspend_and_wait(state)
 
-        # 验证 pending notifications 已被消费
-        assert services.get(f"__pending_notifications_{pipeline_id}") is None
-        # 验证通知被注入到 _suspended_state
-        injected = engine._suspended_state.get("user_input", "")
+        assert engine._pending_notifications == []
+        injected = state.get("user_input", "")
         assert "子任务 'A'" in injected
         assert "子任务 'B'" in injected
         assert "原始输入" in injected
@@ -540,10 +533,154 @@ class TestSuspendAndWaitPendingNotifications:
 
         async def _wake_after_delay():
             await asyncio.sleep(0.05)
-            engine._wake_event.set()
+            engine.wake()
 
         asyncio.create_task(_wake_after_delay())
         await engine._suspend_and_wait(state)
 
-        # 引擎应被注册过（虽然已经被清理了）
-        assert services.get(f"__suspended_engine_{pipeline_id}") is None
+
+class TestEnginePublicInterface:
+    """测试引擎重构后的公开属性和接口。"""
+
+    def test_pipeline_id_read_write(self):
+        """pipeline_id 属性支持读写。"""
+        engine = _build_engine()
+        original_id = engine.pipeline_id
+        assert isinstance(original_id, str)
+        assert len(original_id) > 0
+
+        engine.pipeline_id = "custom-id-123"
+        assert engine.pipeline_id == "custom-id-123"
+
+        engine.pipeline_id = "another-id-456"
+        assert engine.pipeline_id == "another-id-456"
+
+    def test_services_property_readonly(self):
+        """services 属性返回构造时传入的服务字典。"""
+        svc = {"db": "mock_db", "cache": "mock_cache"}
+        from pipeline.engine import PipelineEngine
+
+        engine = PipelineEngine(
+            input_route_table=MagicMock(),
+            output_route_table=MagicMock(),
+            plugin_registry=MagicMock(),
+            services=svc,
+        )
+        assert engine.services is svc
+        assert engine.services["db"] == "mock_db"
+
+    def test_services_default_empty_dict(self):
+        """未传 services 时返回空字典。"""
+        engine = _build_engine()
+        assert isinstance(engine.services, dict)
+        assert len(engine.services) == 0
+
+    def test_consecutive_core_errors_read_write(self):
+        """consecutive_core_errors 属性支持读写。"""
+        engine = _build_engine()
+        assert engine.consecutive_core_errors == 0
+
+        engine.consecutive_core_errors = 3
+        assert engine.consecutive_core_errors == 3
+
+        engine.consecutive_core_errors = 0
+        assert engine.consecutive_core_errors == 0
+
+    def test_max_consecutive_core_errors_readonly(self):
+        """max_consecutive_core_errors 属性只读。"""
+        engine = _build_engine()
+        assert isinstance(engine.max_consecutive_core_errors, int)
+        assert engine.max_consecutive_core_errors > 0
+
+    def test_is_running_initially_false(self):
+        """引擎初始状态 is_running 为 False。"""
+        engine = _build_engine()
+        assert engine.is_running is False
+
+    def test_is_suspended_initially_false(self):
+        """引擎初始状态 is_suspended 为 False。"""
+        engine = _build_engine()
+        assert engine.is_suspended is False
+
+    @pytest.mark.asyncio
+    async def test_suspend_and_wait_saves_state(self):
+        """suspend_and_wait 内部自动保存 state 快照到 _suspended_state。"""
+        import asyncio
+
+        from pipeline.engine import PipelineEngine
+
+        engine = PipelineEngine(
+            input_route_table=MagicMock(),
+            output_route_table=MagicMock(),
+            plugin_registry=MagicMock(),
+            services={"__test__": True},
+        )
+
+        state = {
+            StateKeys.PIPELINE_ID: "test-save-state",
+            "user_input": "hello",
+            "submitted_task_ids": [],
+        }
+
+        async def _wake_after_delay():
+            await asyncio.sleep(0.05)
+            engine.wake()
+
+        asyncio.create_task(_wake_after_delay())
+        result = await engine.suspend_and_wait(state)
+
+        assert engine.is_suspended is False
+
+    @pytest.mark.asyncio
+    async def test_resume_from_state(self):
+        """resume_from_state 从外部状态恢复管道执行。"""
+        from pipeline.engine import PipelineEngine
+
+        engine = PipelineEngine(
+            input_route_table=MagicMock(),
+            output_route_table=MagicMock(),
+            plugin_registry=MagicMock(),
+            services={"__test__": True},
+        )
+
+        saved_state = create_initial_state()
+        saved_state[StateKeys.ITERATION] = 5
+        saved_state[StateKeys.CORE_TYPE] = "llm_call"
+        saved_state["user_input"] = "resumed input"
+        saved_state["submitted_task_ids"] = []
+
+        mock_route_table = MagicMock()
+        mock_route_table.arbitrate = MagicMock(
+            return_value=RouteSignal(route_type="end", reason="test_resume")
+        )
+        engine.output_route_table = mock_route_table
+
+        result = await engine.resume_from_state(saved_state)
+
+        assert result[StateKeys.ENDED] is True
+
+    def test_wake_no_error_when_not_suspended(self):
+        """wake() 在引擎未挂起时不报错。"""
+        engine = _build_engine()
+        engine.wake()
+
+    def test_inject_message_when_not_suspended(self):
+        """inject_message() 在引擎未挂起时入队到 _pending_notifications。"""
+        engine = _build_engine()
+        engine.inject_message("test message", source="system")
+        assert len(engine._pending_notifications) == 1
+        assert engine._pending_notifications[0] == "test message"
+
+    def test_consume_pending_notifications(self):
+        """consume_pending_notifications 原子消费并清空通知队列。"""
+        engine = _build_engine()
+        engine._pending_notifications = ["msg1", "msg2", "msg3"]
+        result = engine.consume_pending_notifications()
+        assert result == ["msg1", "msg2", "msg3"]
+        assert engine._pending_notifications == []
+
+    def test_consume_pending_notifications_empty(self):
+        """无通知时返回空列表。"""
+        engine = _build_engine()
+        result = engine.consume_pending_notifications()
+        assert result == []

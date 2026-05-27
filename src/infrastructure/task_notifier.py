@@ -112,20 +112,22 @@ class TaskNotifierMixin:
             if _task_obj and hasattr(_task_obj, "metadata") and _task_obj.metadata:
                 _user_id = _task_obj.metadata.get("user_id", "")
 
+            _mapped_status = _BACKEND_TO_FRONTEND_STATUS.get(new_status, new_status)
+
             if _notifier and _user_id:
                 await _notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
                     "data": {
                         "task_id": task_id,
-                        "old_status": data.get("old_status", ""),
-                        "new_status": new_status,
+                        "old_status": _BACKEND_TO_FRONTEND_STATUS.get(data.get("old_status", ""), data.get("old_status", "")),
+                        "new_status": _mapped_status,
                         "current_phase": _STATUS_TO_PHASE.get(new_status, "prepare"),
                     },
                 })
 
             logger.debug(
-                "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
-                task_id, data.get("old_status", ""), new_status,
+                "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s (mapped=%s)",
+                task_id, data.get("old_status", ""), new_status, _mapped_status,
             )
         except Exception as _ws_exc:
             logger.warning(

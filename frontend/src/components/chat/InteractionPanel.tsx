@@ -24,13 +24,12 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
 
   const handleRespondChoice = useCallback(
-    async (requestId: string, optionId: string) => {
-      console.log('[InteractionPanel] handleRespondChoice | requestId=%s | optionId=%s | submittingId=%s', requestId, optionId, submittingId)
+    async (requestId: string, optionId: string, optionLabel?: string) => {
       if (submittingId && submittingId !== requestId) return
       setSubmittingId(requestId)
       dismissInteraction(requestId)
       try {
-        await respondChoice(requestId, optionId)
+        await respondChoice(requestId, optionLabel || optionId)
       } finally {
         setSubmittingId(null)
       }
@@ -83,8 +82,8 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
         <InteractionCard
           key={interaction.requestId}
           interaction={interaction}
-          onRespondChoice={(optionId) =>
-            handleRespondChoice(interaction.requestId, optionId)
+          onRespondChoice={(optionId, optionLabel) =>
+            handleRespondChoice(interaction.requestId, optionId, optionLabel)
           }
           onRespondText={(text) =>
             handleRespondText(interaction.requestId, text)

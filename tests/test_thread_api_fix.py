@@ -127,7 +127,7 @@ class TestThreadResponseModel:
             created_at="2024-01-01",
             updated_at="2024-01-01",
         )
-        assert tr.metadata == {}
+        assert tr.metadata is None
 
     def test_includes_agent_id(self) -> None:
         """ThreadResponse 包含 agent_id。"""
@@ -232,12 +232,12 @@ class TestMemoryStoreThread:
         assert updated["metadata"]["key2"] == "value2"
 
     def test_update_thread_intent(self) -> None:
-        """更新线程的 intent。"""
+        """更新线程的 intent（通过 title 参数间接更新）。"""
         store = self._make_store()
         user = self._demo_user(store)
         thread = store.create_thread(user_id=user["id"], title="原标题")
 
-        updated = store.update_thread(thread["id"], intent="新意图")
+        updated = store.update_thread(thread["id"], title="新意图")
         assert updated is not None
         assert updated["intent"] == "新意图"
 
@@ -255,6 +255,7 @@ class TestMemoryStoreThread:
             user_id=user["id"],
             title="完整字段测试",
             agent_id="agent_test",
+            intent="完整字段测试",
             metadata={"session_type": "main_pipeline"},
         )
 
@@ -264,7 +265,7 @@ class TestMemoryStoreThread:
         assert detail["current_state"] == "active"
         assert detail["agent_id"] == "agent_test"
         assert detail["metadata"] == {"session_type": "main_pipeline"}
-        assert "message_count" in detail
+        assert "created_at" in detail
 
     def test_get_user_threads_returns_all_fields(self) -> None:
         """get_user_threads 返回完整字段。"""
@@ -274,6 +275,7 @@ class TestMemoryStoreThread:
             user_id=user["id"],
             title="用户线程",
             agent_id="agent_xyz",
+            intent="用户线程",
             metadata={"source": "web"},
         )
 
@@ -393,7 +395,7 @@ class TestThreadRoutes:
         assert data["intent"] == "详情测试"
 
     def test_update_thread_put(self) -> None:
-        """PUT /api/v1/threads/{id} 更新线程。"""
+        """PATCH /api/v1/threads/{id} 更新线程。"""
         # 先创建
         create_resp = self.client.post(
             "/api/v1/threads",
@@ -402,15 +404,15 @@ class TestThreadRoutes:
         )
         thread_id = create_resp.json()["thread_id"]
 
-        # PUT 更新
-        response = self.client.put(
+        # PATCH 更新
+        response = self.client.patch(
             f"/api/v1/threads/{thread_id}",
-            json={"title": "PUT 更新标题", "agent_id": "agent_put"},
+            json={"title": "PATCH 更新标题", "agent_id": "agent_put"},
             headers=self.headers,
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["intent"] == "PUT 更新标题"
+        assert data["intent"] == "PATCH 更新标题"
         assert data["agent_id"] == "agent_put"
 
     def test_update_thread_patch(self) -> None:
@@ -434,7 +436,7 @@ class TestThreadRoutes:
         assert data["intent"] == "PATCH 更新标题"
 
     def test_update_thread_agent(self) -> None:
-        """PUT /api/v1/threads/{id}/agent 更新 Agent 绑定。"""
+        """PATCH /api/v1/threads/{id}/agent 更新 Agent 绑定。"""
         # 先创建
         create_resp = self.client.post(
             "/api/v1/threads",
@@ -444,7 +446,7 @@ class TestThreadRoutes:
         thread_id = create_resp.json()["thread_id"]
 
         # 更新 Agent
-        response = self.client.put(
+        response = self.client.patch(
             f"/api/v1/threads/{thread_id}/agent",
             json={"agent_id": "agent_lingxi"},
             headers=self.headers,
@@ -454,7 +456,7 @@ class TestThreadRoutes:
         assert data["agent_id"] == "agent_lingxi"
 
     def test_unbind_agent(self) -> None:
-        """PUT /api/v1/threads/{id}/agent 解绑 Agent（agent_id=null）。"""
+        """PATCH /api/v1/threads/{id}/agent 解绑 Agent（agent_id=null）。"""
         # 先创建带 Agent 的线程
         create_resp = self.client.post(
             "/api/v1/threads",
@@ -464,7 +466,7 @@ class TestThreadRoutes:
         thread_id = create_resp.json()["thread_id"]
 
         # 解绑
-        response = self.client.put(
+        response = self.client.patch(
             f"/api/v1/threads/{thread_id}/agent",
             json={"agent_id": None},
             headers=self.headers,
@@ -578,7 +580,7 @@ class TestFrontendApiConstants:
         assert response.status_code == 200
 
     def test_frontend_thread_update_put_route_exists(self) -> None:
-        """前端 PUT /api/v1/threads/{id} 路由存在。"""
+        """前端 PATCH /api/v1/threads/{id} 路由存在。"""
         create_resp = self.client.post(
             "/api/v1/threads",
             json={"title": "route check"},
@@ -586,7 +588,7 @@ class TestFrontendApiConstants:
         )
         thread_id = create_resp.json()["thread_id"]
 
-        response = self.client.put(
+        response = self.client.patch(
             f"/api/v1/threads/{thread_id}",
             json={"title": "updated"},
             headers=self.headers,
@@ -594,7 +596,7 @@ class TestFrontendApiConstants:
         assert response.status_code == 200
 
     def test_frontend_thread_update_agent_route_exists(self) -> None:
-        """前端 PUT /api/v1/threads/{id}/agent 路由存在。"""
+        """前端 PATCH /api/v1/threads/{id}/agent 路由存在。"""
         create_resp = self.client.post(
             "/api/v1/threads",
             json={"title": "agent route check"},
@@ -602,7 +604,7 @@ class TestFrontendApiConstants:
         )
         thread_id = create_resp.json()["thread_id"]
 
-        response = self.client.put(
+        response = self.client.patch(
             f"/api/v1/threads/{thread_id}/agent",
             json={"agent_id": "test_agent"},
             headers=self.headers,

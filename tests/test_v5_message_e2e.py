@@ -33,13 +33,16 @@ class TestBackendMessageDelivery:
         """验证 _find_engine 能找到运行中的引擎。"""
         mock_engine = MagicMock()
         mock_engine.is_suspended = False
+        mock_engine.is_running = True
+        mock_engine._run_started = True
 
-        mock_provider = MagicMock()
-        mock_provider.get.return_value = mock_engine
+        mock_entry = MagicMock()
+        mock_entry.engine = mock_engine
 
-        # get_service_provider 在 _find_engine 内部局部 import，
-        # 所以 patch 源模块而非调用者模块
-        with patch("infrastructure.service_provider.get_service_provider", return_value=mock_provider):
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_entry
+
+        with patch("pipeline.registry.get_engine_registry", return_value=mock_registry):
             from pipeline.message_bus import _find_engine
             engine, state = _find_engine("test_pipeline_id")
             assert engine is mock_engine
@@ -49,11 +52,15 @@ class TestBackendMessageDelivery:
         """验证 _find_engine 能找到挂起的引擎。"""
         mock_engine = MagicMock()
         mock_engine.is_suspended = True
+        mock_engine.is_running = False
 
-        mock_provider = MagicMock()
-        mock_provider.get.return_value = mock_engine
+        mock_entry = MagicMock()
+        mock_entry.engine = mock_engine
 
-        with patch("infrastructure.service_provider.get_service_provider", return_value=mock_provider):
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_entry
+
+        with patch("pipeline.registry.get_engine_registry", return_value=mock_registry):
             from pipeline.message_bus import _find_engine
             engine, state = _find_engine("test_pipeline_id")
             assert engine is mock_engine
@@ -97,17 +104,27 @@ class TestBackendMessageDelivery:
 
         mock_engine = MagicMock()
         mock_engine.is_suspended = False
-        mock_engine._pending_notifications = []
-        mock_engine._wake_event = None
+        mock_engine.is_running = True
+        mock_engine._run_started = True
+        mock_engine.inject_message = MagicMock()
 
-        with patch("pipeline.message_bus._find_engine") as mock_find:
+        mock_entry = MagicMock()
+        mock_entry.engine = mock_engine
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_entry
+        mock_registry.get_bridge.return_value = None
+
+        with patch("pipeline.message_bus._find_engine") as mock_find, \
+             patch("pipeline.registry.get_engine_registry", return_value=mock_registry), \
+             patch("pipeline.message_bus._create_sink", return_value=None):
             mock_find.return_value = (mock_engine, "running")
             result = await send_pipeline_message("test_pipeline", "Hello AI")
 
             assert result.success is True
             assert result.method == "notification"
             assert result.pipeline_id == "test_pipeline"
-            assert "Hello AI" in mock_engine._pending_notifications
+            mock_engine.inject_message.assert_called()
 
     @pytest.mark.asyncio
     async def test_send_pipeline_message_wake_suspended(self):
@@ -115,25 +132,30 @@ class TestBackendMessageDelivery:
         from pipeline.message_bus import send_pipeline_message
 
         mock_engine = MagicMock()
-        mock_engine._suspended_state = {
-            "user_input": "",
-            "messages": [],
-        }
-        mock_engine._wake_event = MagicMock()
-        mock_engine._wake_event.set = MagicMock()
+        mock_engine.is_suspended = True
+        mock_engine.is_running = False
+        mock_engine.inject_message = MagicMock()
 
-        with patch("pipeline.message_bus._find_engine") as mock_find:
+        mock_entry = MagicMock()
+        mock_entry.engine = mock_engine
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_entry
+        mock_registry.get_bridge.return_value = None
+
+        mock_sink = MagicMock()
+
+        with patch("pipeline.message_bus._find_engine") as mock_find, \
+             patch("pipeline.registry.get_engine_registry", return_value=mock_registry), \
+             patch("pipeline.message_bus._create_sink", return_value=mock_sink):
             mock_find.return_value = (mock_engine, "suspended")
             result = await send_pipeline_message("test_pipeline", "Wake up!")
 
             assert result.success is True
             assert result.method == "wake"
-            # 验证消息被注入到 suspended state
-            assert mock_engine._suspended_state["user_input"] == "Wake up!"
-            # 验证消息被追加到 messages
-            msgs = mock_engine._suspended_state["messages"]
-            assert any(m["content"] == "Wake up!" and m["role"] == "user" for m in msgs)
+            mock_engine.inject_message.assert_called()
 
+    @pytest.mark.skip(reason="_inject_notification_to_engine 函数已移除")
     def test_inject_notification_appends_to_pending(self):
         """验证通知注入到引擎的 _pending_notifications 列表。"""
         from pipeline.message_bus import _inject_notification_to_engine
@@ -148,6 +170,7 @@ class TestBackendMessageDelivery:
         assert mock_engine._pending_notifications[0] == "test notification"
         mock_engine._wake_event.set.assert_called_once()
 
+    @pytest.mark.skip(reason="_inject_message_engine 函数已移除")
     def test_inject_message_engine(self):
         """验证向挂起引擎注入消息并唤醒。"""
         from pipeline.message_bus import _inject_message_engine
@@ -381,8 +404,8 @@ class TestStreamingDisplay:
         })
 
         calls = mock_sink.send_event.call_args_list
-        # tool_start + tool_result
-        assert len(calls) == 2
+        # tool_start + tool_result + stream_start
+        assert len(calls) == 3
         result_event = calls[1][0][0]
         assert result_event["type"] == "tool_result"
         assert result_event["data"]["success"] is True
@@ -411,8 +434,8 @@ class TestStreamingDisplay:
         })
 
         calls = mock_sink.send_event.call_args_list
-        # 应该自动补发 tool_start + tool_result
-        assert len(calls) == 2
+        # 应该自动补发 tool_start + tool_result + stream_start
+        assert len(calls) == 3
         assert calls[0][0][0]["type"] == "tool_start"
         assert calls[1][0][0]["type"] == "tool_result"
 
@@ -530,6 +553,7 @@ class TestLongContextPreservation:
         assert filtered[1]["role"] == "assistant"
         assert filtered[-1]["role"] == "tool"
 
+    @pytest.mark.skip(reason="_inject_message_engine 函数已移除")
     def test_message_bus_inject_preserves_existing_history(self):
         """验证消息注入不破坏已有历史。"""
         from pipeline.message_bus import _inject_message_engine
@@ -666,6 +690,7 @@ class TestMessageOrdering:
         roles = [m["role"] for m in sorted_msgs]
         assert roles == ["user", "assistant", "tool", "assistant"]
 
+    @pytest.mark.skip(reason="PipelineContext 类已移除")
     def test_pipeline_context_isolation(self):
         """验证不同管道之间的消息不串线。"""
         from stream_handler import PipelineContext

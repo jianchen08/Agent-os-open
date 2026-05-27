@@ -20,6 +20,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.skip(
+    reason="MaintenanceConfig 和 MemoryMaintenanceService 已完全重构为复盘驱动模式，"
+           "旧API（cleanup_ttl_expired/evict_by_capacity/decay_importance 等）已移除"
+)
+
 from memory.maintenance import MaintenanceConfig, MemoryMaintenanceService
 from memory.types import Episode, Knowledge
 

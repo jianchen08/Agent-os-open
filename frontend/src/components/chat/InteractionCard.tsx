@@ -26,7 +26,7 @@ import type { InteractionOption, PendingInteraction } from '@/stores/interaction
 
 export interface InteractionCardProps {
   interaction: PendingInteraction
-  onRespondChoice: (optionId: string) => void
+  onRespondChoice: (optionId: string, optionLabel?: string) => void
   onRespondText: (text: string) => void
   onNavigateToTab: () => void
   onDismiss: () => void
@@ -81,7 +81,7 @@ export function InteractionCard({
           {!isDone && (
             <button
               onClick={onDismiss}
-              className="ml-auto rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 [.animate-pulse-subtle_&]:opacity-60"
+              className="ml-auto rounded-sm p-0.5 text-muted-foreground opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-foreground [.animate-pulse-subtle_&]:opacity-60"
               title="关闭"
             >
               <X className="h-3.5 w-3.5" />
@@ -179,11 +179,37 @@ export function InteractionCard({
           </div>
         )}
 
-        {/* Conversation 模式：快捷回复 + 跳转 + 输入 */}
+        {/* Conversation 模式：选项/快捷回复 + 跳转 + 输入 */}
         {interaction.mode === 'conversation' && !isDone && (
           <div className="space-y-3">
-            {/* 快捷回复芯片 */}
-            {interaction.suggestions && interaction.suggestions.length > 0 && (
+            {/* 选项按钮（如果有 options） */}
+            {interaction.options && interaction.options.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {interaction.options.map((opt) => (
+                  <Button
+                    key={opt.id}
+                    variant="outline"
+                    size="sm"
+                    disabled={isSubmitting}
+                    onClick={() => onRespondChoice(opt.id, opt.label)}
+                    className="text-sm"
+                  >
+                    <span className="flex flex-col items-start gap-0.5">
+                      <span>{opt.label}</span>
+                      {opt.description && (
+                        <span className="text-xs text-muted-foreground line-clamp-1 text-left">
+                          {opt.description}
+                        </span>
+                      )}
+                    </span>
+                  </Button>
+                ))}
+              </div>
+            )}
+
+            {/* 快捷回复芯片（如果没有 options，用 suggestions） */}
+            {(!interaction.options || interaction.options.length === 0) &&
+              interaction.suggestions && interaction.suggestions.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {interaction.suggestions.map((suggestion, i) => (
                   <Button
@@ -270,7 +296,7 @@ export function InteractionCard({
               disabled={isSubmitting}
               onClick={() => {
                 if (detailOption) {
-                  onRespondChoice(detailOption.id)
+                  onRespondChoice(detailOption.id, detailOption.label)
                   setDetailOption(null)
                 }
               }}

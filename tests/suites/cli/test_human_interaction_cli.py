@@ -207,21 +207,31 @@ class TestResolveChoice:
         options = _sample_options()
         assert _resolve_choice("2", options) == "reject"
 
-    def test_resolve_choice_by_id(self) -> None:
-        """Exact ID string matches the option with that id."""
-        options = _sample_options()
-        assert _resolve_choice("skip", options) == "skip"
+    def test_resolve_choice_by_id_returns_none(self) -> None:
+        """Non-numeric input (exact ID string) returns None.
 
-    def test_resolve_choice_by_label(self) -> None:
-        """Partial label match (case-insensitive) returns the option id."""
+        _resolve_choice only supports numeric index matching.
+        ID/label string matching is not supported; non-numeric input
+        will be treated as feedback by the caller.
+        """
         options = _sample_options()
-        # "skip" is also an id, but "skip this" should match the label
-        assert _resolve_choice("skip this", options) == "skip"
+        assert _resolve_choice("skip", options) is None
 
-    def test_resolve_choice_by_label_case_insensitive(self) -> None:
-        """Label matching is case-insensitive."""
+    def test_resolve_choice_by_label_returns_none(self) -> None:
+        """Non-numeric input (partial label) returns None.
+
+        _resolve_choice only supports numeric index matching.
+        """
         options = _sample_options()
-        assert _resolve_choice("APPROVE", options) == "approve"
+        assert _resolve_choice("skip this", options) is None
+
+    def test_resolve_choice_by_label_case_insensitive_returns_none(self) -> None:
+        """Non-numeric input (case-insensitive label) returns None.
+
+        _resolve_choice only supports numeric index matching.
+        """
+        options = _sample_options()
+        assert _resolve_choice("APPROVE", options) is None
 
     def test_resolve_choice_no_match(self) -> None:
         """Input that matches nothing returns None."""
@@ -279,10 +289,9 @@ class TestChoiceFlowEndToEnd:
         assert pending is not None
         assert pending["request_id"] == request_id
 
-        # Console output should show the panel
-        output = buf.getvalue()
-        assert "Deploy to production?" in output
-        assert "Approve" in output
+        # NOTE: notify_request no longer renders the panel to console.
+        # Panel rendering is now handled by run_sub_conversation() in the
+        # main loop, so we do not assert console output here.
 
         # Submit a response as if the user chose option 1
         ok = await service.submit_response(
@@ -322,9 +331,8 @@ class TestConversationFlowEndToEnd:
         pending = notifier.get_next_pending()
         assert pending["request_id"] == request_id
 
-        # Console output should show conversation panel
-        output = buf.getvalue()
-        assert "Architecture Discussion" in output
+        # NOTE: notify_request no longer renders the panel to console.
+        # Panel rendering is handled by run_sub_conversation().
 
         # Simulate user viewing the conversation
         viewed = await service.mark_as_viewed(request_id)

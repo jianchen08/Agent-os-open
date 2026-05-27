@@ -102,7 +102,7 @@ class HumanInteractionService(IHumanInteractionService):
         priority: Priority = Priority.NORMAL,
         progress: float | None = None,
         agent_id: str | None = None,
-        file_contents: dict[str, str] | None = None,
+        file_paths: list[str] | None = None,
     ) -> str:
         """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
         request_id = str(uuid4())
@@ -119,7 +119,7 @@ class HumanInteractionService(IHumanInteractionService):
             extra={
                 "progress": progress,
                 "priority": priority.value,
-                "file_contents": file_contents,
+                "file_paths": file_paths,
             },
         )
         self._requests[request_id] = record
@@ -146,7 +146,7 @@ class HumanInteractionService(IHumanInteractionService):
         priority: Priority = Priority.NORMAL,
         user_id: str | None = None,
         agent_id: str | None = None,
-        file_contents: dict[str, str] | None = None,
+        file_paths: list[str] | None = None,
         agent_level: str | None = None,
     ) -> str:
         """创建选择模式请求，返回 request_id。"""
@@ -169,7 +169,7 @@ class HumanInteractionService(IHumanInteractionService):
                 "timeout_seconds": timeout,
                 "priority": priority.value,
                 "timeout_reminded": False,
-                "file_contents": file_contents,
+                "file_paths": file_paths,
                 **({"agent_level": agent_level} if agent_level else {}),
             },
         )
@@ -200,7 +200,7 @@ class HumanInteractionService(IHumanInteractionService):
         suggestions: list[str] | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
-        file_contents: dict[str, str] | None = None,
+        file_paths: list[str] | None = None,
         agent_level: str | None = None,
     ) -> str:
         """创建对话模式请求，返回 request_id。"""
@@ -219,7 +219,7 @@ class HumanInteractionService(IHumanInteractionService):
             extra={
                 "initial_message": initial_message,
                 "suggestions": suggestions,
-                "file_contents": file_contents,
+                "file_paths": file_paths,
                 **({"agent_level": agent_level} if agent_level else {}),
             },
         )
@@ -324,38 +324,15 @@ class HumanInteractionService(IHumanInteractionService):
         }
 
     async def respond(self, request_id: str, resp_data: dict[str, Any]) -> bool:
-        """处理前端交互响应，路由到 submit_response。
-
-        BUG-FIX-fix_20260511_respond_method_missing:
-        问题根因: start_server.py 调用 human_svc.respond()，但该方法不存在，
-                  导致所有 interaction_response 处理失败（AttributeError 被静默捕获）。
-        修复方案: 添加 respond() 方法，解析前端响应数据并调用 submit_response。
-
-        BUG-FIX-fix_20260512_conversation_enter_no_response:
-        问题根因: (1) 前端 GlobalWebSocket 发送的数据嵌套在 response 字段中，
-                  respond() 从顶层取 response_type 拿不到。
-                  (2) approved 被无条件转成 answered，导致对话模式"进入对话"后
-                  后端走不到 user_arrived 分支，管道无法正确挂起。
-        修复方案: 兼容嵌套和扁平两种数据格式；保留 approved 类型不做转换。
-        """
-        logger.info(
-            "[HumanInteraction] respond() 入口 | request_id=%s | resp_data keys=%s",
-            request_id, list(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data).__name__,
-        )
-
-        inner = resp_data.get("response") or resp_data
+        """处理前端交互响应，解析嵌套数据并路由到 submit_response。"""
+        inner = resp_data.get("response", {})
         if not isinstance(inner, dict):
-            inner = resp_data
+            inner = {}
 
-        response_type = inner.get("response_type") or inner.get("responseType") or resp_data.get("response_type") or "answered"
-        selected_option = inner.get("selected_option") or inner.get("selectedOption") or resp_data.get("selected_option") or resp_data.get("selectedOption")
-        feedback = inner.get("feedback") or resp_data.get("feedback")
-        answers = inner.get("answers") or resp_data.get("answers")
-
-        logger.info(
-            "[HumanInteraction] respond() 解析结果 | request_id=%s | response_type=%s | selected_option=%s | feedback=%s",
-            request_id, response_type, selected_option, (feedback or "")[:50],
-        )
+        response_type = inner.get("response_type", "answered")
+        selected_option = inner.get("selected_option")
+        feedback = inner.get("feedback")
+        answers = inner.get("answers")
 
         return await self.submit_response(
             request_id=request_id,
@@ -422,9 +399,6 @@ class HumanInteractionService(IHumanInteractionService):
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]
 
-        # BUG-FIX-fix_20260511_auto_confirm_not_cancelled:
-        # 问题根因: auto_confirm_fallback 任务在用户响应后未被取消，浪费资源且可能竞争。
-        # 修复方案: 在 submit_response 成功后，通知 notifier 取消对应的 fallback task。
         if self._notifier and hasattr(self._notifier, "cancel_fallback"):
             self._notifier.cancel_fallback(request_id)
 
@@ -460,7 +434,7 @@ class HumanInteractionService(IHumanInteractionService):
             return False
 
         status = record.get("status")
-        if status in (InteractionStatus.COMPLETED.value, InteractionStatus.TIMEOUT.value):
+        if status in (InteractionStatus.COMPLETED.value, InteractionStatus.TIMEOUT.value, InteractionStatus.CANCELLED.value):
             return False
 
         record["status"] = InteractionStatus.CANCELLED.value
@@ -644,7 +618,7 @@ class HumanInteractionService(IHumanInteractionService):
 
         async def timeout_handler():
             try:
-                await asyncio.sleep(timeout_seconds - self._remind_before_seconds)
+                await asyncio.sleep(max(0, timeout_seconds - self._remind_before_seconds))
 
                 record = self._requests.get(request_id)
                 if record and record.get("status") == InteractionStatus.PENDING.value:

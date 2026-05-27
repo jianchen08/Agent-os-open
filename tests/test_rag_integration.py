@@ -55,6 +55,7 @@ def _make_item(
 class TestRetrievalMethodEnum:
     """验证 RetrievalMethod 枚举包含所有预期值。"""
 
+    @pytest.mark.skip(reason="RetrievalMethod.WAVE 已移除")
     def test_wave_enum_exists(self) -> None:
         """RetrievalMethod 应包含 WAVE 值。"""
         assert hasattr(RetrievalMethod, "WAVE")
@@ -91,24 +92,28 @@ class TestModuleImports:
         assert WaveRetriever is not None
         assert WaveRetrieverConfig is not None
 
+    @pytest.mark.skip(reason="memory.semantic_preprocessor 模块已移除")
     def test_import_semantic_preprocessor(self) -> None:
         """应能导入 SemanticPreprocessor。"""
         from memory.semantic_preprocessor import SemanticPreprocessor, SemanticPreprocessorConfig
         assert SemanticPreprocessor is not None
         assert SemanticPreprocessorConfig is not None
 
+    @pytest.mark.skip(reason="memory.cross_domain_discovery 模块已移除")
     def test_import_cross_domain_discovery(self) -> None:
         """应能导入 CrossDomainDiscovery。"""
         from memory.cross_domain_discovery import CrossDomainDiscovery, CrossDomainConfig
         assert CrossDomainDiscovery is not None
         assert CrossDomainConfig is not None
 
+    @pytest.mark.skip(reason="memory.directory_generator 模块已移除")
     def test_import_directory_generator(self) -> None:
         """应能导入 DirectoryGenerator。"""
         from memory.directory_generator import DirectoryGenerator, DirectoryConfig
         assert DirectoryGenerator is not None
         assert DirectoryConfig is not None
 
+    @pytest.mark.skip(reason="memory.WaveRetriever 已移除")
     def test_import_from_package_init(self) -> None:
         """应能从 memory 包的 __init__ 导入所有新组件。"""
         import memory
@@ -224,6 +229,7 @@ class TestCrossDomainIntegration:
     """验证跨域发现可找到不同领域的隐式关联（AC-4b）。"""
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="memory.cross_domain_discovery 模块已移除")
     async def test_discovers_cross_domain_links(self) -> None:
         """跨域发现应能找到不同领域间的隐式关联。"""
         from memory.cross_domain_discovery import CrossDomainConfig, CrossDomainDiscovery
@@ -272,6 +278,7 @@ class TestCrossDomainIntegration:
             assert len(results) > 0
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="memory.cross_domain_discovery 模块已移除")
     async def test_cross_domain_concept_bridge(self) -> None:
         """不同领域共享概念应被识别为概念桥。"""
         from memory.cross_domain_discovery import CrossDomainConfig, CrossDomainDiscovery
@@ -315,6 +322,7 @@ class TestCrossDomainIntegration:
 class TestDirectoryGeneratorIntegration:
     """DirectoryGenerator 与其他模块的协作验证。"""
 
+    @pytest.mark.skip(reason="memory.directory_generator 模块已移除")
     def test_generates_directory_from_items(self) -> None:
         """DirectoryGenerator 应能从知识条目生成概念页和索引。"""
         from memory.directory_generator import DirectoryConfig, DirectoryGenerator
@@ -336,6 +344,7 @@ class TestDirectoryGeneratorIntegration:
         assert isinstance(index, dict)
         assert "concepts" in index or "statistics" in index or "total_items" in index
 
+    @pytest.mark.skip(reason="memory.directory_generator 模块已移除")
     def test_cross_domain_concepts_in_directory(self) -> None:
         """跨域概念应在目录中得到体现。"""
         from memory.directory_generator import DirectoryConfig, DirectoryGenerator
@@ -363,6 +372,7 @@ class TestPreprocessorRetrieverIntegration:
     """验证 SemanticPreprocessor 预处理后数据可被 WaveRetriever 检索。"""
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="memory.semantic_preprocessor 模块已移除")
     async def test_preprocessed_data_retrievable(self) -> None:
         """SemanticPreprocessor 处理后的块应可被 WaveRetriever 检索。"""
         from memory.semantic_preprocessor import SemanticPreprocessor
@@ -416,6 +426,7 @@ class TestFullMemoryServiceIntegration:
     """MemoryService + WaveRetriever 端到端集成测试（AC-4c）。"""
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="RetrievalMethod.WAVE 已移除")
     async def test_memory_service_with_wave_retriever(self) -> None:
         """通过 MemoryService 使用 WaveRetriever 检索应正常工作。"""
         from memory.wave_retriever import WaveRetriever
@@ -453,6 +464,7 @@ class TestFullMemoryServiceIntegration:
         assert all(isinstance(r, SearchResult) for r in results)
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(reason="RetrievalMethod.WAVE 已移除")
     async def test_memory_service_retrieval_stats(self) -> None:
         """MemoryService 应记录检索统计。"""
         from memory.wave_retriever import WaveRetriever

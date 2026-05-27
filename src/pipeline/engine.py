@@ -632,8 +632,33 @@ class PipelineEngine:
 
     @property
     def pipeline_id(self) -> str:
-        """只读：引擎自己管理的管道 ID，外部只能读取不能修改。"""
+        """管道唯一标识。"""
         return self._pipeline_id
+
+    @pipeline_id.setter
+    def pipeline_id(self, value: str) -> None:
+        """设置管道 ID（供 registry 和会话恢复使用）。"""
+        self._pipeline_id = value
+
+    @property
+    def services(self) -> dict[str, Any]:
+        """服务实例字典，传递给 PluginContext。"""
+        return self._services
+
+    @property
+    def consecutive_core_errors(self) -> int:
+        """连续 Core 执行错误计数。"""
+        return self._consecutive_core_errors
+
+    @consecutive_core_errors.setter
+    def consecutive_core_errors(self, value: int) -> None:
+        """设置连续 Core 错误计数。"""
+        self._consecutive_core_errors = value
+
+    @property
+    def max_consecutive_core_errors(self) -> int:
+        """连续 Core 错误上限阈值（只读）。"""
+        return self._max_consecutive_core_errors
 
     @property
     def is_running(self) -> bool:
@@ -816,6 +841,36 @@ class PipelineEngine:
         """
         if self._wake_event is not None:
             self._wake_event.set()
+
+    async def suspend_and_wait(self, state: dict[str, Any]) -> bool:
+        """保存状态快照并挂起管道，等待外部唤醒（公开入口）。
+
+        将 state 深拷贝保存到 _suspended_state，然后进入挂起等待。
+        外部模块（engine_chain、engine_route）统一调此方法，
+        代替直接操作 _suspended_state + _suspend_and_wait。
+
+        Args:
+            state: 当前管道状态字典
+
+        Returns:
+            True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
+        """
+        self._suspended_state = _safe_deepcopy(state)
+        return await self._suspend_and_wait(state)
+
+    async def resume_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        """从外部提供的状态快照恢复管道执行（检查点恢复专用）。
+
+        将 state 注入为 _suspended_state，然后执行 resume()。
+
+        Args:
+            state: 从检查点加载的管道状态字典
+
+        Returns:
+            管道最终状态字典
+        """
+        self._suspended_state = state
+        return await self.resume()
 
     def consume_pending_notifications(self) -> list[str]:
         """消费所有待处理通知，返回通知列表（可能为空）。

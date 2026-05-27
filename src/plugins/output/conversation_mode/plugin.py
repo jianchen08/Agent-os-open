@@ -168,7 +168,7 @@ class ConversationModeDetector(IOutputPlugin):
         for result in tool_results:
             if not isinstance(result, dict):
                 continue
-            if not result.get("success", True):
+            if result.get("success") is not True:
                 continue
 
             data = result.get("data", {})

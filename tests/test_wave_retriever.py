@@ -758,12 +758,12 @@ class TestMemoryServiceIntegration:
         )
 
         service = MemoryService()
-        service.register_retriever("wave", wave_retriever)
+        service.register_retriever("tagwave", wave_retriever)
 
         # 通过 MemoryService.retrieve 调用
         results = await service.retrieve(
             query="检索算法",
-            retrieval_method="wave",
+            retrieval_method="tagwave",
             top_k=5,
         )
         assert isinstance(results, list)
@@ -792,12 +792,12 @@ class TestMemoryServiceIntegration:
         ])
 
         service = MemoryService()
-        service.register_retriever("wave", wave)
+        service.register_retriever("tagwave", wave)
         service.register_retriever("keyword", mock_retriever)
 
-        # wave 检索
+        # tagwave 检索
         wave_results = await service.retrieve(
-            query="波浪", retrieval_method="wave", top_k=5,
+            query="波浪", retrieval_method="tagwave", top_k=5,
         )
         assert len(wave_results) > 0
 

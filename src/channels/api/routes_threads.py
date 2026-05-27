@@ -308,7 +308,7 @@ def _build_thread_response(t: dict) -> ThreadResponse:
 def list_threads(
     session_type: str | None = Query(default=None, description="按会话类型过滤，如 main_pipeline"),
     skip: int = Query(default=0, ge=0, description="偏移量"),
-    limit: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    limit: int = Query(default=100, ge=1, le=9999, description="每页数量"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """获取当前用户的所有线程列表，支持分页。
@@ -533,12 +533,12 @@ def delete_thread(
             provider = get_service_provider()
             task_service = provider.get("task_service")
             if task_service:
-                for task in task_service._storage._tasks.values():
+                for task in task_service.get_all_tasks():
                     if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
                         all_pipeline_ids.add(task.id)
                         if task.pipeline_run_id:
                             all_pipeline_ids.add(task.pipeline_run_id)
-                        for sub in task_service._storage.list_subtasks(task.id):
+                        for sub in task_service.list_subtasks(task.id):
                             if sub.pipeline_run_id:
                                 all_pipeline_ids.add(sub.pipeline_run_id)
         except Exception:
@@ -567,10 +567,10 @@ def delete_thread(
         provider = get_service_provider()
         task_service = provider.get("task_service")
         if task_service:
-            for task in list(task_service._storage._tasks.values()):
+            for task in task_service.get_all_tasks():
                 if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
                     try:
-                        task_service._storage.delete(task.id)
+                        task_service.hard_delete_sync(task.id)
                     except Exception:
                         logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
     except Exception:

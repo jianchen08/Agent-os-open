@@ -130,21 +130,22 @@ export function handleStreamStart(eventData: any) {
       const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
       if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
       if (interactionStore.getEnteredForPipeline(pipelineId)) return true
-      // BUG-FIX-fix_20260526_sub_agent_auto_activate:
-      // 问题根因: 原逻辑 if (!currentActivePipelineId) return true 导致子Agent管道在无活跃管道时
-      //          无条件自动激活，任务提交后子Agent流式输出即弹出对应管道标签。
-      //          即使 pipelineMeta 为 null（事件乱序），pipelineTabMap 中已有映射说明
-      //          该管道是子Agent创建的，也不应自动激活。
-      // 修复方案: 无活跃管道时，仅当管道确认为主管道（无 tab 映射且无 level>=2 元数据）才自动激活；
+      // BUG-FIX-fix_20260527_sub_agent_auto_activate:
+      // 问题根因: 原修复仅在 !currentActivePipelineId 时检查子Agent管道，
+      //          竞态条件下 sub_agent_created 尚未处理、stream_start 先到达时，
+      //          pipelineTabMap 无映射且 pipelineMeta 为 null，子Agent管道被误判为主管道自动激活。
+      // 修复方案: 将子Agent管道守卫提升为通用规则（不受 currentActivePipelineId 状态限制），
+      //          任何有 tab 映射或 level>=2 的管道均不自动激活，
       //          子Agent管道必须通过用户点击对话按钮或人类交互工具触发才会激活。
       // 影响范围: 子Agent管道标签的自动弹出行为
-      // 修复日期: 2026-05-26
+      // 修复日期: 2026-05-27
+      const hasTabMapping = !!agentTabStore.getTabIdByPipeline(pipelineId)
+      const isSubAgentPipeline = hasTabMapping || (pipelineMeta && pipelineMeta.level > 1)
+      if (isSubAgentPipeline) {
+        return false
+      }
       if (!currentActivePipelineId) {
-        const hasTabMapping = !!agentTabStore.getTabIdByPipeline(pipelineId)
-        const isSubAgentPipeline = hasTabMapping || (pipelineMeta && pipelineMeta.level > 1)
-        if (!isSubAgentPipeline) {
-          return true
-        }
+        return true
       }
       return false
     })()

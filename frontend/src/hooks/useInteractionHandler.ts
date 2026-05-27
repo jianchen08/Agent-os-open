@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ROUTES } from '@/constants/routes'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import apiClient from '@/services/api/client'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { registerFileReview } from '@/stores/fileReviewRegistry'
@@ -17,46 +18,67 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useStreamingStore } from '@/stores/streamingStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 /**
  * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
+ * 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容
  */
-function parseInteractionEvent(
+async function parseInteractionEvent(
   data: Record<string, unknown>,
-): Omit<PendingInteraction, 'status'> | null {
+): Promise<Omit<PendingInteraction, 'status'> | null> {
   const inner = (data.data as Record<string, unknown>) || data
 
-  const requestId = (inner.request_id as string) || (inner.requestId as string)
+  const requestId = inner.request_id as string
   if (!requestId) return null
 
-  const rawAgentLevel = (
-    (inner.agent_level as string)
-    || (inner.agentLevel as string)
-    || ''
-  ).toUpperCase()
+  const rawAgentLevel = (inner.agent_level as string || '').toUpperCase()
 
-  // BUG-FIX-fix_20260510_file_contents:
-  // 问题根因: parseInteractionEvent 没有解析 file_contents 字段，导致前端收不到文件内容
-  // 修复方案: 添加 file_contents / fileContents 字段解析
-  const fileContents = (
-    (inner.file_contents as Record<string, string>)
-    || (inner.fileContents as Record<string, string>)
-    || undefined
-  )
+  /** 从 file_paths 列表通过 API 拉取文件内容 */
+  const filePaths = inner.file_paths as string[] | undefined
+  let fileContents: Record<string, string> | undefined
+  if (filePaths && filePaths.length > 0) {
+    const layoutStore = useLayoutModeStore.getState()
+    const wsTab = layoutStore.workspaceTabs.find(
+      (t) => t.dataSource && t.dataSource.startsWith('workspace://'),
+    )
+    const containerId = wsTab?.dataSource?.replace('workspace://', '').split('/')[0] || ''
+    if (containerId) {
+      const contents: Record<string, string> = {}
+      await Promise.all(
+        filePaths.map(async (filePath) => {
+          try {
+            const resp = await apiClient.get(
+              `/api/v1/workspaces/${containerId}/file-content`,
+              { params: { path: filePath } },
+            )
+            if (resp.data?.success) {
+              contents[filePath] = resp.data.content ?? ''
+            }
+          } catch {
+            // 单个文件拉取失败不阻塞整体流程
+          }
+        }),
+      )
+      if (Object.keys(contents).length > 0) {
+        fileContents = contents
+      }
+    }
+  }
 
-  const sessionId = (inner.session_id as string) || (inner.sessionId as string) || undefined
+  const sessionId = inner.session_id as string | undefined
 
   return {
     requestId,
     mode: (inner.interaction_mode as 'choice' | 'conversation' | 'notification') || 'choice',
     title: (inner.title as string) || '',
     description: (inner.description as string) || '',
-    threadId: (inner.thread_id as string) || (inner.threadId as string) || '',
-    tabId: (inner.tab_id as string) || (inner.tabId as string) || '',
-    agentId: (inner.agent_id as string) || (inner.agentId as string) || '',
-    pipelineId: (inner.pipeline_id as string) || (inner.pipelineId as string) || '',
+    threadId: (inner.thread_id as string) || '',
+    tabId: (inner.tab_id as string) || '',
+    agentId: (inner.agent_id as string) || '',
+    pipelineId: (inner.pipeline_id as string) || '',
     options: inner.options as PendingInteraction['options'],
     questions: inner.questions as string[],
     initialMessage: inner.initial_message as string,
@@ -113,14 +135,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
   useEffect(() => {
     const requestToNotificationMap = new Map<string, string>()
 
-    const handleInteractionRequest = (data: Record<string, unknown>) => {
-      const parsed = parseInteractionEvent(data)
+    const handleInteractionRequest = async (data: Record<string, unknown>) => {
+      const parsed = await parseInteractionEvent(data)
       if (!parsed) return
 
-      // BUG-FIX-fix_20260512_duplicate_interaction:
-      // 问题根因: seenRequestIds 在 useEffect 闭包内，React 重渲染时闭包重建，
-      //           seenRequestIds 清空，同一请求被重复处理（添加两个卡片 + 两个通知）。
-      // 修复方案: 用 interactionStore 检查是否已存在，store 是全局持久化的不会重置。
       const existing = useInteractionStore.getState().pendingInteractions.find(
         (i) => i.requestId === parsed.requestId,
       )
@@ -150,11 +168,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
           options: parsed.options,
           sessionId: parsed.sessionId,
         })
-        // BUG-FIX-fix_20260512_tab_not_switching:
-        // 问题根因: addWorkspaceTab 只追加 tab 到数组，不将其他 tab 的 isActive 设为 false，
-        //          导致多个 tab 同时 isActive=true，WorkspacePanel 用 find 取第一个，
-        //          内容区渲染旧 tab 内容而新 tab 样式显示为选中。
-        // 修复方案: 添加 tab 后调用 setActiveTab 正确切换活跃标签页。
         const layoutStore = useLayoutModeStore.getState()
         const existingTab = layoutStore.workspaceTabs.find((t) => t.id === tabId)
         if (!existingTab) {
@@ -180,7 +193,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
 
     const handleInteractionCancelled = (data: Record<string, unknown>) => {
-      const requestId = (data.request_id as string) || (data.requestId as string)
+      const requestId = data.request_id as string
       if (requestId) {
         dismissInteraction(requestId)
         removeNotificationForRequest(requestId)
@@ -188,7 +201,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
 
     const handleInteractionTimeout = (data: Record<string, unknown>) => {
-      const requestId = (data.request_id as string) || (data.requestId as string)
+      const requestId = data.request_id as string
       if (requestId) {
         dismissInteraction(requestId)
         removeNotificationForRequest(requestId)
@@ -241,8 +254,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {
-        responseType: 'answered',
-        selectedOption,
+        response_type: 'answered',
+        selected_option: selectedOption,
         feedback,
       })
       markResponded(requestId)
@@ -260,7 +273,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
         return
       }
       await globalWS.sendInteractionResponse(sid, requestId, {
-        responseType: 'answered',
+        response_type: 'answered',
         feedback,
       })
       markResponded(requestId)
@@ -277,7 +290,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
       // 发送 interaction_response(type=approved) 解除后端阻塞，
       // 后端返回 user_arrived → 管道走 wait 路由挂起 → 等用户发消息再唤醒。
       await globalWS.sendInteractionResponse(currentSid, requestId, {
-        responseType: 'approved',
+        response_type: 'approved',
         feedback: '用户已进入对话标签页',
       })
 
@@ -291,6 +304,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
       const activePid = pipelineStore.activePipelineId
       if (activePid && pipelineStore.streamingState[activePid]?.isStreaming) {
         pipelineStore.stopStreaming(activePid)
+        useStreamingStore.getState().setStreamingForTab(activePid, false)
       }
 
       if (window.location.pathname !== ROUTES.HOME) {

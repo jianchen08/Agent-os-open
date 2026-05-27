@@ -75,6 +75,12 @@ class CompositeNotifier(IInteractionNotifier):
             suggestions=suggestions,
         )
 
+    async def cancel_fallback(self, request_id: str) -> None:
+        """透传取消 fallback 调用到所有支持该方法的子通知器。"""
+        for notifier in self._notifiers:
+            if hasattr(notifier, "cancel_fallback"):
+                await notifier.cancel_fallback(request_id)
+
     async def _delegate(self, method_name: str, *args: Any, **kwargs: Any) -> bool:
         """逐一调用子通知器的同名方法，任一成功即返回 True。"""
         any_ok = False

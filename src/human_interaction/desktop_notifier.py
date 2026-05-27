@@ -19,6 +19,7 @@
     无需修改任何现有代码。
 """
 
+import asyncio
 import os
 import logging
 from dataclasses import dataclass
@@ -82,7 +83,7 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         )
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
-            await play_alert_sound()
+            asyncio.ensure_future(play_alert_sound())
         return await send_notification(
             title=title, message=body,
             sound=self._config.sound, app_name=self._config.app_name,
@@ -101,7 +102,7 @@ class DesktopInteractionNotifier(IInteractionNotifier):
         display_title = title or "交互请求"
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
-            await play_alert_sound()
+            asyncio.ensure_future(play_alert_sound())
         return await send_notification(
             title="超时提醒",
             message=f"「{display_title}」将在 {time_str} 后超时",
@@ -118,7 +119,7 @@ class DesktopInteractionNotifier(IInteractionNotifier):
             body += f"：{reason}"
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
-            await play_alert_sound()
+            asyncio.ensure_future(play_alert_sound())
         return await send_notification(
             title="请求已取消", message=body,
             sound=self._config.sound, app_name=self._config.app_name,
@@ -129,7 +130,7 @@ class DesktopInteractionNotifier(IInteractionNotifier):
             return False
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
-            await play_alert_sound()
+            asyncio.ensure_future(play_alert_sound())
         return await send_notification(
             title="请求已超时", message=f"请求 {request_id[:8]} 已超时",
             sound=self._config.sound, app_name=self._config.app_name,
@@ -147,7 +148,7 @@ class DesktopInteractionNotifier(IInteractionNotifier):
             body += f"：{initial_message[:self._config.max_message_length]}"
         # 独立播放系统提示音，不依赖桌面通知自身的声音机制
         if self._config.sound:
-            await play_alert_sound()
+            asyncio.ensure_future(play_alert_sound())
         return await send_notification(
             title="对话已开启", message=body,
             sound=self._config.sound, app_name=self._config.app_name,
@@ -187,8 +188,11 @@ def install_hook() -> None:
                 logger.debug("Desktop notification disabled by config")
                 return
 
+            # 解包已有 CompositeNotifier，防止嵌套包装
+            existing_notifiers = getattr(notifier, '_notifiers', [notifier])
+            non_desktop = [n for n in existing_notifiers if not isinstance(n, DesktopInteractionNotifier)]
             desktop = DesktopInteractionNotifier(config)
-            composite = CompositeNotifier(notifier, desktop)
+            composite = CompositeNotifier(*non_desktop, desktop)
             _original_set_notifier(self, composite)
             logger.info(
                 "Desktop notification hook installed (signal → OS notifier)"

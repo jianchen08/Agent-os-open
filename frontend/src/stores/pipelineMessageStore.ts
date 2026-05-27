@@ -9,7 +9,6 @@ import { create } from 'zustand'
 import { getMessages as apiGetMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { retry, isRetryableError } from '@/utils/retry'
-import { useStreamingStore } from './streamingStore'
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 
@@ -395,8 +394,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    * 停止流式传输，同时将消息状态标记为 completed
    */
   stopStreaming: (pipelineId: string) => {
-    useStreamingStore.getState().setStreamingForTab(pipelineId, false)
-
     set((state) => {
       const streamStatus = state.streamingState[pipelineId]
       const newStreamingState = { ...state.streamingState }

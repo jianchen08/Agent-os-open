@@ -111,7 +111,7 @@ const AttachmentPreview = ({
       <Button
         variant="ghost"
         size="sm"
-        className="hover:bg-destructive/10 hover:text-destructive h-6 w-6 rounded-lg p-0 opacity-0 group-hover:opacity-100"
+        className="hover:bg-destructive/10 hover:text-destructive h-6 w-6 rounded-lg p-0 opacity-100 md:opacity-0 md:group-hover:opacity-100"
         onClick={onRemove}
         disabled={status === 'uploading'}
         aria-label={`移除附件 ${fileName}`}

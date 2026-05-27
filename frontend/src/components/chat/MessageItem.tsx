@@ -388,7 +388,7 @@ export const MessageItem = ({
                 )
               }
 
-              if (!isMessageStreaming && renderContext.fragments.length === 0 && !message.toolCalls?.length) return null
+              if (!isMessageStreaming && renderContext.fragments.length === 0) return null
 
               return (
                 <div className={bubbleCls} style={bubbleStyle}>
@@ -437,7 +437,7 @@ export const MessageItem = ({
           <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
 
           {activeSessionId && (
-            <div className="opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-200">
               <MessageActions
                 message={message}
                 sessionId={message.sessionId || activeSessionId}

@@ -302,7 +302,7 @@ class CLIInteractiveMixin:
                 self._engine.pipeline_id,
                 session.active_pipeline_id,
             )
-            self._engine._pipeline_id = session.active_pipeline_id
+            self._engine.pipeline_id = session.active_pipeline_id
         elif self._engine is not None:
             session.register_pipeline(self._engine.pipeline_id)
             session_svc._persist_session_state(session)

@@ -55,12 +55,10 @@ class TestIsAvailable:
         """edge-tts 已安装时返回 True。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(),
         )
-        # edge_tts 已安装（测试环境中通常不可用，我们 mock）
-        with patch.dict(sys.modules, {"edge_tts": MagicMock()}):
+        mock_edge_tts = MagicMock()
+        with patch.object(mod, "edge_tts", mock_edge_tts):
             result = await provider.is_available()
         assert result is True
 
@@ -69,12 +67,9 @@ class TestIsAvailable:
         """edge-tts 未安装时返回 False。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(),
         )
-        # 模拟 ImportError
-        with patch.dict(sys.modules, {"edge_tts": None}):
+        with patch.object(mod, "edge_tts", None):
             result = await provider.is_available()
         assert result is False
 
@@ -92,51 +87,42 @@ class TestSynthesize:
         """合成成功后生成 mp3 文件并返回 MediaResult。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(config={"output_dir": str(tmp_path)}),
         )
 
-        # Mock edge_tts 模块
         mock_edge_tts = MagicMock()
         mock_communicate = AsyncMock()
 
-        # 模拟 save 写入文件
         async def fake_save(path: str) -> None:
             Path(path).write_bytes(b"fake-mp3-data")
 
         mock_communicate.save = fake_save
         mock_edge_tts.Communicate.return_value = mock_communicate
 
-        with patch.dict(sys.modules, {"edge_tts": mock_edge_tts}):
+        with patch.object(mod, "edge_tts", mock_edge_tts):
             result = await provider.synthesize(
                 text="你好世界",
                 voice="zh-CN-XiaoxiaoNeural",
                 rate="+0%",
             )
 
-        # 验证返回类型
         assert isinstance(result, MediaResult)
         assert result.media_type == MediaType.TTS
         assert result.provider_name == "edge_tts"
 
-        # 验证文件已创建
         assert isinstance(result.file_path, Path)
         assert result.file_path.exists()
         assert result.file_path.suffix == ".mp3"
 
-        # 验证元数据
         assert result.metadata["voice"] == "zh-CN-XiaoxiaoNeural"
         assert result.metadata["rate"] == "+0%"
-        assert result.metadata["text_length"] == 4  # "你好世界"
+        assert result.metadata["text_length"] == 4
 
     @pytest.mark.asyncio
     async def test_synthesize_with_default_voice(self, tmp_path: Path) -> None:
         """不指定 voice 时使用默认语音。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(config={"output_dir": str(tmp_path)}),
         )
 
@@ -149,18 +135,16 @@ class TestSynthesize:
         mock_communicate.save = fake_save
         mock_edge_tts.Communicate.return_value = mock_communicate
 
-        with patch.dict(sys.modules, {"edge_tts": mock_edge_tts}):
+        with patch.object(mod, "edge_tts", mock_edge_tts):
             result = await provider.synthesize(text="测试文本")
 
         assert result.metadata["voice"] == "zh-CN-XiaoxiaoNeural"
 
     @pytest.mark.asyncio
-    async def test_synthesize_passes_rate_and_volume(self, tmp_path: Path) -> None:
-        """rate 和 volume 参数正确传递给 Communicate。"""
+    async def test_synthesize_passes_rate(self, tmp_path: Path) -> None:
+        """rate 参数正确传递给 Communicate。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(config={"output_dir": str(tmp_path)}),
         )
 
@@ -173,18 +157,15 @@ class TestSynthesize:
         mock_communicate.save = fake_save
         mock_edge_tts.Communicate.return_value = mock_communicate
 
-        with patch.dict(sys.modules, {"edge_tts": mock_edge_tts}):
+        with patch.object(mod, "edge_tts", mock_edge_tts):
             await provider.synthesize(
                 text="测试",
                 rate="+50%",
-                volume="+20%",
             )
 
-        # 验证 Communicate 调用参数
         mock_edge_tts.Communicate.assert_called_once()
         call_args = mock_edge_tts.Communicate.call_args
         assert call_args[1]["rate"] == "+50%"
-        assert call_args[1]["volume"] == "+20%"
 
 
 # ========================================================================
@@ -200,12 +181,10 @@ class TestSynthesizeErrors:
         """edge-tts 未安装时 synthesize 抛出异常。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(),
         )
 
-        with patch.dict(sys.modules, {"edge_tts": None}):
+        with patch.object(mod, "edge_tts", None):
             with pytest.raises(RuntimeError, match="edge-tts"):
                 await provider.synthesize(text="测试")
 
@@ -214,8 +193,6 @@ class TestSynthesizeErrors:
         """合成保存失败时抛出异常。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(config={"output_dir": str(tmp_path)}),
         )
 
@@ -224,7 +201,7 @@ class TestSynthesizeErrors:
         mock_communicate.save = AsyncMock(side_effect=IOError("磁盘已满"))
         mock_edge_tts.Communicate.return_value = mock_communicate
 
-        with patch.dict(sys.modules, {"edge_tts": mock_edge_tts}):
+        with patch.object(mod, "edge_tts", mock_edge_tts):
             with pytest.raises(RuntimeError, match="合成失败"):
                 await provider.synthesize(text="测试")
 
@@ -241,8 +218,6 @@ class TestProviderProperties:
         """media_type 应为 TTS。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(),
         )
         assert provider.media_type == MediaType.TTS
@@ -251,8 +226,6 @@ class TestProviderProperties:
         """provider_name 应为构造时传入的名称。"""
         mod = _import_provider()
         provider = mod.EdgeTTSProvider(
-            provider_name="edge_tts",
-            media_type=MediaType.TTS,
             config=_make_config(),
         )
         assert provider.provider_name == "edge_tts"

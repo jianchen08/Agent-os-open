@@ -318,7 +318,7 @@ export function KnowledgeBasePage() {
               ) : (
                 <button
                   onClick={() => setConfirmDeleteCategory(cat.name)}
-                  className="text-muted-foreground hover:text-destructive hidden p-0.5 group-hover:block"
+                  className="text-muted-foreground hover:text-destructive block md:hidden md:group-hover:block p-0.5"
                   title="删除分类"
                 >
                   <X className="h-3 w-3" />

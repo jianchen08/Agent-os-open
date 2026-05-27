@@ -192,7 +192,7 @@ class TaskExecutorMixin:
                 return
 
             engine = _reg_result.engine
-            pipeline_id = engine._pipeline_id
+            pipeline_id = engine.pipeline_id
 
             await self._bind_pipeline_run(task_id, pipeline_id, task_service)
             await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
@@ -225,10 +225,7 @@ class TaskExecutorMixin:
                 logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
                 return
 
-            await self._handle_suspension_loop(
-                engine, task_id, task_service, ctx,
-                child_wait_timeout=self._config.get("child_wait_timeout", 600),
-            )
+            await self._wait_for_engine_completion(engine, task_id, ctx)
 
             ctx.suspended_engine = None
             ctx.active = False
@@ -258,36 +255,11 @@ class TaskExecutorMixin:
             ctx.cleanup(timer_manager)
             return
 
-        # ── 5.5 检查任务是否已到达终态 ──
-        # BUG-FIX-fix_20260526_status_revert:
-        # 问题根因: send_pipeline_message 异步启动管道(engine.run 在后台执行)，
-        #   _handle_suspension_loop 在引擎未挂起时直接跳过 while 循环，
-        #   然后 _check_post_pipeline_state 收到 pipeline_state=None，
-        #   判定为"被中断"将任务 reset_to_pending (running→pending)，
-        #   导致前端显示"准备阶段"但管道已在执行。
-        # 修复方案: 仅当引擎不在运行/挂起状态时才执行状态检查。
-        #   引擎仍在运行说明管道尚未完成，不应做 post-pipeline 处理。
-        _engine_still_active = False
-        try:
-            from pipeline.registry import get_engine_registry
-            _reg = get_engine_registry()
-            _entry = _reg.find_by_tag("task_id", task_id)
-            if _entry:
-                _e = _entry[0].engine
-                _engine_still_active = getattr(_e, 'is_running', False) or getattr(_e, 'is_suspended', False)
-        except Exception:
-            pass
-
-        if not _engine_still_active:
-            await self._check_post_pipeline_state(
-                task_id, task_service, None, lifecycle, workspace, ws_meta,
-                ctx, timer_manager,
-            )
-        else:
-            logger.info(
-                "TaskWorker: 跳过 post-pipeline 检查（引擎仍在运行）| task=%s",
-                task_id,
-            )
+        # ── 5.5 管道已结束，检查任务终态 ──
+        await self._check_post_pipeline_state(
+            task_id, task_service, None, lifecycle, workspace, ws_meta,
+            ctx, timer_manager,
+        )
 
         # ── 6. 等待终态 Event ──
         terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)
@@ -589,66 +561,21 @@ class TaskExecutorMixin:
             )
             return None
 
-    async def _handle_suspension_loop(
+    async def _wait_for_engine_completion(
         self,
         engine: Any,
         task_id: str,
-        task_service: Any,
         ctx: TaskExecutionContext,
-        child_wait_timeout: float = 600,
     ) -> None:
-        """处理管道挂起/恢复循环。"""
-        while engine.is_suspended:
-            logger.info(
-                "TaskWorker: pipeline suspended for task %s (waiting for children), "
-                "saving engine reference",
-                task_id,
-            )
-            ctx.suspended_engine = engine
+        """等待管道引擎执行完成。
 
-            # 重置 wake_event，由 _notify_suspended_pipelines 或 _try_resume_engine set
-            ctx.wake_event.clear()
-
-            try:
-                await asyncio.wait_for(
-                    ctx.wake_event.wait(), timeout=child_wait_timeout,
-                )
-                resumed = ctx.resume_requested
-                ctx.resume_requested = False
-                if resumed:
-                    logger.info(
-                        "TaskWorker: idle timeout requested resume for task %s",
-                        task_id,
-                    )
-                else:
-                    logger.info(
-                        "TaskWorker: child task completed, resuming pipeline for task %s",
-                        task_id,
-                    )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "TaskWorker: timed out waiting for child task of %s",
-                    task_id,
-                )
-
-            if not engine.is_suspended:
-                logger.info(
-                    "TaskWorker: engine already resumed for task %s (via send_pipeline_message), skipping",
-                    task_id,
-                )
-                continue
-
-            try:
-                await engine.resume()
-            except Exception as resume_exc:
-                logger.error(
-                    "TaskWorker: engine.resume failed for task %s: %s",
-                    task_id, resume_exc,
-                )
-                ctx.suspended_engine = None
+        管道的挂起/恢复/运行都是引擎自己的事，任务只关心引擎是否还活着。
+        引擎活着就等，死了（不再 running 也不再 suspended）就返回。
+        """
+        for _ in range(36000):
+            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
                 break
-
-            ctx.idle_remind_count = 0
+            await asyncio.sleep(0.1)
 
 
     # ───────────────────────────────────────────────────────────────────

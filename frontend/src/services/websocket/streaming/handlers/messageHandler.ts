@@ -83,8 +83,8 @@ export function handleNewMessage(eventData: any) {
       useStreamingStore.getState().setStreamingForTab(threadId, false)
     }
   } else if (threadId) {
-    // FIX: pipeline_id 缺失时仍清理 threadId 的 tab 状态
     pipelineStore.getState().stopStreaming(threadId)
+    useStreamingStore.getState().setStreamingForTab(threadId, false)
   }
 
   if (!pipelineId) return

@@ -183,28 +183,6 @@ export interface MessageToolCall {
 }
 
 /**
- * 有序内容块类型
- *
- * FEATURE-content_blocks: 按执行顺序排列的消息内容块
- * 每个内容块代表消息中的一个渲染单元，按 sequence 顺序排列
- * 支持文本和工具调用的交替显示（与 Claude/OpenAI Responses API 对齐）
- */
-export interface ContentBlock {
-  /** 内容块类型 */
-  type: 'thinking' | 'text' | 'tool_call'
-  /** 文本内容（type=text 时使用） */
-  text?: string
-  /** 思考内容（type=thinking 时使用） */
-  thinking?: ThinkingContent
-  /** 工具调用数据（type=tool_call 时使用） */
-  toolCall?: MessageToolCall
-  /** 原始消息 ID（用于追踪来源） */
-  sourceId?: string
-  /** 原始 sequence（用于排序） */
-  sequence?: number
-}
-
-/**
  * 消息类型（扩展支持任务消息）
  */
 export interface Message {
@@ -246,11 +224,7 @@ export interface Message {
   _thinkingSplitLength?: number
   /** 合并前的原始消息 ID 列表（合并连续 assistant 消息时填充） */
   _originalIds?: string[]
-  /** 工具调用列表（AI 消息可选，旧模式） */
-  toolCalls?: MessageToolCall[]
-  /** 有序内容块列表（新模式，按 sequence 顺序排列，优先于 content + toolCalls） */
-  contentBlocks?: ContentBlock[]
-  /** 统一 Part 列表（最终模式，按 sequence 排序，优先于 contentBlocks 和 content+toolCalls+thinking） */
+  /** 统一 Part 列表（按 sequence 排序，唯一渲染数据源） */
   parts?: import('./messageParts').MessagePart[]
   /** 消息类型（可选，用于任务消息） */
   messageType?:

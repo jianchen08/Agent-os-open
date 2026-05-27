@@ -228,7 +228,6 @@ class TaskPostPipelineMixin:
             else "管道异常退出，Agent 未完成评估"
         )
 
-        is_interrupted = state_is_empty or state_not_ended
         logger.warning(
             "TaskWorker: task %s still RUNNING "
             "after pipeline exit. "
@@ -241,25 +240,12 @@ class TaskPostPipelineMixin:
             error_msg,
         )
 
-        if is_interrupted and task_service:
-            try:
-                await task_service.reset_to_pending(task_id)
-                logger.info(
-                    "TaskWorker: task %s reset to pending for retry"
-                    " (pipeline was interrupted, likely process restart)",
-                    task_id,
-                )
-            except Exception as reset_exc:
-                logger.warning(
-                    "TaskWorker: reset_to_pending failed for %s: %s,"
-                    " falling back to fail_task",
-                    task_id, reset_exc,
-                )
-                await task_service.fail_task(
-                    task_id, error_msg,
-                )
-        else:
+        if task_service:
             await task_service.fail_task(
+                task_id, error_msg,
+            )
+            logger.info(
+                "TaskWorker: task %s marked failed after pipeline exit: %s",
                 task_id, error_msg,
             )
         # BUG-FIX: fail_task 后清理 idle 计时器

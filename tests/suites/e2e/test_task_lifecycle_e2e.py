@@ -8,7 +8,8 @@
 """
 import pytest
 
-from tasks.service import SimpleStateMachine, TaskService
+from tasks.service import TaskService
+from tasks.state_machine import SimpleStateMachine
 from tasks.storage import TaskStorage
 from tasks.types import TaskStatus, create_task
 

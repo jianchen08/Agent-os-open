@@ -60,21 +60,9 @@ input_schema:
   required: ["mode", "title"]
 
 injected_params:
-  - name: "user_id"
-    description: "用户ID"
+  - name: "pipeline_id"
+    description: "管道ID"
     required: true
-  - name: "session_id"
-    description: "会话ID"
-    required: true
-  - name: "thread_id"
-    description: "线程ID"
-    required: true
-  - name: "tab_id"
-    description: "标签ID"
-    required: true
-  - name: "agent_id"
-    description: "Agent ID"
-    required: false
 
 tags:
   - "interaction"

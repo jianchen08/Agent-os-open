@@ -157,22 +157,19 @@ class TestHasSecret:
 class TestEncryption:
     """加密安全性测试。"""
 
-    def test_stored_value_is_encrypted(self, secret_mgr: ExternalToolSecretManager) -> None:
+    @pytest.mark.asyncio
+    async def test_stored_value_is_encrypted(self, secret_mgr: ExternalToolSecretManager) -> None:
         """存储的值是加密的（不是明文）。"""
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(
-            secret_mgr.store_secret("enc_test", "plaintext_value")
-        )
+        await secret_mgr.store_secret("enc_test", "plaintext_value")
         encrypted, _ = secret_mgr._store["enc_test"]
         assert encrypted != b"plaintext_value"
         assert isinstance(encrypted, bytes)
 
-    def test_different_keys_different_encryption(self, secret_mgr: ExternalToolSecretManager) -> None:
+    @pytest.mark.asyncio
+    async def test_different_keys_different_encryption(self, secret_mgr: ExternalToolSecretManager) -> None:
         """相同值不同密钥名产生不同密文。"""
-        import asyncio
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(secret_mgr.store_secret("k1", "same_val"))
-        loop.run_until_complete(secret_mgr.store_secret("k2", "same_val"))
+        await secret_mgr.store_secret("k1", "same_val")
+        await secret_mgr.store_secret("k2", "same_val")
         enc1, _ = secret_mgr._store["k1"]
         enc2, _ = secret_mgr._store["k2"]
         # Fernet 每次加密产生不同密文（含随机 IV）

@@ -112,15 +112,13 @@ class PipelineRecovery:
         if state is None:
             raise RuntimeError(f"No checkpoint to recover for pipeline: {pipeline_id}")
 
-        engine._suspended_state = state
-
         logger.info(
             "Pipeline resuming from checkpoint: pipeline_id=%s, iteration=%d",
             pipeline_id,
             state.get("iteration", 0),
         )
 
-        final_state = await engine.resume()
+        final_state = await engine.resume_from_state(state)
         return final_state
 
     async def get_recovery_info(self, pipeline_id: str) -> dict[str, Any] | None:

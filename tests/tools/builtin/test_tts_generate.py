@@ -20,7 +20,7 @@ from tools.media.base import MediaProviderConfig, MediaResult, MediaType
 # 辅助
 # ---------------------------------------------------------------------------
 
-def _import_tool() -> types.ModuleType:
+def _import_tool():
     """动态导入 tts_generate 模块。"""
     from tools.builtin import tts_generate
     return tts_generate
@@ -47,37 +47,37 @@ class TestGetToolDefinition:
     def test_returns_tool_with_correct_name(self) -> None:
         """工具名称应为 tts_generate。"""
         mod = _import_tool()
-        tool_def = mod.TTSGenerateTool.get_tool_definition()
+        tool_def = mod.TtsGenerateTool.get_tool_definition()
         assert tool_def.name == "tts_generate"
 
     def test_input_schema_has_required_text(self) -> None:
         """input_schema 中 text 为必填字段。"""
         mod = _import_tool()
-        tool_def = mod.TTSGenerateTool.get_tool_definition()
+        tool_def = mod.TtsGenerateTool.get_tool_definition()
         schema = tool_def.input_schema
         assert "text" in schema.get("properties", {})
         assert "text" in schema.get("required", [])
 
     def test_input_schema_has_optional_params(self) -> None:
-        """input_schema 包含可选参数 voice, rate, output_dir。"""
+        """input_schema 包含可选参数 voice, format, speed。"""
         mod = _import_tool()
-        tool_def = mod.TTSGenerateTool.get_tool_definition()
+        tool_def = mod.TtsGenerateTool.get_tool_definition()
         schema = tool_def.input_schema
         props = schema.get("properties", {})
         assert "voice" in props
-        assert "rate" in props
-        assert "output_dir" in props
+        assert "format" in props
+        assert "speed" in props
 
     def test_source_is_builtin(self) -> None:
         """工具来源应为 builtin。"""
         mod = _import_tool()
-        tool_def = mod.TTSGenerateTool.get_tool_definition()
+        tool_def = mod.TtsGenerateTool.get_tool_definition()
         assert tool_def.source.value == "builtin"
 
     def test_description_is_non_empty(self) -> None:
         """工具描述非空。"""
         mod = _import_tool()
-        tool_def = mod.TTSGenerateTool.get_tool_definition()
+        tool_def = mod.TtsGenerateTool.get_tool_definition()
         assert len(tool_def.description) > 0
 
 
@@ -116,7 +116,7 @@ class TestExecute:
         mock_chain.execute_synthesize.return_value = mock_provider.synthesize.return_value
         mock_registry.get_chain_for_type.return_value = mock_chain
 
-        tool = mod.TTSGenerateTool(registry=mock_registry)
+        tool = mod.TtsGenerateTool(registry=mock_registry)
         result = await tool.execute(inputs={"text": "你好世界"})
 
         assert result.success
@@ -128,11 +128,11 @@ class TestExecute:
         """缺少 text 参数时返回失败结果。"""
         mod = _import_tool()
         mock_registry = MagicMock()
-        tool = mod.TTSGenerateTool(registry=mock_registry)
+        tool = mod.TtsGenerateTool(registry=mock_registry)
         result = await tool.execute(inputs={})
 
         assert result.is_failed
-        assert "text" in (result.error or "").lower()
+        assert "文本" in (result.error or "") or "不能为空" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_execute_provider_failure_returns_failure(self) -> None:
@@ -146,7 +146,7 @@ class TestExecute:
         )
         mock_registry.get_chain_for_type.return_value = mock_chain
 
-        tool = mod.TTSGenerateTool(registry=mock_registry)
+        tool = mod.TtsGenerateTool(registry=mock_registry)
         result = await tool.execute(inputs={"text": "测试"})
 
         assert result.is_failed

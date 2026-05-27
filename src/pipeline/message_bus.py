@@ -96,6 +96,32 @@ async def _auto_complete_interaction(pipeline_id: str) -> None:
         logger.debug("[MessageBus] 自动完成交互检查失败（可忽略）: %s", exc)
 
 
+async def _send_received_event(
+    event_sink: Any,
+    pipeline_id: str,
+    thread_id: str,
+    message_id: str,
+    content: str,
+    source: str,
+) -> None:
+    """发送 pipeline_received 事件到前端。"""
+    if event_sink is None:
+        return
+    try:
+        await event_sink.send_event({
+            "type": "pipeline_received",
+            "data": {
+                "pipeline_id": pipeline_id,
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "content": content,
+                "source": source,
+            },
+        })
+    except Exception:
+        pass
+
+
 async def send_pipeline_message(
     pipeline_id: str,
     message: str,
@@ -211,20 +237,8 @@ async def send_pipeline_message(
                     )
                     _start_bg_drain(pipeline_id, bridge, engine, engine_task=engine_task)
                     logger.info("[MessageBus] idle engine started | pipeline=%s", pipeline_id[:12])
-                    if _msg_source == "user" and _event_sink is not None:
-                        try:
-                            await _event_sink.send_event({
-                                "type": "pipeline_received",
-                                "data": {
-                                    "pipeline_id": pipeline_id,
-                                    "thread_id": thread_id,
-                                    "message_id": message_id,
-                                    "content": message,
-                                    "source": _msg_source,
-                                },
-                            })
-                        except Exception:
-                            pass
+                    if _msg_source == "user":
+                        await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
                     return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
                 return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
 
@@ -254,20 +268,8 @@ async def send_pipeline_message(
                 "[MessageBus] 消息已注入 | pipeline=%s method=%s",
                 pipeline_id[:12], method,
             )
-            if _msg_source == "user" and _event_sink is not None:
-                try:
-                    await _event_sink.send_event({
-                        "type": "pipeline_received",
-                        "data": {
-                            "pipeline_id": pipeline_id,
-                            "thread_id": thread_id,
-                            "message_id": message_id,
-                            "content": message,
-                            "source": _msg_source,
-                        },
-                    })
-                except Exception:
-                    pass
+            if _msg_source == "user":
+                await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
             return InjectResult(
                 success=True, method=method, pipeline_id=pipeline_id, bridge=bridge,
             )
@@ -296,6 +298,7 @@ async def send_pipeline_message(
         conversation_history=conversation_history,
         streaming=streaming or (revive_bridge is not None),
         on_chunk=revive_bridge.on_chunk if revive_bridge else on_chunk,
+        revive_bridge=revive_bridge,
         **kwargs,
     )
 
@@ -304,20 +307,8 @@ async def send_pipeline_message(
         get_engine_registry().set_bridge(pipeline_id, revive_bridge)
         revive_result.bridge = revive_bridge
 
-    if _msg_source == "user" and _event_sink is not None and revive_result.success:
-        try:
-            await _event_sink.send_event({
-                "type": "pipeline_received",
-                "data": {
-                    "pipeline_id": pipeline_id,
-                    "thread_id": thread_id,
-                    "message_id": message_id,
-                    "content": message,
-                    "source": _msg_source,
-                },
-            })
-        except Exception:
-            pass
+    if _msg_source == "user" and revive_result.success:
+        await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
 
     return revive_result
 
@@ -332,6 +323,7 @@ async def _try_revive_pipeline(
     conversation_history: list[dict] | None = None,
     streaming: bool = False,
     on_chunk: Callable | None = None,
+    revive_bridge: Any = None,
     **kwargs,
 ) -> InjectResult:
     """尝试从历史记录恢复管道。
@@ -438,7 +430,6 @@ async def _try_revive_pipeline(
         # 修复方案: 用 asyncio.create_task 异步启动 engine.run()，
         #   _try_revive_pipeline 立即返回，让 app_factory.py 启动 drain_loop。
         #   engine.run() 在后台执行，通过 on_chunk 回调将 LLM 输出发送到 bridge。
-        import asyncio
         engine_task = asyncio.create_task(
             new_engine.run(
                 user_input=message,

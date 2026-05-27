@@ -204,7 +204,7 @@ export function ImageAreaAnnotation({
         </div>
 
         {/* 悬停显示建议 */}
-        <div className="absolute bottom-0 left-0 right-0 hidden bg-black/70 p-1 text-[10px] text-white group-hover:block">
+        <div className="absolute bottom-0 left-0 right-0 block md:hidden md:group-hover:block bg-black/70 p-1 text-[10px] text-white">
           {annotation.suggestion}
         </div>
 

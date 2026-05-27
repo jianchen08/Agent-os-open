@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from pipeline.engine_state import _safe_deepcopy
 from pipeline.types import RouteSignal, StateKeys
 
 if TYPE_CHECKING:
@@ -141,12 +140,11 @@ async def apply_route(
         return False
 
     elif route_type == "wait":
-        engine._suspended_state = _safe_deepcopy(state)
         state[StateKeys.ENDED] = False
         logger.info("Route applied: wait, pipeline suspended")
         # BUG-FIX-fix_20260521_on_chunk_missing:
         # 恢复逻辑已内置到 _suspend_and_wait，无需手动恢复。
-        restored = await engine._suspend_and_wait(state)
+        restored = await engine.suspend_and_wait(state)
         if restored:
             logger.info("Pipeline woken up from output wait, resetting CORE_TYPE to llm_call")
             state[StateKeys.CORE_TYPE] = "llm_call"

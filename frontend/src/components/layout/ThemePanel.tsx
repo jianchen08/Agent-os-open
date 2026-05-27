@@ -123,13 +123,26 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
   const extendedThemes = themes.filter((t) => t.id !== 'dark' && t.id !== 'light')
 
   return (
-    <div
-      className="bg-card text-card-foreground absolute top-full right-0 z-50 mt-2 w-72 rounded-lg border shadow-xl"
-      style={{
-        backgroundColor: 'var(--modal-bg, hsl(var(--card)))',
-        boxShadow: '0 20px 40px -12px rgba(0, 0, 0, 0.3)',
-      }}
-    >
+    <>
+      {/* 移动端背景遮罩 */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-[99] bg-black/40 md:hidden"
+          onClick={onClose}
+        />
+      )}
+
+      {/* 面板主体：移动端 fixed bottom sheet / 桌面端 absolute dropdown */}
+      <div
+        className={cn(
+          'z-[100] rounded-lg border shadow-xl',
+          'fixed inset-x-0 bottom-0 max-h-[70vh] overflow-y-auto md:absolute md:inset-x-auto md:bottom-auto md:right-0 md:top-full md:mt-2 md:max-h-none md:w-72',
+        )}
+        style={{
+          backgroundColor: 'var(--modal-bg, hsl(var(--card)))',
+          boxShadow: '0 20px 40px -12px rgba(0, 0, 0, 0.3)',
+        }}
+      >
       {/* 基础主题 - 浅色/深色快速切换 */}
       <div className="border-border/50 border-b p-3">
         <div className="text-muted-foreground mb-2 text-xs">快速切换</div>
@@ -181,6 +194,7 @@ export function ThemePanel({ isOpen, onClose }: ThemePanelProps) {
           自定义主题设置
         </button>
       </div>
-    </div>
+      </div>
+    </>
   )
 }

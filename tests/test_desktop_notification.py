@@ -198,7 +198,11 @@ class TestDesktopNotifier:
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
             return_value=True,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
             notifier = DesktopInteractionNotifier()
             result = await notifier.notify_request(_make_request())
             assert result is True
@@ -211,7 +215,10 @@ class TestDesktopNotifier:
         with patch(
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+        ):
             cfg = DesktopNotifierConfig(enabled=False)
             notifier = DesktopInteractionNotifier(cfg)
             result = await notifier.notify_request(_make_request())
@@ -224,7 +231,11 @@ class TestDesktopNotifier:
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
             return_value=True,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
             notifier = DesktopInteractionNotifier()
             result = await notifier.notify_timeout_reminder(
                 "req-1", 120, title="确认操作"
@@ -239,7 +250,10 @@ class TestDesktopNotifier:
         with patch(
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+        ):
             notifier = DesktopInteractionNotifier()
             await notifier.notify_cancel("req-1")
             mock_send.assert_not_called()
@@ -249,7 +263,10 @@ class TestDesktopNotifier:
         with patch(
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+        ):
             notifier = DesktopInteractionNotifier()
             await notifier.notify_timeout("req-1")
             mock_send.assert_not_called()
@@ -260,7 +277,11 @@ class TestDesktopNotifier:
             "human_interaction.desktop_notifier.send_notification",
             new_callable=AsyncMock,
             return_value=True,
-        ) as mock_send:
+        ) as mock_send, patch(
+            "human_interaction.desktop_notifier.play_alert_sound",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
             notifier = DesktopInteractionNotifier()
             await notifier.notify_request(_make_request(mode="conversation"))
             msg = mock_send.call_args[1]["message"]

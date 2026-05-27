@@ -196,7 +196,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       })
 
       expect(onRespondChoice).toHaveBeenCalledTimes(1)
-      expect(onRespondChoice).toHaveBeenCalledWith('a')
+      expect(onRespondChoice).toHaveBeenCalledWith('req-1', 'a', '批准')
     })
 
     it('点击"拒绝"应触发 onRespondChoice 传入 optionId=b', async () => {
@@ -219,7 +219,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         fireEvent.click(screen.getByText('拒绝'))
       })
 
-      expect(onRespondChoice).toHaveBeenCalledWith('b')
+      expect(onRespondChoice).toHaveBeenCalledWith('req-1', 'b', '拒绝')
     })
 
     it('提交中时选项按钮应禁用', async () => {
@@ -258,7 +258,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       render(<InteractionCard {...props} />)
 
       // 无选项时应显示文本输入区域
-      const textarea = screen.getByPlaceholderText('输入回复...')
+      const textarea = screen.getByPlaceholderText('输入回复后发送...')
       expect(textarea).toBeInTheDocument()
 
       // 输入文字并点击发送
@@ -531,7 +531,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       await act(async () => {
         fireEvent.click(screen.getByText('批准'))
       })
-      expect(onRespondChoice).toHaveBeenCalledWith('approve')
+      expect(onRespondChoice).toHaveBeenCalledWith('req-1', 'approve', '批准')
 
       // 模拟状态变为 responded
       const updatedInteraction = { ...interaction, status: 'responded' as const }
@@ -661,7 +661,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         await act(async () => {
           fireEvent.click(screen.getByText(opt.label))
         })
-        expect(onRespondChoice).toHaveBeenCalledWith(opt.id)
+        expect(onRespondChoice).toHaveBeenCalledWith('req-1', opt.id, opt.label)
       }
 
       expect(onRespondChoice).toHaveBeenCalledTimes(6)
@@ -749,7 +749,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         fireEvent.click(screen.getByText('是'))
       })
 
-      expect(onRespondChoice).toHaveBeenCalledWith('yes')
+      expect(onRespondChoice).toHaveBeenCalledWith('req-testutils', 'yes', '是')
     })
 
     it('通过 renderInteractionCard 正确渲染 conversation 模式', async () => {

@@ -53,39 +53,39 @@ const generateSessionTitle = (): string => {
 export const useSessionListStore = create<SessionListState>()((set, get) => ({
   fetchSessions: async (options?: { background?: boolean }) => {
     const sessionStore = useSessionStore.getState()
-    if (sessionStore.isLoading) {
-      return
-    }
+      if (sessionStore.isLoading) {
+        return
+      }
 
-    const isBackground = options?.background ?? false
+      const isBackground = options?.background ?? false
 
-    if (!isBackground) {
-      useSessionStore.setState({ isLoading: true, error: null })
-    }
+      if (!isBackground) {
+        useSessionStore.setState({ isLoading: true, error: null })
+      }
 
-    try {
-      const sessions = await getSessions()
-      const validSessionIds = new Set(sessions.map((s) => s.id))
+      try {
+        const sessions = await getSessions()
+        const validSessionIds = new Set(sessions.map((s) => s.id))
 
-      useSessionStore.setState((state) => {
-        const activeSessionExistsInBackend = state.activeSessionId
-          ? validSessionIds.has(state.activeSessionId)
-          : false
+        useSessionStore.setState((state) => {
+          const activeSessionExistsInBackend = state.activeSessionId
+            ? validSessionIds.has(state.activeSessionId)
+            : false
 
-        const newActiveSessionId = activeSessionExistsInBackend ? state.activeSessionId : null
+          const newActiveSessionId = activeSessionExistsInBackend ? state.activeSessionId : null
 
-        return {
-          sessions: sessions,
-          activeSessionId: newActiveSessionId,
-          isLoading: false,
-          error: null,
-        }
-      })
-    } catch (error: any) {
-      const errorMessage = error.message || '获取会话列表失败'
-      useSessionStore.setState({ isLoading: false, error: errorMessage })
-      throw new Error(errorMessage)
-    }
+          return {
+            sessions: sessions,
+            activeSessionId: newActiveSessionId,
+            isLoading: false,
+            error: null,
+          }
+        })
+      } catch (error: any) {
+        const errorMessage = error.message || '获取会话列表失败'
+        useSessionStore.setState({ isLoading: false, error: errorMessage })
+        throw new Error(errorMessage)
+      }
   },
 
   createSession: async (title?: string, options?: CreateSessionOptions) => {

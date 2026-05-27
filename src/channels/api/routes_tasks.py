@@ -26,35 +26,22 @@ from channels.api.memory_store import store
 
 logger = logging.getLogger(__name__)
 
-# 后台任务强引用集合，防止 asyncio.create_task 返回值被 GC 回收
-_background_tasks: set[asyncio.Task] = set()
-
 # FastAPI 在模块级别使用 -> 注解时需要 APIRouter 实例
 from fastapi import APIRouter  # noqa: E402
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
 
 
-# BUG-FIX: 前后端任务状态名称映射
-# 后端 ExecutionStatus 使用 running，前端 TaskStatus 使用 in_progress
-# 此映射层确保 API 响应中使用前端期望的状态名称
-_BACKEND_TO_FRONTEND_STATUS: dict[str, str] = {
-    "running": "in_progress",
-    "evaluating": "in_progress",
-    "scheduled": "pending",
-}
-
-
 def _map_status_for_api(status: str) -> str:
-    """将后端 ExecutionStatus 映射为前端 TaskStatus 期望的值。
+    """直接返回后端原始状态值，前后端统一字段。
 
     Args:
         status: 后端状态字符串
 
     Returns:
-        映射后的前端状态字符串
+        原始状态字符串
     """
-    return _BACKEND_TO_FRONTEND_STATUS.get(status, status)
+    return status
 
 
 def _get_task_service() -> Any:
@@ -177,18 +164,15 @@ async def list_tasks(
     if skip is not None:
         offset = skip
     validate_pagination(limit, offset)
-    tasks = store.get_user_tasks(_user["sub"])
-
     task_service = _get_task_service()
+    tasks: list[dict[str, Any]] = []
     if task_service is not None:
         try:
             # BUG-FIX-fix_20260512_async_list_all: 添加 await
             # BUG-FIX-fix_20260512_session_filter: 传递 session_id 到 list_all 减少不必要数据获取
             ts_tasks = await task_service.list_all(limit=1000, session_id=session_id)
-            api_ids = {t["id"] for t in tasks}
             for tm in ts_tasks:
-                if tm.id not in api_ids:
-                    tasks.append(_task_model_to_dict(tm))
+                tasks.append(_task_model_to_dict(tm))
         except Exception as exc:
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
@@ -294,27 +278,38 @@ async def create_task(
     Returns:
         TaskResponse 新创建的任务
     """
-    task = store.create_task(
-        user_id=_user["sub"],
+    task_service = _get_task_service()
+    if task_service is None:
+        raise APIError(
+            status_code=503,
+            error_code="TASK_003",
+            message="TaskService 不可用，无法创建任务",
+        )
+
+    from tasks.types import Task as TaskModel, TaskStatus, TaskPriority
+
+    task_model = TaskModel(
         title=body.title,
-        description=body.description,
-        agent_id=body.agent_id,
-        priority=body.priority,
-        tags=body.tags,
-        input_data=body.input_data,
+        description=body.description or "",
+        status=TaskStatus.PENDING,
+        priority=TaskPriority(body.priority if body.priority is not None else 5),
+        metadata={
+            "target_id": body.agent_id or "",
+            "acceptance_criteria": {},
+            "workspace": "",
+            "tags": body.tags or [],
+            "input_data": body.input_data or {},
+            "user_id": _user["sub"],
+        },
     )
-    task_id = task["id"]
+    task_model = await task_service.create_task(task_model)
+    task_id = task_model.id
+    task = _task_model_to_dict(task_model)
+
     logger.info("用户 %s 创建任务: %s", _user.get("username"), task_id)
 
-    # BUG-FIX: 创建后自动提交执行
-    # 问题根因: create_task 只在 MemoryStore 中创建 pending 状态的任务，
-    #           前端不会调用 submit_task 端点，导致任务永远停留在 pending 不执行。
-    # 修复方案: 创建后立即启动 _auto_advance_memstore_task 后台协程，
-    #           自动将任务从 pending → running → completed 推进，
-    #           与 submit_task 端点行为一致。
-    _bg = asyncio.create_task(_auto_advance_memstore_task(task_id))
-    _background_tasks.add(_bg)
-    _bg.add_done_callback(_background_tasks.discard)
+    # 创建后自动提交执行
+    submitted = await _submit_task_event(task_id, task_service)
 
     return _task_to_response(task)
 
@@ -339,13 +334,12 @@ def get_task(
     Raises:
         APIError: 任务不存在 (404)
     """
-    task = store.get_task(task_id)
-    if task is None:
-        task_service = _get_task_service()
-        if task_service is not None:
-            tm = task_service.get_task(task_id)
-            if tm is not None:
-                task = _task_model_to_dict(tm)
+    task = None
+    task_service = _get_task_service()
+    if task_service is not None:
+        tm = task_service.get_task(task_id)
+        if tm is not None:
+            task = _task_model_to_dict(tm)
     if task is None:
         raise APIError(
             status_code=404,
@@ -377,38 +371,24 @@ def update_task(
     Raises:
         APIError: 任务不存在 (404)
     """
-    # BUG-FIX-fix_20260520_task_update_404:
-    # 问题根因: update_task 只查 MemoryStore，管道创建的任务在 TaskStorage 中
-    # 修复方案: MemoryStore 失败时回退到 TaskStorage
-    task = store.update_task(
-        task_id,
-        title=body.title,
-        description=body.description,
-        status=body.status,
-        priority=body.priority,
-        tags=body.tags,
-    )
-
-    if task is None:
-        task_service = _get_task_service()
-        if task_service is not None:
-            tm = task_service.get_task(task_id)
-            if tm is not None:
-                # 更新 TaskStorage 中的任务字段
-                updates: dict[str, Any] = {}
-                if body.description is not None:
-                    updates["description"] = body.description
-                if body.status is not None:
-                    from tasks.types import TaskStatus
-                    updates["status"] = TaskStatus(body.status)
-                if body.priority is not None:
-                    updates["priority"] = body.priority
-                if updates:
-                    tm.updated_at = datetime.now().isoformat()
-                    for k, v in updates.items():
-                        setattr(tm, k, v)
-                    task_service._storage.save(tm)
-                task = _task_model_to_dict(tm)
+    # 统一通过 TaskService 更新任务
+    task_service = _get_task_service()
+    task = None
+    if task_service is not None:
+        tm = task_service.get_task(task_id)
+        if tm is not None:
+            # 更新任务字段
+            updates: dict[str, Any] = {}
+            if body.description is not None:
+                updates["description"] = body.description
+            if body.status is not None:
+                from tasks.types import TaskStatus
+                updates["status"] = TaskStatus(body.status)
+            if body.priority is not None:
+                updates["priority"] = body.priority
+            if updates:
+                task_service.update_task_fields_sync(task_id, **updates)
+            task = _task_model_to_dict(tm)
 
     if task is None:
         raise APIError(
@@ -446,29 +426,27 @@ async def delete_task(
         APIError: 任务不存在 (404)
     """
     task_service = _get_task_service()
+    if task_service is None:
+        raise APIError(
+            status_code=503,
+            error_code="TASK_003",
+            message="TaskService 不可用，无法删除任务",
+        )
 
-    if task_service is not None:
-        deleted = await task_service.delete_task(task_id)
-        if not deleted:
-            raise APIError(
-                status_code=404,
-                error_code="TASK_001",
-                message="任务不存在或已被删除",
-            )
-        task = task_service.get_task(task_id)
-        if task is not None and task.metadata.get("soft_deleted"):
-            logger.info(
-                "用户 %s 软删除容器任务 %s",
-                _user.get("username"), task_id,
-            )
-            return {"message": "容器任务已标记删除"}
-    else:
-        if not store.delete_task(task_id):
-            raise APIError(
-                status_code=404,
-                error_code="TASK_001",
-                message="任务不存在或已被删除",
-            )
+    deleted = await task_service.delete_task(task_id)
+    if not deleted:
+        raise APIError(
+            status_code=404,
+            error_code="TASK_001",
+            message="任务不存在或已被删除",
+        )
+    task = task_service.get_task(task_id)
+    if task is not None and task.metadata.get("soft_deleted"):
+        logger.info(
+            "用户 %s 软删除容器任务 %s",
+            _user.get("username"), task_id,
+        )
+        return {"message": "容器任务已标记删除"}
 
     logger.info(
         "用户 %s 删除任务 %s",
@@ -499,18 +477,12 @@ async def submit_task(
     Raises:
         APIError: 任务不存在 (404) 或状态不允许 (400)
     """
-    task = store.get_task(task_id)
-
-    # BUG-FIX-fix_20260520_task_submit_404:
-    # 问题根因: submit_task 只查 MemoryStore，管道系统创建的任务在 TaskStorage(YAML)
-    #           中，前端调用必然 404 (TASK_001)
-    # 修复方案: 与 get_task/delete_task/pause_task 一致，添加 TaskStorage 回退
-    if task is None:
-        task_service = _get_task_service()
-        if task_service is not None:
-            tm = task_service.get_task(task_id)
-            if tm is not None:
-                task = _task_model_to_dict(tm)
+    task_service = _get_task_service()
+    task = None
+    if task_service is not None:
+        tm = task_service.get_task(task_id)
+        if tm is not None:
+            task = _task_model_to_dict(tm)
 
     if task is None:
         raise APIError(
@@ -520,9 +492,7 @@ async def submit_task(
         )
 
     current_status = task.get("status", "pending")
-    # 前端状态映射反转：in_progress → running
-    _FRONTEND_TO_BACKEND_STATUS = {"in_progress": "running", "queued": "running"}
-    backend_status = _FRONTEND_TO_BACKEND_STATUS.get(current_status, current_status)
+    backend_status = current_status
     allowed_statuses = {"pending", "failed"}
     if backend_status not in allowed_statuses:
         raise APIError(
@@ -532,22 +502,9 @@ async def submit_task(
             f"仅允许: {', '.join(allowed_statuses)}",
         )
 
-    # MemoryStore 任务直接更新状态 + 启动后台自动流转
-    is_memstore_task = store.get_task(task_id) is not None
-    if is_memstore_task:
-        store.update_task(task_id, status="queued")
-        # BUG-FIX-fix_20260520_memstore_queued_stuck:
-        # 问题根因: MemoryStore 中的 queued 任务没有后台消费者，
-        #           导致任务停留在 queued 状态不自动流转到 running/completed。
-        # 修复方案: 启动后台协程自动推进 MemoryStore 任务状态。
-        _bg = asyncio.create_task(_auto_advance_memstore_task(task_id))
-        _background_tasks.add(_bg)
-        _bg.add_done_callback(_background_tasks.discard)
-
-    # TaskStorage 任务通过事件提交执行
-    task_service = _get_task_service()
+    # 统一通过 TaskService 提交执行
     submitted = False
-    if task_service is not None and task_service.get_task(task_id) is not None:
+    if task_service is not None:
         submitted = await _submit_task_event(task_id, task_service)
 
     logger.info("用户 %s 提交任务 %s 执行", _user.get("username"), task_id)
@@ -584,15 +541,12 @@ def evaluate_task(
     Raises:
         APIError: 任务不存在 (404)
     """
-    task = store.get_task(task_id)
-
-    # BUG-FIX-fix_20260520_task_evaluate_404: 回退到 TaskStorage
-    if task is None:
-        task_service = _get_task_service()
-        if task_service is not None:
-            tm = task_service.get_task(task_id)
-            if tm is not None:
-                task = _task_model_to_dict(tm)
+    task = None
+    task_service = _get_task_service()
+    if task_service is not None:
+        tm = task_service.get_task(task_id)
+        if tm is not None:
+            task = _task_model_to_dict(tm)
 
     if task is None:
         raise APIError(
@@ -1008,128 +962,6 @@ async def _submit_task_event(task_id: str, task_service: Any) -> bool:
     except Exception as exc:
         logger.warning("_submit_task_event: 提交任务失败: task_id=%s, error=%s", task_id, exc)
         return False
-
-
-
-async def _auto_advance_memstore_task(task_id: str) -> None:
-    """MemoryStore 任务自动流转协程。
-
-    BUG-FIX-fix_20260520_memstore_queued_stuck:
-    问题根因: MemoryStore 中的 queued 任务没有后台消费者（TaskWorker 只消费
-              TaskStorage/YAML 层的任务），导致任务永远停在 queued 状态。
-    修复方案: 在 submit_task 中为 MemoryStore 任务启动此后台协程，
-              模拟 TaskWorker 的核心流转：queued → running → completed。
-              通过 EventBus 发布 task.submitted 事件，让已启动的 TaskWorker
-              能拾取并执行该任务。若 EventBus/TaskWorker 不可用，则直接
-              在 MemoryStore 层推进状态。
-
-    BUG-FIX-fix_20260520_silent_failure:
-    问题根因: 原代码 task_service 为 None 时无日志、控制流隐式 fallthrough，
-              导致 fallback 路径不可追踪、协程静默失败难以定位。
-    修复方案: 1) 每个分支路径添加明确日志
-              2) 使用显式 event_submitted 标志驱动 fallback
-              3) task_service 为 None 时记录 info 级别日志
-              4) 确保无论 EventBus 路径如何，fallback 始终可执行
-    """
-    try:
-        # 短暂延迟，让 submit_task 的响应先返回客户端
-        await asyncio.sleep(0.5)
-
-        task = store.get_task(task_id)
-        # BUG-FIX: 同时接受 "pending"（create_task 创建）和 "queued"（submit_task 提交）状态
-        if task is None or task.get("status") not in ("pending", "queued"):
-            logger.info(
-                "_auto_advance: 跳过流转（任务不存在或状态不可流转） | task_id=%s, found=%s, status=%s",
-                task_id, task is not None, task.get("status") if task else "N/A",
-            )
-            return
-
-        # ── 尝试通过 EventBus 交给 TaskWorker 执行 ──
-        task_service = _get_task_service()
-        event_submitted = False
-
-        if task_service is not None:
-            # 尝试将 MemoryStore 任务同步到 TaskStorage，使 TaskWorker 能拾取
-            try:
-                from tasks.types import Task as TaskModel, TaskStatus, TaskPriority
-
-                existing = task_service.get_task(task_id)
-                if existing is None:
-                    tm = TaskModel(
-                        id=task_id,
-                        title=task.get("title", ""),
-                        description=task.get("description", ""),
-                        status=TaskStatus.PENDING,
-                        priority=TaskPriority(task.get("priority", 5)),
-                        metadata={
-                            "target_id": task.get("agent_id", ""),
-                            "acceptance_criteria": {},
-                            "workspace": "",
-                        },
-                    )
-                    await task_service.create_task(tm)
-                    logger.info(
-                        "_auto_advance: 同步任务到 TaskStorage | task_id=%s", task_id,
-                    )
-
-                event_submitted = await _submit_task_event(task_id, task_service)
-                if event_submitted:
-                    logger.info(
-                        "_auto_advance: 已通过 EventBus 提交 | task_id=%s", task_id,
-                    )
-                    store.update_task(task_id, status="running")
-                    return
-                else:
-                    logger.info(
-                        "_auto_advance: EventBus 提交未成功，将走 fallback | task_id=%s",
-                        task_id,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "_auto_advance: EventBus 路径异常，回退直接推进 | task_id=%s, error=%s",
-                    task_id, exc,
-                )
-        else:
-            logger.info(
-                "_auto_advance: task_service 不可用，走 fallback 直接推进 | task_id=%s",
-                task_id,
-            )
-
-        # ── Fallback: 直接在 MemoryStore 层推进状态 queued → running → completed ──
-        # 无论 task_service 是否可用、EventBus 是否成功，此路径始终可达
-        logger.info(
-            "_auto_advance: 开始 fallback 直接推进 | task_id=%s", task_id,
-        )
-
-        # queued → running
-        store.update_task(task_id, status="running")
-        await asyncio.sleep(1.0)
-
-        # running → completed（MemoryStore 任务无实际管道执行，直接标记完成）
-        task = store.get_task(task_id)
-        if task is not None and task.get("status") in ("running", "queued"):
-            store.update_task(task_id, status="completed")
-            logger.info(
-                "_auto_advance: MemoryStore 任务流转完成 | task_id=%s", task_id,
-            )
-        else:
-            logger.warning(
-                "_auto_advance: fallback 推进时任务状态异常 | task_id=%s, status=%s",
-                task_id,
-                task.get("status") if task else "None",
-            )
-
-    except Exception as exc:
-        logger.error(
-            "_auto_advance: 自动流转失败 | task_id=%s, error=%s", task_id, exc,
-            exc_info=True,
-        )
-        # 确保任务不会永远卡住
-        try:
-            store.update_task(task_id, status="failed")
-            logger.info("_auto_advance: 已将任务标记为 failed | task_id=%s", task_id)
-        except Exception:
-            pass
 
 
 def _get_agent_registry() -> Any:
