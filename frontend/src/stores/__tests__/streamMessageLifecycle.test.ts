@@ -195,31 +195,42 @@ describe('stream 消息生命周期', () => {
     it('initFromAPI 用 API 数据覆盖后，WS 新消息 ID 在 API 中不存在', () => {
       const store = usePipelineMessageStore.getState()
 
-      // 1. 加载历史
+      // 1. 加载历史（使用固定 sequence 模拟真实 API 数据）
       store.initFromAPI(PIPELINE_ID, [
-        makeMsg('old-1', { content: 'history', status: 'completed' }),
+        { id: 'old-1', sessionId: SESSION_ID, role: 'user', content: 'history', sequence: 1, timestamp: new Date().toISOString(), parentId: null, status: 'completed' } as Message,
       ])
 
-      // 2. 用户消息
-      store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'test', status: 'completed' }))
+      // 2. 用户发消息（前端创建，sequence=2）
+      store.addMessage(PIPELINE_ID, { id: 'user-1', sessionId: SESSION_ID, role: 'user', content: 'test', sequence: 2, timestamp: new Date().toISOString(), parentId: null } as Message)
 
-      // 3. stream_start 创建占位符
+      // 3. stream_start: ensureStreamingPlaceholder 计算 nextSeq
+      const existingMsgs = store.getMessages(PIPELINE_ID)
+      const nextSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
+      expect(nextSeq).toBe(3)
+
       store.startStreaming(PIPELINE_ID, MESSAGE_ID)
-      store.addMessage(PIPELINE_ID, makeMsg(MESSAGE_ID, { content: '', status: 'streaming' }))
+      store.addMessage(PIPELINE_ID, {
+        id: MESSAGE_ID,
+        sessionId: SESSION_ID,
+        role: 'assistant',
+        content: '',
+        sequence: nextSeq,
+        timestamp: new Date().toISOString(),
+        parentId: null,
+        status: 'streaming',
+      } as Message)
 
       expect(store.getMessages(PIPELINE_ID)).toHaveLength(3)
 
-      // 4. 模拟另一个 fetchMessages 调用 initFromAPI
-      // 场景：initFromAPI 被某个 effect 触发，API 还没有 streaming 消息
+      // 4. 模拟另一个 fetchMessages → initFromAPI（API 还没有 streaming 消息）
       store.initFromAPI(PIPELINE_ID, [
-        makeMsg('old-1', { content: 'history', status: 'completed' }),
-        makeMsg('user-1', { role: 'user' as any, content: 'test', status: 'completed' }),
+        { id: 'old-1', sessionId: SESSION_ID, role: 'user', content: 'history', sequence: 1, timestamp: new Date().toISOString(), parentId: null, status: 'completed' } as Message,
+        { id: 'user-1', sessionId: SESSION_ID, role: 'user', content: 'test', sequence: 2, timestamp: new Date().toISOString(), parentId: null, status: 'completed' } as Message,
       ])
 
       const msgs = store.getMessages(PIPELINE_ID)
       const streamingMsg = msgs.find((m) => m.id === MESSAGE_ID)
 
-      // 关键断言: streaming 消息必须被保留
       expect(streamingMsg).toBeDefined()
       expect(streamingMsg!.status).toBe('streaming')
 
