@@ -168,24 +168,21 @@ async def get_file_content(
     Returns:
         包含 success、content、path、size 的字典
     """
-    full_path = Path(path).resolve()
-
-    if not full_path.is_absolute() or not full_path.exists():
-        workspace_path_str = await _resolve_workspace_path(container_task_id)
-        if workspace_path_str:
-            full_path = (Path(workspace_path_str) / path).resolve()
+    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    if workspace_path_str:
+        full_path = (Path(workspace_path_str) / path).resolve()
+        if not str(full_path).startswith(str(Path(workspace_path_str).resolve())):
+            return {
+                "success": False,
+                "message": "路径超出工作空间范围",
+            }
+    else:
+        full_path = Path(path).resolve()
 
     if not full_path.is_file():
         return {
             "success": False,
             "message": f"文件不存在或不是普通文件: {path}",
-        }
-
-    cwd = Path.cwd().resolve()
-    if not str(full_path).startswith(str(cwd)):
-        return {
-            "success": False,
-            "message": "路径超出工作目录范围",
         }
 
     MAX_SIZE = 10 * 1024 * 1024

@@ -40,6 +40,7 @@ async function parseInteractionEvent(
 
   const filePaths = inner.file_paths as string[] | undefined
   let fileContents: Record<string, string> | undefined
+  console.log('[InteractionHandler] file_paths=', filePaths)
   if (filePaths && filePaths.length > 0) {
     const contents: Record<string, string> = {}
     await Promise.all(
@@ -49,14 +50,16 @@ async function parseInteractionEvent(
             `/api/v1/workspaces/_local/file-content`,
             { params: { path: filePath } },
           )
+          console.log('[InteractionHandler] API response for', filePath, ':', resp.data?.success, resp.data?.message)
           if (resp.data?.success) {
             contents[filePath] = resp.data.content ?? ''
           }
-        } catch {
-          // 单个文件失败不阻塞整体
+        } catch (err) {
+          console.warn('[InteractionHandler] API failed for', filePath, ':', err)
         }
       }),
     )
+    console.log('[InteractionHandler] contents keys=', Object.keys(contents))
     if (Object.keys(contents).length > 0) {
       fileContents = contents
     }
@@ -130,8 +133,13 @@ export function useInteractionHandler(sessionId: string | undefined) {
     const requestToNotificationMap = new Map<string, string>()
 
     const handleInteractionRequest = async (data: Record<string, unknown>) => {
+      console.log('[InteractionHandler] handleInteractionRequest received:', JSON.stringify(data).slice(0, 500))
       const parsed = await parseInteractionEvent(data)
-      if (!parsed) return
+      if (!parsed) {
+        console.warn('[InteractionHandler] parseInteractionEvent returned null')
+        return
+      }
+      console.log('[InteractionHandler] parsed.fileContents=', parsed.fileContents ? Object.keys(parsed.fileContents) : 'undefined')
 
       const existing = useInteractionStore.getState().pendingInteractions.find(
         (i) => i.requestId === parsed.requestId,

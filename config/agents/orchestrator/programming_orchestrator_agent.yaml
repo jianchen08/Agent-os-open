@@ -442,6 +442,7 @@ tool_ids:
   - task_evaluate
   - resource_search
   - file_read
+  - list_directory
   - memory
 
 hard_constraints:

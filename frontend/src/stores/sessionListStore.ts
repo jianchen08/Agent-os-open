@@ -11,6 +11,7 @@ import {
   updateSession as updateSessionApi,
 } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
+import { uiStorage, STORAGE_KEYS } from '@/utils/storage'
 import { useAgentStore } from './agentStore'
 import { useAgentTabStore } from './agentTabStore'
 import { useLayoutModeStore } from './layoutModeStore'
@@ -52,12 +53,13 @@ const generateSessionTitle = (): string => {
 
 export const useSessionListStore = create<SessionListState>()((set, get) => ({
   fetchSessions: async (options?: { background?: boolean }) => {
-    const sessionStore = useSessionStore.getState()
+      const sessionStore = useSessionStore.getState()
       if (sessionStore.isLoading) {
         return
       }
 
       const isBackground = options?.background ?? false
+      const hadNoActiveSession = !sessionStore.activeSessionId
 
       if (!isBackground) {
         useSessionStore.setState({ isLoading: true, error: null })
@@ -68,11 +70,17 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
         const validSessionIds = new Set(sessions.map((s) => s.id))
 
         useSessionStore.setState((state) => {
-          const activeSessionExistsInBackend = state.activeSessionId
-            ? validSessionIds.has(state.activeSessionId)
-            : false
+          let newActiveSessionId: string | null = null
 
-          const newActiveSessionId = activeSessionExistsInBackend ? state.activeSessionId : null
+          if (state.activeSessionId && validSessionIds.has(state.activeSessionId)) {
+            newActiveSessionId = state.activeSessionId
+          } else if (hadNoActiveSession) {
+            // BUG-FIX-fix_20260528_session_persist: 从 localStorage 恢复上次选中的会话
+            const savedSessionId = uiStorage.getLastActiveSession()
+            if (savedSessionId && validSessionIds.has(savedSessionId)) {
+              newActiveSessionId = savedSessionId
+            }
+          }
 
           return {
             sessions: sessions,
@@ -81,6 +89,14 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
             error: null,
           }
         })
+
+        // BUG-FIX-fix_20260528_session_persist: 从 localStorage 恢复会话后触发完整的数据加载
+        if (hadNoActiveSession) {
+          const restoredId = useSessionStore.getState().activeSessionId
+          if (restoredId) {
+            await get().setActiveSession(restoredId)
+          }
+        }
       } catch (error: any) {
         const errorMessage = error.message || '获取会话列表失败'
         useSessionStore.setState({ isLoading: false, error: errorMessage })
@@ -238,6 +254,11 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           error: null,
         }
       })
+
+      // BUG-FIX-fix_20260528_session_persist: 删除当前活跃会话时清理持久化的会话ID
+      if (!useSessionStore.getState().activeSessionId) {
+        try { localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) } catch (_e) { /* localStorage 清理失败不影响主流程 */ }
+      }
     } catch (error: any) {
       const errorMessage = error.message || '删除会话失败'
       useSessionStore.setState((state) => {
@@ -261,6 +282,8 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }
 
     useSessionStore.setState({ activeSessionId: id })
+    // BUG-FIX-fix_20260528_session_persist: 持久化当前活跃会话ID，页面刷新后可恢复
+    uiStorage.setLastActiveSession(id)
 
     const session = sessions.find((s) => s.id === id)
     if (session?.agentId) {
@@ -283,8 +306,19 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
           // 修复方案: 管道正在流式传输时跳过 API 请求，保留本地流式数据。
           // 影响范围: 会话切换时的流式输出连续性
           // 修复日期: 2026-05-15
+          //
+          // BUG-FIX-fix_20260528_refresh_streaming_only_one_msg:
+          // 问题根因: 页面刷新后 WS 重连，后端继续发送流式事件（stream_start），
+          //          在用户点击会话之前就创建了流式占位消息并设置 streamingState。
+          //          用户点击时 isStreaming 返回 true，fetchMessages 被跳过，
+          //          历史消息未加载，只显示一条流式占位消息。
+          // 修复方案: 即使管道正在流式传输，如果本地消息数量极少（<=1，仅占位消息），
+          //          仍然调用 fetchMessages 加载历史消息，initFromAPI 的合并逻辑会保留流式消息。
+          // 影响范围: 页面刷新后进入正在输出的会话时的消息显示
+          // 修复日期: 2026-05-28
           const pipelineStore = usePipelineMessageStore.getState()
-          if (!pipelineStore.isStreaming(pipelineId)) {
+          const existingCount = (pipelineStore.messagesByPipeline[pipelineId] || []).length
+          if (!pipelineStore.isStreaming(pipelineId) || existingCount <= 1) {
             await pipelineStore.fetchMessages(pipelineId, { threadId: id })
           }
         }

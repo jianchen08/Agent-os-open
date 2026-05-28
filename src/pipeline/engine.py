@@ -112,6 +112,7 @@ class PipelineEngine:
         self._pending_notifications: list[str] = []
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
+        self._last_state: dict[str, Any] | None = None
         self._running: bool = False
         self._preserved_bridge: Any = None
         self._preserved_drain_task: Any = None
@@ -293,6 +294,7 @@ class PipelineEngine:
             _reg_entry.drain_task = self._preserved_drain_task
         self._preserved_bridge = None
         self._preserved_drain_task = None
+        self._run_started = True
         try:
             self._setup_pipeline_logging(pipeline_run_id, resumed, _pipeline_loggers)
             if _pipeline_loggers:
@@ -471,6 +473,7 @@ class PipelineEngine:
             await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine exception: {exc}")
         finally:
             self._running = False
+            self._last_state = state
             await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
                 _pipeline_id_token,

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -166,13 +167,63 @@ class TaskNotifierMixin:
 
         try:
             if new_status == "completed":
-                logger.info(
-                    "TaskWorker: worktree 合并已在评估阶段完成: task_id=%s",
-                    task_id,
-                )
+                ws_path = Path(workspace).resolve()
+                if ws_path.exists():
+                    # BUG-FIX-fix_20260528_safetynet_merge_before_cleanup:
+                    # 问题根因: 安全网发现 worktree 仍存在时直接 cleanup_workspace 删除，
+                    #   不执行合并，导致 agent 的工作成果全部丢失。
+                    # 修复方案: 先尝试合并（on_eval_passed），合并成功再清理，
+                    #   合并失败则将任务回退为 failed 并保留 worktree。
+                    logger.warning(
+                        "TaskWorker: 任务已完成但 worktree 仍存在，"
+                        "尝试安全网合并: task_id=%s, workspace=%s",
+                        task_id, workspace,
+                    )
+                    merge_result = lifecycle.on_eval_passed(task_id, workspace, ws_meta)
+                    if merge_result.get("success"):
+                        logger.info(
+                            "TaskWorker: 安全网合并成功: task_id=%s, method=%s",
+                            task_id, merge_result.get("method"),
+                        )
+                    else:
+                        merge_error = merge_result.get("error", "unknown")
+                        logger.error(
+                            "TaskWorker: 安全网合并失败，回退任务为 failed: "
+                            "task_id=%s, error=%s",
+                            task_id, merge_error,
+                        )
+                        task_service = self._task_service
+                        if task_service:
+                            try:
+                                await task_service.fail_task(
+                                    task_id,
+                                    f"worktree 合并失败（安全网）: {merge_error}",
+                                )
+                            except Exception as fail_exc:
+                                logger.error(
+                                    "TaskWorker: 安全网 fail_task 也失败: "
+                                    "task_id=%s, error=%s",
+                                    task_id, fail_exc,
+                                )
+                else:
+                    logger.info(
+                        "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
+                        task_id,
+                    )
             elif new_status == "failed":
-                lifecycle.on_eval_failed(task_id, workspace, ws_meta)
-                logger.info("TaskWorker: worktree 评估失败处理完成: task_id=%s", task_id)
+                ws_path = Path(workspace).resolve()
+                if ws_path.exists():
+                    logger.warning(
+                        "TaskWorker: 任务已失败但 worktree 仍存在，执行安全网清理: "
+                        "task_id=%s, workspace=%s",
+                        task_id, workspace,
+                    )
+                    lifecycle.on_task_failed(workspace, ws_meta)
+                else:
+                    logger.info(
+                        "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
+                        task_id,
+                    )
         except Exception as e:
             logger.warning(
                 "TaskWorker: _handle_terminal_lifecycle failed: task_id=%s, error=%s",

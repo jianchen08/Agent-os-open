@@ -400,10 +400,10 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         问题根因: _persist_ws_meta 是同步方法，但 self._task_tree.save_task(task) 是
                   async 方法（TaskService.save_task），直接调用 async 函数不 await
                   会导致 RuntimeWarning，协程也不会实际执行，ws_meta 无法持久化。
-        修复方案: 使用 asyncio.create_task 在当前运行的事件循环中调度协程。
-                  由于 _persist_ws_meta 的调用者（init_container_workspace / on_task_start）
-                  都在 async 上下文中被调用（_handle_container_task / _execute_background_task），
-                  asyncio.get_running_loop() 一定能获取到事件循环。
+        修复方案: 先立即更新内存中的 task 对象（确保后续 get_task 可获取），
+                  再使用 asyncio.create_task 异步持久化到文件。
+                  TaskStorage.save() 内部是同步的（dict 写入 + YAML 写文件），
+                  create_task 调度后会在事件循环的下一次微任务中立即完成。
         影响范围: ws_meta 持久化到 task.metadata 的可靠性。
         修复日期: 2026-05-24
         """

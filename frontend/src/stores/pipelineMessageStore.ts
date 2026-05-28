@@ -234,15 +234,22 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const pipelineMessages = state.messagesByPipeline[pipelineId] || []
       const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
 
+      logger.info(
+        '[addMessage] pipelineId=%s id=%s realId=%s role=%s seq=%d existing=%d activePipeline=%s',
+        pipelineId?.slice(0, 12), message.id?.slice(0, 12), realMessageId?.slice(0, 12),
+        message.role, message.sequence ?? -1, pipelineMessages.length,
+        state.activePipelineId?.slice(0, 12) || 'null',
+      )
+
       // 精确 ID 匹配去重
       let existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
 
-      // BUG-FIX-fix_20260515_long_context_message_loss:
-      // 精确匹配失败时，尝试基于 sequence 或指纹的模糊匹配
-      // 避免同一消息因 WS/API ID 格式不同被当作两条消息
+      // BUG-FIX-fix_20260528_send_no_output:
+      // 精确匹配失败时，尝试基于 sequence 的模糊匹配（仅限同 role）
+      // 避免不同 role 的消息因 sequence 相同被错误合并
       if (existingIndex < 0 && message.sequence != null) {
         existingIndex = pipelineMessages.findIndex((m) =>
-          m.sequence === message.sequence,
+          m.sequence === message.sequence && m.role === message.role,
         )
       }
       if (existingIndex < 0 && message.role === 'assistant') {
@@ -476,10 +483,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           if (localMsg.status === 'streaming') {
             const apiIds = new Set(sorted.map((m) => m.id))
             if (apiIds.has(localMsg.id)) return false
-            if (localMsg.sequence != null) {
-              const dupSeq = sorted.find((m) => m.sequence === localMsg.sequence && m.role === localMsg.role)
-              if (dupSeq) return false
-            }
             return true
           }
 

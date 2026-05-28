@@ -76,13 +76,12 @@ export function handlePipelineReceived(data: any): void {
     return
   }
 
-  // 计算下一个 sequence
-  const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1
+  const placeholderSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1000
 
   pipelineStore.addMessage(pipelineId, {
     role: 'system',
     content,
-    sequence: nextSeq,
+    sequence: placeholderSeq,
     timestamp: new Date().toISOString(),
     status: 'completed',
     parts: [

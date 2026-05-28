@@ -1345,6 +1345,11 @@ function TreeNode({
       try {
         const layoutStore = useLayoutModeStore.getState()
         const tabId = `ws-tree-${nodeId}`
+        const existingTab = layoutStore.workspaceTabs.find(t => t.id === tabId)
+        if (existingTab) {
+          layoutStore.setActiveTab(tabId)
+          return
+        }
         layoutStore.addWorkspaceTab({
           id: tabId,
           title: title || '工作空间',

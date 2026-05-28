@@ -115,6 +115,7 @@ class _MergeOpsMixin:
                     "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: "
                     "task_id=%s, workspace=%s", task_id, workspace)
                 result["verify_error"] = verify_detail
+                result["success"] = False
                 return result
             if mode == "shared":
                 logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
@@ -140,12 +141,14 @@ class _MergeOpsMixin:
                 self._run_git("worktree", "remove", str(workspace), "--force", cwd=project_root)
             except Exception as e:
                 logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
+                self._run_git("worktree", "prune", cwd=project_root)
             if branch:
                 # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
                 if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
                     logger.info("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
+                self._run_git("worktree", "prune", cwd=project_root)
                 self._run_git("branch", "-D", branch, cwd=project_root)
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
@@ -511,49 +514,3 @@ class _MergeOpsMixin:
                            branch_name, len(log_output.splitlines()))
             return False
         return True
-
-    # ── 12. 工作空间清理 ──────────────────────────────────────────
-
-    def cleanup_workspace(self, task_id: str) -> dict[str, Any]:
-        """清理单个任务关联的工作空间（worktree/分支/目录），不递归子任务"""
-        self.restore_ws_meta(task_id)
-        meta = self._ws_meta_store.get(task_id)
-        if not meta:
-            return {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-
-        mode = meta.get("mode", "")
-        workspace = meta.get("path", "")
-        result: dict[str, Any] = {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-
-        if mode == "worktree":
-            project_root = Path(meta.get("project_root", "")).resolve()
-            branch = meta.get("branch", "")
-            ws_path = Path(workspace).resolve()
-            if project_root.exists():
-                if ws_path.exists():
-                    rc, _, _ = self._run_git("worktree", "remove", str(ws_path), "--force", cwd=project_root)
-                    result["worktree_removed"] = rc == 0
-                if branch:
-                    rc, _, _ = self._run_git("branch", "-D", branch, cwd=project_root)
-                    result["branch_deleted"] = rc == 0
-            if ws_path.exists() and "__wt_" in ws_path.name:
-                try:
-                    _force_rmtree(str(ws_path))
-                    result["dir_removed"] = True
-                except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s", workspace, e)
-        elif mode == "plain":
-            ws_path = Path(workspace)
-            if not ws_path.is_absolute():
-                ws_path = ws_path.resolve()
-            if ws_path.exists():
-                try:
-                    _force_rmtree(str(ws_path))
-                    result["dir_removed"] = True
-                    logger.info("[WorkspaceLifecycle] 已清理 plain 工作空间: %s", ws_path)
-                except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace plain rmtree 失败: %s, %s", workspace, e)
-
-        self._ws_meta_store.pop(task_id, None)
-        logger.info("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s", task_id, mode, result)
-        return result

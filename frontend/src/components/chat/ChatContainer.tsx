@@ -220,8 +220,15 @@ export const ChatContainer = ({
         const mainPipelineId = session?.activePipelineId || ''
         if (mainPipelineId) {
           pipelineStore.activatePipeline(mainPipelineId)
+          // BUG-FIX-fix_20260528_refresh_streaming_only_one_msg:
+          // 刷新后 WS 流式事件先到达时，管道中可能只有 1 条流式占位消息，
+          // 原条件 existing.length === 0 不满足，历史消息不会被加载。
+          // 修复：当消息数量 <= 1 且正在流式传输时，仍加载历史消息。
           const existing = pipelineStore.messagesByPipeline[mainPipelineId]
-          if (!existing || existing.length === 0) {
+          const isStreaming = pipelineStore.streamingState[mainPipelineId]?.isStreaming
+          const shouldFetch = !existing || existing.length === 0
+            || (isStreaming && existing.length <= 1)
+          if (shouldFetch) {
             pipelineStore.fetchMessages(mainPipelineId, { threadId: sessionId }).catch(() => {})
           }
         }
@@ -293,8 +300,17 @@ export const ChatContainer = ({
         if (m.role === 'tool') return false
         return true
       })
+      // BUG-FIX-fix_20260528_system_msg_render:
+      // 问题根因: 仅匹配 '[系统通知]' 前缀，遗漏 '[系统提醒]' 等其他系统消息
+      // 修复方案: 同时检查 parts 中是否包含 type='system' 的 part，以及 metadata 中的系统标识
       .map((m: any) => {
-        if (m.role === 'user' && (m.content || '').trimStart().startsWith('[系统通知]')) {
+        if (m.role === 'system') return m
+        const hasSystemPart = m.parts?.some((p: any) => p.type === 'system')
+        const hasSystemMeta = m.metadata?.record_type === 'system' ||
+          m.metadata?.type === 'system' ||
+          m.metadata?.sender_type === 'system'
+        const hasSystemPrefix = (m.content || '').trimStart().startsWith('[系统')
+        if (hasSystemPart || hasSystemMeta || hasSystemPrefix) {
           return { ...m, role: 'system' }
         }
         return m

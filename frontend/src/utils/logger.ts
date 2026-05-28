@@ -202,83 +202,85 @@ class ModuleLogger {
    * @param message 日志消息
    * @param data 附加数据（可选）
    */
-  error(message: string, data?: unknown): void {
+  error(message: string, ...args: unknown[]): void {
     if (!this.manager.shouldLog(LogLevel.ERROR)) return
-
     const prefix = this.manager.formatPrefix(this.moduleName, LogLevel.ERROR)
-    if (data !== undefined) {
-      console.error(prefix, message, data)
-    } else {
-      console.error(prefix, message)
-    }
+    console.error(prefix, this._format(message, args))
   }
 
   /**
    * 记录警告日志
    *
-   * @param message 日志消息
-   * @param data 附加数据（可选）
+   * @param message 日志消息，支持 printf 格式化（%s/%d/%j）
+   * @param args 格式化参数
    */
-  warn(message: string, data?: unknown): void {
+  warn(message: string, ...args: unknown[]): void {
     if (!this.manager.shouldLog(LogLevel.WARN)) return
-
     const prefix = this.manager.formatPrefix(this.moduleName, LogLevel.WARN)
-    if (data !== undefined) {
-      console.warn(prefix, message, data)
-    } else {
-      console.warn(prefix, message)
-    }
+    console.warn(prefix, this._format(message, args))
   }
 
   /**
    * 记录信息日志
    *
-   * @param message 日志消息
-   * @param data 附加数据（可选）
+   * @param message 日志消息，支持 printf 格式化（%s/%d/%j）
+   * @param args 格式化参数
    */
-  info(message: string, data?: unknown): void {
+  info(message: string, ...args: unknown[]): void {
     if (!this.manager.shouldLog(LogLevel.INFO)) return
-
     const prefix = this.manager.formatPrefix(this.moduleName, LogLevel.INFO)
-    if (data !== undefined) {
-      console.log(prefix, message, data)
-    } else {
-      console.log(prefix, message)
-    }
+    console.log(prefix, this._format(message, args))
   }
 
   /**
    * 记录调试日志
    *
-   * @param message 日志消息
-   * @param data 附加数据（可选）
+   * @param message 日志消息，支持 printf 格式化（%s/%d/%j）
+   * @param args 格式化参数
    */
-  debug(message: string, data?: unknown): void {
+  debug(message: string, ...args: unknown[]): void {
     if (!this.manager.shouldLog(LogLevel.DEBUG)) return
-
     const prefix = this.manager.formatPrefix(this.moduleName, LogLevel.DEBUG)
-    if (data !== undefined) {
-      console.log(prefix, message, data)
-    } else {
-      console.log(prefix, message)
-    }
+    console.log(prefix, this._format(message, args))
   }
 
   /**
    * 记录详细日志
    *
-   * @param message 日志消息
-   * @param data 附加数据（可选）
+   * @param message 日志消息，支持 printf 格式化（%s/%d/%j）
+   * @param args 格式化参数
    */
-  verbose(message: string, data?: unknown): void {
+  verbose(message: string, ...args: unknown[]): void {
     if (!this.manager.shouldLog(LogLevel.VERBOSE)) return
-
     const prefix = this.manager.formatPrefix(this.moduleName, LogLevel.VERBOSE)
-    if (data !== undefined) {
-      console.log(prefix, message, data)
-    } else {
-      console.log(prefix, message)
+    console.log(prefix, this._format(message, args))
+  }
+
+  /**
+   * 简易 printf 格式化：将 %s/%d/%j 替换为对应参数值
+   *
+   * 无占位符时直接返回原始 message + 追加参数。
+   *
+   * @param template 模板字符串
+   * @param args 格式化参数列表
+   * @returns 格式化后的字符串
+   */
+  private _format(template: string, args: unknown[]): string {
+    if (args.length === 0) return template
+    let idx = 0
+    const result = template.replace(/%[sdj]/g, (match) => {
+      if (idx >= args.length) return match
+      const val = args[idx++]
+      if (match === '%d') return String(typeof val === 'number' ? val : Number(val) || 0)
+      if (match === '%j') {
+        try { return JSON.stringify(val) } catch { return '[Circular]' }
+      }
+      return String(val ?? '')
+    })
+    if (idx < args.length) {
+      return result + ' ' + args.slice(idx).map((a) => String(a ?? '')).join(' ')
     }
+    return result
   }
 
   /**

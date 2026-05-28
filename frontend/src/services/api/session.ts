@@ -241,12 +241,18 @@ function mapBackendMessageToMessage(
     }
   }
 
+  // BUG-FIX-fix_20260528_system_msg_render:
+  // 问题根因: 后端引擎将系统通知存储为 type='user'，API 返回 role='user'，
+  //           导致前端合并后系统消息丢失系统样式
+  // 修复方案: 当 isSystemMsg 为 true 时，将 role 修正为 'system'
+  const effectiveRole = isSystemMsg ? 'system' : backendMessage.role as Message['role']
+
   return {
     id: backendMessage.id,
     sessionId: sessionId,
     parentId: backendMessage.parentId,
     sequence: backendMessage.sequence,
-    role: backendMessage.role as Message['role'],
+    role: effectiveRole,
     content: backendMessage.content,
     timestamp: backendMessage.timestamp,
     agentId: backendMessage.agentId,

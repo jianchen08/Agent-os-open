@@ -262,6 +262,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
     localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
+    // BUG-FIX-fix_20260528_session_persist: 登出时清理持久化的活跃会话ID
+    localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION)
 
     // 清除状态
     set({

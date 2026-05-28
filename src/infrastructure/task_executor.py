@@ -261,8 +261,14 @@ class TaskExecutorMixin:
             return
 
         # ── 5.5 管道已结束，检查任务终态 ──
+        # BUG-FIX-fix_20260528_pipeline_state_none:
+        # 问题根因: _check_post_pipeline_state 传入 pipeline_state=None，
+        #   导致 _fail_after_pipeline_exit 中 state_is_empty=True，
+        #   误报"管道被中断"而丢失精确错误信息（iteration/raw_error 等）。
+        # 修复方案: 从 engine._last_state 获取管道最终状态。
+        _pipeline_state = getattr(engine, '_last_state', None)
         await self._check_post_pipeline_state(
-            task_id, task_service, None, lifecycle, workspace, ws_meta,
+            task_id, task_service, _pipeline_state, lifecycle, workspace, ws_meta,
             ctx, timer_manager,
         )
 
@@ -577,6 +583,23 @@ class TaskExecutorMixin:
         管道的挂起/恢复/运行都是引擎自己的事，任务只关心引擎是否还活着。
         引擎活着就等，死了（不再 running 也不再 suspended）就返回。
         """
+        # BUG-FIX-fix_20260528_wait_engine_race:
+        # 问题根因: send_pipeline_message 通过 asyncio.create_task 调度引擎运行，
+        #   但引擎还没来得及执行 _run_loop（is_running=False），
+        #   _wait_for_engine_completion 第一次检查就判定引擎已结束，直接 break。
+        #   导致"管道被中断"误报（iterations=?/?, ended=?）。
+        # 修复方案: 先等待引擎实际开始运行（_run_started=True），再进入轮询。
+        #   最多等 30 秒（600 * 0.05s），超时则放弃。
+        for _ in range(600):
+            if getattr(engine, '_run_started', False):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            logger.warning(
+                "TaskWorker: 引擎在30秒内未启动: task_id=%s", task_id,
+            )
+            return
+
         for _ in range(36000):
             if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
                 break
