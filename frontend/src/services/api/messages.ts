@@ -180,12 +180,15 @@ export function toMessage(
     })
   }
 
+  // BUG-FIX-fix_20260528_system_msg_render:
+  // 问题根因: 仅匹配 '[系统通知]' 前缀，遗漏 '[系统提醒]' 等其他系统消息
+  // 修复方案: 改为匹配 '[系统' 开头的所有前缀
   const isSystemMsg =
     role === 'system' ||
     metadata?.record_type === 'system' ||
     metadata?.type === 'system' ||
     metadata?.sender_type === 'system' ||
-    content?.trimStart().startsWith('[系统通知]')
+    content?.trimStart().startsWith('[系统')
 
   if (content?.trim()) {
     if (isSystemMsg) {
@@ -221,12 +224,18 @@ export function toMessage(
     }
   }
 
+  // BUG-FIX-fix_20260528_system_msg_render:
+  // 问题根因: 后端引擎将系统通知存储为 type='user'，API 返回 role='user'，
+  //           导致前端合并后系统消息丢失系统样式
+  // 修复方案: 当 isSystemMsg 为 true 时，将 role 修正为 'system'
+  const effectiveRole = isSystemMsg ? 'system' : role
+
   return {
     id,
     sessionId,
     parentId,
     sequence,
-    role: role as any,
+    role: effectiveRole as any,
     content,
     timestamp,
     agentId,

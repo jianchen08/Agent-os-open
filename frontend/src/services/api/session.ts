@@ -200,12 +200,15 @@ function mapBackendMessageToMessage(
     })
   }
 
+  // BUG-FIX-fix_20260528_system_msg_render:
+  // 问题根因: 仅匹配 '[系统通知]' 前缀，遗漏 '[系统提醒]' 等其他系统消息
+  // 修复方案: 改为匹配 '[系统' 开头的所有前缀
   const isSystemMsg =
     backendMessage.role === 'system' ||
     metadata?.record_type === 'system' ||
     metadata?.type === 'system' ||
     metadata?.sender_type === 'system' ||
-    backendMessage.content?.trimStart().startsWith('[系统通知]')
+    backendMessage.content?.trimStart().startsWith('[系统')
 
   if (backendMessage.content?.trim()) {
     if (isSystemMsg) {
