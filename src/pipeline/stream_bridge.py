@@ -490,11 +490,31 @@ class PipelineStreamBridge:
                 )
 
                 if _is_suspended:
-                    logger.info(
-                        "drain_loop: engine suspended, ending stream: pipeline=%s chunks=%d",
-                        self.pipeline_id[:12], _chunk_count,
-                    )
-                    break
+                    # BUG-FIX-fix_20260528_drain_race:
+                    # 问题根因: inject_message 设置 _wake_event 后，引擎的
+                    #   _suspend_and_wait 恢复逻辑（设 is_suspended=False）
+                    #   需要下一个事件循环 tick 才执行。如果 drain_loop 在
+                    #   此处立即退出，LLM 后续生成的 chunk 无消费者。
+                    # 修复方案: 检测到 suspended 后等待最多 1 秒，期间每
+                    #   50ms 重新检查。如果引擎醒来则继续；超时才退出。
+                    _suspend_grace_start = asyncio.get_event_loop().time()
+                    _suspend_grace_max = 1.0
+                    _actually_suspended = True
+                    while asyncio.get_event_loop().time() - _suspend_grace_start < _suspend_grace_max:
+                        await asyncio.sleep(0.05)
+                        if not suspend_check():
+                            _actually_suspended = False
+                            break
+                        if not self._queue.empty():
+                            _actually_suspended = False
+                            break
+                    if _actually_suspended:
+                        logger.info(
+                            "drain_loop: engine suspended (grace expired), ending stream: pipeline=%s chunks=%d",
+                            self.pipeline_id[:12], _chunk_count,
+                        )
+                        break
+                    last_keepalive = asyncio.get_event_loop().time()
 
                 # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
                 if now - last_keepalive > heartbeat_interval:
