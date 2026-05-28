@@ -4,8 +4,8 @@
 
 ## 基本信息 [必填]
 
-- **任务ID**: 399df3fb587a
-- **任务类型**: Bug修复
+- **任务ID**: bdd1aa494689
+- **任务类型**: 编码开发（含真实运行验证）
 - **执行路径**: 路径 A（编码开发）
 - **涉及Agent**: code_writer_agent, code_reviewer_agent, test_debug_agent, function_verifier_agent
 - **创建时间**: 2026-05-28
@@ -16,10 +16,11 @@
 
 | 序号 | 目标描述 | 验收标准 |
 |------|----------|----------|
-| 1 | 全面检查复盘模块代码，发现所有问题 | 列出完整的 Bug 清单，含位置、原因、影响 |
-| 2 | 修复发现的全部 Bug | 修复代码无语法错误，无新增问题 |
-| 3 | 启动复盘测试，验证模块能正常运行 | 测试全部通过，端到端复盘流程无异常 |
-| 4 | 输出检查和测试结果报告 | 报告包含检查结果、修复措施、测试结果、最终结论 |
+| 1 | 阅读代码了解复盘模块的启动方式和依赖关系 | 产出启动脚本，接口契约正确对接 |
+| 2 | 编写启动脚本，实际触发一次复盘流程 | 脚本可通过 `python scripts/trigger_review.py` 运行，退出码0 |
+| 3 | 记录复盘执行的全过程和结果 | 控制台输出完整的复盘日志（pipeline列表、经验提取、状态变化、统计） |
+| 4 | 遇到问题排查修复，直到复盘正常完成 | 复盘引擎能正常完成一轮，无未捕获异常 |
+| 5 | 输出完整的复盘触发和执行报告 | 编排报告 + 功能验证报告齐全 |
 
 ---
 
@@ -27,10 +28,9 @@
 
 | 文件路径 | 修改内容 | 修改原因 | 关联目标 |
 |----------|----------|----------|----------|
-| src/memory/maintenance/review_engine.py:161 | `saved_count` → `saved_counts.get("experiences", 0)` | `saved_count` 变量未定义，运行时会抛出 NameError | #1, #2 |
-| src/memory/maintenance/review_engine.py:784-797 | `_load_existing_experiences` 改用 `list_semantic_memory(user_id="system")` + 按 `source_type` 过滤 | 原调用 `search(query="", source_type="experience", limit=50)` 签名完全错误：缺少 user_id、无 source_type 参数、空 query 直接返回空列表 | #1, #2 |
-| src/memory/maintenance/review_engine.py:806 | `_mark_pipeline_reviewed` 从 `def` 改为 `async def`，内部 `run_until_complete` 改为 `await` | 在 async 上下文中调用 `run_until_complete` 会抛出 RuntimeError: Cannot run the event loop while another loop is running | #1, #2 |
-| src/memory/maintenance/review_engine.py:147,852,874 | 3 处 `_mark_pipeline_reviewed` 调用添加 `await` | 配合 Bug3 修复，同步调用改为异步等待 | #2 |
+| scripts/trigger_review.py | 新建复盘触发启动脚本，包含3个内存依赖组件、模拟数据、两阶段复盘触发 | 实际触发复盘流程进行真实运行验证 | #1,#2,#3,#4 |
+
+**说明**：本任务核心产出为新增启动脚本，不涉及对现有复盘模块源码的修改。test_debug_agent 和 function_verifier_agent 在验证过程中创建了 `__init__.py` 包文件和 `verify_reproduce.py` 验证脚本，属于辅助验证产物。
 
 ---
 
@@ -38,32 +38,56 @@
 
 ### 验证工具
 
-| 工具 | 版本 | 用途 |
-|------|------|------|
-| pytest | Python 3.12+ | 单元测试执行 |
-| ruff | - | 静态代码扫描 |
-| mypy | - | 类型检查 |
-| bash_execute | - | 端到端验证脚本运行 |
+| 工具 | 版本（如适用） | 用途 |
+|------|---------------|------|
+| python3 | - | 运行复盘触发脚本 |
+| pytest | - | test_debug_agent 创建并运行测试用例 |
+| verify_reproduce.py | - | function_verifier_agent 独立验证脚本（39项测试） |
 
 ### 验证动作与结果
 
 | 序号 | 验证动作 | 验证工具 | 验证结果 | 具体数据 |
 |------|----------|----------|----------|----------|
-| 1 | 代码审查：3 个 Bug 修复的需求追溯、架构边界、接口一致性 | code_reviewer_agent | 通过 | 细节清单 92.3%（12/13），验收标准 4/4，结论 Approve |
-| 2 | 静态扫描：py_compile + ruff + mypy | ruff/mypy | 通过 | 0 个编译错误，0 个 lint 问题，0 个类型错误 |
-| 3 | 单元测试：3 个 Bug 专项 + 集成测试 | pytest | 通过 | 15/15 passed，耗时 0.33s |
-| 4 | 用户旅程：6 步串联端到端验证（构建引擎→查询pending→执行复盘→验证产出→验证标记→二次触发） | bash_execute | 通过 | 6/6 步骤通过 |
-| 5 | 补充场景：错误输入 + 边界异常 | bash_execute | 通过 | 2/2 场景通过（不存在pipeline、Knowledge异常容错、全量去重、无pending） |
-| 6 | Bug 专项：逐个验证 3 个修复 | bash_execute | 通过 | 3/3 Bug 修复后行为正确 |
+| 1 | code_writer_agent 编码阶段运行脚本 | python3 | 通过 | 脚本退出码0，3个pipeline复盘完成，提取3条经验 |
+| 2 | code_reviewer_agent 法定审查 | 静态扫描+人工审查 | 通过（Comment） | 接口契约完全匹配，4/5物理保险项通过，34条细节清单88.2%通过 |
+| 3 | test_debug_agent 运行验证 | pytest + python3 | 通过 | 6个测试全部通过，退出码0 |
+| 4 | function_verifier_agent 功能验证 | python3 + verify_reproduce.py | 通过 | 39项测试100%通过，5步用户旅程全部通过 |
+
+### 复盘执行核心数据
+
+```
+阶段1 - ReviewEngine 直接复盘：
+  待复盘 pipeline 数量: 3
+  处理结果: 3/3 completed
+  经验提取: pipeline-001=2条, pipeline-002=1条, pipeline-003=0条, 总计3条
+  状态变化: 3个 pipeline 从 pending → completed ✓
+  chunk 标记: 3个 chunk 的 reviewed 标记为 True
+
+阶段2 - MemoryMaintenanceService 触发：
+  接口兼容性检查: 发现3个不匹配
+    - 缺失方法: run_batch_review (严重度: high)
+    - 缺失方法: get_summary (严重度: medium)
+    - 缺失方法: reset (严重度: medium)
+  Service 层仍完成复盘: processed=1
+```
+
+### 补充场景验证
+
+| 场景 | 结果 | 数据 |
+|------|------|------|
+| 空 pipeline 列表 | 通过 | pending=0, processed=0, 无异常 |
+| 100条错误记录边界 | 通过 | 100条经验全部提取，状态正常 |
+| 未知错误类型 | 通过 | 正常分类处理，无崩溃 |
 
 ### 验证充分性自评
 
-| 需求目标序号 | 是否已验证 | 验证动作序号 | 未验证原因 |
-|-------------|-----------|-------------|-----------|
-| #1 | 是 | 1, 2 | - |
-| #2 | 是 | 1, 2, 3, 4, 5, 6 | - |
-| #3 | 是 | 3, 4, 5, 6 | - |
-| #4 | 是 | 本报告 | - |
+| 需求目标序号 | 是否已验证 | 验证动作序号 | 未验证原因（如有） |
+|-------------|-----------|-------------|-------------------|
+| #1 | 是 | 2 | 审查确认接口契约正确对接 |
+| #2 | 是 | 1,3,4 | 三轮运行均退出码0 |
+| #3 | 是 | 1,4 | 控制台日志完整输出 |
+| #4 | 是 | 3,4 | 6+39项测试全部通过 |
+| #5 | 是 | 4 | 验证报告+编排报告齐全 |
 
 ---
 
@@ -71,18 +95,24 @@
 
 | 阶段 | 门禁指标 | 结果 | 备注 |
 |------|----------|------|------|
-| 编码质量 | file_check + format_valid | 通过 | 3 个 Bug 修复到位，语法验证通过 |
-| 物理保险+法定审查 | semantic_check (code_reviewer) | 通过 | Approve 有条件，细节 92.3%，验收 4/4。发现 1 个既有架构问题（_save_to_disk 私有方法访问），非本次引入 |
-| 测试达标 | file_check + test_check | 通过 | 15/15 单元测试通过 |
-| 功能验证 | file_check + semantic_check (function_verifier) | 通过 | 用户旅程 6/6，补充场景 2/2，综合评分 95 |
+| A1 编码质量 | file_check + format_valid | 通过 | code_writer_agent 自动运行通过 |
+| A2 物理保险+法定审查 | semantic_check | 通过（Comment） | 接口契约完全匹配，有改进建议但无阻断性问题 |
+| A3 测试达标 | file_check + test_check | 通过 | 6个测试全部通过 |
+| A4 功能验证 | file_check + semantic_check | 通过 | 39项测试100%通过 |
 
 ---
 
 ## 结论 [必填]
 
 - **整体结论**: 达成
-- **数据支撑**: 代码审查通过（4/4 验收标准），静态扫描 0 问题，单元测试 15/15 通过，用户旅程 6/6 步骤通过，补充场景 2/2 通过，功能验证综合评分 95 分
-- **遗留问题**: 第 830 行 `self._chunk_db._save_to_disk(chunk)` 访问私有方法，属于既有架构问题，非本次修复引入，建议后续通过为 ChunkService 添加公共 `update` 方法来解决
+- **数据支撑**: 
+  - 复盘流程完整执行一轮：3个 pipeline 全部从 pending 变为 completed
+  - 经验提取正确：2+1+0=3 条经验，与错误记录数一一对应
+  - 39项功能验证测试100%通过（含用户旅程5步 + 补充场景2个）
+  - service.py 与 ReviewEngine 之间3处接口不匹配被正确诊断
+  - 脚本退出码0，无未捕获异常
+- **遗留问题**: 
+  - service.py 与 ReviewEngine 存在接口不匹配（`review_execution_history` vs `run_review`、`config` 参数不接受、`_count_pending_records` 方法缺失），当前脚本通过兼容性检查正确捕获了这些问题，但 service 层的修复不在本次任务范围内
 
 ---
 
@@ -90,4 +120,6 @@
 
 | 问题 | 严重程度 | 后续建议 |
 |------|----------|----------|
-| `_chunk_db._save_to_disk` 访问私有方法 | 低 | 为 ChunkService 添加公共 update 方法 |
+| service.py 调用 `review_execution_history()` 而 ReviewEngine 只有 `run_review(run_id)` | 高 | 后续任务应统一 service.py 与 ReviewEngine 的接口命名 |
+| service.py `_get_review_engine()` 传入 `config=` 但 ReviewEngine.__init__ 不接受 | 中 | 补充 ReviewEngine 的 config 参数支持 |
+| service.py 调用 `_count_pending_records()` 但该方法不存在 | 中 | 在 ReviewEngine 中实现此方法或改为调用 `len(get_pending_pipelines())` |

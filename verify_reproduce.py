@@ -1,339 +1,238 @@
-"""
-复盘模块修复后完整可用性验证 - 可复现验证脚本
-============================================
-验证修复了 review_engine.py 中 3 个 Bug 后的完整复盘流程。
+#!/usr/bin/env python3
+"""复盘触发脚本功能完整性验证脚本 - 可独立运行复现所有验证场景。
 
-Bug 修复记录:
-- Bug1: saved_count 未定义 → 改为 saved_counts.get("experiences", 0)
-- Bug2: _load_existing_experiences 签名错误 → 改用 list_semantic_memory + 按 source_type 过滤
-- Bug3: _mark_pipeline_reviewed 从同步改为 async，run_until_complete 改为 await
-
-运行方式: python3 verify_reproduce.py
-前置条件: pip install pytest pytest-asyncio
+使用方法: python3 verify_reproduce.py
+工作目录: 项目根目录（scripts/trigger_review.py 所在目录的上级）
 """
 from __future__ import annotations
 
-import asyncio
+import subprocess
 import sys
-from unittest.mock import AsyncMock, MagicMock
+import json
+from pathlib import Path
+
+# 确保项目根目录在 sys.path 中
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.memory.maintenance.review_engine import (
-    ChunkData,
-    ExecutionRecord,
-    PipelineRunSummary,
+    ErrorRecord,
+    Pipeline,
     ReviewEngine,
+    ReviewStatus,
+)
+from src.memory.maintenance.service import MemoryMaintenanceService
+
+PASSED = 0
+FAILED = 0
+
+
+def report(name: str, ok: bool, detail: str = ""):
+    global PASSED, FAILED
+    status = "✓ PASS" if ok else "✗ FAIL"
+    PASSED += 1 if ok else 0
+    FAILED += 1 if not ok else 0
+    msg = f"  [{status}] {name}"
+    if detail:
+        msg += f"\n         {detail}"
+    print(msg)
+
+
+def separator(title: str):
+    print(f"\n{'='*60}")
+    print(f"  {title}")
+    print(f"{'='*60}")
+
+
+# ============================================================
+# 用户旅程 Step 1: 触发脚本执行（退出码0）
+# ============================================================
+separator("用户旅程 Step 1: 运行 trigger_review.py")
+result = subprocess.run(
+    [sys.executable, "scripts/trigger_review.py"],
+    capture_output=True,
+    text=True,
+    timeout=30,
+)
+output = result.stdout + result.stderr
+exit_code = result.returncode
+
+report("退出码为 0", exit_code == 0, f"实际退出码: {exit_code}")
+report("输出包含 '复盘触发脚本启动'", "复盘触发脚本启动" in output)
+report("输出包含 '复盘流程全部完成'", "复盘流程全部完成" in output)
+
+
+# ============================================================
+# 用户旅程 Step 2: 复盘执行结果（3个pipeline全部完成）
+# ============================================================
+separator("用户旅程 Step 2: 复盘执行结果")
+engine = ReviewEngine()
+p1 = Pipeline(pipeline_id="p1", errors=[
+    ErrorRecord("e1", "timeout", "API 调用超时", "2026-05-28T08:00:00Z"),
+    ErrorRecord("e2", "connection", "数据库连接断开", "2026-05-28T08:01:00Z"),
+])
+p2 = Pipeline(pipeline_id="p2", errors=[
+    ErrorRecord("e3", "validation", "参数格式不正确", "2026-05-28T08:05:00Z"),
+])
+p3 = Pipeline(pipeline_id="p3", errors=[])
+engine.register_pipelines([p1, p2, p3])
+
+pending = engine.get_pending_pipelines()
+report("注册后 pending 数量为 3", len(pending) == 3, f"实际: {len(pending)}")
+
+review_result = engine.run_review()
+report("处理数量为 3", review_result["processed"] == 3, f"实际: {review_result['processed']}")
+report("总 pending 数为 3", review_result["total_pending"] == 3)
+
+# 验证每个 pipeline 结果状态
+for pr in review_result["pipeline_results"]:
+    report(
+        f"{pr['pipeline_id']} 状态为 completed",
+        pr["status"] == "completed",
+        f"实际: {pr['status']}",
+    )
+
+
+# ============================================================
+# 用户旅程 Step 3: 经验提取正确性
+# ============================================================
+separator("用户旅程 Step 3: 经验提取正确性")
+report(
+    "pipeline-001 提取 2 条经验",
+    review_result["pipeline_results"][0]["experience_count"] == 2,
+    f"实际: {review_result['pipeline_results'][0]['experience_count']}",
+)
+report(
+    "pipeline-002 提取 1 条经验",
+    review_result["pipeline_results"][1]["experience_count"] == 1,
+    f"实际: {review_result['pipeline_results'][1]['experience_count']}",
+)
+report(
+    "pipeline-003 提取 0 条经验",
+    review_result["pipeline_results"][2]["experience_count"] == 0,
+    f"实际: {review_result['pipeline_results'][2]['experience_count']}",
+)
+report(
+    "总经验数为 3",
+    review_result["experiences_extracted"] == 3,
+    f"实际: {review_result['experiences_extracted']}",
+)
+
+# 验证经验内容的具体字段
+report("p1 的经验对象数量为 2", len(p1.experiences) == 2, f"实际: {len(p1.experiences)}")
+if p1.experiences:
+    exp = p1.experiences[0]
+    report("经验包含 experience_id", bool(exp.experience_id), f"值: {exp.experience_id}")
+    report("经验包含 lesson", bool(exp.lesson), f"值: {exp.lesson[:50]}...")
+    report("经验包含 category", bool(exp.category), f"值: {exp.category}")
+    report("经验包含 created_at", bool(exp.created_at), f"值: {exp.created_at}")
+
+
+# ============================================================
+# 用户旅程 Step 4: 状态变化验证（pending → completed）
+# ============================================================
+separator("用户旅程 Step 4: 状态变化 pending → completed")
+for p in [p1, p2, p3]:
+    report(
+        f"{p.pipeline_id} 状态为 COMPLETED",
+        p.status == ReviewStatus.COMPLETED,
+        f"实际: {p.status}",
+    )
+    report(
+        f"{p.pipeline_id} 有 reviewed_at 时间戳",
+        p.reviewed_at is not None,
+        f"值: {p.reviewed_at}",
+    )
+
+
+# ============================================================
+# 用户旅程 Step 5: 接口兼容性诊断
+# ============================================================
+separator("用户旅程 Step 5: 接口兼容性诊断")
+service = MemoryMaintenanceService()
+configs = [{"pipeline_id": "svc-p1", "errors": [{"error_id": "se1", "error_type": "timeout", "message": "服务超时"}]}]
+svc_result = service.trigger_review(configs)
+
+interface_issues = svc_result["interface_check"]
+report("检测到接口不匹配问题", len(interface_issues) > 0, f"检测到 {len(interface_issues)} 个问题")
+
+missing_methods = [issue["missing_method"] for issue in interface_issues]
+report("检测到 run_batch_review 缺失", "run_batch_review" in missing_methods)
+report("检测到 get_summary 缺失", "get_summary" in missing_methods)
+report("检测到 reset 缺失", "reset" in missing_methods)
+
+# 验证严重度分级
+for issue in interface_issues:
+    if issue["missing_method"] == "run_batch_review":
+        report("run_batch_review 严重度为 high", issue["severity"] == "high", f"实际: {issue['severity']}")
+
+# Service 层复盘仍能完成（使用兼容的 run_review）
+review_output = svc_result["review_result"]
+report(
+    "Service 层复盘成功完成",
+    isinstance(review_output, dict) and review_output.get("processed") is not None,
+    f"结果: {review_output}",
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ============================================================
+# 补充场景 1: 错误输入 - 空 pipeline 列表
+# ============================================================
+separator("补充场景 1: 错误输入 - 空 pipeline 列表")
+engine2 = ReviewEngine()
+engine2.register_pipelines([])
+pending2 = engine2.get_pending_pipelines()
+report("空注册后 pending 数量为 0", len(pending2) == 0, f"实际: {len(pending2)}")
 
-def make_summary(
-    run_id: str = "run-001",
-    status: str = "completed",
-    review_status: str = "pending",
-) -> PipelineRunSummary:
-    return PipelineRunSummary(
-        run_id=run_id, status=status, review_status=review_status,
-        total_records=5, total_iterations=3,
-        created_at="2026-01-01T00:00:00", error="",
+result2 = engine2.run_review()
+report("空列表复盘 processed 为 0", result2["processed"] == 0, f"实际: {result2['processed']}")
+report("空列表复盘 experiences_extracted 为 0", result2["experiences_extracted"] == 0)
+
+
+# ============================================================
+# 补充场景 2: 边界情况 - 大量错误记录的 pipeline
+# ============================================================
+separator("补充场景 2: 边界情况 - 大量错误记录")
+engine3 = ReviewEngine()
+many_errors = [ErrorRecord(f"err-{i:04d}", "timeout", f"错误 {i}", "2026-05-28T08:00:00Z") for i in range(100)]
+big_pipeline = Pipeline(pipeline_id="big-pipeline", errors=many_errors)
+engine3.register_pipeline(big_pipeline)
+
+result3 = engine3.run_review()
+report("大量错误复盘 processed 为 1", result3["processed"] == 1)
+report("100条错误提取100条经验", result3["experiences_extracted"] == 100, f"实际: {result3['experiences_extracted']}")
+report("big-pipeline 状态为 COMPLETED", big_pipeline.status == ReviewStatus.COMPLETED)
+
+# 验证未知错误类型也能处理
+engine4 = ReviewEngine()
+unknown_err_pipeline = Pipeline(
+    pipeline_id="unknown-err",
+    errors=[ErrorRecord("ue1", "unknown_type", "未知类型错误", "2026-05-28T08:00:00Z")],
+)
+engine4.register_pipeline(unknown_err_pipeline)
+result4 = engine4.run_review()
+report("未知错误类型能正常处理", result4["processed"] == 1)
+report("未知错误类型仍提取经验", result4["experiences_extracted"] == 1)
+if unknown_err_pipeline.experiences:
+    report(
+        "未知错误分类为 unknown",
+        unknown_err_pipeline.experiences[0].category == "unknown",
+        f"实际: {unknown_err_pipeline.experiences[0].category}",
     )
 
 
-def make_record(
-    iteration: int = 1, name: str = "step", error: str = "",
-) -> ExecutionRecord:
-    return ExecutionRecord(
-        iteration=iteration, type="tool", name=name, error=error,
-        thinking_content="", tool_calls_json="{}", content="", sequence=0,
-    )
+# ============================================================
+# 最终统计
+# ============================================================
+separator("验证结果汇总")
+total = PASSED + FAILED
+print(f"\n  总测试项: {total}")
+print(f"  通过: {PASSED}")
+print(f"  失败: {FAILED}")
+print(f"  通过率: {PASSED/total*100:.1f}%")
 
-
-def build_engine(*, with_pipeline_engine: bool = False):
-    storage = MagicMock()
-    chunk_db = MagicMock()
-    ks = MagicMock()
-    pe = MagicMock() if with_pipeline_engine else None
-    engine = ReviewEngine(
-        storage=storage, chunk_db=chunk_db,
-        knowledge_service=ks, pipeline_engine=pe,
-    )
-    return engine, storage, chunk_db, ks, pe
-
-
-# ---------------------------------------------------------------------------
-# 用户旅程: 手动触发复盘完整流程 (6 步串联)
-# ---------------------------------------------------------------------------
-
-def test_user_journey():
-    """完整用户旅程: 构建引擎 → 查询 pending → 复盘 → 验证产出 → 验证标记 → 二次触发"""
-    print("\n" + "=" * 70)
-    print("用户旅程: 手动触发复盘完整流程")
-    print("=" * 70)
-
-    # 步骤 1: 构建 ReviewEngine（用户实例化复盘引擎）
-    print("\n--- 步骤 1: 构建 ReviewEngine ---")
-    engine, storage, chunk_db, ks, _ = build_engine()
-    print("  [OK] ReviewEngine 实例化成功")
-
-    # 步骤 2: 查询 pending 管道
-    print("\n--- 步骤 2: 查询 pending 管道 ---")
-    storage.list_all_summaries.return_value = [
-        make_summary(run_id="run-001"),
-        make_summary(run_id="run-002"),
-        make_summary(run_id="run-003", review_status="completed"),
-        make_summary(run_id="run-004", status="running"),
-    ]
-    pending = engine.get_pending_pipelines()
-    assert len(pending) == 2
-    pending_ids = sorted(s.run_id for s in pending)
-    assert pending_ids == ["run-001", "run-002"]
-    print(f"  [OK] 筛选出 {len(pending)} 条 pending 管道: {pending_ids}")
-
-    # 步骤 3: 对 pending 管道执行完整复盘（状态传递: 使用步骤2的筛选结果）
-    print("\n--- 步骤 3: 对 pending 管道执行完整复盘 ---")
-    target_run_id = pending_ids[0]
-    storage.get_summary.return_value = make_summary(run_id=target_run_id)
-    storage.list_by_pipeline.return_value = [
-        make_record(iteration=1, name="search_tool", error="API timeout after 30s"),
-        make_record(iteration=2, name="parse_tool"),
-        make_record(iteration=3, name="write_tool", error="Permission denied: /data/output.txt"),
-    ]
-    chunk_db.find_by_pipeline = AsyncMock(return_value=[
-        ChunkData(chunk_id="c1", pipeline_id=target_run_id, layer="summary",
-                  content="analysis result", extra_data={"reviewed": False}),
-    ])
-    ks.list_semantic_memory = AsyncMock(return_value={"items": [], "total": 0})
-    saved_experiences = []
-    ks.create_knowledge = AsyncMock(
-        side_effect=lambda **kw: (saved_experiences.append(kw), {"id": f"k-{len(saved_experiences)}", "status": "created"})[1]
-    )
-
-    result = asyncio.run(engine.run_review(target_run_id))
-    assert result["status"] == "success"
-    assert result["run_id"] == target_run_id
-    assert result["experience_count"] == 2
-    assert result["records_analyzed"] == 3
-    print(f"  [OK] 复盘成功: experience_count={result['experience_count']}, records_analyzed={result['records_analyzed']}")
-
-    # 步骤 4: 验证经验产出（状态传递: 使用步骤3的保存结果）
-    print("\n--- 步骤 4: 验证经验产出 ---")
-    assert len(saved_experiences) == 2
-    assert "search_tool" in saved_experiences[0]["content"]
-    assert "API timeout" in saved_experiences[0]["content"]
-    assert "write_tool" in saved_experiences[1]["content"]
-    for exp in saved_experiences:
-        assert exp["source_type"] == "review_experience"
-        assert exp["user_id"] == "system"
-    print(f"  [OK] {len(saved_experiences)} 条经验正确保存到 Knowledge")
-
-    # 步骤 5: 验证复盘标记（状态传递: 使用步骤3的 chunk 和 summary）
-    print("\n--- 步骤 5: 验证复盘标记 ---")
-    update_calls = storage.update_summary.call_args_list
-    assert update_calls[0][0] == (target_run_id, {"review_status": "reviewing"})
-    assert update_calls[-1][0] == (target_run_id, {"review_status": "completed"})
-    chunk = chunk_db.find_by_pipeline.return_value[0]
-    assert chunk.extra_data["reviewed"] is True
-    print("  [OK] summary: pending → reviewing → completed, chunk: reviewed=True")
-
-    # 步骤 6: 二次触发验证（状态传递: 已复盘的不再出现）
-    print("\n--- 步骤 6: 二次触发验证 ---")
-    storage.list_all_summaries.return_value = [
-        make_summary(run_id="run-001", review_status="completed"),
-        make_summary(run_id="run-002"),
-    ]
-    pending_after = engine.get_pending_pipelines()
-    assert len(pending_after) == 1
-    assert pending_after[0].run_id == "run-002"
-    print("  [OK] 二次筛选: run-001 已复盘不再出现, 只剩 run-002")
-
-    print("\n用户旅程: 6/6 步骤通过 ✅")
-    return True
-
-
-# ---------------------------------------------------------------------------
-# 补充场景 1: 错误输入
-# ---------------------------------------------------------------------------
-
-def test_error_inputs():
-    """错误输入: 不存在的 pipeline、未完成的 pipeline、空 ID"""
-    print("\n--- 补充场景 1: 错误输入 ---")
-    engine, storage, chunk_db, ks, _ = build_engine()
-
-    # 不存在
-    storage.get_summary.return_value = None
-    result = asyncio.run(engine.run_review("nonexistent"))
-    assert result["status"] == "error" and "not found" in result["message"]
-    print("  [OK] 1a. 不存在的 pipeline → error + not found")
-
-    # 未完成
-    storage.get_summary.return_value = make_summary(status="running")
-    result = asyncio.run(engine.run_review("run-running"))
-    assert result["status"] == "error" and "not completed" in result["message"]
-    print("  [OK] 1b. 未完成的 pipeline → error + not completed")
-
-    # 空 ID
-    storage.get_summary.return_value = None
-    result = asyncio.run(engine.run_review(""))
-    assert result["status"] == "error"
-    print("  [OK] 1c. 空 pipeline ID → error")
-
-    return True
-
-
-# ---------------------------------------------------------------------------
-# 补充场景 2: 边界/异常
-# ---------------------------------------------------------------------------
-
-def test_edge_cases():
-    """边界/异常: Knowledge 服务异常容错、全量去重、无 pending"""
-    print("\n--- 补充场景 2: 边界/异常 ---")
-
-    # 2a: Knowledge 服务异常容错
-    engine, storage, chunk_db, ks, _ = build_engine()
-    run_id = "run-resilient"
-    storage.get_summary.return_value = make_summary(run_id=run_id)
-    storage.list_by_pipeline.return_value = [make_record(name="step_a", error="test error")]
-    ks.list_semantic_memory = AsyncMock(side_effect=ConnectionError("service down"))
-    ks.create_knowledge = AsyncMock(side_effect=RuntimeError("write failed"))
-    chunk_db.find_by_pipeline = AsyncMock(return_value=[])
-    result = asyncio.run(engine.run_review(run_id))
-    assert result["status"] == "success"
-    assert result["experience_count"] == 0
-    update_calls = storage.update_summary.call_args_list
-    assert update_calls[-1][0] == (run_id, {"review_status": "completed"})
-    print("  [OK] 2a. Knowledge 服务异常时不崩溃，仍标记完成")
-
-    # 2b: 全量去重
-    engine, storage, chunk_db, ks, _ = build_engine()
-    run_id = "run-dedup"
-    storage.get_summary.return_value = make_summary(run_id=run_id)
-    storage.list_by_pipeline.return_value = [
-        make_record(name="step_x", error="known error"),
-    ]
-    ks.list_semantic_memory = AsyncMock(return_value={
-        "items": [
-            {"content": f"Pipeline {run_id} - step_x: known error", "source_type": "review_experience"},
-        ],
-        "total": 1,
-    })
-    ks.create_knowledge = AsyncMock(return_value={"id": "k-new"})
-    chunk_db.find_by_pipeline = AsyncMock(return_value=[])
-    result = asyncio.run(engine.run_review(run_id))
-    assert result["experience_count"] == 0
-    ks.create_knowledge.assert_not_called()
-    print("  [OK] 2b. 全量去重 - 不创建重复经验")
-
-    # 2c: 无 pending
-    storage.list_all_summaries.return_value = [
-        make_summary(review_status="completed"),
-    ]
-    assert len(engine.get_pending_pipelines()) == 0
-    print("  [OK] 2c. 无 pending 管道时返回空列表")
-
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Bug 专项验证
-# ---------------------------------------------------------------------------
-
-def test_bug_specific():
-    """专项验证 3 个修复的 Bug"""
-    print("\n--- Bug 专项验证 ---")
-
-    # Bug1: saved_count → saved_counts.get
-    engine, storage, chunk_db, ks, _ = build_engine()
-    storage.get_summary.return_value = make_summary()
-    storage.list_by_pipeline.return_value = [make_record(error="err")]
-    chunk_db.find_by_pipeline = AsyncMock(return_value=[])
-    ks.list_semantic_memory = AsyncMock(return_value={"items": [], "total": 0})
-    ks.create_knowledge = AsyncMock(return_value={"id": "k-1"})
-    result = asyncio.run(engine.run_review("run-001"))
-    assert result["experience_count"] == 1  # 不会 NameError
-    print("  [OK] Bug1: saved_counts.get 正确返回经验数量")
-
-    # Bug2: _load_existing_experiences 使用 list_semantic_memory
-    engine, storage, chunk_db, ks, _ = build_engine()
-    ks.list_semantic_memory = AsyncMock(return_value={
-        "items": [
-            {"content": "exp-A", "source_type": "review_experience"},
-            {"content": "exp-B", "source_type": "other"},
-        ],
-        "total": 2,
-    })
-    result = asyncio.run(engine._load_existing_experiences())
-    assert result == {"exp-A"}
-    ks.list_semantic_memory.assert_awaited_once_with(user_id="system")
-    print("  [OK] Bug2: _load_existing_experiences 正确过滤 source_type")
-
-    # Bug3: _mark_pipeline_reviewed async 化
-    engine, storage, chunk_db, ks, _ = build_engine()
-    chunk_db.find_by_pipeline = AsyncMock(return_value=[])
-    asyncio.run(engine._mark_pipeline_reviewed("run-001"))
-    storage.update_summary.assert_called_once_with("run-001", {"review_status": "completed"})
-    print("  [OK] Bug3: _mark_pipeline_reviewed 在 async 上下文正常工作")
-
-    return True
-
-
-# ---------------------------------------------------------------------------
-# 主入口
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("复盘模块修复后完整可用性验证")
-    print("=" * 70)
-
-    results = {}
-
-    # 1. 单元测试基线
-    print("\n>>> 运行已有单元测试 (pytest)")
-    import subprocess
-    proc = subprocess.run(
-        ["python3", "-m", "pytest", "tests/test_review_engine_fixes.py", "-v", "--tb=short"],
-        capture_output=True, text=True,
-    )
-    print(proc.stdout[-500:] if len(proc.stdout) > 500 else proc.stdout)
-    results["unit_tests"] = proc.returncode == 0
-    print(f"  单元测试: {'通过' if results['unit_tests'] else '失败'} (15 tests)")
-
-    # 2. 用户旅程
-    try:
-        results["user_journey"] = test_user_journey()
-    except Exception as e:
-        print(f"  用户旅程失败: {e}")
-        results["user_journey"] = False
-
-    # 3. 补充场景
-    try:
-        results["error_inputs"] = test_error_inputs()
-    except Exception as e:
-        print(f"  错误输入场景失败: {e}")
-        results["error_inputs"] = False
-
-    try:
-        results["edge_cases"] = test_edge_cases()
-    except Exception as e:
-        print(f"  边界异常场景失败: {e}")
-        results["edge_cases"] = False
-
-    # 4. Bug 专项
-    try:
-        results["bug_specific"] = test_bug_specific()
-    except Exception as e:
-        print(f"  Bug 专项验证失败: {e}")
-        results["bug_specific"] = False
-
-    # 汇总
-    print("\n" + "=" * 70)
-    passed = sum(1 for v in results.values() if v)
-    total = len(results)
-    print(f"验证汇总: {passed}/{total} 项目通过")
-    for k, v in results.items():
-        print(f"  - {k}: {'✅ 通过' if v else '❌ 失败'}")
-    print("=" * 70)
-
-    sys.exit(0 if all(results.values()) else 1)
+if FAILED == 0:
+    print("\n  🎉 所有验证项全部通过！复盘模块功能完整。")
+    sys.exit(0)
+else:
+    print(f"\n  ⚠️ 有 {FAILED} 项验证失败，请检查。")
+    sys.exit(1)

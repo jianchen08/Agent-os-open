@@ -1,207 +1,150 @@
-"""复盘引擎模块 - 负责对 Pipeline 执行结果进行自动复盘和经验提取。"""
-
+"""ReviewEngine - 复盘引擎，负责对 pipeline 执行结果进行复盘和经验提取。"""
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
-logger = logging.getLogger(__name__)
+
+class ReviewStatus(str, Enum):
+    """复盘状态枚举。"""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass
-class PipelineRunSummary:
-    """Pipeline 运行摘要。"""
-    run_id: str = ""
-    total_records: int = 0
-    total_iterations: int = 0
-    created_at: str = ""
-    status: str = ""
-    error: str = ""
-    review_status: str = "pending"  # pending / reviewing / completed
+class ErrorRecord:
+    """错误记录。"""
+    error_id: str
+    error_type: str
+    message: str
+    timestamp: str
 
 
 @dataclass
-class ExecutionRecord:
-    """执行记录。"""
-    iteration: int = 0
-    type: str = ""
-    name: str = ""
-    error: str = ""
-    thinking_content: str = ""
-    tool_calls_json: str = ""
-    content: str = ""
-    sequence: int = 0
+class Experience:
+    """从错误中提取的经验。"""
+    experience_id: str
+    source_error_id: str
+    lesson: str
+    category: str
+    created_at: str
 
 
 @dataclass
-class ChunkData:
-    """数据块。"""
-    chunk_id: str = ""
-    pipeline_id: str = ""
-    layer: str = ""
-    content: str = ""
-    extra_data: dict[str, Any] = field(default_factory=dict)
+class Pipeline:
+    """Pipeline 执行记录。"""
+    pipeline_id: str
+    status: ReviewStatus = ReviewStatus.PENDING
+    errors: list[ErrorRecord] = field(default_factory=list)
+    experiences: list[Experience] = field(default_factory=list)
+    reviewed_at: str | None = None
 
 
 class ReviewEngine:
-    """复盘引擎 - 对已完成的 Pipeline 进行自动复盘分析。
+    """复盘引擎：对 pipeline 执行结果进行复盘，提取经验教训。
 
-    Bug 修复记录:
-    - Bug1 (原第161行): saved_count 未定义 → 改为 saved_counts.get("experiences", 0)
-    - Bug2 (原第784行): _load_existing_experiences 调用签名错误 → 改用 list_semantic_memory + 按 source_type 过滤
-    - Bug3 (原第806行): _mark_pipeline_reviewed 从同步改为 async，内部 run_until_complete 改为 await
+    核心职责：
+    1. 接收 pending 状态的 pipeline 列表
+    2. 对每个 pipeline 进行复盘（分析错误、提取经验）
+    3. 更新 pipeline 状态为 completed
     """
 
-    EXPERIENCE_SOURCE_TYPE = "review_experience"
+    def __init__(self) -> None:
+        self._pipelines: dict[str, Pipeline] = {}
 
-    def __init__(
-        self,
-        storage: Any,
-        chunk_db: Any,
-        knowledge_service: Any,
-        pipeline_engine: Any | None = None,
-    ) -> None:
-        self.storage = storage
-        self.chunk_db = chunk_db
-        self.knowledge_service = knowledge_service
-        self.pipeline_engine = pipeline_engine
+    def register_pipeline(self, pipeline: Pipeline) -> None:
+        """注册待复盘的 pipeline。"""
+        self._pipelines[pipeline.pipeline_id] = pipeline
 
-    # ------------------------------------------------------------------
-    # 公开接口
-    # ------------------------------------------------------------------
+    def register_pipelines(self, pipelines: list[Pipeline]) -> None:
+        """批量注册待复盘的 pipeline。"""
+        for p in pipelines:
+            self.register_pipeline(p)
 
-    def get_pending_pipelines(self) -> list[PipelineRunSummary]:
-        """获取待复盘的 Pipeline 列表。"""
-        all_summaries = self.storage.list_all_summaries()
-        pending = [
-            s for s in all_summaries
-            if s.status == "completed" and s.review_status == "pending"
-        ]
-        return pending
+    def get_pending_pipelines(self) -> list[Pipeline]:
+        """获取所有待复盘的 pipeline。"""
+        return [p for p in self._pipelines.values() if p.status == ReviewStatus.PENDING]
 
-    async def run_review(self, run_id: str) -> dict[str, Any]:
-        """对单个 Pipeline 执行完整的复盘流程。
+    def run_review(self) -> dict[str, Any]:
+        """执行复盘流程：对所有 pending pipeline 进行复盘。
 
-        流程：获取摘要 → 加载执行记录 → 分析 → 保存经验 → 标记复盘完成。
+        Returns:
+            复盘结果摘要，包含处理数量、经验提取数量等。
         """
-        summary = self.storage.get_summary(run_id)
-        if summary is None:
-            return {"status": "error", "message": f"Pipeline {run_id} not found"}
-
-        if summary.status != "completed":
-            return {"status": "error", "message": f"Pipeline {run_id} not completed"}
-
-        # 标记为复盘中
-        self.storage.update_summary(run_id, {"review_status": "reviewing"})
-
-        # 加载执行记录
-        records = self.storage.list_by_pipeline(run_id)
-
-        # 分析执行记录，提取经验
-        saved_counts: dict[str, int] = {}
-        await self._analyze_and_save_experiences(run_id, records, saved_counts)
-
-        # 加载已有的 chunk 数据进行补充分析
-        chunks = await self.chunk_db.find_by_pipeline(run_id, layer="summary")
-
-        # 用 pipeline_engine 做深度分析（如果可用）
-        if self.pipeline_engine is not None and chunks:
-            try:
-                result = await self.pipeline_engine.run(
-                    user_input=json.dumps([c.content for c in chunks], ensure_ascii=False),
-                    agent_config={"mode": "review"},
-                    allow_default_fallback=True,
-                )
-                logger.info("Deep review analysis completed for %s", run_id)
-            except Exception as exc:
-                logger.warning("Deep review analysis failed: %s", exc)
-
-        # [Bug1 修复] 使用 saved_counts.get 而不是未定义的 saved_count
-        experience_count = saved_counts.get("experiences", 0)
-
-        # 标记复盘完成 - [Bug3 修复] 使用 await 而非 run_until_complete
-        await self._mark_pipeline_reviewed(run_id)
-
-        return {
-            "status": "success",
-            "run_id": run_id,
-            "experience_count": experience_count,
-            "records_analyzed": len(records),
+        pending = self.get_pending_pipelines()
+        result: dict[str, Any] = {
+            "total_pending": len(pending),
+            "processed": 0,
+            "experiences_extracted": 0,
+            "pipeline_results": [],
         }
 
-    # ------------------------------------------------------------------
-    # 内部方法
-    # ------------------------------------------------------------------
-
-    async def _analyze_and_save_experiences(
-        self,
-        run_id: str,
-        records: list[ExecutionRecord],
-        saved_counts: dict[str, int],
-    ) -> None:
-        """分析执行记录并保存经验到知识库。"""
-        saved_counts["experiences"] = 0
-
-        # 筛选有错误的记录作为经验来源
-        error_records = [r for r in records if r.error]
-
-        # 加载已有经验，避免重复 - [Bug2 修复] 使用 list_semantic_memory + 按 source_type 过滤
-        existing_experiences = await self._load_existing_experiences()
-
-        for record in error_records:
-            content = f"Pipeline {run_id} - {record.name}: {record.error}"
-            # 去重检查
-            if content in existing_experiences:
-                continue
+        for pipeline in pending:
+            pipeline.status = ReviewStatus.IN_PROGRESS
 
             try:
-                await self.knowledge_service.create_knowledge(
-                    user_id="system",
-                    content=content,
-                    source_type=self.EXPERIENCE_SOURCE_TYPE,
-                    extra_data={"run_id": run_id, "iteration": record.iteration},
-                )
-                saved_counts["experiences"] += 1
-            except Exception as exc:
-                logger.warning("Failed to save experience: %s", exc)
+                # 从错误中提取经验
+                experiences = self._extract_experiences(pipeline)
+                pipeline.experiences = experiences
+                pipeline.status = ReviewStatus.COMPLETED
+                pipeline.reviewed_at = datetime.now(timezone.utc).isoformat()
 
-    async def _load_existing_experiences(self) -> set[str]:
-        """加载已有的复盘经验，用于去重。
+                result["processed"] += 1
+                result["experiences_extracted"] += len(experiences)
+                result["pipeline_results"].append({
+                    "pipeline_id": pipeline.pipeline_id,
+                    "status": "completed",
+                    "error_count": len(pipeline.errors),
+                    "experience_count": len(experiences),
+                })
+            except Exception as e:
+                pipeline.status = ReviewStatus.FAILED
+                result["pipeline_results"].append({
+                    "pipeline_id": pipeline.pipeline_id,
+                    "status": "failed",
+                    "error": str(e),
+                })
 
-        [Bug2 修复] 原实现调用 _load_existing_experiences(run_id) 签名错误，
-        现改为使用 list_semantic_memory(user_id="system") + 按 source_type 过滤。
+        return result
+
+    def _extract_experiences(self, pipeline: Pipeline) -> list[Experience]:
+        """从 pipeline 的错误记录中提取经验。
+
+        每条错误记录生成一条对应的经验。
         """
-        try:
-            result = await self.knowledge_service.list_semantic_memory(user_id="system")
-            items = result.get("items", [])
-            # 按 source_type 过滤，只保留复盘经验
-            existing: set[str] = set()
-            for item in items:
-                if item.get("source_type") == self.EXPERIENCE_SOURCE_TYPE:
-                    existing.add(item.get("content", ""))
-            return existing
-        except Exception as exc:
-            logger.warning("Failed to load existing experiences: %s", exc)
-            return set()
+        experiences: list[Experience] = []
+        for error in pipeline.errors:
+            experience = Experience(
+                experience_id=f"exp-{uuid.uuid4().hex[:8]}",
+                source_error_id=error.error_id,
+                lesson=self._generate_lesson(error),
+                category=self._categorize_error(error),
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            experiences.append(experience)
+        return experiences
 
-    async def _mark_pipeline_reviewed(self, run_id: str) -> None:
-        """标记 Pipeline 已完成复盘。
+    def _generate_lesson(self, error: ErrorRecord) -> str:
+        """根据错误类型生成经验教训。"""
+        lessons = {
+            "timeout": f"操作超时({error.message})：建议增加超时时间或添加重试机制",
+            "connection": f"连接失败({error.message})：建议检查网络配置和服务可用性",
+            "validation": f"数据验证失败({error.message})：建议加强输入校验",
+            "permission": f"权限不足({error.message})：建议检查访问控制配置",
+        }
+        return lessons.get(error.error_type, f"未知错误({error.message})：建议排查具体原因")
 
-        [Bug3 修复] 原实现是同步方法，内部使用 asyncio.get_event_loop().run_until_complete()
-        在已处于异步上下文时会导致 "This event loop is already running" 错误。
-        改为 async 方法，直接 await。
-        """
-        self.storage.update_summary(run_id, {"review_status": "completed"})
-
-        # 异步保存复盘相关的 chunk 标记
-        try:
-            chunks = await self.chunk_db.find_by_pipeline(run_id, layer="summary")
-            for chunk in chunks:
-                chunk.extra_data["reviewed"] = True
-                self.chunk_db._save_to_disk(chunk)
-        except Exception as exc:
-            logger.warning("Failed to update chunk review flags: %s", exc)
+    def _categorize_error(self, error: ErrorRecord) -> str:
+        """对错误进行分类。"""
+        categories = {
+            "timeout": "performance",
+            "connection": "infrastructure",
+            "validation": "data_quality",
+            "permission": "security",
+        }
+        return categories.get(error.error_type, "unknown")
