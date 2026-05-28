@@ -112,7 +112,15 @@ class MemoryStore:
         无需在 JSON 中存储 sessions 段。
         """
         path = self._persist_file()
-        if not path or not os.path.exists(path):
+        if not path:
+            return
+        if not os.path.exists(path):
+            persist_dir = os.path.dirname(path)
+            if os.path.exists(persist_dir) and os.listdir(persist_dir):
+                _log.warning(
+                    "store.json 不存在但 persist_dir 非空，可能数据丢失: %s",
+                    persist_dir)
+                self._load_failed = True
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
