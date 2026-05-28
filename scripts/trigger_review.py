@@ -102,12 +102,16 @@ def main() -> int:
 
     # 报告接口兼容性检查
     interface_issues = svc_result["interface_check"]
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpik4_5nch\current
 <<<<<<< C:\Users\jc\AppData\Local\Temp\tmpsxe8aa86\current
+=======
+>>>>>>> D:\myproject\container_08f57__wt_b30e823c\scripts\trigger_review.py
     print(f"  接口兼容性检查发现 {len(interface_issues)} 个问题:")
     for issue in interface_issues:
         print(f"    - 缺失方法: {issue['missing_method']} (严重度: {issue['severity']})")
         print(f"      说明: {issue['description']}")
 
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpik4_5nch\current
     assert len(interface_issues) > 0, "应检测到接口不匹配问题"
 =======
     if interface_issues:
@@ -120,6 +124,9 @@ def main() -> int:
 
     assert len(interface_issues) == 0, f"接口应已兼容，但仍有缺失方法: {interface_issues}"
 >>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\scripts\trigger_review.py
+=======
+    assert len(interface_issues) == 0, f"接口不匹配问题已全部修复，但仍有残留: {interface_issues}"
+>>>>>>> D:\myproject\container_08f57__wt_b30e823c\scripts\trigger_review.py
 
     # 验证 service 层仍能完成复盘（使用兼容的 run_review）
     review_output = svc_result["review_result"]

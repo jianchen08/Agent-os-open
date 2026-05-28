@@ -831,10 +831,17 @@ class TestWorkspaceServiceRegression:
             # 通过在遍历过程中让某个 entry 的 full_path 以 \\\\.\\ 开头
             original_join = os.path.join
 
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpg2xmugp_\current
             def mock_join(path, entry):
                 if entry == "device_entry":
                     return "\\\\.\\COM1"
                 return original_join(path, entry)
+=======
+            def mock_join(*args):
+                if args[-1] == "device_entry":
+                    return "\\\\.\\COM1"
+                return original_join(*args)
+>>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\channels\test_routes_workspaces.py
 
             # 模拟 listdir 返回包含设备路径的条目
             with patch("os.listdir", return_value=["normal.txt", "subdir", "device_entry"]):
