@@ -115,6 +115,8 @@ class _MergeOpsMixin:
                     "[WorkspaceLifecycle] 合并重试耗尽，保留 worktree 不清理: "
                     "task_id=%s, workspace=%s", task_id, workspace)
                 result["verify_error"] = verify_detail
+                if "error" not in result:
+                    result["error"] = f"合并验证失败(重试{max_retries}次): {verify_detail}"
                 result["success"] = False
                 return result
             if mode == "shared":

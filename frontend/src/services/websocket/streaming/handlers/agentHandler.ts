@@ -62,35 +62,4 @@ export function handleSubAgentCreated(eventData: any) {
 
   // 注册 pipeline→tab 映射（所有会话都注册，用于 WebSocket 消息路由）
   agentTabStore.registerPipelineTab(pipelineId, tabId)
-
-  // BUG-FIX-fix_20260528_tab_wrong_session:
-  // 问题根因: 子标签无条件创建在当前 agentTabStore.tabs 中，但 agentTabStore.tabs
-  //          是按会话隔离的（通过 currentSessionId + localStorage）。当用户在会话 B
-  //          但收到会话 A 的 sub_agent_created 事件时，会话 A 的子标签被错误地
-  //          创建在会话 B 的 Tab 列表中，saveCurrentTabs() 后持久化到错误的 localStorage key。
-  //          导致切换回会话 A 时看不到该子标签，而会话 B 中出现了不属于它的标签。
-  // 修复方案: 只在子标签属于当前活跃会话时才调用 openSubAgentTab 创建标签；
-  //          非当前会话的子标签仅注册映射和管道元数据，等用户切换到对应会话时
-  //          通过 initSessionTabs 从 localStorage 恢复（或通过 pipelineNavigator 按需创建）。
-  // 影响范围: 多会话并行时子标签的会话归属正确性
-  // 修复日期: 2026-05-28
-  const currentSessionId = agentTabStore.currentSessionId
-  if (sessionId && currentSessionId && sessionId === currentSessionId) {
-    agentTabStore.openSubAgentTab({
-      agentId: taskId,
-      agentName,
-      parentRecordId: parentId || taskId,
-      agentLevel: 2,
-      taskId,
-      status: 'running',
-      setActive: false,
-      pipelineId,
-    })
-  } else {
-    _debugLogger.info(
-      `[SUB_AGENT_CREATED] skipping openSubAgentTab: pipeline belongs to session %s, current session is %s`,
-      sessionId?.slice(0, 12) || '(empty)',
-      currentSessionId?.slice(0, 12) || '(empty)',
-    )
-  }
 }

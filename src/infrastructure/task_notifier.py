@@ -171,37 +171,69 @@ class TaskNotifierMixin:
                     #   不执行合并，导致 agent 的工作成果全部丢失。
                     # 修复方案: 先尝试合并（on_eval_passed），合并成功再清理，
                     #   合并失败则将任务回退为 failed 并保留 worktree。
-                    logger.warning(
-                        "TaskWorker: 任务已完成但 worktree 仍存在，"
-                        "尝试安全网合并: task_id=%s, workspace=%s",
-                        task_id, workspace,
-                    )
-                    merge_result = lifecycle.on_eval_passed(task_id, workspace, ws_meta)
-                    if merge_result.get("success"):
+                    #
+                    # BUG-FIX-fix_20260529_safetynet_already_merged:
+                    # 问题根因: 第一次合并成功后 _cleanup_worktree 删除了分支但
+                    #   Windows 文件锁导致目录残留，安全网再次合并时因分支已删除
+                    #   导致验证失败，返回 error=unknown，任务被错误标记为 failed。
+                    # 修复方案: 安全网先检查分支是否已不存在（说明已合并成功），
+                    #   如果分支已删除则直接清理残留目录，不再尝试合并。
+                    branch = ws_meta.get("branch", "")
+                    project_root = ws_meta.get("project_root", "")
+                    already_merged = False
+                    if branch and project_root:
+                        from pathlib import Path as _P
+                        proj_path = _P(project_root)
+                        if proj_path.exists():
+                            rc, _, _ = lifecycle._run_git(
+                                "rev-parse", "--verify", branch, cwd=proj_path)
+                            already_merged = rc != 0
+
+                    if already_merged:
                         logger.info(
-                            "TaskWorker: 安全网合并成功: task_id=%s, method=%s",
-                            task_id, merge_result.get("method"),
+                            "TaskWorker: 安全网检测到分支已删除(已合并)，"
+                            "直接清理残留目录: task_id=%s, workspace=%s",
+                            task_id, workspace,
                         )
+                        lifecycle.cleanup_workspace(task_id)
                     else:
-                        merge_error = merge_result.get("error", "unknown")
-                        logger.error(
-                            "TaskWorker: 安全网合并失败，回退任务为 failed: "
-                            "task_id=%s, error=%s",
-                            task_id, merge_error,
+                        logger.warning(
+                            "TaskWorker: 任务已完成但 worktree 仍存在，"
+                            "尝试安全网合并: task_id=%s, workspace=%s",
+                            task_id, workspace,
                         )
-                        task_service = self._task_service
-                        if task_service:
-                            try:
-                                await task_service.fail_task(
-                                    task_id,
-                                    f"worktree 合并失败（安全网）: {merge_error}",
-                                )
-                            except Exception as fail_exc:
-                                logger.error(
-                                    "TaskWorker: 安全网 fail_task 也失败: "
-                                    "task_id=%s, error=%s",
-                                    task_id, fail_exc,
-                                )
+                        merge_result = lifecycle.on_eval_passed(
+                            task_id, workspace, ws_meta)
+                        if merge_result.get("success"):
+                            logger.info(
+                                "TaskWorker: 安全网合并成功: task_id=%s, method=%s",
+                                task_id, merge_result.get("method"),
+                            )
+                        else:
+                            merge_error = merge_result.get("error", "unknown")
+                            if merge_result.get("verify_error"):
+                                merge_error += (
+                                    f" | 验证详情: "
+                                    f"{merge_result['verify_error']}")
+                            logger.error(
+                                "TaskWorker: 安全网合并失败，回退任务为 failed: "
+                                "task_id=%s, error=%s",
+                                task_id, merge_error,
+                            )
+                            task_service = self._task_service
+                            if task_service:
+                                try:
+                                    await task_service.fail_task(
+                                        task_id,
+                                        f"worktree 合并失败（安全网）: "
+                                        f"{merge_error}",
+                                    )
+                                except Exception as fail_exc:
+                                    logger.error(
+                                        "TaskWorker: 安全网 fail_task 也失败: "
+                                        "task_id=%s, error=%s",
+                                        task_id, fail_exc,
+                                    )
                 else:
                     logger.info(
                         "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
