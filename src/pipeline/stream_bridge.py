@@ -118,7 +118,11 @@ class TargetedSink:
         except Exception:
             self._fail_count += 1
             logger.error(
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpzkg4l8ub\current
                 "TargetedSink: 推送异常 #%d thread_id=%s type=%s err=%s",
+=======
+                "TargetedSink: 推送异常 #%d thread_id=%s type=%s",
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\src\pipeline\stream_bridge.py
                 self._fail_count,
                 (self._thread_id or "(empty)")[:12],
                 event.get("type", "?"),
@@ -490,6 +494,7 @@ class PipelineStreamBridge:
                 )
 
                 if _is_suspended:
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpzkg4l8ub\current
                     # BUG-FIX-fix_20260528_drain_race:
                     # 问题根因: inject_message 设置 _wake_event 后，引擎的
                     #   _suspend_and_wait 恢复逻辑（设 is_suspended=False）
@@ -515,6 +520,13 @@ class PipelineStreamBridge:
                         )
                         break
                     last_keepalive = asyncio.get_event_loop().time()
+=======
+                    logger.info(
+                        "drain_loop: engine suspended, ending stream: pipeline=%s chunks=%d",
+                        self.pipeline_id[:12], _chunk_count,
+                    )
+                    break
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\src\pipeline\stream_bridge.py
 
                 # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
                 if now - last_keepalive > heartbeat_interval:

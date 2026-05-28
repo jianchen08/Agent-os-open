@@ -25,8 +25,16 @@ pytestmark = pytest.mark.skip(
            "旧API（cleanup_ttl_expired/evict_by_capacity/decay_importance 等）已移除"
 )
 
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpz39k4b45\current
 from memory.maintenance import MaintenanceConfig, MemoryMaintenanceService
 from memory.types import Episode, Knowledge
+=======
+try:
+    from memory.maintenance import MaintenanceConfig, MemoryMaintenanceService
+    from memory.types import Episode, Knowledge
+except ImportError:
+    pass
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_memory_maintenance.py
 
 
 # ============================================================

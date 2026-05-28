@@ -286,9 +286,18 @@ class TestFrontendImmediateDisplay:
     @pytest.mark.asyncio
     async def test_targeted_sink_send_event_no_thread_id(self):
         """验证 TargetedSink 在 thread_id 为空时返回 False。"""
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpk6e_l6vg\current
         from pipeline.stream_bridge import TargetedSink
 
         mock_notifier = MagicMock()
+=======
+        from unittest.mock import AsyncMock
+
+        from pipeline.stream_bridge import TargetedSink
+
+        mock_notifier = MagicMock()
+        mock_notifier.send_to_thread = AsyncMock(return_value=False)
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_v5_message_e2e.py
         sink = TargetedSink(mock_notifier, thread_id="")
 
         result = await sink.send_event({"type": "test"})

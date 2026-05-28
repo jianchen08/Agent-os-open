@@ -5,6 +5,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpm3wy5hdt\current
+=======
+from pathlib import Path
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\src\memory\maintenance\review_engine.py
 from typing import Any
 
 
@@ -148,3 +152,64 @@ class ReviewEngine:
             "permission": "security",
         }
         return categories.get(error.error_type, "unknown")
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpm3wy5hdt\current
+=======
+
+    # -- 任务1：service.py 期望的接口方法 --
+
+    def run_batch_review(self) -> dict[str, Any]:
+        """批量复盘，委托给 run_review()。
+
+        Returns:
+            复盘结果摘要。
+        """
+        return self.run_review()
+
+    def get_summary(self) -> dict[str, Any]:
+        """返回引擎内部统计摘要。
+
+        Returns:
+            包含已注册 pipeline 数、pending 数、已完成数等统计信息。
+        """
+        total = len(self._pipelines)
+        pending = sum(
+            1 for p in self._pipelines.values()
+            if p.status == ReviewStatus.PENDING
+        )
+        completed = sum(
+            1 for p in self._pipelines.values()
+            if p.status == ReviewStatus.COMPLETED
+        )
+        failed = sum(
+            1 for p in self._pipelines.values()
+            if p.status == ReviewStatus.FAILED
+        )
+        return {
+            "total_registered": total,
+            "pending": pending,
+            "completed": completed,
+            "failed": failed,
+        }
+
+    def reset(self) -> None:
+        """清空所有已注册的 pipeline，重置引擎状态。"""
+        self._pipelines.clear()
+
+    # -- 日志解析（委托给 log_parser 模块） --
+
+    @classmethod
+    def parse_pipeline_logs(cls, log_dir: str | Path) -> list[Pipeline]:
+        """扫描 log_dir 下的 pipeline_*.log 文件，解析为 Pipeline 列表。
+
+        委托给 PipelineLogParser 实现，保持向后兼容。
+
+        Args:
+            log_dir: 日志目录路径。
+
+        Returns:
+            解析出的 Pipeline 列表，可直接传给 register_pipelines()。
+        """
+        from src.memory.maintenance.log_parser import PipelineLogParser
+
+        return PipelineLogParser.parse_pipeline_logs(log_dir)
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\src\memory\maintenance\review_engine.py

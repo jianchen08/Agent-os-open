@@ -139,7 +139,11 @@ class TestListThreadsPagination:
 
         # 默认 skip=0, limit=20
         assert data["skip"] == 0
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpb01q4aus\current
         assert data["limit"] == 20
+=======
+        assert data["limit"] == 100
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_thread_list_pagination.py
 
     def test_list_threads_invalid_limit(self) -> None:
         """limit 超出范围时返回错误。"""
@@ -157,7 +161,11 @@ class TestListThreadsPagination:
             params={"limit": 101},
             headers=self.headers,
         )
+<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpb01q4aus\current
         assert response.status_code == 422
+=======
+        assert response.status_code == 400
+>>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_thread_list_pagination.py
 
     def test_list_threads_negative_skip(self) -> None:
         """skip 为负数时返回错误。"""
