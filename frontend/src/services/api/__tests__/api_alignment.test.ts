@@ -418,7 +418,7 @@ describe('前后端 Projects API 响应解包验证', () => {
           {
             id: 'project-2',
             goal: '优化数据库性能',
-            status: 'paused',
+            status: 'suspended',
             auto_execute: false,
           },
         ],
@@ -495,7 +495,7 @@ describe('前后端 Projects API 响应解包验证', () => {
         project: {
           id: 'proj-1',
           goal: '测试目标',
-          status: 'paused',
+          status: 'suspended',
           auto_execute: false,
           current_task_index: 0,
           created_at: '2026-05-14T00:00:00Z',
@@ -513,7 +513,7 @@ describe('前后端 Projects API 响应解包验证', () => {
     const result = await taskApi.pauseProject('proj-1')
 
     expect(result.id).toBe('proj-1')
-    expect(result.status).toBe('paused')
+    expect(result.status).toBe('suspended')
 
     // 验证调用端点（POST，而非 PATCH）
     expect(mockPost).toHaveBeenCalledWith('/api/v1/projects/proj-1/pause')

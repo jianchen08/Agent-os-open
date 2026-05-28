@@ -161,11 +161,10 @@ function mapTaskStatusToProjectStatus(status: TaskStatus): string {
   const statusMap: Record<string, string> = {
     pending: 'planning',
     running: 'running',
-    running: 'running',
     evaluating: 'running',
     scheduled: 'planning',
-    blocked: 'paused',
-    suspended: 'paused',
+    blocked: 'suspended',
+    suspended: 'suspended',
     completed: 'completed',
     failed: 'failed',
     cancelled: 'failed',

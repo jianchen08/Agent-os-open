@@ -62,7 +62,7 @@ describe('任务管理 API', () => {
               user_id: 'user-1',
               session_id: 'session-2',
               goal: '优化数据库性能',
-              status: 'paused' as ProjectStatus,
+              status: 'suspended' as ProjectStatus,
               auto_execute: false,
               current_task_index: 0,
               created_at: '2024-01-02T00:00:00Z',

@@ -19,9 +19,8 @@ _TERMINAL_STATES = frozenset({"completed", "failed"})
 _STATUS_TO_PHASE: dict[str, str] = {
     "pending": "prepare",
     "scheduled": "prepare",
-    "paused": "prepare",
+    "suspended": "prepare",
     "running": "execute",
-    "suspended": "execute",
     "evaluating": "evaluate",
     "completed": "prepare",
     "failed": "prepare",
@@ -113,8 +112,6 @@ class TaskNotifierMixin:
             if _task_obj and hasattr(_task_obj, "metadata") and _task_obj.metadata:
                 _user_id = _task_obj.metadata.get("user_id", "")
 
-            _mapped_status = _BACKEND_TO_FRONTEND_STATUS.get(new_status, new_status)
-
             _task_error = ""
             if _task_obj:
                 _task_error = getattr(_task_obj, "error", "") or ""
@@ -126,16 +123,16 @@ class TaskNotifierMixin:
                     "type": "task_status_update",
                     "data": {
                         "task_id": task_id,
-                        "old_status": _BACKEND_TO_FRONTEND_STATUS.get(data.get("old_status", ""), data.get("old_status", "")),
-                        "new_status": _mapped_status,
+                        "old_status": data.get("old_status", ""),
+                        "new_status": new_status,
                         "current_phase": _STATUS_TO_PHASE.get(new_status, "prepare"),
                         "error": _task_error,
                     },
                 })
 
             logger.debug(
-                "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s (mapped=%s)",
-                task_id, data.get("old_status", ""), new_status, _mapped_status,
+                "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
+                task_id, data.get("old_status", ""), new_status,
             )
         except Exception as _ws_exc:
             logger.warning(

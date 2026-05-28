@@ -584,7 +584,7 @@ export interface ExecutionControlResponseEvent {
   /** 响应消息 */
   message: string
   /** 新状态 */
-  new_status?: 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
+  new_status?: 'running' | 'suspended' | 'cancelled' | 'completed' | 'failed'
   /** 线程 ID */
   thread_id?: string
 }

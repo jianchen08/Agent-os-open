@@ -44,9 +44,7 @@ class TaskStatus(Enum):
     EVALUATING = "evaluating"
     COMPLETED = "completed"
     FAILED = "failed"
-    PAUSED = "paused"
-    # BUG-FIX-fix_20260523_cancel_task: 状态机 state_machine.py 已定义 "cancelled" 状态转换，
-    # 但 TaskStatus 枚举缺少 CANCELLED 值，导致取消任务时无法设置正确的状态。
+    SUSPENDED = "suspended"
     CANCELLED = "cancelled"
 
 

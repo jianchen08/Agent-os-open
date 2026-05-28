@@ -61,7 +61,7 @@ class TaskRecoveryMixin:
                 )
 
         # 1.5. paused 任务重置为 pending（stop→start 后 RUNNING/PENDING 被标记为 PAUSED）
-        paused_tasks = self._task_service.list_by_status(TaskStatus.PAUSED)
+        paused_tasks = self._task_service.list_by_status(TaskStatus.SUSPENDED)
         for task in paused_tasks:
             task_scope = task.metadata.get("task_scope", "non_container")
             if task_scope == "container":

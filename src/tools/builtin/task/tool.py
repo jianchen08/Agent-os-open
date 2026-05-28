@@ -945,7 +945,7 @@ class TaskTool(BuiltinTool):
                     "task_id": task_id,
                     "paused": True,
                     "old_status": TaskStatus.RUNNING.value,
-                    "new_status": TaskStatus.PAUSED.value,
+                    "new_status": TaskStatus.SUSPENDED.value,
                     "reason": reason,
                 },
                 metadata={"action": "pause_task"},
@@ -1001,21 +1001,20 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            if task.status != TaskStatus.PAUSED:
+            if task.status != TaskStatus.SUSPENDED:
                 return create_failure_result(
                     error=f"只有暂停状态的任务才能恢复，当前状态: {task.status.value}",
                     error_code="INVALID_STATUS",
                 )
 
             reason = inputs.get("reason", "用户请求继续执行")
-            # BUG-FIX-fix_20260512_async_compat: resume_task 现在是 async
             await service.resume_task(task_id)
 
             return create_success_result(
                 data={
                     "task_id": task_id,
                     "resumed": True,
-                    "old_status": TaskStatus.PAUSED.value,
+                    "old_status": TaskStatus.SUSPENDED.value,
                     "new_status": TaskStatus.RUNNING.value,
                     "reason": reason,
                 },
@@ -1077,7 +1076,7 @@ class TaskTool(BuiltinTool):
             # 只有非终态任务可以取消
             cancellable_statuses = {
                 TaskStatus.PENDING, TaskStatus.RUNNING,
-                TaskStatus.PAUSED, TaskStatus.EVALUATING,
+                TaskStatus.SUSPENDED, TaskStatus.EVALUATING,
             }
             if task.status not in cancellable_statuses:
                 return create_failure_result(
@@ -1166,9 +1165,9 @@ class TaskTool(BuiltinTool):
                 )
 
             # BUG-FIX-fix_20260523_retry_paused:
-            # 支持 FAILED 和 PAUSED 两种状态的重试。
-            # PAUSED 来自 TaskWorker.stop() 暂停的任务（系统重启后恢复场景）。
-            if task.status not in (TaskStatus.FAILED, TaskStatus.PAUSED):
+            # 支持 FAILED 和 SUSPENDED 两种状态的重试。
+            # SUSPENDED 来自 TaskWorker.stop() 暂停的任务（系统重启后恢复场景）。
+            if task.status not in (TaskStatus.FAILED, TaskStatus.SUSPENDED):
                 return create_failure_result(
                     error=f"只有失败或暂停的任务才能重试，当前状态: {task.status.value}",
                     error_code="INVALID_STATUS",
@@ -1319,7 +1318,7 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            if task.status not in [TaskStatus.RUNNING, TaskStatus.PAUSED]:
+            if task.status not in [TaskStatus.RUNNING, TaskStatus.SUSPENDED]:
                 return create_failure_result(
                     error=f"只能向运行中或暂停的任务注入指令，当前状态: {task.status.value}",
                     error_code="INVALID_STATUS",

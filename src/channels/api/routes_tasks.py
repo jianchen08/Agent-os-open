@@ -866,7 +866,7 @@ async def cancel_task(
 
     cancellable_statuses = {
         TaskStatus.PENDING, TaskStatus.RUNNING,
-        TaskStatus.PAUSED, TaskStatus.EVALUATING,
+        TaskStatus.SUSPENDED, TaskStatus.EVALUATING,
     }
     if task.status not in cancellable_statuses:
         raise APIError(

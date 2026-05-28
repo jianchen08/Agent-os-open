@@ -85,7 +85,7 @@ class ProjectController:
                 update(Task)
                 .where(Task.id == project_id)
                 .values(
-                    status="paused",
+                    status="suspended",
                     task_metadata=task_metadata,
                     updated_at=datetime.now(),
                 )

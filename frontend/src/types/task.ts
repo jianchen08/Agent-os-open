@@ -20,7 +20,7 @@
 export type ProjectStatus =
   | 'planning' // 规划中
   | 'running' // 执行中
-  | 'paused' // 已暂停
+  | 'suspended' // 已暂停
   | 'completed' // 已完成
   | 'failed' // 已失败
 

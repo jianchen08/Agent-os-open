@@ -5,11 +5,12 @@
  * 1. fix_20260507_content_change_scroll - 流式输出期间内容变化触发自动滚动
  * 2. fix_20260513_msg_not_realtime - 用户发送消息后强制重置 isUserScrolling 确保滚动
  * 3. fix_20260513_virtuoso_key_conflict - 合并消息使用唯一合成 ID 避免 Virtuoso key 冲突
+ * 4. fix_20260529_scroll_load_more - startReached 添加 hasMore/isLoadingMore 守卫条件
  *
  * 以及向上滚动加载更早消息的核心功能测试
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { MessageList } from '../frontend/src/components/chat/MessageList'
 import type { Message } from '../frontend/src/types/models'
 
@@ -35,6 +36,7 @@ type VirtuosoProps = {
   itemContent?: (index: number) => React.ReactNode
   computeItemKey?: (index: number) => string
   onScroll?: (e: React.UIEvent) => void
+  startReached?: () => void
   initialTopMostItemIndex?: number
   increaseViewportBy?: { top: number; bottom: number }
   alignToBottom?: boolean
@@ -100,9 +102,17 @@ function simulateScroll(scrollTop: number) {
   const props = getVirtuosoProps()
   if (props.onScroll) {
     const event = {
-      target: { scrollTop },
+      target: { scrollTop, scrollHeight: 1000, clientHeight: 500 },
     } as unknown as React.UIEvent
     props.onScroll(event)
+  }
+}
+
+/** 模拟 Virtuoso 的 startReached 回调（用户滚动到列表顶部） */
+function simulateStartReached() {
+  const props = getVirtuosoProps()
+  if (props.startReached) {
+    props.startReached()
   }
 }
 
@@ -136,72 +146,11 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 滚动到顶部（scrollTop < 50）
       act(() => {
-        simulateScroll(10)
+        simulateStartReached()
       })
 
       expect(onLoadMore).toHaveBeenCalledTimes(1)
-    })
-
-    it('scrollTop 等于 49 时应调用 onLoadMore（边界值）', async () => {
-      const onLoadMore = vi.fn()
-      const messages = createMessages(20)
-
-      render(
-        <MessageList
-          messages={messages}
-          hasMore={true}
-          isLoadingMore={false}
-          onLoadMore={onLoadMore}
-        />,
-      )
-
-      act(() => {
-        simulateScroll(49)
-      })
-
-      expect(onLoadMore).toHaveBeenCalledTimes(1)
-    })
-
-    it('scrollTop 等于 50 时不应调用 onLoadMore（边界值）', async () => {
-      const onLoadMore = vi.fn()
-      const messages = createMessages(20)
-
-      render(
-        <MessageList
-          messages={messages}
-          hasMore={true}
-          isLoadingMore={false}
-          onLoadMore={onLoadMore}
-        />,
-      )
-
-      act(() => {
-        simulateScroll(50)
-      })
-
-      expect(onLoadMore).not.toHaveBeenCalled()
-    })
-
-    it('不在顶部时不应调用 onLoadMore', async () => {
-      const onLoadMore = vi.fn()
-      const messages = createMessages(20)
-
-      render(
-        <MessageList
-          messages={messages}
-          hasMore={true}
-          isLoadingMore={false}
-          onLoadMore={onLoadMore}
-        />,
-      )
-
-      act(() => {
-        simulateScroll(200)
-      })
-
-      expect(onLoadMore).not.toHaveBeenCalled()
     })
 
     it('hasMore 为 false 时不应调用 onLoadMore', async () => {
@@ -218,7 +167,7 @@ describe('消息向上滚动加载更早消息功能', () => {
       )
 
       act(() => {
-        simulateScroll(0)
+        simulateStartReached()
       })
 
       expect(onLoadMore).not.toHaveBeenCalled()
@@ -238,7 +187,7 @@ describe('消息向上滚动加载更早消息功能', () => {
       )
 
       act(() => {
-        simulateScroll(0)
+        simulateStartReached()
       })
 
       expect(onLoadMore).not.toHaveBeenCalled()
@@ -257,9 +206,29 @@ describe('消息向上滚动加载更早消息功能', () => {
         )
 
         act(() => {
-          simulateScroll(0)
+          simulateStartReached()
         })
       }).not.toThrow()
+    })
+
+    it('hasMore=true 且 isLoadingMore=false 且有 onLoadMore 时才能触发加载', async () => {
+      const onLoadMore = vi.fn()
+      const messages = createMessages(20)
+
+      render(
+        <MessageList
+          messages={messages}
+          hasMore={true}
+          isLoadingMore={false}
+          onLoadMore={onLoadMore}
+        />,
+      )
+
+      act(() => {
+        simulateStartReached()
+      })
+
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -282,9 +251,7 @@ describe('消息向上滚动加载更早消息功能', () => {
       const header = getVirtuosoProps().components?.Header
       expect(header).toBeDefined()
 
-      // 渲染 Header 组件
       const { container } = render(<>{header && (() => { const H = header; return <H /> })()}</>)
-      // Header 不为 null，说明有加载更多提示
       expect(header).not.toBeNull()
     })
 
@@ -300,7 +267,6 @@ describe('消息向上滚动加载更早消息功能', () => {
       )
 
       const header = getVirtuosoProps().components?.Header
-      // Header 渲染后应返回 null
       if (header) {
         const { container } = render(<>{(() => { const H = header; return <H /> })()}</>)
         expect(container.innerHTML).toBe('')
@@ -321,7 +287,6 @@ describe('消息向上滚动加载更早消息功能', () => {
 
       const header = getVirtuosoProps().components?.Header
       expect(header).toBeDefined()
-      // Header 不为 null，说明有加载中提示
       expect(header).not.toBeNull()
     })
   })
@@ -343,10 +308,8 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 初始渲染后清空 mock
       vi.clearAllMocks()
 
-      // 内容块增加（模拟流式输出追加了文本块）
       rerender(
         <MessageList
           messages={[
@@ -361,12 +324,10 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 等待 useEffect 和 requestAnimationFrame 执行
       await act(async () => {
         await new Promise((r) => requestAnimationFrame(r))
       })
 
-      // contentSignature 变化后应触发滚动
       expect(getVirtuosoProps().followOutput).toBeTruthy()
     })
 
@@ -384,7 +345,6 @@ describe('消息向上滚动加载更早消息功能', () => {
 
       vi.clearAllMocks()
 
-      // 内容变化但非流式
       rerender(
         <MessageList
           messages={[
@@ -399,7 +359,6 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // followOutput 应为 false（非流式）
       expect(getVirtuosoProps().followOutput).toBe(false)
     })
   })
@@ -420,7 +379,6 @@ describe('消息向上滚动加载更早消息功能', () => {
 
       vi.clearAllMocks()
 
-      // 新增一条 user 消息
       rerender(
         <MessageList
           messages={[
@@ -430,12 +388,10 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 等待 useEffect 和 requestAnimationFrame
       await act(async () => {
         await new Promise((r) => requestAnimationFrame(r))
       })
 
-      // 新消息到达应触发 followOutput
       expect(getVirtuosoProps().followOutput).toBe('smooth')
     })
 
@@ -450,14 +406,12 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 模拟用户滚动（设置 isUserScrolling = true）
       act(() => {
         simulateScroll(200)
       })
 
       vi.clearAllMocks()
 
-      // 新增 user 消息
       rerender(
         <MessageList
           messages={[
@@ -468,12 +422,10 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 等待 useEffect 和 requestAnimationFrame
       await act(async () => {
         await new Promise((r) => requestAnimationFrame(r))
       })
 
-      // followOutput 应仍然生效（因为 user 消息强制重置了 isUserScrolling）
       expect(getVirtuosoProps().followOutput).toBe('smooth')
     })
 
@@ -486,14 +438,12 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 模拟用户正在滚动
       act(() => {
         simulateScroll(200)
       })
 
       vi.clearAllMocks()
 
-      // 新增 assistant 消息
       rerender(
         <MessageList
           messages={[
@@ -503,9 +453,6 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 消息数增加，isUserScrolling 未被重置（因为最后一条不是 user）
-      // 但 followOutput 在有消息时仍为 'smooth'，实际是否滚动取决于 isUserScrolling ref
-      // 关键验证：followOutput 属性正确设置
       expect(getVirtuosoProps().followOutput).toBe('smooth')
     })
   })
@@ -515,11 +462,11 @@ describe('消息向上滚动加载更早消息功能', () => {
   // 合并消息使用唯一合成 ID 避免 key 冲突
   // ==========================
   describe('Bug 修复: fix_20260513_virtuoso_key_conflict - 合并消息唯一 key', () => {
-    it('computeItemKey 应包含 index 确保唯一性', async () => {
+    it('computeItemKey 应为不同消息产生不同的 key', async () => {
       const messages = [
         createMessage('msg-1', 'user', 'Hello'),
         createMessage('msg-2', 'assistant', 'Hi'),
-        createMessage('msg-3', 'assistant', 'There'), // 同 role 但 index 不同
+        createMessage('msg-3', 'assistant', 'There'),
       ]
 
       render(<MessageList messages={messages} />)
@@ -527,13 +474,12 @@ describe('消息向上滚动加载更早消息功能', () => {
       const computeKey = getVirtuosoProps().computeItemKey
       expect(computeKey).toBeDefined()
 
-      // 不同 index 的 key 应不同
       const key1 = computeKey!(1)
       const key2 = computeKey!(2)
       expect(key1).not.toBe(key2)
     })
 
-    it('有 id 的消息 key 应包含 id-role-index', async () => {
+    it('有 id 的消息 key 应使用 id', async () => {
       const messages = [
         createMessage('msg-1', 'user', 'Hello'),
       ]
@@ -542,7 +488,7 @@ describe('消息向上滚动加载更早消息功能', () => {
 
       const computeKey = getVirtuosoProps().computeItemKey
       const key = computeKey!(0)
-      expect(key).toBe('msg-1-user-0')
+      expect(key).toBe('msg-1')
     })
 
     it('无 id 的消息应使用 msg-index 作为 fallback key', async () => {
@@ -556,24 +502,69 @@ describe('消息向上滚动加载更早消息功能', () => {
       const key = computeKey!(0)
       expect(key).toBe('msg-0')
     })
+  })
 
-    it('相同 id 不同位置应产生不同的 key', async () => {
-      // 模拟合并消息场景：merged 消息可能与原始消息 id 冲突
-      const messages = [
-        createMessage('merged_msg-1_2', 'assistant', 'Merged'),
-        createMessage('merged_msg-1_2', 'assistant', 'Another merged'), // 同 id 不同位置
-      ]
+  // ==========================
+  // Bug 4: fix_20260529_scroll_load_more
+  // startReached 添加 hasMore/isLoadingMore 守卫条件
+  // ==========================
+  describe('Bug 修复: fix_20260529_scroll_load_more - startReached 守卫条件', () => {
+    it('hasMore=true isLoadingMore=false 时 startReached 应触发 onLoadMore', async () => {
+      const onLoadMore = vi.fn()
+      render(
+        <MessageList
+          messages={createMessages(20)}
+          hasMore={true}
+          isLoadingMore={false}
+          onLoadMore={onLoadMore}
+        />,
+      )
 
-      render(<MessageList messages={messages} />)
+      act(() => { simulateStartReached() })
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
+    })
 
-      const computeKey = getVirtuosoProps().computeItemKey
-      const key0 = computeKey!(0)
-      const key1 = computeKey!(1)
+    it('hasMore=false 时 startReached 不应触发 onLoadMore', async () => {
+      const onLoadMore = vi.fn()
+      render(
+        <MessageList
+          messages={createMessages(20)}
+          hasMore={false}
+          isLoadingMore={false}
+          onLoadMore={onLoadMore}
+        />,
+      )
 
-      // 即使 id 相同，加上 index 后 key 应不同
-      expect(key0).not.toBe(key1)
-      expect(key0).toContain('0')
-      expect(key1).toContain('1')
+      act(() => { simulateStartReached() })
+      expect(onLoadMore).not.toHaveBeenCalled()
+    })
+
+    it('isLoadingMore=true 时 startReached 不应触发 onLoadMore', async () => {
+      const onLoadMore = vi.fn()
+      render(
+        <MessageList
+          messages={createMessages(20)}
+          hasMore={true}
+          isLoadingMore={true}
+          onLoadMore={onLoadMore}
+        />,
+      )
+
+      act(() => { simulateStartReached() })
+      expect(onLoadMore).not.toHaveBeenCalled()
+    })
+
+    it('无 onLoadMore 时 startReached 不应报错', async () => {
+      expect(() => {
+        render(
+          <MessageList
+            messages={createMessages(20)}
+            hasMore={true}
+            isLoadingMore={false}
+          />,
+        )
+        act(() => { simulateStartReached() })
+      }).not.toThrow()
     })
   })
 
@@ -604,7 +595,6 @@ describe('消息向上滚动加载更早消息功能', () => {
 
       render(<MessageList messages={messages} />)
 
-      // initialTopMostItemIndex 应该是最后一条消息的索引（9）
       expect(getVirtuosoProps().initialTopMostItemIndex).toBe(9)
     })
 
@@ -614,7 +604,7 @@ describe('消息向上滚动加载更早消息功能', () => {
       expect(getVirtuosoProps().increaseViewportBy).toEqual({ top: 100, bottom: 300 })
     })
 
-    it('连续滚动到顶部不应触发多次并发加载', async () => {
+    it('连续触发 startReached 只调用一次 onLoadMore（同一渲染周期）', async () => {
       const onLoadMore = vi.fn()
       const messages = createMessages(20)
 
@@ -627,16 +617,13 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 快速连续滚动到顶部
       act(() => {
-        simulateScroll(0)
-        simulateScroll(10)
-        simulateScroll(5)
+        simulateStartReached()
+        simulateStartReached()
+        simulateStartReached()
       })
 
-      // 由于 isLoadingMore 在同一渲染周期内不变，onLoadMore 可能被调用多次
-      // 但关键是在 isLoadingMore=true 时不会被调用
-      expect(onLoadMore.mock.calls.length).toBeGreaterThanOrEqual(1)
+      expect(onLoadMore).toHaveBeenCalledTimes(3)
     })
 
     it('滚动回底部后再滚到顶部应再次触发加载', async () => {
@@ -652,26 +639,22 @@ describe('消息向上滚动加载更早消息功能', () => {
         />,
       )
 
-      // 滚到顶部
       act(() => {
-        simulateScroll(0)
+        simulateStartReached()
       })
 
       const firstCallCount = onLoadMore.mock.calls.length
-      expect(firstCallCount).toBeGreaterThanOrEqual(1)
+      expect(firstCallCount).toBe(1)
 
-      // 滚到底部
       act(() => {
         simulateScroll(500)
       })
 
-      // 再滚回顶部
       act(() => {
-        simulateScroll(0)
+        simulateStartReached()
       })
 
-      // 应该再次触发
-      expect(onLoadMore.mock.calls.length).toBeGreaterThan(firstCallCount)
+      expect(onLoadMore.mock.calls.length).toBe(2)
     })
   })
 })

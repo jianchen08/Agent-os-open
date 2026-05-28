@@ -8,6 +8,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
+import { generateUUID } from '@/utils/uuid'
 
 import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
@@ -79,6 +80,7 @@ export function handlePipelineReceived(data: any): void {
   const placeholderSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1000
 
   pipelineStore.addMessage(pipelineId, {
+    id: `sys_${generateUUID()}`,
     role: 'system',
     content,
     sequence: placeholderSeq,
@@ -366,6 +368,7 @@ export function handleSystemNotification(eventData: any): void {
   }
 
   pipelineStore.addMessage(pipelineId, {
+    id: `sys_${generateUUID()}`,
     role: 'system',
     content,
     sequence: nextSeq,

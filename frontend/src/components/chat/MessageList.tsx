@@ -204,6 +204,22 @@ export const MessageList = ({
   }, [messages])
 
   /**
+   * 处理滚动到顶部加载更多
+   *
+   * BUG-FIX-fix_20260529_scroll_load_more:
+   * 问题根因: startReached 直接绑定 onLoadMore，没有检查 hasMore 和 isLoadingMore，
+   *          导致即使没有更多消息也会发起无意义的 API 请求，且在加载中时重复触发。
+   * 修复方案: 包装回调，添加 hasMore 和 isLoadingMore 守卫条件。
+   * 影响范围: 向上翻页加载更多消息功能
+   * 修复日期: 2026-05-29
+   */
+  const handleStartReached = useCallback(() => {
+    if (hasMore && !isLoadingMore && onLoadMore) {
+      onLoadMore()
+    }
+  }, [hasMore, isLoadingMore, onLoadMore])
+
+  /**
    * 渲染头部加载更多组件
    */
   const HeaderComponent = useCallback(() => {
@@ -265,8 +281,7 @@ export const MessageList = ({
           return msg?.id ?? `msg-${index}`
         }}
         onScroll={handleScroll}
-        /** 滚动到顶部时触发加载更多，替代 handleScroll 中的 scrollTop < 50 判断，更可靠 */
-        startReached={onLoadMore}
+        startReached={handleStartReached}
         initialTopMostItemIndex={initialTopMostItemIndex}
         increaseViewportBy={{ top: 100, bottom: 300 }}
         alignToBottom={true}

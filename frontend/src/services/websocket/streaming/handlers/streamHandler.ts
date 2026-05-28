@@ -6,7 +6,6 @@
  */
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -118,77 +117,12 @@ export function handleStreamStart(eventData: any) {
 
   ensureStreamingPlaceholder(pipelineId, messageId, threadId)
 
-  if (currentActivePipelineId !== pipelineId) {
-    const agentTabStore = useAgentTabStore.getState()
-    const activeTab = agentTabStore.getActiveTab()
-    const interactionStore = useInteractionStore.getState()
+  if (currentActivePipelineId === pipelineId) return
 
-    const shouldActivatePipeline = (() => {
-      // BUG-FIX-fix_20260524_cross_session_stream:
-      // 问题根因: 用户在会话A发送消息后快速切换到会话B，会话A的 stream_start 事件到达时，
-      //          shouldActivatePipeline 未检查管道是否属于当前活跃会话，导致 activePipelineId
-      //          被错误切换回会话A的管道，会话A的消息渲染在会话B的界面中。
-      // 修复方案: 在所有激活判断之前增加会话边界检查，管道不属于当前会话时禁止自动激活。
-      // 影响范围: 跨会话切换时的流式消息渲染
-      // 修复日期: 2026-05-24
-      const pipelineMeta = pipelineStore.getState().pipelines[pipelineId]
-      const activeSessionId = useSessionStore.getState().activeSessionId
-      if (pipelineMeta?.sessionId && activeSessionId && pipelineMeta.sessionId !== activeSessionId) {
-        return false
-      }
-      // BUG-FIX-fix_20260528_cross_pipeline_jump:
-      // 兜底保护：管道元数据未注册时（sub_agent_created 和 stream_start 竞态），
-      // 通过 pipelineSessionMap 查找归属会话，不属于当前会话则禁止激活。
-      if (!pipelineMeta && activeSessionId) {
-        const pipelineSession = pipelineStore.getState().pipelineSessionMap[pipelineId]
-        if (pipelineSession && pipelineSession !== activeSessionId) {
-          return false
-        }
-      }
-      if (activeTab?.pipelineRunId === pipelineId) return true
-      const tabIdForPipeline = agentTabStore.getTabIdByPipeline(pipelineId)
-      if (tabIdForPipeline && tabIdForPipeline === agentTabStore.activeTabId) return true
-      if (interactionStore.getEnteredForPipeline(pipelineId)) return true
-      // BUG-FIX-fix_20260527_sub_agent_auto_activate:
-      // 问题根因: 原修复仅在 !currentActivePipelineId 时检查子Agent管道，
-      //          竞态条件下 sub_agent_created 尚未处理、stream_start 先到达时，
-      //          pipelineTabMap 无映射且 pipelineMeta 为 null，子Agent管道被误判为主管道自动激活。
-      // 修复方案: 将子Agent管道守卫提升为通用规则（不受 currentActivePipelineId 状态限制），
-      //          任何有 tab 映射或 level>=2 的管道均不自动激活，
-      //          子Agent管道必须通过用户点击对话按钮或人类交互工具触发才会激活。
-      // 影响范围: 子Agent管道标签的自动弹出行为
-      // 修复日期: 2026-05-27
-      const hasTabMapping = !!agentTabStore.getTabIdByPipeline(pipelineId)
-      const isSubAgentPipeline = hasTabMapping || (pipelineMeta && pipelineMeta.level > 1)
-      if (isSubAgentPipeline) {
-        return false
-      }
-      if (!currentActivePipelineId) {
-        return true
-      }
-      const activeSessId = useSessionStore.getState().activeSessionId
-      const currentPipelineSession = pipelineStore.getState().pipelineSessionMap[currentActivePipelineId]
-      const isSameSession = threadId && (
-        threadId === activeSessId
-        || threadId === currentPipelineSession
-      )
-      const isCurrentStreaming = pipelineStore.getState().streamingState[currentActivePipelineId]?.isStreaming
-      if (isSameSession && !isCurrentStreaming) {
-        return true
-      }
-      return false
-    })()
-
-    if (shouldActivatePipeline) {
-      _debugLogger.info(
-        `[STREAM_START] activePipelineId changed: ${currentActivePipelineId?.slice(0, 12) || 'null'} -> ${pipelineId.slice(0, 12)}`,
-      )
-      pipelineStore.getState().activatePipeline(pipelineId)
-    } else {
-      _debugLogger.info(
-        `[STREAM_START] skipping activatePipeline: user not viewing pipeline ${pipelineId.slice(0, 12)}, keeping activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
-      )
-    }
+  const agentTabStore = useAgentTabStore.getState()
+  const activeTab = agentTabStore.getActiveTab()
+  if (activeTab?.pipelineRunId === pipelineId) {
+    pipelineStore.getState().activatePipeline(pipelineId)
   }
 }
 

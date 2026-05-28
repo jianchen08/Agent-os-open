@@ -337,16 +337,16 @@ class TaskService:
         allowed = {"running", "pending", "scheduled", "evaluating"}
         if current not in allowed:
             raise InvalidTransitionError(
-                current, "paused",
+                current, "suspended",
                 f"不允许从 '{current}' 暂停任务",
             )
 
         old_status = current
-        task.status = TaskStatus.PAUSED
+        task.status = TaskStatus.SUSPENDED
         task.updated_at = datetime.now().isoformat()
         self._storage.save(task)
 
-        await self._emit_state_change(task_id, old_status, "paused")
+        await self._emit_state_change(task_id, old_status, "suspended")
 
     async def resume_task(self, task_id: str) -> Any:
         """恢复暂停的任务。
@@ -373,7 +373,7 @@ class TaskService:
         from tasks.types import TaskStatus
 
         current = task.status.value if hasattr(task.status, "value") else str(task.status)
-        if current != "paused":
+        if current != "suspended":
             raise InvalidTransitionError(
                 current, "pending",
                 f"只有 paused 状态的任务可以恢复，当前: '{current}'",

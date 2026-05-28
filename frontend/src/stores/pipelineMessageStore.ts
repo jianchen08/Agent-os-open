@@ -352,12 +352,33 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       if (messageIndex < 0) {
         const storeIds = pipelineMessages.map((m) => m.id?.slice(0, 12)).join(',')
         const streamState = get().streamingState[pipelineId]
-        logger.warn(
-          `[updateMessage] message not found: pipelineId=%s messageId=%s totalMsgs=%d storeIds=[%s] streaming=%s`,
+        logger.error(
+          `[updateMessage] message not found, auto-creating: pipelineId=%s messageId=%s totalMsgs=%d storeIds=[%s] streaming=%s`,
           pipelineId?.slice(0, 12), messageId?.slice(0, 12), pipelineMessages.length,
           storeIds, streamState ? `yes(${streamState.messageId?.slice(0, 12)})` : 'no',
         )
-        return state
+        const sessionId = state.pipelineSessionMap[pipelineId] || ''
+        const maxSeq = pipelineMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
+        const placeholder: Message = {
+          id: messageId,
+          sessionId,
+          role: partial.role || 'assistant',
+          content: '',
+          sequence: partial.sequence ?? maxSeq + 1000,
+          timestamp: partial.timestamp || new Date().toISOString(),
+          parentId: null,
+          status: 'completed',
+          ...partial,
+          _lastUpdated: Date.now(),
+        } as Message
+        const newMessages = [...pipelineMessages, placeholder]
+        newMessages.sort(compareMessages)
+        return {
+          messagesByPipeline: {
+            ...state.messagesByPipeline,
+            [pipelineId]: newMessages,
+          },
+        }
       }
 
       const updatedMessages = [...pipelineMessages]
@@ -742,8 +763,27 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           )
         }
       } finally {
-        // 请求完成后从去重映射中移除
         _fetchingPipelines.delete(dedupeKey)
+        // BUG-FIX-fix_20260529_scroll_load_more:
+        // 问题根因: finally 块只删除了去重键，没有重置 isLoadingOlderByPipeline，
+        //          当 API 请求失败时 loading 状态永远卡在 true，后续请求被跳过，
+        //          导致用户滚动到顶部后"加载更多"完全失效。
+        // 修复方案: 在 finally 中确保 isLoadingOlderByPipeline 被重置为 false。
+        // 影响范围: 向上翻页加载更多消息功能
+        // 修复日期: 2026-05-29
+        if (options?.before_sequence !== undefined) {
+          set((state) => {
+            if (state.isLoadingOlderByPipeline[pipelineId]) {
+              return {
+                isLoadingOlderByPipeline: {
+                  ...state.isLoadingOlderByPipeline,
+                  [pipelineId]: false,
+                },
+              }
+            }
+            return state
+          })
+        }
       }
     })()
 

@@ -7,15 +7,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Message } from '@/types/models'
 
-const warnCalls: string[] = []
+const logCalls: string[] = []
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
     sessionStore: {
       debug: vi.fn(),
       info: vi.fn(),
-      warn: vi.fn((...args: unknown[]) => { warnCalls.push(args.filter(a => typeof a === 'string').join(' ')) }),
-      error: vi.fn(),
+      warn: vi.fn((...args: unknown[]) => { logCalls.push(args.filter(a => typeof a === 'string').join(' ')) }),
+      error: vi.fn((...args: unknown[]) => { logCalls.push(args.filter(a => typeof a === 'string').join(' ')) }),
     },
     websocket: {
       debug: vi.fn(),
@@ -78,7 +78,7 @@ describe('发送消息没有输出 bug 复现', () => {
 
   beforeEach(async () => {
     _seq = 0
-    warnCalls.length = 0
+    logCalls.length = 0
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
     usePipelineMessageStore = mod.usePipelineMessageStore
@@ -100,7 +100,6 @@ describe('发送消息没有输出 bug 复现', () => {
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
 
-    // 1. 模拟 API 加载大量历史消息（10轮对话）
     const historyMsgs: Message[] = []
     for (let i = 0; i < 10; i++) {
       historyMsgs.push(makeMsg(`user-${i}`, { role: 'user', content: `问题${i}` }))
@@ -109,7 +108,6 @@ describe('发送消息没有输出 bug 复现', () => {
     store.initFromAPI(PIPELINE_ID, historyMsgs)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(20)
 
-    // 2. 用户发新消息（前端乐观写入）
     const userMsgId = 'user-new-1'
     const existingMsgs = store.getMessages(PIPELINE_ID)
     const userSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
@@ -124,12 +122,10 @@ describe('发送消息没有输出 bug 复现', () => {
     } as Message)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(21)
 
-    // 3. 后端 stream_start → ensureStreamingPlaceholder
     const streamMsgId = 'msg_stream_001'
     ensureStreamingPlaceholder(store, PIPELINE_ID, streamMsgId)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(22)
 
-    // 4. stream_end → updateMessage
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
     store.finalizeMessage(PIPELINE_ID, streamMsgId)
 
@@ -137,7 +133,7 @@ describe('发送消息没有输出 bug 复现', () => {
     const ended = finalMsgs.find(m => m.id === streamMsgId)
     expect(ended).toBeDefined()
     expect(ended!.status).toBe('completed')
-    expect(warnCalls.some(w => w.includes('message not found'))).toBe(false)
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
   it('场景2: initFromAPI 在 stream_start 之后被调用（竞态）', () => {
@@ -145,7 +141,6 @@ describe('发送消息没有输出 bug 复现', () => {
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
 
-    // 1. 先加载历史
     const historyMsgs: Message[] = []
     for (let i = 0; i < 5; i++) {
       historyMsgs.push(makeMsg(`user-${i}`, { role: 'user', content: `问题${i}` }))
@@ -153,17 +148,13 @@ describe('发送消息没有输出 bug 复现', () => {
     }
     store.initFromAPI(PIPELINE_ID, historyMsgs)
 
-    // 2. 用户发消息
     const userSeq = store.getMessages(PIPELINE_ID).reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
     store.addMessage(PIPELINE_ID, makeMsg('user-new', { role: 'user', content: '新问题', sequence: userSeq }))
 
-    // 3. stream_start 创建占位符
     const streamMsgId = 'msg_stream_002'
     ensureStreamingPlaceholder(store, PIPELINE_ID, streamMsgId)
     expect(store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)).toBeDefined()
 
-    // 4. ★ 竞态：fetchMessages 返回（比如 setSessionActive 触发），API 没有 streaming 消息
-    //    initFromAPI 用 API 数据覆盖，但 API 的消息列表还没有 streaming 消息
     _seq = 0
     const apiMsgs: Message[] = []
     for (let i = 0; i < 5; i++) {
@@ -173,17 +164,15 @@ describe('发送消息没有输出 bug 复现', () => {
     apiMsgs.push(makeMsg('user-new', { role: 'user', content: '新问题', status: 'completed' }))
     store.initFromAPI(PIPELINE_ID, apiMsgs)
 
-    // 5. streaming 消息应该被保留
     const msgsAfterInit = store.getMessages(PIPELINE_ID)
     const streamingMsg = msgsAfterInit.find(m => m.id === streamMsgId)
     expect(streamingMsg).toBeDefined()
 
-    // 6. stream_end 应该能找到消息
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
     const afterEnd = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
     expect(afterEnd).toBeDefined()
     expect(afterEnd!.status).toBe('completed')
-    expect(warnCalls.some(w => w.includes('message not found'))).toBe(false)
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
   it('场景3: stopStreaming 在 updateMessage 之前被调用（stream_end 顺序）', () => {
@@ -191,27 +180,20 @@ describe('发送消息没有输出 bug 复现', () => {
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
 
-    // 创建占位符
     const streamMsgId = 'msg_stream_003'
     ensureStreamingPlaceholder(store, PIPELINE_ID, streamMsgId)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(1)
 
-    // 模拟 handleStreamEnd 的实际调用顺序：
-    // 1. terminatePipeline → stopStreaming（会将消息标记为 completed）
-    // 2. updateMessage(pipelineId, messageId, { status: 'completed' })
-
     store.stopStreaming(PIPELINE_ID)
 
-    // stopStreaming 后消息应该还在
     const afterStop = store.getMessages(PIPELINE_ID)
     expect(afterStop).toHaveLength(1)
     expect(afterStop[0].status).toBe('completed')
 
-    // updateMessage 应该能找到（因为 stopStreaming 已经标记为 completed）
     store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
     const afterUpdate = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
     expect(afterUpdate).toBeDefined()
-    expect(warnCalls.some(w => w.includes('message not found'))).toBe(false)
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 
   it('场景4: pipelineId 不一致 - 消息写入 A 管道但 updateMessage 用 B 管道', () => {
@@ -223,34 +205,134 @@ describe('发送消息没有输出 bug 复现', () => {
     store.registerPipeline({ pipelineId: PIPELINE_B, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_A)
 
-    // 用户发消息写入 PIPELINE_A
     store.addMessage(PIPELINE_A, makeMsg('user-1', { role: 'user', content: 'hello' }))
 
-    // stream_start 创建占位符写入 PIPELINE_A
     const streamMsgId = 'msg_stream_004'
     ensureStreamingPlaceholder(store, PIPELINE_A, streamMsgId)
 
-    // ★ 模拟 BUG: updateMessage 用了 PIPELINE_B（pipelineId 不匹配）
     store.updateMessage(PIPELINE_B, streamMsgId, { status: 'completed' } as any)
 
-    // 应该产生 WARN 日志
-    expect(warnCalls.some(w => w.includes('message not found'))).toBe(true)
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(true)
 
-    // PIPELINE_A 中的消息还在
     const msgsA = store.getMessages(PIPELINE_A)
     expect(msgsA.find(m => m.id === streamMsgId)).toBeDefined()
     expect(msgsA.find(m => m.id === streamMsgId)!.status).toBe('streaming')
   })
 
-  it('场景5: addMessage sequence 去重 - 不同 role 同 sequence', () => {
+  it('场景5: stream_start 缺失导致占位消息未创建，updateMessage 自动创建消息', () => {
     const store = usePipelineMessageStore.getState()
     store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
     store.activatePipeline(PIPELINE_ID)
 
-    // 用户消息 seq=1
+    const historyMsgs: Message[] = []
+    for (let i = 0; i < 25; i++) {
+      historyMsgs.push(makeMsg(`hex_${i.toString(16).padStart(8, '0')}`, { role: 'user', content: `问题${i}` }))
+      historyMsgs.push(makeMsg(`hex_${(i + 100).toString(16).padStart(8, '0')}`, { role: 'assistant', content: `回答${i}` }))
+    }
+    historyMsgs.push(makeMsg('user-c98dfca0-ec6', { role: 'user', content: '最新问题' }))
+    store.initFromAPI(PIPELINE_ID, historyMsgs)
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(51)
+
+    const streamMsgId = 'msg_19743fdb'
+
+    store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
+
+    const msgs = store.getMessages(PIPELINE_ID)
+    expect(msgs).toHaveLength(52)
+    const autoCreated = msgs.find(m => m.id === streamMsgId)
+    expect(autoCreated).toBeDefined()
+    expect(autoCreated!.status).toBe('completed')
+    expect(autoCreated!.role).toBe('assistant')
+  })
+
+  it('场景6: 真实 ID 格式竞态 — API hex ID vs WS msg_ 前缀 ID', () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    store.activatePipeline(PIPELINE_ID)
+
+    const apiHistoryMsgs: Message[] = []
+    for (let i = 1; i <= 25; i++) {
+      apiHistoryMsgs.push(makeMsg(`hex_user_${i.toString().padStart(12, '0')}`, { role: 'user', content: `问题${i}` }))
+      apiHistoryMsgs.push(makeMsg(`hex_asst_${i.toString().padStart(12, '0')}`, { role: 'assistant', content: `回答${i}` }))
+    }
+    store.initFromAPI(PIPELINE_ID, apiHistoryMsgs)
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(50)
+
+    const userSeq = store.getMessages(PIPELINE_ID).reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
+    store.addMessage(PIPELINE_ID, makeMsg('c98dfca0-ec6b-4f5a', { role: 'user', content: '新问题', sequence: userSeq }))
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(51)
+
+    const streamMsgId = 'msg_19743fdb'
+    ensureStreamingPlaceholder(store, PIPELINE_ID, streamMsgId)
+    expect(store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)).toBeDefined()
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(52)
+
+    _seq = 0
+    const apiMsgs: Message[] = []
+    for (let i = 1; i <= 25; i++) {
+      apiMsgs.push(makeMsg(`hex_user_${i.toString().padStart(12, '0')}`, { role: 'user', content: `问题${i}`, status: 'completed' }))
+      apiMsgs.push(makeMsg(`hex_asst_${i.toString().padStart(12, '0')}`, { role: 'assistant', content: `回答${i}`, status: 'completed' }))
+    }
+    apiMsgs.push(makeMsg('hex_user_new_0000', { role: 'user', content: '新问题', status: 'completed' }))
+    store.initFromAPI(PIPELINE_ID, apiMsgs)
+
+    const msgsAfterInit = store.getMessages(PIPELINE_ID)
+    const streamingMsg = msgsAfterInit.find(m => m.id === streamMsgId)
+    expect(streamingMsg).toBeDefined()
+    expect(streamingMsg!.status).toBe('streaming')
+
+    store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
+    const afterEnd = store.getMessages(PIPELINE_ID).find(m => m.id === streamMsgId)
+    expect(afterEnd).toBeDefined()
+    expect(afterEnd!.status).toBe('completed')
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
+  })
+
+  it('场景7: stream_end 后 initFromAPI 覆盖已完成的占位消息', () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    store.activatePipeline(PIPELINE_ID)
+
+    const apiHistoryMsgs: Message[] = []
+    for (let i = 1; i <= 25; i++) {
+      apiHistoryMsgs.push(makeMsg(`hex_user_${i.toString().padStart(12, '0')}`, { role: 'user', content: `问题${i}` }))
+      apiHistoryMsgs.push(makeMsg(`hex_asst_${i.toString().padStart(12, '0')}`, { role: 'assistant', content: `回答${i}` }))
+    }
+    store.initFromAPI(PIPELINE_ID, apiHistoryMsgs)
+
+    const userSeq = store.getMessages(PIPELINE_ID).reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
+    store.addMessage(PIPELINE_ID, makeMsg('c98dfca0-ec6b-4f5a', { role: 'user', content: '新问题', sequence: userSeq }))
+
+    const streamMsgId = 'msg_19743fdb'
+    ensureStreamingPlaceholder(store, PIPELINE_ID, streamMsgId)
+
+    store.stopStreaming(PIPELINE_ID)
+    store.updateMessage(PIPELINE_ID, streamMsgId, { status: 'completed' } as any)
+    store.finalizeMessage(PIPELINE_ID, streamMsgId)
+
+    _seq = 0
+    const apiMsgs: Message[] = []
+    for (let i = 1; i <= 25; i++) {
+      apiMsgs.push(makeMsg(`hex_user_${i.toString().padStart(12, '0')}`, { role: 'user', content: `问题${i}`, status: 'completed' }))
+      apiMsgs.push(makeMsg(`hex_asst_${i.toString().padStart(12, '0')}`, { role: 'assistant', content: `回答${i}`, status: 'completed' }))
+    }
+    apiMsgs.push(makeMsg('hex_user_new_0000', { role: 'user', content: '新问题', status: 'completed' }))
+    store.initFromAPI(PIPELINE_ID, apiMsgs)
+
+    const afterInit = store.getMessages(PIPELINE_ID)
+    const completedMsg = afterInit.find(m => m.id === streamMsgId)
+    expect(completedMsg).toBeDefined()
+    expect(completedMsg!.status).toBe('completed')
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
+  })
+
+  it('场景8: addMessage sequence 去重 - 不同 role 同 sequence', () => {
+    const store = usePipelineMessageStore.getState()
+    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    store.activatePipeline(PIPELINE_ID)
+
     store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'hello', sequence: 1 }))
 
-    // assistant 占位符也用 seq=1（如果 ensureStreamingPlaceholder 计算有误）
     store.addMessage(PIPELINE_ID, {
       id: 'msg_assistant_1',
       sessionId: SESSION_ID,
@@ -264,15 +346,13 @@ describe('发送消息没有输出 bug 复现', () => {
 
     const msgs = store.getMessages(PIPELINE_ID)
 
-    // 关键断言：assistant 消息应该存在且 ID 为 msg_assistant_1
     const assistantMsg = msgs.find(m => m.id === 'msg_assistant_1')
     expect(assistantMsg).toBeDefined()
 
-    // updateMessage 用 assistant ID 必须能找到
     store.updateMessage(PIPELINE_ID, 'msg_assistant_1', { status: 'completed' } as any)
     const afterUpdate = store.getMessages(PIPELINE_ID).find(m => m.id === 'msg_assistant_1')
     expect(afterUpdate).toBeDefined()
     expect(afterUpdate!.status).toBe('completed')
-    expect(warnCalls.some(w => w.includes('message not found'))).toBe(false)
+    expect(logCalls.some(w => w.includes('message not found'))).toBe(false)
   })
 })

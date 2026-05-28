@@ -503,12 +503,14 @@ function HomePage(): ReactNode {
       hasMoreMessages={hasMoreMessages}
       isLoadingMoreMessages={isLoadingMoreMessages}
       onLoadMoreMessages={() => {
-        const pid = usePipelineMessageStore.getState().activePipelineId
+        const store = usePipelineMessageStore.getState()
+        const pid = store.activePipelineId
         const sid = useSessionStore.getState().activeSessionId
-        if (pid) {
-          const topCursor = usePipelineMessageStore.getState().getTopCursor(pid)
-          usePipelineMessageStore.getState().fetchMessages(pid, { before_sequence: topCursor, threadId: sid || undefined })
-        }
+        if (!pid) return
+        if (!store.hasMoreOlderByPipeline[pid]) return
+        if (store.isLoadingOlderByPipeline[pid]) return
+        const topCursor = store.getTopCursor(pid)
+        store.fetchMessages(pid, { before_sequence: topCursor, threadId: sid || undefined })
       }}
       className="flex-1"
     />

@@ -323,7 +323,7 @@ async def pause_project(project_id: str, _user: dict = Depends(require_auth)) ->
     Returns:
         {project: {...}}
     """
-    return {"project": {"id": project_id, "status": "paused"}}
+    return {"project": {"id": project_id, "status": "suspended"}}
 
 
 @projects_router.post("/{project_id}/resume", summary="恢复项目")
@@ -660,7 +660,7 @@ async def get_monitoring_tasks(
     # 注意：monitoring TaskInfo 使用 'running' 而非 'in_progress'
     _MONITORING_STATUS_MAP: dict[str, str] = {
         "evaluating": "running",
-        "paused": "pending",
+        "suspended": "pending",
         "queued": "pending",
     }
 
@@ -1373,9 +1373,8 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
     _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {
         "pending": ("prepare", "pending"),
         "scheduled": ("prepare", "pending"),
-        "paused": ("prepare", "pending"),
+        "suspended": ("prepare", "pending"),
         "running": ("execute", "running"),
-        "suspended": ("execute", "running"),
         "blocked": ("execute", "running"),
         "evaluating": ("evaluate", "running"),
         "completed": ("evaluate", "completed"),

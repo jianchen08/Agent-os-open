@@ -336,11 +336,12 @@ class _MergeOpsMixin:
             merged.append(str(rel))
         if merged:
             self._ensure_git_user(dst)
-            self._run_git("add", "-A", cwd=dst)
+            for f in merged:
+                self._run_git("add", "--", f, cwd=dst)
             commit_msg = f"merge: copy_merge ({len(merged)} files)"
             if conflict_files:
                 commit_msg += f" ({len(conflict_files)} conflicts)"
-            self._git_add_commit_if_dirty(dst, commit_msg)
+            self._run_git("commit", "-m", commit_msg, "--allow-empty", cwd=dst)
             result = {"success": True, "action": "merged",
                       "method": "copy", "merged_files": merged}
             if conflict_files:

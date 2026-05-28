@@ -354,7 +354,7 @@ export async function fetchACResult(taskId: string, acId: string): Promise<Accep
 export interface TaskPauseResumeResponse {
   success: boolean
   task_id: string
-  paused_count?: number
+  suspended_count?: number
   resumed_count?: number
   message: string
 }

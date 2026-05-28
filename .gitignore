@@ -9,6 +9,7 @@ node_modules/
 .env
 *.log
 .tox/
+NUL
 nul
 .ports
 .py_deps_installed
