@@ -169,10 +169,13 @@ class PipelineStreamBridge:
         self.output_sink = output_sink
         self.message_id = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._sent_tool_starts: set[str] = set()
-        # BUG-FIX-fix_20260529_msg_order: 移除本地 _seq 计数器，改用 PipelineEntry 共享计数器
-        # 问题根因: stream_bridge 本地 _seq 在 reset_for_new_turn 时归零，
-        #   与 message_bus/track_plugin 的独立计数器产生 sequence 冲突。
-        # 修复方案: 通过 _get_next_sequence() 从 PipelineEntry 共享计数器获取 sequence。
+        # BUG-FIX-fix_20260529_msg_order: 缓存 PipelineEntry 引用，避免 Registry unregister 后丢失计数器
+        self._entry: Any | None = None
+        try:
+            from pipeline.registry import get_engine_registry
+            self._entry = get_engine_registry().get(pipeline_id)
+        except Exception:
+            pass
 
         # 内部状态
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -232,16 +235,18 @@ class PipelineStreamBridge:
     def _get_next_sequence(self) -> int:
         """从 PipelineEntry 共享计数器获取下一个 sequence。
 
-        通过 pipeline_id 查找 EngineRegistry 中的 PipelineEntry，
-        调用其 next_sequence() 原子递增方法获取全局唯一的 sequence。
+        优先使用创建时缓存的 entry 引用，避免 Registry unregister 后丢失计数器。
 
         Returns:
-            全局递增的 sequence 值；Registry 不可用时返回 0（降级处理）
+            全局递增的 sequence 值；entry 不可用时返回 0（降级处理）
         """
+        if self._entry is not None:
+            return self._entry.next_sequence()
         try:
             from pipeline.registry import get_engine_registry
             entry = get_engine_registry().get(self.pipeline_id)
             if entry is not None:
+                self._entry = entry
                 return entry.next_sequence()
         except Exception:
             pass

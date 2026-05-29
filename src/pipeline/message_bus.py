@@ -642,11 +642,7 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             if content:
-                # BUG-FIX-fix_20260529_msg_order: new_message 使用共享计数器获取 sequence
-                # 问题根因: send_new_message 硬编码 sequence=1，导致 new_message 事件
-                #   的 sequence 与其他事件不协调，前端双游标系统异常。
-                # 修复方案: 从 PipelineEntry 共享计数器获取 sequence。
-                _nm_seq = _get_pipeline_sequence(pipeline_id)
+                _nm_seq = bridge._get_next_sequence()
                 await bridge.send_new_message(content, sequence=_nm_seq)
         except asyncio.CancelledError:
             pass

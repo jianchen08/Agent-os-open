@@ -250,6 +250,23 @@ class _GitOpsMixin:
 
         self._ensure_git_user(cwd)
 
+        # BUG-FIX-fix_20260529_gitignore_guard:
+        # git add -A 前确保 .gitignore 存在。
+        # 如果 .gitignore 丢失（sparse checkout 未检出、merge 覆盖等），
+        # git add -A 会跟踪 data/ 等本应排除的目录，后续 git 操作会破坏数据。
+        gitignore = cwd / ".gitignore"
+        if not gitignore.exists():
+            logger.warning(
+                "[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s",
+                gitignore)
+            try:
+                gitignore.write_text(
+                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n"
+                    "node_modules/\n.env\n*.log\n*.bak\n",
+                    encoding="utf-8")
+            except OSError:
+                pass
+
         self._remove_index_lock(cwd)
 
         rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
@@ -424,10 +441,22 @@ class _GitOpsMixin:
                 f"task_id={task_id}, error={stderr}")
 
     def _setup_sparse_worktree(self, ws_dir: Path, project_root: Path, branch: str):
-        """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）"""
+        """为大项目设置 sparse-checkout worktree，排除目录通过符号链接关联（Windows 用 junction point 降级）
+
+        BUG-FIX-fix_20260529_sparse_gitignore:
+        白名单必须包含 .gitignore 等基础设施文件。
+        如果 sparse checkout 不包含 .gitignore，worktree 分支上就没有这个文件，
+        git merge 时会把 project_root 的 .gitignore 当作"被删除"处理，
+        导致 .gitignore 丢失，后续 git add -A 会跟踪 data/ 等本应排除的目录。
+        """
         self._run_git("worktree", "add", "--no-checkout", "-b", branch, str(ws_dir), cwd=project_root)
         self._run_git("sparse-checkout", "init", "--cone", cwd=ws_dir)
-        whitelist = self._config.get("workspace", {}).get("worktree_include_patterns", ["src", "config"])
+        whitelist = self._config.get("workspace", {}).get(
+            "worktree_include_patterns", ["src", "config"])
+        mandatory = [".gitignore", ".gitattributes", ".gitmodules"]
+        for m in mandatory:
+            if m not in whitelist:
+                whitelist = whitelist + [m]
         if whitelist:
             self._run_git("sparse-checkout", "set", *whitelist, cwd=ws_dir)
         self._run_git("checkout", "HEAD", cwd=ws_dir)
