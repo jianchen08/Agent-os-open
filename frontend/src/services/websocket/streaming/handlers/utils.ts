@@ -70,30 +70,20 @@ export function stopPipelineStreaming(pipelineId: string, threadId?: string): vo
 }
 
 /**
- * BUG-FIX-fix_20260529_msg_order:
- * 统一分配下一个 sequence 值，优先使用后端返回的真实 sequence。
- *
- * 问题根因: 前端自算 sequence (max+5000) 与后端真实 sequence 不一致，
- *          导致消息排序错乱（后端已增加共享 Pipeline Sequence Allocator）。
- * 修复方案: 后端 WS 事件现在携带真实 sequence，优先使用；fallback 到自算。
- * 影响范围: 所有客户端分配 sequence 的场景
- * 修复日期: 2026-05-29
+ * 分配下一个 sequence 值。
+ * 后端消息直接使用后端返回的 sequence；用户消息使用乐观临时值。
  *
  * @param pipelineId - 管道 ID
- * @param backendSequence - 可选的后端返回的真实 sequence 值
- * @returns 后端 sequence（有效时）或 当前管道中最大 sequence + 5000
+ * @param backendSequence - 后端返回的真实 sequence（WS 事件携带）
  */
 export function allocateNextSequence(pipelineId: string, backendSequence?: number): number {
-  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
-  // 问题根因: 前端自算 sequence 与后端不一致
-  // 修复方案: 后端现在携带真实 sequence，优先使用
   if (backendSequence != null && backendSequence > 0) {
     return backendSequence
   }
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
   return existingMsgs.reduce(
     (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
-  ) + 5000
+  ) + 1
 }
 
 /**

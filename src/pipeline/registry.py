@@ -322,6 +322,25 @@ class EngineRegistry:
         """
         return self._engines.get(pipeline_id)
 
+    def _resume_entry_sequence(self, entry: PipelineEntry, pipeline_id: str) -> None:
+        """从 DB 已有记录续接 PipelineEntry 的共享 sequence 计数器。
+
+        Args:
+            entry: PipelineEntry 实例
+            pipeline_id: 管道 ID
+        """
+        try:
+            from infrastructure.service_provider import ServiceProvider
+            provider = ServiceProvider()
+            storage = provider.get("execution_record_storage")
+            if storage and hasattr(storage, "list_by_pipeline"):
+                existing = storage.list_by_pipeline(pipeline_id)
+                if existing:
+                    max_seq = max(r.sequence for r in existing)
+                    entry.init_sequence(max_seq)
+        except Exception:
+            pass
+
     def get_bridge(self, pipeline_id: str) -> Any | None:
         """获取管道的活跃 bridge。
 
@@ -400,6 +419,11 @@ class EngineRegistry:
                 output_sink=sink,
             )
             entry.bridge = bridge
+            # BUG-FIX-fix_20260529_msg_order: bridge 创建时从 DB 续接共享计数器
+            # 问题根因: TrackPlugin 续接在 Output 链(Step 9)中执行，
+            #   但 bridge 的 drain_loop(Step 8) 已经在消费计数器，
+            #   导致初始 sequence 从 0/1 开始，比前端已有消息小。
+            self._resume_entry_sequence(entry, pipeline_id)
         else:
             # 停止旧 drain task：先发哨兵值立即终止 drain_loop，
             # 再取消 asyncio.Task 确保协程退出，避免双消费者竞争。
