@@ -241,7 +241,7 @@ class PipelineStreamBridge:
         Returns:
             全局递增的 sequence 值；entry 不可用时返回 0（降级处理）
         """
-        if self._entry is not None:
+        if getattr(self, '_entry', None) is not None:
             return self._entry.next_sequence()
         try:
             from pipeline.registry import get_engine_registry
@@ -255,6 +255,8 @@ class PipelineStreamBridge:
 
     def _next_part_seq(self) -> int:
         """Part 级 sequence，本地递增，仅用于前端 parts 排序。"""
+        if not hasattr(self, '_part_seq'):
+            self._part_seq = 0
         self._part_seq += 1
         return self._part_seq
 
