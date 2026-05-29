@@ -132,29 +132,6 @@ class TrackPlugin(IOutputPlugin):
             pass
         return 0
 
-    def _get_stream_sequence(self, pipeline_run_id: str) -> int:
-        """获取当前流式消息的 sequence（复用 stream_start 分配的值）。
-
-        stream_start 在 Core 链期间已分配 sequence，AI 记录持久化时
-        直接复用该值，确保 WS 推送和持久化使用同一个 sequence。
-
-        Args:
-            pipeline_run_id: 管道 ID
-
-        Returns:
-            stream_start 分配的 sequence；获取失败时 fallback 到 _next_sequence
-        """
-        try:
-            from pipeline.registry import get_engine_registry
-            entry = get_engine_registry().get(pipeline_run_id)
-            if entry is not None and entry.bridge is not None:
-                msg_seq = getattr(entry.bridge, '_current_msg_seq', 0)
-                if msg_seq > 0:
-                    return msg_seq
-        except Exception:
-            pass
-        return self._next_sequence(pipeline_run_id)
-
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """收集追踪统计信息。
 
@@ -380,11 +357,10 @@ class TrackPlugin(IOutputPlugin):
                     _tool_calls_json = json.dumps(raw_tool_calls, ensure_ascii=False, default=str)
                 except (TypeError, ValueError):
                     pass
-            ai_seq = self._get_stream_sequence(pipeline_run_id)
             ai_record = ExecutionRecordData(
                 pipeline_run_id=pipeline_run_id,
                 type="ai",
-                sequence=ai_seq,
+                sequence=self._next_sequence(pipeline_run_id),
                 iteration=iteration,
                 role="assistant",
                 content=str(raw_result) if raw_result else "",
@@ -393,6 +369,7 @@ class TrackPlugin(IOutputPlugin):
             )
             try:
                 storage.save(ai_record)
+                ctx.state["track.last_ai_sequence"] = ai_record.sequence
             except Exception:
                 logger.exception("AI 执行记录持久化失败")
 

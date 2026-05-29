@@ -315,17 +315,15 @@ class PipelineStreamBridge:
         _threadId 仅作为辅助路由信息。
         """
         self._stream_started = True
-        self._current_msg_seq = self._get_next_sequence()
+        self._current_msg_seq = 0
         logger.info(
-            "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s seq=%d",
+            "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s",
             self.message_id[:12], self.pipeline_id[:12],
             getattr(self.output_sink, 'sink_id', '?'), type(self.output_sink).__name__,
-            self._current_msg_seq,
         )
         success = await self._send_event(self._make_event("stream_start", {
             "message_id": self.message_id,
             "pipeline_id": self.pipeline_id,
-            "sequence": self._current_msg_seq,
             "_threadId": getattr(self.output_sink, '_thread_id', None),
         }))
         logger.info(
