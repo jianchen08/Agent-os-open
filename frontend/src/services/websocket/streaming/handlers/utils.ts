@@ -107,9 +107,6 @@ export function ensureStreamingPlaceholder(
 ): void {
   startPipelineStreaming(pipelineId, messageId, threadId)
 
-  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
-  // 问题根因: 前端自算 sequence 与后端不一致
-  // 修复方案: 后端 WS 事件现在携带真实 sequence，透传给 allocateNextSequence
   const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
 
   pipelineStore.getState().addMessage(pipelineId, {

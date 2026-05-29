@@ -390,7 +390,6 @@ function HomePage(): ReactNode {
       const targetPipelineId = params.pipelineId || activePipelineId
 
       const existingMsgs = pipelineStore.getMessages(targetPipelineId)
-      // BUG-FIX-fix_20260529_msg_order: 用户消息 sequence 使用 max+1，与 WS 事件一致
       const userSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
       const userMessage: Message = {

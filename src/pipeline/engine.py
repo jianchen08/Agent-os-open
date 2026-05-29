@@ -352,7 +352,11 @@ class PipelineEngine:
                 _iter_notifs = self.consume_pending_notifications()
                 if _iter_notifs:
                     _combined = "\n\n".join(_iter_notifs)
-                    state["user_input"] = _combined
+                    _existing_input = state.get("user_input", "")
+                    if _existing_input:
+                        state["user_input"] = f"{_combined}\n\n{_existing_input}"
+                    else:
+                        state["user_input"] = _combined
                     state.setdefault("messages", []).append(
                         {"role": "user", "content": _combined}
                     )

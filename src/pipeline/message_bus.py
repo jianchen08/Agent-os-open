@@ -684,15 +684,7 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             if content:
-                _ai_seq = 0
-                if engine_task is not None and not engine_task.done():
-                    try:
-                        await asyncio.wait_for(engine_task, timeout=10.0)
-                    except Exception:
-                        pass
-                _last_state = getattr(engine, '_last_state', None)
-                if isinstance(_last_state, dict):
-                    _ai_seq = _last_state.get('track.last_ai_sequence', 0)
+                _ai_seq = getattr(bridge, '_last_ai_sequence', 0)
                 if _ai_seq <= 0:
                     _ai_seq = getattr(bridge, '_current_msg_seq', 0)
                 await bridge.send_new_message(content, sequence=_ai_seq)

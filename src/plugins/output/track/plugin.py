@@ -370,6 +370,13 @@ class TrackPlugin(IOutputPlugin):
             try:
                 storage.save(ai_record)
                 ctx.state["track.last_ai_sequence"] = ai_record.sequence
+                try:
+                    from pipeline.registry import get_engine_registry
+                    _entry = get_engine_registry().get(pipeline_run_id)
+                    if _entry and _entry.bridge:
+                        _entry.bridge._last_ai_sequence = ai_record.sequence
+                except Exception:
+                    pass
             except Exception:
                 logger.exception("AI 执行记录持久化失败")
 

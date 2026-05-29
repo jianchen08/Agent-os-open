@@ -58,6 +58,8 @@ export function handlePipelineReceived(data: any): void {
 
   // 去重：检查管道中是否已存在相同 content 前缀的 system 消息
   const existingMsgs = pipelineStore.getMessages(pipelineId)
+
+  const nextSeq = allocateNextSequence(pipelineId)
   const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
     if (m.role === 'system') {
@@ -77,17 +79,11 @@ export function handlePipelineReceived(data: any): void {
     return
   }
 
-  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
-  // 问题根因: 前端自算 sequence 与后端不一致
-  // 修复方案: 从 WS 事件中提取后端 sequence，优先使用；fallback 到自算
-  const backendSeq = data?.sequence || payload?.sequence
-  const placeholderSeq = allocateNextSequence(pipelineId, backendSeq)
-
   pipelineStore.addMessage(pipelineId, {
     id: `sys_${generateUUID()}`,
     role: 'system',
     content,
-    sequence: placeholderSeq,
+    sequence: nextSeq,
     timestamp: new Date().toISOString(),
     status: 'completed',
     parts: [
@@ -351,11 +347,8 @@ export function handleSystemNotification(eventData: any): void {
   const pipelineStore = usePipelineMessageStore.getState()
 
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
-  // 问题根因: 前端自算 sequence 与后端不一致
-  // 修复方案: 从 WS 事件中提取后端 sequence，优先使用；fallback 到自算
-  const backendSeq = data?.sequence || eventData?.data?.sequence
-  const nextSeq = allocateNextSequence(pipelineId, backendSeq)
+
+  const nextSeq = allocateNextSequence(pipelineId)
   const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
     if (m.role === 'system') {

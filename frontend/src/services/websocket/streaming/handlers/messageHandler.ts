@@ -84,6 +84,7 @@ export function handleNewMessage(eventData: any) {
 
   const finalContent = eventData?.content || eventData?.data?.content || eventData?.data?.final_content
   const data = eventData?.data || eventData
+  const backendSeq = data?.sequence ?? eventData?.sequence
 
   // 确保消息存在：复用 ensureStreamingPlaceholder 统一创建逻辑
   const msgs = pipelineStore.getState().getMessages(pipelineId)
@@ -101,8 +102,13 @@ export function handleNewMessage(eventData: any) {
   const builtParts = buildPartsFromApiData(finalContent, data?.thinking, data?.toolCalls)
   const hasExistingParts = existing?.parts && existing.parts.length > 0
   const newMessageHasThinking = !!data?.thinking?.content
+  const isAlreadyCompleted = existing?.status === 'completed'
 
-  if (hasExistingParts && !newMessageHasThinking && builtParts.length > 0) {
+  if (isAlreadyCompleted) {
+    pipelineStore.getState().updateMessage(pipelineId, messageId, {
+      ...(backendSeq ? { sequence: backendSeq } : {}),
+    } as any)
+  } else if (hasExistingParts && !newMessageHasThinking && builtParts.length > 0) {
     // 增量更新：保留已有 parts 中的 thinking/tool_call，只更新 text part 的 content
     const mergedParts = existing.parts.map((p: any) => {
       if (p.type === 'text' && finalContent) {
@@ -113,11 +119,13 @@ export function handleNewMessage(eventData: any) {
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
       content: finalContent,
+      ...(backendSeq ? { sequence: backendSeq } : {}),
       parts: mergedParts,
     } as any)
   } else {
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
+      ...(backendSeq ? { sequence: backendSeq } : {}),
       ...(finalContent ? { content: finalContent } : {}),
       ...(builtParts.length > 0 ? { parts: builtParts } : {}),
     } as any)
