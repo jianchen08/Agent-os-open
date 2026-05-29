@@ -286,18 +286,12 @@ class TestFrontendImmediateDisplay:
     @pytest.mark.asyncio
     async def test_targeted_sink_send_event_no_thread_id(self):
         """验证 TargetedSink 在 thread_id 为空时返回 False。"""
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpk6e_l6vg\current
-        from pipeline.stream_bridge import TargetedSink
-
-        mock_notifier = MagicMock()
-=======
         from unittest.mock import AsyncMock
 
         from pipeline.stream_bridge import TargetedSink
 
         mock_notifier = MagicMock()
         mock_notifier.send_to_thread = AsyncMock(return_value=False)
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_v5_message_e2e.py
         sink = TargetedSink(mock_notifier, thread_id="")
 
         result = await sink.send_event({"type": "test"})
@@ -413,8 +407,8 @@ class TestStreamingDisplay:
         })
 
         calls = mock_sink.send_event.call_args_list
-        # tool_start + tool_result + stream_start
-        assert len(calls) == 3
+        # tool_start + tool_result（不再有多余的 stream_start）
+        assert len(calls) == 2
         result_event = calls[1][0][0]
         assert result_event["type"] == "tool_result"
         assert result_event["data"]["success"] is True
@@ -443,8 +437,8 @@ class TestStreamingDisplay:
         })
 
         calls = mock_sink.send_event.call_args_list
-        # 应该自动补发 tool_start + tool_result + stream_start
-        assert len(calls) == 3
+        # 应该自动补发 tool_start + tool_result（不再有多余的 stream_start）
+        assert len(calls) == 2
         assert calls[0][0][0]["type"] == "tool_start"
         assert calls[1][0][0]["type"] == "tool_result"
 

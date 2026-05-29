@@ -154,8 +154,8 @@ describe('stream 消息生命周期', () => {
     })
   })
 
-  describe('场景4: tool_start 中间发送 stream_end 再 stream_start', () => {
-    it('工具调用中间的 stream_end/stream_start 循环后消息仍可找到', () => {
+  describe('场景4: tool_start/tool_result 后续 chunks 无多余 stream_start', () => {
+    it('工具调用后直接追加 chunks，消息仍可找到', () => {
       const store = usePipelineMessageStore.getState()
 
       // 1. stream_start 创建占位符
@@ -171,17 +171,12 @@ describe('stream 消息生命周期', () => {
       })
 
       // 3. tool_start: 前端收到 tool_start 事件 (不触发 stream_end)
-      // 后端在 tool_result 后会发新的 stream_start
+      // tool_result 后不再发多余的 stream_start，直接追加后续 chunks
       store.stopStreaming(PIPELINE_ID)
       store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
       store.finalizeMessage(PIPELINE_ID, MESSAGE_ID)
 
-      // 4. 新的 stream_start（同一个 MESSAGE_ID）
-      store.startStreaming(PIPELINE_ID, MESSAGE_ID)
-      // addMessage 同 ID 会更新
-      store.addMessage(PIPELINE_ID, makeMsg(MESSAGE_ID, { content: 'partial text', status: 'streaming' }))
-
-      // 5. 最终 stream_end
+      // 4. 最终 stream_end（无多余 stream_start）
       store.updateMessage(PIPELINE_ID, MESSAGE_ID, { status: 'completed' } as any)
       store.finalizeMessage(PIPELINE_ID, MESSAGE_ID)
 

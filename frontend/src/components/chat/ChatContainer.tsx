@@ -211,6 +211,15 @@ export const ChatContainer = ({
 
   /**
    * 会话切换时初始化 Tab 状态并激活对应管道
+   *
+   * BUG-FIX-fix_20260529_session_msg_duplicate_v2:
+   * 问题根因: ChatContainer 的 useEffect 调用了 fetchMessages，
+   *          而 setActiveSession 也调用了 fetchMessages，
+   *          导致 initFromAPI 被调用两次，消息重复渲染。
+   * 修复方案: 删除 ChatContainer 中的 fetchMessages 调用，
+   *          只保留 activatePipeline，消息加载统一由 setActiveSession 负责。
+   * 影响范围: 会话切换时的消息加载流程
+   * 修复日期: 2026-05-29
    */
   useEffect(() => {
     if (sessionId) {
@@ -227,17 +236,7 @@ export const ChatContainer = ({
         const mainPipelineId = session?.activePipelineId || ''
         if (mainPipelineId) {
           pipelineStore.activatePipeline(mainPipelineId)
-          // BUG-FIX-fix_20260528_refresh_streaming_only_one_msg:
-          // 刷新后 WS 流式事件先到达时，管道中可能只有 1 条流式占位消息，
-          // 原条件 existing.length === 0 不满足，历史消息不会被加载。
-          // 修复：当消息数量 <= 1 且正在流式传输时，仍加载历史消息。
-          const existing = pipelineStore.messagesByPipeline[mainPipelineId]
-          const isStreaming = pipelineStore.streamingState[mainPipelineId]?.isStreaming
-          const shouldFetch = !existing || existing.length === 0
-            || (isStreaming && existing.length <= 1)
-          if (shouldFetch) {
-            pipelineStore.fetchMessages(mainPipelineId, { threadId: sessionId }).catch(() => {})
-          }
+          // 注意：不在这里调用 fetchMessages，由 setActiveSession 统一负责
         }
       }
     }
@@ -303,25 +302,7 @@ export const ChatContainer = ({
       ? pipelineMessages
       : messages
     const mapped = source
-      .filter((m: any) => {
-        if (m.role === 'tool') return false
-        return true
-      })
-      // BUG-FIX-fix_20260528_system_msg_render:
-      // 问题根因: 仅匹配 '[系统通知]' 前缀，遗漏 '[系统提醒]' 等其他系统消息
-      // 修复方案: 同时检查 parts 中是否包含 type='system' 的 part，以及 metadata 中的系统标识
-      .map((m: any) => {
-        if (m.role === 'system') return m
-        const hasSystemPart = m.parts?.some((p: any) => p.type === 'system')
-        const hasSystemMeta = m.metadata?.record_type === 'system' ||
-          m.metadata?.type === 'system' ||
-          m.metadata?.sender_type === 'system'
-        const hasSystemPrefix = (m.content || '').trimStart().startsWith('[系统')
-        if (hasSystemPart || hasSystemMeta || hasSystemPrefix) {
-          return { ...m, role: 'system' }
-        }
-        return m
-      })
+      .filter((m: any) => m.role !== 'tool')
     const seenSystemContents = new Set<string>()
     const deduped = mapped.filter((m: any) => {
       if (m.role !== 'system') return true
@@ -330,7 +311,13 @@ export const ChatContainer = ({
       seenSystemContents.add(contentPrefix)
       return true
     })
-    const result = mergeConsecutiveAssistantMessages(deduped)
+    const noDupUserMsg = deduped.filter((m: any) => {
+      if (m.role !== 'user') return true
+      const contentPrefix = (m.content || '').trimStart().slice(0, 50)
+      if (seenSystemContents.has(contentPrefix)) return false
+      return true
+    })
+    const result = mergeConsecutiveAssistantMessages(noDupUserMsg)
     if (result.length > 0) {
       const ids = result.map((m: any) => `${m.role[0]}${(m.sequence ?? '?')}`).join(',')
       console.log('[activeMessages]', result.length, 'msgs:', ids, 'source:', pipelineMessages.length > 0 ? 'pipeline' : 'props')

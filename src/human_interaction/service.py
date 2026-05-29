@@ -334,13 +334,24 @@ class HumanInteractionService(IHumanInteractionService):
         feedback = inner.get("feedback")
         answers = inner.get("answers")
 
-        return await self.submit_response(
+        logger.info(
+            "[HumanInteraction] respond() | request_id=%s | type=%s | option=%s",
+            request_id, response_type, selected_option,
+        )
+
+        result = await self.submit_response(
             request_id=request_id,
             response_type=response_type,
             selected_option=selected_option,
             answers=answers,
             feedback=feedback,
         )
+
+        logger.info(
+            "[HumanInteraction] respond() result=%s | request_id=%s",
+            result, request_id,
+        )
+        return result
 
     async def submit_response(
         self,
@@ -400,7 +411,12 @@ class HumanInteractionService(IHumanInteractionService):
                 del self._timeout_tasks[request_id]
 
         if self._notifier and hasattr(self._notifier, "cancel_fallback"):
-            self._notifier.cancel_fallback(request_id)
+            try:
+                result = self._notifier.cancel_fallback(request_id)
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:
+                pass
 
         logger.info(
             "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",

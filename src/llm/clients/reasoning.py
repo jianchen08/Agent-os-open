@@ -207,7 +207,12 @@ class ReasoningClient(LLMClient):
     def _build_request(
         self, messages: list[dict[str, str]], params: dict[str, Any]
     ) -> dict[str, Any]:
-        """构建请求数据"""
+        """
+        构建请求数据
+
+        透明传递所有参数，不区分供应商类型。
+        客户端应该是通用的参数传递者，配置即所见。
+        """
         request_data = {
             "model": self.model_name,
             "messages": messages,
@@ -218,22 +223,10 @@ class ReasoningClient(LLMClient):
             request_data["tools"] = params["tools"]
             logger.debug(f"[_build_request] 添加工具调用 | 工具数={len(params['tools'])}")
 
-        # 添加思考模型特定参数
-        if self.reasoning_type == "openai":
-            if "reasoning_effort" in params:
-                request_data["reasoning_effort"] = params["reasoning_effort"]
-            if "max_completion_tokens" in params:
-                request_data["max_completion_tokens"] = params["max_completion_tokens"]
-        elif self.reasoning_type == "deepseek":
-            if "temperature" in params:
-                request_data["temperature"] = params["temperature"]
-            if "max_tokens" in params:
-                request_data["max_tokens"] = params["max_tokens"]
-
-        # 添加其他通用参数
-        excluded_keys = ["reasoning_effort", "max_completion_tokens", "tools"]
+        # 透明传递所有其他参数（排除内部框架参数）
+        internal_keys = {"tools"}
         for key, value in params.items():
-            if key not in request_data and key not in excluded_keys:
+            if key not in request_data and key not in internal_keys:
                 request_data[key] = value
 
         return request_data

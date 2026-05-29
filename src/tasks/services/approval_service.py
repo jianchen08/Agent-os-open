@@ -63,8 +63,15 @@ class TaskApprovalService:
         failed_criteria: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
-        """
-        创建人工审批请求
+        """创建人工审批请求并阻塞等待用户决策，然后自动执行对应动作。
+
+        BUG-FIX-fix_20260529_approval_stuck:
+        问题根因: 原实现只创建 choice 请求后立即返回，不等待用户响应。
+                 用户选择审批选项后，响应写入 HumanInteractionService 但
+                 无人消费（没有 wait_for_choice 调用），process_decision()
+                 从未被触发，任务永远停留在 BLOCKED 状态。
+        修复方案: 创建请求后调用 wait_for_choice() 阻塞等待用户响应，
+                 收到响应后自动调用 process_decision() 执行对应动作。
 
         Args:
             task_id: 任务 ID
@@ -73,7 +80,7 @@ class TaskApprovalService:
             thread_id: 线程 ID（可选）
 
         Returns:
-            审批请求结果
+            审批处理结果（来自 process_decision）
         """
         async with managed_session() as session:
             result = await session.execute(select(Task).where(Task.id == task_id))
@@ -122,15 +129,50 @@ class TaskApprovalService:
             )
 
             logger.info(
-                "[TaskApprovalService] 审批请求已创建 | "
+                "[TaskApprovalService] 审批请求已创建，等待用户决策 | "
                 "task_id=%s | request_id=%s", task_id, request_id
             )
 
+        from human_interaction.service import InteractionTimeoutError, InteractionCancelledError
+
+        try:
+            response = await self._interaction_service.wait_for_choice(
+                request_id, timeout=600,
+            )
+        except InteractionTimeoutError:
+            logger.warning(
+                "[TaskApprovalService] 审批超时 | task_id=%s | request_id=%s",
+                task_id, request_id,
+            )
             return {
-                "request_id": request_id,
                 "task_id": task_id,
-                "status": "pending",
+                "status": "timeout",
+                "message": "审批超时，用户未在规定时间内响应",
             }
+        except InteractionCancelledError as e:
+            logger.info(
+                "[TaskApprovalService] 审批取消 | task_id=%s | request_id=%s | reason=%s",
+                task_id, request_id, e.reason,
+            )
+            return {
+                "task_id": task_id,
+                "status": "cancelled",
+                "message": f"审批已取消: {e.reason or '用户取消'}",
+            }
+
+        selected_option = response.get("selected_option")
+        feedback = response.get("feedback")
+
+        logger.info(
+            "[TaskApprovalService] 收到审批决策 | task_id=%s | action=%s | feedback=%s",
+            task_id, selected_option, (feedback or "")[:100],
+        )
+
+        return await self.process_decision(
+            task_id=task_id,
+            action=selected_option,
+            reason=feedback,
+        )
 
     async def process_decision(
         self,

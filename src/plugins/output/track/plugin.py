@@ -95,27 +95,65 @@ class TrackPlugin(IOutputPlugin):
         return []
 
     def _get_current_sequence(self, pipeline_run_id: str) -> int:
-        """获取当前消息的 sequence 值。
-
-        优先从 bridge 缓存的消息 sequence 读取（与 stream_start 一致），
-        否则从 PipelineEntry 共享计数器读取。
+        """获取当前消息的 sequence 值（只读，用于 summary 统计）。
 
         Args:
             pipeline_run_id: 管道 ID
 
         Returns:
-            当前消息的 sequence 值
+            当前计数器值
         """
         try:
             from pipeline.registry import get_engine_registry
             entry = get_engine_registry().get(pipeline_run_id)
             if entry is not None:
-                if entry.bridge is not None and entry.bridge._current_msg_seq > 0:
-                    return entry.bridge._current_msg_seq
                 return entry.msg_sequence
         except Exception:
             pass
         return 0
+
+    def _next_sequence(self, pipeline_run_id: str) -> int:
+        """获取下一条记录的 sequence。
+
+        从 PipelineEntry 共享计数器递增获取，与 WS 推送共享同一计数器。
+
+        Args:
+            pipeline_run_id: 管道 ID
+
+        Returns:
+            递增后的 sequence 值
+        """
+        try:
+            from pipeline.registry import get_engine_registry
+            entry = get_engine_registry().get(pipeline_run_id)
+            if entry is not None:
+                return entry.next_sequence()
+        except Exception:
+            pass
+        return 0
+
+    def _get_stream_sequence(self, pipeline_run_id: str) -> int:
+        """获取当前流式消息的 sequence（复用 stream_start 分配的值）。
+
+        stream_start 在 Core 链期间已分配 sequence，AI 记录持久化时
+        直接复用该值，确保 WS 推送和持久化使用同一个 sequence。
+
+        Args:
+            pipeline_run_id: 管道 ID
+
+        Returns:
+            stream_start 分配的 sequence；获取失败时 fallback 到 _next_sequence
+        """
+        try:
+            from pipeline.registry import get_engine_registry
+            entry = get_engine_registry().get(pipeline_run_id)
+            if entry is not None and entry.bridge is not None:
+                msg_seq = getattr(entry.bridge, '_current_msg_seq', 0)
+                if msg_seq > 0:
+                    return msg_seq
+        except Exception:
+            pass
+        return self._next_sequence(pipeline_run_id)
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """收集追踪统计信息。
@@ -297,7 +335,7 @@ class TrackPlugin(IOutputPlugin):
                 user_record = ExecutionRecordData(
                     pipeline_run_id=pipeline_run_id,
                     type="user",
-                    sequence=self._get_current_sequence(pipeline_run_id),
+                    sequence=self._next_sequence(pipeline_run_id),
                     iteration=0,
                     role="user",
                     content=str(user_input),
@@ -315,7 +353,7 @@ class TrackPlugin(IOutputPlugin):
                     notification_record = ExecutionRecordData(
                         pipeline_run_id=pipeline_run_id,
                         type="user",
-                        sequence=self._get_current_sequence(pipeline_run_id),
+                        sequence=self._next_sequence(pipeline_run_id),
                         iteration=iteration,
                         role="user",
                         content=new_content,
@@ -342,10 +380,11 @@ class TrackPlugin(IOutputPlugin):
                     _tool_calls_json = json.dumps(raw_tool_calls, ensure_ascii=False, default=str)
                 except (TypeError, ValueError):
                     pass
+            ai_seq = self._get_stream_sequence(pipeline_run_id)
             ai_record = ExecutionRecordData(
                 pipeline_run_id=pipeline_run_id,
                 type="ai",
-                sequence=self._get_current_sequence(pipeline_run_id),
+                sequence=ai_seq,
                 iteration=iteration,
                 role="assistant",
                 content=str(raw_result) if raw_result else "",
@@ -406,7 +445,7 @@ class TrackPlugin(IOutputPlugin):
                         pipeline_run_id=pipeline_run_id,
                         type="tool",
                         name=tool_name,
-                        sequence=self._get_current_sequence(pipeline_run_id),
+                        sequence=self._next_sequence(pipeline_run_id),
                         iteration=iteration,
                         role="tool",
                         content=tool_output,

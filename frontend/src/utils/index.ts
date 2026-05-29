@@ -33,3 +33,6 @@ export type { StorageKey } from './storage'
 
 // 导出数据映射工具
 export { mapThreadToSession, mapThreadsToSessions, mapSessionToThread } from './mappers'
+
+// 导出消息类型判断工具
+export { checkIsSystemMessage } from './messageType'

@@ -22,27 +22,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
-# BUG-FIX-fix_20260529_msg_order: 共享 sequence 辅助函数
-def _get_pipeline_sequence(pipeline_id: str) -> int:
-    """从 PipelineEntry 共享计数器获取下一个 sequence。
 
-    供 message_bus 中 system_notification 和 pipeline_received 事件使用，
-    确保这些事件也参与全局 sequence 递增，避免前端消息乱序。
-
-    Args:
-        pipeline_id: 管道 ID
-
-    Returns:
-        全局递增的 sequence 值；Registry 不可用时返回 0（降级处理）
-    """
-    try:
-        from pipeline.registry import get_engine_registry
-        entry = get_engine_registry().get(pipeline_id)
-        if entry is not None:
-            return entry.next_sequence()
-    except Exception:
-        pass
-    return 0
 
 
 @dataclass
@@ -127,13 +107,14 @@ async def _send_received_event(
     content: str,
     source: str,
 ) -> None:
-    """发送 pipeline_received 事件到前端。"""
+    """发送 pipeline_received 事件到前端。
+
+    用户消息的 sequence 由 WS 流式推送（stream_start）分配，
+    pipeline_received 事件不额外分配 sequence，避免同一消息被分配两次。
+    """
     if event_sink is None:
         return
     try:
-        # BUG-FIX-fix_20260529_msg_order: pipeline_received 事件附带共享 sequence
-        # 问题根因: pipeline_received 事件没有 sequence，前端无法确定其与其他事件的顺序。
-        # 修复方案: 从 PipelineEntry 共享计数器获取 sequence 并附带在事件中。
         await event_sink.send_event({
             "type": "pipeline_received",
             "data": {
@@ -142,7 +123,6 @@ async def _send_received_event(
                 "message_id": message_id,
                 "content": content,
                 "source": source,
-                "sequence": _get_pipeline_sequence(pipeline_id),
             },
         })
     except Exception:
@@ -210,37 +190,99 @@ async def send_pipeline_message(
         _event_sink = _create_sink(pipeline_id)
 
     if _msg_source != "user":
-        if _event_sink is None:
-            logger.warning(
-                "[MessageBus] system_notification SKIP: no sink | pipeline=%s source=%s",
-                pipeline_id[:12], _msg_source,
-            )
-        else:
-            try:
+        # BUG-FIX-fix_20260529_notification_order:
+        # 问题根因: system_notification 在流式输出期间立即推送 WS 事件，
+        #   前端收到后分配到与正在流式的 AI 消息相同或相近的 sequence，
+        #   导致通知"顶掉"正在输出的消息气泡。
+        # 修复方案: 如果当前 bridge 正在流式输出，将通知缓冲到 bridge 的
+        #   _pending_notifications 队列，stream_end 后统一刷出；
+        #   否则立即推送（非流式期间无冲突风险）。
+        try:
+            from pipeline.registry import get_engine_registry as _greg
+            _e = _greg().get(pipeline_id)
+            _bridge = _e.bridge if _e else None
+        except Exception:
+            _bridge = None
+
+        _is_streaming = (
+            _bridge is not None
+            and getattr(_bridge, '_stream_started', False)
+            and _event_sink is not None
+        )
+
+        if _is_streaming:
+            # 流式进行中，缓冲通知到 bridge
+            _pending = getattr(_bridge, '_pending_notifications', None)
+            if _pending is not None:
                 _level = "info" if _msg_source in ("system", "trigger") else "warning"
-                # BUG-FIX-fix_20260529_msg_order: system_notification 事件附带共享 sequence
-                # 问题根因: system_notification 事件没有 sequence，前端无法确定其与
-                #   AI 回复消息的顺序，导致系统通知出现在 AI 回复之后。
-                # 修复方案: 从 PipelineEntry 共享计数器获取 sequence 并附带在事件中。
-                await _event_sink.send_event({
-                    "type": "system_notification",
-                    "data": {
-                        "content": message,
-                        "level": _level,
-                        "notificationType": f"{_msg_source}_notification",
-                        "pipeline_id": pipeline_id,
-                        "sequence": _get_pipeline_sequence(pipeline_id),
-                    },
+                _pending.append({
+                    "content": message,
+                    "level": _level,
+                    "notificationType": f"{_msg_source}_notification",
                 })
                 logger.info(
-                    "[MessageBus] system_notification SENT | pipeline=%s source=%s",
-                    pipeline_id[:12], _msg_source,
+                    "[MessageBus] system_notification BUFFERED (streaming active): "
+                    "pipeline=%s source=%s queue_len=%d",
+                    pipeline_id[:12], _msg_source, len(_pending),
                 )
-            except Exception as _sn_err:
-                logger.warning(
-                    "[MessageBus] system_notification FAILED | pipeline=%s source=%s error=%s",
-                    pipeline_id[:12], _msg_source, _sn_err,
-                )
+            else:
+                # bridge 无缓冲队列字段，降级为立即推送
+                if _event_sink is not None:
+                    try:
+                        _level = "info" if _msg_source in ("system", "trigger") else "warning"
+                        await _event_sink.send_event({
+                            "type": "system_notification",
+                            "data": {
+                                "content": message,
+                                "level": _level,
+                                "notificationType": f"{_msg_source}_notification",
+                                "pipeline_id": pipeline_id,
+                            },
+                        })
+                    except Exception:
+                        pass
+        else:
+            _level = "info" if _msg_source in ("system", "trigger") else "warning"
+            _notif_event = {
+                "type": "system_notification",
+                "data": {
+                    "content": message,
+                    "level": _level,
+                    "notificationType": f"{_msg_source}_notification",
+                    "pipeline_id": pipeline_id,
+                },
+            }
+            if _event_sink is not None:
+                try:
+                    await _event_sink.send_event(_notif_event)
+                    logger.info(
+                        "[MessageBus] system_notification SENT | pipeline=%s source=%s",
+                        pipeline_id[:12], _msg_source,
+                    )
+                except Exception as _sn_err:
+                    logger.warning(
+                        "[MessageBus] system_notification FAILED | pipeline=%s source=%s error=%s",
+                        pipeline_id[:12], _msg_source, _sn_err,
+                    )
+            else:
+                try:
+                    from pipeline.stream_bridge import send_frontend_event
+                    _fallback_ok = await send_frontend_event(pipeline_id, _notif_event)
+                    if _fallback_ok:
+                        logger.info(
+                            "[MessageBus] system_notification SENT (fallback) | pipeline=%s source=%s",
+                            pipeline_id[:12], _msg_source,
+                        )
+                    else:
+                        logger.warning(
+                            "[MessageBus] system_notification SKIP: no sink & fallback failed | pipeline=%s source=%s",
+                            pipeline_id[:12], _msg_source,
+                        )
+                except Exception as _fb_err:
+                    logger.warning(
+                        "[MessageBus] system_notification SKIP: no sink & fallback error | pipeline=%s source=%s error=%s",
+                        pipeline_id[:12], _msg_source, _fb_err,
+                    )
 
     engine, state = _find_engine(pipeline_id)
 
@@ -642,7 +684,7 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             if content:
-                await bridge.send_new_message(content, sequence=getattr(bridge, '_current_msg_seq', 0) or bridge._get_next_sequence())
+                await bridge.send_new_message(content, sequence=getattr(bridge, '_current_msg_seq', 0))
         except asyncio.CancelledError:
             pass
         except Exception as exc:

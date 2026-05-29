@@ -24,6 +24,7 @@ from evaluation.mapper import ResultMapper
 from evaluation.types import (
     EvaluationConfig,
     EvaluationResult,
+    sanitize_eval_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,8 +133,8 @@ class EvaluationExecutor:
                             "score": r.score,
                             "message": r.message,
                             "error": r.error,
-                            "evaluator_input": r.evaluator_input,
-                            "evaluator_output": r.evaluator_output,
+                            "evaluator_input": sanitize_eval_paths(r.evaluator_input),
+                            "evaluator_output": sanitize_eval_paths(r.evaluator_output),
                             "pipeline_run_id": r.pipeline_run_id,
                         }
                         for r in result.results

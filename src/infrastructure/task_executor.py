@@ -212,6 +212,8 @@ class TaskExecutorMixin:
             await self._bind_pipeline_run(task_id, pipeline_id, task_service)
             await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
 
+            ctx.active = True
+
             ctx.idle_timer_registered = await self._register_idle_timer(
                 task_id, timer_manager, task_service, ctx,
             )

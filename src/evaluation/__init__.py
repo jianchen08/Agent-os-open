@@ -28,6 +28,7 @@ from evaluation.types import (
     MetricDefinition,
     MetricResult,
     MetricType,
+    sanitize_eval_paths,
 )
 
 __all__ = [

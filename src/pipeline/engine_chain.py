@@ -304,10 +304,9 @@ async def handle_no_route_signals(
             "挂起等待触发器唤醒 (iter=%d)", iteration,
         )
         state[StateKeys.CORE_TYPE] = "llm_call"
-        state["user_input"] = (
-            "[系统提示] 管道已挂起，等待触发器唤醒。"
-            "当触发器触发时会自动收到通知并继续执行。"
-        )
+        state["user_input"] = ""
+
+
     else:
         logger.info(
             "No route signals after LLM response (iter=%d), "

@@ -19,7 +19,7 @@ class ReasoningConfig:
         "deepseek-reasoner": {
             "provider": "deepseek_reasoning",
             "display_name": "DeepSeek R1 思考模型",
-            "supports_reasoning_effort": False,
+            "supports_reasoning_effort": True,
             "supports_cot": True,
             "supports_tools": True,  # DeepSeek R1 支持工具调用
             "max_context": 64000,

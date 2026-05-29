@@ -11,6 +11,7 @@ from typing import Any
 from tasks.types import TaskStatus
 
 from core.results import ToolExecutionResult
+from evaluation.types import sanitize_eval_paths
 from tools.builtin.base import BuiltinTool
 from tools.types import (
     Tool,
@@ -1348,16 +1349,16 @@ class TaskEvaluateTool(BuiltinTool):
                     if eo.get("suggestions"):
                         m["suggestions"] = eo["suggestions"]
                     if eo.get("report_path"):
-                        m["report_path"] = eo["report_path"]
+                        m["report_path"] = sanitize_eval_paths(eo["report_path"])
                 # 期望条件失败的详细信息
                 if r.details and isinstance(r.details, dict):
                     failed = r.details.get("failed_conditions")
                     if failed:
                         m["failed_conditions"] = failed
                 if r.evaluator_input:
-                    m["evaluator_input"] = r.evaluator_input
+                    m["evaluator_input"] = sanitize_eval_paths(r.evaluator_input)
                 if r.evaluator_output:
-                    m["evaluator_output"] = r.evaluator_output
+                    m["evaluator_output"] = sanitize_eval_paths(r.evaluator_output)
                 if r.pipeline_run_id:
                     m["pipeline_run_id"] = r.pipeline_run_id
                 metrics.append(m)

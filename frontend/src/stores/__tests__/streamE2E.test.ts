@@ -147,7 +147,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(afterEnd.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('场景D: tool_start 中间的 stream_end → tool_result 后的 stream_start → 最终 stream_end', () => {
+  it('场景D: tool_start/tool_result → 后续 chunks → stream_end（无多余 stream_start）', () => {
     pipelineStore.getState().registerPipeline({
       pipelineId: PIPELINE_ID,
       sessionId: THREAD_ID,
@@ -181,18 +181,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(midMsg).toBeDefined()
     expect(midMsg!.status).toBe('completed')
 
-    // 4. 新 stream_start（tool_result 之后）
-    handleStreamStart({
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      _threadId: THREAD_ID,
-    })
-
-    const afterRestart = pipelineStore.getState().getMessages(PIPELINE_ID)
-    const restartedMsg = afterRestart.find(m => m.id === MESSAGE_ID)
-    expect(restartedMsg).toBeDefined()
-
-    // 5. 更多 chunk
+    // 4. 更多 chunk（tool_result 后不再发多余的 stream_start，消息已存在）
     handleStreamChunk({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,
@@ -200,7 +189,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
       _threadId: THREAD_ID,
     })
 
-    // 6. 最终 stream_end
+    // 5. 最终 stream_end
     handleStreamEnd({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,

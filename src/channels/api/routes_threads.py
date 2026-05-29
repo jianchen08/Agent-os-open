@@ -624,6 +624,27 @@ def _record_to_message_response(
     tool_error: str | None = None
     agent_name: str | None = None
 
+    _content_stripped = (record.content or "").lstrip()
+    _is_system_user_msg = (
+        record.type == "user"
+        and _content_stripped
+        and (
+            _content_stripped.startswith("[系统提示]")
+            or _content_stripped.startswith("[系统通知]")
+            or _content_stripped.startswith("[系统提醒]")
+            or _content_stripped.startswith("[触发器通知]")
+        )
+    )
+    if _is_system_user_msg:
+        role = "system"
+        metadata = {
+            "record_type": "system",
+            "type": "system",
+            "sender_type": "system",
+            "notification_level": "info",
+            "notification_type": "system_notification",
+        }
+
     if record.type == "ai":
         if record.thinking_content:
             metadata = {"thinkingContent": record.thinking_content}

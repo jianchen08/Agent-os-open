@@ -10,6 +10,7 @@
 
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart } from '@/types/messageParts'
+import { checkIsSystemMessage } from '@/utils/messageType'
 
 /**
  * 消息响应类型（数据库驱动增强）
@@ -180,15 +181,7 @@ export function toMessage(
     })
   }
 
-  // BUG-FIX-fix_20260528_system_msg_render:
-  // 问题根因: 仅匹配 '[系统通知]' 前缀，遗漏 '[系统提醒]' 等其他系统消息
-  // 修复方案: 改为匹配 '[系统' 开头的所有前缀
-  const isSystemMsg =
-    role === 'system' ||
-    metadata?.record_type === 'system' ||
-    metadata?.type === 'system' ||
-    metadata?.sender_type === 'system' ||
-    content?.trimStart().startsWith('[系统')
+  const isSystemMsg = checkIsSystemMessage(role, metadata)
 
   if (content?.trim()) {
     if (isSystemMsg) {

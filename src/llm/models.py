@@ -31,7 +31,7 @@ SUPPORTED_THINKING_MODELS: dict[str, ThinkingModelConfig] = {
     "deepseek-reasoner": ThinkingModelConfig(
         provider="deepseek_reasoning",
         display_name="DeepSeek R1 思考模型",
-        supports_reasoning_effort=False,
+        supports_reasoning_effort=True,
         supports_cot=True,
         supports_tools=True,
         max_context=64000,

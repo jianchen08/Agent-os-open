@@ -126,12 +126,7 @@ export const MessageItem = ({
   const isAssistant = message.role === 'assistant'
   const isTool = message.role === 'tool'
 
-  const isSystemMessage =
-    message.role === 'system' ||
-    message.metadata?.record_type === 'system' ||
-    message.metadata?.type === 'system' ||
-    message.metadata?.sender_type === 'system' ||
-    (message.role === 'user' && message.content?.trimStart().startsWith('[系统通知]'))
+  const isSystemMessage = message.role === 'system'
 
   // BUG-FIX-fix_20260523_max_update_depth:
   // 问题根因: useSessionStore()/useAgentStore() 无 selector 全量订阅，

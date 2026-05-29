@@ -6,7 +6,7 @@ import { useStreamingStore } from '@/stores/streamingStore'
 
 import { resolvePipelineId } from '../router'
 
-import { extractMessageId, extractThreadId, terminatePipeline, allocateNextSequence } from './utils'
+import { extractMessageId, extractThreadId, terminatePipeline, ensureStreamingPlaceholder } from './utils'
 
 /**
  * 从 API 事件数据中为消息构建 parts[] 数组
@@ -47,34 +47,21 @@ function buildPartsFromApiData(
 }
 
 /**
- * 将消息中所有 streaming 状态的 parts 标记为 done
- *
- * @param msg - 消息对象
- * @returns 更新后的 parts 数组
- */
-function finalizeStreamingParts(msg: any): any[] {
-  return (msg.parts || []).map((p: any) =>
-    p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
-  )
-}
-
-/**
  * 处理新消息事件
  *
  * 流程：
  * 1. 终止管道并清理流式状态
- * 2. 若消息已有 parts 且有文本内容，仅更新 status 并将 streaming parts 改为 done
- * 3. 若消息无 parts 或无文本内容，从 API 数据构建 parts[]
+ * 2. 确保消息存在（复用 ensureStreamingPlaceholder 统一创建占位符）
+ * 3. 构建或更新 parts，标记消息为 completed
  */
 export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = extractThreadId(eventData)
 
   if (pipelineId) {
-    // BUG-FIX-fix_20260522: 标记管道已终止（new_message），防止 ensureStreamingPlaceholder 重新启动
+    // 标记管道已终止，防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId, threadId)
-    // BUG-FIX-fix_20260522_stream_end_over_cleanup:
-    // new_message 同样需要清理所有关联的 streamingTabs
+    // 清理所有关联的 streamingTabs
     const currentActivePipelineId = pipelineStore.getState().activePipelineId
     if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
       useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
@@ -89,7 +76,7 @@ export function handleNewMessage(eventData: any) {
 
   if (!pipelineId) return
 
-  // messageHandler 还需要兼容更多消息 ID 来源（event.message?.id, eventData.data?.id）
+  // 统一提取消息 ID
   const messageId = extractMessageId(eventData)
     || eventData?.message?.id
     || eventData?.data?.id
@@ -98,45 +85,37 @@ export function handleNewMessage(eventData: any) {
   const finalContent = eventData?.content || eventData?.data?.content || eventData?.data?.final_content
   const data = eventData?.data || eventData
 
+  // 确保消息存在：复用 ensureStreamingPlaceholder 统一创建逻辑
   const msgs = pipelineStore.getState().getMessages(pipelineId)
-  let existing = msgs.find((m: any) => m.id === messageId)
-
-  // BUG-FIX-fix_20260529_new_message_loss:
-  // 问题根因: 如果 new_message 事件先于 stream_start 到达，或者占位消息被 initFromAPI 清理了，
-  //          existing 为空导致消息被直接丢弃，用户看不到 AI 回复。
-  // 修复方案: 当 existing 不存在时，自动创建消息（类似 ensureStreamingPlaceholder 的逻辑），
-  //          然后继续执行后续的内容更新流程。
-  // 影响范围: new_message 事件处理的消息完整性
-  // 修复日期: 2026-05-29
+  const existing = msgs.find((m: any) => m.id === messageId)
   if (!existing) {
-    const sessionId = threadId || pipelineStore.getState().pipelineSessionMap[pipelineId] || ''
-    const placeholderSeq = allocateNextSequence(pipelineId)
-    pipelineStore.getState().addMessage(pipelineId, {
-      id: messageId,
-      sessionId,
-      role: 'assistant',
-      content: finalContent || '',
-      timestamp: new Date().toISOString(),
-      parentId: null,
-      sequence: placeholderSeq,
-      status: 'streaming',
-    } as any)
-    // 重新获取刚创建的消息
-    const updatedMsgs = pipelineStore.getState().getMessages(pipelineId)
-    existing = updatedMsgs.find((m: any) => m.id === messageId)
-    if (!existing) return
+    const backendSeq = eventData.sequence ?? eventData.data?.sequence
+    ensureStreamingPlaceholder(pipelineId, messageId, threadId, backendSeq)
   }
 
-  const existingParts = (existing as any).parts || []
-  const hasTextParts = existingParts.some((p: any) => p.type === 'text' && (p.text || p.content)?.trim())
+  // 构建已完成消息的 parts 并更新状态
+  // BUG-FIX-fix_20260529_minimax_thinking_stream:
+  // 当 new_message 未携带 thinking 数据但消息已有流式累积的 parts 时，
+  // 不覆盖已有 parts，只更新 status 和 content。
+  // 否则流式期间正确接收的 thinking part 会被不含 thinking 的 parts 覆盖掉。
+  const builtParts = buildPartsFromApiData(finalContent, data?.thinking, data?.toolCalls)
+  const hasExistingParts = existing?.parts && existing.parts.length > 0
+  const newMessageHasThinking = !!data?.thinking?.content
 
-  if (hasTextParts) {
+  if (hasExistingParts && !newMessageHasThinking && builtParts.length > 0) {
+    // 增量更新：保留已有 parts 中的 thinking/tool_call，只更新 text part 的 content
+    const mergedParts = existing.parts.map((p: any) => {
+      if (p.type === 'text' && finalContent) {
+        return { ...p, content: finalContent.trim(), state: 'done' as const }
+      }
+      return { ...p, state: 'done' as const }
+    })
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
-      parts: finalizeStreamingParts(existing),
+      content: finalContent,
+      parts: mergedParts,
     } as any)
   } else {
-    const builtParts = buildPartsFromApiData(finalContent, data?.thinking, data?.toolCalls)
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       status: 'completed',
       ...(finalContent ? { content: finalContent } : {}),

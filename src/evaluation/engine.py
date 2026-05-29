@@ -504,7 +504,17 @@ class EvaluationEngine:
                 # human_interaction 工具需要 pipeline_id
                 if (evaluator_id == "human_interaction"
                         and "pipeline_id" not in params):
-                    params["pipeline_id"] = task_id or "eval_session"
+                    # FIX: 使用当前运行的 pipeline_id（从上下文变量获取），
+                    # 而不是 task_id。task_id 是评估任务的ID，不是前端会话的 pipeline_id。
+                    # 这确保 human_interaction 的通知能正确发送到前端。
+                    from pipeline.engine_state import _current_pipeline_id
+                    current_pid = _current_pipeline_id.get(None)
+                    params["pipeline_id"] = current_pid or task_id or "eval_session"
+
+                logger.info(
+                    "[EvalEngine] _evaluate_tool | metric=%s | evaluator=%s | pipeline_id=%s | params_keys=%s",
+                    metric_def.id, evaluator_id, params.get("pipeline_id"), list(params.keys()),
+                )
 
                 # BUG-FIX-fix_20260513_eval_blocking:
                 # 问题根因: _evaluate_tool 是同步方法，通过 .result() 阻塞 asyncio 事件循环，

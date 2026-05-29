@@ -214,6 +214,11 @@ class HumanInteractionTool(BuiltinTool):
                 request_id, timeout=timeout_seconds,
             )
 
+            logger.info(
+                "[HumanInteractionTool] wait_for_choice() 返回 | request_id=%s | response=%s",
+                request_id, {k: v for k, v in response.items() if k != "answers"},
+            )
+
             selected_id = response.get("selected_option")
             result: dict[str, Any] = {
                 "status": "completed",
@@ -230,6 +235,10 @@ class HumanInteractionTool(BuiltinTool):
                 result["answers"] = response["answers"]
             if response.get("feedback"):
                 result["feedback"] = response["feedback"]
+            logger.info(
+                "[HumanInteractionTool] 选择模式完成 | request_id=%s | selected=%s | status=%s",
+                request_id, result.get("selected_option"), result.get("status"),
+            )
             return create_success_result(data=result)
 
         except InteractionTimeoutError as e:

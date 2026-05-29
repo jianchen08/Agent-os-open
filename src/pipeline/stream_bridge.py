@@ -184,6 +184,7 @@ class PipelineStreamBridge:
         self._accumulated_content: list[str] = []
         self._thinking_content_parts: list[str] = []
         self._stream_started: bool = False
+        self._pending_notifications: list[dict] = []
 
     def on_chunk(self, chunk: dict) -> None:
         """同步回调，将 chunk 放入内部队列并立即唤醒 drain_loop。
@@ -224,6 +225,10 @@ class PipelineStreamBridge:
         self._sent_tool_starts = set()
         self._part_seq = 0
         self._current_msg_seq = 0
+        # BUG-FIX-fix_20260529_notification_lost:
+        # 不清空 _pending_notifications，保留给新 drain_loop 在 stream_start 后刷出。
+        # 旧 drain_loop 已被 stop+cancel，如果此时清空会丢失缓冲中的通知。
+        # self._pending_notifications = []
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -310,7 +315,6 @@ class PipelineStreamBridge:
         _threadId 仅作为辅助路由信息。
         """
         self._stream_started = True
-        # 消息级 sequence: 只在创建新消息时从共享计数器分配一次
         self._current_msg_seq = self._get_next_sequence()
         logger.info(
             "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s seq=%d",
@@ -420,7 +424,6 @@ class PipelineStreamBridge:
                 "call_id": chunk.get("call_id"),
             }))
             self._accumulated_content = []
-            await self._send_stream_start()
 
         elif chunk_type == "iteration":
             # 迭代开始时关闭旧的 thinking
@@ -460,203 +463,271 @@ class PipelineStreamBridge:
             "drain_loop 开始: msg=%s pipeline=%s sink=%s",
             self.message_id[:16], self.pipeline_id[:12], type(self.output_sink).__name__,
         )
-        # 1. 发送 stream_start
+
         try:
-            await self._send_stream_start()
-            logger.info(
-                "drain_loop: stream_start 已发送: msg=%s pipeline=%s sink=%s",
-                self.message_id[:12], self.pipeline_id[:12], self.output_sink.sink_id,
-            )
-        except Exception as _e:
-            logger.error("drain_loop: stream_start 失败: %s", _e, exc_info=True)
-            return {"accumulated_content": "", "thinking_content_parts": [], "timed_out": False}
-
-        last_keepalive = asyncio.get_event_loop().time()
-        # 挂起超时检测需要独立追踪最后活跃时间
-        _last_active = asyncio.get_event_loop().time() if call_timeout is not None else 0.0
-
-        # 2. 主循环：消费队列
-        _chunk_count = 0
-        while not engine_task.done() or not self._queue.empty():
-            # BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
-            # 检测 sink 是否已死亡（连续推送失败超过阈值），
-            # 如果 dead 则提前发送 stream_end 保底事件并退出循环，
-            # 避免前端因收不到 stream_end 而无限等待。
-            if getattr(self.output_sink, 'is_dead', False) is True:
-                logger.warning(
-                    "drain_loop: sink 已 dead（前端连接丢失），提前终止流式输出: "
-                    "pipeline=%s chunks=%d",
-                    self.pipeline_id[:12], _chunk_count,
+            # 0.5 刷出 reset_for_new_turn 保留的缓冲通知（在 stream_start 之前）
+            if self._pending_notifications:
+                _preserved = self._pending_notifications[:]
+                self._pending_notifications = []
+                for _notif in _preserved:
+                    await self._send_event(self._make_event("system_notification", _notif))
+                logger.info(
+                    "drain_loop: flushed %d preserved notifications before stream_start: pipeline=%s",
+                    len(_preserved), self.pipeline_id[:12],
                 )
-                await self._close_thinking_if_active(None)
-                full_content = "".join(self._accumulated_content)
-                # sink 已 dead，stream_end 大概率也发不出去，但仍尝试发送
-                try:
-                    await self.output_sink.send_event(self._make_event("stream_end", {
-                        "full_content": full_content,
+
+            # 1. 发送 stream_start
+            try:
+                await self._send_stream_start()
+                logger.info(
+                    "drain_loop: stream_start 已发送: msg=%s pipeline=%s sink=%s",
+                    self.message_id[:12], self.pipeline_id[:12], self.output_sink.sink_id,
+                )
+            except Exception as _e:
+                logger.error("drain_loop: stream_start 失败: %s", _e, exc_info=True)
+                return {"accumulated_content": "", "thinking_content_parts": [], "timed_out": False}
+
+            last_keepalive = asyncio.get_event_loop().time()
+            # 挂起超时检测需要独立追踪最后活跃时间
+            _last_active = asyncio.get_event_loop().time() if call_timeout is not None else 0.0
+
+            # 2. 主循环：消费队列
+            _chunk_count = 0
+            while not engine_task.done() or not self._queue.empty():
+                # BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
+                # 检测 sink 是否已死亡（连续推送失败超过阈值），
+                # 如果 dead 则提前发送 stream_end 保底事件并退出循环，
+                # 避免前端因收不到 stream_end 而无限等待。
+                if getattr(self.output_sink, 'is_dead', False) is True:
+                    logger.warning(
+                        "drain_loop: sink 已 dead（前端连接丢失），提前终止流式输出: "
+                        "pipeline=%s chunks=%d",
+                        self.pipeline_id[:12], _chunk_count,
+                    )
+                    await self._close_thinking_if_active(None)
+                    full_content = "".join(self._accumulated_content)
+                    # sink 已 dead，stream_end 大概率也发不出去，但仍尝试发送
+                    try:
+                        await self.output_sink.send_event(self._make_event("stream_end", {
+                            "full_content": full_content,
+                            "connection_lost": True,
+                        }))
+                    except Exception:
+                        pass
+                    # 丢弃缓冲的通知（连接已死，通知无需发送）
+                    self._pending_notifications = []
+                    return {
+                        "accumulated_content": full_content,
+                        "thinking_content_parts": list(self._thinking_content_parts),
                         "connection_lost": True,
+                        "timed_out": False,
+                    }
+
+                try:
+                    chunk = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    now = asyncio.get_event_loop().time()
+
+                    _is_suspended = (
+                        not engine_task.done()
+                        and self._queue.empty()
+                        and suspend_check is not None
+                        and suspend_check()
+                    )
+
+                    if _is_suspended:
+                        # BUG-FIX-fix_20260528_drain_race:
+                        # 问题根因: inject_message 设置 _wake_event 后，引擎的
+                        #   _suspend_and_wait 恢复逻辑（设 is_suspended=False）
+                        #   需要下一个事件循环 tick 才执行。如果 drain_loop 在
+                        #   此处立即退出，LLM 后续生成的 chunk 无消费者。
+                        # 修复方案: 检测到 suspended 后等待最多 1 秒，期间每
+                        #   50ms 重新检查。如果引擎醒来则继续；超时才退出。
+                        _suspend_grace_start = asyncio.get_event_loop().time()
+                        _suspend_grace_max = 1.0
+                        _actually_suspended = True
+                        while asyncio.get_event_loop().time() - _suspend_grace_start < _suspend_grace_max:
+                            await asyncio.sleep(0.05)
+                            if not suspend_check():
+                                _actually_suspended = False
+                                break
+                            if not self._queue.empty():
+                                _actually_suspended = False
+                                break
+                        if _actually_suspended:
+                            logger.info(
+                                "drain_loop: engine suspended (grace expired), ending stream: pipeline=%s chunks=%d",
+                                self.pipeline_id[:12], _chunk_count,
+                            )
+                            break
+                        last_keepalive = asyncio.get_event_loop().time()
+
+                    # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
+                    if now - last_keepalive > heartbeat_interval:
+                        last_keepalive = now
+                        # 仅在 heartbeat_callback 有值时调用回调
+                        if heartbeat_callback is not None:
+                            try:
+                                await heartbeat_callback()
+                            except Exception:
+                                pass
+                        # keepalive 事件始终发送，防止前端因长时间无 chunk 而超时
+                        try:
+                            await self._send_event(self._make_event("stream_keepalive", {}))
+                        except Exception:
+                            pass
+
+                    # 挂起超时检测：管道挂起时不计入超时，超时后直接 return
+                    if call_timeout is not None:
+                        if suspend_check is not None and suspend_check():
+                            _last_active = now
+                        else:
+                            elapsed = now - _last_active
+                            if elapsed > call_timeout:
+                                logger.warning(
+                                    "LLM 活动超时 (%.1fs/%.1fs): pipeline=%s",
+                                    elapsed, call_timeout, self.pipeline_id,
+                                )
+                                # FIX: 超时退出前补发 stream_end，确保前端总是收到配对的 start/end
+                                await self._close_thinking_if_active(None)
+                                full_content = "".join(self._accumulated_content)
+                                try:
+                                    await self._send_event(self._make_event("stream_end", {
+                                        "full_content": full_content,
+                                        "timed_out": True,
+                                    }))
+                                except Exception as _send_err:
+                                    logger.debug("超时 stream_end 发送失败: %s", _send_err)
+                                # BUG-FIX-fix_20260529_notification_lost:
+                                # 超时退出时刷出缓冲通知，避免丢失
+                                if self._pending_notifications:
+                                    for _notif in self._pending_notifications:
+                                        try:
+                                            await self._send_event(self._make_event("system_notification", _notif))
+                                        except Exception:
+                                            pass
+                                    self._pending_notifications = []
+                                return {
+                                    "accumulated_content": full_content,
+                                    "thinking_content_parts": list(self._thinking_content_parts),
+                                    "timed_out": True,
+                                }
+
+                    continue
+
+                # 收到 chunk，更新活跃时间
+                if call_timeout is not None:
+                    _last_active = asyncio.get_event_loop().time()
+
+                if chunk is None:
+                    break
+
+                _chunk_type = chunk.get("type", "?")
+
+                if _chunk_type == "pipeline_suspended":
+                    await self._close_thinking_if_active(None)
+                    await self._send_event(self._make_event("state_change", {
+                        "status": "suspended",
+                        "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
+                        "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
+                    }))
+                    logger.info(
+                        "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
+                        self.pipeline_id[:12],
+                    )
+                    continue
+
+                if _chunk_type == "system":
+                    self._pending_notifications.append({
+                        "content": chunk.get("content", ""),
+                        "level": chunk.get("level", "info"),
+                        "notificationType": chunk.get("notificationType", ""),
+                    })
+                    logger.debug(
+                        "drain_loop: system_notification buffered: pipeline=%s count=%d",
+                        self.pipeline_id[:12], len(self._pending_notifications),
+                    )
+                    continue
+
+                if _chunk_type in ("tool_start", "tool_result"):
+                    logger.debug(
+                        "drain: type=%s tool=%s pipeline=%s",
+                        _chunk_type, chunk.get('tool_name'), self.pipeline_id[:12],
+                    )
+
+                _chunk_count += 1
+                logger.info(
+                    "drain_loop chunk #%d: type=%s content_len=%d pipeline=%s",
+                    _chunk_count, _chunk_type,
+                    len(chunk.get("content", "")) if chunk.get("content") else 0,
+                    self.pipeline_id[:12],
+                )
+                try:
+                    await self._handle_chunk(chunk)
+                except Exception as _hc_err:
+                    logger.warning(
+                        "drain_loop: _handle_chunk 异常 (chunk #%d type=%s): %s pipeline=%s",
+                        _chunk_count, _chunk_type, _hc_err, self.pipeline_id[:12],
+                    )
+
+            # 3. 管道结束后关闭可能仍活跃的 thinking
+            await self._close_thinking_if_active(None)
+
+            # 4. 发送 stream_end
+            full_content = "".join(self._accumulated_content)
+            _end_ok = await self._send_event(self._make_event("stream_end", {
+                "full_content": full_content,
+            }))
+            logger.info(
+                "drain_loop: stream_end %s: msg=%s pipeline=%s content=%d chars chunks=%d/%d",
+                "OK" if _end_ok else "FAILED",
+                self.message_id[:12], self.pipeline_id[:12],
+                len(full_content), _chunk_count, len(self._accumulated_content),
+            )
+
+            # 5. 刷出缓冲的系统通知（stream_end 后发送，确保前端已标记消息完成）
+            if self._pending_notifications:
+                _notif_count = len(self._pending_notifications)
+                for _notif in self._pending_notifications:
+                    await self._send_event(self._make_event("system_notification", _notif))
+                self._pending_notifications = []
+                logger.info(
+                    "drain_loop: flushed %d buffered system_notification: pipeline=%s",
+                    _notif_count, self.pipeline_id[:12],
+                )
+
+            return {
+                "accumulated_content": full_content,
+                "thinking_content_parts": list(self._thinking_content_parts),
+                "timed_out": False,
+            }
+        except Exception as _dl_err:
+            # BUG-FIX-fix_20260529_frontend_stuck:
+            # drain_loop 异常退出时补发 stream_end，防止前端永远卡在"思考中"
+            logger.error(
+                "drain_loop 异常退出: pipeline=%s error=%s",
+                self.pipeline_id[:12], _dl_err, exc_info=True,
+            )
+            if self._stream_started:
+                try:
+                    await self._close_thinking_if_active(None)
+                    _fallback_content = "".join(self._accumulated_content)
+                    await self._send_event(self._make_event("stream_end", {
+                        "full_content": _fallback_content,
+                        "error": True,
                     }))
                 except Exception:
                     pass
-                return {
-                    "accumulated_content": full_content,
-                    "thinking_content_parts": list(self._thinking_content_parts),
-                    "connection_lost": True,
-                    "timed_out": False,
-                }
-
-            try:
-                chunk = await asyncio.wait_for(self._queue.get(), timeout=0.1)
-            except asyncio.TimeoutError:
-                now = asyncio.get_event_loop().time()
-
-                _is_suspended = (
-                    not engine_task.done()
-                    and self._queue.empty()
-                    and suspend_check is not None
-                    and suspend_check()
-                )
-
-                if _is_suspended:
-                    # BUG-FIX-fix_20260528_drain_race:
-                    # 问题根因: inject_message 设置 _wake_event 后，引擎的
-                    #   _suspend_and_wait 恢复逻辑（设 is_suspended=False）
-                    #   需要下一个事件循环 tick 才执行。如果 drain_loop 在
-                    #   此处立即退出，LLM 后续生成的 chunk 无消费者。
-                    # 修复方案: 检测到 suspended 后等待最多 1 秒，期间每
-                    #   50ms 重新检查。如果引擎醒来则继续；超时才退出。
-                    _suspend_grace_start = asyncio.get_event_loop().time()
-                    _suspend_grace_max = 1.0
-                    _actually_suspended = True
-                    while asyncio.get_event_loop().time() - _suspend_grace_start < _suspend_grace_max:
-                        await asyncio.sleep(0.05)
-                        if not suspend_check():
-                            _actually_suspended = False
-                            break
-                        if not self._queue.empty():
-                            _actually_suspended = False
-                            break
-                    if _actually_suspended:
-                        logger.info(
-                            "drain_loop: engine suspended (grace expired), ending stream: pipeline=%s chunks=%d",
-                            self.pipeline_id[:12], _chunk_count,
-                        )
-                        break
-                    last_keepalive = asyncio.get_event_loop().time()
-
-                # 心跳保活：无论 heartbeat_callback 是否存在，都发送 stream_keepalive
-                if now - last_keepalive > heartbeat_interval:
-                    last_keepalive = now
-                    # 仅在 heartbeat_callback 有值时调用回调
-                    if heartbeat_callback is not None:
-                        try:
-                            await heartbeat_callback()
-                        except Exception:
-                            pass
-                    # keepalive 事件始终发送，防止前端因长时间无 chunk 而超时
-                    try:
-                        await self._send_event(self._make_event("stream_keepalive", {}))
-                    except Exception:
-                        pass
-
-                # 挂起超时检测：管道挂起时不计入超时，超时后直接 return
-                if call_timeout is not None:
-                    if suspend_check is not None and suspend_check():
-                        _last_active = now
-                    else:
-                        elapsed = now - _last_active
-                        if elapsed > call_timeout:
-                            logger.warning(
-                                "LLM 活动超时 (%.1fs/%.1fs): pipeline=%s",
-                                elapsed, call_timeout, self.pipeline_id,
-                            )
-                            # FIX: 超时退出前补发 stream_end，确保前端总是收到配对的 start/end
-                            await self._close_thinking_if_active(None)
-                            full_content = "".join(self._accumulated_content)
-                            try:
-                                await self._send_event(self._make_event("stream_end", {
-                                    "full_content": full_content,
-                                    "timed_out": True,
-                                }))
-                            except Exception as _send_err:
-                                logger.debug("超时 stream_end 发送失败: %s", _send_err)
-                            return {
-                                "accumulated_content": full_content,
-                                "thinking_content_parts": list(self._thinking_content_parts),
-                                "timed_out": True,
-                            }
-
-                continue
-
-            # 收到 chunk，更新活跃时间
-            if call_timeout is not None:
-                _last_active = asyncio.get_event_loop().time()
-
-            if chunk is None:
-                break
-
-            _chunk_type = chunk.get("type", "?")
-
-            if _chunk_type == "pipeline_suspended":
-                await self._close_thinking_if_active(None)
-                await self._send_event(self._make_event("state_change", {
-                    "status": "suspended",
-                    "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
-                    "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
-                }))
-                logger.info(
-                    "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
-                    self.pipeline_id[:12],
-                )
-                continue
-
-            if _chunk_type == "system":
-                await self._send_event(self._make_event("system_notification", {
-                    "content": chunk.get("content", ""),
-                    "level": chunk.get("level", "info"),
-                    "notificationType": chunk.get("notificationType", ""),
-                }))
-                logger.debug(
-                    "drain_loop: system_notification sent: pipeline=%s",
-                    self.pipeline_id[:12],
-                )
-                continue
-
-            if _chunk_type in ("tool_start", "tool_result"):
-                logger.debug(
-                    "drain: type=%s tool=%s pipeline=%s",
-                    _chunk_type, chunk.get('tool_name'), self.pipeline_id[:12],
-                )
-
-            _chunk_count += 1
-            logger.info(
-                "drain_loop chunk #%d: type=%s content_len=%d pipeline=%s",
-                _chunk_count, _chunk_type,
-                len(chunk.get("content", "")) if chunk.get("content") else 0,
-                self.pipeline_id[:12],
-            )
-            await self._handle_chunk(chunk)
-
-        # 3. 管道结束后关闭可能仍活跃的 thinking
-        await self._close_thinking_if_active(None)
-
-        # 4. 发送 stream_end
-        full_content = "".join(self._accumulated_content)
-        _end_ok = await self._send_event(self._make_event("stream_end", {
-            "full_content": full_content,
-        }))
-        logger.info(
-            "drain_loop: stream_end %s: msg=%s pipeline=%s content=%d chars chunks=%d/%d",
-            "OK" if _end_ok else "FAILED",
-            self.message_id[:12], self.pipeline_id[:12],
-            len(full_content), _chunk_count, len(self._accumulated_content),
-        )
-
-        return {
-            "accumulated_content": full_content,
-            "thinking_content_parts": list(self._thinking_content_parts),
-            "timed_out": False,
-        }
+            return {
+                "accumulated_content": "".join(self._accumulated_content),
+                "thinking_content_parts": list(self._thinking_content_parts),
+                "timed_out": False,
+            }
+        finally:
+            # BUG-FIX-fix_20260529_notification_order:
+            # drain_loop 退出后重置 _stream_started，防止 send_pipeline_message
+            # 误判为仍在流式而将通知缓冲到无消费者的 _pending_notifications。
+            self._stream_started = False
 
     async def send_new_message(self, content: str, sequence: int = 1) -> None:
         """发送 new_message 最终消息，包含完整的助手消息数据。

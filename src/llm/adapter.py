@@ -432,6 +432,13 @@ class _BaseLiteLLMAdapter:
             kwargs.pop("max_thinking_chars", 180000)
         )
 
+        # BUG-FIX-fix_20260529_minimax_thinking_stream:
+        # 流式 <think/> 标签状态机。MiniMax 等模型的思考内容通过 <think/> 标签
+        # 包裹在 delta.content 中返回（而非 delta.reasoning_content），且标签会
+        # 跨多个 chunk 切分。状态机通过 "<think" / "</think" 字符串查找跟踪开/闭状态，
+        # 确保 thinking 内容正确路由到 thinking 通道、正文路由到 text 通道。
+        _in_think_tag: bool = False
+
         aiter = response.__aiter__()
         try:
             # 首个 chunk：检测连接是否建立，超时说明被限流或网络异常
@@ -461,6 +468,7 @@ class _BaseLiteLLMAdapter:
             # _process_chunk 内联处理每个 chunk
             async def _process_chunk(chunk: Any) -> bool:
                 """处理单个 chunk，返回是否应该 break。"""
+                nonlocal stream_repetition, _in_think_tag, stream_usage
                 # 流式诊断：只写文件，不显示在 CLI
                 _chunk_idx = len(result_parts) + len(thinking_parts)
                 if _chunk_idx <= 1 or _chunk_idx % 200 == 0:
@@ -488,7 +496,6 @@ class _BaseLiteLLMAdapter:
                             )
                 # 收集流式 usage（通常在最后一个 chunk）
                 if hasattr(chunk, "usage") and chunk.usage:
-                    nonlocal stream_usage
                     stream_usage = {
                         "prompt_tokens": getattr(
                             chunk.usage, "prompt_tokens", 0
@@ -535,30 +542,105 @@ class _BaseLiteLLMAdapter:
                         )
                         return True
 
-                # 文本内容
+                # 文本内容：流式 <think/> 状态机处理（MiniMax 等模型）
                 if delta.content:
-                    # thinking→text 过渡：发送 thinking_end 确保思考完整关闭后再输出文本
-                    if on_chunk and thinking_parts:
-                        on_chunk({"type": "thinking_end", "content": ""})
-                    result_parts.append(delta.content)
-                    _stream_logger.debug(
-                        "[STREAM][TEXT] #%d +%d chars: %s",
-                        len(result_parts), len(delta.content),
-                        repr(delta.content[:80]),
-                    )
-                    if on_chunk:
-                        signal = on_chunk(
-                            {"type": "text", "content": delta.content}
-                        )
-                        if signal == "stop":
-                            nonlocal stream_repetition
-                            stream_repetition = True
-                            logger.warning(
-                                "[%s] "
-                                "收到 stop 信号，截断流式输出",
-                                type(self).__name__,
+                    content = delta.content
+
+                    if _in_think_tag:
+                        # 标签内：检查闭合标签
+                        if "</think" in content:
+                            close_idx = content.index("</think")
+                            _think_part = content[:close_idx]
+                            if _think_part:
+                                thinking_parts.append(_think_part)
+                                if on_chunk:
+                                    on_chunk({"type": "thinking", "content": _think_part})
+                            _after_close = content[close_idx:]
+                            _gt = _after_close.find(">")
+                            _rest = _after_close[_gt + 1:] if _gt >= 0 else ""
+                            _in_think_tag = False
+                            if _rest.strip():
+                                result_parts.append(_rest)
+                                if on_chunk:
+                                    signal = on_chunk({"type": "text", "content": _rest})
+                                    if signal == "stop":
+                                        stream_repetition = True
+                                        return True
+                        else:
+                            thinking_parts.append(content)
+                            _stream_logger.debug(
+                                "[STREAM][THINKING] #%d +%d chars",
+                                len(thinking_parts), len(content),
                             )
-                            return True
+                            if on_chunk:
+                                on_chunk({"type": "thinking", "content": content})
+                            thinking_len = sum(len(p) for p in thinking_parts)
+                            if _max_thinking_chars > 0 and thinking_len > _max_thinking_chars:
+                                logger.warning(
+                                    "[%s] 思考内容过长 (%d>%d chars)，截断",
+                                    type(self).__name__,
+                                    thinking_len, _max_thinking_chars,
+                                )
+                                return True
+                    else:
+                        # 标签外：检查开标签
+                        if "<think" in content:
+                            _open_idx = content.index("<think")
+                            _before = content[:_open_idx]
+                            if _before:
+                                result_parts.append(_before)
+                                if on_chunk:
+                                    on_chunk({"type": "text", "content": _before})
+                            _after_open = content[_open_idx:]
+                            _gt = _after_open.find(">")
+                            _inner = _after_open[_gt + 1:] if _gt >= 0 else ""
+                            _in_think_tag = True
+                            if "</think" in _inner:
+                                _ci = _inner.index("</think")
+                                _tp = _inner[:_ci]
+                                if _tp:
+                                    thinking_parts.append(_tp)
+                                    if on_chunk:
+                                        on_chunk({"type": "thinking", "content": _tp})
+                                _ac = _inner[_ci:]
+                                _g2 = _ac.find(">")
+                                _rs = _ac[_g2 + 1:] if _g2 >= 0 else ""
+                                _in_think_tag = False
+                                if _rs.strip():
+                                    result_parts.append(_rs)
+                                    if on_chunk:
+                                        signal = on_chunk({"type": "text", "content": _rs})
+                                        if signal == "stop":
+                                            stream_repetition = True
+                                            return True
+                            elif _inner:
+                                thinking_parts.append(_inner)
+                                _stream_logger.debug(
+                                    "[STREAM][THINKING] #%d +%d chars",
+                                    len(thinking_parts), len(_inner),
+                                )
+                                if on_chunk:
+                                    on_chunk({"type": "thinking", "content": _inner})
+                        else:
+                            if on_chunk and thinking_parts:
+                                on_chunk({"type": "thinking_end", "content": ""})
+                            result_parts.append(content)
+                            _stream_logger.debug(
+                                "[STREAM][TEXT] #%d +%d chars: %s",
+                                len(result_parts), len(content),
+                                repr(content[:80]),
+                            )
+                            if on_chunk:
+                                signal = on_chunk(
+                                    {"type": "text", "content": content}
+                                )
+                                if signal == "stop":
+                                    stream_repetition = True
+                                    logger.warning(
+                                        "[%s] 收到 stop 信号，截断流式输出",
+                                        type(self).__name__,
+                                    )
+                                    return True
 
                 # 工具调用（流式增量）
                 if delta.tool_calls:
@@ -649,18 +731,6 @@ class _BaseLiteLLMAdapter:
         result_text = "".join(result_parts) if result_parts else None
         thinking_text = "".join(thinking_parts) if thinking_parts else None
         tool_calls = self._normalize_tool_calls(tool_calls_map)
-
-        # 兜底：当流式中未收到 reasoning_content 时，从收集的文本中提取 <think/> 标签
-        if not thinking_text and result_text:
-            extracted_thinking, cleaned_content = _extract_thinking_from_content(result_text)
-            if extracted_thinking:
-                thinking_text = extracted_thinking
-                result_text = cleaned_content
-                logger.info(
-                    "[%s] 流式模式从 <think/> 标签提取 thinking (thinking=%d, content=%d)",
-                    type(self).__name__,
-                    len(thinking_text), len(result_text or ""),
-                )
 
         # 流式接收完成：记录速度统计
         _stream_elapsed = _time.monotonic() - _stream_start

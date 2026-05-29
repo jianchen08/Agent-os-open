@@ -12,7 +12,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -607,6 +607,32 @@ class TaskService:
             if not _eval_reason:
                 _eval_reason = "评估未通过"
             await self.fail_task(task_id, reason=_eval_reason)
+
+    async def recover_to_completed(
+        self, task_id: str, result: dict | None = None,
+    ) -> None:
+        """将已 failed 的任务恢复为 completed（评估通过但 idle timer 先杀掉了任务）。
+
+        Args:
+            task_id: 任务 ID
+            result: 评估结果数据
+        """
+        if self._storage is None:
+            return
+
+        task = self._storage.get(task_id)
+        if task is None:
+            return
+
+        if result is not None:
+            task.result = result
+
+        task.status = TaskStatus.COMPLETED
+        task.completed_at = datetime.now(UTC)
+        logger.info(
+            "[TaskService] 任务已从 failed 恢复为 completed | task_id=%s",
+            task_id,
+        )
 
     async def reset_to_pending(self, task_id: str) -> None:
         """将任务重置为 pending 状态（用于恢复/重试）。

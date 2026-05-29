@@ -764,12 +764,12 @@ class TestEventSequence:
 
         后端行为（stream_bridge._handle_chunk）:
         1. tool_start 之前会先关闭 thinking 并发送 stream_end（如果有待刷写的文本）
-        2. tool_result 之后重置 accumulated_content 并重新发送 stream_start
+        2. tool_result 之后重置 accumulated_content（不再重发 stream_start）
         3. tool_result 会自动补发缺失的 tool_start（FIXUP 逻辑）
 
         事件序列:
-        stream_start -> stream_chunk -> tool_start -> tool_result
-        -> stream_start -> stream_chunk -> stream_end
+        stream_start -> stream_chunk -> stream_end -> tool_start -> tool_result
+        -> stream_chunk -> stream_end
         """
         events = [
             _make_event(EVENT_STREAM_START, {
@@ -798,15 +798,9 @@ class TestEventSequence:
                 "duration_ms": 150,
                 "call_id": "call_001",
             }),
-            _make_event(EVENT_STREAM_START, {
-                "message_id": "msg-1",
-                "pipeline_id": "pipe-1",
-                "sequence": 3,
-                "_threadId": "thread-1",
-            }),
             _make_event(EVENT_STREAM_CHUNK, {
                 "content": "搜索结果如上。",
-                "sequence": 4,
+                "sequence": 3,
             }),
             _make_event(EVENT_STREAM_END, {
                 "full_content": "搜索结果如上。",
@@ -827,8 +821,8 @@ class TestEventSequence:
             f"tool_start call_id={tool_start_call_id} 与 tool_result call_id={tool_result_call_id} 不匹配"
         )
 
-        # 验证 tool_result 之后有新的 stream_start（后端自动重发）
-        assert types[tool_result_idx + 1] == EVENT_STREAM_START
+        # 验证 tool_result 之后没有多余的 stream_start
+        assert types[tool_result_idx + 1] != EVENT_STREAM_START
 
         # 验证最终以 stream_end 结束
         assert types[-1] == EVENT_STREAM_END
@@ -861,15 +855,9 @@ class TestEventSequence:
                 "result": "fixed result",
                 "call_id": "call_fixup_001",
             }),
-            _make_event(EVENT_STREAM_START, {
-                "message_id": "msg-1",
-                "pipeline_id": "pipe-1",
-                "sequence": 2,
-                "_threadId": "thread-1",
-            }),
             _make_event(EVENT_STREAM_CHUNK, {
                 "content": "结果已修复。",
-                "sequence": 3,
+                "sequence": 2,
             }),
             _make_event(EVENT_STREAM_END, {
                 "full_content": "结果已修复。",
@@ -911,18 +899,12 @@ class TestEventSequence:
                 "result": "results",
                 "call_id": "call_001",
             }),
-            _make_event(EVENT_STREAM_START, {
-                "message_id": "msg-1",
-                "pipeline_id": "pipe-1",
-                "sequence": 2,
-                "_threadId": "thread-1",
-            }),
             # 第二次工具调用
             _make_event(EVENT_TOOL_START, {
                 "tool_name": "execute",
                 "args": {"code": "print(1)"},
                 "call_id": "call_002",
-                "sequence": 3,
+                "sequence": 2,
             }),
             _make_event(EVENT_TOOL_RESULT, {
                 "tool_name": "execute",
@@ -930,15 +912,9 @@ class TestEventSequence:
                 "result": "1",
                 "call_id": "call_002",
             }),
-            _make_event(EVENT_STREAM_START, {
-                "message_id": "msg-1",
-                "pipeline_id": "pipe-1",
-                "sequence": 4,
-                "_threadId": "thread-1",
-            }),
             _make_event(EVENT_STREAM_CHUNK, {
                 "content": "最终回复。",
-                "sequence": 5,
+                "sequence": 3,
             }),
             _make_event(EVENT_STREAM_END, {
                 "full_content": "最终回复。",

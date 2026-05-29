@@ -7,9 +7,10 @@
  * 渲染路径：parts[]（唯一数据源，按 sequence 排序）
  */
 
+import { Copy } from 'lucide-react'
 import { useMemo } from 'react'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
-import type { ActivityData } from '@/types/activity'
+import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { SystemLevel, ToolCallPart } from '@/types/messageParts'
 /**
@@ -60,13 +61,92 @@ export interface MessageRenderContext {
 }
 
 /**
+ * 构建默认的详情区块
+ */
+function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
+  const details: ActivityDetailBlock[] = []
+
+  details.push({
+    id: 'args',
+    label: '参数',
+    content: toolCall.tool_args,
+    contentType: 'json',
+    collapsible: true,
+    defaultExpanded: false,
+  })
+
+  if (toolCall.result !== undefined && toolCall.result !== null) {
+    details.push({
+      id: 'result',
+      label: '结果',
+      content: toolCall.result as string | Record<string, unknown>,
+      contentType: 'json',
+      collapsible: true,
+      defaultExpanded: false,
+    })
+  }
+
+  if (toolCall.partialOutput && toolCall.partialOutput.length > 0) {
+    details.push({
+      id: 'output',
+      label: '执行输出',
+      content: toolCall.partialOutput.join('\n'),
+      contentType: 'text',
+      collapsible: false,
+    })
+  }
+
+  return details
+}
+
+/**
+ * 构建默认的操作按钮
+ */
+function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
+  const actions: ActivityAction[] = [
+    {
+      id: 'copy_args',
+      icon: <Copy className="h-3.5 w-3.5" />,
+      label: '复制参数',
+      type: 'copy',
+      onClick: () => {
+        navigator.clipboard.writeText(JSON.stringify(toolCall.tool_args, null, 2))
+      },
+    },
+  ]
+
+  if (toolCall.result !== undefined) {
+    actions.push({
+      id: 'copy_result',
+      icon: <Copy className="h-3.5 w-3.5" />,
+      label: '复制结果',
+      type: 'copy',
+      onClick: () => {
+        navigator.clipboard.writeText(
+          typeof toolCall.result === 'string'
+            ? toolCall.result
+            : JSON.stringify(toolCall.result, null, 2),
+        )
+      },
+    })
+  }
+
+  return actions
+}
+
+/**
  * 从 ToolCallPart 构建 ActivityData（parts[] 路径专用）
  *
  * @param part - 工具调用 Part 数据
+ * @param toolCall - 对应的 MessageToolCall 数据
  * @param index - 在 parts 数组中的索引（用于生成 fallback ID）
  * @returns ActivityData 活动数据
  */
-function buildActivityFromToolPart(part: ToolCallPart, index: number): ActivityData {
+function buildActivityFromToolPart(
+  part: ToolCallPart,
+  toolCall: MessageToolCall,
+  index: number,
+): ActivityData {
   return {
     type: 'tool_call',
     id: part.callId || `tool-${index}`,
@@ -85,9 +165,9 @@ function buildActivityFromToolPart(part: ToolCallPart, index: number): ActivityD
     durationMs: part.durationMs,
     progress: part.progress,
     currentStep: part.currentStep,
-    details: [],
+    details: buildDefaultDetails(toolCall),
     error: part.error,
-    actions: [],
+    actions: buildDefaultActions(toolCall),
   }
 }
 
@@ -167,7 +247,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
         }
         // 构建 ActivityData 并应用工具卡片注册表增强
         const activity = enhanceActivityWithToolConfig(
-          buildActivityFromToolPart(part, i),
+          buildActivityFromToolPart(part, toolCall, i),
           toolCall,
         )
         fragments.push({
@@ -230,31 +310,35 @@ export interface UseMessageRenderOptions {
  * 消息渲染 Hook
  *
  * 渲染策略：parts[] 是唯一数据源（WS 消息和 API 消息均通过 parts 渲染）。
+ * displayContent 从 fragments 派生，避免对 parts[] 二次遍历。
  */
 export function useMessageRender(options: UseMessageRenderOptions): MessageRenderContext {
   const { message, isLast = false, isGenerating = false, versionContent } = options
-
-  /** 从 text parts 拼接显示内容；parts 为空时回退到 versionContent 或原始 content */
-  const displayContent =
-    message.parts && message.parts.length > 0
-      ? message.parts
-          .filter((p) => p.type === 'text')
-          .map((p) => (p as { content: string; text?: string }).content || (p as { content: string; text?: string }).text || '')
-          .join('') || message.content
-      : versionContent ?? message.content
 
   /**
    * 从 parts[] 构建渲染片段（唯一路径）
    *
    * 所有消息（WS 流式消息和 API 历史消息）在进入渲染前均已构建 parts[]，
    * 不再需要 contentBlocks 或 content/toolCalls/thinking 的 fallback 路径。
+   * 依赖 message.parts 数组引用而非整个 message 对象，减少不必要的重计算。
    */
-  const fragments = useMemo(() => {
+  const { fragments, displayContent } = useMemo(() => {
     if (message.parts && message.parts.length > 0) {
-      return buildFragmentsFromParts(message)
+      const frags = buildFragmentsFromParts(message)
+      const textContent = frags
+        .filter((f): f is Extract<RenderFragment, { type: 'text' }> => f.type === 'text')
+        .map((f) => f.content)
+        .join('')
+      return {
+        fragments: frags,
+        displayContent: textContent || message.content,
+      }
     }
-    return []
-  }, [message])
+    return {
+      fragments: [],
+      displayContent: versionContent ?? message.content,
+    }
+  }, [message.parts, message.content, versionContent, message])
 
   const isStreaming = useMemo(() => {
     return isGenerating && isLast && message.role === 'assistant'

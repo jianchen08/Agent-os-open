@@ -216,6 +216,56 @@ function makeMessageFingerprint(m: Message): string {
   return m.role + '::' + m.timestamp + '::' + contentPrefix
 }
 
+/**
+ * 合并 API 消息与本地已有消息
+ *
+ * 简化策略：
+ * 1. 本地无消息 → 直接用 API 数据
+ * 2. 本地有 streaming 消息 → 只保留 streaming 消息（API 未返回同 ID 的），其余用 API 数据
+ * 3. 本地无 streaming 消息 → 直接用 API 数据（不保留本地消息，避免重复）
+ *
+ * @param sorted - 已排序的 API 消息列表
+ * @param existing - 本地已有消息列表（可能为 undefined）
+ * @returns { finalMessages: 合并后的消息列表, preservedCount: 保留的本地消息数 }
+ */
+function mergeApiWithExisting(
+  sorted: Message[],
+  existing: Message[] | undefined,
+): { finalMessages: Message[]; preservedCount: number } {
+  // 本地无消息，直接用 API 数据
+  if (!existing || existing.length === 0) {
+    return { finalMessages: sorted, preservedCount: 0 }
+  }
+
+  // 只保留本地 streaming 消息（API 未返回同 ID 的）
+  const apiIds = new Set(sorted.map((m) => m.id))
+  const streamingOnly = existing.filter((m) => 
+    m.status === 'streaming' && !apiIds.has(m.id)
+  )
+
+  // 无 streaming 消息需要保留 → 直接用 API 数据
+  if (streamingOnly.length === 0) {
+    return { finalMessages: sorted, preservedCount: 0 }
+  }
+
+  // 有 streaming 消息需要保留 → 合并
+  const finalMessages = mergeSorted(sorted, streamingOnly)
+  return { finalMessages, preservedCount: streamingOnly.length }
+}
+
+/**
+ * 计算 bottom 游标（只增不减，防止流式消息 sequence 临时值导致回退）
+ *
+ * BUG-FIX-fix_20260529_bottom_cursor_regression:
+ * 取 max(API 返回的最大 seq, 现有 bottomCursor)，只增不减。
+ */
+function calculateBottomCursor(finalMessages: Message[], existingCursor: number | undefined): number {
+  const apiBottomCursor = finalMessages.length > 0
+    ? finalMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
+    : 0
+  return Math.max(apiBottomCursor, existingCursor ?? 0)
+}
+
 
 /**
  * 统一管道消息 Store
@@ -290,32 +340,15 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         state.activePipelineId?.slice(0, 12) || 'null',
       )
 
-      // 精确 ID 匹配去重
+      // 去重匹配优先级：
+      // 1. 精确 ID 匹配（最高优先级）
       let existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
 
-      // BUG-FIX-fix_20260528_send_no_output:
-      // 精确匹配失败时，尝试基于 sequence 的模糊匹配（仅限同 role）
-      // 避免不同 role 的消息因 sequence 相同被错误合并
+      // 2. sequence + role 匹配（sequence 在管道内唯一递增，需限制同 role 避免误匹配）
       if (existingIndex < 0 && message.sequence != null) {
         existingIndex = pipelineMessages.findIndex((m) =>
           m.sequence === message.sequence && m.role === message.role,
         )
-      }
-      if (existingIndex < 0 && message.role === 'assistant') {
-        // 优先用 sequence 匹配（sequence 在会话内唯一）
-        if (message.sequence != null) {
-          existingIndex = pipelineMessages.findIndex((m) =>
-            m.role === 'assistant' && m.sequence === message.sequence,
-          )
-        }
-        // sequence 匹配失败时，回退到 role + timestamp（保持兼容）
-        if (existingIndex < 0 && message.timestamp) {
-          existingIndex = pipelineMessages.findIndex((m) =>
-            m.role === 'assistant'
-            && m.timestamp
-            && m.timestamp === message.timestamp,
-          )
-        }
       }
 
       let updatedMessages: Message[]
@@ -367,6 +400,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
 
   /**
    * 更新指定管道中的消息（部分更新），支持模糊匹配
+   *
+   * 注意：找不到消息时不会自动创建，仅输出 warn 日志。
+   * 消息创建应统一走 addMessage 或 ensureStreamingPlaceholder。
    */
   updateMessage: (pipelineId: string, messageId: string, partial: Partial<Message>) => {
     set((state) => {
@@ -374,61 +410,26 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
 
       let messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
 
-      // BUG-FIX-fix_20260515_long_context_message_loss:
-      // 精确匹配失败时，assistant 消息尝试模糊匹配
-      // 优先使用 sequence 匹配（sequence 在会话内唯一），回退到 role + timestamp
-      if (messageIndex < 0 && partial.role === 'assistant') {
-        // 优先用 sequence 精确匹配
-        if (partial.sequence != null) {
-          messageIndex = pipelineMessages.findIndex((m) =>
-            m.role === 'assistant' && m.sequence === partial.sequence,
-          )
-        }
-        // sequence 匹配失败时，回退到 role + timestamp（保持兼容）
-        if (messageIndex < 0 && partial.timestamp) {
-          messageIndex = pipelineMessages.findIndex((m) =>
-            m.role === 'assistant'
-            && m.timestamp === partial.timestamp,
-          )
-        }
+      // 精确匹配失败时，assistant 消息尝试基于 sequence 模糊匹配
+      if (messageIndex < 0 && partial.role === 'assistant' && partial.sequence != null) {
+        messageIndex = pipelineMessages.findIndex((m) =>
+          m.role === 'assistant' && m.sequence === partial.sequence,
+        )
       }
 
       if (messageIndex < 0) {
-        const storeIds = pipelineMessages.map((m) => m.id?.slice(0, 12)).join(',')
-        const streamState = get().streamingState[pipelineId]
-        logger.error(
-          `[updateMessage] message not found, auto-creating: pipelineId=%s messageId=%s totalMsgs=%d storeIds=[%s] streaming=%s`,
-          pipelineId?.slice(0, 12), messageId?.slice(0, 12), pipelineMessages.length,
-          storeIds, streamState ? `yes(${streamState.messageId?.slice(0, 12)})` : 'no',
+        logger.warn(
+          '[updateMessage] message not found: pipelineId=%s messageId=%s role=%s seq=%d',
+          pipelineId?.slice(0, 12), messageId?.slice(0, 12),
+          partial.role, partial.sequence ?? -1,
         )
-        const sessionId = state.pipelineSessionMap[pipelineId] || ''
-        const maxSeq = pipelineMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
-        const placeholder: Message = {
-          id: messageId,
-          sessionId,
-          role: partial.role || 'assistant',
-          content: '',
-          sequence: partial.sequence ?? maxSeq + 1000,
-          timestamp: partial.timestamp || new Date().toISOString(),
-          parentId: null,
-          status: 'completed',
-          ...partial,
-          _lastUpdated: Date.now(),
-        } as Message
-        const newMessages = sortedInsert(pipelineMessages, placeholder)
-        return {
-          messagesByPipeline: {
-            ...state.messagesByPipeline,
-            [pipelineId]: newMessages,
-          },
-        }
+        return state
       }
 
       const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
         ...updatedMessages[messageIndex],
         ...partial,
-        // BUG-FIX-fix_20260522_msg_disappear: 记录消息最后更新时间，防止 initFromAPI 覆盖近期 WS 更新
         _lastUpdated: Date.now(),
       } as Message
 
@@ -512,7 +513,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    * 冷启动：从 API 写入最新消息并设置双游标
    *
    * FIX: 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。
-   * 删除模糊的时间窗口匹配逻辑（WS 和 API 竞争由 streaming 保留逻辑覆盖）。
    */
   initFromAPI: (pipelineId: string, messages: Message[]) => {
     set((state) => {
@@ -522,91 +522,14 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       logger.info('[initFromAPI] pipelineId=%s apiMsgs=%d existingMsgs=%d',
         pipelineId?.slice(0, 12), sorted.length, existing?.length || 0)
 
-      let finalMessages: Message[]
-      // BUG-FIX-fix_20260522_msg_disappear: 跟踪被保留的本地消息数量
-      let preservedCount = 0
+      const { finalMessages, preservedCount } = mergeApiWithExisting(sorted, existing)
 
-      if (existing && existing.length > 0) {
-        // BUG-FIX-fix_20260515_long_context_message_loss:
-        // 原逻辑只保留 streaming 消息，导致 WS 已接收但 API 尚未同步的消息被丢弃。
-        // 修复方案: 使用指纹去重，逐条检查旧消息是否在新消息列表中有匹配，
-        //          只丢弃已被 API 数据覆盖的旧消息，保留 API 尚未返回的有效消息。
-        const apiFingerprints = new Map<string, Message[]>()
-        for (const m of sorted) {
-          const fp = makeMessageFingerprint(m)
-          const arr = apiFingerprints.get(fp) || []
-          arr.push(m)
-          apiFingerprints.set(fp, arr)
-        }
+      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
+      const bottomCursor = calculateBottomCursor(finalMessages, state.bottomCursorsByPipeline[pipelineId])
 
-        // 逐条过滤旧消息：仅在指纹匹配且新消息列表中确实存在对应条目时才移除旧消息
-        const matchedApiIds = new Set<string>()
-        // BUG-FIX-fix_20260522_msg_disappear: 记录因近期 WS 更新被保护的本地消息对应的 API 消息 ID
-        const excludedApiIds = new Set<string>()
-        const preserved = existing.filter((localMsg) => {
-          if (localMsg.status === 'streaming') {
-            const apiIds = new Set(sorted.map((m) => m.id))
-            if (apiIds.has(localMsg.id)) return false
-            return true
-          }
-
-          const fp = makeMessageFingerprint(localMsg)
-          const candidates = apiFingerprints.get(fp)
-          if (!candidates) return true // 没有匹配的API消息 -> 保留这条WS消息
-          // 检查是否有尚未被匹配的 API 消息
-          const unmatched = candidates.find((c) => !matchedApiIds.has(c.id))
-          if (unmatched) {
-            matchedApiIds.add(unmatched.id)
-
-            // BUG-FIX-fix_20260522_msg_disappear: 保护近期通过 WS 更新的消息不被 API 空内容覆盖
-            const localUpdated = (localMsg as Message & { _lastUpdated?: number })._lastUpdated
-            if (localUpdated && Date.now() - localUpdated < 5000) {
-              const localLen = (localMsg.content || '').length
-              const apiLen = (unmatched.content || '').length
-              if (apiLen < localLen * 0.5) {
-                excludedApiIds.add(unmatched.id)
-                return true // 保留本地版本，排除对应 API 消息
-              }
-            }
-
-            return false // 这条旧消息被新 API 消息替代
-          }
-          return true // API 消息已全部匹配完毕，保留旧消息
-        })
-
-        // BUG-FIX-fix_20260522_msg_disappear: 排除被本地版本保护的 API 消息，避免重复
-        const filteredSorted = excludedApiIds.size > 0
-          ? sorted.filter((m) => !excludedApiIds.has(m.id))
-          : sorted
-
-        preservedCount = preserved.length
-
-        if (preserved.length > 0) {
-          finalMessages = mergeSorted(filteredSorted, preserved)
-        } else {
-          finalMessages = filteredSorted
-        }
-      } else {
-        finalMessages = sorted
-      }
-
-      // BUG-FIX-fix_20260522_msg_disappear: 诊断日志，记录合并结果
       logger.info('[initFromAPI] done: pipelineId=%s finalMsgs=%d preserved=%d',
         pipelineId?.slice(0, 12), finalMessages.length, preservedCount)
 
-      const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
-      // BUG-FIX-fix_20260529_bottom_cursor_regression:
-      // 问题根因: initFromAPI 用 API 返回的最大 seq 覆盖 bottomCursor，
-      //          但如果有流式消息正在进行（sequence 是客户端分配的临时值，比 API 数据大），
-      //          bottomCursor 会被回退到一个更小的值，导致断线补漏重复拉取已有消息。
-      // 修复方案: 取 max(API返回的最大seq, 现有bottomCursor)，只增不减。
-      // 影响范围: initFromAPI 后的断线补漏正确性
-      // 修复日期: 2026-05-29
-      const apiBottomCursor = finalMessages.length > 0
-        ? finalMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
-        : 0
-      const existingBottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
-      const bottomCursor = Math.max(apiBottomCursor, existingBottomCursor)
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
