@@ -158,6 +158,44 @@ function compareMessages(a: Message, b: Message): number {
   return idA < idB ? -1 : idA > idB ? 1 : 0
 }
 
+/** 二分查找插入位置，保持数组按 compareMessages 排序 */
+function bisectInsertIndex(arr: Message[], msg: Message): number {
+  let lo = 0
+  let hi = arr.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (compareMessages(arr[mid], msg) < 0) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  return lo
+}
+
+/** 将 msg 插入已排序数组 arr 的正确位置，返回新数组 */
+function sortedInsert(arr: Message[], msg: Message): Message[] {
+  const idx = bisectInsertIndex(arr, msg)
+  return [...arr.slice(0, idx), msg, ...arr.slice(idx)]
+}
+
+/** 合并两个已排序数组，返回新的已排序数组 */
+function mergeSorted(a: Message[], b: Message[]): Message[] {
+  const result: Message[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (compareMessages(a[i], b[j]) <= 0) {
+      result.push(a[i++])
+    } else {
+      result.push(b[j++])
+    }
+  }
+  while (i < a.length) result.push(a[i++])
+  while (j < b.length) result.push(b[j++])
+  return result
+}
+
 /**
  * 生成消息指纹，用于跨 ID 格式（WS UUID vs API hex）去重
  *
@@ -291,17 +329,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           id: pipelineMessages[existingIndex].id,
         }
       } else {
-        updatedMessages = [
-          ...pipelineMessages,
-          { ...message, id: realMessageId },
-        ]
+        updatedMessages = sortedInsert(pipelineMessages, { ...message, id: realMessageId })
         // 非激活管道收到新消息时增加未读计数
         if (state.activePipelineId !== pipelineId) {
           unreadChanged = true
         }
       }
-
-      updatedMessages.sort(compareMessages)
 
       const newPipelines = { ...state.pipelines }
       if (unreadChanged && newPipelines[pipelineId]) {
@@ -382,8 +415,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           ...partial,
           _lastUpdated: Date.now(),
         } as Message
-        const newMessages = [...pipelineMessages, placeholder]
-        newMessages.sort(compareMessages)
+        const newMessages = sortedInsert(pipelineMessages, placeholder)
         return {
           messagesByPipeline: {
             ...state.messagesByPipeline,
@@ -550,8 +582,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         preservedCount = preserved.length
 
         if (preserved.length > 0) {
-          finalMessages = [...filteredSorted, ...preserved]
-          finalMessages.sort(compareMessages)
+          finalMessages = mergeSorted(filteredSorted, preserved)
         } else {
           finalMessages = filteredSorted
         }
@@ -618,8 +649,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const existing = state.messagesByPipeline[pipelineId] || []
       const existingIds = new Set(existing.map((m) => m.message_id || m.id))
       const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
-      const merged = [...newMsgs, ...existing]
-      merged.sort(compareMessages)
+      const merged = mergeSorted(newMsgs, existing)
       const topCursor = merged[0].sequence ?? 0
       return {
         messagesByPipeline: {
@@ -652,8 +682,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const existing = state.messagesByPipeline[pipelineId] || []
       const existingIds = new Set(existing.map((m) => m.message_id || m.id))
       const newMsgs = sorted.filter((m) => !existingIds.has(m.message_id || m.id))
-      const merged = [...existing, ...newMsgs]
-      merged.sort(compareMessages)
+      const merged = mergeSorted(existing, newMsgs)
       const bottomCursor = merged.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
       return {
         messagesByPipeline: {

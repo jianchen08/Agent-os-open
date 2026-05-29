@@ -94,23 +94,24 @@ class TrackPlugin(IOutputPlugin):
         """本插件不产出路由信号。"""
         return []
 
-    # BUG-FIX-fix_20260529_msg_order: 从共享计数器读取当前 sequence（不递增）
     def _get_current_sequence(self, pipeline_run_id: str) -> int:
-        """从 PipelineEntry 共享计数器获取当前值（不递增）。
+        """获取当前消息的 sequence 值。
 
-        TrackPlugin 仅读取 WS 事件推送时已递增过的 sequence 值，
-        用于持久化记录，不再独立自增计数器。
+        优先从 bridge 缓存的消息 sequence 读取（与 stream_start 一致），
+        否则从 PipelineEntry 共享计数器读取。
 
         Args:
             pipeline_run_id: 管道 ID
 
         Returns:
-            当前共享计数器的值；Registry 不可用时返回 0
+            当前消息的 sequence 值
         """
         try:
             from pipeline.registry import get_engine_registry
             entry = get_engine_registry().get(pipeline_run_id)
             if entry is not None:
+                if entry.bridge is not None and entry.bridge._current_msg_seq > 0:
+                    return entry.bridge._current_msg_seq
                 return entry.msg_sequence
         except Exception:
             pass

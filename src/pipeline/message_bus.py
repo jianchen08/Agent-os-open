@@ -642,8 +642,7 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             if content:
-                _nm_seq = bridge._get_next_sequence()
-                await bridge.send_new_message(content, sequence=_nm_seq)
+                await bridge.send_new_message(content, sequence=bridge._current_msg_seq)
         except asyncio.CancelledError:
             pass
         except Exception as exc:

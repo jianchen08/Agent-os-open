@@ -71,19 +71,21 @@ export function stopPipelineStreaming(pipelineId: string, threadId?: string): vo
 
 /**
  * 分配下一个 sequence 值。
- * 后端消息直接使用后端返回的 sequence；用户消息使用乐观临时值。
+ * - 后端消息：直接使用后端 sequence，但不小于本地已有最大值（防止后端计数器未续接）
+ * - 用户消息：使用本地最大值 + 1（乐观更新，等后端覆盖）
  *
  * @param pipelineId - 管道 ID
  * @param backendSequence - 后端返回的真实 sequence（WS 事件携带）
  */
 export function allocateNextSequence(pipelineId: string, backendSequence?: number): number {
-  if (backendSequence != null && backendSequence > 0) {
-    return backendSequence
-  }
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
-  return existingMsgs.reduce(
+  const localMax = existingMsgs.reduce(
     (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
-  ) + 1
+  )
+  if (backendSequence != null && backendSequence > 0) {
+    return Math.max(backendSequence, localMax + 1)
+  }
+  return localMax + 1
 }
 
 /**

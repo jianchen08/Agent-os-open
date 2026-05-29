@@ -106,28 +106,6 @@ echo.
 echo [2/3] 启动后端服务器 (FastAPI + WebSocket :!BACKEND_PORT!)...
 start "Agent OS Backend - !PROJECT_ID!" /D "%ROOT%" cmd /c "set PYTHONPATH=src&& set BACKEND_PORT=!BACKEND_PORT!&& set REDIS_PORT=!REDIS_HOST_PORT!&& set _AO_PROJECT_ID=!PROJECT_ID!&& python app_factory.py"
 
-:: ========== 等待后端就绪 ==========
-echo [INFO] 等待后端服务就绪...
-set "BACKEND_READY=0"
-for /L %%i in (1,1,30) do (
-    if "!BACKEND_READY!"=="0" (
-        curl -s -o nul http://localhost:!BACKEND_PORT!/health >nul 2>&1
-        if !errorlevel! == 0 (
-            set "BACKEND_READY=1"
-            echo [OK] 后端已就绪
-        ) else (
-            timeout /t 1 /nobreak >nul
-        )
-    )
-)
-if "!BACKEND_READY!"=="0" (
-    echo [WARN] 后端未在 30 秒内就绪，继续启动前端...
-)
-
-:: 获取后端进程 PID
-set "BACKEND_PID="
-for /f "tokens=5" %%p in ('netstat -aon 2^>nul ^| findstr ":!BACKEND_PORT! " ^| findstr "LISTENING"') do set "BACKEND_PID=%%p"
-
 :: ========== 启动前端预览服务器 ==========
 echo [3/3] 启动前端生产服务器 (Vite Preview :!FRONTEND_PORT!)...
 start "Agent OS Frontend (Prod) - !PROJECT_ID!" /D "%ROOT%\frontend" cmd /c "set VITE_API_BASE_URL=&& set _AO_PROJECT_ID=!PROJECT_ID!&& npx vite preview --host 0.0.0.0 --port !FRONTEND_PORT!"

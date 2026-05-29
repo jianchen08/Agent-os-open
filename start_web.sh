@@ -278,19 +278,6 @@ export _AO_PROJECT_ID=$PROJECT_ID
 PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/app_factory.py" &
 BACKEND_PID=$!
 
-# 等待后端就绪
-echo "[INFO] 等待后端服务就绪..."
-for i in $(seq 1 30); do
-    if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$BACKEND_PORT/health" 2>/dev/null | grep -q "200"; then
-        echo "[OK] 后端已就绪"
-        break
-    fi
-    if [ "$i" -eq 30 ]; then
-        echo "[WARN] 后端未在 30 秒内就绪，继续启动前端..."
-    fi
-    sleep 1
-done
-
 # ========== 启动前端 ==========
 echo "[2/2] 启动前端开发服务器 (Vite :$FRONTEND_PORT)..."
 cd "$FRONTEND_DIR" && _AO_PROJECT_ID=$PROJECT_ID npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
