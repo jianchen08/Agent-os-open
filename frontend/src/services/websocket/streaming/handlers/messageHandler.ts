@@ -6,7 +6,7 @@ import { useStreamingStore } from '@/stores/streamingStore'
 
 import { resolvePipelineId } from '../router'
 
-import { extractMessageId, extractThreadId, terminatePipeline } from './utils'
+import { extractMessageId, extractThreadId, terminatePipeline, allocateNextSequence } from './utils'
 
 /**
  * 从 API 事件数据中为消息构建 parts[] 数组
@@ -99,8 +99,33 @@ export function handleNewMessage(eventData: any) {
   const data = eventData?.data || eventData
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const existing = msgs.find((m: any) => m.id === messageId)
-  if (!existing) return
+  let existing = msgs.find((m: any) => m.id === messageId)
+
+  // BUG-FIX-fix_20260529_new_message_loss:
+  // 问题根因: 如果 new_message 事件先于 stream_start 到达，或者占位消息被 initFromAPI 清理了，
+  //          existing 为空导致消息被直接丢弃，用户看不到 AI 回复。
+  // 修复方案: 当 existing 不存在时，自动创建消息（类似 ensureStreamingPlaceholder 的逻辑），
+  //          然后继续执行后续的内容更新流程。
+  // 影响范围: new_message 事件处理的消息完整性
+  // 修复日期: 2026-05-29
+  if (!existing) {
+    const sessionId = threadId || pipelineStore.getState().pipelineSessionMap[pipelineId] || ''
+    const placeholderSeq = allocateNextSequence(pipelineId)
+    pipelineStore.getState().addMessage(pipelineId, {
+      id: messageId,
+      sessionId,
+      role: 'assistant',
+      content: finalContent || '',
+      timestamp: new Date().toISOString(),
+      parentId: null,
+      sequence: placeholderSeq,
+      status: 'streaming',
+    } as any)
+    // 重新获取刚创建的消息
+    const updatedMsgs = pipelineStore.getState().getMessages(pipelineId)
+    existing = updatedMsgs.find((m: any) => m.id === messageId)
+    if (!existing) return
+  }
 
   const existingParts = (existing as any).parts || []
   const hasTextParts = existingParts.some((p: any) => p.type === 'text' && (p.text || p.content)?.trim())

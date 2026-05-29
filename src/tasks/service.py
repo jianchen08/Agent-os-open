@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from src.tasks.state_machine import (
 )
 
 logger = logging.getLogger(__name__)
+
+StateChangeCallback = Callable[[str, str, str], Awaitable[None]]
 
 
 def _default_data_dir() -> str:
@@ -53,6 +56,7 @@ class TaskService:
     ) -> None:
         self.task_id = task_id
         self._event_bus = event_bus
+        self._state_callbacks: list[StateChangeCallback] = []
 
         # 门面模式的存储层（仅 task_id=None 时初始化）
         self._storage: Any = None
@@ -1469,26 +1473,41 @@ class TaskService:
             return None
         return self._storage._find_root_id(task)
 
+    def register_state_callback(self, callback: StateChangeCallback) -> None:
+        """注册任务状态变更回调函数。
+
+        Args:
+            callback: 异步回调函数，签名为 async (task_id, old_status, new_status) -> None
+        """
+        self._state_callbacks.append(callback)
+
+    def unregister_state_callback(self, callback: StateChangeCallback) -> None:
+        """注销任务状态变更回调函数。
+
+        Args:
+            callback: 之前注册的回调函数
+        """
+        if callback in self._state_callbacks:
+            self._state_callbacks.remove(callback)
+
     async def _emit_state_change(
         self,
         task_id: str,
         old_status: str,
         new_status: str,
     ) -> None:
-        """通过 EventBus 发布任务状态变更事件（best-effort）。
+        """通知所有注册的回调函数任务状态已变更。
+
+        直接 await 调用回调，保证时序确定性。每个回调独立
+        try-except，单个回调异常不影响其他回调。
 
         Args:
             task_id: 任务 ID
             old_status: 原状态
             new_status: 新状态
         """
-        if self._event_bus is None:
-            return
-        try:
-            await self._event_bus.emit("task_state_changed", {
-                "task_id": task_id,
-                "old_status": old_status,
-                "new_status": new_status,
-            })
-        except Exception as exc:
-            logger.debug("emit task_state_changed 失败: %s", exc)
+        for cb in self._state_callbacks:
+            try:
+                await cb(task_id, old_status, new_status)
+            except Exception as exc:
+                logger.debug("state callback 执行失败: %s", exc)

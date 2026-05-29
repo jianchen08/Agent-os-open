@@ -169,8 +169,10 @@ class PipelineStreamBridge:
         self.output_sink = output_sink
         self.message_id = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._sent_tool_starts: set[str] = set()
-        # BUG-FIX-fix_20260522_tool_order: 统一自增序号，text/tool 共用，确保前端按执行顺序渲染
-        self._seq: int = 0
+        # BUG-FIX-fix_20260529_msg_order: 移除本地 _seq 计数器，改用 PipelineEntry 共享计数器
+        # 问题根因: stream_bridge 本地 _seq 在 reset_for_new_turn 时归零，
+        #   与 message_bus/track_plugin 的独立计数器产生 sequence 冲突。
+        # 修复方案: 通过 _get_next_sequence() 从 PipelineEntry 共享计数器获取 sequence。
 
         # 内部状态
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -217,7 +219,7 @@ class PipelineStreamBridge:
         self._thinking_active = False
         self._stream_started = False
         self._sent_tool_starts = set()
-        self._seq = 0
+        # BUG-FIX-fix_20260529_msg_order: 不再重置本地 _seq，共享计数器跨 turn 持续递增
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -225,6 +227,25 @@ class PipelineStreamBridge:
                 break
         if message_id:
             self.message_id = message_id
+
+    # BUG-FIX-fix_20260529_msg_order: 从 PipelineEntry 共享计数器获取下一个 sequence
+    def _get_next_sequence(self) -> int:
+        """从 PipelineEntry 共享计数器获取下一个 sequence。
+
+        通过 pipeline_id 查找 EngineRegistry 中的 PipelineEntry，
+        调用其 next_sequence() 原子递增方法获取全局唯一的 sequence。
+
+        Returns:
+            全局递增的 sequence 值；Registry 不可用时返回 0（降级处理）
+        """
+        try:
+            from pipeline.registry import get_engine_registry
+            entry = get_engine_registry().get(self.pipeline_id)
+            if entry is not None:
+                return entry.next_sequence()
+        except Exception:
+            pass
+        return 0
 
     def _make_event(self, event_type: str, data: dict) -> dict:
         """构造事件字典，自动注入 pipeline_id 和 message_id。
@@ -276,8 +297,8 @@ class PipelineStreamBridge:
         _threadId 仅作为辅助路由信息。
         """
         self._stream_started = True
-        _start_seq = self._seq
-        self._seq += 1
+        # BUG-FIX-fix_20260529_msg_order: 使用共享计数器替代本地 _seq
+        _start_seq = self._get_next_sequence()
         logger.info(
             "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s seq=%d",
             self.message_id[:12], self.pipeline_id[:12],
@@ -323,8 +344,8 @@ class PipelineStreamBridge:
 
         if chunk_type == "text" and content:
             self._accumulated_content.append(content)
-            _text_seq = self._seq
-            self._seq += 1
+            # BUG-FIX-fix_20260529_msg_order: 使用共享计数器替代本地 _seq
+            _text_seq = self._get_next_sequence()
             await self._send_event(self._make_event("stream_chunk", {
                 "content": content,
                 "sequence": _text_seq,
@@ -334,8 +355,8 @@ class PipelineStreamBridge:
             self._thinking_content_parts.append(content)
             if not self._thinking_active:
                 self._thinking_active = True
-                _thinking_seq = self._seq
-                self._seq += 1
+                # BUG-FIX-fix_20260529_msg_order: 使用共享计数器替代本地 _seq
+                _thinking_seq = self._get_next_sequence()
                 await self._send_event(self._make_event("thinking_start", {
                     "sequence": _thinking_seq,
                 }))
@@ -355,8 +376,8 @@ class PipelineStreamBridge:
                 }))
             _call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
             self._sent_tool_starts.add(_call_id)
-            _seq = self._seq
-            self._seq += 1
+            # BUG-FIX-fix_20260529_msg_order: 使用共享计数器替代本地 _seq
+            _seq = self._get_next_sequence()
             logger.info(
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
                 chunk.get('tool_name'), _call_id, _seq, self.pipeline_id[:12],
@@ -376,8 +397,8 @@ class PipelineStreamBridge:
                     chunk.get('tool_name'), self.pipeline_id[:12],
                 )
                 self._sent_tool_starts.add(_result_call_id)
-                _fixup_seq = self._seq
-                self._seq += 1
+                # BUG-FIX-fix_20260529_msg_order: 使用共享计数器替代本地 _seq
+                _fixup_seq = self._get_next_sequence()
                 await self._send_event(self._make_event("tool_start", {
                     "tool_name": chunk.get("tool_name", "unknown"),
                     "args": None,

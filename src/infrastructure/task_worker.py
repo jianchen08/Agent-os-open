@@ -163,12 +163,6 @@ class TaskWorker(
         self._tasks: set[asyncio.Task] = set()
         self._contexts: dict[str, TaskExecutionContext] = {}
         self._last_container_check: float = 0.0
-        # BUG-FIX-fix_20260520_subscribe_args: 保存 subscribe_simple 返回的订阅 ID，用于 unsubscribe
-        self._sub_ids: list[str] = []
-        # BUG-FIX-fix_20260524_submit_task_loop:
-        # submit_task 可能从工作线程（asyncio.to_thread + asyncio.run）调用，
-        # asyncio.create_task 会在临时事件循环上创建任务，循环关闭后任务丢失。
-        # 保存主事件循环引用，确保任务创建在正确的循环上。
         self._main_loop: asyncio.AbstractEventLoop | None = None
         # 注册自身到 services，供 PipelineEngine 通过 services 访问 idle timer reset
         self._services["task_worker"] = self
@@ -189,25 +183,14 @@ class TaskWorker(
 
         self._init_lifecycle()
 
-        # BUG-FIX-fix_20260520_subscribe_args:
-        # 问题根因: subscribe(handler, filter) 签名第一个参数是 handler，但传入了字符串事件类型，
-        #          导致 handler 是 "task.submitted"（不可调用的 str），真正的 handler 被当作 filter。
-        #          EventBus 内部 _notify_subscribers 调用 str() 时静默失败，事件无人处理，任务永远 pending。
-        # 修复方案: 使用 subscribe_simple() 替代 subscribe()，自动解析事件类型并创建 EventFilter。
-        if self._event_bus:
-            sub_id = self._event_bus.subscribe_simple("task_state_changed", self._on_task_state_changed)
-            self._sub_ids = [sub_id]
-            logger.info(
-                "TaskWorker: 订阅完成 | sub=%s | event_bus_type=%s | event_bus_id=%s | total_subscribers=%s",
-                sub_id,
-                type(self._event_bus).__name__, id(self._event_bus),
-                getattr(self._event_bus, 'subscriber_count', "N/A"),
-            )
+        if self._task_service:
+            self._task_service.register_state_callback(self._on_task_state_changed)
+            logger.info("TaskWorker: 已注册任务状态变更回调")
 
         await self._recover_running_tasks()
         await self._recover_evaluating_tasks()
 
-        logger.info("TaskWorker started (event-driven background task processor)")
+        logger.info("TaskWorker started (callback-driven background task processor)")
 
     def _init_lifecycle(self) -> None:
         """初始化 WorkspaceLifecycleManager 实例并注册到 services
@@ -255,14 +238,8 @@ class TaskWorker(
     async def stop(self) -> None:
         """停止后台任务监听，等待所有 pending 任务完成。"""
         self._running = False
-        # BUG-FIX-fix_20260520_subscribe_args: 使用 subscribe_simple 返回的订阅 ID 取消订阅
-        if self._event_bus:
-            for _sid in self._sub_ids:
-                try:
-                    self._event_bus.unsubscribe(_sid)
-                except Exception:
-                    pass
-            self._sub_ids.clear()
+        if self._task_service:
+            self._task_service.unregister_state_callback(self._on_task_state_changed)
 
         if self._tasks:
             # 等待已提交的 asyncio.Task 开始执行，确保 _contexts 已注册

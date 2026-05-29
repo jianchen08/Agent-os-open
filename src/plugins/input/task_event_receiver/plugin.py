@@ -33,7 +33,6 @@ class TaskEventReceiverPlugin(IInputPlugin):
         self._config = config or {}
         self._pending_events: list[dict[str, Any]] = []
         self._subscribed = False
-        self._event_bus: Any = None
         self._task_service: Any = None
         self._current_task_id: str = ""
 
@@ -97,38 +96,26 @@ class TaskEventReceiverPlugin(IInputPlugin):
         return PluginResult(state_updates=state_updates)
 
     def _try_subscribe(self, ctx: PluginContext) -> None:
-        """尝试订阅事件总线。
-
-        通过 ctx.get_service 获取 EventBus 并订阅任务状态变更事件。
+        """通过 TaskService 注册状态变更回调。
 
         Args:
             ctx: 插件执行上下文
         """
-        event_bus = None
-
-        # 通过服务注册表获取 EventBus
-        try:
-            event_bus = ctx.get_service("event_bus")
-        except KeyError:
-            pass
-
-        if event_bus is not None:
-            try:
-                event_bus.subscribe_simple("task_state_changed", self._on_state_changed)
-                self._subscribed = True
-                self._event_bus = event_bus
-                logger.info("[TaskEventReceiver] Subscribed to task_state_changed events")
-            except Exception as exc:
-                logger.warning("[TaskEventReceiver] Failed to subscribe: %s", exc)
-
-        # 获取 task_service
         try:
             self._task_service = ctx.get_service("task_service")
         except KeyError:
             pass
 
-    async def _on_state_changed(self, event: Any) -> None:
-        """处理任务状态变更事件。
+        if self._task_service is not None:
+            try:
+                self._task_service.register_state_callback(self._on_state_changed)
+                self._subscribed = True
+                logger.info("[TaskEventReceiver] Registered state callback via TaskService")
+            except Exception as exc:
+                logger.warning("[TaskEventReceiver] Failed to register callback: %s", exc)
+
+    async def _on_state_changed(self, task_id: str, old_status: str, new_status: str) -> None:
+        """处理任务状态变更回调。
 
         终态（completed/failed）时将事件排入待处理队列，
         在下一轮管道迭代时注入到主 Agent 对话中。
@@ -137,24 +124,15 @@ class TaskEventReceiverPlugin(IInputPlugin):
         子任务通知由 TaskWorker._notify_suspended_pipelines 统一处理。
 
         Args:
-            event: ExecutionEvent 对象或原始 dict 数据
+            task_id: 任务 ID
+            old_status: 变更前状态
+            new_status: 变更后状态
         """
-        data = event.data if hasattr(event, "data") else event
-        new_status = data.get("new_status")
-
         if new_status not in ("completed", "failed"):
             return
 
-        task = data.get("task")
-        task_id = data.get("task_id", "")
-
-        # BUG-FIX-fix_20260521_notification_route:
-        # 问题根因: _emit_state_change 的事件数据中不包含 task 对象（只有 task_id），
-        #   导致 task=None，parent_task_id 和 parent_pipeline_id 的过滤全部失效，
-        #   所有子任务终态事件都通过此插件注入到 user_input，与 _notify_suspended_pipelines
-        #   的 send_pipeline_message 形成重复通知。
-        # 修复方案: 当 task 为 None 时，通过 task_service 查找任务对象获取过滤字段。
-        if task is None and self._task_service and task_id:
+        task = None
+        if self._task_service and task_id:
             try:
                 task = self._task_service.get_task(task_id)
             except Exception:
@@ -176,8 +154,6 @@ class TaskEventReceiverPlugin(IInputPlugin):
             task_title = "未知任务"
             task_error = ""
 
-        # 子任务通知由 TaskWorker._notify_suspended_pipelines 通过
-        # send_pipeline_message 统一注入，此处跳过以避免重复通知。
         if parent_id:
             logger.debug(
                 "[TaskEventReceiver] Skipping child task event: parent_id=%s (handled by TaskWorker)",
@@ -204,7 +180,11 @@ class TaskEventReceiverPlugin(IInputPlugin):
         logger.info("[TaskEventReceiver] Queued event: %s for task %s (%s)", evt["type"], task_id, task_title)
 
     def shutdown(self) -> None:
-        """关闭插件，取消订阅。"""
-        if self._subscribed:
-            logger.info("[TaskEventReceiver] Shutdown, events will be discarded")
+        """关闭插件，注销回调。"""
+        if self._subscribed and self._task_service:
+            try:
+                self._task_service.unregister_state_callback(self._on_state_changed)
+            except Exception:
+                pass
+            logger.info("[TaskEventReceiver] Shutdown, callback unregistered")
             self._pending_events.clear()

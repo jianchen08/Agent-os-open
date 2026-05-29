@@ -137,6 +137,10 @@ interface PipelineMessageState {
 
 /**
  * 消息排序比较函数：先按 sequence 升序，再按 timestamp 升序
+ *
+ * BUG-FIX-fix_20260529_sequence_race:
+ * 新增 id 第三级排序：当 sequence 和 timestamp 都相同时，按 id 排序确保结果稳定。
+ * 避免 sequence 相同时消息顺序不确定导致 UI 闪烁或错乱。
  */
 function compareMessages(a: Message, b: Message): number {
   const seqA = a.sequence ?? Number.MAX_SAFE_INTEGER
@@ -144,7 +148,14 @@ function compareMessages(a: Message, b: Message): number {
   if (seqA !== seqB) {
     return seqA - seqB
   }
-  return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  const timeDiff = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  if (timeDiff !== 0) {
+    return timeDiff
+  }
+  // BUG-FIX-fix_20260529_sequence_race: 第三级排序用 id，确保 sequence + timestamp 相同时排序稳定
+  const idA = a.id || ''
+  const idB = b.id || ''
+  return idA < idB ? -1 : idA > idB ? 1 : 0
 }
 
 /**
@@ -553,9 +564,18 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         pipelineId?.slice(0, 12), finalMessages.length, preservedCount)
 
       const topCursor = finalMessages.length > 0 ? (finalMessages[0].sequence ?? 0) : 0
-      const bottomCursor = finalMessages.length > 0
+      // BUG-FIX-fix_20260529_bottom_cursor_regression:
+      // 问题根因: initFromAPI 用 API 返回的最大 seq 覆盖 bottomCursor，
+      //          但如果有流式消息正在进行（sequence 是客户端分配的临时值，比 API 数据大），
+      //          bottomCursor 会被回退到一个更小的值，导致断线补漏重复拉取已有消息。
+      // 修复方案: 取 max(API返回的最大seq, 现有bottomCursor)，只增不减。
+      // 影响范围: initFromAPI 后的断线补漏正确性
+      // 修复日期: 2026-05-29
+      const apiBottomCursor = finalMessages.length > 0
         ? finalMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
         : 0
+      const existingBottomCursor = state.bottomCursorsByPipeline[pipelineId] ?? 0
+      const bottomCursor = Math.max(apiBottomCursor, existingBottomCursor)
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,

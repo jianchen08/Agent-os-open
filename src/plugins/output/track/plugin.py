@@ -58,7 +58,6 @@ class TrackPlugin(IOutputPlugin):
     Attributes:
         _config: 插件配置字典
         _start_time: 插件创建时间，用于计算总耗时
-        _record_count: 已持久化的记录计数，用于生成 sequence
     """
 
     error_policy = ErrorPolicy.SKIP
@@ -77,7 +76,6 @@ class TrackPlugin(IOutputPlugin):
         self._track_tokens = self._config.get("track_token_usage", True)
         self._track_time = self._config.get("track_execution_time", True)
         self._start_time = time.monotonic()
-        self._record_count: int = 0
         self._initialized_pipeline_ids: set[str] = set()
         self._last_saved_user_input: str = ""
 
@@ -95,6 +93,28 @@ class TrackPlugin(IOutputPlugin):
     def route_signals(self) -> list[str]:
         """本插件不产出路由信号。"""
         return []
+
+    # BUG-FIX-fix_20260529_msg_order: 从共享计数器读取当前 sequence（不递增）
+    def _get_current_sequence(self, pipeline_run_id: str) -> int:
+        """从 PipelineEntry 共享计数器获取当前值（不递增）。
+
+        TrackPlugin 仅读取 WS 事件推送时已递增过的 sequence 值，
+        用于持久化记录，不再独立自增计数器。
+
+        Args:
+            pipeline_run_id: 管道 ID
+
+        Returns:
+            当前共享计数器的值；Registry 不可用时返回 0
+        """
+        try:
+            from pipeline.registry import get_engine_registry
+            entry = get_engine_registry().get(pipeline_run_id)
+            if entry is not None:
+                return entry.msg_sequence
+        except Exception:
+            pass
+        return 0
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """收集追踪统计信息。
@@ -245,20 +265,23 @@ class TrackPlugin(IOutputPlugin):
         iteration = ctx.state.get(StateKeys.ITERATION, 0)
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
 
-        # BUG-FIX-20260427: CLI 重启后复用 session_pipeline_id 时，
-        # TrackPlugin 被重建（_record_count=0），但旧记录仍在 storage 中。
-        # 首次遇到该 pipeline_run_id 时，续接已有最大 sequence，避免新旧记录 sequence 重叠。
+        # BUG-FIX-20260427: CLI 重启后续接已有记录的 sequence 到共享计数器
         if pipeline_run_id not in self._initialized_pipeline_ids:
             self._initialized_pipeline_ids.add(pipeline_run_id)
             existing = storage.list_by_pipeline(pipeline_run_id)
             if existing:
                 max_seq = max(r.sequence for r in existing)
-                if max_seq >= self._record_count:
-                    self._record_count = max_seq
-                    logger.info(
-                        "TrackPlugin: resumed sequence from %d for pipeline %s",
-                        self._record_count, pipeline_run_id,
-                    )
+                try:
+                    from pipeline.registry import get_engine_registry
+                    entry = get_engine_registry().get(pipeline_run_id)
+                    if entry is not None:
+                        entry.init_sequence(max_seq)
+                        logger.info(
+                            "TrackPlugin: resumed shared sequence to %d for pipeline %s",
+                            max_seq, pipeline_run_id,
+                        )
+                except Exception:
+                    pass
 
         # BUG-FIX-20260418: 管道结束后的 Output 链仅用于保存摘要，
         # 跳过记录创建，避免与循环内已保存的记录重复
@@ -270,11 +293,10 @@ class TrackPlugin(IOutputPlugin):
         if user_input and user_input != self._last_saved_user_input:
             if iteration == 1:
                 self._last_saved_user_input = user_input
-                self._record_count += 1
                 user_record = ExecutionRecordData(
                     pipeline_run_id=pipeline_run_id,
                     type="user",
-                    sequence=self._record_count,
+                    sequence=self._get_current_sequence(pipeline_run_id),
                     iteration=0,
                     role="user",
                     content=str(user_input),
@@ -289,11 +311,10 @@ class TrackPlugin(IOutputPlugin):
                 )
                 if new_content:
                     self._last_saved_user_input = user_input
-                    self._record_count += 1
                     notification_record = ExecutionRecordData(
                         pipeline_run_id=pipeline_run_id,
                         type="user",
-                        sequence=self._record_count,
+                        sequence=self._get_current_sequence(pipeline_run_id),
                         iteration=iteration,
                         role="user",
                         content=new_content,
@@ -313,7 +334,6 @@ class TrackPlugin(IOutputPlugin):
         raw_tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         has_llm_output = raw_result or raw_tool_calls
         if has_llm_output and core_type != "tool_execute":
-            self._record_count += 1
             # 保存 tool_calls JSON，供 task_worker 恢复对话历史时使用
             _tool_calls_json = None
             if raw_tool_calls:
@@ -324,7 +344,7 @@ class TrackPlugin(IOutputPlugin):
             ai_record = ExecutionRecordData(
                 pipeline_run_id=pipeline_run_id,
                 type="ai",
-                sequence=self._record_count,
+                sequence=self._get_current_sequence(pipeline_run_id),
                 iteration=iteration,
                 role="assistant",
                 content=str(raw_result) if raw_result else "",
@@ -348,7 +368,6 @@ class TrackPlugin(IOutputPlugin):
                     if not isinstance(tr, dict):
                         continue
                     tool_name = tr.get("tool_name", "unknown")
-                    self._record_count += 1
 
                     tool_output = ""
                     if tr.get("success"):
@@ -386,7 +405,7 @@ class TrackPlugin(IOutputPlugin):
                         pipeline_run_id=pipeline_run_id,
                         type="tool",
                         name=tool_name,
-                        sequence=self._record_count,
+                        sequence=self._get_current_sequence(pipeline_run_id),
                         iteration=iteration,
                         role="tool",
                         content=tool_output,
@@ -477,7 +496,7 @@ class TrackPlugin(IOutputPlugin):
                 "total_tokens": llm_usage.get("total_tokens", 0),
             },
             total_seconds=round(elapsed_total, 3),
-            total_records=self._record_count,
+            total_records=self._get_current_sequence(pipeline_run_id),
             status=ctx.state.get(StateKeys.EXECUTION_STATUS, "completed"),
             final_output=str(ctx.state.get(StateKeys.RAW_RESULT, ""))[:500],
             error=ctx.state.get(StateKeys.RAW_ERROR),
@@ -485,6 +504,7 @@ class TrackPlugin(IOutputPlugin):
 
         try:
             storage.save_summary(summary)
-            logger.info("PipelineRunSummary saved: %s (%d records)", pipeline_run_id, self._record_count)
+            _total_recs = self._get_current_sequence(pipeline_run_id)
+            logger.info("PipelineRunSummary saved: %s (%d records)", pipeline_run_id, _total_recs)
         except Exception:
             logger.exception("PipelineRunSummary 持久化失败")

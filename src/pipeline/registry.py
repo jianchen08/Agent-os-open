@@ -62,6 +62,37 @@ class PipelineEntry:
     thread_id: str = ""
     tags: dict[str, str] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    # BUG-FIX-fix_20260529_msg_order: 共享消息 sequence 计数器
+    # 问题根因: stream_bridge、message_bus、track_plugin 各自维护独立计数器，
+    #   导致 WS 推送事件的 sequence 不连续/冲突，前端消息乱序。
+    # 修复方案: PipelineEntry 持有唯一的共享计数器，所有模块通过
+    #   next_sequence() 原子递增获取 sequence，确保全局单调递增。
+    msg_sequence: int = 0
+
+    def next_sequence(self) -> int:
+        """原子递增，返回下一个消息级别的 sequence。
+
+        所有 WS 事件推送（stream_start、stream_chunk、tool_start、
+        system_notification、pipeline_received、new_message 等）
+        都通过此方法获取 sequence，保证跨模块全局单调递增。
+
+        Returns:
+            递增后的 sequence 值
+        """
+        self.msg_sequence += 1
+        return self.msg_sequence
+
+    def init_sequence(self, max_seq: int) -> None:
+        """从已有记录续接 sequence（管道恢复/重启时使用）。
+
+        当管道重启或 TrackPlugin 初始化时，从持久化存储中读取
+        已有的最大 sequence，续接到共享计数器，避免 sequence 重叠。
+
+        Args:
+            max_seq: 已有记录中的最大 sequence 值
+        """
+        if max_seq > self.msg_sequence:
+            self.msg_sequence = max_seq
 
 
 MAX_TAGS_PER_PIPELINE = 8

@@ -10,7 +10,7 @@ import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 import { generateUUID } from '@/utils/uuid'
 
-import { terminatePipeline } from './handlers/utils'
+import { allocateNextSequence, terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
 /** 重连后补漏轮询间隔（5秒） */
@@ -77,7 +77,11 @@ export function handlePipelineReceived(data: any): void {
     return
   }
 
-  const placeholderSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1000
+  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
+  // 问题根因: 前端自算 sequence 与后端不一致
+  // 修复方案: 从 WS 事件中提取后端 sequence，优先使用；fallback 到自算
+  const backendSeq = data?.sequence || payload?.sequence
+  const placeholderSeq = allocateNextSequence(pipelineId, backendSeq)
 
   pipelineStore.addMessage(pipelineId, {
     id: `sys_${generateUUID()}`,
@@ -347,7 +351,11 @@ export function handleSystemNotification(eventData: any): void {
   const pipelineStore = usePipelineMessageStore.getState()
 
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-  const nextSeq = existingMsgs.reduce((max: number, m: any) => Math.max(max, m.sequence ?? 0), 0) + 1
+  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
+  // 问题根因: 前端自算 sequence 与后端不一致
+  // 修复方案: 从 WS 事件中提取后端 sequence，优先使用；fallback 到自算
+  const backendSeq = data?.sequence || eventData?.data?.sequence
+  const nextSeq = allocateNextSequence(pipelineId, backendSeq)
   const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
     if (m.role === 'system') {

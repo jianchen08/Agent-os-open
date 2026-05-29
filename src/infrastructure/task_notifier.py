@@ -38,27 +38,21 @@ class TaskNotifierMixin:
     由 TaskWorker 通过多继承组合使用。
     """
 
-    async def _on_task_state_changed(self, event: Any) -> None:
-        """处理任务状态变更事件，触发对应的 asyncio.Event。
+    async def _on_task_state_changed(self, task_id: str, old_status: str, new_status: str) -> None:
+        """处理任务状态变更回调，触发对应的 asyncio.Event。
 
-        当 TaskService 的 on_state_change 回调 emit 了
-        task_state_changed 事件时，检查是否为终态，
-        如果是则 set 对应的 asyncio.Event。
+        由 TaskService 通过直接回调触发（替代 EventBus 事件），
+        检查是否为终态，如果是则 set 对应的 asyncio.Event。
 
         Args:
-            event: 状态变更事件
+            task_id: 任务 ID
+            old_status: 变更前状态
+            new_status: 变更后状态
         """
-        data = event.data if hasattr(event, "data") else event
-        if not isinstance(data, dict):
-            return
-
-        task_id = data.get("task_id", "")
-        new_status = data.get("new_status", "")
-
         if new_status in _TERMINAL_STATES:
             logger.info(
-                "TaskWorker: 收到终态事件 | task=%s, status=%s, source=%s",
-                task_id, new_status, data.get("source", "unknown"),
+                "TaskWorker: 收到终态回调 | task=%s, status=%s",
+                task_id, new_status,
             )
             ctx = self._contexts.get(task_id)
             if ctx is not None:
@@ -68,10 +62,6 @@ class TaskNotifierMixin:
                     task_id, new_status,
                 )
 
-            # BUG-FIX-fix_20260510_notify_guard:
-            # 问题根因: _handle_terminal_lifecycle / _check_stale_containers 抛异常时
-            #   后续的 _notify_suspended_pipelines 不会被执行，导致上级管道永远收不到通知。
-            # 修复方案: 每个调用独立 try-except，确保通知逻辑不受其他钩子影响。
             try:
                 await self._handle_terminal_lifecycle(task_id, new_status)
             except Exception as exc:
@@ -89,20 +79,17 @@ class TaskNotifierMixin:
                 )
 
             try:
-                await self._notify_suspended_pipelines(task_id, new_status, data)
+                await self._notify_suspended_pipelines(task_id, new_status)
             except Exception as exc:
                 logger.error(
                     "TaskWorker: _notify_suspended_pipelines 失败: task=%s, status=%s, error=%s",
                     task_id, new_status, exc, exc_info=True,
                 )
 
-        # BUG-FIX-fix_20260526_status_push:
-        # 任务状态变更统一通过 ws_interaction_notifier 推送给用户。
-        # 不管是顶层任务还是子任务，状态变了就推。
         try:
             from ws_handler import ws_interaction_notifier as _notifier
-            _task_obj = data.get("task")
-            if not _task_obj and self._task_service:
+            _task_obj = None
+            if self._task_service:
                 try:
                     _task_obj = self._task_service.get_task(task_id)
                 except Exception:
@@ -115,15 +102,13 @@ class TaskNotifierMixin:
             _task_error = ""
             if _task_obj:
                 _task_error = getattr(_task_obj, "error", "") or ""
-            elif data.get("error"):
-                _task_error = data["error"]
 
             if _notifier and _user_id:
                 await _notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
                     "data": {
                         "task_id": task_id,
-                        "old_status": data.get("old_status", ""),
+                        "old_status": old_status,
                         "new_status": new_status,
                         "current_phase": _STATUS_TO_PHASE.get(new_status, "prepare"),
                         "error": _task_error,
@@ -132,7 +117,7 @@ class TaskNotifierMixin:
 
             logger.debug(
                 "TaskWorker: task_status_update 已广播 | task=%s, %s -> %s",
-                task_id, data.get("old_status", ""), new_status,
+                task_id, old_status, new_status,
             )
         except Exception as _ws_exc:
             logger.warning(
@@ -259,7 +244,7 @@ class TaskNotifierMixin:
                 task_id, e,
             )
 
-    async def _notify_suspended_pipelines(self, task_id: str, new_status: str, data: dict) -> None:
+    async def _notify_suspended_pipelines(self, task_id: str, new_status: str) -> None:
         """子任务到达终态时，通过统一消息总线通知父管道。"""
         from pipeline.message_bus import send_pipeline_message
 
@@ -288,14 +273,15 @@ class TaskNotifierMixin:
             logger.info("TaskWorker: 无父管道，跳过通知 | task=%s", task_id)
             return
 
-        # ── 2. 构造通知文本（含重试信息） ──
-        task_info = data.get("task", {})
-        if isinstance(task_info, dict):
-            title = task_info.get("title", task_id)
-            error = task_info.get("error", "")
+        if isinstance(task_obj, dict):
+            title = task_obj.get("title", task_id)
+            error = task_obj.get("error", "")
+        elif task_obj:
+            title = getattr(task_obj, "title", task_id)
+            error = getattr(task_obj, "error", "") or ""
         else:
-            title = getattr(task_info, "title", task_id)
-            error = getattr(task_info, "error", "") or ""
+            title = task_id
+            error = ""
 
         # BUG-FIX-fix_20260519_pipeline_retry:
         # 问题根因: 通知文本中不包含 retry_count / max_retries 信息，

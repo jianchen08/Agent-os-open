@@ -70,6 +70,33 @@ export function stopPipelineStreaming(pipelineId: string, threadId?: string): vo
 }
 
 /**
+ * BUG-FIX-fix_20260529_msg_order:
+ * 统一分配下一个 sequence 值，优先使用后端返回的真实 sequence。
+ *
+ * 问题根因: 前端自算 sequence (max+5000) 与后端真实 sequence 不一致，
+ *          导致消息排序错乱（后端已增加共享 Pipeline Sequence Allocator）。
+ * 修复方案: 后端 WS 事件现在携带真实 sequence，优先使用；fallback 到自算。
+ * 影响范围: 所有客户端分配 sequence 的场景
+ * 修复日期: 2026-05-29
+ *
+ * @param pipelineId - 管道 ID
+ * @param backendSequence - 可选的后端返回的真实 sequence 值
+ * @returns 后端 sequence（有效时）或 当前管道中最大 sequence + 5000
+ */
+export function allocateNextSequence(pipelineId: string, backendSequence?: number): number {
+  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
+  // 问题根因: 前端自算 sequence 与后端不一致
+  // 修复方案: 后端现在携带真实 sequence，优先使用
+  if (backendSequence != null && backendSequence > 0) {
+    return backendSequence
+  }
+  const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
+  return existingMsgs.reduce(
+    (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
+  ) + 5000
+}
+
+/**
  * 确保流式占位符消息存在
  *
  * 合并 startStreaming + setStreamingForTab + addMessage 三步操作，
@@ -78,18 +105,20 @@ export function stopPipelineStreaming(pipelineId: string, threadId?: string): vo
  * @param pipelineId - 管道 ID（唯一路由键）
  * @param messageId - 消息 ID
  * @param threadId - 可选的会话 ID，用于 streamingStore tab 配对
+ * @param backendSequence - 可选的后端返回的真实 sequence 值
  */
 export function ensureStreamingPlaceholder(
   pipelineId: string,
   messageId: string,
   threadId?: string,
+  backendSequence?: number,
 ): void {
   startPipelineStreaming(pipelineId, messageId, threadId)
 
-  const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
-  const placeholderSeq = existingMsgs.reduce(
-    (max: number, m: any) => Math.max(max, m.sequence ?? 0), 0,
-  ) + 1000
+  // BUG-FIX-fix_20260529_msg_order: 优先使用后端返回的真实 sequence
+  // 问题根因: 前端自算 sequence 与后端不一致
+  // 修复方案: 后端 WS 事件现在携带真实 sequence，透传给 allocateNextSequence
+  const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
 
   pipelineStore.getState().addMessage(pipelineId, {
     id: messageId,

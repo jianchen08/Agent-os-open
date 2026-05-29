@@ -22,6 +22,29 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+# BUG-FIX-fix_20260529_msg_order: 共享 sequence 辅助函数
+def _get_pipeline_sequence(pipeline_id: str) -> int:
+    """从 PipelineEntry 共享计数器获取下一个 sequence。
+
+    供 message_bus 中 system_notification 和 pipeline_received 事件使用，
+    确保这些事件也参与全局 sequence 递增，避免前端消息乱序。
+
+    Args:
+        pipeline_id: 管道 ID
+
+    Returns:
+        全局递增的 sequence 值；Registry 不可用时返回 0（降级处理）
+    """
+    try:
+        from pipeline.registry import get_engine_registry
+        entry = get_engine_registry().get(pipeline_id)
+        if entry is not None:
+            return entry.next_sequence()
+    except Exception:
+        pass
+    return 0
+
+
 @dataclass
 class InjectResult:
     """消息注入结果。"""
@@ -108,6 +131,9 @@ async def _send_received_event(
     if event_sink is None:
         return
     try:
+        # BUG-FIX-fix_20260529_msg_order: pipeline_received 事件附带共享 sequence
+        # 问题根因: pipeline_received 事件没有 sequence，前端无法确定其与其他事件的顺序。
+        # 修复方案: 从 PipelineEntry 共享计数器获取 sequence 并附带在事件中。
         await event_sink.send_event({
             "type": "pipeline_received",
             "data": {
@@ -116,6 +142,7 @@ async def _send_received_event(
                 "message_id": message_id,
                 "content": content,
                 "source": source,
+                "sequence": _get_pipeline_sequence(pipeline_id),
             },
         })
     except Exception:
@@ -191,6 +218,10 @@ async def send_pipeline_message(
         else:
             try:
                 _level = "info" if _msg_source in ("system", "trigger") else "warning"
+                # BUG-FIX-fix_20260529_msg_order: system_notification 事件附带共享 sequence
+                # 问题根因: system_notification 事件没有 sequence，前端无法确定其与
+                #   AI 回复消息的顺序，导致系统通知出现在 AI 回复之后。
+                # 修复方案: 从 PipelineEntry 共享计数器获取 sequence 并附带在事件中。
                 await _event_sink.send_event({
                     "type": "system_notification",
                     "data": {
@@ -198,6 +229,7 @@ async def send_pipeline_message(
                         "level": _level,
                         "notificationType": f"{_msg_source}_notification",
                         "pipeline_id": pipeline_id,
+                        "sequence": _get_pipeline_sequence(pipeline_id),
                     },
                 })
                 logger.info(
@@ -610,7 +642,12 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             if content:
-                await bridge.send_new_message(content, sequence=1)
+                # BUG-FIX-fix_20260529_msg_order: new_message 使用共享计数器获取 sequence
+                # 问题根因: send_new_message 硬编码 sequence=1，导致 new_message 事件
+                #   的 sequence 与其他事件不协调，前端双游标系统异常。
+                # 修复方案: 从 PipelineEntry 共享计数器获取 sequence。
+                _nm_seq = _get_pipeline_sequence(pipeline_id)
+                await bridge.send_new_message(content, sequence=_nm_seq)
         except asyncio.CancelledError:
             pass
         except Exception as exc:

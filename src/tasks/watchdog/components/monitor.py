@@ -896,16 +896,13 @@ class TaskMonitor:
         return time.time() - heartbeat
 
     def subscribe_events(self) -> None:
-        """
-        订阅事件（事件驱动改造）
+        """订阅事件（已废弃）。
 
-        只订阅 task.completed 和 task.cancelled 事件。
-        task.submitted 事件由 TaskOrchestrator 处理。
-        长期任务准备任务的检测通过定期扫描实现。
+        原订阅 task.completed / task.cancelled 事件从未被 emit 过，
+        属于死代码。任务状态变更通知已改为 TaskService 直接回调机制。
+        WatchdogMonitor 的任务触发由定时扫描（check_projects）驱动。
         """
-        # 不再订阅 task.submitted，由 TaskOrchestrator 处理
-        self._event_bus.subscribe_simple("task.completed", self._on_task_completed)
-        self._event_bus.subscribe_simple("task.cancelled", self._on_task_cancelled)
+        pass
 
     async def _on_task_completed(self, event: ExecutionEvent) -> None:
         """

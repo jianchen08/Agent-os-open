@@ -115,7 +115,11 @@ export function handleStreamStart(eventData: any) {
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
   )
 
-  ensureStreamingPlaceholder(pipelineId, messageId, threadId)
+  // BUG-FIX-fix_20260529_msg_order: 提取后端返回的真实 sequence
+  // 问题根因: 前端自算 sequence 与后端不一致
+  // 修复方案: 从 WS 事件中提取后端 sequence，传递给 ensureStreamingPlaceholder
+  const backendSeq = eventData.sequence ?? eventData.data?.sequence
+  ensureStreamingPlaceholder(pipelineId, messageId, threadId, backendSeq)
 
   if (currentActivePipelineId === pipelineId) return
 

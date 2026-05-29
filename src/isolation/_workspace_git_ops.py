@@ -250,23 +250,6 @@ class _GitOpsMixin:
 
         self._ensure_git_user(cwd)
 
-        gitignore = cwd / ".gitignore"
-        if not gitignore.exists():
-            try:
-                ws_root = self._get_workspace_root()
-                ws_root_name = ws_root.name + "/"
-                gitignore.write_text("\n".join([
-                    ws_root_name,
-                    "nul", "CON", "PRN", "AUX", "NUL",
-                    "COM1", "COM2", "COM3", "COM4", "COM5",
-                    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
-                    "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/",
-                    "*.bak", "*.egg-info/", ".mypy_cache/",
-                    "node_modules/", ".env", "*.log", ".tox/",
-                ]) + "\n", encoding="utf-8")
-            except OSError:
-                pass
-
         self._remove_index_lock(cwd)
 
         rc, _, stderr = self._run_git("add", "-A", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
