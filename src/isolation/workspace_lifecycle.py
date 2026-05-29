@@ -420,10 +420,19 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     t = loop.create_task(coro)
                     t.add_done_callback(self._log_persist_failure)
                 except RuntimeError:
-                    logger.warning(
-                        "[WorkspaceLifecycle] _persist_ws_meta: 无运行中的事件循环, task_id=%s",
-                        task_id,
-                    )
+                    # BUG-FIX-fix_20260529_on_task_start_blocks_eventloop:
+                    # on_task_start 现在通过 run_in_executor 在线程池中执行，
+                    # 线程池线程没有运行中的事件循环，get_running_loop() 会抛 RuntimeError。
+                    # 回退方案: 获取主线程的事件循环来调度 save_task。
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if not loop.is_closed():
+                            loop.call_soon_threadsafe(loop.create_task, coro)
+                    except Exception:
+                        logger.warning(
+                            "[WorkspaceLifecycle] _persist_ws_meta: 无法调度 save_task, task_id=%s",
+                            task_id,
+                        )
         except Exception as e:
             logger.warning("[WorkspaceLifecycle] _persist_ws_meta 失败: task_id=%s, error=%s",
                            task_id, e)

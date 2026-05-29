@@ -109,7 +109,6 @@ system_prompt: |
 
   1. 用 `trigger_setup` 注册（参数和限制见该工具描述）
   2. 触发后：简单任务直接执行，复杂任务派发给对应 Agent
-  3. 停止条件满足时：写执行总结报告到 `{{workspace}}/execution_summary_report.md`
 
   ## 资源准备流程（普通任务，可被任何资源创建相关流程都应触发）
   当需要为系统**生成新的 Agent 或工具**（即创建内部资源）时，触发此流程。**这是普通任务（non_container），不是容器任务。**

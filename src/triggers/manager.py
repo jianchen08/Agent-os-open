@@ -409,12 +409,6 @@ class TriggerManager:
             fire_info += f"/共 {trigger.max_fires} 次"
         fire_info += f")\n{trigger.message}"
 
-        if trigger.status == TriggerStatus.FIRED:
-            fire_info += (
-                "\n\n[系统提示] 触发器已达停止条件，"
-                "这是最后一次触发。请生成执行总结报告并调用 task_evaluate 完成任务。"
-            )
-
         # ★ 获取 output_sink 以确保前端能收到事件
         _output_sink = None
         try:

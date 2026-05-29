@@ -141,7 +141,16 @@ class TaskExecutorMixin:
             ws_meta: dict[str, Any] = {}
             if lifecycle:
                 try:
-                    ws_meta = lifecycle.on_task_start(task_id, workspace, task_data)
+                    # BUG-FIX-fix_20260529_on_task_start_blocks_eventloop:
+                    # 问题根因: on_task_start 是同步方法，内部执行多个 subprocess.run（git 命令），
+                    #           在 asyncio 事件循环中直接调用会冻结事件循环约 18 秒，
+                    #           导致 drain_loop 无法推送流式事件到前端、心跳保活无法发送。
+                    # 修复方案: 使用 loop.run_in_executor 将同步的 on_task_start 移到线程池执行，
+                    #           不阻塞事件循环，前端的 drain_loop、心跳保活等异步任务正常运行。
+                    loop = asyncio.get_running_loop()
+                    ws_meta = await loop.run_in_executor(
+                        None, lifecycle.on_task_start, task_id, workspace, task_data
+                    )
                     workspace = ws_meta.get("path", workspace)
                     logger.info(
                         "TaskWorker: lifecycle on_task_start, task_id=%s, mode=%s",
