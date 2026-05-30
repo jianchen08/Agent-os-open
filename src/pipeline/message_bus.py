@@ -288,6 +288,11 @@ async def send_pipeline_message(
 
     engine, state = _find_engine(pipeline_id)
 
+    logger.warning(
+        "[DRAIN-DEBUG] send_pipeline_message 核心路径: pipeline=%s engine=%s state=%s source=%s",
+        pipeline_id[:12], "found" if engine else "NONE", state, _msg_source,
+    )
+
     if engine is not None:
         try:
             logger.info("[MessageBus] inject ENTER | pipeline=%s state=%s", pipeline_id[:12], state)
@@ -322,20 +327,50 @@ async def send_pipeline_message(
             engine.inject_message(message, source=msg_source)
             method = "wake" if state == "suspended" else "notification"
 
+            logger.warning(
+                "[INJECT-COMPARE] pipeline=%s source=%s state=%s method=%s msgLen=%d",
+                pipeline_id[:12], msg_source, state, method, len(message),
+            )
+
             from pipeline.registry import get_engine_registry
             registry = get_engine_registry()
             bridge = registry.get_bridge(pipeline_id)
-            if state == "suspended":
+
+            # BUG-FIX-fix_20260530_drain_loop_race:
+            # 问题根因: 子任务完成通知唤醒引擎时，存在时序竞争：
+            #   1. inject_message() 设置 _wake_event
+            #   2. _suspend_and_wait 被唤醒，设置 _running = True
+            #   3. _find_engine() 检查时引擎已经是 running 状态
+            #   4. 进入 running 分支，不启动 drain_loop
+            #   5. LLM 生成的 chunks 没有消费者，前端显示空消息
+            # 修复方案: system 通知唤醒时，无论引擎处于什么状态，都确保
+            #   drain_loop 已启动。running 分支也检查 bridge 是否存在，
+            #   不存在则创建并启动 drain_loop。
+            # 影响范围: 所有 system/notification 来源的消息注入
+            # 修复日期: 2026-05-30
+            if state == "suspended" or msg_source == "system":
                 _sink = output_sink or _create_sink(pipeline_id)
+                logger.warning(
+                    "[DRAIN-TRACE] send_pipeline_message ensure_bridge 分支: pipeline=%s state=%s msg_source=%s has_output_sink=%s has_created_sink=%s",
+                    pipeline_id[:12], state, msg_source,
+                    output_sink is not None, _sink is not None,
+                )
                 if _sink is not None:
                     bridge = registry.ensure_bridge(
                         pipeline_id, _sink,
                         auto_start_drain=True,
                         engine=engine,
                     )
-                    logger.info("[MessageBus] ensure_bridge for suspended | pipeline=%s has_bridge=%s", pipeline_id[:12], bridge is not None)
+                    logger.warning(
+                        "[DRAIN-TRACE] ensure_bridge 返回: pipeline=%s bridge=%s",
+                        pipeline_id[:12], "yes" if bridge else "None",
+                    )
                 else:
-                    logger.warning("[MessageBus] FAILED to create sink for suspended | pipeline=%s", pipeline_id[:12])
+                    logger.warning(
+                        "[MessageBus] FAILED to create sink for %s | pipeline=%s",
+                        "suspended" if state == "suspended" else "system_wake",
+                        pipeline_id[:12],
+                    )
 
             if state == "running" and msg_source == "user":
                 await _auto_complete_interaction(pipeline_id)
@@ -668,16 +703,45 @@ def _start_bg_drain(
     供 ensure_bridge 复用 bridge 时取消旧 drain，以及
     stop_generation 场景即时停止流式输出。
     """
+    logger.warning(
+        "[DRAIN-DEBUG] _start_bg_drain 调用: pipeline=%s bridge_msg=%s engine_running=%s engine_suspended=%s has_engine_task=%s",
+        pipeline_id[:12], bridge.message_id[:12],
+        getattr(engine, 'is_running', False),
+        getattr(engine, 'is_suspended', False),
+        engine_task is not None,
+    )
+    _drain_id = f"{id(bridge):x}_{id(engine):x}"
+
     async def _engine_tracker() -> None:
+        _tracker_id = f"tracker_{_drain_id}"
         await asyncio.sleep(0.5)
+        _consecutive_inactive = 0
         while True:
-            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
-                break
+            _is_running = getattr(engine, 'is_running', False)
+            _is_suspended = getattr(engine, 'is_suspended', False)
+            if not _is_running and not _is_suspended:
+                _consecutive_inactive += 1
+                if _consecutive_inactive >= 3:
+                    logger.warning(
+                        "[DRAIN-TRACKER] _engine_tracker 退出: pipeline=%s tracker_id=%s inactive_count=%d is_running=%s is_suspended=%s",
+                        pipeline_id[:12], _tracker_id, _consecutive_inactive, _is_running, _is_suspended,
+                    )
+                    break
+                logger.info(
+                    "[DRAIN-TRACKER] _engine_tracker 引擎不活跃(连续%d次): pipeline=%s is_running=%s is_suspended=%s",
+                    _consecutive_inactive, pipeline_id[:12], _is_running, _is_suspended,
+                )
+            else:
+                _consecutive_inactive = 0
             await asyncio.sleep(0.3)
 
     tracker = engine_task or asyncio.create_task(_engine_tracker())
 
     async def _drain_and_cleanup() -> None:
+        logger.warning(
+            "[DRAIN-COMPARE] _drain_and_cleanup 启动: pipeline=%s bridge=%s queueLen=%d drain_id=%s",
+            pipeline_id[:12], bridge.message_id[:12], bridge._queue.qsize(), _drain_id,
+        )
         try:
             result = await bridge.drain_loop(
                 tracker,
@@ -685,16 +749,34 @@ def _start_bg_drain(
                 suspend_check=lambda: getattr(engine, "is_suspended", False),
             )
             content = result.get("accumulated_content", "")
-            if content:
-                _ai_seq = getattr(bridge, '_last_ai_sequence', 0)
-                if _ai_seq <= 0:
-                    _ai_seq = getattr(bridge, '_current_msg_seq', 0)
-                await bridge.send_new_message(content, sequence=_ai_seq)
+            thinking_parts = result.get("thinking_content_parts", [])
+            _ai_seq = getattr(bridge, '_last_ai_sequence', 0)
+            if _ai_seq <= 0:
+                _ai_seq = getattr(bridge, '_current_msg_seq', 0)
+            logger.warning(
+                "[DRAIN-COMPARE] pipeline=%s msg=%s contentLen=%d thinkingParts=%d seq=%d engine_running=%s engine_suspended=%s",
+                pipeline_id[:12], bridge.message_id[:12],
+                len(content), len(thinking_parts), _ai_seq,
+                getattr(engine, 'is_running', False),
+                getattr(engine, 'is_suspended', False),
+            )
+            await bridge.send_new_message(content, sequence=_ai_seq)
         except asyncio.CancelledError:
-            pass
+            logger.warning(
+                "[DRAIN-CANCEL] _drain_and_cleanup 被 CancelledError 终止: pipeline=%s drain_id=%s",
+                pipeline_id[:12], _drain_id,
+            )
         except Exception as exc:
             logger.error("[MessageBus] bg drain 异常: pipeline=%s error=%s", pipeline_id[:12], exc)
         finally:
+            logger.warning(
+                "[DRAIN-DEBUG] _drain_and_cleanup finally: pipeline=%s engine_running=%s engine_suspended=%s queueLen=%d drain_id=%s",
+                pipeline_id[:12],
+                getattr(engine, 'is_running', False),
+                getattr(engine, 'is_suspended', False),
+                bridge._queue.qsize(),
+                _drain_id,
+            )
             if engine_task is None:
                 tracker.cancel()
             if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):

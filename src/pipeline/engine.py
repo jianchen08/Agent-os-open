@@ -758,6 +758,49 @@ class PipelineEngine:
         self._watching_task_ids = []
         self._running = True
 
+        # BUG-FIX-fix_20260530_drain_loop_not_running:
+        # 问题根因: 引擎从挂起状态唤醒后，drain_loop 没有重新启动。
+        #   无论引擎通过什么方式被唤醒（send_pipeline_message、engine.wake()、
+        #   engine.resume() 等），LLM 生成的 chunks 都需要 drain_loop 消费。
+        #   之前的逻辑依赖 send_pipeline_message 中的 ensure_bridge 来启动
+        #   drain_loop，但存在时序竞争：_find_engine 可能返回 "running" 而非
+        #   "suspended"，导致不进入 ensure_bridge 分支；或者 send_pipeline_message
+        #   根本没被调用（如 engine.wake() 直接唤醒）。
+        # 修复方案: 引擎自己在唤醒后主动确保 drain_loop 运行，不依赖外部调用者。
+        #   检查 Registry 中的 drain_task 状态，如果不在运行则重新启动。
+        # 影响范围: 所有引擎挂起后唤醒的场景
+        # 修复日期: 2026-05-30
+        try:
+            _reg = get_engine_registry()
+            _entry = _reg.get(pipeline_id)
+            if _entry is not None:
+                _drain_alive = (
+                    _entry.drain_task is not None
+                    and not _entry.drain_task.done()
+                )
+                if not _drain_alive:
+                    _bridge = _entry.bridge
+                    if _bridge is not None:
+                        _bridge.reset_for_new_turn(
+                            message_id=f"msg_{_uuid.uuid4().hex[:12]}"
+                        )
+                        from pipeline.message_bus import _start_bg_drain
+                        _start_bg_drain(pipeline_id, _bridge, self)
+                        logger.warning(
+                            "[DRAIN-FIX] 引擎唤醒后重启 drain_loop: pipeline=%s bridge_msg=%s",
+                            pipeline_id[:12], _bridge.message_id[:12],
+                        )
+                    else:
+                        logger.warning(
+                            "[DRAIN-FIX] 引擎唤醒但无 bridge，无法启动 drain_loop: pipeline=%s",
+                            pipeline_id[:12],
+                        )
+        except Exception as _drain_exc:
+            logger.warning(
+                "[DRAIN-FIX] 引擎唤醒后确保 drain_loop 运行失败: pipeline=%s error=%s",
+                pipeline_id[:12], _drain_exc,
+            )
+
         if self._suspended_state is not None:
             # BUG-FIX-fix_20260525_idle_wake_empty_llm:
             # 安全网: 唤醒后检查 suspended_state 中是否有实质性内容。

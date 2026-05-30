@@ -409,9 +409,21 @@ class EngineRegistry:
         """
         entry = self._engines.get(pipeline_id)
         if not entry:
+            logger.warning(
+                "[DRAIN-DEBUG] ensure_bridge: entry NOT FOUND | pipeline=%s auto_start_drain=%s",
+                pipeline_id[:12], auto_start_drain,
+            )
             return None
 
         bridge = entry.bridge
+        logger.warning(
+            "[DRAIN-DEBUG] ensure_bridge: pipeline=%s has_bridge=%s drain_task=%s auto_start_drain=%s engine=%s",
+            pipeline_id[:12],
+            bridge is not None,
+            "done" if entry.drain_task and entry.drain_task.done() else ("running" if entry.drain_task else "None"),
+            auto_start_drain,
+            engine is not None,
+        )
         if bridge is None:
             from pipeline.stream_bridge import PipelineStreamBridge
             bridge = PipelineStreamBridge(

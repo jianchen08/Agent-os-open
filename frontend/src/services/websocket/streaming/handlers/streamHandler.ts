@@ -206,17 +206,13 @@ export function handleStreamEnd(eventData: any) {
         `[MSG-LIFE] ★ stream_end 处理: pipeline=%s msgId=%s %s totalMsgs=%d`,
         pipelineId.slice(0, 12), messageId.slice(0, 12), msgSummary, msgs.length,
       )
-      if (msg && msg.status === 'streaming') {
-        const hasContent = (msg.content && msg.content.trim()) || (msg.parts && msg.parts.length > 0)
-        if (!hasContent) {
-          console.warn(
-            `[MSG-LIFE] ★ stream_end 清理空占位: pipeline=%s msgId=%s → completed`,
-            pipelineId.slice(0, 12), messageId.slice(0, 12),
-          )
+      if (msg) {
+        if (msg.status === 'streaming') {
           pipelineStore.getState().updateMessage(pipelineId, messageId, {
             status: 'completed',
           } as any)
         }
+        pipelineStore.getState().finalizeMessage(pipelineId, messageId)
       }
     }
   } else {

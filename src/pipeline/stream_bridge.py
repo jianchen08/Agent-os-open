@@ -192,6 +192,10 @@ class PipelineStreamBridge:
         此方法直接传给 engine.run(on_chunk=bridge.on_chunk)，
         由 LLM Adapter 在流式生成时同步调用。
 
+        BUG-FIX-fix_20260530_drain_loop_not_running:
+        当发现 drain_task 不在运行时，自动启动新的 drain_loop。
+        这是最后一道防线，确保 LLM 生成的 chunks 一定有消费者。
+
         Args:
             chunk: 管道事件字典，包含 type 和 content 等字段
         """
@@ -204,6 +208,49 @@ class PipelineStreamBridge:
             )
         self._queue.put_nowait(chunk)
         self._chunk_event.set()
+        _ctype = chunk.get("type", "?") if isinstance(chunk, dict) else "?"
+        if _ctype not in ("iteration", "stream_keepalive"):
+            _drain_running = False
+            _drain_detail = ""
+            _entry_ref = None
+            try:
+                from pipeline.registry import get_engine_registry
+                _e = get_engine_registry().get(self.pipeline_id)
+                _entry_ref = _e
+                if _e is None:
+                    _drain_detail = "no_entry"
+                elif _e.drain_task is None:
+                    _drain_detail = "task_None"
+                elif _e.drain_task.done():
+                    _exc = _e.drain_task.exception()
+                    _drain_detail = f"task_done(exc={_exc})" if _exc else "task_done"
+                else:
+                    _drain_running = True
+                    _drain_detail = "alive"
+            except Exception as ex:
+                _drain_detail = f"err:{ex}"
+            logger.warning(
+                "[CHUNK-TRACE] on_chunk: pipeline=%s msg=%s type=%s queueLen=%d drain=%s(%s)",
+                self.pipeline_id[:12], self.message_id[:12],
+                _ctype, self._queue.qsize(), _drain_running, _drain_detail,
+            )
+            if not _drain_running and _entry_ref is not None and _entry_ref.engine is not None:
+                logger.warning(
+                    "[DRAIN-AUTOFIX] on_chunk 发现 drain_loop 不在运行，自动启动: pipeline=%s msg=%s detail=%s",
+                    self.pipeline_id[:12], self.message_id[:12], _drain_detail,
+                )
+                try:
+                    from pipeline.message_bus import _start_bg_drain
+                    _start_bg_drain(self.pipeline_id, self, _entry_ref.engine)
+                    logger.warning(
+                        "[DRAIN-AUTOFIX] drain_loop 已自动启动: pipeline=%s msg=%s",
+                        self.pipeline_id[:12], self.message_id[:12],
+                    )
+                except Exception as _af_err:
+                    logger.error(
+                        "[DRAIN-AUTOFIX] 自动启动 drain_loop 失败: pipeline=%s error=%s",
+                        self.pipeline_id[:12], _af_err,
+                    )
 
     def stop(self) -> None:
         """发送哨兵值 None 终止 drain_loop。"""
@@ -470,9 +517,11 @@ class PipelineStreamBridge:
             - accumulated_content: str 累积的完整文本
             - thinking_content_parts: list[str] thinking 内容片段
         """
-        logger.info(
-            "drain_loop 开始: msg=%s pipeline=%s sink=%s",
+        _drain_id = uuid.uuid4().hex[:8]
+        logger.warning(
+            "[DRAIN-COMPARE] drain_loop 开始: msg=%s pipeline=%s sink=%s queueLen=%d drain_id=%s",
             self.message_id[:16], self.pipeline_id[:12], type(self.output_sink).__name__,
+            self._queue.qsize(), _drain_id,
         )
 
         # BUG-FIX-fix_20260530_queue_event_loop:
@@ -505,9 +554,9 @@ class PipelineStreamBridge:
             # 1. 发送 stream_start
             try:
                 await self._send_stream_start()
-                logger.info(
-                    "drain_loop: stream_start 已发送: msg=%s pipeline=%s sink=%s",
-                    self.message_id[:12], self.pipeline_id[:12], self.output_sink.sink_id,
+                logger.warning(
+                    "[DRAIN-COMPARE] stream_start 已发送: msg=%s pipeline=%s queueLen=%d",
+                    self.message_id[:12], self.pipeline_id[:12], self._queue.qsize(),
                 )
             except Exception as _e:
                 logger.error("drain_loop: stream_start 失败: %s", _e, exc_info=True)
@@ -519,7 +568,17 @@ class PipelineStreamBridge:
 
             # 2. 主循环：消费队列
             _chunk_count = 0
+            _actually_suspended = False
+            _last_chunk = None
+            _loop_iter = 0
             while not engine_task.done() or not self._queue.empty():
+                _loop_iter += 1
+                if _loop_iter <= 5 or _loop_iter % 50 == 0:
+                    logger.warning(
+                        "[DRAIN-ITER] drain_loop while 迭代 #%d: pipeline=%s drain_id=%s engine_task_done=%s queueLen=%d",
+                        _loop_iter, self.pipeline_id[:12], _drain_id,
+                        engine_task.done(), self._queue.qsize(),
+                    )
                 # BUG-FIX-fix_20260524_ws_push_fail_frontend_stuck:
                 # 检测 sink 是否已死亡（连续推送失败超过阈值），
                 # 如果 dead 则提前发送 stream_end 保底事件并退出循环，
@@ -581,9 +640,11 @@ class PipelineStreamBridge:
                                 _actually_suspended = False
                                 break
                         if _actually_suspended:
-                            logger.info(
-                                "drain_loop: engine suspended (grace expired), ending stream: pipeline=%s chunks=%d",
-                                self.pipeline_id[:12], _chunk_count,
+                            logger.warning(
+                                "[DRAIN-COMPARE] drain_loop 挂起退出: pipeline=%s msg=%s chunks=%d accumulatedLen=%d thinkingParts=%d",
+                                self.pipeline_id[:12], self.message_id[:12],
+                                _chunk_count, len("".join(self._accumulated_content)),
+                                len(self._thinking_content_parts),
                             )
                             break
                         last_keepalive = asyncio.get_event_loop().time()
@@ -646,7 +707,10 @@ class PipelineStreamBridge:
                     _last_active = asyncio.get_event_loop().time()
 
                 if chunk is None:
+                    _last_chunk = None
                     break
+
+                _last_chunk = chunk
 
                 _chunk_type = chunk.get("type", "?")
 
@@ -700,16 +764,27 @@ class PipelineStreamBridge:
             # 3. 管道结束后关闭可能仍活跃的 thinking
             await self._close_thinking_if_active(None)
 
+            _exit_reason = "unknown"
+            if engine_task.done():
+                _exit_reason = f"engine_task_done(exc={engine_task.exception()})" if engine_task.exception() else "engine_task_done"
+            elif _actually_suspended:
+                _exit_reason = "suspended_grace_expired"
+            elif _last_chunk is None:
+                _exit_reason = "sentinel_None"
+            logger.warning(
+                "[DRAIN-DEBUG] drain_loop while 循环退出: reason=%s pipeline=%s drain_id=%s queueLen=%d engine_task_done=%s iterations=%d",
+                _exit_reason, self.pipeline_id[:12], _drain_id, self._queue.qsize(), engine_task.done(), _loop_iter,
+            )
+
             # 4. 发送 stream_end
             full_content = "".join(self._accumulated_content)
             _end_ok = await self._send_event(self._make_event("stream_end", {
                 "full_content": full_content,
             }))
-            logger.info(
-                "drain_loop: stream_end %s: msg=%s pipeline=%s content=%d chars chunks=%d/%d",
-                "OK" if _end_ok else "FAILED",
+            logger.warning(
+                "[DRAIN-COMPARE] drain_loop 正常退出: msg=%s pipeline=%s contentLen=%d chunks=%d thinkingParts=%d",
                 self.message_id[:12], self.pipeline_id[:12],
-                len(full_content), _chunk_count, len(self._accumulated_content),
+                len(full_content), _chunk_count, len(self._thinking_content_parts),
             )
 
             # 5. 刷出缓冲的系统通知（stream_end 后发送，确保前端已标记消息完成）
@@ -728,6 +803,23 @@ class PipelineStreamBridge:
                 "thinking_content_parts": list(self._thinking_content_parts),
                 "timed_out": False,
             }
+        except asyncio.CancelledError:
+            logger.warning(
+                "[DRAIN-CANCEL] drain_loop 被 CancelledError 终止: pipeline=%s drain_id=%s msg=%s stream_started=%s chunks=%d",
+                self.pipeline_id[:12], _drain_id, self.message_id[:12],
+                self._stream_started, _chunk_count if '_chunk_count' in dir() else -1,
+            )
+            if self._stream_started:
+                try:
+                    await self._close_thinking_if_active(None)
+                    _fallback_content = "".join(self._accumulated_content)
+                    await self._send_event(self._make_event("stream_end", {
+                        "full_content": _fallback_content,
+                        "cancelled": True,
+                    }))
+                except Exception:
+                    pass
+            raise
         except Exception as _dl_err:
             # BUG-FIX-fix_20260529_frontend_stuck:
             # drain_loop 异常退出时补发 stream_end，防止前端永远卡在"思考中"
@@ -757,32 +849,12 @@ class PipelineStreamBridge:
             self._stream_started = False
 
     async def send_new_message(self, content: str, sequence: int = 1) -> None:
-        """发送 new_message 最终消息，包含完整的助手消息数据。
-
-        BUG-FIX-20260515: 当 content 为空但流式累积有内容时，
-        使用 _accumulated_content 作为保底，防止发送空消息。
-
-        Args:
-            content: 消息内容
-            sequence: 消息序号，默认为 1
-        """
-        # BUG-FIX-20260515: 空内容保底逻辑
-        # 问题根因: _stream_engine_response 提取 actual_content 时，
-        #   引擎返回的 messages 中 assistant 内容可能为空，
-        #   导致 send_new_message('') 发送空消息，前端显示空白。
-        # 修复: 当传入内容为空但流式累积有内容时，用累积内容保底。
+        """发送 new_message 最终消息，包含完整的助手消息数据。"""
         effective_content = content
         if not effective_content:
             accumulated = "".join(self._accumulated_content)
             if accumulated:
                 effective_content = accumulated
-                logger.info(
-                    "send_new_message: 传入内容为空，使用累积内容保底 "
-                    "(%d chars): msg=%s pipeline=%s",
-                    len(effective_content),
-                    self.message_id[:12],
-                    self.pipeline_id[:12],
-                )
 
         await self._send_event(self._make_event("new_message", {
             "id": self.message_id,

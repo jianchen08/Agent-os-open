@@ -392,20 +392,7 @@ export const MessageItem = ({
               const _displayFallback = _rawFallback?.trim() ? _rawFallback : ''
 
               if (!isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
-                console.warn(
-                  `[MSG-LIFE] ★ 消息被隐藏(return null): id=%s role=%s status=%s partsLen=%d contentLen=%d`,
-                  (message.id as string).slice(0, 12), message.role, message.status,
-                  (message.parts as any[])?.length ?? 0, (message.content || '').length,
-                )
                 return null
-              }
-
-              if (isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
-                console.warn(
-                  `[MSG-LIFE] ★ streaming 空消息渲染: id=%s role=%s partsLen=%d contentLen=%d`,
-                  (message.id as string).slice(0, 12), message.role,
-                  (message.parts as any[])?.length ?? 0, (message.content || '').length,
-                )
               }
 
               return (

@@ -333,21 +333,29 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       const pipelineMessages = state.messagesByPipeline[pipelineId] || []
       const realMessageId = (message as Message & { message_id?: string }).message_id || message.id
 
-      logger.info(
-        '[addMessage] pipelineId=%s id=%s realId=%s role=%s seq=%d existing=%d activePipeline=%s',
-        pipelineId?.slice(0, 12), message.id?.slice(0, 12), realMessageId?.slice(0, 12),
-        message.role, message.sequence ?? -1, pipelineMessages.length,
-        state.activePipelineId?.slice(0, 12) || 'null',
-      )
-
-      // 去重匹配优先级：
-      // 1. 精确 ID 匹配（最高优先级）
       let existingIndex = pipelineMessages.findIndex((m) => m.id === realMessageId)
 
-      // 2. sequence + role 匹配（sequence 在管道内唯一递增，需限制同 role 避免误匹配）
       if (existingIndex < 0 && message.sequence != null) {
         existingIndex = pipelineMessages.findIndex((m) =>
           m.sequence === message.sequence && m.role === message.role,
+        )
+      }
+
+      if (existingIndex >= 0) {
+        const oldMsg = pipelineMessages[existingIndex]
+        console.warn(
+          `[MSG-LIFE] ★ addMessage 更新: id=%s role=%s oldStatus=%s newStatus=%s oldContentLen=%d newContentLen=%d oldPartsLen=%d newPartsLen=%d`,
+          realMessageId?.slice(0, 12), message.role,
+          oldMsg.status, (message as any).status,
+          (oldMsg.content || '').length, ((message as any).content || '').length,
+          (oldMsg.parts || []).length, ((message as any).parts || []).length,
+        )
+      } else {
+        console.warn(
+          `[MSG-LIFE] ★ addMessage 新增: id=%s role=%s status=%s contentLen=%d seq=%s totalMsgs=%d`,
+          realMessageId?.slice(0, 12), message.role, (message as any).status,
+          ((message as any).content || '').length, message.sequence ?? '-',
+          pipelineMessages.length,
         )
       }
 
@@ -418,13 +426,21 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       }
 
       if (messageIndex < 0) {
-        logger.warn(
-          '[updateMessage] message not found: pipelineId=%s messageId=%s role=%s seq=%d',
-          pipelineId?.slice(0, 12), messageId?.slice(0, 12),
-          partial.role, partial.sequence ?? -1,
-        )
+        if (partial.role !== 'user') {
+          console.warn(
+            `[MSG-LIFE] ★ updateMessage 未找到: id=%s pipeline=%s`,
+            messageId?.slice(0, 12), pipelineId?.slice(0, 12),
+          )
+        }
         return state
       }
+
+      const oldMsg = pipelineMessages[messageIndex]
+      console.warn(
+        `[MSG-LIFE] ★ updateMessage: id=%s oldStatus=%s → newStatus=%s oldContentLen=%d → newContentLen=%d`,
+        messageId?.slice(0, 12), oldMsg.status, (partial as any).status || oldMsg.status,
+        (oldMsg.content || '').length, ((partial as any).content ?? (oldMsg.content || '')).length,
+      )
 
       const updatedMessages = [...pipelineMessages]
       updatedMessages[messageIndex] = {
@@ -515,6 +531,21 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    * FIX: 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。
    */
   initFromAPI: (pipelineId: string, messages: Message[]) => {
+    console.warn(
+      `[DATA-SOURCE] ★ initFromAPI 数据: pipeline=%s msgs=%d`,
+      pipelineId?.slice(0, 12), messages.length,
+    )
+    for (const m of messages.slice(0, 5)) {
+      console.table({
+        id: (m.id as string).slice(0, 12),
+        role: m.role,
+        contentLen: (m.content || '').length,
+        contentPreview: (m.content || '').slice(0, 60),
+        partsLen: (m.parts || []).length,
+        partsTypes: (m.parts || []).map((p: any) => p.type).join(','),
+        seq: m.sequence,
+      })
+    }
     set((state) => {
       const sorted = [...messages].sort(compareMessages)
       const existing = state.messagesByPipeline[pipelineId]

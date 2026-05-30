@@ -80,8 +80,7 @@ function _logEvent(eventType: string, data: any): void {
   const mid = data.message_id || data.data?.message_id || data.data?.id || ''
   const content = data.data?.content || data.content || ''
   console.warn(
-    `[WS-EVENT] %-22s pid=%s mid=%s contentLen=%d`,
-    eventType, pid?.slice(0, 12) || '-', mid?.slice(0, 12) || '-', content.length,
+    `[WS-EVENT] ${eventType.padEnd(22)} pid=${(pid?.slice(0, 12) || '-').padEnd(12)} mid=${(mid?.slice(0, 12) || '-').padEnd(12)} contentLen=${content.length}`,
   )
 }
 

@@ -4,7 +4,16 @@
  * 核心原则：后端持久化数据是唯一真相源。
  * new_message 到达时，用后端数据完全替换流式阶段的临时数据，
  * 确保最终渲染结果与刷新后从 API 加载的数据完全一致。
- * 流式阶段只是多了 streaming 游标用于 UI 动画。
+ * 流式阶段只是多了 streaming index.ts:82 [WS-EVENT] tool_start             pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] tool_start             pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] tool_result            pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] tool_result            pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] iteration              pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] iteration              pid=382a0649b2fb mid=msg_8cfe28f4 contentLen=0
+index.ts:82 [WS-EVENT] tool_result            pid=845bd32ec44f mid=msg_63e4e5e4 contentLen=0
+index.ts:82 [WS-EVENT] tool_result            pid=845bd32ec44f mid=msg_63e4e5e4 contentLen=0
+index.ts:82 [WS-EVENT] tool_start             pid=845bd32ec44f mid=msg_63e4e5e4 contentLen=0
+index.ts:82 [WS-EVENT] tool_start             pid=845bd32ec44f mid=msg_63e4e5e4 contentL游标用于 UI 动画。
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
@@ -49,9 +58,15 @@ export function handleNewMessage(eventData: any) {
   const backendSeq = data?.sequence ?? eventData?.sequence
 
   console.warn(
-    `[MSG-LIFE] ★ new_message 到达: pipeline=%s msgId=%s contentLen=%d seq=%s`,
+    `[DATA-SOURCE] ★ new_message 完整数据: pipeline=%s msgId=%s contentLen=%d seq=%s`,
     pipelineId.slice(0, 12), messageId.slice(0, 12), (finalContent || '').length, backendSeq,
   )
+  console.table({
+    content: (finalContent || '').slice(0, 80),
+    thinking: data?.thinking?.content?.slice(0, 80) || '-',
+    toolCalls: JSON.stringify(data?.toolCalls || []).slice(0, 80),
+    fullData: JSON.stringify(data).slice(0, 200),
+  })
 
   pipelineStore.getState().updateMessage(pipelineId, messageId, {
     status: 'completed',
