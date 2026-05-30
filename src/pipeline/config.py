@@ -389,10 +389,8 @@ def build_plugin_registry(
         if core_type == "llm_call" and model_loader is not None:
             configured_model = plugin_config.get("model_name", "")
             if configured_model:
-                # 有 model_name → 从 llm.yaml 加载该模型的完整配置
                 llm_conf = model_loader.get_llm_core_config(configured_model)
                 if llm_conf:
-                    # pipeline config 覆盖模型配置（如 api_key 等）
                     merged_config = dict(llm_conf)
                     merged_config.update(plugin_config)
                     plugin_config = merged_config
@@ -401,7 +399,6 @@ def build_plugin_registry(
                         configured_model, llm_conf.get("context_window"),
                     )
             else:
-                # 无 model_name → 使用 defaults.chat
                 default_model_conf = model_loader.get_default_model("chat")
                 if default_model_conf:
                     llm_conf = model_loader.get_llm_core_config(
@@ -422,7 +419,6 @@ def build_plugin_registry(
                         "使用 core_plugins 中的原有配置"
                     )
 
-            # 校验：llm_call 必须有 context_window，否则上下文守卫无法工作
             if core_type == "llm_call" and not plugin_config.get("context_window"):
                 logger.error(
                     "[build_plugin_registry] llm_call 缺少 context_window！"

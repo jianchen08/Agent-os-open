@@ -165,35 +165,53 @@ class ExecutionResult(BaseModel, Generic[T]):
 
     # === 序列化方法 ===
 
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典（统一序列化）"""
+    def to_dict(self, slim: bool = False) -> dict[str, Any]:
+        """转换为字典（统一序列化）
+
+        Args:
+            slim: 精简模式，仅保留 LLM 需要的字段。
+                成功时省略 status/success/completed_at/started_at/duration_ms，
+                仅保留 output 和有意义的 metadata。
+                失败时保留 success/error/error_code。
+        """
+        if slim:
+            result: dict[str, Any] = {}
+            if not self.success:
+                result["success"] = False
+                if self.error:
+                    result["error"] = self.error
+                if self.error_code:
+                    result["error_code"] = self.error_code
+            else:
+                if self.output is not None:
+                    result["output"] = self._serialize_output()
+                if self.metadata:
+                    non_action = {k: v for k, v in self.metadata.items() if k != "action"}
+                    if non_action:
+                        result["metadata"] = non_action
+            return result
+
         # 处理 status：由于 use_enum_values=True，status 可能已经是字符串
         status_value = self.status.value if hasattr(self.status, 'value') else self.status
 
-        result: dict[str, Any] = {
+        result = {
             "status": status_value,
             "success": self.success,
         }
-
         if self.output is not None:
             result["output"] = self._serialize_output()
-
         if self.error:
             result["error"] = self.error
         if self.error_code:
             result["error_code"] = self.error_code
-
         if self.duration_ms is not None:
             result["duration_ms"] = self.duration_ms
-
         if self.started_at:
             result["started_at"] = self.started_at.isoformat()
         if self.completed_at:
             result["completed_at"] = self.completed_at.isoformat()
-
         if self.metadata:
             result["metadata"] = self.metadata
-
         return result
 
     def _serialize_output(self) -> Any:

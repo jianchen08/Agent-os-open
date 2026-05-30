@@ -394,6 +394,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
 
+        # BUG-FIX-fix_20260530_description_lost: 诊断日志
+        # 追踪 description 在 task_submit 入口的值
+        logger.info(
+            "[TaskSubmit] description 追踪 | has_inputs_desc=%s | has_goal_desc=%s | final_desc_len=%d | preview=%s",
+            bool(inputs.get("description")),
+            bool(goal.get("description")),
+            len(description),
+            description[:80] if description else "(empty)",
+        )
+
         # BUG-FIX-fix_20260420_eval_inject: LLM 可能传入非 dict 类型的
         # acceptance_criteria（如字符串、列表），导致跳过自动补全又跳过验证。
         # 统一规范化为 dict，非 dict 视为空以触发自动补全。
@@ -699,6 +709,14 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             "_inherit_workspace_resolved": _inherit_resolved,
             "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
         }
+
+        # BUG-FIX-fix_20260530_description_lost: 诊断日志
+        logger.info(
+            "[TaskSubmit] task_data description 追踪 | task_id=%s | desc_in_task_data=%s | desc_len=%d",
+            task.id,
+            bool(task_data.get("description")),
+            len(task_data.get("description", "")),
+        )
         if not task_worker.submit_task(task_data):
             await task_service.hard_delete(task.id)
             return create_failure_result(
@@ -750,6 +768,7 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         result_data = {
             "task_id": task.id,
             "title": task.title,
+            "description": description,
             "status": task.status.value,
             "target_type": target_type,
             "target_id": target_id,

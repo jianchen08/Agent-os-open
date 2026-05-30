@@ -173,7 +173,7 @@ class ToolCore(ICorePlugin):
     }
 
     @staticmethod
-    def _normalize_tool_result(result: Any) -> Any:
+    def _normalize_tool_result(result: Any, slim: bool = False) -> Any:
         """将工具返回值标准化为可 JSON 序列化的对象。
 
         如果工具返回 ToolExecutionResult 实例，提取其 output/data 字段；
@@ -181,6 +181,7 @@ class ToolCore(ICorePlugin):
 
         Args:
             result: 工具函数的原始返回值
+            slim: 精简模式，省略 LLM 不需要的冗余字段
 
         Returns:
             可 JSON 序列化的对象
@@ -189,7 +190,7 @@ class ToolCore(ICorePlugin):
             return None
 
         if hasattr(result, "to_dict"):
-            return result.to_dict()
+            return result.to_dict(slim=slim)
 
         if hasattr(result, "output"):
             return result.output
@@ -315,7 +316,7 @@ class ToolCore(ICorePlugin):
                     timeout=timeout,
                 )
 
-            normalized = self._normalize_tool_result(raw_result)
+            normalized = self._normalize_tool_result(raw_result, slim=True)
 
             duration_ms = (time.monotonic() - start) * 1000
             _result_preview = str(normalized)[:200] if normalized else ""

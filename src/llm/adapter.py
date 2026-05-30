@@ -941,8 +941,23 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         raise last_exc  # type: ignore[misc]
 
     async def _route_call(self, **kwargs: Any) -> Any:
-        """无 KeyPool 时的回退路径，直接走 Router。"""
-        return await self._router.acompletion(**kwargs)
+        """无 KeyPool 时的回退路径，动态获取最新 Router。
+
+        BUG-FIX-fix_20260530_config_not_take_effect:
+        问题根因: self._router 是初始化时缓存的旧 Router 实例，
+                  前端修改模型配置后 invalidate_all_llm_caches() 清除了模块级单例，
+                  但 KeyPoolAdapter 仍持有旧 Router 引用，导致配置不生效。
+        修复方案: 每次调用时通过 get_or_create_router() 动态获取最新 Router，
+                  若模块级单例已被重置则自动从 YAML 重建。
+        影响范围: KeyPoolAdapter 的所有 LLM 调用路径
+        修复日期: 2026-05-30
+        """
+        from llm.router_factory import get_or_create_router
+        from config.models import get_model_config_loader
+
+        model_loader = get_model_config_loader()
+        router = get_or_create_router(model_loader)
+        return await router.acompletion(**kwargs)
 
     async def _direct_call_with_slot(
         self, slot: Any, **kwargs: Any

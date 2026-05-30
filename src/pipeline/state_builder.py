@@ -106,8 +106,11 @@ def resolve_conversation_history(
         return []
 
     history: list[dict[str, Any]] = []
+    # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
+    _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
     for r in records:
-        msg: dict[str, Any] = {"role": r.role, "content": r.content}
+        role = r.role or _type_to_role.get(r.type, "user")
+        msg: dict[str, Any] = {"role": role, "content": r.content}
         if getattr(r, "name", None):
             msg["name"] = r.name
         if getattr(r, "tool_call_id", None):

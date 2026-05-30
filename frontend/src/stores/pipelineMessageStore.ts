@@ -83,6 +83,8 @@ interface PipelineMessageState {
   addMessage: (pipelineId: string, message: Message) => void
   /** 更新指定管道中的消息（部分更新） */
   updateMessage: (pipelineId: string, messageId: string, partial: Partial<Message>) => void
+  /** 移除指定管道中的消息 */
+  removeMessage: (pipelineId: string, messageId: string) => void
   /** 获取指定管道的消息列表 */
   getMessages: (pipelineId: string) => Message[]
 
@@ -156,27 +158,6 @@ function compareMessages(a: Message, b: Message): number {
   const idA = a.id || ''
   const idB = b.id || ''
   return idA < idB ? -1 : idA > idB ? 1 : 0
-}
-
-/** 二分查找插入位置，保持数组按 compareMessages 排序 */
-function bisectInsertIndex(arr: Message[], msg: Message): number {
-  let lo = 0
-  let hi = arr.length
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (compareMessages(arr[mid], msg) < 0) {
-      lo = mid + 1
-    } else {
-      hi = mid
-    }
-  }
-  return lo
-}
-
-/** 将 msg 插入已排序数组 arr 的正确位置，返回新数组 */
-function sortedInsert(arr: Message[], msg: Message): Message[] {
-  const idx = bisectInsertIndex(arr, msg)
-  return [...arr.slice(0, idx), msg, ...arr.slice(idx)]
 }
 
 /** 合并两个已排序数组，返回新的已排序数组 */
@@ -370,8 +351,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
           id: pipelineMessages[existingIndex].id,
         }
       } else {
-        updatedMessages = sortedInsert(pipelineMessages, { ...message, id: realMessageId })
-        // 非激活管道收到新消息时增加未读计数
+        updatedMessages = [...pipelineMessages, { ...message, id: realMessageId }]
         if (state.activePipelineId !== pipelineId) {
           unreadChanged = true
         }
@@ -463,6 +443,28 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    */
   getMessages: (pipelineId: string) => {
     return get().messagesByPipeline[pipelineId] || []
+  },
+
+  /**
+   * 移除指定管道中的消息
+   *
+   * BUG-FIX-fix_20260530_empty_bubble:
+   * 用于移除空的 assistant 占位消息（无内容无 parts），
+   * 避免在系统通知场景下出现空气泡。
+   */
+  removeMessage: (pipelineId: string, messageId: string) => {
+    set((state) => {
+      const pipelineMessages = state.messagesByPipeline[pipelineId] || []
+      const messageIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+      if (messageIndex < 0) return state
+      const updatedMessages = pipelineMessages.filter((_, i) => i !== messageIndex)
+      return {
+        messagesByPipeline: {
+          ...state.messagesByPipeline,
+          [pipelineId]: updatedMessages,
+        },
+      }
+    })
   },
 
   /**

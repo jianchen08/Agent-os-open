@@ -315,9 +315,10 @@ async def handle_no_route_signals(
         )
         state["user_input"] = ""
 
-    state.setdefault("messages", []).append(
-        {"role": "user", "content": state["user_input"]}
-    )
+    if state["user_input"]:
+        state.setdefault("messages", []).append(
+            {"role": "user", "content": state["user_input"]}
+        )
     await engine.suspend_and_wait(state)
     return "continue"
 

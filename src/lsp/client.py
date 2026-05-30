@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +44,22 @@ class LSPClient:
         self.request_id = 0
         self.initialized = False
 
+    @staticmethod
+    def is_server_installed(command: str) -> bool:
+        """检查 LSP 服务器命令是否在 PATH 中可用"""
+        return shutil.which(command) is not None
+
     async def start(self) -> bool:
         """启动 LSP 服务器"""
         try:
+            # 检查服务器是否已安装
+            if not self.is_server_installed(self.server_info.command):
+                logger.error(
+                    f"LSP 服务器未安装: {self.server_info.name} "
+                    f"(命令 '{self.server_info.command}' 不在 PATH 中)"
+                )
+                return False
+
             # 启动 LSP 服务器进程
             self.process = await asyncio.create_subprocess_exec(
                 self.server_info.command,
@@ -64,6 +78,10 @@ class LSPClient:
 
         except Exception as e:
             logger.error(f"启动 LSP 服务器失败: {e}")
+            if self.process:
+                self.process.terminate()
+                await self.process.wait()
+                self.process = None
             return False
 
     async def stop(self):

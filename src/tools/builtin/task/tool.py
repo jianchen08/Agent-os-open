@@ -481,6 +481,7 @@ class TaskTool(BuiltinTool):
         result = {
             "task_id": task.id,
             "title": task.title,
+            "description": task.description or "",
             "status": task.status.value,
             "parent_task_id": task.parent_task_id,
             "priority": task.priority.value if hasattr(task.priority, "value") else task.priority,

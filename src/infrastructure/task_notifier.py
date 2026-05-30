@@ -501,6 +501,7 @@ class TaskNotifierMixin:
                     "pipelineId": pipeline_id,
                     "agentName": target_id or "子Agent",
                     "title": _title_ws,
+                    "description": task_data.get("description", ""),
                     "parentId": _parent_task_id_ws or "",
                     "status": "running",
                     "agentLevel": _agent_level_ws,

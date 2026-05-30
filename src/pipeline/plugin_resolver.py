@@ -205,17 +205,29 @@ def apply_agent_model_override(
     if not agent_config or not hasattr(agent_config, "model_name"):
         return
 
-    model_id = agent_config.model_name
+    # BUG-FIX-fix_20260530_config_not_take_effect:
+    # 清除所有 ModelConfigLoader 的 YAML 缓存，确保直接编辑文件也能生效。
+    # services 中可能有 model_loader，同时 get_model_config_loader() 单例
+    # 也有自己的 _llm_data 缓存，两者都需要清除。
+    _ml = services.get("model_loader") if services else None
+    if _ml and hasattr(_ml, "_llm_data"):
+        _ml._llm_data = None
+    try:
+        from config.models import get_model_config_loader
+        _global_loader = get_model_config_loader()
+        _global_loader._llm_data = None
+    except Exception:
+        pass
 
-    # model_tier 解析：当 model_name 未指定时，从 tiers 映射
-    if not model_id and hasattr(agent_config, "model_tier") and agent_config.model_tier:
+    # BUG-FIX-fix_20260530_config_not_take_effect:
+    # agent_config.model_name 是初始化时从 tier 解析的旧值，
+    # 运行中改了 YAML 后不会更新。所以有 model_tier 时必须重新解析。
+    model_id = None
+    if hasattr(agent_config, "model_tier") and agent_config.model_tier:
         model_id = resolve_tier(agent_config.model_tier, services)
-        if model_id:
-            logger.info(
-                "[apply_agent_model_override] model_tier=%s -> model_name=%s",
-                agent_config.model_tier,
-                model_id,
-            )
+
+    if not model_id:
+        model_id = agent_config.model_name
 
     if not model_id:
         return

@@ -113,6 +113,7 @@ class PipelineEngine:
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
         self._last_state: dict[str, Any] | None = None
+        self._agent_config: Any | None = None
         self._running: bool = False
         self._preserved_bridge: Any = None
         self._preserved_drain_task: Any = None
@@ -215,6 +216,8 @@ class PipelineEngine:
 
         if agent_config and hasattr(agent_config, "max_iterations") and agent_config.max_iterations:
             self.max_iterations = agent_config.max_iterations
+
+        self._agent_config = agent_config
 
         from pipeline.plugin_resolver import apply_agent_plugin_configs, apply_agent_model_override
         apply_agent_plugin_configs(self.plugin_registry, agent_config)
@@ -327,6 +330,15 @@ class PipelineEngine:
 
                 # 显示当前使用的模型信息
                 self._log_model_info()
+
+                # BUG-FIX-fix_20260530_config_not_take_effect:
+                # 每次迭代刷新模型配置，确保运行中修改 YAML 后新配置生效。
+                if self._agent_config is not None:
+                    from pipeline.plugin_resolver import apply_agent_model_override, _tier_cache
+                    _tier_cache.clear()
+                    apply_agent_model_override(
+                        self.plugin_registry, self._agent_config, self._services
+                    )
 
                 # 发射 iteration 事件
                 self._emit_iteration_event(state, iteration)  # type: ignore[arg-type]
@@ -617,6 +629,9 @@ class PipelineEngine:
         # 清理 EngineRegistry 注册
         _cp_pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
         if _cp_pipeline_id:
+            _cl_entry = get_engine_registry().get(_cp_pipeline_id)
+            if _cl_entry:
+                _cl_entry.engine_task = None
             get_engine_registry().unregister(_cp_pipeline_id)
             # 释放 chunk_service 内存缓存
             try:
@@ -785,7 +800,7 @@ class PipelineEngine:
                             message_id=f"msg_{_uuid.uuid4().hex[:12]}"
                         )
                         from pipeline.message_bus import _start_bg_drain
-                        _start_bg_drain(pipeline_id, _bridge, self)
+                        _start_bg_drain(pipeline_id, _bridge, self, engine_task=_entry.engine_task)
                         logger.warning(
                             "[DRAIN-FIX] 引擎唤醒后重启 drain_loop: pipeline=%s bridge_msg=%s",
                             pipeline_id[:12], _bridge.message_id[:12],

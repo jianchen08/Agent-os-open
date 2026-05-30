@@ -1,4 +1,4 @@
-﻿"""
+"""
 LSP 工具
 
 暴露接口：
@@ -45,6 +45,23 @@ class LSPTools:
             return path, None
         except (ValueError, OSError) as e:
             return None, f"路径解析失败: {str(e)}"
+
+    @staticmethod
+    def _check_lsp_unavailable(gateway: Any, file_path: str) -> ToolResult | None:
+        """检查 LSP 服务器是否不可用，若不可用返回失败结果，否则返回 None"""
+        language = gateway._detect_language(file_path)
+        if not gateway.get_client(language):
+            from lsp.gateway import LSP_SERVERS
+
+            server_config = LSP_SERVERS.get(language)
+            server_name = server_config.name if server_config else language
+            hint = gateway.get_install_hint(language)
+            return create_failure_result(
+                f"LSP 服务器未启动: {language} 语言的服务器 ({server_name}) 不可用。\n"
+                f"安装提示: {hint}",
+                error_code="LSP_SERVER_NOT_AVAILABLE",
+            )
+        return None
 
     @staticmethod
     def get_tools() -> list[Tool]:
@@ -97,7 +114,7 @@ class LSPTools:
             injected_params=["workspace"],
         )
 
-    async def _lsp_definition(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _lsp_definition(self, inputs: dict[str, Any]) -> ToolResult:
         """执行跳转到定义"""
         workspace = inputs.get("workspace")
         if workspace:
@@ -127,6 +144,9 @@ class LSPTools:
             locations = await gateway.go_to_definition(str(validated_path), position)
 
             if not locations:
+                unavailable = self._check_lsp_unavailable(gateway, str(validated_path))
+                if unavailable:
+                    return unavailable
                 return create_success_result(
                     data="未找到定义",
                     metadata={
@@ -229,6 +249,9 @@ class LSPTools:
             references = await gateway.find_references(str(validated_path), position)
 
             if not references:
+                unavailable = self._check_lsp_unavailable(gateway, str(validated_path))
+                if unavailable:
+                    return unavailable
                 return create_success_result(
                     data="未找到引用",
                     metadata={"count": 0},
@@ -313,6 +336,9 @@ class LSPTools:
             diagnostics = await gateway.get_diagnostics(str(validated_path))
 
             if not diagnostics:
+                unavailable = self._check_lsp_unavailable(gateway, str(validated_path))
+                if unavailable:
+                    return unavailable
                 return create_success_result(
                     data="没有诊断信息",
                     metadata={"count": 0},

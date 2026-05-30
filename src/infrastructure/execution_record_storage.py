@@ -658,7 +658,11 @@ class ExecutionRecordStorage:
     @staticmethod
     def _record_to_message(record: ExecutionRecordData) -> dict[str, Any]:
         """将 ExecutionRecordData 转换为 message dict 格式。"""
-        role = record.role or "user"
+        # BUG-FIX-fix_20260530_role_mapping: 优先基于 record.type 映射 role，
+        # 避免 role 为空字符串时回退为 "user" 导致 type=ai+tool_calls 的消息
+        # 被错误标记为 role=user（与 routes_threads.py 的正确实现保持一致）
+        _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
+        role = record.role or _type_to_role.get(record.type, "user")
         msg: dict[str, Any] = {
             "role": role,
             "content": record.content or "",

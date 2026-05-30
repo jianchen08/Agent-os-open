@@ -4,6 +4,8 @@
 1. Service 层 create_choice_request / create_conversation_request
    正确传递 file_paths 参数（路径列表）
 2. Tool 层通知模式传入 file_paths 时返回 INVALID_PARAMS 错误
+3. WebSocket 通知器正确传递 file_paths 和 pipeline_id
+4. Tool 层 choice 模式正确传递 file_paths 到 service
 """
 
 from __future__ import annotations

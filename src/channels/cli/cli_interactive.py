@@ -320,9 +320,12 @@ class CLIInteractiveMixin:
                         session.active_pipeline_id
                     )
                     if prev_records:
+                        # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
+                        _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
                         for r in prev_records:
+                            role = r.role or _type_to_role.get(r.type, "user")
                             msg: dict[str, Any] = {
-                                "role": r.role, "content": r.content,
+                                "role": role, "content": r.content,
                             }
                             if r.name:
                                 msg["name"] = r.name

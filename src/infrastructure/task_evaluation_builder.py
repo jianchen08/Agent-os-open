@@ -187,6 +187,12 @@ class TaskEvaluationBuilderMixin:
         user_input = task_data.get("user_input", "")
         description = task_data.get("description", "")
 
+        # BUG-FIX-fix_20260530_description_lost: 诊断日志
+        logger.info(
+            "[BuildFullInput] task=%s | user_input=%.50s | desc_len=%d | has_desc=%s",
+            task_id, user_input[:50], len(description), bool(description),
+        )
+
         # BUG-FIX-fix_20260421_goal_context_injection:
         # 问题根因: task_submit 将 goal.context 存入 metadata["goal_context"]，
         #          但 TaskWorker 构建 full_input 时未提取该字段，导致包含原始用户需求的

@@ -501,15 +501,19 @@ class EvaluationEngine:
             try:
                 import asyncio
 
-                # human_interaction 工具需要 pipeline_id
-                if (evaluator_id == "human_interaction"
-                        and "pipeline_id" not in params):
-                    # FIX: 使用当前运行的 pipeline_id（从上下文变量获取），
-                    # 而不是 task_id。task_id 是评估任务的ID，不是前端会话的 pipeline_id。
-                    # 这确保 human_interaction 的通知能正确发送到前端。
-                    from pipeline.engine_state import _current_pipeline_id
-                    current_pid = _current_pipeline_id.get(None)
-                    params["pipeline_id"] = current_pid or task_id or "eval_session"
+                # BUG-FIX-fix_20260530_eval_human_interaction_decouple:
+                # 问题根因: 评估器调用 human_interaction 时借用子管道的 pipeline_id，
+                #           导致用户确认后 app_factory 误唤醒子管道引擎（子管道并未挂起），
+                #           而评估器自身的 Event.set() 路径也被干扰。
+                #           评估器的 human_interaction 不应与任何真实管道耦合，
+                #           其等待/唤醒完全通过 asyncio.Event 机制实现。
+                # 修复方案: 使用虚拟 session_id (__eval__{task_id}) 标识评估请求，
+                #           app_factory 根据 __eval__ 前缀跳过 engine.wake()，
+                #           仅依赖 Event.set() 完成评估流程。
+                # 影响范围: 所有 HUMAN 类型评估指标（human_review 等）
+                # 修复日期: 2026-05-30
+                if evaluator_id == "human_interaction":
+                    params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
 
                 logger.info(
                     "[EvalEngine] _evaluate_tool | metric=%s | evaluator=%s | pipeline_id=%s | params_keys=%s",

@@ -365,16 +365,15 @@ def create_combined_app() -> FastAPI:
                             human_svc = get_human_interaction_service()
                             if human_svc:
                                 await human_svc.respond(request_id, resp_data)
-                                # FIX: 唤醒可能处于挂起状态的 pipeline 引擎
-                                # 问题根因: 用户点击 approve 后，human_interaction 工具的 wait_for_choice
-                                # 被唤醒返回，但如果 pipeline 引擎正处于 _suspend_and_wait 挂起状态，
-                                # 它不会自动唤醒，导致整个流程卡住。
-                                # 修复方案: 从 request 记录中获取 session_id(pipeline_id)，
-                                # 查找并唤醒对应的引擎。
                                 request_record = await human_svc.get_request(request_id)
                                 if request_record:
                                     pipeline_id = request_record.get("session_id", "")
-                                    if pipeline_id:
+                                    # BUG-FIX-fix_20260530_eval_human_interaction_decouple:
+                                    # 评估器使用虚拟 session_id (__eval__{task_id})，
+                                    # 其等待/唤醒完全通过 asyncio.Event 机制实现，
+                                    # 不需要也不应该唤醒任何管道引擎。
+                                    # 仅当 session_id 对应真实管道时才执行 engine.wake()。
+                                    if pipeline_id and not pipeline_id.startswith("__eval__"):
                                         from pipeline.message_bus import _find_engine
                                         engine, _ = _find_engine(pipeline_id)
                                         if engine and hasattr(engine, "wake"):
@@ -384,6 +383,12 @@ def create_combined_app() -> FastAPI:
                                                 "request_id=%s | pipeline_id=%s",
                                                 request_id, pipeline_id,
                                             )
+                                    elif pipeline_id.startswith("__eval__"):
+                                        logger.info(
+                                            "[GlobalWS] 评估交互响应已处理（纯Event，无管道唤醒） | "
+                                            "request_id=%s | session_id=%s",
+                                            request_id, pipeline_id,
+                                        )
                         except Exception as exc:
                             logger.warning("[GlobalWS] interaction_response 处理失败: %s", exc)
                     continue

@@ -5,9 +5,7 @@
 """
 
 from plugins.output.approval_view_route.plugin import ApprovalViewRoutePlugin
-from plugins.output.output_repetition_guard.plugin import OutputRepetitionGuard
 
 __all__ = [
     "ApprovalViewRoutePlugin",
-    "OutputRepetitionGuard",
 ]

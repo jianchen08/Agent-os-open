@@ -113,20 +113,19 @@ export function ensureStreamingPlaceholder(
       && msg.status === 'streaming'
       && msg.id !== messageId
     ) {
-      console.warn(
-        `[MSG-LIFE] ★ 清理旧 streaming 占位: pipeline=%s oldMsgId=%s → completed (newMsgId=%s)`,
-        pipelineId.slice(0, 12), (msg.id as string).slice(0, 12), messageId.slice(0, 12),
-      )
-      store.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+      // BUG-FIX-fix_20260530_empty_bubble:
+      // 旧 streaming 占位消息如果没有实际内容，直接移除避免空气泡；
+      // 如果有内容（如部分流式输出），标记为 completed 保留。
+      const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
+      if (hasContent) {
+        store.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+      } else {
+        store.removeMessage(pipelineId, msg.id)
+      }
     }
   }
 
   const placeholderSeq = backendSequence ?? 0
-
-  console.warn(
-    `[MSG-LIFE] ★ 创建 streaming 占位: pipeline=%s msgId=%s seq=%s role=assistant`,
-    pipelineId.slice(0, 12), messageId.slice(0, 12), placeholderSeq,
-  )
 
   store.addMessage(pipelineId, {
     id: messageId,

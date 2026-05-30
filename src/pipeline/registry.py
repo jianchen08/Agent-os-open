@@ -59,6 +59,7 @@ class PipelineEntry:
     engine: Any  # PipelineEngine（用 Any 避免循环导入）
     bridge: Any | None = None  # PipelineStreamBridge | None
     drain_task: Any | None = None  # asyncio.Task | None — 后台 drain_loop 任务引用
+    engine_task: Any | None = None  # asyncio.Task | None — 引擎主循环 Task
     thread_id: str = ""
     tags: dict[str, str] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
@@ -155,6 +156,7 @@ class EngineRegistry:
         if existing is not None:
             entry.bridge = existing.bridge
             entry.drain_task = existing.drain_task
+            entry.engine_task = existing.engine_task
         self._engines[pipeline_id] = entry
         logger.info(
             "[EngineRegistry] 注册引擎: pipeline=%s thread=%s is_suspended=%s total=%d preserved_bridge=%s",
@@ -409,20 +411,18 @@ class EngineRegistry:
         """
         entry = self._engines.get(pipeline_id)
         if not entry:
-            logger.warning(
-                "[DRAIN-DEBUG] ensure_bridge: entry NOT FOUND | pipeline=%s auto_start_drain=%s",
-                pipeline_id[:12], auto_start_drain,
+            logger.debug(
+                "[DRAIN] ensure_bridge: entry NOT FOUND | pipeline=%s",
+                pipeline_id[:12],
             )
             return None
 
         bridge = entry.bridge
-        logger.warning(
-            "[DRAIN-DEBUG] ensure_bridge: pipeline=%s has_bridge=%s drain_task=%s auto_start_drain=%s engine=%s",
+        logger.debug(
+            "[DRAIN] ensure_bridge: pipeline=%s has_bridge=%s auto_start_drain=%s",
             pipeline_id[:12],
             bridge is not None,
-            "done" if entry.drain_task and entry.drain_task.done() else ("running" if entry.drain_task else "None"),
             auto_start_drain,
-            engine is not None,
         )
         if bridge is None:
             from pipeline.stream_bridge import PipelineStreamBridge
@@ -449,7 +449,8 @@ class EngineRegistry:
 
         if auto_start_drain and engine is not None:
             from pipeline.message_bus import _start_bg_drain
-            _start_bg_drain(pipeline_id, bridge, engine, engine_task)
+            _effective_task = engine_task or (entry.engine_task if entry else None)
+            _start_bg_drain(pipeline_id, bridge, engine, _effective_task)
 
         return bridge
 

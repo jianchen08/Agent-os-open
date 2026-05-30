@@ -112,9 +112,19 @@ class TaskExecutorMixin:
             workspace = ctx.workspace
             ws_meta = ctx.ws_meta
             full_input = ctx.full_input
+            # BUG-FIX-fix_20260530_description_lost: 诊断日志
+            logger.info(
+                "TaskWorker: full_input 来自 _prepared_context | task=%s | input_len=%d",
+                task_id, len(full_input),
+            )
         else:
             user_input = task_data.get("user_input", "")
             description = task_data.get("description", "")
+            # BUG-FIX-fix_20260530_description_lost: 诊断日志
+            logger.info(
+                "TaskWorker: 构建 full_input | task=%s | user_input_len=%d | desc_len=%d | has_desc=%s",
+                task_id, len(user_input), len(description), bool(description),
+            )
             acceptance_criteria = task_data.get("acceptance_criteria", {})
             explicit_workspace = task_data.get("workspace") or None
             workspace = self._resolve_task_workspace(task_id, explicit_workspace)
@@ -211,8 +221,6 @@ class TaskExecutorMixin:
 
             await self._bind_pipeline_run(task_id, pipeline_id, task_service)
             await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
-
-            ctx.active = True
 
             ctx.idle_timer_registered = await self._register_idle_timer(
                 task_id, timer_manager, task_service, ctx,
@@ -552,8 +560,12 @@ class TaskExecutorMixin:
             if not prev_records:
                 return None
             conversation_history: list[dict[str, Any]] = []
+            # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role，
+            # 避免 role 为空字符串时 assistant 消息被错误标记为 user
+            _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
             for r in prev_records:
-                msg: dict[str, Any] = {"role": r.role, "content": r.content}
+                role = r.role or _type_to_role.get(r.type, "user")
+                msg: dict[str, Any] = {"role": role, "content": r.content}
                 if r.name:
                     msg["name"] = r.name
                 if r.tool_call_id:

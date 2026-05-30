@@ -191,15 +191,8 @@ class ResourceSearchTool:
                     )
                     if results:
                         return create_success_result(
-                            data={
-                                "query": query,
-                                **results,
-                                "total": sum(
-                                    v for k, v in results.items() if k.endswith("_c")
-                                ),
-                                "mode": "vector",
-                            },
-                            metadata={"action": "resource_search"},
+                            data=self._slim_results(results, detailed=detailed),
+                            metadata={},
                         )
             except Exception as e:
                 logger.warning("Vector search failed, fallback to traversal: %s", e)
@@ -309,12 +302,8 @@ class ResourceSearchTool:
                 results["skill_c"] = len(skill_names)
 
         return create_success_result(
-            data={
-                "query": query,
-                **results,
-                "mode": "traversal",
-            },
-            metadata={"action": "resource_search"},
+            data=self._slim_results(results, detailed=detailed),
+            metadata={},
         )
 
     async def _search_with_engine(
@@ -468,6 +457,25 @@ class ResourceSearchTool:
                 f"[resource_search] 向量检索失败，回退到遍历模式: {e}", exc_info=True
             )
             return {}
+
+    @staticmethod
+    def _slim_results(results: dict[str, Any], detailed: bool) -> dict[str, Any]:
+        """精简搜索结果，移除对 LLM 无用的字段
+
+        Args:
+            results: 原始搜索结果（包含 _h/_d/_c 等字段）
+            detailed: detailed 模式保留 _h 表头，simple 模式只保留 _d
+
+        Returns:
+            精简后的结果字典
+        """
+        slim = {}
+        for key, value in results.items():
+            if key.endswith("_d"):
+                slim[key] = value
+            elif detailed and key.endswith("_h"):
+                slim[key] = value
+        return slim
 
     def _get_search_engine(self):
         """

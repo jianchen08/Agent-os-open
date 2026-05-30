@@ -60,19 +60,22 @@ class ToolExecutionResult(ExecutionResult[Any]):
             return self.duration_ms / 1000.0
         return 0.0
 
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典"""
-        result = super().to_dict()
+    def to_dict(self, slim: bool = False) -> dict[str, Any]:
+        """转换为字典
 
-        # 添加向后兼容字段
-        if self.output is not None:
-            result["data"] = self.output
+        Args:
+            slim: 精简模式，省略 tool_name/tool_id/input_params/data 等冗余字段
+        """
+        result = super().to_dict(slim=slim)
 
-        if self.tool_name:
-            result["tool_name"] = self.tool_name
-        if self.tool_id:
-            result["tool_id"] = self.tool_id
-        if self.input_params:
-            result["input_params"] = self.input_params
+        if not slim:
+            if self.output is not None:
+                result["data"] = self.output
+            if self.tool_name:
+                result["tool_name"] = self.tool_name
+            if self.tool_id:
+                result["tool_id"] = self.tool_id
+            if self.input_params:
+                result["input_params"] = self.input_params
 
         return result
