@@ -69,29 +69,51 @@ function _wrapWithTimeoutReset(event: string, handler: (data: any) => void): (da
 }
 
 /**
+ * 全局 WS 事件日志包装器
+ *
+ * 记录每一个到达前端的 WS 事件类型、pipelineId、messageId，
+ * 用于定位消息生命周期问题。
+ */
+function _logEvent(eventType: string, data: any): void {
+  if (eventType === 'stream_chunk' || eventType === 'stream_keepalive' || eventType === 'thinking_chunk') return
+  const pid = resolvePipelineId(data)
+  const mid = data.message_id || data.data?.message_id || data.data?.id || ''
+  const content = data.data?.content || data.content || ''
+  console.warn(
+    `[WS-EVENT] %-22s pid=%s mid=%s contentLen=%d`,
+    eventType, pid?.slice(0, 12) || '-', mid?.slice(0, 12) || '-', content.length,
+  )
+}
+
+/**
  * 初始化全局流式事件处理器（幂等，重复调用安全）
  */
 export function initStreamingEvents(): void {
   if (_initialized) return
   _initialized = true
 
-  _handlers[WS_SERVER_EVENTS.STREAM_START] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_START, handleStreamStart)
-  _handlers[WS_SERVER_EVENTS.STREAM_CHUNK] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk)
-  _handlers[WS_SERVER_EVENTS.STREAM_END] = handleStreamEnd
-  _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = handleStreamError
-  _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = handleNewMessage
-  _handlers[WS_SERVER_EVENTS.THINKING_START] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_START, handleThinkingStart)
-  _handlers[WS_SERVER_EVENTS.THINKING_CHUNK] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_CHUNK, handleThinkingChunk)
-  _handlers[WS_SERVER_EVENTS.THINKING_END] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_END, handleThinkingEnd)
-  _handlers[WS_SERVER_EVENTS.TOOL_START] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
-  _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
-  _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = handleSubAgentCreated
-  _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
-  _handlers[WS_SERVER_EVENTS.ITERATION] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.ITERATION, handleIteration)
+  const _logWrap = (event: string, handler: (data: any) => void) => (data: any) => {
+    _logEvent(event, data)
+    handler(data)
+  }
 
-  _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = handleStateChange
-  _handlers[WS_SERVER_EVENTS.PIPELINE_RECEIVED] = handlePipelineReceived
-  _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = handleSystemNotification
+  _handlers[WS_SERVER_EVENTS.STREAM_START] = _logWrap(WS_SERVER_EVENTS.STREAM_START, _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_START, handleStreamStart))
+  _handlers[WS_SERVER_EVENTS.STREAM_CHUNK] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_CHUNK, handleStreamChunk)
+  _handlers[WS_SERVER_EVENTS.STREAM_END] = _logWrap(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
+  _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = _logWrap(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError)
+  _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
+  _handlers[WS_SERVER_EVENTS.THINKING_START] = _logWrap(WS_SERVER_EVENTS.THINKING_START, _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_START, handleThinkingStart))
+  _handlers[WS_SERVER_EVENTS.THINKING_CHUNK] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_CHUNK, handleThinkingChunk)
+  _handlers[WS_SERVER_EVENTS.THINKING_END] = _logWrap(WS_SERVER_EVENTS.THINKING_END, _wrapWithTimeoutReset(WS_SERVER_EVENTS.THINKING_END, handleThinkingEnd))
+  _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, _wrapWithTimeoutReset(WS_SERVER_EVENTS.TOOL_START, handleToolStart))
+  _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _logWrap(WS_SERVER_EVENTS.TOOL_RESULT, _wrapWithTimeoutReset(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult))
+  _handlers[WS_SERVER_EVENTS.SUB_AGENT_CREATED] = _logWrap(WS_SERVER_EVENTS.SUB_AGENT_CREATED, handleSubAgentCreated)
+  _handlers[WS_SERVER_EVENTS.STREAM_KEEPALIVE] = _wrapWithTimeoutReset(WS_SERVER_EVENTS.STREAM_KEEPALIVE, handleStreamKeepalive)
+  _handlers[WS_SERVER_EVENTS.ITERATION] = _logWrap(WS_SERVER_EVENTS.ITERATION, _wrapWithTimeoutReset(WS_SERVER_EVENTS.ITERATION, handleIteration))
+
+  _handlers[WS_SERVER_EVENTS.STATE_CHANGE] = _logWrap(WS_SERVER_EVENTS.STATE_CHANGE, handleStateChange)
+  _handlers[WS_SERVER_EVENTS.PIPELINE_RECEIVED] = _logWrap(WS_SERVER_EVENTS.PIPELINE_RECEIVED, handlePipelineReceived)
+  _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = _logWrap(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, handleSystemNotification)
 
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.subscribe(event, handler)

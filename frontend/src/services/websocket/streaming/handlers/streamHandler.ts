@@ -196,21 +196,21 @@ export function handleStreamEnd(eventData: any) {
       useStreamingStore.getState().setStreamingForTab(threadId, false)
     }
 
-    /**
-     * 清理无内容的 streaming 占位消息
-     *
-     * 当 AI 调用工具（如子任务）时，先发 stream_start 创建占位，再发 stream_end。
-     * 如果 AI 没有输出任何文本就调用了工具，占位消息 content='' parts=[]。
-     * 此处将其标记为 completed，MessageItem 会 return null 隐藏它。
-     */
     if (messageId) {
       const msgs = pipelineStore.getState().getMessages(pipelineId)
       const msg = msgs.find((m: any) => m.id === messageId)
+      const msgSummary = msg
+        ? `status=${msg.status} contentLen=${(msg.content || '').length} partsLen=${(msg.parts || []).length}`
+        : 'NOT_FOUND'
+      console.warn(
+        `[MSG-LIFE] ★ stream_end 处理: pipeline=%s msgId=%s %s totalMsgs=%d`,
+        pipelineId.slice(0, 12), messageId.slice(0, 12), msgSummary, msgs.length,
+      )
       if (msg && msg.status === 'streaming') {
         const hasContent = (msg.content && msg.content.trim()) || (msg.parts && msg.parts.length > 0)
         if (!hasContent) {
           console.warn(
-            `[MSG-LIFE] ★ stream_end 清理空占位: pipeline=%s msgId=%s (no content)`,
+            `[MSG-LIFE] ★ stream_end 清理空占位: pipeline=%s msgId=%s → completed`,
             pipelineId.slice(0, 12), messageId.slice(0, 12),
           )
           pipelineStore.getState().updateMessage(pipelineId, messageId, {
