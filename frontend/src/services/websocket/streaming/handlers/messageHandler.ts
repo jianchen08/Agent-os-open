@@ -58,6 +58,19 @@ export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
   const threadId = extractThreadId(eventData)
 
+  const _diagMsgId = extractMessageId(eventData)
+    || eventData?.message?.id
+    || eventData?.data?.id
+  const _diagData = eventData?.data || eventData
+  const _diagSeq = _diagData?.sequence ?? eventData?.sequence
+  const _diagContent = eventData?.content || _diagData?.content || _diagData?.final_content
+  console.log(
+    '[DIAG] handleNewMessage: pipeline=%s msgId=%s sequence=%s content=%.60s ts=%s',
+    pipelineId?.slice(0, 12), _diagMsgId?.slice(0, 12), _diagSeq,
+    (_diagContent || '').slice(0, 60),
+    new Date().toISOString(),
+  )
+
   if (pipelineId) {
     // 标记管道已终止，防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId, threadId)

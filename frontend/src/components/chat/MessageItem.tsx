@@ -383,7 +383,16 @@ export const MessageItem = ({
                 )
               }
 
-              if (!isMessageStreaming && renderContext.fragments.length === 0) return null
+              // BUG-FIX-fix_20260530_message_render_empty:
+              // 问题根因: 合并后的消息 parts 为 undefined 导致 fragments 为空，
+              //   但 displayContent 有值（来自 message.content），原代码直接 return null
+              //   导致消息不渲染。刷新后只有2条消息可见。
+              // 修复方案: fragments 为空时 fallback 到 displayContent 渲染纯文本。
+              const _displayFallback = renderContext.displayContent || message.content
+
+              if (!isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
+                return null
+              }
 
               return (
                 <div className={bubbleCls} style={bubbleStyle}>
@@ -402,6 +411,8 @@ export const MessageItem = ({
                           </>
                         )}
                       </div>
+                    ) : _displayFallback ? (
+                      <div className="whitespace-pre-wrap break-words text-sm">{_displayFallback}</div>
                     ) : null
                   ) : (
                     <MessageContentRenderer

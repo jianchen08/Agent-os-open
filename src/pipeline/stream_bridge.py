@@ -636,14 +636,21 @@ class PipelineStreamBridge:
                     continue
 
                 if _chunk_type == "system":
+                    _notif_content = chunk.get("content", "")
                     self._pending_notifications.append({
-                        "content": chunk.get("content", ""),
+                        "content": _notif_content,
                         "level": chunk.get("level", "info"),
                         "notificationType": chunk.get("notificationType", ""),
                     })
                     logger.debug(
                         "drain_loop: system_notification buffered: pipeline=%s count=%d",
                         self.pipeline_id[:12], len(self._pending_notifications),
+                    )
+                    logger.info(
+                        "[DIAG] drain_loop: system chunk buffered: pipeline=%s queue_len=%d "
+                        "content=%.60s chunk_count=%d",
+                        self.pipeline_id[:12], len(self._pending_notifications),
+                        _notif_content[:60], _chunk_count,
                     )
                     continue
 
@@ -686,7 +693,12 @@ class PipelineStreamBridge:
             # 5. 刷出缓冲的系统通知（stream_end 后发送，确保前端已标记消息完成）
             if self._pending_notifications:
                 _notif_count = len(self._pending_notifications)
-                for _notif in self._pending_notifications:
+                for _notif_idx, _notif in enumerate(self._pending_notifications):
+                    logger.info(
+                        "[DIAG] drain_loop: flushing notification [%d/%d]: pipeline=%s content=%.60s",
+                        _notif_idx + 1, _notif_count, self.pipeline_id[:12],
+                        _notif.get("content", "")[:60],
+                    )
                     await self._send_event(self._make_event("system_notification", _notif))
                 self._pending_notifications = []
                 logger.info(
@@ -755,6 +767,13 @@ class PipelineStreamBridge:
                     self.pipeline_id[:12],
                 )
 
+        logger.info(
+            "[DIAG] send_new_message BEFORE send: pipeline=%s msg=%s "
+            "sequence=%d content=%.60s",
+            self.pipeline_id[:12], self.message_id[:12],
+            sequence, effective_content[:60],
+        )
+
         await self._send_event(self._make_event("new_message", {
             "id": self.message_id,
             "role": "assistant",
@@ -762,6 +781,11 @@ class PipelineStreamBridge:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sequence": sequence,
         }))
+
+        logger.info(
+            "[DIAG] send_new_message AFTER send: pipeline=%s msg=%s sequence=%d",
+            self.pipeline_id[:12], self.message_id[:12], sequence,
+        )
 
 
 # ---------------------------------------------------------------------------

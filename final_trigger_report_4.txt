@@ -1,0 +1,100 @@
+# 第4次触发器最终验证报告 - 工作空间环境状态
+
+## 目录信息
+当前工作空间根目录文件列表
+
+## 统计摘要
+- 总文件数量: 74
+- 目录项数量: 20
+- 总项目数: 94
+
+## 目录列表
+
+| 名称 | 类型 | 大小 |
+|------|------|------|
+| .claude | 目录 | 0B |
+| .codebuddy | 目录 | 0B |
+| .git | 目录 | 4.0KB |
+| .mypy_cache | 目录 | 0B |
+| .pytest_cache | 目录 | 0B |
+| .workbuddy | 目录 | 0B |
+| __pycache__ | 目录 | 4.0KB |
+| config | 目录 | 4.0KB |
+| data | 目录 | 4.0KB |
+| docs | 目录 | 24.0KB |
+| electron | 目录 | 0B |
+| frontend | 目录 | 8.0KB |
+| logs | 目录 | 16.0KB |
+| mcp-servers | 目录 | 0B |
+| node_modules | 目录 | 0B |
+| scripts | 目录 | 0B |
+| skills | 目录 | 0B |
+| src | 目录 | 8.0KB |
+| tests | 目录 | 16.0KB |
+
+## 文件列表
+
+| 名称 | 大小 |
+|------|------|
+| .dockerignore | 1.2KB |
+| .env | 1.0KB |
+| .gitignore | 368B |
+| .ports | 162B |
+| .py_deps_installed | 3B |
+| app_factory.py | 29.7KB |
+| cli.bat | 249B |
+| debug_eval_agent_entry.log | 146B |
+| debug_eval_trace.log | 84.1KB |
+| debug_eventbus.log | 11.0KB |
+| docker-compose.override.yml | 1.4KB |
+| docker-compose.yml | 2.9KB |
+| docker-entrypoint.sh | 4.7KB |
+| Dockerfile | 3.3KB |
+| eight_trigger_validation.txt | 51B |
+| fifth_verification.txt | 19B |
+| final_test.txt | 70B |
+| package-lock.json | 336.8KB |
+| package.json | 1.7KB |
+| pyproject.toml | 826B |
+| pytest.ini | 645B |
+| README.md | 10.5KB |
+| requirements.txt | 3.0KB |
+| run.py | 5.6KB |
+| sixth_trigger_test.txt | 19B |
+| start_web.bat | 12.3KB |
+| start_web.log | 141B |
+| start_web.sh | 10.9KB |
+| start_web_prod.bat | 12.4KB |
+| static_files.py | 2.0KB |
+| stop.ps1 | 5.4KB |
+| stop_web.bat | 5.0KB |
+| stop_web.sh | 4.1KB |
+| stream_handler.py | 17.1KB |
+| test_final_last_trigger.txt | 79B |
+| test_hello.txt | 68B |
+| test_trigger.txt | 19B |
+| test_trigger_2.txt | 42B |
+| test_trigger_3.txt | 86B |
+| test_trigger_4.txt | 84B |
+| timestamp.txt | 29B |
+| timestamp_test.txt | 77B |
+| timestamp_test.txt.bak | 64B |
+| trigger_check_round3.md | 85B |
+| trigger_check_third.txt | 53B |
+| trigger_final_5.txt | 123B |
+| trigger_round1_verification.txt | 79B |
+| trigger_round2.txt | 51B |
+| trigger_round2_verification.txt | 79B |
+| trigger_run3_verify.txt | 136B |
+| trigger_summary.md | 1.9KB |
+| trigger_test_003.txt | 19B |
+| trigger_test_batch2.txt | 85B |
+| trigger_test_log.txt | 59B |
+| trigger_test_log.txt.bak | 53B |
+| trigger_validation_round3.txt | 71B |
+| trigger_verification_run3.txt | 110B |
+| worktree_verify_report.md | 2.7KB |
+| ws_handler.py | 16.1KB |
+
+---
+生成时间: 2026-05-29T23:35:27+00:00

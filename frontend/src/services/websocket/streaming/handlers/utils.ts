@@ -107,7 +107,7 @@ export function ensureStreamingPlaceholder(
 ): void {
   startPipelineStreaming(pipelineId, messageId, threadId)
 
-  const placeholderSeq = allocateNextSequence(pipelineId, backendSequence)
+  const placeholderSeq = backendSequence ?? 0
 
   pipelineStore.getState().addMessage(pipelineId, {
     id: messageId,
@@ -116,7 +116,7 @@ export function ensureStreamingPlaceholder(
     content: '',
     timestamp: new Date().toISOString(),
     parentId: null,
-    sequence: placeholderSeq,
+    sequence: placeholderSeq > 0 ? placeholderSeq : undefined,
     status: 'streaming',
   } as any)
 }

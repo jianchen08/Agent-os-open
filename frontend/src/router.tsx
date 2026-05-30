@@ -390,7 +390,6 @@ function HomePage(): ReactNode {
       const targetPipelineId = params.pipelineId || activePipelineId
 
       const existingMsgs = pipelineStore.getMessages(targetPipelineId)
-      const userSeq = existingMsgs.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0) + 1
 
       const userMessage: Message = {
         id: generateUUID(),
@@ -399,7 +398,6 @@ function HomePage(): ReactNode {
         content: params.content,
         timestamp: new Date().toISOString(),
         parentId: null,
-        sequence: userSeq,
       }
 
       pipelineStore.addMessage(targetPipelineId, userMessage)

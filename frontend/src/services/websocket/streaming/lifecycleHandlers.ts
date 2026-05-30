@@ -48,6 +48,12 @@ export function handlePipelineReceived(data: any): void {
   const content = payload?.content || ''
   const source = payload?.source || ''
 
+  console.log(
+    '[DIAG] handlePipelineReceived: pipeline=%s source=%s content=%.60s ts=%s',
+    pipelineId.slice(0, 12), source, content.slice(0, 60),
+    new Date().toISOString(),
+  )
+
   // 用户消息已由 handleSendMessage 处理，此处跳过
   if (source === 'user') return
 
@@ -58,8 +64,6 @@ export function handlePipelineReceived(data: any): void {
 
   // 去重：检查管道中是否已存在相同 content 前缀的 system 消息
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-
-  const nextSeq = allocateNextSequence(pipelineId)
   const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
     if (m.role === 'system') {
@@ -83,7 +87,6 @@ export function handlePipelineReceived(data: any): void {
     id: `sys_${generateUUID()}`,
     role: 'system',
     content,
-    sequence: nextSeq,
     timestamp: new Date().toISOString(),
     status: 'completed',
     parts: [
@@ -346,9 +349,14 @@ export function handleSystemNotification(eventData: any): void {
 
   const pipelineStore = usePipelineMessageStore.getState()
 
-  const existingMsgs = pipelineStore.getMessages(pipelineId)
+  console.log(
+    '[DIAG] handleSystemNotification: pipeline=%s content=%.60s msgCount=%d ts=%s',
+    pipelineId?.slice(0, 12), content.slice(0, 60),
+    pipelineStore.getMessages(pipelineId).length,
+    new Date().toISOString(),
+  )
 
-  const nextSeq = allocateNextSequence(pipelineId)
+  const existingMsgs = pipelineStore.getMessages(pipelineId)
   const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
     if (m.role === 'system') {
@@ -372,7 +380,6 @@ export function handleSystemNotification(eventData: any): void {
     id: `sys_${generateUUID()}`,
     role: 'system',
     content,
-    sequence: nextSeq,
     timestamp: new Date().toISOString(),
     parts: [
       {

@@ -31,64 +31,17 @@ import type { Message } from '@/types/models'
 const EMPTY_MESSAGES: Message[] = []
 
 /**
- * 合并连续的 assistant 消息
+ * 确保每条消息有独立对象引用（Virtuoso 变更检测用）
  *
- * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
- * 单条 assistant 消息也创建新对象引用，确保 Virtuoso 检测到变化。
+ * BUG-FIX-fix_20260530_merge_blank:
+ * 问题根因: mergeConsecutiveAssistantMessages 将连续 assistant 消息合并后，
+ *   原始消息的 content 为空白字符串（\n\n\n），合并后 content 仍为空，
+ *   导致 MessageItem 判断无内容而 return null，消息不渲染。
+ *   后端持久化的每条 assistant 消息都是独立的，前端不应合并。
+ * 修复方案: 不再合并连续 assistant 消息，逐条输出，仅创建新对象引用。
  */
-function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
-  if (messages.length <= 1) return messages
-  const result: Message[] = []
-  let i = 0
-  while (i < messages.length) {
-    const msg = messages[i]
-    if (msg.role !== 'assistant') {
-      result.push(msg)
-      i++
-      continue
-    }
-    const groupStart = i
-    while (i < messages.length && messages[i].role === 'assistant') { i++ }
-    const group = messages.slice(groupStart, i)
-    if (group.length === 1) {
-      result.push({ ...group[0] })
-      continue
-    }
-    // BUG-FIX-fix_20260529_streaming_merge:
-    // 问题根因: 已完成的 assistant 消息与 streaming 占位消息被合并，
-    //   合并后取 first 的 status='completed'，streaming 状态丢失，
-    //   导致前端"一直在思考中"但内容不更新。
-    // 修复方案: 如果组内存在 streaming 状态的消息，不合并，逐条输出。
-    const hasStreaming = group.some((m) => m.status === 'streaming')
-    if (hasStreaming) {
-      for (const m of group) {
-        result.push({ ...m })
-      }
-      continue
-    }
-    const first = group[0]
-    const allContent: string[] = []
-    for (const m of group) {
-      if (m.content && m.content.trim()) {
-        allContent.push(m.content.trim())
-      }
-    }
-    const mergedContent = allContent.join('\n\n')
-    let globalSeq = 0
-    const mergedParts = group.flatMap((m) => {
-      const rawParts = m.parts || []
-      return rawParts.map((p) => ({ ...p, sequence: globalSeq++ }))
-    })
-    const mergedId = `merged_${first.id}_${group.length}`
-    result.push({
-      ...first,
-      id: mergedId,
-      _originalIds: group.map(m => m.id),
-      content: mergedContent,
-      parts: mergedParts.length > 0 ? mergedParts : undefined,
-    })
-  }
-  return result
+function ensureMessageRefs(messages: Message[]): Message[] {
+  return messages.map((m) => ({ ...m }))
 }
 
 /**
@@ -303,26 +256,20 @@ export const ChatContainer = ({
       : messages
     const mapped = source
       .filter((m: any) => m.role !== 'tool')
-    const seenSystemContents = new Set<string>()
-    const deduped = mapped.filter((m: any) => {
-      if (m.role !== 'system') return true
-      const contentPrefix = (m.content || '').trimStart().slice(0, 50)
-      if (seenSystemContents.has(contentPrefix)) return false
-      seenSystemContents.add(contentPrefix)
-      return true
-    })
-    const noDupUserMsg = deduped.filter((m: any) => {
+    // BUG-FIX-fix_20260530_system_dedup:
+    // 问题根因: 系统消息按 content 前50字符去重，导致3次触发器通知（内容相似但
+    //   是不同时间点的不同事件）只保留第1次，后续触发器通知全部丢失。
+    // 修复方案: 不再按内容前缀去重系统消息。每条系统通知都是独立事件，应全部保留。
+    // 同时修复了用户消息去重错误使用 seenSystemContents 的 bug。
+    const seenUserContents = new Set<string>()
+    const noDupUserMsg = mapped.filter((m: any) => {
       if (m.role !== 'user') return true
       const contentPrefix = (m.content || '').trimStart().slice(0, 50)
-      if (seenSystemContents.has(contentPrefix)) return false
+      if (seenUserContents.has(contentPrefix)) return false
+      seenUserContents.add(contentPrefix)
       return true
     })
-    const result = mergeConsecutiveAssistantMessages(noDupUserMsg)
-    if (result.length > 0) {
-      const ids = result.map((m: any) => `${m.role[0]}${(m.sequence ?? '?')}`).join(',')
-      console.log('[activeMessages]', result.length, 'msgs:', ids, 'source:', pipelineMessages.length > 0 ? 'pipeline' : 'props')
-    }
-    return result
+    return ensureMessageRefs(noDupUserMsg)
   }, [pipelineMessages, messages])
 
   /**

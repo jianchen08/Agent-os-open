@@ -87,7 +87,7 @@ defaults:
   embedding: embedding-3
   call_timeout: 120
   tiers:
-    large: minimax-m2.7
+    large: glm-5.1
     medium: minimax-m2.7
     small: minimax-m2.7
   fallback_chain:
