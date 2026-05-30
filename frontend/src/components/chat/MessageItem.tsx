@@ -388,10 +388,24 @@ export const MessageItem = ({
               //   但 displayContent 有值（来自 message.content），原代码直接 return null
               //   导致消息不渲染。刷新后只有2条消息可见。
               // 修复方案: fragments 为空时 fallback 到 displayContent 渲染纯文本。
-              const _displayFallback = renderContext.displayContent || message.content
+              const _rawFallback = renderContext.displayContent || message.content
+              const _displayFallback = _rawFallback?.trim() ? _rawFallback : ''
 
               if (!isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
+                console.warn(
+                  `[MSG-LIFE] ★ 消息被隐藏(return null): id=%s role=%s status=%s partsLen=%d contentLen=%d`,
+                  (message.id as string).slice(0, 12), message.role, message.status,
+                  (message.parts as any[])?.length ?? 0, (message.content || '').length,
+                )
                 return null
+              }
+
+              if (isMessageStreaming && renderContext.fragments.length === 0 && !_displayFallback) {
+                console.warn(
+                  `[MSG-LIFE] ★ streaming 空消息渲染: id=%s role=%s partsLen=%d contentLen=%d`,
+                  (message.id as string).slice(0, 12), message.role,
+                  (message.parts as any[])?.length ?? 0, (message.content || '').length,
+                )
               }
 
               return (

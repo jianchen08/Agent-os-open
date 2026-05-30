@@ -209,10 +209,12 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
       }
 
       case 'thinking': {
+        const thinkContent = part.content || (part as any).thinking?.content || ''
+        if (!thinkContent.trim()) break
         fragments.push({
           type: 'thinking',
           thinking: {
-            content: part.content,
+            content: thinkContent,
             isThinking: part.state === 'streaming',
             durationMs: part.durationMs,
             steps: part.steps,

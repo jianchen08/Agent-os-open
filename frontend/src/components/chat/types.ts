@@ -67,8 +67,6 @@ export interface SendMessageParams {
 export interface ChatContainerProps {
   /** 会话 ID */
   sessionId: string
-  /** 消息列表 */
-  messages: Message[]
   /** 是否正在加载 */
   isLoading?: boolean
   /** 是否正在生成回复 */

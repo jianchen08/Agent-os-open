@@ -381,10 +381,12 @@ class _BaseLiteLLMAdapter:
         # 解析 usage 信息
         usage: dict[str, Any] | None = None
         if hasattr(response, "usage") and response.usage:
+            _prompt_details = getattr(response.usage, "prompt_tokens_details", None)
             usage = {
                 "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
                 "completion_tokens": getattr(response.usage, "completion_tokens", 0),
                 "total_tokens": getattr(response.usage, "total_tokens", 0),
+                "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
             }
 
         return LLMResponse(
@@ -496,6 +498,7 @@ class _BaseLiteLLMAdapter:
                             )
                 # 收集流式 usage（通常在最后一个 chunk）
                 if hasattr(chunk, "usage") and chunk.usage:
+                    _prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
                     stream_usage = {
                         "prompt_tokens": getattr(
                             chunk.usage, "prompt_tokens", 0
@@ -506,6 +509,7 @@ class _BaseLiteLLMAdapter:
                         "total_tokens": getattr(
                             chunk.usage, "total_tokens", 0
                         ) or 0,
+                        "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
                     }
 
                 if not chunk.choices:

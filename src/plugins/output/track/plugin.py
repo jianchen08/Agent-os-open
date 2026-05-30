@@ -242,13 +242,16 @@ class TrackPlugin(IOutputPlugin):
         prev_total = ctx.state.get("track.llm_usage", {})
         total_input = prev_total.get("total_input_tokens", 0) + current_usage.get("input_tokens", 0)
         total_output = prev_total.get("total_output_tokens", 0) + current_usage.get("output_tokens", 0)
+        total_cached = prev_total.get("total_cached_tokens", 0) + current_usage.get("cached_tokens", 0)
 
         return {
             "total_input_tokens": total_input,
             "total_output_tokens": total_output,
             "total_tokens": total_input + total_output,
+            "total_cached_tokens": total_cached,
             "last_input_tokens": current_usage.get("input_tokens", 0),
             "last_output_tokens": current_usage.get("output_tokens", 0),
+            "last_cached_tokens": current_usage.get("cached_tokens", 0),
         }
 
     def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:
@@ -518,6 +521,7 @@ class TrackPlugin(IOutputPlugin):
                 "input_tokens": llm_usage.get("total_input_tokens", 0),
                 "output_tokens": llm_usage.get("total_output_tokens", 0),
                 "total_tokens": llm_usage.get("total_tokens", 0),
+                "cached_tokens": llm_usage.get("total_cached_tokens", 0),
             },
             total_seconds=round(elapsed_total, 3),
             total_records=self._get_current_sequence(pipeline_run_id),

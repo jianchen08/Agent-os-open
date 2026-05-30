@@ -689,12 +689,6 @@ def _start_bg_drain(
                 _ai_seq = getattr(bridge, '_last_ai_sequence', 0)
                 if _ai_seq <= 0:
                     _ai_seq = getattr(bridge, '_current_msg_seq', 0)
-                logger.info(
-                    "[DIAG] _drain_and_cleanup: calling send_new_message: pipeline=%s "
-                    "sequence=%d content=%.60s msg=%s",
-                    pipeline_id[:12], _ai_seq, content[:60],
-                    getattr(bridge, 'message_id', '')[:12],
-                )
                 await bridge.send_new_message(content, sequence=_ai_seq)
         except asyncio.CancelledError:
             pass

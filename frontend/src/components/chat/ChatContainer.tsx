@@ -31,17 +31,70 @@ import type { Message } from '@/types/models'
 const EMPTY_MESSAGES: Message[] = []
 
 /**
- * 确保每条消息有独立对象引用（Virtuoso 变更检测用）
+ * 合并连续的 assistant 消息
  *
- * BUG-FIX-fix_20260530_merge_blank:
- * 问题根因: mergeConsecutiveAssistantMessages 将连续 assistant 消息合并后，
- *   原始消息的 content 为空白字符串（\n\n\n），合并后 content 仍为空，
- *   导致 MessageItem 判断无内容而 return null，消息不渲染。
- *   后端持久化的每条 assistant 消息都是独立的，前端不应合并。
- * 修复方案: 不再合并连续 assistant 消息，逐条输出，仅创建新对象引用。
+ * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
+ * 单条 assistant 消息也创建新对象引用，确保 Virtuoso 检测到变化。
  */
-function ensureMessageRefs(messages: Message[]): Message[] {
-  return messages.map((m) => ({ ...m }))
+function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
+  if (messages.length <= 1) return messages
+  const result: Message[] = []
+  let i = 0
+  while (i < messages.length) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant') {
+      result.push(msg)
+      i++
+      continue
+    }
+    const groupStart = i
+    while (i < messages.length && messages[i].role === 'assistant') { i++ }
+    const group = messages.slice(groupStart, i)
+    if (group.length === 1) {
+      result.push({ ...group[0] })
+      continue
+    }
+    // BUG-FIX-fix_20260529_streaming_merge:
+    // 问题根因: 已完成的 assistant 消息与 streaming 占位消息被合并，
+    //   合并后取 first 的 status='completed'，streaming 状态丢失，
+    //   导致前端"一直在思考中"但内容不更新。
+    // 修复方案: 如果组内存在 streaming 状态的消息，不合并，逐条输出。
+    const hasStreaming = group.some((m) => m.status === 'streaming')
+    if (hasStreaming) {
+      for (const m of group) {
+        result.push({ ...m })
+      }
+      continue
+    }
+    const first = group[0]
+    const allContent: string[] = []
+    for (const m of group) {
+      if (m.content && m.content.trim()) {
+        allContent.push(m.content.trim())
+      }
+    }
+    const mergedContent = allContent.join('\n\n')
+    let globalSeq = 0
+    const mergedParts = group.flatMap((m) => {
+      const rawParts = m.parts || []
+      return rawParts.map((p) => ({ ...p, sequence: globalSeq++ }))
+    })
+    if (!mergedContent && mergedParts.length === 0) {
+      for (const m of group) {
+        result.push({ ...m })
+      }
+      continue
+    }
+    const mergedId = `merged_${first.id}_${group.length}`
+    result.push({
+      ...first,
+      id: mergedId,
+      _originalIds: group.map(m => m.id),
+      content: mergedContent,
+      parts: mergedParts.length > 0 ? mergedParts : undefined,
+    })
+  }
+  return result
 }
 
 /**
@@ -98,7 +151,6 @@ function mapStoreTabsToBarFormat(
  */
 export const ChatContainer = ({
   sessionId,
-  messages,
   isLoading = false,
   isGenerating: _isGenerating = false,
   onSendMessage,
@@ -239,22 +291,13 @@ export const ChatContainer = ({
   const effectiveTokenCount = effectiveTokenUsage
 
   /**
-   * 根据当前激活管道获取消息列表
+   * 统一消息源：只使用 pipelineMessageStore
    *
-   * BUG-FIX-fix_20260523_tab_pipeline_msg:
-   * 问题根因: pipelineMessages 与 messages prop 读取同一数据源
-   *          （activePipelineId || sid），两者完全重复，fallback 无意义。
-   * 修复方案: 优先使用 pipelineMessages（已在 selector 中处理 sid fallback），
-   *          当管道尚未激活或消息尚未加载时，保留 messages prop 作为过渡数据显示，
-   *          避免异步加载期间用户看到空白消息列表。
-   * 影响范围: 聊天消息列表显示
-   * 修复日期: 2026-05-23
+   * 所有消息（流式、API 加载、历史翻页）统一通过 pipelineMessageStore 管理，
+   * 不再使用外部传入的 messages prop 作为 fallback，消除双数据源不一致问题。
    */
   const activeMessages = useMemo(() => {
-    const source = pipelineMessages.length > 0
-      ? pipelineMessages
-      : messages
-    const mapped = source
+    const mapped = pipelineMessages
       .filter((m: any) => m.role !== 'tool')
     // BUG-FIX-fix_20260530_system_dedup:
     // 问题根因: 系统消息按 content 前50字符去重，导致3次触发器通知（内容相似但
@@ -269,8 +312,8 @@ export const ChatContainer = ({
       seenUserContents.add(contentPrefix)
       return true
     })
-    return ensureMessageRefs(noDupUserMsg)
-  }, [pipelineMessages, messages])
+    return mergeConsecutiveAssistantMessages(noDupUserMsg)
+  }, [pipelineMessages])
 
   /**
    * 将 store Tab 映射为 AgentTabBar 所需格式

@@ -187,17 +187,37 @@ export function handleStreamEnd(eventData: any) {
   )
 
   if (pipelineId) {
-    // BUG-FIX-fix_20260522: 标记管道已终止，防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId, threadId)
-    // BUG-FIX-fix_20260522_stream_end_over_cleanup:
-    // stream_end 时需要确保所有关联的 streamingTabs 都被清理，
-    // 包括 pipelineId、threadId 和 activePipelineId。
     const currentActivePipelineId = pipelineStore.getState().activePipelineId
     if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
       useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
     }
     if (threadId && threadId !== pipelineId) {
       useStreamingStore.getState().setStreamingForTab(threadId, false)
+    }
+
+    /**
+     * 清理无内容的 streaming 占位消息
+     *
+     * 当 AI 调用工具（如子任务）时，先发 stream_start 创建占位，再发 stream_end。
+     * 如果 AI 没有输出任何文本就调用了工具，占位消息 content='' parts=[]。
+     * 此处将其标记为 completed，MessageItem 会 return null 隐藏它。
+     */
+    if (messageId) {
+      const msgs = pipelineStore.getState().getMessages(pipelineId)
+      const msg = msgs.find((m: any) => m.id === messageId)
+      if (msg && msg.status === 'streaming') {
+        const hasContent = (msg.content && msg.content.trim()) || (msg.parts && msg.parts.length > 0)
+        if (!hasContent) {
+          console.warn(
+            `[MSG-LIFE] ★ stream_end 清理空占位: pipeline=%s msgId=%s (no content)`,
+            pipelineId.slice(0, 12), messageId.slice(0, 12),
+          )
+          pipelineStore.getState().updateMessage(pipelineId, messageId, {
+            status: 'completed',
+          } as any)
+        }
+      }
     }
   } else {
     _debugLogger.warn(
@@ -225,13 +245,6 @@ export function handleStreamEnd(eventData: any) {
   if (usage && typeof usage === 'object') {
     useContextUsageStore.getState().updateUsage(pipelineId, usage)
   }
-
-  if (!messageId) return
-
-  pipelineStore.getState().updateMessage(pipelineId, messageId, {
-    status: 'completed',
-  } as any)
-  pipelineStore.getState().finalizeMessage(pipelineId, messageId)
 }
 
 /**

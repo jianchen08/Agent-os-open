@@ -33,12 +33,11 @@ export function handleStateChange(eventData: any): void {
 }
 
 /**
- * 处理 PIPELINE_RECEIVED 事件（非用户消息注入）
+ * 处理 PIPELINE_RECEIVED 事件
  *
- * 当后端通过管道注入非用户来源的消息（如任务触发、定时器等）时，
- * 创建一个 system 角色的消息气泡显示在聊天界面中。
- * 若 source === 'user' 则跳过（前端已在 handleSendMessage 中创建了用户消息气泡）。
- * 包含基于 content 前缀的去重逻辑，防止重复创建相同内容的系统消息。
+ * 后端只在 source='user' 时发送 pipeline_received 事件，
+ * 而本函数在 source='user' 时直接 return，所以永远不会创建消息。
+ * 仅保留日志记录。
  */
 export function handlePipelineReceived(data: any): void {
   const pipelineId = resolvePipelineId(data)
@@ -48,63 +47,10 @@ export function handlePipelineReceived(data: any): void {
   const content = payload?.content || ''
   const source = payload?.source || ''
 
-  console.log(
-    '[DIAG] handlePipelineReceived: pipeline=%s source=%s content=%.60s ts=%s',
+  loggers.sessionStore.info(
+    '[handlePipelineReceived] pipeline=%s source=%s content=%.60s',
     pipelineId.slice(0, 12), source, content.slice(0, 60),
-    new Date().toISOString(),
   )
-
-  // 用户消息已由 handleSendMessage 处理，此处跳过
-  if (source === 'user') return
-
-  // 无内容则无需创建气泡
-  if (!content) return
-
-  const pipelineStore = usePipelineMessageStore.getState()
-
-  // 去重：检查管道中是否已存在相同 content 前缀的 system 消息
-  const existingMsgs = pipelineStore.getMessages(pipelineId)
-  const dedupPrefix = content.substring(0, 60)
-  const alreadyExists = existingMsgs.some((m: any) => {
-    if (m.role === 'system') {
-      const mContent = m.content || ''
-      if (mContent && mContent.includes(dedupPrefix)) return true
-      const parts = m.parts || []
-      if (parts.some((p: any) => p.type === 'system' && (p.content || '').includes(dedupPrefix))) return true
-    }
-    return false
-  })
-
-  if (alreadyExists) {
-    loggers.sessionStore.info(
-      '[handlePipelineReceived] dedup: skipping duplicate inject: pipeline=%s prefix=%.30s',
-      pipelineId.slice(0, 12), dedupPrefix,
-    )
-    return
-  }
-
-  pipelineStore.addMessage(pipelineId, {
-    id: `sys_${generateUUID()}`,
-    role: 'system',
-    content,
-    timestamp: new Date().toISOString(),
-    status: 'completed',
-    parts: [
-      {
-        type: 'system',
-        content,
-        level: 'info',
-        notificationType: 'pipeline_inject',
-        sequence: 0,
-      },
-    ],
-    metadata: {
-      record_type: 'system',
-      type: 'system',
-      sender_type: 'system',
-      source,
-    },
-  } as any)
 }
 
 /**
@@ -325,18 +271,10 @@ export function handleChunkTimeout(data: { pipelineId: string; messageId: string
 /**
  * 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知）
  *
- * 通过统一流式路径（bridge on_chunk → drain_loop → WebSocket）发送，
- * 将系统通知作为独立消息添加到管道消息列表中渲染。
+ * 系统消息气泡的唯一创建入口。后端通过 send_frontend_event 发送
+ * system_notification WS 事件，此处接收并添加到管道消息列表。
  *
- * BUG-FIX-fix_20260524_duplicate_notification:
- * 问题根因: task_notifier 同时通过两条路径发送同一通知：
- *          1) send_pipeline_message → 注入为 role:'user' 消息（后端管道记录，前端已过滤）
- *          2) send_frontend_event → system_notification WS事件（实时显示为系统气泡）
- *          导致用户看到两条一模一样的通知，气泡样式不同（用户气泡 vs 系统气泡）。
- * 修复方案: ChatContainer 过滤后端注入的 [系统通知] user 消息；
- *          此处仅保留 system 消息自身去重（防止 WS 事件重复发送）。
- * 影响范围: 任务完成/失败通知的显示
- * 修复日期: 2026-05-24
+ * 去重策略：精确内容匹配（不使用 includes，避免相似内容被误判为重复）。
  */
 export function handleSystemNotification(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
@@ -349,32 +287,20 @@ export function handleSystemNotification(eventData: any): void {
 
   const pipelineStore = usePipelineMessageStore.getState()
 
-  console.log(
-    '[DIAG] handleSystemNotification: pipeline=%s content=%.60s msgCount=%d ts=%s',
-    pipelineId?.slice(0, 12), content.slice(0, 60),
-    pipelineStore.getMessages(pipelineId).length,
-    new Date().toISOString(),
-  )
-
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-  const dedupPrefix = content.substring(0, 60)
   const alreadyExists = existingMsgs.some((m: any) => {
-    if (m.role === 'system') {
-      const mContent = m.content || ''
-      if (mContent && mContent.includes(dedupPrefix)) return true
-      const parts = m.parts || []
-      if (parts.some((p: any) => p.type === 'system' && (p.content || '').includes(dedupPrefix))) return true
-    }
+    if (m.role === 'system' && m.content === content) return true
     return false
   })
 
   if (alreadyExists) {
-    loggers.sessionStore.info(
-      '[handleSystemNotification] dedup: skipping duplicate notification: pipeline=%s prefix=%.30s',
-      pipelineId?.slice(0, 12), dedupPrefix,
-    )
     return
   }
+
+  console.warn(
+    `[MSG-LIFE] ★ 系统通知创建: pipeline=%s content=%.40s`,
+    pipelineId.slice(0, 12), content.slice(0, 40),
+  )
 
   pipelineStore.addMessage(pipelineId, {
     id: `sys_${generateUUID()}`,

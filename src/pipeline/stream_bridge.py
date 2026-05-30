@@ -229,11 +229,24 @@ class PipelineStreamBridge:
         # 不清空 _pending_notifications，保留给新 drain_loop 在 stream_start 后刷出。
         # 旧 drain_loop 已被 stop+cancel，如果此时清空会丢失缓冲中的通知。
         # self._pending_notifications = []
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        # BUG-FIX-fix_20260530_queue_event_loop:
+        # 重建 Queue 和 Event，避免绑定到旧事件循环导致 RuntimeError。
+        # 复用 bridge 时（ensure_bridge -> reset_for_new_turn），如果事件循环
+        # 已更换（进程重启、uvicorn reload 等），旧 Queue 的 _loop 仍指向旧循环。
+        try:
+            loop = asyncio.get_running_loop()
+            if getattr(self._queue, '_loop', None) is not loop:
+                self._queue = asyncio.Queue()
+                self._chunk_event = asyncio.Event()
+            else:
+                while not self._queue.empty():
+                    try:
+                        self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+        except RuntimeError:
+            self._queue = asyncio.Queue()
+            self._chunk_event = asyncio.Event()
         if message_id:
             self.message_id = message_id
 
@@ -462,6 +475,21 @@ class PipelineStreamBridge:
             self.message_id[:16], self.pipeline_id[:12], type(self.output_sink).__name__,
         )
 
+        # BUG-FIX-fix_20260530_queue_event_loop:
+        # 防御性检查：如果 Queue 绑定了不同的事件循环，立即重建。
+        # 正常情况下 reset_for_new_turn 已处理，此处为双重保险。
+        try:
+            _current_loop = asyncio.get_running_loop()
+            if getattr(self._queue, '_loop', None) is not _current_loop:
+                logger.warning(
+                    "drain_loop: Queue 绑定了不同事件循环，重建 Queue/Event: pipeline=%s",
+                    self.pipeline_id[:12],
+                )
+                self._queue = asyncio.Queue()
+                self._chunk_event = asyncio.Event()
+        except RuntimeError:
+            pass
+
         try:
             # 0.5 刷出 reset_for_new_turn 保留的缓冲通知（在 stream_start 之前）
             if self._pending_notifications:
@@ -646,12 +674,6 @@ class PipelineStreamBridge:
                         "drain_loop: system_notification buffered: pipeline=%s count=%d",
                         self.pipeline_id[:12], len(self._pending_notifications),
                     )
-                    logger.info(
-                        "[DIAG] drain_loop: system chunk buffered: pipeline=%s queue_len=%d "
-                        "content=%.60s chunk_count=%d",
-                        self.pipeline_id[:12], len(self._pending_notifications),
-                        _notif_content[:60], _chunk_count,
-                    )
                     continue
 
                 if _chunk_type in ("tool_start", "tool_result"):
@@ -694,11 +716,6 @@ class PipelineStreamBridge:
             if self._pending_notifications:
                 _notif_count = len(self._pending_notifications)
                 for _notif_idx, _notif in enumerate(self._pending_notifications):
-                    logger.info(
-                        "[DIAG] drain_loop: flushing notification [%d/%d]: pipeline=%s content=%.60s",
-                        _notif_idx + 1, _notif_count, self.pipeline_id[:12],
-                        _notif.get("content", "")[:60],
-                    )
                     await self._send_event(self._make_event("system_notification", _notif))
                 self._pending_notifications = []
                 logger.info(
@@ -767,13 +784,6 @@ class PipelineStreamBridge:
                     self.pipeline_id[:12],
                 )
 
-        logger.info(
-            "[DIAG] send_new_message BEFORE send: pipeline=%s msg=%s "
-            "sequence=%d content=%.60s",
-            self.pipeline_id[:12], self.message_id[:12],
-            sequence, effective_content[:60],
-        )
-
         await self._send_event(self._make_event("new_message", {
             "id": self.message_id,
             "role": "assistant",
@@ -781,11 +791,6 @@ class PipelineStreamBridge:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sequence": sequence,
         }))
-
-        logger.info(
-            "[DIAG] send_new_message AFTER send: pipeline=%s msg=%s sequence=%d",
-            self.pipeline_id[:12], self.message_id[:12], sequence,
-        )
 
 
 # ---------------------------------------------------------------------------

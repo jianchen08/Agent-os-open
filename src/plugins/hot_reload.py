@@ -736,6 +736,12 @@ class PluginHotReloader:
             # Tool configs are read-only definitions; mark as loaded
             logger.debug("Tool config reload recorded (definition update)")
 
+        elif config_type == "model":
+            # BUG-FIX: 模型配置变更时清除所有 LLM 缓存，使配置实时生效
+            from config.models import invalidate_all_llm_caches
+            invalidate_all_llm_caches()
+            logger.info("Model config hot-reloaded: %s", file_path)
+
         else:
             logger.debug("No registry action for config type: %s", config_type)
 
@@ -753,6 +759,12 @@ class PluginHotReloader:
         elif record.config_type == "tool" and self._tool_registry:
             # Tool unregistration handled separately
             logger.debug("Tool config unload recorded: %s", record.config_path)
+
+        elif record.config_type == "model":
+            # BUG-FIX: 模型配置删除时同样清除所有 LLM 缓存
+            from config.models import invalidate_all_llm_caches
+            invalidate_all_llm_caches()
+            logger.info("Model config cache invalidated on delete: %s", record.config_path)
 
     # -- Validation --------------------------------------------------------
 

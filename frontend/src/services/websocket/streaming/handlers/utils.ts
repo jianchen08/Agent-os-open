@@ -94,10 +94,8 @@ export function allocateNextSequence(pipelineId: string, backendSequence?: numbe
  * 合并 startStreaming + setStreamingForTab + addMessage 三步操作，
  * 当 stream_start 丢失或 chunk 先于 start 到达时自动创建占位符。
  *
- * @param pipelineId - 管道 ID（唯一路由键）
- * @param messageId - 消息 ID
- * @param threadId - 可选的会话 ID，用于 streamingStore tab 配对
- * @param backendSequence - 可选的后端返回的真实 sequence 值
+ * 同时清理同管道中旧的 streaming 占位消息（引擎唤醒/reset_for_new_turn 后
+ * message_id 变化，旧占位消息残留会导致空气泡）。
  */
 export function ensureStreamingPlaceholder(
   pipelineId: string,
@@ -107,9 +105,30 @@ export function ensureStreamingPlaceholder(
 ): void {
   startPipelineStreaming(pipelineId, messageId, threadId)
 
+  const store = pipelineStore.getState()
+  const existing = store.getMessages(pipelineId)
+  for (const msg of existing) {
+    if (
+      msg.role === 'assistant'
+      && msg.status === 'streaming'
+      && msg.id !== messageId
+    ) {
+      console.warn(
+        `[MSG-LIFE] ★ 清理旧 streaming 占位: pipeline=%s oldMsgId=%s → completed (newMsgId=%s)`,
+        pipelineId.slice(0, 12), (msg.id as string).slice(0, 12), messageId.slice(0, 12),
+      )
+      store.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+    }
+  }
+
   const placeholderSeq = backendSequence ?? 0
 
-  pipelineStore.getState().addMessage(pipelineId, {
+  console.warn(
+    `[MSG-LIFE] ★ 创建 streaming 占位: pipeline=%s msgId=%s seq=%s role=assistant`,
+    pipelineId.slice(0, 12), messageId.slice(0, 12), placeholderSeq,
+  )
+
+  store.addMessage(pipelineId, {
     id: messageId,
     sessionId: threadId || '',
     role: 'assistant',

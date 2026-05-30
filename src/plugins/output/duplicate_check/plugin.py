@@ -26,6 +26,7 @@ State 命名空间：
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from typing import Any
 
@@ -360,7 +361,14 @@ class DuplicateCheckPlugin(IOutputPlugin):
         current_signatures = []
         for tc in tool_calls:
             name = tc.get("name", "")
-            args = tc.get("args", {})
+            args = tc.get("args") or tc.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
             sig = hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()[:8]  # noqa: S324
             current_signatures.append(sig)
 

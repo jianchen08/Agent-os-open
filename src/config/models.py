@@ -327,3 +327,32 @@ def invalidate_model_config_cache(config_dir: str | Path | None = None) -> None:
     """清除缓存，下次 get_model_config_loader 会重新加载。"""
     cache_key = str(config_dir or _DEFAULT_CONFIG_DIR)
     _loader_cache.pop(cache_key, None)
+
+
+def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
+    """BUG-FIX: 清除所有 LLM 相关缓存，使配置变更实时生效。
+
+    清除顺序：底层 → 顶层
+    1. ModelConfigLoader 实例缓存和模块级缓存
+    2. LLMConfigManager 单例
+    3. litellm.Router 和 Adapter 单例
+    4. LLMFactory 实例缓存和模块级单例
+    """
+    # 1. 清除 ModelConfigLoader 缓存
+    invalidate_model_config_cache(config_dir)
+
+    # 2. 清除 LLMConfigManager 单例（延迟导入避免循环依赖）
+    from config.llm_config import reset_llm_config
+    reset_llm_config()
+
+    # 3. 清除 Router 和 Adapter 单例（延迟导入）
+    from llm.router_factory import reset_router
+    reset_router()
+
+    # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
+    import llm.factory as factory_mod
+    if factory_mod._llm_factory_instance is not None:
+        factory_mod._llm_factory_instance.clear_cache()
+        factory_mod._llm_factory_instance = None
+
+    logger.info("所有 LLM 缓存已清除")

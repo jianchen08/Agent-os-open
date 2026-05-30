@@ -257,6 +257,7 @@ class LLMCore(ICorePlugin):
                     "input_tokens": response.usage.get("prompt_tokens", 0),
                     "output_tokens": response.usage.get("completion_tokens", 0),
                     "total_tokens": response.usage.get("total_tokens", 0),
+                    "cached_tokens": response.usage.get("cached_tokens", 0),
                 }
 
             logger.info(

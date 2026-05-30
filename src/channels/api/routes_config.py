@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, HTTPException
 
-from config.models import invalidate_model_config_cache
+from config.models import invalidate_all_llm_caches
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
         if key in body:
             data["defaults"][key] = body[key]
     _write_yaml(_LLM_YAML, data)
-    invalidate_model_config_cache()
+    invalidate_all_llm_caches()
     logger.info("LLM 默认配置已更新: %s", body)
     return {
         "chat": data["defaults"].get("chat", ""),
@@ -146,7 +146,7 @@ def add_model(body: dict[str, dict[str, Any]]) -> dict[str, Any]:
     for model_id, model_conf in body.items():
         models[model_id] = model_conf
     _write_yaml(_LLM_YAML, data)
-    invalidate_model_config_cache()
+    invalidate_all_llm_caches()
     logger.info("添加模型: %s", list(body.keys()))
     return {"models": models}
 
@@ -159,7 +159,7 @@ def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
     models[model_id].update(body)
     _write_yaml(_LLM_YAML, data)
-    invalidate_model_config_cache()
+    invalidate_all_llm_caches()
     logger.info("更新模型配置: %s", model_id)
     return {"models": models}
 
@@ -172,7 +172,7 @@ def delete_model(model_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
     del models[model_id]
     _write_yaml(_LLM_YAML, data)
-    invalidate_model_config_cache()
+    invalidate_all_llm_caches()
     logger.info("删除模型: %s", model_id)
     return {"models": models}
 
@@ -185,7 +185,7 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
         providers[provider_id] = {}
     providers[provider_id].update(body)
     _write_yaml(_LLM_YAML, data)
-    invalidate_model_config_cache()
+    invalidate_all_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
     return {"providers": providers}
 
