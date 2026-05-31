@@ -20,6 +20,12 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
     useInteractionHandler(sessionId)
   const dismissInteraction = useInteractionStore((s) => s.dismissInteraction)
 
+  // BUG-FIX-fix_20260531_interaction_duplicate:
+  // 安全措施：过滤掉 notification 模式的交互，确保通知模式不在聊天区域的 InteractionCard 中显示
+  const nonNotificationInteractions = pendingInteractions.filter(
+    (i) => i.mode !== 'notification',
+  )
+
   const [submittingId, setSubmittingId] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
@@ -67,18 +73,18 @@ export function InteractionPanel({ sessionId }: InteractionPanelProps) {
   )
 
   useEffect(() => {
-    if (pendingInteractions.length > 0 && panelRef.current) {
+    if (nonNotificationInteractions.length > 0 && panelRef.current) {
       panelRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' })
     }
-  }, [pendingInteractions.length])
+  }, [nonNotificationInteractions.length])
 
-  if (pendingInteractions.length === 0) {
+  if (nonNotificationInteractions.length === 0) {
     return null
   }
 
   return (
     <div ref={panelRef} className="shrink-0 animate-in fade-in slide-in-from-bottom-2 duration-300">
-      {pendingInteractions.map((interaction) => (
+      {nonNotificationInteractions.map((interaction) => (
         <InteractionCard
           key={interaction.requestId}
           interaction={interaction}

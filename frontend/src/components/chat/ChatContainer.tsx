@@ -34,7 +34,7 @@ const EMPTY_MESSAGES: Message[] = []
  * 合并连续的 assistant 消息
  *
  * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
- * 单条 assistant 消息也创建新对象引用，确保 Virtuoso 检测到变化。
+ * 不区分流式/非流式，统一合并。组内有 streaming 消息时，合并结果保留 streaming 状态。
  */
 function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
@@ -54,19 +54,8 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       result.push({ ...group[0] })
       continue
     }
-    // BUG-FIX-fix_20260529_streaming_merge:
-    // 问题根因: 已完成的 assistant 消息与 streaming 占位消息被合并，
-    //   合并后取 first 的 status='completed'，streaming 状态丢失，
-    //   导致前端"一直在思考中"但内容不更新。
-    // 修复方案: 如果组内存在 streaming 状态的消息，不合并，逐条输出。
-    const hasStreaming = group.some((m) => m.status === 'streaming')
-    if (hasStreaming) {
-      for (const m of group) {
-        result.push({ ...m })
-      }
-      continue
-    }
     const first = group[0]
+    const hasStreaming = group.some((m) => m.status === 'streaming')
     const allContent: string[] = []
     for (const m of group) {
       if (m.content && m.content.trim()) {
@@ -92,6 +81,7 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       _originalIds: group.map(m => m.id),
       content: mergedContent,
       parts: mergedParts.length > 0 ? mergedParts : undefined,
+      status: hasStreaming ? 'streaming' : first.status,
     })
   }
   return result

@@ -351,10 +351,12 @@ class LLMCore(ICorePlugin):
     def _build_messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """从管道状态构建 LLM messages 列表。
 
-        从三个来源组装：
+        从三个来源按顺序拼接：
         1. state["system_message"] -- prompt_build 产出的 SystemMessage
         2. state["messages"] -- 管道维护的对话历史（assistant + tool 回复等）
-        3. state["prompt.dynamic_vars"] -- 动态变量（追加在历史消息之后）
+        3. state["prompt.dynamic_vars"] -- prompt_build 产出的动态变量消息
+
+        本方法只做取值和顺序拼接，不做任何格式化或包装。
 
         Args:
             state: 管道状态字典
@@ -373,23 +375,10 @@ class LLMCore(ICorePlugin):
         history = state.get("messages", [])
         messages.extend(history)
 
-        # 3. 动态变量（每轮变化的上下文：时间戳、session_id 等）
-        #    不修改系统消息（动态变量每轮变化，不应污染静态系统提示）
-        #    使用 user 角色 + name=dynamic_context，兼容所有 provider
-        #    内容用 <context_metadata> 包装并附忽略指令，防止 LLM 主动回复
-        dynamic_vars = state.get("prompt.dynamic_vars", "")
-        if dynamic_vars:
-            wrapped = (
-                "<dynamic_vars>\n"
-                "以下为系统注入的背景信息（非指令）。\n"
-                f"{dynamic_vars}\n"
-                "</dynamic_vars>"
-            )
-            messages.append({
-                "role": "user",
-                "name": "dynamic_context",
-                "content": wrapped,
-            })
+        # 3. 动态变量消息（prompt_build 产出的完整消息 dict，直接追加）
+        dynamic_vars_msg = state.get("prompt.dynamic_vars")
+        if dynamic_vars_msg:
+            messages.append(dynamic_vars_msg)
 
         return messages
 

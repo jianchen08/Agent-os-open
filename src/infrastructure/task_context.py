@@ -49,6 +49,7 @@ class TaskExecutionContext:
         self.resume_requested: bool = False
         self.idle_remind_count: int = 0
         self.idle_timer_registered: bool = False
+        self.idle_timer_paused_for_children: bool = False
 
         self.workspace: str = ""
         self.ws_meta: dict[str, Any] = {}
@@ -63,6 +64,7 @@ class TaskExecutionContext:
         """统一清理：重置执行状态 + 取消计时器。"""
         self.active = False
         self.idle_remind_count = 0
+        self.idle_timer_paused_for_children = False
         self.suspended_engine = None
         self.resume_requested = False
         if timer_manager and self.idle_timer_registered:

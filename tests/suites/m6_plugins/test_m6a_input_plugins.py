@@ -180,7 +180,7 @@ class TestPromptBuildPlugin:
         result = await plugin.execute(ctx)
 
         dynamic = result.state_updates.get("prompt.dynamic_vars", "")
-        assert "日期" in dynamic or "时间" in dynamic
+        assert "日期" in dynamic["content"] or "时间" in dynamic["content"]
 
     @pytest.mark.asyncio
     async def test_tool_descriptions_in_system_message(self, ctx, base_state):

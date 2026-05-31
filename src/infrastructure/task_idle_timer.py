@@ -42,7 +42,7 @@ class TaskIdleTimerMixin:
 
         BUG-FIX-fix_20260522_idle_suspended_children:
         挂起管道等待子任务时，检查子任务是否仍在活跃运行。
-        活跃子任务存在时不计入 remind 次数，避免编排 Agent 被误杀。
+        活跃子任务存在时暂停 idle 计时器（不重建），等引擎循环自动重置。
 
         Args:
             task_id: 超时的任务ID
@@ -131,21 +131,12 @@ class TaskIdleTimerMixin:
 
             if has_active_children:
                 logger.info(
-                    "TaskWorker: idle 超时但有挂起管道且子任务仍在运行，"
-                    "重建 timer 继续等待（不计入提醒次数）: task_id=%s",
+                    "TaskWorker: idle 超时但有活跃子任务，"
+                    "暂停 idle 计时器（等子任务完成后由引擎循环重置）: task_id=%s",
                     task_id,
                 )
-                timer_manager = self._services.get("timer_manager")
-                if timer_manager:
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
-                            self._recreate_idle_timer_async(
-                                task_id, timer_manager,
-                            ),
-                        )
-                    except RuntimeError:
-                        pass
+                ctx.idle_timer_paused_for_children = True
+                self._cancel_idle_timer_async(task_id)
                 return
 
             if remind_count < idle_remind_limit:
@@ -447,6 +438,13 @@ class TaskIdleTimerMixin:
         ctx = self._contexts.get(task_id)
         if not ctx:
             return
+
+        if ctx.idle_timer_paused_for_children:
+            ctx.idle_timer_paused_for_children = False
+            logger.debug(
+                "TaskWorker: idle 计时器从子任务暂停中恢复: task_id=%s",
+                task_id,
+            )
 
         try:
             await timer_manager.cancel_timer(task_id)

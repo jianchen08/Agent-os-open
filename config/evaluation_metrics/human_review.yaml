@@ -77,8 +77,8 @@ expect:
       pass_message: "审核通过"
       fail_message: "审核未通过"
     - field: "data.selected_option"
-      operator: "equals"
-      value: "approve"
+      operator: "in"
+      value: ["approve", "通过"]
       logic: "and"
       pass_message: "用户选择通过"
       fail_message: "用户选择不通过"

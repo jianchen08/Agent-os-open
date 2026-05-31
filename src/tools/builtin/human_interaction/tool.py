@@ -24,6 +24,8 @@ from human_interaction.service import (
 )
 from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
+from tools.builtin.shared.formatters import format_size
+from tools.builtin.workspace_aware import WorkspaceAwareMixin
 from tools.types import (
     Tool,
     ToolCategory,
@@ -35,8 +37,11 @@ from tools.types import (
 
 logger = logging.getLogger(__name__)
 
+MAX_FILE_PATHS = 10
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 
-class HumanInteractionTool(BuiltinTool):
+
+class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
     """
     人类交互工具
 
@@ -118,7 +123,7 @@ class HumanInteractionTool(BuiltinTool):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过2MB，最多10个文件。",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -129,11 +134,14 @@ class HumanInteractionTool(BuiltinTool):
             tags=["interaction", "human", "approval", "conversation"],
             injected_params=[
                 "pipeline_id",
+                "workspace",
             ],
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行人类交互工具"""
+        self._init_workspace(inputs)
+
         # DIAG: check if pipeline task is already being cancelled
         _current_task = asyncio.current_task()
         if _current_task:
@@ -174,6 +182,57 @@ class HumanInteractionTool(BuiltinTool):
             val = 1
         return f"L{val}"
 
+    def _validate_file_paths(self, inputs: dict[str, Any]) -> ToolExecutionResult | None:
+        """校验 file_paths 参数的合法性。
+
+        校验规则：
+        - file_paths 为 None 或空列表 → 合法，直接返回 None
+        - file_paths 超过 MAX_FILE_PATHS 个 → 返回错误
+        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制 → 收集错误
+
+        Args:
+            inputs: 工具执行时接收的输入参数字典
+
+        Returns:
+            None 表示校验通过，ToolExecutionResult 表示校验失败
+        """
+        file_paths = inputs.get("file_paths")
+
+        if file_paths is None or (isinstance(file_paths, list) and len(file_paths) == 0):
+            return None
+
+        if len(file_paths) > MAX_FILE_PATHS:
+            return create_failure_result(
+                error=f"文件路径数量超过限制 ({len(file_paths)} > {MAX_FILE_PATHS})",
+                error_code="INVALID_FILE_PATHS",
+            )
+
+        errors: list[str] = []
+        for path_str in file_paths:
+            path = self.resolve_path(path_str)
+
+            if not path.exists():
+                errors.append(f"文件不存在: {path_str}")
+                continue
+
+            if not path.is_file():
+                errors.append(f"路径不是文件: {path_str}")
+                continue
+
+            file_size = path.stat().st_size
+            if file_size > MAX_FILE_SIZE_BYTES:
+                errors.append(
+                    f"文件过大 ({format_size(file_size)})，超过限制 ({format_size(MAX_FILE_SIZE_BYTES)}): {path_str}"
+                )
+
+        if errors:
+            return create_failure_result(
+                error="; ".join(errors),
+                error_code="INVALID_FILE_PATHS",
+            )
+
+        return None
+
     async def _execute_choice_mode(
         self,
         inputs: dict[str, Any],
@@ -181,6 +240,11 @@ class HumanInteractionTool(BuiltinTool):
         pipeline_id: str,
     ) -> ToolExecutionResult:
         """执行选择模式"""
+        # 校验 file_paths 参数
+        validation_error = self._validate_file_paths(inputs)
+        if validation_error is not None:
+            return validation_error
+
         title = inputs.get("title", "")
         description = inputs.get("description", "")
         options = inputs.get("options")
@@ -316,6 +380,11 @@ class HumanInteractionTool(BuiltinTool):
         pipeline_id: str,
     ) -> ToolExecutionResult:
         """执行对话模式"""
+        # 校验 file_paths 参数
+        validation_error = self._validate_file_paths(inputs)
+        if validation_error is not None:
+            return validation_error
+
         title = inputs.get("title", "")
         description = inputs.get("description", "")
         initial_message = inputs.get("initial_message")

@@ -63,6 +63,9 @@ injected_params:
   - name: "pipeline_id"
     description: "管道ID"
     required: true
+  - name: "workspace"
+    description: "工作空间路径"
+    required: false
 
 tags:
   - "interaction"

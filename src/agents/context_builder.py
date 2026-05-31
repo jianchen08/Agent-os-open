@@ -9,6 +9,7 @@
 支持的变量类型：
 - rules: 从配置文件读取规则内容
 - path: 从指定路径读取文件内容
+- folder: 从指定文件夹路径自动加载所有文件内容（可通过 extensions 过滤）
 - timestamp: 动态生成当前时间戳
 - session: 动态生成会话信息
 - agent: 动态生成当前 Agent 信息
@@ -81,6 +82,58 @@ class ContextBuilder:
             logger.warning("读取文件失败 %s: %s", full_path, e)
         return ""
 
+    def _resolve_folder_content(
+        self,
+        folder_path: str,
+        extensions: list[str] | None = None,
+    ) -> str:
+        """读取文件夹中所有文件的内容，合并为一个字符串。
+
+        遍历文件夹下的所有文件（非递归），按文件名排序，
+        将每个文件的内容以 ``--- filename ---`` 分隔拼接。
+        超过大小限制的文件会被跳过。
+
+        Args:
+            folder_path: 相对于 base_path 的文件夹路径。
+            extensions: 文件扩展名过滤列表，如 [".py", ".md"]。
+                        为空或 None 则不过滤。
+
+        Returns:
+            合并后的内容字符串，读取失败返回空字符串。
+        """
+        full_path = self._base_path / folder_path
+        if not full_path.exists() or not full_path.is_dir():
+            logger.warning("文件夹不存在或不是目录: %s", full_path)
+            return ""
+
+        ext_set = set(extensions) if extensions else None
+        parts: list[str] = []
+
+        try:
+            entries = sorted(full_path.iterdir(), key=lambda p: p.name)
+        except OSError as e:
+            logger.warning("遍历文件夹失败 %s: %s", full_path, e)
+            return ""
+
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if ext_set and entry.suffix.lower() not in ext_set:
+                continue
+            try:
+                if entry.stat().st_size > self._MAX_CONTEXT_FILE_SIZE:
+                    logger.warning(
+                        "上下文文件过大，跳过: %s (%d bytes)",
+                        entry, entry.stat().st_size,
+                    )
+                    continue
+                content = entry.read_text(encoding="utf-8")
+                parts.append(f"--- {entry.name} ---\n{content}")
+            except OSError as e:
+                logger.warning("读取文件失败 %s: %s", entry, e)
+
+        return "\n\n".join(parts)
+
     def _build_item_value(self, item: ContextVarItem) -> dict[str, Any]:
         """构建单个上下文变量项的值。
 
@@ -110,6 +163,14 @@ class ContextBuilder:
             result["type"] = "path"
             result["path"] = item.path
             result["content"] = content
+        elif var_type == "folder":
+            # 文件夹内容读取 — 自动加载目录下所有文件
+            content = self._resolve_folder_content(item.path, item.extensions or None)
+            result["type"] = "folder"
+            result["path"] = item.path
+            result["content"] = content
+            if item.extensions:
+                result["extensions"] = item.extensions
         elif var_type == "timestamp":
             # 动态时间戳
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -221,6 +282,14 @@ class ContextBuilder:
     async def _resolve_path_content_async(self, file_path: str) -> str:
         """异步版本的文件内容读取。"""
         return await asyncio.to_thread(self._resolve_path_content, file_path)
+
+    async def _resolve_folder_content_async(
+        self, folder_path: str, extensions: list[str] | None = None
+    ) -> str:
+        """异步版本的文件夹内容读取。"""
+        return await asyncio.to_thread(
+            self._resolve_folder_content, folder_path, extensions
+        )
 
     async def build_static_context_async(self, config: AgentConfig) -> dict[str, Any]:
         """异步构建静态上下文，文件读取卸载到线程池。"""

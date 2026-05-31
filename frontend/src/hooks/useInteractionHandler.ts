@@ -23,6 +23,9 @@ import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
+/** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
+let _isSubscribed = false
+
 /**
  * 从 WebSocket interaction_request 事件数据解析为 PendingInteraction
  * 后端传递 file_paths（文件路径列表），前端通过 file-content API 拉取实际内容
@@ -129,7 +132,16 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
   }, [pendingInteractions, dismissInteraction])
 
+  // BUG-FIX-fix_20260531_interaction_duplicate:
+  // 问题根因: useInteractionHandler 被 InteractionPanel 和 GlobalInteractionOverlay
+  //   两个组件同时调用，导致 WebSocket 事件处理器注册两次，每个事件触发两次回调。
+  // 修复方案: 使用模块级标志位 _isSubscribed 确保全局只注册一次。
+  // 影响范围: WebSocket 交互事件订阅
+  // 修复日期: 2026-05-31
   useEffect(() => {
+    if (_isSubscribed) return
+    _isSubscribed = true
+
     const requestToNotificationMap = new Map<string, string>()
 
     const handleInteractionRequest = async (data: Record<string, unknown>) => {
@@ -146,18 +158,31 @@ export function useInteractionHandler(sessionId: string | undefined) {
       )
       if (existing) return
 
-      addInteraction(parsed)
-      playNotificationSound().catch(() => {})
+      // BUG-FIX-fix_20260531_interaction_duplicate:
+      // 问题根因: 所有交互模式同时写入 interactionStore 和 notificationStore，
+      //   导致 notification 模式在聊天区域和通知中心重复显示，
+      //   choice/conversation 模式在通知中心产生冗余通知。
+      // 修复方案: 按交互模式分流 Store 写入：
+      //   - notification 模式：只写入 notificationStore（纯通知，不需要用户交互）
+      //   - choice/conversation 模式：只写入 interactionStore（交互卡片已在聊天区域展示）
+      // 影响范围: 人类交互请求的展示逻辑
+      // 修复日期: 2026-05-31
+      if (parsed.mode === 'notification') {
+        // notification 模式：只写入通知中心，不写入交互 Store
+        const notifId = useNotificationStore.getState().addNotification({
+          title: parsed.title || '人类交互请求',
+          message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
+          priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
+          category: 'alert',
+          isBlocking: false,
+        })
+        requestToNotificationMap.set(parsed.requestId, notifId)
+      } else {
+        // choice/conversation 模式：只写入交互 Store，不写入通知中心
+        addInteraction(parsed)
+      }
 
-      const notifId = useNotificationStore.getState().addNotification({
-        title: parsed.title || '人类交互请求',
-        message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
-        priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
-        category: 'alert',
-        isBlocking: false,
-        sourceId: parsed.requestId,
-      })
-      requestToNotificationMap.set(parsed.requestId, notifId)
+      playNotificationSound().catch(() => {})
 
       if (parsed.fileContents && Object.keys(parsed.fileContents).length > 0) {
         const tabId = `review-${parsed.requestId}`
@@ -197,7 +222,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
 
     const handleInteractionCancelled = (data: Record<string, unknown>) => {
-      const requestId = data.request_id as string
+      const inner = (data.data as Record<string, unknown>) || data
+      const requestId = inner.request_id as string
       if (requestId) {
         dismissInteraction(requestId)
         removeNotificationForRequest(requestId)
@@ -205,12 +231,21 @@ export function useInteractionHandler(sessionId: string | undefined) {
     }
 
     const handleInteractionTimeout = (data: Record<string, unknown>) => {
-      const requestId = data.request_id as string
+      const inner = (data.data as Record<string, unknown>) || data
+      const requestId = inner.request_id as string
       if (requestId) {
         dismissInteraction(requestId)
         removeNotificationForRequest(requestId)
       }
     }
+
+    const handleWsStatusChange = (data: Record<string, unknown>) => {
+      if ((data as any).status === 'disconnected') {
+        _isSubscribed = false
+      }
+    }
+
+    globalWS.subscribe('_status', handleWsStatusChange as any)
 
     globalWS.subscribe(
       WS_SERVER_EVENTS.INTERACTION_REQUEST,
@@ -226,28 +261,13 @@ export function useInteractionHandler(sessionId: string | undefined) {
     )
 
     return () => {
-      globalWS.unsubscribe(
-        WS_SERVER_EVENTS.INTERACTION_REQUEST,
-        handleInteractionRequest as any,
-      )
-      globalWS.unsubscribe(
-        'interaction_cancelled',
-        handleInteractionCancelled as any,
-      )
-      globalWS.unsubscribe(
-        'interaction_timeout',
-        handleInteractionTimeout as any,
-      )
+      globalWS.unsubscribe('_status', handleWsStatusChange as any)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest as any)
+      globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled as any)
+      globalWS.unsubscribe('interaction_timeout', handleInteractionTimeout as any)
+      _isSubscribed = false
     }
   }, [addInteraction, dismissInteraction])
-
-  const removeNotificationBySource = (sourceId: string) => {
-    const store = useNotificationStore.getState()
-    const notif = store.notifications.find((n) => (n as any).sourceId === sourceId)
-    if (notif) {
-      store.removeNotification(notif.id)
-    }
-  }
 
   const respondChoice = useCallback(
     async (requestId: string, selectedOption?: string, feedback?: string) => {
@@ -263,7 +283,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
         feedback,
       })
       markResponded(requestId)
-      removeNotificationBySource(requestId)
     },
     [markResponded],
   )
@@ -281,7 +300,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
         feedback,
       })
       markResponded(requestId)
-      removeNotificationBySource(requestId)
     },
     [markResponded],
   )
@@ -291,15 +309,12 @@ export function useInteractionHandler(sessionId: string | undefined) {
       const currentSid = useSessionStore.getState().activeSessionId
       if (!currentSid) return
 
-      // 发送 interaction_response(type=approved) 解除后端阻塞，
-      // 后端返回 user_arrived → 管道走 wait 路由挂起 → 等用户发消息再唤醒。
       await globalWS.sendInteractionResponse(currentSid, requestId, {
         response_type: 'approved',
         feedback: '用户已进入对话标签页',
       })
 
       markEntered(requestId)
-      removeNotificationBySource(requestId)
 
       if (!threadId) return
 

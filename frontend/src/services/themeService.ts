@@ -367,6 +367,7 @@ export function compileThemeVariables(config: ThemeConfig): string {
   vars.push(`--card-foreground: ${colorToHsl(c.text.primary)}`)
   vars.push(`--popover: ${colorToHsl(c.background.elevated)}`)
   vars.push(`--popover-foreground: ${colorToHsl(c.text.primary)}`)
+  vars.push(`--panel-solid: ${colorToHslSolid(c.background.elevated)}`)
   vars.push(`--primary: ${colorToHsl(c.primary)}`)
   vars.push(`--primary-foreground: ${colorToHsl(c.bubble.user_text)}`)
   vars.push(`--secondary: ${colorToHsl(c.secondary)}`)
@@ -611,6 +612,31 @@ function colorToHsl(color: string): string {
     const b = parseInt(rgbaMatch[3])
     const a = rgbaMatch[4] !== undefined ? parseFloat(rgbaMatch[4]) : undefined
     return rgbToHsl(r, g, b, a)
+  }
+
+  return color
+}
+
+/**
+ * 将颜色转换为不透明的 HSL 原始格式
+ *
+ * 与 colorToHsl 相同，但强制忽略 alpha 通道，确保输出为完全不透明
+ *
+ * @param color - 颜色值字符串
+ * @returns 不透明的 HSL 格式字符串
+ */
+function colorToHslSolid(color: string): string {
+  if (color.startsWith('#')) {
+    const rgb = hexToRgb(color)
+    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
+  }
+
+  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
+  if (rgbaMatch) {
+    const r = parseInt(rgbaMatch[1])
+    const g = parseInt(rgbaMatch[2])
+    const b = parseInt(rgbaMatch[3])
+    return rgbToHsl(r, g, b)
   }
 
   return color

@@ -5,7 +5,7 @@
 
 产出：
     - state["system_message"]: 一条 SystemMessage（不含历史消息和动态变量）
-    - state["prompt.dynamic_vars"]: 动态变量文本（由 LLMCore 追加在历史消息之后）
+    - state["prompt.dynamic_vars"]: 动态变量消息 dict（LLMCore 直接追加在历史消息之后）
 
 构建顺序（与旧代码 context_window_config.yaml 的 layer_order 一致）：
     1. system_prompt      <- state["context.system_prompt"]
@@ -144,14 +144,14 @@ class PromptBuildPlugin(IInputPlugin):
         # 产出 SystemMessage
         updates["system_message"] = {"role": "system", "content": system_content}
 
-        # 单独产出动态变量（由 LLMCore 追加在历史消息之后）
-        dynamic_vars = await self._build_dynamic_vars(ctx)
-        if dynamic_vars:
-            updates["prompt.dynamic_vars"] = dynamic_vars
+        # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
+        dynamic_vars_msg = await self._build_dynamic_vars(ctx)
+        if dynamic_vars_msg:
+            updates["prompt.dynamic_vars"] = dynamic_vars_msg
 
         logger.debug(
             "[%s] SystemMessage built | content_len=%d | dynamic_vars=%s",
-            self.name, len(system_content), bool(dynamic_vars),
+            self.name, len(system_content), bool(dynamic_vars_msg),
         )
 
         return updates
@@ -725,11 +725,11 @@ class PromptBuildPlugin(IInputPlugin):
             return 0
         return max(1, len(text) // 2)
 
-    async def _build_dynamic_vars(self, ctx: PluginContext) -> str:
-        """构建动态变量内容。
+    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:
+        """构建动态变量消息。
 
-        动态变量由 LLMCore 追加到消息列表末尾（在历史消息之后），
-        不拼入系统提示词。包含日期、时间、Agent 名称、会话 ID 等。
+        产出完整的消息 dict（含 role/name/content），
+        LLMCore 直接追加到消息列表末尾，无需二次包装。
 
         优先从 state["context.dynamic_vars"] 读取 Agent YAML 配置的
         dynamic_vars.items，回退到硬编码的默认动态变量。
@@ -738,7 +738,7 @@ class PromptBuildPlugin(IInputPlugin):
             ctx: 插件执行上下文
 
         Returns:
-            动态变量文本，或空字符串
+            动态变量消息 dict，或 None（无动态变量时）
         """
         now = datetime.now(UTC)
         parts: list[str] = []
@@ -787,4 +787,17 @@ class PromptBuildPlugin(IInputPlugin):
             if session_id:
                 parts.append(f"- 会话: {session_id}")
 
-        return "\n".join(parts)
+        if not parts:
+            return None
+
+        content = (
+            "<dynamic_vars>\n"
+            "以下为系统注入的背景信息和思考提示。\n"
+            f"{chr(10).join(parts)}\n"
+            "</dynamic_vars>"
+        )
+        return {
+            "role": "user",
+            "name": "dynamic_context",
+            "content": content,
+        }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -171,3 +172,178 @@ class TestToolNotificationFilePathsValidation:
         assert result.success is False
         assert result.error_code == "INVALID_PARAMS"
         assert "file_paths" in result.error
+
+
+# ---------------------------------------------------------------------------
+#  TestToolFilePathsValidation — 测试 Tool 层 file_paths 校验逻辑
+# ---------------------------------------------------------------------------
+
+
+class TestToolFilePathsValidation:
+    """测试 choice/conversation 模式下 file_paths 参数的校验逻辑。"""
+
+    def setup_method(self):
+        """每个测试用例前创建工具实例和临时目录。"""
+        self.tool = HumanInteractionTool(pipeline_id="pipe-001")
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def _create_file(self, name: str, size: int = 100) -> str:
+        """在临时目录中创建指定大小的文件并返回路径。"""
+        file_path = Path(self.tmp_dir) / name
+        file_path.write_bytes(b"x" * size)
+        return str(file_path)
+
+    def _make_service_mock(self) -> AsyncMock:
+        """创建 service mock 对象。"""
+        service = AsyncMock()
+        service.create_choice_request = AsyncMock(return_value="req-mock")
+        service.create_conversation_request = AsyncMock(return_value="req-mock")
+        service.wait_for_choice = AsyncMock(return_value={
+            "response_type": "approved",
+            "selected_option": "yes",
+            "feedback": "",
+        })
+        return service
+
+    @pytest.mark.asyncio
+    async def test_file_paths_not_exist_returns_error(self):
+        """file_paths 中文件不存在时返回错误。"""
+        service = self._make_service_mock()
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": ["/nonexistent/file.md"],
+            })
+
+        assert result.success is False
+        assert result.error_code == "INVALID_FILE_PATHS"
+        assert "文件不存在" in result.error
+
+    @pytest.mark.asyncio
+    async def test_file_paths_is_directory_returns_error(self):
+        """file_paths 中路径是目录时返回错误。"""
+        service = self._make_service_mock()
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": [self.tmp_dir],
+            })
+
+        assert result.success is False
+        assert result.error_code == "INVALID_FILE_PATHS"
+        assert "路径不是文件" in result.error
+
+    @pytest.mark.asyncio
+    async def test_file_paths_exceeds_limit_returns_error(self):
+        """file_paths 超过 10 个时返回错误。"""
+        service = self._make_service_mock()
+        # 创建 11 个文件路径（不需要真实文件，因为数量校验先于文件校验）
+        paths = [f"/path/to/file_{i}.txt" for i in range(11)]
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": paths,
+            })
+
+        assert result.success is False
+        assert result.error_code == "INVALID_FILE_PATHS"
+        assert "文件路径数量超过限制" in result.error
+
+    @pytest.mark.asyncio
+    async def test_file_paths_file_too_large_returns_error(self):
+        """file_paths 中文件超过 10MB 时返回错误。"""
+        service = self._make_service_mock()
+        # 创建一个超过 10MB 的文件
+        large_file = self._create_file("large.bin", size=10 * 1024 * 1024 + 1)
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": [large_file],
+            })
+
+        assert result.success is False
+        assert result.error_code == "INVALID_FILE_PATHS"
+        assert "文件过大" in result.error
+
+    @pytest.mark.asyncio
+    async def test_file_paths_none_passes(self):
+        """file_paths 为 None 时正常通过。"""
+        service = self._make_service_mock()
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+            })
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_file_paths_empty_list_passes(self):
+        """file_paths 为空列表时正常通过。"""
+        service = self._make_service_mock()
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": [],
+            })
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_file_paths_all_valid_passes(self):
+        """file_paths 全部合法时正常通过。"""
+        service = self._make_service_mock()
+        file1 = self._create_file("valid1.txt", size=100)
+        file2 = self._create_file("valid2.txt", size=200)
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "choice",
+                "title": "测试",
+                "file_paths": [file1, file2],
+            })
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_conversation_mode_file_paths_not_exist_returns_error(self):
+        """conversation 模式下 file_paths 中文件不存在时返回错误。"""
+        service = self._make_service_mock()
+        with patch(
+            "tools.builtin.human_interaction.tool.get_human_interaction_service",
+            return_value=service,
+        ):
+            result = await self.tool.execute({
+                "mode": "conversation",
+                "title": "测试",
+                "file_paths": ["/nonexistent/file.md"],
+            })
+
+        assert result.success is False
+        assert result.error_code == "INVALID_FILE_PATHS"
+        assert "文件不存在" in result.error

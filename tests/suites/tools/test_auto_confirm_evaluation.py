@@ -209,8 +209,8 @@ class TestHumanReviewExpectEvaluation:
                 ExpectCondition(field="success", operator="is_true"),
                 ExpectCondition(
                     field="data.selected_option",
-                    operator="equals",
-                    value="approve",
+                    operator="in",
+                    value=["approve", "通过"],
                 ),
             ],
             logic="and",
@@ -239,6 +239,27 @@ class TestHumanReviewExpectEvaluation:
 
         assert result.passed is True
         assert result.message == "审核通过"
+
+    def test_label_option_passes(self):
+        """selected_option='通过'（前端传 label）时评估通过。"""
+        evaluator = ExpectEvaluator()
+        expect = self._make_human_review_expect()
+
+        result = evaluator.evaluate(
+            metric_id="human_review",
+            expect=expect,
+            output={
+                "success": True,
+                "data": {
+                    "status": "completed",
+                    "response_type": "answered",
+                    "selected_option": "通过",
+                    "feedback": "用户确认通过",
+                },
+            },
+        )
+
+        assert result.passed is True
 
     def test_approved_option_fails(self):
         """selected_option='approved'（旧 Bug 值）时评估失败。"""

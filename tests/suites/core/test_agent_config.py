@@ -846,6 +846,164 @@ class TestContextBuilder:
         assert item.routes["coding"] == "你是专业的编程助手"
         assert item.routes["_default"] == "你是全能助手"
 
+    def test_build_static_context_folder(self) -> None:
+        """测试构建 folder 类型的静态上下文 — 自动加载文件夹内容。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 创建子目录并放入多个文件
+            docs_dir = Path(tmpdir) / "my_docs"
+            docs_dir.mkdir()
+            (docs_dir / "guide.md").write_text("# 指南\n这是使用指南", encoding="utf-8")
+            (docs_dir / "rules.txt").write_text("规则1\n规则2", encoding="utf-8")
+            (docs_dir / "ignored.json").write_text('{"skip": true}', encoding="utf-8")
+
+            config = self._make_config_with_context(
+                static_items=[
+                    ContextVarItem(name="文档目录", type="folder", path="my_docs"),
+                ],
+            )
+            builder = ContextBuilder(base_path=tmpdir)
+            ctx = builder.build_static_context(config)
+            folder_item = ctx["items"][0]
+            assert folder_item["type"] == "folder"
+            assert folder_item["name"] == "文档目录"
+            # 应包含所有文件内容
+            assert "指南" in folder_item["content"]
+            assert "规则1" in folder_item["content"]
+            assert "skip" in folder_item["content"]
+
+    def test_build_static_context_folder_with_extension_filter(self) -> None:
+        """测试 folder 类型使用 extensions 过滤文件扩展名。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docs_dir = Path(tmpdir) / "my_docs"
+            docs_dir.mkdir()
+            (docs_dir / "guide.md").write_text("# 指南", encoding="utf-8")
+            (docs_dir / "rules.txt").write_text("规则", encoding="utf-8")
+            (docs_dir / "data.json").write_text('{"key": "val"}', encoding="utf-8")
+
+            config = self._make_config_with_context(
+                static_items=[
+                    ContextVarItem(
+                        name="文档目录",
+                        type="folder",
+                        path="my_docs",
+                        extensions=[".md"],
+                    ),
+                ],
+            )
+            builder = ContextBuilder(base_path=tmpdir)
+            ctx = builder.build_static_context(config)
+            folder_item = ctx["items"][0]
+            assert folder_item["type"] == "folder"
+            assert "指南" in folder_item["content"]
+            # .txt 和 .json 文件应被过滤掉
+            assert "规则" not in folder_item["content"]
+            assert '"key"' not in folder_item["content"]
+            assert folder_item["extensions"] == [".md"]
+
+    def test_build_static_context_folder_not_found(self) -> None:
+        """测试 folder 类型文件夹不存在时返回空内容。"""
+        config = self._make_config_with_context(
+            static_items=[
+                ContextVarItem(name="不存在", type="folder", path="/nonexistent/folder"),
+            ],
+        )
+        builder = ContextBuilder()
+        ctx = builder.build_static_context(config)
+        folder_item = ctx["items"][0]
+        assert folder_item["content"] == ""
+
+    def test_build_static_context_folder_empty_dir(self) -> None:
+        """测试 folder 类型文件夹为空时返回空内容。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config_with_context(
+                static_items=[
+                    ContextVarItem(name="空目录", type="folder", path="empty"),
+                ],
+            )
+            builder = ContextBuilder(base_path=tmpdir)
+            ctx = builder.build_static_context(config)
+            folder_item = ctx["items"][0]
+            assert folder_item["content"] == ""
+
+    def test_build_dynamic_context_folder(self) -> None:
+        """测试构建 folder 类型的动态上下文。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir) / "logs"
+            logs_dir.mkdir()
+            (logs_dir / "status.txt").write_text("运行中", encoding="utf-8")
+
+            config = self._make_config_with_context(
+                dynamic_items=[
+                    ContextVarItem(name="状态文件", type="folder", path="logs"),
+                ],
+            )
+            builder = ContextBuilder(base_path=tmpdir)
+            ctx = builder.build_dynamic_context(config)
+            folder_item = ctx["items"][0]
+            assert folder_item["type"] == "folder"
+            assert "运行中" in folder_item["content"]
+
+    def test_to_state_includes_folder_extensions(self) -> None:
+        """测试 to_state() 包含 folder 类型的 extensions 字段。"""
+        config = AgentConfig(
+            config_id="folder_state_test",
+            static_vars=ContextConfig(
+                enabled=True,
+                items=[
+                    ContextVarItem(
+                        name="代码目录",
+                        type="folder",
+                        path="src/",
+                        extensions=[".py"],
+                    ),
+                ],
+            ),
+            dynamic_vars=ContextConfig(
+                enabled=True,
+                items=[
+                    ContextVarItem(
+                        name="日志目录",
+                        type="folder",
+                        path="logs/",
+                        extensions=[".log", ".txt"],
+                    ),
+                ],
+            ),
+        )
+        state = config.to_state()
+        static_var = state["context.static_vars"][0]
+        assert static_var["extensions"] == [".py"]
+        dynamic_var = state["context.dynamic_vars"][0]
+        assert dynamic_var["extensions"] == [".log", ".txt"]
+
+    def test_loader_parses_folder_with_extensions(self) -> None:
+        """测试 AgentConfigLoader 解析 folder 类型的 extensions 字段。"""
+        from agents.loader import AgentConfigLoader
+
+        item_data = {
+            "name": "代码目录",
+            "type": "folder",
+            "path": "src/",
+            "extensions": [".py", ".md"],
+        }
+        item = AgentConfigLoader._parse_context_var_item(item_data)
+        assert item.type == "folder"
+        assert item.path == "src/"
+        assert item.extensions == [".py", ".md"]
+
+    def test_loader_parses_folder_without_extensions(self) -> None:
+        """测试 AgentConfigLoader 解析无 extensions 的 folder 类型。"""
+        from agents.loader import AgentConfigLoader
+
+        item_data = {
+            "name": "全部文件",
+            "type": "folder",
+            "path": "data/",
+        }
+        item = AgentConfigLoader._parse_context_var_item(item_data)
+        assert item.type == "folder"
+        assert item.extensions == []
+
 
 # ============================================================================
 # 5. schema_validator.py 测试

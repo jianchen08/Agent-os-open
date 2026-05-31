@@ -350,7 +350,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
             ref={panelRef}
             className={cn(
               'fixed right-0 top-0',
-              'bg-background border-l border-border shadow-2xl',
+              'border-l border-border shadow-2xl',
               'flex flex-col',
               className,
             )}
@@ -359,6 +359,7 @@ export function NotificationCenter({ className }: NotificationCenterProps) {
               width: '400px',
               maxWidth: '85vw',
               height: '100vh',
+              backgroundColor: 'hsl(var(--panel-solid))',
             }}
             data-testid="notification-center-panel"
           >

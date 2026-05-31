@@ -87,9 +87,9 @@ class TestPromptBuildBasic:
         system_content = result.state_updates["system_message"]["content"]
         dynamic_vars = result.state_updates.get("prompt.dynamic_vars", "")
 
-        assert "日期" in dynamic_vars
-        assert "时间" in dynamic_vars
-        assert dynamic_vars not in system_content
+        assert "日期" in dynamic_vars["content"]
+        assert "时间" in dynamic_vars["content"]
+        assert dynamic_vars["content"] not in system_content
 
     @pytest.mark.asyncio
     async def test_no_messages_in_output(self) -> None:
@@ -404,7 +404,7 @@ class TestLLMCoreBuildMessages:
                 {"role": "assistant", "content": "回答1"},
                 {"role": "user", "content": "问题2"},
             ],
-            "prompt.dynamic_vars": "动态变量内容",
+            "prompt.dynamic_vars": {"role": "user", "name": "dynamic_context", "content": "动态变量内容"},
         }
 
         messages = core._build_messages(state)
@@ -413,14 +413,16 @@ class TestLLMCoreBuildMessages:
         assert messages[1]["role"] == "user"
         assert messages[2]["role"] == "assistant"
         assert messages[3]["role"] == "user"
+        assert messages[4]["role"] == "user"
+        assert messages[4]["name"] == "dynamic_context"
 
     def test_dynamic_vars_last(self) -> None:
-        """动态变量追加在历史消息之后（作为第二条 SystemMessage）。"""
+        """动态变量追加在历史消息之后（作为 user 消息，name=dynamic_context）。"""
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = {
             "system_message": {"role": "system", "content": "系统提示词"},
             "messages": [{"role": "user", "content": "你好"}],
-            "prompt.dynamic_vars": "- 日期: 2025-01-01\n- 时间: 12:00:00",
+            "prompt.dynamic_vars": {"role": "user", "name": "dynamic_context", "content": "- 日期: 2025-01-01\n- 时间: 12:00:00"},
         }
 
         messages = core._build_messages(state)
@@ -428,7 +430,8 @@ class TestLLMCoreBuildMessages:
         assert len(messages) == 3
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
-        assert messages[2]["role"] == "system"
+        assert messages[2]["role"] == "user"
+        assert messages[2]["name"] == "dynamic_context"
         assert "日期" in messages[2]["content"]
 
     def test_no_dynamic_vars(self) -> None:
@@ -479,7 +482,7 @@ class TestLLMCoreNoAccumulation:
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = make_base_state()
         state["system_message"] = {"role": "system", "content": "提示词"}
-        state["prompt.dynamic_vars"] = "动态变量"
+        state["prompt.dynamic_vars"] = {"role": "user", "name": "dynamic_context", "content": "动态变量"}
         state["messages"] = [{"role": "user", "content": "你好"}]
 
         core._call_llm = AsyncMock(return_value=LLMResponse(
@@ -528,7 +531,7 @@ class TestLLMCoreNoAccumulation:
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = make_base_state()
         state["system_message"] = {"role": "system", "content": "提示词"}
-        state["prompt.dynamic_vars"] = "动态变量"
+        state["prompt.dynamic_vars"] = {"role": "user", "name": "dynamic_context", "content": "动态变量"}
         state["messages"] = [{"role": "user", "content": "你好"}]
 
         core._call_llm = AsyncMock(return_value=LLMResponse(
@@ -910,8 +913,8 @@ class TestRoutedVars:
         result = await plugin.execute(ctx)
         dynamic_vars = result.state_updates.get("prompt.dynamic_vars", "")
 
-        assert "早上好" in dynamic_vars
-        assert "晚上好" not in dynamic_vars
+        assert "早上好" in dynamic_vars["content"]
+        assert "晚上好" not in dynamic_vars["content"]
 
     @pytest.mark.asyncio
     async def test_routed_non_string_state_value(self) -> None:

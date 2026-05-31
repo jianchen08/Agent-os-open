@@ -33,8 +33,8 @@ class ContextVarItem:
 
     Attributes:
         name: 变量名称。
-        type: 变量类型（rules/path/timestamp/session/agent/model/retrieval/routed）。
-        path: 文件路径（type=path 时使用）。
+        type: 变量类型（rules/path/folder/timestamp/session/agent/model/retrieval/routed）。
+        path: 文件路径（type=path 时使用）或文件夹路径（type=folder 时使用）。
         tags: 标签列表（用于知识库检索）。
         inject_type: 注入方式（full/summary/retrieval）。
         top_k: 检索数量。
@@ -43,6 +43,7 @@ class ContextVarItem:
         memory_layer: 记忆层级。
         route_key: 路由键名（type=routed 时使用），从管道 state 中取对应值作为路由依据。
         routes: 路由表（type=routed 时使用），键为可能的 state 值，值为注入内容（字符串或嵌套变量定义）。
+        extensions: 文件扩展名过滤列表（type=folder 时使用），如 [".py", ".md"]。为空则加载所有文件。
     """
 
     name: str = ""
@@ -56,6 +57,7 @@ class ContextVarItem:
     memory_layer: str = ""
     route_key: str = ""
     routes: dict[str, Any] = field(default_factory=dict)
+    extensions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -293,6 +295,7 @@ class AgentConfig:
                     "memory_layer": item.memory_layer,
                     "route_key": item.route_key,
                     "routes": item.routes,
+                    "extensions": item.extensions,
                 }
                 for item in self.static_vars.items
             ]
@@ -326,6 +329,7 @@ class AgentConfig:
                     "memory_layer": item.memory_layer,
                     "route_key": item.route_key,
                     "routes": item.routes,
+                    "extensions": item.extensions,
                 }
                 for item in self.dynamic_vars.items
             ]

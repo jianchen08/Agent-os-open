@@ -130,6 +130,10 @@ async def test_assembly_and_llm_call():
     logger.info("步骤 6: 验证 prompt_build 产出")
     system_message = state.get("system_message")
     dynamic_vars = state.get("prompt.dynamic_vars", "")
+    if dynamic_vars and isinstance(dynamic_vars, dict):
+        dynamic_vars_text = dynamic_vars.get("content", "")
+    else:
+        dynamic_vars_text = str(dynamic_vars)
     tool_schemas = state.get("tool_schemas", [])
 
     if system_message:
@@ -145,7 +149,7 @@ async def test_assembly_and_llm_call():
 
     if dynamic_vars:
         logger.info("✅ dynamic_vars 存在")
-        logger.info("  内容: %s", dynamic_vars)
+        logger.info("  内容: %s", dynamic_vars_text)
     else:
         logger.warning("⚠️ dynamic_vars 为空")
 

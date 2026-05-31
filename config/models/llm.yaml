@@ -82,14 +82,14 @@ models:
       temperature: 0.7
       max_tokens: 8192
 defaults:
-  chat: minimax-m2.7
-  reasoning: minimax-m2.7
+  chat: glm-5.1
+  reasoning: glm-5.1
   embedding: embedding-3
   call_timeout: 120
   tiers:
-    large: minimax-m2.7
-    medium: minimax-m2.7
-    small: minimax-m2.7
+    large: glm-5.1
+    medium: glm-5.1
+    small: glm-5.1
   fallback_chain:
     chat:
     - deepseek-v4-flash
@@ -109,7 +109,7 @@ providers:
     - id: zhipu_coding_2
       api_key: 55fda454331e4507a2b77bfb01bac114.mlcfDPZIKdelyEUC
       max_concurrent: 3
-      rpm: 20
+      rpm: 150
       token_quota: 0
   zhipu:
     api_base: https://open.bigmodel.cn/api/paas/v4/

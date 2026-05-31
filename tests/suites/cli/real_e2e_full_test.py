@@ -132,6 +132,8 @@ async def test_1_llm_dialogue(app: Any) -> None:
         return
 
     prompt_vars = state.get("prompt.dynamic_vars", "")
+    if isinstance(prompt_vars, dict):
+        prompt_vars = prompt_vars.get("content", "")
     has_date = bool(re.search(r"\d{4}-\d{2}-\d{2}", prompt_vars))
     has_time = bool(re.search(r"\d{2}:\d{2}:\d{2}", prompt_vars))
 
