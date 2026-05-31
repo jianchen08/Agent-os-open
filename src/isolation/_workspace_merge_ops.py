@@ -184,7 +184,11 @@ class _MergeOpsMixin:
     # ── 8. 任务异常回滚 ──────────────────────────────────────────
 
     def on_task_failed(self, workspace: str, ws_meta: dict) -> dict:
-        """异常回滚：worktree 模式先 checkout+clean 再清理 worktree，其他模式直接回滚"""
+        """任务异常/失败：只回滚文件，不清理 worktree。
+
+        修复: 任务失败不等于终态，如果还能重试，worktree 应该保留供重试使用。
+        清理 worktree 的职责交给容器完成或手动调用。
+        """
         ws_path = Path(workspace)
         if not ws_path.exists():
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
@@ -198,16 +202,10 @@ class _MergeOpsMixin:
         if mode == "worktree":
             self._run_git("checkout", "--", ".", cwd=ws_path)
             self._run_git("clean", "-fd", cwd=ws_path)
-            if not ws_path.exists():
-                logger.warning(
-                    "[WorkspaceLifecycle] worktree 目录在回滚过程中已不存在，跳过清理: %s",
-                    workspace)
-                return {"success": True, "action": "rollback_worktree"}
-            self._cleanup_worktree(workspace, ws_meta)
-            logger.info("[WorkspaceLifecycle] worktree 回滚并清理: %s", workspace)
-            return {"success": True, "action": "rollback_worktree"}
-        logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，拒绝执行破坏性操作: %s", mode, workspace)
-        return {"success": False, "error": f"未知工作模式: {mode}"}
+            logger.info("[WorkspaceLifecycle] worktree 失败保留（不清理）: %s", workspace)
+            return {"success": True, "action": "rollback_only"}
+        logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，跳过回滚: %s", mode, workspace)
+        return {"success": True, "action": "none"}
 
     # ── 9. 安全合并 ──────────────────────────────────────────────
 
