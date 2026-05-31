@@ -1095,9 +1095,13 @@ class TaskTool(BuiltinTool):
             # 修复日期: 2026-05-24
             await service.cancel_task(task_id, reason=f"已取消: {reason}")
 
-            # BUG-FIX-fix_20260514_cancel_cascade:
-            # 级联取消所有子任务，避免子任务管道继续执行
-            self._cancel_pipeline_recursive(task_id)
+            # BUG-FIX-fix_20260531_cancel_pipeline_recursive:
+            # 问题根因: _cancel_pipeline_recursive 是 TaskService 的方法，
+            #           但代码中用 self（TaskTool实例）调用，导致 AttributeError，
+            #           使 running 状态的任务无法被取消。
+            # 修复方案: 改为通过 service 实例调用该方法。
+            # 修复日期: 2026-05-31
+            service._cancel_pipeline_recursive(task_id)
             cascaded = await service.cancel_task_cascade(task_id, reason=reason)
 
             result_data = {
