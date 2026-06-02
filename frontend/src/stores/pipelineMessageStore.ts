@@ -722,17 +722,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
       }
       try {
         const limit = options?.limit ?? 50
-        // FIX: 自动从 pipelineSessionMap 查找 sessionId 作为 threadId fallback，子管道正确传 pipelineRunId
+        // FIX: 自动从 pipelineSessionMap 查找 sessionId 作为 threadId fallback
+        // FEATURE-pipeline_unify: 统一传 pipelineRunId（主/子管道都用 pipelineId），
+        //                         后端统一走 pipelineRunId 路径，不再区分主/子。
         const sessionFallback = get().pipelineSessionMap[pipelineId]
         const threadId = options?.threadId || sessionFallback || pipelineId
-        const pipelineMeta = get().pipelines[pipelineId]
-        const isSubPipeline = pipelineMeta && pipelineMeta.level > 1
         const apiResult = await retry(
           () => apiGetMessages(threadId, {
             limit,
             before_sequence: options?.before_sequence,
             after_sequence: options?.after_sequence,
-            pipelineRunId: isSubPipeline ? pipelineId : undefined,
+            pipelineRunId: pipelineId,
           }),
           {
             maxAttempts: 3,

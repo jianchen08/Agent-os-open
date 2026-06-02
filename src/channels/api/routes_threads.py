@@ -176,7 +176,7 @@ async def _build_execution_graph(
 
     for pipeline_run_id in all_pipeline_ids:
         try:
-            records = storage.list_by_pipeline(pipeline_run_id)
+            records, _ = storage.list_by_pipeline(pipeline_run_id)
         except Exception:
             logger.warning("查询管道执行记录失败: %s", pipeline_run_id)
             continue
@@ -808,7 +808,7 @@ def _try_recover_pipeline_ids(
 
     # 1. 尝试 thread_id 作为 pipeline_run_id 直接查询
     try:
-        records = exec_storage.list_by_pipeline(thread_id)
+        records, _ = exec_storage.list_by_pipeline(thread_id)
         if records:
             recovered.append(thread_id)
     except Exception:
@@ -818,7 +818,7 @@ def _try_recover_pipeline_ids(
     for child_id, root_id in exec_storage._pipeline_root_map.items():
         if root_id == thread_id and child_id != thread_id:
             try:
-                child_records = exec_storage.list_by_pipeline(child_id)
+                child_records, _ = exec_storage.list_by_pipeline(child_id)
                 if child_records:
                     recovered.append(child_id)
             except Exception:
@@ -860,61 +860,6 @@ def _try_recover_pipeline_ids(
         )
 
     return recovered
-
-
-def _paginate_messages(
-    all_msgs: list[MessageResponse],
-    limit: int,
-    before_sequence: int | None,
-    after_sequence: int | None = None,
-) -> dict[str, Any]:
-    """对已排序的消息列表进行倒序分页。
-
-    all_msgs 必须按 sequence 正序排列（最旧在前）。
-
-    分页逻辑：
-    - before_sequence=None：返回最后 limit 条消息
-    - before_sequence=N：返回 sequence < N 的最后 limit 条消息
-    - after_sequence=N：返回 sequence > N 的消息（断线补漏，不支持分页）
-
-    before_sequence 和 after_sequence 互斥，不能同时使用。
-
-    Args:
-        all_msgs: 按 sequence 正序排列的完整消息列表
-        limit: 每页数量
-        before_sequence: 游标分页的 sequence 边界（向前翻页）
-        after_sequence: 断线补漏的 sequence 边界（返回此值之后的新消息）
-
-    Returns:
-        包含 messages、total、has_more 的分页结果字典
-    """
-    from channels.api.models import MessageListResponse
-
-    total = len(all_msgs)
-
-    # 按 before_sequence 过滤
-    if before_sequence is not None:
-        filtered = [m for m in all_msgs if m.sequence < before_sequence]
-    else:
-        filtered = all_msgs
-
-    # 按 after_sequence 过滤（只返回 sequence > after_sequence 的消息）
-    if after_sequence is not None:
-        filtered = [m for m in filtered if m.sequence > after_sequence]
-
-    filtered_total = len(filtered)
-
-    # 判断是否还有更多消息
-    has_more = filtered_total > limit
-
-    # 取最后 limit 条（即最新的 limit 条）
-    page = filtered[-limit:] if filtered_total > limit else filtered
-
-    return MessageListResponse(
-        messages=page,
-        total=total,
-        has_more=has_more,
-    ).model_dump()
 
 
 @router.get(
@@ -967,119 +912,59 @@ def list_messages(
 
     exec_storage = _get_execution_record_storage()
 
-    # BUG-FIX-fix_20260512_pipeline_direct_query:
-    # 问题根因: 前端 fetchMessages 用 pipelineId 调 API，但后端先验证 thread_id 必须是有效线程，
-    #          子管道的 pipelineId 不是线程 ID，导致 404 错误，消息不显示。
-    # 修复方案: 当传入 pipeline_run_id 时，跳过线程存在性验证，直接用 pipeline_run_id 查消息。
-    #          pipelineId 是消息系统的唯一索引，sessionId 仅用于 UI 路由，不参与消息获取。
-    # 影响范围: 切换标签、WS 重连、子管道消息加载等所有通过 pipelineId 获取消息的场景
-    # 修复日期: 2026-05-12
-    if pipeline_run_id and exec_storage:
+    # FEATURE-pipeline_unify: 所有管道（主/子）统一走 pipelineRunId 路径加载消息。
+    # - 优先用前端传来的 pipeline_run_id（子管道用 pipelineId，主管道前端也传 pipelineId）
+    # - 未传时 fallback 用 thread_id 作为 pipeline_run_id（兼容 thread_id == pipeline_run_id 的旧数据）
+    target_pid = pipeline_run_id or thread_id
+
+    if exec_storage and target_pid:
         try:
-            records = exec_storage.list_by_pipeline(pipeline_run_id)
-            if records:
-                records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-                msgs = [_record_to_message_response(r, thread_id) for r in records]
-                return MessageListResponse(
-                    messages=msgs,
-                    total=len(msgs),
-                    has_more=False,
-                ).model_dump()
+            records, has_more = exec_storage.list_by_pipeline(
+                target_pid,
+                limit=limit,
+                before_sequence=before_sequence,
+                after_sequence=after_sequence,
+            )
         except Exception:
-            logger.warning("按 pipeline_run_id 查询执行记录失败: %s", pipeline_run_id)
+            logger.warning("按 pipeline_run_id 查询执行记录失败: %s", target_pid)
+            records, has_more = [], False
+
+        msgs = [_record_to_message_response(r, thread_id) for r in records]
         return MessageListResponse(
-            messages=[],
-            total=0,
-            has_more=False,
+            messages=msgs,
+            total=len(msgs),
+            has_more=has_more,
         ).model_dump()
 
+    # exec_storage 不可用：尝试从 MemoryStore 的 _messages 读取（保持向后兼容）
     thread = store.get_thread(thread_id)
-
     if thread is not None:
-        # thread 存在，走正常路径（session → pipeline_ids → exec_storage → fallback）
-        logger.info(
-            "[list_messages] thread=%s pipeline_run_id=%s exec_storage=%s",
-            thread_id[:12] if thread_id else "?",
-            (pipeline_run_id or "")[:12] if pipeline_run_id else "None",
-            "yes" if exec_storage else "None",
-        )
-
-        session = _ensure_session(thread_id)
-        logger.info(
-            "[list_messages] session=%s pipeline_ids=%s",
-            "yes" if session else "None",
-            session.pipeline_ids if session else "N/A",
-        )
-
-        pipeline_ids: list[str] = []
-        if session and session.pipeline_ids:
-            pipeline_ids = list(session.pipeline_ids)
-        elif exec_storage and session:
-            pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
-
-        if exec_storage and pipeline_ids:
-            try:
-                all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
-            except Exception:
-                logger.warning("批量查询管道执行记录失败")
-                all_records = []
-
-            if all_records:
-                all_msgs = [_record_to_message_response(r, thread_id) for r in all_records]
-                return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
-
-        # BUG-FIX-fix_20260513_fallback_no_mutation:
-        # Fallback: pipeline_ids 为空时，直接用 thread_id 作为 pipeline_run_id 尝试加载
-        if exec_storage and not pipeline_ids:
-            try:
-                records = exec_storage.list_by_pipeline(thread_id)
-                if records:
-                    records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-                    all_msgs = [_record_to_message_response(r, thread_id) for r in records]
-                    return _paginate_messages(all_msgs, limit, before_sequence, after_sequence)
-            except Exception:
-                logger.warning("Fallback: 用 thread_id 查询执行记录失败: %s", thread_id)
-
-        # 最终 Fallback: 从 MemoryStore 的 _messages 读取
         raw_msgs = store.get_messages(thread_id, limit=100000)
         if raw_msgs["messages"]:
-            fallback_msgs = []
-            for m in raw_msgs["messages"]:
-                fallback_msgs.append(MessageResponse(
+            fallback_msgs = [
+                MessageResponse(
                     id=m.get("id", ""),
                     thread_id=thread_id,
                     role=m.get("role", "user"),
                     content=m.get("content", ""),
                     timestamp=m.get("timestamp", ""),
                     sequence=m.get("sequence", 0),
-                ))
-            return _paginate_messages(fallback_msgs, limit, before_sequence, after_sequence)
+                )
+                for m in raw_msgs["messages"]
+            ]
+            # 简单内存分页（保留旧行为）
+            filtered = fallback_msgs
+            if before_sequence is not None:
+                filtered = [m for m in filtered if (m.sequence or 0) < before_sequence]
+            if after_sequence is not None:
+                filtered = [m for m in filtered if (m.sequence or 0) > after_sequence]
+            has_more = len(filtered) > limit
+            page = filtered[-limit:] if has_more else filtered
+            return MessageListResponse(
+                messages=page, total=len(fallback_msgs), has_more=has_more,
+            ).model_dump()
 
-        return _paginate_messages([], limit, before_sequence, after_sequence)
-
-    else:
-        # BUG-FIX-fix_20260523_restart_404:
-        # 问题根因: 后端重启后 MemoryStore 中线程数据丢失（_load_persisted_data 静默失败），
-        #           list_messages 直接返回 404，但 YAML 执行记录仍存在。
-        # 修复方案: thread 不存在时，尝试用 thread_id 从 ExecutionRecordStorage 恢复消息。
-        # 修复日期: 2026-05-23
-        if exec_storage:
-            try:
-                records = exec_storage.list_by_pipeline(thread_id)
-                if records:
-                    records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-                    msgs = [_record_to_message_response(r, thread_id) for r in records]
-                    return MessageListResponse(
-                        messages=msgs, total=len(msgs), has_more=False,
-                    ).model_dump()
-            except Exception:
-                logger.warning("线程不存在，尝试用 thread_id 恢复消息失败: %s", thread_id)
-
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message="线程不存在",
-        )
+    return MessageListResponse(messages=[], total=0, has_more=False).model_dump()
 
 
 @router.get(
@@ -1128,9 +1013,12 @@ async def get_thread_detail(
     exec_storage = _get_execution_record_storage()
     rich_messages: list[dict[str, Any]] = []
     if exec_storage and session and pipeline_ids:
-        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
+        # 性能优化：遍历调用 list_by_pipeline 收集所有管道记录（保留全量行为，适配新签名）
         try:
-            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+            all_records: list[Any] = []
+            for pid in pipeline_ids:
+                records, _ = exec_storage.list_by_pipeline(pid)
+                all_records.extend(records)
         except Exception:
             all_records = []
         if all_records:
@@ -1218,9 +1106,12 @@ def get_thread_history(
             pipeline_ids = _try_recover_pipeline_ids(thread_id, session, exec_storage)
 
     if exec_storage and pipeline_ids:
-        # 性能优化：使用批量加载替代逐个管道查询，避免 N+1 问题
+        # 性能优化：遍历调用 list_by_pipeline 收集所有管道记录（保留全量行为，适配新签名）
         try:
-            all_records = exec_storage.list_by_pipelines_batch(pipeline_ids)
+            all_records: list[Any] = []
+            for pid in pipeline_ids:
+                records, _ = exec_storage.list_by_pipeline(pid)
+                all_records.extend(records)
         except Exception:
             all_records = []
         if all_records:

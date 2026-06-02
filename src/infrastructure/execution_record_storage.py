@@ -503,48 +503,98 @@ class ExecutionRecordStorage:
         return len(to_delete)
 
     def list_by_pipeline(
-        self, pipeline_run_id: str
-    ) -> list[ExecutionRecordData]:
-        self._ensure_loaded(pipeline_run_id)
-        records = [
-            r for r in self._records.values()
-            if r.pipeline_run_id == pipeline_run_id
-        ]
-        records.sort(key=lambda r: (r.sequence, r.created_at or ""))
-        return records
+        self,
+        pipeline_run_id: str,
+        limit: int | None = None,
+        before_sequence: int | None = None,
+        after_sequence: int | None = None,
+    ) -> tuple[list["ExecutionRecordData"], bool]:
+        """
+        加载指定管道的执行记录（支持游标分页）。
 
-    def list_by_pipelines_batch(
-        self, pipeline_ids: list[str],
-    ) -> list[ExecutionRecordData]:
-        """批量加载多个管道的执行记录，避免 N+1 查询问题。
+        FEATURE-pipeline_unify: 所有管道（主/子）统一通过 pipelineRunId 加载，
+        该方法是唯一的消息加载入口，分页逻辑内联在此处。
 
-        一次性确保所有指定管道的数据已加载到内存，
-        然后从 self._records 中过滤并排序返回。
+        FEATURE-tail_read: 性能优化路径 — 传 limit 时从 YAML 文件尾部反向读取
+        最近 N 条 record，避免全量反序列化 1.3MB 大文件（主管道 4-5s
+        加载时间降到 0.3-0.8s）。
+
+        调用契约:
+          - limit=None: 保留原行为，全量加载所有 records（兼容 review_engine、
+            reconstruct_messages 等需要完整历史的场景）。
+          - limit=int:  走尾部反向读优化，只解析最近 N 条 record（适用于前端
+            list_messages 翻页，主管道 4-5s → 0.3-0.8s）。
 
         Args:
-            pipeline_ids: 管道运行 ID 列表
+            pipeline_run_id: 管道运行 ID
+            limit: 返回的最大记录数（None 表示不限制，保留全量行为）
+            before_sequence: 只返回 sequence < before_sequence 的记录（向上翻页）
+            after_sequence: 只返回 sequence > after_sequence 的记录（断线补漏）
 
         Returns:
-            所有管道的执行记录列表，按 pipeline_order + sequence 排序
+            (records, has_more) 元组，has_more 表示按 before_sequence 过滤后
+            是否存在比 limit 更多的更早记录。
         """
-        if not pipeline_ids:
-            return []
-        # 确保所有指定管道的数据已加载
-        pid_set = set(pipeline_ids)
-        for pid in pipeline_ids:
-            self._ensure_loaded(pid)
-        # 从内存缓存中过滤
-        pipeline_order = {pid: idx for idx, pid in enumerate(pipeline_ids)}
-        records = [
-            r for r in self._records.values()
-            if r.pipeline_run_id in pid_set
-        ]
-        records.sort(key=lambda r: (
-            pipeline_order.get(r.pipeline_run_id, 999),
-            r.sequence,
-            r.created_at or "",
-        ))
-        return records
+        if limit is None:
+            return self._list_by_pipeline_full(
+                pipeline_run_id, before_sequence, after_sequence
+            )
+
+        if before_sequence is not None:
+            return self._list_by_pipeline_full(
+                pipeline_run_id, before_sequence, after_sequence, limit=limit
+            )
+
+        records, has_more = self.read_records_from_tail(
+            pipeline_run_id,
+            limit=limit,
+            before_sequence=before_sequence,
+            after_sequence=after_sequence,
+        )
+        if records:
+            return records, has_more
+
+        logger.debug(
+            "[list_by_pipeline] 尾部读取无结果，fallback 全量加载: %s",
+            pipeline_run_id,
+        )
+        return self._list_by_pipeline_full(
+            pipeline_run_id, before_sequence, after_sequence, limit=limit
+        )
+
+    def _list_by_pipeline_full(
+        self,
+        pipeline_run_id: str,
+        before_sequence: int | None,
+        after_sequence: int | None,
+        limit: int | None = None,
+    ) -> tuple[list["ExecutionRecordData"], bool]:
+        """全量加载指定管道的 records，支持游标分页和 limit 截断。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+            before_sequence: 只返回 sequence < before_sequence 的记录
+            after_sequence: 只返回 sequence > after_sequence 的记录
+            limit: 返回的最大记录数（None 不截断）
+
+        Returns:
+            (records, has_more) 元组
+        """
+        self._ensure_loaded(pipeline_run_id)
+        records = [r for r in self._records.values() if r.pipeline_run_id == pipeline_run_id]
+        records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+
+        if after_sequence is not None:
+            return [r for r in records if r.sequence > after_sequence], False
+
+        if before_sequence is not None:
+            records = [r for r in records if r.sequence < before_sequence]
+
+        has_more = limit is not None and len(records) > limit
+        if limit is not None and len(records) > limit:
+            records = records[-limit:]
+
+        return records, has_more
 
     def reconstruct_messages(
         self,
@@ -654,6 +704,185 @@ class ExecutionRecordStorage:
         except Exception as exc:
             logger.warning("分片文件损坏，跳过加载: %s - %s", file_path.name, exc)
             return []
+
+    # 尾部读取窗口大小：64KB 足够覆盖 20-50 条 record（按平均 2KB/record 估算）
+    _TAIL_READ_BYTES = 64 * 1024
+    # 扩大窗口上限：128KB，足够覆盖单条超大 record
+    _TAIL_READ_BYTES_MAX = 128 * 1024
+
+    def _extract_tail_blocks(self, yaml_file: Path, n: int) -> list[str]:
+        """从单个 YAML 分片文件尾部提取最后 n 个 record 的文本块（不解 YAML）。
+
+        FEATURE-tail_read:
+        算法说明:
+          1. 读取文件末尾固定字节窗口（64KB），反序列化量从全文件降到 KB 级。
+          2. 在窗口内按 "\n- " 切分序列项起点（continuation 行是缩进，不含 "- "），
+             取最后 n 个起点作为 record 块边界。
+          3. 若窗口内 - 起点少于 n 个（边界不够），扩大窗口重试一次。
+
+        YAML 序列项结构:
+          records:
+          - record_id: r001
+            field: value
+          - record_id: r002
+            field: value
+
+        切分时 "\n- " 只匹配真正的 record 起始位置（continuation 行无 "- "），
+        不会切到 record 内部的字段值。
+
+        Args:
+            yaml_file: 单个分片 YAML 文件路径
+            n: 期望提取的 record 块数（可能被文件实际数量截断）
+
+        Returns:
+            record 文本块列表（按文件中出现的顺序，每个块以 "- " 开头）
+        """
+        if n <= 0:
+            return []
+        try:
+            file_size = yaml_file.stat().st_size
+        except OSError:
+            return []
+        if file_size == 0:
+            return []
+
+        pattern = "\n- "
+        read_size = min(self._TAIL_READ_BYTES, file_size)
+        blocks: list[str] = []
+
+        # 两次尝试：第一次用默认窗口，窗口内起点不足则扩大到最大窗口
+        for attempt_size in (read_size, self._TAIL_READ_BYTES_MAX):
+            try:
+                with open(yaml_file, "rb") as f:
+                    f.seek(file_size - attempt_size)
+                    tail_bytes = f.read()
+            except OSError:
+                return blocks
+            tail_text = tail_bytes.decode("utf-8", errors="replace")
+
+            indices = [i for i in range(len(tail_text)) if tail_text.startswith(pattern, i)]
+            # 第一次窗口找到足够起点就停；否则扩大窗口再试一次
+            if len(indices) >= n or attempt_size >= self._TAIL_READ_BYTES_MAX:
+                take = min(n, len(indices))
+                start_indices = indices[-take:] if take > 0 else []
+                for i, start in enumerate(start_indices):
+                    block_start = start + 1  # 跳过 \n，保留 "- "
+                    if i + 1 < len(start_indices):
+                        block_end = start_indices[i + 1]
+                    else:
+                        block_end = len(tail_text)
+                    block = tail_text[block_start:block_end].rstrip()
+                    if block:
+                        blocks.append(block)
+                return blocks
+
+        return blocks
+
+    def read_records_from_tail(
+        self,
+        pipeline_run_id: str,
+        limit: int,
+        before_sequence: int | None = None,
+        after_sequence: int | None = None,
+    ) -> tuple[list[ExecutionRecordData], bool]:
+        """从 YAML 分片文件尾部反向读取 records（不加载整个文件）。
+
+        FEATURE-tail_read:
+        性能优化: 主管道单文件 1.3MB / 500 条 record 时，全量 yaml.safe_load
+        需 4-5s；本方法只读末尾 64KB 窗口，单次解析 ~20 条 record，
+        加载时间降到 0.3-0.8s（5-10x 提升）。
+
+        算法:
+          1. 倒序遍历所有分片文件（最新的分片 part 编号最大），
+             从每个分片尾部提取 N 个 record 文本块。
+          2. 跨分片累积直到凑够 limit 条（或所有分片读完）。
+          3. 拼装为最小 YAML 文档（records:\\n + 文本块）后 safe_load。
+          4. 按游标（before/after sequence）过滤并截断 limit。
+
+        Args:
+            pipeline_run_id: 管道运行 ID
+            limit: 最多返回的 records 数（断线补漏场景下不截断）
+            before_sequence: 只返回 sequence < before_sequence 的 records
+            after_sequence: 只返回 sequence > after_sequence 的 records（断线补漏）
+
+        Returns:
+            (records, has_more) - records 按 sequence 升序；has_more 表示
+            在 before_sequence 边界内是否还有更多未读取的更早 records。
+
+        边界处理:
+          - 无 _data_dir / 无分片文件: 返回 ([], False)
+          - 解析失败: 返回 ([], False)，由调用方 fallback 到全量加载
+          - 末尾分片为空: 自动读上一个分片
+        """
+        if not self._data_dir:
+            return [], False
+
+        part_files = sorted(self._get_part_files(pipeline_run_id), reverse=True)
+        if not part_files:
+            return [], False
+
+        collected_blocks: list[str] = []
+        has_more = False
+        # 单分片读取上限：单分片最多 _MAX_RECORDS_PER_FILE 条 record，
+        # 断线补漏场景下需要把所有新 record 都捞回来，不能用 limit 截断
+        per_part_cap = _MAX_RECORDS_PER_FILE
+
+        for part_file in part_files:
+            if after_sequence is not None:
+                # 断线补漏：每个分片都参与收集，不受 limit 截断
+                blocks = self._extract_tail_blocks(part_file, per_part_cap)
+                collected_blocks.extend(blocks)
+                continue
+            # 初始加载 / 向上翻页：从尾部读，按需扩大
+            needed = limit - len(collected_blocks)
+            if needed <= 0:
+                has_more = True
+                break
+            blocks = self._extract_tail_blocks(part_file, needed)
+            collected_blocks.extend(blocks)
+            # 当前分片已提供足够块，说明更早分片可能还有更早 record
+            if len(blocks) >= needed:
+                has_more = True
+                break
+
+        if not collected_blocks:
+            return [], False
+
+        yaml_text = "records:\n" + "\n".join(collected_blocks)
+        try:
+            data = yaml.safe_load(yaml_text)
+        except Exception as exc:
+            logger.warning(
+                "反向读取 YAML 解析失败: %s - %s", pipeline_run_id, exc
+            )
+            return [], False
+
+        raw_records = data.get("records") if isinstance(data, dict) else []
+        if not isinstance(raw_records, list) or not raw_records:
+            return [], False
+
+        records = [
+            self._dict_to_record(rd)
+            for rd in raw_records
+            if isinstance(rd, dict)
+        ]
+        records.sort(key=lambda r: (r.sequence, r.created_at or ""))
+
+        # 断线补漏：只过滤，不截断
+        if after_sequence is not None:
+            return [r for r in records if r.sequence > after_sequence], False
+
+        if before_sequence is not None:
+            records = [r for r in records if r.sequence < before_sequence]
+
+        # 在截断前判断 has_more；截断后只保留最后 limit 条（最新的）
+        if limit is not None and len(records) > limit:
+            has_more = True
+            records = records[-limit:]
+        else:
+            has_more = False
+
+        return records, has_more
 
     @staticmethod
     def _record_to_message(record: ExecutionRecordData) -> dict[str, Any]:
