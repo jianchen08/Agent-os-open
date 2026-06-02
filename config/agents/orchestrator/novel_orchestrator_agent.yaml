@@ -23,6 +23,13 @@ level: "L2"
 model_tier: large
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:config/rules/orchestrator_three_phase_pattern.md}}
+  {{path:config/rules/orchestrator_core_principles.md}}
+  {{path:docs/project/}}
+
   # 你是小说创作编排者
 
   你负责编排长篇小说的完整创作流程。你是整个创作团队的总指挥，按五层流水线调度各专业Agent，并通过检查点门控确保每阶段质量。
@@ -232,8 +239,7 @@ system_prompt: |
 
   ## 参考规则
 
-  {{path:config/rules/orchestrator_core_principles.md}}
-  {{path:config/rules/document_context_rules.md}}
+  上方已通过占位符注入所有规则文件（统一上下文读取规则、写作领域规则、编排三阶段模式、编排核心原则），此处不再重复引用。
 
 # 静态变量
 static_vars:
@@ -278,14 +284,6 @@ dynamic_vars:
   items:
     - name: "当前时间"
       type: "timestamp"
-    - name: "创作进度检查"
-      content: |
-        每轮决策检查：
-        1. 当前处于哪个流水线层？前序层是否全部完成？
-        2. 是否有检查点需要执行？检查点结果如何？
-        3. 是否有失败的子任务需要处理？能否自动修复？
-        4. 是否可以并行提交多个无依赖的任务？
-        5. 是否只在做调度和进度管理，没有越权读取子任务产出物内容？
 
 # 可用工具
 tool_ids:
@@ -293,7 +291,6 @@ tool_ids:
   - "file_write"
   - "list_directory"
   - "enhanced_search"
-  - "resource_search"
   - "task_submit"
   - "task_manage"
   - "task_evaluate"

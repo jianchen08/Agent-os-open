@@ -50,6 +50,17 @@ class WebSocketInteractionNotifier:
                 thread_id, len(self._active_connections[thread_id]),
                 {k: len(v) for k, v in self._active_connections.items()},
             )
+        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
+        # 问题根因: 前端刷新后 WebSocket 重新连接，但正在运行的 pipeline
+        #   仍持有旧的 dead TargetedSink，导致后续输出被静默丢弃。
+        # 修复方案: 注册新连接时，自动查找该 thread_id 关联的活跃 pipeline，
+        #   更新其 bridge 的 output_sink 为新的活跃连接。
+        # 影响范围: WebSocketInteractionNotifier.register
+        # 修复日期: 2026-06-01
+        try:
+            self._resume_pipeline_for_thread(thread_id)
+        except Exception as _exc:
+            logger.debug("[WS-Reconnect] 恢复 pipeline 失败: %s", _exc)
 
     def unregister(self, thread_id: str, websocket: WebSocket) -> None:
         if thread_id in self._active_connections:
@@ -183,6 +194,78 @@ class WebSocketInteractionNotifier:
                         del self._active_connections[tid]
         self._global_connections[user_id] = websocket
         logger.info("[GlobalWS] 全局连接已注册: user=%s, 总连接数=%d", user_id[:12], len(self._global_connections))
+        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
+        # 全局连接注册时，尝试恢复该用户所有关联 thread 的 pipeline。
+        # 影响范围: WebSocketInteractionNotifier.register_global
+        # 修复日期: 2026-06-01
+        try:
+            for tid in list(self._active_connections.keys()):
+                self._resume_pipeline_for_thread(tid)
+        except Exception as _exc:
+            logger.debug("[WS-Reconnect] 全局连接恢复 pipeline 失败: %s", _exc)
+
+    def _resume_pipeline_for_thread(self, thread_id: str) -> None:
+        """恢复指定 thread_id 关联的活跃 pipeline 的 WebSocket 输出。
+
+        BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
+        前端刷新后重新连接时，查找该 thread_id 关联的正在运行的 pipeline，
+        更新其 bridge 的 output_sink 为新的活跃连接，确保后续输出能续接到前端。
+
+        Args:
+            thread_id: 目标会话的 thread_id
+        """
+        try:
+            from pipeline.registry import get_engine_registry
+            from pipeline.stream_bridge import TargetedSink
+            registry = get_engine_registry()
+        except Exception:
+            return
+
+        # 遍历所有注册表条目，查找与该 thread_id 关联的活跃 pipeline
+        for pipeline_id, entry in list(registry._engines.items()):
+            if entry.thread_id != thread_id:
+                continue
+            if entry.engine is None:
+                continue
+            # 检查引擎是否仍在运行或挂起中
+            _engine_running = getattr(entry.engine, 'is_running', False)
+            _engine_suspended = getattr(entry.engine, 'is_suspended', False)
+            if not _engine_running and not _engine_suspended:
+                continue
+
+            # 找到活跃的 pipeline，更新其 sink
+            if entry.bridge is not None:
+                _old_sink = getattr(entry.bridge, 'output_sink', None)
+                _old_dead = getattr(_old_sink, 'is_dead', False) if _old_sink is not None else False
+                if _old_dead:
+                    # 创建新的 TargetedSink，使用当前 notifier 和 thread_id
+                    _new_sink = TargetedSink(self, thread_id)
+                    entry.bridge.output_sink = _new_sink
+                    logger.info(
+                        "[WS-Reconnect] 已恢复 pipeline 输出: pipeline=%s thread=%s "
+                        "(替换 dead sink)",
+                        pipeline_id[:12], thread_id[:12],
+                    )
+                    # 如果 drain_loop 已退出，尝试重启
+                    _drain_task = getattr(entry, 'drain_task', None)
+                    if _drain_task is None or _drain_task.done():
+                        try:
+                            from pipeline.message_bus import _start_bg_drain
+                            _engine_task = getattr(entry, 'engine_task', None)
+                            _start_bg_drain(
+                                pipeline_id, entry.bridge, entry.engine,
+                                engine_task=_engine_task,
+                            )
+                            logger.info(
+                                "[WS-Reconnect] 已重启 drain_loop: pipeline=%s",
+                                pipeline_id[:12],
+                            )
+                        except Exception as _dl_err:
+                            logger.warning(
+                                "[WS-Reconnect] 重启 drain_loop 失败: pipeline=%s err=%s",
+                                pipeline_id[:12], _dl_err,
+                            )
+            break  # 只恢复第一个匹配的 pipeline
 
     def unregister_global(self, user_id: str, websocket: WebSocket = None) -> None:
         """注销全局连接。只有当传入的 websocket 是当前注册的连接时才删除，防止新连接被旧连接的 finally 块误删。"""

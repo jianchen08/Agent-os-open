@@ -44,6 +44,8 @@ export const MessageList = ({
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
   const initialScrollDone = useRef(false)
+  const lastLoadingMore = useRef(isLoadingMore)
+  const lastHasMore = useRef(hasMore)
   /**
    * 滚动到底部
    */
@@ -179,6 +181,21 @@ export const MessageList = ({
 
   /**
    * 首次加载完成后滚动到底部
+   *
+   * BUG-FIX-fix_20260601_scroll_to_bottom_on_load:
+   * 问题根因: 页面刷新后，MessageList 先挂载（messages 为空），然后 API 返回消息。
+   *          initialScrollDone 只在 messages.length 从 0 变为 >0 时触发一次滚动。
+   *          但如果消息超过 50 条，hasMoreOlder=true，Virtuoso 顶部渲染 HeaderComponent，
+   *          且 initialTopMostItemIndex 只在组件首次渲染时生效，导致视图停在中间位置，
+   *          用户需要手动滚动很久才能到底部。
+   * 修复方案:
+   *   1. 保留原有的首次加载滚动逻辑
+   *   2. 新增监听 isLoadingMore 和 hasMore 变化：
+   *      - 当 isLoadingMore 从 true 变为 false 时（历史消息加载完成），滚动到底部
+   *      - 当 hasMore 从 true 变为 false 时（所有历史消息加载完毕），滚动到底部
+   *   3. 切换会话时重置 initialScrollDone
+   * 影响范围: 页面刷新后、加载历史消息后的滚动行为
+   * 修复日期: 2026-06-01
    */
   useEffect(() => {
     if (messages.length > 0 && !initialScrollDone.current) {
@@ -195,6 +212,30 @@ export const MessageList = ({
       return () => clearTimeout(timer)
     }
   }, [messages.length])
+
+  /**
+   * 历史消息加载完成后滚动到底部
+   *
+   * 首次加载时（initialScrollDone）自动滚动到底部，
+   * 用户主动在底部且 isLoadingMore 完成时自动跟随滚动。
+   */
+  useEffect(() => {
+    const wasLoading = lastLoadingMore.current
+    const hadMore = lastHasMore.current
+
+    const loadingFinished = wasLoading && !isLoadingMore
+    const allHistoryLoaded = hadMore && !hasMore
+
+    // 只在用户在底部时自动跟随滚动，避免"向上翻页加载历史消息后跳到最下面"
+    if ((loadingFinished || allHistoryLoaded) && messages.length > 0 && isNearBottom.current) {
+      requestAnimationFrame(() => {
+        scrollToBottom('auto')
+      })
+    }
+
+    lastLoadingMore.current = isLoadingMore
+    lastHasMore.current = hasMore
+  }, [isLoadingMore, hasMore, messages.length, scrollToBottom])
 
   /** 切换会话时重置初始滚动标记 */
   useEffect(() => {
@@ -241,14 +282,13 @@ export const MessageList = ({
     )
   }, [hasMore, isLoadingMore])
 
-  /**
-   * 安全的初始索引
-   */
+  /** 首次加载时滚动到底部，后续 prepend 不应再触发 */
   const initialTopMostItemIndex = useMemo(() => {
-    if (messages.length > 0) {
+    if (messages.length > 0 && !initialScrollDone.current) {
       return messages.length - 1
     }
-    return 0
+    return undefined
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length])
 
   /** 空状态渲染 */

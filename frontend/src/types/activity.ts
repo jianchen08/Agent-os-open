@@ -102,6 +102,10 @@ export interface ActivityData {
   title: string
   /** 工具名称（仅 type=tool_call 时有值，用于工具级渲染配置匹配） */
   toolName?: string
+  /** 关联的文件路径（如 file_read/file_write 操作的文件） */
+  filePath?: string
+  /** 打开文件回调（点击文件名时调用） */
+  onOpenFile?: (filePath: string) => void | Promise<void>
   /** 活动状态 */
   status: ActivityStatus
   /** 状态文本描述（可选，有默认值） */

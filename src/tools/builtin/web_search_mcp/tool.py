@@ -10,6 +10,7 @@ Network Search Tool (Based on mcp-webgate)
 特性：BM25 重排序、HTML 去噪、URL 去重、上下文保护、纯 HTTP 抓取（无浏览器依赖）
 """
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SEARXNG_URL = "http://localhost:8080"
 
@@ -185,7 +188,7 @@ class WebSearchMCPTool(BuiltinTool):
         query = inputs.get("query", "").strip()
         if not query:
             return create_failure_result(
-                error="Search keyword cannot be empty",
+                error="搜索关键词不能为空",  # BUG-FIX: 统一中文错误信息
                 error_code="EMPTY_QUERY",
             )
 
@@ -241,7 +244,7 @@ class WebSearchMCPTool(BuiltinTool):
                 )
             else:
                 return create_failure_result(
-                    error=f"Unsupported search mode: {search_mode}",
+                    error=f"不支持的搜索模式: {search_mode}",  # BUG-FIX: 统一中文错误信息
                     error_code="INVALID_MODE",
                 )
 
@@ -283,9 +286,8 @@ class WebSearchMCPTool(BuiltinTool):
             )
 
         except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).exception("Web Search MCP call failed")
+            # BUG-FIX: 使用模块级 logger，移除函数内 import logging
+            logger.exception("Web Search MCP call failed")
 
             error_msg = str(e)
             if "MCP_CONNECTION_ERROR" in error_msg or "连接失败" in error_msg:
@@ -303,7 +305,7 @@ class WebSearchMCPTool(BuiltinTool):
                 )
 
             return create_failure_result(
-                error=f"Search failed: {error_msg}",
+                error=f"搜索失败: {error_msg}",  # BUG-FIX: 统一中文错误信息
                 error_code="MCP_CALL_FAILED",
             )
 
@@ -365,6 +367,21 @@ class WebSearchMCPTool(BuiltinTool):
 
         return deduped
 
+    @staticmethod
+    def _smart_truncate(text: str, max_len: int = 500) -> str:
+        """智能截断文本，在最近的句子/标点处截断，避免在句子中间断裂
+
+        BUG-FIX: 替代 text[:500] 硬截断，防止在句子中间截断导致信息不完整
+        """
+        if len(text) <= max_len:
+            return text
+        truncated = text[:max_len]
+        for sep in ("。", ".", "！", "!", "\n", "；", ";"):
+            last = truncated.rfind(sep)
+            if last > max_len * 0.5:
+                return truncated[:last + 1] + "..."
+        return truncated + "..."
+
     def _parse_webgate_result(
         self, result: dict[str, Any], query: str, search_mode: str
     ) -> dict[str, Any]:
@@ -384,7 +401,7 @@ class WebSearchMCPTool(BuiltinTool):
                     {
                         "url": url,
                         "title": title,
-                        "snippet": text[:500],
+                        "snippet": self._smart_truncate(text, 500),  # BUG-FIX: 智能截断替代硬截断
                         "content": text,
                         "char_count": char_count,
                         "truncated": truncated,
@@ -409,7 +426,7 @@ class WebSearchMCPTool(BuiltinTool):
                     {
                         "url": cit.get("url", ""),
                         "title": cit.get("title", ""),
-                        "snippet": summary[:500] if i == 0 else cit.get("title", ""),
+                        "snippet": self._smart_truncate(summary, 500) if i == 0 else cit.get("title", ""),  # BUG-FIX: 智能截断替代硬截断
                         "source": "mcp-webgate",
                         "index": i,
                     }
@@ -435,7 +452,7 @@ class WebSearchMCPTool(BuiltinTool):
                         "url": source.get("url", ""),
                         "title": source.get("title", ""),
                         "snippet": (
-                            content[:500] if content else source.get("title", "")
+                            self._smart_truncate(content, 500) if content else source.get("title", "")  # BUG-FIX: 智能截断替代硬截断
                         ),
                         "content": content,
                         "truncated": source.get("truncated", False),
@@ -451,7 +468,7 @@ class WebSearchMCPTool(BuiltinTool):
                     {
                         "url": snip.get("url", ""),
                         "title": snip.get("title", ""),
-                        "snippet": snip.get("snippet", "")[:500],
+                        "snippet": self._smart_truncate(snip.get("snippet", ""), 500),  # BUG-FIX: 智能截断替代硬截断
                         "source": "mcp-webgate-snippet",
                         "index": len(sources) + i,
                     }

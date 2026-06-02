@@ -23,8 +23,14 @@ export interface FileEditorData {
   loading?: boolean
 }
 
+/** 文件变更监听器回调类型 */
+export type FileChangeListener = (newContent: string, newSize?: number) => void
+
 /** 内部存储：tabId → FileEditorData */
 const editorDataMap = new Map<string, FileEditorData>()
+
+/** 文件变更监听器存储：tabId → Set<listener> */
+const fileChangeListeners = new Map<string, Set<FileChangeListener>>()
 
 /**
  * 注册文件编辑器数据
@@ -71,4 +77,52 @@ export function updateFileEditorData(
  */
 export function removeFileEditorData(tabId: string): void {
   editorDataMap.delete(tabId)
+  fileChangeListeners.delete(tabId)
+}
+
+/**
+ * 订阅文件内容变更事件
+ *
+ * 当文件被外部修改并重新加载时，触发监听器回调。
+ *
+ * @param tabId - 工作区 Tab ID
+ * @param listener - 变更回调函数
+ */
+export function subscribeFileChange(tabId: string, listener: FileChangeListener): void {
+  if (!fileChangeListeners.has(tabId)) {
+    fileChangeListeners.set(tabId, new Set())
+  }
+  fileChangeListeners.get(tabId)!.add(listener)
+}
+
+/**
+ * 取消订阅文件内容变更事件
+ *
+ * @param tabId - 工作区 Tab ID
+ * @param listener - 变更回调函数
+ */
+export function unsubscribeFileChange(tabId: string, listener: FileChangeListener): void {
+  fileChangeListeners.get(tabId)?.delete(listener)
+}
+
+/**
+ * 触发文件内容变更事件
+ *
+ * 当检测到文件被外部修改时调用，通知所有订阅者。
+ *
+ * @param tabId - 工作区 Tab ID
+ * @param newContent - 新的文件内容
+ * @param newSize - 新的文件大小（可选）
+ */
+export function emitFileChange(tabId: string, newContent: string, newSize?: number): void {
+  const listeners = fileChangeListeners.get(tabId)
+  if (listeners) {
+    for (const listener of listeners) {
+      try {
+        listener(newContent, newSize)
+      } catch {
+        // 监听器异常不影响其他监听器
+      }
+    }
+  }
 }

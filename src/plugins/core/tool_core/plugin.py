@@ -26,6 +26,44 @@ from tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from isolation.executor import IsolationExecutor
 
+
+# ---------------------------------------------------------------------------
+# asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
+# ---------------------------------------------------------------------------
+
+def _asyncio_tool_runner(func: Callable, tool_args: dict[str, Any]) -> Any:
+    """在线程中运行异步工具函数，使用独立事件循环。
+
+    不使用 asyncio.run()，因为它的 Runner.__exit__ 会调用
+    _cancel_all_tasks(loop)，取消事件循环中的**所有**任务——
+    包括工具执行期间被间接创建的嵌套管道引擎。
+    这会导致子任务管道在工具返回后被级联终止。
+
+    改用 loop.run_until_complete() 直接运行工具协程并返回结果，
+    关闭循环前不强制取消任何后台任务。
+
+    Args:
+        func: 异步工具函数
+        tool_args: 工具参数字典
+
+    Returns:
+        工具函数返回值
+
+    Note:
+        BUG-FIX-fix_20260601_asyncio_cascade_cancel:
+        原代码: asyncio.run(fa(ta)) → Runner.__exit__ → _cancel_all_tasks(loop)
+        → 取消嵌套子管道引擎 → 所有子任务因 "sink dead" 被终止
+        修复: loop.run_until_complete() + 直接 close，不调用 _cancel_all_tasks
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(func(tool_args))
+    finally:
+        # 关键修复点：不调用 _cancel_all_tasks()
+        # 工具工具返回后，嵌套管道引擎应继续独立运行
+        # 它们有自己的生命周期管理（通过 asyncio.to_thread 独立事件循环）
+        loop.close()
+
 logger = logging.getLogger(__name__)
 
 
@@ -300,11 +338,19 @@ class ToolCore(ICorePlugin):
             #   导致 human_interaction 永远等到 tool_core 的 wait_for 超时才返回。
             # 修复方案: 对 human_interaction 这类纯异步（无阻塞操作）的工具，
             #   直接 await 执行，不经过 to_thread。
+            #
+            # BUG-FIX-fix_20260601_asyncio_cascade_cancel:
+            # 问题根因: asyncio.run() 的 Runner.__exit__ 调用 _cancel_all_tasks(loop)
+            #   取消事件循环中**所有**任务。当工具执行期间创建了嵌套管道引擎时
+            #   （如 task_submit/task_manage），这些引擎会被级联取消，
+            #   导致所有子任务因 "sink dead" 被终止。
+            # 修复方案: 使用 _asyncio_tool_runner() 替代 asyncio.run()，
+            #   只运行工具协程并返回，不调用 _cancel_all_tasks()。
             _is_human_interaction = (tool_name == "human_interaction")
             if inspect.iscoroutinefunction(func) and not _is_human_interaction:
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(
-                        lambda fa=func, ta=tool_args: asyncio.run(fa(ta)),
+                        _asyncio_tool_runner, func, tool_args,
                     ),
                     timeout=timeout,
                 )

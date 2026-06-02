@@ -58,17 +58,13 @@ export interface EvaluationMetric {
 }
 
 /**
- * 评估指标列表响应（后端返回格式）
+ * 评估指标列表响应
  */
 export interface EvaluationMetricsListResponse {
   /** 指标列表 */
   metrics: EvaluationMetric[]
   /** 总数量 */
   total: number
-  /** 当前分类过滤 */
-  category?: string
-  /** 当前状态过滤 */
-  status: string
 }
 
 /**
@@ -82,12 +78,22 @@ export async function getEvaluationMetrics(params?: {
   limit?: number
   category?: string
   status?: string
-}): Promise<EvaluationMetricsListResponse> {
+  metric_type?: string
+}): Promise<{ metrics: EvaluationMetric[]; total: number }> {
   const response = await apiClient.get<EvaluationMetricsListResponse>(
     API_ENDPOINTS.EVALUATION.METRICS,
     { params },
   )
-  return response.data
+  return {
+    metrics: response.data.metrics.map((item) => ({
+      ...item,
+      category: (item as any).category || (item as any).metric_type || '',
+      usage_count: (item as any).usage_count ?? 0,
+      success_count: (item as any).success_count ?? 0,
+      created_at: (item as any).created_at ?? '',
+    })),
+    total: response.data.total,
+  }
 }
 
 /**

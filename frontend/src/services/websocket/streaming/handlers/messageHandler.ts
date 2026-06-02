@@ -1,8 +1,8 @@
 /**
  * 新消息事件处理器
  *
- * 后端持久化完成后的确认信号。
- * 仅做 status 确认和 sequence 更新，不覆盖 content（流式阶段已通过 parts[] 完整构建）。
+ * stream_end 已携带 persisted=true，消息持久化有保证。
+ * 此处理器仅更新后端 sequence 用于后续历史查询。
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
@@ -13,9 +13,6 @@ import { extractMessageId, extractThreadId, terminatePipeline } from './utils'
 
 /**
  * 处理新消息事件
- *
- * 后端持久化完成后的确认信号。仅做 status 确认和 sequence 更新。
- * 不覆盖 content，流式阶段已通过 parts[] 完整构建了消息内容。
  */
 export function handleNewMessage(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)
@@ -23,13 +20,6 @@ export function handleNewMessage(eventData: any) {
 
   if (pipelineId) {
     terminatePipeline(pipelineId, threadId)
-    const currentActivePipelineId = pipelineStore.getState().activePipelineId
-    if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {
-      useStreamingStore.getState().setStreamingForTab(currentActivePipelineId, false)
-    }
-    if (threadId && threadId !== pipelineId) {
-      useStreamingStore.getState().setStreamingForTab(threadId, false)
-    }
   } else if (threadId) {
     pipelineStore.getState().stopStreaming(threadId)
     useStreamingStore.getState().setStreamingForTab(threadId, false)
@@ -45,8 +35,12 @@ export function handleNewMessage(eventData: any) {
   const data = eventData?.data || eventData
   const backendSeq = data?.sequence ?? eventData?.sequence
 
-  pipelineStore.getState().updateMessage(pipelineId, messageId, {
-    status: 'completed',
-    ...(backendSeq != null ? { sequence: backendSeq } : {}),
-  } as any)
+  const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
+  const existingMsg = existingMsgs.find((m: any) => m.id === messageId)
+
+  if (existingMsg && backendSeq != null) {
+    pipelineStore.getState().updateMessage(pipelineId, messageId, {
+      sequence: backendSeq,
+    } as any)
+  }
 }

@@ -43,7 +43,7 @@ class SimpleStateMachine:
             transitions={
                 "pending": ["running"],
                 "running": ["completed", "failed"],
-                "completed": [],
+                "completed": ["pending"],
                 "failed": [],
             },
         )
@@ -110,7 +110,7 @@ _TASK_TRANSITIONS: dict[str, list[str]] = {
     "evaluating": ["completed", "failed", "running", "cancelled"],
     "suspended": ["running", "cancelled", "timeout", "pending"],
     "blocked": ["running", "cancelled", "failed"],
-    "completed": [],
+    "completed": ["pending"],
     "failed": ["pending"],
     "cancelled": [],
     "timeout": ["running", "cancelled", "failed"],

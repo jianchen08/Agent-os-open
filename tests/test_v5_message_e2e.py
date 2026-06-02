@@ -607,7 +607,7 @@ class TestLongContextPreservation:
         }])
 
         mock_storage = MagicMock()
-        mock_storage.list_by_pipeline.return_value = [mock_record_1, mock_record_2]
+        mock_storage.list_by_pipeline.return_value = ([mock_record_1, mock_record_2], False)
 
         mock_provider = MagicMock()
         mock_provider.get.return_value = mock_storage

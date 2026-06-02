@@ -100,15 +100,19 @@ class SearchResultProcessor:
     """
 
     # 默认黑名单域名（广告、低质量站点）
+    # BUG-FIX: 原黑名单包含 "ad." 等带点后缀的短模式，会通过 `in` 操作符误匹配
+    # download.com、cadillac.com 等合法域名。改为精确的子域名关键词。
     DEFAULT_BLOCKED_DOMAINS = [
-        "ad.",
-        "ads.",
-        "adserver.",
-        "click.",
-        "tracker.",
-        "tracking.",
-        "popup.",
-        "banner.",
+        "adservice",
+        "adserver",
+        "doubleclick",
+        "adsystem",
+        "advertising",
+        "clickserver",
+        "trackerserver",
+        "trackingserver",
+        "popupserver",
+        "bannerserver",
     ]
 
     # 默认噪声关键词
@@ -201,8 +205,11 @@ class SearchResultProcessor:
             parsed = urlparse(url)
             domain = parsed.netloc.lower()
 
+            # BUG-FIX: 原实现使用 `blocked in domain` 做子串匹配，"ad." 会误匹配
+            # download.com 等合法域名。改为提取域名各子段进行精确匹配。
+            domain_parts = domain.split(".")
             for blocked in self.blocked_domains:
-                if blocked in domain:
+                if blocked in domain_parts:
                     return True
             return False
         except Exception:
@@ -285,7 +292,9 @@ class SearchResultProcessor:
             }
 
             # 重建 URL
-            normalized = f"{parsed.netloc}{parsed.path}".lower().rstrip("/")
+            # BUG-FIX: 原实现丢弃了 scheme，导致 http://example.com 和
+            # https://example.com 被视为同一 URL。保留 scheme 以正确区分。
+            normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".lower().rstrip("/")
 
             if filtered_params:
                 param_str = "&".join(
@@ -311,15 +320,17 @@ class SearchResultProcessor:
         for result in results[1:]:
             is_duplicate = False
 
-            for existing in deduped:
+            # BUG-FIX: 原实现使用 deduped.remove(existing) + deduped.append(result)，
+            # list.remove 是 O(n) 操作，在外层循环中导致 O(n^3) 总复杂度。
+            # 改为使用 enumerate 索引直接赋值替换，降为 O(n^2)。
+            for i, existing in enumerate(deduped):
                 similarity = self._calculate_similarity(result, existing)
 
                 if similarity >= self.config.content_similarity_threshold:
                     is_duplicate = True
                     # 保留分数更高的
                     if result.score > existing.score:
-                        deduped.remove(existing)
-                        deduped.append(result)
+                        deduped[i] = result
                     break
 
             if not is_duplicate:
@@ -526,7 +537,9 @@ class SearchResultFilter:
             url = result.get("url", "")
             try:
                 domain = urlparse(url).netloc.lower()
-                return not any(b in domain for b in blocked_set)
+                # BUG-FIX: 使用域名段精确匹配，避免子串误匹配
+                domain_parts = domain.split(".")
+                return not any(b in domain_parts for b in blocked_set)
             except Exception:
                 return False
 

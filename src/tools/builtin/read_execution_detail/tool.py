@@ -160,7 +160,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         Returns:
             骨架视图结果，包含 lines 列表和 total_iterations
         """
-        records = storage.list_by_pipeline(pipeline_run_id)
+        records = storage.list_by_pipeline(pipeline_run_id)[0]
 
         if not records:
             return create_failure_result(
@@ -230,7 +230,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             )
 
         # 获取该 iteration 的所有记录，用于构建上下文摘要
-        all_records = storage.list_by_pipeline(pipeline_run_id)
+        all_records = storage.list_by_pipeline(pipeline_run_id)[0]
         target_records = [
             r for r in all_records if r.iteration == iteration
         ]
@@ -341,7 +341,7 @@ class ReadExecutionDetailTool(BuiltinTool):
         if "all" in fields:
             fields = ["all"]
 
-        all_records = storage.list_by_pipeline(pipeline_run_id)
+        all_records = storage.list_by_pipeline(pipeline_run_id)[0]
         target_records = [
             r for r in all_records if r.iteration == iteration
         ]

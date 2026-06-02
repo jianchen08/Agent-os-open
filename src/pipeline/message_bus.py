@@ -14,12 +14,29 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 管道引擎独立线程运行器（与 task_executor._run_engine_isolated 同源）
+# 避免跨模块循环导入（message_bus ← task_executor ← message_bus）
+# ---------------------------------------------------------------------------
+
+def _run_engine_in_thread(engine: Any, **run_kwargs: Any) -> Any:
+    """在独立线程 + 独立事件循环中运行管道引擎。"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(engine.run(**run_kwargs))
+    finally:
+        loop.close()
 
 
 
@@ -99,36 +116,6 @@ async def _auto_complete_interaction(pipeline_id: str) -> None:
         logger.debug("[MessageBus] 自动完成交互检查失败（可忽略）: %s", exc)
 
 
-async def _send_received_event(
-    event_sink: Any,
-    pipeline_id: str,
-    thread_id: str,
-    message_id: str,
-    content: str,
-    source: str,
-) -> None:
-    """发送 pipeline_received 事件到前端。
-
-    用户消息的 sequence 由 WS 流式推送（stream_start）分配，
-    pipeline_received 事件不额外分配 sequence，避免同一消息被分配两次。
-    """
-    if event_sink is None:
-        return
-    try:
-        await event_sink.send_event({
-            "type": "pipeline_received",
-            "data": {
-                "pipeline_id": pipeline_id,
-                "thread_id": thread_id,
-                "message_id": message_id,
-                "content": content,
-                "source": source,
-            },
-        })
-    except Exception:
-        pass
-
-
 async def send_pipeline_message(
     pipeline_id: str,
     message: str,
@@ -172,121 +159,49 @@ async def send_pipeline_message(
     if not pipeline_id:
         return InjectResult(success=False, error="pipeline_id 不能为空", method="failed")
 
-    if not message:
-        return InjectResult(success=False, error="message 不能为空", method="failed")
+    # BUG-FIX-fix_20260601_empty_message:
+    # 空字符串 "" 允许通过（用于管道恢复/唤醒场景），
+    # state_builder 中 if user_input: 保证空字符串不会被加入对话历史。
+    # 仅拦截非空但纯空白的消息（如 "   "），这类消息无意义且会污染历史。
+    if message is not None and len(message) > 0 and not message.strip():
+        return InjectResult(success=False, error="message 不能仅包含空白字符", method="failed")
 
     _msg_source = (metadata or {}).get("source", "user")
 
-    _event_sink = output_sink
-    if _event_sink is None:
-        try:
-            from pipeline.registry import get_engine_registry as _greg
-            _e = _greg().get(pipeline_id)
-            if _e and _e.bridge and getattr(_e.bridge, "output_sink", None):
-                _event_sink = _e.bridge.output_sink
-        except Exception:
-            pass
-    if _event_sink is None:
-        _event_sink = _create_sink(pipeline_id)
-
     if _msg_source != "user":
-        # BUG-FIX-fix_20260529_notification_order:
-        # 问题根因: system_notification 在流式输出期间立即推送 WS 事件，
-        #   前端收到后分配到与正在流式的 AI 消息相同或相近的 sequence，
-        #   导致通知"顶掉"正在输出的消息气泡。
-        # 修复方案: 如果当前 bridge 正在流式输出，将通知缓冲到 bridge 的
-        #   _pending_notifications 队列，stream_end 后统一刷出；
-        #   否则立即推送（非流式期间无冲突风险）。
+        # 系统通知统一走 bridge.enqueue_notification
+        # bridge 内部处理缓冲/推送/LLM注入，不再有多条降级路径
         try:
             from pipeline.registry import get_engine_registry as _greg
             _e = _greg().get(pipeline_id)
-            _bridge = _e.bridge if _e else None
-        except Exception:
-            _bridge = None
-
-        _is_streaming = (
-            _bridge is not None
-            and getattr(_bridge, '_stream_started', False)
-            and _event_sink is not None
-        )
-
-        if _is_streaming:
-            # 流式进行中，缓冲通知到 bridge
-            _pending = getattr(_bridge, '_pending_notifications', None)
-            if _pending is not None:
+            if _e and _e.bridge and hasattr(_e.bridge, 'enqueue_notification'):
                 _level = "info" if _msg_source in ("system", "trigger") else "warning"
-                _pending.append({
-                    "content": message,
-                    "level": _level,
-                    "notificationType": f"{_msg_source}_notification",
-                })
+                _e.bridge.enqueue_notification(message, source=_msg_source, level=_level)
                 logger.info(
-                    "[MessageBus] system_notification BUFFERED (streaming active): "
-                    "pipeline=%s source=%s queue_len=%d content=%.60s",
-                    pipeline_id[:12], _msg_source, len(_pending),
-                    message[:60],
+                    "[MessageBus] system_notification → bridge.enqueue: pipeline=%s source=%s",
+                    pipeline_id[:12], _msg_source,
                 )
             else:
-                # bridge 无缓冲队列字段，降级为立即推送
-                if _event_sink is not None:
-                    try:
-                        _level = "info" if _msg_source in ("system", "trigger") else "warning"
-                        await _event_sink.send_event({
-                            "type": "system_notification",
-                            "data": {
-                                "content": message,
-                                "level": _level,
-                                "notificationType": f"{_msg_source}_notification",
-                                "pipeline_id": pipeline_id,
-                            },
-                        })
-                    except Exception:
-                        pass
-        else:
-            _level = "info" if _msg_source in ("system", "trigger") else "warning"
-            _notif_event = {
-                "type": "system_notification",
-                "data": {
-                    "content": message,
-                    "level": _level,
-                    "notificationType": f"{_msg_source}_notification",
-                    "pipeline_id": pipeline_id,
-                },
-            }
-            if _event_sink is not None:
-                try:
-                    await _event_sink.send_event(_notif_event)
-                    logger.info(
-                        "[MessageBus] system_notification SENT | pipeline=%s source=%s content=%.60s",
-                        pipeline_id[:12], _msg_source,
-                        message[:60],
-                    )
-                except Exception as _sn_err:
-                    logger.warning(
-                        "[MessageBus] system_notification FAILED | pipeline=%s source=%s error=%s",
-                        pipeline_id[:12], _msg_source, _sn_err,
-                    )
-            else:
-                try:
-                    from pipeline.stream_bridge import send_frontend_event
-                    _fallback_ok = await send_frontend_event(pipeline_id, _notif_event)
-                    if _fallback_ok:
-                        logger.info(
-                            "[MessageBus] system_notification SENT (fallback) | pipeline=%s source=%s",
-                            pipeline_id[:12], _msg_source,
-                        )
-                    else:
-                        logger.warning(
-                            "[MessageBus] system_notification SKIP: no sink & fallback failed | pipeline=%s source=%s",
-                            pipeline_id[:12], _msg_source,
-                        )
-                except Exception as _fb_err:
-                    logger.warning(
-                        "[MessageBus] system_notification SKIP: no sink & fallback error | pipeline=%s source=%s error=%s",
-                        pipeline_id[:12], _msg_source, _fb_err,
-                    )
+                logger.warning("[MessageBus] no bridge for notification: pipeline=%s", pipeline_id[:12])
+        except Exception as _sn_err:
+            logger.warning("[MessageBus] bridge notification failed: pipeline=%s err=%s", pipeline_id[:12], _sn_err)
 
     engine, state = _find_engine(pipeline_id)
+
+    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
+    # 问题根因: 重启后 restore_pipelines_on_startup 通过 revive_pipeline 注册引擎时
+    #   没有 thread_id（内存注册表被清空），后续 send_pipeline_message 虽然收到
+    #   thread_id 参数但从不更新 registry。导致 _create_sink 获取空 thread_id，
+    #   TargetedSink 推送永远失败，sink dead 导致管道异常退出。
+    # 修复方案: 当 thread_id 参数非空且 registry 中 entry.thread_id 为空时，主动更新。
+    if thread_id and pipeline_id:
+        try:
+            from pipeline.registry import get_engine_registry as _reg_get
+            _reg_entry = _reg_get().get(pipeline_id)
+            if _reg_entry and not _reg_entry.thread_id:
+                _reg_entry.thread_id = thread_id
+        except Exception:
+            pass
 
     logger.debug(
         "[DRAIN-DEBUG] send_pipeline_message 核心路径: pipeline=%s engine=%s state=%s source=%s",
@@ -304,8 +219,14 @@ async def send_pipeline_message(
                     _registry = get_engine_registry()
                     bridge = _registry.ensure_bridge(pipeline_id, _sink)
                     _on_chunk = bridge.on_chunk if bridge else lambda chunk: None
-                    engine_task = asyncio.create_task(
-                        engine.run(
+                    # BUG-FIX-fix_20260601_isolated_engine:
+                    # engine.run() 跑在独立线程+独立事件循环，与调用方完全解耦。
+                    # 不再使用 asyncio.create_task 绑定到当前事件循环。
+                    # run_in_executor 只接受位置参数，用 functools.partial 预绑定 kwargs。
+                    engine_future = asyncio.get_running_loop().run_in_executor(
+                        None,
+                        functools.partial(
+                            _run_engine_in_thread, engine,
                             user_input=message,
                             agent_config=agent_config,
                             conversation_history=conversation_history or [],
@@ -314,15 +235,13 @@ async def send_pipeline_message(
                             project_root="",
                             streaming=True,
                             on_chunk=_on_chunk,
-                        )
+                        ),
                     )
-                    _start_bg_drain(pipeline_id, bridge, engine, engine_task=engine_task)
+                    _start_bg_drain(pipeline_id, bridge, engine, engine_task=engine_future)
                     _idle_entry = _registry.get(pipeline_id)
                     if _idle_entry:
-                        _idle_entry.engine_task = engine_task
-                    logger.info("[MessageBus] idle engine started | pipeline=%s", pipeline_id[:12])
-                    if _msg_source == "user":
-                        await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
+                        _idle_entry.engine_task = engine_future  # concurrent.futures.Future
+                    logger.info("[MessageBus] idle engine started (isolated) | pipeline=%s", pipeline_id[:12])
                     return InjectResult(success=True, method="start", pipeline_id=pipeline_id, bridge=bridge)
                 return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
 
@@ -384,8 +303,6 @@ async def send_pipeline_message(
                 "[MessageBus] 消息已注入 | pipeline=%s method=%s",
                 pipeline_id[:12], method,
             )
-            if _msg_source == "user":
-                await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
             return InjectResult(
                 success=True, method=method, pipeline_id=pipeline_id, bridge=bridge,
             )
@@ -422,9 +339,6 @@ async def send_pipeline_message(
         from pipeline.registry import get_engine_registry
         get_engine_registry().set_bridge(pipeline_id, revive_bridge)
         revive_result.bridge = revive_bridge
-
-    if _msg_source == "user" and revive_result.success:
-        await _send_received_event(_event_sink, pipeline_id, thread_id, message_id, message, _msg_source)
 
     return revive_result
 
@@ -543,11 +457,13 @@ async def _try_revive_pipeline(
         #   run() 方法不会返回而是进入 _wake_event.wait() 等待循环。
         #   这导致 _try_revive_pipeline 永远阻塞，send_pipeline_message 不返回，
         #   app_factory.py 中的 drain_loop 永远不启动。
-        # 修复方案: 用 asyncio.create_task 异步启动 engine.run()，
-        #   _try_revive_pipeline 立即返回，让 app_factory.py 启动 drain_loop。
-        #   engine.run() 在后台执行，通过 on_chunk 回调将 LLM 输出发送到 bridge。
-        engine_task = asyncio.create_task(
-            new_engine.run(
+        # 修复方案(升级): 使用 _run_engine_in_thread 在独立线程+独立事件循环中
+        #   异步启动 engine.run()，_try_revive_pipeline 立即返回。
+        #   这比 asyncio.create_task 更彻底——引擎与调用方事件循环完全解耦。
+        engine_future = asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(
+                _run_engine_in_thread, new_engine,
                 user_input=message,
                 agent_config=agent_config,
                 conversation_history=conversation_history,
@@ -557,16 +473,16 @@ async def _try_revive_pipeline(
                 allow_default_fallback=_allow_default_fallback,
                 streaming=streaming,
                 on_chunk=on_chunk or (lambda chunk: None),
-            )
+            ),
         )
 
         # BUG-FIX-fix_20260525_realtime_render:
         # revive 路径也需要 drain_loop 消费队列推送到前端
         if revive_bridge is not None:
-            _start_bg_drain(pipeline_id, revive_bridge, new_engine, engine_task)
+            _start_bg_drain(pipeline_id, revive_bridge, new_engine, engine_task=engine_future)
             _revive_entry = get_engine_registry().get(pipeline_id)
             if _revive_entry:
-                _revive_entry.engine_task = engine_task
+                _revive_entry.engine_task = engine_future
 
         logger.info("[MessageBus] 管道复活已启动(异步): pipeline=%s", pipeline_id[:12])
         return InjectResult(success=True, method="revive", pipeline_id=pipeline_id)
@@ -602,7 +518,7 @@ def _load_history_from_storage(
         return None
 
     try:
-        records = exec_storage.list_by_pipeline(pipeline_id)
+        records = exec_storage.list_by_pipeline(pipeline_id)[0]
     except Exception:
         return None
 
@@ -736,17 +652,13 @@ def _start_bg_drain(
             )
             content = result.get("accumulated_content", "")
             thinking_parts = result.get("thinking_content_parts", [])
-            _ai_seq = getattr(bridge, '_last_ai_sequence', 0)
-            if _ai_seq <= 0:
-                _ai_seq = getattr(bridge, '_current_msg_seq', 0)
             logger.warning(
-                "[DRAIN] pipeline=%s msg=%s contentLen=%d thinkingParts=%d seq=%d engine_running=%s engine_suspended=%s",
+                "[DRAIN] pipeline=%s msg=%s contentLen=%d thinkingParts=%d engine_running=%s engine_suspended=%s",
                 pipeline_id[:12], bridge.message_id[:12],
-                len(content), len(thinking_parts), _ai_seq,
+                len(content), len(thinking_parts),
                 getattr(engine, 'is_running', False),
                 getattr(engine, 'is_suspended', False),
             )
-            await bridge.send_new_message(content, sequence=_ai_seq)
         except asyncio.CancelledError:
             logger.warning(
                 "[DRAIN-CANCEL] _drain_and_cleanup 被 cancel: pipeline=%s drain_id=%s",

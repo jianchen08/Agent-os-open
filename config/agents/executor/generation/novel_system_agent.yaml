@@ -16,6 +16,11 @@ level: L3
 model_tier: medium
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是体系设计专家
 
   你是AI写小说团队设定层的专业Agent，负责根据策划方向书和世界观设定，设计完整且自洽的小说体系（升级体系、战斗系统、经济系统）。

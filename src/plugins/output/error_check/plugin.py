@@ -151,10 +151,13 @@ class ErrorCheckPlugin(IOutputPlugin):
                     return self._handle_knowledge_insufficient(ctx)
 
         # 检查格式错误（但 LLM 返回 tool_calls 时不算格式错误）
+        # BUG-FIX: 工具执行结果(core_type=tool_execute)不是LLM生成的内容，
+        # 可能包含文件内容等，不能用LLM输出格式标准检查
         if self._check_format:
+            core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
             raw_tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
-            if not raw_tool_calls and raw_result and self._is_format_error(raw_result):
+            if core_type != "tool_execute" and not raw_tool_calls and raw_result and self._is_format_error(raw_result):
                 # 格式错误 + 反复重试 → 可能是策略错误
                 if self._check_strategy_error and self._is_strategy_error(ctx):
                     return self._handle_strategy_error(ctx)

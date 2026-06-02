@@ -177,7 +177,17 @@ async def get_file_content(
                 "message": "路径超出工作空间范围",
             }
     else:
-        full_path = Path(path).resolve()
+        safe_root = Path.cwd().resolve()
+        raw_path = Path(path)
+        if raw_path.is_absolute():
+            full_path = raw_path.resolve()
+        else:
+            full_path = (safe_root / path).resolve()
+        if not str(full_path).startswith(str(safe_root)):
+            return {
+                "success": False,
+                "message": "路径超出工作空间范围",
+            }
 
     if not full_path.is_file():
         return {
@@ -229,12 +239,14 @@ async def save_file_content(
     if not str(full_path).startswith(str(workspace_path)):
         return {"success": False, "message": "路径超出工作空间范围"}
 
-    MAX_SIZE = 1 * 1024 * 1024
+    MAX_SIZE = 10 * 1024 * 1024
     if len(content.encode("utf-8")) > MAX_SIZE:
-        return {"success": False, "message": "内容过大，超过 1MB 限制"}
+        return {"success": False, "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024*1024)}MB 限制"}
+
+    if not full_path.parent.exists():
+        return {"success": False, "message": f"目标目录不存在: {full_path.parent}"}
 
     try:
-        full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
         return {"success": True, "path": path, "size": len(content.encode("utf-8"))}
     except Exception as e:
@@ -572,12 +584,20 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
     通过 TaskService 获取任务实例，从其 metadata.ws_meta.path 字段提取
     工作空间路径。
 
+    特殊处理 _local: 返回项目根目录（本文件向上4级），
+    确保 fileOpener 发起的非任务文件读取能正确解析相对路径。
+
     Args:
         container_task_id: 容器任务 ID
 
     Returns:
         工作空间路径字符串，未找到时返回 None
     """
+    # 特殊处理 _local 工作空间
+    if container_task_id == "_local":
+        _local_root = Path(__file__).resolve().parent.parent.parent.parent
+        return str(_local_root)
+
     try:
         from infrastructure.service_provider import get_service_provider
 

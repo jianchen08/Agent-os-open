@@ -7,12 +7,13 @@
  * @module components/workspace/CodeEditor
  */
 
-import { Save, AlertTriangle, FileText, Eye, Pencil } from 'lucide-react'
+import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { cn } from '@/lib/utils'
+import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorRegistry'
 
 /** Markdown 扩展名集合 */
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
@@ -100,6 +101,14 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   '.lock': 'text',
 }
 
+/** 自动刷新配置 */
+export interface AutoRefreshConfig {
+  /** 是否启用自动刷新 */
+  enabled: boolean
+  /** 刷新间隔（毫秒，默认 3000） */
+  interval?: number
+}
+
 /** CodeEditor 组件属性 */
 export interface CodeEditorProps {
   /** 文件路径（如 src/main.py） */
@@ -114,6 +123,10 @@ export interface CodeEditorProps {
   readOnly?: boolean
   /** 自定义类名 */
   className?: string
+  /** 可选的 Tab ID，用于接收实时刷新事件 */
+  tabId?: string
+  /** 自动刷新配置 */
+  autoRefresh?: AutoRefreshConfig
 }
 
 /**
@@ -178,6 +191,8 @@ export function CodeEditor({
   onSave,
   readOnly = false,
   className,
+  tabId,
+  autoRefresh,
 }: CodeEditorProps) {
   const [localContent, setLocalContent] = useState(initialContent)
   const [isDirty, setIsDirty] = useState(false)
@@ -185,8 +200,16 @@ export function CodeEditor({
   const [saveError, setSaveError] = useState<string | null>(null)
   /** 预览/编辑模式切换，默认预览模式 */
   const [isPreview, setIsPreview] = useState(true)
+  /** 外部变更提示状态 */
+  const [externalChange, setExternalChange] = useState<{ content: string; size?: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const preRef = useRef<HTMLPreElement>(null)
+  const isDirtyRef = useRef(isDirty)
+
+  /** 同步 isDirty 到 ref，供事件监听使用 */
+  useEffect(() => {
+    isDirtyRef.current = isDirty
+  }, [isDirty])
 
   const fileName = useMemo(() => {
     const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
@@ -205,12 +228,93 @@ export function CodeEditor({
     [size, initialContent.length],
   )
 
+  /** 内容容器的 ref，用于保存和恢复滚动位置 */
+  const contentContainerRef = useRef<HTMLDivElement>(null)
+
   /** 当外部 content 变化时同步（如文件重新加载） */
   useEffect(() => {
     setLocalContent(initialContent)
     setIsDirty(false)
     setSaveError(null)
+    setExternalChange(null)
   }, [initialContent])
+
+  /**
+   * 保存当前滚动位置
+   */
+  const saveScrollPosition = useCallback(() => {
+    const container = contentContainerRef.current
+    if (!container) return null
+    return {
+      scrollTop: container.scrollTop,
+      scrollLeft: container.scrollLeft,
+    }
+  }, [])
+
+  /**
+   * 恢复滚动位置
+   */
+  const restoreScrollPosition = useCallback((pos: { scrollTop: number; scrollLeft: number } | null) => {
+    if (!pos) return
+    const container = contentContainerRef.current
+    if (!container) return
+    requestAnimationFrame(() => {
+      container.scrollTop = pos.scrollTop
+      container.scrollLeft = pos.scrollLeft
+    })
+  }, [])
+
+  /**
+   * 订阅文件外部变更事件
+   *
+   * 当文件被外部修改时，如果当前没有未保存的修改，自动同步新内容；
+   * 如果有未保存的修改，显示提示让用户选择是否覆盖。
+   */
+  useEffect(() => {
+    if (!tabId) return
+
+    const handleFileChange = (newContent: string, newSize?: number) => {
+      if (isDirtyRef.current) {
+        // 有未保存修改，显示覆盖提示
+        setExternalChange({ content: newContent, size: newSize })
+      } else {
+        // 无未保存修改，直接同步，保持滚动位置
+        const scrollPos = saveScrollPosition()
+        setLocalContent(newContent)
+        setIsDirty(false)
+        setSaveError(null)
+        restoreScrollPosition(scrollPos)
+      }
+    }
+
+    subscribeFileChange(tabId, handleFileChange)
+    return () => unsubscribeFileChange(tabId, handleFileChange)
+  }, [tabId, saveScrollPosition, restoreScrollPosition])
+
+  /**
+   * 处理外部变更覆盖
+   *
+   * 用户确认用外部修改覆盖当前未保存的内容。
+   */
+  const handleAcceptExternalChange = useCallback(() => {
+    if (externalChange) {
+      const scrollPos = saveScrollPosition()
+      setLocalContent(externalChange.content)
+      setIsDirty(false)
+      setSaveError(null)
+      setExternalChange(null)
+      restoreScrollPosition(scrollPos)
+    }
+  }, [externalChange, saveScrollPosition, restoreScrollPosition])
+
+  /**
+   * 忽略外部变更
+   *
+   * 用户选择保留当前修改，忽略外部变更。
+   */
+  const handleIgnoreExternalChange = useCallback(() => {
+    setExternalChange(null)
+  }, [])
 
   /** 处理保存 */
   const handleSave = useCallback(async () => {
@@ -331,6 +435,35 @@ export function CodeEditor({
   // 可编辑文件：支持预览/编辑模式切换
   return (
     <div className={cn('flex h-full flex-col', className)}>
+      {/* 外部变更提示条 */}
+      {externalChange && (
+        <div className="flex items-center justify-between border-b border-amber-500/30 bg-amber-500/10 px-4 py-2">
+          <div className="flex items-center gap-2">
+            <RefreshCw className="h-3.5 w-3.5 text-amber-600" />
+            <span className="text-xs text-amber-700">
+              文件已被外部修改
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAcceptExternalChange}
+              className="flex items-center gap-1 rounded-md bg-amber-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-700"
+              title="用外部修改覆盖当前内容"
+            >
+              <RefreshCw className="h-3 w-3" />
+              覆盖
+            </button>
+            <button
+              onClick={handleIgnoreExternalChange}
+              className="flex items-center gap-1 rounded-md bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title="保留当前修改"
+            >
+              忽略
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 工具栏 */}
       <div className="border-border bg-muted/30 flex items-center justify-between border-b px-4 py-2">
         <div className="flex items-center gap-2">
@@ -392,11 +525,11 @@ export function CodeEditor({
       {isPreview ? (
         /* 预览模式：Markdown 文件使用 LobeChatMarkdown 渲染，其他使用 SyntaxHighlighter */
         isMarkdownFile ? (
-          <div className="prose prose-sm dark:prose-invert max-w-none min-h-0 flex-1 overflow-auto p-4">
+          <div ref={contentContainerRef} className="prose prose-sm dark:prose-invert max-w-none min-h-0 flex-1 overflow-auto p-4">
             <LobeChatMarkdown content={localContent} />
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div ref={contentContainerRef} className="min-h-0 flex-1 overflow-auto">
             <SyntaxHighlighter
               language={language}
               style={oneDark}
@@ -422,7 +555,7 @@ export function CodeEditor({
         )
       ) : (
         /* 编辑模式：textarea + 语法高亮背景 */
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div ref={contentContainerRef} className="relative min-h-0 flex-1 overflow-hidden">
           {/* 语法高亮底层（用于视觉参考，实际编辑在 textarea 上层） */}
           <pre
             ref={preRef}

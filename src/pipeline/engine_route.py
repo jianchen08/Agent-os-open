@@ -70,6 +70,8 @@ async def apply_route(
 
     根据路由类型更新状态字典：
     - next_llm → state["core_type"] = "llm_call"
+      但当 AI 纯文本输出（无 tool_calls）且无新用户输入时，
+      自动降级为 wait（挂起等用户输入），防止管道空转。
     - next_tool → state["core_type"] = "tool_execute"
     - end → state["ended"] = True
     - delegate → 通过 pipeline_registry.route() 路由，不设 ended=True
@@ -86,6 +88,50 @@ async def apply_route(
     route_type = route.route_type
 
     if route_type == "next_llm":
+        # BUG-FIX-fix_20260601_text_only_next_llm_idle_loop:
+        # 问题根因: AI 输出纯文本（无 tool_calls）后，某些输出插件（如
+        #   output_repetition_guard、task_reminder）仍发出 next_llm 信号，
+        #   导致管道空转——下一轮 LLM 调用只有 dynamic_vars 时间戳变化，
+        #   没有实质性新输入，浪费 tokens 且容易引发幻觉。
+        # 修复方案: 检测 AI 纯文本输出 + 无新用户输入的组合，
+        #   自动降级为 wait（挂起等待用户输入），与 handle_no_route_signals
+        #   的无信号路径行为一致。
+        _raw_result = state.get("raw_result", "")
+        _has_tool_calls = bool(state.get("tool_calls"))
+        # 增加 core_type 检查，避免 tool_execute 场景下的工具执行结果
+        # 被误判为"LLM纯文本输出"导致管道错误挂起
+        _core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
+        _is_text_only = bool(_raw_result and not _has_tool_calls and _core_type == "llm_call")
+
+        if _is_text_only:
+            # AI 只输出了文本，没有调用任何工具。
+            # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
+            notif_sources = engine.consume_pending_notifications()
+            if notif_sources:
+                # 有新通知，注入后继续 LLM 调用
+                combined = "\n\n".join(notif_sources)
+                state["user_input"] = combined
+                state.setdefault("messages", []).append(
+                    {"role": "user", "content": combined}
+                )
+                state[StateKeys.CORE_TYPE] = "llm_call"
+                logger.info(
+                    "Route next_llm + text-only output: %d pending notifications found, continuing",
+                    len(notif_sources),
+                )
+                return False
+
+            # 无新输入，降级为 wait（挂起等用户反馈）
+            logger.info(
+                "Route next_llm + text-only output (no new input): "
+                "downgrading to wait, suspending pipeline"
+            )
+            restored = await engine.suspend_and_wait(state)
+            if restored:
+                state[StateKeys.CORE_TYPE] = "llm_call"
+                return False
+            return True
+
         state[StateKeys.CORE_TYPE] = "llm_call"
         logger.info("Route applied: next_llm")
         return False

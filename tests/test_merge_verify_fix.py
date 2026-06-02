@@ -149,15 +149,8 @@ class TestMergeVerifyFix:
         lifecycle._verify_merge_result = mock_verify
         result = lifecycle.on_eval_passed("test1", str(wt_dir), ws_meta)
 
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpaswx9aie\current
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmp6skow815\current
-        assert result["success"] is True
-=======
         assert result["success"] is False
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_merge_verify_fix.py
-=======
         assert result["success"] is False
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_merge_verify_fix.py
         assert "verify_error" in result
         assert call_count == 2, f"应重试2次, 实际调用{call_count}次"
         assert wt_dir.exists(), "worktree 应该保留不清理"

@@ -32,6 +32,8 @@ export interface ConversionOptions {
   includeDetails?: boolean
   /** 自定义样式类名 */
   customClassName?: string
+  /** 打开文件回调 */
+  onOpenFile?: (filePath: string) => void | Promise<void>
 }
 
 /**
@@ -126,7 +128,9 @@ export function toolCallToActivity(
     customClassName: options?.customClassName,
   }
 
-  return enhanceActivityWithToolConfig(base, toolCall)
+  return enhanceActivityWithToolConfig(base, toolCall, {
+    onOpenFile: options?.onOpenFile,
+  })
 }
 
 /**

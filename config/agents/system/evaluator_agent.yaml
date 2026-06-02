@@ -13,7 +13,7 @@ description: |
 agent_type: system
 category: system
 level: L3
-model_tier: small
+model_name: minimax-m3
 
 tags:
   - evaluation

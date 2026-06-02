@@ -227,7 +227,8 @@ class TrackPlugin(IOutputPlugin):
         """收集 token 用量统计。
 
         从 state 中读取 LLM 返回的 token 用量信息，
-        累加到跨迭代的总用量中。
+        累加到跨迭代的总用量中。仅在 llm_call 轮累加，
+        tool_execute 轮跳过（此时 llm_usage 是上一轮残留值）。
 
         Args:
             ctx: 插件执行上下文
@@ -235,10 +236,22 @@ class TrackPlugin(IOutputPlugin):
         Returns:
             Token 用量字典
         """
-        # 从当前轮次读取
+        core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
         current_usage = ctx.state.get("llm_usage", {})
 
-        # 累加到跨迭代总量
+        # tool_execute 轮不累加 token（llm_usage 是上一轮残留）
+        if core_type != "llm_call" or not current_usage:
+            prev_total = ctx.state.get("track.llm_usage", {})
+            return {
+                "total_input_tokens": prev_total.get("total_input_tokens", 0),
+                "total_output_tokens": prev_total.get("total_output_tokens", 0),
+                "total_tokens": prev_total.get("total_tokens", 0),
+                "total_cached_tokens": prev_total.get("total_cached_tokens", 0),
+                "last_input_tokens": 0,
+                "last_output_tokens": 0,
+                "last_cached_tokens": 0,
+            }
+
         prev_total = ctx.state.get("track.llm_usage", {})
         total_input = prev_total.get("total_input_tokens", 0) + current_usage.get("input_tokens", 0)
         total_output = prev_total.get("total_output_tokens", 0) + current_usage.get("output_tokens", 0)
@@ -287,7 +300,7 @@ class TrackPlugin(IOutputPlugin):
         # BUG-FIX-20260427: CLI 重启后续接已有记录的 sequence 到共享计数器
         if pipeline_run_id not in self._initialized_pipeline_ids:
             self._initialized_pipeline_ids.add(pipeline_run_id)
-            existing = storage.list_by_pipeline(pipeline_run_id)
+            existing = storage.list_by_pipeline(pipeline_run_id)[0]
             if existing:
                 max_seq = max(r.sequence for r in existing)
                 try:
@@ -479,6 +492,37 @@ class TrackPlugin(IOutputPlugin):
 
         return stripped_curr
 
+    def _check_cache_anomaly(self, llm_usage: dict[str, Any], pipeline_id: str) -> None:
+        """检测缓存命中异常并输出警告。
+
+        理想情况下，每轮只有新增部分未命中缓存，
+        所有轮次的未命中总量 ≈ 最后一轮的 input_tokens。
+        若 (总未命中 - 末轮input) / 总input > 5%，说明缓存命中率异常低。
+
+        Args:
+            llm_usage: 累计 token 用量字典
+            pipeline_id: 管道 ID（用于日志）
+        """
+        total_input = llm_usage.get("total_input_tokens", 0)
+        total_cached = llm_usage.get("total_cached_tokens", 0)
+        last_input = llm_usage.get("last_input_tokens", 0)
+
+        if total_input <= 0:
+            return
+
+        total_uncached = total_input - total_cached
+        gap = abs(total_uncached - last_input)
+        ratio = gap / total_input
+
+        if ratio > 0.05:
+            logger.warning(
+                "[%s] 缓存命中异常: 总未命中=%d, 末轮input=%d, 偏差=%d (%.1f%% > 5%%阈值), "
+                "总input=%d, 总cached=%d, 命中率=%.1f%%",
+                pipeline_id, total_uncached, last_input, gap, ratio * 100,
+                total_input, total_cached,
+                total_cached / total_input * 100 if total_input else 0,
+            )
+
     def save_pipeline_summary(self, ctx: PluginContext, elapsed_total: float) -> None:
         """保存管道运行摘要。
 
@@ -501,6 +545,9 @@ class TrackPlugin(IOutputPlugin):
             return
 
         llm_usage = ctx.state.get("track.llm_usage", {})
+
+        # 缓存命中异常检测
+        self._check_cache_anomaly(llm_usage, pipeline_run_id)
 
         # BUG-FIX-fix_pipeline_thread_id_missing:
         # 问题根因: thread_id 从未被写入 PipelineRunSummary，导致服务器重启后

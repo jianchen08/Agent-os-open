@@ -287,22 +287,8 @@ export const ChatContainer = ({
    * 不再使用外部传入的 messages prop 作为 fallback，消除双数据源不一致问题。
    */
   const activeMessages = useMemo(() => {
-    const mapped = pipelineMessages
-      .filter((m: any) => m.role !== 'tool')
-    // BUG-FIX-fix_20260530_system_dedup:
-    // 问题根因: 系统消息按 content 前50字符去重，导致3次触发器通知（内容相似但
-    //   是不同时间点的不同事件）只保留第1次，后续触发器通知全部丢失。
-    // 修复方案: 不再按内容前缀去重系统消息。每条系统通知都是独立事件，应全部保留。
-    // 同时修复了用户消息去重错误使用 seenSystemContents 的 bug。
-    const seenUserContents = new Set<string>()
-    const noDupUserMsg = mapped.filter((m: any) => {
-      if (m.role !== 'user') return true
-      const contentPrefix = (m.content || '').trimStart().slice(0, 50)
-      if (seenUserContents.has(contentPrefix)) return false
-      seenUserContents.add(contentPrefix)
-      return true
-    })
-    return mergeConsecutiveAssistantMessages(noDupUserMsg)
+    const mapped = pipelineMessages.filter((m: any) => m.role !== 'tool')
+    return mergeConsecutiveAssistantMessages(mapped)
   }, [pipelineMessages])
 
   /**

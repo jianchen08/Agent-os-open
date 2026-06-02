@@ -193,18 +193,6 @@ class TaskEvaluationBuilderMixin:
             task_id, user_input[:50], len(description), bool(description),
         )
 
-        # BUG-FIX-fix_20260421_goal_context_injection:
-        # 问题根因: task_submit 将 goal.context 存入 metadata["goal_context"]，
-        #          但 TaskWorker 构建 full_input 时未提取该字段，导致包含原始用户需求的
-        #          结构化上下文在传递中丢失，下游 Agent 只能看到简化的标题。
-        # 修复方案: 从 task.metadata 中提取 goal_context 并拼入 full_input。
-        # 影响范围: 所有通过 task_submit 提交且携带 goal.context 的任务
-        goal_context = None
-        if task_service:
-            _task_obj = task_service.get_task(task_id)
-            if _task_obj and _task_obj.metadata:
-                goal_context = _task_obj.metadata.get("goal_context")
-
         is_default_workspace = not explicit_workspace
 
         # 读取 retry_message（由 TaskTool._retry_task 存入 metadata）
@@ -224,8 +212,7 @@ class TaskEvaluationBuilderMixin:
             full_input += f"\n\n详细描述：{description}"
         if retry_message:
             full_input += f"\n\n[重试纠正信息]：{retry_message}"
-        if goal_context:
-            full_input += f"\n\n上下文信息：{json.dumps(goal_context, ensure_ascii=False, indent=2) if isinstance(goal_context, dict) else str(goal_context)}"
+        # goal_context 信息不再注入到任务输入中，减少冗余输出
         if acceptance_criteria:
             acceptance_criteria = self._normalize_acceptance_criteria_paths(
                 acceptance_criteria, workspace,

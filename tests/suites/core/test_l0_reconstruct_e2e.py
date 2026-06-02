@@ -190,7 +190,7 @@ class TestFileSplitting:
 
         # 新实例加载
         storage2 = ExecutionRecordStorage(data_dir=str(data_dir))
-        records = storage2.list_by_pipeline("run-001")
+        records = storage2.list_by_pipeline("run-001")[0]
         assert len(records) == 600
         # 按 sequence 升序
         assert records[0].sequence == 1
@@ -235,7 +235,7 @@ class TestFileSplitting:
         assert (data_dir / "run-001_002.yaml").exists()
 
         # 删掉 200 条
-        records = storage.list_by_pipeline("run-001")
+        records = storage.list_by_pipeline("run-001")[0]
         for r in records[400:]:
             del storage._records[r.record_id]
         storage._persist_pipeline("run-001")

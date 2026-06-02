@@ -98,7 +98,7 @@ def resolve_conversation_history(
         return []
 
     try:
-        records = exec_storage.list_by_pipeline(pipeline_id)
+        records = exec_storage.list_by_pipeline(pipeline_id)[0]
     except Exception:
         return []
 

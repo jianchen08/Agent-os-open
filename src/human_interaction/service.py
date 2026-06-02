@@ -268,6 +268,7 @@ class HumanInteractionService(IHumanInteractionService):
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """等待用户选择。"""
+        current_loop_id = id(asyncio.get_event_loop())
         event = self._pending_events.get(request_id)
         if not event:
             record = self._requests.get(request_id)
@@ -286,8 +287,8 @@ class HumanInteractionService(IHumanInteractionService):
 
         try:
             logger.info(
-                "[HumanInteraction] wait_for_choice() 开始等待 | request_id=%s | timeout=%s",
-                request_id, timeout,
+                "[HumanInteraction] wait_for_choice() 开始等待 | request_id=%s | timeout=%s | loop_id=%s | event_id=%s | event_is_set=%s",
+                request_id, timeout, current_loop_id, id(event), event.is_set(),
             )
             await asyncio.wait_for(event.wait(), timeout=timeout)
             logger.info(
@@ -400,12 +401,23 @@ class HumanInteractionService(IHumanInteractionService):
 
         async with self._lock:
             event_exists = request_id in self._pending_events
+            _set_loop_id = id(asyncio.get_event_loop())
             if event_exists:
-                self._pending_events[request_id].set()
-            logger.info(
-                "[HumanInteraction] Event.set() | request_id=%s | event_exists=%s | pending_events_count=%d",
-                request_id, event_exists, len(self._pending_events),
-            )
+                _evt = self._pending_events[request_id]
+                logger.info(
+                    "[HumanInteraction] Event.set() | request_id=%s | event_exists=%s | loop_id=%s | event_id=%s | event_is_set_before=%s",
+                    request_id, event_exists, _set_loop_id, id(_evt), _evt.is_set(),
+                )
+                _evt.set()
+                logger.info(
+                    "[HumanInteraction] Event.set() DONE | request_id=%s | event_is_set_after=%s",
+                    request_id, _evt.is_set(),
+                )
+            else:
+                logger.warning(
+                    "[HumanInteraction] Event NOT found | request_id=%s | pending_keys=%s",
+                    request_id, list(self._pending_events.keys())[:5],
+                )
             if request_id in self._timeout_tasks:
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]

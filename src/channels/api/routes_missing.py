@@ -1217,13 +1217,38 @@ eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=
 
 
 @eval_metrics_alias_router.get("", summary="获取评估指标列表（别名）")
-async def list_eval_metrics_alias(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def list_eval_metrics_alias(
+    metric_type: str | None = Query(default=None, description="按类型筛选"),
+    tag: str | None = Query(default=None, description="按标签筛选"),
+    is_red_line: bool | None = Query(default=None, description="是否红线指标"),
+    limit: int = Query(default=50, ge=1, le=200, description="每页数量"),
+    offset: int = Query(default=0, ge=0, description="偏移量"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import list_metrics
-        result = await list_metrics()
-        if "items" in result and "metrics" not in result:
-            result["metrics"] = result.pop("items")
-        return result
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response
+        loader = _get_metric_loader()
+        if loader is None:
+            return {"metrics": [], "total": 0}
+        metrics = list(loader.metrics.values())
+        if metric_type:
+            metrics = [
+                m for m in metrics
+                if (
+                    m.metric_type.value
+                    if hasattr(m.metric_type, "value")
+                    else str(m.metric_type)
+                ) == metric_type
+            ]
+        if tag:
+            metrics = [m for m in metrics if tag in m.tags]
+        if is_red_line is not None:
+            metrics = [m for m in metrics if m.is_red_line == is_red_line]
+        total = len(metrics)
+        end = offset + limit
+        page = metrics[offset:end]
+        items = [_metric_to_response(m).model_dump() for m in page]
+        return {"metrics": items, "total": total}
     except Exception:
         return {"metrics": [], "total": 0}
 
@@ -1231,8 +1256,14 @@ async def list_eval_metrics_alias(_user: dict = Depends(require_auth)) -> dict[s
 @eval_metrics_alias_router.get("/{metric_id}", summary="获取评估指标详情（别名）")
 async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import get_metric
-        return await get_metric(metric_id, _user)
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail
+        loader = _get_metric_loader()
+        if loader is None:
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")
+        metric = loader.get(metric_id)
+        if metric is None:
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message=f"评估指标 '{metric_id}' 不存在")
+        return _metric_to_detail(metric).model_dump()
     except Exception:
         return {"id": metric_id, "name": "", "description": ""}
 

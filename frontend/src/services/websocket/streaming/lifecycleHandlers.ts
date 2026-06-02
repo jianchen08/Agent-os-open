@@ -1,22 +1,15 @@
 /**
- * 生命周期事件处理器（STATE_CHANGE / PIPELINE_RECEIVED / WS重连补漏 / chunk超时回调）
+ * 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / chunk超时回调 / 系统通知）
  *
  * 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
  */
-import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 import { generateUUID } from '@/utils/uuid'
 
-import { allocateNextSequence, terminatePipeline } from './handlers/utils'
+import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
-
-/** 重连后补漏轮询间隔（5秒） */
-const RECONNECT_POLL_INTERVAL_MS = 5_000
-/** 重连后补漏最大轮询时长（3分钟） */
-const RECONNECT_POLL_MAX_DURATION_MS = 180_000
 
 /**
  * 处理 STATE_CHANGE 事件
@@ -30,27 +23,6 @@ export function handleStateChange(eventData: any): void {
     terminatePipeline(pipelineId, threadId)
     loggers.sessionStore.info('[STATE_CHANGE] pipeline suspended → streaming cleaned: pipeline=%s', pipelineId)
   }
-}
-
-/**
- * 处理 PIPELINE_RECEIVED 事件
- *
- * 后端只在 source='user' 时发送 pipeline_received 事件，
- * 而本函数在 source='user' 时直接 return，所以永远不会创建消息。
- * 仅保留日志记录。
- */
-export function handlePipelineReceived(data: any): void {
-  const pipelineId = resolvePipelineId(data)
-  if (!pipelineId) return
-
-  const payload = data?.data || data
-  const content = payload?.content || ''
-  const source = payload?.source || ''
-
-  loggers.sessionStore.info(
-    '[handlePipelineReceived] pipeline=%s source=%s content=%.60s',
-    pipelineId.slice(0, 12), source, content.slice(0, 60),
-  )
 }
 
 /**
@@ -93,6 +65,9 @@ function _startReconnectPolling(
 
 /**
  * 处理 WS 重连补漏
+ *
+ * 后端 session_manager 通过 missed_messages 事件主动推送补偿光标。
+ * 前端只做必要的清理（stuck streaming parts）和基于 streamingState 的 fetch。
  */
 export function handleReconnected(): void {
   const pipelineStore = usePipelineMessageStore.getState()
@@ -100,17 +75,15 @@ export function handleReconnected(): void {
   const streamingStore = useStreamingStore.getState()
   const logger = loggers.sessionStore
 
-  logger.info('[streaming] WS 重连，开始补偿遗漏消息，streaming 管道数=%d', Object.keys(streamingState).length)
+  logger.info('[streaming] WS 重连，清理残留状态，streaming 管道数=%d', Object.keys(streamingState).length)
 
-  // 遍历所有管道消息，将 parts 中 state='streaming' 的 thinking part 强制清理为 done
+  // 清理残留 streaming thinking parts
   const messagesByPipeline = pipelineStore.messagesByPipeline
   for (const [pipelineId, messages] of Object.entries(messagesByPipeline)) {
     const stuckMessages = (messages as any[]).filter(
       (m: any) => (m.parts || []).some((p: any) => p.type === 'thinking' && p.state === 'streaming'),
     )
     for (const msg of stuckMessages) {
-      logger.info('[streaming] 重连清理残留 streaming thinking part: pipelineId=%s messageId=%s', pipelineId, msg.id)
-      // 将所有 streaming 状态的 parts 改为 done
       const updatedParts = (msg.parts as any[]).map((p: any) =>
         p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
       )
@@ -118,7 +91,7 @@ export function handleReconnected(): void {
     }
   }
 
-  // 清理 streamingStore 中残留的 thinking 状态
+  // 清理 streamingStore 中不再 streaming 的 tab
   const streamingTabs = streamingStore.streamingTabs
   for (const tabId of Object.keys(streamingTabs)) {
     if (!streamingState[tabId]?.isStreaming) {
@@ -126,58 +99,18 @@ export function handleReconnected(): void {
     }
   }
 
-  for (const [pipelineId, streamStatus] of Object.entries(streamingState)) {
-    if (!streamStatus.isStreaming) continue
-
+  // 为 streaming 管道补漏
+  for (const pipelineId of Object.keys(streamingState)) {
+    if (!streamingState[pipelineId]?.isStreaming) continue
     const bottomCursor = pipelineStore.getBottomCursor(pipelineId)
     const sessionId = pipelineStore.pipelineSessionMap[pipelineId]
-
     if (sessionId) {
       pipelineStore.fetchMessages(pipelineId, {
         after_sequence: bottomCursor,
         threadId: sessionId,
-      }).then(() => {
-        const currentStore = usePipelineMessageStore.getState()
-        if (currentStore.isStreaming(pipelineId)) {
-          _startReconnectPolling(pipelineId, sessionId, bottomCursor, logger)
-        }
       }).catch((err) => {
-        logger.warn('[streaming] 重连补漏失败，启动轮询: pipelineId=%s err=%s', pipelineId, err)
-        _startReconnectPolling(pipelineId, sessionId, bottomCursor, logger)
+        logger.warn('[streaming] 重连补漏失败: pipelineId=%s err=%s', pipelineId, err)
       })
-    } else {
-      // BUG-FIX-fix_20260523_reconnect_missing_session:
-      // 问题根因: pipelineSessionMap 中没有对应 pipelineId 的 sessionId 时，
-      //          该管道被完全跳过，无任何 fallback，streaming 状态残留。
-      // 修复方案: 尝试从 agentTabStore 的 pipelineTabMap 获取关联信息作为 fallback；
-      //          如果仍然没有，打印 warn 并清理该管道的 streaming 状态。
-      // 影响范围: 重连后的消息补漏完整性
-      // 修复日期: 2026-05-23
-      const agentTabStore = useAgentTabStore.getState()
-      const fallbackTabId = agentTabStore.pipelineTabMap[pipelineId]
-      const fallbackTab = fallbackTabId
-        ? agentTabStore.tabs.find((t) => t.id === fallbackTabId)
-        : null
-      const fallbackSessionId = fallbackTab?.parentRecordId || agentTabStore.currentSessionId || ''
-
-      if (fallbackSessionId) {
-        logger.warn('[streaming] 重连补漏 pipelineSessionMap 缺失，使用 fallback sessionId: pipelineId=%s fallbackSessionId=%s', pipelineId, fallbackSessionId)
-        pipelineStore.fetchMessages(pipelineId, {
-          after_sequence: bottomCursor,
-          threadId: fallbackSessionId,
-        }).then(() => {
-          const currentStore = usePipelineMessageStore.getState()
-          if (currentStore.isStreaming(pipelineId)) {
-            _startReconnectPolling(pipelineId, fallbackSessionId, bottomCursor, logger)
-          }
-        }).catch((err) => {
-          logger.warn('[streaming] 重连补漏 fallback 失败: pipelineId=%s err=%s', pipelineId, err)
-        })
-      } else {
-        logger.warn('[streaming] 重连补漏无可用 sessionId，清理 streaming 状态: pipelineId=%s', pipelineId)
-        pipelineStore.stopStreaming(pipelineId)
-        streamingStore.setStreamingForTab(pipelineId, false)
-      }
     }
   }
 }
@@ -282,15 +215,18 @@ export function handleSystemNotification(eventData: any): void {
   const content = data?.content || ''
   const level = data?.level || 'info'
   const notificationType = data?.notificationType || ''
+  const notificationId = data?.notification_id || ''
 
   if (!pipelineId || !content) return
 
   const pipelineStore = usePipelineMessageStore.getState()
 
   const existingMsgs = pipelineStore.getMessages(pipelineId)
+  // 按 notification_id 去重
   const alreadyExists = existingMsgs.some((m: any) => {
-    if (m.role === 'system' && m.content === content) return true
-    return false
+    if (m.role !== 'system') return false
+    const metaId = (m as any).metadata?.notification_id || ''
+    return metaId === notificationId
   })
 
   if (alreadyExists) {
@@ -323,6 +259,7 @@ export function handleSystemNotification(eventData: any): void {
       sender_type: 'system',
       notification_level: level,
       notification_type: notificationType,
+      notification_id: notificationId,  // Stage1: 保存notification_id用于去重
     },
   } as any)
 }

@@ -4,15 +4,16 @@
     Input 插件链:
         message_inject → context_build → memory_read → tool_schema → prompt_build
     Core 插件:
-        LLMCore._build_messages() 从 system_message + messages + dynamic_vars 组装
+        LLMCore._build_messages() 从 system_message + messages 组装
+        (dynamic_vars 已改为 system role，合并到 system_message 中)
 
 测试覆盖：
     1. prompt_build 只产出 state["system_message"]，不含历史和动态变量
     2. prompt_build 按 layer_order 顺序组装（system_prompt → static_vars → knowledge → memory → L3 → L2 → L1）
     3. prompt_build 默认不拼入 tools_description（走 function calling）
     4. tool_schema 默认不写 prompt.tool_descriptions
-    5. LLMCore._build_messages 从三来源组装
-    6. LLMCore._build_messages 动态变量追加在历史消息之后
+    5. LLMCore._build_messages 从两来源组装（system_message 含 dynamic_vars + history）
+    6. LLMCore._build_messages 动态变量合并到 system_message 而非作为独立 user 消息追加
     7. LLMCore 只将 assistant 回复追加到 state["messages"]（不包含 system/dynamic）
     8. 完整链路：message_inject → prompt_build → LLMCore._build_messages
 """
@@ -77,7 +78,7 @@ class TestPromptBuildBasic:
 
     @pytest.mark.asyncio
     async def test_output_dynamic_vars_separately(self) -> None:
-        """prompt_build 将 dynamic_vars 单独输出，不拼入 system_message。"""
+        """prompt_build 将 dynamic_vars 单独输出（role=system），不拼入 system_message。"""
         plugin = PromptBuildPlugin()
         state = make_base_state()
         ctx = make_ctx(state)
@@ -89,6 +90,7 @@ class TestPromptBuildBasic:
 
         assert "日期" in dynamic_vars["content"]
         assert "时间" in dynamic_vars["content"]
+        assert dynamic_vars["role"] == "system"  # 改为 system role
         assert dynamic_vars["content"] not in system_content
 
     @pytest.mark.asyncio
@@ -395,7 +397,7 @@ class TestLLMCoreBuildMessages:
         assert messages[0]["content"] == "你是一个助手。"
 
     def test_history_in_middle(self) -> None:
-        """历史消息在 system_message 之后、dynamic_vars 之前。"""
+        """历史消息在 system_message 之后；dynamic_vars 已合并到 system_message 不再单独追加。"""
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = {
             "system_message": {"role": "system", "content": "系统提示词"},
@@ -404,35 +406,36 @@ class TestLLMCoreBuildMessages:
                 {"role": "assistant", "content": "回答1"},
                 {"role": "user", "content": "问题2"},
             ],
-            "prompt.dynamic_vars": {"role": "user", "name": "dynamic_context", "content": "动态变量内容"},
+            "prompt.dynamic_vars": {"role": "system", "name": "dynamic_context", "content": "动态变量内容"},
         }
 
         messages = core._build_messages(state)
 
+        # dynamic_vars 合并到 system_message 中，不再作为独立消息追加
         assert messages[0]["role"] == "system"
+        assert "系统提示词" in messages[0]["content"]
+        assert "动态变量内容" in messages[0]["content"]
         assert messages[1]["role"] == "user"
         assert messages[2]["role"] == "assistant"
         assert messages[3]["role"] == "user"
-        assert messages[4]["role"] == "user"
-        assert messages[4]["name"] == "dynamic_context"
 
     def test_dynamic_vars_last(self) -> None:
-        """动态变量追加在历史消息之后（作为 user 消息，name=dynamic_context）。"""
+        """动态变量合并到 system_message 中（作为 system role，不再作为 user 消息追加）。"""
         core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = {
             "system_message": {"role": "system", "content": "系统提示词"},
             "messages": [{"role": "user", "content": "你好"}],
-            "prompt.dynamic_vars": {"role": "user", "name": "dynamic_context", "content": "- 日期: 2025-01-01\n- 时间: 12:00:00"},
+            "prompt.dynamic_vars": {"role": "system", "name": "dynamic_context", "content": "- 日期: 2025-01-01\n- 时间: 12:00:00"},
         }
 
         messages = core._build_messages(state)
 
-        assert len(messages) == 3
+        # dynamic_vars 合并到 system_message 中
+        assert len(messages) == 2
         assert messages[0]["role"] == "system"
+        assert "系统提示词" in messages[0]["content"]
+        assert "日期" in messages[0]["content"]
         assert messages[1]["role"] == "user"
-        assert messages[2]["role"] == "user"
-        assert messages[2]["name"] == "dynamic_context"
-        assert "日期" in messages[2]["content"]
 
     def test_no_dynamic_vars(self) -> None:
         """没有 dynamic_vars 时不追加额外的 SystemMessage。"""
@@ -555,7 +558,7 @@ class TestFullAssemblyPipeline:
 
     @pytest.mark.asyncio
     async def test_full_pipeline_system_memory_history_dynamic(self) -> None:
-        """完整链路：system → knowledge → memory → history → dynamic_vars。"""
+        """完整链路：dynamic_vars 合并到 system_message 中，history 随后。"""
         prompt_plugin = PromptBuildPlugin(config={"include_static_vars": False, "include_compressed_layers": False})
         llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
 
@@ -575,17 +578,16 @@ class TestFullAssemblyPipeline:
         # Step 2: LLMCore._build_messages 组装最终 messages
         final_messages = llm_core._build_messages(state)
 
-        # 验证顺序: system → history → dynamic
+        # 验证: dynamic_vars 合并到 system_message 中
         assert final_messages[0]["role"] == "system"
         assert "你是一个有用的 AI 助手" in final_messages[0]["content"]
-        assert "知识库" in final_messages[0]["content"]
-        assert "记忆检索" in final_messages[0]["content"]
+        assert "日期" in final_messages[0]["content"]  # dynamic_vars 合并进来
 
         assert final_messages[1]["role"] == "user"
         assert final_messages[2]["role"] == "assistant"
 
-        assert final_messages[3]["role"] == "system"
-        assert "日期" in final_messages[3]["content"]
+        # dynamic_vars 不再作为独立消息追加
+        assert len(final_messages) == 3
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_static_vars_and_compressed(self) -> None:

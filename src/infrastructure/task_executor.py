@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import json
 import logging
 import uuid as _uuid
@@ -19,6 +21,36 @@ from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 管道引擎独立线程运行器 — 解耦工具执行与管道生命周期
+# ---------------------------------------------------------------------------
+
+def _run_engine_isolated(engine: Any, **run_kwargs: Any) -> Any:
+    """在独立线程 + 独立事件循环中运行管道引擎。
+
+    完全隔离管道引擎与调用方的事件循环：
+    - 引擎跑在自己的线程和事件循环里
+    - 调用方通过 Future 获取完成通知，不阻塞、不轮询
+    - 引擎的 _cleanup_run_loop 自行管理注册/注销
+
+    这消除了 asyncio.run() 的 _cancel_all_tasks() 级联取消问题，
+    因为引擎的事件循环与工具/调用方的事件循环完全独立。
+
+    Args:
+        engine: PipelineEngine 实例
+        **run_kwargs: 传递给 engine.run() 的参数
+
+    Returns:
+        engine.run() 的返回值（最终状态字典）
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(engine.run(**run_kwargs))
+    finally:
+        loop.close()
 
 
 class TaskExecutorMixin:
@@ -108,9 +140,13 @@ class TaskExecutorMixin:
                 return
 
         # ── 3. 构建完整的 user_input ──
+        # BUG-FIX-fix_20260601_retry_lifecycle:
+        # lifecycle 在 ctx.full_input 分支（retry _prepared_context）中未定义，
+        # 但被 _cleanup_after_engine 闭包引用。移到 if/else 外保证始终可用。
+        lifecycle: WorkspaceLifecycleManager | None = self._services.get("workspace_lifecycle_manager")
+        ws_meta: dict[str, Any] = ctx.ws_meta or {}
         if ctx.full_input:
             workspace = ctx.workspace
-            ws_meta = ctx.ws_meta
             full_input = ctx.full_input
             # BUG-FIX-fix_20260530_description_lost: 诊断日志
             logger.info(
@@ -148,7 +184,7 @@ class TaskExecutorMixin:
 
             # ── 3.x 生命周期钩子：任务启动 + 工作空间状态注入 ──
             lifecycle: WorkspaceLifecycleManager | None = self._services.get("workspace_lifecycle_manager")
-            ws_meta: dict[str, Any] = {}
+            ws_meta = {}
             if lifecycle:
                 try:
                     # BUG-FIX-fix_20260529_on_task_start_blocks_eventloop:
@@ -234,26 +270,143 @@ class TaskExecutorMixin:
             from pipeline.stream_bridge import TargetedSink
 
             _sink = TargetedSink(_notifier, _ws_thread_id) if _notifier else None
-            _msg_result = await send_pipeline_message(
-                pipeline_id, "" if conversation_history else full_input,
-                output_sink=_sink,
-                agent_config=agent_config,
-                conversation_history=conversation_history,
-                task_id=task_id,
-                workspace=workspace,
-                streaming=True,
-                thread_id=_ws_thread_id or "",
-            )
 
-            if not _msg_result.success:
-                logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
-                return
+            # ── 启动管道引擎（独立线程，fire-and-forget）──
+            # BUG-FIX-fix_20260601_isolated_engine:
+            # 问题根因: asyncio.create_task(engine.run(...)) 将引擎绑在调用方事件循环上。
+            #   _wait_for_engine_completion 轮询阻塞调用方协程，形成紧密耦合。
+            #   父管道引擎被杀 → 子管道失去 thread_id → sink dead → 全部终止。
+            # 修复方案: engine.run() 通过 run_in_executor 跑在独立线程+独立事件循环。
+            #   调用方不等待、不阻塞，通过 Future 回调处理清理。
+            #   PipelineEngine 自行管理注册/注销（_cleanup_run_loop），
+            #   生命周期与 TaskWorker 完全解耦。
+            _main_loop = asyncio.get_running_loop()
 
-            await self._wait_for_engine_completion(engine, task_id, ctx)
+            def _on_engine_done(future: concurrent.futures.Future) -> None:
+                """引擎完成后的清理回调（运行在 executor 线程）。"""
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error(
+                        "TaskWorker: 独立引擎异常 | task=%s | error=%s", task_id, exc,
+                    )
+                # 调度清理到主事件循环
+                _main_loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        _cleanup_after_engine(task_id, ctx, timer_manager, task_service, lifecycle, workspace, ws_meta, engine)
+                    )
+                )
 
-            ctx.suspended_engine = None
-            ctx.active = False
-            logger.info("TaskWorker: pipeline completed for task %s", task_id)
+            async def _cleanup_after_engine(
+                _task_id: str,
+                _ctx: TaskExecutionContext,
+                _timer_mgr: Any,
+                _task_svc: Any,
+                _lifecycle: Any,
+                _ws: str,
+                _ws_meta: dict[str, Any],
+                _engine_ref: Any,  # PipelineEngine
+            ) -> None:
+                """引擎结束后统一清理：检查终态 + 等待terminal + 清理上下文。"""
+                try:
+                    # 获取管道最终状态
+                    _pipeline_state = getattr(_engine_ref, '_last_state', None)
+                    # 检查管道退出后任务状态（转为 evaluating 或标记 failed）
+                    await self._check_post_pipeline_state(
+                        _task_id, _task_svc, _pipeline_state, _lifecycle, _ws, _ws_meta,
+                        _ctx, _timer_mgr,
+                    )
+                    # 等待任务达到终态
+                    terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)
+                    try:
+                        await asyncio.wait_for(_ctx.terminal_event.wait(), timeout=terminal_wait_timeout)
+                        logger.info("TaskWorker: task %s reached terminal state", _task_id)
+                    except asyncio.TimeoutError:
+                        logger.warning("TaskWorker: task %s timed out waiting for terminal state", _task_id)
+                except Exception as _cleanup_exc:
+                    logger.error("TaskWorker: post-pipeline cleanup error | task=%s | error=%s", _task_id, _cleanup_exc)
+                finally:
+                    _ctx.suspended_engine = None
+                    _ctx.active = False
+                    _ctx.cleanup(_timer_mgr)
+                    if _lifecycle and _ws_meta:
+                        try:
+                            _lifecycle.on_task_completed(_ws, _ws_meta)
+                        except Exception as _hook_exc:
+                            logger.debug("lifecycle on_task_completed: %s", _hook_exc)
+                    # 从 TaskWorker 的 _contexts 中移除（fire-and-forget 不再由 _run_and_cleanup 负责）
+                    self._contexts.pop(_task_id, None)
+                    logger.info("TaskWorker: pipeline done | task=%s", _task_id)
+
+            if conversation_history:
+                logger.info(
+                    "TaskWorker: 从历史恢复启动管道（独立线程）| task=%s | history_len=%d | pipeline=%s",
+                    task_id, len(conversation_history), pipeline_id[:12],
+                )
+                engine_future = _main_loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        _run_engine_isolated, engine,
+                        user_input="",
+                        agent_config=agent_config,
+                        conversation_history=conversation_history,
+                        task_id=task_id,
+                        workspace=workspace,
+                        streaming=True,
+                        on_chunk=_sink.on_chunk if _sink else lambda chunk: None,
+                    ),
+                )
+                engine_future.add_done_callback(_on_engine_done)
+
+                # 启动 drain_loop 消费流式输出（主事件循环）
+                from pipeline.message_bus import _start_bg_drain
+                _start_bg_drain(pipeline_id, _sink, engine, engine_task=engine_future)
+                # engine_future (concurrent.futures.Future) 有 .done() 方法，
+                # drain_loop 通过它判断引擎是否结束，避免死循环空转
+                from pipeline.registry import get_engine_registry
+                _entry = get_engine_registry().get(pipeline_id)
+                if _entry:
+                    _entry.engine_task = engine_future
+            else:
+                # 无历史记录: 正常发送消息启动管道
+                if not full_input or not full_input.strip():
+                    logger.error(
+                        "TaskWorker: 拒绝发送空消息，任务终止 | task=%s",
+                        task_id,
+                    )
+                    if task_service:
+                        await task_service.fail_task(task_id, "消息内容为空，无法启动管道")
+                    return
+
+                _msg_result = await send_pipeline_message(
+                    pipeline_id, full_input,
+                    output_sink=_sink,
+                    agent_config=agent_config,
+                    conversation_history=conversation_history,
+                    task_id=task_id,
+                    workspace=workspace,
+                    streaming=True,
+                    thread_id=_ws_thread_id or "",
+                )
+
+                if not _msg_result.success:
+                    logger.error("TaskWorker: 消息注入失败 task=%s error=%s", task_id, _msg_result.error)
+                    return
+
+                # send_pipeline_message 已在内部启动了引擎（asyncio.Task on main loop）
+                # 从 registry 获取 engine_task 并注册完成回调
+                _entry = get_engine_registry().get(pipeline_id)
+                if _entry and _entry.engine_task is not None:
+                    _entry.engine_task.add_done_callback(
+                        lambda t: asyncio.ensure_future(
+                            _cleanup_after_engine(task_id, ctx, timer_manager, task_service, lifecycle, workspace, ws_meta, engine)
+                        )
+                    )
+                else:
+                    await _cleanup_after_engine(task_id, ctx, timer_manager, task_service, lifecycle, workspace, ws_meta, engine)
+
+            # fire-and-forget: 不阻塞等待引擎完成
+            # ctx 和 _contexts 由 _on_engine_done 回调负责清理
 
         except asyncio.CancelledError:
             logger.info("TaskWorker: task %s cancelled", task_id)
@@ -279,42 +432,9 @@ class TaskExecutorMixin:
             ctx.cleanup(timer_manager)
             return
 
-        # ── 5.5 管道已结束，检查任务终态 ──
-        # BUG-FIX-fix_20260528_pipeline_state_none:
-        # 问题根因: _check_post_pipeline_state 传入 pipeline_state=None，
-        #   导致 _fail_after_pipeline_exit 中 state_is_empty=True，
-        #   误报"管道被中断"而丢失精确错误信息（iteration/raw_error 等）。
-        # 修复方案: 从 engine._last_state 获取管道最终状态。
-        _pipeline_state = getattr(engine, '_last_state', None)
-        await self._check_post_pipeline_state(
-            task_id, task_service, _pipeline_state, lifecycle, workspace, ws_meta,
-            ctx, timer_manager,
-        )
-
-        # ── 6. 等待终态 Event ──
-        terminal_wait_timeout = self._config.get("terminal_wait_timeout", 600)
-        try:
-            await asyncio.wait_for(ctx.terminal_event.wait(), timeout=terminal_wait_timeout)
-            logger.info("TaskWorker: task %s reached terminal state", task_id)
-            # lifecycle 钩子已移至 _on_task_state_changed → _handle_terminal_lifecycle
-        except asyncio.TimeoutError:
-            logger.warning(
-                "TaskWorker: task %s timed out waiting for terminal state", task_id,
-            )
-            if task_service:
-                try:
-                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
-                    await task_service.fail_task(
-                        task_id,
-                        f"TaskWorker 等待终态超时({terminal_wait_timeout}s)",
-                    )
-                except Exception as e:
-                    logger.error(
-                        "TaskWorker: fail_task after timeout failed for %s: %s",
-                        task_id, e,
-                    )
-        finally:
-            ctx.cleanup(timer_manager)
+        # fire-and-forget: 引擎在独立线程中运行，不阻塞等待
+        # 管道完成后的 _check_post_pipeline_state + terminal_event.wait()
+        # 已移至 _cleanup_after_engine 回调，由 engine_future.add_done_callback 触发
 
     # ───────────────────────────────────────────────────────────────────
     # _execute_background_task 的辅助方法
@@ -497,27 +617,25 @@ class TaskExecutorMixin:
         task_service: Any,
         ctx: TaskExecutionContext,
     ) -> bool:
-        """注册 idle 计时器。
+        """注册 idle 计时器（任务启动阶段调用）。
 
-        BUG-FIX-fix_20260422_idle_timer_timing:
-        将 idle 计时器注册移到 engine.run() 之前，确保计时器只在
-        任务真正开始执行管道时才启动。
+        底层调用 TaskIdleTimerMixin._arm_idle_timer 完成统一的
+        cancel+create 流程；注册失败会直接 fail_task 并标记终态，
+        避免管道在无 idle 监控的情况下"裸跑"。
+
+        Args:
+            task_id: 任务 ID
+            timer_manager: 计时器管理器实例（可为 None）
+            task_service: 任务服务实例，用于失败时回滚
+            ctx: 当前任务执行上下文
 
         Returns:
-            True=成功注册或无需注册，False=注册失败（任务已 fail）
+            True=成功注册或无需注册；False=注册失败（任务已 fail）
         """
         if not timer_manager:
             return True
         try:
-            try:
-                await timer_manager.cancel_timer(task_id)
-            except Exception:
-                pass
-            await timer_manager.create_timer(
-                task_id=task_id,
-                timeout=float(timer_manager.idle_threshold),
-                callback=lambda tid=task_id: self._on_idle_timeout(tid),
-            )
+            await self._arm_idle_timer(task_id, timer_manager)
             logger.info(
                 "TaskWorker: idle 计时器已注册: task_id=%s, timeout=%ds",
                 task_id, timer_manager.idle_threshold,
@@ -529,8 +647,10 @@ class TaskExecutorMixin:
                 task_id, e,
             )
             if task_service:
-                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
-                await task_service.fail_task(task_id, f"idle计时器初始化失败，任务拒绝执行: {e}")
+                await task_service.fail_task(
+                    task_id,
+                    f"idle计时器初始化失败，任务拒绝执行: {e}",
+                )
             ctx.set_terminal()
             return False
 
@@ -556,7 +676,7 @@ class TaskExecutorMixin:
         if not exec_storage:
             return None
         try:
-            prev_records = exec_storage.list_by_pipeline(existing_pipeline_id)
+            prev_records = exec_storage.list_by_pipeline(existing_pipeline_id)[0]
             if not prev_records:
                 return None
             conversation_history: list[dict[str, Any]] = []
@@ -594,40 +714,6 @@ class TaskExecutorMixin:
                 "TaskWorker: failed to restore pipeline history: %s", exc,
             )
             return None
-
-    async def _wait_for_engine_completion(
-        self,
-        engine: Any,
-        task_id: str,
-        ctx: TaskExecutionContext,
-    ) -> None:
-        """等待管道引擎执行完成。
-
-        管道的挂起/恢复/运行都是引擎自己的事，任务只关心引擎是否还活着。
-        引擎活着就等，死了（不再 running 也不再 suspended）就返回。
-        """
-        # BUG-FIX-fix_20260528_wait_engine_race:
-        # 问题根因: send_pipeline_message 通过 asyncio.create_task 调度引擎运行，
-        #   但引擎还没来得及执行 _run_loop（is_running=False），
-        #   _wait_for_engine_completion 第一次检查就判定引擎已结束，直接 break。
-        #   导致"管道被中断"误报（iterations=?/?, ended=?）。
-        # 修复方案: 先等待引擎实际开始运行（_run_started=True），再进入轮询。
-        #   最多等 30 秒（600 * 0.05s），超时则放弃。
-        for _ in range(600):
-            if getattr(engine, '_run_started', False):
-                break
-            await asyncio.sleep(0.05)
-        else:
-            logger.warning(
-                "TaskWorker: 引擎在30秒内未启动: task_id=%s", task_id,
-            )
-            return
-
-        for _ in range(36000):
-            if not getattr(engine, 'is_running', False) and not getattr(engine, 'is_suspended', False):
-                break
-            await asyncio.sleep(0.1)
-
 
     # ───────────────────────────────────────────────────────────────────
     # 管道取消
@@ -680,7 +766,6 @@ class TaskExecutorMixin:
             ctx.suspended_engine = None
             ctx.wake_event.set()
             ctx.active = False
-            ctx.idle_remind_count = 0
             ctx.set_terminal()
             bg_task = ctx.bg_task
         else:

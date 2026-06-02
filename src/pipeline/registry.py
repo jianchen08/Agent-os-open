@@ -148,9 +148,19 @@ class EngineRegistry:
             注册的 PipelineEntry
         """
         existing = self._engines.get(pipeline_id)
+        # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
+        # 问题根因: 引擎 _run_loop 启动后调用 register(pid, engine) 不传 thread_id,
+        #   创建新 PipelineEntry(thread_id="") 覆盖了之前通过 register_pipeline 或
+        #   app_factory 设置的 thread_id。后续 _create_sink 获取空 thread_id，
+        #   TargetedSink 推送永远失败，连续 5 次后标记 sink dead 导致管道异常退出。
+        # 修复方案: 新传入的 thread_id 为空时，保留已有 entry 的 thread_id，
+        #   与保留 bridge/drain_task/engine_task 的逻辑一致。
+        _effective_thread_id = thread_id
+        if not _effective_thread_id and existing is not None and existing.thread_id:
+            _effective_thread_id = existing.thread_id
         entry = PipelineEntry(
             engine=engine,
-            thread_id=thread_id,
+            thread_id=_effective_thread_id,
             tags=tags or {},
         )
         if existing is not None:
@@ -336,7 +346,7 @@ class EngineRegistry:
             provider = ServiceProvider()
             storage = provider.get("execution_record_storage")
             if storage and hasattr(storage, "list_by_pipeline"):
-                existing = storage.list_by_pipeline(pipeline_id)
+                existing = storage.list_by_pipeline(pipeline_id)[0]
                 if existing:
                     max_seq = max(r.sequence for r in existing)
                     entry.init_sequence(max_seq)
@@ -443,6 +453,14 @@ class EngineRegistry:
                 bridge.stop()
                 entry.drain_task.cancel()
                 entry.drain_task = None
+            # BUG-FIX-fix_20260531_sink_dead_persist:
+            # 问题根因: ensure_bridge 复用已有 bridge 时只调用 reset_for_new_turn，
+            #   不更新 output_sink。如果上一轮 sink 已 dead（前端断连），
+            #   新一轮仍使用 dead sink，所有事件发送立即失败，drain_loop 瞬间退出。
+            # 修复方案: 传入的 sink 非 None 时更新 bridge 的 output_sink，
+            #   确保新一轮使用新的活跃连接。
+            if sink is not None:
+                bridge.output_sink = sink
             bridge.reset_for_new_turn(
                 message_id=f"msg_{uuid.uuid4().hex[:12]}"
             )

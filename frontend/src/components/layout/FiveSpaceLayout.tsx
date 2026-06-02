@@ -28,7 +28,7 @@ import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { getFileReviewData, removeFileReviewData, registerFileReview } from '@/stores/fileReviewRegistry'
-import { getFileEditorData, registerFileEditor, removeFileEditorData } from '@/stores/fileEditorRegistry'
+import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -133,6 +133,56 @@ export function FiveSpaceLayout({
     () => `${connectionStatus?.lastConnectedAt ?? ''}-v${workspaceDataVersion}`,
     [connectionStatus?.lastConnectedAt, workspaceDataVersion],
   )
+
+  /** 使用 ref 保持最新的 workspaceRefreshKey，避免 renderTabContent 依赖变化导致 CodeEditor 重新挂载 */
+  const workspaceRefreshKeyRef = useRef(workspaceRefreshKey)
+  useEffect(() => {
+    workspaceRefreshKeyRef.current = workspaceRefreshKey
+  }, [workspaceRefreshKey])
+
+  /**
+   * 文件编辑器自动刷新逻辑
+   *
+   * 每 3 秒轮询检查已打开的文件编辑器 Tab 对应的文件是否被外部修改，
+   * 若内容变化则通过事件机制通知 CodeEditor 组件更新。
+   */
+  useEffect(() => {
+    const intervalMs = 3000
+    const timer = setInterval(async () => {
+      const tabs = useLayoutModeStore.getState().workspaceTabs
+      const fileEditorTabs = tabs.filter(
+        (t) => t.moduleId === '__file_editor__' && t.isActive
+      )
+
+      for (const tab of fileEditorTabs) {
+        const editorData = getFileEditorData(tab.id)
+        if (!editorData || !editorData.containerTaskId) continue
+
+        try {
+          const resp = await apiClient.get(
+            `/api/v1/workspaces/${editorData.containerTaskId}/file-content`,
+            { params: { path: editorData.filePath } }
+          )
+          if (resp.data?.success && resp.data.content !== undefined) {
+            const newContent = resp.data.content
+            const newSize = resp.data.size
+            // 仅当内容真正变化时才更新
+            if (newContent !== editorData.content) {
+              updateFileEditorData(tab.id, {
+                content: newContent,
+                size: newSize,
+              })
+              emitFileChange(tab.id, newContent, newSize)
+            }
+          }
+        } catch {
+          // 静默失败，不影响用户体验
+        }
+      }
+    }, intervalMs)
+
+    return () => clearInterval(timer)
+  }, [])
 
   /**
    * 处理工作区 Tab 关闭，对文件审批类型 Tab 进行额外的数据清理
@@ -316,7 +366,12 @@ export function FiveSpaceLayout({
               { content },
               { params: { path: editorData.filePath } },
             )
-            return resp.data?.success ?? false
+            const success = resp.data?.success ?? false
+            if (success) {
+              // 保存成功后更新注册表中的基准内容，避免后续轮询误判为外部修改
+              updateFileEditorData(tab.id, { content })
+            }
+            return success
           } catch {
             return false
           }
@@ -354,6 +409,7 @@ export function FiveSpaceLayout({
             content={editorData.content}
             size={editorData.size}
             onSave={handleSaveFile}
+            tabId={tab.id}
           />
         )
       }
@@ -456,7 +512,7 @@ export function FiveSpaceLayout({
                     {...(spaceConfig.props as Record<string, unknown> ?? {})}
                     dataSource={spaceConfig.dataSource as string}
                     sessionId={activeSessionId}
-                    refreshKey={workspaceRefreshKey}
+                    refreshKey={workspaceRefreshKeyRef.current}
                     onNodeClick={(node: any) => handleTaskNodeClick(node)}
                   />
                 </div>
@@ -546,7 +602,7 @@ export function FiveSpaceLayout({
                 <WidgetComponent
                   dataSource={tab.dataSource}
                   sessionId={activeSessionId}
-                  refreshKey={workspaceRefreshKey}
+                  refreshKey={workspaceRefreshKeyRef.current}
                   showStatus={false}
                   showProgress={false}
                   showSearch={true}
@@ -567,7 +623,7 @@ export function FiveSpaceLayout({
         </div>
       )
     },
-    [activeSessionId, handleTaskNodeClick, workspaceRefreshKey],
+    [activeSessionId, handleTaskNodeClick],
   )
 
   // Render floating window content (placeholder)

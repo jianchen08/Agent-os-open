@@ -269,7 +269,11 @@ async def handle_no_route_signals(
     core_type: str,
     iteration: int,
 ) -> str:
-    """处理无路由信号时的后续逻辑，始终返回 "continue"。"""
+    """处理无路由信号时的后续逻辑。
+
+    Returns:
+        "continue" 继续循环；"end" 结束管道。
+    """
     if core_type == "tool_execute" or state.get("thinking_retry_needed"):
         if state.get("thinking_retry_needed"):
             retry_count = state.get("thinking_retry_count", 0)
@@ -319,7 +323,19 @@ async def handle_no_route_signals(
         state.setdefault("messages", []).append(
             {"role": "user", "content": state["user_input"]}
         )
-    await engine.suspend_and_wait(state)
+
+    # BUG-FIX-fix_20260531_pipeline_infinite_loop:
+    # 问题根因: suspend_and_wait 返回 False（管道应结束）时，本函数仍返回 "continue"，
+    #   导致 _run_loop while 循环永不退出，管道每 600s 被 _check_children_terminal
+    #   无意义唤醒一次，每次都调 LLM 浪费 token。
+    # 修复方案: 检查 suspend_and_wait 返回值，False 时返回 "end" 让管道结束。
+    resumed = await engine.suspend_and_wait(state)
+    if not resumed:
+        logger.info(
+            "[Engine] suspend_and_wait 返回 False，管道结束 (iter=%d)", iteration,
+        )
+        state[StateKeys.ENDED] = True
+        return "end"
     return "continue"
 
 

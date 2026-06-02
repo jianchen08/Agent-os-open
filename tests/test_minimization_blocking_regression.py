@@ -91,14 +91,15 @@ class TestPipelineEngineRegression:
         assert engine._wake_event.is_set()
 
     def test_inject_message_running_state_queues(self) -> None:
-        """运行状态下 inject_message 应入队到 _pending_notifications。"""
+        """运行状态下 inject_message 不再自行维护 _pending_notifications。
+        运行态的消息由 bridge.enqueue_notification 统一管理。"""
         engine = self._make_engine()
         engine._suspended_state = None
         engine._wake_event = asyncio.Event()
 
         engine.inject_message("运行中通知")
 
-        assert "运行中通知" in engine._pending_notifications
+        # 运行态不维护 _pending_notifications（已迁移到 bridge）
         assert engine._wake_event.is_set()
 
     def test_inject_message_empty_input_ignored(self) -> None:

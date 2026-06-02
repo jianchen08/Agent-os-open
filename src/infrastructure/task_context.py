@@ -26,7 +26,6 @@ class TaskExecutionContext:
         bg_task: 后台 asyncio.Task 引用
         suspended_engine: 挂起的 PipelineEngine 引用
         resume_requested: 是否请求恢复
-        idle_remind_count: idle 超时提醒次数
         idle_timer_registered: 是否已注册 idle 计时器
         workspace: 已解析的工作空间路径
         ws_meta: 工作空间元数据
@@ -47,9 +46,7 @@ class TaskExecutionContext:
         self.bg_task: asyncio.Task | None = None
         self.suspended_engine: Any = None
         self.resume_requested: bool = False
-        self.idle_remind_count: int = 0
         self.idle_timer_registered: bool = False
-        self.idle_timer_paused_for_children: bool = False
 
         self.workspace: str = ""
         self.ws_meta: dict[str, Any] = {}
@@ -63,8 +60,6 @@ class TaskExecutionContext:
     def cleanup(self, timer_manager: Any = None) -> None:
         """统一清理：重置执行状态 + 取消计时器。"""
         self.active = False
-        self.idle_remind_count = 0
-        self.idle_timer_paused_for_children = False
         self.suspended_engine = None
         self.resume_requested = False
         if timer_manager and self.idle_timer_registered:

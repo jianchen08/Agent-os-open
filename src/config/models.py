@@ -360,6 +360,7 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     # 清除 tier 缓存，使 defaults.tiers 变更后 resolve_tier 返回最新值
     try:
         import pipeline.plugin_resolver as pr_mod
+        logger.info("[DIAG][invalidate] 清除 _tier_cache: %s", pr_mod._tier_cache)
         pr_mod._tier_cache.clear()
     except Exception:
         pass

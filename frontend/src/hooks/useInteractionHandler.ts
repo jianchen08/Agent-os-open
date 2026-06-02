@@ -46,6 +46,7 @@ async function parseInteractionEvent(
   console.log('[InteractionHandler] file_paths=', filePaths)
   if (filePaths && filePaths.length > 0) {
     const contents: Record<string, string> = {}
+    const failedPaths: string[] = []
     await Promise.all(
       filePaths.map(async (filePath) => {
         try {
@@ -56,12 +57,20 @@ async function parseInteractionEvent(
           console.log('[InteractionHandler] API response for', filePath, ':', resp.data?.success, resp.data?.message)
           if (resp.data?.success) {
             contents[filePath] = resp.data.content ?? ''
+          } else {
+            failedPaths.push(filePath)
+            contents[filePath] = `⚠️ 文件加载失败: ${resp.data?.message || '未知错误'}`
           }
         } catch (err) {
           console.warn('[InteractionHandler] API failed for', filePath, ':', err)
+          failedPaths.push(filePath)
+          contents[filePath] = `⚠️ 文件加载失败: ${err instanceof Error ? err.message : '网络错误'}`
         }
       }),
     )
+    if (failedPaths.length > 0) {
+      console.warn('[InteractionHandler] 部分文件加载失败:', failedPaths)
+    }
     console.log('[InteractionHandler] contents keys=', Object.keys(contents))
     if (Object.keys(contents).length > 0) {
       fileContents = contents

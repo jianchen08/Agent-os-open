@@ -1,0 +1,11 @@
+- [x] 1. 步骤零：方向校准 — 拆解调研目标，编写 research_questions.md ✅
+- [x] 2. 调研子方向 1：NovelAI 写作工作流和提示词设计 ✅
+- [x] 3. 调研子方向 2：Sudowrite 写作模板和流程 ✅
+- [x] 4. 调研子方向 3：人类作家方法论（雪花法/三幕式/英雄之旅/Save the Cat/七点结构/起承转合） ✅
+- [x] 5. 调研子方向 4：AI 平台小说写作 skill/prompt（Coze/Dify/GPTs/Claude） ✅
+- [x] 6. 调研子方向 5：AI 辅助写作工具的审查/审稿清单 ✅
+- [x] 7. 关注点专题：文风规范、人物一致性、世界观、章节结构、对话vs叙述、节奏、审稿标准 ✅
+- [x] 8. 整理参考材料 — 存入 docs/working/reference_materials/writing/ ✅
+- [x] 9. 输出调研报告 — 写入 docs/写作领域规则标杆调研_research_report.md ✅
+- [x] 10. 闭环校验 — 29/29 调研问题已全部覆盖 ✅
+- [x] 11. 调用 task_evaluate 评估 ✅

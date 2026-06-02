@@ -103,7 +103,7 @@ class ReviewEngine:
     3. 更新 pipeline 状态为 completed
 
     Args:
-        storage: 执行记录存储，提供 get_summary/list_by_pipeline/list_all_summaries/update_summary
+        storage: 执行记录存储，提供 get_summary/list_by_pipeline (返回 (records, has_more) 元组)/list_all_summaries/update_summary
         chunk_db: 数据块存储，提供 find_by_pipeline/save_chunk
         knowledge_service: 知识服务，提供 list_semantic_memory/create_knowledge
         pipeline_engine: 可选管道引擎，提供 run 方法用于深度分析
@@ -166,7 +166,13 @@ class ReviewEngine:
         return categories.get(error.error_type, "unknown")
 
     def get_pending_pipelines(self) -> list[PipelineRunSummary]:
-        """获取所有待复盘的 pipeline（status='completed' 且 review_status='pending'）。"""
+        """获取所有待复盘的 pipeline。
+
+        过滤条件：review_status='pending' 且 status 为"已结束"状态。
+        兼容 track 插件实际写入的 status 值（success/failed/completed）。
+        """
+        # 已结束状态：track 插件写入 success/failed，旧版/单元测试用 completed
+        _TERMINAL_STATUSES = {"completed", "success", "failed"}
         if self._storage is None:
             return [
                 PipelineRunSummary(
@@ -180,7 +186,7 @@ class ReviewEngine:
         summaries = self._storage.list_all_summaries()
         return [
             s for s in summaries
-            if s.status == "completed" and s.review_status == "pending"
+            if s.status in _TERMINAL_STATUSES and s.review_status == "pending"
         ]
 
     def run_review(self, run_id: str = "") -> Any:
@@ -248,7 +254,7 @@ class ReviewEngine:
         self._storage.update_summary(run_id, {"review_status": "reviewing"})
 
         try:
-            records: list[ExecutionRecord] = self._storage.list_by_pipeline(run_id)
+            records: list[ExecutionRecord] = self._storage.list_by_pipeline(run_id)[0]
 
             existing_experiences = await self._load_existing_experiences()
 

@@ -108,13 +108,14 @@ class PipelineEngine:
         self._watching_task_ids: list[str] = []
         self._consecutive_core_errors: int = 0
         self._max_consecutive_core_errors: int = 3
-        # 外部通知队列（线程安全）：终态通知在此排队，_run_loop 每轮迭代检查
-        self._pending_notifications: list[str] = []
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
         self._last_state: dict[str, Any] | None = None
         self._agent_config: Any | None = None
         self._running: bool = False
+        # BUG-FIX-fix_20260531_sink_dead_stop_engine:
+        # sink 死亡后设置此标志，引擎在下次迭代检查时停止运行
+        self._should_stop: bool = False
         self._preserved_bridge: Any = None
         self._preserved_drain_task: Any = None
 
@@ -154,7 +155,6 @@ class PipelineEngine:
         self._wake_event = None
         self._streaming_flag = False
         self._streaming_on_chunk = None
-        self._pending_notifications.clear()
 
         # 保留当前 entry 中的 bridge 和 drain_task 引用，
         # 避免下面 _run_loop register 时丢失 idle 阶段绑定的流式桥接。
@@ -312,7 +312,18 @@ class PipelineEngine:
                 if _llm_core and hasattr(_llm_core, "_context_window") and _llm_core._context_window:
                     state["context_window"] = _llm_core._context_window
 
-            while not state.get(StateKeys.ENDED, False):
+            while not state.get(StateKeys.ENDED, False) and not self._should_stop:
+                # BUG-FIX-fix_20260531_sink_dead_stop_engine:
+                # sink 死亡后 _should_stop 被置为 True，引擎应立即停止
+                if self._should_stop:
+                    state[StateKeys.ENDED] = True
+                    state[StateKeys.RAW_RESULT] = "Pipeline stopped: frontend connection lost"
+                    logger.warning(
+                        "[Engine] sink 死亡，引擎停止: pipeline=%s",
+                        self._pipeline_id[:12],
+                    )
+                    break
+
                 # 1. 递增迭代计数器
                 state[StateKeys.ITERATION] = state.get(StateKeys.ITERATION, 0) + 1
                 iteration = state[StateKeys.ITERATION]
@@ -363,18 +374,22 @@ class PipelineEngine:
 
                 _iter_notifs = self.consume_pending_notifications()
                 if _iter_notifs:
-                    _combined = "\n\n".join(_iter_notifs)
-                    _existing_input = state.get("user_input", "")
-                    if _existing_input:
-                        state["user_input"] = f"{_combined}\n\n{_existing_input}"
-                    else:
-                        state["user_input"] = _combined
-                    state.setdefault("messages", []).append(
-                        {"role": "user", "content": _combined}
-                    )
-                    state[StateKeys.CORE_TYPE] = "llm_call"
-                    state.pop("raw_result", None)
-                    state.pop("error_analysis", None)
+                    # BUG-FIX-fix_20260601_empty_message:
+                    # 过滤掉空字符串通知，避免空消息进入对话历史
+                    _filtered_notifs = [n for n in _iter_notifs if n and n.strip()]
+                    if _filtered_notifs:
+                        _combined = "\n\n".join(_filtered_notifs)
+                        _existing_input = state.get("user_input", "")
+                        if _existing_input:
+                            state["user_input"] = f"{_combined}\n\n{_existing_input}"
+                        else:
+                            state["user_input"] = _combined
+                        state.setdefault("messages", []).append(
+                            {"role": "user", "content": _combined}
+                        )
+                        state[StateKeys.CORE_TYPE] = "llm_call"
+                        state.pop("raw_result", None)
+                        state.pop("error_analysis", None)
 
                     logger.info(
                         "[Engine] 迭代 %d 开始时消费 %d 条待处理通知，注入 state",
@@ -396,16 +411,20 @@ class PipelineEngine:
                 if target == "end":
                     _end_notifs = self.consume_pending_notifications()
                     if _end_notifs:
-                        _combined = "\n\n".join(_end_notifs)
-                        state["user_input"] = _combined
-                        state.setdefault("messages", []).append(
-                            {"role": "user", "content": _combined}
-                        )
-                        state[StateKeys.CORE_TYPE] = "llm_call"
-                        logger.info(
-                            "[Engine] target=end 但有 %d 条待处理通知，继续循环",
-                            len(_end_notifs),
-                        )
+                        # BUG-FIX-fix_20260601_empty_message:
+                        # 过滤掉空字符串通知，避免空消息进入对话历史
+                        _filtered_end_notifs = [n for n in _end_notifs if n and n.strip()]
+                        if _filtered_end_notifs:
+                            _combined = "\n\n".join(_filtered_end_notifs)
+                            state["user_input"] = _combined
+                            state.setdefault("messages", []).append(
+                                {"role": "user", "content": _combined}
+                            )
+                            state[StateKeys.CORE_TYPE] = "llm_call"
+                            logger.info(
+                                "[Engine] target=end 但有 %d 条待处理通知，继续循环",
+                                len(_filtered_end_notifs),
+                            )
                     else:
                         if matched_entry and matched_entry.result:
                             result_msg = matched_entry.format_result(state)
@@ -459,7 +478,9 @@ class PipelineEngine:
                     if should_break:
                         break
                 else:
-                    await handle_no_route_signals(self, state, core_type, iteration)
+                    _no_route_action = await handle_no_route_signals(self, state, core_type, iteration)
+                    if _no_route_action == "end":
+                        break
                     continue
 
             # 管道结束后，再执行一次 Output 链
@@ -470,15 +491,22 @@ class PipelineEngine:
         except asyncio.CancelledError:
             _task = asyncio.current_task()
             _must_cancel = getattr(_task, '_must_cancel', None) if _task else None
+            # 尝试获取取消来源信息
+            _cancel_source = "unknown"
+            if _task and hasattr(_task, 'get_name'):
+                _cancel_source = f"task_name={_task.get_name()}"
+            if _must_cancel is True:
+                _cancel_source = "explicit_cancel(_must_cancel=True)"
             logger.warning(
-                "Pipeline cancelled | iteration=%d | _must_cancel=%s | stack:\n%s",
+                "Pipeline cancelled | iteration=%d | _must_cancel=%s | cancel_source=%s | stack:\n%s",
                 state.get(StateKeys.ITERATION, 0),
                 _must_cancel,
+                _cancel_source,
                 ''.join(_traceback.format_stack()),
             )
             state[StateKeys.ENDED] = True
-            state[StateKeys.RAW_ERROR] = "Pipeline engine cancelled"
-            await self._mark_task_failed_on_engine_exit(state, "Pipeline engine cancelled")
+            state[StateKeys.RAW_ERROR] = f"Pipeline engine cancelled (source={_cancel_source})"
+            await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
         except Exception as exc:
             logger.error(
                 "Pipeline uncaught exception (iter=%d): %s",
@@ -489,7 +517,18 @@ class PipelineEngine:
             await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine exception: {exc}")
         finally:
             self._running = False
+            # BUG-FIX-fix_20260531_sink_dead_stop_engine:
+            # 重置 _should_stop 标志，防止引擎复用时旧状态泄漏
+            self._should_stop = False
             self._last_state = state
+            logger.info(
+                "[Engine] _run_loop finally: pipeline=%s iteration=%d ended=%s "
+                "raw_error=%s _last_state_set=True",
+                self._pipeline_id[:12],
+                state.get(StateKeys.ITERATION, 0),
+                state.get(StateKeys.ENDED, False),
+                (state.get(StateKeys.RAW_ERROR) or "(none)")[:100],
+            )
             await self._cleanup_run_loop(
                 state, _pipeline_log_handler, _pipeline_loggers,
                 _pipeline_id_token,
@@ -501,27 +540,80 @@ class PipelineEngine:
     # _run_loop 辅助方法
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 管道日志过滤器 — 任务执行事件独立输出
+    # ------------------------------------------------------------------
+    _TASK_LOG_LOGGERS: tuple[str, ...] = (
+        "tools.builtin.task_submit",
+        "tools.builtin.task_manage",
+        "tools.builtin.task_evaluate",
+        "infrastructure.task_worker",
+        "tasks",
+    )
+
+    class _TaskLogFilter(logging.Filter):
+        """只放行任务执行相关的日志（task_submit/task_manage/task_evaluate/worker）。"""
+
+        def __init__(self, pipeline_id: str) -> None:
+            super().__init__()
+            self.pipeline_id = pipeline_id
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            if _current_pipeline_id.get() != self.pipeline_id:
+                return False
+            return any(
+                record.name.startswith(prefix)
+                for prefix in PipelineEngine._TASK_LOG_LOGGERS
+            )
+
+    # ------------------------------------------------------------------
+    # 管道日志设置
+    # ------------------------------------------------------------------
+
     def _setup_pipeline_logging(
         self,
         pipeline_run_id: str,
         resumed: bool,
         pipeline_loggers: list[logging.Logger],
     ) -> None:
-        """为当前管道设置独立日志文件。"""
+        """为当前管道设置独立日志文件（主日志 + 错误日志 + 任务日志）。"""
         try:
             _log_dir = Path.cwd() / "logs"
             _log_dir.mkdir(parents=True, exist_ok=True)
             log_mode = "a" if resumed else "w"
-            _handler = logging.FileHandler(
+            _log_fmt = logging.Formatter(
+                "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+
+            # ---- 1. 主日志（完整，DEBUG 级别，现有行为） ----
+            _main_handler = logging.FileHandler(
                 str(_log_dir / f"pipeline_{pipeline_run_id}.log"),
                 encoding="utf-8", mode=log_mode,
             )
-            _handler.setLevel(logging.DEBUG)
-            _handler.setFormatter(logging.Formatter(
-                "%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S",
-            ))
-            _handler.addFilter(_PipelineLogFilter(pipeline_run_id))
-            for _ln in [
+            _main_handler.setLevel(logging.DEBUG)
+            _main_handler.setFormatter(_log_fmt)
+            _main_handler.addFilter(_PipelineLogFilter(pipeline_run_id))
+
+            # ---- 2. 错误/中断/警告日志（WARNING+ 级别，独立文件） ----
+            _error_handler = logging.FileHandler(
+                str(_log_dir / f"pipeline_{pipeline_run_id}.error.log"),
+                encoding="utf-8", mode=log_mode,
+            )
+            _error_handler.setLevel(logging.WARNING)
+            _error_handler.setFormatter(_log_fmt)
+            _error_handler.addFilter(_PipelineLogFilter(pipeline_run_id))
+
+            # ---- 3. 任务执行日志（task_submit/manage/evaluate/worker） ----
+            _task_handler = logging.FileHandler(
+                str(_log_dir / f"pipeline_{pipeline_run_id}.task.log"),
+                encoding="utf-8", mode=log_mode,
+            )
+            _task_handler.setLevel(logging.DEBUG)
+            _task_handler.setFormatter(_log_fmt)
+            _task_handler.addFilter(self._TaskLogFilter(pipeline_run_id))
+
+            _all_loggers = [
                 "pipeline.engine", "pipeline.chain", "pipeline.event_bus",
                 "pipeline.route", "pipeline.config", "pipeline.registry",
                 "pipeline.stream_bridge",
@@ -532,11 +624,14 @@ class PipelineEngine:
                 "triggers.manager",
                 "pipeline.message_bus",
                 "src.core.event_bus",
-            ]:
+            ]
+            for _ln in _all_loggers:
                 _lg = logging.getLogger(_ln)
                 if _lg.level == logging.NOTSET:
                     _lg.setLevel(logging.DEBUG)
-                _lg.addHandler(_handler)
+                _lg.addHandler(_main_handler)
+                _lg.addHandler(_error_handler)
+                _lg.addHandler(_task_handler)
                 pipeline_loggers.append(_lg)
         except Exception:
             pass
@@ -620,11 +715,31 @@ class PipelineEngine:
         loggers: list[logging.Logger],
         pipeline_id_token: contextvars.Token,
     ) -> None:
-        """清理 _run_loop 的资源和注册。"""
-        if log_handler:
-            log_handler.close()
+        """清理 _run_loop 的资源和注册。
+
+        关闭所有为当前管道创建的 FileHandler（主日志/错误日志/任务日志），
+        并从所有 logger 中移除，防止 handler 泄漏和文件句柄泄漏。
+        """
+        # 收集所有需要关闭的 FileHandler（可能有多个：主日志+错误日志+任务日志）
+        _handlers_to_close: list[logging.FileHandler] = []
+        _seen: set[int] = set()
+        for _lg in loggers:
+            for _h in _lg.handlers:
+                if isinstance(_h, logging.FileHandler) and id(_h) not in _seen:
+                    _seen.add(id(_h))
+                    _handlers_to_close.append(_h)
+
+        for _h in _handlers_to_close:
+            try:
+                _h.close()
+            except Exception:
+                pass
             for _lg in loggers:
-                _lg.removeHandler(log_handler)
+                try:
+                    _lg.removeHandler(_h)
+                except Exception:
+                    pass
+
         _current_pipeline_id.reset(pipeline_id_token)
         # 清理 EngineRegistry 注册
         _cp_pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
@@ -851,7 +966,11 @@ class PipelineEngine:
 
     def _inject_notifications_to_suspended_state(self, notifications: list[str]) -> None:
         """将通知消息注入到挂起状态中。"""
+        # BUG-FIX-fix_20260601_empty_message:
+        # 过滤掉空字符串通知，避免空消息进入对话历史
         for notif in notifications:
+            if not notif or not notif.strip():
+                continue
             if self._suspended_state is not None:
                 orig = self._suspended_state.get("user_input", "")
                 self._suspended_state["user_input"] = f"{notif}\n\n{orig}".strip()
@@ -865,6 +984,10 @@ class PipelineEngine:
         当管道因 child_task_guard 挂起时，submitted_task_ids 记录了活跃子任务。
         如果所有子任务都已完成/失败/取消，管道应自动唤醒继续执行，
         而不是无限等待。
+
+        BUG-FIX-fix_20260531_pipeline_infinite_loop:
+        确认所有子任务已终态后，清除 submitted_task_ids，
+        防止下一轮 iteration 挂起时再次被 _check_children_terminal 误判唤醒。
         """
         task_ids = state.get("submitted_task_ids", [])
         if not task_ids:
@@ -896,6 +1019,7 @@ class PipelineEngine:
             "[Engine] 所有子任务已终态: pipeline=%s task_ids=%s",
             state.get(StateKeys.PIPELINE_ID, ""), task_ids,
         )
+        state["submitted_task_ids"] = []
         return True
 
     def wake(self) -> None:
@@ -938,16 +1062,23 @@ class PipelineEngine:
         return await self.resume()
 
     def consume_pending_notifications(self) -> list[str]:
-        """消费所有待处理通知，返回通知列表（可能为空）。
+        """从 bridge 获取待处理通知。引擎不再维护自己的通知队列。
 
-        统一的通知消费入口，所有需要读取 _pending_notifications 的地方
-        都应通过此方法，确保消费和清空是原子操作。
+        通过 registry 找到 bridge，拉取通知。无 bridge 时返回空列表。
         """
-        if not self._pending_notifications:
-            return []
-        notifs = self._pending_notifications[:]
-        self._pending_notifications.clear()
-        return notifs
+        try:
+            from pipeline.registry import get_engine_registry
+            entry = get_engine_registry().get(self._pipeline_id)
+            if entry and entry.bridge:
+                bridge = entry.bridge
+                if hasattr(bridge, '_pending_notifications'):
+                    notifs = bridge._pending_notifications[:]
+                    bridge._pending_notifications.clear()
+                    # 提取通知文本
+                    return [n if isinstance(n, str) else n.get("content", "") for n in notifs]
+        except Exception:
+            pass
+        return []
 
     def save_streaming_context(self, state: dict[str, Any]) -> None:
         """从 state 保存流式上下文。"""
@@ -968,20 +1099,20 @@ class PipelineEngine:
         self._streaming_flag = streaming
 
     def inject_message(self, message: str, *, source: str = "user") -> None:
-        """统一消息注入入口，自动根据引擎状态选择注入方式。
+        """消息注入入口。挂起态写入 suspended_state + 唤醒。
 
-        替代原先的 _inject_notification_to_engine 和 _inject_message_engine
-        两个独立函数，外部调用方只需调此方法，引擎内部自动处理状态差异：
-        - 挂起态：写入 _suspended_state + 唤醒
-        - 运行态：写入 _pending_notifications
+        运行态的系统通知走 bridge notification 路径，不经过此方法。
+        运行态的 user 消息仅取消 pending 交互请求。
 
         Args:
             message: 要注入的消息文本
-            source: 消息来源，"user" 表示用户主动消息（默认），
-                    "system" 表示系统通知（触发器、子任务完成等）。
-                    系统通知不会取消正在等待的 human_interaction 交互请求。
+            source: 消息来源
         """
-        if not message:
+        if not message or not message.strip():
+            logger.warning(
+                "[Engine] inject_message: 拒绝空消息 | pipeline=%s source=%s",
+                self._pipeline_id[:12], source,
+            )
             return
         if self.is_suspended:
             if self._suspended_state is not None:
@@ -996,16 +1127,19 @@ class PipelineEngine:
                 "[Engine] inject_message: 挂起态注入并唤醒: pipeline=%s source=%s preview=%.60s",
                 self._pipeline_id[:12], source, message,
             )
-        else:
-            self._pending_notifications.append(message)
-            if source == "user":
-                self._try_cancel_pending_interaction()
+        elif source == "user":
+            # 运行态 user 消息：取消 pending 交互，唤醒引擎
+            self._try_cancel_pending_interaction()
             if self._wake_event is not None:
                 self._wake_event.set()
-            logger.info(
-                "[Engine] inject_message: 运行态通知入队 (queue=%d): pipeline=%s source=%s preview=%.60s",
-                len(self._pending_notifications), self._pipeline_id[:12], source, message,
-            )
+
+    def request_stop(self) -> None:
+        """通知引擎停止运行。替代 bridge 直接访问引擎内部字段。"""
+        self._should_stop = True
+        if self._suspended_state is not None:
+            self._suspended_state["ended"] = True
+        if self._wake_event is not None:
+            self._wake_event.set()
 
     def _try_cancel_pending_interaction(self) -> None:
         """尝试取消当前管道关联的 pending human_interaction 请求。

@@ -797,7 +797,7 @@ class PromptBuildPlugin(IInputPlugin):
             "</dynamic_vars>"
         )
         return {
-            "role": "user",
+            "role": "system",
             "name": "dynamic_context",
             "content": content,
         }

@@ -216,7 +216,7 @@ class TestToolFilePathsValidation:
             result = await self.tool.execute({
                 "mode": "choice",
                 "title": "测试",
-                "file_paths": ["/nonexistent/file.md"],
+                "file_paths": ["nonexistent_file.md"],
             })
 
         assert result.success is False
@@ -227,26 +227,30 @@ class TestToolFilePathsValidation:
     async def test_file_paths_is_directory_returns_error(self):
         """file_paths 中路径是目录时返回错误。"""
         service = self._make_service_mock()
-        with patch(
-            "tools.builtin.human_interaction.tool.get_human_interaction_service",
-            return_value=service,
-        ):
-            result = await self.tool.execute({
-                "mode": "choice",
-                "title": "测试",
-                "file_paths": [self.tmp_dir],
-            })
+        subdir = Path.cwd() / "_test_dir_for_is_dir_check"
+        subdir.mkdir(exist_ok=True)
+        try:
+            with patch(
+                "tools.builtin.human_interaction.tool.get_human_interaction_service",
+                return_value=service,
+            ):
+                result = await self.tool.execute({
+                    "mode": "choice",
+                    "title": "测试",
+                    "file_paths": [str(subdir)],
+                })
 
-        assert result.success is False
-        assert result.error_code == "INVALID_FILE_PATHS"
-        assert "路径不是文件" in result.error
+            assert result.success is False
+            assert result.error_code == "INVALID_FILE_PATHS"
+            assert "目录而非文件" in result.error
+        finally:
+            subdir.rmdir()
 
     @pytest.mark.asyncio
     async def test_file_paths_exceeds_limit_returns_error(self):
         """file_paths 超过 10 个时返回错误。"""
         service = self._make_service_mock()
-        # 创建 11 个文件路径（不需要真实文件，因为数量校验先于文件校验）
-        paths = [f"/path/to/file_{i}.txt" for i in range(11)]
+        paths = [f"file_{i}.txt" for i in range(11)]
         with patch(
             "tools.builtin.human_interaction.tool.get_human_interaction_service",
             return_value=service,
@@ -259,27 +263,30 @@ class TestToolFilePathsValidation:
 
         assert result.success is False
         assert result.error_code == "INVALID_FILE_PATHS"
-        assert "文件路径数量超过限制" in result.error
+        assert "超过最大限制" in result.error
 
     @pytest.mark.asyncio
     async def test_file_paths_file_too_large_returns_error(self):
         """file_paths 中文件超过 10MB 时返回错误。"""
         service = self._make_service_mock()
-        # 创建一个超过 10MB 的文件
-        large_file = self._create_file("large.bin", size=10 * 1024 * 1024 + 1)
-        with patch(
-            "tools.builtin.human_interaction.tool.get_human_interaction_service",
-            return_value=service,
-        ):
-            result = await self.tool.execute({
-                "mode": "choice",
-                "title": "测试",
-                "file_paths": [large_file],
-            })
+        large_file = Path.cwd() / "_test_large_file.bin"
+        large_file.write_bytes(b"x" * (10 * 1024 * 1024 + 1))
+        try:
+            with patch(
+                "tools.builtin.human_interaction.tool.get_human_interaction_service",
+                return_value=service,
+            ):
+                result = await self.tool.execute({
+                    "mode": "choice",
+                    "title": "测试",
+                    "file_paths": [str(large_file)],
+                })
 
-        assert result.success is False
-        assert result.error_code == "INVALID_FILE_PATHS"
-        assert "文件过大" in result.error
+            assert result.success is False
+            assert result.error_code == "INVALID_FILE_PATHS"
+            assert "超过单文件上限" in result.error
+        finally:
+            large_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_file_paths_none_passes(self):
@@ -316,19 +323,25 @@ class TestToolFilePathsValidation:
     async def test_file_paths_all_valid_passes(self):
         """file_paths 全部合法时正常通过。"""
         service = self._make_service_mock()
-        file1 = self._create_file("valid1.txt", size=100)
-        file2 = self._create_file("valid2.txt", size=200)
-        with patch(
-            "tools.builtin.human_interaction.tool.get_human_interaction_service",
-            return_value=service,
-        ):
-            result = await self.tool.execute({
-                "mode": "choice",
-                "title": "测试",
-                "file_paths": [file1, file2],
-            })
+        file1 = Path.cwd() / "_test_valid1.txt"
+        file2 = Path.cwd() / "_test_valid2.txt"
+        file1.write_bytes(b"x" * 100)
+        file2.write_bytes(b"x" * 200)
+        try:
+            with patch(
+                "tools.builtin.human_interaction.tool.get_human_interaction_service",
+                return_value=service,
+            ):
+                result = await self.tool.execute({
+                    "mode": "choice",
+                    "title": "测试",
+                    "file_paths": [str(file1), str(file2)],
+                })
 
-        assert result.success is True
+            assert result.success is True
+        finally:
+            file1.unlink(missing_ok=True)
+            file2.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_conversation_mode_file_paths_not_exist_returns_error(self):
@@ -341,7 +354,7 @@ class TestToolFilePathsValidation:
             result = await self.tool.execute({
                 "mode": "conversation",
                 "title": "测试",
-                "file_paths": ["/nonexistent/file.md"],
+                "file_paths": ["nonexistent_file.md"],
             })
 
         assert result.success is False

@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     )
     task_timeout: int = Field(default=300, validation_alias="TASK_TIMEOUT")  # 5分钟
     ac_max_retries: int = Field(default=5, validation_alias="AC_MAX_RETRIES")  # AC 最大重试次数
-    task_max_retries: int = Field(default=3, validation_alias="TASK_MAX_RETRIES")  # 任务最大重试次数
+    task_max_retries: int = Field(default=6, validation_alias="TASK_MAX_RETRIES")  # 任务最大重试次数
 
     # 任务存储配置
     task_storage_type: str = Field(

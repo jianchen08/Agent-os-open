@@ -174,6 +174,20 @@ class TaskPostPipelineMixin:
         task_complete = pipeline_state.get("task_complete") if pipeline_state else None
         error_analysis = pipeline_state.get("error_analysis") if pipeline_state else None
         stop_reason = pipeline_state.get("router.stop_reason", "") if pipeline_state else ""
+        pipeline_id = pipeline_state.get("pipeline_id", "unknown") if pipeline_state else "unknown"
+
+        # BUG-FIX: 增强诊断 - 记录 engine._last_state 状态
+        logger.info(
+            "TaskWorker: _fail_after_pipeline_exit 诊断 | task=%s pipeline=%s "
+            "state_empty=%s state_not_ended=%s iteration=%s/%s ended=%s "
+            "raw_error=%s stop_reason=%s",
+            task_id, pipeline_id[:12] if isinstance(pipeline_id, str) else pipeline_id,
+            not pipeline_state,
+            isinstance(ended, bool) and not ended,
+            iteration_count, max_iter, ended,
+            raw_error or "(none)",
+            stop_reason or "(none)",
+        )
 
         # 根据实际原因构建精确的错误信息
         parts: list[str] = []

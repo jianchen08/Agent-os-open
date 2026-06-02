@@ -155,17 +155,17 @@ class TestExecutionRecordStorage:
         for i in range(3):
             storage.save(ExecutionRecordData(pipeline_run_id="run-002", sequence=i, iteration=i))
 
-        records = storage.list_by_pipeline("run-001")
+        records = storage.list_by_pipeline("run-001")[0]
         assert len(records) == 5
         # 按 sequence 升序排列
         assert [r.sequence for r in records] == [0, 1, 2, 3, 4]
 
-        records_2 = storage.list_by_pipeline("run-002")
+        records_2 = storage.list_by_pipeline("run-002")[0]
         assert len(records_2) == 3
 
     def test_list_by_pipeline_empty(self, storage: ExecutionRecordStorage):
         """测试列出不存在管道运行的记录返回空列表。"""
-        records = storage.list_by_pipeline("nonexistent")
+        records, _has_more = storage.list_by_pipeline("nonexistent")
         assert records == []
 
     def test_delete_by_session(self, storage: ExecutionRecordStorage):
@@ -177,8 +177,8 @@ class TestExecutionRecordStorage:
 
         deleted = storage.delete_by_session("run-001")
         assert deleted == 5
-        assert len(storage.list_by_pipeline("run-001")) == 0
-        assert len(storage.list_by_pipeline("run-002")) == 3
+        assert len(storage.list_by_pipeline("run-001")[0]) == 0
+        assert len(storage.list_by_pipeline("run-002")[0]) == 3
 
     def test_delete_by_session_nonexistent(self, storage: ExecutionRecordStorage):
         """测试删除不存在会话的记录返回 0。"""
@@ -204,14 +204,14 @@ class TestExecutionRecordStorage:
         assert len(data["records"]) == 1
 
         storage2 = ExecutionRecordStorage(data_dir=str(data_dir))
-        records = storage2.list_by_pipeline("run-001")
+        records = storage2.list_by_pipeline("run-001")[0]
         assert len(records) == 1
         assert records[0].content == "test output"
         assert records[0].type == "ai"
 
     def test_memory_only_storage(self, storage: ExecutionRecordStorage):
         storage.save(ExecutionRecordData(pipeline_run_id="s1", sequence=1, iteration=1))
-        assert len(storage.list_by_pipeline("s1")) == 1
+        assert len(storage.list_by_pipeline("s1")[0]) == 1
         assert storage._data_dir is None
 
     def test_load_corrupted_file(self, tmp_path: Path):
@@ -220,7 +220,7 @@ class TestExecutionRecordStorage:
         (data_dir / "corrupted.yaml").write_text("not: valid: yaml: {{{", encoding="utf-8")
 
         storage = ExecutionRecordStorage(data_dir=str(data_dir))
-        assert len(storage.list_by_pipeline("any")) == 0
+        assert len(storage.list_by_pipeline("any")[0]) == 0
 
 
 # ── summarize_text Tests ──
@@ -311,7 +311,7 @@ class TestTrackPluginWithExecutionRecord:
         assert "track.execution_stats" in result.state_updates
 
         # 持久化记录已写入
-        records = storage.list_by_pipeline("run-persist")
+        records = storage.list_by_pipeline("run-persist")[0]
         assert len(records) == 1
         record = records[0]
         assert record.iteration == 3
@@ -338,7 +338,7 @@ class TestTrackPluginWithExecutionRecord:
         plugin = TrackPlugin()
         await plugin.execute(ctx_with_storage)
 
-        records = storage.list_by_pipeline("run-err")
+        records = storage.list_by_pipeline("run-err")[0]
         assert len(records) == 1
         assert records[0].type == "ai"
         # 错误信息保存在摘要中
@@ -362,7 +362,7 @@ class TestTrackPluginWithExecutionRecord:
         plugin = TrackPlugin()
         await plugin.execute(ctx_with_storage)
 
-        records = storage.list_by_pipeline("run-trunc")
+        records = storage.list_by_pipeline("run-trunc")[0]
         assert len(records) == 1
         # content 应完整保存，不截断
         assert records[0].content == large_content
@@ -466,7 +466,7 @@ class TestTrackPluginWithExecutionRecord:
             base_state[StateKeys.RAW_RESULT] = f"response-{i}"
             await plugin.execute(ctx_with_storage)
 
-        records = storage.list_by_pipeline("run-multi")
+        records = storage.list_by_pipeline("run-multi")[0]
         assert len(records) == 4
 
 

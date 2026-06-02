@@ -141,6 +141,10 @@ def create_combined_app() -> FastAPI:
         在应用启动时立即启动 TaskWorker，确保纯 API 场景下任务可正常执行。
         """
         global _task_worker_started
+        logger.info(
+            "[Lifespan] 应用启动开始 | pid=%d | loop_id=%s",
+            os.getpid(), id(asyncio.get_running_loop()),
+        )
         if not _task_worker_started:
             tw = getattr(stream_handler, "_task_worker", None)
             if tw and hasattr(tw, "start"):
@@ -161,12 +165,20 @@ def create_combined_app() -> FastAPI:
 
         try:
             from triggers.manager import get_trigger_manager
-            import asyncio
-            get_trigger_manager().set_main_loop(asyncio.get_running_loop())
+            main_loop = asyncio.get_running_loop()
+            get_trigger_manager().set_main_loop(main_loop)
+            asyncio._main_loop_ref = main_loop
+            logger.info("[Lifespan] 主事件循环已保存: loop_id=%s", id(main_loop))
         except Exception as exc:
             logger.debug("TriggerManager set_main_loop skipped: %s", exc)
 
-        yield
+        try:
+            yield
+        finally:
+            logger.info(
+                "[Lifespan] 应用关闭 | pid=%d | loop_id=%s",
+                os.getpid(), id(asyncio.get_running_loop()),
+            )
 
     # BUG-FIX-fix_20260524_lifespan_not_called:
     # 问题根因: 之前使用 app.router.lifespan_context = _combined_lifespan 设置 lifespan，
@@ -312,6 +324,13 @@ def create_combined_app() -> FastAPI:
 
                     _registry = get_engine_registry()
 
+                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
+                    # 重启后 registry 中 entry.thread_id 为空，需在此处补上。
+                    if _target_pid and thread_id:
+                        _existing_entry = _registry.get(_target_pid)
+                        if _existing_entry and not _existing_entry.thread_id:
+                            _existing_entry.thread_id = thread_id
+
                     if not _target_pid or not _registry.get(_target_pid):
                         _sess = api_store.get_session(thread_id)
                         _new_pid = _target_pid or ""
@@ -338,6 +357,14 @@ def create_combined_app() -> FastAPI:
                                 if _sess and not _sess.active_pipeline_id:
                                     _sess.active_pipeline_id = _target_pid
 
+                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
+                    # 管道已存在时（跳过了 register_pipeline），确保 thread_id 被更新。
+                    # 引擎 _run_loop 的 register() 会覆盖 entry，此处作为双重保险。
+                    if _target_pid:
+                        _existing_entry = _registry.get(_target_pid)
+                        if _existing_entry and not _existing_entry.thread_id:
+                            _registry.update_thread_id(_target_pid, thread_id)
+
                     _result = await send_pipeline_message(
                         _target_pid, _user_content,
                         output_sink=_sink,
@@ -359,20 +386,27 @@ def create_combined_app() -> FastAPI:
                 elif msg_type == "interaction_response":
                     resp_data = msg_data.get("data", {}) if isinstance(msg_data.get("data"), dict) else msg_data
                     request_id = resp_data.get("request_id", "")
+                    logger.info(
+                        "[GlobalWS] 收到 interaction_response | request_id=%s | data_keys=%s",
+                        request_id, list(resp_data.keys()) if isinstance(resp_data, dict) else "non-dict",
+                    )
                     if request_id:
                         try:
                             from human_interaction import get_human_interaction_service
                             human_svc = get_human_interaction_service()
                             if human_svc:
-                                await human_svc.respond(request_id, resp_data)
+                                respond_result = await human_svc.respond(request_id, resp_data)
+                                logger.info(
+                                    "[GlobalWS] human_svc.respond 返回 | request_id=%s | result=%s",
+                                    request_id, respond_result,
+                                )
                                 request_record = await human_svc.get_request(request_id)
                                 if request_record:
                                     pipeline_id = request_record.get("session_id", "")
-                                    # BUG-FIX-fix_20260530_eval_human_interaction_decouple:
-                                    # 评估器使用虚拟 session_id (__eval__{task_id})，
-                                    # 其等待/唤醒完全通过 asyncio.Event 机制实现，
-                                    # 不需要也不应该唤醒任何管道引擎。
-                                    # 仅当 session_id 对应真实管道时才执行 engine.wake()。
+                                    logger.info(
+                                        "[GlobalWS] 交互请求记录 | request_id=%s | session_id=%s | status=%s",
+                                        request_id, pipeline_id, request_record.get("status"),
+                                    )
                                     if pipeline_id and not pipeline_id.startswith("__eval__"):
                                         from pipeline.message_bus import _find_engine
                                         engine, _ = _find_engine(pipeline_id)
@@ -389,8 +423,17 @@ def create_combined_app() -> FastAPI:
                                             "request_id=%s | session_id=%s",
                                             request_id, pipeline_id,
                                         )
+                                else:
+                                    logger.warning(
+                                        "[GlobalWS] 交互请求记录未找到 | request_id=%s",
+                                        request_id,
+                                    )
+                            else:
+                                logger.warning("[GlobalWS] human_svc 为 None，无法处理交互响应")
                         except Exception as exc:
-                            logger.warning("[GlobalWS] interaction_response 处理失败: %s", exc)
+                            logger.warning("[GlobalWS] interaction_response 处理失败: %s", exc, exc_info=True)
+                    else:
+                        logger.warning("[GlobalWS] interaction_response 缺少 request_id")
                     continue
                 elif msg_type == "stop_generation":
                     # BUG-FIX-fix_20260512_stop_generation_global_ws:

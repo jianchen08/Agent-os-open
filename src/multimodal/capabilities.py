@@ -277,12 +277,18 @@ class ModelCapabilityRegistry:
             ],
             max_image_size=20 * 1024 * 1024,
         ),
-        "MiniMax-M2.7": ModelCapability(
-            model_name="MiniMax-M2.7",
-            supports_image=False,
+        "MiniMax-M3": ModelCapability(
+            model_name="MiniMax-M3",
+            supports_image=True,
             supports_audio=False,
-            supports_video=False,
-            supported_image_types=[],
+            supports_video=True,
+            supported_image_types=[
+                "image/jpeg",
+                "image/png",
+                "image/gif",
+                "image/webp",
+            ],
+            max_image_size=20 * 1024 * 1024,
         ),
         # === Ollama 本地模型 ===
         "llava": ModelCapability(
@@ -307,7 +313,7 @@ class ModelCapabilityRegistry:
         "google": OpenAIVisionAdapter,  # Gemini 使用类似 OpenAI 的格式
         "zhipu": OpenAIVisionAdapter,   # 智谱使用类似 OpenAI 的格式
         "zhipu_coding": OpenAIVisionAdapter,  # GLM-5 系列支持图片
-        "minimax": DefaultAdapter,             # MiniMax-M2.7 不支持图片
+        "minimax": OpenAIVisionAdapter,  # MiniMax-M3 支持图片和视频
         "deepseek": DefaultAdapter,
         "deepseek_reasoning": DefaultAdapter,
         "ollama": OpenAIVisionAdapter,   # Ollama 使用类似 OpenAI 的格式
@@ -342,7 +348,7 @@ class ModelCapabilityRegistry:
         "glm-5.1": "zhipu_coding",
         "glm-5-turbo": "zhipu_coding",
         # MiniMax
-        "MiniMax-M2.7": "minimax",
+        "MiniMax-M3": "minimax",
         # Ollama
         "llava": "ollama",
     }

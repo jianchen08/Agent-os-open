@@ -12,7 +12,7 @@ import { useMemo } from 'react'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
-import type { SystemLevel, ToolCallPart } from '@/types/messageParts'
+import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
 /**
  * 渲染片段类型
  */
@@ -180,6 +180,45 @@ function buildActivityFromToolPart(
  * @param message - 消息对象（必须包含 parts[]）
  * @returns RenderFragment[] 渲染片段列表
  */
+/**
+ * 生成稳定的 part key，避免数组索引变化导致 React 重新创建 DOM
+ *
+ * BUG-FIX-fix_20260601_message_render_duplicate:
+ * 问题根因: 原代码使用数组索引 `i` 作为 fragment key，当流式追加新 part 时，
+ *          后续 part 的索引全部后移，导致所有已有 fragment 的 key 改变，
+ *          React 销毁并重新创建 DOM，视觉上表现为消息内容重复/闪烁。
+ * 修复方案: 使用 part 的固有属性生成稳定 key：
+ *          - text: sequence + content hash
+ *          - thinking: sequence + content hash
+ *          - tool_call: callId（已天然唯一）
+ *          - system: sequence + content hash
+ * 影响范围: 流式消息渲染稳定性
+ * 修复日期: 2026-06-01
+ */
+function makeStablePartKey(part: MessagePart, index: number): string {
+  const seq = part.sequence ?? index
+  switch (part.type) {
+    case 'text': {
+      const content = part.content || (part as any).text || ''
+      const contentPrefix = content.substring(0, 16)
+      return `part-text-${seq}-${contentPrefix}`
+    }
+    case 'thinking': {
+      const content = part.content || (part as any).thinking?.content || ''
+      const contentPrefix = content.substring(0, 16)
+      return `part-thinking-${seq}-${contentPrefix}`
+    }
+    case 'tool_call':
+      return `part-tool-${part.callId}`
+    case 'system': {
+      const contentPrefix = (part.content || '').substring(0, 16)
+      return `part-system-${seq}-${contentPrefix}`
+    }
+    default:
+      return `part-${part.type}-${seq}-${index}`
+  }
+}
+
 function buildFragmentsFromParts(message: Message): RenderFragment[] {
   const fragments: RenderFragment[] = []
   const parts = message.parts!
@@ -193,6 +232,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
 
   for (let i = 0; i < sorted.length; i++) {
     const part = sorted[i]
+    const stableKey = makeStablePartKey(part, i)
     switch (part.type) {
       case 'text': {
         const textContent = part.content || (part as any).text || ''
@@ -200,7 +240,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
           fragments.push({
             type: 'text',
             content: textContent,
-            key: `part-text-${i}`,
+            key: stableKey,
             sourceId: message.id,
             isLast: false,
           })
@@ -219,7 +259,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
             durationMs: part.durationMs,
             steps: part.steps,
           },
-          key: `part-thinking-${i}`,
+          key: stableKey,
           sourceId: message.id,
         })
         break
@@ -256,7 +296,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
           type: 'tool_call',
           toolCall,
           activity,
-          key: `part-tool-${part.callId}-${i}`,
+          key: stableKey,
           index: toolCallIndex,
           total: toolCallCount,
         })
@@ -271,7 +311,7 @@ function buildFragmentsFromParts(message: Message): RenderFragment[] {
             content: part.content,
             level: part.level,
             notificationType: part.notificationType,
-            key: `part-system-${i}`,
+            key: stableKey,
           })
         }
         break
@@ -340,7 +380,14 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
       fragments: [],
       displayContent: versionContent ?? message.content,
     }
-  }, [message.parts, message.content, versionContent, message])
+    // BUG-FIX-fix_20260601_message_render_duplicate:
+    // 问题根因: 原依赖数组包含整个 message 对象，导致 message 任何属性变化
+    //   （如 status 从 streaming 变为 completed）都会触发 useMemo 重新计算，
+    //   即使 parts 和 content 没有变化，造成不必要的重渲染。
+    // 修复方案: 只依赖 message.parts 数组引用、message.content 和 versionContent，
+    //   不依赖整个 message 对象。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [message.parts, message.content, versionContent])
 
   const isStreaming = useMemo(() => {
     return isGenerating && isLast && message.role === 'assistant'

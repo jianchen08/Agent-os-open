@@ -150,12 +150,12 @@ class MemoryMaintenanceService:
         """
         if self._review_engine is None:
             from .review_engine import ReviewEngine
+            # 注意：ReviewEngine.__init__ 不接受 config 参数
             self._review_engine = ReviewEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
                 knowledge_service=self._knowledge_service,
                 pipeline_engine=self._pipeline_engine,
-                config=self._config,
             )
         return self._review_engine
 
@@ -241,20 +241,23 @@ class MemoryMaintenanceService:
         """判断是否应该触发复盘。
 
         满足以下任一条件即触发：
-        1. 新积累的待复盘管道执行记录数 >= review_min_records
+        1. 存在 status=completed 且 review_status=pending 的管道运行
         2. 距上次复盘超过 review_max_interval
 
         Returns:
             是否应该触发复盘
         """
-        # 条件1：积累的待复盘记录数达到阈值
-        pending_count = self._get_review_engine()._count_pending_records()
-        if pending_count >= self._config.review_min_records:
-            logger.info(
-                "[Maintenance] 触发复盘：待复盘记录 %d >= %d",
-                pending_count, self._config.review_min_records,
-            )
-            return True
+        # 条件1：存在 pending 的管道运行
+        try:
+            pending = self._get_review_engine().get_pending_pipelines()
+            if pending:
+                logger.info(
+                    "[Maintenance] 触发复盘：发现 %d 个待复盘管道运行",
+                    len(pending),
+                )
+                return True
+        except Exception as exc:
+            logger.warning("[Maintenance] 检查 pending pipelines 失败: %s", exc)
 
         # 条件2：距上次复盘超过最大间隔
         last_review = self._stats.get("last_review_at")
@@ -270,14 +273,6 @@ class MemoryMaintenanceService:
                     return True
             except (ValueError, TypeError):
                 pass
-        else:
-            # 从未复盘过，检查是否有待复盘数据
-            if pending_count > 0:
-                logger.info(
-                    "[Maintenance] 触发复盘：首次复盘，有 %d 条待复盘记录",
-                    pending_count,
-                )
-                return True
 
         return False
 
@@ -321,7 +316,7 @@ class MemoryMaintenanceService:
 
         # 独立判断：是否需要复盘
         if self.should_trigger_review():
-            review_result = await self._get_review_engine().review_execution_history()
+            review_result = await self.trigger_review_now(force=False)
             results["tasks"]["review"] = review_result
             # 同步统计
             now_review = review_result.get("reviewed_at") or datetime.now(UTC).isoformat()
@@ -347,6 +342,64 @@ class MemoryMaintenanceService:
 
         logger.info("[Maintenance] 维护巡检完成")
         return results
+
+    async def trigger_review_now(self, force: bool = False) -> dict[str, Any]:
+        """立即触发复盘，处理所有 pending 的管道运行。
+
+        直接调用 ReviewEngine.run_review 处理 ExecutionRecordStorage 中
+        status=completed && review_status=pending 的管道，
+        把错误经验写入 KnowledgeService（source_type=review_experience）。
+
+        Args:
+            force: 是否强制执行（当前实现下与 False 等效）
+
+        Returns:
+            复盘结果汇总
+        """
+        review_engine = self._get_review_engine()
+        pending = review_engine.get_pending_pipelines()
+
+        started_at = datetime.now(UTC).isoformat()
+        result: dict[str, Any] = {
+            "started_at": started_at,
+            "force": force,
+            "pending_count": len(pending),
+            "pipelines_reviewed": 0,
+            "experiences_saved": 0,
+            "details": [],
+        }
+
+        for summary in pending:
+            try:
+                pr = await review_engine.run_review(summary.run_id)
+                ok = pr.get("status") == "success"
+                exp_count = pr.get("experience_count", 0) if ok else 0
+                result["details"].append({
+                    "run_id": summary.run_id,
+                    "status": pr.get("status"),
+                    "experiences": exp_count,
+                    "records_analyzed": pr.get("records_analyzed", 0),
+                })
+                if ok:
+                    result["pipelines_reviewed"] += 1
+                    result["experiences_saved"] += exp_count
+            except Exception as exc:
+                logger.warning(
+                    "[Maintenance] 复盘单管道失败 | run_id=%s | err=%s",
+                    summary.run_id, exc,
+                )
+                result["details"].append({
+                    "run_id": summary.run_id,
+                    "status": "error",
+                    "error": str(exc),
+                })
+
+        result["completed_at"] = datetime.now(UTC).isoformat()
+        logger.info(
+            "[Maintenance] 复盘完成 | reviewed=%d | experiences=%d",
+            result["pipelines_reviewed"], result["experiences_saved"],
+        )
+        return result
 
     # ============================================
     # 统计

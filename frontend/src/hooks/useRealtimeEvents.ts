@@ -44,6 +44,14 @@ export function useRealtimeEvents(): void {
     /**
      * FIX: WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。
      * 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。
+     *
+     * BUG-FIX-fix_20260601_ws_connect_fetch:
+     * 问题根因: 页面刷新后 isStreaming 为 false，导致不会调用 fetchMessages 获取最新消息。
+     *          即使后端仍在流式输出，前端也无法接收到新消息。
+     * 修复方案: 移除 isStreaming 检查，WS 重连后总是调用 fetchMessages 获取最新消息（包括可能正在流式的消息）。
+     *          streaming/index.ts 中的 handleReconnected 会处理流式状态的恢复和补漏。
+     * 影响范围: 页面刷新后、WS 重连后的消息获取
+     * 修复日期: 2026-06-01
      */
     const handleWsConnect = () => {
       // 防抖：1 秒内不重复调用 fetchMessages
@@ -57,10 +65,9 @@ export function useRealtimeEvents(): void {
       // FIX: 用 activePipelineId 而非 sessionId 调 fetchMessages
       const activePipelineId = usePipelineMessageStore.getState().activePipelineId
       if (activeSessionId && activePipelineId) {
-        const isStreaming = usePipelineMessageStore.getState().isStreaming(activePipelineId)
-        if (!isStreaming) {
-          usePipelineMessageStore.getState().fetchMessages(activePipelineId, { threadId: activeSessionId }).catch(() => {})
-        }
+        // 总是获取最新消息，不管是否正在流式输出
+        // handleReconnected 会处理流式状态的恢复
+        usePipelineMessageStore.getState().fetchMessages(activePipelineId, { threadId: activeSessionId }).catch(() => {})
       }
     }
 

@@ -90,7 +90,7 @@ class TaskTool(BuiltinTool):
         storage = self._get_execution_record_storage()
         if not storage or not task.pipeline_run_id:
             return None
-        records = storage.list_by_pipeline(task.pipeline_run_id)
+        records = storage.list_by_pipeline(task.pipeline_run_id)[0]
         if not records:
             return None
         latest = records[-1]
@@ -106,7 +106,7 @@ class TaskTool(BuiltinTool):
         storage = self._get_execution_record_storage()
         if not storage or not task.pipeline_run_id:
             return []
-        records = storage.list_by_pipeline(task.pipeline_run_id)
+        records = storage.list_by_pipeline(task.pipeline_run_id)[0]
         recent = records[-limit:] if len(records) > limit else records
         recent.reverse()
         return [
@@ -162,7 +162,7 @@ class TaskTool(BuiltinTool):
                 "- list：列出任务列表（支持 parent_task_id 筛选子任务、status 按状态过滤）\n"
                 "- status：全局状态概览（各状态统计 + 最近任务摘要）\n"
                 "- update：更新任务状态\n"
-                "- pause/resume/cancel/retry：任务生命周期控制\n"
+                "- pause/resume/cancel/retry/resume_completed：任务生命周期控制\n"
                 "- inject：向运行中或暂停的子任务注入指令\n"
                 "- delete：删除任务\n"
                 "- complete_container/fail_container：标记容器完成/失败（仅L1）\n\n"
@@ -175,7 +175,7 @@ class TaskTool(BuiltinTool):
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["get", "update", "list", "status", "pause", "resume", "cancel", "retry", "delete", "inject", "complete_container", "fail_container"],
+                        "enum": ["get", "update", "list", "status", "pause", "resume", "cancel", "retry", "resume_completed", "delete", "inject", "complete_container", "fail_container"],
                         "description": (
                             "操作类型，根据场景选择：\n"
                             "- get：查询单个任务详情，需要 task_id；加 include_details=true 可展开最近执行活动\n"
@@ -186,6 +186,7 @@ class TaskTool(BuiltinTool):
                             "- resume：恢复暂停的任务\n"
                             "- cancel：取消任务\n"
                             "- retry：重试失败的任务（重置为pending重新执行）\n"
+                            "- resume_completed：恢复已完成的任务继续执行（completed→pending，携带对话历史）\n"
                             "- inject：向运行中或暂停的子任务注入新指令（如调整方向、补充要求），子任务下一轮会看到该消息\n"
                             "- delete：删除任务及关联资源\n"
                             "- complete_container：标记容器任务完成（仅L1），需所有子任务已到达终态\n"
@@ -282,6 +283,14 @@ class TaskTool(BuiltinTool):
                         "description": "是否显示当前会话的所有任务（含子任务的子任务）。默认 false，L1 只显示自己提交的任务。设为 true 时递归展示当前会话中所有层级的任务。仅 L1 生效。",
                         "default": False,
                     },
+                    "goal": {
+                        "type": "object",
+                        "description": "更新后的任务目标（resume_completed操作时可选）。写入任务的metadata.goal，覆盖原有目标",
+                    },
+                    "acceptance_criteria": {
+                        "type": "object",
+                        "description": "更新后的验收标准（resume_completed操作时可选）。写入任务的metadata.acceptance_criteria，覆盖原有验收标准",
+                    },
                 },
                 "required": ["action"],
             },
@@ -301,6 +310,7 @@ class TaskTool(BuiltinTool):
                         "resume": 0,
                         "cancel": 0,
                         "retry": 0,
+                        "resume_completed": 0,
                         "delete": 0,
                         "inject": 0,
                         "complete_container": 1,
@@ -339,7 +349,7 @@ class TaskTool(BuiltinTool):
 
         # 检查是否使用批量参数
         task_ids = inputs.get("task_ids")
-        if task_ids and isinstance(task_ids, list) and action in ("pause", "resume", "cancel", "retry", "delete", "inject"):
+        if task_ids and isinstance(task_ids, list) and action in ("pause", "resume", "cancel", "retry", "resume_completed", "delete", "inject"):
             return await self._batch_tasks(inputs, parent_agent_level)
 
         if action == "get":
@@ -358,6 +368,8 @@ class TaskTool(BuiltinTool):
             return await self._cancel_task(inputs, parent_agent_level)
         elif action == "retry":
             return await self._retry_task(inputs, parent_agent_level)
+        elif action == "resume_completed":
+            return await self._resume_completed_task(inputs, parent_agent_level)
         elif action == "delete":
             return await self._delete_task(inputs, parent_agent_level)
         elif action == "inject":
@@ -455,6 +467,8 @@ class TaskTool(BuiltinTool):
         之前该参数在 schema 中定义但从未被使用。现在传 include_agent_calls=true 时
         自动启用 include_details，并筛选只返回工具调用类型的活动记录。
 
+        精简策略：只返回 LLM 做决策需要的关键字段，移除大量冗余字段。
+
         Args:
             task: 任务模型
             include_details: 是否包含详细活动信息
@@ -463,33 +477,40 @@ class TaskTool(BuiltinTool):
         Returns:
             可序列化的任务字典
         """
-        # 精简 metadata：去掉 evaluation_history（按需查看），只保留评估结果摘要
-        metadata = dict(task.metadata) if task.metadata else {}
-        eval_summary = None
-        if "evaluation_history" in metadata:
-            history = metadata.pop("evaluation_history")
-            if history:
-                last = history[-1]
-                eval_summary = {
-                    "passed": last.get("passed"),
-                    "summary": last.get("summary", ""),
-                    "attempt_count": len(history),
-                }
-        if eval_summary:
-            metadata["evaluation_summary"] = eval_summary
-
         result = {
             "task_id": task.id,
             "title": task.title,
-            "description": task.description or "",
             "status": task.status.value,
-            "parent_task_id": task.parent_task_id,
-            "priority": task.priority.value if hasattr(task.priority, "value") else task.priority,
-            "metadata": metadata,
-            "created_at": task.created_at,
-            "completed_at": task.completed_at,
             "error": task.error,
         }
+
+        if task.metadata:
+            metadata = dict(task.metadata)
+
+            eval_summary = None
+            if "evaluation_history" in metadata:
+                history = metadata.pop("evaluation_history")
+                if history:
+                    last = history[-1]
+                    eval_summary = {
+                        "passed": last.get("passed"),
+                        "summary": last.get("summary", ""),
+                        "attempt_count": len(history),
+                    }
+            if eval_summary:
+                result["evaluation_summary"] = eval_summary
+
+            fail_reason = metadata.get("fail_reason") or metadata.get("container_reason")
+            if fail_reason:
+                result["fail_reason"] = fail_reason
+
+            retry_count = metadata.get("retry_count")
+            max_retries = metadata.get("max_retries")
+            if retry_count is not None:
+                result["retry_count"] = retry_count
+            if max_retries is not None:
+                result["max_retries"] = max_retries
+
         if include_details or include_agent_calls:
             result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
             activities = self._get_recent_activities(task)
@@ -615,6 +636,8 @@ class TaskTool(BuiltinTool):
                 result = await self._cancel_task(file_inputs, parent_agent_level)
             elif action == "retry":
                 result = await self._retry_task(file_inputs, parent_agent_level)
+            elif action == "resume_completed":
+                result = await self._resume_completed_task(file_inputs, parent_agent_level)
             elif action == "delete":
                 result = await self._delete_task(file_inputs, parent_agent_level)
             elif action == "inject":
@@ -874,13 +897,10 @@ class TaskTool(BuiltinTool):
 
             return create_success_result(
                 data={
-                    "h": ["task_id", "title", "status", "priority", "target", "latest_action", "elapsed"],
                     "d": [
                         [task_ids[i], titles[i], statuses[i], priorities[i], target_names[i], latest_actions[i], elapsed_list[i]]
                         for i in range(len(task_ids))
                     ],
-                    "c": len(task_ids),
-                    "agent_level": f"L{parent_agent_level}",
                     "hint": "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。",
                 },
                 metadata={"action": "list_tasks"},
@@ -1186,7 +1206,7 @@ class TaskTool(BuiltinTool):
             if not task.metadata:
                 task.metadata = {}
             retry_count = task.metadata.get("retry_count", 0)
-            max_retries = task.metadata.get("max_retries", 3)
+            max_retries = task.metadata.get("max_retries", 6)
             if retry_count >= max_retries:
                 return create_failure_result(
                     error=(
@@ -1218,31 +1238,62 @@ class TaskTool(BuiltinTool):
             # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
             await service.save_task(task)
 
-            # 通过 task_worker 直接提交任务，触发重新执行
+            # BUG-FIX-fix_20260531_retry_pending_stuck:
+            # 问题根因: _retry_task 中 target_id 为空时跳过 submit_task 调用，
+            #   任务被设为 PENDING 但永远不会提交给 TaskWorker 执行，导致状态卡住。
+            # 修复方案: target_id 优先从 metadata 获取，回退到 task.agent_name；
+            #   移除 if target_id 守卫，始终提交任务。TaskWorker 未启动时
+            #   任务留在 PENDING，启动后 _recover_running_tasks 会自动恢复。
+            # 影响范围: 所有通过 task_manage retry 重试的任务。
+            # 修复日期: 2026-05-31
+            
+            # BUG-FIX-fix_20260601_retry_via_taskworker:
+            # 问题根因: _try_inject_message_for_retry 绕过 TaskWorker 直接
+            #   注入管道，导致 start_task 不被调用，任务状态卡在 PENDING。
+            # 修复方案: 始终走 submit_task → TaskWorker → _execute_background_task
+            #   → start_task → engine.run。TaskWorker 内部已有 conversation_history
+            #   恢复逻辑，无需单独的管道注入路径。
+            # BUG-FIX-fix_20260601_retry_prepared_context:
+            # retry 时 workspace、配置、输入都已就绪，通过 _prepared_context 跳过
+            # _execute_background_task 中的重复准备工作（lifecycle/input_build）。
+            target_id = task.metadata.get("target_id", "") or task.agent_name or ""
             execution_warning = None
-            target_id = task.metadata.get("target_id", "")
-            if target_id:
-                try:
-                    from infrastructure.service_provider import get_service_provider
-                    task_worker = get_service_provider().get("task_worker")
-                    if task_worker:
-                        if not task_worker.submit_task({
-                            "task_id": task.id,
-                            "target_type": task.target_type or "agent",
-                            "target_id": target_id,
-                            "user_input": task.title,
-                            "description": task.description,
-                            "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
-                            "workspace": task.metadata.get("workspace", ""),
-                        }):
-                            execution_warning = "后台执行器未启动，任务已重置为pending但不会自动执行"
-                        else:
-                            logger.info("[TaskTool] retry 已通过 task_worker 提交任务: task_id=%s", task_id)
+            _ws_meta = task.metadata.get("ws_meta", {})
+            _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
+
+            try:
+                from infrastructure.service_provider import get_service_provider
+                task_worker = get_service_provider().get("task_worker")
+                if task_worker:
+                    if not task_worker.submit_task({
+                        "task_id": task.id,
+                        "pipeline_id": task.parent_pipeline_id or "",
+                        "pipeline_run_id": task.pipeline_run_id or "",
+                        "target_type": task.target_type or "agent",
+                        "target_id": target_id,
+                        "user_input": task.title,
+                        "description": task.description,
+                        "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
+                        "workspace": _workspace,
+                        "isolation_level": task.metadata.get("isolation_level", ""),
+                        # retry 预构建上下文：跳过 workspace 初始化 + input 构建
+                        "_prepared_context": {
+                            "workspace": _workspace,
+                            "ws_meta": _ws_meta,
+                            "full_input": task.title,  # retry 时 description 在 history 里
+                            "isolation_mode": task.metadata.get("isolation_level", ""),
+                            "has_explicit_workspace": True,
+                            "agent_config_validated": True,
+                        },
+                    }):
+                        execution_warning = "后台执行器未启动，任务已重置为pending但不会自动执行"
                     else:
-                        execution_warning = "后台执行器不可用，任务已重置为pending但不会自动执行"
-                except Exception as submit_exc:
-                    logger.warning("[TaskTool] retry 提交任务失败: %s", submit_exc)
-                    execution_warning = f"任务提交失败: {submit_exc}"
+                        logger.info("[TaskTool] retry 已提交到 TaskWorker: task_id=%s", task_id)
+                else:
+                    execution_warning = "后台执行器不可用，任务已重置为pending但不会自动执行"
+            except Exception as submit_exc:
+                logger.warning("[TaskTool] retry 提交任务失败: %s", submit_exc)
+                execution_warning = f"任务提交失败: {submit_exc}"
 
             result_data = {
                 "task_id": task_id,
@@ -1271,6 +1322,202 @@ class TaskTool(BuiltinTool):
             return create_failure_result(
                 error=f"重试任务失败: {str(e)}",
                 error_code="RETRY_FAILED",
+            )
+
+    async def _resume_completed_task(
+        self, inputs: dict[str, Any], parent_agent_level: int
+    ) -> ToolExecutionResult:
+        """恢复已完成的任务继续执行（completed → pending）。
+
+        携带原对话历史重新提交任务到 TaskWorker，使管道从已有上下文继续执行。
+        可选更新 goal 和 acceptance_criteria。
+
+        Args:
+            inputs: 工具输入参数，需包含 task_id
+            parent_agent_level: 父 Agent 层级
+
+        Returns:
+            恢复结果或错误
+        """
+        try:
+            task_id = inputs.get("task_id")
+            if not task_id:
+                return create_failure_result(
+                    error="任务 ID 不能为空",
+                    error_code="MISSING_TASK_ID",
+                )
+
+            service = self._get_task_service()
+            task = service.get_task(task_id)
+
+            if not task:
+                return create_failure_result(
+                    error=f"任务不存在: {task_id}",
+                    error_code="TASK_NOT_FOUND",
+                )
+
+            has_permission, error_msg = self._check_permission(
+                task, parent_agent_level, inputs
+            )
+            if not has_permission:
+                return create_failure_result(
+                    error=error_msg,
+                    error_code="INSUFFICIENT_PERMISSION",
+                )
+
+            if task.status != TaskStatus.COMPLETED:
+                return create_failure_result(
+                    error=f"只有已完成的任务才能恢复，当前状态: {task.status.value}",
+                    error_code="INVALID_STATUS",
+                )
+
+            if not task.metadata:
+                task.metadata = {}
+
+            resume_count = task.metadata.get("resume_count", 0)
+            max_resumes = task.metadata.get("max_resumes", 3)
+            if resume_count >= max_resumes:
+                return create_failure_result(
+                    error=(
+                        f"任务已达到最大恢复次数 ({resume_count}/{max_resumes})，"
+                        f"无法继续恢复。"
+                    ),
+                    error_code="MAX_RESUMES_EXCEEDED",
+                )
+
+            old_status = task.status.value
+
+            # 可选：更新 goal
+            goal = inputs.get("goal")
+            if goal:
+                task.metadata["goal"] = goal
+
+            # 可选：更新 acceptance_criteria
+            acceptance_criteria = inputs.get("acceptance_criteria")
+            if acceptance_criteria:
+                task.metadata["acceptance_criteria"] = acceptance_criteria
+
+            # 构造 resume_message
+            resume_message = inputs.get("message", "")
+
+            # 递增 resume_count
+            task.metadata["resume_count"] = resume_count + 1
+
+            # 加载 conversation_history
+            conversation_history = []
+            has_history = False
+            history_warning = None
+
+            if task.pipeline_run_id:
+                try:
+                    from pipeline.message_bus import _load_history_from_storage
+                    from infrastructure.service_provider import get_service_provider
+                    provider = get_service_provider()
+                    conversation_history = _load_history_from_storage(
+                        task.pipeline_run_id, provider
+                    ) or []
+                    has_history = bool(conversation_history)
+                    if not has_history:
+                        history_warning = "未找到对话历史记录，任务将从零开始执行"
+                except Exception as hist_err:
+                    logger.warning(
+                        "[TaskTool] resume_completed 加载对话历史失败: %s", hist_err
+                    )
+                    history_warning = f"加载对话历史失败: {hist_err}"
+            else:
+                history_warning = "任务无 pipeline_run_id，无法恢复对话历史"
+
+            # 将 resume_message 存入 metadata，供 _execute_background_task 读取
+            if resume_message:
+                task.metadata["resume_message"] = resume_message
+                logger.info(
+                    "[TaskTool] resume_completed 携带恢复信息 | task_id=%s | preview=%s",
+                    task_id, resume_message[:80],
+                )
+
+            # force_transition: completed → pending
+            await service.force_transition(task.id, TaskStatus.PENDING)
+            task.error = None
+            await service.save_task(task)
+
+            # 通过 TaskWorker 重提交，携带 _prepared_context + conversation_history
+            target_id = task.metadata.get("target_id", "") or task.agent_name or ""
+            execution_warning = None
+            _ws_meta = task.metadata.get("ws_meta", {})
+            _workspace = task.metadata.get("workspace", "") or _ws_meta.get("path", "")
+
+            try:
+                from infrastructure.service_provider import get_service_provider
+                task_worker = get_service_provider().get("task_worker")
+                if task_worker:
+                    if not task_worker.submit_task({
+                        "task_id": task.id,
+                        "pipeline_id": task.parent_pipeline_id or "",
+                        "pipeline_run_id": task.pipeline_run_id or "",
+                        "target_type": task.target_type or "agent",
+                        "target_id": target_id,
+                        "user_input": task.title,
+                        "description": task.description,
+                        "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
+                        "workspace": _workspace,
+                        "isolation_level": task.metadata.get("isolation_level", ""),
+                        "_prepared_context": {
+                            "workspace": _workspace,
+                            "ws_meta": _ws_meta,
+                            "full_input": task.title,
+                            "isolation_mode": task.metadata.get("isolation_level", ""),
+                            "has_explicit_workspace": True,
+                            "agent_config_validated": True,
+                        },
+                        "conversation_history": conversation_history,
+                        "resume_message": resume_message,
+                    }):
+                        execution_warning = "后台执行器未启动，任务已重置为pending但不会自动执行"
+                    else:
+                        logger.info(
+                            "[TaskTool] resume_completed 已提交到 TaskWorker: task_id=%s",
+                            task_id,
+                        )
+                else:
+                    execution_warning = "后台执行器不可用，任务已重置为pending但不会自动执行"
+            except Exception as submit_exc:
+                logger.warning("[TaskTool] resume_completed 提交任务失败: %s", submit_exc)
+                execution_warning = f"任务提交失败: {submit_exc}"
+
+            # 合并 warnings
+            warnings = []
+            if history_warning:
+                warnings.append(history_warning)
+            if execution_warning:
+                warnings.append(execution_warning)
+
+            result_data = {
+                "task_id": task_id,
+                "resumed": True,
+                "old_status": old_status,
+                "new_status": TaskStatus.PENDING.value,
+                "resume_count": resume_count + 1,
+                "max_resumes": max_resumes,
+                "has_conversation_history": has_history,
+            }
+            if warnings:
+                result_data["warning"] = "; ".join(warnings)
+
+            return create_success_result(
+                data=result_data,
+                metadata={"action": "resume_completed_task"},
+            )
+
+        except InvalidTransitionError as e:
+            return create_failure_result(
+                error=f"恢复失败（状态转换不合法）: {e}",
+                error_code="INVALID_TRANSITION",
+            )
+        except Exception as e:
+            logger.error("[TaskTool] 恢复已完成任务失败: %s", e)
+            return create_failure_result(
+                error=f"恢复已完成任务失败: {str(e)}",
+                error_code="RESUME_FAILED",
             )
 
     async def _inject_task(

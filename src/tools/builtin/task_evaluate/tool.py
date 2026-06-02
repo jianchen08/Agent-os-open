@@ -671,6 +671,15 @@ class TaskEvaluateTool(BuiltinTool):
                 )
                 try:
                     eval_data = self._build_result_data(eval_result)
+                    # BUG-FIX-fix_20260601_merge_fail_result_inconsistency:
+                    # 合并失败时，eval_data 中的 overall_passed 仍为 true，
+                    # 但任务状态将变为 failed，导致 result 和 status 矛盾。
+                    # 修复: 将 overall_passed 设为 false 并追加合并失败原因。
+                    eval_data["overall_passed"] = False
+                    eval_data["merge_failure"] = merge_error
+                    eval_data["summary"] = (
+                        f"评估指标已通过，但 worktree 合并失败: {merge_error}"
+                    )
                     await task_service.complete_evaluation(
                         task.id, passed=False, result=eval_data)
                 except Exception as e:
@@ -704,6 +713,13 @@ class TaskEvaluateTool(BuiltinTool):
         仅 worktree 模式需要合并，其他模式直接返回 None 表示无需合并。
         合并成功返回 None，合并失败返回错误信息字符串。
 
+        BUG-FIX-fix_20260601_ws_meta_fallback:
+        问题根因: task.metadata["ws_meta"] 可能因 _persist_ws_meta 异步写入延迟
+                  而缺失，导致跳过合并，任务被标记 completed 但 worktree 未合并。
+                  安全网后续尝试合并失败时调 fail_task() 造成双重通知。
+        修复方案: 先从 task.metadata 取 ws_meta，缺失时从 lifecycle._ws_meta_store
+                  兜底查找，确保不遗漏 worktree 合并。
+
         Args:
             task: TaskModel 实例
 
@@ -713,7 +729,17 @@ class TaskEvaluateTool(BuiltinTool):
         metadata = task.metadata if task.metadata else {}
         ws_meta = metadata.get("ws_meta")
         if not ws_meta or not isinstance(ws_meta, dict):
-            return None
+            # 兜底: 从 lifecycle._ws_meta_store 查找（可能是异步持久化延迟）
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            services = provider.get("services")
+            if services:
+                lifecycle = services.get("workspace_lifecycle_manager")
+                if lifecycle:
+                    lifecycle.restore_ws_meta(task.id)
+                    ws_meta = lifecycle._ws_meta_store.get(task.id)
+            if not ws_meta or not isinstance(ws_meta, dict):
+                return None
         if ws_meta.get("mode") != "worktree":
             return None
 
@@ -940,6 +966,17 @@ class TaskEvaluateTool(BuiltinTool):
         main_loop = None
         try:
             main_loop = asyncio.get_running_loop()
+            if main_loop is not None:
+                import threading
+                main_thread_loop = getattr(asyncio, "_main_loop_ref", None)
+                if main_thread_loop is None:
+                    try:
+                        main_thread_loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        pass
+                if main_thread_loop is not None and main_thread_loop is not main_loop:
+                    if not main_thread_loop.is_closed():
+                        main_loop = main_thread_loop
         except RuntimeError:
             pass
 

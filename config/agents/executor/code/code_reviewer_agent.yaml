@@ -16,6 +16,11 @@ level: L3
 model_tier: large
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/coding_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是代码审查专家
 
   ## 核心职责
@@ -111,7 +116,6 @@ system_prompt: |
 
   ## 参考规则
 
-  {{path:config/rules/coding_context_rules.md}}
   {{path:config/rules/per_agent/code_reviewer_rules.md}}
   {{path:config/rules/per_agent/detail_review_checklist.md}}
   {{path:config/rules/per_agent/design_system_constraints.md}}
@@ -155,9 +159,6 @@ dynamic_vars:
   items:
     - name: "当前时间"
       type: "timestamp"
-    - name: "最小行动原则"
-      content: |
-        每轮行动前检查：目标多大，动作多大。问自己：哪些是目标要求的？哪些是自己加的？多余的动作不做。例：保存记录只需追加写入而非全量读写、修按钮颜色只需改那行CSS而不重构整个组件
 
 # 工具配置
 tool_ids:

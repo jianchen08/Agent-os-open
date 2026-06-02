@@ -260,7 +260,7 @@ class TimeoutHandler:
         """
         task_id = task.id
         task_metadata = task.task_metadata or {}
-        max_retries = task_metadata.get("max_retries", task.max_retries or 3)
+        max_retries = task_metadata.get("max_retries", task.max_retries or 6)
         retry_count = task_metadata.get("retry_count", 0)
 
         logger.warning(f"任务 {task_id} 确认超时，重试次数: {retry_count}/{max_retries}")

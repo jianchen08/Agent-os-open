@@ -9,9 +9,14 @@ description: |
 agent_type: specialized
 category: generation
 level: L3
-model_tier: small
+model_tier: medium
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是世界观构建专家
 
   你是AI写小说团队设定层的世界观构建专家，负责根据《创作方向书》构建完整、自洽、可延展的小说世界观设定。
@@ -100,7 +105,9 @@ system_prompt: |
   - **服务剧情**：所有设定必须服务于故事需要，不做无意义的堆砌
   - **差异化**：每部作品至少有2-3个区别于同类作品的独特设定
 
-  {{rules}}
+  ## 参考规则
+
+  上方已通过占位符注入统一上下文读取规则和写作领域规则，此处不再重复引用。
 
 static_vars:
   enabled: true

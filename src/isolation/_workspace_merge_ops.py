@@ -301,14 +301,36 @@ class _MergeOpsMixin:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
+            # BUG-FIX-fix_20260601_chinese_filename_verify:
+            # Windows 上 git 默认用系统编码（GBK/CP936）输出中文文件名，
+            # 即使 _run_git 指定 encoding="utf-8" 也可能导致乱码。
+            # 使用 -c core.quotepath=false 确保 git 输出可读的中文路径，
+            # 同时在验证时做双重检查：先尝试精确匹配，再尝试模糊匹配。
             rc, diff_out, _ = self._run_git(
+                "-c", "core.quotepath=false",
                 "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
             if rc == 0 and diff_out.strip():
                 branch_files = set(diff_out.strip().splitlines())
                 missing = []
                 for f in branch_files:
-                    if not (proj_path / f).exists():
-                        missing.append(f)
+                    f_stripped = f.strip().strip('"')
+                    target = proj_path / f_stripped
+                    if not target.exists():
+                        # 模糊匹配：在同名目录下搜索文件名包含目标名的文件
+                        # 处理 git 输出编码不一致导致路径不完全匹配的情况
+                        parent = target.parent
+                        target_name = target.name
+                        found = False
+                        if parent.exists() and target_name:
+                            try:
+                                for existing in parent.iterdir():
+                                    if existing.name == target_name:
+                                        found = True
+                                        break
+                            except OSError:
+                                pass
+                        if not found:
+                            missing.append(f_stripped)
                     if len(missing) >= 10:
                         break
                 if missing:

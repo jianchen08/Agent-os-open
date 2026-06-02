@@ -1,6 +1,11 @@
 """任务 idle 计时器管理 Mixin。
 
-负责 idle 超时回调、计时器重建/取消、挂起管道唤醒等逻辑。
+负责 idle 超时回调、计时器重建/取消等逻辑。
+
+idle 新语义：
+    idle = (管道协程已结束) AND (无活跃子任务)
+只要管道协程还活着（bg_task.done() is False），就不算 idle；
+只要还有任何子任务在 pending/running/evaluating/scheduled 状态，就不算 idle。
 
 从 task_worker.py 拆分而出，降低原文件复杂度。
 """
@@ -9,45 +14,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import time as _time
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_IDLE_REMIND_LIMIT = 3
 
 
 class TaskIdleTimerMixin:
     """任务 idle 计时器管理混入类。
 
-    提供 _on_idle_timeout、_cancel_idle_timer_async、_do_cancel_timer、
-    _recreate_idle_timer_async、_try_resume_engine、_get_pipeline_last_activity
-    方法，由 TaskWorker 通过多继承组合使用。
+    提供 _on_idle_timeout、is_actually_idle、_arm_idle_timer、
+    _cancel_idle_timer_async、_do_cancel_timer、_recreate_idle_timer_async、
+    reset_idle_timer、_has_active_children 方法，
+    由 TaskWorker 通过多继承组合使用。
     """
 
     def _on_idle_timeout(self, task_id: str) -> None:
-        """idle 计时器超时回调。
+        """idle 计时器超时回调（新语义）。
 
-        idle 计时器在管道运行全生命周期中持续监控：
-        - 管道活跃时：通过 checkpoint 文件龄判断是否真正存活，
-          存活则重建 timer 继续监控，死亡则标记 failed
-        - 管道挂起时：
-          - 若有活跃子任务（running/pending/evaluating/scheduled），
-            重建 timer 继续等待，不计入提醒次数
-          - 若无活跃子任务，提醒并唤醒（最多 idle_remind_limit 次），超限则标记 failed
+        判定流程：
+          1. 任务非 running 状态 → 直接取消计时器并返回；
+          2. 调用 is_actually_idle(task_id) 判定是否真正空闲：
+             - 真正 idle → fail_task("idle: 管道已退出且无活跃子任务")；
+             - 非真正 idle → _arm_idle_timer 重建计时器继续监控。
 
-        BUG-FIX-fix_20260514_active_pipeline_deadlock:
-        新增活跃管道存活检测，解决管道进程异常死亡后任务永远卡在 running 的问题。
-
-        BUG-FIX-fix_20260522_idle_suspended_children:
-        挂起管道等待子任务时，检查子任务是否仍在活跃运行。
-        活跃子任务存在时暂停 idle 计时器（不重建），等引擎循环自动重置。
+        不再注入 remind 消息，不再依赖 checkpoint mtime。
 
         Args:
-            task_id: 超时的任务ID
+            task_id: 超时的任务 ID
         """
-        ctx = self._contexts.get(task_id)
         task_service = self._task_service
         if not task_service:
             logger.warning(
@@ -73,211 +67,120 @@ class TaskIdleTimerMixin:
                 " 状态: task_id=%s, status=%s",
                 task_id, status_str,
             )
+            ctx = self._contexts.get(task_id)
             if ctx:
                 ctx.active = False
-                ctx.idle_remind_count = 0
+                ctx.cleanup(self._services.get("timer_manager"))
             self._cancel_idle_timer_async(task_id)
             return
 
-        idle_remind_limit = _IDLE_REMIND_LIMIT
-        remind_count = ctx.idle_remind_count if ctx else 0
+        timer_manager = self._services.get("timer_manager")
 
-        # BUG-FIX-fix_20260514_active_pipeline_deadlock:
-        # 原逻辑: 管道活跃时直接取消 timer → 管道死亡后无检测机制 → 任务永远卡在 running
-        # 新逻辑: 管道活跃时通过 checkpoint 文件龄判断是否真正存活，
-        #         存活则重建 timer 继续监控，死亡则标记任务 failed
-        if ctx and ctx.active:
-            timer_manager = self._services.get("timer_manager")
-            idle_threshold = (
-                getattr(timer_manager, "idle_threshold", 300)
-                if timer_manager else 300
-            )
-            max_stale_seconds = idle_threshold * 3
-
-            last_activity = self._get_pipeline_last_activity(task_id)
-            if last_activity is not None:
-                stale_seconds = _time.time() - last_activity
-                if stale_seconds < max_stale_seconds:
-                    logger.debug(
-                        "TaskWorker: idle 超时但管道活跃且近期有进度"
-                        "(checkpoint %.0fs 前)，重建 timer: task_id=%s",
-                        stale_seconds, task_id,
+        if self.is_actually_idle(task_id):
+            # 真正 idle：管道协程已结束且无活跃子任务 → 直接失败
+            try:
+                threshold = (
+                    getattr(timer_manager, "idle_threshold", "?")
+                    if timer_manager else "?"
+                )
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    task_service.fail_task(
+                        task_id,
+                        f"idle: 管道已退出且无活跃子任务 ({threshold}s)",
                     )
-                    if timer_manager:
-                        try:
-                            loop = asyncio.get_running_loop()
-                            loop.create_task(
-                                self._recreate_idle_timer_async(
-                                    task_id, timer_manager,
-                                ),
-                            )
-                        except RuntimeError:
-                            pass
-                    return
+                )
                 logger.warning(
-                    "TaskWorker: 管道标记活跃但 checkpoint 已 %.0fs "
-                    "无更新(阈值 %ds)，判定管道死亡: task_id=%s",
-                    stale_seconds, max_stale_seconds, task_id,
+                    "TaskWorker: 管道已退出且无活跃子任务，"
+                    "标记 failed: task_id=%s", task_id,
                 )
-            else:
+                ctx = self._contexts.get(task_id)
+                if ctx:
+                    ctx.set_terminal()
+                    ctx.cleanup(timer_manager)
+            except Exception as e:
+                logger.error(
+                    "TaskWorker: idle 超时 fail 处理失败: "
+                    "task_id=%s, error=%s", task_id, e,
+                )
+            return
+
+        # 非真正 idle：管道协程仍在跑 或 有活跃子任务 → 重建计时器继续监控
+        logger.debug(
+            "TaskWorker: idle 超时但非真正 idle，重建计时器继续监控: "
+            "task_id=%s", task_id,
+        )
+        if timer_manager:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self._recreate_idle_timer_async(
+                        task_id, timer_manager,
+                    ),
+                )
+            except RuntimeError:
                 logger.warning(
-                    "TaskWorker: 管道标记活跃但无 checkpoint 记录，"
-                    "判定管道死亡: task_id=%s",
+                    "TaskWorker: no event loop to "
+                    "recreate idle timer: task_id=%s",
                     task_id,
                 )
 
-        if ctx and ctx.suspended_engine is not None:
-            has_active_children = self._has_active_children(task_id)
+    def is_actually_idle(self, task_id: str) -> bool:
+        """判定任务是否真正处于 idle 状态（新语义）。
 
-            if has_active_children:
-                logger.info(
-                    "TaskWorker: idle 超时但有活跃子任务，"
-                    "暂停 idle 计时器（等子任务完成后由引擎循环重置）: task_id=%s",
-                    task_id,
-                )
-                ctx.idle_timer_paused_for_children = True
-                self._cancel_idle_timer_async(task_id)
-                return
-
-            if remind_count < idle_remind_limit:
-                ctx.idle_remind_count = remind_count + 1
-                timer_mgr_for_threshold = self._services.get("timer_manager")
-                _threshold = (
-                    getattr(timer_mgr_for_threshold, "idle_threshold", 300)
-                    if timer_mgr_for_threshold else 300
-                )
-                logger.info(
-                    "TaskWorker: idle 超时但有挂起管道（无活跃子任务），"
-                    "提醒 #%d: task_id=%s",
-                    remind_count + 1, task_id,
-                )
-                # BUG-FIX-fix_20260525_idle_wake_empty_llm:
-                # 问题根因: 直接通过 engine.resume() 恢复管道时，
-                #   _suspended_state 中的 user_input 为空，
-                #   导致 LLM 被空内容调用。
-                # 修复方案: 改用 engine.inject_message() 注入系统提醒消息，
-                #   通过 PipelineEngine 内部的 _wake_event 唤醒 _suspend_and_wait，
-                #   使 _run_loop 获得有意义的 user_input 再调用 LLM。
-                engine = ctx.suspended_engine
-                # BUG-FIX-fix_20260525_realtime_render:
-                # 统一走 send_pipeline_message，确保 drain_loop 启动推送数据到前端
-                try:
-                    from pipeline.message_bus import send_pipeline_message
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(send_pipeline_message(
-                        engine.pipeline_id,
-                        f"[系统提醒] 管道已空闲超过 {_threshold} 秒（第 {remind_count + 1}/{idle_remind_limit} 次）。"
-                        f"如果没有待处理任务，请告知用户并结束。",
-                        metadata={"source": "system"},
-                    ))
-                except Exception:
-                    engine.inject_message(
-                        f"[系统提醒] 管道已空闲超过 {_threshold} 秒（第 {remind_count + 1}/{idle_remind_limit} 次）。"
-                        f"如果没有待处理任务，请告知用户并结束。",
-                        source="system",
-                    )
-
-                timer_manager = self._services.get("timer_manager")
-                if timer_manager:
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
-                            self._recreate_idle_timer_async(
-                                task_id, timer_manager,
-                            ),
-                        )
-                    except RuntimeError:
-                        logger.warning(
-                            "TaskWorker: no event loop to "
-                            "recreate idle timer: task_id=%s",
-                            task_id,
-                        )
-                return
-
-        try:
-            timer_mgr = self._services.get("timer_manager")
-            threshold = (
-                getattr(timer_mgr, "idle_threshold", "?")
-                if timer_mgr else "?"
-            )
-            # BUG-FIX-fix_20260512_async_compat:
-            # _on_idle_timeout 是同步回调，但 fail_task 现在是 async，
-            # 使用 asyncio.create_task 调度异步调用
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                task_service.fail_task(
-                    task_id,
-                    f"idle 超时({threshold}s无活动)",
-                )
-            )
-            logger.warning(
-                "TaskWorker: 任务 idle 超时，已标记 failed: "
-                "task_id=%s", task_id,
-            )
-            if ctx:
-                ctx.set_terminal()
-                ctx.cleanup(timer_mgr)
-        except Exception as e:
-            logger.error(
-                "TaskWorker: idle 超时处理失败: "
-                "task_id=%s, error=%s", task_id, e,
-            )
-
-    def _get_pipeline_last_activity(self, task_id: str) -> float | None:
-        """通过 checkpoint 文件最后修改时间判断管道是否仍在运行。
-
-        遍历 data/pipeline_checkpoints/ 目录，查找以 pipeline_run_id
-        为前缀的 .json 文件，返回最新修改时间的 Unix 时间戳。
-        仅在 _on_idle_timeout 中调用，用于检测"活跃但实际已死亡"的管道。
-
-        BUG-FIX-fix_20260514_active_pipeline_deadlock:
-        问题根因: 管道进程异常死亡后 task_id 残留在 _active_tasks，
-                 idle_timer 因"管道活跃"被取消不再触发，任务永远卡在
-                 running 状态，只能等系统重启时 _recover_running_tasks 恢复。
-        修复方案: idle_timer 触发时通过 checkpoint 文件龄判断管道是否真正存活，
-                 超过阈值则标记任务失败。
+        判定顺序：
+          a) 如果 ctx.bg_task 存在且 not bg_task.done()
+             → 返回 False（管道协程还活着，不算 idle）；
+          b) 如果 _has_active_children(task_id) 返回 True
+             → 返回 False（仍有活跃子任务，不算 idle）；
+          c) 否则返回 True。
 
         Args:
             task_id: 任务 ID
 
         Returns:
-            最新 checkpoint 的 Unix 时间戳，无 checkpoint 时返回 None
+            True 表示真正 idle；False 表示仍有活动迹象
         """
-        if not self._task_service:
-            return None
+        ctx = self._contexts.get(task_id)
+        if ctx is not None and ctx.bg_task is not None:
+            if not ctx.bg_task.done():
+                return False
+        if self._has_active_children(task_id):
+            return False
+        return True
 
-        task = self._task_service.get_task(task_id)
-        if not task or not task.pipeline_run_id:
-            return None
+    async def _arm_idle_timer(
+        self, task_id: str, timer_manager: Any,
+    ) -> None:
+        """统一为任务装备 idle 计时器（取消旧 + 创建新）。
 
-        checkpoint_dir = os.path.join(
-            os.getcwd(), "data", "pipeline_checkpoints",
-        )
-        if not os.path.exists(checkpoint_dir):
-            return None
+        作为 reset_idle_timer / _recreate_idle_timer_async /
+        task_executor._register_idle_timer 共用的底层原语，
+        消除三处重复的 cancel+create 模板代码。
 
-        latest_mtime = 0.0
-        prefix = task.pipeline_run_id + "_"
+        取消旧计时器失败被吞掉（可能不存在）；创建新计时器失败
+        将抛出异常，由调用方决定是否触发 fail_task 等副作用。
+
+        Args:
+            task_id: 任务 ID
+            timer_manager: 计时器管理器实例
+
+        Raises:
+            Exception: create_timer 失败时透出
+        """
         try:
-            for f in os.listdir(checkpoint_dir):
-                if f.startswith(prefix) and f.endswith(".json"):
-                    fpath = os.path.join(checkpoint_dir, f)
-                    try:
-                        latest_mtime = max(
-                            latest_mtime,
-                            os.path.getmtime(fpath),
-                        )
-                    except OSError:
-                        pass
-        except OSError:
-            return None
-
-        return latest_mtime if latest_mtime > 0 else None
+            await timer_manager.cancel_timer(task_id)
+        except Exception:
+            pass
+        await timer_manager.create_timer(
+            task_id=task_id,
+            timeout=float(timer_manager.idle_threshold),
+            callback=lambda tid=task_id: self._on_idle_timeout(tid),
+        )
 
     def _cancel_idle_timer_async(self, task_id: str) -> None:
         """异步取消残留的 idle 计时器（从同步回调调用）。
 
-        当 _on_idle_timeout 发现任务已不在 running 状态时，
         通过此方法调度异步计时器取消，防止计时器残留触发风暴。
 
         Args:
@@ -313,21 +216,17 @@ class TaskIdleTimerMixin:
     async def _recreate_idle_timer_async(
         self, task_id: str, timer_manager: Any,
     ) -> None:
-        """idle 超时提醒后异步重新创建计时器。
+        """idle 超时非真正 idle 时异步重建计时器。
 
-        在 _on_idle_timeout 发送提醒后调用，
-        为下一个超时周期创建新计时器。
-        重建前先检查任务状态，避免在任务已终态后
-        无意义地重建计时器（防止超时风暴）。
+        重建前会先校验任务状态，避免在任务已终态后
+        无意义地重建计时器（防止超时风暴）。底层调用
+        _arm_idle_timer 完成实际的 cancel+create。
 
         Args:
             task_id: 任务 ID
             timer_manager: 计时器管理器实例
         """
         try:
-            # BUG-FIX: 重建前先检查任务是否仍在 running
-            # 防止在任务已终态（failed/completed/evaluating）
-            # 后无意义地重建计时器
             if self._task_service:
                 task = self._task_service.get_task(task_id)
                 if task is not None:
@@ -346,20 +245,12 @@ class TaskIdleTimerMixin:
                         ctx = self._contexts.get(task_id)
                         if ctx:
                             ctx.active = False
-                            ctx.idle_remind_count = 0
+                            ctx.cleanup(timer_manager)
                         return
-            try:
-                await timer_manager.cancel_timer(task_id)
-            except Exception:
-                pass
-            await timer_manager.create_timer(
-                task_id=task_id,
-                timeout=float(timer_manager.idle_threshold),
-                callback=lambda tid=task_id: self._on_idle_timeout(tid),
-            )
+            await self._arm_idle_timer(task_id, timer_manager)
             logger.info(
                 "TaskWorker: idle timer recreated after "
-                "remind for task %s", task_id,
+                "timeout for task %s", task_id,
             )
         except Exception as e:
             logger.warning(
@@ -371,17 +262,13 @@ class TaskIdleTimerMixin:
     def _has_active_children(self, task_id: str) -> bool:
         """检查任务是否有仍在活跃状态的子任务。
 
-        在 _on_idle_timeout 中使用，判断挂起管道是否因等待活跃子任务而
-        处于合理等待状态。如果子任务仍在 running/pending/evaluating/scheduled，
-        说明父任务的"无活动"是预期行为，不应计入 idle remind 次数。
-
-        参考实现: TaskReminderPlugin._has_active_children
+        活跃状态集合：pending / running / evaluating / scheduled。
 
         Args:
             task_id: 父任务 ID
 
         Returns:
-            True 表示有活跃子任务，False 表示无活跃子任务
+            True 表示有活跃子任务；False 表示无活跃子任务
         """
         task_service = self._task_service
         if not task_service:
@@ -394,31 +281,14 @@ class TaskIdleTimerMixin:
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
         for st in subtasks:
-            status = st.status.value if hasattr(st.status, "value") else str(st.status)
+            status = (
+                st.status.value
+                if hasattr(st.status, "value")
+                else str(st.status)
+            )
             if status in active_statuses:
                 return True
         return False
-
-    def _try_resume_engine(self, task_id: str) -> None:
-        """通过标记和 wake_event 请求主循环执行 resume。
-
-        idle 超时回调是同步的，不能直接 await engine.resume()。
-        旧方案通过 asyncio.create_task fire-and-forget 执行 resume，
-        存在竞态和异常静默问题。新方案标记 resume_requested 并
-        直接 set wake_event，由主循环统一执行 resume，
-        保证 engine 操作的串行性。
-
-        Args:
-            task_id: 挂起管道对应的任务 ID
-        """
-        ctx = self._contexts.get(task_id)
-        if not ctx or ctx.suspended_engine is None:
-            return
-
-        ctx.resume_requested = True
-        logger.debug("TaskWorker: resume requested for task %s", task_id)
-
-        ctx.wake_event.set()
 
     async def reset_idle_timer(self, task_id: str) -> None:
         """主动重置 idle 计时器。
@@ -427,6 +297,7 @@ class TaskIdleTimerMixin:
         只要完成了迭代就会重置定时器，避免被误判为 idle 超时。
 
         机制：取消当前计时器并重新创建，等同于重新开始 idle 倒计时。
+        底层调用 _arm_idle_timer 完成实际的 cancel+create。
 
         Args:
             task_id: 任务 ID
@@ -439,20 +310,8 @@ class TaskIdleTimerMixin:
         if not ctx:
             return
 
-        if ctx.idle_timer_paused_for_children:
-            ctx.idle_timer_paused_for_children = False
-            logger.debug(
-                "TaskWorker: idle 计时器从子任务暂停中恢复: task_id=%s",
-                task_id,
-            )
-
         try:
-            await timer_manager.cancel_timer(task_id)
-            await timer_manager.create_timer(
-                task_id=task_id,
-                timeout=float(timer_manager.idle_threshold),
-                callback=lambda tid=task_id: self._on_idle_timeout(tid),
-            )
+            await self._arm_idle_timer(task_id, timer_manager)
             logger.debug(
                 "TaskWorker: idle timer 主动重置: task_id=%s",
                 task_id,

@@ -187,8 +187,9 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
 
         校验规则：
         - file_paths 为 None 或空列表 → 合法，直接返回 None
+        - file_paths 类型必须为 list → 否则返回错误
         - file_paths 超过 MAX_FILE_PATHS 个 → 返回错误
-        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制 → 收集错误
+        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制、路径超出工作空间范围 → 收集错误
 
         Args:
             inputs: 工具执行时接收的输入参数字典
@@ -201,33 +202,72 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         if file_paths is None or (isinstance(file_paths, list) and len(file_paths) == 0):
             return None
 
+        if not isinstance(file_paths, list):
+            return create_failure_result(
+                error=(
+                    f"file_paths 参数类型错误：期望字符串列表（list[str]），"
+                    f"实际收到 {type(file_paths).__name__}。"
+                    "请将 file_paths 改为字符串数组格式，例如：[\"src/main.py\", \"docs/plan.md\"]"
+                ),
+                error_code="INVALID_FILE_PATHS",
+            )
+
         if len(file_paths) > MAX_FILE_PATHS:
             return create_failure_result(
-                error=f"文件路径数量超过限制 ({len(file_paths)} > {MAX_FILE_PATHS})",
+                error=(
+                    f"file_paths 包含 {len(file_paths)} 个路径，"
+                    f"超过最大限制 {MAX_FILE_PATHS} 个。"
+                    "请减少文件数量，只保留最重要的文件，去掉不必要的内容后重试。"
+                ),
                 error_code="INVALID_FILE_PATHS",
             )
 
         errors: list[str] = []
+        workspace_root = self._workspace.resolve()
         for path_str in file_paths:
             path = self.resolve_path(path_str)
+            real_path = path.resolve()
 
-            if not path.exists():
-                errors.append(f"文件不存在: {path_str}")
+            try:
+                real_path.relative_to(workspace_root)
+            except ValueError:
+                errors.append(
+                    f"路径 \"{path_str}\" 超出工作空间范围（{workspace_root}），"
+                    "不允许访问工作空间之外的文件。"
+                    "请确认路径是否正确，或改用工作空间内的相对路径"
+                )
                 continue
 
-            if not path.is_file():
-                errors.append(f"路径不是文件: {path_str}")
+            if not real_path.exists():
+                errors.append(
+                    f"路径 \"{path_str}\" 对应的文件不存在。"
+                    "请先用文件列表工具确认文件是否真实存在、路径拼写是否正确，"
+                    "如果文件尚未创建，请先创建文件再发起交互"
+                )
                 continue
 
-            file_size = path.stat().st_size
+            if not real_path.is_file():
+                errors.append(
+                    f"路径 \"{path_str}\" 是一个目录而非文件，"
+                    "file_paths 只能指定文件，不能指定目录。"
+                    "请改为指定目录下的具体文件路径"
+                )
+                continue
+
+            file_size = real_path.stat().st_size
             if file_size > MAX_FILE_SIZE_BYTES:
                 errors.append(
-                    f"文件过大 ({format_size(file_size)})，超过限制 ({format_size(MAX_FILE_SIZE_BYTES)}): {path_str}"
+                    f"文件 \"{path_str}\" 大小为 {format_size(file_size)}，"
+                    f"超过单文件上限 {format_size(MAX_FILE_SIZE_BYTES)}，无法在交互面板中展示。"
+                    "请改用 file_read 工具分段读取文件内容，或在描述中说明文件过大需用户自行查看"
                 )
 
         if errors:
             return create_failure_result(
-                error="; ".join(errors),
+                error=(
+                    "file_paths 校验失败，请修正以下问题后重试：\n"
+                    + "；\n".join(f"  {i + 1}. {e}" for i, e in enumerate(errors))
+                ),
                 error_code="INVALID_FILE_PATHS",
             )
 

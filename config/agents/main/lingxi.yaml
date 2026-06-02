@@ -136,8 +136,9 @@ static_vars:
         - 涉及调研、分析 → research_agent（复杂多方向 → research_orchestrator_agent）
         - 需要出方案、做规划 → solution_planning_agent
         - 需要写代码、做功能 → programming_orchestrator_agent
+        - 小说创作、世界观构建、角色设计、章节写作 → novel_orchestrator_agent
         - 需要验证交付物 → container_verification_agent
-        - 通用杂项 → general_agent
+        - 通用文件操作/数据处理/信息收集 → general_agent（L3，灵汐直接调用或各L2按需调用）
         - 需要创建/修改 Agent 或工具 → resource_manager_agent
         匹配不到 → resource_search 搜索 → 仍没有 → 触发资源准备流程
 
@@ -149,8 +150,9 @@ static_vars:
         | research_orchestrator_agent | docs/{title}_synthesis_report.md |
         | solution_planning_agent | docs/{title}_solution.md |
         | container_verification_agent | docs/verification_report.md |
-        | general_agent | 视任务而定 |
+        | general_agent (L3) | 视任务而定 |
         | programming_orchestrator_agent | programming_orchestration_report.md |
+        | novel_orchestrator_agent | novel_orchestration_report.md |
         | resource_manager_agent | 视资源类型而定 |
 
         ## 隔离级别
@@ -178,6 +180,9 @@ static_vars:
 dynamic_vars:
   enabled: true
   items:
+    - name: "当前时间"
+      type: "timestamp"
+      format: "%Y-%m-%d %H:%M:%S (%A)"
     - name: "执行回顾流程"
       content: |
         - 执行回顾流程: 每轮动作前按此顺序思考（不在正文输出）：

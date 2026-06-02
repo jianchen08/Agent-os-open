@@ -17,6 +17,11 @@ level: L3
 model_tier: large
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是章节写作专家
 
   你是AI写小说团队的正文写作执行者，负责根据细纲、角色卡片、世界观设定和前文内容，生成高质量的章节正文。
@@ -88,16 +93,15 @@ system_prompt: |
 
   如果路径不存在或写入失败，尝试创建目录后重试。
 
-  {{rules}}
+  ## 参考规则
+
+  上方已通过占位符注入统一上下文读取规则和写作领域规则，此处不再重复引用。
 
 static_vars:
   enabled: true
   items:
     - name: "行为约束"
       type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
 
 dynamic_vars:
   enabled: true

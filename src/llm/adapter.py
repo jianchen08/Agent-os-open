@@ -957,6 +957,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         model_loader = get_model_config_loader()
         router = get_or_create_router(model_loader)
+        logger.info(
+            "[DIAG][KeyPoolAdapter._route_call] model=%s router_id=%s",
+            kwargs.get("model", "?"), id(router),
+        )
         return await router.acompletion(**kwargs)
 
     async def _direct_call_with_slot(

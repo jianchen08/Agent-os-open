@@ -137,19 +137,11 @@ class TestListThreadsPagination:
         assert response.status_code == 200
         data = response.json()
 
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpie3e9i8f\current
-        # 默认 skip=0, limit=20
-        assert data["skip"] == 0
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpb01q4aus\current
-        assert data["limit"] == 20
-=======
         assert data["limit"] == 100
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_thread_list_pagination.py
 
     def test_list_threads_invalid_limit(self) -> None:
         """limit 超出范围时返回错误。"""
         # limit=0 应该被拒绝
-=======
         # 默认 skip=0, limit=100
         assert data["skip"] == 0
         assert data["limit"] == 100
@@ -157,27 +149,12 @@ class TestListThreadsPagination:
     def test_list_threads_invalid_limit(self) -> None:
         """limit 超出范围时返回错误。"""
         # limit=0 应该被拒绝 (ge=1 约束)
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_thread_list_pagination.py
         response = self.client.get(
             "/api/v1/threads",
             params={"limit": 0},
             headers=self.headers,
         )
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpie3e9i8f\current
-        assert response.status_code == 422
-
-        # limit=101 应该被拒绝
-        response = self.client.get(
-            "/api/v1/threads",
-            params={"limit": 101},
-            headers=self.headers,
-        )
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpb01q4aus\current
-        assert response.status_code == 422
-=======
         assert response.status_code == 400
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_thread_list_pagination.py
-=======
         assert response.status_code in (400, 422)
 
         # limit=10000 应该被拒绝 (le=9999 约束)
@@ -187,7 +164,6 @@ class TestListThreadsPagination:
             headers=self.headers,
         )
         assert response.status_code in (400, 422)
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_thread_list_pagination.py
 
     def test_list_threads_negative_skip(self) -> None:
         """skip 为负数时返回错误。"""

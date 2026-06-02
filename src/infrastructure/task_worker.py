@@ -332,8 +332,10 @@ class TaskWorker(
                 await self._execute_background_task(td, ctx)
             except Exception as e:
                 logger.error("TaskWorker: 执行失败 | task=%s | error=%s", td.get("task_id"), e)
-            finally:
-                self._contexts.pop(td.get("task_id"), None)
+                self._contexts.pop(td.get("task_id"), None)  # 启动失败时清理
+            # BUG-FIX-fix_20260601_isolated_engine:
+            # 正常路径（fire-and-forget）不再在此处 pop context。
+            # context 由 _cleanup_after_engine 回调在引擎完成后负责清理。
 
         # BUG-FIX-fix_20260524_submit_task_loop:
         # ToolCore 通过 asyncio.to_thread + asyncio.run 在工作线程执行工具，

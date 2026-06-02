@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  FileText,
   Loader2,
   Sparkles,
   Target,
@@ -297,7 +298,21 @@ const ActivityCard: FC<ActivityCardProps> = ({
       >
         <span className="flex-shrink-0">{getStatusIcon(activity.status)}</span>
 
-        <span className="text-foreground min-w-0 truncate font-medium">{activity.title}</span>
+        {/* 文件名（可点击打开）或标题 */}
+        {activity.filePath && activity.onOpenFile ? (
+          <span
+            className="text-primary min-w-0 cursor-pointer truncate font-medium hover:underline"
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenFile?.(activity.filePath!)
+            }}
+            title={`点击打开文件: ${activity.filePath}`}
+          >
+            {activity.title}
+          </span>
+        ) : (
+          <span className="text-foreground min-w-0 truncate font-medium">{activity.title}</span>
+        )}
 
         {activity.durationMs && (
           <span className="text-muted-foreground/70 flex-shrink-0">

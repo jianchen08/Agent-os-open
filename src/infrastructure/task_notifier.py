@@ -200,25 +200,21 @@ class TaskNotifierMixin:
                                 merge_error += (
                                     f" | 验证详情: "
                                     f"{merge_result['verify_error']}")
+                            # BUG-FIX-fix_20260601_safetynet_double_notification:
+                            # 问题根因: 安全网合并失败时调用 fail_task() 将 completed
+                            #   改为 failed，触发第二次终态通知，用户看到"一个成功一个失败"。
+                            #   而任务已在 _complete_task 中通过 _try_merge_before_complete
+                            #   成功合并后才标记 completed，安全网的验证失败通常是
+                            #   编码问题（中文文件名）或 Windows 文件锁导致的误判。
+                            # 修复方案: 安全网合并失败时不再调 fail_task() 改变终态，
+                            #   仅记录错误日志并强制清理 worktree 目录。
+                            #   避免双重通知，避免将正常完成的任务误标为失败。
                             logger.error(
-                                "TaskWorker: 安全网合并失败，回退任务为 failed: "
+                                "TaskWorker: 安全网合并失败（不改变终态，仅清理worktree）: "
                                 "task_id=%s, error=%s",
                                 task_id, merge_error,
                             )
-                            task_service = self._task_service
-                            if task_service:
-                                try:
-                                    await task_service.fail_task(
-                                        task_id,
-                                        f"worktree 合并失败（安全网）: "
-                                        f"{merge_error}",
-                                    )
-                                except Exception as fail_exc:
-                                    logger.error(
-                                        "TaskWorker: 安全网 fail_task 也失败: "
-                                        "task_id=%s, error=%s",
-                                        task_id, fail_exc,
-                                    )
+                            lifecycle.cleanup_workspace(task_id)
                 else:
                     logger.info(
                         "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
@@ -290,7 +286,7 @@ class TaskNotifierMixin:
         #   达到最大次数时明确告知 AI 放弃重试。
         _task_meta = getattr(task_obj, "metadata", None) or {}
         retry_count = _task_meta.get("retry_count", 0) if task_obj else 0
-        max_retries = _task_meta.get("max_retries", 3) if task_obj else 3
+        max_retries = _task_meta.get("max_retries", 6) if task_obj else 6
 
         if new_status == "completed":
             notification = (

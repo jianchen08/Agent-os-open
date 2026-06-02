@@ -9,6 +9,8 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { useAuthStore } from './stores/authStore'
 import { initializeTheme } from './stores/themeStore'
+import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import { openFile } from '@/services/fileOpener'
 import './index.css'
 
 /**
@@ -27,8 +29,16 @@ async function bootstrap() {
 
   await initializeTheme()
 
+  // 注册全局文件打开回调
+  registerGlobalOpenFileCallback(async (filePath: string) => {
+    const result = await openFile(filePath)
+    if (!result.success) {
+      console.error('[main] 打开文件失败:', result.message)
+    }
+  })
+
   // 先渲染 React 应用，用户立刻看到加载状态而非空白页
-  // ProtectedRoute 会在 isInitializing=true 时显示加载动画
+  // ProtectedRoute 在 isInitializing=true 时显示加载动画
   createRoot(root).render(
     <StrictMode>
       <App />

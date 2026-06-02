@@ -6,6 +6,7 @@
 - PlatformAdapter：平台适配器抽象基类
 """
 
+import asyncio
 import json
 import logging
 import threading
@@ -111,9 +112,8 @@ class ExternalResourceSearch:
         self._max_results = max_results
         self._cache: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
-
-        # 启动时加载缓存
-        self._load_cache()
+        # BUG-FIX: 延迟加载缓存，避免在 __init__ 中执行同步 I/O 阻塞事件循环
+        self._cache_loaded = False
 
     # -----------------------------------------------------------------------
     # 公开接口
@@ -139,6 +139,9 @@ class ExternalResourceSearch:
         if not query:
             return []
 
+        # BUG-FIX: 首次使用时异步加载缓存
+        await self._ensure_cache_loaded()
+
         results: list[dict[str, Any]] = []
 
         # 1. 先从本地缓存中搜索已信任的资源
@@ -158,7 +161,7 @@ class ExternalResourceSearch:
 
         return results[:limit]
 
-    def record_usage(self, name: str, success: bool) -> None:
+    async def record_usage(self, name: str, success: bool) -> None:
         """
         记录使用反馈，成功提升 trust_score，失败降级
 
@@ -166,6 +169,9 @@ class ExternalResourceSearch:
             name: 资源名称
             success: 是否使用成功
         """
+        # BUG-FIX: 确保缓存已异步加载
+        await self._ensure_cache_loaded()
+
         with self._lock:
             if name not in self._cache:
                 return
@@ -186,7 +192,9 @@ class ExternalResourceSearch:
                 )
 
             entry["last_used"] = datetime.now().isoformat()
-            self._save_cache()
+
+        # BUG-FIX: 使用异步保存代替同步 _save_cache，在锁外执行避免阻塞
+        await self._async_save_cache()
 
         logger.info(
             "[external_search] 使用反馈: name=%s success=%s trust_score=%.2f",
@@ -218,35 +226,60 @@ class ExternalResourceSearch:
     # 缓存管理
     # -----------------------------------------------------------------------
 
-    def _load_cache(self) -> None:
-        """从 JSON 文件加载缓存，文件不存在则创建空缓存"""
+    # BUG-FIX: 异步加载缓存，避免同步 I/O 阻塞事件循环
+    async def _ensure_cache_loaded(self) -> None:
+        """确保缓存已加载，首次调用时异步加载"""
+        if not self._cache_loaded:
+            await self._load_cache_async()
+            self._cache_loaded = True
+
+    async def _load_cache_async(self) -> None:
+        """从 JSON 文件异步加载缓存，文件不存在则创建空缓存"""
         try:
             if self._cache_path.exists():
-                with open(self._cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self._cache = data
-                        logger.info(
-                            "[external_search] 缓存加载成功: %d 条记录",
-                            len(self._cache),
-                        )
-                        return
+                data = await asyncio.to_thread(self._read_cache_file)
+                if isinstance(data, dict):
+                    self._cache = data
+                    logger.info(
+                        "[external_search] 缓存加载成功: %d 条记录",
+                        len(self._cache),
+                    )
+                    return
             # 文件不存在或格式错误，创建空缓存
             self._cache = {}
             self._ensure_cache_dir()
-            self._save_cache()
+            await self._async_save_cache()
         except Exception as e:
             logger.warning("[external_search] 缓存加载失败，使用空缓存: %s", e)
             self._cache = {}
 
+    def _read_cache_file(self) -> dict:
+        """同步读取缓存文件（供 asyncio.to_thread 调用）"""
+        with open(self._cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
     def _save_cache(self) -> None:
-        """将缓存写入 JSON 文件（调用方需持有 self._lock）"""
+        """将缓存写入 JSON 文件（同步版本，调用方需持有 self._lock）"""
         try:
             self._ensure_cache_dir()
             with open(self._cache_path, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning("[external_search] 缓存写入失败: %s", e)
+
+    # BUG-FIX: 异步保存缓存，避免同步 I/O 阻塞事件循环
+    async def _async_save_cache(self) -> None:
+        """将缓存异步写入 JSON 文件"""
+        try:
+            self._ensure_cache_dir()
+            await asyncio.to_thread(self._write_cache_file)
+        except Exception as e:
+            logger.warning("[external_search] 缓存写入失败: %s", e)
+
+    def _write_cache_file(self) -> None:
+        """同步写入缓存文件（供 asyncio.to_thread 调用）"""
+        with open(self._cache_path, "w", encoding="utf-8") as f:
+            json.dump(self._cache, f, ensure_ascii=False, indent=2)
 
     def _ensure_cache_dir(self) -> None:
         """确保缓存文件所在目录存在"""
@@ -317,58 +350,68 @@ class ExternalResourceSearch:
         Returns:
             合并后的搜索结果列表
         """
-        all_results: list[dict[str, Any]] = []
+        # BUG-FIX: 使用 asyncio.gather 并行搜索所有平台，而非串行 for 循环
+        if not self._platforms:
+            return []
 
-        for platform in self._platforms:
+        async def _search_one(platform: PlatformAdapter) -> list[dict[str, Any]]:
             try:
-                items = await platform.search(query, resource_type, limit)
-                for item in items:
-                    name = item.get("name", "")
-                    if not name:
-                        continue
-
-                    # LLM 审查
-                    review = await self._review_resource(item)
-
-                    result = {
-                        "name": name,
-                        "description": item.get("description", ""),
-                        "schema": item.get("schema", {}),
-                        "source": item.get("source_platform", platform.__class__.__name__),
-                        "trust_score": 0.5,
-                        "review_status": review.get("status", "unreviewed"),
-                        "risk_level": review.get("risk_level", "unknown"),
-                        "needs_deep_review": review.get("needs_deep_review", False),
-                        "from_cache": False,
-                    }
-
-                    # 写入缓存
-                    self._update_cache_entry(name, {
-                        "name": name,
-                        "description": result["description"],
-                        "schema": result["schema"],
-                        "source_platform": result["source"],
-                        "resource_type": resource_type,
-                        "trust_score": result["trust_score"],
-                        "review_status": result["review_status"],
-                        "risk_level": result.get("risk_level", "unknown"),
-                        "needs_deep_review": result.get("needs_deep_review", False),
-                        "usage_count": 0,
-                        "success_count": 0,
-                        "first_seen": datetime.now().isoformat(),
-                    })
-
-                    all_results.append(result)
-
+                return await platform.search(query, resource_type, limit)
             except Exception as e:
                 logger.warning(
                     "[external_search] 平台 %s 搜索失败: %s",
                     platform.__class__.__name__, e,
                 )
+                return []
+
+        platform_results = await asyncio.gather(
+            *[_search_one(p) for p in self._platforms]
+        )
+
+        all_results: list[dict[str, Any]] = []
+        for items in platform_results:
+            for item in items:
+                name = item.get("name", "")
+                if not name:
+                    continue
+
+                # LLM 审查
+                review = await self._review_resource(item)
+
+                result = {
+                    "name": name,
+                    "description": item.get("description", ""),
+                    "schema": item.get("schema", {}),
+                    "source": item.get("source_platform", ""),
+                    "trust_score": 0.5,
+                    "review_status": review.get("status", "unreviewed"),
+                    "risk_level": review.get("risk_level", "unknown"),
+                    "needs_deep_review": review.get("needs_deep_review", False),
+                    "from_cache": False,
+                }
+
+                # 写入缓存
+                await self._update_cache_entry(name, {
+                    "name": name,
+                    "description": result["description"],
+                    "schema": result["schema"],
+                    "source_platform": result["source"],
+                    "resource_type": resource_type,
+                    "trust_score": result["trust_score"],
+                    "review_status": result["review_status"],
+                    "risk_level": result.get("risk_level", "unknown"),
+                    "needs_deep_review": result.get("needs_deep_review", False),
+                    "usage_count": 0,
+                    "success_count": 0,
+                    "first_seen": datetime.now().isoformat(),
+                })
+
+                all_results.append(result)
 
         return all_results[:limit]
 
-    def _update_cache_entry(self, name: str, entry: dict[str, Any]) -> None:
+    # BUG-FIX: 改为 async 以支持异步缓存写入
+    async def _update_cache_entry(self, name: str, entry: dict[str, Any]) -> None:
         """
         更新缓存条目（仅在新资源时写入，已有资源保留使用统计）
 
@@ -386,7 +429,9 @@ class ExternalResourceSearch:
                 existing["needs_deep_review"] = entry.get("needs_deep_review", existing.get("needs_deep_review", False))
             else:
                 self._cache[name] = entry
-            self._save_cache()
+
+        # BUG-FIX: 在锁外异步保存，避免同步 I/O 阻塞事件循环
+        await self._async_save_cache()
 
     # -----------------------------------------------------------------------
     # LLM 审查
@@ -409,9 +454,13 @@ class ExternalResourceSearch:
 
         try:
             prompt = self._build_review_prompt(resource)
-            response = await self._llm_caller.completion(
-                model=self._review_model,
-                messages=[{"role": "user", "content": prompt}],
+            # BUG-FIX: 使用 asyncio.wait_for 为 LLM 调用添加超时保护
+            response = await asyncio.wait_for(
+                self._llm_caller.completion(
+                    model=self._review_model,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=15.0,
             )
 
             # 解析响应
@@ -421,6 +470,12 @@ class ExternalResourceSearch:
 
             return self._parse_review_response(text)
 
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[external_search] LLM 审查超时，降级为未审查: name=%s",
+                resource.get("name", ""),
+            )
+            return {"status": "unreviewed", "risk_level": "unknown", "needs_deep_review": True}
         except Exception as e:
             logger.warning(
                 "[external_search] LLM 审查失败，降级为未审查: name=%s error=%s",

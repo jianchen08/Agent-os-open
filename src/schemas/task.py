@@ -123,7 +123,7 @@ class TaskResponse(BaseModel):
     priority: int = Field(5, description="优先级 (1-10)")
     due_date: str | None = Field(None, description="截止日期")
     retry_count: int = Field(0, description="重试次数")
-    max_retries: int = Field(3, description="最大重试次数")
+    max_retries: int = Field(6, description="最大重试次数")
 
     # ==================== 评估指标引用 ====================
     evaluation_metric_ids: list[str] | None = Field(

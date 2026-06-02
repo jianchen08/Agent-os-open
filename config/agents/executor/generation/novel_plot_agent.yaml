@@ -15,6 +15,11 @@ level: L3
 model_tier: large
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是情节规划专家
 
   ## 核心职责
@@ -112,16 +117,15 @@ system_prompt: |
   - 每个伏笔必须在伏笔追踪表中记录：编号、埋设章节、内容、回收章节、状态
   - 伏笔回收时要有「恍然大悟」的效果
 
-  {{rules}}
+  ## 参考规则
+
+  上方已通过占位符注入统一上下文读取规则和写作领域规则，此处不再重复引用。
 
 static_vars:
   enabled: true
   items:
     - name: "行为约束"
       type: "rules"
-    - name: "文档上下文规则"
-      type: "path"
-      path: "config/rules/document_context_rules.md"
     - name: "情节规划产出物模板"
       type: "path"
       path: "config/templates/plot_planning_template.md"

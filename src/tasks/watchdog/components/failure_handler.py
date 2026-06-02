@@ -107,7 +107,7 @@ class FailureHandler:
         """
         task_id = failed_task.id
         task_metadata = failed_task.task_metadata or {}
-        max_retries = task_metadata.get("max_retries", 3)
+        max_retries = task_metadata.get("max_retries", 6)
         retry_count = task_metadata.get("retry_count", 0)
 
         logger.info(
@@ -504,7 +504,7 @@ class FailureHandler:
             是否应该重试
         """
         task_metadata = task.task_metadata or {}
-        max_retries = task_metadata.get("max_retries", 3)
+        max_retries = task_metadata.get("max_retries", 6)
         retry_count = task_metadata.get("retry_count", 0)
 
         return retry_count < max_retries
@@ -520,7 +520,7 @@ class FailureHandler:
             重试信息
         """
         task_metadata = task.task_metadata or {}
-        max_retries = task_metadata.get("max_retries", 3)
+        max_retries = task_metadata.get("max_retries", 6)
         retry_count = task_metadata.get("retry_count", 0)
 
         return {

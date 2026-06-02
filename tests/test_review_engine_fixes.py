@@ -9,10 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpq7jxkzx3\current
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmp9szr4uab\current
-=======
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_review_engine_fixes.py
 from src.memory.maintenance.review_engine import (
     ChunkData,
     ExecutionRecord,
@@ -20,8 +16,6 @@ from src.memory.maintenance.review_engine import (
     ReviewEngine,
 )
 
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpq7jxkzx3\current
-=======
 pytestmark = pytest.mark.skip(
     reason="ReviewEngine API 已重构为 register_pipeline/run_review 模型，"
            "旧构造函数参数（storage/chunk_db/knowledge_service）和方法签名已移除"
@@ -37,9 +31,6 @@ try:
 except ImportError:
     pass
 
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_review_engine_fixes.py
-=======
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_review_engine_fixes.py
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,10 +111,10 @@ class TestBug1SavedCountFix:
         run_id = "run-bug1"
         storage.get_summary.return_value = _make_summary(run_id=run_id)
         # 2 条错误记录 → 应保存 2 条经验
-        storage.list_by_pipeline.return_value = [
+        storage.list_by_pipeline.return_value = ([
             _make_record(name="step_a", error="timeout"),
             _make_record(name="step_b", error="value error"),
-        ]
+        ], False)
         chunk_db.find_by_pipeline = AsyncMock(return_value=[])
         ks.list_semantic_memory = AsyncMock(return_value={"items": [], "total": 0})
         ks.create_knowledge = AsyncMock(
@@ -143,9 +134,9 @@ class TestBug1SavedCountFix:
         run_id = "run-clean"
         storage.get_summary.return_value = _make_summary(run_id=run_id)
         # 无错误记录
-        storage.list_by_pipeline.return_value = [
+        storage.list_by_pipeline.return_value = ([
             _make_record(name="step_a", error=""),
-        ]
+        ], False)
         chunk_db.find_by_pipeline = AsyncMock(return_value=[])
         ks.list_semantic_memory = AsyncMock(return_value={"items": [], "total": 0})
 
@@ -279,11 +270,7 @@ class TestBug3MarkPipelineReviewedAsyncFix:
         await engine._mark_pipeline_reviewed(run_id)
 
         assert chunk1.extra_data["reviewed"] is True
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmpq7jxkzx3\current
-        chunk_db._save_to_disk.assert_called_once_with(chunk1)
-=======
         chunk_db.save_chunk.assert_called_once_with(chunk1)
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_review_engine_fixes.py
 
     @pytest.mark.asyncio
     async def test_mark_reviewed_handles_chunk_error_gracefully(self):
@@ -350,11 +337,11 @@ class TestIntegrationReviewFlow:
         # --- 阶段 2: 对 run-100 执行复盘 ---
         run_id = "run-100"
         storage.get_summary.return_value = _make_summary(run_id=run_id)
-        storage.list_by_pipeline.return_value = [
+        storage.list_by_pipeline.return_value = ([
             _make_record(iteration=1, name="search", error="API timeout"),
             _make_record(iteration=2, name="parse", error=""),  # 无错误
             _make_record(iteration=3, name="write", error="Permission denied"),
-        ]
+        ], False)
         chunk_db.find_by_pipeline = AsyncMock(return_value=[
             ChunkData(
                 chunk_id="c1", pipeline_id=run_id, layer="summary",

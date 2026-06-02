@@ -63,6 +63,8 @@ class ResourceSearchTool:
         self._search_engine = search_engine
         self._dynamic_tool_injector = dynamic_tool_injector
         self._external_search = external_search
+        # BUG-FIX: 使用字典缓存替代动态属性，避免随 tool 数量增长无限创建属性
+        self._desc_cache: dict[str, str] = {}
 
     @staticmethod
     def get_tool_definition() -> Tool:
@@ -157,9 +159,7 @@ class ResourceSearchTool:
         session_id = inputs.get("session_id", "")
         parent_record_id = inputs.get("parent_record_id", "")
 
-        logger.debug(
-            f"[resource_search] execute: query={query}, mode={mode}, detailed={detailed}, session_id={session_id}"
-        )
+        # BUG-FIX: 移除冗余的 debug 日志，只保留 info 日志
         logger.info(
             f"[resource_search] execute: query={query}, mode={mode}, detailed={detailed}, resource_type={resource_type}, session_id={session_id}"
         )
@@ -200,10 +200,9 @@ class ResourceSearchTool:
         results = {}
 
         if resource_type in ["agent", "all"]:
-            # BUG-FIX-fix_20260422_file_check_path: 使用 detailed=True 获取
-            # recommended_metrics，使 LLM 能看到正确的 file_check 路径
+            # BUG-FIX: 使用用户传入的 detailed 参数，而非硬编码 True
             agent_names, agent_descriptions, agent_ids, agent_details = await self._search_agents(
-                query, category, level, limit, detailed=True, exact=False
+                query, category, level, limit, detailed=detailed, exact=False
             )
             if agent_names:
                 results["agent_h"] = ["config_id", "agent_name", "agent_description"]
@@ -464,16 +463,17 @@ class ResourceSearchTool:
 
         Args:
             results: 原始搜索结果（包含 _h/_d/_c 等字段）
-            detailed: detailed 模式保留 _h 表头，simple 模式只保留 _d
+            detailed: 保留参数，目前所有 _h/_d/_c/message 都保留
 
         Returns:
             精简后的结果字典
         """
+        # BUG-FIX: 无论什么模式都保留 _h 表头，LLM 需要表头理解各列含义
         slim = {}
         for key, value in results.items():
-            if key.endswith("_d"):
+            if key.endswith("_d") or key.endswith("_h") or key.endswith("_c"):
                 slim[key] = value
-            elif detailed and key.endswith("_h"):
+            elif key == "message":
                 slim[key] = value
         return slim
 
@@ -900,10 +900,9 @@ class ResourceSearchTool:
         tool_info: tuple[str, str],
     ) -> str:
         """从工具代码中提取描述信息（缓存后复用）"""
-        cache_key = f"_desc_cache_{tool_name}"
-        cached = getattr(self, cache_key, None)
-        if cached is not None:
-            return cached
+        # BUG-FIX: 使用字典缓存替代 setattr 动态属性
+        if tool_name in self._desc_cache:
+            return self._desc_cache[tool_name]
 
         try:
             import importlib
@@ -922,7 +921,7 @@ class ResourceSearchTool:
         except Exception:
             desc = f"内置工具 {tool_name}"
 
-        setattr(self, cache_key, desc)
+        self._desc_cache[tool_name] = desc
         return desc
 
     def _search_tools_from_yaml(

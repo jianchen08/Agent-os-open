@@ -140,11 +140,11 @@ class TestTextSearch:
         assert result.success is True
         data = result.output
         # 默认不区分大小写，"search_test_marker" 同时匹配 .py 文件中的小写和
-        # readme.txt 中的 "SEARCH_TEST_MARKER"，因此 count >= 2
-        assert data["count"] >= 2
-        assert len(data["file_paths"]) >= 2
+        # readme.txt 中的 "SEARCH_TEST_MARKER"，因此 c >= 2
+        assert data["c"] >= 2
+        assert len(data["d"]) >= 2
         # 确认匹配的文件包含 main.py 和 utils.py
-        file_paths_str = " ".join(data["file_paths"])
+        file_paths_str = " ".join(row[0] for row in data["d"])
         assert "main.py" in file_paths_str
         assert "utils.py" in file_paths_str
 
@@ -165,8 +165,9 @@ class TestTextSearch:
 
         assert result.success is True
         data = result.output
-        assert len(data["line_numbers"]) > 0
-        for ln in data["line_numbers"]:
+        line_numbers = [row[1] for row in data["d"]]
+        assert len(line_numbers) > 0
+        for ln in line_numbers:
             assert isinstance(ln, int)
             assert ln > 0
 
@@ -187,8 +188,9 @@ class TestTextSearch:
 
         assert result.success is True
         data = result.output
-        assert len(data["contents"]) > 0
-        matched = " ".join(data["contents"])
+        contents = [row[2] for row in data["d"]]
+        assert len(contents) > 0
+        matched = " ".join(contents)
         assert "Hello World" in matched
 
     async def test_text_search_engine_is_python(
@@ -226,10 +228,8 @@ class TestTextSearch:
 
         assert result.success is True
         data = result.output
-        assert data["count"] == 0
-        assert data["file_paths"] == []
-        assert data["line_numbers"] == []
-        assert data["contents"] == []
+        assert data["c"] == 0
+        assert data["d"] == []
 
     async def test_text_search_recursive(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -243,12 +243,13 @@ class TestTextSearch:
             "query": "deep_search_target",
             "search_type": "text",
             "path": str(sample_files),
+            "context_lines": 0,
         })
 
         assert result.success is True
         data = result.output
-        assert data["count"] == 1
-        assert "module.py" in data["file_paths"][0]
+        assert data["c"] == 1
+        assert "module.py" in data["d"][0][0]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -501,7 +502,7 @@ class TestCaseSensitive:
         })
 
         assert result.success is True
-        assert result.output["count"] >= 1
+        assert result.output["c"] >= 1
 
     async def test_case_sensitive_text_search(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -512,28 +513,26 @@ class TestCaseSensitive:
         - case_sensitive=True 时，小写查询不匹配大写内容
         - 大写 "SEARCH_TEST_MARKER" 仅在 readme.txt 中匹配
         """
-        # 小写查询，区分大小写，不应匹配大写内容
         result_lower = await search_tool.execute({
             "query": "search_test_marker",
             "search_type": "text",
             "path": str(sample_files),
             "case_sensitive": True,
+            "context_lines": 0,
         })
 
-        # 大写查询，区分大小写，应匹配 readme.txt 中的大写内容
         result_upper = await search_tool.execute({
             "query": "SEARCH_TEST_MARKER",
             "search_type": "text",
             "path": str(sample_files),
             "case_sensitive": True,
+            "context_lines": 0,
         })
 
-        assert result_upper.output["count"] == 1
-        # 区分大小写时，小写搜索应只在 .py 文件中找到（注释中的小写标记）
-        # 而非 readme.txt 中的大写版本
+        assert result_upper.output["c"] == 1
         readme_found = any(
-            "readme" in fp
-            for fp in result_lower.output["file_paths"]
+            "readme" in row[0]
+            for row in result_lower.output["d"]
         )
         assert readme_found is False
 
@@ -591,8 +590,8 @@ class TestFilePattern:
         })
 
         assert result.success is True
-        for fp in result.output["file_paths"]:
-            assert fp.endswith(".py"), f"非 Python 文件出现在结果中: {fp}"
+        for row in result.output["d"]:
+            assert row[0].endswith(".py"), f"非 Python 文件出现在结果中: {row[0]}"
 
     async def test_file_pattern_json_only(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -610,8 +609,8 @@ class TestFilePattern:
         })
 
         assert result.success is True
-        for fp in result.output["file_paths"]:
-            assert fp.endswith(".json")
+        for row in result.output["d"]:
+            assert row[0].endswith(".json")
 
     async def test_file_pattern_default_all_files(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -629,7 +628,7 @@ class TestFilePattern:
         })
 
         assert result.success is True
-        assert result.output["count"] >= 1
+        assert result.output["c"] >= 1
 
 
 class TestMaxResults:
@@ -659,10 +658,11 @@ class TestMaxResults:
             "search_type": "text",
             "path": str(sample_files),
             "max_results": 1,
+            "context_lines": 0,
         })
 
         assert result.success is True
-        assert result.output["count"] <= 1
+        assert result.output["c"] <= 1
 
     async def test_max_results_filename_search(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -706,9 +706,9 @@ class TestUseRegex:
         })
 
         assert result.success is True
-        assert result.output["count"] >= 1
+        assert result.output["c"] >= 1
         # 匹配内容应包含函数定义
-        all_contents = " ".join(result.output["contents"])
+        all_contents = " ".join(row[2] for row in result.output["d"])
         assert "def " in all_contents
 
     async def test_regex_search_pattern_error(
@@ -753,7 +753,7 @@ class TestUseRegex:
         })
 
         assert result.success is True
-        assert result.output["count"] >= 1
+        assert result.output["c"] >= 1
 
     async def test_regex_vs_literal_difference(
         self, search_tool: EnhancedSearchTool, sample_files: Path
@@ -789,7 +789,7 @@ class TestUseRegex:
         assert result_literal.success is True
         assert result_regex.success is True
         # 正则搜索应找到更多结果（包括函数定义行）
-        assert result_regex.output["count"] >= result_literal.output["count"]
+        assert result_regex.output["c"] >= result_literal.output["c"]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -817,7 +817,7 @@ class TestWorkspaceInjection:
 
         assert result.success is True
         # 默认不区分大小写，匹配 .py 文件和 readme.txt 中的大小写变体
-        assert result.output["count"] >= 2
+        assert result.output["c"] >= 2
 
 
 # ═══════════════════════════════════════════════════════════

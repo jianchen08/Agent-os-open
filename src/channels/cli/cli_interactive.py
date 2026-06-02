@@ -318,7 +318,7 @@ class CLIInteractiveMixin:
                 try:
                     prev_records = exec_storage.list_by_pipeline(
                         session.active_pipeline_id
-                    )
+                    )[0]
                     if prev_records:
                         # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
                         _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}

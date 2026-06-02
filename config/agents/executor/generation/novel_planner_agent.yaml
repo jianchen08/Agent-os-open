@@ -11,6 +11,11 @@ level: L3
 model_tier: large
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是小说策划专家
 
   你是AI写小说团队五层流水线的第一层——策划层。你的核心职责是根据用户的创作意向，产出一份结构完整、可执行的《创作方向书》，为下游Agent（世界观构建、角色设计、情节规划等）提供明确的创作纲领。

@@ -515,18 +515,38 @@ class EvaluationEngine:
                 if evaluator_id == "human_interaction":
                     params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
 
+                _is_human_interaction = (evaluator_id == "human_interaction")
+                try:
+                    _running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    _running_loop = None
+
                 logger.info(
-                    "[EvalEngine] _evaluate_tool | metric=%s | evaluator=%s | pipeline_id=%s | params_keys=%s",
+                    "[EvalEngine] _evaluate_tool | metric=%s | evaluator=%s | pipeline_id=%s | params_keys=%s | running_loop=%s | main_loop=%s",
                     metric_def.id, evaluator_id, params.get("pipeline_id"), list(params.keys()),
+                    id(_running_loop) if _running_loop else None, id(self._main_loop) if self._main_loop else None,
                 )
 
-                # BUG-FIX-fix_20260513_eval_blocking:
-                # 问题根因: _evaluate_tool 是同步方法，通过 .result() 阻塞 asyncio 事件循环，
-                #           导致前端 WebSocket 连接无法处理。
-                # 修复方案: 将 _evaluate_tool 改为 async，使用 await 替代 .result() 阻塞调用。
-                tool_result = handler(params)
-                if asyncio.iscoroutine(tool_result):
-                    tool_result = await tool_result
+                _needs_main_loop = (
+                    _is_human_interaction
+                    and self._main_loop is not None
+                    and _running_loop is not None
+                    and self._main_loop is not _running_loop
+                    and not self._main_loop.is_closed()
+                )
+
+                if _needs_main_loop:
+                    logger.info(
+                        "[EvalEngine] human_interaction 跨事件循环检测 | running=%s | main=%s | 使用 run_coroutine_threadsafe",
+                        id(_running_loop), id(self._main_loop),
+                    )
+                    coro = handler(params)
+                    future = asyncio.run_coroutine_threadsafe(coro, self._main_loop)
+                    tool_result = future.result()
+                else:
+                    tool_result = handler(params)
+                    if asyncio.iscoroutine(tool_result):
+                        tool_result = await tool_result
 
                 if hasattr(tool_result, "to_dict"):
                     result_dict = tool_result.to_dict()

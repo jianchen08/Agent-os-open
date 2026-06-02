@@ -225,6 +225,41 @@ class TestErrorCheckPlugin:
         assert "category" in analysis
         assert "retry_count" in analysis
 
+    @pytest.mark.asyncio
+    async def test_tool_execute_result_not_format_error(self, ctx, base_state):
+        """测试工具执行结果(core_type=tool_execute)不应被误判为格式错误。
+
+        BUG-FIX: 工具执行结果(如file_read返回的文件内容)可能包含奇数个```，
+        但这不是LLM输出格式错误，不应该触发格式错误重试。
+        """
+        # 模拟 tool_execute 后的文件读取结果，包含奇数个 ```
+        base_state[StateKeys.CORE_TYPE] = "tool_execute"
+        base_state[StateKeys.RAW_RESULT] = "```python\nprint('hello')\n```\n\n一些说明\n\n```json\n{'a': 1}\n```\n\n结尾"
+        base_state[StateKeys.RAW_TOOL_CALLS] = []
+        base_state["retry.count"] = 0
+        plugin = ErrorCheckPlugin()
+        result = await plugin.execute(ctx)
+
+        # 不应该被判定为格式错误
+        assert result.route_signal is None
+        assert result.state_updates[StateKeys.EXECUTION_STATUS] == "success"
+
+    @pytest.mark.asyncio
+    async def test_llm_call_format_error_still_detected(self, ctx, base_state):
+        """测试LLM调用时的格式错误仍然应该被检测。"""
+        base_state[StateKeys.CORE_TYPE] = "llm_call"
+        # 奇数个 ``` 的LLM回复（未关闭的代码块）
+        base_state[StateKeys.RAW_RESULT] = "```python\nprint('hello')\n"
+        base_state[StateKeys.RAW_TOOL_CALLS] = []
+        base_state["retry.count"] = 0
+        plugin = ErrorCheckPlugin()
+        result = await plugin.execute(ctx)
+
+        # LLM调用时应该被判定为格式错误
+        assert result.route_signal is not None
+        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates[StateKeys.EXECUTION_STATUS] == "needs_retry"
+
 
 # ── DuplicateCheckPlugin Tests ──
 

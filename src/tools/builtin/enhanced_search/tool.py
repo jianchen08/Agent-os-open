@@ -195,8 +195,8 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 # 字面量搜索
                 cmd.append("--fixed-strings")
 
-            # 限制结果数量
-            cmd.extend(["--max-count", str(max_results)])
+            # BUG-FIX: 移除 --max-count，它限制的是每个文件的匹配数而非总结果数
+            # 改为在解析 stdout 时按总结果数截断
 
             # 执行搜索
             process = await asyncio.create_subprocess_exec(
@@ -224,16 +224,27 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 file_paths = []
                 line_numbers = []
                 contents = []
+                match_count = 0
 
                 for line in stdout.decode("utf-8", errors="replace").splitlines():
                     if not line.strip():
                         continue
 
+                    # BUG-FIX: 仅对 match 类型计数，context 行不限制
+                    if match_count >= max_results:
+                        break
+
                     try:
                         entry = json.loads(line)
                         entry_type = entry.get("type")
 
-                        if entry_type in ("match", "context"):
+                        if entry_type == "match":
+                            match_count += 1
+                            data = entry.get("data", {})
+                            file_paths.append(data.get("path", {}).get("text", ""))
+                            line_numbers.append(data.get("line_number", 0))
+                            contents.append(data.get("lines", {}).get("text", "").strip())
+                        elif entry_type == "context":
                             data = entry.get("data", {})
                             file_paths.append(data.get("path", {}).get("text", ""))
                             line_numbers.append(data.get("line_number", 0))
@@ -288,6 +299,8 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             case_sensitive = inputs.get("case_sensitive", False)
             max_results = inputs.get("max_results", 100)
             use_regex = inputs.get("use_regex", False)
+            # BUG-FIX: 获取 context_lines 参数，之前被完全忽略
+            context_lines = inputs.get("context_lines", 2)
 
             path = Path(search_path)
             if not path.exists():
@@ -309,6 +322,12 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="REGEX_ERROR",
                 )
 
+            # BUG-FIX: 排除隐藏目录和常见大目录，避免无意义遍历
+            SKIP_DIRS = {
+                ".git", "node_modules", "__pycache__", ".venv", "venv",
+                ".tox", "dist", "build", ".mypy_cache", ".pytest_cache",
+            }
+
             # 搜索文件
             file_paths = []
             line_numbers = []
@@ -316,10 +335,18 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             search_pattern = file_pattern if file_pattern != "*" else None
 
             for file_path in path.rglob("*"):
+                # BUG-FIX: 跳过隐藏目录和常见大目录
+                if any(part in SKIP_DIRS for part in file_path.parts):
+                    continue
+
                 if search_pattern and not file_path.match(search_pattern):
                     continue
 
                 if not file_path.is_file():
+                    continue
+
+                # BUG-FIX: 跳过超过 1MB 的大文件，防止内存占用过高
+                if file_path.stat().st_size > 1024 * 1024:
                     continue
 
                 try:
@@ -327,13 +354,29 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                     content = file_path.read_text(encoding="utf-8", errors="ignore")
 
                     # 搜索匹配
-                    for line_num, line in enumerate(content.splitlines(), 1):
+                    match_count = 0
+                    lines = content.splitlines()
+                    for line_num, line in enumerate(lines, 1):
                         if pattern.search(line):
-                            file_paths.append(str(file_path.relative_to(path)))
+                            match_count += 1
+                            # 添加匹配行
+                            rel_path = str(file_path.relative_to(path))
+                            file_paths.append(rel_path)
                             line_numbers.append(line_num)
                             contents.append(line.strip())
 
-                            if len(file_paths) >= max_results:
+                            # BUG-FIX: 收集前后 context_lines 行上下文（不计入 max_results）
+                            for offset in range(1, context_lines + 1):
+                                if line_num - 1 - offset >= 0:
+                                    file_paths.append(rel_path)
+                                    line_numbers.append(line_num - offset)
+                                    contents.append(lines[line_num - 1 - offset].strip())
+                                if line_num - 1 + offset < len(lines):
+                                    file_paths.append(rel_path)
+                                    line_numbers.append(line_num + offset)
+                                    contents.append(lines[line_num - 1 + offset].strip())
+
+                            if match_count >= max_results:
                                 break
 
                 except Exception:
@@ -343,14 +386,14 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 if len(file_paths) >= max_results:
                     break
 
+            # BUG-FIX: 返回格式与 ripgrep 一致，使用 h/d/c 紧凑格式
             return create_success_result(
                 data={
                     "query": query,
                     "engine": "python",
-                    "file_paths": file_paths,
-                    "line_numbers": line_numbers,
-                    "contents": contents,
-                    "count": len(file_paths),
+                    "h": ["file_path", "line_number", "content"],
+                    "d": [[file_paths[i], line_numbers[i], contents[i]] for i in range(len(file_paths))],
+                    "c": len(file_paths),
                 },
                 metadata={
                     "action": "search_python",

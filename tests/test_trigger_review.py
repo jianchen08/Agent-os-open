@@ -109,35 +109,17 @@ class TestTriggerReviewScript:
                 f"{p.pipeline_id} 状态应为 completed，实际 {p.status}"
             )
 
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmp5es5o67j\current
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmphccebyw8\current
-    def test_service_interface_mismatch_detected(self):
-        """验证 MemoryMaintenanceService 正确捕获接口不匹配问题。"""
-=======
     def test_service_interface_compatibility_verified(self):
         """验证 MemoryMaintenanceService 与 ReviewEngine 接口兼容。"""
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_trigger_review.py
-=======
     def test_service_interface_mismatch_fixed(self):
         """验证 MemoryMaintenanceService 与 ReviewEngine 接口已对齐。"""
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_trigger_review.py
         service = MemoryMaintenanceService()
         result = service.trigger_review([{"pipeline_id": "test", "errors": []}])
 
         interface_issues = result["interface_check"]
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmp5es5o67j\current
-<<<<<<< C:\Users\jc\AppData\Local\Temp\tmphccebyw8\current
-        assert len(interface_issues) > 0, "应检测到接口不匹配问题"
-
-        missing_methods = [i["missing_method"] for i in interface_issues]
-        assert "run_batch_review" in missing_methods, "应检测到 run_batch_review 缺失"
-=======
         assert len(interface_issues) == 0, (
             f"接口应已兼容，但仍有缺失方法: {interface_issues}"
         )
->>>>>>> D:\myproject\container_08f57__wt_7f34aa1e\tests\test_trigger_review.py
-=======
         assert len(interface_issues) == 0, (
             f"接口不匹配问题已全部修复，不应存在残留: {interface_issues}"
         )
->>>>>>> D:\myproject\container_08f57__wt_b30e823c\tests\test_trigger_review.py

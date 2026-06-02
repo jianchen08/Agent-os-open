@@ -202,18 +202,12 @@ export function handleStreamEnd(eventData: any) {
       if (msg) {
         const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
         if (hasContent) {
+          pipelineStore.getState().finalizeMessage(pipelineId, messageId)
           if (msg.status === 'streaming') {
             pipelineStore.getState().updateMessage(pipelineId, messageId, {
               status: 'completed',
             } as any)
           }
-          pipelineStore.getState().finalizeMessage(pipelineId, messageId)
-        } else {
-          // BUG-FIX-fix_20260530_empty_bubble:
-          // 问题根因: AI 不输出文本时（如触发器场景只发系统通知），
-          //   assistant 占位消息 content 为空且 parts 为空，finalize 后成为空气泡。
-          // 修复方案: 空消息直接移除，不做 finalize。
-          pipelineStore.getState().removeMessage(pipelineId, messageId)
         }
       }
     }

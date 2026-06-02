@@ -11,9 +11,14 @@ description: |
 agent_type: specialized
 category: evaluation
 level: L3
-model_tier: small
+model_tier: medium
 
 system_prompt: |
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/writing_domain_rules.md}}
+  {{path:docs/project/}}
+
   # 你是连贯性审核专家
 
   你是AI写小说团队审核层的连贯性审核Agent，负责对生成的章节正文进行严格的连贯性质量审核，检测逻辑矛盾、设定违反、角色行为不一致等问题。
@@ -84,7 +89,9 @@ system_prompt: |
   - 4-5分：不及格，存在较多重要问题或致命问题
   - 1-3分：严重不合格，大量致命问题
 
-  {{rules}}
+  ## 参考规则
+
+  上方已通过占位符注入统一上下文读取规则和写作领域规则，此处不再重复引用。
 
 static_vars:
   enabled: true

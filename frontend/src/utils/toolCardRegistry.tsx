@@ -30,12 +30,37 @@ export interface ToolCardConfig {
   className?: string
   /** 运行状态的自定义颜色（CSS 色值），用于区分阻塞等待用户的工具 */
   runningColor?: string
+  /** 是否关联文件（为 true 时自动从参数中提取文件路径） */
+  hasFilePath?: boolean
 }
 
 /**
  * 注册表：工具名 → 渲染配置
  */
 const registry = new Map<string, ToolCardConfig>()
+
+/** 全局文件打开回调 */
+let globalOnOpenFile: ((filePath: string) => void | Promise<void>) | null = null
+
+/**
+ * 注册全局文件打开回调
+ *
+ * 在应用启动时调用一次，用于设置文件打开的统一处理逻辑。
+ *
+ * @param callback - 文件打开回调函数
+ */
+export function registerGlobalOpenFileCallback(callback: (filePath: string) => void | Promise<void>): void {
+  globalOnOpenFile = callback
+}
+
+/**
+ * 获取全局文件打开回调
+ */
+export function getGlobalOpenFileCallback(): (filePath: string) => void | Promise<void> {
+  return globalOnOpenFile || ((filePath: string) => {
+    console.warn('[toolCardRegistry] 未注册文件打开回调，请在应用启动时调用 registerGlobalOpenFileCallback')
+  })
+}
 
 /**
  * 注册工具卡片配置
@@ -59,6 +84,9 @@ export function getToolCardConfig(toolName: string): ToolCardConfig | undefined 
 export function enhanceActivityWithToolConfig(
   activity: ActivityData,
   toolCall: MessageToolCall,
+  options?: {
+    onOpenFile?: (filePath: string) => void | Promise<void>
+  },
 ): ActivityData {
   if (activity.type !== 'tool_call' || !activity.toolName) {
     return activity
@@ -93,6 +121,16 @@ export function enhanceActivityWithToolConfig(
 
   if (config.runningColor) {
     enhanced.customColor = config.runningColor
+  }
+
+  // 自动提取文件路径并注入打开文件回调
+  if (config.hasFilePath) {
+    const filePath = extractFilePath(toolCall)
+    if (filePath) {
+      enhanced.filePath = filePath
+      const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
+      enhanced.onOpenFile = () => openFileCallback(filePath)
+    }
   }
 
   return enhanced
@@ -243,6 +281,7 @@ export function safeParseResult(result: unknown): Record<string, unknown> | null
 registerToolCard({
   name: 'file_read',
   icon: <FileText className="h-4 w-4" />,
+  hasFilePath: true,
   formatTitle: (tc) => {
     const path = extractFilePath(tc)
     const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
@@ -301,6 +340,7 @@ registerToolCard({
 registerToolCard({
   name: 'file_write',
   icon: <Trash2 className="h-4 w-4" />,
+  hasFilePath: true,
   formatTitle: (tc) => {
     const path = extractFilePath(tc)
     const fileName = path ? path.split(/[/\\]/).pop() || path : tc.tool_name
