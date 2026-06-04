@@ -522,13 +522,22 @@ class PipelineStreamBridge:
                 "duration_ms": chunk.get("duration_ms"),
                 "call_id": chunk.get("call_id"),
             }))
-            # 更新 _collected_parts 中对应 tool_call 的 state/result
+            # 更新 _collected_parts 中对应 tool_call 的 state/result/name/args
             _result_call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
+            _result_tool_name = chunk.get("tool_name")
             for p in reversed(self._collected_parts):
                 if p.get("type") == "tool_call" and p.get("callId") == _result_call_id:
                     p["state"] = "done" if chunk.get("success", True) else "error"
                     p["result"] = chunk.get("result")
                     p["durationMs"] = chunk.get("duration_ms")
+                    # 流式首个 delta 可能不带 function.name，tool_start 存的 name 是 "unknown"
+                    # tool_result 带真实名称时回填
+                    if _result_tool_name and _result_tool_name != "unknown" and p.get("name") in ("unknown", "", None):
+                        p["name"] = _result_tool_name
+                    # args 也可能不完整，用 result 事件携带的 args 回填
+                    _result_args = chunk.get("args")
+                    if _result_args and not p.get("args"):
+                        p["args"] = _result_args
                     break
             self._accumulated_content = []
 
