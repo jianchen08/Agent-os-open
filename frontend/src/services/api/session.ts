@@ -270,6 +270,9 @@ function mapBackendMessageToMessage(
  */
 function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
+  // DEBUG: 打印消息序列的角色顺序
+  console.warn('[API-MERGE] 输入 %d 条消息, 角色序列: %s', messages.length,
+    messages.map(m => `${m.role}:${(m.parts||[]).map((p:any)=>p.type).join('+')||m.content?.slice(0,20)||'-'}`).join(' | '))
   const result: Message[] = []
   let i = 0
   while (i < messages.length) {

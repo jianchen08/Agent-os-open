@@ -151,7 +151,7 @@ class TestE2ECompression:
         }
 
         # 验证估算：len//2 算法，~400K chars → ~200K tokens > 100K trigger
-        estimated = plugin._estimate_effective_tokens(messages, ctx)
+        estimated = await plugin._estimate_effective_tokens(messages, ctx)
         trigger = int(200000 * 0.5)
         print(f"estimated={estimated}, trigger={trigger}, exceeds={estimated >= trigger}")
         assert estimated >= trigger, f"估算值 {estimated} 未超过触发线 {trigger}"

@@ -100,7 +100,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 tokens += max(1, len(args) // 2)
         return tokens
 
-    def _estimate_effective_tokens(
+    async def _estimate_effective_tokens(
         self, messages: list[dict[str, Any]], ctx: PluginContext,
     ) -> int:
         """估算有效上下文大小。
@@ -147,7 +147,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return effective
 
         # 策略 2：压缩块拼接估算
-        assembled = self._estimate_assembled_tokens(ctx, messages)
+        assembled = await self._estimate_assembled_tokens(ctx, messages)
         if assembled >= 0:
             logger.info(
                 "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
@@ -163,7 +163,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         )
         return estimated
 
-    def _estimate_assembled_tokens(
+    async def _estimate_assembled_tokens(
         self, ctx: PluginContext, messages: list[dict[str, Any]],
     ) -> int:
         """用已有的压缩块 + recent 消息估算实际发送给 LLM 的 token 数。
@@ -184,7 +184,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return -1
 
         try:
-            l1_chunks = chunk_service.find_by_pipeline_sync(pipeline_id, "L1")
+            l1_chunks = await chunk_service.find_by_pipeline(pipeline_id, "L1")
         except Exception:
             return -1
 
@@ -197,7 +197,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # STATE_SNAPSHOT token 估算
         snapshot_tokens = 0
         try:
-            snapshots = chunk_service.find_by_pipeline_sync(pipeline_id, "STATE_SNAPSHOT")
+            snapshots = await chunk_service.find_by_pipeline(pipeline_id, "STATE_SNAPSHOT")
             if snapshots:
                 snapshot_tokens = max(1, len(snapshots[0].content) // 2)
         except Exception:
@@ -271,7 +271,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             messages = cleaned
 
         # 阈值检查
-        estimated_tokens = self._estimate_effective_tokens(messages, ctx)
+        estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
         logger.info(
             "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, "
