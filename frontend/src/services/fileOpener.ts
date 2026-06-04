@@ -20,14 +20,16 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 export type EditorType = 'ide' | 'builtin' | 'external'
 
 /** 内置编辑器打开处理器 */
-let builtinOpenHandler: ((filePath: string, line?: number, column?: number) => Promise<void>) | null = null
+let builtinOpenHandler: ((filePath: string, line?: number, column?: number, containerTaskId?: string) => Promise<void>) | null = null
 
 /**
  * 设置内置编辑器打开处理器
  *
  * @param handler - 内置编辑器打开处理函数
  */
-export function setBuiltinOpenHandler(handler: (filePath: string, line?: number, column?: number) => Promise<void>): void {
+export function setBuiltinOpenHandler(
+  handler: (filePath: string, line?: number, column?: number, containerTaskId?: string) => Promise<void>,
+): void {
   builtinOpenHandler = handler
 }
 
@@ -45,6 +47,7 @@ export function setBuiltinOpenHandler(handler: (filePath: string, line?: number,
  * @param options - 可选参数
  * @param options.line - 跳转到的行号
  * @param options.column - 跳转到的列号
+ * @param options.containerTaskId - 任务容器 ID，用于解析文件所在的工作空间
  * @returns 打开结果，包含 success、editor 和可选的 message
  */
 export async function openFile(
@@ -52,50 +55,24 @@ export async function openFile(
   options?: {
     line?: number
     column?: number
+    containerTaskId?: string
   },
 ): Promise<{ success: boolean; editor: EditorType; message?: string }> {
   try {
-    const resp = await resolveEditor(filePath)
-    const { editor } = resp.data
-    const editorType = editor as EditorType
-
-    switch (editorType) {
-      case 'ide': {
-        const result = await openFileInIDE(filePath, options?.line, options?.column)
-        const data = result.data
-        if (!data.success) {
-          // IDE连接器不可用，降级到内置编辑器
-          if (builtinOpenHandler) {
-            await builtinOpenHandler(filePath, options?.line, options?.column)
-          }
-          return { success: true, editor: 'builtin', message: 'IDE不可用，已切换到内置编辑器' }
-        }
-        return { success: true, editor: 'ide' }
-      }
-      case 'builtin': {
-        if (builtinOpenHandler) {
-          await builtinOpenHandler(filePath, options?.line, options?.column)
-        }
-        return { success: true, editor: 'builtin' }
-      }
-      case 'external': {
-        // 外部应用通过后端API打开（后续可扩展）
-        if (builtinOpenHandler) {
-          await builtinOpenHandler(filePath, options?.line, options?.column)
-        }
-        return { success: true, editor: 'external', message: '暂不支持外部应用，已使用内置编辑器' }
-      }
-      default: {
-        if (builtinOpenHandler) {
-          await builtinOpenHandler(filePath, options?.line, options?.column)
-        }
-        return { success: true, editor: 'builtin' }
-      }
+    // BUG-FIX-fix_20260603_resolve_editor_404:
+    // 问题根因: /api/v1/config/editor/resolve 路由不存在，resolveEditor 始终 404，
+    //           axios 拦截器会报告 [VALIDATION] Not Found 错误到 ErrorReporting。
+    // 修复方案: 直接跳过 resolveEditor，使用内置编辑器打开文件。
+    //           等后端实现编辑器配置 API 后再恢复 resolveEditor 调用。
+    const containerTaskId = options?.containerTaskId
+    if (builtinOpenHandler) {
+      await builtinOpenHandler(filePath, options?.line, options?.column, containerTaskId)
     }
+    return { success: true, editor: 'builtin' }
   } catch {
     // 解析失败，降级到内置编辑器
     if (builtinOpenHandler) {
-      await builtinOpenHandler(filePath, options?.line, options?.column)
+      await builtinOpenHandler(filePath, options?.line, options?.column, options?.containerTaskId)
     }
     return { success: true, editor: 'builtin', message: '解析失败，已使用内置编辑器' }
   }
@@ -114,6 +91,7 @@ async function defaultBuiltinOpenHandler(
   filePath: string,
   line?: number,
   column?: number,
+  containerTaskId?: string,
 ): Promise<void> {
   const tabId = `file-local-${filePath.replace(/[/\\]/g, '_')}`
   const layoutStore = useLayoutModeStore.getState()
@@ -126,8 +104,9 @@ async function defaultBuiltinOpenHandler(
   }
 
   try {
-    // 使用 _local 工作空间读取本地文件
-    const resp = await apiClient.get('/api/v1/workspaces/_local/file-content', {
+    // 优先使用任务容器 ID，否则 fallback 到 _local（项目根目录）
+    const resolvedContainerId = containerTaskId || '_local'
+    const resp = await apiClient.get(`/api/v1/workspaces/${resolvedContainerId}/file-content`, {
       params: { path: filePath }
     })
     if (resp.data?.success) {
@@ -137,7 +116,7 @@ async function defaultBuiltinOpenHandler(
         fileName,
         content: resp.data.content ?? '',
         size: resp.data.size,
-        containerTaskId: '_local',
+        containerTaskId: resolvedContainerId,
       })
       layoutStore.addWorkspaceTab({
         id: tabId,

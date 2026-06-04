@@ -83,21 +83,19 @@ models:
       thinking:
         type: enabled
 defaults:
-  chat: glm-5.1
-  reasoning: glm-5.1
+  chat: minimax-m3
   embedding: embedding-3
   call_timeout: 300
+  # 压缩专用模型：context_window_guard 插件在 compression_model 为空时回退到该值
+  compression: minimax-m3
   tiers:
     large: glm-5.1
     medium: minimax-m3
     small: minimax-m3
   fallback_chain:
     chat:
-    - deepseek-v4-flash
-    - glm-4.7
-    reasoning:
-    - deepseek-v4-pro
-    - glm-5-turbo
+    - minimax-m3
+    - minimax-m3
 providers:
   zhipu_coding:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
@@ -135,7 +133,8 @@ providers:
     keys:
     - id: minimax_main
       api_key: [REDACTED]
-      rpm: 30
+      max_concurrent: 5
+      rpm: 0
       token_quota: 0
 embeddings: {}
 concurrency:

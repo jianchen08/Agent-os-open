@@ -61,6 +61,9 @@ class TaskRecoveryMixin:
                 )
 
         # 1.5. paused 任务重置为 pending（stop→start 后 RUNNING/PENDING 被标记为 PAUSED）
+        # BUG-FIX-fix_20260603_pause_recovery:
+        # 区分用户手动暂停（paused_by="user"）和系统关闭暂停（paused_by="system"）。
+        # 用户暂停的任务应保持 SUSPENDED，不自动恢复；仅系统暂停的任务需要恢复。
         paused_tasks = self._task_service.list_by_status(TaskStatus.SUSPENDED)
         for task in paused_tasks:
             task_scope = task.metadata.get("task_scope", "non_container")
@@ -69,10 +72,20 @@ class TaskRecoveryMixin:
                     "TaskWorker: 跳过容器任务恢复(paused): task_id=%s", task.id,
                 )
                 continue
+
+            paused_by = (task.metadata or {}).get("paused_by", "unknown")
+            if paused_by == "user":
+                logger.info(
+                    "TaskWorker: 保留用户暂停任务（不恢复）: task_id=%s paused_by=user",
+                    task.id,
+                )
+                continue
+
             try:
                 await self._task_service.reset_to_pending(task.id)
                 logger.info(
-                    "TaskWorker: 恢复 paused → pending: task_id=%s", task.id,
+                    "TaskWorker: 恢复 paused → pending: task_id=%s paused_by=%s",
+                    task.id, paused_by,
                 )
             except Exception as e:
                 logger.warning(

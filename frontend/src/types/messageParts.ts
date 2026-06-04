@@ -48,6 +48,8 @@ export interface ToolCallPart {
   progress?: number
   /** 当前执行步骤描述 */
   currentStep?: string
+  /** 所属任务容器 ID（用于解析工具卡片的文件路径） */
+  containerTaskId?: string
 }
 
 /** 系统通知 Part */

@@ -3,6 +3,7 @@
  *
  * 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
  */
+import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'

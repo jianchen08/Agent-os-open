@@ -4,6 +4,12 @@
 input_schema。对不符合的调用先尝试自动修复类型不匹配的字段，
 修复仍失败的调用才记录错误并标记跳过。
 
+同时检测 LLM 生成的 tool_call arguments 是否被截断：
+当 arguments JSON 字符串不完整时，repair_json_string 会丢弃尾部
+不完整的字段（如 goal），导致工具收到残缺参数并返回模糊错误
+（如 MISSING_GOAL）。本插件在输入阶段提前检测截断，返回精确
+诊断信息指导 LLM 缩短参数后重试。
+
 使用简单类型检查实现，不依赖 jsonschema 第三方库。
 
 State 命名空间：
@@ -16,12 +22,27 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy, StateKeys
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json_top_keys(s: str) -> list[str]:
+    """从不完整/截断的 JSON 字符串中提取顶层 key 名称列表。
+
+    使用简单正则扫描，不依赖完整 JSON 解析，适用于截断场景。
+
+    Args:
+        s: 可能被截断的 JSON 字符串
+
+    Returns:
+        提取到的顶层 key 名称列表
+    """
+    return re.findall(r'[{,]\s*"([^"]+)"\s*:', s)
 
 
 class ToolSchemaValidator(IInputPlugin):
@@ -100,10 +121,41 @@ class ToolSchemaValidator(IInputPlugin):
         schema_errors: list[dict[str, Any]] = []
         validated_calls: list[dict[str, Any]] = []
         all_fix_messages: list[dict[str, Any]] = []
+        state_updates: dict[str, Any] = {}
 
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
+            tc_call_id = tc.get("id", "")
+
+            # ── 阶段 0: arguments JSON 截断检测 ──
+            # LLM 生成 tool_call 时可能截断 arguments JSON 字符串，
+            # 导致下游 repair_json_string 丢弃尾部不完整的字段。
+            # 在此处提前检测，将诊断信息作为 tool result 注入 messages，
+            # 让 LLM 立即知道哪些字段丢失并重试。
+            truncation_result = self._check_args_truncation(args, tool_name)
+            if truncation_result:
+                # 将截断诊断作为 tool result 消息注入对话历史，
+                # 模拟工具已执行并返回截断错误，LLM 可据此重试
+                messages = list(ctx.state.get("messages", []))
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_call_id,
+                    "content": json.dumps({
+                        "success": False,
+                        "error": truncation_result["error"],
+                        "error_code": "ARGS_TRUNCATED",
+                        "lost_keys": truncation_result["lost_keys"],
+                    }, ensure_ascii=False),
+                })
+                state_updates["messages"] = messages
+                logger.warning(
+                    "[%s] 截断 tool_call %s 已注入诊断结果，"
+                    "丢失字段: %s",
+                    self.name, tool_name, truncation_result["lost_keys"],
+                )
+                # 不加入 validated_calls → tool_core 不会重复执行此调用
+                continue
 
             tool_def = tool_definitions.get(tool_name)
             if tool_def is None:
@@ -164,7 +216,6 @@ class ToolSchemaValidator(IInputPlugin):
             else:
                 validated_calls.append(tc)
 
-        state_updates: dict[str, Any] = {}
         if schema_errors:
             state_updates["schema_errors"] = schema_errors
         state_updates["schema_validated"] = validated_calls
@@ -267,6 +318,85 @@ class ToolSchemaValidator(IInputPlugin):
             )
 
         return value
+
+    def _check_args_truncation(
+        self, args: Any, tool_name: str,
+    ) -> dict[str, Any] | None:
+        """检测 arguments JSON 是否被截断。
+
+        当 LLM 生成的 tool_call arguments 字符串不完整时，
+        repair_json_string 会补全括号并丢弃尾部不完整的字段。
+        本方法在输入阶段检测这种情况，返回精确诊断错误。
+
+        检测逻辑：
+        1. args 是字符串且无法直接 json.loads → 可能被截断
+        2. 尝试 repair_json_string 修复
+        3. 比较修复前后的顶层 key，找出丢失的字段
+        4. 有字段丢失 → 返回截断错误
+
+        Args:
+            args: 工具调用参数（可能是 dict 或未解析的 JSON 字符串）
+            tool_name: 工具名称
+
+        Returns:
+            截断错误字典，或 None（未检测到截断）
+        """
+        if not isinstance(args, str):
+            return None
+
+        # 能直接解析说明不是截断
+        try:
+            json.loads(args)
+            return None
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 尝试修复
+        from plugins.core.llm_core import _repair_json_string
+        repaired = _repair_json_string(args)
+        if repaired is None:
+            # 完全无法修复 → 不是截断场景，交给 tool_core 处理
+            return None
+
+        # 比较修复前后的顶层 key
+        original_keys = _extract_json_top_keys(args)
+        try:
+            repaired_dict = json.loads(repaired)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        if not isinstance(repaired_dict, dict):
+            return None
+
+        repaired_keys = set(repaired_dict.keys())
+        lost_keys = [k for k in original_keys if k not in repaired_keys]
+
+        if not lost_keys:
+            return None
+
+        logger.warning(
+            "[%s] 工具 %s 的 arguments JSON 被截断修复，"
+            "丢失字段: %s，原始长度=%d，修复后长度=%d",
+            self.name, tool_name, lost_keys,
+            len(args), len(repaired),
+        )
+
+        return {
+            "tool": tool_name,
+            "error": (
+                f"工具 {tool_name} 的调用参数 JSON 在生成时被截断，"
+                f"系统尝试修复但部分字段丢失（丢失字段: {', '.join(lost_keys)}），"
+                f"当前保留的字段为: {', '.join(repaired_keys)}。\n"
+                f"请缩短参数内容（尤其是 description 等长文本字段）后重新调用。"
+                f"建议：\n"
+                f"1. 缩短 description 文本，去掉不必要的换行和转义字符\n"
+                f"2. 只保留关键字段，次要字段不要传入\n"
+                f"3. 避免在参数值中使用大量嵌套引号和换行符"
+            ),
+            "lost_keys": lost_keys,
+            "repaired_keys": sorted(repaired_keys),
+            "truncated": True,
+        }
 
     def _validate_args(
         self, args: dict[str, Any], schema: dict[str, Any],

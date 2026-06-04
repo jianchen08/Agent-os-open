@@ -169,21 +169,22 @@ async def get_file_content(
         包含 success、content、path、size 的字典
     """
     workspace_path_str = await _resolve_workspace_path(container_task_id)
-    if workspace_path_str:
-        full_path = (Path(workspace_path_str) / path).resolve()
-        if not str(full_path).startswith(str(Path(workspace_path_str).resolve())):
-            return {
-                "success": False,
-                "message": "路径超出工作空间范围",
-            }
+    raw_path = Path(path)
+    project_root = _get_project_root()
+
+    # BUG-FIX-fix_20260603_file_card_open_fail:
+    # 问题根因: 工具卡片点击时，file_read 的参数可能是其他项目/容器的绝对路径
+    #           （如 D:\myproject\a7bb41e6210f\xxx.md），不在当前项目根范围内，
+    #           安全检查会拒绝。但用户只是想查看工具调用时读取的文件内容。
+    # 修复方案: 绝对路径直接使用，仅对相对路径做安全检查（防路径穿越）。
+    if raw_path.is_absolute():
+        full_path = raw_path.resolve()
+    elif workspace_path_str:
+        full_path = (Path(workspace_path_str).resolve() / path).resolve()
     else:
-        safe_root = Path.cwd().resolve()
-        raw_path = Path(path)
-        if raw_path.is_absolute():
-            full_path = raw_path.resolve()
-        else:
-            full_path = (safe_root / path).resolve()
-        if not str(full_path).startswith(str(safe_root)):
+        full_path = (project_root / path).resolve()
+        # 相对路径且无工作空间时，确保不超出项目根
+        if not full_path.is_relative_to(project_root):
             return {
                 "success": False,
                 "message": "路径超出工作空间范围",
@@ -578,6 +579,15 @@ async def open_workspace_in_ide(
         }
 
 
+def _get_project_root() -> Path:
+    """获取项目根目录（本文件向上4级）。
+
+    Returns:
+        项目根目录的 Path 对象
+    """
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
 async def _resolve_workspace_path(container_task_id: str) -> str | None:
     """从任务 metadata 中解析工作空间路径。
 
@@ -595,8 +605,7 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
     """
     # 特殊处理 _local 工作空间
     if container_task_id == "_local":
-        _local_root = Path(__file__).resolve().parent.parent.parent.parent
-        return str(_local_root)
+        return str(_get_project_root())
 
     try:
         from infrastructure.service_provider import get_service_provider

@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, "src")
 
-from pipeline.engine import (
+from pipeline.engine_state import (
     _safe_deepcopy,
     _manual_copy_dict,
     _manual_copy_list,

@@ -92,6 +92,15 @@ async def get_task_tree(
     # 策略 1：直接匹配 task.metadata["session_id"]
     # 策略 2：通过 parent_pipeline_id 关联会话的 pipeline_ids
     # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
+    # BUG-FIX-fix_20260603_task_tree_visibility:
+    # 问题根因: _pipeline_root_map 的 value 是根任务ID（如 "94f7afbd2cc8"），
+    #           而 related_pipeline_ids 是管道运行ID（如 "0fc481ee9ebe"），
+    #           两者属于不同的 ID 空间，所以子管道 ID 永远匹配不上，
+    #           导致通过管道关联的子任务无法被任务树 API 找到。
+    # 修复方案: 从任务自身的 pipeline_run_id / parent_pipeline_id 字段递归扩展
+    #           管道 ID 集合，不依赖 _pipeline_root_map 的跨 ID 空间匹配。
+    # 影响范围: 任务管理面板的任务树按会话过滤功能。
+    # 修复日期: 2026-06-03
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
@@ -99,17 +108,22 @@ async def get_task_tree(
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
-            # BUG-FIX-fix_20260513_child_pipeline: 加入子管道 ID
-            from infrastructure.execution_record_storage import ExecutionRecordStorage
-            try:
-                exec_storage = ExecutionRecordStorage()
-                root_map = getattr(exec_storage, "_pipeline_root_map", {})
-                child_ids = {c for c, r in root_map.items() if r in related_pipeline_ids}
-                related_pipeline_ids.update(child_ids)
-            except Exception:
-                pass
         except Exception:
             pass
+
+        # 从任务自身的 pipeline_run_id / parent_pipeline_id 递归扩展管道树
+        # 主管道的 pipeline_run_id 已在 related_pipeline_ids 中，
+        # 子任务的 parent_pipeline_id 指向父管道，pipeline_run_id 是子管道自身。
+        # 通过迭代扩展：已知管道 → 找到 parent_pipeline_id 匹配的任务 → 加入其 pipeline_run_id
+        if related_pipeline_ids:
+            changed = True
+            while changed:
+                changed = False
+                for t in all_tasks:
+                    if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:
+                        if t.pipeline_run_id and t.pipeline_run_id not in related_pipeline_ids:
+                            related_pipeline_ids.add(t.pipeline_run_id)
+                            changed = True
 
         # 第一轮：收集匹配的任务 ID
         matched_ids: set[str] = set()

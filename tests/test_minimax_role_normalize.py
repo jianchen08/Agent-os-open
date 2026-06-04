@@ -15,7 +15,18 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock, patch
 
-from plugins.core.llm_core._message_normalizer import normalize_messages_for_provider
+from plugins.core.llm_core._message_normalizer import (
+    _pairing_validated_len,
+    normalize_messages_for_provider,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_pairing_cache():
+    """每个测试前后清理增量配对校验缓存，避免测试间相互污染。"""
+    _pairing_validated_len.clear()
+    yield
+    _pairing_validated_len.clear()
 
 
 def _normalize_minimax(messages):
@@ -321,12 +332,12 @@ class TestMinimaxPhase0OrphanToolResult:
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [{
-                    "id": "call_valid",
+                    "id": "call_a1b2c3d4e5f6",
                     "type": "function",
                     "function": {"name": "fn", "arguments": "{}"},
                 }],
             },
-            {"role": "tool", "tool_call_id": "call_valid", "content": "valid result"},
+            {"role": "tool", "tool_call_id": "call_a1b2c3d4e5f6", "content": "valid result"},
             {"role": "user", "content": "Next"},
             {"role": "tool", "tool_call_id": "orphan_2", "content": "another orphan"},
         ]
@@ -334,14 +345,19 @@ class TestMinimaxPhase0OrphanToolResult:
         tool_msgs = [m for m in result if m.get("role") == "tool"]
         # 只有 call_valid 的 tool result 应保留
         assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "call_valid"
+        assert tool_msgs[0]["tool_call_id"] == "call_a1b2c3d4e5f6"
 
 
 class TestMinimaxPhase2RelocateIntruders:
     """Phase 2: assistant(tool_calls) 和 tool 之间插入的非 tool 消息应被重定位。"""
 
-    def test_system_between_assistant_tool_calls_and_tool_relocated(self) -> None:
-        """system 消息夹在 assistant(tool_calls) 和 tool result 之间应被移到 tool 组之后。"""
+    def test_system_between_assistant_tool_calls_and_tool_removed(self) -> None:
+        """系统消息打破 assistant(tool_calls)→tool 序列时，不完整的 assistant 应被删除。
+
+        旧行为（已废弃）：将系统消息重定位到 tool 组之后。
+        新行为：消息注入打破了配对 → tool result 成为孤儿 → assistant 被删除。
+                LLM 不会看到孤儿工具调用，避免上下文污染和补全假结果。
+        """
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Go"},
@@ -358,26 +374,17 @@ class TestMinimaxPhase2RelocateIntruders:
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
         result = _normalize_minimax(messages)
-        # 找到 assistant(tool_calls) 的位置
-        assistant_idx = None
-        for i, m in enumerate(result):
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                assistant_idx = i
-                break
-        assert assistant_idx is not None
-        # assistant 后面应紧跟 tool result，不应有 system
-        assert result[assistant_idx + 1]["role"] == "tool", (
-            "assistant(tool_calls) 后面应紧跟 tool result"
+        roles = [m["role"] for m in result]
+        assert "system" in roles, "系统消息应保留"
+        assert "user" in roles, "用户消息应保留"
+        has_tool_calls = any(
+            m.get("role") == "assistant" and m.get("tool_calls")
+            for m in result
         )
-        # 插入的 system 应被移到 tool 组之后，且角色应为 user
-        after_tool = result[assistant_idx + 2]
-        assert after_tool["role"] == "user", (
-            f"重定位后的消息应为 user 角色，实际为 {after_tool['role']}"
-        )
-        assert "TaskReminder" in after_tool.get("content", "")
+        assert not has_tool_calls, "不完整的 assistant(tool_calls) 应被删除"
 
-    def test_user_between_assistant_tool_calls_and_tool_kept(self) -> None:
-        """user 消息夹在中间也应被重定位到 tool 组之后。"""
+    def test_user_between_assistant_tool_calls_and_tool_removed(self) -> None:
+        """user 消息打破 assistant(tool_calls)→tool 序列时，不完整的 assistant 应被删除。"""
         messages = [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "Go"},
@@ -394,15 +401,14 @@ class TestMinimaxPhase2RelocateIntruders:
             {"role": "tool", "tool_call_id": "call_1", "content": "result"},
         ]
         result = _normalize_minimax(messages)
-        # assistant 后面紧跟 tool
-        assistant_idx = next(
-            i for i, m in enumerate(result)
-            if m.get("role") == "assistant" and m.get("tool_calls")
+        # 不完整的 assistant 被删除，用户消息保留
+        roles = [m["role"] for m in result]
+        assert "user" in roles
+        has_tool_calls = any(
+            m.get("role") == "assistant" and m.get("tool_calls")
+            for m in result
         )
-        assert result[assistant_idx + 1]["role"] == "tool"
-        # user 消息被移到 tool 之后
-        assert result[assistant_idx + 2]["role"] == "user"
-        assert result[assistant_idx + 2]["content"] == "Intruder"
+        assert not has_tool_calls, "不完整的 assistant(tool_calls) 应被删除"
 
 
 class TestMinimaxPhase5SafetyNet:

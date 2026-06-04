@@ -215,6 +215,11 @@ class DownloadTool(BuiltinTool):
                         "type": "string",
                         "description": "期望的 SHA256 哈希值（可选，下载后校验）",
                     },
+                    "skip_ssrf_check": {
+                        "type": "boolean",
+                        "description": "跳过 SSRF 内网 IP 检查（默认 false，仅用于测试本地服务器）",
+                        "default": False,
+                    },
                 },
                 "required": ["url", "save_path"],
             },
@@ -251,6 +256,7 @@ class DownloadTool(BuiltinTool):
         proxy = inputs.get("proxy") or None
         allow_domains = inputs.get("allow_domains") or None
         expected_hash = inputs.get("expected_hash") or None
+        skip_ssrf_check = bool(inputs.get("skip_ssrf_check", False))
 
         # ── 参数校验 ──
         if not url:
@@ -259,9 +265,17 @@ class DownloadTool(BuiltinTool):
             return create_failure_result("缺少必填参数: save_path")
 
         # ── URL 安全校验 ──
-        valid, msg = _validate_url(url, allow_domains)
-        if not valid:
-            return create_failure_result(f"URL 安全校验失败: {msg}")
+        if skip_ssrf_check:
+            # 仅校验协议和基本格式
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return create_failure_result(f"URL 安全校验失败: 不支持的协议: {parsed.scheme}")
+            if not parsed.hostname:
+                return create_failure_result("URL 安全校验失败: URL 缺少主机名")
+        else:
+            valid, msg = _validate_url(url, allow_domains)
+            if not valid:
+                return create_failure_result(f"URL 安全校验失败: {msg}")
 
         # ── 创建保存目录 ──
         save_dir = Path(save_path)

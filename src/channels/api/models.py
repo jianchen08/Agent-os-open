@@ -170,19 +170,40 @@ class TaskUpdate(BaseModel):
 
 class TaskResponse(BaseModel):
     """任务响应模型。"""
+
+    # ── 核心标识 ──
     id: str
     title: str
     description: str | None = None
     status: str = "pending"
     priority: int = 5
+
+    # ── 层级关系 ──
+    parent_task_id: str | None = None
+
+    # ── 执行者信息 ──
     agent_id: str | None = None
+    agent_name: str | None = None
+    agent_level: str | None = None
     thread_id: str | None = None
     created_by: str | None = None
+
+    # ── 管道关联 ──
+    pipeline_run_id: str | None = None
+    execution_record_id: str | None = None
+
+    # ── 标签与数据 ──
     tags: list[str] = Field(default_factory=list)
     input_data: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
+    error: str | None = None
+
+    # ── 时间 ──
     created_at: str = ""
     updated_at: str = ""
+
+    # ── 元数据 ──
+    metadata: dict[str, Any] | None = None
 
 
 class TaskListResponse(BaseModel):

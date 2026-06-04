@@ -113,13 +113,40 @@ export function ensureStreamingPlaceholder(
       && msg.status === 'streaming'
       && msg.id !== messageId
     ) {
-      // BUG-FIX-fix_20260530_empty_bubble:
-      // 旧 streaming 占位消息如果没有实际内容，直接移除避免空气泡；
-      // 如果有内容（如部分流式输出），标记为 completed 保留。
-      const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
-      if (hasContent) {
-        store.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+      // BUG-FIX-fix_20260603_stale_streaming_cleanup:
+      // 问题根因: 旧 streaming 占位符的清理逻辑只检查了 content/parts 是否有内容，
+      //   但如果 parts 中只有 tool_call 且处于 calling 状态（未收到 tool_result），
+      //   这些残留消息被标记 completed 后会与新的流式消息合并，造成渲染混乱。
+      // 修复方案: 检查 tool_call parts 的解析状态。
+      //   - 有未解析的 tool_call（calling）→ remove（不完整消息，直接丢弃）
+      //   - 所有 tool_call 已解析 + 有内容 → 标记 completed 保留
+      //   - 完全无内容 → remove
+      // 影响范围: 流式过程切换时旧占位符的清理
+      // 修复日期: 2026-06-03
+      const parts = msg.parts || []
+      const hasTextContent = (msg.content || '').length > 0
+      const hasParts = parts.length > 0
+      const unresolvedToolCalls = parts.some(
+        (p: any) => p.type === 'tool_call' && (p.state === 'calling' || p.state === 'streaming')
+      )
+      const resolvedParts = parts.filter(
+        (p: any) => p.type !== 'tool_call' || (p.state !== 'calling' && p.state !== 'streaming')
+      )
+
+      if (unresolvedToolCalls) {
+        // 有未解析的 tool_call → 消息不完整，直接移除
+        store.removeMessage(pipelineId, msg.id)
+      } else if (hasTextContent || resolvedParts.length > 0) {
+        // 有完整内容 → 保留但标记 completed，同时确保 tool parts 为 done
+        const finalizedParts = resolvedParts.map((p: any) =>
+          p.type === 'tool_call' ? { ...p, state: 'done' as const } : p
+        )
+        store.updateMessage(pipelineId, msg.id, {
+          status: 'completed',
+          parts: finalizedParts.length > 0 ? finalizedParts : undefined,
+        } as any)
       } else {
+        // 完全空消息 → 移除
         store.removeMessage(pipelineId, msg.id)
       }
     }

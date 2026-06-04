@@ -43,15 +43,31 @@ class AgentConfigLoader:
     """Agent 配置加载器，从 YAML 文件加载 AgentConfig。"""
 
     @staticmethod
-    def _parse_context_var_item(data: dict[str, Any]) -> ContextVarItem:
+    def _parse_context_var_item(data: dict[str, Any] | str) -> ContextVarItem:
         """解析上下文变量项。
 
         Args:
-            data: 原始 YAML 字典。
+            data: 原始 YAML 字典，或占位符字符串（如 "{{rules}}"）。
 
         Returns:
             ContextVarItem 实例。
         """
+        # 字符串形式：占位符语法，整体作为 name 存储
+        if isinstance(data, str):
+            return ContextVarItem(
+                name=data,
+                type="placeholder",
+                path="",
+                tags=[],
+                inject_type="",
+                top_k=5,
+                content="",
+                memory_type="",
+                memory_layer="",
+                route_key="",
+                routes={},
+                extensions=[],
+            )
         return ContextVarItem(
             name=data.get("name", ""),
             type=data.get("type", ""),

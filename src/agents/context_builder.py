@@ -102,6 +102,9 @@ class ContextBuilder:
             合并后的内容字符串，读取失败返回空字符串。
         """
         full_path = self._base_path / folder_path
+        if not folder_path or not folder_path.strip():
+            # 空 path 不允许回退到 base_path，直接跳过
+            return ""
         if not full_path.exists() or not full_path.is_dir():
             logger.warning("文件夹不存在或不是目录: %s", full_path)
             return ""

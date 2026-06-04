@@ -579,46 +579,16 @@ def find_available_port(start_port: int, host: str = "0.0.0.0") -> int:
 
 
 def _cleanup_ghost_running_tasks() -> int:
-    """清理服务重启后残留的幽灵 running 任务。
+    """清理服务重启后残留的幽灵任务。
 
-    BUG-FIX-fix_20260522_ghost_running_tasks:
-    问题根因: 后端重启后，磁盘上存在大量 status: running 的任务（引擎已死但 YAML 未更新），
-              新后端进程不会检查和清理这些幽灵任务，导致系统卡死。
-    修复方案: 在 uvicorn 启动前扫描 TaskStorage 中所有 running 任务，
-              全部标记为 failed（重启后引擎均不在内存中）。
-
-    Returns:
-        被清理的幽灵任务数量
+    委托给 TaskService.cleanup_ghost_tasks() 静态方法，
+    app_factory.py 只负责传入数据目录，不持有任务生命周期逻辑。
     """
-    try:
-        from tasks.storage import TaskStorage
-        from tasks.types import TaskStatus
-        _data_dir = str(Path(__file__).resolve().parent / "data" / "tasks")
-        storage = TaskStorage(data_dir=_data_dir)
-    except Exception as exc:
-        logger.warning("[Startup] 幽灵任务清理: 初始化 TaskStorage 失败: %s", exc)
-        return 0
+    import asyncio
+    from tasks.service import TaskService
 
-    ghost_tasks = storage.list_by_status(TaskStatus.RUNNING)
-    if not ghost_tasks:
-        return 0
-
-    cleaned = 0
-    for task in ghost_tasks:
-        try:
-            task.status = TaskStatus.FAILED
-            task.updated_at = datetime.now(timezone.utc).isoformat()
-            task.metadata["fail_reason"] = "服务重启后引擎状态丢失"
-            storage.save(task)
-            cleaned += 1
-        except Exception as exc:
-            logger.warning(
-                "[Startup] 幽灵任务清理失败: task=%s err=%s",
-                task.id[:12] if hasattr(task, "id") else "?", exc,
-            )
-
-    if cleaned > 0:
-        logger.info("[Startup] 已清理 %d 个幽灵 running 任务（标记为 failed）", cleaned)
+    _data_dir = str(Path(__file__).resolve().parent / "data" / "tasks")
+    cleaned, cascaded = asyncio.run(TaskService.cleanup_ghost_tasks(_data_dir))
     return cleaned
 
 

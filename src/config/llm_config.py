@@ -241,9 +241,9 @@ class LLMConfigManager:
         # 保存默认配置
         config_to_save["defaults"] = {
             "chat": self._defaults.chat,
-            "reasoning": self._defaults.reasoning,
             "embedding": self._defaults.embedding,
             "fallback": self._defaults.fallback,
+            "tiers": self._defaults.tiers,
         }
 
         # 保存提供商配置

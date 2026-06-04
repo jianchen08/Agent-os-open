@@ -41,9 +41,9 @@ class LLMDefaults(BaseModel):
     """LLM 默认配置"""
 
     chat: str = "gpt4o"
-    reasoning: str = "claude"
     embedding: str = "openai"
     fallback: str = "claude-haiku"
+    tiers: dict[str, str] = Field(default_factory=dict)
 
 
 class EndpointConfig(BaseModel):

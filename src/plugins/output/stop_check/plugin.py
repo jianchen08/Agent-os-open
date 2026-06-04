@@ -35,8 +35,7 @@ class StopCheckPlugin(IOutputPlugin):
 
     检查维度（按优先级）：
     1. 用户请求停止 → should_stop == True
-    2. sink 死亡停止 → engine._should_stop == True（前端连接丢失）
-    3. 迭代上限检测 → iteration > max_iterations
+    2. 迭代上限检测 → iteration > max_iterations
     4. 执行超时检测 → elapsed > max_duration
     5. task_evaluate 工具结果检测 → completed/failed
     6. 任务状态检测 → task 被删除/取消/完成/失败
@@ -131,23 +130,7 @@ class StopCheckPlugin(IOutputPlugin):
                 ),
             }
 
-        # 2. sink 死亡停止（前端连接丢失）
-        # BUG-FIX-fix_20260531_sink_dead_stop_engine:
-        # 当 TargetedSink 标记 is_dead 后，stream_bridge 通知引擎设置
-        # _should_stop=True。stop_check 在输出阶段检查此标志，
-        # 确保引擎在当前迭代的输出阶段就能感知并终止，无需等到下一轮迭代。
-        _engine = self._get_engine_from_registry(ctx)
-        if _engine is not None and getattr(_engine, "_should_stop", False):
-            logger.info("[%s] Stop requested: sink dead (frontend connection lost)", self.name)
-            return {
-                "router.stop_reason": "sink_dead",
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason="Frontend connection lost",
-                ),
-            }
-
-        # 3. 迭代上限检测（-1 表示无限制）
+        # 2. 迭代上限检测（-1 表示无限制）
         if self._max_iterations != -1 and iteration > self._max_iterations:
             logger.warning(
                 "[%s] Max iterations reached: %d > %d",
@@ -346,26 +329,3 @@ class StopCheckPlugin(IOutputPlugin):
             self._start_time = time.monotonic()
             self._last_pipeline_id = pipeline_id
 
-    def _get_engine_from_registry(self, ctx: PluginContext) -> Any:
-        """从 Registry 获取当前管道对应的引擎实例。
-
-        BUG-FIX-fix_20260531_sink_dead_stop_engine:
-        用于检查引擎的 _should_stop 标志，判断 sink 是否已死亡。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            PipelineEngine 实例，未找到返回 None
-        """
-        pipeline_id = ctx.state.get("pipeline_id", "")
-        if not pipeline_id:
-            return None
-        try:
-            from pipeline.registry import get_engine_registry
-            _entry = get_engine_registry().get(pipeline_id)
-            if _entry is not None:
-                return _entry.engine
-        except Exception:
-            pass
-        return None

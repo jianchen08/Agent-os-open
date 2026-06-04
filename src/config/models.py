@@ -260,10 +260,13 @@ class ModelConfigLoader:
 
         # api_key: 模型配置优先，提供商配置回退
         api_key = model_conf.get("api_key", "") or provider_conf.get("api_key", "")
+        if not api_key:
+            keys_list = provider_conf.get("keys", [])
+            if keys_list:
+                api_key = keys_list[0].get("api_key", "")
 
         # api_base: 模型配置优先，提供商配置回退
         api_base = model_conf.get("api_base", "") or provider_conf.get("api_base", "")
-
         # default_params: 使用模型配置中的值，或默认值
         default_params = model_conf.get("default_params", {"temperature": 0.7, "max_tokens": 4096})
 

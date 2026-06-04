@@ -141,6 +141,12 @@ class FakeEngine:
         """模拟引擎运行结束。"""
         self._running = False
 
+    async def run(self, **kwargs):
+        """模拟 engine.run()，供 idle 路径的 run_in_executor 调用。"""
+        self._running = True
+        await asyncio.sleep(0.5)
+        self._running = False
+
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
@@ -165,6 +171,7 @@ class TestIdlePathStreaming:
         pid = "idle-test-pipe"
 
         engine = FakeEngine(pid)
+        engine._run_started = False  # idle 状态：未启动过 run()
         registry.register(pid, engine, thread_id="ws-thread-001")
 
         sink = FakeSink()
@@ -229,6 +236,13 @@ class TestSuspendedWakeStreaming:
         bridge = PipelineStreamBridge(pipeline_id=pid, output_sink=sink)
         registry.set_bridge(pid, bridge)
 
+        # 手动启动 drain_loop（模拟真实环境中 ensure_bridge 的行为）
+        # 使用永不完成的 Future 作为 engine_task，防止 drain_loop 因 engine_task=None 立即退出
+        _never_done = asyncio.get_running_loop().create_future()
+        async def _drain():
+            await bridge.drain_loop(_never_done, heartbeat_interval=5.0)
+        drain_task = asyncio.create_task(_drain())
+
         engine._on_chunk = bridge.on_chunk
         engine._streaming_flag = True
 
@@ -247,6 +261,7 @@ class TestSuspendedWakeStreaming:
             pid,
             "[系统通知] 子任务已完成",
             metadata={"source": "system"},
+            output_sink=sink,
         )
 
         assert result.success, f"send_pipeline_message 应成功，实际: {result.error}"
@@ -267,7 +282,8 @@ class TestSuspendedWakeStreaming:
         for evt in sink.events:
             print(f"  {evt['type']}: {str(evt.get('data', {}))[:80]}")
 
-        assert has_system_notification, "应有 system_notification（通知气泡）"
+        assert has_stream_start, "应有 stream_start"
+        assert has_stream_chunk, "应有 stream_chunk（唤醒后 LLM 产出被消费）"
 
         if not has_stream_start:
             print("\n*** BUG 确认: suspended 唤醒后没有 stream_start! ***")
@@ -277,8 +293,13 @@ class TestSuspendedWakeStreaming:
             print("*** LLM 的 chunk 没有被 drain_loop 消费 ***")
 
         lifecycle_task.cancel()
+        drain_task.cancel()
         try:
             await lifecycle_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await drain_task
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -343,11 +364,17 @@ class TestSuspendedWakeStreaming:
 
 
 class TestDrainLoopSuspendRace:
-    """精确定位 drain_loop 竞态条件的测试。"""
+    """验证 drain_loop 在引擎挂起时不退出，持续空转等待。"""
 
     @pytest.mark.asyncio
-    async def test_drain_loop_exits_on_suspend_check(self):
-        """验证 drain_loop 在引擎仍为 suspended 时会提前退出。"""
+    async def test_drain_loop_survives_suspend(self):
+        """验证 drain_loop 在引擎 suspended 时不退出，等待引擎唤醒后消费 chunk。
+
+        模拟场景：
+        1. drain_loop 启动时引擎为 suspended
+        2. 300ms 后引擎醒来，开始产出 chunk
+        3. drain_loop 应等到 chunk 并正确消费
+        """
         from pipeline.stream_bridge import PipelineStreamBridge
 
         sink = FakeSink()
@@ -355,38 +382,51 @@ class TestDrainLoopSuspendRace:
 
         engine_ref = {"suspended": True, "running": False}
 
+        async def _delayed_wake():
+            await asyncio.sleep(0.3)
+            engine_ref["suspended"] = False
+            engine_ref["running"] = True
+            bridge.on_chunk({"type": "text", "content": "唤醒"})
+            await asyncio.sleep(0.2)
+            engine_ref["running"] = False
+
         async def _engine_tracker():
             await asyncio.sleep(0.5)
             while engine_ref["running"] or engine_ref["suspended"]:
                 await asyncio.sleep(0.1)
 
         tracker = asyncio.create_task(_engine_tracker())
+        wake_task = asyncio.create_task(_delayed_wake())
 
         result = await bridge.drain_loop(
             tracker,
             heartbeat_interval=5.0,
-            suspend_check=lambda: engine_ref["suspended"],
         )
 
         event_types = [e["type"] for e in sink.events]
 
-        print(f"\n[RACE] 引擎始终 suspended 时的事件序列: {event_types}")
+        print(f"\n[RACE] 事件类型序列: {event_types}")
         print(f"[RACE] drain_loop 结果: {result}")
 
         assert "stream_start" in event_types
+        assert "stream_chunk" in event_types, "引擎唤醒后应消费 chunk"
         assert "stream_end" in event_types
-        assert "stream_chunk" not in event_types, "引擎 suspended 时不应有 chunk"
-        assert result["accumulated_content"] == "", "引擎 suspended 时内容应为空"
+        assert "唤醒" in result["accumulated_content"]
 
         tracker.cancel()
+        wake_task.cancel()
         try:
             await tracker
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await wake_task
         except (asyncio.CancelledError, Exception):
             pass
 
     @pytest.mark.asyncio
     async def test_drain_loop_survives_delayed_wake(self):
-        """验证 drain_loop 在引擎延迟唤醒时是否仍能消费 chunk。
+        """验证 drain_loop 在引擎延迟唤醒时仍能消费 chunk。
 
         模拟真实场景：
         1. drain_loop 启动时引擎仍为 suspended
@@ -421,7 +461,6 @@ class TestDrainLoopSuspendRace:
         result = await bridge.drain_loop(
             tracker,
             heartbeat_interval=5.0,
-            suspend_check=lambda: engine_ref["suspended"],
         )
 
         event_types = [e["type"] for e in sink.events]

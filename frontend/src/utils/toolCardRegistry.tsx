@@ -39,8 +39,8 @@ export interface ToolCardConfig {
  */
 const registry = new Map<string, ToolCardConfig>()
 
-/** 全局文件打开回调 */
-let globalOnOpenFile: ((filePath: string) => void | Promise<void>) | null = null
+/** 全局文件打开回调（支持 containerTaskId） */
+let globalOnOpenFile: ((filePath: string, containerTaskId?: string) => void | Promise<void>) | null = null
 
 /**
  * 注册全局文件打开回调
@@ -49,15 +49,17 @@ let globalOnOpenFile: ((filePath: string) => void | Promise<void>) | null = null
  *
  * @param callback - 文件打开回调函数
  */
-export function registerGlobalOpenFileCallback(callback: (filePath: string) => void | Promise<void>): void {
+export function registerGlobalOpenFileCallback(
+  callback: (filePath: string, containerTaskId?: string) => void | Promise<void>,
+): void {
   globalOnOpenFile = callback
 }
 
 /**
  * 获取全局文件打开回调
  */
-export function getGlobalOpenFileCallback(): (filePath: string) => void | Promise<void> {
-  return globalOnOpenFile || ((filePath: string) => {
+export function getGlobalOpenFileCallback(): (filePath: string, containerTaskId?: string) => void | Promise<void> {
+  return globalOnOpenFile || ((filePath: string, _containerTaskId?: string) => {
     console.warn('[toolCardRegistry] 未注册文件打开回调，请在应用启动时调用 registerGlobalOpenFileCallback')
   })
 }
@@ -85,7 +87,7 @@ export function enhanceActivityWithToolConfig(
   activity: ActivityData,
   toolCall: MessageToolCall,
   options?: {
-    onOpenFile?: (filePath: string) => void | Promise<void>
+    onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
   },
 ): ActivityData {
   if (activity.type !== 'tool_call' || !activity.toolName) {
@@ -123,13 +125,14 @@ export function enhanceActivityWithToolConfig(
     enhanced.customColor = config.runningColor
   }
 
-  // 自动提取文件路径并注入打开文件回调
+  // 自动提取文件路径并注入打开文件回调（携带 containerTaskId）
   if (config.hasFilePath) {
     const filePath = extractFilePath(toolCall)
     if (filePath) {
       enhanced.filePath = filePath
       const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
-      enhanced.onOpenFile = () => openFileCallback(filePath)
+      const taskId = toolCall.containerTaskId
+      enhanced.onOpenFile = () => openFileCallback(filePath, taskId)
     }
   }
 

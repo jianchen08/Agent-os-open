@@ -73,6 +73,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
     <li><a href="#sec7">前端消息接收与渲染</a></li>
     <li><a href="#sec8">问题清单汇总</a></li>
     <li><a href="#sec9">简化与改进方案</a></li>
+    <li><a href="#sec10">实际日志问题分析（2026-06-03 执行记录）</a></li>
   </ol>
 </div>
 
@@ -927,6 +928,137 @@ class Notification:
 
 <hr>
 
+<!-- ====================================================================== -->
+<h2 id="sec10">10. 实际日志问题分析（2026-06-03 执行记录）</h2>
+
+<p>以下分析基于项目 <code>logs/</code> 目录下实际运行时产生的日志文件。</p>
+
+<h3>10.1 日志结构概览</h3>
+
+<table>
+<tr><th>目录</th><th>文件数</th><th>内容</th><th>状态</th></tr>
+<tr><td><code>logs/pipeline/</code></td><td>12 个</td><td>管道完整执行日志（含工具调用详情、LLM 消息）</td><td><span class="badge badge-ok">&#x2705; 活跃</span></td></tr>
+<tr><td><code>logs/error/</code></td><td>12 个</td><td>管道错误日志（ERROR/WARNING 级别）</td><td><span class="badge badge-warn">&#x26A0; 6/12 为空</span></td></tr>
+<tr><td><code>logs/task/</code></td><td>12 个</td><td>任务定时器超时与状态变更日志</td><td><span class="badge badge-warn">&#x26A0; 6/12 为空</span></td></tr>
+<tr><td><code>logs/bash/</code></td><td>空</td><td>Bash 命令日志</td><td><span class="badge badge-err">&#x274C; 未启用</span></td></tr>
+</table>
+
+<p><strong>问题：</strong>12 个 pipeline 实例中有 6 个的 error/task 日志为空（43e7ec, 6f7102, a70647, dc5a13, ef94573e），说明这些管道的错误没有被分类记录到独立文件中。</p>
+
+<h3>10.2 核心错误链 — LLM API 调用持续失败</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: Minimax M3 API "tool call id is invalid (2013)" 循环失败</h4>
+  <p><strong>现象：</strong>从 20:09:22 到 20:16:35，Minimax API 持续返回 <code>tool call id is invalid (2013)</code> 错误，每条间隔约 5-10 秒，共产生约 24 次重试，全部失败。</p>
+  <p><strong>时间线（以 pipeline_36d6cba2afcd 为例）：</strong></p>
+  <table>
+    <tr><th>时间</th><th>错误信息</th><th>重试</th></tr>
+    <tr><td>20:09:22</td><td>tool call result does not follow tool call</td><td>第 1 次</td></tr>
+    <tr><td>20:09:43</td><td>tool call id is invalid (2013)</td><td>第 2 次</td></tr>
+    <tr><td>20:09:54</td><td>tool call id is invalid (2013)</td><td>第 3 次</td></tr>
+    <tr><td>20:10:12</td><td>tool call id is invalid (2013)</td><td>第 4 次</td></tr>
+    <tr><td>20:10:17</td><td>tool call id is invalid (2013)</td><td>第 5 次</td></tr>
+    <tr><td>20:10:35</td><td>tool call id is invalid (2013)</td><td>第 6 次</td></tr>
+    <tr><td>20:10:47</td><td>tool call id is invalid (2013)</td><td>第 7 次</td></tr>
+    <tr><td>20:10:52</td><td>tool call id is invalid (2013)</td><td>第 8 次</td></tr>
+    <tr><td>20:11:02</td><td>tool call id is invalid (2013)</td><td>第 9 次</td></tr>
+  </table>
+  <p><strong>根因推断：</strong></p>
+  <ol>
+    <li>LLM 产生了 tool_call 但没有等到 tool_result 就继续输出下一个 assistant message → Minimax 报 <code>tool call result does not follow tool call</code></li>
+    <li>message_normalizer 检测到"不完整的 assistant message"，移除后重新发送 → 移除过程中 tool_call_id 被破坏 → Minimax 报 <code>tool call id is invalid</code></li>
+    <li>一旦进入这个循环，所有后续请求都因 tool_call_id 无效而失败，无法自愈</li>
+  </ol>
+  <p><strong>日志中的 warning 证据：</strong></p>
+  <pre><code>[llm_core] minimax tool_call pairing: removing incomplete assistant message
+(missing tool results: {'call_9978e1e5f9f84ddc82e0fa1e', 'call_11476f2f0bbd47468ef548fc'})
+[llm_core] minimax tool_call pairing: removed 1 incomplete assistant messages
+(tool execution was interrupted, no result available)</code></pre>
+  <p>这两个 warning 在 3 个不同管道中反复出现（36d6cba, 4d5a01f, a3e8f37），说明是系统性 bug。</p>
+</div>
+
+<h3>10.3 子任务执行超时连环失败</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: 3 个子任务持续超时，5 分钟一轮循环</h4>
+  <p><strong>现象：</strong>同一批子任务在 18:53 - 19:28 期间持续超时，每 5 分钟触发一次：</p>
+  <table>
+    <tr><th>task_id</th><th>任务</th><th>超时次数</th><th>时间范围</th></tr>
+    <tr><td>3ca33f0cd3ed</td><td>早期批次子任务</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+    <tr><td>9f55c104483a</td><td>含 task_evaluate auto_complete</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+    <tr><td>e52788a8db6a</td><td>审查边界场景与异常处理</td><td>8 次</td><td>18:53 - 19:28</td></tr>
+  </table>
+  <p><strong>暴露的问题：</strong></p>
+  <ol>
+    <li>系统重启后（约 19:41），旧子任务状态仍为 running，但没有自动恢复机制将它们重置</li>
+    <li>任务 e52788a8db6a 超时 8 次后仍未被标记为最终失败</li>
+    <li>新批次子任务 b707c7fb 和 00d59821 在 20:15 重试后仍失败，根因是 LLM tool call id 错误</li>
+  </ol>
+</div>
+
+<h3>10.4 系统通知重复发送</h3>
+
+<div class="problem-card">
+  <h4>&#128308; P0: 同一子任务失败通知被多次注入引擎</h4>
+  <p><strong>日志证据（pipeline_4d5a01fadcee.log L347-356）：</strong></p>
+  <pre><code>MSG-34: [系统通知] 子任务 '追踪消息全生命周期代码路径' (ID: b707c7fb0258) failed ❌
+MSG-35: [系统通知] 子任务 '审查任务状态机与调度机制' (ID: 00d5982118f9) failed ❌
+MSG-36: [系统通知] 子任务 '审查任务状态机与调度机制' (ID: 00d5982118f9) failed ❌  ← 重复！
+MSG-37: [系统通知] 子任务 '追踪消息全生命周期代码路径' (ID: b707c7fb0258) failed ❌  ← 重复！</code></pre>
+  <p><strong>后果：</strong>task_notifier 对同一失败事件发送了两次通知，两次都被 inject_message 注入引擎的 _pending_notifications，LLM 看到重复通知后产生混乱。</p>
+</div>
+
+<h3>10.5 日志缺失与诊断盲区</h3>
+
+<div class="problem-card">
+  <h4>&#128993; P1: 关键诊断日志虽已实施但实际未触发</h4>
+  <p>通过 grep 搜索所有 <code>logs/pipeline/*.log</code> 发现：</p>
+  <ol>
+    <li><strong>无 CancelledError 日志</strong>：搜索不到 <code>CancelledError</code> 或 <code>RAW_ERROR</code> — 说明管道中断路径绕过了 engine.py 的异常捕获</li>
+    <li><strong>无引擎退出摘要</strong>：搜索不到 <code>_run_loop finally</code> — 说明引擎的 finally 块可能未执行</li>
+    <li><strong>无 task_post_pipeline 诊断</strong>：搜索不到 <code>_fail_after_pipeline_exit</code> — 说明任务失败判断走了不同的代码路径</li>
+    <li><strong>5 个 error 日志为空</strong>：这些管道的 WARNING/ERROR 没有被分类写入</li>
+  </ol>
+  <p><strong>结论：</strong>之前补充的 5 处日志点在本次执行中全部未触发，说明管道中断的实际路径可能不同于预期（可能是在 LLM 重试耗尽后直接失败，而非被 CancelledError 中断）。</p>
+</div>
+
+<h3>10.6 计时器频繁重置性能问题</h3>
+
+<div class="problem-card">
+  <h4>&#128993; P1: 同一任务 ID 的计时器在 1 秒内被取消并重建多次</h4>
+  <p><strong>日志模式（pipeline_dc5a13d60437.log）：</strong></p>
+  <pre><code>19:42:53 取消计时器: task_id=5b07fbf6d133
+19:42:53 创建计时器: task_id=5b07fbf6d133, timeout=300.0s
+19:42:53 取消计时器: task_id=5b07fbf6d133  ← 同一秒内！
+19:42:53 创建计时器: task_id=5b07fbf6d133, timeout=300.0s  ← 同一秒内！</code></pre>
+  <p>同一任务的计时器在毫秒级被反复取消并重建，可能是每个 LLM 迭代都触发计时器重置。</p>
+</div>
+
+<h3>10.7 日志覆盖缺失汇总</h3>
+
+<table>
+<tr><th>缺失日志</th><th>严重度</th><th>影响</th><th>状态</th></tr>
+<tr><td>引擎 CancelledError 触发来源</td><td><span class="badge badge-err">P0</span></td><td>无法区分用户取消/超时/进程重启</td><td>已实施但未触发</td></tr>
+<tr><td>引擎退出状态摘要 (_run_loop finally)</td><td><span class="badge badge-err">P0</span></td><td>无法确认引擎退出时状态是否正确保存</td><td>已实施但未触发</td></tr>
+<tr><td>task_post_pipeline 诊断信息</td><td><span class="badge badge-err">P0</span></td><td>无法追踪任务失败根因</td><td>已实施但未触发</td></tr>
+<tr><td>drain_loop 异常退出 traceback</td><td><span class="badge badge-warn">P1</span></td><td>无法定位 drain_loop 崩溃原因</td><td>已实施但未触发</td></tr>
+<tr><td>应用启动/关闭 pid 和 loop_id</td><td><span class="badge badge-warn">P1</span></td><td>无法关联管道中断与进程重启</td><td>已实施但未触发</td></tr>
+<tr><td>子任务失败通知去重日志</td><td><span class="badge badge-err">P0</span></td><td>重复通知导致 LLM 困惑</td><td>❌ 未实施</td></tr>
+<tr><td>LLM API 错误分类与重试决策日志</td><td><span class="badge badge-warn">P1</span></td><td>tool call id 错误被误分类为可重试</td><td>❌ 未实施</td></tr>
+<tr><td>message_normalizer 移除 tool_call 的原因</td><td><span class="badge badge-warn">P1</span></td><td>无法追踪为何 tool_call 不完整</td><td>❌ 未实施</td></tr>
+</table>
+
+<h3>10.8 总结：本次执行暴露的 3 个根因</h3>
+
+<table>
+<tr><th>#</th><th>根因</th><th>直接后果</th><th>当前防护</th></tr>
+<tr><td>1</td><td><b>Minimax tool call id 循环失败</b><br>LLM 产生不完整 tool_call → normalizer 移除带偏 id → 后续请求全部因 tool call id invalid 而失败</td><td>主任务所有子任务全部失败，LLM 无法继续执行</td><td>重试耗尽后失败，无自愈能力</td></tr>
+<tr><td>2</td><td><b>子任务超时无自动恢复</b><br>系统重启后旧子任务状态残留，新批次子任务因 LLM 失败而无法推进</td><td>大量僵尸子任务持续耗尽资源</td><td>5 分钟超时检测，但无自动重置</td></tr>
+<tr><td>3</td><td><b>系统通知重复注入</b><br>task_notifier 对同一事件发送多次通知</td><td>LLM 上下文被重复通知污染</td><td>无去重机制</td></tr>
+</table>
+
+<hr>
+
 <h2>附录：关键文件清单</h2>
 
 <table>
@@ -954,7 +1086,7 @@ class Notification:
 
 <hr>
 <p style="text-align:center;color:var(--accent);font-size:0.9rem;">
-  &#128203; 审查完成 — 共识别 16 个问题 + 8 个改进方案
+  &#128203; 审查完成 — 共识别 16 个架构问题 + 8 个改进方案 + 日志分析发现 8 个新问题（3 个根因）
 </p>
 </body>
 </html>

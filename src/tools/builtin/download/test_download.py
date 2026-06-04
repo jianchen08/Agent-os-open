@@ -128,6 +128,7 @@ async def test_download_small_file_with_hash(tool, download_dir, test_server):
         "save_path": download_dir,
         "timeout": 30,
         "expected_hash": expected_hash,
+        "skip_ssrf_check": True,
     })
 
     print(f"\n[小文件下载] 结果: success={result.success}")
@@ -168,6 +169,7 @@ async def test_download_medium_file_segmented(tool, download_dir, test_server):
         "filename": "medium_test.bin",
         "max_connections": 4,
         "timeout": 60,
+        "skip_ssrf_check": True,
     })
 
     print(f"\n[中等文件分段下载] 结果: success={result.success}")
@@ -249,6 +251,7 @@ async def test_resume_download(tool, download_dir, test_server):
         "filename": filename,
         "max_connections": 4,
         "timeout": 60,
+        "skip_ssrf_check": True,
     })
 
     print(f"[断点续传] 结果: success={result.success}")
@@ -372,6 +375,7 @@ async def test_file_size_limit(tool, download_dir, test_server):
         "url": url,
         "save_path": download_dir,
         "max_size": 1,  # 1 字节上限
+        "skip_ssrf_check": True,
     })
 
     print(f"\n[大小限制] 结果: success={result.success}, error={result.error}")

@@ -268,7 +268,7 @@ def apply_agent_model_override(
         )
         return
 
-    # 直连模式：重建插件（原有逻辑）
+    # 直连模式：直接更新属性，不重建插件实例
     model_loader = None
     if services:
         model_loader = services.get("model_loader")
@@ -292,37 +292,22 @@ def apply_agent_model_override(
         )
         return
 
-    # 以现有 llm_call 配置为基础，用模型配置覆盖
-    # 这样 provider/api_base/api_key 等字段跟随模型配置
+    # 直接更新属性，无需重建插件实例
     if hasattr(llm_call, "_config") and isinstance(llm_call._config, dict):
-        merged_config = dict(llm_call._config)
-        merged_config.update(llm_conf)
-    else:
-        merged_config = dict(llm_conf)
-    merged_config["model_name"] = llm_conf.get("model_name", model_id)
-
-    try:
-        # 复用已有的 KeyPoolAdapter（按 key 粒度并发控制）
-        existing_adapter = getattr(llm_call, "_adapter", None)
-        if existing_adapter is not None:
-            new_plugin = type(llm_call)(config=merged_config, adapter=existing_adapter)
-        else:
-            new_plugin = type(llm_call)(config=merged_config)
-        plugin_name = getattr(llm_call, "name", "LLMCorePlugin")
-        plugin_registry._core_plugins["llm_call"] = new_plugin
-        plugin_registry._plugins[plugin_name] = new_plugin
-        logger.info(
-            "[apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
-            getattr(agent_config, "config_id", "?"),
-            merged_config.get("model_name"),
-            merged_config.get("provider"),
-            merged_config.get("context_window"),
-        )
-    except Exception as exc:
-        logger.warning(
-            "[apply_agent_model_override] 重建 llm_call 插件失败: %s",
-            exc,
-        )
+        llm_call._config.update(llm_conf)
+    llm_call._model = llm_conf.get("model_name", model_id)
+    llm_call._provider = llm_conf.get("provider", llm_call._provider)
+    llm_call._api_base = llm_conf.get("api_base") or llm_call._api_base
+    llm_call._api_key = llm_conf.get("api_key") or llm_call._api_key
+    llm_call._context_window = llm_conf.get("context_window")
+    llm_call._default_params = llm_conf.get("default_params", llm_call._default_params)
+    logger.info(
+        "[apply_agent_model_override] Agent %s 使用模型: %s (provider=%s, context_window=%s)",
+        getattr(agent_config, "config_id", "?"),
+        llm_conf.get("model_name"),
+        llm_conf.get("provider"),
+        llm_conf.get("context_window"),
+    )
 
 
 # 模块级 tier 缓存：避免每次调用都触发 _load_llm_data()

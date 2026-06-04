@@ -426,7 +426,7 @@ class _BaseLiteLLMAdapter:
 
         # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
-        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 120))
+        inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
 
         stream_repetition = False
         thinking_truncated = False
@@ -907,17 +907,24 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 last_exc = exc
                 # 不要 raise，继续循环尝试下一个 key
             except litellm.RateLimitError as exc:
-                retry_after = None
-                if hasattr(exc, "headers") and exc.headers:
-                    retry_after = float(
-                        exc.headers.get("retry-after", 0)
-                    )
-                slot.on_rate_limit(retry_after)
+                # 429 限流：冷却该 key，尝试其他 key
+                slot.on_rate_limit()
                 last_exc = exc
-                # 限流：冷却该 key，尝试其他 key
+            except litellm.BudgetExceededError as exc:
+                # 配额耗尽（如"每周/每月使用上限"）：冷却该 key，尝试其他 key
+                slot.on_rate_limit(retry_after=3600.0)
+                logger.warning(
+                    "[KeyPoolAdapter] 配额耗尽 → key=%s 冷却 3600s"
+                    "，尝试其他 key (attempt %d/%d): %s",
+                    slot.key_id, attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
             except litellm.Timeout as exc:
                 last_exc = exc
-                # 超时：不冷却 key，但不重试
+                # 超时：不冷却 key，不轮转（不是 key 的问题）
+                raise
+            except asyncio.CancelledError:
+                # 用户取消：不冷却，直接抛
                 raise
             except litellm.InternalServerError as exc:
                 slot.on_rate_limit()
@@ -927,8 +934,36 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                     slot.key_id, exc,
                 )
                 last_exc = exc
-            except Exception:
-                raise
+            except litellm.BadRequestError as exc:
+                # 400：通常是请求参数错误，但如果错误消息包含配额相关关键词
+                # （如 DeepSeek 的 "Insufficient Balance"），也应轮转 key
+                _msg = str(exc).lower()
+                _quota_keywords = (
+                    "insufficient", "balance", "quota", "exceeded",
+                    "limit", "额度", "上限", "用完", "余额", "不足",
+                )
+                if any(kw in _msg for kw in _quota_keywords):
+                    slot.on_rate_limit(retry_after=3600.0)
+                    logger.warning(
+                        "[KeyPoolAdapter] 疑似配额耗尽 (400) → key=%s 冷却"
+                        "，尝试其他 key (attempt %d/%d): %s",
+                        slot.key_id, attempt + 1, max_retries, exc,
+                    )
+                    last_exc = exc
+                else:
+                    # 真正的请求参数错误 → 不轮转
+                    raise
+            except Exception as exc:
+                # 其他所有异常（含 PermissionDeniedError、ServiceUnavailableError、
+                # APIConnectionError 等 API 错误，以及可能的未分类配额错误）：
+                # 冷却当前 key 并尝试下一个。只有所有 key 都失败才最终抛异常。
+                slot.on_rate_limit()
+                logger.warning(
+                    "[KeyPoolAdapter] 未分类错误 → key=%s 冷却 type=%s"
+                    "，尝试其他 key (attempt %d/%d): %s",
+                    slot.key_id, type(exc).__name__, attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
             finally:
                 slot.release()
 

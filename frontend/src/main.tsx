@@ -30,8 +30,8 @@ async function bootstrap() {
   await initializeTheme()
 
   // 注册全局文件打开回调
-  registerGlobalOpenFileCallback(async (filePath: string) => {
-    const result = await openFile(filePath)
+  registerGlobalOpenFileCallback(async (filePath: string, containerTaskId?: string) => {
+    const result = await openFile(filePath, { containerTaskId })
     if (!result.success) {
       console.error('[main] 打开文件失败:', result.message)
     }

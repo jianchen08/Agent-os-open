@@ -89,6 +89,13 @@ async def execute_core_plugin(
             core_result = await core_plugin.execute(core_ctx)
             if isinstance(core_result, dict):
                 state.update(core_result)
+            # BUG-FIX-fix_20260603_stale_raw_error:
+            # Core 重试成功后，_handle_core_error 设置的 raw_error 和
+            # llm_error_info 仍残留在 state 中，导致 error_check 插件和
+            # llm_error_recovery 插件在下一轮产出错误的 end 信号或恢复提示。
+            # 重试成功时清除这些过期错误状态。
+            state.pop("raw_error", None)
+            state.pop("llm_error_info", None)
             logger.debug("Core plugin executed: core_type=%s", core_type)
             engine.consecutive_core_errors = 0
             break  # success, exit retry loop

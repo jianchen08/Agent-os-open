@@ -23,6 +23,7 @@ import asyncio
 import logging
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
@@ -108,7 +109,18 @@ class PromptBuildPlugin(IInputPlugin):
         if type_name == "timestamp":
             return "timestamp", {"format": args_str} if args_str else {}
         elif type_name == "path":
-            return "path", {"path": args_str}
+            # {{path:文件或目录路径}} 或 {{path:目录路径|extensions=.md,.yaml}}
+            params: dict[str, Any] = {}
+            if "|" in args_str:
+                path_part, _, ext_part = args_str.partition("|")
+                params["path"] = path_part
+                for pair in ext_part.split("|"):
+                    k, _, v = pair.partition("=")
+                    if k.strip() == "extensions" and v.strip():
+                        params["extensions"] = [e.strip() for e in v.split(",") if e.strip()]
+            else:
+                params["path"] = args_str
+            return "path", params
         elif type_name == "content":
             return "content", {"content": args_str}
         else:
@@ -134,15 +146,20 @@ class PromptBuildPlugin(IInputPlugin):
         """执行提示词构建逻辑。
 
         Returns:
-            要写入 state 的字段字典，包含 system_message 和 prompt.dynamic_vars
+            要写入 state 的字段字典，含 system_message、compression_messages、dynamic_vars
         """
         updates: dict[str, Any] = {}
 
-        # 按 layer_order 顺序组装系统消息内容
+        # 按 layer_order 顺序组装系统消息内容（不含压缩块）
         system_content = await self._build_system_content(ctx)
 
-        # 产出 SystemMessage
+        # 产出 SystemMessage（纯 prompt，永不变化）
         updates["system_message"] = {"role": "system", "content": system_content}
+
+        # 加载压缩块和状态快照为独立消息
+        if self._config.get("include_compressed_layers", True):
+            compression_msgs = await self._load_compression_messages(ctx)
+            updates["compression_messages"] = compression_msgs
 
         # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
         dynamic_vars_msg = await self._build_dynamic_vars(ctx)
@@ -150,8 +167,10 @@ class PromptBuildPlugin(IInputPlugin):
             updates["prompt.dynamic_vars"] = dynamic_vars_msg
 
         logger.debug(
-            "[%s] SystemMessage built | content_len=%d | dynamic_vars=%s",
-            self.name, len(system_content), bool(dynamic_vars_msg),
+            "[%s] SystemMessage built | content_len=%d | compression_msgs=%d | dynamic_vars=%s",
+            self.name, len(system_content),
+            len(updates.get("compression_messages", [])),
+            bool(dynamic_vars_msg),
         )
 
         return updates
@@ -210,13 +229,6 @@ class PromptBuildPlugin(IInputPlugin):
         if memory_retrieved:
             parts.append(memory_retrieved)
 
-        # 5. 压缩层：统一预算驱动分层加载
-        # 顺序：关键词(最老) → L2 → L1(最新)
-        if self._config.get("include_compressed_layers", True):
-            comp_text = await self._load_compression_blocks(ctx)
-            if comp_text:
-                parts.append(comp_text)
-
         return "\n\n".join(parts)
 
     async def _resolve_single_var_content(
@@ -251,15 +263,39 @@ class PromptBuildPlugin(IInputPlugin):
             content = "\n".join(rules_parts)
 
         elif var_type == "path":
+            # path 类型：文件 → 注入单文件（base=project_root）
+            #          目录 → 注入目录下所有文件（base=project_root，与文件一致）
             file_path = var_def.get("path", "")
-            if file_path:
+            target = self._resolve_path_for_file(ctx, file_path)
+            if target is not None and target.is_file():
                 try:
-                    from pathlib import Path
-                    p = Path(file_path)
-                    if p.exists():
-                        content = await asyncio.to_thread(p.read_text, "utf-8")
+                    content = await asyncio.to_thread(target.read_text, "utf-8")
                 except Exception as e:
-                    logger.warning("[%s] 读取静态变量文件失败 | path=%s | error=%s", self.name, file_path, e)
+                    logger.warning(
+                        "[%s] 读取静态变量文件失败 | path=%s | error=%s",
+                        self.name, file_path, e,
+                    )
+            elif target is not None and target.is_dir():
+                # 目录 → 遍历读取（base=project_root，直接用已解析的 target）
+                content = await self._read_dir_entries(target, var_def.get("extensions"))
+            else:
+                logger.debug(
+                    "[%s] path 类型变量跳过 | name=%s | path=%s",
+                    self.name, var_name, file_path,
+                )
+
+        elif var_type == "folder":
+            # folder（目录注入）：base=ws_meta.path，与 {{path:目录}} 共用 _read_dir_entries。
+            folder_path = var_def.get("path", "")
+            target = self._resolve_target_path(ctx, folder_path)
+            if target is not None and target.is_dir():
+                content = await self._read_dir_entries(target, var_def.get("extensions"))
+            else:
+                logger.debug(
+                    "[%s] folder 类型变量跳过 | name=%s | path=%s | ws_meta=%s",
+                    self.name, var_name, folder_path,
+                    bool((ctx.state.get("ws_meta") or {}).get("path")),
+                )
 
         elif var_type in ("reference", "content", ""):
             content = var_def.get("content", "") or var_def.get("value", "")
@@ -301,6 +337,106 @@ class PromptBuildPlugin(IInputPlugin):
 
         return content
 
+    async def _read_dir_entries(
+        self, target: Path, extensions: list[str] | None = None,
+    ) -> str:
+        """读取目录下所有顶层文件内容（接收已解析的 Path 对象）。
+
+        非递归读取顶层文件，按文件名排序，extensions 过滤，每文件 10MB 上限。
+
+        Args:
+            target: 已解析的目录 Path 对象。
+            extensions: 文件扩展名白名单，如 [".md", ".yaml"]。
+
+        Returns:
+            拼接后的文件内容字符串。
+        """
+        if not target.is_dir():
+            return ""
+        ext_set = {e.lower() for e in extensions} if extensions else None
+        max_size = 10 * 1024 * 1024
+        parts: list[str] = []
+        try:
+            entries = sorted(target.iterdir(), key=lambda p: p.name)
+        except OSError as e:
+            logger.warning("[%s] 目录遍历失败 | path=%s | error=%s", self.name, target, e)
+            return ""
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if ext_set and entry.suffix.lower() not in ext_set:
+                continue
+            try:
+                if entry.stat().st_size > max_size:
+                    logger.debug("[%s] 跳过超大文件 | file=%s", self.name, entry.name)
+                    continue
+                text = await asyncio.to_thread(entry.read_text, "utf-8")
+            except (OSError, UnicodeDecodeError, ValueError) as e:
+                logger.debug("[%s] 文件读取失败 | file=%s | error=%s", self.name, entry.name, e)
+                continue
+            parts.append(f"--- {entry.name} ---\n{text}")
+        return "\n\n".join(parts)
+
+    def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
+        """把目录路径解析为最终目标 Path（base=ws_meta.path）。
+
+        Args:
+            ctx: 插件执行上下文。
+            rel_path: 相对路径。
+
+        Returns:
+            解析后的 Path，无法解析则返回 None。
+        """
+        if not rel_path or not rel_path.strip():
+            return None
+        p = Path(rel_path)
+        if p.is_absolute():
+            return p
+        ws_meta = ctx.state.get("ws_meta") or {}
+        base = ws_meta.get("path")
+        if not base:
+            return None
+        return Path(base) / rel_path
+
+    def _get_project_root(self, ctx: PluginContext) -> str:
+        """获取项目根目录路径。
+
+        优先级: state["project_root"] → ctx._services["project_root"] → ""
+
+        Returns:
+            项目根目录路径字符串
+        """
+        pr = ctx.state.get("project_root", "")
+        if not pr:
+            pr = (ctx._services or {}).get("project_root", "")
+        return str(pr) if pr else ""
+
+    def _resolve_path_for_file(self, ctx: PluginContext, rel_path: str) -> Path | None:
+        """把 path 类型（单文件注入）的路径解析为最终目标 Path 对象。
+
+        path 类型的 base 是 **项目根目录**（project_root），不是 ws_meta.path。
+        规则:
+            1. 空 path → 返回 None
+            2. 绝对路径 → 直用
+            3. 相对路径 → 拼 project_root；project_root 缺失则返回 None
+
+        Args:
+            ctx: 插件执行上下文
+            rel_path: 静态变量声明的 path 字段
+
+        Returns:
+            解析后的 Path，无法解析则返回 None
+        """
+        if not rel_path or not rel_path.strip():
+            return None
+        p = Path(rel_path)
+        if p.is_absolute():
+            return p
+        base = self._get_project_root(ctx)
+        if not base:
+            return None
+        return Path(base) / rel_path
+
     async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
         """解析单个 {{占位符}} 并返回替换内容。
 
@@ -329,6 +465,10 @@ class PromptBuildPlugin(IInputPlugin):
             return str(pr) if pr else ""
         elif var_type == "path":
             var_def = {"type": "path", "name": "path", "path": params["path"]}
+        elif var_type == "folder":
+            # {{folder:路径}} 占位符：路径是文件→注入单文件；路径是目录→注入目录下所有顶层文件
+            # base = project_root（与 {{path:...}} 一致；与 static_vars.items[].type:folder 用 ws_meta.path 不同）
+            var_def = {"type": "folder_placeholder", "name": "folder", "path": params.get("path", "")}
         elif var_type == "content":
             var_def = {"type": "content", "name": "content", "content": params["content"]}
         elif var_type == "timestamp":
@@ -414,10 +554,18 @@ class PromptBuildPlugin(IInputPlugin):
         session_id = ctx.state.get("context.session_id", "")
         constraints = ctx.state.get("constraints", {})
 
-        for var_def in static_vars_def:
-            if not isinstance(var_def, dict):
+        for item in static_vars_def:
+            # 字符串形式：占位符语法，如 "{{rules}}" 或 "{{path:config/rules/xxx.md}}"
+            if isinstance(item, str):
+                content = await self._resolve_placeholders(ctx, item)
+                if content:
+                    parts.append(content)
                 continue
 
+            # dict 形式：旧版配置语法（向后兼容）
+            if not isinstance(item, dict):
+                continue
+            var_def = item
             if not var_def.get("enabled", True):
                 continue
 
@@ -535,77 +683,64 @@ class PromptBuildPlugin(IInputPlugin):
 
         return ""
 
-    async def _load_compression_blocks(
+    async def _load_compression_messages(
         self,
         ctx: PluginContext,
-    ) -> str:
-        """统一预算驱动分层加载压缩块。
+    ) -> list[dict[str, Any]]:
+        """加载压缩块和状态快照为独立消息列表。
 
-        只加载 L1 chunks（它们包含 l2_content 和 keywords 字段）。
-        从最新块开始按 L1 预算分配，L1 满了溢出到 L2，L2 满了溢出到关键词。
-
-        预算计算：
-        1. 先算系统提示词 + 最近消息已占 tokens
-        2. 压缩块可用 = 触发线 - 已占
-        3. L1/L2 预算 = min(绝对上限, 可用 × 比例)
-
-        最终组装顺序（由老到新）：
-        关键词 → L2 三元组 → L1 十段摘要
+        每个块一条消息（XML 包裹），组装顺序：L2(老→新) → L1(老→新) → state_snapshot。
+        预算不足时从 L1 → L2 降级，L2 也不够则丢弃（state_snapshot.keywords 兜底）。
 
         Returns:
-            格式化后的分层压缩文本，或空字符串
+            独立消息列表
         """
+        messages: list[dict[str, Any]] = []
+
         try:
             chunk_service = ctx.get_service("chunk_service")
         except KeyError:
-            logger.debug("[%s] No chunk_service, skipping", self.name)
-            return ""
+            return messages
 
         from pipeline.types import StateKeys
-
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         if not pipeline_run_id:
-            return ""
+            return messages
 
         try:
             chunks = await chunk_service.find_by_pipeline(
                 pipeline_run_id, "L1",
             )
         except Exception as e:
-            logger.warning(
-                "[%s] 读取压缩块失败 | error=%s", self.name, e,
-            )
-            return ""
+            logger.warning("[%s] 读取压缩块失败 | error=%s", self.name, e)
+            return messages
 
         if not chunks:
-            return ""
+            # 没有压缩块，只加载状态快照
+            state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id, chunk_service)
+            messages.extend(state_msgs)
+            return messages
 
-        # ── 预算计算（全部从 CompressionConfig 读取） ──
+        # ── 预算计算 ──
         from memory.context_compressor import CompressionConfig
-
         context_window = ctx.state.get("context_window", 128000)
         config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = config.get_trigger_threshold()
 
-        # 已占 tokens：系统提示词 + 最近消息
         sys_msg = ctx.state.get("system_message", {})
         sys_tokens = self._estimate_tokens_for_budget(
             sys_msg.get("content", "") if isinstance(sys_msg, dict) else str(sys_msg),
         )
-        messages = ctx.state.get("messages", [])
+        msgs = ctx.state.get("messages", [])
         msg_tokens = sum(
             self._estimate_tokens_for_budget(
                 m.get("content", "") if isinstance(m, dict) else str(m),
             )
-            for m in messages
+            for m in msgs
         )
         used_tokens = sys_tokens + msg_tokens
-
-        # 压缩块可用空间 = 触发线 - 已占
         available = max(0, trigger_tokens - used_tokens)
-
-        # 按配置比例分配 L1/L2 预算，不超过绝对上限
         comp_total_ratio = config.l1_ratio + config.l2_ratio
         l1_budget = min(budgets["L1"], int(available * config.l1_ratio / comp_total_ratio))
         l2_budget = min(budgets["L2"], available - l1_budget)
@@ -620,12 +755,10 @@ class PromptBuildPlugin(IInputPlugin):
 
         if available <= 0:
             logger.info("[%s] 无可用预算，跳过压缩块加载", self.name)
-            return ""
+            return messages
 
-        # ── 去重：按 sequence_end 降序，高水位线算法移除被完全覆盖的块 ──
-        dedup_sorted = sorted(
-            chunks, key=lambda c: c.sequence_end, reverse=True,
-        )
+        # ── 去重 ──
+        dedup_sorted = sorted(chunks, key=lambda c: c.sequence_end, reverse=True)
         high_water = float("inf")
         deduped: list = []
         for chunk in dedup_sorted:
@@ -634,89 +767,84 @@ class PromptBuildPlugin(IInputPlugin):
             deduped.append(chunk)
             high_water = chunk.sequence_start
 
-        logger.info(
-            "[%s] 压缩块去重: %d → %d 块",
-            self.name, len(chunks), len(deduped),
-        )
-
-        # 按创建时间排序：最新的先分配预算（使用去重后的块）
-        sorted_chunks = sorted(
-            deduped, key=lambda c: c.created_at, reverse=True,
-        )
-
-        # 分配每个块到对应层
+        # ── 预算分配：新→老，L1→L2→丢弃 ──
+        sorted_chunks = sorted(deduped, key=lambda c: c.created_at, reverse=True)
         l1_used = 0
         l2_used = 0
-        kw_blocks = []
-        l2_blocks = []
-        l1_blocks = []
+        l1_blocks: list = []
+        l2_blocks: list = []
 
         for chunk in sorted_chunks:
             l1_content = chunk.content or ""
             l2_content = getattr(chunk, "l2_content", "") or ""
             keywords = getattr(chunk, "keywords", []) or []
-            seq_range = f"[{chunk.sequence_start}-{chunk.sequence_end}]"
+            seq = f"{chunk.sequence_start}-{chunk.sequence_end}"
 
             l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
             l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
-            kw_text = ", ".join(keywords) if keywords else ""
-            self._estimate_tokens_for_budget(kw_text) if kw_text else 0
 
-            # 尝试 L1
             if l1_budget > 0 and l1_used + l1_tokens <= l1_budget and l1_content:
-                l1_blocks.append((seq_range, l1_content, keywords))
+                l1_blocks.append((seq, l1_content, keywords))
                 l1_used += l1_tokens
-                continue
-
-            # L1 满了，尝试 L2
-            if l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
-                l2_blocks.append((seq_range, l2_content, keywords))
+            elif l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
+                l2_blocks.append((seq, l2_content, keywords))
                 l2_used += l2_tokens
-                continue
+            # else: 丢弃（keywords 在 state_snapshot.key_entities 兜底）
 
-            # L2 也满了，用关键词
-            if keywords:
-                kw_blocks.append((seq_range, keywords))
-
-        # 反转：从老到新
-        kw_blocks.reverse()
+        # ── 组装消息：L2(老→新) → L1(老→新) ──
         l2_blocks.reverse()
         l1_blocks.reverse()
 
-        parts = []
+        for seq, content, _kw in l2_blocks:
+            messages.append({
+                "role": "system",
+                "name": "compressed",
+                "content": f'<compressed seq="{seq}" level="L2">\n'
+                          f'## 三元组摘要\n{content}\n'
+                          f'</compressed>',
+            })
 
-        # 关键词层（最老）
-        if kw_blocks:
-            kw_lines = []
-            for seq_range, keywords in kw_blocks:
-                kw_lines.append(f"{seq_range} 关键词: {', '.join(keywords)}")
-            parts.append("## 历史关键词索引\n" + "\n".join(kw_lines))
+        for seq, content, _kw in l1_blocks:
+            messages.append({
+                "role": "system",
+                "name": "compressed",
+                "content": f'<compressed seq="{seq}" level="L1">\n'
+                          f'## 过程摘要\n{content}\n'
+                          f'</compressed>',
+            })
 
-        # L2 层
-        if l2_blocks:
-            l2_lines = []
-            for seq_range, content, _kw in l2_blocks:
-                l2_lines.append(f"{seq_range} {content}")
-            parts.append("## 三元组摘要（L2）\n" + "\n".join(l2_lines))
-
-        # L1 层（最新）
-        if l1_blocks:
-            l1_lines = []
-            for seq_range, content, _kw in l1_blocks:
-                l1_lines.append(f"{seq_range} {content}")
-            parts.append("## 八段摘要（L1）\n" + "\n".join(l1_lines))
-
-        if not parts:
-            return ""
+        # ── 状态快照（含 keywords 合并）──
+        state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id, chunk_service)
+        messages.extend(state_msgs)
 
         logger.info(
-            "[%s] 压缩块加载: L1=%d块/%dtokens, "
-            "L2=%d块/%dtokens, keywords=%d块",
-            self.name, len(l1_blocks), l1_used,
-            len(l2_blocks), l2_used, len(kw_blocks),
+            "[%s] 压缩消息: L1=%d块 L2=%d块 state_snapshot=%s",
+            self.name, len(l1_blocks), len(l2_blocks),
+            "有" if state_msgs else "无",
         )
+        return messages
 
-        return "\n\n".join(parts)
+    async def _load_state_snapshot_message(
+        self, ctx: PluginContext, pipeline_run_id: str, chunk_service,
+    ) -> list[dict[str, Any]]:
+        """加载状态快照为一条独立消息。"""
+        try:
+            snapshots = await chunk_service.find_by_pipeline(
+                pipeline_run_id, "STATE_SNAPSHOT",
+            )
+            if snapshots:
+                return [{
+                    "role": "system",
+                    "name": "state_snapshot",
+                    "content": (
+                        "<current_state>\n"
+                        f"{snapshots[0].content}\n"
+                        "</current_state>"
+                    ),
+                }]
+        except Exception:
+            pass
+        return []
 
     @staticmethod
     def _estimate_tokens_for_budget(text: str) -> int:
@@ -748,9 +876,18 @@ class PromptBuildPlugin(IInputPlugin):
             session_id = ctx.state.get("context.session_id", "")
             agent_name = ctx.state.get("context.agent_name", "")
 
-            for var_def in dynamic_vars_def:
-                if not isinstance(var_def, dict):
+            for item in dynamic_vars_def:
+                # 字符串形式：占位符语法，如 "{{timestamp}}" 或 "{{session}}"
+                if isinstance(item, str):
+                    content = await self._resolve_placeholders(ctx, item)
+                    if content:
+                        parts.append(content)
                     continue
+
+                # dict 形式：旧版配置语法（向后兼容）
+                if not isinstance(item, dict):
+                    continue
+                var_def = item
                 if not var_def.get("enabled", True):
                     continue
 

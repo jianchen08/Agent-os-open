@@ -33,7 +33,7 @@ export interface ConversionOptions {
   /** 自定义样式类名 */
   customClassName?: string
   /** 打开文件回调 */
-  onOpenFile?: (filePath: string) => void | Promise<void>
+  onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
 }
 
 /**

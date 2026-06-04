@@ -105,11 +105,11 @@ export function LlmSettingsPage() {
         if (!cancelled) {
           console.error('[LlmSettingsPage] Failed to load LLM config:', err)
           setLoadError('无法连接服务器，请检查网络后重试')
-          setDefaults({ chat: '', reasoning: '', embedding: '' })
+          setDefaults({ chat: '', embedding: '', tiers: {} })
           setConfig({
             models: {},
             providers: {},
-            defaults: { chat: '', reasoning: '', embedding: '' },
+            defaults: { chat: '', embedding: '', tiers: {} },
           })
         }
       })
@@ -238,15 +238,61 @@ export function LlmSettingsPage() {
               </Select>
             </FieldRow>
 
-            <FieldRow label="推理模型" htmlFor="default-reasoning">
+            <FieldRow label="模型分级 (Large)" htmlFor="tier-large">
               <Select
-                value={defaults?.reasoning ?? ''}
+                value={defaults?.tiers?.large ?? ''}
                 onValueChange={(v) =>
-                  setDefaults((prev) => (prev ? { ...prev, reasoning: v } : prev))
+                  setDefaults((prev) =>
+                    prev ? { ...prev, tiers: { ...prev.tiers, large: v } } : prev
+                  )
                 }
               >
-                <SelectTrigger id="default-reasoning">
-                  <SelectValue placeholder="选择推理模型" />
+                <SelectTrigger id="tier-large">
+                  <SelectValue placeholder="大型任务模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelIds.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+
+            <FieldRow label="模型分级 (Medium)" htmlFor="tier-medium">
+              <Select
+                value={defaults?.tiers?.medium ?? ''}
+                onValueChange={(v) =>
+                  setDefaults((prev) =>
+                    prev ? { ...prev, tiers: { ...prev.tiers, medium: v } } : prev
+                  )
+                }
+              >
+                <SelectTrigger id="tier-medium">
+                  <SelectValue placeholder="中型任务模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelIds.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldRow>
+
+            <FieldRow label="模型分级 (Small)" htmlFor="tier-small">
+              <Select
+                value={defaults?.tiers?.small ?? ''}
+                onValueChange={(v) =>
+                  setDefaults((prev) =>
+                    prev ? { ...prev, tiers: { ...prev.tiers, small: v } } : prev
+                  )
+                }
+              >
+                <SelectTrigger id="tier-small">
+                  <SelectValue placeholder="小型任务模型" />
                 </SelectTrigger>
                 <SelectContent>
                   {modelIds.map((id) => (

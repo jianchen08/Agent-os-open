@@ -15,8 +15,6 @@ from .models import (
     CompressionReport,
     CompressionResult,
     ContentRef,
-    MemoryExtraction,
-    PreservedZone,
 )
 
 
@@ -48,6 +46,4 @@ __all__ = [
     "ContentRef",
     "CompressionResult",
     "CompressionReport",
-    "PreservedZone",
-    "MemoryExtraction",
 ]

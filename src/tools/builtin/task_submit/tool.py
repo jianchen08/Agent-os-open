@@ -853,6 +853,21 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                     root_id = task_service.get_root_task_id(task.id)
                     if root_id:
                         exec_storage.register_pipeline(pipeline_id, root_id)
+
+                # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
+                # 容器任务管道也注册到 api_store，保持 pipeline_ids 完整
+                _session_id = inputs.get("session_id", "")
+                if _session_id:
+                    try:
+                        from channels.api.memory_store import store as api_store
+                        _session = api_store.get_session(_session_id)
+                        if _session:
+                            _session.register_pipeline(pipeline_id)
+                            api_store.set_session(_session_id, _session)
+                    except Exception as _reg_exc:
+                        logger.warning(
+                            "[TaskSubmit] 注册容器管道到 api_store 失败: %s", _reg_exc,
+                        )
             except Exception as exc:
                 logger.warning(
                     "[TaskSubmit] 容器任务绑定管道失败 | task_id=%s | error=%s",

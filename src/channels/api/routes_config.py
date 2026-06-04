@@ -116,8 +116,8 @@ def get_defaults() -> dict[str, Any]:
     defaults = data.get("defaults", {})
     return {
         "chat": defaults.get("chat", ""),
-        "reasoning": defaults.get("reasoning", ""),
         "embedding": defaults.get("embedding", ""),
+        "tiers": defaults.get("tiers", {}),
     }
 
 
@@ -126,16 +126,18 @@ def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     if "defaults" not in data:
         data["defaults"] = {}
-    for key in ("chat", "reasoning", "embedding"):
+    for key in ("chat", "embedding"):
         if key in body:
             data["defaults"][key] = body[key]
+    if "tiers" in body:
+        data["defaults"]["tiers"] = body["tiers"]
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("LLM 默认配置已更新: %s", body)
     return {
         "chat": data["defaults"].get("chat", ""),
-        "reasoning": data["defaults"].get("reasoning", ""),
         "embedding": data["defaults"].get("embedding", ""),
+        "tiers": data["defaults"].get("tiers", {}),
     }
 
 

@@ -71,10 +71,10 @@ export interface ProviderConfig {
  * LLM 默认配置类型
  */
 export interface LLMDefaults {
-  /** 聊天模型 */
+  /** 默认模型 */
   chat: string
-  /** 推理模型 */
-  reasoning: string
+  /** 模型分级 */
+  tiers: Record<string, string>
   /** 嵌入模型 */
   embedding: string
 }

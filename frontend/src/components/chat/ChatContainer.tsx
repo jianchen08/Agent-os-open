@@ -36,57 +36,6 @@ const EMPTY_MESSAGES: Message[] = []
  * 将多个连续的 assistant 消息合并为一条，整合 content 和 parts。
  * 不区分流式/非流式，统一合并。组内有 streaming 消息时，合并结果保留 streaming 状态。
  */
-function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
-  if (messages.length <= 1) return messages
-  const result: Message[] = []
-  let i = 0
-  while (i < messages.length) {
-    const msg = messages[i]
-    if (msg.role !== 'assistant') {
-      result.push(msg)
-      i++
-      continue
-    }
-    const groupStart = i
-    while (i < messages.length && messages[i].role === 'assistant') { i++ }
-    const group = messages.slice(groupStart, i)
-    if (group.length === 1) {
-      result.push({ ...group[0] })
-      continue
-    }
-    const first = group[0]
-    const hasStreaming = group.some((m) => m.status === 'streaming')
-    const allContent: string[] = []
-    for (const m of group) {
-      if (m.content && m.content.trim()) {
-        allContent.push(m.content.trim())
-      }
-    }
-    const mergedContent = allContent.join('\n\n')
-    let globalSeq = 0
-    const mergedParts = group.flatMap((m) => {
-      const rawParts = m.parts || []
-      return rawParts.map((p) => ({ ...p, sequence: globalSeq++ }))
-    })
-    if (!mergedContent && mergedParts.length === 0) {
-      for (const m of group) {
-        result.push({ ...m })
-      }
-      continue
-    }
-    const mergedId = `merged_${first.id}_${group.length}`
-    result.push({
-      ...first,
-      id: mergedId,
-      _originalIds: group.map(m => m.id),
-      content: mergedContent,
-      parts: mergedParts.length > 0 ? mergedParts : undefined,
-      status: hasStreaming ? 'streaming' : first.status,
-    })
-  }
-  return result
-}
-
 /**
  * 活跃投票面板列表
  *
@@ -287,8 +236,7 @@ export const ChatContainer = ({
    * 不再使用外部传入的 messages prop 作为 fallback，消除双数据源不一致问题。
    */
   const activeMessages = useMemo(() => {
-    const mapped = pipelineMessages.filter((m: any) => m.role !== 'tool')
-    return mergeConsecutiveAssistantMessages(mapped)
+    return pipelineMessages.filter((m: any) => m.role !== 'tool')
   }, [pipelineMessages])
 
   /**

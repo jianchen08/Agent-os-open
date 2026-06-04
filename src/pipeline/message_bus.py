@@ -217,7 +217,10 @@ async def send_pipeline_message(
                 if _sink is not None:
                     from pipeline.registry import get_engine_registry
                     _registry = get_engine_registry()
-                    bridge = _registry.ensure_bridge(pipeline_id, _sink)
+                    bridge = _registry.ensure_bridge(
+                        pipeline_id, _sink, engine=engine,
+                        auto_start_drain=False,
+                    )
                     _on_chunk = bridge.on_chunk if bridge else lambda chunk: None
                     # BUG-FIX-fix_20260601_isolated_engine:
                     # engine.run() 跑在独立线程+独立事件循环，与调用方完全解耦。
@@ -258,43 +261,10 @@ async def send_pipeline_message(
             registry = get_engine_registry()
             bridge = registry.get_bridge(pipeline_id)
 
-            # BUG-FIX-fix_20260530_drain_loop_race:
-            # 问题根因: 子任务完成通知唤醒引擎时，存在时序竞争：
-            #   1. inject_message() 设置 _wake_event
-            #   2. _suspend_and_wait 被唤醒，设置 _running = True
-            #   3. _find_engine() 检查时引擎已经是 running 状态
-            #   4. 进入 running 分支，不启动 drain_loop
-            #   5. LLM 生成的 chunks 没有消费者，前端显示空消息
-            # 修复方案: system 通知唤醒时，无论引擎处于什么状态，都确保
-            #   drain_loop 已启动。running 分支也检查 bridge 是否存在，
-            #   不存在则创建并启动 drain_loop。
-            # 影响范围: 所有 system/notification 来源的消息注入
-            # 修复日期: 2026-05-30
-            if state == "suspended" or msg_source == "system":
-                _sink = output_sink or _create_sink(pipeline_id)
-                logger.debug(
-                    "[DRAIN-TRACE] send_pipeline_message ensure_bridge 分支: pipeline=%s state=%s msg_source=%s has_output_sink=%s has_created_sink=%s",
-                    pipeline_id[:12], state, msg_source,
-                    output_sink is not None, _sink is not None,
-                )
-                if _sink is not None:
-                    _engine_task_ref = registry.get(pipeline_id)
-                    bridge = registry.ensure_bridge(
-                        pipeline_id, _sink,
-                        auto_start_drain=True,
-                        engine=engine,
-                        engine_task=_engine_task_ref.engine_task if _engine_task_ref else None,
-                    )
-                    logger.debug(
-                        "[DRAIN-TRACE] ensure_bridge 返回: pipeline=%s bridge=%s",
-                        pipeline_id[:12], "yes" if bridge else "None",
-                    )
-                else:
-                    logger.warning(
-                        "[MessageBus] FAILED to create sink for %s | pipeline=%s",
-                        "suspended" if state == "suspended" else "system_wake",
-                        pipeline_id[:12],
-                    )
+            if state == "suspended":
+                # 仅更新 sink，不调 ensure_bridge（会杀掉正在运行的 drain_loop）
+                if output_sink is not None and bridge is not None:
+                    bridge.output_sink = output_sink
 
             if state == "running" and msg_source == "user":
                 await _auto_complete_interaction(pipeline_id)
@@ -648,11 +618,10 @@ def _start_bg_drain(
             result = await bridge.drain_loop(
                 engine_task,
                 heartbeat_interval=5.0,
-                suspend_check=lambda: getattr(engine, "is_suspended", False),
             )
             content = result.get("accumulated_content", "")
             thinking_parts = result.get("thinking_content_parts", [])
-            logger.warning(
+            logger.debug(
                 "[DRAIN] pipeline=%s msg=%s contentLen=%d thinkingParts=%d engine_running=%s engine_suspended=%s",
                 pipeline_id[:12], bridge.message_id[:12],
                 len(content), len(thinking_parts),

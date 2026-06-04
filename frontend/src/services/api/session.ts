@@ -375,20 +375,23 @@ export async function getMessages(
 
     // 兼容旧格式（纯数组）和新格式（带 total/has_more 的对象）
     if (Array.isArray(response.data)) {
+      const mapped = response.data.map((msg: BackendMessageResponse) =>
+        mapBackendMessageToMessage(msg, sessionId),
+      )
       return {
-        messages: response.data.map((msg: BackendMessageResponse) =>
-          mapBackendMessageToMessage(msg, sessionId),
-        ),
+        messages: mergeConsecutiveAssistantMessages(mapped),
         total: response.data.length,
         has_more: false,
       }
     }
 
     const rawMessages = response.data.messages || []
+    const mapped = rawMessages.map((msg: BackendMessageResponse) =>
+      mapBackendMessageToMessage(msg, sessionId),
+    )
+    const merged = mergeConsecutiveAssistantMessages(mapped)
     return {
-      messages: rawMessages.map((msg: BackendMessageResponse) =>
-        mapBackendMessageToMessage(msg, sessionId),
-      ),
+      messages: merged,
       total: response.data.total ?? rawMessages.length,
       has_more: response.data.has_more ?? false,
     }

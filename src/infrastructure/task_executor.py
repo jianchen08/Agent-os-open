@@ -255,7 +255,7 @@ class TaskExecutorMixin:
             engine = _reg_result.engine
             pipeline_id = engine.pipeline_id
 
-            await self._bind_pipeline_run(task_id, pipeline_id, task_service)
+            await self._bind_pipeline_run(task_id, pipeline_id, task_service, _ws_thread_id)
             await self._send_sub_agent_created_event(task_id, target_id, pipeline_id, task_data)
 
             ctx.idle_timer_registered = await self._register_idle_timer(
@@ -583,11 +583,17 @@ class TaskExecutorMixin:
 
     async def _bind_pipeline_run(
         self, task_id: str, pipeline_id: str, task_service: Any,
+        thread_id: str = "",
     ) -> None:
-        """早期绑定 pipeline_run_id 到任务。
+        """早期绑定 pipeline_run_id 到任务，并注册到 api_store 的会话映射。
 
         BUG-FIX-fix_20260417_task_manage_records:
         管道启动前立即绑定，确保运行中查询执行记录不为空。
+
+        BUG-FIX-fix_20260603_api_store_pipeline_mapping:
+        问题根因: 子任务的 pipeline_run_id 未写入 api_store 的 session.pipeline_ids，
+                  导致删除会话时无法通过 pipeline_ids 直接找到所有子管道。
+        修复方案: 在绑定管道时，将 pipeline_id 注册到 MemoryStore 对应会话的 pipeline_ids。
         """
         if not task_service:
             return
@@ -604,6 +610,25 @@ class TaskExecutorMixin:
                 root_id = task_service.get_root_task_id(task_id)
                 if root_id:
                     exec_storage.register_pipeline(pipeline_id, root_id)
+
+            # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
+            # 将子管道 ID 注册到 api_store 的 session.pipeline_ids，
+            # 使 store.json 的 pipeline_ids 包含所有子管道，便于级联清理。
+            if thread_id:
+                try:
+                    from channels.api.memory_store import store as api_store
+                    session = api_store.get_session(thread_id)
+                    if session:
+                        session.register_pipeline(pipeline_id)
+                        api_store.set_session(thread_id, session)
+                        logger.info(
+                            "TaskWorker: registered sub-pipeline %s to api_store session %s",
+                            pipeline_id, thread_id,
+                        )
+                except Exception as reg_exc:
+                    logger.warning(
+                        "TaskWorker: failed to register sub-pipeline to api_store: %s", reg_exc,
+                    )
         except Exception as exc:
             logger.warning(
                 "TaskWorker: early bind_pipeline_run failed for %s: %s",

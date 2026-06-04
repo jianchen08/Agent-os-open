@@ -47,7 +47,6 @@ class MemoryContextService:
         _compressor: 上下文压缩器
         _config: 服务配置
         _layers: 内存中的层级数据 {session_id: {layer: content}}
-        _token_estimate_fn: token 估算函数
     """
 
     _MAX_COMPRESS_ROUNDS = 2
@@ -56,15 +55,13 @@ class MemoryContextService:
         self,
         compressor: ContextCompressor | None = None,
         config: dict[str, Any] | None = None,
-        token_estimate_fn: Callable[[str], int] | None = None,
         llm_call_fn: LLMCallFn | None = None,
     ) -> None:
         """初始化记忆上下文服务。
 
         Args:
             compressor: 上下文压缩器（可选）
-            config: 服务配置，需包含 context_window, compress_trigger_ratio, budgets
-            token_estimate_fn: token 估算函数
+            config: 服务配置，需包含 context_window, compress_trigger_ratio
             llm_call_fn: LLM 调用函数（可选，支持后续通过 set_llm_call_fn 延迟注入）
         """
         compression_config = CompressionConfig.from_yaml_config(
@@ -72,7 +69,6 @@ class MemoryContextService:
         )
         self._compressor = compressor or ContextCompressor(config=compression_config)
         self._config = config or {"context_window": 128000, "compress_trigger_ratio": 0.5}
-        self._token_estimate_fn = token_estimate_fn or self._default_token_estimate
         self._llm_call_fn: LLMCallFn | None = llm_call_fn
 
         # 内存存储：{session_id: {"L0": [messages], "L1": str, "L2": str}}
@@ -80,6 +76,16 @@ class MemoryContextService:
 
         # 父执行记录 ID（用于上下文隔离）
         self.parent_record_id: str | None = None
+
+        # 外部依赖（通过 setup() 注入）
+        self._chunk_service = None
+        self._memory_service = None
+        self._llm_core = None
+        self._pipeline_id = ""
+        self._session_id = ""
+        self._user_id = ""
+        self._compression_model_id = None
+        self._model_name = ""
 
         self._validate_config()
 
@@ -90,11 +96,14 @@ class MemoryContextService:
         )
 
     def _validate_config(self) -> None:
-        """验证配置完整性。"""
-        required_keys = ["context_window", "compress_trigger_ratio"]
-        for key in required_keys:
+        """验证配置完整性，缺失字段用默认值填充。"""
+        defaults = {
+            "context_window": 128000,
+            "compress_trigger_ratio": 0.5,
+        }
+        for key, default in defaults.items():
             if key not in self._config:
-                raise KeyError(f"配置缺失: {key}")
+                self._config[key] = default
 
     def set_llm_call_fn(self, llm_call_fn: LLMCallFn) -> None:
         """延迟注入 LLM 调用函数。
@@ -109,124 +118,30 @@ class MemoryContextService:
         self._compressor.set_llm_call_fn(llm_call_fn)
         logger.debug("[MemoryContextService] LLM 调用函数已注入")
 
-    @staticmethod
-    def _default_token_estimate(text: str) -> int:
-        """默认 token 估算（简化版）。
-
-        Args:
-            text: 文本
-
-        Returns:
-            估算的 token 数
-        """
-        return max(1, len(text) // 2) if text else 0
-
-    def _get_session_data(self, session_id: str) -> dict[str, Any]:
-        """获取会话数据。
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            会话数据字典
-        """
-        if session_id not in self._layers:
-            self._layers[session_id] = {
-                "L0": [],
-                "L1": "",
-                "L2": "",
-            }
-        return self._layers[session_id]
-
-    async def add_message(
-        self,
-        session_id: str,
-        message: dict[str, Any],
-        parent_record_id: str | None = None,
-    ) -> None:
-        """写流程：添加消息，按需压缩保存。
-
-        Args:
-            session_id: 会话 ID
-            message: 消息字典
-            parent_record_id: 父执行记录 ID
-        """
-        data = self._get_session_data(session_id)
-
-        # 1. 追加消息到 L0
-        data["L0"].append(message)
-
-        # 2. 检查总 token
-        total_tokens = self._get_total_tokens(session_id)
-        context_window = self._config["context_window"]
-        trigger_ratio = self._config["compress_trigger_ratio"]
-        trigger_threshold = int(context_window * trigger_ratio)
-
-        # 3. 如果超过阈值，触发递进压缩
-        if total_tokens > trigger_threshold:
-            logger.info(
-                "[MemoryContextService] 触发压缩 | "
-                "total=%d, threshold=%d",
-                total_tokens, trigger_threshold,
-            )
-            await self._compress_and_save(session_id)
-
-    async def _compress_and_save(self, session_id: str) -> None:
-        """执行递进压缩并保存结果。
-
-        Args:
-            session_id: 会话 ID
-        """
-        if not self._llm_call_fn:
-            logger.warning(
-                "[MemoryContextService] 跳过压缩：未提供 LLM 调用函数，"
-                "请通过 set_llm_call_fn() 注入或初始化时传入 llm_call_fn 参数",
-            )
-            return
-
-        data = self._get_session_data(session_id)
-
-        l0_content = self._format_messages_to_string(data["L0"])
-        l1_content = data.get("L1", "")
-        l2_content = data.get("L2", "")
-
-        # 计算预算
-        budgets = self._calculate_budgets()
-
-        try:
-            new_l1, new_l2 = await self._compressor.progressive_compress(
-                l0=l0_content,
-                l1=l1_content,
-                l2=l2_content,
-                budgets=budgets,
-            )
-
-            # 保存压缩结果
-            data["L0"] = []
-            data["L1"] = new_l1
-            data["L2"] = new_l2
-
-            logger.info(
-                "[MemoryContextService] 压缩完成 | "
-                "L1≈%d字符, L2≈%d字符",
-                len(new_l1), len(new_l2),
-            )
-        except Exception as e:
-            logger.warning("[MemoryContextService] 压缩失败: %s，保留原文", e)
-
-    def _calculate_budgets(self) -> dict[str, int]:
-        """计算各层预算。
-
-        Returns:
-            各层 token 预算字典
-        """
-        context_window = self._config["context_window"]
-        budgets_config = self._config.get("budgets", {"l1": 0.15, "l2": 0.05})
-
-        return {
-            "L1": int(context_window * budgets_config.get("l1", 0.15)),
-            "L2": int(context_window * budgets_config.get("l2", 0.05)),
-        }
+    def setup(self, *, chunk_service=None, memory_service=None,
+              llm_core=None, pipeline_id="", session_id="",
+              context_window=0, user_id="",
+              compression_model_id=None,
+              model_name="") -> None:
+        """注入外部依赖，供 context_window_guard 调用。"""
+        if chunk_service is not None:
+            self._chunk_service = chunk_service
+        if memory_service is not None:
+            self._memory_service = memory_service
+        if llm_core is not None:
+            self._llm_core = llm_core
+        if pipeline_id:
+            self._pipeline_id = pipeline_id
+        if session_id:
+            self._session_id = session_id
+        if context_window:
+            self._config["context_window"] = context_window
+        if user_id:
+            self._user_id = user_id
+        if compression_model_id is not None:
+            self._compression_model_id = compression_model_id
+        if model_name:
+            self._model_name = model_name
 
     # ------------------------------------------------------------------
     # 预算驱动的完整压缩流程（供 context_window_guard 调用）
@@ -237,8 +152,10 @@ class MemoryContextService:
         messages: list[dict[str, Any]],
         context_window: int,
         trigger_ratio: float = 0.6,
-        previous_l1: str = "",
+        state_snapshot: str = "",
+        recent_process_blocks: str = "",
         save_chunk_fn: Callable[..., Awaitable[None]] | None = None,
+        compression_window: int | None = None,
     ) -> list[dict[str, Any]] | None:
         """预算驱动的完整压缩流程。
 
@@ -248,28 +165,101 @@ class MemoryContextService:
 
         Args:
             messages: 完整消息列表
-            context_window: 模型上下文窗口大小
+            context_window: 主模型上下文窗口大小（用于预算切分）
             trigger_ratio: 触发压缩的比例
-            previous_l1: 前次压缩的 L1 摘要（增量压缩背景）
-            save_chunk_fn: 压缩块持久化回调（可选）
+            state_snapshot: 当前累积的状态快照（JSON）
+            recent_process_blocks: 最近的过程块样本（采样文本）
+            save_chunk_fn: 压缩块持久化回调（已弃用，内部自动保存）
+            compression_window: 压缩模型上下文窗口大小（用于分片大小计算），
+                为 None 时回退到 context_window
 
         Returns:
             压缩后的消息列表，无需压缩或失败返回 None
         """
+        try:
+            return await self._compress_messages_impl(
+                messages, context_window, trigger_ratio,
+                state_snapshot, recent_process_blocks,
+                save_chunk_fn, compression_window,
+            )
+        except Exception as exc:
+            logger.error(
+                "[MemoryContextService] compress_messages 顶层异常: %s",
+                exc, exc_info=True,
+            )
+            return None
+
+    async def _compress_messages_impl(
+        self,
+        messages: list[dict[str, Any]],
+        context_window: int,
+        trigger_ratio: float,
+        state_snapshot: str,
+        recent_process_blocks: str,
+        save_chunk_fn,
+        compression_window: int | None,
+    ) -> list[dict[str, Any]] | None:
+        """compress_messages 的实际实现。"""
+        logger.info("[MemoryContextService] _compress_messages_impl 开始执行")
+        # 自动加载背景和构建依赖
+        if not state_snapshot and self._chunk_service:
+            logger.info("[MemoryContextService] 加载背景信息...")
+            bg = await self._load_background()
+            state_snapshot = bg["state_snapshot"]
+            if not recent_process_blocks:
+                recent_process_blocks = bg["process_blocks"]
+            logger.info("[MemoryContextService] 背景加载完成: snapshot=%d, blocks=%d",
+                        len(state_snapshot), len(recent_process_blocks))
+
+        if not self._llm_call_fn:
+            logger.info("[MemoryContextService] 构建 LLM 调用函数...")
+            fn = self._build_llm_call_fn()
+            if fn:
+                self.set_llm_call_fn(fn)
+                logger.info("[MemoryContextService] LLM 调用函数构建成功")
+            else:
+                logger.warning(
+                    "[MemoryContextService] compress_messages: 无法构建 LLM 调用函数"
+                    " (compression_model_id=%s, llm_core=%s, model_name=%s)",
+                    self._compression_model_id,
+                    type(self._llm_core).__name__ if self._llm_core else None,
+                    self._model_name,
+                )
+
+        if not compression_window:
+            compression_window = self._get_compression_window(context_window)
+
+        logger.info(
+            "[MemoryContextService] compress_messages 入口: "
+            "msg_count=%d, context_window=%d, compression_window=%s, "
+            "trigger_ratio=%.2f, llm_fn=%s, chunk_service=%s, "
+            "state_snapshot_len=%d, process_blocks_len=%d",
+            len(messages), context_window,
+            compression_window or context_window,
+            trigger_ratio,
+            "有" if self._llm_call_fn else "无",
+            "有" if self._chunk_service else "无",
+            len(state_snapshot), len(recent_process_blocks),
+        )
+
         if not self._llm_call_fn:
             logger.warning("[MemoryContextService] 跳过压缩：未提供 LLM 调用函数")
             return None
 
+        # 预算切分用主模型窗口，分片大小用压缩模型窗口
         config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
         trigger_tokens = int(context_window * trigger_ratio)
+        comp_window = compression_window or context_window
 
         current_messages = messages
         compressed = None
 
         for round_idx in range(self._MAX_COMPRESS_ROUNDS):
             compressed = await self._do_compress_round(
-                current_messages, context_window, budgets, previous_l1, save_chunk_fn,
+                current_messages, context_window, budgets,
+                state_snapshot, recent_process_blocks,
+                compression_window=comp_window,
             )
             if compressed is None:
                 break
@@ -293,10 +283,14 @@ class MemoryContextService:
         messages: list[dict[str, Any]],
         context_window: int,
         budgets: dict[str, int],
-        previous_l1: str,
-        save_chunk_fn: Callable[..., Awaitable[None]] | None,
+        state_snapshot: str,
+        recent_process_blocks: str,
+        compression_window: int | None = None,
     ) -> list[dict[str, Any]] | None:
         """执行一轮预算驱动的压缩。
+
+        预算切分（recent_budget）基于主模型 context_window，
+        分片大小（batch_budget）基于 compression_window（防止压缩模型上下文不够）。
 
         多块追加模式：
         - 识别已有压缩块，保留不动
@@ -321,13 +315,28 @@ class MemoryContextService:
             else:
                 pure_system_msgs.append(m)
 
+        logger.info(
+            "[MemoryContextService] _do_compress_round: "
+            "total=%d, pure_system=%d, old_blocks=%d, other=%d, "
+            "recent_budget=%d, context_window=%d, compression_window=%s",
+            len(messages), len(pure_system_msgs), len(old_blocks), len(other_msgs),
+            budgets.get("recent", 0), context_window,
+            compression_window or context_window,
+        )
+
         if not other_msgs:
             return None
 
-        # 按 token 预算从尾部向前计算切分点
+        # 按 token 预算从尾部向前计算切分点（基于主模型窗口）
         recent_budget = budgets["recent"]
         split_idx = self._find_split_by_budget(other_msgs, recent_budget)
         if split_idx <= 0:
+            total_est = sum(self._estimate_msg_tokens(m) for m in other_msgs)
+            logger.warning(
+                "[MemoryContextService] split_idx=%d, 所有消息都在 recent 预算内: "
+                "total_estimated=%d tokens, recent_budget=%d, context_window=%d, msg_count=%d",
+                split_idx, total_est, recent_budget, context_window, len(other_msgs),
+            )
             return None
 
         # 保证工具调用配对完整
@@ -346,15 +355,15 @@ class MemoryContextService:
             len(old_blocks) // 2,
         )
 
-        # 按压缩模型上下文窗口比例计算分片数
-        # 每片大小不超过 context_window * batch_ratio，超出则均分
+        # 分片大小按压缩模型窗口算（防止压缩模型上下文不够）
+        # 每片大小不超过 compression_window * batch_ratio，超出则均分
+        comp_win = compression_window or context_window
         old_tokens = sum(self._estimate_msg_tokens(m) for m in old_msgs)
         batch_ratio = 0.5
-        batch_budget = int(context_window * batch_ratio)
+        batch_budget = int(comp_win * batch_ratio)
         num_batches = max(1, -(-old_tokens // batch_budget))  # ceil division
 
         any_success = False
-        current_previous_l1 = previous_l1
 
         for batch_idx in range(num_batches):
             start = batch_idx * len(old_msgs) // num_batches
@@ -369,7 +378,7 @@ class MemoryContextService:
             )
 
             comp_result = await self._build_compression_content(
-                batch, context_window, budgets, current_previous_l1,
+                batch, context_window, budgets, state_snapshot, recent_process_blocks,
             )
             if not comp_result:
                 logger.warning(
@@ -377,13 +386,10 @@ class MemoryContextService:
                 )
                 continue
 
-            if save_chunk_fn:
-                try:
-                    updated_bg = await save_chunk_fn(batch, comp_result)
-                    if updated_bg:
-                        current_previous_l1 = updated_bg
-                except Exception as exc:
-                    logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
+            try:
+                await self._save_compression_result(batch, comp_result)
+            except Exception as exc:
+                logger.warning("[MemoryContextService] 保存压缩块失败: %s", exc)
 
             any_success = True
 
@@ -392,79 +398,325 @@ class MemoryContextService:
 
         return pure_system_msgs + recent_msgs
 
-    def _downgrade_blocks_if_needed(
-        self,
-        blocks: list[dict[str, Any]],
-        l1_budget: int,
-        l2_budget: int,
-    ) -> list[dict[str, Any]]:
-        """所有压缩块总量超 L1 预算时，从最老的块开始降级。
+    # ------------------------------------------------------------------
+    # 压缩背景加载
+    # ------------------------------------------------------------------
 
-        降级链：L1 → L2 → keywords
-        """
-        summary_indices = [
-            i for i, b in enumerate(blocks)
-            if isinstance(b.get("content"), str)
-            and b["content"].startswith("## 历史对话压缩摘要")
-        ]
-        if not summary_indices:
-            return blocks
+    async def _load_background(self) -> dict[str, str]:
+        """加载压缩背景信息（state_snapshot + 过程块采样）。"""
+        state_snapshot = ""
+        process_blocks = ""
 
-        total_tokens = sum(self._estimate_msg_tokens(blocks[i]) for i in summary_indices)
-        if total_tokens <= l1_budget:
-            return blocks
+        if self._chunk_service and self._pipeline_id:
+            try:
+                snapshots = await self._chunk_service.find_by_pipeline(
+                    self._pipeline_id, "STATE_SNAPSHOT",
+                )
+                if snapshots:
+                    state_snapshot = snapshots[0].content or ""
+            except Exception:
+                pass
+
+            try:
+                chunks = await self._chunk_service.find_by_pipeline(
+                    self._pipeline_id, "L1",
+                )
+                if chunks:
+                    sorted_chunks = sorted(chunks, key=lambda c: c.sequence_start)
+                    if len(sorted_chunks) <= 3:
+                        samples = sorted_chunks
+                    else:
+                        mid_idx = len(sorted_chunks) // 2
+                        samples = [
+                            sorted_chunks[0],
+                            sorted_chunks[mid_idx],
+                            sorted_chunks[-1],
+                        ]
+                    process_blocks = "\n\n---\n\n".join(
+                        f"[{chunk.sequence_start}-{chunk.sequence_end}] {chunk.content}"
+                        for chunk in samples
+                    )
+            except Exception:
+                pass
+
+        return {"state_snapshot": state_snapshot, "process_blocks": process_blocks}
+
+    # ------------------------------------------------------------------
+    # 压缩结果持久化
+    # ------------------------------------------------------------------
+
+    async def _save_compression_result(
+        self, old_msgs: list[dict[str, Any]], comp_result: dict[str, Any],
+    ) -> None:
+        """保存压缩块到 ChunkService + 覆盖状态快照 + 写入长期记忆。"""
+        if not self._chunk_service or not self._pipeline_id:
+            return
+
+        from memory.types import ChunkData
+
+        l1_content = comp_result.get("l1", "")
+        l2_content = comp_result.get("l2", "")
+        keywords = comp_result.get("keywords", [])
+        state_snapshot = comp_result.get("state_snapshot", {})
+        memory_items = comp_result.get("memory_items", {})
+        msg_count = len(old_msgs)
+        context_window = self._config.get("context_window", 0)
+
+        # 从已有块计算序列范围
+        sequence_start = 1
+        try:
+            existing = await self._chunk_service.find_by_pipeline(
+                self._pipeline_id, "L1",
+            )
+            if existing:
+                max_end = max(c.sequence_end for c in existing if c.sequence_end)
+                sequence_start = max_end + 1
+        except Exception:
+            pass
+        sequence_end = sequence_start + msg_count - 1
+
+        # L1 过程块
+        l1_chunk = ChunkData(
+            pipeline_run_id=self._pipeline_id,
+            session_id=self._session_id,
+            layer="L1",
+            content=l1_content,
+            l2_content=l2_content,
+            token_count=max(1, len(l1_content) // 2),
+            message_count=msg_count,
+            sequence_start=sequence_start,
+            sequence_end=sequence_end,
+            keywords=keywords,
+            context_window=context_window,
+        )
+        l1_id = await self._chunk_service.save(l1_chunk)
+
+        # L2 块
+        if l2_content:
+            l2_chunk = ChunkData(
+                pipeline_run_id=self._pipeline_id,
+                session_id=self._session_id,
+                layer="L2",
+                content=l2_content,
+                token_count=max(1, len(l2_content) // 2),
+                message_count=msg_count,
+                sequence_start=sequence_start,
+                sequence_end=sequence_end,
+                keywords=keywords,
+                context_window=context_window,
+            )
+            await self._chunk_service.save(l2_chunk)
+
+        # STATE_SNAPSHOT（覆盖）
+        if state_snapshot:
+            try:
+                old_snapshots = await self._chunk_service.find_by_pipeline(
+                    self._pipeline_id, "STATE_SNAPSHOT",
+                )
+                for old in old_snapshots:
+                    await self._chunk_service.delete(old.id)
+            except Exception:
+                pass
+
+            import json
+            ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
+            snapshot_chunk = ChunkData(
+                pipeline_run_id=self._pipeline_id,
+                session_id=self._session_id,
+                layer="STATE_SNAPSHOT",
+                content=ss_content,
+                token_count=max(1, len(ss_content) // 2),
+                message_count=msg_count,
+                sequence_start=1,
+                sequence_end=sequence_end,
+                context_window=context_window,
+            )
+            await self._chunk_service.save(snapshot_chunk)
+
+        # memory_items → memory_service
+        if memory_items and any(v for v in memory_items.values() if v and v != "null"):
+            if self._memory_service:
+                try:
+                    tag_map = {
+                        "user_profile_updates": "user_profile",
+                        "project_knowledge_updates": "project_knowledge",
+                        "experience_updates": "experience",
+                    }
+                    extracted = 0
+                    for key, value in memory_items.items():
+                        if value and value != "null":
+                            await self._memory_service.add_memory(
+                                user_id=self._user_id,
+                                memory_type="semantic",
+                                tags=[tag_map.get(key, key)],
+                                content=value,
+                                source="compression",
+                            )
+                            extracted += 1
+                    if extracted:
+                        logger.info(
+                            "[MemoryContextService] 长期记忆提取: %d 条", extracted,
+                        )
+                except Exception as exc:
+                    logger.warning("[MemoryContextService] 长期记忆写入失败: %s", exc)
 
         logger.info(
-            "[MemoryContextService] 压缩块总量超 L1 预算: %d > %d, 开始降级",
-            total_tokens, l1_budget,
+            "[MemoryContextService] 压缩块已保存: L1_id=%s (%d字符), "
+            "L2≈%d字符, keywords=%d, state_snapshot=%s",
+            l1_id, len(l1_content), len(l2_content), len(keywords),
+            "有" if state_snapshot else "无",
         )
 
-        # 阶段 1：从最老 summary 开始 L1 → L2
-        for idx in summary_indices:
-            if total_tokens <= l1_budget:
-                break
-            block = blocks[idx]
-            l2_content = block.get("_l2", "")
-            if not l2_content:
-                continue
-            old_tokens = self._estimate_msg_tokens(block)
-            blocks[idx] = {
-                **{k: v for k, v in block.items() if k != "_l2"},
-                "content": f"## 历史对话压缩摘要（L2）\n\n{l2_content}",
-            }
-            total_tokens -= old_tokens - self._estimate_msg_tokens(blocks[idx])
+    # ------------------------------------------------------------------
+    # LLM 调用函数构建
+    # ------------------------------------------------------------------
 
-        if total_tokens <= l1_budget:
-            return blocks
+    def _build_llm_call_fn(self):
+        """构建 LLM 调用函数，统一走 router_factory 的 KeyPoolAdapter。
 
-        # 阶段 2：从最老开始 L2 → keywords
-        for idx in summary_indices:
-            if total_tokens <= l1_budget:
-                break
-            block = blocks[idx]
-            keywords = block.get("_keywords", [])
-            if not keywords:
-                continue
-            old_tokens = self._estimate_msg_tokens(block)
-            blocks[idx] = {
-                **{k: v for k, v in block.items() if k != "_keywords"},
-                "content": "## 历史对话压缩摘要（关键词）\n\n关键词: " + ", ".join(keywords),
-            }
-            total_tokens -= old_tokens - self._estimate_msg_tokens(blocks[idx])
+        优先级：
+        1. 通过 router_factory 的共享 Adapter（正确处理 keys 列表 + 并发控制）
+        2. 回退到 llm_core 的 adapter
+        """
+        # 优先：通过 router_factory 获取共享 Adapter（统一通道）
+        try:
+            from config.models import get_model_config_loader
+            from llm.router_factory import get_or_create_adapter
 
-        return blocks
+            loader = get_model_config_loader()
+            adapter = get_or_create_adapter(loader)
+            model_id = self._compression_model_id or self._model_name
+            if model_id:
+                # 获取 litellm 模型字符串
+                model_conf = loader.get_model_config(model_id)
+                if model_conf:
+                    provider = model_conf.get("provider", "")
+                    bare_name = model_conf.get("model_name", model_id)
+                    from llm.router_factory import _get_litellm_model_string
+                    litellm_model = _get_litellm_model_string(provider, bare_name)
+
+                    async def _call_via_shared_adapter(prompt: str) -> str:
+                        response = await adapter.completion(
+                            model=litellm_model,
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=False,
+                        )
+                        return response.text or ""
+
+                    logger.info(
+                        "[MemoryContextService] 压缩使用共享Adapter: model=%s (provider=%s)",
+                        model_id, provider,
+                    )
+                    return _call_via_shared_adapter
+        except Exception as exc:
+            logger.warning("[MemoryContextService] 共享Adapter构建失败: %s", exc)
+
+        # 回退：llm_core 的 adapter
+        if self._llm_core and hasattr(self._llm_core, "_adapter") and hasattr(self._llm_core, "_model"):
+            _use_router = hasattr(self._llm_core._adapter, '_router')
+            _model_str = self._llm_core._model if _use_router else self._llm_core._get_model_string()
+
+            async def _call_via_core(prompt: str) -> str:
+                kwargs: dict[str, Any] = {
+                    "model": _model_str,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                }
+                if not _use_router:
+                    if getattr(self._llm_core, "_api_base", None):
+                        kwargs["api_base"] = self._llm_core._api_base
+                    if getattr(self._llm_core, "_api_key", None):
+                        kwargs["api_key"] = self._llm_core._api_key
+                response = await self._llm_core._adapter.completion(**kwargs)
+                return response.text or ""
+            return _call_via_core
+
+        return None
+
+    # ------------------------------------------------------------------
+    # 压缩模型窗口获取
+    # ------------------------------------------------------------------
+
+    def _get_compression_window(self, context_window: int) -> int | None:
+        """获取压缩模型的 context_window。"""
+        if not self._compression_model_id:
+            return None
+        try:
+            from config.models import get_model_config_loader
+            loader = get_model_config_loader()
+            conf = loader.get_llm_core_config(self._compression_model_id)
+            if conf and conf.get("context_window"):
+                return conf["context_window"]
+        except Exception:
+            pass
+        return None
+
+    # ------------------------------------------------------------------
+    # 窗口变更检测与清理
+    # ------------------------------------------------------------------
+
+    async def clean_if_window_changed(
+        self,
+        messages: list[dict[str, Any]],
+        context_window: int,
+    ) -> list[dict[str, Any]] | None:
+        """检测 context_window 是否变化，变化时清理旧压缩摘要。"""
+        if not self._chunk_service or not self._pipeline_id:
+            return None
+
+        try:
+            chunks = await self._chunk_service.find_by_pipeline(
+                self._pipeline_id, "L1",
+            )
+        except Exception:
+            return None
+
+        if not chunks:
+            return None
+
+        latest_chunk = max(chunks, key=lambda c: c.sequence_end)
+        chunk_window = latest_chunk.context_window
+
+        if not chunk_window or chunk_window == context_window:
+            return None
+
+        cleaned = [
+            m for m in messages
+            if not (
+                m.get("role") == "system"
+                and (
+                    str(m.get("content", "")).startswith("## 历史对话压缩摘要")
+                    or str(m.get("content", "")) == _COMPRESSION_NOTICE
+                )
+            )
+        ]
+
+        if len(cleaned) == len(messages):
+            return None
+
+        logger.info(
+            "[MemoryContextService] context_window 变更: %d → %d, 清理 %d 条旧压缩摘要",
+            chunk_window, context_window, len(messages) - len(cleaned),
+        )
+        return cleaned
+
+    # ------------------------------------------------------------------
+    # 压缩内容构建
+    # ------------------------------------------------------------------
 
     async def _build_compression_content(
         self,
         old_msgs: list[dict[str, Any]],
         context_window: int,
         budgets: dict[str, int],
-        previous_l1: str,
+        state_snapshot: str,
+        recent_process_blocks: str,
     ) -> dict[str, Any] | None:
-        """压缩旧消息，返回 L1/L2/keywords 三元组。
+        """压缩旧消息，返回 L1/L2/keywords/state_snapshot/memory_items。
 
         Returns:
-            {"l1": str, "l2": str, "keywords": list} 或 None
+            {"l1": str, "l2": str, "keywords": list,
+             "state_snapshot": dict, "memory_items": dict} 或 None
         """
         if not self._llm_call_fn:
             return None
@@ -473,7 +725,9 @@ class MemoryContextService:
 
         try:
             result = await self._compressor.compress_all(
-                old_msgs, previous_l1=previous_l1,
+                old_msgs,
+                state_snapshot=state_snapshot,
+                recent_process_blocks=recent_process_blocks,
             )
         except Exception as exc:
             logger.warning("[MemoryContextService] 压缩失败: %s", exc)
@@ -482,15 +736,20 @@ class MemoryContextService:
         l1 = result.get("l1", "")
         l2 = result.get("l2", "")
         kw = result.get("keywords", [])
+        ss = result.get("state_snapshot", {})
+        mi = result.get("memory_items", {})
 
         if not l1:
             return None
 
         logger.info(
-            "[MemoryContextService] 压缩完成: L1≈%d字符 L2≈%d字符 keywords=%d",
+            "[MemoryContextService] 压缩完成: L1≈%d字符 L2≈%d字符 "
+            "keywords=%d state_snapshot=%d字段",
             len(l1), len(l2), len(kw),
+            sum(1 for v in ss.values() if v) if isinstance(ss, dict) else 0,
         )
-        return {"l1": l1, "l2": l2, "keywords": kw}
+        return {"l1": l1, "l2": l2, "keywords": kw,
+                "state_snapshot": ss, "memory_items": mi}
 
     # ------------------------------------------------------------------
     # 预算切分辅助
@@ -516,23 +775,14 @@ class MemoryContextService:
         return 0
 
     def _estimate_msg_tokens(self, msg: dict[str, Any]) -> int:
-        """估算单条消息的 token 数。"""
-        tokens = 0.0
+        """估算单条消息的 token 数（简化版）。"""
         content = str(msg.get("content", ""))
-        for c in content:
-            if "一" <= c <= "鿿" or "぀" <= c <= "ヿ":
-                tokens += 1.5
-            else:
-                tokens += 0.25
+        tokens = max(1, len(content) // 2) if content else 0
         for tc in msg.get("tool_calls", []):
             args = tc.get("function", {}).get("arguments", "")
             if args:
-                tokens += len(args) * 0.25
-        return int(tokens)
-
-    def _estimate_text_tokens(self, text: str) -> int:
-        """估算文本的 token 数。"""
-        return self._token_estimate_fn(text) if text else 0
+                tokens += max(1, len(args) // 2)
+        return tokens
 
     @staticmethod
     def _split_preserving_tool_pairs(
@@ -568,139 +818,3 @@ class MemoryContextService:
             recent_msgs = migrated + recent_msgs
 
         return old_msgs, recent_msgs
-
-    def _format_messages_to_string(self, messages: list[dict[str, Any]]) -> str:
-        """将消息列表格式化为字符串。
-
-        Args:
-            messages: 消息列表
-
-        Returns:
-            格式化后的字符串
-        """
-        lines: list[str] = []
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if content:
-                lines.append(f"[{role.upper()}]\n{content}")
-        return "\n\n".join(lines)
-
-    def _get_total_tokens(self, session_id: str) -> int:
-        """获取会话总 token 数。
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            总 token 数
-        """
-        data = self._get_session_data(session_id)
-        total = 0
-
-        # L0
-        for msg in data.get("L0", []):
-            total += self._token_estimate_fn(msg.get("content", ""))
-
-        # L1
-        l1 = data.get("L1", "")
-        if l1:
-            total += self._token_estimate_fn(l1)
-
-        # L2
-        l2 = data.get("L2", "")
-        if l2:
-            total += self._token_estimate_fn(l2)
-
-        return total
-
-    async def get_context_prompt(self, session_id: str) -> str:
-        """获取上下文提示词（读流程）。
-
-        拼接各层内容返回完整提示词。
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            上下文提示词
-        """
-        data = self._get_session_data(session_id)
-        parts: list[str] = []
-
-        l2 = data.get("L2", "")
-        if l2:
-            parts.append(f"## 历史摘要\n\n{l2}")
-
-        l1 = data.get("L1", "")
-        if l1:
-            parts.append(f"## 详细历史\n\n{l1}")
-
-        l0_messages = data.get("L0", [])
-        if l0_messages:
-            recent = self._format_messages_to_string(l0_messages)
-            parts.append(recent)
-
-        return "\n\n".join(parts)
-
-    async def get_memory_stats(
-        self,
-        session_id: str,
-        parent_record_id: str | None = None,
-    ) -> dict[str, Any]:
-        """获取记忆统计信息。
-
-        Args:
-            session_id: 会话 ID
-            parent_record_id: 父执行记录 ID
-
-        Returns:
-            统计信息字典
-        """
-        data = self._get_session_data(session_id)
-        total_tokens = self._get_total_tokens(session_id)
-        context_window = self._config["context_window"]
-
-        l0_messages = data.get("L0", [])
-        l0_tokens = sum(
-            self._token_estimate_fn(msg.get("content", ""))
-            for msg in l0_messages
-        )
-
-        l1_content = data.get("L1", "")
-        l1_tokens = self._token_estimate_fn(l1_content)
-
-        l2_content = data.get("L2", "")
-        l2_tokens = self._token_estimate_fn(l2_content)
-
-        return {
-            "session_id": session_id,
-            "context_window": context_window,
-            "total_tokens": total_tokens,
-            "usage_ratio": total_tokens / context_window if context_window > 0 else 0,
-            "parent_record_id": parent_record_id or self.parent_record_id,
-            "layers": {
-                "L0": {"tokens": l0_tokens, "messages_count": len(l0_messages)},
-                "L1": {"tokens": l1_tokens},
-                "L2": {"tokens": l2_tokens},
-            },
-        }
-
-    async def clear_memory(
-        self,
-        session_id: str,
-        parent_record_id: str | None = None,
-    ) -> None:
-        """清空会话记忆。
-
-        Args:
-            session_id: 会话 ID
-            parent_record_id: 父执行记录 ID
-        """
-        if session_id in self._layers:
-            del self._layers[session_id]
-
-        logger.info(
-            "[MemoryContextService] 记忆已清空 | session_id=%s",
-            session_id,
-        )

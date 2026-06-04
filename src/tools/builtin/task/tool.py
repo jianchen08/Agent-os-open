@@ -1031,6 +1031,9 @@ class TaskTool(BuiltinTool):
             reason = inputs.get("reason", "用户请求继续执行")
             await service.resume_task(task_id)
 
+            # BUG-FIX-fix_20260603_resume_status_report:
+            # resume_task 现在将状态设为 RUNNING（而非 PENDING），
+            # 前端显示的 new_status 应与实际一致。
             return create_success_result(
                 data={
                     "task_id": task_id,

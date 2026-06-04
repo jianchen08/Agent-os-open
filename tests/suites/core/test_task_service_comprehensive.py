@@ -82,7 +82,7 @@ class TestSimpleStateMachineTransitions:
         ("pending", "scheduled"),
         ("pending", "running"),
         ("pending", "cancelled"),
-        ("pending", "paused"),
+        ("pending", "suspended"),
         ("scheduled", "running"),
         ("scheduled", "cancelled"),
         ("running", "evaluating"),
@@ -91,7 +91,7 @@ class TestSimpleStateMachineTransitions:
         ("running", "suspended"),
         ("running", "blocked"),
         ("running", "cancelled"),
-        ("running", "paused"),
+        ("running", "suspended"),
         ("evaluating", "completed"),
         ("evaluating", "failed"),
         ("evaluating", "running"),
@@ -106,9 +106,9 @@ class TestSimpleStateMachineTransitions:
         ("timeout", "running"),
         ("timeout", "cancelled"),
         ("timeout", "failed"),
-        ("paused", "pending"),
-        ("paused", "running"),
-        ("paused", "cancelled"),
+        ("suspended", "pending"),
+        ("suspended", "running"),
+        ("suspended", "cancelled"),
     ])
     def test_valid_transition(self, from_s: str, to_s: str) -> None:
         """合法转换应成功。"""
@@ -124,9 +124,9 @@ class TestSimpleStateMachineTransitions:
         ("completed", "evaluating"),
         ("failed", "running"),
         ("failed", "completed"),
-        ("paused", "completed"),
-        ("paused", "evaluating"),
-        ("evaluating", "paused"),
+        ("suspended", "completed"),
+        ("suspended", "evaluating"),
+        ("evaluating", "suspended"),
         ("running", "pending"),
         ("cancelled", "running"),
         ("cancelled", "pending"),
@@ -145,7 +145,7 @@ class TestSimpleStateMachineTransitions:
         """can_transition 对合法/非法返回正确的布尔值。"""
         sm = SimpleStateMachine(initial_state="pending", transitions=_TASK_TRANSITIONS)
         assert sm.can_transition("running") is True
-        assert sm.can_transition("paused") is True
+        assert sm.can_transition("suspended") is True
         assert sm.can_transition("cancelled") is True
 
         sm_completed = SimpleStateMachine(initial_state="completed", transitions=_TASK_TRANSITIONS)
@@ -154,7 +154,7 @@ class TestSimpleStateMachineTransitions:
         sm_failed = SimpleStateMachine(initial_state="failed", transitions=_TASK_TRANSITIONS)
         assert sm_failed.can_transition("pending") is True
 
-        sm_paused = SimpleStateMachine(initial_state="paused", transitions=_TASK_TRANSITIONS)
+        sm_paused = SimpleStateMachine(initial_state="suspended", transitions=_TASK_TRANSITIONS)
         assert sm_paused.can_transition("evaluating") is False
 
 
@@ -394,21 +394,23 @@ class TestTaskServiceTransitions:
 
     @pytest.mark.asyncio
     async def test_pause_task_success(self) -> None:
-        """running → paused 成功。"""
+        """running → suspended 成功。"""
         task = await self.svc.create_task(title="暂停")
         await self.svc.start_task(task.id)
         await self.svc.pause_task(task.id)
         fetched = self.svc.get_task(task.id)
-        assert fetched.status == TaskStatus.PAUSED
+        assert fetched.status == TaskStatus.SUSPENDED
 
     @pytest.mark.asyncio
     async def test_resume_task_success(self) -> None:
-        """paused → pending 成功（resume_task 将 paused 恢复为 pending）。"""
+        """suspended → running 成功（resume_task 将 suspended 恢复为 running）。"""
         task = await self.svc.create_task(title="恢复")
         await self.svc.start_task(task.id)
         await self.svc.pause_task(task.id)
         result = await self.svc.resume_task(task.id)
-        assert result.status == TaskStatus.PENDING
+        # BUG-FIX-fix_20260603_resume_wake_engine:
+        # resume_task 现在将状态设为 RUNNING（而非 PENDING），以便挂起的管道引擎继续执行
+        assert result.status == TaskStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_fail_task_with_reason(self) -> None:
@@ -775,7 +777,7 @@ class TestTaskServiceTransitionHelpers:
         task = await self.svc.create_task(title="查询转换")
         transitions = self.svc.get_valid_transitions(task.id)
         assert "running" in transitions
-        assert "paused" in transitions
+        assert "suspended" in transitions
         assert "scheduled" in transitions
         assert "cancelled" in transitions
 
@@ -788,7 +790,7 @@ class TestTaskServiceTransitionHelpers:
         assert "completed" in transitions
         assert "failed" in transitions
         assert "evaluating" in transitions
-        assert "paused" in transitions
+        assert "suspended" in transitions
 
     def test_get_valid_transitions_nonexistent(self) -> None:
         """获取不存在的任务的转换列表返回空。"""
@@ -992,14 +994,10 @@ class TestTaskServiceEdgeCases:
 
         # running -> paused
         await self.svc.pause_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.PAUSED
+        assert self.svc.get_task(task.id).status == TaskStatus.SUSPENDED
 
-        # paused -> pending (resume_task 将 paused 恢复为 pending)
+        # paused -> running (resume_task 将 suspended 恢复为 running)
         await self.svc.resume_task(task.id)
-        assert self.svc.get_task(task.id).status == TaskStatus.PENDING
-
-        # pending -> running
-        await self.svc.start_task(task.id)
         assert self.svc.get_task(task.id).status == TaskStatus.RUNNING
 
         # running -> evaluating

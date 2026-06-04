@@ -2,7 +2,7 @@
 
 验证 _do_compress_round 的分批逻辑：
 - old_msgs 超过 batch_ratio × context_window 时自动分片
-- 每片独立压缩并调用 save_chunk_fn
+- 每片独立压缩并通过内部 _save_compression_result 保存
 - 背景信息在批次间正确传递
 """
 
@@ -26,10 +26,10 @@ def _make_service() -> MemoryContextService:
 def _make_messages(count: int, tokens_each: int = 100) -> list[dict[str, Any]]:
     """生成指定数量的消息，每条约 tokens_each 个 token。
 
-    通过填充内容让 _estimate_msg_tokens 返回接近的值。
-    粗略估算：1个中文字 ≈ 1.5 token，所以 tokens_each / 1.5 个中文字。
+    _estimate_msg_tokens 使用 len(content) // 2 估算，
+    所以 char_count = tokens_each * 2 以精确匹配。
     """
-    char_count = max(1, int(tokens_each / 1.5))
+    char_count = max(1, tokens_each * 2)
     content = "测" * char_count
     return [{"role": "user", "content": content}] * count
 
@@ -64,11 +64,11 @@ class TestBatchCount:
 
         async def mock_save(old_msgs, comp_result):
             save_calls.append((len(old_msgs), comp_result))
-            return "L1摘要"
 
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", side_effect=mock_save):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         assert len(compress_calls) == 1
@@ -80,7 +80,6 @@ class TestBatchCount:
         """old_msgs 超过 batch_budget 但不超过 2×batch_budget 时分 2 批。"""
         svc = _make_service()
         context_window = 200000
-        batch_budget = int(context_window * 0.5)  # 100000
 
         # recent 预算大，确保只有少量进入 recent
         budgets = {"recent": 200, "L1": 5000, "L2": 2000}
@@ -98,11 +97,11 @@ class TestBatchCount:
 
         async def mock_save(old_msgs, comp_result):
             save_calls.append((len(old_msgs), comp_result))
-            return comp_result.get("l1", "")
 
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", side_effect=mock_save):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         assert result is not None
@@ -114,7 +113,6 @@ class TestBatchCount:
         """old_msgs 远超上下文窗口时分正确数量的批。"""
         svc = _make_service()
         context_window = 200000
-        batch_budget = int(context_window * 0.5)  # 100000
 
         budgets = {"recent": 200, "L1": 5000, "L2": 2000}
 
@@ -128,12 +126,10 @@ class TestBatchCount:
             compress_calls.append(len(old_msgs))
             return {"l1": f"L1_{len(compress_calls)}", "l2": "L2", "keywords": []}
 
-        async def mock_save(old_msgs, comp_result):
-            return comp_result.get("l1", "")
-
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", new=AsyncMock()):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         assert result is not None
@@ -149,36 +145,36 @@ class TestBatchCount:
 
 
 class TestBackgroundPassing:
-    """验证 previous_l1 在批次间正确传递。"""
+    """验证 state_snapshot 和 recent_process_blocks 在批次间保持不变。"""
 
     @pytest.mark.asyncio
     async def test_背景信息在批次间传递(self) -> None:
-        """save_fn 返回的 updated_bg 应作为下一批的 previous_l1。"""
+        """所有批次收到相同的 state_snapshot 和 recent_process_blocks。"""
         svc = _make_service()
         context_window = 200000
         budgets = {"recent": 200, "L1": 5000, "L2": 2000}
 
         messages = [{"role": "system", "content": "sys"}] + _make_messages(100, 2000)
 
-        received_previous_l1: list[str] = []
+        received_state: list[str] = []
+        received_process: list[str] = []
 
-        async def mock_compress(old_msgs, cw, b, previous_l1, **kwargs):
-            received_previous_l1.append(previous_l1)
-            idx = len(received_previous_l1)
+        async def mock_compress(old_msgs, cw, b, state_snapshot, recent_process_blocks, **kwargs):
+            received_state.append(state_snapshot)
+            received_process.append(recent_process_blocks)
+            idx = len(received_state)
             return {"l1": f"batch_{idx}_L1", "l2": "L2", "keywords": []}
 
-        async def mock_save(old_msgs, comp_result):
-            return comp_result.get("l1", "")
-
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", new=AsyncMock()):
             await svc._do_compress_round(
-                messages, context_window, budgets, "初始背景", mock_save,
+                messages, context_window, budgets, "初始状态", "过程块样本",
             )
 
-        # 第 1 批应该收到初始背景
-        assert received_previous_l1[0] == "初始背景"
-        # 第 2 批应该收到第 1 批 save_fn 返回的 L1
-        assert received_previous_l1[1] == "batch_1_L1"
+        # 所有批次收到相同的 state_snapshot
+        assert all(s == "初始状态" for s in received_state)
+        # 所有批次收到相同的 recent_process_blocks
+        assert all(p == "过程块样本" for p in received_process)
 
 
 # ============================================================
@@ -207,12 +203,10 @@ class TestPartialFailure:
                 return None  # 第 1 批失败
             return {"l1": "L1_ok", "l2": "L2", "keywords": []}
 
-        async def mock_save(old_msgs, comp_result):
-            return comp_result.get("l1", "")
-
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", new=AsyncMock()):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         # 至少一批成功，应返回结果
@@ -230,12 +224,9 @@ class TestPartialFailure:
         async def mock_compress(old_msgs, *args, **kwargs):
             return None  # 全部失败
 
-        async def mock_save(old_msgs, comp_result):
-            return ""
-
         with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         assert result is None
@@ -263,12 +254,10 @@ class TestMessageSeparation:
         async def mock_compress(old_msgs, *args, **kwargs):
             return {"l1": "L1", "l2": "L2", "keywords": []}
 
-        async def mock_save(old_msgs, comp_result):
-            return "L1"
-
-        with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
+        with patch.object(svc, "_build_compression_content", side_effect=mock_compress), \
+             patch.object(svc, "_save_compression_result", new=AsyncMock()):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", mock_save,
+                messages, context_window, budgets, "", "",
             )
 
         if result is not None:
@@ -289,7 +278,7 @@ class TestMessageSeparation:
 
         with patch.object(svc, "_build_compression_content", side_effect=mock_compress):
             result = await svc._do_compress_round(
-                messages, context_window, budgets, "", None,
+                messages, context_window, budgets, "", "",
             )
 
         assert result is None

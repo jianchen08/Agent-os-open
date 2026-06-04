@@ -14,7 +14,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL_STATES = frozenset({"completed", "failed"})
+# BUG-FIX-fix_20260603_cancelled_terminal:
+# 问题根因: "cancelled" 未包含在 _TERMINAL_STATES 中，
+#   导致子任务被 cancel_task_cascade 取消后，Worker 的 terminal_event 不会触发，
+#   运行中的子任务线程永远等待（直到 600s 超时），无法真正停止。
+#   同时导致父任务失败时 fail_task_cascade 级联取消的子任务也无法真正终止。
+# 修复方案: 将 "cancelled" 加入终态集合，与 completed/failed 一致处理。
+# 影响范围: 所有被取消任务的 Worker 将会正确收到 terminal 信号并清理。
+# 修复日期: 2026-06-03
+_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 _STATUS_TO_PHASE: dict[str, str] = {
     "pending": "prepare",

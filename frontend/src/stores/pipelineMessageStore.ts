@@ -96,9 +96,9 @@ interface PipelineMessageState {
   isStreaming: (pipelineId: string) => boolean
 
   /** 冷启动：从 API 写入最新消息并设置双游标 */
-  initFromAPI: (pipelineId: string, messages: Message[]) => void
+  initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => void
   /** 向上翻页：将更早消息插入头部并更新 topCursor */
-  prependMessages: (pipelineId: string, messages: Message[]) => void
+  prependMessages: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => void
   /** 断线补漏：追加缺失消息到底部并更新 bottomCursor */
   appendMessages: (pipelineId: string, messages: Message[]) => void
   /** 获取指定管道的顶部游标 */
@@ -532,7 +532,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
    *
    * FIX: 合并策略 — streaming 消息仅在 API 未返回同 ID 时保留，其余以 API 数据为准。
    */
-  initFromAPI: (pipelineId: string, messages: Message[]) => {
+  initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => {
     console.warn(
       `[DATA-SOURCE] ★ initFromAPI 数据: pipeline=%s msgs=%d`,
       pipelineId?.slice(0, 12), messages.length,
@@ -578,7 +578,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         },
         hasMoreOlderByPipeline: {
           ...state.hasMoreOlderByPipeline,
-          [pipelineId]: messages.length >= 50,
+          // 优先用后端返回的 hasMoreOlder，无则 fallback 到 messages.length >= 50
+          [pipelineId]: hasMoreOlder !== undefined ? hasMoreOlder : messages.length >= 50,
         },
       }
     })
@@ -587,7 +588,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
   /**
    * 向上翻页：将更早消息插入头部并更新 topCursor
    */
-  prependMessages: (pipelineId: string, messages: Message[]) => {
+  prependMessages: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => {
     set((state) => {
       if (messages.length === 0) {
         return {
@@ -618,7 +619,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         },
         hasMoreOlderByPipeline: {
           ...state.hasMoreOlderByPipeline,
-          [pipelineId]: messages.length >= 50,
+          // 优先用后端返回的 hasMoreOlder，无则 fallback 到 messages.length >= 50
+          [pipelineId]: hasMoreOlder !== undefined ? hasMoreOlder : messages.length >= 50,
         },
         isLoadingOlderByPipeline: {
           ...state.isLoadingOlderByPipeline,
@@ -747,15 +749,20 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         )
 
         const rawMessages: Message[] = apiResult.messages || []
+        // DEBUG: 确认 has_more 是否正确传递
+        console.warn('[fetchMessages] API result: msgs=%d has_more=%s', rawMessages.length, apiResult.has_more)
         // FIX: 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端不再额外过滤 parentId
         const mainMessages = rawMessages
 
         if (options?.after_sequence !== undefined) {
           get().appendMessages(pipelineId, mainMessages)
         } else if (options?.before_sequence !== undefined) {
-          get().prependMessages(pipelineId, mainMessages)
+          const hasMoreOlder = (apiResult as any)?.has_more ?? false
+          get().prependMessages(pipelineId, mainMessages, hasMoreOlder)
         } else {
-          get().initFromAPI(pipelineId, mainMessages)
+          // 首次冷启动：从 API 响应读取 has_more，避免首次返回 <50 条时被错误地标记为无更多历史消息
+          const hasMoreOlder = (apiResult as any)?.has_more ?? false
+          get().initFromAPI(pipelineId, mainMessages, hasMoreOlder)
         }
       } catch (err: any) {
         const status = err?.response?.status ?? err?.status

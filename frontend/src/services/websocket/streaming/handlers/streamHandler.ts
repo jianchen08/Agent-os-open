@@ -200,13 +200,24 @@ export function handleStreamEnd(eventData: any) {
       const msgs = pipelineStore.getState().getMessages(pipelineId)
       const msg = msgs.find((m: any) => m.id === messageId)
       if (msg) {
-        const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
-        if (hasContent) {
-          pipelineStore.getState().finalizeMessage(pipelineId, messageId)
-          if (msg.status === 'streaming') {
-            pipelineStore.getState().updateMessage(pipelineId, messageId, {
-              status: 'completed',
-            } as any)
+        // 后端发送了完整 parts[] → 用权威版本完整替换
+        const serverParts = eventData?.data?.parts
+        if (serverParts && Array.isArray(serverParts)) {
+          pipelineStore.getState().updateMessage(pipelineId, messageId, {
+            content: eventData?.data?.full_content ?? msg.content ?? '',
+            parts: serverParts,
+            status: 'completed',
+          } as any)
+        } else {
+          // fallback: 后端未发 parts，走原有 finalizeMessage
+          const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
+          if (hasContent) {
+            pipelineStore.getState().finalizeMessage(pipelineId, messageId)
+            if (msg.status === 'streaming') {
+              pipelineStore.getState().updateMessage(pipelineId, messageId, {
+                status: 'completed',
+              } as any)
+            }
           }
         }
       }

@@ -277,8 +277,11 @@ class TaskWorker(
                     try:
                         task = self._task_service.get_task(tid)
                         if task and (task.status == TaskStatus.RUNNING or task.status == TaskStatus.PENDING):
-                            await self._task_service.pause_task(tid)
-                            logger.info("TaskWorker.stop: task %s marked as paused", tid)
+                            # BUG-FIX-fix_20260603_pause_metadata:
+                            # 传入 paused_by="system" 以区分用户手动暂停。
+                            # 重启时只恢复系统暂停的任务，用户暂停的保持 SUSPENDED。
+                            await self._task_service.pause_task(tid, paused_by="system")
+                            logger.info("TaskWorker.stop: task %s marked as paused (system)", tid)
                     except Exception as e:
                         logger.warning("TaskWorker.stop: failed to pause task %s: %s", tid, e)
             except Exception as e:

@@ -925,6 +925,25 @@ class TestContextBuilder:
             folder_item = ctx["items"][0]
             assert folder_item["content"] == ""
 
+    def test_build_static_context_folder_empty_path(self) -> None:
+        """folder 类型未指定 path 时不应回退到 base_path，必须显式给定路径。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "stray.md").write_text("不应被注入", encoding="utf-8")
+
+            config = self._make_config_with_context(
+                static_items=[
+                    ContextVarItem(name="空路径", type="folder", path=""),
+                ],
+            )
+            builder = ContextBuilder(base_path=tmpdir)
+            ctx = builder.build_static_context(config)
+            folder_item = ctx["items"][0]
+            assert folder_item["type"] == "folder"
+            # 不允许默认注入整个工作空间/base_path
+            assert folder_item["content"] == ""
+            assert "不应被注入" not in folder_item["content"]
+
     def test_build_dynamic_context_folder(self) -> None:
         """测试构建 folder 类型的动态上下文。"""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -18,6 +18,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
+# 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
+_pairing_validated_len: dict[str, int] = {}
+
 
 def repair_json_string(s: str) -> str | None:
     """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
@@ -145,48 +149,101 @@ def repair_json_string(s: str) -> str | None:
     return None
 
 
-def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
-    """确保 assistant 消息中的 tool_calls 使用 OpenAI API 格式。
+def _is_valid_tool_call_id(tc_id: str | None) -> bool:
+    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。
 
-    执行记录存储的 tool_calls_json 是内部 raw 格式：
-        {"id": "...", "name": "...", "arguments": "..."}
-    OpenAI API 要求的格式：
-        {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
+    系统内统一使用 call_<24位hex> 格式（如 call_b3982bf711c648b297524fe6）。
+    部分模型（如 MiniMax）可能返回 call_function_<base62>_<n> 等非标准格式，
+    MiniMax API 在回传时会拒绝这些非标准 id。
+
+    Args:
+        tc_id: 待检查的 tool_call_id
+
+    Returns:
+        是否符合标准格式
+    """
+    if not tc_id or not isinstance(tc_id, str):
+        return False
+    # 标准格式: call_ + 仅含十六进制字符（至少1位）
+    # 拒绝 call_function_xxx_1 等含非hex字符或下划线的格式
+    if not tc_id.startswith("call_") or len(tc_id) < 6:
+        return False
+    hex_part = tc_id[5:]  # "call_" 之后的部分
+    return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
+
+
+def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
+    """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
+
+    执行两项修正：
+    1. 结构格式：确保 tool_calls 使用 OpenAI API 格式
+        内部 raw: {"id": "...", "name": "...", "arguments": "..."}
+        标准格式: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
+    2. ID 格式：确保所有 tool_call_id 符合系统标准 call_<hex> 格式。
+        部分模型返回非标准 id（如 call_function_xxx_1），统一替换为标准格式，
+        同时同步修正对应 tool 消息的 tool_call_id 以保持配对一致。
 
     缺少 type 字段会导致智谱AI等 API 报"工具类型不能为空"。
-    此方法原地修正 messages 中所有 tool_calls 的格式。
+    非标准 tool_call_id 会导致 MiniMax API 报 "invalid params, tool call id is invalid"。
     """
-    for msg in messages:
+    # id_remap: 记录非标准 id -> 新标准 id 的映射，用于同步修正 tool 消息
+    id_remap: dict[str, str] = {}
+
+    for msg_idx, msg in enumerate(messages):
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
             continue
         raw_tcs = msg["tool_calls"]
         if not isinstance(raw_tcs, list):
             continue
-        needs_fix = False
+
+        # ── 修正 1: 结构格式 ──
+        needs_struct_fix = False
         for tc in raw_tcs:
             if not isinstance(tc, dict):
                 continue
             if tc.get("type") != "function" or not isinstance(tc.get("function"), dict):
-                needs_fix = True
+                needs_struct_fix = True
                 break
-        if not needs_fix:
-            continue
-        normalized = []
+        if needs_struct_fix:
+            normalized = []
+            for tc in raw_tcs:
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
+                    normalized.append(tc)
+                    continue
+                normalized.append({
+                    "id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("args", tc.get("arguments", "{}")),
+                    },
+                })
+            msg["tool_calls"] = normalized
+            raw_tcs = normalized
+
+        # ── 修正 2: tool_call_id 格式统一 ──
         for tc in raw_tcs:
             if not isinstance(tc, dict):
                 continue
-            if tc.get("type") == "function" and isinstance(tc.get("function"), dict):
-                normalized.append(tc)
+            old_id = tc.get("id")
+            if old_id and not _is_valid_tool_call_id(old_id):
+                new_id = f"call_{uuid.uuid4().hex[:24]}"
+                tc["id"] = new_id
+                id_remap[old_id] = new_id
+                logger.info(
+                    "tool_call_id 格式修正: %s → %s", old_id, new_id,
+                )
+
+    # 同步修正 tool 消息中对应的 tool_call_id，保持 assistant↔tool 配对一致
+    if id_remap:
+        for msg in messages:
+            if msg.get("role") != "tool":
                 continue
-            normalized.append({
-                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": tc.get("name", ""),
-                    "arguments": tc.get("args", tc.get("arguments", "{}")),
-                },
-            })
-        msg["tool_calls"] = normalized
+            tc_id = msg.get("tool_call_id")
+            if tc_id and tc_id in id_remap:
+                msg["tool_call_id"] = id_remap[tc_id]
 
 
 def _validate_tool_call_pairing(
@@ -194,14 +251,17 @@ def _validate_tool_call_pairing(
     provider: str,
     name: str,
 ) -> list[dict[str, Any]]:
-    """验证 tool_calls 和 tool result 的配对完整性。
+    """增量验证 tool_calls 和 tool result 的配对完整性。
 
     DeepSeek 和 MiniMax 严格要求每条 assistant(tool_calls) 后面必须跟齐
     所有 tool_call_id 对应的 tool 消息。消息历史在压缩/截断/执行记录恢复
     等场景下可能产生不配对的消息，此函数负责清理和补全。
 
+    采用增量扫描：通过模块级缓存 _pairing_validated_len 记录上次验证完成时
+    的消息数量，下次只扫描新增部分，避免每次对整个消息列表做完整遍历。
+
     Phase A: 移除孤立的 tool result（前面没有 assistant(tool_calls) 的）
-    Phase B: 补全缺失的 tool result（assistant(tool_calls) 后面缺的）
+    Phase B: 清理不完整的 assistant(tool_calls)（后面缺少 tool result 的）
 
     Args:
         messages: 消息列表
@@ -211,13 +271,76 @@ def _validate_tool_call_pairing(
     Returns:
         修正后的消息列表
     """
-    # Phase A: 移除孤立的 tool result
-    validated: list[dict[str, Any]] = []
+    cache_key = f"{provider}:{name}"
+    cached_len = _pairing_validated_len.get(cache_key, 0)
+    msg_count = len(messages)
+
+    # 消息被截断/重建（数量比缓存少），重置缓存做全量扫描
+    if msg_count < cached_len:
+        cached_len = 0
+
+    # 没有新增消息，直接返回
+    if cached_len > 0 and cached_len == msg_count:
+        return messages
+
+    scan_start = cached_len
+
+    # 确定安全起点：向前回溯到最近一条 assistant(tool_calls)
+    # 确保新增的 tool result 能匹配到之前的 tool_calls
+    safety_start = 0
+    for idx in range(scan_start - 1, -1, -1):
+        if messages[idx].get("role") == "assistant" and messages[idx].get("tool_calls"):
+            safety_start = idx
+            break
+
+    if scan_start > 0:
+        logger.debug(
+            "[%s] %s tool_call pairing: incremental scan "
+            "safety_start=%d, scan_start=%d, total=%d",
+            name, provider, safety_start, scan_start, msg_count,
+        )
+
+    # ── Phase A: 移除孤立的 tool result ──
+    # 从 safety_start 到 scan_start 重放消息，仅追踪 expecting 状态
     expecting_tool_ids: set[str] = set()
     expecting_tool_ids_ordered: list[str] = []
+    for msg in messages[safety_start:scan_start]:
+        if msg.get("role") == "assistant":
+            if msg.get("tool_calls"):
+                expecting_tool_ids = {
+                    tc.get("id")
+                    for tc in msg["tool_calls"]
+                    if tc.get("id")
+                }
+                expecting_tool_ids_ordered = [
+                    tc.get("id")
+                    for tc in msg["tool_calls"]
+                    if tc.get("id")
+                ]
+            else:
+                expecting_tool_ids = set()
+                expecting_tool_ids_ordered = []
+        elif msg.get("role") == "tool":
+            if expecting_tool_ids:
+                tc_id = msg.get("tool_call_id")
+                if tc_id in expecting_tool_ids:
+                    expecting_tool_ids.discard(tc_id)
+                    if tc_id in expecting_tool_ids_ordered:
+                        expecting_tool_ids_ordered.remove(tc_id)
+                elif expecting_tool_ids_ordered:
+                    matched_id = expecting_tool_ids_ordered.pop(0)
+                    expecting_tool_ids.discard(matched_id)
+        else:
+            expecting_tool_ids = set()
+            expecting_tool_ids_ordered = []
+
+    # scan_start 之前的消息直接加入 validated（已验证，不做检查）
+    validated: list[dict[str, Any]] = list(messages[:scan_start])
     dropped_count = 0
     positional_match_count = 0
-    for msg in messages:
+
+    # 对新增消息（scan_start 之后）执行 Phase A 检查
+    for msg in messages[scan_start:]:
         if msg.get("role") == "assistant":
             if msg.get("tool_calls"):
                 expecting_tool_ids = {
@@ -283,14 +406,18 @@ def _validate_tool_call_pairing(
             name, provider, positional_match_count,
         )
 
-    # Phase B: 补全缺失的 tool result
-    final: list[dict[str, Any]] = []
-    patch_count = 0
-    i = 0
+    # ── Phase B: 清理不完整的 assistant(tool_calls) 消息 ──
+    # 修复：当 safety_start < scan_start 时，说明 validated 区域内有 assistant(tool_calls)
+    # 可能在之前的扫描中被误判为完整（或从未被 Phase B 检查过）。
+    # 必须从 safety_start 开始检查，而非 scan_start，确保所有未完整配对的
+    # assistant(tool_calls) 都能被清理。
+    phase_b_start = safety_start if safety_start < scan_start else scan_start
+    final: list[dict[str, Any]] = list(validated[:phase_b_start])
+    removed_count = 0
+    i = phase_b_start
     while i < len(validated):
         msg = validated[i]
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            final.append(msg)
             required_ids = {
                 tc.get("id")
                 for tc in msg["tool_calls"]
@@ -300,31 +427,60 @@ def _validate_tool_call_pairing(
             while j < len(validated) and validated[j].get("role") == "tool":
                 tc_id = validated[j].get("tool_call_id")
                 required_ids.discard(tc_id)
-                final.append(validated[j])
                 j += 1
-            for missing_id in required_ids:
-                patch_count += 1
+            if required_ids:
+                # 有不完整的 tool_call → 删除整条 assistant 消息及已匹配的 tool 结果
+                removed_count += 1
                 logger.warning(
-                    "[%s] %s tool_call pairing: patching missing "
-                    "tool result tool_call_id=%s",
-                    name, provider, missing_id,
+                    "[%s] %s tool_call pairing: removing incomplete assistant message "
+                    "(missing tool results: %s)",
+                    name, provider, required_ids,
                 )
-                final.append({
-                    "role": "tool",
-                    "tool_call_id": missing_id,
-                    "content": "Tool execution result unavailable.",
-                })
-            i = j
+                i = j  # 跳过后续已匹配的 tool 结果
+            else:
+                # 完整配对 → 保留
+                final.append(msg)
+                while i + 1 < j:
+                    i += 1
+                    final.append(validated[i])
+                i = j
         else:
             final.append(msg)
             i += 1
-    if patch_count:
+    if removed_count:
         logger.warning(
-            "[%s] %s tool_call pairing: patched %d missing tool results",
-            name, provider, patch_count,
+            "[%s] %s tool_call pairing: removed %d incomplete assistant messages "
+            "(tool execution was interrupted, no result available)",
+            name, provider, removed_count,
         )
 
+    # 更新缓存：记录本次验证完成时的消息数量
+    # 注意：final 可能比 msg_count 更短（Phase B 可能移除了不完整的消息），
+    # 所以缓存 final 的实际长度，而不是原始 msg_count
+    _pairing_validated_len[cache_key] = len(final)
+
     return final
+
+
+def reset_pairing_cache(provider: str = "", name: str = "") -> None:
+    """重置 tool_call 配对验证缓存。
+
+    当 LLM API 返回 tool_call 相关错误（如 tool call id invalid）时调用，
+    强制下一次 normalize_messages_for_provider 执行全量扫描，而非增量扫描。
+
+    Args:
+        provider: 提供商名称，空字符串表示重置所有
+        name: 插件名称，空字符串表示重置指定 provider 的所有
+    """
+    if not provider:
+        _pairing_validated_len.clear()
+        return
+    if not name:
+        to_remove = [k for k in _pairing_validated_len if k.startswith(f"{provider}:")]
+        for k in to_remove:
+            del _pairing_validated_len[k]
+        return
+    _pairing_validated_len.pop(f"{provider}:{name}", None)
 
 
 def normalize_messages_for_provider(
@@ -431,6 +587,9 @@ def normalize_messages_for_provider(
                             fn["arguments"] = "{}"
 
     # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
+    # 修复：验证 tool_call_id 匹配。Phase B 的增量扫描可能遗漏不完整的
+    # assistant(tool_calls)，导致后续 assistant 的 tool results 被错误分配给
+    # 前面的不完整 assistant。必须通过 tool_call_id 匹配来正确分组。
     result: list[dict[str, Any]] = []
     i = 0
     while i < len(converted):
@@ -438,20 +597,38 @@ def normalize_messages_for_provider(
         result.append(msg)
 
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            # 收集紧随其后的 tool 消息
+            # 收集此 assistant 期望的 tool_call_id 集合
+            expected_ids: set[str] = {
+                tc.get("id")
+                for tc in msg["tool_calls"]
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            # 收集紧随其后且 tool_call_id 匹配的 tool 消息
             tool_group: list[dict[str, Any]] = []
             intruders: list[dict[str, Any]] = []
             j = i + 1
             while j < len(converted):
-                if converted[j].get("role") == "tool":
-                    tool_group.append(converted[j])
-                    j += 1
+                nxt = converted[j]
+                if nxt.get("role") == "tool":
+                    tc_id = nxt.get("tool_call_id", "")
+                    if tc_id and tc_id in expected_ids:
+                        # tool_call_id 匹配当前 assistant → 属于当前 tool group
+                        tool_group.append(nxt)
+                        j += 1
+                    elif tool_group:
+                        # 已经有匹配的 tool 结果了，不匹配的是另一个 assistant 的
+                        # 或者是属于后面 assistant 的 → 停止，不要再偷后面的
+                        break
+                    else:
+                        # 还没有匹配的 tool 结果，tool_call_id 不匹配 → 可能是
+                        # 后面 assistant 的 tool 结果被提前消费。停止收集。
+                        break
                 elif tool_group:
                     # 已经有 tool 消息了，后续非 tool 消息是新的对话轮次，停止
                     break
                 else:
-                    # assistant(tool_calls) 后第一个消息不是 tool → 非法插入
-                    intruders.append(converted[j])
+                    # assistant(tool_calls) 后第一个消息不是匹配的 tool → 非法插入
+                    intruders.append(nxt)
                     j += 1
             if intruders:
                 relocated_count += len(intruders)

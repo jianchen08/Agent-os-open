@@ -23,7 +23,10 @@ from llm.adapter import (
 )
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
-from plugins.core.llm_core._message_normalizer import normalize_messages_for_provider
+from plugins.core.llm_core._message_normalizer import (
+    _is_valid_tool_call_id,
+    normalize_messages_for_provider,
+)
 from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
@@ -126,6 +129,13 @@ class LLMCore(ICorePlugin):
             )
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
+        )
+        # BUG-FIX-fix_20260603_call_timeout_from_config:
+        # call_timeout 在 llm.yaml 中配置（如 call_timeout: 300），
+        # 但在 LLMCore 中从未被读取，导致适配器使用硬编码默认值 300。
+        # 现在从配置读取并透传为 inter_chunk_timeout。
+        self._call_timeout: float = float(
+            self._config.get("call_timeout", 300)
         )
         # 允许配置覆盖类属性
         if "max_retries" in self._config:
@@ -288,14 +298,25 @@ class LLMCore(ICorePlugin):
             history = list(ctx.state.get("messages", []))
             if tool_calls:
                 # 预先解析 tool_call_id，确保 assistant 消息和 state 中的 raw_tool_calls 使用一致的 id
+                # 同时标准化 id 格式：部分模型返回非标准格式（如 call_function_xxx_1），
+                # 统一替换为 call_<hex> 格式，确保系统内一致且 API 兼容
                 resolved_ids: list[str] = []
                 for tc in tool_calls:
-                    resolved_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
+                    raw_id = tc.get("id")
+                    if raw_id and _is_valid_tool_call_id(raw_id):
+                        resolved_ids.append(raw_id)
+                    else:
+                        std_id = f"call_{uuid.uuid4().hex[:24]}"
+                        resolved_ids.append(std_id)
+                        if raw_id:
+                            logger.info(
+                                "[%s] LLM 返回非标准 tool_call_id，已修正: %s → %s",
+                                self.name, raw_id, std_id,
+                            )
 
                 # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
                 for i, tc in enumerate(tool_calls):
-                    if "id" not in tc or not tc["id"]:
-                        tc["id"] = resolved_ids[i]
+                    tc["id"] = resolved_ids[i]
 
                 # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
                 assistant_msg: dict[str, Any] = {
@@ -346,15 +367,27 @@ class LLMCore(ICorePlugin):
                 "[%s] LLM call failed: %s — %s",
                 self.name, type(exc).__name__, exc,
             )
+            # 工具调用错误后重置消息配对缓存，确保下次全量扫描
+            exc_msg = str(exc)
+            if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
+                from plugins.core.llm_core._message_normalizer import (
+                    reset_pairing_cache,
+                )
+                reset_pairing_cache(self._provider, self.name)
+                logger.info(
+                    "[%s] 检测到 tool_call 相关错误，已重置配对缓存",
+                    self.name,
+                )
             raise
 
     def _build_messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """从管道状态构建 LLM messages 列表。
 
-        从三个来源按顺序拼接：
-        1. state["system_message"] -- prompt_build 产出的 SystemMessage
-        2. state["messages"] -- 管道维护的对话历史（assistant + tool 回复等）
-        3. state["prompt.dynamic_vars"] -- 动态变量（追加在历史消息之后）
+        拼接顺序：
+        1. state["system_message"] -- prompt_build 产出的纯 SystemMessage
+        2. state["compression_messages"] -- 压缩块独立消息（L2→L1→state_snapshot）
+        3. state["messages"] -- 管道维护的对话历史（最近消息）
+        4. state["prompt.dynamic_vars"] -- 动态变量（追加在最后）
 
         Args:
             state: 管道状态字典
@@ -364,18 +397,20 @@ class LLMCore(ICorePlugin):
         """
         messages: list[dict[str, Any]] = []
 
-        # 1. SystemMessage（prompt_build 产出）
+        # 1. SystemMessage（纯 prompt，永不变化 → cache hit）
         system_msg = state.get("system_message")
         if system_msg:
             messages.append(system_msg)
 
-        # 2. 历史消息（管道维护的对话历史）
+        # 2. 压缩消息（每个块独立消息，老→新。前缀匹配 → cache hit）
+        for cm in state.get("compression_messages", []):
+            messages.append(cm)
+
+        # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
         history = state.get("messages", [])
         messages.extend(history)
 
-        # 3. 动态变量（每轮变化的上下文：时间戳、session_id 等）
-        #    不修改系统消息（动态变量每轮变化，不应污染静态系统提示词）
-        #    使用 user 角色 + name=dynamic_context，兼容所有 provider
+        # 4. 动态变量（每轮变化的上下文：时间戳、session_id 等）
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):
@@ -531,6 +566,7 @@ class LLMCore(ICorePlugin):
                 tools=tool_schemas or None,
                 stream=stream,
                 on_chunk=on_chunk,
+                inter_chunk_timeout=self._call_timeout,
                 **kwargs,
             )
         except asyncio.TimeoutError:

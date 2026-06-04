@@ -1,8 +1,8 @@
 /**
  * 新消息事件处理器
  *
- * stream_end 已携带 persisted=true，消息持久化有保证。
- * 此处理器仅更新后端 sequence 用于后续历史查询。
+ * 后端在 new_message 中携带完整 parts[] 作为权威版本，
+ * 前端用其完整替换流式过程中增量构建的消息。
  */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
@@ -33,11 +33,24 @@ export function handleNewMessage(eventData: any) {
   if (!messageId) return
 
   const data = eventData?.data || eventData
+  const serverParts = data?.parts
   const backendSeq = data?.sequence ?? eventData?.sequence
 
   const existingMsgs = pipelineStore.getState().getMessages(pipelineId)
   const existingMsg = existingMsgs.find((m: any) => m.id === messageId)
 
+  // 后端发送了完整 parts[] → 用权威版本完整替换
+  if (existingMsg && serverParts && Array.isArray(serverParts)) {
+    pipelineStore.getState().updateMessage(pipelineId, messageId, {
+      content: data?.content ?? existingMsg.content ?? '',
+      parts: serverParts,
+      status: 'completed',
+      sequence: backendSeq ?? existingMsg.sequence,
+    } as any)
+    return
+  }
+
+  // fallback: 仅更新 sequence
   if (existingMsg && backendSeq != null) {
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
       sequence: backendSeq,

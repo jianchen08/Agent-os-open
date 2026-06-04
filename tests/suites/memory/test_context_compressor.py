@@ -1,7 +1,6 @@
 """ContextCompressor + CompressionConfig 测试。
 
-测试压缩配置计算、一次性压缩、递进压缩、
-长期记忆提取、token 估算、缓存管理和无 LLM 时的错误处理。
+测试压缩配置计算、一次性压缩、token 估算和无 LLM 时的错误处理。
 """
 
 from __future__ import annotations
@@ -129,7 +128,8 @@ class TestCompressAll:
         """空消息列表应返回空字典。"""
         compressor = ContextCompressor(llm_call_fn=AsyncMock())
         result = await compressor.compress_all([])
-        assert result == {"l1": "", "l2": "", "keywords": []}
+        assert result == {"l1": "", "l2": "", "keywords": [],
+                          "state_snapshot": {}, "memory_items": {}}
 
     @pytest.mark.asyncio
     async def test_正常压缩(self) -> None:
@@ -167,117 +167,12 @@ class TestCompressAll:
         llm_fn = AsyncMock(return_value="这不是JSON")
         compressor = ContextCompressor(llm_call_fn=llm_fn)
         result = await compressor.compress_all([{"role": "user", "content": "测试"}])
-        assert result == {"l1": "", "l2": "", "keywords": []}
+        assert result == {"l1": "", "l2": "", "keywords": [],
+                          "state_snapshot": {}, "memory_items": {}}
 
 
 # ============================================================
-# 4. progressive_compress 测试
-# ============================================================
-
-
-class TestProgressiveCompress:
-    """测试递进压缩。"""
-
-    @pytest.mark.asyncio
-    async def test_L0触发压缩(self) -> None:
-        """有 L0 内容时应触发一次性压缩。"""
-        llm_fn = AsyncMock(return_value=_MOCK_COMPRESS_JSON)
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        budgets = {"L1": 500, "L2": 200}
-        new_l1, new_l2 = await compressor.progressive_compress(
-            l0="这是一段很长的原文内容",
-            l1="",
-            l2="",
-            budgets=budgets,
-        )
-        assert "测试会话" in new_l1
-        assert "测试意图" in new_l2
-
-    @pytest.mark.asyncio
-    async def test_L1超预算时裁剪(self) -> None:
-        """L1 超预算时应裁剪到预算内。"""
-        llm_fn = AsyncMock(return_value=_MOCK_COMPRESS_JSON)
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        budgets = {"L1": 5, "L2": 200}
-        new_l1, new_l2 = await compressor.progressive_compress(
-            l0="原文",
-            l1="",
-            l2="",
-            budgets=budgets,
-        )
-        assert compressor._estimate_tokens(new_l1) <= budgets["L1"]
-
-    @pytest.mark.asyncio
-    async def test_无L0内容不压缩(self) -> None:
-        """无 L0 内容且 L1/L2 不超预算时不应调用 LLM。"""
-        llm_fn = AsyncMock(return_value="不应该被调用")
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        budgets = {"L1": 5000, "L2": 2000}
-        new_l1, new_l2 = await compressor.progressive_compress(
-            l0="", l1="短L1", l2="短L2", budgets=budgets,
-        )
-        assert new_l1 == "短L1"
-        assert new_l2 == "短L2"
-        llm_fn.assert_not_called()
-
-
-# ============================================================
-# 5. extract_long_term_memory 测试
-# ============================================================
-
-
-class TestExtractLongTermMemory:
-    """测试长期记忆提取。"""
-
-    @pytest.mark.asyncio
-    async def test_空消息返回空实例(self) -> None:
-        """空消息列表应返回空 MemoryExtraction。"""
-        compressor = ContextCompressor(llm_call_fn=AsyncMock())
-        result = await compressor.extract_long_term_memory([])
-        assert result.user_profile_updates == ""
-        assert result.project_knowledge_updates == ""
-        assert result.experience_updates == ""
-
-    @pytest.mark.asyncio
-    async def test_正常提取(self) -> None:
-        """正常消息应返回提取的记忆。"""
-        memory_json = json.dumps({
-            "user_profile_updates": "用户喜欢用 Python",
-            "project_knowledge_updates": "项目使用 FastAPI",
-            "experience_updates": "发现某个 API 有 bug",
-        }, ensure_ascii=False)
-        llm_fn = AsyncMock(return_value=memory_json)
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        result = await compressor.extract_long_term_memory(
-            [{"role": "user", "content": "我用 Python 开发"}],
-        )
-        assert "Python" in result.user_profile_updates
-        assert "FastAPI" in result.project_knowledge_updates
-        llm_fn.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_无效JSON返回空实例(self) -> None:
-        """LLM 返回无效 JSON 应返回空实例。"""
-        llm_fn = AsyncMock(return_value="这不是JSON")
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        result = await compressor.extract_long_term_memory(
-            [{"role": "user", "content": "测试"}],
-        )
-        assert result.user_profile_updates == ""
-
-    @pytest.mark.asyncio
-    async def test_LLM失败返回空实例(self) -> None:
-        """LLM 调用失败应返回空实例（不抛异常）。"""
-        llm_fn = AsyncMock(side_effect=Exception("LLM 错误"))
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        result = await compressor.extract_long_term_memory(
-            [{"role": "user", "content": "测试"}],
-        )
-        assert result.user_profile_updates == ""
-
-
-# ============================================================
-# 6. _estimate_tokens 测试
+# 4. _estimate_tokens 测试
 # ============================================================
 
 
@@ -314,7 +209,7 @@ class TestEstimateTokens:
 
 
 # ============================================================
-# 7. _format_messages 测试
+# 5. _format_messages 测试
 # ============================================================
 
 
@@ -371,7 +266,7 @@ class TestFormatMessages:
 
 
 # ============================================================
-# 8. _truncate_to_budget 测试
+# 6. _truncate_to_budget 测试
 # ============================================================
 
 
@@ -394,118 +289,7 @@ class TestTruncateToBudget:
 
 
 # ============================================================
-# 9. 缓存管理测试
-# ============================================================
-
-
-class TestCacheManagement:
-    """测试缓存管理。"""
-
-    def test_generate_cache_key一致性(self) -> None:
-        """相同消息和层级应生成相同的缓存键。"""
-        compressor = ContextCompressor()
-        messages = [{"role": "user", "content": "测试"}]
-        key1 = compressor._generate_cache_key(messages, "L1")
-        key2 = compressor._generate_cache_key(messages, "L1")
-        assert key1 == key2
-
-    def test_generate_cache_key不同消息(self) -> None:
-        """不同消息应生成不同的缓存键。"""
-        compressor = ContextCompressor()
-        key1 = compressor._generate_cache_key(
-            [{"role": "user", "content": "测试1"}], "L1",
-        )
-        key2 = compressor._generate_cache_key(
-            [{"role": "user", "content": "测试2"}], "L1",
-        )
-        assert key1 != key2
-
-    def test_generate_cache_key不同层级(self) -> None:
-        """不同层级应生成不同的缓存键。"""
-        compressor = ContextCompressor()
-        messages = [{"role": "user", "content": "测试"}]
-        key1 = compressor._generate_cache_key(messages, "L1")
-        key2 = compressor._generate_cache_key(messages, "L2")
-        assert key1 != key2
-
-    def test_cache_put_and_get(self) -> None:
-        """缓存写入后应可读取。"""
-        compressor = ContextCompressor()
-        compressor._cache_put("key1", "value1")
-        assert compressor._cache["key1"] == "value1"
-
-    def test_cache_put_超限清理(self) -> None:
-        """缓存超限时应清理。"""
-        compressor = ContextCompressor()
-        compressor._cache_max_size = 10
-        for i in range(15):
-            compressor._cache_put(f"key_{i}", f"value_{i}")
-        assert compressor.get_cache_size() <= 10
-
-    def test_clear_cache(self) -> None:
-        """清空缓存。"""
-        compressor = ContextCompressor()
-        compressor._cache_put("key1", "value1")
-        compressor.clear_cache()
-        assert compressor.get_cache_size() == 0
-
-    def test_get_cache_size(self) -> None:
-        """获取缓存大小。"""
-        compressor = ContextCompressor()
-        assert compressor.get_cache_size() == 0
-        compressor._cache_put("key1", "value1")
-        assert compressor.get_cache_size() == 1
-
-
-# ============================================================
-# 10. get_stats 测试
-# ============================================================
-
-
-class TestGetStats:
-    """测试统计信息。"""
-
-    def test_初始统计(self) -> None:
-        """初始状态统计。"""
-        compressor = ContextCompressor()
-        stats = compressor.get_stats()
-        assert stats["l0_to_l1_count"] == 0
-        assert stats["l1_to_l2_count"] == 0
-        assert stats["total_tokens_compressed"] == 0
-        assert stats["cache_size"] == 0
-        assert "budgets" in stats
-
-    @pytest.mark.asyncio
-    async def test_压缩后统计更新(self) -> None:
-        """压缩后统计应更新。"""
-        llm_fn = AsyncMock(return_value=_MOCK_COMPRESS_JSON)
-        compressor = ContextCompressor(llm_call_fn=llm_fn)
-        await compressor.compress_all([{"role": "user", "content": "测试"}])
-        stats = compressor.get_stats()
-        assert stats["l0_to_l1_count"] == 1
-        assert stats["l1_to_l2_count"] == 1
-        assert stats["total_tokens_compressed"] > 0
-
-
-# ============================================================
-# 11. update_config 测试
-# ============================================================
-
-
-class TestUpdateConfig:
-    """测试配置更新。"""
-
-    def test_更新配置(self) -> None:
-        """更新配置应重新计算预算。"""
-        compressor = ContextCompressor()
-        new_config = CompressionConfig(context_window=50000)
-        compressor.update_config(new_config)
-        assert compressor.config.context_window == 50000
-        assert compressor.budgets["L1"] == int(50000 * 0.08)
-
-
-# ============================================================
-# 12. 无 LLM 函数时抛 RuntimeError
+# 7. 无 LLM 函数时抛 RuntimeError
 # ============================================================
 
 

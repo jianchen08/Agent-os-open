@@ -875,12 +875,9 @@ class ExecutionRecordStorage:
         if before_sequence is not None:
             records = [r for r in records if r.sequence < before_sequence]
 
-        # 在截断前判断 has_more；截断后只保留最后 limit 条（最新的）
+        # 截断到 limit 条（保留最新的），has_more 保留收集循环的判断
         if limit is not None and len(records) > limit:
-            has_more = True
             records = records[-limit:]
-        else:
-            has_more = False
 
         return records, has_more
 

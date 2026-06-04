@@ -57,11 +57,19 @@ input_routes:
       - prompt_build
     priority: 20
 
+  # 任务暂停检测 → 挂起管道（优先级最高，先于其他路由）
+  - name: task_paused
+    condition: "pause_guard.checked.paused == True"
+    target: wait
+    plugins: []
+    priority: 3
+
   # 默认路由
   - name: default
     condition: "True"
     target: core
     plugins:
+      - pause_guard
       - tool_schema
       - param_inject
       - memory_read
@@ -97,7 +105,7 @@ plugins:
     config:
       enabled: true
       trigger_ratio: 0.6
-      compression_model: deepseek-v4-pro
+      compression_model: minimax-m3
   - name: tool_schema
     config:
       enabled: true

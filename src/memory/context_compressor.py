@@ -11,12 +11,9 @@ token 计数使用简化估算，LLM 调用通过注入的可调用对象实现�
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
-
-from memory.compressor.models import MemoryExtraction, PreservedZone
 
 logger = logging.getLogger(__name__)
 
@@ -126,127 +123,162 @@ class ContextCompressor:
         config: 压缩配置
         budgets: 各层 token 预算
         _llm_call_fn: LLM 调用函数
-        _cache: 压缩结果缓存
-        _stats: 统计信息
     """
 
-    # 一次性压缩模板：L1 + L2 + 关键词
+    # 一次性压缩模板：L1 + L2 + keywords + state_snapshot + memory_items
     COMPRESS_PROMPT = """## 任务
-将以下对话历史压缩为三部分：
-1. **l1**：精简的结构化摘要，保留关键信息让另一个 AI 能接手
-2. **l2**：一句话级别的核心要点
-3. **keywords**：3-5 个核心关键词
+将以下对话历史压缩为五部分：l1 / l2 / keywords / state_snapshot / memory_items。
 
-## L1 各字段详略要求
-- **需详细**（保留具体细节）：key_entities（文件路径、URL、数值要原样保留）、errors_and_corrections（错误原因和解决方案要具体）、key_results（产出物位置和关键数据要完整）、pending（具体待办事项和步骤，要能让接手者知道接下来做什么）
-- **适中**（概括但不遗漏）：workflow（做了什么+结果，省略中间过程）、domain_knowledge（重要规则和约束）、decisions（决策结论和核心理由）
-- **简洁**：session_title、current_state、task_specification（一两句话即可）
-- l2 极简，每个字段不超过 2 句话
-- 无内容填 null
-- 如有背景信息，整合新内容即可，关注新对话
+l1/l2/keywords 描述同一批对话，详略不同。
+**L1 必须比 L2 详细得多**：L1 含具体步骤、决策、产出，
+L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
-{previous_l1_section}
-## 当前用户消息
-{user_message}
+## 输入
 
-## 对话历史
+### 当前全局状态（已累积，请在此基础上合并更新）
+{state_snapshot}
+
+### 最近的步骤（了解上下文即可，不重复描述）
+{recent_process_blocks}
+
+### 需要压缩的对话
 {messages}
 
-## 输出格式
-严格输出以下 JSON，不要输出任何其他内容。
+---
 
-```json
+## l1 — 过程摘要（预算充足时使用）
+
+只描述本批新增，不重复已有状态。
+
+### session_title
+本段对话的核心主题，一句话。
+提取方法：从对话中找最核心的一件事。
+
+### workflow
+执行步骤及结果，省略重试和微调，只写关键步骤。
+提取方法：从 assistant 消息和 tool 调用结果中提取。
+
+### errors_and_corrections
+本段遇到的错误和修复方案。无则填 null。
+提取方法：从"报错"、"bug"、"修复"等关键词中提取。
+
+### decisions
+重要决策结论和理由。无则填 null。
+提取方法：从"决定"、"用XX方案"、"最终选"等描述中提取。
+
+### key_results
+本段产出成果，含文件路径和数据。无则填 null。
+提取方法：从最终结果消息中提取。
+
+---
+
+## l2 — 三元组（L1 的紧凑概括版）
+
+比 L1 简略得多。每个字段一两句话，不展开细节。
+
+### intent
+用户目标和验收标准。
+提取方法：从用户消息中提取最终目的。
+
+### process
+关键步骤，一句话。
+
+### results
+用 | 分隔"本轮产出 | 剩余待办"。
+
+---
+
+## keywords — 本批新增关键词
+
+提取本批特有的关键词，数量不固定，有则提取，无则空数组。
+用于检索本压缩块。允许与前面块的关键词重复（方便检索），
+
+---
+
+## state_snapshot — 合并更新
+
+在传入的当前状态基础上更新，不是从零写。
+没变化的字段保持原值，不要改写为"无变化"或编造。
+
+### current_state
+当前整体进度。
+提取方法：从最后几条消息判断"进展到哪了"。
+
+### task_specification
+用户要完成的具体任务。本批细化则更新。
+提取方法：从用户最新消息中提取。
+
+### pending
+待办列表。做完删除，新增追加，搁置标注"(搁置)"。
+提取方法：用户说"还要/接下来" + 助手说"接下来要..."的事。
+
+### key_entities
+累积实体列表。路径/URL/函数名/类名/配置项，原样保留，合并去重。
+提取方法：从对话中提取所有被明确引用的实体名。
+
+### domain_knowledge
+累积的重要事实/规则/约束。新发现则更新，无变化则保持。
+提取方法：从助手消息中提取关键结论和发现。
+
+### user_feedback
+用户明确的纠偏指令（"不对"、"不要XX"、"应该是XX"等）。
+无新反馈则保持原值。
+提取方法：从用户纠正性话语中提取。
+
+### attention_hints
+接手者须知，帮下一个 LLM 快速进入状态。
+提取方法：提炼本批最关键的变化点和注意事项。
+
+---
+
+## memory_items — 长期记忆（不进上下文）
+
+有值得跨会话保存的才填，无则 null。
+
+### user_profile_updates
+用户偏好/习惯更新。
+
+### project_knowledge_updates
+项目技术决策/架构约定。
+
+### experience_updates
+踩过的坑/验证过的方案。
+
+---
+
+## 输出格式
+严格输出 JSON，不要任何其他内容。
+
 {{
   "l1": {{
-    "session_title": "会话主题（一句话）",
-    "current_state": "当前进度和状态",
-    "task_specification": "用户要求完成的具体任务",
-    "key_entities": "对话中涉及的重要实体",
-    "workflow": "已执行的步骤及结果",
-    "errors_and_corrections": "问题和错误信息",
-    "domain_knowledge": "重要事实和约束",
-    "decisions": "重要决策和理由",
-    "key_results": "已完成的具体成果",
-    "pending": "未完成的待办"
+    "session_title": "...",
+    "workflow": "...",
+    "errors_and_corrections": "无则null",
+    "decisions": "无则null",
+    "key_results": "无则null"
   }},
   "l2": {{
-    "intent": "用户的目标和验收标准",
-    "process": "关键步骤和重要决策",
-    "results": "已完成成果和未完成待办"
+    "intent": "...",
+    "process": "...",
+    "results": "..."
   }},
-  "keywords": ["关键词1", "关键词2", "关键词3"]
+  "keywords": ["词1", "词2"],
+  "state_snapshot": {{
+    "current_state": "...",
+    "task_specification": "...",
+    "pending": "...",
+    "key_entities": "...",
+    "domain_knowledge": "...",
+    "user_feedback": "...",
+    "attention_hints": "..."
+  }},
+  "memory_items": {{
+    "user_profile_updates": "无则null",
+    "project_knowledge_updates": "无则null",
+    "experience_updates": "无则null"
+  }}
 }}
-```"""
-
-    # 保留区提取模板：从完整上下文中重新识别保留区内容
-    PRESERVED_PROMPT = """## 任务
-从以下完整上下文中提取「保留区」信息。保留区存储的是对话中最关键、必须始终保留的信息。
-
-## 提取规则
-- **user_requirements**：用户的原始需求和核心指令，保留用户的原话要点
-- **key_decisions**：已做出的关键决策及其理由（只保留最终决策，不含讨论过程）
-- **execution_plan**：当前执行计划，只保留最新版本（覆盖旧版本）
-- **constraints**：当前活跃的约束条件和技术限制
-- **pending_tasks**：尚未完成的任务及其状态
-- 每个字段如果没有对应内容，填空字符串 ""
-- 内容要精炼，只保留最关键的信息，避免冗余
-
-## 旧保留区（可能需要更新）
-{old_preserved}
-
-## 背景信息（前次压缩摘要）
-{previous_l1}
-
-## 当前用户消息
-{user_message}
-
-## 对话历史
-{messages}
-
-## 输出格式
-严格输出以下 JSON，不要输出任何其他内容。
-
-```json
-{{
-  "user_requirements": "用户的原始需求和指令",
-  "key_decisions": "关键决策记录",
-  "execution_plan": "当前执行计划",
-  "constraints": "活跃约束条件",
-  "pending_tasks": "未完成任务状态"
-}}
-```"""
-
-    # 长期记忆提取模板：从对话中提取可长期保存的记忆
-    MEMORY_EXTRACTION_PROMPT = """## 任务
-从以下对话中提取值得长期保存的记忆信息。这些信息将写入持久化记忆系统。
-
-## 提取规则
-- **user_profile_updates**：用户偏好、习惯、工作方式等个人信息更新（如"用户喜欢用 TypeScript"、"用户是前端开发者"）
-- **project_knowledge_updates**：项目相关的知识更新（如技术栈选择、架构决策、目录结构等）
-- **experience_updates**：本次对话中的经验教训（如踩过的坑、找到的解决方案、验证过的最佳实践等）
-- 有值就填，没值就填空字符串 ""
-- 只提取本次对话中新发现的信息，不要重复已有信息
-- 每类信息用简洁的分条格式，每条一行
-
-## 背景信息（前次压缩摘要）
-{previous_l1}
-
-## 当前用户消息
-{user_message}
-
-## 对话历史
-{messages}
-
-## 输出格式
-严格输出以下 JSON，不要输出任何其他内容。
-
-```json
-{{
-  "user_profile_updates": "用户偏好/习惯更新，无则填空字符串",
-  "project_knowledge_updates": "项目知识更新，无则填空字符串",
-  "experience_updates": "经验教训更新，无则填空字符串"
-}}
-```"""
+"""
 
     def __init__(
         self,
@@ -263,17 +295,6 @@ class ContextCompressor:
         self.config = config or CompressionConfig()
         self.budgets = self.config.get_budgets()
 
-        # 缓存
-        self._cache: dict[str, str] = {}
-        self._cache_max_size = 1000
-
-        # 统计信息
-        self._stats: dict[str, Any] = {
-            "l0_to_l1_count": 0,
-            "l1_to_l2_count": 0,
-            "total_tokens_compressed": 0,
-        }
-
     def set_llm_call_fn(self, llm_call_fn: Callable[[str], Awaitable[str]]) -> None:
         """延迟注入 LLM 调用函数。
 
@@ -285,47 +306,33 @@ class ContextCompressor:
     async def compress_all(
         self,
         messages: list[dict[str, Any]],
-        previous_l1: str = "",
-        user_message: str = "",
+        state_snapshot: str = "",
+        recent_process_blocks: str = "",
     ) -> dict[str, Any]:
-        """一次性完成 L1 + L2 + 关键词压缩（单次 LLM 调用）。
+        """一次性完成 L1 + L2 + keywords + state_snapshot + memory_items 压缩。
 
         Args:
             messages: 对话消息列表
-            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
-            user_message: 当前用户消息（作为最新上下文）
+            state_snapshot: 当前累积的状态快照（JSON 字符串）
+            recent_process_blocks: 最近的过程块样本（采样后的文本）
 
         Returns:
-            {"l1": str, "l2": str, "keywords": list[str]}
+            {"l1": str, "l2": str, "keywords": list[str],
+             "state_snapshot": dict, "memory_items": dict}
 
         Raises:
             RuntimeError: LLM 调用失败时
         """
         if not messages:
-            return {"l1": "", "l2": "", "keywords": []}
+            return {"l1": "", "l2": "", "keywords": [],
+                    "state_snapshot": {}, "memory_items": {}}
 
         messages_text = self._format_messages(messages)
 
-        # 构建前次压缩背景段落
-        if previous_l1:
-            previous_l1_section = (
-                "## 背景信息（前次压缩摘要，请在此基础上整合新内容）\n"
-                f"{previous_l1}\n"
-            )
-        else:
-            previous_l1_section = ""
-
-        # 提取用户消息（如果未显式传入，从消息列表中提取）
-        if not user_message:
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    user_message = msg.get("content", "")
-                    break
-
         prompt = self.COMPRESS_PROMPT.format(
             messages=messages_text,
-            previous_l1_section=previous_l1_section,
-            user_message=user_message or "（无明确用户消息）",
+            state_snapshot=state_snapshot or "（无已有状态，这是首次压缩）",
+            recent_process_blocks=recent_process_blocks or "（无最近步骤）",
         )
 
         try:
@@ -337,7 +344,8 @@ class ContextCompressor:
             raw_json = self._extract_json(response)
             if not raw_json or not raw_json.strip():
                 logger.warning("[ContextCompressor] JSON 提取结果为空，跳过压缩")
-                return {"l1": "", "l2": "", "keywords": []}
+                return {"l1": "", "l2": "", "keywords": [],
+                        "state_snapshot": {}, "memory_items": {}}
 
             import json
             try:
@@ -347,7 +355,8 @@ class ContextCompressor:
                     "[ContextCompressor] JSON 解析失败: %s | raw_json 前 200 字符: %s",
                     je, raw_json[:200],
                 )
-                return {"l1": "", "l2": "", "keywords": []}
+                return {"l1": "", "l2": "", "keywords": [],
+                        "state_snapshot": {}, "memory_items": {}}
 
             l1_data = parsed.get("l1", {})
             l1_str = json.dumps(l1_data, ensure_ascii=False, indent=2) if l1_data else ""
@@ -361,316 +370,34 @@ class ContextCompressor:
                 if isinstance(kw, str) and kw.strip()
             ][:10]
 
+            state_snapshot_data = parsed.get("state_snapshot", {})
+            memory_items_data = parsed.get("memory_items", {})
+
             l1_max = self.budgets.get("L1", 1000)
             l2_max = self.budgets.get("L2", 500)
             l1_str = self._truncate_to_budget(l1_str, l1_max)
             l2_str = self._truncate_to_budget(l2_str, l2_max)
 
-            self._stats["l0_to_l1_count"] += 1
-            self._stats["l1_to_l2_count"] += 1
-            self._stats["total_tokens_compressed"] += self._estimate_tokens(messages_text)
-
             logger.info(
-                "[ContextCompressor] 一次性压缩完成 | L1≈%d字符 L2≈%d字符 keywords=%d",
+                "[ContextCompressor] 一次性压缩完成 | L1≈%d字符 L2≈%d字符 "
+                "keywords=%d state_snapshot=%d字段 memory_items=%d",
                 len(l1_str), len(l2_str), len(keywords),
+                sum(1 for v in state_snapshot_data.values() if v) if isinstance(state_snapshot_data, dict) else 0,
+                sum(1 for v in memory_items_data.values() if v and v != "null") if isinstance(memory_items_data, dict) else 0,
             )
 
-            return {"l1": l1_str, "l2": l2_str, "keywords": keywords}
+            return {
+                "l1": l1_str,
+                "l2": l2_str,
+                "keywords": keywords,
+                "state_snapshot": state_snapshot_data,
+                "memory_items": memory_items_data,
+            }
 
         except Exception as e:
             logger.error("[ContextCompressor] 一次性压缩失败 | error=%s", e)
             raise RuntimeError(f"压缩失败: {e}") from e
 
-
-    async def extract_preserved(
-        self,
-        messages: list[dict[str, Any]],
-        previous_l1: str = "",
-        user_message: str = "",
-        old_preserved: str = "",
-    ) -> "PreservedZone":
-        """从完整上下文中提取保留区信息。
-
-        保留区每轮从完整上下文（旧保留区 + 压缩块 + 当前对话）中重新识别提取，
-        内容刷新到最新状态，覆盖旧保留区。
-
-        Args:
-            messages: 对话消息列表
-            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
-            user_message: 当前用户消息
-            old_preserved: 旧保留区内容（JSON 字符串或纯文本）
-
-        Returns:
-            PreservedZone 实例，异常时返回空实例
-        """
-        if not messages:
-            return PreservedZone()
-
-        messages_text = self._format_messages(messages)
-
-        # 提取用户消息（如果未显式传入）
-        if not user_message:
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    user_message = msg.get("content", "")
-                    break
-
-        old_preserved_section = (
-            old_preserved if old_preserved and old_preserved.strip() else "（无旧保留区）"
-        )
-        previous_l1_section = (
-            previous_l1 if previous_l1 and previous_l1.strip() else "（无前次压缩摘要）"
-        )
-
-        prompt = self.PRESERVED_PROMPT.format(
-            old_preserved=old_preserved_section,
-            previous_l1=previous_l1_section,
-            user_message=user_message or "（无明确用户消息）",
-            messages=messages_text,
-        )
-
-        try:
-            response = await self._call_llm(prompt)
-            if not response or not response.strip():
-                logger.warning("[ContextCompressor] 保留区提取：LLM 返回空响应")
-                return PreservedZone()
-
-            raw_json = self._extract_json(response)
-            if not raw_json or not raw_json.strip():
-                logger.warning("[ContextCompressor] 保留区提取：JSON 提取结果为空")
-                return PreservedZone()
-
-            import json
-
-            try:
-                parsed = json.loads(raw_json)
-            except json.JSONDecodeError as je:
-                logger.warning(
-                    "[ContextCompressor] 保留区提取：JSON 解析失败: %s | raw_json 前 200 字符: %s",
-                    je,
-                    raw_json[:200],
-                )
-                return PreservedZone()
-
-            return PreservedZone(
-                user_requirements=str(parsed.get("user_requirements", "") or ""),
-                key_decisions=str(parsed.get("key_decisions", "") or ""),
-                execution_plan=str(parsed.get("execution_plan", "") or ""),
-                constraints=str(parsed.get("constraints", "") or ""),
-                pending_tasks=str(parsed.get("pending_tasks", "") or ""),
-            )
-
-        except Exception as e:
-            logger.error("[ContextCompressor] 保留区提取失败 | error=%s", e)
-            return PreservedZone()
-
-    async def extract_long_term_memory(
-        self,
-        messages: list[dict[str, Any]],
-        previous_l1: str = "",
-        user_message: str = "",
-    ) -> "MemoryExtraction":
-        """从对话中提取可长期保存的记忆项。
-
-        有值就填，没值就空，不做去重判断。调用方负责将提取结果写入 memory 工具存储。
-
-        Args:
-            messages: 对话消息列表
-            previous_l1: 前次压缩的 L1 摘要（作为背景信息）
-            user_message: 当前用户消息
-
-        Returns:
-            MemoryExtraction 实例，异常时返回空实例
-        """
-        if not messages:
-            return MemoryExtraction()
-
-        messages_text = self._format_messages(messages)
-
-        # 提取用户消息（如果未显式传入）
-        if not user_message:
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    user_message = msg.get("content", "")
-                    break
-
-        previous_l1_section = (
-            previous_l1 if previous_l1 and previous_l1.strip() else "（无前次压缩摘要）"
-        )
-
-        prompt = self.MEMORY_EXTRACTION_PROMPT.format(
-            previous_l1=previous_l1_section,
-            user_message=user_message or "（无明确用户消息）",
-            messages=messages_text,
-        )
-
-        try:
-            response = await self._call_llm(prompt)
-            if not response or not response.strip():
-                logger.warning("[ContextCompressor] 长期记忆提取：LLM 返回空响应")
-                return MemoryExtraction()
-
-            raw_json = self._extract_json(response)
-            if not raw_json or not raw_json.strip():
-                logger.warning("[ContextCompressor] 长期记忆提取：JSON 提取结果为空")
-                return MemoryExtraction()
-
-            import json
-
-            try:
-                parsed = json.loads(raw_json)
-            except json.JSONDecodeError as je:
-                logger.warning(
-                    "[ContextCompressor] 长期记忆提取：JSON 解析失败: %s | raw_json 前 200 字符: %s",
-                    je,
-                    raw_json[:200],
-                )
-                return MemoryExtraction()
-
-            return MemoryExtraction(
-                user_profile_updates=str(parsed.get("user_profile_updates", "") or ""),
-                project_knowledge_updates=str(parsed.get("project_knowledge_updates", "") or ""),
-                experience_updates=str(parsed.get("experience_updates", "") or ""),
-            )
-
-        except Exception as e:
-            logger.error("[ContextCompressor] 长期记忆提取失败 | error=%s", e)
-            return MemoryExtraction()
-
-    async def progressive_compress(
-        self,
-        l0: str,
-        l1: str,
-        l2: str,
-        budgets: dict[str, int],
-        executor_id: str | None = None,
-    ) -> tuple[str, str]:
-        """递进压缩主逻辑。
-
-        Args:
-            l0: L0 原文
-            l1: L1 摘要
-            l2: L2 三元组
-            budgets: 各层预算
-            executor_id: 执行器 ID
-
-        Returns:
-            (新 L1, 新 L2) 元组
-        """
-        l0_tokens = self._estimate_tokens(l0) if l0 else 0
-        l1_tokens = self._estimate_tokens(l1) if l1 else 0
-        l2_tokens = self._estimate_tokens(l2) if l2 else 0
-
-        l1_budget = budgets.get("L1", budgets.get("DSL", 1000))
-        l2_budget = budgets.get("L2", budgets.get("CSL", 500))
-
-        new_l1, new_l2 = l1, l2
-
-        # 一次性压缩 L0 → L1 + L2
-        if l0_tokens > 0:
-            messages = [{"role": "user", "content": l0}]
-            result = await self.compress_all(
-                messages, previous_l1=l1 if l1 else "",
-            )
-
-            compressed_l1 = result.get("l1", "")
-            compressed_l2 = result.get("l2", "")
-
-            if compressed_l1:
-                if new_l1:
-                    new_l1 = new_l1 + "\n\n---\n\n" + compressed_l1
-                else:
-                    new_l1 = compressed_l1
-                l1_tokens = self._estimate_tokens(new_l1)
-
-            if compressed_l2:
-                if new_l2:
-                    new_l2 = new_l2 + "\n\n---\n\n" + compressed_l2
-                else:
-                    new_l2 = compressed_l2
-                l2_tokens = self._estimate_tokens(new_l2)
-
-        # L1 超预算：溢出部分已有 L2，直接裁剪 L1
-        if l1_tokens > l1_budget:
-            new_l1 = self._keep_within_budget(new_l1, l1_budget)
-
-        # L2 超预算
-        if l2_tokens > l2_budget:
-            new_l2 = self._keep_within_budget(new_l2, l2_budget)
-
-        logger.debug(
-            "[ContextCompressor] 递进压缩完成: L1≈%dtokens, L2≈%dtokens",
-            self._estimate_tokens(new_l1), self._estimate_tokens(new_l2),
-        )
-
-        return new_l1, new_l2
-
-    def _extract_overflow(self, content: str, budget: int) -> str:
-        """提取超出预算的内容（最旧的部分）。
-
-        Args:
-            content: 内容文本
-            budget: token 预算
-
-        Returns:
-            溢出内容
-        """
-        if not content:
-            return ""
-
-        total_tokens = self._estimate_tokens(content)
-        if total_tokens <= budget:
-            return ""
-
-        parts = content.split("\n\n---\n\n")
-        if len(parts) <= 1:
-            return content
-
-        overflow_parts: list[str] = []
-        remaining_tokens = 0
-
-        for part in parts:
-            part_tokens = self._estimate_tokens(part)
-            if remaining_tokens + part_tokens <= budget:
-                remaining_tokens += part_tokens
-            else:
-                overflow_parts.append(part)
-
-        return "\n\n---\n\n".join(overflow_parts) if overflow_parts else ""
-
-    def _keep_within_budget(self, content: str, budget: int) -> str:
-        """保留预算内的内容（最新的部分）。
-
-        Args:
-            content: 内容文本
-            budget: token 预算
-
-        Returns:
-            预算内的内容
-        """
-        if not content:
-            return ""
-
-        total_tokens = self._estimate_tokens(content)
-        if total_tokens <= budget:
-            return content
-
-        parts = content.split("\n\n---\n\n")
-        if len(parts) <= 1:
-            return self._truncate_to_budget(content, budget)
-
-        remaining_parts: list[str] = []
-        current_tokens = 0
-
-        for part in reversed(parts):
-            part_tokens = self._estimate_tokens(part)
-            if current_tokens + part_tokens <= budget:
-                remaining_parts.insert(0, part)
-                current_tokens += part_tokens
-            else:
-                break
-
-        return "\n\n---\n\n".join(remaining_parts) if remaining_parts else ""
 
     def _truncate_to_budget(self, text: str, max_tokens: int) -> str:
         """截断文本到预算内，保持 JSON 结构完整。
@@ -813,69 +540,3 @@ class ContextCompressor:
 
         # 简化估算：字符数 / 2
         return max(1, len(text) // 2)
-
-    def _generate_cache_key(
-        self, messages: list[dict[str, Any]], layer: str = "",
-    ) -> str:
-        """生成缓存键。
-
-        Args:
-            messages: 消息列表
-            layer: 层级标识
-
-        Returns:
-            缓存键
-        """
-        msg_count = len(messages)
-        last_content = messages[-1].get("content", "") if messages else ""
-        key_str = f"{layer}_{msg_count}_{last_content[:100]}"
-        return hashlib.md5(key_str.encode(), usedforsecurity=False).hexdigest()
-
-    def _cache_put(self, key: str, value: str) -> None:
-        """放入缓存，超限时清理。
-
-        Args:
-            key: 缓存键
-            value: 缓存值
-        """
-        if len(self._cache) >= self._cache_max_size:
-            # 简单清理：删除最早的 10%
-            remove_count = self._cache_max_size // 10
-            keys_to_remove = list(self._cache.keys())[:remove_count]
-            for k in keys_to_remove:
-                del self._cache[k]
-
-        self._cache[key] = value
-
-    def clear_cache(self) -> None:
-        """清空缓存。"""
-        self._cache.clear()
-
-    def get_cache_size(self) -> int:
-        """获取缓存大小。
-
-        Returns:
-            缓存条目数
-        """
-        return len(self._cache)
-
-    def get_stats(self) -> dict[str, Any]:
-        """获取统计信息。
-
-        Returns:
-            统计信息字典
-        """
-        return {
-            **self._stats,
-            "budgets": self.budgets,
-            "cache_size": len(self._cache),
-        }
-
-    def update_config(self, config: CompressionConfig) -> None:
-        """更新配置。
-
-        Args:
-            config: 新的压缩配置
-        """
-        self.config = config
-        self.budgets = config.get_budgets()

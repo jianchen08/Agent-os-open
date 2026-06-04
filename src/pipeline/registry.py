@@ -447,23 +447,22 @@ class EngineRegistry:
             #   导致初始 sequence 从 0/1 开始，比前端已有消息小。
             self._resume_entry_sequence(entry, pipeline_id)
         else:
-            # 停止旧 drain task：先发哨兵值立即终止 drain_loop，
+            # 停止旧 drain task（安全网）：先发哨兵值立即终止 drain_loop，
             # 再取消 asyncio.Task 确保协程退出，避免双消费者竞争。
             if entry.drain_task is not None and not entry.drain_task.done():
                 bridge.stop()
                 entry.drain_task.cancel()
                 entry.drain_task = None
             # BUG-FIX-fix_20260531_sink_dead_persist:
-            # 问题根因: ensure_bridge 复用已有 bridge 时只调用 reset_for_new_turn，
-            #   不更新 output_sink。如果上一轮 sink 已 dead（前端断连），
-            #   新一轮仍使用 dead sink，所有事件发送立即失败，drain_loop 瞬间退出。
-            # 修复方案: 传入的 sink 非 None 时更新 bridge 的 output_sink，
-            #   确保新一轮使用新的活跃连接。
+            # 更新 output_sink，确保使用新的活跃连接。
             if sink is not None:
                 bridge.output_sink = sink
-            bridge.reset_for_new_turn(
-                message_id=f"msg_{uuid.uuid4().hex[:12]}"
-            )
+            # 仅在需要启动新 drain 时 reset（新 pipeline 场景）。
+            # drain_loop 不再退出，不应在每次消息时 reset bridge。
+            if auto_start_drain:
+                bridge.reset_for_new_turn(
+                    message_id=f"msg_{uuid.uuid4().hex[:12]}"
+                )
 
         if auto_start_drain and engine is not None:
             from pipeline.message_bus import _start_bg_drain

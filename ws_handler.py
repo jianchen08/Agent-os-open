@@ -399,13 +399,20 @@ class WebSocketInteractionNotifier:
         """
         ok = await self._send_event_to_thread(thread_id, event_data)
         if not ok:
-            logger.warning(
-                "send_to_thread: 无活跃连接: thread_id=%s type=%s active=%s global=%s",
-                thread_id[:12] if thread_id else "(empty)",
-                event_data.get("type", "?"),
-                {k[:12]: len(v) for k, v in self._active_connections.items()},
-                list(self._global_connections.keys()),
-            )
+            # thread_id 为空说明是后端任务（CLI/定时触发），没有前端连接是正常的，不打 warning
+            if not thread_id:
+                logger.debug(
+                    "send_to_thread: 无活跃连接（后端任务）: type=%s",
+                    event_data.get("type", "?"),
+                )
+            else:
+                logger.warning(
+                    "send_to_thread: 无活跃连接: thread_id=%s type=%s active=%s global=%s",
+                    thread_id[:12] if thread_id else "(empty)",
+                    event_data.get("type", "?"),
+                    {k[:12]: len(v) for k, v in self._active_connections.items()},
+                    list(self._global_connections.keys()),
+                )
         return ok
 
     async def notify_cancel(

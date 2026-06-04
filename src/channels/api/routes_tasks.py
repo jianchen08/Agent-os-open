@@ -116,20 +116,34 @@ def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
 def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     """将存储层任务字典转为 TaskResponse。"""
     raw_status = t.get("status", "pending")
+    # 从 metadata 中提取 agent_level
+    meta = t.get("metadata", {}) or {}
+    agent_level = t.get("agent_level")
+    if agent_level is None and meta.get("agent_level"):
+        agent_level = meta.get("agent_level")
+    if agent_level is not None and hasattr(agent_level, "value"):
+        agent_level = agent_level.value
     return TaskResponse(
         id=t["id"],
         title=t["title"],
         description=t.get("description"),
         status=_map_status_for_api(raw_status),
         priority=t.get("priority", 5),
+        parent_task_id=t.get("parent_task_id"),
         agent_id=t.get("agent_id"),
+        agent_name=t.get("agent_name"),
+        agent_level=agent_level,
         thread_id=t.get("thread_id"),
         created_by=t.get("created_by"),
+        pipeline_run_id=t.get("pipeline_run_id"),
+        execution_record_id=t.get("execution_record_id"),
         tags=t.get("tags", []),
         input_data=t.get("input_data", {}),
         result=t.get("result"),
+        error=t.get("error"),
         created_at=t.get("created_at", ""),
         updated_at=t.get("updated_at", ""),
+        metadata=meta,
     )
 
 
@@ -177,21 +191,28 @@ async def list_tasks(
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
     # BUG-FIX-fix_20260513_task_session_filter: 通过 pipeline_ids 关联任务与会话
-    # 问题根因: 任务 metadata 中没有 session_id 字段，按 session_id 过滤永远匹配不上
-    # 修复方案: 通过 session_id 从 store 获取 pipeline_ids，然后匹配任务的
-    #           parent_pipeline_id / pipeline_run_id（包括子管道）
-    # 影响范围: 任务列表按会话过滤功能
-    # 修复日期: 2026-05-13
+    # BUG-FIX-fix_20260603_task_tree_visibility:
+    # 问题根因: _pipeline_root_map 的 value 是根任务ID，而 pipeline_ids 是管道运行ID，
+    #           跨 ID 空间匹配永远不命中。改为从任务自身字段递归扩展管道 ID 集合。
+    # 修复日期: 2026-06-03
     if session_id:
         pipeline_ids = set()
         thread_data = store.threads.get(session_id)
         if thread_data:
             pipeline_ids.update(thread_data.get("pipeline_ids", []))
-        root_map = getattr(
-            _get_execution_record_storage(), "_pipeline_root_map", {}
-        ) if _get_execution_record_storage() else {}
-        child_ids = {c for c, r in root_map.items() if r in pipeline_ids}
-        pipeline_ids.update(child_ids)
+
+        # 从任务自身的 pipeline_run_id / parent_pipeline_id 递归扩展管道树
+        if pipeline_ids:
+            changed = True
+            while changed:
+                changed = False
+                for td in tasks:
+                    ppid = td.get("parent_pipeline_id", "")
+                    prid = td.get("pipeline_run_id", "")
+                    if ppid and ppid in pipeline_ids:
+                        if prid and prid not in pipeline_ids:
+                            pipeline_ids.add(prid)
+                            changed = True
 
         def _task_matches_pipeline(task_dict: dict) -> bool:
             meta = task_dict.get("metadata", {})

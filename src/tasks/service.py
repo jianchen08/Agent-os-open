@@ -316,13 +316,15 @@ class TaskService:
 
         await self._emit_state_change(task_id, current, target)
 
-    async def pause_task(self, task_id: str) -> None:
+    async def pause_task(self, task_id: str, paused_by: str = "user") -> None:
         """暂停任务。
 
         将任务状态设置为 paused 并持久化到 YAML。
 
         Args:
             task_id: 任务 ID
+            paused_by: 暂停来源，"user"（用户手动暂停）或 "system"（系统关闭时暂停），
+                       用于重启时区分是否需要恢复。
 
         Raises:
             KeyError: 任务不存在
@@ -348,6 +350,11 @@ class TaskService:
         old_status = current
         task.status = TaskStatus.SUSPENDED
         task.updated_at = datetime.now().isoformat()
+        # BUG-FIX-fix_20260603_pause_metadata:
+        # 记录暂停来源，重启时区分用户暂停（应保持 SUSPENDED）和系统暂停（应恢复）
+        if task.metadata is None:
+            task.metadata = {}
+        task.metadata["paused_by"] = paused_by
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "suspended")
@@ -355,7 +362,7 @@ class TaskService:
     async def resume_task(self, task_id: str) -> Any:
         """恢复暂停的任务。
 
-        将任务状态从 paused 变为 pending 并持久化。
+        将任务状态从 paused 变为 running 并持久化，同时唤醒挂起的管道引擎。
 
         Args:
             task_id: 任务 ID
@@ -379,16 +386,41 @@ class TaskService:
         current = task.status.value if hasattr(task.status, "value") else str(task.status)
         if current != "suspended":
             raise InvalidTransitionError(
-                current, "pending",
+                current, "running",
                 f"只有 paused 状态的任务可以恢复，当前: '{current}'",
             )
 
         old_status = current
-        task.status = TaskStatus.PENDING
+        # BUG-FIX-fix_20260603_resume_wake_engine:
+        # resume 后应设为 RUNNING（而非 PENDING），因为挂起的管道引擎需要继续执行，
+        # 不能等 TaskWorker 重新拾取 PENDING 任务再起新管道。
+        task.status = TaskStatus.RUNNING
         task.updated_at = datetime.now().isoformat()
+        # 清除暂停来源标记（恢复后不再需要）
+        if task.metadata:
+            task.metadata.pop("paused_by", None)
         self._storage.save(task)
 
-        await self._emit_state_change(task_id, old_status, "pending")
+        await self._emit_state_change(task_id, old_status, "running")
+
+        # 唤醒挂起的管道引擎：任务状态已恢复为 RUNNING，pause_guard 下次检查
+        # 会看到非 SUSPENDED 状态，管道自动继续执行。
+        try:
+            from pipeline.registry import get_engine_registry
+            entries = get_engine_registry().find_by_tag("task_id", task_id)
+            for entry in entries:
+                if entry.engine is not None and entry.engine.is_suspended:
+                    entry.engine.wake()
+                    logger.info(
+                        "TaskService: 唤醒挂起引擎 task_id=%s pipeline=%s",
+                        task_id, entry.pipeline_id[:12],
+                    )
+        except Exception as exc:
+            logger.debug(
+                "TaskService: 唤醒引擎失败（非致命）task_id=%s: %s",
+                task_id, exc,
+            )
+
         return task
 
     # ── 门面模式：TaskWorker 依赖的操作 ──────────────────────────
@@ -457,6 +489,22 @@ class TaskService:
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "failed")
+
+        # BUG-FIX-fix_20260603_fail_task_cascade:
+        # 问题根因: fail_task 只将当前任务标记为 FAILED，不处理子任务，
+        #   导致父任务失败后子任务仍然在运行（状态为 RUNNING/EVALUATING），
+        #   出现"父任务已失败但子任务还在跑"的不一致状态。
+        # 修复方案: 父任务失败时级联取消所有非终态的子任务（递归），
+        #   子任务标记为 CANCELLED（而非 FAILED），因为子任务本身未执行失败，
+        #   而是因父任务失败被终止。
+        # 影响范围: 所有调用 fail_task 的场景（管道异常、超时、工作空间失败等）。
+        # 修复日期: 2026-06-03
+        _cascade_count = await self.fail_task_cascade(task_id, reason=reason)
+        if _cascade_count > 0:
+            logger.info(
+                "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
+                task_id, _cascade_count,
+            )
 
     # BUG-FIX-fix_20260523_cancel_task:
     # 问题根因: cancel_task_cascade 复用 fail_task 将子任务状态设为 FAILED，
@@ -534,6 +582,125 @@ class TaskService:
             cancelled_count += deeper_count
 
         return cancelled_count
+
+    async def fail_task_cascade(self, task_id: str, reason: str = "") -> int:
+        """级联取消父任务失败时的所有子任务。
+
+        BUG-FIX-fix_20260603_fail_task_cascade:
+        问题根因: fail_task 只处理当前任务，不处理子任务，
+          导致父任务失败后子任务仍保持 RUNNING/EVALUATING 状态继续执行。
+        修复方案: 参照 cancel_task_cascade()，递归遍历所有后代子任务，
+          对非终态的子任务调用 cancel_task 标记为 CANCELLED，
+          跳过已处于终态（COMPLETED/FAILED/CANCELLED）的子任务。
+        修复日期: 2026-06-03
+
+        Args:
+            task_id: 父任务 ID
+            reason: 失败原因（会传递给子任务的取消原因）
+
+        Returns:
+            被级联取消的子任务数量
+        """
+        if self._storage is None:
+            return 0
+
+        from tasks.types import TaskStatus
+
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
+
+        subtasks = self._storage.list_by_parent(task_id)
+        cancelled_count = 0
+
+        for subtask in subtasks:
+            if subtask.status in _TERMINAL:
+                continue
+
+            await self.cancel_task(
+                subtask.id,
+                reason=f"父任务失败，级联取消: {reason}" if reason else "父任务失败，级联取消",
+            )
+            cancelled_count += 1
+
+            # 递归处理更深层级的子任务
+            deeper_count = await self.fail_task_cascade(subtask.id, reason=reason)
+            cancelled_count += deeper_count
+
+        return cancelled_count
+
+    @staticmethod
+    async def cleanup_ghost_tasks(data_dir: str) -> tuple[int, int]:
+        """清理服务重启后残留的幽灵任务（running/evaluating）。
+
+        服务重启后，内存中的引擎已不存在，但磁盘上可能残留
+        status=running 或 status=evaluating 的任务 YAML。
+        此方法将它们标记为 failed，并级联取消所有非终态的子任务。
+
+        Args:
+            data_dir: TaskStorage 的数据目录路径
+
+        Returns:
+            (清理的幽灵任务数, 级联取消的子任务数)
+        """
+        from pathlib import Path as _Path
+        from datetime import datetime, timezone
+        from tasks.storage import TaskStorage
+        from tasks.types import TaskStatus
+
+        _data_dir = str(_Path(data_dir).resolve())
+        try:
+            storage = TaskStorage(data_dir=_data_dir)
+        except Exception as exc:
+            logger.warning("[GhostCleanup] 初始化 TaskStorage 失败: %s", exc)
+            return (0, 0)
+
+        _GHOST_STATES = frozenset({TaskStatus.RUNNING, TaskStatus.EVALUATING})
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
+        _REASON = "服务重启后引擎状态丢失"
+
+        ghost_tasks: list = []
+        for state in _GHOST_STATES:
+            ghost_tasks.extend(storage.list_by_status(state))
+
+        if not ghost_tasks:
+            return (0, 0)
+
+        def _cancel_descendants(parent_id: str) -> int:
+            subtasks = storage.list_by_parent(parent_id)
+            count = 0
+            for st in subtasks:
+                if st.status in _TERMINAL:
+                    continue
+                st.status = TaskStatus.CANCELLED
+                st.updated_at = datetime.now(timezone.utc).isoformat()
+                st.metadata["cancel_reason"] = "父任务因服务重启失败，级联取消"
+                st.error = "父任务因服务重启失败，级联取消"
+                storage.save(st)
+                count += 1
+                count += _cancel_descendants(st.id)
+            return count
+
+        cleaned = 0
+        cascaded = 0
+        for task in ghost_tasks:
+            try:
+                task.status = TaskStatus.FAILED
+                task.updated_at = datetime.now(timezone.utc).isoformat()
+                task.metadata["fail_reason"] = _REASON
+                task.error = _REASON
+                storage.save(task)
+                cleaned += 1
+                cascaded += _cancel_descendants(task.id)
+            except Exception as exc:
+                logger.warning(
+                    "[GhostCleanup] 清理失败: task=%s err=%s",
+                    task.id[:12] if hasattr(task, "id") else "?", exc,
+                )
+
+        logger.info(
+            "[GhostCleanup] 完成: cleaned=%d, cascaded=%d",
+            cleaned, cascaded,
+        )
+        return (cleaned, cascaded)
 
     async def complete_task(self, task_id: str) -> None:
         """将任务标记为完成。

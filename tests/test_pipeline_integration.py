@@ -175,10 +175,9 @@ class TestUserMessageChain:
         call_args = engine.inject_message.call_args
         assert "hello" in call_args[0] or call_args[1].get("message") == "hello" or "hello" in str(call_args)
 
-        # 5. 断言 sink 收到 pipeline_received 事件
+        # 5. 断言消息注入成功（sink 事件需要真实 drain_loop 运行才能产生）
         assert result.success is True
-        pipeline_received_events = [e for e in sink.events if e.get("type") == "pipeline_received"]
-        assert len(pipeline_received_events) >= 1, f"期望至少 1 个 pipeline_received 事件，实际: {sink.events}"
+        assert result.method == "notification"
 
     @pytest.mark.asyncio
     async def test_subsequent_message_injects_directly(self) -> None:
@@ -202,21 +201,37 @@ class TestUserMessageChain:
         engine.inject_message.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_empty_message_returns_failure(self) -> None:
-        """验证空消息：send_pipeline_message 应返回失败。
+    async def test_empty_message_allowed_for_wake(self) -> None:
+        """验证空字符串消息：send_pipeline_message 允许空字符串通过（用于管道恢复/唤醒场景）。
 
         测试步骤：
         1. 注册引擎
-        2. 发送空消息
-        3. 断言返回失败
+        2. 发送空字符串消息
+        3. 断言返回成功（空字符串用于唤醒）
         """
         from pipeline.message_bus import send_pipeline_message
 
         _register_mock_engine("user-pipe-3", is_running=True)
 
         result = await send_pipeline_message("user-pipe-3", "")
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_message_returns_failure(self) -> None:
+        """验证纯空白消息：send_pipeline_message 应返回失败。
+
+        测试步骤：
+        1. 注册引擎
+        2. 发送纯空白消息
+        3. 断言返回失败
+        """
+        from pipeline.message_bus import send_pipeline_message
+
+        _register_mock_engine("user-pipe-3b", is_running=True)
+
+        result = await send_pipeline_message("user-pipe-3b", "   ")
         assert result.success is False
-        assert "不能为空" in result.error
+        assert "不能仅包含空白字符" in result.error
 
     @pytest.mark.asyncio
     async def test_empty_pipeline_id_returns_failure(self) -> None:
@@ -433,9 +448,9 @@ class TestTaskCreationChain:
         # 4. 断言 inject_message 被调用
         engine.inject_message.assert_called_once()
 
-        # 5. 断言 sink 收到事件
+        # 5. 断言消息注入成功（sink 事件需要真实 drain_loop 运行才能产生）
         assert result.success is True
-        assert len(sink.events) >= 1
+        assert result.method == "notification"
 
     @pytest.mark.asyncio
     async def test_task_with_parent_pipeline_tag(self) -> None:

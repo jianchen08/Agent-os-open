@@ -307,6 +307,375 @@ class TestPromptBuildStaticVars:
 
 
 # ══════════════════════════════════════════════════
+# 3.5 prompt_build folder 类型（相对路径拼接 workspace）
+# ══════════════════════════════════════════════════
+
+
+class TestPromptBuildFolderInjection:
+    """folder 类型静态变量注入：path 必填，相对路径拼接 ws_meta.path（worktree 路径）。
+
+    实际数据形态（参考 2eee5194e20f.yaml）::
+
+        ws_meta:
+          mode: worktree
+          path: D:\\myproject\\myproject__wt_2eee5194
+          branch: task/2eee5194e20f
+          project_root: D:\\myproject
+
+    即: 任务 YAML 中 ``workspace`` 字段是 ``.`` 之类的相对值, 真正的 worktree 路径
+    落在 ``ws_meta.path``, 必须用它作为 folder 相对路径的拼接 base。
+
+    路径解析规则（**不允许 CWD 回退**）：
+        1. 相对路径优先拼 ``state["ws_meta"]["path"]``
+        2. 缺失 ws_meta 时回退到 ``state["workspace"]``
+        3. 二者都缺失 → 返回空，**绝不**用 CWD 解析
+        4. 绝对路径直接使用
+    """
+
+    @pytest.mark.asyncio
+    async def test_folder_empty_path_skipped(self, tmp_path) -> None:
+        """folder 未指定 path 时直接跳过，不允许默认注入整个工作空间。"""
+        # workspace 下放一个文件，确认它不会被默认吸入
+        (tmp_path / "stray.md").write_text("不应出现", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree", "branch": "task/test"}
+        state["workspace"] = "."  # 模拟实际场景：workspace 是相对值, 真实路径在 ws_meta
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "空路径目录", "path": ""}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        # 既不应有 section 标题，也不应有任何文件内容
+        assert "空路径目录" not in content
+        assert "不应出现" not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_relative_path_joined_with_ws_meta_path(self, tmp_path) -> None:
+        """相对路径与 state["ws_meta"]["path"] 拼接，读取目录下文件。
+
+        模拟实际 worktree 场景：state["workspace"] 是 ``.``，真实路径在 ws_meta.path。
+        """
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("文档A", encoding="utf-8")
+        (docs / "b.md").write_text("文档B", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {
+            "path": str(tmp_path),
+            "mode": "worktree",
+            "branch": "task/2eee5194e20f",
+            "project_root": str(tmp_path.parent),
+        }
+        # 故意把 workspace 设为相对值, 验证实现会忽略它、直接用 ws_meta.path
+        state["workspace"] = "."
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "项目文档", "path": "docs"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "项目文档" in content
+        assert "文档A" in content
+        assert "文档B" in content
+        # 应使用 `--- filename ---` 分隔
+        assert "--- a.md ---" in content
+        assert "--- b.md ---" in content
+
+    @pytest.mark.asyncio
+    async def test_folder_no_ws_meta_returns_empty(self, tmp_path) -> None:
+        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
+        # 在 workspace 与 CWD 下都放同名目录, 验证两个都不会被注入
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "a.md").write_text("不应出现", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
+        state.pop("ws_meta", None)
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "无ws_meta", "path": "docs"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "无ws_meta" not in content
+        assert "不应出现" not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_absolute_path_used_as_is(self, tmp_path) -> None:
+        """绝对路径直接使用，不与 workspace / ws_meta 拼接。"""
+        docs = tmp_path / "external"
+        docs.mkdir()
+        (docs / "info.md").write_text("外部信息", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        # 故意把 workspace / ws_meta 指到无关目录，确认不影响绝对路径
+        state["ws_meta"] = {"path": str(tmp_path / "unrelated"), "mode": "worktree"}
+        (tmp_path / "unrelated").mkdir()
+        state["workspace"] = str(tmp_path / "unrelated")
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "外部文档", "path": str(docs)}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "外部信息" in content
+        assert "--- info.md ---" in content
+
+    @pytest.mark.asyncio
+    async def test_folder_extensions_filter(self, tmp_path) -> None:
+        """extensions 按白名单过滤文件扩展名。"""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.md").write_text("Markdown", encoding="utf-8")
+        (docs / "b.txt").write_text("应被过滤", encoding="utf-8")
+        (docs / "c.json").write_text("{\"k\":1}", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
+        state["context.static_vars"] = [
+            {
+                "type": "folder",
+                "name": "仅Markdown",
+                "path": "docs",
+                "extensions": [".md"],
+            }
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "Markdown" in content
+        assert "应被过滤" not in content
+        assert '"k"' not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_no_cwd_fallback_returns_empty(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """无 ws_meta 也无 workspace 时，相对路径绝不回退到 CWD，应返回空。"""
+        # 在 CWD 下放一个同名目录, 验证实现不会去 CWD 找
+        cwd_dir = tmp_path / "cwd_fake"
+        cwd_dir.mkdir()
+        (cwd_dir / "a.md").write_text("CWD 内容, 不应被注入", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state.pop("workspace", None)
+        state.pop("ws_meta", None)
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "无base", "path": "cwd_fake"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        # 既不应有 section 标题，也不应注入任何 CWD 中的文件
+        assert "无base" not in content
+        assert "CWD 内容" not in content
+        assert "不应被注入" not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_directory_not_found_returns_empty(self, tmp_path) -> None:
+        """目标目录不存在时静默返回空（不抛错）。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
+        state["context.static_vars"] = [
+            {"type": "folder", "name": "不存在的目录", "path": "missing"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        # 目录不存在 → content 为空 → 不应渲染该 section
+        assert "不存在的目录" not in content
+
+
+# ══════════════════════════════════════════════════
+# 3.6 prompt_build path 类型（同样拼接 ws_meta.path）
+# ══════════════════════════════════════════════════
+
+
+class TestPromptBuildPathInjection:
+    """path 类型静态变量注入：相对路径同样拼接 ws_meta.path（worktree 路径）。
+
+    与 folder 类型共享同一条 base 解析规则（**只认 ws_meta.path，无任何回退**）：
+        1. 相对路径必须拼 ``state["ws_meta"]["path"]``（worktree 路径）
+        2. 缺失 ws_meta → 跳过
+        3. 绝对路径直接使用
+        4. 严禁回退到 ``state["workspace"]`` 或 CWD
+    """
+
+    @pytest.mark.asyncio
+    async def test_path_no_cwd_fallback_returns_empty(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """无 ws_meta 也无 workspace 时，相对路径绝不回退到 CWD，应返回空。"""
+        cwd_file = tmp_path / "rules.md"
+        cwd_file.write_text("CWD 内容, 不应被注入", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state.pop("workspace", None)
+        state.pop("ws_meta", None)
+        state["context.static_vars"] = [
+            {"type": "path", "name": "无base", "path": "rules.md"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "无base" not in content
+        assert "CWD 内容" not in content
+        assert "不应被注入" not in content
+
+    @pytest.mark.asyncio
+    async def test_path_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
+        """相对路径与 state["ws_meta"]["path"] 拼接，读取单个文件。"""
+        (tmp_path / "rules.md").write_text("## 项目规范\n1. 必须有类型注解", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {
+            "path": str(tmp_path),
+            "mode": "worktree",
+            "branch": "task/2eee5194e20f",
+        }
+        state["workspace"] = "."  # 实际场景 workspace 是相对值
+        state["context.static_vars"] = [
+            {"type": "path", "name": "项目规则", "path": "rules.md"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "项目规则" in content
+        assert "类型注解" in content
+
+    @pytest.mark.asyncio
+    async def test_path_nested_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
+        """多层相对路径（如 docs/sub/spec.md）也能正确拼接到 ws_meta.path。"""
+        nested = tmp_path / "docs" / "sub"
+        nested.mkdir(parents=True)
+        (nested / "spec.md").write_text("嵌套规范", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
+        state["context.static_vars"] = [
+            {"type": "path", "name": "嵌套规则", "path": "docs/sub/spec.md"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "嵌套规范" in content
+
+    @pytest.mark.asyncio
+    async def test_path_absolute_used_as_is(self, tmp_path) -> None:
+        """绝对路径直接使用，不与 ws_meta.path 拼接。"""
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "info.md").write_text("外部信息", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        # 故意把 ws_meta / workspace 指到无关目录，确认不影响绝对路径
+        state["ws_meta"] = {"path": str(tmp_path / "unrelated"), "mode": "worktree"}
+        (tmp_path / "unrelated").mkdir()
+        state["workspace"] = str(tmp_path / "unrelated")
+        state["context.static_vars"] = [
+            {"type": "path", "name": "外部文档", "path": str(external / "info.md")}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "外部信息" in content
+
+    @pytest.mark.asyncio
+    async def test_path_no_ws_meta_returns_empty(self, tmp_path) -> None:
+        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
+        (tmp_path / "rules.md").write_text("不应出现", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
+        state.pop("ws_meta", None)
+        state["context.static_vars"] = [
+            {"type": "path", "name": "无ws_meta", "path": "rules.md"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "无ws_meta" not in content
+        assert "不应出现" not in content
+
+    @pytest.mark.asyncio
+    async def test_path_empty_path_skipped(self) -> None:
+        """path 未指定 path 时跳过，不允许默认注入。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": "D:\\some\\path", "mode": "worktree"}
+        state["context.static_vars"] = [
+            {"type": "path", "name": "空路径文件", "path": ""}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "空路径文件" not in content
+
+    @pytest.mark.asyncio
+    async def test_path_file_not_found_returns_empty(self, tmp_path) -> None:
+        """目标文件不存在时静默返回空（不抛错）。"""
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
+        state["context.static_vars"] = [
+            {"type": "path", "name": "不存在的文件", "path": "missing.md"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "不存在的文件" not in content
+
+
+# ══════════════════════════════════════════════════
 # 4. tool_schema 默认行为
 # ══════════════════════════════════════════════════
 
