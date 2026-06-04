@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -71,14 +70,6 @@ class TaskNotifierMixin:
                 )
 
             try:
-                await self._handle_terminal_lifecycle(task_id, new_status)
-            except Exception as exc:
-                logger.warning(
-                    "TaskWorker: _handle_terminal_lifecycle 失败(不影响通知): task=%s, error=%s",
-                    task_id, exc,
-                )
-
-            try:
                 await self._check_stale_containers()
             except Exception as exc:
                 logger.warning(
@@ -134,119 +125,7 @@ class TaskNotifierMixin:
             )
 
     async def _handle_terminal_lifecycle(self, task_id: str, new_status: str) -> None:
-        """终态时处理 worktree 回滚（仅 worktree 模式的 failed 状态）。
-
-        合并前置策略：worktree 合并已在 task_evaluate._complete_task 中完成，
-        此处不再执行合并操作。仅处理 failed 状态的回滚清理。
-        """
-        lifecycle = self._services.get("workspace_lifecycle_manager")
-        if not lifecycle:
-            return
-
-        lifecycle.restore_ws_meta(task_id)
-        ws_meta = lifecycle._ws_meta_store.get(task_id)
-        if not ws_meta:
-            return
-
-        if ws_meta.get("mode") != "worktree":
-            return
-
-        workspace = ws_meta.get("path", "")
-        if not workspace:
-            return
-
-        try:
-            if new_status == "completed":
-                ws_path = Path(workspace).resolve()
-                if ws_path.exists():
-                    # BUG-FIX-fix_20260528_safetynet_merge_before_cleanup:
-                    # 问题根因: 安全网发现 worktree 仍存在时直接 cleanup_workspace 删除，
-                    #   不执行合并，导致 agent 的工作成果全部丢失。
-                    # 修复方案: 先尝试合并（on_eval_passed），合并成功再清理，
-                    #   合并失败则将任务回退为 failed 并保留 worktree。
-                    #
-                    # BUG-FIX-fix_20260529_safetynet_already_merged:
-                    # 问题根因: 第一次合并成功后 _cleanup_worktree 删除了分支但
-                    #   Windows 文件锁导致目录残留，安全网再次合并时因分支已删除
-                    #   导致验证失败，返回 error=unknown，任务被错误标记为 failed。
-                    # 修复方案: 安全网先检查分支是否已不存在（说明已合并成功），
-                    #   如果分支已删除则直接清理残留目录，不再尝试合并。
-                    branch = ws_meta.get("branch", "")
-                    project_root = ws_meta.get("project_root", "")
-                    already_merged = False
-                    if branch and project_root:
-                        from pathlib import Path as _P
-                        proj_path = _P(project_root)
-                        if proj_path.exists():
-                            rc, _, _ = lifecycle._run_git(
-                                "rev-parse", "--verify", branch, cwd=proj_path)
-                            already_merged = rc != 0
-
-                    if already_merged:
-                        logger.info(
-                            "TaskWorker: 安全网检测到分支已删除(已合并)，"
-                            "直接清理残留目录: task_id=%s, workspace=%s",
-                            task_id, workspace,
-                        )
-                        lifecycle.cleanup_workspace(task_id)
-                    else:
-                        logger.warning(
-                            "TaskWorker: 任务已完成但 worktree 仍存在，"
-                            "尝试安全网合并: task_id=%s, workspace=%s",
-                            task_id, workspace,
-                        )
-                        merge_result = lifecycle.on_eval_passed(
-                            task_id, workspace, ws_meta)
-                        if merge_result.get("success"):
-                            logger.info(
-                                "TaskWorker: 安全网合并成功: task_id=%s, method=%s",
-                                task_id, merge_result.get("method"),
-                            )
-                        else:
-                            merge_error = merge_result.get("error", "unknown")
-                            if merge_result.get("verify_error"):
-                                merge_error += (
-                                    f" | 验证详情: "
-                                    f"{merge_result['verify_error']}")
-                            # BUG-FIX-fix_20260601_safetynet_double_notification:
-                            # 问题根因: 安全网合并失败时调用 fail_task() 将 completed
-                            #   改为 failed，触发第二次终态通知，用户看到"一个成功一个失败"。
-                            #   而任务已在 _complete_task 中通过 _try_merge_before_complete
-                            #   成功合并后才标记 completed，安全网的验证失败通常是
-                            #   编码问题（中文文件名）或 Windows 文件锁导致的误判。
-                            # 修复方案: 安全网合并失败时不再调 fail_task() 改变终态，
-                            #   仅记录错误日志并强制清理 worktree 目录。
-                            #   避免双重通知，避免将正常完成的任务误标为失败。
-                            logger.error(
-                                "TaskWorker: 安全网合并失败（不改变终态，仅清理worktree）: "
-                                "task_id=%s, error=%s",
-                                task_id, merge_error,
-                            )
-                            lifecycle.cleanup_workspace(task_id)
-                else:
-                    logger.info(
-                        "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
-                        task_id,
-                    )
-            elif new_status == "failed":
-                ws_path = Path(workspace).resolve()
-                if ws_path.exists():
-                    logger.warning(
-                        "TaskWorker: 任务已失败但 worktree 仍存在，执行安全网清理: "
-                        "task_id=%s, workspace=%s",
-                        task_id, workspace,
-                    )
-                    lifecycle.on_task_failed(workspace, ws_meta)
-                else:
-                    logger.info(
-                        "TaskWorker: worktree 已在评估阶段清理: task_id=%s",
-                        task_id,
-                    )
-        except Exception as e:
-            logger.warning(
-                "TaskWorker: _handle_terminal_lifecycle failed: task_id=%s, error=%s",
-                task_id, e,
-            )
+        """已废弃：安全网机制已移除。worktree 合并由 task_evaluate._complete_task 负责。"""
 
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str) -> None:
         """子任务到达终态时，通过统一消息总线通知父管道。"""

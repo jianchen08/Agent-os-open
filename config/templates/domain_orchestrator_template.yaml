@@ -22,7 +22,7 @@ system_prompt: |
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/{domain}_domain_rules.md}}
   {{path:config/rules/orchestrator_three_phase_pattern.md}}
-  {{path:config/rules/orchestrator_core_principles.md}}
+  {{path:config/rules/orchestrator_three_phase_pattern.md}}
 
   # 你是{领域名}编排者
 

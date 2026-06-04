@@ -32,7 +32,7 @@ import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFile
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
-import { useInteractionStore } from '@/stores/interactionStore'
+
 import { useUIStore } from '@/stores/uiStore'
 import { AppHeader } from './AppHeader'
 import { DockBar } from './DockBar'
@@ -118,7 +118,6 @@ export function FiveSpaceLayout({
   const fullscreenActive = useLayoutModeStore((s) => s.fullscreenActive)
   const fullscreenTitle = useLayoutModeStore((s) => s.fullscreenTitle)
   const fullscreenContent = useLayoutModeStore((s) => s.fullscreenContent)
-  const activeExecutions = useLayoutModeStore((s) => s.activeExecutions)
   const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
   const workspaceDataVersion = useLayoutModeStore((s) => s.workspaceDataVersion)
@@ -279,7 +278,7 @@ export function FiveSpaceLayout({
     }
   }, [activeSessionId, isMobile])
 
-  // Build dynamic dock items with execution status
+  // Build dock items from module schema (workspace tabs + external tool connections)
   const enrichedDockItems = useMemo(() => {
     const items = [...dockItems]
 
@@ -295,46 +294,8 @@ export function FiveSpaceLayout({
       }
     }
 
-    for (const execution of activeExecutions) {
-      if (execution.status === 'running') {
-        items.push({
-          id: `exec-${execution.id}`,
-          moduleId: execution.id,
-          icon: execution.type === 'tool' ? '🔧' : execution.type === 'agent' ? '🤖' : '⚡',
-          label: execution.name,
-          indicator: 'dot' as const,
-          indicatorColor: 'var(--accent-waiting, #f59e0b)',
-          isActive: true,
-          onClick: () => {
-            navigateToPipeline(execution.id)
-            if (isMobile) {
-              setMobileWorkspaceOpen(false)
-              setWorkspaceFullscreen(false)
-              setWorkspaceCollapsed(true)
-            }
-          },
-        })
-      }
-    }
-
-    // Add interaction request items
-    for (const interaction of pendingInteractions) {
-      items.push({
-        id: `interaction-${interaction.id}`,
-        moduleId: interaction.id,
-        icon: '❓',
-        label: 'Input Required',
-        indicator: 'badge' as const,
-        badgeCount: 1,
-        isActive: true,
-        onClick: () => {
-          useInteractionStore.getState().setGlobalOpenRequestId(interaction.id)
-        },
-      })
-    }
-
     return items
-  }, [dockItems, pendingInteractions, isMobile])
+  }, [dockItems, isMobile])
 
   /**
    * 渲染工作区 Tab 内容
