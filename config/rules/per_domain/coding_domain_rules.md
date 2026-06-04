@@ -1,6 +1,7 @@
 # 编程领域规则
 
 > **适用场景**：所有涉及代码生成、代码修改、代码审查、Bug修复、重构等编程任务的 Agent。
+> **来源**：基于编程领域标杆调研（Cursor Rules / CLAUDE.md / Google / Airbnb / SonarQube / Conventional Commits）+ AI辅助编程体系流程设计文档。
 
 ---
 
@@ -53,7 +54,7 @@
 
 - **函数式优先**：优先纯函数，避免副作用
 - **单文件 < 300 行**：超过则拆分模块
-- **圈复杂度**：具体阈值见 code_writer_rules.md
+- **圈复杂度 < 10**：过高则提取子函数
 - **函数行数 < 50 行**：过长则拆分
 - **参数个数 ≤ 4**：超过则使用对象封装
 
@@ -67,7 +68,7 @@
 ### 2.4 Python 规范
 
 - 遵循 PEP 8
-- 类型注解：具体规范见 python_type_hints.md 和 code_writer_rules.md
+- 类型注解：函数签名必须标注参数和返回类型
 - docstring：公共函数/类必须有 docstring
 - import 顺序：标准库 → 第三方 → 本地
 
@@ -122,7 +123,9 @@ tests/
 
 ### 4.1 覆盖率标准
 
-具体标准见 testing_rules.md
+- 单元测试覆盖率 ≥ 80%
+- 关键路径（认证、支付、数据写入）覆盖率 ≥ 95%
+- 新增代码必须附带测试
 
 ### 4.2 测试编写规范
 
@@ -292,7 +295,7 @@ Lint → Type Check → Unit Test → Integration Test → Build → Deploy
 
 - 任何阶段失败阻塞合并
 
-### 9.3 质量门禁量化指标
+### 9.3 质量门禁量化指标（参考 SonarQube 体系）
 
 | 指标 | 阈值 | 说明 |
 |------|------|------|
@@ -307,4 +310,10 @@ Lint → Type Check → Unit Test → Integration Test → Build → Deploy
 
 ---
 
+## 十、参考资料
 
+- Conventional Commits 1.0.0: https://www.conventionalcommits.org/en/v1.0.0/
+- Airbnb JavaScript Style Guide: https://github.com/airbnb/javascript
+- Google Style Guide: https://github.com/google/styleguide
+- pre-commit 框架: https://pre-commit.com/
+- 调研报告: `docs/编程领域规则标杆调研_research_report.md`
