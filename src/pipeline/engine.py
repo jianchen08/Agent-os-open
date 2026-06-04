@@ -104,6 +104,7 @@ class PipelineEngine:
         self._checkpoint_manager = checkpoint_manager
         self._pipeline_id: str = _uuid.uuid4().hex[:12]
         self._wake_event: asyncio.Event | None = None
+        self._pending_wake: bool = False  # BUG-FIX-fix_20260604_wake_overwrite
         self._engine_loop: asyncio.AbstractEventLoop | None = None
         self._watching_task_ids: list[str] = []
         self._consecutive_core_errors: int = 0
@@ -154,6 +155,7 @@ class PipelineEngine:
         # BUG-FIX: 每次新 run() 调用重置挂起状态，防止引擎复用时旧状态泄漏。
         self._suspended_state = None
         self._wake_event = None
+        self._pending_wake = False  # BUG-FIX-fix_20260604_wake_overwrite
         self._streaming_flag = False
         self._streaming_on_chunk = None
 
@@ -916,12 +918,23 @@ class PipelineEngine:
         self._running = False
 
         pending_notifications = self.consume_pending_notifications()
-        if pending_notifications:
-            self._inject_notifications_to_suspended_state(pending_notifications)
-            logger.info(
-                "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: pipeline=%s",
-                len(pending_notifications), pipeline_id,
-            )
+        # BUG-FIX-fix_20260604_wake_overwrite:
+        # 检查是否有延迟唤醒标志（engine.wake() 在 _wake_event 创建前被调用）。
+        # 如果外部已经调用了 wake()，即使没有 pending_notifications 也应立即唤醒。
+        _has_pending_wake = self._pending_wake
+        self._pending_wake = False
+        if pending_notifications or _has_pending_wake:
+            if _has_pending_wake:
+                logger.info(
+                    "[Engine] 管道挂起时发现 _pending_wake=True，立即唤醒: pipeline=%s",
+                    pipeline_id,
+                )
+            if pending_notifications:
+                self._inject_notifications_to_suspended_state(pending_notifications)
+                logger.info(
+                    "[Engine] 管道挂起时发现 %d 条待处理通知，立即唤醒: pipeline=%s",
+                    len(pending_notifications), pipeline_id,
+                )
         else:
             logger.info(
                 "[Engine] 管道挂起，等待唤醒: pipeline=%s, watching_tasks=%s",
@@ -933,6 +946,16 @@ class PipelineEngine:
             # call_soon_threadsafe 安全地跨线程 set() wake_event。
             self._engine_loop = asyncio.get_running_loop()
             for wait_round in range(max_wait_rounds):
+                # BUG-FIX-fix_20260604_wake_overwrite:
+                # 在创建新 Event 之前检查现有 Event 是否已被外部 set（如 engine.wake()），
+                # 避免覆盖已 set 的 Event 导致唤醒信号永久丢失。
+                if self._wake_event is not None and self._wake_event.is_set():
+                    logger.info(
+                        "[Engine] _wake_event 已被外部设置，跳过等待立即唤醒: "
+                        "pipeline=%s round=%d",
+                        pipeline_id, wait_round,
+                    )
+                    break
                 self._wake_event = asyncio.Event()
                 _registry = get_engine_registry()
                 _entry = _registry.get(pipeline_id)
@@ -1070,6 +1093,10 @@ class PipelineEngine:
 
         仅用于特殊场景（如 CLI 空输入唤醒）。
         正常消息注入请使用 pipeline.message_bus.send_pipeline_message()。
+
+        BUG-FIX-fix_20260604_wake_overwrite:
+        当 _wake_event 为 None 时（引擎尚未进入挂起），设置 _pending_wake 标志，
+        避免 wake() 信号因竞态条件丢失。
         """
         if self._wake_event is not None:
             # BUG-FIX-fix_20260603_wake_event_threadsafe
@@ -1077,6 +1104,13 @@ class PipelineEngine:
                 self._engine_loop.call_soon_threadsafe(self._wake_event.set)
             else:
                 self._wake_event.set()
+        else:
+            # 引擎尚未进入 _suspend_and_wait，记录 pending wake
+            self._pending_wake = True
+            logger.info(
+                "[Engine] wake() 延迟唤醒（_wake_event 尚未创建），"
+                "设置 _pending_wake=True"
+            )
 
     def _suspend_copy_state(self, state: dict) -> dict:
         """轻量级挂起状态拷贝，仅深拷贝 messages（唯一会被修改的嵌套结构）。"""

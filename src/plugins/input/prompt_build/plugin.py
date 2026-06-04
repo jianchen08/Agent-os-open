@@ -265,11 +265,13 @@ class PromptBuildPlugin(IInputPlugin):
         elif var_type == "path":
             # path 类型：文件 → 注入单文件（base=project_root）
             #          目录 → 注入目录下所有文件（base=project_root，与文件一致）
+            # 每个注入项都用 XML 标签包裹，方便 LLM 识别来源
             file_path = var_def.get("path", "")
             target = self._resolve_path_for_file(ctx, file_path)
             if target is not None and target.is_file():
                 try:
-                    content = await asyncio.to_thread(target.read_text, "utf-8")
+                    text = await asyncio.to_thread(target.read_text, "utf-8")
+                    content = f'<file path="{file_path}">\n{text}\n</file>'
                 except Exception as e:
                     logger.warning(
                         "[%s] 读取静态变量文件失败 | path=%s | error=%s",
@@ -277,7 +279,9 @@ class PromptBuildPlugin(IInputPlugin):
                     )
             elif target is not None and target.is_dir():
                 # 目录 → 遍历读取（base=project_root，直接用已解析的 target）
-                content = await self._read_dir_entries(target, var_def.get("extensions"))
+                dir_content = await self._read_dir_entries(target, var_def.get("extensions"))
+                if dir_content:
+                    content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
             else:
                 logger.debug(
                     "[%s] path 类型变量跳过 | name=%s | path=%s",
