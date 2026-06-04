@@ -35,6 +35,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.errors import ErrorCode
 from core.results import ToolExecutionResult
+import logging
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from core.runnable import ToolRunnable
@@ -189,9 +192,10 @@ class Tool(BaseModel):
     param_level_restrictions: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description=(
-            "参数层级限制：控制参数的枚举值在不同 Agent 层级的可见性。"
-            "格式: { 'param_name': { 'enum_restrictions': { 'enum_value': max_agent_level } } }。"
-            "max_agent_level=0 表示所有层级可见，max_agent_level=1 表示仅 L1 可见。"
+            "参数层级限制：控制参数在不同 Agent 层级的可见性和枚举值。"
+            "支持两种限制: "
+            "(1) max_visible_level: 整个参数仅对 <=该层级的 Agent 可见（如 max_visible_level=1 则仅 L1 可见）；"
+            "(2) enum_restrictions: { 'enum_value': max_agent_level }，max_agent_level=0 所有层级可见"
         ),
     )
 
@@ -323,13 +327,44 @@ class Tool(BaseModel):
         return schema
 
     def _apply_level_restrictions(self, schema: dict[str, Any], agent_level: int) -> None:
-        """根据 Agent 层级过滤 schema 中的枚举值。
+        """根据 Agent 层级过滤 schema：隐藏参数 + 过滤枚举值。
+
+        支持两种限制类型：
+        - max_visible_level: 整个参数对超过该层级的 Agent 隐藏
+        - enum_restrictions: 过滤参数的枚举值
 
         Args:
             schema: 待修改的 schema（会被原地修改）
-            agent_level: 当前 Agent 层级
+            agent_level: 当前 Agent 层级（1=L1, 2=L2, 3=L3）
         """
         properties = schema.get("properties", {})
+
+        # 第一遍：收集需要删除的参数（max_visible_level）
+        to_remove: list[str] = []
+        for param_name, restriction in self.param_level_restrictions.items():
+            if param_name not in properties:
+                continue
+            max_visible = restriction.get("max_visible_level")
+            if max_visible is not None and agent_level > max_visible:
+                to_remove.append(param_name)
+
+        for param_name in to_remove:
+            del properties[param_name]
+            logger.debug(
+                "[ToolSchema] hidden param '%s' from L%d (max_visible=%d)",
+                param_name, agent_level,
+                self.param_level_restrictions[param_name]["max_visible_level"],
+            )
+
+        # 从 required 中移除已隐藏的参数
+        if "required" in schema and isinstance(schema["required"], list):
+            schema["required"] = [
+                r for r in schema["required"] if r not in set(to_remove)
+            ]
+            if not schema["required"]:
+                del schema["required"]
+
+        # 第二遍：过滤枚举值
         for param_name, restriction in self.param_level_restrictions.items():
             if param_name not in properties:
                 continue

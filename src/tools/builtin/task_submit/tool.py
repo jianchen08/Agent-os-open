@@ -93,14 +93,14 @@ class TaskSubmitTool(BuiltinTool):
                             },
                             "description": {
                                 "type": "string",
+                                "maxLength": 2000,
                                 "description": (
-                                    "任务描述。只写目标、背景和要求，"
-                                    "禁止写执行步骤、工具选择、流程顺序等执行细节。"
-                                    "如实传递用户明确说明的要求，禁止添加主观判断。"
-                                    "如果当前会话有相关的历史任务产出物，必须附上文件路径，避免重复工作。"
-                                    "正确示例：'实现用户登录API，支持邮箱+密码登录，返回JWT token'。"
-                                    "错误示例：'先用file_write创建login.py，再写LoginService类，"
-                                    "然后用bash_execute安装依赖，最后用test工具测试'"
+                                    "任务描述（上限2000字符）。只写目标和背景，"
+                                    "禁止写执行步骤、工具选择、流程顺序。"
+                                    "引用文件只写路径（如 docs/report.md），"
+                                    "禁止复制文件内容进来，让下级 Agent 用 file_read 自行读取。"
+                                    "正确：'实现用户登录API，参考 docs/auth_spec.md'"
+                                    "错误：'先用file_write创建login.py，再...'"
                                 ),
                             },
                             "context": {
@@ -112,7 +112,8 @@ class TaskSubmitTool(BuiltinTool):
                     },
                     "description": {
                         "type": "string",
-                        "description": "任务描述（可选，用于日志/审计）",
+                        "maxLength": 2000,
+                        "description": "任务描述（可选，上限2000字符，用于日志/审计）",
                     },
                     "acceptance_criteria": {
                         "type": "object",
@@ -308,6 +309,19 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
                         "non_container": 0,
                         "container": 1,
                     },
+                    "max_visible_level": 1,  # L2/L3 不需要看到此参数，默认 non_container
+                },
+                "parent_task_id": {
+                    "max_visible_level": 1,  # L2/L3 系统自动注入，不应手动指定
+                },
+                "workspace": {
+                    "max_visible_level": 1,  # L2/L3 子任务自动继承父工作空间
+                },
+                "isolation_level": {
+                    "max_visible_level": 1,  # L2/L3 子任务自动继承隔离级别
+                },
+                "description": {
+                    "max_visible_level": 1,  # L2/L3 用 goal.description，顶层 description 是冗余入口
                 },
             },
         )
@@ -403,6 +417,24 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
             len(description),
             description[:80] if description else "(empty)",
         )
+
+        # ── 描述长度硬限制（防止超大消息体打爆 LLM API） ──
+        # BUG-FIX-fix_20260604_description_too_large:
+        # L2 orchestrator 曾将 658 行审查报告塞入 goal.description，
+        # 导致子 Agent 的 LLM API 返回 "messages 参数非法"。
+        _MAX_DESC_LEN = 2000
+        if len(description) > _MAX_DESC_LEN:
+            logger.warning(
+                "[TaskSubmit] 描述超长拒绝 | len=%d | max=%d | preview=%.100s",
+                len(description), _MAX_DESC_LEN, description[:100],
+            )
+            return create_failure_result(
+                error=(
+                    f"任务描述过长（{len(description)}字符，上限{_MAX_DESC_LEN}字符）。"
+                    "请精简描述，只写目标和文件路径，让下级 Agent 自行 file_read 文件内容。"
+                ),
+                error_code="DESCRIPTION_TOO_LONG",
+            )
 
         # BUG-FIX-fix_20260420_eval_inject: LLM 可能传入非 dict 类型的
         # acceptance_criteria（如字符串、列表），导致跳过自动补全又跳过验证。

@@ -210,6 +210,13 @@ export const ChatContainer = ({
       return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
     }
   )
+  // DEBUG
+  useEffect(() => {
+    console.warn('[CHAT] isGenerating=%s tabPid=%s activePid=%s',
+      effectiveIsGenerating,
+      activeTab?.pipelineRunId?.slice(0,12),
+      usePipelineMessageStore.getState().activePipelineId?.slice(0,12))
+  }, [effectiveIsGenerating])
 
   /**
    * 根据当前模型名获取动态 context_window
