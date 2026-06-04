@@ -187,11 +187,6 @@ export function handleStreamEnd(eventData: any) {
   )
 
   if (pipelineId) {
-    // DEBUG: 打印终止前 streamingState 现状
-    const _beforeStream = pipelineStore.getState().streamingState
-    const _beforeKeys = Object.keys(_beforeStream).filter(k => _beforeStream[k]?.isStreaming)
-    console.warn('[STREAM_END] terminate前 streaming管道: %s activePipeline: %s', 
-      _beforeKeys.join(','), pipelineStore.getState().activePipelineId?.slice(0,12))
     terminatePipeline(pipelineId, threadId)
     const currentActivePipelineId = pipelineStore.getState().activePipelineId
     if (currentActivePipelineId && currentActivePipelineId !== pipelineId) {

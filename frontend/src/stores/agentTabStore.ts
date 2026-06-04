@@ -676,9 +676,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     set({ activeTabId: tabId })
     get().clearTabUnread(tabId)
 
-    // 切换标签时主动从后端拉取最新消息状态
-    // 确保后台管道在切标签期间产生的新消息能被显示
-    get().loadTabMessages(tabId)
+    if (tab.agentLevel !== 1) {
+      get().loadTabMessages(tabId)
+    }
 
     // BUG-FIX-fix_20260513_tab_not_restored:
     // 问题根因: switchToTab 切换标签后未调用 saveCurrentTabs()，

@@ -1,7 +1,6 @@
 # 写作领域规则
 
 > **适用场景**：所有涉及创意写作、小说创作、内容生成、文案撰写等写作任务的 Agent。
-> **来源**：基于写作领域标杆调研（NovelAI / Sudowrite / Coze / Dify / 雪花法 / 英雄之旅 / Save the Cat）+ 通用领域流程设计文档。
 
 ---
 
@@ -346,14 +345,3 @@ Break Into Three → Finale → Final Image
 ```
 
 每轮审稿只关注该轮的重点，不混合检查，避免遗漏。
-
----
-
-## 八、参考资料
-
-- 调研报告: `docs/写作领域规则标杆调研_research_report.md`
-- NovelAI 工作流参考: `docs/working/reference_materials/writing/novelai_workflow.md`
-- Sudowrite 功能矩阵: `docs/working/reference_materials/writing/sudowrite_features.md`
-- 人类作家方法论: `docs/working/reference_materials/writing/novel_writing_methodologies.md`
-- 审稿清单: `docs/working/reference_materials/writing/novel_review_checklist.md`
-- AI小说提示词: `docs/working/reference_materials/writing/ai_novel_prompts.md`

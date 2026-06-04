@@ -262,63 +262,39 @@ function mapBackendMessageToMessage(
 }
 
 /**
- * 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载）
+ * 合并连续的 assistant 消息（仅用于历史 API 加载）
  *
  * 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData，
- * 工具结果更是存成独立的 type=tool 记录。API 返回格式为:
- *   assistant(tool_call) | tool(result) | tool(result) | assistant(text)
- * 此函数将 tool 消息的结果注入前一个 assistant 的 tool_call part，
- * 再合并连续的 assistant 消息，保证与流式路径一致。
+ * API 返回多条连续 assistant 消息。此函数将其合并为一条，
+ * 保证渲染结果与流式路径（后端已统一为一条消息含完整 parts[]）一致。
  */
 function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
-  // 第一遍：将夹在 assistant 之间的 tool 消息的结果注入 tool_call part
-  const absorbed: Message[] = []
+  // DEBUG: 打印消息序列的角色顺序
+  console.warn('[API-MERGE] 输入 %d 条消息, 角色序列: %s', messages.length,
+    messages.map(m => `${m.role}:${(m.parts||[]).map((p:any)=>p.type).join('+')||m.content?.slice(0,20)||'-'}`).join(' | '))
+  const result: Message[] = []
   let i = 0
   while (i < messages.length) {
     const msg = messages[i]
     if (msg.role !== 'assistant') {
-      absorbed.push(msg)
-      i++
-      continue
-    }
-    const assistant = { ...msg, parts: msg.parts ? [...msg.parts] : undefined }
-    const toolParts = (assistant.parts || []).filter((p: any) => p.type === 'tool_call')
-    i++
-    while (i < messages.length && messages[i].role === 'tool') {
-      const tm = messages[i]
-      const tcId = tm.toolCallId
-      if (tcId) {
-        const target = toolParts.find((p: any) => p.callId === tcId)
-        if (target) {
-          target.result = tm.toolResult
-          target.error = tm.toolError
-          target.state = 'done' as const
-          target.durationMs = tm.durationMs ?? target.durationMs
-        }
-      }
-      i++
-    }
-    absorbed.push(assistant)
-  }
-  // 第二遍：合并连续的 assistant
-  const result: Message[] = []
-  let j = 0
-  while (j < absorbed.length) {
-    const msg = absorbed[j]
-    if (msg.role !== 'assistant') {
       result.push(msg)
-      j++
+      i++
       continue
     }
-    const groupStart = j
-    while (j < absorbed.length && absorbed[j].role === 'assistant') { j++ }
-    const group = absorbed.slice(groupStart, j)
+    const groupStart = i
+    while (i < messages.length && messages[i].role === 'assistant') { i++ }
+    const group = messages.slice(groupStart, i)
     if (group.length === 1) {
       result.push(group[0])
       continue
     }
     const first = group[0]
+    console.warn(
+      `[API-MERGE] 合并 ${group.length} 条连续 assistant: ids=%s parts=%s`,
+      group.map(m => m.id?.slice(0,12)).join(','),
+      group.map(m => `${(m.parts||[]).length}parts`).join(','),
+    )
     const mergedContent = group
       .map((m) => m.content)
       .filter((c) => c?.trim())
