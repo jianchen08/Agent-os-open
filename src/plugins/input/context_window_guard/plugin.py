@@ -105,19 +105,18 @@ class ContextWindowGuardPlugin(IInputPlugin):
     ) -> int:
         """用上一轮 LLM 实际用量 + 本轮新增估算有效上下文大小。
 
-        不再对全量 messages 做字符估算（会导致 10x 假阳性），
-        改用上次 LLM 真实 input_tokens 加上本轮新增消息的增量估算。
+        首轮（prev_input=0）时无法可靠估算，返回 0 跳过压缩。
+        等首轮 LLM 调用产生真实 input_tokens 后，后续轮次用增量估算。
         """
         llm_usage = ctx.state.get("llm_usage", {})
         prev_input = llm_usage.get("input_tokens", 0)
 
         if prev_input == 0:
-            estimated = sum(self._estimate_msg_tokens(m) for m in messages)
             logger.info(
-                "[%s] 估算(prev_input=0, 全量字符): %d tokens, msg_count=%d",
-                self.name, estimated, len(messages),
+                "[%s] 估算: 首轮无历史 input_tokens，跳过压缩",
+                self.name,
             )
-            return estimated
+            return 0
 
         tracked = ctx.state.get("_tracked_msg_count", 0)
         current_non_sys = sum(1 for m in messages if m.get("role") != "system")

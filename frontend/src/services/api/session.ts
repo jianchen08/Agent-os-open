@@ -261,6 +261,53 @@ function mapBackendMessageToMessage(
   }
 }
 
+/**
+ * 合并连续的 assistant 消息（仅用于历史 API 加载）
+ *
+ * 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData，
+ * API 返回多条连续 assistant 消息。此函数将其合并为一条，
+ * 保证渲染结果与流式路径（后端已统一为一条消息含完整 parts[]）一致。
+ */
+function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
+  if (messages.length <= 1) return messages
+  const result: Message[] = []
+  let i = 0
+  while (i < messages.length) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant') {
+      result.push(msg)
+      i++
+      continue
+    }
+    const groupStart = i
+    while (i < messages.length && messages[i].role === 'assistant') { i++ }
+    const group = messages.slice(groupStart, i)
+    if (group.length === 1) {
+      result.push(group[0])
+      continue
+    }
+    const first = group[0]
+    const mergedContent = group
+      .map((m) => m.content)
+      .filter((c) => c?.trim())
+      .join('\n\n')
+    let globalSeq = 0
+    const mergedParts = group.flatMap((m) =>
+      (m.parts || []).map((p: any) => ({ ...p, sequence: globalSeq++ })),
+    )
+    if (!mergedContent && mergedParts.length === 0) {
+      for (const m of group) result.push(m)
+      continue
+    }
+    result.push({
+      ...first,
+      content: mergedContent,
+      parts: mergedParts.length > 0 ? mergedParts : undefined,
+    } as Message)
+  }
+  return result
+}
+
 export async function getSessions(options: RetryOptions = {}): Promise<Session[]> {
   return requestWithRetry(async () => {
     // 只获取主管道会话（session_type=main_pipeline），过滤子任务管道

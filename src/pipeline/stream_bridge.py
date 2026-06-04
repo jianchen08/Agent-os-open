@@ -508,6 +508,13 @@ class PipelineStreamBridge:
                     "call_id": chunk.get("call_id"),
                     "sequence": _fixup_seq,
                 }))
+                # FIXUP: 补上 _collected_parts 中缺失的 part
+                self._collected_parts.append({
+                    "type": "tool_call", "callId": _result_call_id,
+                    "name": chunk.get("tool_name", "unknown"),
+                    "args": None,
+                    "state": "calling", "sequence": _fixup_seq,
+                })
             await self._send_event(self._make_event("tool_result", {
                 "tool_name": chunk.get("tool_name", "unknown"),
                 "success": chunk.get("success", True),
