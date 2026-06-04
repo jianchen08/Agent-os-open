@@ -167,26 +167,12 @@ async def send_pipeline_message(
         return InjectResult(success=False, error="message 不能仅包含空白字符", method="failed")
 
     _msg_source = (metadata or {}).get("source", "user")
-
-    if _msg_source != "user":
-        # 系统通知统一走 bridge.enqueue_notification
-        # bridge 内部处理缓冲/推送/LLM注入，不再有多条降级路径
-        try:
-            from pipeline.registry import get_engine_registry as _greg
-            _e = _greg().get(pipeline_id)
-            if _e and _e.bridge and hasattr(_e.bridge, 'enqueue_notification'):
-                _level = "info" if _msg_source in ("system", "trigger") else "warning"
-                _e.bridge.enqueue_notification(message, source=_msg_source, level=_level)
-                logger.info(
-                    "[MessageBus] system_notification → bridge.enqueue: pipeline=%s source=%s",
-                    pipeline_id[:12], _msg_source,
-                )
-            else:
-                logger.warning("[MessageBus] no bridge for notification: pipeline=%s", pipeline_id[:12])
-        except Exception as _sn_err:
-            logger.warning("[MessageBus] bridge notification failed: pipeline=%s err=%s", pipeline_id[:12], _sn_err)
-
     engine, state = _find_engine(pipeline_id)
+
+    # BUG-FIX-fix_20260604_duplicate_notification:
+    # 移除系统通知的 bridge.enqueue_notification 路径。
+    # 系统通知只走 engine.inject_message 统一注入，不再同时走
+    # bridge → consume_pending_notifications 双路径导致重复。
 
     # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
     # 问题根因: 重启后 restore_pipelines_on_startup 通过 revive_pipeline 注册引擎时

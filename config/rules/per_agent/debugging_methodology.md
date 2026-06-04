@@ -95,7 +95,7 @@ class LLMCore:
 
 ## 规则 5：警惕 confirmation bias — 主动证伪，不要只验证
 
-研究表明：
+学术界对软件工程中 confirmation bias 的研究 ([IEEE/ACM](https://www.computer.org/csdl/journal/ts/2020/12/08506423/14DL8SnwZk4), [Simula](https://web-backend.simula.no/sites/default/files/publications/files/confbiasinse_15_feb_to_submit.pdf)) 表明：
 
 > 调试时，开发者倾向寻找支持自己假设的证据，而非尝试推翻它。
 
@@ -128,6 +128,7 @@ class LLMCore:
 
 ## 规则 7：5 Whys 根因分析
 
+> 来源：Toyota Production System，被广泛用于软件事故复盘。
 
 **原则**：连续问 5 次"为什么"，从表层症状追到系统根因。
 
@@ -149,6 +150,7 @@ class LLMCore:
 
 ## 规则 8：先收集数据，再分析
 
+> 来源：Selementrix RCA 方法论 — "Don't analyze too early."
 
 **原则**：在形成任何假设之前，先收集足够的事实数据。
 
@@ -171,6 +173,7 @@ class LLMCore:
 
 ## 规则 9：证据驱动的假设管理
 
+> 来源：Koder.ai Bug Triage Loop。
 
 **假设管理规则**：
 - 同时维护的假设**不超过 3 个**
@@ -193,6 +196,7 @@ class LLMCore:
 
 ## 规则 10：架构级熔断器
 
+> 来源：MCP Market Systematic Debugging Framework。
 
 **规则**：连续 3 次修复尝试失败后，**停止修复**，进入架构重新评估。
 
@@ -218,6 +222,7 @@ class LLMCore:
 
 ## 规则 11：回归测试的正确写法
 
+> 来源：Koder.ai — "Regression tests can pass for the wrong reasons."
 
 **原则**：回归测试必须验证**根本原因**被修复，而不仅仅是**症状**消失。
 
@@ -247,6 +252,7 @@ def test_fork_preserves_adapter():
 
 ## 规则 12：鱼骨图分析法
 
+> 来源：Selementrix RCA — 因果分类分析。
 
 当 bug 原因不明时，按以下分类逐项排查：
 
@@ -270,6 +276,50 @@ def test_fork_preserves_adapter():
 
 ---
 
+## 调试工作流（推荐）
+
+```
+阶段 0：数据收集（新增）
+  ├─ 收集完整错误堆栈
+  ├─ 在分叉点和构造函数加 print 标记
+  ├─ 记录对象类型、ID、创建栈
+  └─ 至少收集 2 轮数据
+
+阶段 1：复现与定位（最多 2 轮）
+  ├─ 用最小输入复现 bug
+  ├─ 在报错的所有可能分支加 print 标记
+  ├─ 确认"是哪个对象/实例在执行"
+  └─ 形成 ≤3 个假设（规则 9）
+
+阶段 2：根因分析（新增）
+  ├─ 用 5 Whys 追踪根因（规则 7）
+  ├─ 用假设管理排除错误方向（规则 9）
+  ├─ 必要时用鱼骨图分类排查（规则 12）
+  └─ 确认根因位置（代码层 vs 架构层）
+
+阶段 3：对象生命周期追踪（最多 2 轮）
+  ├─ 在构造函数加 traceback
+  ├─ 确认对象被创建了几次、由谁创建
+  └─ 确认运行时实例与预期一致
+
+阶段 4：根因修复
+  ├─ 修复真正的根因（不是症状）
+  ├─ 在完整系统中验证（不是隔离测试）
+  └─ 移除所有临时诊断代码
+
+阶段 5：回归保护
+  ├─ 写回归测试验证根因（不是症状）（规则 11）
+  └─ 集成测试验证全系统行为
+
+架构熔断器（任何阶段触发）
+  ├─ 连续 3 次修复失败 → 停止修复
+  ├─ 画出架构图，标记 bug 位置和修复位置
+  └─ 如果不在同一层 → 修改架构层（规则 10）
+```
+
+**核心原则**：阶段 0-2 是纯诊断，不改任何代码。只加 print。确认了"是谁"、"在哪里"和"为什么"之后，才进入阶段 4 修改代码。
+
+---
 
 ## 常见陷阱速查
 
