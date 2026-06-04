@@ -103,41 +103,128 @@ class ContextWindowGuardPlugin(IInputPlugin):
     def _estimate_effective_tokens(
         self, messages: list[dict[str, Any]], ctx: PluginContext,
     ) -> int:
-        """用上一轮 LLM 实际用量 + 本轮新增估算有效上下文大小。
+        """估算有效上下文大小。
 
-        首轮（prev_input=0）时无法可靠估算，返回 0 跳过压缩。
-        等首轮 LLM 调用产生真实 input_tokens 后，后续轮次用增量估算。
+        三级估算策略：
+        1. prev_input + delta：用上一轮 LLM 真实 input_tokens + 新增消息增量
+        2. 压缩块拼接估算：L1 块 tokens + recent 消息 tokens（重启/llm_usage 丢失时）
+        3. 全量字符估算：最后手段
         """
         llm_usage = ctx.state.get("llm_usage", {})
         prev_input = llm_usage.get("input_tokens", 0)
 
+        # llm_usage 可能为空（空响应/截断），从历史累计回退
         if prev_input == 0:
+            track_usage = ctx.state.get("track.llm_usage", {})
+            prev_input = track_usage.get("input_tokens", 0)
+            if prev_input > 0:
+                logger.info(
+                    "[%s] 估算: llm_usage 为空，从 track 回退: prev_input=%d",
+                    self.name, prev_input,
+                )
+
+        # 策略 1：prev_input + delta
+        if prev_input > 0:
+            tracked = ctx.state.get("_tracked_msg_count", 0)
+            current_non_sys = sum(1 for m in messages if m.get("role") != "system")
+
+            if current_non_sys <= tracked:
+                logger.info(
+                    "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
+                    self.name, prev_input, prev_input, tracked, current_non_sys,
+                )
+                return prev_input
+
+            non_sys_msgs = [m for m in messages if m.get("role") != "system"]
+            delta_msgs = non_sys_msgs[tracked:]
+            delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
+
+            effective = prev_input + delta_tokens
             logger.info(
-                "[%s] 估算: 首轮无历史 input_tokens，跳过压缩",
-                self.name,
+                "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d)",
+                self.name, effective, prev_input, delta_tokens, tracked, current_non_sys,
             )
-            return 0
+            return effective
 
-        tracked = ctx.state.get("_tracked_msg_count", 0)
-        current_non_sys = sum(1 for m in messages if m.get("role") != "system")
-
-        if current_non_sys <= tracked:
+        # 策略 2：压缩块拼接估算
+        assembled = self._estimate_assembled_tokens(ctx, messages)
+        if assembled >= 0:
             logger.info(
-                "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
-                self.name, prev_input, prev_input, tracked, current_non_sys,
+                "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
+                self.name, assembled, len(messages),
             )
-            return prev_input
+            return assembled
 
-        non_sys_msgs = [m for m in messages if m.get("role") != "system"]
-        delta_msgs = non_sys_msgs[tracked:]
-        delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
-
-        effective = prev_input + delta_tokens
+        # 策略 3：全量字符估算（最后手段）
+        estimated = sum(self._estimate_msg_tokens(m) for m in messages)
         logger.info(
-            "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d)",
-            self.name, effective, prev_input, delta_tokens, tracked, current_non_sys,
+            "[%s] 估算(全量字符): %d tokens, msg_count=%d",
+            self.name, estimated, len(messages),
         )
-        return effective
+        return estimated
+
+    def _estimate_assembled_tokens(
+        self, ctx: PluginContext, messages: list[dict[str, Any]],
+    ) -> int:
+        """用已有的压缩块 + recent 消息估算实际发送给 LLM 的 token 数。
+
+        模拟 prompt_build 的拼接逻辑：
+        system 消息 + L1 压缩块 + STATE_SNAPSHOT + recent 消息
+
+        Returns:
+            估算 token 数，无法估算时返回 -1
+        """
+        pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_id:
+            return -1
+
+        try:
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            return -1
+
+        try:
+            l1_chunks = chunk_service.find_by_pipeline_sync(pipeline_id, "L1")
+        except Exception:
+            return -1
+
+        if not l1_chunks:
+            return -1
+
+        # L1 压缩块 token 估算
+        l1_tokens = sum(max(1, len(c.content) // 2) for c in l1_chunks)
+
+        # STATE_SNAPSHOT token 估算
+        snapshot_tokens = 0
+        try:
+            snapshots = chunk_service.find_by_pipeline_sync(pipeline_id, "STATE_SNAPSHOT")
+            if snapshots:
+                snapshot_tokens = max(1, len(snapshots[0].content) // 2)
+        except Exception:
+            pass
+
+        # system 消息 + recent 消息（非压缩块的）
+        system_tokens = sum(
+            self._estimate_msg_tokens(m) for m in messages
+            if m.get("role") == "system"
+        )
+
+        # recent 消息：从最大 L1 块的 sequence_end 之后开始
+        max_end = max((c.sequence_end for c in l1_chunks if c.sequence_end), default=0)
+        recent_tokens = 0
+        non_sys_count = 0
+        for m in messages:
+            if m.get("role") != "system":
+                non_sys_count += 1
+                if non_sys_count > max_end:
+                    recent_tokens += self._estimate_msg_tokens(m)
+
+        total = l1_tokens + snapshot_tokens + system_tokens + recent_tokens
+        logger.debug(
+            "[%s] 压缩块拼接估算: l1=%d (blocks=%d), snapshot=%d, system=%d, recent=%d (after=%d), total=%d",
+            self.name, l1_tokens, len(l1_chunks), snapshot_tokens, system_tokens, recent_tokens, max_end, total,
+        )
+        return total
 
     _warned_no_context_window = False
 

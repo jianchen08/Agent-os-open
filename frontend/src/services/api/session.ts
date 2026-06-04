@@ -287,6 +287,11 @@ function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
       continue
     }
     const first = group[0]
+    console.warn(
+      `[API-MERGE] 合并 ${group.length} 条连续 assistant: ids=%s parts=%s`,
+      group.map(m => m.id?.slice(0,12)).join(','),
+      group.map(m => `${(m.parts||[]).length}parts`).join(','),
+    )
     const mergedContent = group
       .map((m) => m.content)
       .filter((c) => c?.trim())
@@ -401,6 +406,7 @@ export async function getMessages(
   options: RetryOptions = {},
 ): Promise<{ messages: Message[]; total: number; has_more: boolean }> {
   // 参数验证
+  console.warn('[SESSION-API] getMessages 被调用: sessionId=%s pipelineRunId=%s', sessionId?.slice(0,12), filters?.pipelineRunId?.slice(0,12))
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {

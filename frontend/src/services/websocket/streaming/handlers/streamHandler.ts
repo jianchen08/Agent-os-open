@@ -203,6 +203,10 @@ export function handleStreamEnd(eventData: any) {
         // 后端发送了完整 parts[] → 用权威版本完整替换
         const serverParts = eventData?.data?.parts
         if (serverParts && Array.isArray(serverParts)) {
+          console.warn(
+            `[STREAM_END] 收到后端 parts[${serverParts.length}]: %s`,
+            serverParts.map((p: any) => `${p.type}/${p.state}`).join(','),
+          )
           pipelineStore.getState().updateMessage(pipelineId, messageId, {
             content: eventData?.data?.full_content ?? msg.content ?? '',
             parts: serverParts,

@@ -696,6 +696,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
+    console.warn('[STORE] fetchMessages: pipeline=%s before=%s after=%s', pipelineId?.slice(0,12), options?.before_sequence, options?.after_sequence)
     if (pipelineId.startsWith('temp-')) {
       get().initFromAPI(pipelineId, [])
       return
