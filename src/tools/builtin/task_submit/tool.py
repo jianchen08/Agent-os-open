@@ -7,6 +7,8 @@
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from core.results import ToolExecutionResult
@@ -21,6 +23,107 @@ from tools.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── 危险目标空间目录列表 ──
+# 这些目录是操作系统关键目录，绝不允许作为任务的目标工作空间。
+_DANGEROUS_DIRS: set[str] = set()
+
+_DANGEROUS_WINDOWS_DIRS = [
+    r"C:\Windows",
+    r"C:\Windows\System32",
+    r"C:\Windows\SysWOW64",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+    r"C:\Users",
+]
+
+_DANGEROUS_UNIX_DIRS = [
+    "/",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib64",
+    "/proc",
+    "/root",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var",
+    "/tmp",
+    "/home",
+    "/opt",
+]
+
+for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
+    _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
+
+
+def _validate_workspace_path(workspace: str) -> str | None:
+    """验证目标空间路径的安全性。
+
+    检查规则：
+    1. 不能是磁盘根目录（如 ``C:\\``、``D:\\``、``/``）
+    2. 不能是系统危险目录（如 ``C:\\Windows``、``/etc``）
+    3. 不能是配置文件中的工作空间根目录
+
+    Args:
+        workspace: 用户提交的目标工作空间路径
+
+    Returns:
+        None 表示验证通过，否则返回错误消息字符串
+    """
+    if not workspace:
+        return None
+
+    # 规范化路径用于比较
+    try:
+        normalized = os.path.normpath(workspace)
+    except (ValueError, TypeError):
+        return f"目标空间路径无效: {workspace}"
+
+    path = Path(normalized)
+
+    # ── 1. 磁盘根目录检查 ──
+    if os.name == "nt":
+        # Windows: 检查是否为盘符根目录，如 C:\ D:\
+        if len(normalized) == 3 and normalized[1] == ":" and normalized[2] == "\\":
+            return (
+                f"目标空间不能设置为磁盘根目录: {workspace}。"
+                "请指定具体的项目子目录。"
+            )
+    else:
+        # Unix: 检查是否为 /
+        if normalized == "/":
+            return (
+                f"目标空间不能设置为根目录: {workspace}。"
+                "请指定具体的项目子目录。"
+            )
+
+    # ── 2. 系统危险目录检查 ──
+    normalized_lower = normalized.lower()
+    if normalized_lower in _DANGEROUS_DIRS:
+        return (
+            f"目标空间不能设置为系统目录: {workspace}。"
+            "系统关键目录不允许作为任务的工作空间。"
+        )
+
+    # ── 3. 配置文件工作空间根目录检查 ──
+    try:
+        from isolation.workspace import get_workspace_config_root
+        ws_root = get_workspace_config_root()
+        ws_root_normalized = os.path.normpath(ws_root)
+        if normalized_lower == ws_root_normalized.lower():
+            return (
+                f"目标空间不能设置为当前配置的工作空间根目录: {workspace}。"
+                f"该目录是系统管理工作空间的根目录，不允许作为任务目标操作。"
+            )
+    except Exception as e:
+        logger.warning("[TaskSubmit] 读取工作空间配置根目录失败，跳过该检查 | error=%s", e)
+
+    return None
 
 
 class TaskSubmitTool(BuiltinTool):
@@ -591,6 +694,15 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         if _inherit_resolved:
             inputs["workspace"] = workspace
 
+        # ── 目标空间安全检查 ──
+        if workspace:
+            ws_error = _validate_workspace_path(workspace)
+            if ws_error:
+                return create_failure_result(
+                    error=ws_error,
+                    error_code="UNSAFE_WORKSPACE",
+                )
+
         logger.info(
             "[TaskSubmit] 非容器任务 | target_type=%s | target_id=%s",
             target_type, target_id,
@@ -835,6 +947,16 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
         """
         goal = inputs.get("goal")
         parent_agent_level = inputs.get("parent_agent_level")
+
+        # ── 目标空间安全检查 ──
+        workspace = inputs.get("workspace", "")
+        if workspace:
+            ws_error = _validate_workspace_path(workspace)
+            if ws_error:
+                return create_failure_result(
+                    error=ws_error,
+                    error_code="UNSAFE_WORKSPACE",
+                )
 
         logger.info(
             "[TaskSubmit] 容器任务提交 | title=%s | parent_agent_level=%s",

@@ -826,62 +826,19 @@ class TaskExecutorMixin:
     def _resolve_task_workspace(
         self, task_id: str, task_workspace: str | None = None,
     ) -> str:
-        """根据任务层级关系解析工作空间路径。
+        """根据任务数据解析工作空间路径。
 
-        子任务继承父任务的工作空间，形成嵌套目录结构：
-        - 根任务: .ai_workspaces/{task_id}
-        - 子任务: {parent_resolved_workspace}/{task_id}
-
-        BUG-FIX-fix_20260419_workspace_inherit:
-        问题根因: TaskWorker 为每个子任务创建平级工作空间 .ai_workspaces/{task_id}，
-                 忽略了父任务的工作空间，导致子任务无法共享父任务的文件产出。
-        修复方案: 沿 parent_task_id 链向上追溯，从根任务向下逐层解析工作空间路径，
-                 确保子任务嵌套在父任务工作空间下。
-
-        Args:
-            task_id: 当前任务 ID
-            task_workspace: 任务显式指定的 workspace
-
-        Returns:
-            解析后的工作空间路径字符串
+        从 tasks.workspace.resolve_task_workspace 统一获取，
+        不做 resolve_workspace 链计算。
         """
-        from isolation.workspace import get_workspace_config_root, resolve_workspace
+        from tasks.workspace import resolve_task_workspace
 
-        root = get_workspace_config_root()
-        task_service = self._task_service
+        task = self._task_service.get_task(task_id) if self._task_service else None
+        if task is None:
+            return task_workspace or f".ai_workspaces/{task_id}"
 
-        if not task_service:
-            return task_workspace or f"{root}/{task_id}"
-
-        ancestor_chain: list[tuple[str, str | None]] = []
-        current_id = task_id
-        visited: set[str] = set()
-
-        while current_id and current_id not in visited:
-            task = task_service.get_task(current_id)
-            if task is None:
-                break
-            visited.add(current_id)
-            stored_ws = task.metadata.get("workspace") or None
-            ancestor_chain.append((current_id, stored_ws))
-            current_id = task.parent_task_id
-
-        if not ancestor_chain:
-            return task_workspace or f"{root}/{task_id}"
-
-        resolved: str | None = None
-        for tid, tws in reversed(ancestor_chain):
-            if resolved is None:
-                # 根任务：无父空间，直接解析
-                resolved = resolve_workspace(tid, tws, config_root=root)
-            elif tid == task_id:
-                # 当前任务：使用调用方传入的 task_workspace 参数
-                resolved = resolve_workspace(tid, task_workspace, parent_resolved_workspace=resolved)
-            else:
-                # 中间祖先：使用其 metadata 中存储的 workspace 值
-                resolved = resolve_workspace(tid, tws, parent_resolved_workspace=resolved)
-
-        return resolved or f"{root}/{task_id}"
+        ws = resolve_task_workspace(task)
+        return ws or (task_workspace or f".ai_workspaces/{task_id}")
 
     # ───────────────────────────────────────────────────────────────────
     # 容器过期检查（已禁用）

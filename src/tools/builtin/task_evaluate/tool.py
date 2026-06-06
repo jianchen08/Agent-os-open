@@ -1222,7 +1222,12 @@ class TaskEvaluateTool(BuiltinTool):
         if isinstance(ac, dict):
             all_metric_ids.update(ac.keys())
 
-        workspace_abs = self._resolve_task_workspace_abs(task)
+        workspace_abs: str | None = None
+        try:
+            from tasks.workspace import resolve_task_workspace
+            workspace_abs = resolve_task_workspace(task)
+        except Exception:
+            pass
 
         for metric_id in all_metric_ids:
             p = params.get(metric_id, {})
@@ -1250,98 +1255,6 @@ class TaskEvaluateTool(BuiltinTool):
             params[metric_id] = p
 
         return params
-
-    @staticmethod
-    def _resolve_task_workspace_abs(task: Any) -> str | None:
-        """解析任务的绝对工作空间路径。
-
-        BUG-FIX-fix_20260425_eval_ws_meta:
-        问题根因: 容器子任务的实际工作空间是 worktree（如 .ai_workspaces/容器__wt_任务ID前8位），
-                 但 resolve_workspace 链路计算出的是 拼接路径（如 .ai_workspaces/容器/任务ID），
-                 两者不一致导致 file_check 永远找不到 agent 写入的文件。
-        修复方案: 优先使用 task.metadata.ws_meta.path（TaskWorker 执行时保存的实际工作空间路径），
-                 仅在 ws_meta 不可用时才走 resolve_workspace 计算逻辑。
-        影响范围: 所有使用工具型评估指标（file_check 等）的任务评估
-
-        Args:
-            task: TaskModel 实例
-
-        Returns:
-            绝对工作空间路径字符串，无法解析时返回 None
-        """
-        from pathlib import Path
-
-        metadata = task.metadata if task.metadata else {}
-
-        # 使用 ws_meta.path — TaskWorker 执行时通过 _persist_ws_meta
-        # 写入 task.metadata 的实际工作空间路径（git worktree 绝对路径）。
-        # ws_meta 由 on_task_start → _persist_ws_meta 同步写入内存 task 对象，
-        # 评估器通过同一个 TaskStorage._tasks 字典读取，一定存在。
-        #
-        # 子任务的文件在父工作空间的 {task_id}/ 子目录下，
-        # 因此 ws_meta.path 作为基路径，需要追加 task.id 得到实际工作目录。
-        ws_meta = metadata.get("ws_meta")
-        if ws_meta and isinstance(ws_meta, dict):
-            ws_path = ws_meta.get("path")
-            if ws_path:
-                p = Path(ws_path)
-                if not p.is_absolute():
-                    p = Path.cwd() / p
-                # 子任务：追加 task_id 子目录
-                parent_id = getattr(task, "parent_task_id", None)
-                if parent_id:
-                    p = p / task.id
-                return str(p)
-
-        # fallback: 原有的 resolve_workspace 链路
-        from isolation.workspace import get_workspace_config_root, resolve_workspace
-
-        task_workspace = metadata.get("workspace")
-        root = get_workspace_config_root()
-
-        task_service = None
-        try:
-            from infrastructure.service_provider import get_service_provider
-            provider = get_service_provider()
-            services = provider.get("services")
-            if services:
-                task_service = services.get("task_service")
-        except Exception:
-            pass
-
-        if not task_service:
-            if task_workspace:
-                return str(Path.cwd() / task_workspace)
-            return str(Path.cwd() / root / task.id)
-
-        ancestor_chain: list[tuple[str, str | None]] = []
-        current_id = task.id
-        visited: set[str] = set()
-
-        while current_id and current_id not in visited:
-            t = task_service.get_task(current_id)
-            if t is None:
-                break
-            visited.add(current_id)
-            stored_ws = (t.metadata or {}).get("workspace") if t.metadata else None
-            ancestor_chain.append((current_id, stored_ws))
-            current_id = t.parent_task_id if hasattr(t, "parent_task_id") else None
-
-        if not ancestor_chain:
-            return str(Path.cwd() / root / task.id)
-
-        resolved: str | None = None
-        for tid, tws in reversed(ancestor_chain):
-            if resolved is None:
-                resolved = resolve_workspace(tid, tws, config_root=root)
-            elif tid == task.id:
-                resolved = resolve_workspace(tid, task_workspace, parent_resolved_workspace=resolved)
-            else:
-                resolved = resolve_workspace(tid, tws, parent_resolved_workspace=resolved)
-
-        if resolved:
-            return str(Path.cwd() / resolved)
-        return None
 
     @staticmethod
     def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:
