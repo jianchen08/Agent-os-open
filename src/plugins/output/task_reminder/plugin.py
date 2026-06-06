@@ -150,6 +150,7 @@ class TaskReminder(IOutputPlugin):
                             "messages": messages,
                             "evaluate_reminder_count": reminder_count + 1,
                             "eval_tool_only_count": 0,
+                            "_has_new_llm_input": True,
                         },
                         route_signal=RouteSignal(
                             route_type="next_llm",
@@ -247,6 +248,7 @@ class TaskReminder(IOutputPlugin):
             state_updates={
                 "messages": messages,
                 "evaluate_reminder_count": reminder_count + 1,
+                "_has_new_llm_input": True,
             },
             route_signal=RouteSignal(
                 route_type="next_llm",

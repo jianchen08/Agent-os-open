@@ -40,12 +40,13 @@ export const MessageList = ({
 }: ExtendedMessageListProps) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const isNearBottom = useRef(true)
+  const isNearTop = useRef(false)
   const lastMessageCount = useRef(messages.length)
+  const lastMaxSequence = useRef(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
   const initialScrollDone = useRef(false)
   const lastLoadingMore = useRef(isLoadingMore)
-  const lastHasMore = useRef(hasMore)
   /**
    * 滚动到底部
    */
@@ -69,12 +70,13 @@ export const MessageList = ({
       const { scrollTop, scrollHeight, clientHeight } = target
       const distanceFromBottom = scrollHeight - scrollTop - clientHeight
       isNearBottom.current = distanceFromBottom <= 150
+      isNearTop.current = scrollTop <= 150
     },
     [],
   )
 
   /**
-   * 处理消息变化：新消息到达时自动滚动到底部
+   * 处理消息变化：新消息追加到底部时自动滚动到底部
    *
    * BUG-FIX-fix_20260513_msg_not_realtime:
    * 问题根因: 用户发送消息后 isUserScrolling 可能刚被 handleScroll 设为 true
@@ -83,12 +85,32 @@ export const MessageList = ({
    *          确保用户发送的消息始终能滚动到底部可见。
    * 影响范围: 用户发送消息后的自动滚动行为
    * 修复日期: 2026-05-13
+   *
+   * BUG-FIX-fix_20260606_prepend_scroll_jump:
+   * 问题根因: 向上翻页加载历史消息时，messages.length 增加（prepend），
+   *          本 effect 误判为"新消息到达"并触发 scrollToBottom，
+   *          导致用户从顶部被弹回底部。
+   * 修复方案: 通过比较最大 sequence 区分 prepend 和 append，
+   *          只有最大 sequence 增大时（真正的新消息）才触发滚动。
    */
   useEffect(() => {
     const messageCount = messages.length
     const hasNewMessages = messageCount > lastMessageCount.current
 
     if (hasNewMessages) {
+      // 计算当前最大 sequence
+      const currentMaxSeq = messages.length > 0
+        ? Math.max(...messages.map((m) => m.sequence ?? 0))
+        : 0
+      const isAppend = currentMaxSeq > lastMaxSequence.current
+      lastMaxSequence.current = currentMaxSeq
+
+      // 只有真正的新消息追加到底部时才滚动，prepend 历史消息不触发
+      if (!isAppend) {
+        lastMessageCount.current = messageCount
+        return
+      }
+
       if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
         isNearBottom.current = true
       }
@@ -216,26 +238,22 @@ export const MessageList = ({
   /**
    * 历史消息加载完成后滚动到底部
    *
-   * 首次加载时（initialScrollDone）自动滚动到底部，
-   * 用户主动在底部且 isLoadingMore 完成时自动跟随滚动。
+   * BUG-FIX-fix_20260606_prepend_scroll_jump:
+   * 只在首次加载（initialScrollDone=false）时滚动到底部，
+   * 向上翻页加载历史消息完成后不再跳到底部——用户应该在原来的位置继续阅读。
    */
   useEffect(() => {
     const wasLoading = lastLoadingMore.current
-    const hadMore = lastHasMore.current
 
-    const loadingFinished = wasLoading && !isLoadingMore
-    const allHistoryLoaded = hadMore && !hasMore
-
-    // 只在用户在底部时自动跟随滚动，避免"向上翻页加载历史消息后跳到最下面"
-    if ((loadingFinished || allHistoryLoaded) && messages.length > 0 && isNearBottom.current) {
+    // 只在首次加载（还未完成初始滚动）且加载完成时滚动到底部
+    if (wasLoading && !isLoadingMore && !initialScrollDone.current && messages.length > 0) {
       requestAnimationFrame(() => {
         scrollToBottom('auto')
       })
     }
 
     lastLoadingMore.current = isLoadingMore
-    lastHasMore.current = hasMore
-  }, [isLoadingMore, hasMore, messages.length, scrollToBottom])
+  }, [isLoadingMore, messages.length, scrollToBottom])
 
   /** 切换会话时重置初始滚动标记 */
   useEffect(() => {
@@ -259,6 +277,21 @@ export const MessageList = ({
       onLoadMore()
     }
   }, [hasMore, isLoadingMore, onLoadMore])
+
+  /**
+   * BUG-FIX-fix_20260606_start_reached_stale:
+   * 问题根因: Virtuoso 的 startReached 只在"到达顶部"的瞬间触发一次。
+   *          向上翻页加载历史消息后，如果用户仍在顶部（prepend 的内容短），
+   *          startReached 不会再次触发，导致后续页无法加载。
+   * 修复方案: prepend 完成后（isLoadingMore 从 true 变 false），检测用户是否仍在顶部，
+   *          如果是且 hasMore=true，自动触发下一轮加载。
+   */
+  useEffect(() => {
+    if (hasMore && !isLoadingMore && initialScrollDone.current && isNearTop.current && onLoadMore) {
+      const timer = setTimeout(onLoadMore, 150)
+      return () => clearTimeout(timer)
+    }
+  }, [hasMore, isLoadingMore, messages.length, onLoadMore])
 
   /**
    * 渲染头部加载更多组件

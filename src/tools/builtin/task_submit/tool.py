@@ -126,17 +126,17 @@ key 为评估指标 ID，value 为配置对象 {"input_params": {...}}。
 
 【按产出物选择指标】
 - 文件产出物 → file_check(存在) + format_valid(格式)
-- 代码产出物 → file_check + format_valid（一般任务）/ function_verify + semantic_check（仅重要任务）
+- 代码产出物 → file_check + format_valid（一般任务）/ file_check + bash_check（仅重要任务）
 - 文档/方案产出物 → file_check（一般任务）/ semantic_check（仅重要任务）
 - 需要人工确认 → human_review(人工审核)
 
-⚠️ Agent 评估器（semantic_check / function_verify）会调用 LLM，有较高 token 成本，仅在重要任务（涉及核心功能、影响项目质量、用户明确要求质量）中使用。简单任务仅用 tool 类指标（file_check、format_valid 等）即可。
+⚠️ Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本，仅在重要任务（涉及核心功能、影响项目质量、用户明确要求质量）中使用。简单任务仅用 tool 类指标（file_check、format_valid、bash_check 等）即可。
 
 【常用评估指标】
 - file_check: 文件存在性检查。input_params: {"path": "具体文件路径（如 tests/test_login.py，禁止传目录如 tests/）"}
 - format_valid: 格式验证。input_params: {"path": "文件路径"} 或 {"data": "数据内容"}
 - semantic_check: 质量评估（调用 LLM，慎用）。input_params: {"criteria": "评估要求描述（自然语言）"} 或 {}（不传参数，评估Agent根据任务目标自动评估）
-- function_verify: 功能验证（调用 LLM，慎用）。input_params: {"requirement": "需求描述", "implementation": "实现代码"}
+- bash_check: 命令执行检查（通过退出码判定）。input_params: {"command": "具体命令"}（适用于 pytest/curl/build 等有明确 exit code 的命令）
 - human_review: 人工审核。input_params: {"mode": "choice", "title": "审核标题"}
 
 【重要】所有参数值必须是正确类型：string传字符串，object传对象(不能用字符串代替)，array传数组。

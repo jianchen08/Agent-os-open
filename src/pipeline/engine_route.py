@@ -97,13 +97,18 @@ async def apply_route(
         #   自动降级为 wait（挂起等待用户输入），与 handle_no_route_signals
         #   的无信号路径行为一致。
         _raw_result = state.get("raw_result", "")
-        _has_tool_calls = bool(state.get("tool_calls"))
+        _has_tool_calls = bool(state.get(StateKeys.RAW_TOOL_CALLS, []))
         # 增加 core_type 检查，避免 tool_execute 场景下的工具执行结果
         # 被误判为"LLM纯文本输出"导致管道错误挂起
         _core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
         _is_text_only = bool(_raw_result and not _has_tool_calls and _core_type == "llm_call")
 
-        if _is_text_only:
+        # BUG-FIX-fix_20260601_task_reminder_not_effective:
+        # 输出插件（如 task_reminder）可能注入了新的系统消息到 messages，
+        # 这是实质性的新输入，下一轮 LLM 会据此行动，不应被降级。
+        _has_new_input = bool(state.pop("_has_new_llm_input", False))
+
+        if _is_text_only and not _has_new_input:
             # AI 只输出了文本，没有调用任何工具。
             # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
             notif_sources = engine.consume_pending_notifications()

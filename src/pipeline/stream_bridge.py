@@ -269,16 +269,42 @@ class PipelineStreamBridge:
         # 不清空 _pending_notifications，保留给新 drain_loop 在 stream_start 后刷出。
         # 旧 drain_loop 已被 stop+cancel，如果此时清空会丢失缓冲中的通知。
         # self._pending_notifications = []
-        # BUG-FIX-fix_20260605_reset_queue_event_loop_mismatch:
-        # 问题根因: reset_for_new_turn 中检测到 _queue._loop 与当前事件循环不一致
-        #   时重建 Queue。但引擎线程的 on_chunk 闭包仍持有旧 Queue 引用，
-        #   新 drain_loop 从新 Queue 消费、引擎往旧 Queue 放入 → 永远消费不到。
-        # 修复方案: 不重建 Queue，只清空内容。Queue 是线程安全的，跨循环可用。
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        # BUG-FIX-fix_20260606_recreate_queue_on_loop_mismatch:
+        # 问题根因: fix_20260605 假设"asyncio.Queue 跨循环安全"，只清空不重建。
+        #           但 asyncio.Queue.get() 内部调用 self._loop.call_soon()，
+        #           如果当前事件循环与 Queue 创建时的循环不同 → RuntimeError。
+        #           同时，on_chunk 是 bound method（self._queue），重建后自动
+        #           指向新 Queue，不存在"闭包持旧引用"问题（fix_20260605 误判）。
+        # 修复方案: 检测事件循环不一致时重建 Queue 和 _chunk_event，
+        #           并将旧 Queue 中未消费的 items 迁移到新 Queue。
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        queue_loop = getattr(self._queue, '_loop', None) if hasattr(self._queue, '_loop') else None
+        if current_loop is not None and queue_loop is not None and current_loop is not queue_loop:
+            logger.warning(
+                "[Bridge] reset_for_new_turn: 事件循环不匹配，重建 Queue | "
+                "pipeline=%s old_loop=%s new_loop=%s",
+                self.pipeline_id[:12], id(queue_loop), id(current_loop),
+            )
+            old_queue = self._queue
+            self._queue = asyncio.Queue()
+            self._chunk_event = asyncio.Event()
+            # 迁移旧 Queue 中尚未消费的 items
+            while not old_queue.empty():
+                try:
+                    item = old_queue.get_nowait()
+                    self._queue.put_nowait(item)
+                except (asyncio.QueueEmpty, RuntimeError):
+                    break
+        else:
+            # 同事件循环或无法检测：仅清空不重建
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
         # BUG-FIX-fix_20260605_same_message_id_overwrites_previous_turn:
         # 问题根因: reset_for_new_turn 不生成新 message_id，每轮 new_message 事件
         #   用同一个 ID，前端 handleNewMessage 按 ID 查找并覆盖已有消息。

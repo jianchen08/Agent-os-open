@@ -85,7 +85,7 @@ class MetricType(Enum):
 
     每种类型对应一种评估器实现：
     - tool: 工具调用型评估（bash/file/api/schema 等）
-    - agent: LLM Agent 型评估（semantic_check/function_verify）
+    - agent: LLM Agent 型评估（semantic_check）
     - human: 人工审核型评估（human_review）
     """
 

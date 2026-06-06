@@ -96,4 +96,66 @@ metrics:
       required: [output]
     tags: [semantic, intent, match, hallucination]
 
+  # ========== 命令检查 ==========
+  - name: bash_check
+    description: 自定义命令执行检查（通过退出码判定结果）
+    category: command
+    evaluator_type: tool
+    evaluator_id: bash_execute
+    level: 2
+    includes: [file_check]
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+          description: 要执行的命令
+        timeout:
+          type: integer
+          description: 超时时间（秒）
+          default: 30
+        working_dir:
+          type: string
+          description: 工作目录
+        use_isolation:
+          type: boolean
+          description: 是否使用隔离环境
+          default: true
+      required: [command]
+    tags: [bash, command, execute, universal]
 
+  # ========== 人工审核 ==========
+  - name: human_review
+    description: 人工审核（审批/复核）
+    category: human
+    evaluator_type: human
+    evaluator_id: human_interaction
+    level: 4
+    includes: []
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [choice, conversation]
+          description: 交互模式
+          default: choice
+        title:
+          type: string
+          description: 审核标题
+        description:
+          type: string
+          description: 审核说明
+        options:
+          type: array
+          items:
+            type: object
+          description: 选项列表（mode=choice 时使用）
+        timeout_seconds:
+          type: number
+          description: 超时时间（秒）
+          default: 300
+      required: [mode, title]
+    tags: [human, approval, review]

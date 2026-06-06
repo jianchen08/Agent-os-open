@@ -852,6 +852,15 @@ class ExecutionRecordStorage:
             if len(blocks) >= needed:
                 has_more = True
                 break
+            # 提取的块数不足，检查是否因读取窗口限制导致
+            # 如果文件大于最大读取窗口，窗口外可能还有更多 record
+            try:
+                file_size = part_file.stat().st_size
+            except OSError:
+                file_size = 0
+            if file_size > self._TAIL_READ_BYTES_MAX:
+                has_more = True
+                break
 
         if not collected_blocks:
             return [], False

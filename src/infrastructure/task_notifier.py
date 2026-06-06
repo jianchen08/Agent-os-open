@@ -69,6 +69,29 @@ class TaskNotifierMixin:
                     task_id, new_status,
                 )
 
+            # BUG-FIX-fix_20260606_task_status_pipeline_sync:
+            # 问题根因: 任务状态变更为 cancelled/failed 时，关联的 PipelineEngine
+            #   没有被终止，导致"任务已取消但引擎还在跑"、"任务失败但引擎继续执行"。
+            #   之前 cancel 的管道取消逻辑散落在 tool/API 调用方，Service 层和
+            #   回调层都不做管道终止，fail_task 更是完全没有管道取消。
+            # 修复方案: 在 _on_task_state_changed 回调中（TaskWorker 监听
+            #   _emit_state_change），当任务进入 cancelled/failed 终态时，
+            #   通过 TaskWorker.cancel_pipeline 终止关联管道引擎。
+            #   与 _emit_state_change 耦合度低，通过回调机制解耦。
+            # 修复日期: 2026-06-06
+            if new_status in ("cancelled", "failed"):
+                try:
+                    _cancelled = self.cancel_pipeline(task_id)
+                    logger.info(
+                        "TaskWorker: 任务终态取消管道 | task=%s, status=%s, cancelled=%s",
+                        task_id, new_status, _cancelled,
+                    )
+                except Exception as _cp_exc:
+                    logger.warning(
+                        "TaskWorker: 取消管道失败(不影响回调) | task=%s, status=%s, error=%s",
+                        task_id, new_status, _cp_exc,
+                    )
+
             try:
                 await self._check_stale_containers()
             except Exception as exc:

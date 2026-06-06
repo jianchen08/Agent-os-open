@@ -254,6 +254,22 @@ class PromptBuildPlugin(IInputPlugin):
 
         content = ""
 
+        # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
+        # 问题根因: YAML 中字符串占位符项（如 '{{path:...}}'）被 loader 解析为
+        #           type="placeholder" 的 dict，但 _resolve_single_var_content 未处理该类型，
+        #           导致 static_vars 中的占位符项也被静默跳过。
+        # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本进行解析。
+        if var_type == "placeholder":
+            placeholder_text = var_def.get("name", "")
+            if placeholder_text and "{{" in placeholder_text:
+                matches = PLACEHOLDER_PATTERN.findall(placeholder_text)
+                result_parts = []
+                for match in matches:
+                    resolved = await self._resolve_placeholder(ctx, match)
+                    if resolved:
+                        result_parts.append(resolved)
+                content = "\n".join(result_parts)
+
         if var_type == "rules":
             rules_parts = []
             for c in constraints.get("hard", []):
@@ -271,7 +287,8 @@ class PromptBuildPlugin(IInputPlugin):
             if target is not None and target.is_file():
                 try:
                     text = await asyncio.to_thread(target.read_text, "utf-8")
-                    content = f'<file path="{file_path}">\n{text}\n</file>'
+                    tag_name = target.stem
+                    content = f'<{tag_name}>\n{text}\n</{tag_name}>'
                 except Exception as e:
                     logger.warning(
                         "[%s] 读取静态变量文件失败 | path=%s | error=%s",
@@ -897,6 +914,19 @@ class PromptBuildPlugin(IInputPlugin):
 
                 var_type = var_def.get("type", "")
                 var_name = var_def.get("name", var_type)
+
+                # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
+                # 问题根因: YAML 中字符串占位符项（如 '{{timestamp:...}}'）被 loader 解析为
+                #           type="placeholder" 的 dict，但 _build_dynamic_vars 未处理该类型，
+                #           导致占位符项被静默跳过，动态变量始终为空。
+                # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本调用 _resolve_placeholders。
+                if var_type == "placeholder":
+                    placeholder_text = var_def.get("name", "")
+                    if placeholder_text:
+                        content = await self._resolve_placeholders(ctx, placeholder_text)
+                        if content:
+                            parts.append(content)
+                    continue
 
                 if var_type == "timestamp":
                     fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")

@@ -1273,7 +1273,13 @@ class TaskEvaluateTool(BuiltinTool):
 
         metadata = task.metadata if task.metadata else {}
 
-        # 优先使用 ws_meta.path — 这是 TaskWorker 执行时保存的实际工作空间路径
+        # 使用 ws_meta.path — TaskWorker 执行时通过 _persist_ws_meta
+        # 写入 task.metadata 的实际工作空间路径（git worktree 绝对路径）。
+        # ws_meta 由 on_task_start → _persist_ws_meta 同步写入内存 task 对象，
+        # 评估器通过同一个 TaskStorage._tasks 字典读取，一定存在。
+        #
+        # 子任务的文件在父工作空间的 {task_id}/ 子目录下，
+        # 因此 ws_meta.path 作为基路径，需要追加 task.id 得到实际工作目录。
         ws_meta = metadata.get("ws_meta")
         if ws_meta and isinstance(ws_meta, dict):
             ws_path = ws_meta.get("path")
@@ -1281,8 +1287,11 @@ class TaskEvaluateTool(BuiltinTool):
                 p = Path(ws_path)
                 if not p.is_absolute():
                     p = Path.cwd() / p
-                if p.exists():
-                    return str(p)
+                # 子任务：追加 task_id 子目录
+                parent_id = getattr(task, "parent_task_id", None)
+                if parent_id:
+                    p = p / task.id
+                return str(p)
 
         # fallback: 原有的 resolve_workspace 链路
         from isolation.workspace import get_workspace_config_root, resolve_workspace

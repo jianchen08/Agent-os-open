@@ -1,6 +1,6 @@
 # 评估系统 (evaluation)
 
-> M5b 里程碑交付 — 统一评估引擎，支持 9 类评估指标
+> M5b 里程碑交付 — 统一评估引擎，支持 5 类评估指标
 
 ## 一、需求
 
@@ -8,8 +8,8 @@
 
 | 类型 | 指标 | 评估方式 |
 |------|------|---------|
-| **tool** | file_check, format_valid | 调用工具执行检查，通过 expect 条件判定 |
-| **agent** | semantic_check, function_verify | 调用独立 LLM Agent 评估，返回 passed/score/feedback |
+| **tool** | file_check, format_valid, bash_check | 调用工具执行检查，通过 expect 条件判定 |
+| **agent** | semantic_check | 调用独立 LLM Agent 评估，返回 passed/score/feedback |
 | **human** | human_review | 等待人工审核，返回 approved/rejected |
 
 评估结果需映射到任务状态：`evaluating → completed`（通过）或 `evaluating → failed`（不通过）。
@@ -63,14 +63,14 @@
 
 ### 配置文件
 
-9 个评估指标 YAML 位于 `config/evaluation_metrics/`：
+5 个评估指标 YAML 位于 `config/evaluation_metrics/`：
 
 | 文件 | 类型 | evaluator_id |
 |------|------|-------------|
 | file_check.yaml | tool | file_read |
 | format_valid.yaml | tool | schema_evaluator |
+| bash_check.yaml | tool | bash_execute |
 | semantic_check.yaml | agent | evaluator_agent |
-| function_verify.yaml | agent | evaluator_agent |
 | human_review.yaml | human | human_interaction |
 
 ### 测试

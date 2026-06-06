@@ -120,6 +120,12 @@ class PipelineEngine:
         # 在 run() 的 unregister/register 循环中保留 engine_task 引用，
         # 避免 suspended 路径再次发消息时 entry.engine_task 为 None。
         self._preserved_engine_task: Any = None
+        # BUG-FIX-fix_20260606_simplify_notification_queue:
+        # 统一注入队列。所有 external 通知（子任务完成/失败、用户消息等）
+        # 通过 inject_message 写入此队列，while 循环每轮开始前 drain 到 state。
+        # 替代了原来的 bridge._pending_notifications + _suspend_and_wait 内消费
+        # 的分支逻辑，消除 suspended/running/idle 状态判断。
+        self._inject_queue: list[str] = []
 
     async def run(
         self,
@@ -990,6 +996,14 @@ class PipelineEngine:
         self._watching_task_ids = []
         self._running = True
 
+        # 唤醒后先把 _inject_queue 里的消息写入 _suspended_state，
+        # 这样下面的 _pending_input 判断才能正确检测到新内容。
+        # inject_message 统一写队列 → 此处 drain 到 suspended_state →
+        # 之后 _run_loop 的 consume_pending_notifications 再 drain 一次（已空，无害）。
+        _queued = self.drain_inject_queue()
+        if _queued and self._suspended_state is not None:
+            self._inject_notifications_to_suspended_state(_queued)
+
         if self._suspended_state is not None:
             # BUG-FIX-fix_20260525_idle_wake_empty_llm:
             # 安全网: 唤醒后检查 suspended_state 中是否有实质性内容。
@@ -1023,10 +1037,27 @@ class PipelineEngine:
             logger.info("[Engine] 管道被唤醒但无 suspended_state: pipeline=%s", pipeline_id)
             return False
 
+    def drain_inject_queue(self) -> list[str]:
+        """从统一注入队列取出所有待处理消息并清空。
+
+        替代旧的 consume_pending_notifications（读 bridge._pending_notifications）。
+        现在所有通知统一走 engine._inject_queue，不再依赖 bridge 队列。
+
+        Returns:
+            待处理消息列表（可能为空）
+        """
+        if not self._inject_queue:
+            return []
+        msgs = self._inject_queue[:]
+        self._inject_queue.clear()
+        return msgs
+
+    def consume_pending_notifications(self) -> list[str]:
+        """兼容旧接口：统一走 drain_inject_queue。"""
+        return self.drain_inject_queue()
+
     def _inject_notifications_to_suspended_state(self, notifications: list[str]) -> None:
-        """将通知消息注入到挂起状态中。"""
-        # BUG-FIX-fix_20260601_empty_message:
-        # 过滤掉空字符串通知，避免空消息进入对话历史
+        """将通知消息注入到挂起状态中（兼容旧接口）。"""
         for notif in notifications:
             if not notif or not notif.strip():
                 continue
@@ -1131,25 +1162,6 @@ class PipelineEngine:
         self._suspended_state = state
         return await self.resume()
 
-    def consume_pending_notifications(self) -> list[str]:
-        """从 bridge 获取待处理通知。引擎不再维护自己的通知队列。
-
-        通过 registry 找到 bridge，拉取通知。无 bridge 时返回空列表。
-        """
-        try:
-            from pipeline.registry import get_engine_registry
-            entry = get_engine_registry().get(self._pipeline_id)
-            if entry and entry.bridge:
-                bridge = entry.bridge
-                if hasattr(bridge, '_pending_notifications'):
-                    notifs = bridge._pending_notifications[:]
-                    bridge._pending_notifications.clear()
-                    # 提取通知文本
-                    return [n if isinstance(n, str) else n.get("content", "") for n in notifs]
-        except Exception:
-            pass
-        return []
-
     def save_streaming_context(self, state: dict[str, Any]) -> None:
         """从 state 保存流式上下文。"""
         on_chunk = state.get("on_chunk")
@@ -1169,14 +1181,14 @@ class PipelineEngine:
         self._streaming_flag = streaming
 
     def inject_message(self, message: str, *, source: str = "user") -> None:
-        """消息注入入口。挂起态写入 suspended_state + 唤醒。
+        """消息注入入口。统一写入 _inject_queue，while 循环每轮开始前 drain。
 
-        运行态的系统通知走 bridge notification 路径，不经过此方法。
-        运行态的 user 消息仅取消 pending 交互请求。
+        不再区分 suspended / running / idle 状态。所有消息先进队列，
+        引擎的 _run_loop 在每轮迭代开始前（llm_call 时）统一 drain + 注入 state。
 
         Args:
             message: 要注入的消息文本
-            source: 消息来源
+            source: 消息来源（"user" / "system"），仅用于日志
         """
         if not message or not message.strip():
             logger.warning(
@@ -1184,53 +1196,20 @@ class PipelineEngine:
                 self._pipeline_id[:12], source,
             )
             return
-        if self.is_suspended:
-            if self._suspended_state is not None:
-                # BUG-FIX-fix_20260603_inject_breaks_tool_sequence:
-                # 如果挂起状态中有待执行的工具调用，不要直接追加到 messages
-                # （会打破 assistant(tool_calls) → tool(result) 序列）。
-                # 但要更新 user_input：恢复后工具先执行，然后 user_input
-                # 由 handle_no_route_signals 追加到 messages 末尾，
-                # 保证顺序：工具结果 → 用户消息 → LLM。
-                pending_tool_calls = self._suspended_state.get(
-                    StateKeys.RAW_TOOL_CALLS, [],
-                )
-                existing = self._suspended_state.get("user_input", "")
-                self._suspended_state["user_input"] = f"{message}\n{existing}" if existing else message
-                if not pending_tool_calls:
-                    self._suspended_state.setdefault("messages", []).append(
-                        {"role": "user", "content": message}
-                    )
-                else:
-                    logger.info(
-                        "[Engine] inject_message: 有 %d 个待执行工具调用，"
-                        "消息已写入 user_input（暂不追加到 messages），"
-                        "工具执行完成后自动处理 | pipeline=%s",
-                        len(pending_tool_calls), self._pipeline_id[:12],
-                    )
-            if self._wake_event is not None:
-                # BUG-FIX-fix_20260603_wake_event_threadsafe:
-                # 跨线程 set() 在 Windows ProactorEventLoop 下不可靠，
-                # 使用 call_soon_threadsafe 将 set() 调度到引擎线程的事件循环中执行。
-                if self._engine_loop is not None and self._engine_loop.is_running():
-                    self._engine_loop.call_soon_threadsafe(self._wake_event.set)
-                else:
-                    self._wake_event.set()
-            logger.info(
-                "[Engine] inject_message: 挂起态注入并唤醒: pipeline=%s source=%s preview=%.60s",
-                self._pipeline_id[:12], source, message,
-            )
-        elif source == "user":
-            # 运行态 user 消息：取消 pending 交互，唤醒引擎
-            self._try_cancel_pending_interaction()
-            if self._wake_event is not None:
-                # BUG-FIX-fix_20260603_wake_event_threadsafe:
-                # 跨线程 set() 在 Windows ProactorEventLoop 下不可靠，
-                # 使用 call_soon_threadsafe 将 set() 调度到引擎线程的事件循环中执行。
-                if self._engine_loop is not None and self._engine_loop.is_running():
-                    self._engine_loop.call_soon_threadsafe(self._wake_event.set)
-                else:
-                    self._wake_event.set()
+
+        self._inject_queue.append(message)
+        logger.info(
+            "[Engine] inject_message: 消息入队 | pipeline=%s source=%s "
+            "queue_size=%d preview=%.60s",
+            self._pipeline_id[:12], source, len(self._inject_queue), message,
+        )
+
+        # 唤醒引擎（仅当挂起时才有 _wake_event；运行态 set 也无害）
+        if self._wake_event is not None:
+            if self._engine_loop is not None and self._engine_loop.is_running():
+                self._engine_loop.call_soon_threadsafe(self._wake_event.set)
+            else:
+                self._wake_event.set()
 
     def _try_cancel_pending_interaction(self) -> None:
         """尝试取消当前管道关联的 pending human_interaction 请求。

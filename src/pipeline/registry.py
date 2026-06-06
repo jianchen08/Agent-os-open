@@ -457,12 +457,16 @@ class EngineRegistry:
             # 更新 output_sink，确保使用新的活跃连接。
             if sink is not None:
                 bridge.output_sink = sink
-            # 仅在需要启动新 drain 时 reset（新 pipeline 场景）。
-            # drain_loop 不再退出，不应在每次消息时 reset bridge。
-            if auto_start_drain:
-                bridge.reset_for_new_turn(
-                    message_id=f"msg_{uuid.uuid4().hex[:12]}"
-                )
+            # BUG-FIX-fix_20260606_reset_bridge_on_reuse:
+            # 问题根因: 仅 auto_start_drain=True 时才 reset bridge。
+            #          但 idle 路径 inject 用 auto_start_drain=False，
+            #          再单独调 _start_bg_drain。bridge 的 Queue 绑在旧循环，
+            #          新 drain_loop 在可能不同的循环中 get() → RuntimeError。
+            # 修复方案: 只要 cancel 了旧 drain_task，就必须 reset bridge，
+            #          确保 Queue 和新 drain_loop 同在一个事件循环。
+            bridge.reset_for_new_turn(
+                message_id=f"msg_{uuid.uuid4().hex[:12]}"
+            )
 
         if auto_start_drain and engine is not None:
             from pipeline.message_bus import _start_bg_drain
