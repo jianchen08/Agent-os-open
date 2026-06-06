@@ -299,25 +299,21 @@ def create_combined_app() -> FastAPI:
                     _pipeline_id = msg_data.get("pipeline_id", "")
                     _history = conversation_histories.get(thread_id, [])
 
-                    # SIMPLIFY-fix_20260522_unified_pipeline_routing:
-                    # 主管道和子管道本质无区别，唯一差异是 pipeline_id 的来源：
-                    #   - 子管道: 从前端消息的 pipeline_id 字段获取
-                    #   - 主管道: 从 session.active_pipeline_id 获取
-                    # 统一为一条路径：确定 pipeline_id → send_pipeline_message 一次调用搞定。
+                    # 管道ID是唯一路由标识，前端必须传 pipeline_id
                     from pipeline.message_bus import send_pipeline_message
                     from pipeline.registry import get_engine_registry
 
                     _raw_pipeline_id = msg_data.get("pipeline_id", "")
 
-                    if _raw_pipeline_id:
-                        _target_pid = _raw_pipeline_id
-                        _agent_config = await _resolve_sub_pipeline_agent_config(_target_pid)
-                    else:
-                        _sess = api_store.get_session(thread_id)
-                        _target_pid = _sess.active_pipeline_id if _sess and _sess.active_pipeline_id else ""
-                        if not _target_pid and _pipeline_ctx and _pipeline_ctx.available and _pipeline_ctx.engine:
-                            _target_pid = _pipeline_ctx.engine.pipeline_id
-                        _agent_config = None
+                    if not _raw_pipeline_id:
+                        # 管道ID是唯一路由标识，没收到就该报错，禁止fallback
+                        logger.error(
+                            "user_input 缺少 pipeline_id，拒绝路由: thread_id=%s content=%.30s",
+                            thread_id, _user_content[:30],
+                        )
+                        continue
+                    _target_pid = _raw_pipeline_id
+                    _agent_config = await _resolve_sub_pipeline_agent_config(_target_pid)
 
                     # 创建 output_sink
                     _sink = TargetedSink(ws_interaction_notifier, thread_id) if _pipeline_ctx and _pipeline_ctx.available else None
@@ -449,26 +445,18 @@ def create_combined_app() -> FastAPI:
 
                     # 1. 通过 Registry 取消关联管道的 drain_task
 
-                    # 2. 尝试查找并取消关联的管道引擎
-                    #    优先使用 pipeline_id 精确取消，不存在时回退到全量取消。
-                    # BUG-FIX-fix_20260522_stop_generation_pipeline:
-                    # 问题根因: 旧代码通过 _pipeline_thread_map 查找所有与 thread_id
-                    #           关联的管道并全部取消，导致同一会话中的所有管道（含子/父）
-                    #           都被误杀。
-                    # 修复方案:
-                    #   1. 优先从消息中读取 pipeline_id，仅取消指定管道（精确取消）
-                    #   2. 若 pipeline_id 不存在，保持原有全量取消逻辑（向后兼容）
-                    #   3. 通过 EngineRegistry.cancel_drain_task 即时停止后台 drain
+                    # 必须携带 pipeline_id 精确停止，管道ID是唯一路由标识
                     _pipeline_id = msg_data.get("pipeline_id", "")
-                    _all_pipeline_ids: set[str] = set()
+                    if not _pipeline_id:
+                        logger.error(
+                            "stop_generation 缺少 pipeline_id，拒绝停止: thread_id=%s",
+                            thread_id,
+                        )
+                        continue
+                    _all_pipeline_ids: set[str] = {_pipeline_id}
                     try:
                         from pipeline.message_bus import _find_engine
                         from pipeline.registry import get_engine_registry as _get_reg
-                        if _pipeline_id:
-                            _all_pipeline_ids.add(_pipeline_id)
-                        elif not _pipeline_id:
-                            for _entry in _get_reg().find_by_thread_id(thread_id):
-                                _all_pipeline_ids.add(_entry.engine.pipeline_id)
                         for _pid in _all_pipeline_ids:
                             # 即时停止后台 drain_loop（bridge.stop 哨兵 + task.cancel）
                             _get_reg().cancel_drain_task(_pid)

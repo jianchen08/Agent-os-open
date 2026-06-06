@@ -13,7 +13,6 @@ import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
@@ -121,31 +120,19 @@ export const ChatContainer = ({
   /**
    * 从 pipelineMessageStore 获取当前激活管道的消息
    *
-   * BUG-FIX-fix_20260513_msg_not_realtime:
-   * 问题根因: EMPTY_MESSAGES 常量导致 Zustand selector 在状态转换时返回相同引用，
-   *          React 浅比较认为数据未变化，跳过重新渲染，导致消息不实时显示。
-   * 修复方案: 使用自定义 equality 函数，通过数组长度和引用比较判断是否变化，
-   *          确保 store 更新后组件能正确重新渲染。
-   * 影响范围: 所有消息列表的实时更新
-   * 修复日期: 2026-05-13
+   * 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责，
+   * selector 只需读取 s.activePipelineId，不依赖 activeTab 做回退判断。
    */
   const pipelineMessages = usePipelineMessageStore(
     (s) => {
-      const effectiveId = activeTab?.pipelineRunId || s.activePipelineId
-      if (!effectiveId) return EMPTY_MESSAGES
-      return s.messagesByPipeline[effectiveId] ?? EMPTY_MESSAGES
+      if (!s.activePipelineId) return EMPTY_MESSAGES
+      return s.messagesByPipeline[s.activePipelineId] ?? EMPTY_MESSAGES
     },
     (a, b) => {
       if (a === b) return true
       if (!Array.isArray(a) || !Array.isArray(b)) return false
       if (a.length !== b.length) return false
       if (a.length === 0 && b.length === 0) return true
-      // BUG-FIX-fix_20260513_ai_msg_duplicate:
-      // 问题根因: 之前 return a === b 永远为 false（因为开头已排除 a === b），
-      //          导致每次 store 更新都触发组件重渲染。
-      // 修复方案: 逐项比较数组引用，仅当所有项引用相同时才认为相等。
-      // 影响范围: ChatContainer 渲染性能
-      // 修复日期: 2026-05-13
       for (let i = 0; i < a.length; i++) {
         if (a[i] !== b[i]) return false
       }
@@ -153,35 +140,14 @@ export const ChatContainer = ({
     },
   )
 
-  /**
-   * 会话切换时初始化 Tab 状态并激活对应管道
-   *
-   * BUG-FIX-fix_20260529_session_msg_duplicate_v2:
-   * 问题根因: ChatContainer 的 useEffect 调用了 fetchMessages，
-   *          而 setActiveSession 也调用了 fetchMessages，
-   *          导致 initFromAPI 被调用两次，消息重复渲染。
-   * 修复方案: 删除 ChatContainer 中的 fetchMessages 调用，
-   *          只保留 activatePipeline，消息加载统一由 setActiveSession 负责。
-   * 影响范围: 会话切换时的消息加载流程
-   * 修复日期: 2026-05-29
-   */
+  /** 会话切换由 setActiveSession 统一处理：fetchMessages + initSessionTabs */
   useEffect(() => {
-    if (sessionId) {
-      initSessionTabs(sessionId)
-      const { activeTabId, tabs } = useAgentTabStore.getState()
-      const activeTab = tabs.find((t) => t.id === activeTabId)
-      const pipelineStore = usePipelineMessageStore.getState()
-
-      if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
-        pipelineStore.activatePipeline(activeTab.pipelineRunId)
-      } else if (activeTab && activeTab.agentLevel === 1) {
-        const sessions = useSessionStore.getState().sessions
-        const session = sessions.find(s => s.id === sessionId)
-        const mainPipelineId = session?.activePipelineId || ''
-        if (mainPipelineId) {
-          pipelineStore.activatePipeline(mainPipelineId)
-          // 注意：不在这里调用 fetchMessages，由 setActiveSession 统一负责
-        }
+    // 防御：处理 setActiveSession 之外直接修改 activeSessionId 的场景
+    const currentSessionId = useSessionStore.getState().activeSessionId
+    if (sessionId && currentSessionId === sessionId) {
+      const { activeTabId: currentTabId } = useAgentTabStore.getState()
+      if (!currentTabId) {
+        initSessionTabs(sessionId)
       }
     }
   }, [sessionId, initSessionTabs])
@@ -210,13 +176,7 @@ export const ChatContainer = ({
       return pid ? (s.streamingState[pid]?.isStreaming ?? false) : false
     }
   )
-  // DEBUG
-  useEffect(() => {
-    console.warn('[CHAT] isGenerating=%s tabPid=%s activePid=%s',
-      effectiveIsGenerating,
-      activeTab?.pipelineRunId?.slice(0,12),
-      usePipelineMessageStore.getState().activePipelineId?.slice(0,12))
-  }, [effectiveIsGenerating])
+
 
   /**
    * 根据当前模型名获取动态 context_window
@@ -375,11 +335,9 @@ export const ChatContainer = ({
           isGenerating={effectiveIsGenerating}
           onSendMessage={(params) => {
             if (isSubTabFinished) return
-            if (isSubTabActive && activeTab?.pipelineRunId) {
-              onSendMessage({ ...params, pipelineId: activeTab.pipelineRunId })
-            } else {
-              onSendMessage(params)
-            }
+            // 所有管道（主标签/子标签）一律带 pipelineId，管道ID是唯一路由标识
+            const pid = activeTab?.pipelineRunId || pipelineActiveId
+            onSendMessage({ ...params, pipelineId: pid })
           }}
           onStopGenerate={onStopGenerate}
           placeholder="输入消息，按 Enter 发送..."

@@ -4,7 +4,6 @@
 - data/tasks/tree_{根任务ID}/{任务ID}.yaml
 - 每个任务独立一个 YAML 文件
 - 同一根任务树下的所有任务文件放在同一目录
-- 向后兼容旧的顶层 *.yaml 文件（包含 tasks 列表的旧格式）
 - 内存 dict 缓存 + 文件持久化
 - 同步 API（任务系统不涉及高并发写入）
 """
@@ -61,9 +60,6 @@ class TaskStorage:
             for yaml_file in sorted(tree_dir.glob("*.yaml")):
                 self._load_task_file(yaml_file)
 
-        for yaml_file in sorted(self._data_dir.glob("*.yaml")):
-            self._load_legacy_file(yaml_file)
-
     def _load_task_file(self, yaml_file: Path) -> None:
         """加载单个任务 YAML 文件（新格式）。
 
@@ -81,30 +77,6 @@ class TaskStorage:
             self._tasks[task.id] = task
         except Exception as exc:
             logger.warning("加载任务文件失败: %s — %s", yaml_file, exc)
-
-    def _load_legacy_file(self, yaml_file: Path) -> None:
-        """加载旧格式 YAML 文件（包含 tasks 列表）。
-
-        旧格式：YAML 中有 "tasks" 键，值为任务字典列表。
-        加载后不删除原文件，保持向后兼容。
-
-        Args:
-            yaml_file: 旧格式 YAML 文件路径
-        """
-        try:
-            text = yaml_file.read_text(encoding="utf-8")
-            data = yaml.safe_load(text)
-            if not isinstance(data, dict):
-                return
-            tasks_list = data.get("tasks")
-            if not tasks_list or not isinstance(tasks_list, list):
-                return
-            for task_dict in tasks_list:
-                if isinstance(task_dict, dict):
-                    task = self._dict_to_task(task_dict)
-                    self._tasks[task.id] = task
-        except Exception:
-            pass
 
     def _find_root_id(self, task: TaskModel) -> str:
         """查找任务所属的根任务ID。

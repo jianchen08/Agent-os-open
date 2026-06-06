@@ -408,7 +408,11 @@ class LLMCore(ICorePlugin):
 
         # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
         history = state.get("messages", [])
-        messages.extend(history)
+        for m in history:
+            # 清理内部标记字段，不发给 LLM
+            if "_record_sequence" in m:
+                m = {k: v for k, v in m.items() if k != "_record_sequence"}
+            messages.append(m)
 
         # 4. 动态变量（每轮变化的上下文：时间戳、session_id 等）
         dynamic_vars_msg = state.get("prompt.dynamic_vars")

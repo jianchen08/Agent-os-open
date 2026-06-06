@@ -1,5 +1,5 @@
 /**
- * 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / chunk超时回调 / 系统通知）
+ * 生命周期事件处理器（STATE_CHANGE / WS重连补漏 / 系统通知）
  *
  * 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
  */
@@ -117,92 +117,6 @@ export function handleReconnected(): void {
 }
 
 /**
- * 处理 chunk 超时回调
- */
-export function handleChunkTimeout(data: { pipelineId: string; messageId: string }): void {
-  const { pipelineId, messageId } = data
-  const pipelineStore = usePipelineMessageStore.getState()
-  const streamingStore = useStreamingStore.getState()
-  const logger = loggers.sessionStore
-
-  logger.warn('[streaming] chunk 超时，清理管道状态（保留已累积内容）: pipelineId=%s messageId=%s', pipelineId, messageId)
-
-  // BUG-FIX-fix_20260523_streaming_timeout_blank:
-  // 问题根因: chunk 超时时无条件将消息标记为 completed，但未检查消息是否有实际内容。
-  //          当后端 LLM 响应慢或完全失败时，消息内容为空，用户看到空白消息且无任何错误提示。
-  // 修复方案: 超时时先检查消息是否有内容，有内容则保留并标记 completed，无内容则标记 error 并通知用户。
-  //
-  // BUG-FIX-fix_20260523_unified_timeout_silent_drop:
-  // 问题根因: 统一流式超时（120s）传入 messageId=''，导致 if (messageId) 为 false，
-  //          跳过所有超时处理，消息被静默丢弃，用户无任何反馈。
-  // 修复方案: 即使 messageId 为空，也要将 streaming 状态的消息标记为 error 并通知用户。
-  // 影响范围: 统一流式超时后的用户体验
-  // 修复日期: 2026-05-23
-  if (messageId) {
-    const msgs = pipelineStore.getMessages(pipelineId)
-    const msg = msgs.find((m: any) => m.id === messageId)
-    if (msg) {
-      // 基于 parts[] 检查消息是否有实际内容
-      const hasContent = !!(msg as any).content?.trim()
-        || (msg.parts || []).some((p: any) => p.type === 'text' && p.text?.trim())
-
-      // 将所有 streaming 状态的 parts 改为 done
-      const finalizeParts = (m: any): any[] =>
-        (m.parts || []).map((p: any) =>
-          p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
-        )
-
-      if (hasContent) {
-        pipelineStore.updateMessage(pipelineId, messageId, {
-          status: 'completed',
-          parts: finalizeParts(msg),
-        } as any)
-      } else {
-        pipelineStore.updateMessage(pipelineId, messageId, {
-          status: 'error',
-          parts: finalizeParts(msg),
-        } as any)
-        useNotificationStore.getState().addNotification({
-          title: '响应超时',
-          message: '响应超时，请重试',
-          priority: 'high',
-          category: 'error',
-          isBlocking: false,
-        })
-      }
-    }
-  } else {
-    // 统一流式超时（messageId 为空）：查找该管道中 streaming 状态的消息并标记 error
-    const msgs = pipelineStore.getMessages(pipelineId)
-    const streamingMsg = msgs.find((m: any) => m.status === 'streaming' || m.status === 'pending')
-    if (streamingMsg) {
-      // 将所有 streaming 状态的 parts 改为 done
-      const finalizeParts = (m: any): any[] =>
-        (m.parts || []).map((p: any) =>
-          p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
-        )
-      pipelineStore.updateMessage(pipelineId, (streamingMsg as any).id, {
-        status: 'error',
-        parts: finalizeParts(streamingMsg),
-      } as any)
-    }
-    useNotificationStore.getState().addNotification({
-      title: '响应超时',
-      message: '等待响应超时，请重试',
-      priority: 'high',
-      category: 'error',
-      isBlocking: false,
-    })
-  }
-
-  // 清理 streaming 状态
-  if (pipelineStore.isStreaming(pipelineId)) {
-    pipelineStore.stopStreaming(pipelineId)
-  }
-  streamingStore.setStreamingForTab(pipelineId, false)
-}
-
-/**
  * 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知）
  *
  * 系统消息气泡的唯一创建入口。后端通过 send_frontend_event 发送
@@ -223,15 +137,24 @@ export function handleSystemNotification(eventData: any): void {
   const pipelineStore = usePipelineMessageStore.getState()
 
   const existingMsgs = pipelineStore.getMessages(pipelineId)
-  // 按 notification_id 去重
-  const alreadyExists = existingMsgs.some((m: any) => {
-    if (m.role !== 'system') return false
-    const metaId = (m as any).metadata?.notification_id || ''
-    return metaId === notificationId
-  })
-
-  if (alreadyExists) {
-    return
+  // notification_id 为空时走内容精确去重，避免空字符串匹配所有通知
+  if (notificationId) {
+    const alreadyExists = existingMsgs.some((m: any) => {
+      if (m.role !== 'system') return false
+      const metaId = (m as any).metadata?.notification_id || ''
+      return metaId === notificationId
+    })
+    if (alreadyExists) return
+  } else {
+    // notification_id 缺失时，用 content 精确匹配去重
+    const alreadyExists = existingMsgs.some((m: any) => {
+      if (m.role !== 'system') return false
+      return m.content === content
+    })
+    if (alreadyExists) {
+      console.warn('[系统通知] notification_id 缺失，使用内容去重: %.40s', content.slice(0, 40))
+      return
+    }
   }
 
   console.warn(

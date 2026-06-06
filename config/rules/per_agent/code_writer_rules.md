@@ -1,8 +1,6 @@
 # Code Writer Agent 规则文件
 
-
 ## 第一部分：通用规则
-
 
 ---
 
@@ -269,6 +267,3 @@ Keep It Simple and Stupid，保持简单直接。
 - 有计划地淘汰而非突然断裂：Deprecate（标记废弃）→ Warn（警告期）→ Remove（移除），每个阶段至少经历一个版本
 - 不信任外部输入：所有外部输入都做校验，兼容性不等于放任
 
-<!-- 前端编码规范由 frontend_rules.md 按需加载 -->
-<!-- 后端编码规范由 backend_rules.md 按需加载 -->
-<!-- 路由机制详见 coding_context_rules.md -->

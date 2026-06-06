@@ -1,11 +1,13 @@
 /**
  * 调试任务页面
  *
- * 展示任务列表，支持按状态过滤
+ * 展示任务列表，支持按状态过滤，支持暂停任务的恢复操作
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { Play } from 'lucide-react'
 import { getTaskList } from '@/services/api/monitoring'
+import { resumeTask } from '@/services/api/tasks'
 import type { TaskInfo } from '@/types/monitoring'
 
 /** 任务状态选项 */
@@ -13,6 +15,7 @@ const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
   { value: 'pending', label: '等待中' },
   { value: 'running', label: '运行中' },
+  { value: 'suspended', label: '已暂停' },
   { value: 'completed', label: '已完成' },
   { value: 'failed', label: '失败' },
   { value: 'cancelled', label: '已取消' },
@@ -31,10 +34,27 @@ function getTaskStatusStyle(status: string): string {
       return 'bg-status-error/10 text-status-error'
     case 'pending':
       return 'bg-status-warning/10 text-status-warning'
+    case 'suspended':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
     case 'cancelled':
       return 'bg-status-pending/10 text-status-pending'
     default:
       return 'bg-status-pending/10 text-status-pending'
+  }
+}
+
+/**
+ * 获取任务状态的中文标签
+ */
+function getTaskStatusLabel(status: string): string {
+  switch (status) {
+    case 'pending': return '等待中'
+    case 'running': return '运行中'
+    case 'suspended': return '已暂停'
+    case 'completed': return '已完成'
+    case 'failed': return '失败'
+    case 'cancelled': return '已取消'
+    default: return status
   }
 }
 
@@ -48,6 +68,7 @@ export function DebugTasksPage() {
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [page, setPage] = useState(1)
+  const [resumingIds, setResumingIds] = useState<Set<string>>(new Set())
   const pageSize = 20
 
   /**
@@ -78,6 +99,25 @@ export function DebugTasksPage() {
     fetchTasks(1, status || undefined)
   }
 
+  /**
+   * 恢复任务
+   */
+  const handleResume = async (taskId: string) => {
+    setResumingIds((prev) => new Set(prev).add(taskId))
+    try {
+      await resumeTask(taskId)
+      fetchTasks(page, statusFilter || undefined)
+    } catch (err: any) {
+      setError(err.message || '恢复任务失败')
+    } finally {
+      setResumingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(taskId)
+        return next
+      })
+    }
+  }
+
   const totalPages = Math.ceil(total / pageSize)
 
   return (
@@ -89,9 +129,9 @@ export function DebugTasksPage() {
         <h1 className="ml-4 text-base font-semibold">调试任务</h1>
         <span className="text-muted-foreground ml-auto text-xs">共 {total} 个任务</span>
       </header>
-      <main className="flex-1 space-y-4 overflow-y-auto p-3 sm:p-6">
+      <main className="flex-1 space-y-4 overflow-y-auto p-6">
         {/* 状态过滤 */}
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           {STATUS_OPTIONS.map((opt) => (
             <button
               key={opt.value}
@@ -128,28 +168,7 @@ export function DebugTasksPage() {
         {/* 任务列表 */}
         {!isLoading && !error && tasks.length > 0 && (
           <>
-            {/* 移动端卡片视图 */}
-            <div className="space-y-2 md:hidden">
-              {tasks.map((task) => (
-                <div key={task.id} className="rounded-lg border p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm font-medium leading-snug">{task.intent || task.name || task.id}</span>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
-                    >
-                      {task.status}
-                    </span>
-                  </div>
-                  <div className="text-muted-foreground mt-2 space-y-1 text-xs">
-                    <div>当前步骤：{task.current_step || '--'}</div>
-                    <div>创建时间：{new Date(task.created_at).toLocaleString()}</div>
-                    <div>耗时：{task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            {/* 桌面端表格视图 */}
-            <div className="hidden md:block overflow-hidden rounded-lg border">
+            <div className="overflow-hidden rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -160,13 +179,13 @@ export function DebugTasksPage() {
                       状态
                     </th>
                     <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      当前步骤
+                      说明
                     </th>
                     <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
                       创建时间
                     </th>
                     <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      耗时
+                      操作
                     </th>
                   </tr>
                 </thead>
@@ -180,17 +199,35 @@ export function DebugTasksPage() {
                         <span
                           className={`rounded-full px-2 py-0.5 text-xs ${getTaskStatusStyle(task.status)}`}
                         >
-                          {task.status}
+                          {getTaskStatusLabel(task.status)}
                         </span>
                       </td>
-                      <td className="text-muted-foreground max-w-[150px] truncate px-4 py-2 text-xs">
-                        {task.current_step || '--'}
+                      <td className="text-muted-foreground max-w-[200px] truncate px-4 py-2 text-xs">
+                        {task.error || task.description || task.current_step || '--'}
                       </td>
                       <td className="text-muted-foreground px-4 py-2 text-xs">
                         {new Date(task.created_at).toLocaleString()}
                       </td>
-                      <td className="text-muted-foreground px-4 py-2 text-xs">
-                        {task.duration ? `${(task.duration / 1000).toFixed(1)}s` : '--'}
+                      <td className="px-4 py-2">
+                        {task.status === 'suspended' && (
+                          <button
+                            onClick={() => handleResume(task.id)}
+                            disabled={resumingIds.has(task.id)}
+                            className="inline-flex items-center gap-1 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+                          >
+                            {resumingIds.has(task.id) ? (
+                              <>
+                                <div className="h-3 w-3 animate-spin rounded-full border border-primary border-t-transparent" />
+                                恢复中...
+                              </>
+                            ) : (
+                              <>
+                                <Play className="h-3 w-3" />
+                                恢复
+                              </>
+                            )}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -204,7 +241,7 @@ export function DebugTasksPage() {
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1}
-                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -214,7 +251,7 @@ export function DebugTasksPage() {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="hover:bg-accent/50 min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>

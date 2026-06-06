@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -14,8 +15,8 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
-# 密钥配置（生产环境应从环境变量读取）
-SECRET_KEY = "dev-secret-key-change-in-production"
+# 密钥配置 — 优先从环境变量读取，保留开发默认值
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
 ALGORITHM = "HS256"
 
 

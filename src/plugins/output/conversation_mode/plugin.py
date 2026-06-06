@@ -126,7 +126,7 @@ class ConversationModeDetector(IOutputPlugin):
         )
 
     def _extract_conversation_flag(self, data: dict[str, Any]) -> bool:
-        """从 tool_result.data 中提取 conversation_mode 标志。
+        """从 tool_result.output 中提取 conversation_mode 标志。
 
         tool_core 的 _normalize_tool_result 对 ToolExecutionResult 调用 to_dict()，
         返回完整结构 {"status": ..., "success": ..., "output": {...}, "data": {...}}，

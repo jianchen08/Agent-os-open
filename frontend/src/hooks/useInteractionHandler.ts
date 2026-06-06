@@ -79,15 +79,25 @@ async function parseInteractionEvent(
 
   const sessionId = inner.session_id as string | undefined
 
+  // 路由关键字段为空会导致后续路由失败，显式告警
+  const threadId = (inner.thread_id as string) || ''
+  const pipelineId = (inner.pipeline_id as string) || ''
+  if (!threadId) {
+    console.warn('[useInteractionHandler] thread_id 缺失，交互路由可能失败', inner)
+  }
+  if (!pipelineId) {
+    console.warn('[useInteractionHandler] pipeline_id 缺失，管道路由可能失败', inner)
+  }
+
   return {
     requestId,
     mode: (inner.interaction_mode as 'choice' | 'conversation' | 'notification') || 'choice',
     title: (inner.title as string) || '',
     description: (inner.description as string) || '',
-    threadId: (inner.thread_id as string) || '',
+    threadId,
     tabId: (inner.tab_id as string) || '',
     agentId: (inner.agent_id as string) || '',
-    pipelineId: (inner.pipeline_id as string) || '',
+    pipelineId,
     options: inner.options as PendingInteraction['options'],
     questions: inner.questions as string[],
     initialMessage: inner.initial_message as string,
@@ -316,7 +326,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
   const navigateToTab = useCallback(
     async (requestId: string, threadId: string, title?: string, agentLevelStr?: string, interactionSessionId?: string) => {
       const currentSid = useSessionStore.getState().activeSessionId
-      if (!currentSid) return
+      if (!currentSid) {
+        console.error('[useInteractionHandler.navigateToTab] 无活跃会话，无法处理交互跳转', requestId)
+        return
+      }
 
       await globalWS.sendInteractionResponse(currentSid, requestId, {
         response_type: 'approved',
@@ -325,7 +338,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
       markEntered(requestId)
 
-      if (!threadId) return
+      if (!threadId) {
+        console.error('[useInteractionHandler.navigateToTab] 交互请求缺少 threadId，无法跳转', requestId)
+        return
+      }
 
       // 进入对话后管道挂起等待用户输入，清理当前活跃管道的流式状态以恢复发送按钮
       const pipelineStore = usePipelineMessageStore.getState()

@@ -243,7 +243,7 @@ class ComfyUIService:
         result = await connector.execute_action(action)
         if not result.success:
             raise RuntimeError(f"获取模型列表失败: {result.error}")
-        return result.data.get("models", {})
+        return result.output.get("models", {})
 
     # ================================================================
     # 生成任务
@@ -297,7 +297,7 @@ class ComfyUIService:
             record = self._history.get(record.id) or record
             return record
 
-        prompt_id = result.data.get("prompt_id", "")
+        prompt_id = result.output.get("prompt_id", "")
         self._history.update(
             record.id,
             status=GenerationStatus.RUNNING,
@@ -329,13 +329,13 @@ class ComfyUIService:
                 if not result.success:
                     continue
 
-                status = result.data.get("status", "unknown")
-                completed = result.data.get("completed", False)
+                status = result.output.get("status", "unknown")
+                completed = result.output.get("completed", False)
 
                 if completed or status in ("success", "error"):
                     break
 
-                self._task_progress[record_id] = result.data.get("progress", 0)
+                self._task_progress[record_id] = result.output.get("progress", 0)
 
             from connectors.types import ConnectorAction
             from datetime import datetime, timezone
@@ -346,12 +346,12 @@ class ComfyUIService:
             )
             result = await connector.execute_action(action)
 
-            if result.success and result.data.get("images"):
+            if result.success and result.output.get("images"):
                 self._history.update(
                     record_id,
                     status=GenerationStatus.COMPLETED,
                     progress=100,
-                    result_images=result.data["images"],
+                    result_images=result.output["images"],
                     completed_at=datetime.now(timezone.utc).isoformat(),
                 )
             else:

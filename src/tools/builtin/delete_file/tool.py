@@ -103,7 +103,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
             results.append({
                 "path": path_str,
                 "success": result.success,
-                "data": result.data if result.success else None,
+                "data": result.output if result.success else None,
                 "error": result.error if not result.success else None,
             })
 

@@ -105,63 +105,6 @@ class ErrorCode(str, Enum):
     LLM_EXEC_9002 = "LLM_EXEC_9002"  # 调用失败
     LLM_TIME_9003 = "LLM_TIME_9003"  # 调用超时
 
-    # ============================================================================
-    # 兼容旧版错误码（从 api/errors.py 迁移）
-    # ============================================================================
-
-    # 认证错误 (AUTH_*) - 兼容旧版
-    AUTH_001 = "AUTH_001"
-    AUTH_002 = "AUTH_002"
-    AUTH_003 = "AUTH_003"
-    AUTH_004 = "AUTH_004"
-    AUTH_005 = "AUTH_005"
-    AUTH_006 = "AUTH_006"
-    AUTH_007 = "AUTH_007"
-    AUTH_008 = "AUTH_008"
-    AUTH_009 = "AUTH_009"
-
-    # 任务错误 (TASK_*) - 兼容旧版
-    TASK_001 = "TASK_001"
-    TASK_002 = "TASK_002"
-    TASK_003 = "TASK_003"
-    TASK_004 = "TASK_004"
-    TASK_005 = "TASK_005"
-    TASK_006 = "TASK_006"
-    TASK_007 = "TASK_007"
-    TASK_008 = "TASK_008"
-
-    # 工具错误 (TOOL_*) - 兼容旧版
-    TOOL_001 = "TOOL_001"
-    TOOL_002 = "TOOL_002"
-    TOOL_003 = "TOOL_003"
-    TOOL_004 = "TOOL_004"
-    TOOL_005 = "TOOL_005"
-    TOOL_006 = "TOOL_006"
-    TOOL_007 = "TOOL_007"
-
-    # 系统错误 (SYS_*) - 兼容旧版
-    SYS_001 = "SYS_001"
-    SYS_002 = "SYS_002"
-    SYS_003 = "SYS_003"
-    SYS_004 = "SYS_004"
-    SYS_005 = "SYS_005"
-    SYS_006 = "SYS_006"
-    SYS_007 = "SYS_007"
-    SYS_008 = "SYS_008"
-
-    # 验证错误 (VAL_*) - 兼容旧版
-    VAL_001 = "VAL_001"
-    VAL_002 = "VAL_002"
-    VAL_003 = "VAL_003"
-    VAL_004 = "VAL_004"
-    VAL_005 = "VAL_005"
-
-    # 记忆错误 (MEM_*) - 兼容旧版
-    MEM_001 = "MEM_001"
-    MEM_002 = "MEM_002"
-    MEM_003 = "MEM_003"
-    MEM_004 = "MEM_004"
-    MEM_005 = "MEM_005"
 
 
 # ============================================================================
@@ -213,57 +156,6 @@ ERROR_MESSAGES: dict[str, str] = {
     ErrorCode.LLM_CONN_9001: "LLM 连接失败",
     ErrorCode.LLM_EXEC_9002: "LLM 调用失败",
     ErrorCode.LLM_TIME_9003: "LLM 调用超时",
-    # ============================================================================
-    # 兼容旧版错误码消息（从 api/errors.py 迁移）
-    # ============================================================================
-    # 认证错误
-    ErrorCode.AUTH_001: "用户名或密码错误",
-    ErrorCode.AUTH_002: "登录已过期，请重新登录",
-    ErrorCode.AUTH_003: "登录已过期，请重新登录",
-    ErrorCode.AUTH_004: "请重新登录",
-    ErrorCode.AUTH_005: "您已在其他设备登出",
-    ErrorCode.AUTH_006: "您没有权限执行此操作",
-    ErrorCode.AUTH_007: "登录尝试次数过多，请稍后再试",
-    ErrorCode.AUTH_008: "该用户名已被注册",
-    ErrorCode.AUTH_009: "该邮箱已被注册",
-    # 任务错误
-    ErrorCode.TASK_001: "任务不存在或已被删除",
-    ErrorCode.TASK_002: "当前状态不允许此操作",
-    ErrorCode.TASK_003: "任务正在执行中，请稍后",
-    ErrorCode.TASK_004: "任务执行超时，请重试",
-    ErrorCode.TASK_005: "任务执行失败，请重试",
-    ErrorCode.TASK_006: "请检查任务参数",
-    ErrorCode.TASK_007: "系统繁忙，请稍后提交",
-    ErrorCode.TASK_008: "请先完成前置任务",
-    # 工具错误
-    ErrorCode.TOOL_001: "请求的工具不存在",
-    ErrorCode.TOOL_002: "工具参数格式错误",
-    ErrorCode.TOOL_003: "工具执行出错，请重试",
-    ErrorCode.TOOL_004: "工具暂时不可用",
-    ErrorCode.TOOL_005: "无法生成所需工具",
-    ErrorCode.TOOL_006: "工具版本冲突，请刷新",
-    ErrorCode.TOOL_007: "工具依赖存在冲突",
-    # 系统错误
-    ErrorCode.SYS_001: "系统繁忙，请稍后重试",
-    ErrorCode.SYS_002: "服务暂时不可用",
-    ErrorCode.SYS_003: "请求超时，请重试",
-    ErrorCode.SYS_004: "系统繁忙，请稍后重试",
-    ErrorCode.SYS_005: "系统繁忙，请稍后重试",
-    ErrorCode.SYS_006: "AI服务暂时不可用",
-    ErrorCode.SYS_007: "请求过于频繁，请稍后重试",
-    ErrorCode.SYS_008: "请求内容过大",
-    # 验证错误
-    ErrorCode.VAL_001: "缺少必要参数",
-    ErrorCode.VAL_002: "参数格式不正确",
-    ErrorCode.VAL_003: "参数值超出允许范围",
-    ErrorCode.VAL_004: "请求格式错误",
-    ErrorCode.VAL_005: "不支持的文件格式",
-    # 记忆错误
-    ErrorCode.MEM_001: "未找到相关记忆",
-    ErrorCode.MEM_002: "记忆检索出错",
-    ErrorCode.MEM_003: "记忆数据格式错误",
-    ErrorCode.MEM_004: "记忆数据冲突",
-    ErrorCode.MEM_005: "无权访问此记忆",
 }
 
 
@@ -316,57 +208,6 @@ ERROR_SEVERITY: dict[str, ErrorSeverity] = {
     ErrorCode.LLM_CONN_9001: ErrorSeverity.ERROR,
     ErrorCode.LLM_EXEC_9002: ErrorSeverity.ERROR,
     ErrorCode.LLM_TIME_9003: ErrorSeverity.WARNING,
-    # ============================================================================
-    # 兼容旧版错误码严重程度
-    # ============================================================================
-    # 认证错误
-    ErrorCode.AUTH_001: ErrorSeverity.ERROR,
-    ErrorCode.AUTH_002: ErrorSeverity.WARNING,
-    ErrorCode.AUTH_003: ErrorSeverity.WARNING,
-    ErrorCode.AUTH_004: ErrorSeverity.WARNING,
-    ErrorCode.AUTH_005: ErrorSeverity.WARNING,
-    ErrorCode.AUTH_006: ErrorSeverity.ERROR,
-    ErrorCode.AUTH_007: ErrorSeverity.WARNING,
-    ErrorCode.AUTH_008: ErrorSeverity.ERROR,
-    ErrorCode.AUTH_009: ErrorSeverity.ERROR,
-    # 任务错误
-    ErrorCode.TASK_001: ErrorSeverity.WARNING,
-    ErrorCode.TASK_002: ErrorSeverity.ERROR,
-    ErrorCode.TASK_003: ErrorSeverity.WARNING,
-    ErrorCode.TASK_004: ErrorSeverity.WARNING,
-    ErrorCode.TASK_005: ErrorSeverity.ERROR,
-    ErrorCode.TASK_006: ErrorSeverity.ERROR,
-    ErrorCode.TASK_007: ErrorSeverity.WARNING,
-    ErrorCode.TASK_008: ErrorSeverity.ERROR,
-    # 工具错误
-    ErrorCode.TOOL_001: ErrorSeverity.WARNING,
-    ErrorCode.TOOL_002: ErrorSeverity.ERROR,
-    ErrorCode.TOOL_003: ErrorSeverity.ERROR,
-    ErrorCode.TOOL_004: ErrorSeverity.WARNING,
-    ErrorCode.TOOL_005: ErrorSeverity.ERROR,
-    ErrorCode.TOOL_006: ErrorSeverity.WARNING,
-    ErrorCode.TOOL_007: ErrorSeverity.ERROR,
-    # 系统错误
-    ErrorCode.SYS_001: ErrorSeverity.ERROR,
-    ErrorCode.SYS_002: ErrorSeverity.WARNING,
-    ErrorCode.SYS_003: ErrorSeverity.WARNING,
-    ErrorCode.SYS_004: ErrorSeverity.ERROR,
-    ErrorCode.SYS_005: ErrorSeverity.ERROR,
-    ErrorCode.SYS_006: ErrorSeverity.WARNING,
-    ErrorCode.SYS_007: ErrorSeverity.WARNING,
-    ErrorCode.SYS_008: ErrorSeverity.ERROR,
-    # 验证错误
-    ErrorCode.VAL_001: ErrorSeverity.ERROR,
-    ErrorCode.VAL_002: ErrorSeverity.ERROR,
-    ErrorCode.VAL_003: ErrorSeverity.ERROR,
-    ErrorCode.VAL_004: ErrorSeverity.ERROR,
-    ErrorCode.VAL_005: ErrorSeverity.ERROR,
-    # 记忆错误
-    ErrorCode.MEM_001: ErrorSeverity.WARNING,
-    ErrorCode.MEM_002: ErrorSeverity.ERROR,
-    ErrorCode.MEM_003: ErrorSeverity.ERROR,
-    ErrorCode.MEM_004: ErrorSeverity.WARNING,
-    ErrorCode.MEM_005: ErrorSeverity.ERROR,
 }
 
 
@@ -419,18 +260,6 @@ SUGGESTED_ACTIONS: dict[str, str] = {
     ErrorCode.LLM_CONN_9001: "请检查 LLM 服务连接",
     ErrorCode.LLM_EXEC_9002: "请重试",
     ErrorCode.LLM_TIME_9003: "请稍后重试",
-    # ============================================================================
-    # 兼容旧版错误码建议操作
-    # ============================================================================
-    # 任务错误
-    ErrorCode.TASK_001: "请确认任务是否存在",
-    ErrorCode.TASK_002: "请检查任务当前状态",
-    ErrorCode.TASK_003: "请稍后重试",
-    ErrorCode.TASK_004: "请重试",
-    ErrorCode.TASK_005: "请重试或联系管理员",
-    ErrorCode.TASK_006: "请检查任务参数",
-    ErrorCode.TASK_007: "请稍后提交",
-    ErrorCode.TASK_008: "请先完成前置任务",
 }
 
 
@@ -483,57 +312,6 @@ HTTP_STATUS_CODES: dict[str, int] = {
     ErrorCode.LLM_CONN_9001: 503,
     ErrorCode.LLM_EXEC_9002: 500,
     ErrorCode.LLM_TIME_9003: 504,
-    # ============================================================================
-    # 兼容旧版错误码 HTTP 状态码
-    # ============================================================================
-    # 认证错误
-    ErrorCode.AUTH_001: 401,
-    ErrorCode.AUTH_002: 401,
-    ErrorCode.AUTH_003: 401,
-    ErrorCode.AUTH_004: 401,
-    ErrorCode.AUTH_005: 401,
-    ErrorCode.AUTH_006: 403,
-    ErrorCode.AUTH_007: 429,
-    ErrorCode.AUTH_008: 409,
-    ErrorCode.AUTH_009: 409,
-    # 任务错误
-    ErrorCode.TASK_001: 404,
-    ErrorCode.TASK_002: 400,
-    ErrorCode.TASK_003: 409,
-    ErrorCode.TASK_004: 408,
-    ErrorCode.TASK_005: 500,
-    ErrorCode.TASK_006: 400,
-    ErrorCode.TASK_007: 429,
-    ErrorCode.TASK_008: 400,
-    # 工具错误
-    ErrorCode.TOOL_001: 404,
-    ErrorCode.TOOL_002: 400,
-    ErrorCode.TOOL_003: 500,
-    ErrorCode.TOOL_004: 503,
-    ErrorCode.TOOL_005: 500,
-    ErrorCode.TOOL_006: 409,
-    ErrorCode.TOOL_007: 400,
-    # 系统错误
-    ErrorCode.SYS_001: 500,
-    ErrorCode.SYS_002: 503,
-    ErrorCode.SYS_003: 504,
-    ErrorCode.SYS_004: 500,
-    ErrorCode.SYS_005: 500,
-    ErrorCode.SYS_006: 503,
-    ErrorCode.SYS_007: 429,
-    ErrorCode.SYS_008: 413,
-    # 验证错误
-    ErrorCode.VAL_001: 400,
-    ErrorCode.VAL_002: 400,
-    ErrorCode.VAL_003: 400,
-    ErrorCode.VAL_004: 400,
-    ErrorCode.VAL_005: 400,
-    # 记忆错误
-    ErrorCode.MEM_001: 404,
-    ErrorCode.MEM_002: 500,
-    ErrorCode.MEM_003: 400,
-    ErrorCode.MEM_004: 409,
-    ErrorCode.MEM_005: 403,
 }
 
 

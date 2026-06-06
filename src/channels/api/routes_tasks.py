@@ -303,7 +303,7 @@ async def create_task(
     if task_service is None:
         raise APIError(
             status_code=503,
-            error_code="TASK_003",
+            error_code="API_TIME_2005",
             message="TaskService 不可用，无法创建任务",
         )
 
@@ -364,7 +364,7 @@ def get_task(
     if task is None:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
     return _task_to_response(task)
@@ -414,7 +414,7 @@ def update_task(
     if task is None:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
     return _task_to_response(task)
@@ -450,7 +450,7 @@ async def delete_task(
     if task_service is None:
         raise APIError(
             status_code=503,
-            error_code="TASK_003",
+            error_code="API_TIME_2005",
             message="TaskService 不可用，无法删除任务",
         )
 
@@ -458,7 +458,7 @@ async def delete_task(
     if not deleted:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
     task = task_service.get_task(task_id)
@@ -508,7 +508,7 @@ async def submit_task(
     if task is None:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
 
@@ -518,7 +518,7 @@ async def submit_task(
     if backend_status not in allowed_statuses:
         raise APIError(
             status_code=400,
-            error_code="TASK_002",
+            error_code="API_VAL_2003",
             message=f"当前状态 '{current_status}' 不允许提交，"
             f"仅允许: {', '.join(allowed_statuses)}",
         )
@@ -572,7 +572,7 @@ def evaluate_task(
     if task is None:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
 
@@ -717,7 +717,7 @@ async def pause_task(
     if task_service is None:
         raise APIError(
             status_code=503,
-            error_code="TASK_003",
+            error_code="API_TIME_2005",
             message="TaskService 不可用，无法暂停任务",
         )
 
@@ -727,7 +727,7 @@ async def pause_task(
     except KeyError:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message=f"任务不存在: {task_id}",
         )
     except Exception as exc:
@@ -735,7 +735,7 @@ async def pause_task(
         if isinstance(exc, InvalidTransitionError):
             raise APIError(
                 status_code=400,
-                error_code="TASK_002",
+                error_code="API_VAL_2003",
                 message=str(exc),
             )
         raise APIError(
@@ -786,7 +786,7 @@ async def resume_task(
     if task_service is None:
         raise APIError(
             status_code=503,
-            error_code="TASK_003",
+            error_code="API_TIME_2005",
             message="TaskService 不可用，无法恢复任务",
         )
 
@@ -796,7 +796,7 @@ async def resume_task(
     except KeyError:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message=f"任务不存在: {task_id}",
         )
     except Exception as exc:
@@ -804,7 +804,7 @@ async def resume_task(
         if isinstance(exc, InvalidTransitionError):
             raise APIError(
                 status_code=400,
-                error_code="TASK_002",
+                error_code="API_VAL_2003",
                 message=str(exc),
             )
         raise APIError(
@@ -869,7 +869,7 @@ async def cancel_task(
     if task_service is None:
         raise APIError(
             status_code=503,
-            error_code="TASK_003",
+            error_code="API_TIME_2005",
             message="TaskService 不可用，无法取消任务",
         )
 
@@ -878,7 +878,7 @@ async def cancel_task(
     if task is None:
         raise APIError(
             status_code=404,
-            error_code="TASK_001",
+            error_code="API_NOTF_2004",
             message=f"任务不存在: {task_id}",
         )
 
@@ -892,7 +892,7 @@ async def cancel_task(
     if task.status not in cancellable_statuses:
         raise APIError(
             status_code=400,
-            error_code="TASK_002",
+            error_code="API_VAL_2003",
             message=f"当前状态无法取消: {task.status.value}",
         )
 

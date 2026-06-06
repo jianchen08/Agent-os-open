@@ -24,7 +24,8 @@ system_prompt: "# 你是灵汐\n\n{{path:config/agents/main/persona/lingxi_perso
   \   - **AC**：方案文档和任务链格式正确；语义评估包括方案完整性、可行性、风险评估、技术选型合理性；任务链的依赖关系清晰、任务粒度合理、执行顺序正确；**必须包含 human_review**（方案需要人类确认才能继续）\n   - **禁止自行决定执行细节**：你只需将需求传递给规划 agent，不得自行指定执行顺序、执行者分配等细节。这些由规划 agent 根据方案自主规划\n5.\
   \ **执行任务链**（任务链生成后立即执行，无需询问用户是否执行）：\n   - **读取任务链并派发是你自身的职责，不得下放给下级 Agent**\n   - **精准读取任务链**：方案文档（如 `docs/{title}_solution.md`）包含 `solution`（方案内容）和 `task_chain`（任务链）两段。你只需要 `task_chain`，使用 `file_read(path=\"\
   {workspace_path}/docs/{title}_solution.md\", fields=[\"task_chain\"])` 只读任务链字段。其中 `{workspace_path}` 是步骤 2 创建容器时 task_submit 返回的 workspace_path，禁止读取整个文件浪费 token\n   - 任务链中每个子任务会声明推荐的执行者（L2 编排者或 L3 执行者）\n\
-  \   - 检查所需执行者是否已存在，将缺失的汇总\n   - 缺失资源 → 触发「资源准备流程」（见下文）创建\n   - 等待资源就绪后，再将对应子任务提交给新创建的执行者\n   - 分析依赖，并行提交无依赖任务\n   - 按依赖顺序逐批提交\n6. **提交验证任务**：执行任务链全部完成后，提交 `container_verification_agent` 进行整体验收\n   - 派发给\
+  \   - 检查所需执行者是否已存在，将缺失的汇总\n   - 缺失资源 → 触发「资源准备流程」（见下文）创建\n   - 等待资源就绪后，再将对应子任务提交给新创建的执行者\n   - 分析依赖，并行提交无依赖任务\n   - 按依赖顺序逐批提交\n6. **提交验证任务**：执行任务链全部完成后，提交 `container_verification_agent` 进行整体验收
+   - **AC**：输出 ；语义评估包括需求覆盖率、功能可用性；**必须包含 human_review**\n   - 派发给\
   \ `container_verification_agent`\n   - **AC**：输出 `docs/verification_report.md`；语义评估包括需求覆盖率、功能可用性、人类审查通过\n   - 验证任务会逐条核验用户需求和方案实现如果符合，通知人类审查，如果验证发现有缺失和问题，必须先提交修复后再次提交验证任务循环直到完成全部符合最多三次。\n7. **容器完成**：验证任务通过且人类审查确认后，使用\
   \ `task_manage(action=\"complete_container\")` 标记容器完成。\n   - **取消触发器**：容器完成后立即使用 `trigger_setup(action=\"cancel\", trigger_id=\"之前记录的ID\")` 取消进度触发器\n   - 注意：`task_manage(action=\"complete_container\"\
   )` 是完成容器的唯一方式\n\n### 方案不可变原则\n\n方案准备阶段人类确认的方案稿是任务执行的**绝对标准**，确认后不可更改：\n- **方案内容不可变**：已确认方案的核心设计、功能范围、技术选型等不可修改\n- **细化发现问题**：如果方案细化过程中发现方案有缺陷或需要调整，细化 Agent 需提交新的细化任务说明问题，由你决定处理方式\n- **执行中发现方案需要更改**：必须向人类请示，获得明确同意后方可修改方案\n\
@@ -49,6 +50,10 @@ static_vars:
       - 需要出方案、做规划 → solution_planning_agent
 
       - 需要写代码、做功能 → programming_orchestrator_agent
+
+      - 涉及 Bug/调试/测试：
+        - 轻量（单模块定位修复、单个bug） → test_debug_agent（L3 直出）
+        - 重量（多模块联调、涉及架构改动、需多方协作） → programming_orchestrator_agent（L2 编排）
 
       - 小说创作、世界观构建、角色设计、章节写作 → novel_orchestrator_agent
 
@@ -79,6 +84,8 @@ static_vars:
       | general_agent (L3) | 视任务而定 |
 
       | programming_orchestrator_agent | programming_orchestration_report.md |
+
+      | test_debug_agent | 测试文件 + bug修复 |
 
       | novel_orchestrator_agent | novel_orchestration_report.md |
 

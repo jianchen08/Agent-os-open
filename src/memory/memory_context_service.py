@@ -462,18 +462,31 @@ class MemoryContextService:
         msg_count = len(old_msgs)
         context_window = self._config.get("context_window", 0)
 
-        # 从已有块计算序列范围
-        sequence_start = 1
-        try:
-            existing = await self._chunk_service.find_by_pipeline(
-                self._pipeline_id, "L1",
-            )
-            if existing:
-                max_end = max(c.sequence_end for c in existing if c.sequence_end)
-                sequence_start = max_end + 1
-        except Exception:
-            pass
-        sequence_end = sequence_start + msg_count - 1
+        # BUG-FIX: sequence 范围直接从被压缩消息的 _record_sequence 取实际值，
+        # 而非从已有块递增。重启后压缩同一批消息时，已有块的
+        # sequence_end 会被累加（如 1-1027, 1028-2089），
+        # 但实际覆盖的是同一批消息，导致多个块范围"不重叠"的假象。
+        # 正确做法：直接用消息自身的 sequence 字段。
+        sequences = [
+            m["_record_sequence"] for m in old_msgs
+            if "_record_sequence" in m and isinstance(m["_record_sequence"], int)
+        ]
+        if sequences:
+            sequence_start = min(sequences)
+            sequence_end = max(sequences)
+        else:
+            # 兜底：消息没有 sequence 信息时，从已有块递增
+            sequence_start = 1
+            try:
+                existing_l1 = await self._chunk_service.find_by_pipeline(
+                    self._pipeline_id, "L1",
+                )
+                if existing_l1:
+                    max_end = max(c.sequence_end for c in existing_l1 if c.sequence_end)
+                    sequence_start = max_end + 1
+            except Exception:
+                pass
+            sequence_end = sequence_start + msg_count - 1
 
         # L1 过程块
         l1_chunk = ChunkData(

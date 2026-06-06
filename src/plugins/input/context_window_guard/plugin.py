@@ -50,6 +50,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         self._compression_model: str | None = self._resolve_compression_model(
             self._config.get("compression_model"),
         )
+        # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
+        # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
+        self._tracked_msg_count: int = 0
 
     @staticmethod
     def _resolve_compression_model(explicit: str | None) -> str | None:
@@ -125,7 +128,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 1：prev_input + delta
         if prev_input > 0:
-            tracked = ctx.state.get("_tracked_msg_count", 0)
+            # 以实例变量为主（跨同一插件实例的多次调用），
+            # ctx.state 为辅（重启/state 恢复场景，取更大值）
+            tracked = max(self._tracked_msg_count, ctx.state.get("_tracked_msg_count", 0))
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
 
             if current_non_sys <= tracked:
@@ -141,8 +146,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
             effective = prev_input + delta_tokens
             logger.info(
-                "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d)",
-                self.name, effective, prev_input, delta_tokens, tracked, current_non_sys,
+                "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
+                self.name, effective, prev_input, delta_tokens, tracked, current_non_sys, len(delta_msgs),
             )
             return effective
 
@@ -280,9 +285,24 @@ class ContextWindowGuardPlugin(IInputPlugin):
             self._trigger_ratio, len(messages), type(service).__name__,
         )
         if estimated_tokens < trigger_tokens:
-            if cleaned is not None:
-                return PluginResult(state_updates={"messages": messages})
-            return PluginResult()
+            # 不需要压缩，但可能需要裁剪被已有压缩块覆盖的旧消息
+            # 仅在重启加载场景（消息数远超上次追踪值）时裁剪，
+            # 正常迭代中新增的消息不应被裁剪
+            trimmed_messages = messages
+            if len(messages) > self._tracked_msg_count + 50:
+                trimmed_messages = await self._trim_covered_messages(
+                    ctx, messages,
+                )
+            current_non_sys = sum(
+                1 for m in trimmed_messages if m.get("role") != "system"
+            )
+            self._tracked_msg_count = current_non_sys
+            updates = {"_tracked_msg_count": current_non_sys}
+            if trimmed_messages is not messages:
+                updates["messages"] = trimmed_messages
+            elif cleaned is not None:
+                updates["messages"] = messages
+            return PluginResult(state_updates=updates)
 
         logger.info(
             "[%s] 上下文接近窗口限制: estimated_tokens=%d, trigger_tokens=%d, "
@@ -328,10 +348,15 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 "[%s] 压缩完成: %d -> %d 条消息",
                 self.name, len(messages), len(compressed),
             )
-            ctx.state["_tracked_msg_count"] = sum(
+            post_compress_count = sum(
                 1 for m in compressed if m.get("role") != "system"
             )
-            return PluginResult(state_updates={"messages": compressed})
+            self._tracked_msg_count = post_compress_count
+            ctx.state["_tracked_msg_count"] = post_compress_count
+            return PluginResult(state_updates={
+                "messages": compressed,
+                "_tracked_msg_count": post_compress_count,
+            })
 
         # 压缩返回 None（失败）或未减少消息数 → 终止管线
         logger.error(
@@ -350,6 +375,82 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    async def _trim_covered_messages(
+        self, ctx: PluginContext, messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """裁剪被已有压缩块覆盖的旧消息（重启场景）。
+
+        重启后从存储加载了全部历史消息，但压缩块已覆盖了前面的部分。
+        如果不裁剪，prompt_build 会把压缩块 + 全部原始消息都发给 LLM，
+        导致 tool_calls/tool_response 配对被破坏。
+
+        裁剪逻辑：保留 system 消息 + 非系统消息中序号 > max_end 的部分。
+        max_end 取自压缩块的 sequence_end（已修正为实际消息序号）。
+
+        Args:
+            ctx: 插件执行上下文
+            messages: 当前消息列表
+
+        Returns:
+            裁剪后的消息列表（如果没有压缩块则原样返回）
+        """
+        pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
+        if not pipeline_id:
+            return messages
+
+        try:
+            chunk_service = ctx.get_service("chunk_service")
+        except (KeyError, AttributeError):
+            return messages
+
+        try:
+            l1_chunks = await chunk_service.find_by_pipeline(pipeline_id, "L1")
+        except Exception:
+            return messages
+
+        if not l1_chunks:
+            return messages
+
+        max_end = max((c.sequence_end for c in l1_chunks if c.sequence_end), default=0)
+        if max_end <= 0:
+            return messages
+
+        # 裁剪：保留 system 消息 + 序号 > max_end 的非 system 消息
+        non_sys_count = sum(1 for m in messages if m.get("role") != "system")
+        if non_sys_count <= max_end:
+            # 所有非 system 消息都被压缩块覆盖，只保留 system 消息
+            trimmed = [m for m in messages if m.get("role") == "system"]
+        else:
+            # 保留 system 消息 + 最后 (non_sys_count - max_end) 条非 system 消息
+            keep_recent = non_sys_count - max_end
+            trimmed = []
+            recent_seen = 0
+            # 从尾部向前数，保留最后 keep_recent 条非 system 消息
+            recent_part: list[dict[str, Any]] = []
+            for m in reversed(messages):
+                if m.get("role") != "system":
+                    recent_seen += 1
+                    if recent_seen <= keep_recent:
+                        recent_part.append(m)
+                else:
+                    recent_part.append(m)
+            # recent_part 是倒序的，需要再反转
+            # 但 system 消息也混在里面了，需要重新分离
+            trimmed_sys = [m for m in messages if m.get("role") == "system"]
+            trimmed_recent = list(reversed(
+                [m for m in recent_part if m.get("role") != "system"]
+            ))
+            trimmed = trimmed_sys + trimmed_recent
+
+        if len(trimmed) < len(messages):
+            logger.info(
+                "[%s] 裁剪被压缩块覆盖的旧消息: %d -> %d (max_end=%d)",
+                self.name, len(messages), len(trimmed), max_end,
+            )
+            return trimmed
+
+        return messages
 
     @staticmethod
     def _get_memory_service(ctx: PluginContext):

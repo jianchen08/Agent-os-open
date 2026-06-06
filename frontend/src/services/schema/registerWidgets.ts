@@ -10,6 +10,7 @@ import { DecisionWidget } from '@/components/schema/widgets/DecisionWidget'
 import { FileTreeWidget } from '@/components/schema/widgets/FileTreeWidget'
 import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
+import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { ProgressWidget } from '@/components/schema/widgets/ProgressWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
@@ -78,15 +79,21 @@ export function initializeWidgets(): void {
       spaces: ['chat', 'workspace'],
       fallback: 'table',
     },
+    {
+      name: 'html_preview',
+      component: HtmlPreviewWidget,
+      spaces: ['workspace', 'floating', 'fullscreen'],
+      fallback: 'code_block',
+    },
   ]
 
   widgets.forEach(({ name, component, spaces, fallback }) => {
-    // 注册到 composer 的 registry（兼容旧代码）
+    // 注册到 Composer 的 registry（用于消息渲染管道）
     composerRegistry.register(name, {
       component: component as React.ComponentType<Record<string, unknown>>,
       supportedSpaces: spaces,
     })
-    // 注册到 WidgetRegistry.ts 的 registry（RenderingEngine 使用）
+    // 注册到 WidgetRegistry（用于 RenderingEngine 独立渲染）
     widgetRegistry.register(name, component as WidgetComponent, {
       name,
       supportedSpaces: spaces as Array<'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen'>,

@@ -111,6 +111,9 @@ def resolve_conversation_history(
     for r in records:
         role = r.role or _type_to_role.get(r.type, "user")
         msg: dict[str, Any] = {"role": role, "content": r.content}
+        # 保留执行记录的 sequence，用于压缩块记录实际消息范围
+        if getattr(r, "sequence", 0) > 0:
+            msg["_record_sequence"] = r.sequence
         if getattr(r, "name", None):
             msg["name"] = r.name
         if getattr(r, "tool_call_id", None):

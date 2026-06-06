@@ -496,6 +496,10 @@ class TaskTool(BuiltinTool):
                         "passed": last.get("passed"),
                         "summary": last.get("summary", ""),
                         "attempt_count": len(history),
+                        "evidence": last.get("evidence", []),
+                        "suggestions": last.get("suggestions", []),
+                        "score": last.get("score"),
+                        "metrics": last.get("metrics", []),
                     }
             if eval_summary:
                 result["evaluation_summary"] = eval_summary
@@ -651,7 +655,7 @@ class TaskTool(BuiltinTool):
             results.append({
                 "task_id": task_id,
                 "success": result.success,
-                "data": result.data if result.success else None,
+                "data": result.output if result.success else None,
                 "error": result.error if not result.success else None,
             })
 

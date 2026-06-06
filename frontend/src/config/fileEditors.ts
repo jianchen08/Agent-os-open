@@ -42,6 +42,12 @@ const editors: Record<string, EditorDefinition> = {
     component: 'image_preview',
     builtin: true,
   },
+  html_preview: {
+    id: 'html_preview',
+    label: 'HTML 预览',
+    component: 'html_preview',
+    builtin: true,
+  },
 }
 
 /** 文件扩展名 → 编辑器映射（小写） */
@@ -59,8 +65,8 @@ const fileTypeMap: Record<string, string> = {
   '.yml': 'text_editor',
   '.toml': 'text_editor',
   '.xml': 'text_editor',
-  '.html': 'text_editor',
-  '.htm': 'text_editor',
+  '.html': 'html_preview',
+  '.htm': 'html_preview',
   '.css': 'text_editor',
   '.scss': 'text_editor',
   '.less': 'text_editor',

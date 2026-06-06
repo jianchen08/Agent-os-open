@@ -15,66 +15,15 @@ default_config:
   use_isolation: true
   timeout: 15
 
-# ===== 预期输入定义 =====
-expected_input:
-  description: "执行自定义命令并检查结果"
-  params:
-    command:
-      type: string
-      description: "要执行的命令"
-      required: true
-      example: "pip install -e ."
-    working_dir:
-      type: string
-      description: "工作目录"
-      required: false
-      example: "."
-    timeout:
-      type: integer
-      description: "超时时间（秒）"
-      required: false
-      example: 60
-
-# ===== 预期输出定义 =====
-expected_output:
-  description: "返回命令执行结果"
-  params:
-    success:
-      type: boolean
-      description: "工具调用是否成功"
-    data:
-      type: object
-      description: "返回数据"
-      properties:
-        status:
-          type: string
-          description: "命令状态"
-          enum: ["completed", "running", "terminated"]
-        exit_code:
-          type: integer
-          description: "命令退出码（0 表示成功）"
-        output:
-          type: string
-          description: "命令输出"
-        summary:
-          type: array
-          description: "输出摘要"
-        elapsed_seconds:
-          type: number
-          description: "执行耗时（秒）"
-    error:
-      type: string
-      description: "错误信息（失败时）"
-
 # ===== 评估判断标准 =====
 expect:
   conditions:
     - field: "success"
       operator: "is_true"
-    - field: "data.status"
+    - field: "output.status"
       operator: "equals"
       value: "completed"
-    - field: "data.exit_code"
+    - field: "output.exit_code"
       operator: "equals"
       value: 0
   logic: "and"

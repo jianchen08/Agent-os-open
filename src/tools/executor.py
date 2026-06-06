@@ -289,12 +289,12 @@ class ToolExecutor(IToolExecutor):
                 cached_result.metadata["duration_ms"] = 0
 
                 # 在 data 中添加明显的缓存提示
-                if isinstance(cached_result.data, dict):
-                    cached_result.data["_cache_info"] = (
+                if isinstance(cached_result.output, dict):
+                    cached_result.output["_cache_info"] = (
                         "⚠️ 此结果来自缓存，操作已在之前执行过，无需重复操作"
                     )
-                elif isinstance(cached_result.data, str):
-                    cached_result.data = f"⚠️ [缓存结果] {cached_result.data}\n\n注意：此结果来自缓存，操作已在之前执行过，无需重复操作。"
+                elif isinstance(cached_result.output, str):
+                    cached_result.output = f"⚠️ [缓存结果] {cached_result.output}\n\n注意：此结果来自缓存，操作已在之前执行过，无需重复操作。"
 
                 # 记录缓存命中的工具执行指标
                 if self._performance_monitor:
@@ -354,7 +354,7 @@ class ToolExecutor(IToolExecutor):
                         await self._nested_record_mgr.update_nested_execution_record(
                             record_id=nested_record_id,
                             success=result.success,
-                            output=result.data,
+                            output=result.output,
                             error=result.error,
                             duration_ms=(
                                 result.metadata.get("duration_ms")
@@ -399,7 +399,7 @@ class ToolExecutor(IToolExecutor):
                 await self._nested_record_mgr.update_nested_execution_record(
                     record_id=nested_record_id,
                     success=result.success,
-                    output=result.data,
+                    output=result.output,
                     error=result.error,
                     duration_ms=(
                         result.metadata.get("duration_ms") if result.metadata else None
@@ -613,7 +613,7 @@ class ToolExecutor(IToolExecutor):
         if tool and tool.output_schema and result.success:
             try:
                 import jsonschema as _js
-                _js.validate(instance=result.data, schema=tool.output_schema)
+                _js.validate(instance=result.output, schema=tool.output_schema)
             except Exception as schema_err:
                 logger.warning(
                     f"[ToolExecutor] 输出不符合 output_schema | "
@@ -702,10 +702,10 @@ class ToolExecutor(IToolExecutor):
                 return result
 
             # 使用当前结果作为下一个工具的输入
-            if isinstance(result.data, dict):
-                current_input = result.data
+            if isinstance(result.output, dict):
+                current_input = result.output
             else:
-                current_input = {"data": result.data}
+                current_input = {"data": result.output}
 
         return result
 
@@ -812,6 +812,6 @@ class ToolExecutor(IToolExecutor):
         result = await self.execute(tool_name, inputs, context)
         return {
             "success": result.success,
-            "output": result.output if hasattr(result, "output") else result.data,
+            "output": result.output,
             "error": result.error,
         }

@@ -35,10 +35,10 @@ class NestedRecordManager:
         try:
             db = self._db_session
             if db is None:
-                from infrastructure.db import get_session_context
+                from infrastructure.db import get_async_session
 
-                async with get_session_context() as db_session:
-                    return await self._create_nested_record_in_session(
+                db_session = await get_async_session()
+                return await self._create_nested_record_in_session(
                         db_session,
                         parent_record_id,
                         session_id,
@@ -127,10 +127,10 @@ class NestedRecordManager:
         try:
             db = self._db_session
             if db is None:
-                from infrastructure.db import get_session_context
+                from infrastructure.db import get_async_session
 
-                async with get_session_context() as db_session:
-                    await self._update_nested_record_in_session(
+                db_session = await get_async_session()
+                await self._update_nested_record_in_session(
                         db_session, record_id, success, output, error, duration_ms
                     )
             else:

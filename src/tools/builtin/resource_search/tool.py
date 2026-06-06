@@ -274,8 +274,9 @@ class ResourceSearchTool:
                     results["tool_c"] = len(tool_names)
 
         if resource_type in ["skill", "all"]:
+            current_workspace = inputs.get("workspace", "")
             skill_names, skill_descriptions, skill_details = await self._search_skills(
-                query, language, limit, detailed, exact
+                query, language, limit, detailed, exact, workspace=current_workspace
             )
             if skill_names:
                 if detailed and skill_details and any(skill_details):
@@ -1051,12 +1052,13 @@ class ResourceSearchTool:
         return False
 
     def _get_skill_registry(self):
-        """获取 Skill 注册表（延迟加载）"""
+        """获取 Skill 注册表（延迟加载，对接 skills.registry 模块）。"""
         if self.skill_registry is None:
             try:
                 from skills.registry import get_global_skill_registry
                 self.skill_registry = get_global_skill_registry()
-            except ImportError:
+            except Exception as exc:
+                logger.debug("[resource_search] SkillRegistry 加载失败: %s", exc)
                 self.skill_registry = None
         return self.skill_registry
 
@@ -1216,19 +1218,21 @@ class ResourceSearchTool:
         limit: int,
         detailed: bool = False,
         exact: bool = False,
+        workspace: str = "",
     ) -> tuple[list[str], list[str], list[dict]]:
-        """
-        搜索 Skill
+        """搜索本地 Skill。
 
-        simple 模式返回名称和描述，detailed 模式返回 SKILL.md 完整文件内容。
+        simple 模式：只返回名称和描述（不挂载）。
+        detailed 模式：返回 SKILL.md 完整内容 + 自动软链到工作空间。
         """
         skill_registry = self._get_skill_registry()
         if not skill_registry or not skill_registry.is_initialized():
             return [], [], []
 
-        names = []
-        descriptions = []
-        details_list = []
+        names: list[str] = []
+        descriptions: list[str] = []
+        details_list: list[dict] = []
+        matched_skill_names: list[str] = []
         query_lower = query.lower()
 
         if detailed and exact:
@@ -1251,25 +1255,35 @@ class ResourceSearchTool:
 
             names.append(skill.skill_name)
             descriptions.append(skill.description)
+            matched_skill_names.append(skill.skill_name)
 
             if detailed:
-                skill_content = self._read_skill_markdown(skill.skill_path)
-                details_list.append({"skill_content": skill_content})
+                # 用 Skill 对象的懒加载属性读取完整内容
+                details_list.append({"skill_content": skill.skill_content})
             else:
                 details_list.append({})
 
             if len(names) >= limit:
                 break
 
-        # 兜底：内部 Skill 搜索结果不足时，从外部平台搜索
-        if not names and query:
-            ext_names, ext_descs, ext_details = await self._search_external(
-                query, "skill", limit
-            )
-            if ext_names:
-                names = ext_names
-                descriptions = ext_descs
-                details_list = ext_details
+        # detailed 模式自动软链到工作空间（容器内下次可见）
+        if detailed and matched_skill_names and workspace:
+            try:
+                mounted = skill_registry.mount_to_workspace(
+                    matched_skill_names, workspace,
+                )
+                for i, skill_name in enumerate(matched_skill_names):
+                    if skill_name in mounted and i < len(details_list):
+                        details_list[i]["mounted"] = True
+                        details_list[i]["container_path"] = (
+                            f"/workspace/skills/{skill_name}"
+                        )
+                logger.info(
+                    "[resource_search] Skill 挂载完成 | mounted=%s | workspace=%s",
+                    mounted, workspace,
+                )
+            except Exception as exc:
+                logger.warning("[resource_search] Skill 挂载失败: %s", exc)
 
         return names, descriptions, details_list
 

@@ -7,7 +7,6 @@
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 
-import { resetChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
@@ -51,8 +50,6 @@ export function handleThinkingStart(eventData: any) {
   if (!pipelineId) return
   const messageId = extractMessageId(eventData)
   if (!messageId) return
-
-  resetChunkTimeout(pipelineId, messageId)
 
   // FIX: 若 message 不存在（如 stream_start 丢失），先创建占位符
   // 与 handleStreamChunk 保持一致的"有消息就有占位符"语义
@@ -113,8 +110,6 @@ export function handleThinkingChunk(eventData: any) {
   const messageId = extractMessageId(eventData)
   const chunk = eventData.content || eventData.data?.content || eventData.data?.chunk || ''
   if (!messageId || !chunk) return
-
-  resetChunkTimeout(pipelineId, messageId)
 
   // 收到 chunk，清除 thinking 超时（后端仍在响应）
   clearThinkingTimeout(messageId)

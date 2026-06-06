@@ -128,7 +128,7 @@ class ValidationException(DomainException):
         error_details = details.copy() if details else {}
         if field:
             error_details["field"] = field
-        super().__init__(message, code=code or "VAL_001", details=error_details)
+        super().__init__(message, code=code or "VAL_REQ_7001", details=error_details)
         self.field = field
 
 

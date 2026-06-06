@@ -167,11 +167,6 @@ class LLMMessageLogger:
                     result += f"  - {name}: {desc}\n"
                     if params:
                         result += f"    参数: {json.dumps(params, ensure_ascii=False, indent=2)}\n"
-                else:
-                    # 回退到旧格式
-                    result += f"  - {tool.name}: {getattr(tool, 'description', '')}\n"
-                    if hasattr(tool, "parameters") and tool.parameters:
-                        result += f"    参数: {json.dumps(tool.parameters, ensure_ascii=False, indent=2)}\n"
             # 简单的 dict 格式
             elif isinstance(tool, dict):
                 name = tool.get("name", "unknown")

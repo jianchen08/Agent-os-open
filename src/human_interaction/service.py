@@ -88,10 +88,51 @@ class HumanInteractionService(IHumanInteractionService):
         self._default_timeout = default_timeout
         self._remind_before_seconds = remind_before_seconds
         self._pending_events: dict[str, asyncio.Event] = {}
+        self._pending_event_loops: dict[str, asyncio.AbstractEventLoop] = {}
         self._timeout_tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
         self._requests: dict[str, dict[str, Any]] = {}
         self._responses: dict[str, dict[str, Any]] = {}
+
+    def _set_event_threadsafe(self, request_id: str) -> None:
+        """线程安全地设置 Event，确保跨事件循环时也能正确唤醒等待方。
+
+        当 wait_for_choice() 在引擎线程的事件循环中等待，
+        而 submit_response() 在 API 路由的事件循环中调用 set() 时，
+        直接调用 Event.set() 无法唤醒另一个循环中的 wait()。
+        需要通过 call_soon_threadsafe 将 set 操作调度到等待方的事件循环。
+        """
+        event = self._pending_events.get(request_id)
+        if event is None:
+            logger.warning(
+                "[HumanInteraction] Event NOT found | request_id=%s | pending_keys=%s",
+                request_id, list(self._pending_events.keys())[:5],
+            )
+            return
+
+        target_loop = self._pending_event_loops.get(request_id)
+        current_loop: asyncio.AbstractEventLoop | None = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        if (
+            target_loop is not None
+            and target_loop.is_running()
+            and current_loop is not target_loop
+        ):
+            logger.info(
+                "[HumanInteraction] Event.set() via call_soon_threadsafe | request_id=%s | target_loop=%s | current_loop=%s",
+                request_id, id(target_loop), id(current_loop) if current_loop else None,
+            )
+            target_loop.call_soon_threadsafe(event.set)
+        else:
+            logger.info(
+                "[HumanInteraction] Event.set() direct | request_id=%s | target_loop=%s | current_loop=%s",
+                request_id, id(target_loop) if target_loop else None, id(current_loop) if current_loop else None,
+            )
+            event.set()
 
     async def send_notification(
         self,
@@ -268,7 +309,8 @@ class HumanInteractionService(IHumanInteractionService):
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """等待用户选择。"""
-        current_loop_id = id(asyncio.get_event_loop())
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
         event = self._pending_events.get(request_id)
         if not event:
             record = self._requests.get(request_id)
@@ -277,6 +319,9 @@ class HumanInteractionService(IHumanInteractionService):
             async with self._lock:
                 self._pending_events[request_id] = asyncio.Event()
                 event = self._pending_events[request_id]
+
+        # 记录等待方所在的事件循环，供 _set_event_threadsafe 使用
+        self._pending_event_loops[request_id] = current_loop
 
         record = self._requests.get(request_id)
         if not record:
@@ -298,6 +343,8 @@ class HumanInteractionService(IHumanInteractionService):
         except TimeoutError:
             await self._handle_timeout(request_id)
             raise InteractionTimeoutError(request_id, timeout) from None
+        finally:
+            self._pending_event_loops.pop(request_id, None)
 
         response = self._responses.get(request_id)
         if not response:
@@ -401,18 +448,12 @@ class HumanInteractionService(IHumanInteractionService):
 
         async with self._lock:
             event_exists = request_id in self._pending_events
-            _set_loop_id = id(asyncio.get_event_loop())
             if event_exists:
-                _evt = self._pending_events[request_id]
                 logger.info(
-                    "[HumanInteraction] Event.set() | request_id=%s | event_exists=%s | loop_id=%s | event_id=%s | event_is_set_before=%s",
-                    request_id, event_exists, _set_loop_id, id(_evt), _evt.is_set(),
+                    "[HumanInteraction] submit_response() 准备唤醒 | request_id=%s | event_exists=%s",
+                    request_id, event_exists,
                 )
-                _evt.set()
-                logger.info(
-                    "[HumanInteraction] Event.set() DONE | request_id=%s | event_is_set_after=%s",
-                    request_id, _evt.is_set(),
-                )
+                self._set_event_threadsafe(request_id)
             else:
                 logger.warning(
                     "[HumanInteraction] Event NOT found | request_id=%s | pending_keys=%s",
@@ -447,7 +488,7 @@ class HumanInteractionService(IHumanInteractionService):
 
         async with self._lock:
             if request_id in self._pending_events:
-                self._pending_events[request_id].set()
+                self._set_event_threadsafe(request_id)
 
         return True
 
@@ -469,7 +510,7 @@ class HumanInteractionService(IHumanInteractionService):
 
         async with self._lock:
             if request_id in self._pending_events:
-                self._pending_events[request_id].set()
+                self._set_event_threadsafe(request_id)
             if request_id in self._timeout_tasks:
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]
@@ -687,7 +728,7 @@ class HumanInteractionService(IHumanInteractionService):
 
         async with self._lock:
             if request_id in self._pending_events:
-                self._pending_events[request_id].set()
+                self._set_event_threadsafe(request_id)
 
         if self._notifier:
             await self._notifier.notify_timeout(request_id, thread_id=thread_id)

@@ -172,7 +172,7 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        data = result.data
+        data = result.output
         assert data["soft_deleted"] is True
         assert data["deleted"] is False
         assert data["task_id"] == "container-1"
@@ -213,7 +213,7 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        assert result.data["cascaded_subtasks"] == 3
+        assert result.output["cascaded_subtasks"] == 3
 
     @pytest.mark.asyncio
     async def test_non_container_task_with_subtasks(self):
@@ -256,7 +256,7 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        data = result.data
+        data = result.output
         assert data["deleted"] is True
         assert data["task_id"] == "root-1"
 
@@ -300,7 +300,7 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        data = result.data
+        data = result.output
         assert data["deleted"] is True
 
         service.hard_delete_task.assert_called_once_with(
@@ -343,8 +343,8 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        assert result.data["deleted"] is True
-        assert result.data["old_status"] == "running"
+        assert result.output["deleted"] is True
+        assert result.output["old_status"] == "running"
 
     @pytest.mark.asyncio
     async def test_pipeline_file_result_in_data(self):
@@ -378,7 +378,7 @@ class TestDeleteTaskCascade:
         inputs = {"task_id": "pipe-task", "action": "delete", "session_id": "s-1"}
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
-        assert result.data["pipeline_file_cleaned"] is True
+        assert result.output["pipeline_file_cleaned"] is True
 
     @pytest.mark.asyncio
     async def test_no_pipeline_run_id_result(self):
@@ -411,7 +411,7 @@ class TestDeleteTaskCascade:
         inputs = {"task_id": "no-pipe", "action": "delete", "session_id": "s-1"}
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
-        assert result.data["pipeline_file_cleaned"] is False
+        assert result.output["pipeline_file_cleaned"] is False
 
     @pytest.mark.asyncio
     async def test_workspace_protection_same_as_container(self):
@@ -502,7 +502,7 @@ class TestDeleteTaskCascade:
         result = await tool._delete_task(inputs, parent_agent_level=1)
 
         assert result.success is True
-        data = result.data
+        data = result.output
         assert data["cleanup"].get("skipped") is not None
 
     @pytest.mark.asyncio

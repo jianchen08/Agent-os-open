@@ -26,10 +26,6 @@ class ToolExecutionResult(ExecutionResult[Any]):
     - tool_id: 工具 ID
     - input_params: 输入参数
 
-    兼容属性（用于向后兼容旧的 ToolResult）：
-    - data: 等同于 output
-    - duration: duration_ms 转换为秒
-
     Attributes:
         tool_name: 工具名称
         tool_id: 工具 ID
@@ -46,31 +42,15 @@ class ToolExecutionResult(ExecutionResult[Any]):
         description="输入参数"
     )
 
-    # === 兼容属性（向后兼容旧的 ToolResult）===
-
-    @property
-    def data(self) -> Any | None:
-        """兼容旧字段名，等同于 output"""
-        return self.output
-
-    @property
-    def duration(self) -> float:
-        """兼容旧字段名，将 duration_ms 转换为秒"""
-        if self.duration_ms is not None:
-            return self.duration_ms / 1000.0
-        return 0.0
-
     def to_dict(self, slim: bool = False) -> dict[str, Any]:
         """转换为字典
 
         Args:
-            slim: 精简模式，省略 tool_name/tool_id/input_params/data 等冗余字段
+            slim: 精简模式，省略 tool_name/tool_id/input_params 等冗余字段
         """
         result = super().to_dict(slim=slim)
 
         if not slim:
-            if self.output is not None:
-                result["data"] = self.output
             if self.tool_name:
                 result["tool_name"] = self.tool_name
             if self.tool_id:

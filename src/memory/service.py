@@ -86,8 +86,7 @@ class MemoryService:
         self._config = config or {}
         vector_cfg = self._config.get("vector_search", {})
         self._vector_search_enabled = vector_cfg.get("enabled", False)
-        self._fallback_to_keyword = vector_cfg.get("fallback_to_keyword", True)
-        self._default_method = vector_cfg.get("default_method", "vector")
+        self._default_method = vector_cfg.get("default_method", "keyword")
 
         # 混合检索配置
         hybrid_cfg = vector_cfg.get("hybrid", {})
@@ -367,7 +366,7 @@ class MemoryService:
         user_id: str | None = None,
         filter: dict[str, Any] | None = None,
         inject_type: str = "retrieval",
-        retrieval_method: str = "vector",
+        retrieval_method: str = "keyword",
         query: str | None = None,
         query_vector: list[float] | None = None,
         top_k: int = 5,
@@ -406,28 +405,23 @@ class MemoryService:
         filter: dict[str, Any],
         top_k: int,
     ) -> list[SearchResult]:
-        """全量注入 - 直接返回筛选后的所有结果。"""
-        retriever = self._retrievers.get("vector")
+        """全量注入 - 使用默认检索器返回筛选后的所有结果。"""
+        method_name = self._default_method if isinstance(self._default_method, str) else "keyword"
+        retriever = self._retrievers.get(method_name)
         if not retriever:
-            # 检索器不可用时，服务层兜底返回所有知识
-            return await self._service_layer_fallback(
-                user_id, filter.get("memory_type", "semantic"), None, top_k,
+            available = list(self._retrievers.keys())
+            raise ValueError(
+                f"全量注入失败：检索器 '{method_name}' 未注册。可用检索器: {available}"
             )
 
         memory_type = filter.get("memory_type", "semantic")
-        results = await retriever.retrieve(
+        return await retriever.retrieve(
             query="",
             user_id=user_id,
             top_k=top_k,
             memory_type=memory_type,
             filters=filter,
         )
-        # 检索器返回空时也尝试兜底
-        if not results:
-            return await self._service_layer_fallback(
-                user_id, memory_type, None, top_k,
-            )
-        return results
 
     async def _retrieve_summary(
         self,
@@ -436,95 +430,14 @@ class MemoryService:
         query: str | None,
         top_k: int,
     ) -> list[SearchResult]:
-        """摘要注入 - 先检索再生成摘要。"""
+        """摘要注入 - 使用默认检索方法检索后生成摘要。"""
+        default_method = RetrievalMethod(self._default_method)
         results = await self._retrieve_by_method(
-            user_id, filter, RetrievalMethod.VECTOR, query, top_k,
+            user_id, filter, default_method, query, top_k,
         )
 
         # 摘要生成需要 embedding_service，当前 MVP 直接返回检索结果
         return results
-
-    async def _service_layer_fallback(
-        self,
-        user_id: str | None,
-        memory_type: str,
-        query: str | None,
-        top_k: int,
-    ) -> list[SearchResult]:
-        """服务层兜底检索：当所有 IRetriever 都不可用时，直接从服务层数据搜索。
-
-        确保即使降级模式（无注入检索器），store 的数据也能被 retrieve 找到。
-        同时覆盖 episode（内存降级）和 semantic（存储或内存降级）两种路径。
-
-        Args:
-            user_id: 用户 ID
-            memory_type: 记忆类型 (semantic/episode)
-            query: 查询文本，为 None 时返回全量
-            top_k: 返回数量上限
-
-        Returns:
-            搜索结果列表
-        """
-        results: list[SearchResult] = []
-
-        # 语义记忆路径
-        if memory_type in ("semantic", "all"):
-            try:
-                if query:
-                    # 有关键词查询 → 委托给 KnowledgeService.search()
-                    knowledge_results = await self._knowledge_service.search(
-                        user_id=user_id or "",
-                        query=query,
-                        top_k=top_k,
-                    )
-                    results.extend(knowledge_results)
-                else:
-                    # 无查询（full 注入）→ 直接列出所有知识
-                    all_kn = await self._knowledge_service._get_all_knowledge(
-                        user_id or "",
-                    )
-                    for kn in all_kn[:top_k]:
-                        results.append(SearchResult(
-                            id=kn.id,
-                            content=kn.content,
-                            score=1.0,
-                            memory_type=MemoryType.SEMANTIC,
-                            metadata=kn.extra_data,
-                        ))
-            except Exception as e:
-                logger.warning("[MemoryService] 知识服务兜底检索失败: %s", e)
-
-        # 情景记忆路径：委托给 EpisodeService 的内存数据
-        if memory_type in ("episode", "all") and self._episode_service:
-            try:
-                episodes_data = await self._episode_service.list_episodes(
-                    user_id=user_id or "",
-                    page_size=top_k,
-                )
-                for ep_dict in episodes_data.get("items", []):
-                    content = ep_dict.get("execution_summary") or ep_dict.get("intent_text", "")
-                    if not query or (query and query.lower() in content.lower()):
-                        results.append(SearchResult(
-                            id=ep_dict.get("id", ""),
-                            content=content,
-                            score=1.0 if not query else 0.5,
-                            memory_type=MemoryType.EPISODE,
-                            metadata={"tags": ep_dict.get("tags", [])},
-                        ))
-            except Exception as e:
-                logger.warning("[MemoryService] 情景记忆兜底检索失败: %s", e)
-
-        # 兜底命中统计
-        if results:
-            self._retrieval_stats["fallback_hits"] += 1
-            logger.debug(
-                "[MemoryService] 服务层兜底检索 | query=%s | results=%d",
-                query[:30] if query else "None", len(results),
-            )
-        else:
-            self._retrieval_stats["misses"] += 1
-
-        return results[:top_k]
 
     async def _retrieve_by_method(
         self,
@@ -536,7 +449,8 @@ class MemoryService:
     ) -> list[SearchResult]:
         """按检索方法执行检索（第三层决策）。
 
-        支持向量检索不可用时自动回退到关键词检索。
+        检索器必须已通过 register_retriever() 或构造函数注入。
+        未注册的检索方法将直接报错，不会自动回退。
         启用混合检索时，同时调用向量和关键词检索并按权重合并结果。
         """
         self._retrieval_stats["total_requests"] += 1
@@ -545,118 +459,41 @@ class MemoryService:
         if not query:
             return []
 
+        method_name = retrieval_method.value
         memory_type = filter.get("memory_type", "semantic")
 
         # 混合检索模式
-        if self._hybrid_enabled and retrieval_method == RetrievalMethod.VECTOR:
+        if self._hybrid_enabled and method_name == "vector":
             results = await self._hybrid_retrieve(
                 user_id, filter, query, top_k, memory_type,
             )
             if results:
                 return results
 
-        method_name = retrieval_method.value
-
-        # 向量检索配置检查：仅在未注入 vector 检索器时才降级
-        if method_name == "vector" and not self._vector_search_enabled:
-            if self._retrievers.get("vector"):
-                # 有注入的 vector 检索器 → 直接使用，忽略配置标志
-                pass
-            elif self._fallback_to_keyword:
-                logger.debug("[MemoryService] 向量检索未启用且回退到关键词检索")
-                method_name = "keyword"
-                retrieval_method = RetrievalMethod.KEYWORD
-            else:
-                # 向量禁用且不回退 → 服务层兜底
-                return await self._service_layer_fallback(
-                    user_id, memory_type, query, top_k,
-                )
-
         retriever = self._retrievers.get(method_name)
         if not retriever:
-            # 尝试回退到任何可用的检索器
-            if method_name != "keyword" and self._fallback_to_keyword:
-                keyword_retriever = self._retrievers.get("keyword")
-                if keyword_retriever:
-                    logger.debug(
-                        "[MemoryService] 检索器 %s 不可用，回退到关键词检索",
-                        method_name,
-                    )
-                    retriever = keyword_retriever
-                    self._retrieval_stats["fallback_hits"] += 1
-                else:
-                    # 所有检索器都不可用 → 服务层兜底：直接搜索 KnowledgeService
-                    return await self._service_layer_fallback(
-                        user_id, memory_type, query, top_k,
-                    )
-            else:
-                # keyword 检索器也不可用 → 服务层兜底
-                return await self._service_layer_fallback(
-                    user_id, memory_type, query, top_k,
-                )
-
-        try:
-            results = await retriever.retrieve(
-                query=query,
-                user_id=user_id,
-                top_k=top_k,
-                memory_type=memory_type,
-                filters=filter,
+            available = list(self._retrievers.keys())
+            raise ValueError(
+                f"检索器 '{method_name}' 未注册。可用检索器: {available}"
             )
-            if results:
-                if method_name == "vector":
-                    self._retrieval_stats["vector_hits"] += 1
-                else:
-                    self._retrieval_stats["keyword_hits"] += 1
-            else:
-                # 向量检索无结果时尝试回退到关键词检索
-                if method_name == "vector" and self._fallback_to_keyword:
-                    keyword_retriever = self._retrievers.get("keyword")
-                    if keyword_retriever:
-                        logger.debug(
-                            "[MemoryService] 向量检索无结果，回退到关键词检索",
-                        )
-                        results = await keyword_retriever.retrieve(
-                            query=query,
-                            user_id=user_id,
-                            top_k=top_k,
-                            memory_type=memory_type,
-                            filters=filter,
-                        )
-                        if results:
-                            self._retrieval_stats["fallback_hits"] += 1
-                        else:
-                            self._retrieval_stats["misses"] += 1
-                    else:
-                        self._retrieval_stats["misses"] += 1
-                else:
-                    self._retrieval_stats["misses"] += 1
-            return results
-        except Exception as e:
-            logger.warning("[MemoryService] 检索失败 | method=%s | error=%s", method_name, e)
 
-            # 异常时回退到关键词检索
-            if method_name != "keyword" and self._fallback_to_keyword:
-                keyword_retriever = self._retrievers.get("keyword")
-                if keyword_retriever:
-                    try:
-                        results = await keyword_retriever.retrieve(
-                            query=query,
-                            user_id=user_id,
-                            top_k=top_k,
-                            memory_type=memory_type,
-                            filters=filter,
-                        )
-                        self._retrieval_stats["fallback_hits"] += 1
-                        return results
-                    except Exception as fallback_err:
-                        logger.warning(
-                            "[MemoryService] 关键词回退检索也失败 | error=%s",
-                            fallback_err,
-                        )
+        results = await retriever.retrieve(
+            query=query,
+            user_id=user_id,
+            top_k=top_k,
+            memory_type=memory_type,
+            filters=filter,
+        )
 
+        if results:
+            if method_name == "vector":
+                self._retrieval_stats["vector_hits"] += 1
+            elif method_name == "keyword":
+                self._retrieval_stats["keyword_hits"] += 1
+        else:
             self._retrieval_stats["misses"] += 1
-            return []
+
+        return results
 
     async def _hybrid_retrieve(
         self,
@@ -941,7 +778,6 @@ class MemoryService:
             "retrieval_stats": stats,
             "config": {
                 "vector_search_enabled": self._vector_search_enabled,
-                "fallback_to_keyword": self._fallback_to_keyword,
                 "hybrid_enabled": self._hybrid_enabled,
                 "default_method": self._default_method,
             },

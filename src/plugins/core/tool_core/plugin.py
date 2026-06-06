@@ -234,7 +234,7 @@ class ToolCore(ICorePlugin):
             return result.output
 
         if hasattr(result, "data"):
-            return result.data
+            return result.output
 
         if isinstance(result, (dict, list, str, int, float, bool)):
             return result
@@ -419,9 +419,21 @@ class ToolCore(ICorePlugin):
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
                 self.name, tool_name, duration_ms, timeout,
             )
-            error_msg = (
-                f"Tool '{tool_name}' timed out after {timeout}s"
-            )
+            # BUG-FIX-fix_20260605_human_interaction_timeout_msg:
+            # 问题根因: human_interaction 外层超时时返回通用 "Tool timed after Xs"
+            #           错误信息，LLM 无法理解"人类未交互"，可能误判为通过。
+            # 修复方案: human_interaction 超时返回明确的人类未交互信息。
+            if tool_name == "human_interaction":
+                error_msg = (
+                    f"人类交互超时（等待了{timeout:.0f}秒），"
+                    "用户未在规定时间内响应。"
+                    "你不应假设用户同意或默认通过，"
+                    "应根据当前任务上下文决定下一步操作。"
+                )
+            else:
+                error_msg = (
+                    f"Tool '{tool_name}' timed out after {timeout}s"
+                )
             result = {
                 "tool_name": tool_name,
                 "success": False,

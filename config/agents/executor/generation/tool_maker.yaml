@@ -162,7 +162,7 @@ recommended_metrics:
   default_params:
     action: read
     path: src/tools/builtin/{tool_id}.py
-- metric_id: test_check
+- metric_id: bash_check
   default_params:
     requirement: 验证工具功能是否符合需求规格，能正确执行并返回预期结果
 plugins:

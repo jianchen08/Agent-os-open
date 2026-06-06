@@ -293,36 +293,42 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set, get) =
   },
 }))
 
-/** 将后端 snake_case 字段转换为前端 camelCase */
+/** 将后端 API 响应转换为前端 ReviewRequest 类型 */
 function _normalizeReview(data: Record<string, any>): ReviewRequest {
+  if (!data.id) {
+    console.error('[reviewStore] _normalizeReview: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    taskId: data.task_id ?? data.taskId ?? '',
-    threadId: data.thread_id ?? data.threadId ?? '',
-    sessionId: data.session_id ?? data.sessionId ?? '',
-    tabId: data.tab_id ?? data.tabId ?? '',
+    taskId: data.taskId ?? '',
+    threadId: data.threadId ?? '',
+    sessionId: data.sessionId ?? '',
+    tabId: data.tabId ?? '',
     title: data.title ?? '',
     description: data.description ?? '',
-    artifactIds: data.artifact_ids ?? data.artifactIds ?? [],
+    artifactIds: data.artifactIds ?? [],
     status: data.status ?? 'pending',
     priority: data.priority ?? 'normal',
-    timeoutSeconds: data.timeout_seconds ?? data.timeoutSeconds ?? 86400,
-    createdAt: data.created_at ?? data.createdAt ?? '',
-    updatedAt: data.updated_at ?? data.updatedAt ?? '',
-    reviewedAt: data.reviewed_at ?? data.reviewedAt,
-    completedAt: data.completed_at ?? data.completedAt,
+    timeoutSeconds: data.timeoutSeconds ?? 86400,
+    createdAt: data.createdAt ?? '',
+    updatedAt: data.updatedAt ?? '',
+    reviewedAt: data.reviewedAt,
+    completedAt: data.completedAt,
     metadata: data.metadata ?? {},
   }
 }
 
 function _normalizeFeedback(data: Record<string, any>): ReviewFeedback {
+  if (!data.id) {
+    console.error('[reviewStore] _normalizeFeedback: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    reviewRequestId: data.review_request_id ?? data.reviewRequestId ?? '',
-    responseType: data.response_type ?? data.responseType ?? 'approved',
-    overallComment: data.overall_comment ?? data.overallComment ?? '',
+    reviewRequestId: data.reviewRequestId ?? '',
+    responseType: data.responseType ?? 'approved',
+    overallComment: data.overallComment ?? '',
     annotations: data.annotations ?? [],
-    userId: data.user_id ?? data.userId,
-    createdAt: data.created_at ?? data.createdAt ?? '',
+    userId: data.userId,
+    createdAt: data.createdAt ?? '',
   }
 }

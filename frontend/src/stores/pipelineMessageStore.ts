@@ -8,7 +8,7 @@
 import { create } from 'zustand'
 import { getMessages as apiGetMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
-import { retry, isRetryableError } from '@/utils/retry'
+// retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 
@@ -578,8 +578,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         },
         hasMoreOlderByPipeline: {
           ...state.hasMoreOlderByPipeline,
-          // 优先用后端返回的 hasMoreOlder，无则 fallback 到 messages.length >= 50
-          [pipelineId]: hasMoreOlder !== undefined ? hasMoreOlder : messages.length >= 50,
+          // 后端始终返回 has_more，前端直接使用
+          [pipelineId]: hasMoreOlder ?? false,
         },
       }
     })
@@ -619,8 +619,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         },
         hasMoreOlderByPipeline: {
           ...state.hasMoreOlderByPipeline,
-          // 优先用后端返回的 hasMoreOlder，无则 fallback 到 messages.length >= 50
-          [pipelineId]: hasMoreOlder !== undefined ? hasMoreOlder : messages.length >= 50,
+          // 后端始终返回 has_more，前端直接使用
+          [pipelineId]: hasMoreOlder ?? false,
         },
         isLoadingOlderByPipeline: {
           ...state.isLoadingOlderByPipeline,
@@ -729,25 +729,20 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
         // FEATURE-pipeline_unify: 统一传 pipelineRunId（主/子管道都用 pipelineId），
         //                         后端统一走 pipelineRunId 路径，不再区分主/子。
         const sessionFallback = get().pipelineSessionMap[pipelineId]
-        const threadId = options?.threadId || sessionFallback || pipelineId
-        const apiResult = await retry(
-          () => apiGetMessages(threadId, {
-            limit,
-            before_sequence: options?.before_sequence,
-            after_sequence: options?.after_sequence,
-            pipelineRunId: pipelineId,
-          }),
-          {
-            maxAttempts: 3,
-            delayMs: 1000,
-            shouldRetry: (error) => {
-              const status = error?.response?.status ?? error?.status
-              if (status === 429) return true
-              if (status === 404) return false
-              return isRetryableError(error)
-            },
-          },
-        )
+        // 内部 API 不需要 threadId 三层降级：优先传参，其次 pipelineSessionMap，
+        // 二者都无说明调用链有问题，直接报错
+        const threadId = options?.threadId || sessionFallback
+        if (!threadId) {
+          logger.error('[pipelineMessageStore.fetchMessages] 无法确定 threadId: pipelineId=%s', pipelineId)
+          throw new Error(`无法确定 threadId，pipelineId: ${pipelineId}`)
+        }
+        // 内部 API 不做内置重试，429/5xx 由 axios interceptor 统一处理
+        const apiResult = await apiGetMessages(threadId, {
+          limit,
+          before_sequence: options?.before_sequence,
+          after_sequence: options?.after_sequence,
+          pipelineRunId: pipelineId,
+        })
 
         const rawMessages: Message[] = apiResult.messages || []
         // DEBUG: 确认 has_more 是否正确传递

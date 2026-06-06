@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from channels.api.deps import require_auth
+from human_interaction import get_human_interaction_service
 
 logger = logging.getLogger(__name__)
 
@@ -834,39 +835,110 @@ async def manual_trigger(trigger_id: str, _user: dict = Depends(require_auth)) -
 interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"])
 
 
+# BUG-FIX-fix_20260605_interaction_stub_routes:
+# 问题根因: /api/v1/interaction/* 路由全部为存根实现，前端点击选项后
+#           后端未调用 HumanInteractionService.respond() / submit_response()，
+#           导致 asyncio.Event.set() 永远不触发，wait_for_choice() 永久阻塞，
+#           用户看到"工具执行中"状态一直停留。
+# 修复方案: 将存根路由替换为调用 HumanInteractionService 的真实实现。
+# 影响范围: 前端人类交互面板的所有操作（选择/审批/拒绝/取消/查看）。
+# 修复日期: 2026-06-05
+
+
 @interaction_router.post("/response", summary="提交交互响应")
-async def submit_interaction_response(body: dict[str, Any] | None = None, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"success": True, "message": "响应已提交"}
+async def submit_interaction_response(
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """提交交互响应，调用 HumanInteractionService.respond() 触发 Event.set()。"""
+    if not body or "request_id" not in body:
+        raise HTTPException(status_code=400, detail="缺少 request_id")
+    service = get_human_interaction_service()
+    result = await service.respond(body["request_id"], body)
+    return {"success": result}
 
 
 @interaction_router.get("/pending", summary="获取待处理请求")
-async def get_pending_interactions(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"items": [], "total": 0}
+async def get_pending_interactions(
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """获取所有待处理的交互请求列表。"""
+    service = get_human_interaction_service()
+    requests = await service.get_pending_requests()
+    return {"items": requests, "total": len(requests)}
 
 
 @interaction_router.get("/{request_id}", summary="获取交互请求详情")
-async def get_interaction(request_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": request_id, "status": "pending", "type": ""}
+async def get_interaction(
+    request_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """根据 request_id 获取交互请求详情，不存在则返回 404。"""
+    service = get_human_interaction_service()
+    record = await service.get_request(request_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="交互请求不存在")
+    return record
 
 
 @interaction_router.post("/{request_id}/approve", summary="批准请求")
-async def approve_interaction(request_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": request_id, "status": "approved"}
+async def approve_interaction(
+    request_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """批准交互请求。"""
+    service = get_human_interaction_service()
+    result = await service.submit_response(
+        request_id=request_id,
+        response_type="approved",
+        selected_option="approve",
+        feedback=body.get("feedback") if body else None,
+    )
+    return {"success": result, "request_id": request_id, "status": "approved"}
 
 
 @interaction_router.post("/{request_id}/deny", summary="拒绝请求")
-async def deny_interaction(request_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": request_id, "status": "denied"}
+async def deny_interaction(
+    request_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """拒绝交互请求。"""
+    service = get_human_interaction_service()
+    result = await service.submit_response(
+        request_id=request_id,
+        response_type="denied",
+        selected_option="reject",
+        feedback=body.get("feedback") if body else None,
+    )
+    return {"success": result, "request_id": request_id, "status": "denied"}
 
 
 @interaction_router.post("/{request_id}/cancel", summary="取消请求")
-async def cancel_interaction(request_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": request_id, "status": "cancelled"}
+async def cancel_interaction(
+    request_id: str,
+    body: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """取消交互请求。"""
+    service = get_human_interaction_service()
+    result = await service.cancel_request(
+        request_id=request_id,
+        reason=body.get("reason") if body else None,
+    )
+    return {"success": result, "request_id": request_id, "status": "cancelled"}
 
 
 @interaction_router.post("/{request_id}/viewed", summary="标记已查看")
-async def mark_viewed(request_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    return {"id": request_id, "viewed": True}
+async def mark_viewed(
+    request_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """标记交互请求为已查看状态。"""
+    service = get_human_interaction_service()
+    result = await service.mark_as_viewed(request_id)
+    return {"success": result, "request_id": request_id, "viewed": True}
 
 
 # ---------------------------------------------------------------------------

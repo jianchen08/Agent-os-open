@@ -169,6 +169,8 @@ class PipelineStreamBridge:
         self.output_sink = output_sink
         self.message_id = message_id or f"msg_{uuid.uuid4().hex[:12]}"
         self._sent_tool_starts: set[str] = set()
+        # LLM adapter tool_call 增量中看到的 call_id，供 tool_result FIXUP 判断
+        self._llm_seen_call_ids: set[str] = set()
         # BUG-FIX-fix_20260529_msg_order: 缓存 PipelineEntry 引用，避免 Registry unregister 后丢失计数器
         self._entry: Any | None = None
         self._container_task_id: str = ""
@@ -247,8 +249,12 @@ class PipelineStreamBridge:
         在引擎挂起后唤醒时调用，确保新 turn 的流式输出
         不会包含上一 turn 的残留内容。
 
+        每次调用都会生成新的 message_id，因为前端 new_message 事件
+        按 message_id 查找并覆盖已有消息。如果复用同一 message_id，
+        后续 turn 的回复会覆盖之前 turn 的回复，导致只看到最后一条。
+
         Args:
-            message_id: 新的消息 ID，不传则保留当前值
+            message_id: 新的消息 ID，不传则自动生成
         """
         self._accumulated_content = []
         self._thinking_content_parts = []
@@ -256,32 +262,29 @@ class PipelineStreamBridge:
         self._stream_started = False
         self._collected_parts = []
         self._sent_tool_starts = set()
+        self._llm_seen_call_ids = set()
         self._part_seq = 0
         self._current_msg_seq = 0
         # BUG-FIX-fix_20260529_notification_lost:
         # 不清空 _pending_notifications，保留给新 drain_loop 在 stream_start 后刷出。
         # 旧 drain_loop 已被 stop+cancel，如果此时清空会丢失缓冲中的通知。
         # self._pending_notifications = []
-        # BUG-FIX-fix_20260530_queue_event_loop:
-        # 重建 Queue 和 Event，避免绑定到旧事件循环导致 RuntimeError。
-        # 复用 bridge 时（ensure_bridge -> reset_for_new_turn），如果事件循环
-        # 已更换（进程重启、uvicorn reload 等），旧 Queue 的 _loop 仍指向旧循环。
-        try:
-            loop = asyncio.get_running_loop()
-            if getattr(self._queue, '_loop', None) is not loop:
-                self._queue = asyncio.Queue()
-                self._chunk_event = asyncio.Event()
-            else:
-                while not self._queue.empty():
-                    try:
-                        self._queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-        except RuntimeError:
-            self._queue = asyncio.Queue()
-            self._chunk_event = asyncio.Event()
-        if message_id:
-            self.message_id = message_id
+        # BUG-FIX-fix_20260605_reset_queue_event_loop_mismatch:
+        # 问题根因: reset_for_new_turn 中检测到 _queue._loop 与当前事件循环不一致
+        #   时重建 Queue。但引擎线程的 on_chunk 闭包仍持有旧 Queue 引用，
+        #   新 drain_loop 从新 Queue 消费、引擎往旧 Queue 放入 → 永远消费不到。
+        # 修复方案: 不重建 Queue，只清空内容。Queue 是线程安全的，跨循环可用。
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # BUG-FIX-fix_20260605_same_message_id_overwrites_previous_turn:
+        # 问题根因: reset_for_new_turn 不生成新 message_id，每轮 new_message 事件
+        #   用同一个 ID，前端 handleNewMessage 按 ID 查找并覆盖已有消息。
+        #   结果：第二轮回复覆盖第一轮、第三轮覆盖第二轮，最终只剩最后一条。
+        # 修复方案: 每次重置都生成新的 message_id，确保每轮回复是独立消息。
+        self.message_id = message_id or f"msg_{uuid.uuid4().hex[:12]}"
 
     # BUG-FIX-fix_20260529_msg_order: 从 PipelineEntry 共享计数器获取下一个 sequence
     def _get_next_sequence(self) -> int:
@@ -354,7 +357,6 @@ class PipelineStreamBridge:
         确保 stream_start 事件中 pipeline_id 始终存在，
         _threadId 仅作为辅助路由信息。
         """
-        self._stream_started = True
         self._current_msg_seq = 0
         logger.info(
             "DEBUG _send_stream_start: msg=%s pipeline=%s sink=%s sink_type=%s",
@@ -366,6 +368,14 @@ class PipelineStreamBridge:
             "pipeline_id": self.pipeline_id,
             "_threadId": getattr(self.output_sink, '_thread_id', None),
         }))
+        # BUG-FIX-fix_20260604_stream_start_lost:
+        # 问题根因: self._stream_started 在 _send_event 之前就设为 True，
+        #   如果发送失败，后续 chunk 不会再尝试补发 stream_start，
+        #   前端收不到 stream_start → 不会创建占位消息 →
+        #   ensureStreamingPlaceholder 不会被调用 →
+        #   pipelineMessages 选择器看不到新消息 → 不渲染。
+        # 修复方案: 发送成功后才标记 stream_started。
+        self._stream_started = success
         logger.info(
             "DEBUG _send_stream_start result: success=%s msg=%s pipeline=%s",
             success, self.message_id[:12], self.pipeline_id[:12],
@@ -431,56 +441,39 @@ class PipelineStreamBridge:
             await self._close_thinking_if_active(chunk.get("duration_ms"))
 
         elif chunk_type == "tool_call":
-            # BUG-FIX-fix_20260601_tool_call_chunk_lost:
-            # 问题根因: LLM adapter 发送的 "tool_call" chunk 没有被处理，
-            #   导致前端看不到工具调用开始，整个流程卡住直到超时。
-            # 修复方案: 将 "tool_call" 转换为 "tool_start" 事件发送给前端。
-            #   tool_call 是流式增量数据，只在首次收到时发送 tool_start。
-            # 影响范围: stream_bridge._handle_chunk
-            # 修复日期: 2026-06-01
+            # tool_call 来自 LLM adapter 的流式增量，只记录到 _llm_seen_call_ids
+            # 供 tool_result FIXUP 判断用。不发前端事件、不添加 _collected_parts。
+            # 前端 tool_start 事件统一由 tool_core 发来的 tool_start chunk 触发。
             _tool_calls = chunk.get("tool_calls", [])
             if _tool_calls:
                 await self._close_thinking_if_active(None)
                 for _tc in _tool_calls:
-                    _tc_idx = getattr(_tc, 'index', 0)
-                    _tc_id = getattr(_tc, 'id', None) or f"tc_{_tc_idx}"
-                    # 避免重复发送同一 tool_call 的 tool_start
-                    if _tc_id not in self._sent_tool_starts:
-                        self._sent_tool_starts.add(_tc_id)
-                        _seq = self._next_part_seq()
-                        _tc_name = ""
-                        _tc_args = None
-                        if hasattr(_tc, 'function'):
-                            _tc_name = getattr(_tc.function, 'name', '') or ""
-                            _tc_args = getattr(_tc.function, 'arguments', None)
-                        logger.info(
-                            "tool_call → tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
-                            _tc_name or "unknown", _tc_id, _seq, self.pipeline_id[:12],
-                        )
-                        await self._send_event(self._make_event("tool_start", {
-                            "tool_name": _tc_name or "unknown",
-                            "args": _tc_args,
-                            "call_id": _tc_id,
-                            "sequence": _seq,
-                        }))
-                        # 收集到 _collected_parts
-                        self._collected_parts.append({
-                            "type": "tool_call", "callId": _tc_id,
-                            "name": _tc_name or "unknown", "args": _tc_args,
-                            "state": "calling", "sequence": _seq,
-                        })
+                    _tc_id = getattr(_tc, 'id', None)
+                    if _tc_id:
+                        self._llm_seen_call_ids.add(_tc_id)
 
         elif chunk_type == "tool_start":
+            # tool_start 来自 tool_core（工具执行前），是前端 tool_start 事件的唯一来源
             await self._close_thinking_if_active(None)
             _call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
+            _tool_name = chunk.get("tool_name", "unknown")
+            # 去重：同一个 call_id 只转发一次 tool_start 给前端
+            # 注意：只按 call_id 去重，不按 tool_name 去重，
+            # 因为同一轮可能有多个同名工具调用（如多次 task_submit）
+            if _call_id in self._sent_tool_starts:
+                logger.info(
+                    "tool_start skipped (dedup): tool=%s call_id=%s pipeline=%s",
+                    _tool_name, _call_id, self.pipeline_id[:12],
+                )
+                return
             self._sent_tool_starts.add(_call_id)
             _seq = self._next_part_seq()
             logger.info(
                 "tool_start: tool=%s call_id=%s seq=%d pipeline=%s",
-                chunk.get('tool_name'), _call_id, _seq, self.pipeline_id[:12],
+                _tool_name, _call_id, _seq, self.pipeline_id[:12],
             )
             await self._send_event(self._make_event("tool_start", {
-                "tool_name": chunk.get("tool_name", "unknown"),
+                "tool_name": _tool_name,
                 "args": chunk.get("args"),
                 "call_id": chunk.get("call_id"),
                 "sequence": _seq,
@@ -488,14 +481,14 @@ class PipelineStreamBridge:
             # 收集到 _collected_parts
             self._collected_parts.append({
                 "type": "tool_call", "callId": _call_id,
-                "name": chunk.get("tool_name", "unknown"),
+                "name": _tool_name,
                 "args": chunk.get("args"),
                 "state": "calling", "sequence": _seq,
             })
 
         elif chunk_type == "tool_result":
             _result_call_id = chunk.get("call_id") or chunk.get("tool_name", "unknown")
-            if _result_call_id not in self._sent_tool_starts:
+            if _result_call_id not in self._sent_tool_starts and _result_call_id not in self._llm_seen_call_ids:
                 logger.info(
                     "FIXUP: tool_result without tool_start: tool=%s pipeline=%s",
                     chunk.get('tool_name'), self.pipeline_id[:12],
@@ -577,6 +570,14 @@ class PipelineStreamBridge:
         核心消费循环：从内部队列取出 chunk → 转换为前端协议事件 → 经 sink 发送。
         支持心跳保活和挂起超时检测。
 
+        退出条件（按优先级）：
+        1. 收到 ``None`` 哨兵（外部 stop() 或 cancel_drain_task 触发）
+        2. ``engine_task`` 为 None 且队列空（一次性 drain）
+        3. ``engine_task`` 已 done 且队列空（引擎整体结束）
+        4. 流式已启动且队列空闲超过 ``STREAM_COMPLETE_IDLE_TIMEOUT``（LLM 输出完成后
+           引擎降级为 wait 永不返回，drain_loop 必须主动识别"流式已结束"并退出，
+           否则前端永远收不到 stream_end → 状态永远卡在"正在接收"。）
+
         Args:
             engine_task: 管道引擎的异步 Task，用于判断管道是否结束
             heartbeat_callback: 可选的心跳回调协程，在 TimeoutError 时调用
@@ -588,6 +589,10 @@ class PipelineStreamBridge:
             - accumulated_content: str 累积的完整文本
             - thinking_content_parts: list[str] thinking 内容片段
         """
+        # BUG-FIX-fix_20260605_unify_pipeline_suspended_signal:
+        # 流式完成的真正信号是引擎发来的 pipeline_suspended chunk
+        # (见 chunk_type=="pipeline_suspended" 分支)。
+        # 不再使用任何队列空闲超时作为兜底，避免误判思考模式等"安静"阶段。
         _drain_id = uuid.uuid4().hex[:8]
         logger.debug(
             "[DRAIN] drain_loop 开始: msg=%s pipeline=%s sink=%s queueLen=%d drain_id=%s",
@@ -609,6 +614,9 @@ class PipelineStreamBridge:
             last_keepalive = asyncio.get_event_loop().time()
             # 挂起超时检测需要独立追踪最后活跃时间
             _last_active = asyncio.get_event_loop().time() if call_timeout is not None else 0.0
+            _has_received_chunk = False  # 是否曾经收到过任何 chunk
+            # 收到过 chunk 后遇到 pipeline_suspended → 视为本轮流式完成
+            _suspended_after_chunk = False
 
             # 2. 主循环：消费队列
             _chunk_count = 0
@@ -616,13 +624,21 @@ class PipelineStreamBridge:
             _loop_iter = 0
             while True:
                 # engine_task 为空且队列已空 → 没有更多数据，正常退出
+                # BUG-FIX-fix_20260605_drain_exit_no_engine_task:
+                # engine_task=None 时（重启 drain_loop 场景），不依赖 engine_task
+                #   判断退出，改为依赖 pipeline_suspended 信号。否则引擎还在等 LLM 响应
+                #   但 drain_loop 第一次 queue.get 超时后就退出了。
                 _engine_finished = engine_task is not None and engine_task.done()
                 _queue_empty = self._queue.empty()
-                if engine_task is None and _queue_empty:
-                    _last_chunk = None
-                    break
-                if _engine_finished and _queue_empty:
-                    break
+                if engine_task is not None and _queue_empty:
+                    if _engine_finished:
+                        break
+                    # engine_task 还在跑但队列为空 → 继续等（心跳保活会发送 keepalive）
+                # BUG-FIX-fix_20260605_remove_idle_timeout_fallback:
+                # 之前的 _STREAM_COMPLETE_IDLE_TIMEOUT 兜底已删除。
+                # 流式完成信号来自引擎的 pipeline_suspended chunk（见下方
+                #   chunk_type=="pipeline_suspended" 分支），是真正确定的
+                #   "本轮已完成"事件，不靠任何空闲超时猜测。
                 _loop_iter += 1
                 if _loop_iter <= 5 or _loop_iter % 50 == 0:
                     logger.debug(
@@ -692,6 +708,7 @@ class PipelineStreamBridge:
                 # 收到 chunk，更新活跃时间
                 if call_timeout is not None:
                     _last_active = asyncio.get_event_loop().time()
+                _has_received_chunk = True
 
                 if chunk is None:
                     _last_chunk = None
@@ -708,8 +725,23 @@ class PipelineStreamBridge:
                         "pipeline_id": chunk.get("pipeline_id", self.pipeline_id),
                         "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
                     }))
+                    # BUG-FIX-fix_20260605_unify_pipeline_suspended_signal:
+                    # 引擎发来 pipeline_suspended chunk 即"本轮流式完成"信号——
+                    #   input_routes (engine.py:464-489) 和 output_routes
+                    #   (engine_route.py:188-209) 两条挂起路径都会发此 chunk。
+                    #   若本轮已收到过任何 chunk（_has_received_chunk=True），
+                    #   说明本轮有内容产出，pipeline_suspended 就是真正的流式终点。
+                    #   直接 break 让外层 try 块发 stream_end，不再依赖任何超时。
+                    #   _has_received_chunk=False 时仅是状态变化（空轮），continue。
+                    if _has_received_chunk:
+                        _suspended_after_chunk = True
+                        logger.info(
+                            "drain_loop: pipeline_suspended after chunk → 视为流式完成: pipeline=%s chunks=%d",
+                            self.pipeline_id[:12], _chunk_count,
+                        )
+                        break
                     logger.info(
-                        "drain_loop: pipeline_suspended → state_change sent: pipeline=%s",
+                        "drain_loop: pipeline_suspended (no chunk yet) → state_change sent: pipeline=%s",
                         self.pipeline_id[:12],
                     )
                     continue
@@ -758,6 +790,11 @@ class PipelineStreamBridge:
                 _exit_reason = "engine_task_done"
             elif _last_chunk is None:
                 _exit_reason = "sentinel_None"
+            # BUG-FIX-fix_20260605_remove_idle_timeout_fallback:
+            # 之前的 "stream_complete_idle_timeout" 退出原因已删除，
+            # 改为由 pipeline_suspended chunk 触发的 "pipeline_suspended" 原因。
+            elif _suspended_after_chunk:
+                _exit_reason = "pipeline_suspended"
 
             full_content = "".join(self._accumulated_content)
 
@@ -775,11 +812,26 @@ class PipelineStreamBridge:
                 }
 
             _final_seq = self._get_next_sequence()
-            # 构建最终 parts[]，将 streaming/calling 状态转为 done
+            # BUG-FIX-fix_20260605_fragmented_parts:
+            # 问题根因: _collected_parts 中每个 chunk 都是一个独立的 part（如
+            #   50 个 {type: "thinking", content: "一个词"}），new_message 用这些
+            #   parts 完整替换前端消息，导致前端每个 part 渲染为独立条目。
+            # 修复方案: 将连续同类型的 streaming parts 合并为少数几个 parts。
+            #   thinking 所有片段合为一个、text 所有片段合为一个。
+            #   保持 tool_call / system 等非连续类型不变。
+            _merged_parts: list[dict] = []
+            for p in self._collected_parts:
+                _ptype = p.get("type", "text")
+                if _ptype in ("text", "thinking") and _merged_parts:
+                    _last = _merged_parts[-1]
+                    if _last.get("type") == _ptype:
+                        _last["content"] = _last.get("content", "") + p.get("content", "")
+                        continue
+                _merged_parts.append({**p})
             _final_parts = [
                 {**p, "state": "done"}
                 if p.get("state") in ("streaming", "calling") else p
-                for p in self._collected_parts
+                for p in _merged_parts
             ]
             await self.send_new_message(full_content, sequence=_final_seq, parts=_final_parts)
 
@@ -788,12 +840,22 @@ class PipelineStreamBridge:
                 _exit_reason, self.message_id[:12], self.pipeline_id[:12],
                 len(full_content), _chunk_count, self._queue.qsize(), _final_seq, len(_final_parts),
             )
-            await self._send_event(self._make_event("stream_end", {
+            # ROOT-CAUSE-DEBUG: 标记 stream_end 实际发出点
+            _end_event = self._make_event("stream_end", {
                 "full_content": full_content,
                 "parts": _final_parts,
                 "message_persisted": True,
                 "final_sequence": _final_seq,
-            }))
+            })
+            logger.warning(
+                "[STREAM_END-SEND] 发送 stream_end: msg=%s pipeline=%s contentLen=%d final_seq=%d",
+                self.message_id[:12], self.pipeline_id[:12], len(full_content), _final_seq,
+            )
+            _send_ok = await self._send_event(_end_event)
+            logger.warning(
+                "[STREAM_END-SENT] stream_end 发送结果: msg=%s pipeline=%s send_ok=%s",
+                self.message_id[:12], self.pipeline_id[:12], _send_ok,
+            )
 
             # 刷出缓冲的系统通知
             if self._pending_notifications:

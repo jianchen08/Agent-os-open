@@ -214,10 +214,10 @@ class ResourceEvaluator:
                     "is_builtin": builtin,
                 }
 
-            if result.success and result.data:
-                passed = result.data.get("passed", False)
-                msg = result.data.get("feedback", "")
-                score = result.data.get("score", 0)
+            if result.success and result.output:
+                passed = result.output.get("passed", False)
+                msg = result.output.get("feedback", "")
+                score = result.output.get("score", 0)
             else:
                 passed = False
                 msg = result.error or "评估失败"

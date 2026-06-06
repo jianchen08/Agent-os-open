@@ -297,6 +297,10 @@ class TrackPlugin(IOutputPlugin):
         iteration = ctx.state.get(StateKeys.ITERATION, 0)
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
 
+        # BUG-FIX-fix_20260606_file_opener_container_task_id:
+        # 从 pipeline 上下文获取 container_task_id，用于持久化到执行记录中。
+        container_task_id = ctx.state.get("task_id") or ""
+
         # BUG-FIX-20260427: CLI 重启后续接已有记录的 sequence 到共享计数器
         if pipeline_run_id not in self._initialized_pipeline_ids:
             self._initialized_pipeline_ids.add(pipeline_run_id)
@@ -332,6 +336,7 @@ class TrackPlugin(IOutputPlugin):
                     iteration=0,
                     role="user",
                     content=str(user_input),
+                    container_task_id=container_task_id or None,
                 )
                 try:
                     storage.save(user_record)
@@ -350,6 +355,7 @@ class TrackPlugin(IOutputPlugin):
                         iteration=iteration,
                         role="user",
                         content=new_content,
+                        container_task_id=container_task_id or None,
                     )
                     try:
                         storage.save(notification_record)
@@ -382,6 +388,7 @@ class TrackPlugin(IOutputPlugin):
                 content=str(raw_result) if raw_result else "",
                 thinking_content=str(raw_thinking) if raw_thinking else None,
                 tool_calls_json=_tool_calls_json,
+                container_task_id=container_task_id or None,
             )
             try:
                 storage.save(ai_record)
@@ -451,6 +458,7 @@ class TrackPlugin(IOutputPlugin):
                         content=tool_output,
                         tool_input=tool_input,
                         tool_call_id=_tc_id,
+                        container_task_id=container_task_id or None,
                     )
                     try:
                         storage.save(tool_record)

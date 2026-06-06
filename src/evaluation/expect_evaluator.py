@@ -236,34 +236,6 @@ class ExpectConditionEvaluator:
         Returns:
             评估结果
         """
-        # 检查 approved 字段（人工审核）
-        approved = expect.get("approved")
-        if approved is not None:
-            return {
-                "passed": result.get("approved") == approved,
-                "score": 100 if result.get("approved") == approved else 0,
-                "message": "",
-                "details": {
-                    "field": "approved",
-                    "expected": approved,
-                    "actual": result.get("approved"),
-                },
-            }
-
-        # 检查 success 字段
-        success = expect.get("success")
-        if success is not None:
-            return {
-                "passed": result.get("success") == success,
-                "score": 100 if result.get("success") == success else 0,
-                "message": "",
-                "details": {
-                    "field": "success",
-                    "expected": success,
-                    "actual": result.get("success"),
-                },
-            }
-
         # 检查 min_score 字段（质量评估）
         min_score = expect.get("min_score")
         if min_score is not None:

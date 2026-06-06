@@ -211,15 +211,18 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()((se
 }))
 
 function _normalizeWorkspace(data: Record<string, any>): Workspace {
+  if (!data.id) {
+    console.error('[workspaceStore] _normalizeWorkspace: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    containerTaskId: data.container_task_id ?? data.containerTaskId ?? '',
-    sessionId: data.session_id ?? data.sessionId ?? '',
+    containerTaskId: data.containerTaskId ?? '',
+    sessionId: data.sessionId ?? '',
     title: data.title ?? '',
     description: data.description ?? '',
-    fileTree: (data.file_tree ?? data.fileTree ?? []).map(_normalizeFileTreeNode),
-    createdAt: data.created_at ?? data.createdAt ?? '',
-    updatedAt: data.updated_at ?? data.updatedAt ?? '',
+    fileTree: (data.fileTree ?? []).map(_normalizeFileTreeNode),
+    createdAt: data.createdAt ?? '',
+    updatedAt: data.updatedAt ?? '',
   }
 }
 
@@ -228,24 +231,27 @@ function _normalizeFileTreeNode(data: Record<string, any>): FileTreeNode {
     name: data.name ?? '',
     type: data.type ?? 'file',
     path: data.path ?? '',
-    artifactId: data.artifact_id ?? data.artifactId,
+    artifactId: data.artifactId,
     children: data.children ? data.children.map(_normalizeFileTreeNode) : undefined,
     metadata: data.metadata,
   }
 }
 
 function _normalizeArtifact(data: Record<string, any>): Artifact {
+  if (!data.id) {
+    console.error('[workspaceStore] _normalizeArtifact: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    taskId: data.task_id ?? data.taskId ?? '',
+    taskId: data.taskId ?? '',
     title: data.title ?? '',
-    artifactType: data.artifact_type ?? data.artifactType ?? 'text',
+    artifactType: data.artifactType ?? 'text',
     content: data.content ?? '',
-    filePath: data.file_path ?? data.filePath,
+    filePath: data.filePath,
     version: data.version ?? 1,
-    parentArtifactId: data.parent_artifact_id ?? data.parentArtifactId,
+    parentArtifactId: data.parentArtifactId,
     metadata: data.metadata ?? {},
-    createdAt: data.created_at ?? data.createdAt ?? '',
-    updatedAt: data.updated_at ?? data.updatedAt ?? '',
+    createdAt: data.createdAt ?? '',
+    updatedAt: data.updatedAt ?? '',
   }
 }

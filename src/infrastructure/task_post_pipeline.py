@@ -202,19 +202,19 @@ class TaskPostPipelineMixin:
         )
 
         if raw_error:
-            # 管道内有明确错误（LLM 调用失败、工具异常等）
+            # 管道内有明确错误（LLM 调用失败、工具异常等）→ 直接透传
             parts.append(f"管道异常退出: {raw_error}")
             if llm_error_info:
                 etype = llm_error_info.get("error_type", "")
                 if etype:
                     parts.append(f"错误类型={etype}")
-        elif stop_reason == "timeout":
-            parts.append("执行超时")
+        elif stop_reason:
+            # 有明确的停止原因 → 直接透传，不做分类匹配
+            parts.append(stop_reason)
         elif hit_max_iter:
             # 确实是迭代耗尽
             parts.append(
-                f"管道迭代耗尽"
-                f"({iteration_count}/{max_iter})"
+                f"管道迭代耗尽({iteration_count}/{max_iter})"
             )
         elif state_is_empty or state_not_ended:
             # pipeline_state 为空（进程被杀/重启导致 asyncio task 未完成）
@@ -302,8 +302,9 @@ class TaskPostPipelineMixin:
             parts.append(f"管道异常退出: {raw_error}")
             if llm_error_info and llm_error_info.get("error_type"):
                 parts.append(f"错误类型={llm_error_info['error_type']}")
-        elif stop_reason == "timeout":
-            parts.append("执行超时")
+        elif stop_reason:
+            # 有明确的停止原因 → 直接透传
+            parts.append(stop_reason)
         elif hit_max_iter:
             parts.append(f"管道迭代耗尽({iteration_count}/{max_iter})")
         else:

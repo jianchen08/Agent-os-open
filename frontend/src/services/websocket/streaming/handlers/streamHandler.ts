@@ -12,7 +12,6 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 import { loggers } from '@/utils/logger'
 
-import { getChunkTimeoutMessageId, resetChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, terminatePipeline } from './utils'
@@ -212,11 +211,21 @@ export function handleStreamEnd(eventData: any) {
             `[STREAM_END] 收到后端 parts[${serverParts.length}]: %s`,
             serverParts.map((p: any) => `${p.type}/${p.state}`).join(','),
           )
-          pipelineStore.getState().updateMessage(pipelineId, messageId, {
-            content: eventData?.data?.full_content ?? msg.content ?? '',
+          // 仅当 full_content 非空时才更新 content，避免空白消息
+          const fullContent = eventData?.data?.full_content
+          const updatePayload: any = {
             parts: serverParts,
             status: 'completed',
-          } as any)
+          }
+          if (fullContent != null && fullContent !== '') {
+            updatePayload.content = fullContent
+          } else if (!msg.content) {
+            console.warn('[STREAM_END] full_content 和 msg.content 均为空，消息将无内容', {
+              messageId,
+              pipelineId,
+            })
+          }
+          pipelineStore.getState().updateMessage(pipelineId, messageId, updatePayload)
         } else {
           // fallback: 后端未发 parts，走原有 finalizeMessage
           const hasContent = (msg.content || '').length > 0 || (msg.parts || []).length > 0
@@ -315,12 +324,17 @@ export function handleStreamError(eventData: any) {
 
 /**
  * 处理流式保活事件
+ *
+ * BUG-FIX-fix_20260605_stuck_streaming_on_keepalive:
+ * 问题根因: keepalive 在此 handler 内部调用 resetChunkTimeout，导致后端 LLM 卡住、
+ *          keepalive 仍持续发送时，前端永远不会触发内容活跃超时，streamingState 永远为 true。
+ * 修复方案: chunkTimeout 已删除，keepalive 不再重置任何计时器。LLM 异常时由后端
+ *          call_timeout 触发 stream_end 终止事件清理状态。
+ * 影响范围: 流式输出在 LLM 卡住时的状态恢复
+ * 修复日期: 2026-06-05
  */
 export function handleStreamKeepalive(eventData: any) {
+  // keepalive 是"连接保活"信号，仅做存在性检查，不修改任何状态
   const pipelineId = resolvePipelineId(eventData)
   if (!pipelineId) return
-  const messageId = getChunkTimeoutMessageId(pipelineId)
-  if (messageId) {
-    resetChunkTimeout(pipelineId, messageId)
-  }
 }

@@ -127,7 +127,7 @@ def get_memory(
     if memory is None:
         raise APIError(
             status_code=404,
-            error_code="MEM_001",
+            error_code="MEM_NOTF_5001",
             message="未找到相关记忆",
         )
     return _memory_to_response(memory)
@@ -156,7 +156,7 @@ def delete_memory(
     if not deleted:
         raise APIError(
             status_code=404,
-            error_code="MEM_001",
+            error_code="MEM_NOTF_5001",
             message="未找到相关记忆",
         )
     return {"message": "记忆已删除"}
@@ -197,7 +197,7 @@ def get_episode(
     """获取单个情景记忆。"""
     memory = store.get_memory(episode_id)
     if memory is None:
-        raise APIError(status_code=404, error_code="MEM_001", message="未找到相关记忆")
+        raise APIError(status_code=404, error_code="MEM_NOTF_5001", message="未找到相关记忆")
     return {"id": memory["id"], "intent_text": memory.get("content", ""), "tags": memory.get("tags", []), "created_at": memory.get("created_at", "")}
 
 

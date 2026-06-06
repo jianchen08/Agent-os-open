@@ -133,7 +133,7 @@ class IDEShowDiffTool(BuiltinTool):
             },
         )
         if result.success:
-            return create_success_result(data=result.data)
+            return create_success_result(data=result.output)
         return create_failure_result(error=result.error or "降级执行失败")
 
     def _get_active_connector(self) -> Any:

@@ -19,40 +19,6 @@ evaluator_type: tool
 
 default_config: {}
 
-# ===== 预期输入定义 =====
-expected_input:
-  description: "检查文件是否存在"
-  params:
-    path:
-      type: string
-      description: "文件路径"
-      required: true
-      example: "src/main.py"
-
-# ===== 预期输出定义 =====
-expected_output:
-  description: "返回文件检查结果"
-  params:
-    success:
-      type: boolean
-      description: "工具调用是否成功（true=文件存在，false=文件不存在）"
-    data:
-      type: object
-      description: "文件数据（成功时返回）"
-      properties:
-        path:
-          type: string
-          description: "文件路径"
-        content:
-          type: string
-          description: "文件内容"
-        size:
-          type: integer
-          description: "文件大小（字节）"
-    error:
-      type: string
-      description: "错误信息（失败时返回）"
-
 # ===== 评估判断标准 =====
 expect:
   conditions:

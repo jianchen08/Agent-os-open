@@ -428,6 +428,12 @@ class _BaseLiteLLMAdapter:
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
         inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
 
+        # BUG-FIX-fix_20260606_socket_level_timeout:
+        # asyncio.wait_for 的 cancel 无法中断 httpx 在 C 层的 socket recv()，
+        # 导致流式调用在 API 不响应时永久卡死。解决：将 inter_chunk_timeout
+        # 透传给 litellm → httpx.Timeout(read=N)，在 socket 层面强制超时。
+        call_kwargs["timeout"] = inter_chunk_timeout
+
         stream_repetition = False
         thinking_truncated = False
         _max_thinking_chars = int(

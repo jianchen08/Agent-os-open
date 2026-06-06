@@ -24,16 +24,18 @@ class TaskRecoveryMixin:
     """
 
     async def _recover_running_tasks(self) -> None:
-        """恢复残留的 running、pending 和 paused 任务。
+        """启动时将残留任务标记为 suspended，等待用户手动恢复。
 
-        Worker 启动时扫描所有 status=running、status=pending 和 status=paused 的任务，
-        running/paused 任务先重置为 pending，然后统一通过 submit_task 触发执行。
-        跳过容器任务（task_scope=container）。
+        系统重启后不再自动恢复任务，而是将所有未完成的任务
+        （running、pending、suspended）统一标记为 suspended，
+        用户在前端通过按钮手动恢复执行。
+        FAILED 任务保持原样不自动恢复。
 
-        BUG-FIX-fix_20260525_paused_recovery:
-            Worker stop() 会将 RUNNING/PENDING 任务标记为 PAUSED（见 task_worker.py L292-306），
-            但旧版 _recover_running_tasks 只恢复 RUNNING 和 PENDING，遗漏了 PAUSED 状态，
-            导致 stop→start 后 PAUSED 任务永远无法恢复。修复：增加对 PAUSED 任务的恢复。
+        - running 任务 → suspended（执行中被中断）
+        - pending 任务 → suspended（尚未开始执行）
+        - suspended 任务 → 保持 suspended（已是暂停态）
+        - failed 任务 → 保持 failed（确实是执行失败的，不应自动恢复）
+        - 跳过容器任务（task_scope=container）
         """
         if not self._task_service:
             return
@@ -41,7 +43,9 @@ class TaskRecoveryMixin:
         # 局部导入：避免模块级循环依赖
         from tasks.types import TaskStatus
 
-        # 1. running 任务重置为 pending
+        suspended_count = 0
+
+        # ── 1. running 任务 → suspended ──
         running_tasks = self._task_service.list_by_status(TaskStatus.RUNNING)
         for task in running_tasks:
             task_scope = task.metadata.get("task_scope", "non_container")
@@ -51,78 +55,51 @@ class TaskRecoveryMixin:
                 )
                 continue
             try:
-                await self._task_service.reset_to_pending(task.id)
+                await self._task_service.pause_task(task.id, paused_by="system")
+                suspended_count += 1
                 logger.info(
-                    "TaskWorker: 恢复 running → pending: task_id=%s", task.id,
+                    "TaskWorker: 恢复 running → suspended: task_id=%s", task.id,
                 )
             except Exception as e:
                 logger.warning(
-                    "TaskWorker: 恢复任务失败: task_id=%s, error=%s", task.id, e,
+                    "TaskWorker: 恢复 running 任务失败: task_id=%s, error=%s", task.id, e,
                 )
 
-        # 1.5. paused 任务重置为 pending（stop→start 后 RUNNING/PENDING 被标记为 PAUSED）
-        # BUG-FIX-fix_20260603_pause_recovery:
-        # 区分用户手动暂停（paused_by="user"）和系统关闭暂停（paused_by="system"）。
-        # 用户暂停的任务应保持 SUSPENDED，不自动恢复；仅系统暂停的任务需要恢复。
-        paused_tasks = self._task_service.list_by_status(TaskStatus.SUSPENDED)
-        for task in paused_tasks:
-            task_scope = task.metadata.get("task_scope", "non_container")
-            if task_scope == "container":
-                logger.debug(
-                    "TaskWorker: 跳过容器任务恢复(paused): task_id=%s", task.id,
-                )
-                continue
-
-            paused_by = (task.metadata or {}).get("paused_by", "unknown")
-            if paused_by == "user":
-                logger.info(
-                    "TaskWorker: 保留用户暂停任务（不恢复）: task_id=%s paused_by=user",
-                    task.id,
-                )
-                continue
-
-            try:
-                await self._task_service.reset_to_pending(task.id)
-                logger.info(
-                    "TaskWorker: 恢复 paused → pending: task_id=%s paused_by=%s",
-                    task.id, paused_by,
-                )
-            except Exception as e:
-                logger.warning(
-                    "TaskWorker: 恢复 paused 任务失败: task_id=%s, error=%s",
-                    task.id, e,
-                )
-
-        # 2. 所有 pending 任务统一通过 submit_task 触发
-        recovered = 0
+        # ── 2. pending 任务 → suspended（不再自动提交执行） ──
         pending_tasks = self._task_service.list_by_status(TaskStatus.PENDING)
         for task in pending_tasks:
             task_scope = task.metadata.get("task_scope", "non_container")
             if task_scope == "container":
                 continue
-            if not task.metadata.get("target_id"):
-                continue
             try:
-                self.submit_task({
-                    "task_id": task.id,
-                    "target_type": task.target_type or "agent",
-                    "target_id": task.metadata.get("target_id", ""),
-                    "user_input": task.title,
-                    "description": task.description,
-                    "acceptance_criteria": task.metadata.get("acceptance_criteria", {}),
-                    "workspace": task.metadata.get("workspace", ""),
-                })
-                recovered += 1
+                await self._task_service.pause_task(task.id, paused_by="system")
+                suspended_count += 1
                 logger.info(
-                    "TaskWorker: 恢复 pending 任务: task_id=%s", task.id,
+                    "TaskWorker: 恢复 pending → suspended: task_id=%s", task.id,
                 )
             except Exception as e:
                 logger.warning(
                     "TaskWorker: 恢复 pending 任务失败: task_id=%s, error=%s", task.id, e,
                 )
 
-        if recovered:
-            logger.info("TaskWorker: 恢复了 %d 个任务", recovered)
+        # ── 3. 已是 suspended 的任务保持原样 ──
+        # 无论是用户手动暂停还是系统暂停，都应保持 suspended，不自动恢复
+        paused_tasks = self._task_service.list_by_status(TaskStatus.SUSPENDED)
+        for task in paused_tasks:
+            paused_by = (task.metadata or {}).get("paused_by", "unknown")
+            logger.info(
+                "TaskWorker: 保持暂停任务: task_id=%s paused_by=%s",
+                task.id, paused_by,
+            )
+            suspended_count += 1
+
+        # FAILED 任务不处理：保持 failed，不自动恢复
+
+        if suspended_count:
+            logger.info(
+                "TaskWorker: 已将 %d 个任务标记为 suspended，等待用户手动恢复",
+                suspended_count,
+            )
 
     async def _recover_evaluating_tasks(self) -> None:
         """恢复 evaluating 状态的任务：保持评估状态，重新激活评估管道。

@@ -217,18 +217,21 @@ export const useAnnotationStore = create<AnnotationState & AnnotationActions>()(
   },
 }))
 
-/** 将后端 snake_case 字段转换为前端 camelCase */
+/** 将后端 API 响应转换为前端 Annotation 类型 */
 function _normalizeAnnotation(data: Record<string, any>): Annotation {
+  if (!data.id) {
+    console.error('[annotationStore] _normalizeAnnotation: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    artifactId: data.artifact_id ?? data.artifactId ?? '',
-    targetType: data.target_type ?? data.targetType ?? 'whole_artifact',
-    targetData: data.target_data ?? data.targetData ?? {},
+    artifactId: data.artifactId ?? '',
+    targetType: data.targetType ?? 'whole_artifact',
+    targetData: data.targetData ?? {},
     content: data.content ?? '',
-    authorType: data.author_type ?? data.authorType ?? 'user',
-    authorId: data.author_id ?? data.authorId ?? '',
+    authorType: data.authorType ?? 'user',
+    authorId: data.authorId ?? '',
     status: data.status ?? 'active',
-    createdAt: data.created_at ?? data.createdAt ?? '',
-    resolvedAt: data.resolved_at ?? data.resolvedAt,
+    createdAt: data.createdAt ?? '',
+    resolvedAt: data.resolvedAt,
   }
 }

@@ -16,10 +16,11 @@
  * - DockBar, FloatingWindowManager, FullscreenOverlay, WorkspacePanel, SplitPane
  */
 
-import { Minimize2, FolderOpen, PanelRightOpen } from 'lucide-react'
+import { Minimize2, FolderOpen } from 'lucide-react'
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { getEditorForFile } from '@/config/fileEditors'
 import { cn } from '@/lib/utils'
+import { Splitter } from 'antd'
 import apiClient from '@/services/api/client'
 import { safeLoadLayout, resolveLayout } from '@/services/layout/resolver'
 import { schemaRegistry } from '@/services/schema/registry'
@@ -42,6 +43,7 @@ import { WorkspacePanel } from './WorkspacePanel'
 import { FileReviewTab } from '../review/FileReviewTab'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
+import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import type { ResolvedLayout, ViewportBreakpoint, FloatingWindowInstance, WorkspaceTab } from '@/types/layout'
 import type { AgentTab } from '@/types/task'
 
@@ -338,7 +340,7 @@ export function FiveSpaceLayout({
           }
         }
 
-        const editor = getEditorForFile(editorData.fileName)
+        const editor = getEditorForFile(editorData.filePath)
 
         if (editor.id === 'image_viewer') {
           return (
@@ -346,6 +348,17 @@ export function FiveSpaceLayout({
               filePath={editorData.filePath}
               content={editorData.content}
               size={editorData.size}
+              containerTaskId={editorData.containerTaskId}
+            />
+          )
+        }
+
+        if (editor.id === 'html_preview') {
+          return (
+            <HtmlPreviewWidget
+              html={editorData.content}
+              filePath={editorData.filePath}
+              title={editorData.fileName}
               containerTaskId={editorData.containerTaskId}
             />
           )
@@ -433,6 +446,14 @@ export function FiveSpaceLayout({
             return false
           }
         }
+        const filePaths = Object.keys(reviewData.fileContents)
+        const allHtml = filePaths.length > 0 && filePaths.every(
+          (fp: string) => fp.toLowerCase().endsWith('.html') || fp.toLowerCase().endsWith('.htm')
+        )
+        const firstHtmlPath = allHtml ? filePaths[0] : ''
+        const firstHtmlContent = allHtml ? reviewData.fileContents[firstHtmlPath] : ''
+        const firstHtmlName = firstHtmlPath.split(/[\\/]/).pop() ?? firstHtmlPath
+
         return (
           <div className="relative h-full">
             {reviewData.containerTaskId && (
@@ -445,14 +466,23 @@ export function FiveSpaceLayout({
                 打开文件夹
               </button>
             )}
-            <FileReviewTab
-              fileContents={reviewData.fileContents}
-              requestId={reviewData.requestId}
-              mode={reviewData.mode}
-              title={reviewData.title}
-              onSendMessage={handleSendMessage}
-              onSaveFile={handleSaveFile}
-            />
+            {allHtml ? (
+              <HtmlPreviewWidget
+                html={firstHtmlContent}
+                filePath={firstHtmlPath}
+                title={firstHtmlName}
+                containerTaskId={reviewData.containerTaskId}
+              />
+            ) : (
+              <FileReviewTab
+                fileContents={reviewData.fileContents}
+                requestId={reviewData.requestId}
+                mode={reviewData.mode}
+                title={reviewData.title}
+                onSendMessage={handleSendMessage}
+                onSaveFile={handleSaveFile}
+              />
+            )}
           </div>
         )
       }
@@ -702,59 +732,49 @@ export function FiveSpaceLayout({
             )}
 
             {/* Chat + Workspace panels */}
-            <div className="flex min-h-0 flex-1 overflow-hidden">
-              {/* Chat Panel */}
-              <section
-                className={cn(
-                  'border-border flex flex-col overflow-hidden transition-all duration-300',
-                  // 桌面端保持 shrink-0 和 border-r；移动端移除两者以允许 flex-1 完全占满
-                  !isMobile ? 'shrink-0 border-r' : '',
-                  workspaceCollapsed || isMobile ? 'flex-1' : '',
-                )}
-                style={{
-                  width:
-                    workspaceCollapsed || isMobile
-                      ? undefined
-                      : `${resolved.chatPanel.width}px`,
-                  minWidth: isMobile ? 0 : resolved.chatPanel.minWidth,
+            {isMobile ? (
+              <div className="flex min-h-0 flex-1 overflow-hidden">
+                <section className="flex flex-1 flex-col overflow-hidden">
+                  {chatContent}
+                </section>
+              </div>
+            ) : (
+              <Splitter
+                layout="horizontal"
+                className="min-h-0 flex-1 overflow-hidden"
+                onCollapse={(collapsed) => {
+                  if (collapsed[1] !== workspaceCollapsed) {
+                    toggleWorkspace()
+                  }
                 }}
               >
-                {chatContent}
-              </section>
-
-              {/* Workspace toggle handle - always visible */}
-              {!isMobile && (
-                <button
-                  onClick={toggleWorkspace}
-                  className={cn(
-                    'border-border hover:bg-accent relative flex shrink-0 cursor-pointer items-center justify-center border-r transition-colors',
-                    'hover:shadow-[2px_0_8px_rgba(0,0,0,0.1)]',
-                    'active:bg-accent/80',
-                    workspaceCollapsed ? 'w-8' : 'w-4',
-                  )}
-                  style={{ minHeight: '100%' }}
-                  title={workspaceCollapsed ? 'Show workspace' : 'Hide workspace'}
+                {/* Chat Panel */}
+                <Splitter.Panel
+                  defaultSize={resolved.chatPanel.width}
+                  min={resolved.chatPanel.minWidth}
                 >
-                  <span className="text-muted-foreground select-none" style={{ fontSize: workspaceCollapsed ? 16 : 10 }}>
-                    {workspaceCollapsed ? '›' : '‹'}
-                  </span>
-                </button>
-              )}
-
-              {/* Workspace Panel */}
-              {!isMobile && !workspaceCollapsed && (
-                <section className="min-w-0 flex-1 overflow-hidden">
-                  <WorkspacePanel
-                    tabs={workspaceTabs}
-                    onTabChange={setActiveTab}
-                    onTabClose={handleCloseTab}
-                    renderTabContent={renderTabContent}
-                    onFullscreen={toggleWorkspaceFullscreen}
-                    isFullscreen={false}
-                  />
-                </section>
-              )}
-            </div>
+                  <div className="border-border h-full overflow-hidden border-r">
+                    {chatContent}
+                  </div>
+                </Splitter.Panel>
+                {/* Workspace Panel */}
+                <Splitter.Panel
+                  collapsible
+                  min={resolved.workspacePanel.minWidth}
+                >
+                  <section className="h-full min-w-0 overflow-hidden">
+                    <WorkspacePanel
+                      tabs={workspaceTabs}
+                      onTabChange={setActiveTab}
+                      onTabClose={handleCloseTab}
+                      renderTabContent={renderTabContent}
+                      onFullscreen={toggleWorkspaceFullscreen}
+                      isFullscreen={false}
+                    />
+                  </section>
+                </Splitter.Panel>
+              </Splitter>
+            )}
           </div>
 
           {/* ---- Dock Bar ---- */}

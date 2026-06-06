@@ -215,6 +215,7 @@ class WidgetRegistry {
       diff: ['code_block'],
       pivot: ['table'],
       dashboard: ['chart'],
+      html_preview: ['code_block'],
       image_viewer: ['gallery'],
       tree: ['table'],
     }

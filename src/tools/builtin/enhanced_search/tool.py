@@ -7,14 +7,48 @@
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ── 安全常量 ──────────────────────────────────────────────────
+
+# 跳过的目录（性能 + 安全）
+_SKIP_DIRS: frozenset[str] = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    ".tox", "dist", "build", ".mypy_cache", ".pytest_cache",
+    ".workbuddy",
+})
+
+# 敏感系统目录黑名单（不允许搜索的路径前缀，小写规范形式）
+_SENSITIVE_DIRS_WINDOWS: tuple[str, ...] = (
+    "c:/windows",
+    "c:/windows/system32",
+    "c:/windows/syswow64",
+    "c:/program files",
+    "c:/program files (x86)",
+    "c:/$recycle.bin",
+    "c:/system volume information",
+)
+
+_SENSITIVE_DIRS_LINUX: tuple[str, ...] = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/boot",
+    "/dev",
+    "/run",
+)
+
+# 默认最大递归深度
+_DEFAULT_MAX_DEPTH: int = 20
 
 from tools.builtin.base import BuiltinTool
 from tools.builtin.shared import format_size
@@ -45,6 +79,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
     def __init__(self, base_path: str | None = None):
         """初始化搜索工具"""
         self.base_path = Path(base_path) if base_path else Path.cwd()
+        self._original_base_path = self.base_path  # 永久保存构造时的原始路径
         self.ripgrep_available = self._check_ripgrep()
 
         if self.ripgrep_available:
@@ -111,6 +146,11 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                         "description": "是否将query作为正则表达式处理，仅内容搜索支持。默认为false（字面量搜索）",
                         "default": False,
                     },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "最大递归深度，限制搜索目录层级。默认为20，防止在深层目录结构中搜索超时",
+                        "default": 20,
+                    },
                 },
                 "required": ["query"],
             },
@@ -133,13 +173,17 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="MISSING_QUERY",
             )
 
+        # ── 安全校验：路径必须在 workspace 内（或原始 base_path 内）+ 不能是敏感系统目录 ──
+        search_path_str = inputs.get("path", str(self.base_path))
+        err = self._validate_search_path(search_path_str, fallback_boundary=self._original_base_path)
+        if err:
+            return err
+
         search_type = inputs.get("search_type", "text")
 
         if search_type == "filename":
-            # 文件名搜索不支持 ripgrep，使用 Python 实现
             return await self._search_filename(inputs)
         elif search_type == "text":
-            # 内容搜索优先使用 ripgrep
             if self.ripgrep_available:
                 return await self._search_with_ripgrep(inputs)
             else:
@@ -149,6 +193,57 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 error=f"不支持的搜索类型: {search_type}",
                 error_code="INVALID_SEARCH_TYPE",
             )
+
+    def _validate_search_path(
+        self, search_path_str: str, fallback_boundary: Path | None = None
+    ) -> ToolResult | None:
+        """校验搜索路径安全性。
+
+        返回 None 表示通过；返回 ToolResult 表示校验失败。
+        三层检查（按优先级）：
+        1. 路径存在性：给定路径必须真实存在
+        2. workspace 边界：强制限制在当前 workspace 内（或 fallback_boundary 内）
+        3. 敏感系统目录黑名单：禁止搜索 OS 核心目录
+        """
+        search_path = Path(search_path_str).resolve()
+        workspace = self.base_path.resolve()
+
+        # ── 检查 1：路径存在性（优先级最高，不存在就不需要做后续检查） ──
+        if not search_path.exists():
+            return create_failure_result(
+                error=f"搜索路径不存在: {search_path_str}",
+                error_code="PATH_NOT_FOUND",
+            )
+
+        # ── 检查 2：workspace 边界（主边界 + 回退边界） ──
+        sp_str = str(search_path)
+        allowed_boundaries: list[Path] = [workspace]
+        if fallback_boundary is not None and fallback_boundary.resolve() != workspace:
+            allowed_boundaries.append(fallback_boundary.resolve())
+
+        is_allowed = any(
+            sp_str == str(b) or sp_str.startswith(str(b) + os.sep)
+            for b in allowed_boundaries
+        )
+        if not is_allowed:
+            return create_failure_result(
+                error=f"搜索路径超出工作区边界: {search_path_str}（工作区: {workspace}）",
+                error_code="PATH_OUTSIDE_WORKSPACE",
+            )
+
+        # ── 检查 3：敏感系统目录黑名单 ──
+        sp_lower = sp_str.lower().replace("\\", "/")
+        sensitive_dirs = (
+            _SENSITIVE_DIRS_WINDOWS if os.name == "nt" else _SENSITIVE_DIRS_LINUX
+        )
+        for forbidden in sensitive_dirs:
+            if sp_lower == forbidden or sp_lower.startswith(forbidden + "/"):
+                return create_failure_result(
+                    error=f"禁止搜索系统目录: {search_path_str}（命中黑名单: {forbidden}）",
+                    error_code="SENSITIVE_PATH_BLOCKED",
+                )
+
+        return None
 
     async def _search_with_ripgrep(self, inputs: dict[str, Any]) -> ToolResult:
         """
@@ -299,15 +394,11 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             case_sensitive = inputs.get("case_sensitive", False)
             max_results = inputs.get("max_results", 100)
             use_regex = inputs.get("use_regex", False)
-            # BUG-FIX: 获取 context_lines 参数，之前被完全忽略
             context_lines = inputs.get("context_lines", 2)
+            max_depth = inputs.get("max_depth", _DEFAULT_MAX_DEPTH)
 
             path = Path(search_path)
-            if not path.exists():
-                return create_failure_result(
-                    error=f"搜索路径不存在: {search_path}",
-                    error_code="PATH_NOT_FOUND",
-                )
+            # 路径存在性已在 _validate_search_path 中检查，此处不再重复
 
             # 编译搜索模式
             flags = 0 if case_sensitive else re.IGNORECASE
@@ -322,21 +413,23 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                     error_code="REGEX_ERROR",
                 )
 
-            # BUG-FIX: 排除隐藏目录和常见大目录，避免无意义遍历
-            SKIP_DIRS = {
-                ".git", "node_modules", "__pycache__", ".venv", "venv",
-                ".tox", "dist", "build", ".mypy_cache", ".pytest_cache",
-            }
-
             # 搜索文件
-            file_paths = []
-            line_numbers = []
-            contents = []
+            file_paths: list[str] = []
+            line_numbers: list[int] = []
+            contents: list[str] = []
             search_pattern = file_pattern if file_pattern != "*" else None
 
             for file_path in path.rglob("*"):
-                # BUG-FIX: 跳过隐藏目录和常见大目录
-                if any(part in SKIP_DIRS for part in file_path.parts):
+                # 跳过排除目录
+                if any(part in _SKIP_DIRS for part in file_path.parts):
+                    continue
+
+                # 深度限制
+                try:
+                    depth = len(file_path.relative_to(path).parts)
+                    if depth > max_depth:
+                        continue
+                except ValueError:
                     continue
 
                 if search_pattern and not file_path.match(search_pattern):
@@ -345,7 +438,6 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 if not file_path.is_file():
                     continue
 
-                # BUG-FIX: 跳过超过 1MB 的大文件，防止内存占用过高
                 if file_path.stat().st_size > 1024 * 1024:
                     continue
 
@@ -408,42 +500,80 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="SEARCH_FAILED",
             )
 
+    @staticmethod
+    def _should_skip_dir(fp: Path, search_root: Path, max_depth: int) -> bool:
+        """判断是否应跳过该路径（排除目录 + 深度超限）。"""
+        if any(part in _SKIP_DIRS for part in fp.parts):
+            return True
+        try:
+            if len(fp.relative_to(search_root).parts) > max_depth:
+                return True
+        except ValueError:
+            return True
+        return False
+
     async def _search_filename(self, inputs: dict[str, Any]) -> ToolResult:
-        """文件名搜索"""
+        """文件名搜索，支持 glob 通配符 (*, ?, []) 和正则表达式"""
         try:
             query = inputs.get("query")
             search_path = Path(inputs.get("path", str(self.base_path)))
             case_sensitive = inputs.get("case_sensitive", False)
             max_results = inputs.get("max_results", 100)
+            use_regex = inputs.get("use_regex", False)
+            max_depth = inputs.get("max_depth", _DEFAULT_MAX_DEPTH)
 
-            if not search_path.exists():
-                return create_failure_result(
-                    error=f"搜索路径不存在: {search_path}",
-                    error_code="PATH_NOT_FOUND",
-                )
+            # 路径存在性已在 _validate_search_path 中检查
 
-            file_names = []
-            file_sizes = []
-            file_paths = []
+            # 确定匹配策略（优先级: regex > glob > substring）
+            _GLOB_CHARS = frozenset("*?[]")
+            has_glob = any(c in query for c in _GLOB_CHARS)
 
-            # 如果不区分大小写，转换查询为小写
-            search_query = query if case_sensitive else query.lower()
+            if use_regex:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                try:
+                    pattern = re.compile(query, flags)
+                except re.error as e:
+                    return create_failure_result(
+                        error=f"无效的正则表达式: {e}",
+                        error_code="INVALID_REGEX",
+                    )
+                match_mode = "regex"
+            elif has_glob:
+                match_mode = "glob"
+            else:
+                match_mode = "substring"
 
-            # 递归搜索
-            for file_path in search_path.rglob("*"):
+            file_names: list[str] = []
+            file_sizes: list[str] = []
+            file_paths: list[str] = []
+
+            # 递归搜索（跳过排除目录 + 深度限制）
+            for fp in search_path.rglob("*"):
                 if len(file_names) >= max_results:
                     break
 
-                if file_path.is_file():
-                    file_name = file_path.name
+                if self._should_skip_dir(fp, search_path, max_depth):
+                    continue
+
+                if fp.is_file():
+                    file_name = fp.name
                     compare_name = file_name if case_sensitive else file_name.lower()
 
-                    if search_query in compare_name:
+                    matched = False
+                    if match_mode == "regex":
+                        matched = bool(pattern.search(compare_name))
+                    elif match_mode == "glob":
+                        matched = fnmatch.fnmatch(compare_name, query if case_sensitive else query.lower())
+                    else:  # substring
+                        search_query = query if case_sensitive else query.lower()
+                        matched = search_query in compare_name
+
+                    if matched:
                         try:
-                            stat = file_path.stat()
+                            stat = fp.stat()
                             file_names.append(file_name)
                             file_sizes.append(format_size(stat.st_size))
-                            file_paths.append(str(file_path.relative_to(search_path)))
+                            file_paths.append(str(fp.relative_to(search_path)))
                         except Exception:
                             continue
 
@@ -451,11 +581,12 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
                 data={
                     "query": query,
                     "search_type": "filename",
+                    "match_mode": match_mode,
                     "h": ["file_name", "file_size", "file_path"],
                     "d": [[file_names[i], file_sizes[i], file_paths[i]] for i in range(len(file_names))],
                     "c": len(file_names),
                 },
-                metadata={"action": "search_filename"},
+                metadata={"action": "search_filename", "match_mode": match_mode},
             )
 
         except Exception as e:

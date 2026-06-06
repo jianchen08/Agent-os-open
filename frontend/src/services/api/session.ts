@@ -52,14 +52,10 @@ interface ThreadCreateRequest {
 
 /**
  * 后端线程创建响应类型
- *
- * 注意：后端可能返回 session_id 或 thread_id，需要兼容两种格式
  */
 interface ThreadCreateResponse {
-  /** 线程ID（新格式） */
-  session_id?: string
-  /** 线程ID（旧格式） */
-  thread_id?: string
+  /** 线程ID */
+  thread_id: string
   /** 创建时间 */
   created_at: string
   /** 当前状态 */
@@ -156,17 +152,21 @@ function mapBackendMessageToMessage(
 
   let toolCalls: MessageToolCall[] | undefined
   if (backendMessage.toolCalls && Array.isArray(backendMessage.toolCalls)) {
+    // BUG-FIX-fix_20260604_tool_card_empty:
+    // 问题根因: 后端 routes_threads.py 构建 tool_calls 时使用 snake_case 键名
+    //   (call_id/tool_name/tool_args)，但前端映射用了 camelCase (tc.callId/tc.toolName)，
+    //   字段名不匹配导致 callId/toolName 全为空字符串，工具卡片无法渲染。
+    // 修复方案: 兼容 snake_case (后端返回) 和 camelCase (历史数据) 双名
     toolCalls = backendMessage.toolCalls.map((tc) => ({
-      call_id: (tc.call_id || tc.callId || tc.tool_call_id || '') as string,
-      tool_name: (tc.tool_name || tc.toolName || tc.name || '') as string,
-      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<
-        string,
-        unknown
-      >,
+      call_id: (tc.callId || tc.call_id || '') as string,
+      tool_name: (tc.toolName || tc.tool_name || '') as string,
+      tool_args: ((tc.toolArgs || tc.tool_args || {}) as Record<string, unknown>),
       status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
       result: tc.result,
       error: tc.error as string | undefined,
-      duration_ms: (tc.duration_ms || tc.durationMs) as number | undefined,
+      duration_ms: tc.durationMs as number | undefined,
+      // BUG-FIX-fix_20260606_file_opener_container_task_id:
+      containerTaskId: (tc.container_task_id || tc.containerTaskId) as string | undefined,
     }))
   }
 
@@ -178,9 +178,7 @@ function mapBackendMessageToMessage(
   let thinking: Message['thinking'] = undefined
   const metadata = backendMessage.metadata
   if (metadata) {
-    const thinkingStr = (metadata.thinkingContent || metadata.thinking_content) as
-      | string
-      | undefined
+    const thinkingStr = metadata.thinkingContent as string | undefined
     if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
       thinking = {
         content: thinkingStr,
@@ -233,6 +231,10 @@ function mapBackendMessageToMessage(
         result: tc.result,
         error: tc.error,
         sequence: seq++,
+        // BUG-FIX-fix_20260606_file_opener_container_task_id:
+        // 从后端 API 恢复 containerTaskId，确保历史消息加载后
+        // 工具卡片的"打开文件"功能能正确解析工作空间路径。
+        containerTaskId: tc.container_task_id || undefined,
       })
     }
   }
@@ -395,7 +397,7 @@ export async function createSession(
 
     // 将创建响应转换为ThreadStateResponse格式，然后映射为Session
     const threadState: ThreadStateResponse = {
-      thread_id: response.data.session_id || response.data.thread_id || '',
+      thread_id: response.data.thread_id,
       current_state: response.data.current_state || 'created',
       intent: response.data.intent || null,
       created_at: response.data.created_at,
@@ -453,18 +455,7 @@ export async function getMessages(
 
     const response = await apiClient.get<any>(API_ENDPOINTS.MESSAGES.LIST(sessionId), { params })
 
-    // 兼容旧格式（纯数组）和新格式（带 total/has_more 的对象）
-    if (Array.isArray(response.data)) {
-      const mapped = response.data.map((msg: BackendMessageResponse) =>
-        mapBackendMessageToMessage(msg, sessionId),
-      )
-      return {
-        messages: mergeConsecutiveAssistantMessages(mapped),
-        total: response.data.length,
-        has_more: false,
-      }
-    }
-
+    // 后端 MessageListResponse 始终是对象格式 {messages, total, has_more}
     const rawMessages = response.data.messages || []
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
       mapBackendMessageToMessage(msg, sessionId),

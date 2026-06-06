@@ -74,8 +74,8 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
         return { sessionId: session.id, pipelineId, tabId: null }
       }
     }
-  } catch {
-    // 后端请求失败，忽略
+  } catch (e) {
+    console.error('[findPipelineLocation] fetchSessions API 调用失败', e)
   }
 
   return null
@@ -103,7 +103,10 @@ export async function navigateToPipeline(
   const { agentName = '子任务', agentLevel = 2, taskId, status = 'running' } = options || {}
 
   const currentSid = useSessionStore.getState().activeSessionId
-  if (!currentSid) return false
+  if (!currentSid) {
+    console.error('[navigateToPipeline] 无活跃会话，无法导航到管道', pipelineId)
+    return false
+  }
 
   // 快速检查：当前标签的 pipelineRunId 已经是目标管道，直接返回
   const tabStore = useAgentTabStore.getState()

@@ -38,10 +38,7 @@ class ToolSchemaPlugin(IInputPlugin):
         _config: 插件配置字典
     """
 
-    error_policy = ErrorPolicy.FALLBACK
-    fallback_state: dict[str, Any] = {
-        "tool_schemas": [],
-    }
+    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具 Schema 注入插件。

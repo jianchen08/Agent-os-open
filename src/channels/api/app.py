@@ -141,7 +141,7 @@ def _add_middleware(app: FastAPI) -> None:
         if not rate_limiter.is_allowed(client_ip):
             logger.warning("限流: IP %s 请求过于频繁", client_ip)
             return Response(
-                content='{"error":{"code":"SYS_007","message":"请求过于频繁，请稍后重试"}}',
+                content='{"error":{"code":"SYS_LOAD_8002","message":"请求过于频繁，请稍后重试"}}',
                 status_code=429,
                 media_type="application/json",
             )
@@ -185,6 +185,7 @@ def _register_routes(app: FastAPI) -> None:
     )
     from channels.api.routes_tools import router as tools_router
     from channels.api.routes_ui import router as ui_router
+    from channels.api.routes_external_chat import router as external_chat_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -197,6 +198,9 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(config_router)
     app.include_router(thinking_mode_router)
     app.include_router(ui_router)
+
+    # ---- 外部系统路由 ----
+    app.include_router(external_chat_router)
 
     # ---- 模块数据路由（手动注册的自定义端点） ----
     from channels.api.routes_ui import get_module_data_router

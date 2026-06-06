@@ -168,14 +168,16 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
     }))
 
     try {
-      // 1. 发送 WebSocket 取消信号，让后端停止运行中的 Agent 进程
-      globalWS.sendCancel(id, '会话已删除')
-
-      // 2. 查找所有属于该会话的 pipelineId（主管道 + 子管道 + 孙管道）
+      // 1. 收集该会话的所有管道ID，逐个发送取消信号
       const pipelineStore = usePipelineMessageStore.getState()
       const allPipelineIds = Object.entries(pipelineStore.pipelineSessionMap)
         .filter(([, sessionId]) => sessionId === id)
         .map(([pipelineId]) => pipelineId)
+      for (const pid of allPipelineIds) {
+        globalWS.sendCancel(id, '会话已删除', pid)
+      }
+
+      // 2. 查找所有属于该会话的 pipelineId（主管道 + 子管道 + 孙管道）
       // sessionId 本身也可能是主管道 ID
       if (!allPipelineIds.includes(id)) {
         allPipelineIds.push(id)
@@ -281,6 +283,16 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
       return
     }
 
+    // BUG-FIX-fix_20260604_stale_pipeline_id:
+    // 问题根因: setState 设 activeSessionId 触发 ChatContainer 渲染，
+    //          但 activatePipeline 还没跑，selector 短暂读到上一个会话的
+    //          s.activePipelineId，显示"老数据"（上一个会话的消息）。
+    // 修复方案: 在 setState 之前先调 initSessionTabs 同步激活管道，
+    //          确保 selector 首次渲染就读到正确的 activePipelineId。
+    // 影响范围: 会话切换时的消息显示时序
+    // 修复日期: 2026-06-04
+    useAgentTabStore.getState().initSessionTabs(id)
+
     useSessionStore.setState({ activeSessionId: id })
     // BUG-FIX-fix_20260528_session_persist: 持久化当前活跃会话ID，页面刷新后可恢复
     uiStorage.setLastActiveSession(id)
@@ -298,7 +310,10 @@ export const useSessionListStore = create<SessionListState>()((set, get) => ({
 
     if (fetchData) {
       try {
-        const pipelineId = session?.activePipelineId || session?.pipelineIds?.[0]
+        // BUG-FIX-fix_20260605_main_pipeline_use_pipeline_ids_first:
+        // 主管道固定为 session.pipelineIds[0]（按创建顺序的第一个），
+        // 不用 session.activePipelineId（派生过子 Tab 时它会指向子管道）。
+        const pipelineId = session?.pipelineIds?.[0] || session?.activePipelineId
         if (pipelineId) {
           // BUG-FIX-fix_20260515_streaming_interrupt:
           // 问题根因: 切换回正在流式输出的会话时，fetchMessages -> initFromAPI

@@ -109,17 +109,16 @@ export const useAgentStore = create<AgentState>((set) => ({
 
       const data = await response.json()
 
-      // 后端返回 items 字段，兼容两种格式
-      // 同时映射字段名：agent_type -> type
-      const rawAgents = data.items || data.agents || []
+      // 后端 AgentListResponse 使用 items 字段
+      const rawAgents = data.items || []
       const mappedAgents = rawAgents.map((agent: Record<string, unknown>) => ({
         id: agent.id,
-        configId: agent.config_id, // 添加 configId 映射
+        configId: agent.config_id,
         name: agent.name,
         description: agent.description || '',
-        type: agent.agent_type || agent.type || 'atomic',
+        type: agent.agent_type || 'atomic',
         status: agent.status || 'active',
-        model: agent.model, // 添加 model 字段到根层级
+        model: agent.model,
         config: {
           model: agent.model,
           system_prompt: agent.system_prompt,

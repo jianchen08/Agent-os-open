@@ -25,7 +25,6 @@
 # - 任何需要编写 pytest 测试代码的场景
 # ============================================================
 
-
 # 测试代码模板
 
 ---
@@ -113,7 +112,6 @@ tests/
 """
 import pytest
 
-
 class Test{ModuleName}:
     """{测试模块名称}测试类"""
 
@@ -156,7 +154,6 @@ class Test{ModuleName}:
 """
 import pytest
 from src.auth.service import AuthService
-
 
 class TestAuth:
     """认证模块测试类"""

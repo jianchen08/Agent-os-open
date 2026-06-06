@@ -230,15 +230,15 @@ class IsolationManager:
             from sqlalchemy import select
 
             from src.core.states.execution import ExecutionStatus
-            from infrastructure.db import get_session_context
+            from infrastructure.db import get_async_session
             from src.db.models import Task
 
             terminal_statuses = {s.value for s in ExecutionStatus if s.is_terminal}
-            async with get_session_context() as session:
-                result = await session.execute(
-                    select(Task.id).where(Task.status.notin_(terminal_statuses))
-                )
-                return {row[0] for row in result.all()}
+            session = await get_async_session()
+            result = await session.execute(
+                select(Task.id).where(Task.status.notin_(terminal_statuses))
+            )
+            return {row[0] for row in result.all()}
         except Exception as e:
             logger.warning(f"[IsolationManager] 加载活跃任务ID失败: {e}")
             return set()

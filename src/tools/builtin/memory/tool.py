@@ -362,30 +362,57 @@ class MemoryTool(BuiltinTool):
         if not name:
             return create_failure_result("缺少 name 参数")
 
-        if not self._knowledge_importer:
-            return create_failure_result("知识导入器未初始化")
-
-        try:
-            result = await self._knowledge_importer.import_text(
-                content=content,
-                name=name,
-                user_id=self.SYSTEM_USER_ID,
-                tags=tags,
-            )
-
-            if result.success:
-                return create_success_result(
-                    {
-                        "success": True,
-                        "knowledge_id": result.knowledge_id,
-                        "file_path": result.file_path,
-                    }
+        # BUG-FIX-fix_20260606_knowledge_importer_uninit:
+        # 问题根因: _knowledge_importer 从未被注入（全代码库无 set_knowledge_importer 调用方），
+        #   导致 import_text/import_file/update/delete 全部返回"知识导入器未初始化"。
+        # 修复方案: 无 dedicated importer 时，降级使用 MemoryService 的 store_knowledge，
+        #   避免任务因工具不可用而失败。
+        # 影响范围: 记忆工具的 import/update/delete 操作。
+        # 修复日期: 2026-06-06
+        if self._knowledge_importer:
+            try:
+                result = await self._knowledge_importer.import_text(
+                    content=content,
+                    name=name,
+                    user_id=self.SYSTEM_USER_ID,
+                    tags=tags,
                 )
-            else:
-                return create_failure_result(result.error or "导入失败")
+                if result.success:
+                    return create_success_result(
+                        {
+                            "success": True,
+                            "knowledge_id": result.knowledge_id,
+                            "file_path": result.file_path,
+                        }
+                    )
+                else:
+                    return create_failure_result(result.error or "导入失败")
+            except Exception as e:
+                return create_failure_result(f"导入文本失败: {str(e)}")
 
+        # 降级：使用 MemoryService 直接存储知识
+        try:
+            ms = self._get_memory_service(inputs)
+            knowledge = Knowledge(
+                user_id=self.SYSTEM_USER_ID,
+                content=content,
+                source_type="text_import",
+                extra_data={"name": name, "tags": tags},
+            )
+            knowledge_id = await ms.store_knowledge(knowledge)
+            logger.info(
+                "[MemoryTool] import_text 降级存储成功 | name=%s | knowledge_id=%s",
+                name, knowledge_id,
+            )
+            return create_success_result(
+                {
+                    "success": True,
+                    "knowledge_id": knowledge_id,
+                    "file_path": f"memory://{knowledge_id}",
+                }
+            )
         except Exception as e:
-            return create_failure_result(f"导入文本失败: {str(e)}")
+            return create_failure_result(f"导入文本失败（MemoryService降级）: {str(e)}")
 
     async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """导入文件知识，自动将 agent_config_id 注入为标签"""
@@ -399,29 +426,63 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self._knowledge_importer:
-            return create_failure_result("知识导入器未初始化")
+        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
+        if self._knowledge_importer:
+            try:
+                result = await self._knowledge_importer.import_file(
+                    source_path=file_path,
+                    user_id=self.SYSTEM_USER_ID,
+                    tags=tags,
+                )
+                if result.success:
+                    return create_success_result(
+                        {
+                            "success": True,
+                            "knowledge_id": result.knowledge_id,
+                            "file_path": result.file_path,
+                        }
+                    )
+                else:
+                    return create_failure_result(result.error or "导入失败")
+            except Exception as e:
+                return create_failure_result(f"导入文件失败: {str(e)}")
+
+        # 降级：读取文件内容后用 MemoryService 存储
+        import os as _os
+        if not _os.path.exists(file_path):
+            return create_failure_result(f"文件不存在: {file_path}")
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+        except Exception as e:
+            return create_failure_result(f"读取文件失败: {str(e)}")
 
         try:
-            result = await self._knowledge_importer.import_file(
-                source_path=file_path,
+            ms = self._get_memory_service(inputs)
+            knowledge = Knowledge(
                 user_id=self.SYSTEM_USER_ID,
-                tags=tags,
+                content=file_content,
+                source_type="file_import",
+                extra_data={
+                    "name": _os.path.basename(file_path),
+                    "tags": tags,
+                    "source_file": file_path,
+                },
             )
-
-            if result.success:
-                return create_success_result(
-                    {
-                        "success": True,
-                        "knowledge_id": result.knowledge_id,
-                        "file_path": result.file_path,
-                    }
-                )
-            else:
-                return create_failure_result(result.error or "导入失败")
-
+            knowledge_id = await ms.store_knowledge(knowledge)
+            logger.info(
+                "[MemoryTool] import_file 降级存储成功 | file=%s | knowledge_id=%s",
+                file_path, knowledge_id,
+            )
+            return create_success_result(
+                {
+                    "success": True,
+                    "knowledge_id": knowledge_id,
+                    "file_path": file_path,
+                }
+            )
         except Exception as e:
-            return create_failure_result(f"导入文件失败: {str(e)}")
+            return create_failure_result(f"导入文件失败（MemoryService降级）: {str(e)}")
 
     async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """更新知识"""
@@ -432,30 +493,60 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self._knowledge_importer:
-            return create_failure_result("知识导入器未初始化")
+        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
+        if self._knowledge_importer:
+            try:
+                result = await self._knowledge_importer.update_knowledge(
+                    file_path=file_path,
+                    user_id=self.SYSTEM_USER_ID,
+                    new_content=new_content,
+                    new_tags=new_tags,
+                )
+                if result.success:
+                    return create_success_result(
+                        {
+                            "success": True,
+                            "knowledge_id": result.knowledge_id,
+                            "file_path": result.file_path,
+                        }
+                    )
+                else:
+                    return create_failure_result(result.error or "更新失败")
+            except Exception as e:
+                return create_failure_result(f"更新失败: {str(e)}")
+
+        # 降级：从 file_path 提取 knowledge_id，删除旧知识 + 存储新知识
+        knowledge_id_raw = (
+            file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
+        )
+        if not new_content:
+            return create_failure_result("更新知识需要提供 content 参数")
 
         try:
-            result = await self._knowledge_importer.update_knowledge(
-                file_path=file_path,
+            ms = self._get_memory_service(inputs)
+            # 尝试删除旧知识（忽略删除失败，可能是新知识）
+            await ms.delete_knowledge(knowledge_id_raw, self.SYSTEM_USER_ID)
+            # 存储新知识
+            knowledge = Knowledge(
                 user_id=self.SYSTEM_USER_ID,
-                new_content=new_content,
-                new_tags=new_tags,
+                content=new_content,
+                source_type="manual",
+                extra_data={"tags": new_tags or [], "updated_from": file_path},
             )
-
-            if result.success:
-                return create_success_result(
-                    {
-                        "success": True,
-                        "knowledge_id": result.knowledge_id,
-                        "file_path": result.file_path,
-                    }
-                )
-            else:
-                return create_failure_result(result.error or "更新失败")
-
+            knowledge_id = await ms.store_knowledge(knowledge)
+            logger.info(
+                "[MemoryTool] update 降级成功 | old_id=%s | new_knowledge_id=%s",
+                knowledge_id_raw, knowledge_id,
+            )
+            return create_success_result(
+                {
+                    "success": True,
+                    "knowledge_id": knowledge_id,
+                    "file_path": file_path,
+                }
+            )
         except Exception as e:
-            return create_failure_result(f"更新失败: {str(e)}")
+            return create_failure_result(f"更新失败（MemoryService降级）: {str(e)}")
 
     async def _delete(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """删除知识"""
@@ -465,20 +556,33 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        if not self._knowledge_importer:
-            return create_failure_result("知识导入器未初始化")
+        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
+        if self._knowledge_importer:
+            try:
+                success = await self._knowledge_importer.delete_knowledge(
+                    file_path=file_path,
+                    user_id=self.SYSTEM_USER_ID,
+                    delete_file=delete_file,
+                )
+                return create_success_result({"success": success})
+            except Exception as e:
+                return create_failure_result(f"删除失败: {str(e)}")
 
+        # 降级：从 file_path 提取 knowledge_id，调用 MemoryService
+        # file_path 格式可能是 "memory://<id>" 或直接就是 knowledge_id
+        knowledge_id = (
+            file_path.removeprefix("memory://") if file_path.startswith("memory://") else file_path
+        )
         try:
-            success = await self._knowledge_importer.delete_knowledge(
-                file_path=file_path,
-                user_id=self.SYSTEM_USER_ID,
-                delete_file=delete_file,
+            ms = self._get_memory_service(inputs)
+            success = await ms.delete_knowledge(knowledge_id, self.SYSTEM_USER_ID)
+            logger.info(
+                "[MemoryTool] delete 降级成功 | knowledge_id=%s | deleted=%s",
+                knowledge_id, success,
             )
-
             return create_success_result({"success": success})
-
         except Exception as e:
-            return create_failure_result(f"删除失败: {str(e)}")
+            return create_failure_result(f"删除失败（MemoryService降级）: {str(e)}")
 
     async def _get_context(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """获取记忆统计信息"""

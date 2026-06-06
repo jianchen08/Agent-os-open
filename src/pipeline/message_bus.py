@@ -17,11 +17,20 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_log(text: str) -> None:
+    """写入消息总线调试日志，按需创建目录和文件。"""
+    _path = os.path.join("logs", "mbus_debug.log")
+    os.makedirs(os.path.dirname(_path), exist_ok=True)
+    with open(_path, "a", encoding="utf-8") as _f:
+        _f.write(text + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +177,7 @@ async def send_pipeline_message(
 
     _msg_source = (metadata or {}).get("source", "user")
     engine, state = _find_engine(pipeline_id)
+    _debug_log(f"[{_msg_source}] _find_engine: pipeline={pipeline_id[:12]} engine={'found' if engine else 'NONE'} state={state}")
 
     # BUG-FIX-fix_20260604_duplicate_notification:
     # 移除系统通知的 bridge.enqueue_notification 路径。
@@ -197,6 +207,7 @@ async def send_pipeline_message(
     if engine is not None:
         try:
             logger.info("[MessageBus] inject ENTER | pipeline=%s state=%s", pipeline_id[:12], state)
+            _debug_log(f"  inject ENTER pipeline={pipeline_id[:12]} state={state}")
 
             if state == "idle":
                 _sink = output_sink or _create_sink(pipeline_id)
@@ -251,6 +262,28 @@ async def send_pipeline_message(
                 # 仅更新 sink，不调 ensure_bridge（会杀掉正在运行的 drain_loop）
                 if output_sink is not None and bridge is not None:
                     bridge.output_sink = output_sink
+                # BUG-FIX-fix_20260605_drain_loop_not_restarted_on_wake:
+                # 问题根因: drain_loop 收到 pipeline_suspended 后 break 退出，
+                #   _drain_and_cleanup finally 将 entry.drain_task = None。
+                #   第二轮 send_pipeline_message 走 suspended 分支只更新 sink，
+                #   不启动新的 drain_loop → bridge 队列无人消费 → 前端收不到任何事件。
+                # 修复方案: 检查 drain_task 是否已退出，若退出则 reset bridge 并重启 drain。
+                _entry = registry.get(pipeline_id) if registry else None
+                _drain_task = _entry.drain_task if _entry else None
+                _drain_done = (
+                    _entry is None
+                    or _drain_task is None
+                    or _drain_task.done()
+                )
+                _debug_log(f"  suspended: entry={_entry is not None} drain_task={_drain_task} done={_drain_done}")
+                if _drain_done and bridge is not None:
+                    bridge.reset_for_new_turn()
+                    _start_bg_drain(pipeline_id, bridge, engine)
+                    _debug_log(f"  DRAIN RESTARTED pipeline={pipeline_id[:12]}")
+                    logger.info(
+                        "[MessageBus] drain_loop 已退出，重启 drain: pipeline=%s",
+                        pipeline_id[:12],
+                    )
 
             if state == "running" and msg_source == "user":
                 await _auto_complete_interaction(pipeline_id)
@@ -488,6 +521,9 @@ def _load_history_from_storage(
     for r in records:
         role = r.role or _type_to_role.get(r.type, "user")
         msg: dict[str, Any] = {"role": role, "content": r.content}
+        # 保留执行记录的 sequence，用于压缩块记录实际消息范围
+        if getattr(r, "sequence", 0) > 0:
+            msg["_record_sequence"] = r.sequence
         if getattr(r, "name", None):
             msg["name"] = r.name
         if getattr(r, "tool_call_id", None):

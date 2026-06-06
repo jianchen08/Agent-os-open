@@ -4,6 +4,7 @@
  * 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附
  */
 
+import { Maximize2, Minimize2 } from 'lucide-react'
 import React, { useCallback } from 'react'
 import type { WorkspaceTab } from '@/types/layout'
 
@@ -17,6 +18,10 @@ interface WorkspacePanelProps {
   onTabClose: (tabId: string) => void
   /** 渲染 Tab 内容的函数 */
   renderTabContent: (tab: WorkspaceTab) => React.ReactNode
+  /** 全屏切换回调 */
+  onFullscreen?: () => void
+  /** 是否处于全屏状态 */
+  isFullscreen?: boolean
 }
 
 /**
@@ -29,6 +34,8 @@ export function WorkspacePanel({
   onTabChange,
   onTabClose,
   renderTabContent,
+  onFullscreen,
+  isFullscreen,
 }: WorkspacePanelProps) {
   const activeTab = tabs.find((t) => t.isActive)
 
@@ -51,7 +58,8 @@ export function WorkspacePanel({
   return (
     <div className="flex h-full flex-col">
       {/* Tab 栏 */}
-      <div onWheel={handleTabWheel} className="border-border flex flex-shrink-0 items-center overflow-x-auto border-b">
+      <div className="border-border flex flex-shrink-0 items-center border-b">
+        <div onWheel={handleTabWheel} className="flex min-w-0 flex-1 items-center overflow-x-auto">
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -77,6 +85,21 @@ export function WorkspacePanel({
             )}
           </div>
         ))}
+        </div>
+        {/* 全屏按钮 */}
+        {onFullscreen && (
+          <button
+            className="hover:bg-accent text-muted-foreground mx-1 flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors"
+            onClick={onFullscreen}
+            title={isFullscreen ? '退出全屏' : '铺满全屏'}
+          >
+            {isFullscreen ? (
+              <Minimize2 className="h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" />
+            )}
+          </button>
+        )}
       </div>
 
       {/* Tab 内容 */}

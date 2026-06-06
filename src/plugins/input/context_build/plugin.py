@@ -42,14 +42,7 @@ class ContextBuildPlugin(IInputPlugin):
         _agent_level: Agent 层级
     """
 
-    error_policy = ErrorPolicy.FALLBACK
-    fallback_state: dict[str, Any] = {
-        "context.system_prompt": "",
-        "context.agent_name": "",
-        "context.agent_level": "L1",
-        "context.session_id": "",
-        "context.task_id": "",
-    }
+    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文构建插件。

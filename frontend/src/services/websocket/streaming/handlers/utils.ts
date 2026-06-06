@@ -7,7 +7,6 @@
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useStreamingStore } from '@/stores/streamingStore'
 
-import { clearChunkTimeout } from '../chunkTimeout'
 import { resolvePipelineId } from '../router'
 
 /**
@@ -176,12 +175,12 @@ export function extractThreadId(eventData: any): string | undefined {
 }
 
 /**
- * 终止管道：封装 clearChunkTimeout + stopPipelineStreaming
+ * 终止管道：清理 streamingState
  *
- * 在 stream_end / stream_error / chunk超时 等终止场景中复用。
+ * 仅在 stream_end / stream_error 等终止事件到达时调用。
+ * 不再做超时兜底（chunkTimeout 已删除），后端必须主动发终止事件。
  */
 export function terminatePipeline(pipelineId: string, threadId?: string): void {
-  clearChunkTimeout(pipelineId)
   stopPipelineStreaming(pipelineId, threadId)
 }
 

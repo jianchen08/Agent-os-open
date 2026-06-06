@@ -134,7 +134,7 @@ async def test_download_small_file_with_hash(tool, download_dir, test_server):
     print(f"\n[小文件下载] 结果: success={result.success}")
 
     assert result.success, f"下载失败: {result.error}"
-    data = result.data
+    data = result.output
     assert data["success"] is True
     assert data["size"] == 1024, f"期望 1024 字节，实际 {data['size']}"
     assert data["path"], "文件路径为空"
@@ -175,7 +175,7 @@ async def test_download_medium_file_segmented(tool, download_dir, test_server):
     print(f"\n[中等文件分段下载] 结果: success={result.success}")
 
     assert result.success, f"下载失败: {result.error}"
-    data = result.data
+    data = result.output
     assert data["success"] is True
     assert data["size"] == expected_size, f"大小不匹配: {data['size']} vs {expected_size}"
 
@@ -257,7 +257,7 @@ async def test_resume_download(tool, download_dir, test_server):
     print(f"[断点续传] 结果: success={result.success}")
 
     assert result.success, f"续传下载失败: {result.error}"
-    data = result.data
+    data = result.output
     assert data["size"] == expected_size, f"大小不匹配: {data['size']} vs {expected_size}"
 
     # 验证最终文件 SHA256
@@ -398,7 +398,7 @@ async def test_specified_filename(tool, download_dir, test_server):
     })
 
     assert result.success
-    assert Path(result.data["path"]).name == "custom_name.bin"
+    assert Path(result.output["path"]).name == "custom_name.bin"
 
 
 @pytest.mark.asyncio
@@ -430,7 +430,7 @@ async def test_download_external_small_file(tool, download_dir):
     print(f"\n[外部小文件下载] 结果: {result}")
 
     assert result.success, f"下载失败: {result.error}"
-    data = result.data
+    data = result.output
     assert data["size"] > 0
 
     file_path = Path(data["path"])

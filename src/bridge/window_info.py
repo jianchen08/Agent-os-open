@@ -72,12 +72,6 @@ class WindowInfoData:
 def normalize_window_info(raw: Any) -> WindowInfoData | None:
     """将原始 Electron 窗口信息数据规范化。
 
-    处理以下情况：
-    1. 标准格式（直接来自 Electron IPC）：title/processName/x/y/width/height
-    2. 旧格式（测试或遗留代码）：title/app/bounds:{x,y,width,height}
-    3. 非字典输入：返回 None
-    4. 字段缺失：使用默认值
-
     Args:
         raw: 原始窗口信息，通常来自 ctx.state["electron_window"]
 
@@ -91,16 +85,7 @@ def normalize_window_info(raw: Any) -> WindowInfoData | None:
         return None
 
     try:
-        # 检测格式：标准 Electron 格式 vs 旧格式
-        if "processName" in raw:
-            # 标准 Electron WindowInfo 格式
-            return _from_standard_format(raw)
-        elif "app" in raw or "bounds" in raw:
-            # 旧格式兼容：title/app/bounds:{x,y,width,height}
-            return _from_legacy_format(raw)
-        else:
-            # 尝试作为标准格式解析（宽松模式）
-            return _from_standard_format(raw)
+        return _from_standard_format(raw)
     except Exception as exc:
         logger.warning("[WindowInfo] 窗口信息规范化失败: %s", exc)
         return None
@@ -118,26 +103,6 @@ def _from_standard_format(raw: dict[str, Any]) -> WindowInfoData:
         y=_safe_int(raw.get("y", 0)),
         width=_safe_int(raw.get("width", 0)),
         height=_safe_int(raw.get("height", 0)),
-    )
-
-
-def _from_legacy_format(raw: dict[str, Any]) -> WindowInfoData:
-    """从旧格式解析。
-
-    旧格式：title, app, bounds:{x, y, width, height}
-    映射：app -> processName, bounds.* -> 对应字段
-    """
-    bounds = raw.get("bounds", {})
-    if not isinstance(bounds, dict):
-        bounds = {}
-
-    return WindowInfoData(
-        title=str(raw.get("title", "")),
-        processName=str(raw.get("app", "")),
-        x=_safe_int(bounds.get("x", 0)),
-        y=_safe_int(bounds.get("y", 0)),
-        width=_safe_int(bounds.get("width", 0)),
-        height=_safe_int(bounds.get("height", 0)),
     )
 
 

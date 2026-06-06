@@ -75,10 +75,15 @@ export function useRealtimeEvents(): void {
 
     const handleExecutionStart = (rawData: Record<string, unknown>) => {
       const data = (rawData.data as Record<string, unknown>) || rawData
+      const execId = data.execution_id as string | undefined
+      const execName = data.name as string | undefined
+      if (!execId) {
+        console.warn('[useRealtimeEvents] execution_id 缺失，无法追踪执行事件', data)
+      }
       const event: ExecutionEvent = {
-        id: (data.execution_id as string) || generateUUID(),
+        id: execId || generateUUID(),
         type: (data.execution_type as ExecutionEvent['type']) || 'tool',
-        name: (data.name as string) || 'Unknown',
+        name: execName || 'Unknown',
         status: 'running',
         progress: 0,
         startedAt: new Date().toISOString(),
@@ -168,6 +173,9 @@ export function useRealtimeEvents(): void {
       const data = (rawData.data as Record<string, unknown>) || rawData
       const agentId = (data.agentId as string) || (data.taskId as string)
       const agentName = (data.agentName as string) || 'Sub-agent'
+      if (!agentId) {
+        console.warn('[useRealtimeEvents] Sub-agent agentId 缺失，无法追踪', data)
+      }
       const event: ExecutionEvent = {
         id: `agent-${agentId || 'unknown'}`,
         type: 'agent',

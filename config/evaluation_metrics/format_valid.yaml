@@ -13,54 +13,12 @@ default_config:
   format: json
   pattern_mode: all
 
-# ===== 预期输入定义 =====
-expected_input:
-  description: "验证数据格式或使用正则模式校验"
-  params:
-    data:
-      type: string
-      description: "要验证的数据（字符串或对象）"
-      required: false
-    path:
-      type: string
-      description: "或指定文件路径"
-      required: false
-    schema:
-      type: object
-      description: "JSON Schema（format=schema 时使用）"
-      required: false
-    patterns:
-      type: array
-      items:
-        type: string
-      description: "正则表达式列表（format=regex 或配合其他格式使用时）"
-      required: false
-
-# ===== 预期输出定义 =====
-expected_output:
-  description: "返回格式验证结果"
-  params:
-    success:
-      type: boolean
-      description: "工具调用是否成功（true=格式有效，false=格式无效）"
-    data:
-      type: object
-      description: "验证详情（成功时返回）"
-      properties:
-        matched_patterns:
-          type: array
-          description: "匹配成功的正则模式"
-        unmatched_patterns:
-          type: array
-          description: "未匹配的正则模式"
-    error:
-      type: string
-      description: "错误信息（失败时返回）"
-
 # ===== 评估判断标准 =====
 expect:
   conditions:
     - field: "success"
+      operator: "is_true"
+    - field: "output.passed"
       operator: "is_true"
   logic: "and"
   pass_message: "格式验证通过"

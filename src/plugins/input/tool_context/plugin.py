@@ -50,15 +50,7 @@ class ToolContextPlugin(IInputPlugin):
         _enabled: 是否启用
     """
 
-    error_policy = ErrorPolicy.FALLBACK
-    fallback_state: dict[str, Any] = {
-        "tool_context": {
-            "online_tools": [],
-            "active_window": None,
-            "adapter_status": {},
-            "timestamp": 0.0,
-        },
-    }
+    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化工具上下文感知插件。

@@ -303,9 +303,6 @@ class ToolSyncService:
             caveats=tool.caveats or None,
             input_schema=tool.input_schema,
             output_schema=tool.output_schema,
-            # 兼容旧字段
-            args_schema=tool.input_schema,
-            return_schema=tool.output_schema,
             source_type=tool.source.value if tool.source else "custom",
             category=tool.category.value if tool.category else None,
             level=tool.level.value if tool.level else "user",
@@ -336,9 +333,6 @@ class ToolSyncService:
         db_tool.caveats = tool.caveats or None
         db_tool.input_schema = tool.input_schema
         db_tool.output_schema = tool.output_schema
-        # 兼容旧字段
-        db_tool.args_schema = tool.input_schema
-        db_tool.return_schema = tool.output_schema
         db_tool.category = tool.category.value if tool.category else None
         db_tool.level = tool.level.value if tool.level else "user"
         db_tool.version = tool.version
@@ -392,9 +386,8 @@ class ToolSyncService:
         except ValueError:
             status = ToolStatus.ACTIVE
 
-        # 优先使用新字段，兼容旧字段
-        input_schema = db_tool.input_schema or db_tool.args_schema or {}
-        output_schema = db_tool.output_schema or db_tool.return_schema
+        input_schema = db_tool.input_schema or {}
+        output_schema = db_tool.output_schema
 
         return Tool(
             name=db_tool.name,

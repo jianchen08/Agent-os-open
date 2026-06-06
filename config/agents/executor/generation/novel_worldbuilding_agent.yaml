@@ -19,7 +19,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{path:config/rules/per_domain/writing_domain_rules.md}}
 
-  {{path:docs/project/}}
+  {{path:.project/}}
 
 
   # 你是世界观构建专家

@@ -1,14 +1,12 @@
 """插件执行链。
 
 按优先级排序顺序执行插件列表，
-支持错误策略处理（ABORT/SKIP/RETRY/FALLBACK）和跳过后续逻辑。
+支持错误策略处理（ABORT/SKIP）。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
 import time
 
 from pipeline.plugin import (
@@ -19,6 +17,32 @@ from pipeline.plugin import (
 from pipeline.types import ErrorPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _deep_update(target: dict, updates: dict) -> None:
+    """将 updates 合并到 target，展开点号键为嵌套字典结构。
+
+    插件的 state_updates 中使用点号键（如 "security.decision"），
+    但条件解析器和 format_result 按嵌套字典访问（state["security"]["decision"]）。
+    此函数将 "security.decision" 展开为 target["security"]["decision"]，
+    使两种访问方式都能正确工作。
+
+    Args:
+        target: 目标 state 字典（原地修改）
+        updates: 插件返回的 state_updates 字典
+    """
+    for key, value in updates.items():
+        if "." in key:
+            # 展开点号键：security.decision → target["security"]["decision"]
+            parts = key.split(".")
+            current = target
+            for part in parts[:-1]:
+                if part not in current or not isinstance(current[part], dict):
+                    current[part] = {}
+                current = current[part]
+            current[parts[-1]] = value
+        else:
+            target[key] = value
 
 
 class PluginChain:
@@ -54,9 +78,9 @@ class PluginChain:
             result = await self._execute_plugin(plugin, ctx)
             results.append(result)
 
-            # 合并状态更新
+            # 合并状态更新（展开点号键为嵌套字典结构）
             if result.state_updates:
-                ctx.state.update(result.state_updates)
+                _deep_update(ctx.state, result.state_updates)
 
             # 跳过剩余插件
             if result.skip_remaining:
@@ -125,34 +149,6 @@ class PluginChain:
         if policy == ErrorPolicy.SKIP:
             logger.warning("[%s] SKIP: %s", plugin.name, exc)
             return PluginResult()
-
-        if policy == ErrorPolicy.RETRY:
-            # BUG-FIX: 从插件实例读取重试参数，避免硬编码导致无法按场景调优
-            max_retries = getattr(plugin, "max_retries", 3)
-            base_delay = getattr(plugin, "retry_delay", 1.0)
-            for attempt in range(1, max_retries + 1):
-                delay = base_delay * (2 ** (attempt - 1)) * (0.5 + random.random() * 0.5)
-                logger.warning(
-                    "[%s] RETRY attempt %d/%d (delay=%.1fs): %s",
-                    plugin.name, attempt, max_retries, delay, exc,
-                )
-                await asyncio.sleep(delay)
-                try:
-                    raw_result = await plugin.execute(ctx)
-                    logger.info("[%s] RETRY succeeded on attempt %d", plugin.name, attempt)
-                    if isinstance(raw_result, dict):
-                        return PluginResult(state_updates=raw_result)
-                    return raw_result
-                except Exception as retry_exc:
-                    exc = retry_exc
-                    logger.warning("[%s] RETRY attempt %d failed: %s", plugin.name, attempt, retry_exc)
-            logger.error("[%s] RETRY exhausted after %d attempts: %s", plugin.name, max_retries, exc)
-            return PluginResult(error=exc)
-
-        if policy == ErrorPolicy.FALLBACK:
-            fallback = getattr(plugin, "fallback_state", {})
-            logger.warning("[%s] FALLBACK: using fallback_state: %s", plugin.name, exc)
-            return PluginResult(state_updates=dict(fallback))
 
         # 未知策略，默认 ABORT
         logger.error("[%s] Unknown error policy %s, defaulting to ABORT: %s", plugin.name, policy, exc)

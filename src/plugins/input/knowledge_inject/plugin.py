@@ -40,8 +40,7 @@ class KnowledgeInjectPlugin(IInputPlugin):
         _max_tokens: 最大 token 数
     """
 
-    error_policy = ErrorPolicy.FALLBACK
-    fallback_state: dict[str, Any] = {"knowledge.context": ""}
+    error_policy = ErrorPolicy.ABORT
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化知识注入插件。

@@ -304,11 +304,19 @@ def memory_tool(
     memory_service: MemoryService,
     knowledge_importer: InMemoryKnowledgeImporter,
 ) -> MemoryTool:
-    """创建注入了真实依赖的 MemoryTool。"""
-    user_id = str(uuid.uuid4())
-    tool = MemoryTool(user_id=user_id)
+    """创建注入了真实依赖的 MemoryTool（含 knowledge_importer）。"""
+    tool = MemoryTool(knowledge_importer=knowledge_importer)
     tool._memory_service = memory_service
-    tool._knowledge_importer = knowledge_importer
+    return tool
+
+
+@pytest.fixture()
+def memory_tool_no_importer(
+    memory_service: MemoryService,
+) -> MemoryTool:
+    """创建无 knowledge_importer 的 MemoryTool，用于测试降级路径。"""
+    tool = MemoryTool()
+    tool._memory_service = memory_service
     return tool
 
 
@@ -444,7 +452,7 @@ class TestMemoryToolReal:
         需要阻止 _get_session 通过 infrastructure.db 的 get_current_session
         回退机制获取到协程对象，从而意外创建 MemoryService。
         """
-        tool = MemoryTool(user_id=str(uuid.uuid4()))
+        tool = MemoryTool()
 
         # 临时阻止 infrastructure.db 的导入，使 _get_session 返回 None
         saved_db = sys.modules.get("infrastructure.db")
@@ -518,6 +526,76 @@ class TestMemoryToolReal:
         })
         assert result.success
         assert result.output["success"] is True
+
+
+class TestMemoryToolDegraded:
+    """MemoryTool 降级路径测试 -- 无 knowledge_importer 时使用 MemoryService 降级。"""
+
+    async def test_import_text_degraded(
+        self, memory_tool_no_importer: MemoryTool,
+    ) -> None:
+        """无 importer 时 import_text 应通过 MemoryService 降级成功。"""
+        result = await memory_tool_no_importer.execute({
+            "action": "import_text",
+            "content": "降级导入的文本内容",
+            "name": "降级测试",
+        })
+        assert result.success
+        assert result.output["success"] is True
+        assert "knowledge_id" in result.output
+        assert "file_path" in result.output
+
+    async def test_update_degraded(
+        self, memory_tool_no_importer: MemoryTool,
+    ) -> None:
+        """无 importer 时 update 应通过 MemoryService 降级成功。"""
+        import_result = await memory_tool_no_importer.execute({
+            "action": "import_text",
+            "content": "原始内容",
+            "name": "待更新",
+        })
+        file_path = import_result.output["file_path"]
+
+        result = await memory_tool_no_importer.execute({
+            "action": "update",
+            "file_path": file_path,
+            "content": "更新后内容",
+        })
+        assert result.success
+        assert result.output["success"] is True
+
+    async def test_delete_degraded(
+        self, memory_tool_no_importer: MemoryTool,
+    ) -> None:
+        """无 importer 时 delete 应通过 MemoryService 降级成功。"""
+        import_result = await memory_tool_no_importer.execute({
+            "action": "import_text",
+            "content": "待删除内容",
+            "name": "待删除",
+        })
+        file_path = import_result.output["file_path"]
+
+        result = await memory_tool_no_importer.execute({
+            "action": "delete",
+            "file_path": file_path,
+        })
+        assert result.success
+        assert result.output["success"] is True
+
+    async def test_import_file_degraded(
+        self, memory_tool_no_importer: MemoryTool, tmp_path: Path,
+    ) -> None:
+        """无 importer 时 import_file 应通过 MemoryService 降级成功。"""
+        test_file = tmp_path / "degraded_test.txt"
+        test_file.write_text("降级文件内容", encoding="utf-8")
+
+        result = await memory_tool_no_importer.execute({
+            "action": "import_file",
+            "file_path": str(test_file),
+        })
+        assert result.success
+        assert result.output["success"] is True
+        assert "knowledge_id" in result.output
 
 
 # =====================================================================

@@ -210,18 +210,22 @@ function buildDefaultActions(toolCall: MessageToolCall): ActivityAction[] {
 function extractFilePath(toolCall: MessageToolCall): string {
   const args = toolCall.tool_args as Record<string, unknown> | null
   if (!args) return ''
+  // 不同工具使用不同参数名（read_file 用 file_path，其他用 path），
+  // 此处兼容多种工具定义，非 API 格式兼容
   return (args.file_path as string) || (args.path as string) || ''
 }
 
 function extractCommand(toolCall: MessageToolCall): string {
   const args = toolCall.tool_args as Record<string, unknown> | null
   if (!args) return ''
+  // 不同工具使用不同参数名（bash 用 command，部分旧工具用 cmd）
   return (args.command as string) || (args.cmd as string) || ''
 }
 
 function extractUrl(toolCall: MessageToolCall): string {
   const args = toolCall.tool_args as Record<string, unknown> | null
   if (!args) return ''
+  // 不同工具使用不同参数名（web_fetch 用 url，search 用 query）
   return (args.url as string) || (args.query as string) || ''
 }
 

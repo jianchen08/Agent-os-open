@@ -505,4 +505,4 @@ async def web_search_mcp(
             "search_mode": search_mode,
         }
     )
-    return result.data if result.success else {"error": result.error}
+    return result.output if result.success else {"error": result.error}

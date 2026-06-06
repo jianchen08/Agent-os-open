@@ -128,7 +128,11 @@ class TaskNotifierMixin:
         """已废弃：安全网机制已移除。worktree 合并由 task_evaluate._complete_task 负责。"""
 
     async def _notify_suspended_pipelines(self, task_id: str, new_status: str) -> None:
-        """子任务到达终态时，通过统一消息总线通知父管道。"""
+        """子任务到达终态时，通过统一消息总线通知父管道。
+
+        parent_pipeline_id 由 task_submit 工具自动注入（来自 ParamInjectPlugin 注入的
+        pipeline_id → create_task(parent_pipeline_id=...)），走正常流程的子任务一定有此字段。
+        """
         from pipeline.message_bus import send_pipeline_message
 
         logger.info(
@@ -149,11 +153,38 @@ class TaskNotifierMixin:
 
         logger.info(
             "TaskWorker: 通知查找结果 | task=%s, parent_pipeline=%s, has_task_obj=%s",
-            task_id, parent_pipeline_id, task_obj is not None,
+            task_id,
+            parent_pipeline_id[:12] if parent_pipeline_id else "(none)",
+            task_obj is not None,
         )
 
         if not parent_pipeline_id:
-            logger.info("TaskWorker: 无父管道，跳过通知 | task=%s", task_id)
+            # BUG-FIX-fix_20260606_missing_parent_pipeline_id:
+            # 问题根因: parent_pipeline_id 由 ParamInjectPlugin 自动注入 →
+            #   task_submit → create_task，正常链路一定存在。为空说明注入链路断裂，
+            #   是系统级 Bug，不应静默跳过。
+            # 修复方案: logger.error + 写入 task.error 字段，不做降级兜底，
+            #   迫使系统层面排查注入链路。
+            # 修复日期: 2026-06-06
+            _err_msg = (
+                f"系统错误：子任务 {task_id} 缺少 parent_pipeline_id，"
+                "无法通知父管道。请检查 pipeline_id 注入链路。"
+            )
+            logger.error("TaskWorker: %s", _err_msg)
+            if task_service and task_obj:
+                try:
+                    parent_task_id = getattr(task_obj, "parent_task_id", None)
+                    if parent_task_id:
+                        parent_task = task_service.get_task(parent_task_id)
+                        if parent_task:
+                            parent_task.error = _err_msg
+                            await task_service.save_task(parent_task)
+                            logger.info(
+                                "TaskWorker: 已写入父任务 error | parent_task=%s",
+                                parent_task_id,
+                            )
+                except Exception as _setexc:
+                    logger.error("TaskWorker: 写入父任务 error 失败: %s", _setexc)
             return
 
         if isinstance(task_obj, dict):
@@ -175,9 +206,31 @@ class TaskNotifierMixin:
         retry_count = _task_meta.get("retry_count", 0) if task_obj else 0
         max_retries = _task_meta.get("max_retries", 6) if task_obj else 6
 
+        # ── 上下文使用率 ──
+        # 由 TaskService._inject_context_usage() 在任务完成时写入 metadata，
+        # 此处直接从 metadata 读取，零降级。
+        context_usage_text = ""
+        _cu = _task_meta.get("context_usage") if _task_meta else None
+        if _cu and isinstance(_cu, dict):
+            _pct = _cu.get("pct", 0)
+            _input = _cu.get("input_tokens", 0)
+            _cw = _cu.get("context_window", 0)
+            if _pct > 0:
+                if _pct > 60:
+                    context_usage_text = (
+                        f"\n📊 上下文使用率: {_pct}% ({_input:,}/{_cw:,} tokens)"
+                        f"\n⚠️ 建议优先创建新任务（上下文已超过60%，继续派发可能触发压缩或截断）"
+                    )
+                else:
+                    context_usage_text = (
+                        f"\n📊 上下文使用率: {_pct}% ({_input:,}/{_cw:,} tokens)"
+                        f"\n✅ 可直接继续向此 Agent 派发任务（上下文充足）"
+                    )
+
         if new_status == "completed":
             notification = (
-                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅\n"
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅"
+                f"{context_usage_text}\n"
                 "请继续执行后续流程，提交下一个子任务。"
             )
         else:
@@ -185,18 +238,21 @@ class TaskNotifierMixin:
             if retry_count > 0 and retry_count >= max_retries:
                 notification = (
                     f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
-                    f" (已达最大重试次数 {retry_count}/{max_retries}){err_hint}\n"
+                    f" (已达最大重试次数 {retry_count}/{max_retries}){err_hint}"
+                    f"{context_usage_text}\n"
                     "请放弃重试，考虑其他方案或标记任务失败。"
                 )
             elif retry_count > 0:
                 notification = (
                     f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌"
-                    f" (已重试 {retry_count}/{max_retries} 次){err_hint}\n"
+                    f" (已重试 {retry_count}/{max_retries} 次){err_hint}"
+                    f"{context_usage_text}\n"
                     "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
                 )
             else:
                 notification = (
-                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}\n"
+                    f"[系统通知] 子任务 '{title}' (ID: {task_id}) {new_status} ❌{err_hint}"
+                    f"{context_usage_text}\n"
                     "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
                 )
 

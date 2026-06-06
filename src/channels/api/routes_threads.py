@@ -670,6 +670,7 @@ def _record_to_message_response(
                             "tool_name": tc.get("name", tc.get("tool_name", "")),
                             "tool_args": args if isinstance(args, dict) else {"raw": args},
                             "status": "completed",
+                            "container_task_id": record.container_task_id,
                         })
             except (_json.JSONDecodeError, TypeError):
                 pass

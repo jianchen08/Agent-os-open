@@ -16,7 +16,7 @@
     >>>
     >>> loader = get_metric_loader()
     >>> metric = await loader.get_metric("file_check")
-    >>> metrics = await loader.get_metrics_by_ids(["file_check", "code_check"])
+    >>> metrics = await loader.get_metrics_by_ids(["file_check", "bash_check"])
     >>> expected_input = loader.get_expected_input("file_check")
     >>> expected_output = loader.get_expected_output("file_check")
 """

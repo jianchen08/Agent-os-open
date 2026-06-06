@@ -187,8 +187,8 @@ class ToolInfo:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = ""
     description: str = ""
-    args_schema: dict[str, Any] | None = None
-    return_schema: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
     source_type: str = "code"
     requires_approval: bool = False
     success_count: int = 0
@@ -200,7 +200,7 @@ class ToolInfo:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "args_schema": self.args_schema,
+            "input_schema": self.input_schema,
             "source_type": self.source_type,
             "requires_approval": self.requires_approval,
         }

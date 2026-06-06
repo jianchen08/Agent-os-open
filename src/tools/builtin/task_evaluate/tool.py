@@ -906,6 +906,9 @@ class TaskEvaluateTool(BuiltinTool):
                 "score": r.score,
                 "message": r.message,
                 "error": r.error,
+                "evidence": getattr(r, "evidence", []),
+                "suggestions": getattr(r, "suggestions", []),
+                "details": getattr(r, "details", {}),
             }
             if hasattr(r, "evaluator_input") and r.evaluator_input:
                 m["evaluator_input"] = r.evaluator_input

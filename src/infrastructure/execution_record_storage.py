@@ -67,6 +67,14 @@ class ExecutionRecordData:
     thinking_content: str | None = None
     tool_calls_json: str | None = None
 
+    # BUG-FIX-fix_20260606_file_opener_container_task_id:
+    # 问题根因: container_task_id 仅在 WebSocket 流式推送时存在，
+    #           页面刷新后从历史 API 加载消息时丢失，
+    #           导致 fileOpener fallback 到 _local，无法正确解析工作空间内的文件路径。
+    # 修复方案: 在 ExecutionRecordData 中新增 container_task_id 字段并持久化，
+    #           序列化时注入到 tool_calls 中，前端恢复到 ToolCallPart。
+    container_task_id: str | None = None
+
     error: str | None = None
 
     created_at: str = ""

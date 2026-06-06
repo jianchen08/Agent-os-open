@@ -157,7 +157,7 @@ def get_tool(
     if registry is None:
         raise APIError(
             status_code=404,
-            error_code="TOOL_001",
+            error_code="TOOL_NOTF_3001",
             message="工具注册表未初始化",
         )
 
@@ -165,7 +165,7 @@ def get_tool(
     if tool is None:
         raise APIError(
             status_code=404,
-            error_code="TOOL_001",
+            error_code="TOOL_NOTF_3001",
             message=f"工具 '{tool_name}' 不存在",
         )
 

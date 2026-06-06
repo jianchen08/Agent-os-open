@@ -19,7 +19,6 @@ import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
-import { clearChunkTimeout } from './services/websocket/streaming/chunkTimeout'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -413,7 +412,6 @@ function HomePage(): ReactNode {
     }
     if (currentPipelineId) {
       flushStreamChunkBuffer()
-      clearChunkTimeout(currentPipelineId)
       stopStreamingForTab(currentPipelineId)
       usePipelineMessageStore.getState().stopStreaming(currentPipelineId)
     }

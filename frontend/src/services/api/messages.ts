@@ -86,27 +86,31 @@ export interface MessageResponse {
   }
 }
 
+/**
+ * 统一消息转换函数
+ *
+ * @deprecated 此函数为死代码（当前无任何模块导入使用），消息转换已迁移到 session.ts 的 mapBackendMessageToMessage。
+ *             保留此文件用于未来 API 响应格式统一转换入口，届时需确保后端 API 统一返回 camelCase。
+ * @see session.ts:mapBackendMessageToMessage
+ */
 export function toMessage(
   raw: Record<string, unknown>,
   defaults?: { sessionId?: string; sequence?: number },
 ): Message {
-  // 支持多种字段命名
-  const id = (raw.message_id || raw.id) as string
-  const sessionId = ((raw.thread_id || raw.sessionId || defaults?.sessionId) as string) || ''
-  const parentId = (raw.parent_message_id || raw.parentId || raw.parent_message_id) as
-    | string
-    | undefined
+  const id = (raw.id) as string
+  const sessionId = (raw.sessionId || defaults?.sessionId) as string || ''
+  const parentId = raw.parentId as string | undefined
   const sequence = (raw.sequence as number) ?? defaults?.sequence ?? 0
   const role = (raw.role || 'assistant') as 'user' | 'assistant' | 'system' | 'tool'
   const content = (raw.content as string) || ''
   const timestamp = (raw.timestamp as string) || new Date().toISOString()
-  const agentId = (raw.agentId || raw.agent_id) as string | undefined
+  const agentId = raw.agentId as string | undefined
 
   // 思考内容：优先从顶层 thinking 字段获取，其次从 metadata.thinkingContent 恢复
   let thinking = raw.thinking as ThinkingContent | undefined
   if (!thinking) {
     const meta = raw.metadata as Record<string, unknown> | undefined
-    const thinkingStr = (meta?.thinkingContent || meta?.thinking_content) as string | undefined
+    const thinkingStr = meta?.thinkingContent as string | undefined
     if (thinkingStr && typeof thinkingStr === 'string' && thinkingStr.length > 0) {
       thinking = {
         content: thinkingStr,
@@ -130,20 +134,15 @@ export function toMessage(
       timestamp,
       agentId,
       status: (raw.status as string) || 'completed',
-      // 工具消息特有字段（字段名与数据库一致）
-      toolCallId: (raw.toolCallId || raw.tool_call_id) as string | undefined,
-      toolName: (raw.toolName || raw.tool_name || metadata?.name) as string | undefined,
-      toolArgs: (raw.toolArgs || raw.tool_args || metadata?.input || metadata?.args) as
+      // 工具消息特有字段
+      toolCallId: raw.toolCallId as string | undefined,
+      toolName: (raw.toolName || metadata?.name) as string | undefined,
+      toolArgs: (raw.toolArgs || metadata?.input || metadata?.args) as
         | Record<string, unknown>
         | undefined,
-      toolResult: (raw.toolResult ||
-        raw.tool_result ||
-        metadata?.output ||
-        metadata?.result) as unknown,
-      toolError: (raw.toolError || raw.tool_error || metadata?.error) as string | undefined,
-      durationMs: (raw.durationMs || raw.duration_ms || metadata?.duration_ms) as
-        | number
-        | undefined,
+      toolResult: (raw.toolResult || metadata?.output || metadata?.result) as unknown,
+      toolError: raw.toolError as string | undefined,
+      durationMs: raw.durationMs as number | undefined,
       metadata: metadata,
     } as any
   }
@@ -155,16 +154,13 @@ export function toMessage(
     | undefined
   if (rawToolCalls && Array.isArray(rawToolCalls)) {
     toolCalls = rawToolCalls.map((tc) => ({
-      call_id: (tc.call_id || tc.callId || tc.tool_call_id) as string,
-      tool_name: (tc.tool_name || tc.toolName || tc.name) as string,
-      tool_args: (tc.tool_args || tc.toolArgs || tc.args || tc.parameters || {}) as Record<
-        string,
-        unknown
-      >,
+      call_id: (tc.callId || tc.call_id || '') as string,
+      tool_name: (tc.toolName || tc.tool_name || '') as string,
+      tool_args: (tc.toolArgs || tc.tool_args || {}) as Record<string, unknown>,
       status: (tc.status || 'pending') as 'pending' | 'running' | 'completed' | 'failed',
       result: tc.result,
       error: tc.error as string | undefined,
-      duration_ms: (tc.duration_ms || tc.durationMs) as number | undefined,
+      duration_ms: tc.durationMs as number | undefined,
     }))
   }
 

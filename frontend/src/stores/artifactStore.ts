@@ -164,19 +164,22 @@ export const useArtifactStore = create<ArtifactState & ArtifactActions>()((set, 
   },
 }))
 
-/** 将后端 snake_case 字段转换为前端 camelCase */
+/** 将后端 API 响应转换为前端 Artifact 类型 */
 function _normalizeArtifact(data: Record<string, any>): Artifact {
+  if (!data.id) {
+    console.error('[artifactStore] _normalizeArtifact: id 字段缺失', data)
+  }
   return {
     id: data.id ?? '',
-    taskId: data.task_id ?? data.taskId ?? '',
+    taskId: data.taskId ?? '',
     title: data.title ?? '',
-    artifactType: data.artifact_type ?? data.artifactType ?? 'text',
+    artifactType: data.artifactType ?? 'text',
     content: data.content ?? '',
-    filePath: data.file_path ?? data.filePath,
+    filePath: data.filePath,
     version: data.version ?? 1,
-    parentArtifactId: data.parent_artifact_id ?? data.parentArtifactId,
+    parentArtifactId: data.parentArtifactId,
     metadata: data.metadata ?? {},
-    createdAt: data.created_at ?? data.createdAt ?? '',
-    updatedAt: data.updated_at ?? data.updatedAt ?? '',
+    createdAt: data.createdAt ?? '',
+    updatedAt: data.updatedAt ?? '',
   }
 }

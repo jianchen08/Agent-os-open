@@ -485,7 +485,17 @@ class TaskService:
             # 修复方案: 同时写入 task.error 字段，确保前端能正确展示失败原因。
             # 影响范围: 所有调用 fail_task 的场景（管道异常、超时、工作空间失败等）。
             # 修复日期: 2026-05-24
-            task.error = reason
+            #
+            # BUG-FIX-fix_20260606_error_accumulate:
+            # 问题根因: fail_task 在链路中可能被多次调用（引擎异常退出 →
+            #   _mark_task_failed_on_engine_exit → _fail_after_pipeline_exit →
+            #   cleanup_ghost_tasks），每次调用 task.error = reason 会覆盖之前的诊断。
+            #   修复方案: 追加而非覆盖，保留完整错误链。
+            #   修复日期: 2026-06-06
+            if task.error and task.error != reason:
+                task.error = f"{task.error} → {reason}"
+            else:
+                task.error = reason
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "failed")
@@ -537,7 +547,11 @@ class TaskService:
         task.updated_at = datetime.now().isoformat()
         if reason:
             task.metadata["cancel_reason"] = reason
-            task.error = reason
+            # BUG-FIX-fix_20260606_error_accumulate: 追加而非覆盖
+            if task.error and task.error != reason:
+                task.error = f"{task.error} → {reason}"
+            else:
+                task.error = reason
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "cancelled")
@@ -686,7 +700,12 @@ class TaskService:
                 task.status = TaskStatus.FAILED
                 task.updated_at = datetime.now(timezone.utc).isoformat()
                 task.metadata["fail_reason"] = _REASON
-                task.error = _REASON
+                # BUG-FIX-fix_20260606_error_accumulate:
+                # 如果有原始错误（如 LLM timeout、迭代耗尽等），追加而非覆盖
+                if task.error:
+                    task.error = f"{task.error} → {_REASON}"
+                else:
+                    task.error = _REASON
                 storage.save(task)
                 cleaned += 1
                 cascaded += _cancel_descendants(task.id)
@@ -748,6 +767,10 @@ class TaskService:
         if result is not None:
             task.result = result
 
+        # 注入上下文使用率到 task.metadata（供通知链路使用）
+        self._inject_context_usage(task)
+        self._storage.save(task)
+
         if passed:
             await self.complete_task(task_id)
         else:
@@ -774,6 +797,55 @@ class TaskService:
             if not _eval_reason:
                 _eval_reason = "评估未通过"
             await self.fail_task(task_id, reason=_eval_reason)
+
+    @staticmethod
+    def _inject_context_usage(task: Any) -> None:
+        """计算并注入当前 Agent 的上下文使用率到 task.metadata。
+
+        通过 task.pipeline_run_id 查找引擎注册表中的 PipelineEngine，
+        读取 _current_state 中的 context_window 和 llm_usage.input_tokens，
+        计算出上下文使用百分比，写入 task.metadata["context_usage"]。
+
+        此方法在 complete_evaluation() 中被调用，运行时机在引擎生命周期内，
+        保证一定能获取到上下文状态（零降级）。
+
+        Args:
+            task: TaskModel 实例（会被原地修改 metadata）
+        """
+        pipeline_run_id = getattr(task, "pipeline_run_id", None)
+        if not pipeline_run_id:
+            return
+
+        try:
+            from pipeline.registry import get_engine_registry
+            _reg = get_engine_registry()
+            _entry = _reg.get(pipeline_run_id)
+            if not _entry or not _entry.engine:
+                return
+
+            _engine = _entry.engine
+            _state = getattr(_engine, "_current_state", None)
+            if not _state:
+                return
+
+            _cw = _state.get("context_window", 0)
+            _usage = _state.get("llm_usage", {})
+            _input_tokens = _usage.get("input_tokens", 0)
+
+            if _cw <= 0:
+                return
+
+            _pct = round((_input_tokens / _cw) * 100, 1)
+            if task.metadata is None:
+                task.metadata = {}
+            task.metadata["context_usage"] = {
+                "pct": _pct,
+                "input_tokens": _input_tokens,
+                "context_window": _cw,
+            }
+        except Exception:
+            # 上下文使用率计算不是关键路径，异常不影响任务完成
+            pass
 
     async def recover_to_completed(
         self, task_id: str, result: dict | None = None,

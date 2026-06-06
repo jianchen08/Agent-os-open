@@ -111,6 +111,7 @@ class PipelineEngine:
         self._streaming_on_chunk: Any = None
         self._streaming_flag: bool = False
         self._last_state: dict[str, Any] | None = None
+        self._current_state: dict[str, Any] | None = None
         self._agent_config: Any | None = None
         self._running: bool = False
         self._preserved_bridge: Any = None
@@ -340,6 +341,9 @@ class PipelineEngine:
                 state[StateKeys.ITERATION] = state.get(StateKeys.ITERATION, 0) + 1
                 iteration = state[StateKeys.ITERATION]
 
+                # 暴露当前状态供外部读取（如 TaskNotifierMixin 读取上下文使用率）
+                self._current_state = state
+
                 # 安全阀（-1 表示无限制）
                 if self.max_iterations > 0 and iteration > self.max_iterations:
                     logger.warning("Pipeline exceeded %d iterations, forcing end", self.max_iterations)
@@ -462,15 +466,6 @@ class PipelineEngine:
 
                 # 7. target == "wait": 挂起
                 if target == "wait":
-                    _on_chunk_cb = state.get("on_chunk")
-                    if _on_chunk_cb:
-                        try:
-                            _on_chunk_cb({
-                                "type": "pipeline_suspended",
-                                "pipeline_id": state.get(StateKeys.PIPELINE_ID, ""),
-                            })
-                        except Exception:
-                            pass
                     self._suspended_state = self._suspend_copy_state(state)
                     # BUG-FIX-fix_20260603_wake_event_race:
                     # 在设置 _suspended_state 的同时创建 _wake_event，
@@ -912,6 +907,19 @@ class PipelineEngine:
             True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
+        # BUG-FIX-fix_20260605_unify_pipeline_suspended_signal:
+        # 所有挂起路径最终都走到这里，统一在此处发 pipeline_suspended chunk。
+        # drain_loop 收到后视为"本轮流式完成"信号，发 stream_end 后退出。
+        # 不再在各调用方（engine_route / engine_chain / input_routes）分散 emit。
+        _on_chunk_cb = state.get("on_chunk")
+        if _on_chunk_cb:
+            try:
+                _on_chunk_cb({
+                    "type": "pipeline_suspended",
+                    "pipeline_id": pipeline_id,
+                })
+            except Exception:
+                pass
         self._watching_task_ids = list(state.get("submitted_task_ids", []))
         self._running = False
 

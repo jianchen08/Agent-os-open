@@ -223,7 +223,14 @@ core_plugins:
         "2": 14400
         "3": 5400
       tool_timeouts:
-        human_interaction: 1800
+        # BUG-FIX-fix_20260605_human_interaction_timeout:
+        # 问题根因: 外层 asyncio.wait_for 超时(1800s)先于内部超时(默认86400s)触发，
+        #           导致工具被强制取消，LLM 只收到 "Tool timed out" 的通用错误，
+        #           无法得知"人类未交互"。
+        # 修复方案: 外层超时设为 86400s（与工具内部默认超时一致），
+        #           让内部超时机制（InteractionTimeoutError）优先控制，
+        #           返回明确的人类未交互信息。
+        human_interaction: 86400
         task_evaluate: 1200
         bash_execute: 300
         enhanced_search: 600

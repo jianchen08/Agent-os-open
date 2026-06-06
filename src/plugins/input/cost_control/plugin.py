@@ -95,22 +95,8 @@ class CostControlPlugin(IInputPlugin):
         Returns:
             包含成本控制状态的插件执行结果
         """
-        try:
-            result = await self._do_work(ctx)
-            return PluginResult(state_updates=result)
-        except Exception as exc:
-            logger.warning(
-                "[%s] Cost control check failed, applying conservative budget: %s",
-                self.name, exc,
-            )
-            # 异常时使用保守的默认预算，确保不会完全绕过成本控制
-            fallback_budget = self._default_budget
-            return PluginResult(state_updates={
-                "cost_control.budget": fallback_budget,
-                "cost_control.exceeded": False,
-                "cost_control.fallback": True,
-                "cost_control.fallback_reason": str(exc),
-            })
+        result = await self._do_work(ctx)
+        return PluginResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行成本控制逻辑。

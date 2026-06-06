@@ -145,7 +145,9 @@ class SecurityCheckPlugin(IInputPlugin):
             如果检查不通过，会设置 security.decision 为 blocked。
         """
         # 幂等检查：如果已有安全决策则跳过，避免 YAML 继承场景下重复执行
-        if ctx.state.get("security.decision"):
+        # state 中 security.decision 已展开为嵌套字典 state["security"]["decision"]
+        security_decision = ctx.state.get("security", {}).get("decision")
+        if security_decision:
             return PluginResult()
 
         result = await self._do_work(ctx)

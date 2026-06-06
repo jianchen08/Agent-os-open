@@ -41,8 +41,13 @@ export function handleNewMessage(eventData: any) {
 
   // 后端发送了完整 parts[] → 用权威版本完整替换
   if (existingMsg && serverParts && Array.isArray(serverParts)) {
+    // 仅当 data.content 有值时才更新，避免 null/undefined 覆盖已有内容
+    const updatedContent = data?.content != null ? data.content : existingMsg.content
+    if (!updatedContent && !serverParts.length) {
+      console.warn('[MSG_READY] content 和 parts 均为空，消息将无内容', { messageId, pipelineId })
+    }
     pipelineStore.getState().updateMessage(pipelineId, messageId, {
-      content: data?.content ?? existingMsg.content ?? '',
+      content: updatedContent,
       parts: serverParts,
       status: 'completed',
       sequence: backendSeq ?? existingMsg.sequence,

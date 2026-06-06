@@ -123,45 +123,6 @@ class EvaluationExecutionResult(ExecutionResult[Any]):
         """是否成功（覆盖基类）"""
         return self.passed
 
-    # === 兼容性属性 ===
-
-    @property
-    def message(self) -> str:
-        """兼容旧字段名"""
-        if isinstance(self.output, str):
-            return self.output
-        return ""
-
-    @message.setter
-    def message(self, value: str) -> None:
-        """设置消息（兼容旧代码）"""
-        self.output = value
-
-    @property
-    def execution_time_ms(self) -> float | None:
-        """兼容旧字段名"""
-        if self.duration_ms is not None:
-            return float(self.duration_ms)
-        return None
-
-    @execution_time_ms.setter
-    def execution_time_ms(self, value: float | None) -> None:
-        """设置执行时间（兼容旧代码）"""
-        if value is not None:
-            self.duration_ms = int(value)
-        else:
-            self.duration_ms = None
-
-    @property
-    def details(self) -> dict[str, Any]:
-        """兼容旧字段名"""
-        return self.metadata
-
-    @details.setter
-    def details(self, value: dict[str, Any]) -> None:
-        """设置详细信息（兼容旧代码）"""
-        self.metadata = value
-
     def is_success(self) -> bool:
         """检查评估是否成功"""
         return self.status == EvaluationStatus.PASSED and self.passed

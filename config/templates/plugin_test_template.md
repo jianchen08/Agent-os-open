@@ -1,41 +1,8 @@
 # 插件测试流程模板
 
-<!--
-============================================================
-【模板是什么】
-Agent OS 管道插件的标准化测试流程和模板，定义单元测试、集成测试的编写规范和执行流程。
-
-【模板的作用】
-1. 标准化测试结构 — 确保所有插件测试遵循统一格式
-2. 提供测试模板 — 减少测试编写工作量
-3. 定义测试流程 — 明确测试执行步骤和验收标准
-4. 支持 CI 集成 — 测试可自动化执行
-
-【如何使用本模板】
-1. 新建插件时，复制对应类型的测试模板
-2. 根据插件逻辑填写测试用例
-3. 按测试流程执行验证
-4. 确保所有必选测试通过后再提交
-
-【适用场景】
-- 开发新插件时编写测试
-- 修改现有插件时补充测试
-- CI/CD 流水线中的插件测试阶段
-- 代码评审时的测试覆盖率检查
-
-【占位符说明】
-- `{plugin_name}`：插件名称，如 `memory_read`
-- `{PluginClass}`：类名，如 `MemoryReadPlugin`
-- `{plugin_type}`：插件类型，如 `input`
--->
-
 ---
 
 ## 1. 测试目录结构 [必填]
-
-<!--
-> **章节说明**：定义插件测试文件的标准存放位置。
--->
 
 ```
 # 方案 A：插件内嵌测试（推荐）
@@ -59,11 +26,6 @@ tests/
 
 ## 2. 单元测试模板 [必填]
 
-<!--
-> **章节说明**：提供各类插件的单元测试模板。
-> **填写要求**：所有插件必须有单元测试覆盖核心路径。
--->
-
 ### 2.1 Input 插件测试模板
 
 ```python
@@ -77,7 +39,6 @@ from pipeline.plugin import PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
 # TODO: 导入插件类
 # from plugins.{plugin_type}.{plugin_name}.{plugin_name} import {PluginClass}
-
 
 # ── 测试工具函数 ──────────────────────────────────────
 
@@ -102,7 +63,6 @@ def make_ctx(
         _services=services or {{}},
     )
 
-
 def make_plugin(config: dict | None = None):  # -> {PluginClass}
     """创建插件实例。
 
@@ -116,7 +76,6 @@ def make_plugin(config: dict | None = None):  # -> {PluginClass}
     # from plugins.{plugin_type}.{plugin_name}.{plugin_name} import {PluginClass}
     # return {PluginClass}(config=config)
     pass
-
 
 # ── 基础属性测试 ──────────────────────────────────────
 
@@ -145,7 +104,6 @@ class Test{PluginClass}Properties:
             ErrorPolicy.FALLBACK,
         )
 
-
 # ── 构造函数测试 ──────────────────────────────────────
 
 class Test{PluginClass}Init:
@@ -167,7 +125,6 @@ class Test{PluginClass}Init:
         assert plugin._enabled is False
 
     # TODO: 添加插件特有配置项的测试
-
 
 # ── 核心执行测试 ──────────────────────────────────────
 
@@ -219,7 +176,6 @@ class Test{PluginClass}Execute:
 
     # TODO: 添加更多插件特有的执行路径测试
 
-
 # ── 错误路径测试 ──────────────────────────────────────
 
 class Test{PluginClass}Errors:
@@ -249,11 +205,9 @@ import pytest
 from pipeline.plugin import PluginContext, OutputResult, RouteSignal
 # TODO: 导入插件类
 
-
 def make_ctx(state: dict | None = None, config: dict | None = None) -> PluginContext:
     """创建测试用 PluginContext。"""
     return PluginContext(state=state or {{}}, config=config or {{}}, _services={{}})
-
 
 class Test{PluginClass}Output:
     """Output 插件测试。"""
@@ -289,11 +243,9 @@ import pytest
 from pipeline.plugin import PluginContext
 # TODO: 导入插件类
 
-
 def make_ctx(state: dict | None = None, config: dict | None = None) -> PluginContext:
     """创建测试用 PluginContext。"""
     return PluginContext(state=state or {{}}, config=config or {{}}, _services={{}})
-
 
 class Test{PluginClass}Core:
     """Core 插件测试。"""
@@ -315,11 +267,6 @@ class Test{PluginClass}Core:
 
 ## 3. 集成测试流程 [可选]
 
-<!--
-> **章节说明**：定义插件集成测试的流程和模板。
-> **填写要求**：当插件与其他插件有 state 交互时，建议编写集成测试。
--->
-
 ### 3.1 集成测试模板
 
 ```python
@@ -331,7 +278,6 @@ import pytest
 
 from pipeline.plugin import PluginContext, PluginResult, OutputResult
 # TODO: 导入相关插件类
-
 
 class Test{PluginClass}Integration:
     """插件集成测试。"""
@@ -390,10 +336,6 @@ class Test{PluginClass}Integration:
 
 ## 4. 测试执行流程 [必填]
 
-<!--
-> **章节说明**：定义插件测试的标准执行流程。
--->
-
 ### 4.1 本地开发测试流程
 
 ```bash
@@ -450,10 +392,6 @@ jobs:
 
 ## 5. Mock 规范 [必填]
 
-<!--
-> **章节说明**：定义插件测试中的 Mock 使用规范。
--->
-
 ### 5.1 PluginContext Mock
 
 ```python
@@ -498,25 +436,3 @@ ctx = make_ctx(services={"llm": mock_llm, "tool_registry": mock_tool_registry})
 
 ---
 
-<!--
-
-## 评估指南
-
-> **检查维度**：
->
-> | 维度 | 检查内容 | 必填 | 通过标准 |
-> |------|---------|------|---------|
-> | 完整性 | 包含单元测试、集成测试、执行流程、Mock 规范 | 是 | 5 个章节完整 |
-> | 准确性 | 测试模板可直接使用 | 是 | 代码语法正确，导入路径正确 |
-> | 可操作性 | 开发者可直接按模板编写测试 | 是 | 包含具体代码示例和命令 |
-> | 格式规范 | Markdown 格式正确 | 是 | 代码块有语言标注 |
->
-> **评估结论标准**：
->
-> | 结论 | 判定条件 | 后续动作 |
-> |------|---------|---------|
-> | 通过 | 所有必填维度通过 | 模板可用 |
-> | 有条件通过 | 必填维度通过，存在改进建议 | 标注改进项 |
-> | 不通过 | 存在必填维度未通过 | 退回修改 |
-
--->
