@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_bing_server():
     """向上搜索找到 mcp-servers/bing-search/server.py"""
-    from pathlib import Path as _P  # noqa: N814,PLC0415
+    from pathlib import Path as _P
 
     # 1. 从当前模块向上搜索（适用于宿主机和容器）
     try:
@@ -63,8 +63,8 @@ def _get_search_command() -> tuple[str, list[str]]:
     宿主机: python -m mcp_webgate。
     都没装则降级到 bing-search。
     """
-    import shutil  # noqa: PLC0415
-    from pathlib import Path as _P  # noqa: N814,PLC0415
+    import shutil
+    from pathlib import Path as _P
 
     # 容器内全局安装路径(优先,所有用户可访问)
     global_bin = "/usr/local/bin/mcp-webgate"
@@ -226,19 +226,19 @@ class WebSearchMCPTool(BuiltinTool):
 
         server_config = self._build_server_config()
 
+        # BUG-FIX: 每次调用创建独立 loader，避免共享 MCP 连接的并发冲突
         loader = MCPToolLoader()
         try:
             return await self._do_search(loader, server_config, query, max_results, search_mode)
         finally:
             await loader.disconnect_all()
 
-    async def _do_search(  # noqa: PLR0911,PLR0912
+    async def _do_search(
         self, loader: MCPToolLoader, server_config: MCPServerConfig,
         query: str, max_results: int, search_mode: str,
     ) -> ToolResult:
         """执行搜索，mcp-webgate 失败时自动降级到 bing-search"""
-        import json  # noqa: F401,PLC0415
-        import traceback  # noqa: F401,PLC0415
+        import json, traceback
 
         is_webgate = (
             "mcp_webgate" in str(server_config.args)
@@ -342,13 +342,7 @@ class WebSearchMCPTool(BuiltinTool):
             )
         except Exception as e2:
             logger.exception("bing-search 降级也失败")
-            # 携带 error 类型名，便于区分 UnicodeDecodeError（编码）/ TimeoutError
-            # （超时）/ MCPConnectionError（子进程）等不同根因
-            err_type = type(e2).__name__
-            return create_failure_result(
-                error=f"[fallback] 搜索失败 ({err_type}): {e2}",
-                error_code="SEARCH_FAILED",
-            )
+            return create_failure_result(error=f"[fallback] 搜索失败: {e2}", error_code="SEARCH_FAILED")
 
     # ── 精简版 webgate 结果解析（仅提取 sources + snippets → 统一 results 格式）──
 
@@ -386,7 +380,7 @@ class WebSearchMCPTool(BuiltinTool):
     @staticmethod
     def _extract_mcp_content(result: Any) -> Any:
         """从 MCP 标准返回格式中提取实际数据"""
-        import json  # noqa: PLC0415
+        import json
 
         if not isinstance(result, dict):
             return result

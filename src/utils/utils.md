@@ -202,7 +202,6 @@ def batch_operation(batch_size) -> Callable
 | `message_id_helper.py` | 消息 ID 生成辅助 |
 | `sequence_manager.py` | 序列号管理器 |
 | `performance_decorators.py` | 性能监控装饰器 |
-| `enum_utils.py` | 枚举安全提取工具 |
 
 ### 3.3 测试策略
 

@@ -3,13 +3,13 @@
 提供场景的 CRUD、切换和模板查询接口。
 
 端点：
-    - POST /api/v1/scenes - 创建场景
-    - GET /api/v1/scenes - 列出场景
-    - GET /api/v1/scenes/templates - 获取模板列表
-    - GET /api/v1/scenes/{scene_id} - 获取场景详情
-    - PUT /api/v1/scenes/{scene_id} - 更新场景
-    - DELETE /api/v1/scenes/{scene_id} - 删除场景
-    - POST /api/v1/scenes/{scene_id}/switch - 切换场景
+    - POST /api/scenes - 创建场景
+    - GET /api/scenes - 列出场景
+    - GET /api/scenes/templates - 获取模板列表
+    - GET /api/scenes/{scene_id} - 获取场景详情
+    - PUT /api/scenes/{scene_id} - 更新场景
+    - DELETE /api/scenes/{scene_id} - 删除场景
+    - POST /api/scenes/{scene_id}/switch - 切换场景
 """
 
 from __future__ import annotations
@@ -26,11 +26,7 @@ from scene.templates import list_templates
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api/v1/scenes",
-    tags=["场景管理"],
-    dependencies=[Depends(require_auth)],
-)
+router = APIRouter(prefix="/api/scenes", tags=["场景管理"])
 
 # 全局 SceneManager 实例
 _scene_manager: SceneManager | None = None
@@ -42,7 +38,7 @@ def _get_manager() -> SceneManager:
     Returns:
         SceneManager 实例
     """
-    global _scene_manager  # noqa: PLW0603
+    global _scene_manager
     if _scene_manager is None:
         _scene_manager = SceneManager()
     return _scene_manager

@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/v1/metrics", tags=["评估指标"])
 def _get_metric_loader() -> Any:
     """惰性获取或创建 MetricLoader 实例。"""
     try:
-        from evaluation.loader import MetricLoader  # noqa: PLC0415
+        from evaluation.loader import MetricLoader
         loader = MetricLoader()
         if not loader.metrics:
             loader.load_all()

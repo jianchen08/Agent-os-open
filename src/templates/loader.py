@@ -202,7 +202,7 @@ class TemplateLoader:
         """
         items: list[str] = []
         for line in text.split("\n"):
-            line = line.strip()  # noqa: PLW2901
+            line = line.strip()
             if not line:
                 continue
             # 匹配 "1. xxx" 或 "- xxx" 格式
@@ -225,7 +225,7 @@ class TemplateLoader:
         scenarios: list[str] = []
         lines = text.split("\n")
         for line in lines:
-            line = line.strip()  # noqa: PLW2901
+            line = line.strip()
             if not line or line.startswith("|") or line.startswith(">"):
                 continue
             match = re.match(r"[-*]\s+(.+)", line)
@@ -360,7 +360,7 @@ class TemplateLoader:
         # 解析表格行
         lines = eval_text.split("\n")
         for line in lines:
-            line = line.strip()  # noqa: PLW2901
+            line = line.strip()
             if not line.startswith("|"):
                 continue
             # 跳过分隔行

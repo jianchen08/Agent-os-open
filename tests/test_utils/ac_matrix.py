@@ -8,10 +8,8 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 
@@ -74,15 +72,6 @@ class ACMatrixTracker:
         tracker.update("AC-1", ACStatus.PASSED, evidence="RBAC 单测全部通过")
         tracker.update("AC-9", ACStatus.PARTIAL, detail="缺少 2 个配置页")
         html = tracker.to_html()
-
-    也可从 pytest 结果自动推导状态（确定性，不依赖手动盖章）::
-
-        mapping = collect_ac_test_mapping("tests/")
-        tracker = ACMatrixTracker.from_test_results(
-            ac_definitions=AC_DEFINITIONS,
-            ac_test_mapping=mapping,
-            test_results=pytest_report,
-        )
     """
 
     def __init__(self) -> None:
@@ -90,48 +79,6 @@ class ACMatrixTracker:
             ac["id"]: ACEntry(ac_id=ac["id"], title=ac["title"], category=ac["category"])
             for ac in AC_DEFINITIONS
         }
-
-    @classmethod
-    def from_definitions(cls, ac_definitions: list[dict[str, str]]) -> ACMatrixTracker:
-        """基于任意 AC 定义列表构造（不限于硬编码的 15 条）。
-
-        供方案阶段从 frontmatter 读取的 AC 列表使用。
-        """
-        tracker = cls.__new__(cls)
-        tracker._entries = {
-            ac["id"]: ACEntry(
-                ac_id=ac["id"],
-                title=ac.get("title", ac.get("statement", ac["id"])),
-                category=ac.get("category", ""),
-            )
-            for ac in ac_definitions
-        }
-        return tracker
-
-    @classmethod
-    def from_test_results(
-        cls,
-        ac_definitions: list[dict[str, str]],
-        ac_test_mapping: dict[str, list[str]],
-        test_results: dict[str, str],
-    ) -> ACMatrixTracker:
-        """从 AC 定义 + 测试映射 + pytest 结果，一次性自动推导全部状态。
-
-        确定性推导，不调用任何 LLM、不手动盖章。无映射的 AC 保持 NOT_TESTED。
-        """
-        tracker = cls.from_definitions(ac_definitions)
-        for ac in ac_definitions:
-            ac_id = ac["id"]
-            tests = ac_test_mapping.get(ac_id, [])
-            status = derive_status(tests, test_results)
-            tracker._entries[ac_id].status = status
-            tracker._entries[ac_id].test_names = list(tests)
-            tracker._entries[ac_id].evidence = (
-                f"自动推导：{len(tests)} 个关联测试，结果={status.value}"
-                if tests
-                else ""
-            )
-        return tracker
 
     def update(
         self,
@@ -241,101 +188,4 @@ class ACMatrixTracker:
         </div>"""
 
 
-# ── AC↔测试映射与状态自动推导（确定性，不依赖手动盖章） ──────────
-
-# 匹配测试名 / 装饰器 / mark 中的 AC 标记：AC-1 / AC_1 / AC001 / AC:1 / AC 1
-_AC_ID_RE = re.compile(r"AC[-_ :]?(\d+)", re.IGNORECASE)
-
-
-def normalize_ac_id(raw: str) -> str:
-    """把任意写法归一化为 'AC-{n}' 形式。
-
-    >>> normalize_ac_id("AC_01")
-    'AC-1'
-    >>> normalize_ac_id("ac-1")
-    'AC-1'
-    """
-    m = _AC_ID_RE.search(raw)
-    if not m:
-        return raw
-    return f"AC-{int(m.group(1))}"
-
-
-def collect_ac_test_mapping(tests_dir: str | Path) -> dict[str, list[str]]:
-    """扫描测试目录，建立 AC-ID → [测试名] 映射。
-
-    识别来源（任一命中即关联）：
-    - 测试函数名 / 类名含 AC 标记（如 ``test_AC001_create_coupon``）
-    - ``@pytest.mark.ac("AC-1")`` / ``@pytest.mark.AC_1``
-    - docstring / 行内注释含 ``AC-1`` / ``AC:1``
-
-    只读、不执行测试，因此是纯确定性的 grep。
-    """
-    root = Path(tests_dir)
-    if not root.exists():
-        return {}
-
-    mapping: dict[str, list[str]] = {}
-    for py_file in root.rglob("*.py"):
-        if py_file.name.startswith("__"):
-            continue
-        try:
-            text = py_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        # 逐行扫描：装饰器行的 AC 标记先累积，遇到 def test_/class Test_ 时
-        # 一次性归给该测试。这样 @decorator + def 总是关联到同一测试。
-        pending_ac_ids: set[str] = set()
-        for line in text.splitlines():
-            ids = {normalize_ac_id(m.group(0)) for m in _AC_ID_RE.finditer(line)}
-            # 装饰器行：累积 AC 标记，等下一个 def/class
-            if line.lstrip().startswith("@"):
-                pending_ac_ids |= ids
-                continue
-            name_match = re.search(r"def\s+(test_\w+)", line) or re.search(
-                r"class\s+(Test\w+)", line
-            )
-            if name_match:
-                test_name = f"{py_file.name}::{name_match.group(1)}"
-                all_ids = ids | pending_ac_ids
-                for ac_id in all_ids:
-                    mapping.setdefault(ac_id, []).append(test_name)
-                pending_ac_ids.clear()
-            elif ids:
-                # 非 def/装饰器行的 AC 标记（docstring/注释）也累积，
-                # 归给下一个出现的测试
-                pending_ac_ids |= ids
-    return mapping
-
-
-def derive_status(
-    test_names: list[str],
-    test_results: dict[str, str],
-) -> ACStatus:
-    """根据测试结果推导单个 AC 的状态（确定性）。
-
-    - 关联测试全绿 → PASSED
-    - 至少一个红（failed/error） → FAILED
-    - 无关联测试 → NOT_TESTED
-
-    PARTIAL 不在此自动推导中产生——它表示「部分通过」的人工判断，
-    纯测试结果无法确定性给出，留给人工 update。
-    """
-    if not test_names:
-        return ACStatus.NOT_TESTED
-    statuses = [test_results.get(t, "not_run") for t in test_names]
-    if all(s == "passed" for s in statuses):
-        return ACStatus.PASSED
-    if any(s in ("failed", "error") for s in statuses):
-        return ACStatus.FAILED
-    return ACStatus.NOT_TESTED
-
-
-__all__ = [
-    "ACMatrixTracker",
-    "ACStatus",
-    "AC_DEFINITIONS",
-    "collect_ac_test_mapping",
-    "derive_status",
-    "normalize_ac_id",
-]
+__all__ = ["ACMatrixTracker", "ACStatus", "AC_DEFINITIONS"]

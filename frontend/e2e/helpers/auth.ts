@@ -11,7 +11,7 @@
 import { expect, type Page } from '@playwright/test';
 
 /** 后端 API 基础地址 */
-export const API_BASE = 'http://localhost:8988';
+export const API_BASE = 'http://localhost:8888';
 /** 前端应用地址 */
 export const APP_URL = 'http://localhost:5188';
 
@@ -154,6 +154,18 @@ export async function login(page: Page): Promise<void> {
   await registerUser(page);
   const tokens = await loginViaAPI(page);
   await injectTokensAndReload(page, tokens);
+}
+
+/**
+ * 发送聊天消息
+ */
+export async function sendMessage(page: Page, text: string): Promise<void> {
+  const input = page.locator('[data-testid="chat-input-textarea"]');
+  await expect(input, '输入框应可见').toBeVisible({ timeout: 10_000 });
+  await input.fill(text);
+  const sendBtn = page.locator('[data-testid="chat-send-button"]');
+  await sendBtn.click();
+  console.log(`📨 已发送消息: "${text.substring(0, 40)}..."`);
 }
 
 /**

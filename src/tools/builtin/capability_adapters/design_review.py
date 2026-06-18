@@ -429,7 +429,7 @@ class DesignReviewTool(CapabilityAdapterBase):
             error_code="ALL_BACKENDS_FAILED",
         )
 
-    def _transform_results(  # noqa: PLR0912
+    def _transform_results(
         self,
         parsed_results: list[Any],
         backend_name: str,

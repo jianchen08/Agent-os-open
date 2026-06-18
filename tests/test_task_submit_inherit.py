@@ -52,34 +52,22 @@ def _build_mock_provider(
     old_task: MagicMock | None = None,
     new_task: MagicMock | None = None,
 ) -> MagicMock:
-    """构建 mock provider，包含 TaskService / TaskWorker / AgentRegistry / Lifecycle。"""
+    """构建 mock provider，包含 TaskService / TaskWorker / AgentRegistry。"""
     if new_task is None:
         new_task = MagicMock()
         new_task.id = "task_mock_001"
         new_task.title = "测试任务"
         new_task.status.value = "pending"
-        new_task.metadata = {}
 
     mock_task_service = MagicMock()
     mock_task_service.create_task = AsyncMock(return_value=new_task)
-    mock_task_service.get_task.return_value = new_task
-    mock_task_service.hard_delete = AsyncMock()
+    mock_task_service.get_task.return_value = old_task
 
     mock_task_worker = MagicMock()
     mock_task_worker.submit_task.return_value = True
 
     mock_agent_config = MagicMock()
     mock_agent_config.level.value = "L2"
-
-    # 工作空间生命周期 mock：on_task_start 写入 ws_meta 到 new_task.metadata
-    mock_lifecycle = MagicMock()
-
-    def _on_task_start(task_id, workspace, task_data):  # noqa: ANN001
-        new_task.metadata = new_task.metadata or {}
-        new_task.metadata["ws_meta"] = {"path": f"/tmp/ws_{task_id}", "mode": "plain"}
-        return new_task.metadata["ws_meta"]
-
-    mock_lifecycle.on_task_start.side_effect = _on_task_start
 
     def provider_get(key):
         if key == "task_worker":
@@ -90,8 +78,6 @@ def _build_mock_provider(
             return reg
         if key == "task_service":
             return mock_task_service
-        if key == "workspace_lifecycle_manager":
-            return mock_lifecycle
         return None
 
     mock_provider = MagicMock()
@@ -459,25 +445,13 @@ class TestInheritPipeConversationHistoryBug:
         mock_new_task = MagicMock()
         mock_new_task.id = "new_task_001"
         mock_new_task.title = "新任务"
-        mock_new_task.metadata = {}
         mock_task_service.create_task.return_value = mock_new_task
-        mock_task_service.hard_delete = AsyncMock()
 
         mock_task_worker = MagicMock()
         mock_task_worker.submit_task.return_value = True
 
         mock_agent_config = MagicMock()
         mock_agent_config.level.value = "L2"
-
-        # 工作空间生命周期 mock（task_submit 现在同步调用 on_task_start）
-        mock_lifecycle = MagicMock()
-
-        def _on_task_start(task_id, workspace, task_data):  # noqa: ANN001
-            mock_new_task.metadata = mock_new_task.metadata or {}
-            mock_new_task.metadata["ws_meta"] = {"path": f"/tmp/ws_{task_id}", "mode": "plain"}
-            return mock_new_task.metadata["ws_meta"]
-
-        mock_lifecycle.on_task_start.side_effect = _on_task_start
 
         def provider_get(key):
             if key == "task_worker":
@@ -488,8 +462,6 @@ class TestInheritPipeConversationHistoryBug:
                 return reg
             if key == "task_service":
                 return mock_task_service
-            if key == "workspace_lifecycle_manager":
-                return mock_lifecycle
             return None
 
         mock_provider = MagicMock()
@@ -610,154 +582,3 @@ class TestInheritPipeConversationHistoryBug:
             "metadata 应包含 inherit_pipe_from 字段供 retry 恢复"
         )
         assert metadata["inherit_pipe_from"] == "source_task_001"
-
-
-def _build_pipe_inherit_provider(
-    source_pipeline_id: str,
-    mock_task_worker: MagicMock,
-    mock_task_service: MagicMock,
-    exec_storage=None,
-):
-    """构造 pipe 继承场景的 service_provider mock。
-
-    exec_storage 为 None 时不提供该服务（模拟 clone 跳过）；
-    提供 mock 时 task_submit 会调用其 clone_pipeline_records。
-    """
-    mock_source_task = MagicMock()
-    mock_source_task.pipeline_run_id = source_pipeline_id
-    mock_task_service.get_task.return_value = mock_source_task
-    mock_task_service.create_task = AsyncMock()
-    mock_new_task = MagicMock()
-    mock_new_task.id = "new_task_pipe_001"
-    mock_new_task.title = "继承任务"
-    mock_new_task.metadata = {}
-    mock_task_service.create_task.return_value = mock_new_task
-    mock_task_service.hard_delete = AsyncMock()
-
-    mock_agent_config = MagicMock()
-    mock_agent_config.level.value = "L2"
-
-    mock_lifecycle = MagicMock()
-
-    def _on_task_start(task_id, workspace, task_data):  # noqa: ANN001
-        mock_new_task.metadata = mock_new_task.metadata or {}
-        mock_new_task.metadata["ws_meta"] = {"path": f"/tmp/ws_{task_id}", "mode": "plain"}
-        return mock_new_task.metadata["ws_meta"]
-
-    mock_lifecycle.on_task_start.side_effect = _on_task_start
-
-    def provider_get(key):
-        if key == "task_worker":
-            return mock_task_worker
-        if key == "agent_registry":
-            reg = MagicMock()
-            reg.get.return_value = mock_agent_config
-            return reg
-        if key == "task_service":
-            return mock_task_service
-        if key == "workspace_lifecycle_manager":
-            return mock_lifecycle
-        if key == "execution_record_storage":
-            return exec_storage
-        return None
-
-    mock_provider = MagicMock()
-    mock_provider.get_or_create.return_value = mock_task_service
-    mock_provider.get.side_effect = provider_get
-    return mock_provider, mock_new_task
-
-
-class TestInheritPipeCloneContract:
-    """验证 pipe 继承的历史准备（clone）契约。
-
-    task_submit 必须在返回前同步完成 clone：
-    - clone 成功 → task_data 带 _pre_pipeline_id，submit_task 被调用
-    - clone 失败 → 返回失败给父 LLM，submit_task 不被调用，任务记录被清理
-    """
-
-    @pytest.mark.asyncio
-    async def test_clone_success_includes_pre_pipeline_id(self):
-        """clone 成功时 task_data 应带 _pre_pipeline_id 供 task_executor 复用。"""
-        tool = TaskSubmitTool()
-        source_pipeline_id = "pipe_source_clone_ok"
-
-        mock_task_worker = MagicMock()
-        mock_task_worker.submit_task.return_value = True
-        mock_task_service = MagicMock()
-
-        # mock storage：clone 成功，返回记录数
-        mock_storage = MagicMock()
-        mock_storage.clone_pipeline_records.return_value = 5
-
-        mock_provider, _ = _build_pipe_inherit_provider(
-            source_pipeline_id, mock_task_worker, mock_task_service, mock_storage,
-        )
-
-        inputs = _make_minimal_inputs(
-            inherit={"from": "source_task_001", "mode": "pipe"},
-        )
-
-        with (
-            patch(_PROVIDER_TARGET, return_value=mock_provider),
-            patch("tools.builtin.task_submit.tool.os.path.exists", return_value=True),
-        ):
-            result = await tool.execute(inputs)
-
-        assert mock_storage.clone_pipeline_records.called, "clone 应被调用"
-        call_kwargs = mock_storage.clone_pipeline_records.call_args.kwargs
-        assert call_kwargs["source_pipeline_id"] == source_pipeline_id
-        # target_pipeline_id 和 new_container_task_id 应为非空值（预生成 id + 任务 id）
-        assert call_kwargs["target_pipeline_id"], "target_pipeline_id 不应为空"
-        assert call_kwargs["new_container_task_id"], "new_container_task_id 不应为空"
-        # task_data 带 _pre_pipeline_id
-        assert mock_task_worker.submit_task.called, "submit_task 应被调用"
-        task_data = mock_task_worker.submit_task.call_args[0][0]
-        assert "_pre_pipeline_id" in task_data, (
-            f"task_data 应含 _pre_pipeline_id，实际 keys: {list(task_data.keys())}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_clone_failure_returns_error_and_skips_submit(self):
-        """clone 失败时 task_submit 应返回失败，且 submit_task 不被调用、任务被清理。"""
-        tool = TaskSubmitTool()
-        source_pipeline_id = "pipe_source_clone_fail"
-
-        mock_task_worker = MagicMock()
-        mock_task_worker.submit_task.return_value = True
-        mock_task_service = MagicMock()
-
-        # mock storage：clone 抛异常
-        mock_storage = MagicMock()
-        mock_storage.clone_pipeline_records.side_effect = ValueError(
-            "克隆管道记录失败：源管道无执行记录"
-        )
-
-        mock_provider, _ = _build_pipe_inherit_provider(
-            source_pipeline_id, mock_task_worker, mock_task_service, mock_storage,
-        )
-
-        inputs = _make_minimal_inputs(
-            inherit={"from": "source_task_001", "mode": "pipe"},
-        )
-
-        with (
-            patch(_PROVIDER_TARGET, return_value=mock_provider),
-            patch("tools.builtin.task_submit.tool.os.path.exists", return_value=True),
-        ):
-            result = await tool.execute(inputs)
-
-        # clone 失败 → submit_task 不应被调用（任务没起来）
-        assert not mock_task_worker.submit_task.called, (
-            "clone 失败时 submit_task 不应被调用"
-        )
-        # 任务记录应被清理
-        assert mock_task_service.hard_delete.called, (
-            "clone 失败时应清理任务记录（hard_delete）"
-        )
-        # 返回失败结果（ToolExecutionResult 对象）
-        assert result.status == "failed", (
-            f"clone 失败应返回 failed 状态，实际: {result.status}"
-        )
-        assert "继承管道历史失败" in (result.error or ""), (
-            f"失败原因应含继承失败信息，实际 error: {result.error}"
-        )

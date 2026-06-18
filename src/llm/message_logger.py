@@ -90,7 +90,7 @@ class LLMMessageLogger:
             if hasattr(msg, "name") and msg.name:
                 result += f"[工具名称] {msg.name}\n"
             return result
-        elif isinstance(msg, dict):
+        if isinstance(msg, dict):
             role = msg.get("role", "unknown")
             result = f"[{role}]\n"
             if "content" in msg and msg["content"]:
@@ -106,7 +106,7 @@ class LLMMessageLogger:
             if "name" in msg and msg["name"]:
                 result += f"[工具名称] {msg['name']}\n"
             return result
-        elif hasattr(msg, "type") and hasattr(msg, "content"):
+        if hasattr(msg, "type") and hasattr(msg, "content"):
             # LangChain 消息类型（使用 type 属性）
             # type 映射: tool -> tool, human -> user, ai -> assistant, system -> system
             msg_type = msg.type
@@ -131,8 +131,7 @@ class LLMMessageLogger:
             if hasattr(msg, "name") and msg.name:
                 result += f"[工具名称] {msg.name}\n"
             return result
-        else:
-            return str(msg)
+        return str(msg)
 
     def _format_tools(self, tools: list[Any]) -> str:
         """格式化工具列表
@@ -519,9 +518,8 @@ class LLMMessageLogger:
         Args:
             content: 要写入的内容
         """
-        with self._file_lock:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(content)
+        with self._file_lock, open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(content)
 
     def clear_log(self):
         """清空日志文件"""

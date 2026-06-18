@@ -294,7 +294,7 @@ class TriggerStateManager:
         Returns:
             内存使用统计
         """
-        import sys  # noqa: PLC0415
+        import sys
 
         total_states = len(self._trigger_states)
         memory_size = sys.getsizeof(self._trigger_states)

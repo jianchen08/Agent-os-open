@@ -8,26 +8,31 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json  # noqa: F401
+import json
 import logging
-import os  # noqa: F401
-import sys  # noqa: F401
+import os
+import sys
 import time
-import uuid  # noqa: F401
-from dataclasses import dataclass, field  # noqa: F401
-from datetime import datetime, timezone  # noqa: F401
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 # PYTHONPATH 已在 Dockerfile/环境变量中设置为 /app/src，无需 sys.path.insert
-from fastapi import WebSocket  # noqa: F401
 
-from channels.api.memory_store import store as api_store  # noqa: F401
+from fastapi import WebSocket
+
+from channels.api.memory_store import store as api_store
+from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
+
 from channels.websocket.ws_handler import ws_interaction_notifier
-from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F401
 
-# 日志配置由统一入口 src.core.logging.setup_logging() 负责（在 app_factory.py 中调用）
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -80,6 +85,8 @@ class PipelineContext:
         self.plugin_registry = plugin_registry
         self.app = app
         self._engines: dict[str, Any] = {}
+        # BUG-FIX-fix_20260523_engine_memory_leak:
+        # 记录每个引擎的最后活跃时间，供 cleanup_idle_engines 清理使用。
         self._engine_last_active: dict[str, float] = {}
         if engine is not None:
             engine._pipeline_id = ""
@@ -92,6 +99,7 @@ class PipelineContext:
         确保管道之间状态完全隔离，通知不会串线。
         """
         if pipeline_id in self._engines:
+            # BUG-FIX-fix_20260523_engine_memory_leak: 更新最后活跃时间
             self._engine_last_active[pipeline_id] = time.monotonic()
             return self._engines[pipeline_id]
         new_engine = self.app.create_pipeline_engine(
@@ -161,7 +169,9 @@ _task_worker = None
 _cached_call_timeout: int | None = None
 
 
-def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
+
+
+def _init_pipeline_context() -> PipelineContext:
     """初始化管道引擎上下文。
 
     按照以下步骤组装管道：
@@ -178,8 +188,8 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         PipelineContext 实例
     """
     try:
-        from config.models import ModelConfigLoader  # noqa: PLC0415
-        from pipeline.config import build_plugin_registry, load_pipeline_config  # noqa: PLC0415
+        from config.models import ModelConfigLoader
+        from pipeline.config import build_plugin_registry, load_pipeline_config
 
         # 确定管道配置路径
         config_path = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
@@ -194,7 +204,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
         logger.info("加载管道配置: %s", config_path)
 
-        from application import Application  # noqa: PLC0415
+        from application import Application
         model_loader = ModelConfigLoader()
 
         # 加载管道配置
@@ -204,7 +214,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         plugin_registry = build_plugin_registry(pipeline_config, model_loader=model_loader)
 
         # 加载 Agent 配置
-        from agents.registry import AgentRegistry  # noqa: PLC0415
+        from agents.registry import AgentRegistry
         agent_registry = AgentRegistry()
         agent_config_dir = _PROJECT_ROOT / "config" / "agents"
         if agent_config_dir.exists():
@@ -220,13 +230,13 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
             tool_registry = services.get("tool_registry")
             if tool_registry is not None:
                 try:
-                    from tools.builtin import register_core_tools  # noqa: PLC0415
+                    from tools.builtin import register_core_tools
                     registered = register_core_tools(tool_registry, session=None)
                     logger.info("ToolCore 注册了 %d 个核心工具", len(registered))
                 except Exception as exc:
                     logger.warning("register_core_tools 失败: %s", exc)
                 tool_core.register_tools_from_registry(tool_registry)
-            # Docker 容器隔离通过 IsolationManager 统一管理
+            # IsolationExecutor 已由 ToolCore 内部创建，无需外部注入
 
         # 获取默认 Agent 配置（灵汐）
         agent_config = None
@@ -249,7 +259,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
         # 注册路由表和插件注册表到 ServiceProvider，供 MessageBus 重建管道使用
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             _sp = get_service_provider()
             _sp.register("input_route_table", pipeline_config.input_route_table)
             _sp.register("output_route_table", pipeline_config.output_route_table)
@@ -276,10 +286,10 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
         # 注册 WebSocket 交互通知器到 HumanInteractionService
         try:
-            from human_interaction import get_human_interaction_service  # noqa: PLC0415
+            from human_interaction import get_human_interaction_service
             # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
-            try:  # noqa: SIM105
-                import human_interaction.desktop_notifier  # noqa: F401,PLC0415
+            try:
+                import human_interaction.desktop_notifier  # noqa: F401
             except Exception:
                 pass
             human_svc = get_human_interaction_service()
@@ -305,6 +315,7 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
         return PipelineContext(available=False)
 
 
+
 # ---------------------------------------------------------------------------
 # 流式响应辅助函数
 # ---------------------------------------------------------------------------
@@ -312,11 +323,11 @@ def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
 
 def _get_call_timeout() -> int:
     """从 llm.yaml defaults.call_timeout 读取超时秒数，默认 120 秒。"""
-    global _cached_call_timeout  # noqa: PLW0603
+    global _cached_call_timeout
     if _cached_call_timeout is not None:
         return _cached_call_timeout
     try:
-        from config.models import ModelConfigLoader  # noqa: PLC0415
+        from config.models import ModelConfigLoader
         loader = ModelConfigLoader()
         defaults = loader._load_llm_data().get("defaults", {})
         _cached_call_timeout = int(defaults.get("call_timeout", 120))
@@ -341,7 +352,7 @@ def _register_pipeline_thread(pipeline_id: str, engine: Any, thread_id: str) -> 
     如果 pipeline_id 已注册，更新其 thread_id；
     否则，新建注册条目。
     """
-    from pipeline.registry import get_engine_registry  # noqa: PLC0415
+    from pipeline.registry import get_engine_registry
     _registry = get_engine_registry()
     _entry = _registry.get(pipeline_id)
     if _entry:
@@ -383,8 +394,10 @@ async def _cancel_engine_task(engine_task: asyncio.Task) -> None:
     安全地取消 asyncio.Task，捕获 CancelledError 和其他异常。
     """
     engine_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
+    try:
         await engine_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 @dataclass
@@ -433,11 +446,15 @@ async def handle_stream_request(ctx: StreamContext) -> None:
     - new_message 发送
     - 取消/超时/异常处理
     """
+    pipeline_id = ctx.pipeline_id
+    message_id = ctx.message_id
+    thread_id = ctx.thread_id
 
     logger.warning(
         "[handle_stream] 无可用路径: engine=%s bridge=%s user_content=%s pipeline_ctx=%s",
         ctx.engine is not None, ctx.bridge is not None,
         bool(ctx.user_content), ctx.pipeline_ctx is not None,
     )
+
 
 

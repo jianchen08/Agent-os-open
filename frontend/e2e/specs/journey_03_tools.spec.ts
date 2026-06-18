@@ -6,8 +6,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loginAndWaitReady } from '../helpers/auth';
-import { sendChatMessage } from '../utils/test-helpers';
+import { loginAndWaitReady, sendMessage } from '../helpers/auth';
 import { loginAndNavigateTo, ROUTES } from '../helpers/navigation';
 import { waitForToolCard, waitForToolCompleted, waitForAssistantMessage } from '../helpers/assertions';
 
@@ -32,7 +31,7 @@ test.describe('旅程03：工具调用', () => {
     await loginAndWaitReady(page);
 
     // 发送会触发工具调用的消息
-    await sendChatMessage(page, '请读取 package.json 文件的内容');
+    await sendMessage(page, '请读取 package.json 文件的内容');
 
     // 等待工具卡片出现
     const toolCard = await waitForToolCard(page, 45_000);

@@ -6,8 +6,7 @@
  */
 
 import { Bell, Bot, Check, Loader2, MessageSquare, Sparkles, User } from 'lucide-react'
-import { memo, useEffect, useRef, useState } from 'react'
-import { ImageGallery } from '@/components/media/ImageGallery'
+import { useEffect, useRef, useState } from 'react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -111,7 +110,7 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
 /**
  * 消息项组件
  */
-export const MessageItem = memo(function MessageItem({
+export const MessageItem = ({
   message,
   isLast = false,
   isGenerating = false,
@@ -119,8 +118,7 @@ export const MessageItem = memo(function MessageItem({
   modelName,
   className = '',
   searchQuery,
-  taskId,
-}: MessageItemProps) {
+}: MessageItemProps) => {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
 
@@ -190,7 +188,6 @@ export const MessageItem = memo(function MessageItem({
     isLast,
     isGenerating,
     versionContent,
-    taskId,
   })
 
   /** 工具消息独立渲染 */
@@ -378,28 +375,10 @@ export const MessageItem = memo(function MessageItem({
 
               if (isUser) {
                 const userContent = renderContext.displayContent || message.content
-                const userAttachments = message.attachments || []
-                // 兼容两种字段命名：前端 Attachment.type 和后端持久化的 mime_type
-                const getAttMime = (att: { type?: string; mime_type?: string }) =>
-                  att.type || att.mime_type || ''
-                const imageAttachments = userAttachments
-                  .filter((att) => getAttMime(att).startsWith('image/'))
-                  .map((att, idx) => ({
-                    id: att.id || `img-${idx}`,
-                    url: att.url,
-                    title: att.name || '图片',
-                  }))
-                if (!userContent && imageAttachments.length === 0) return null
+                if (!userContent) return null
                 return (
                   <div className={bubbleCls} style={bubbleStyle}>
-                    {userContent && (
-                      <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
-                    )}
-                    {imageAttachments.length > 0 && (
-                      <div className="mt-2">
-                        <ImageGallery images={imageAttachments} columns={2} />
-                      </div>
-                    )}
+                    <div className="whitespace-pre-wrap break-words text-sm">{userContent}</div>
                   </div>
                 )
               }
@@ -482,4 +461,4 @@ export const MessageItem = memo(function MessageItem({
       </div>
     </div>
   )
-})
+}

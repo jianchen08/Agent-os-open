@@ -11,19 +11,15 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from channels.api.deps import APIError, require_auth
+from channels.api.deps import APIError
 from services.comfyui_service import get_comfyui_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api/v1/comfyui",
-    tags=["ComfyUI"],
-    dependencies=[Depends(require_auth)],
-)
+router = APIRouter(prefix="/api/v1/comfyui", tags=["ComfyUI"])
 
 
 class ConnectRequest(BaseModel):
@@ -82,9 +78,9 @@ async def list_models() -> dict[str, Any]:
         models = await service.list_models()
         return {"models": models}
     except RuntimeError as e:
-        raise APIError(status_code=503, error_code="COMFYUI_002", message=str(e))  # noqa: B904
+        raise APIError(status_code=503, error_code="COMFYUI_002", message=str(e))
     except Exception as e:
-        raise APIError(status_code=500, error_code="COMFYUI_099", message=f"获取模型列表失败: {e}")  # noqa: B904
+        raise APIError(status_code=500, error_code="COMFYUI_099", message=f"获取模型列表失败: {e}")
 
 
 @router.get("/workflows", summary="列出工作流模板")
@@ -103,7 +99,7 @@ async def get_workflow(name: str) -> dict[str, Any]:
         workflow = service.get_workflow(name)
         return {"name": name, "workflow": workflow}
     except FileNotFoundError:
-        raise APIError(status_code=404, error_code="COMFYUI_003", message=f"工作流模板不存在: {name}")  # noqa: B904
+        raise APIError(status_code=404, error_code="COMFYUI_003", message=f"工作流模板不存在: {name}")
 
 
 @router.post("/workflows", summary="保存自定义工作流模板")
@@ -122,7 +118,7 @@ async def delete_workflow(name: str) -> dict[str, Any]:
         service.delete_workflow(name)
         return {"success": True, "message": f"模板 {name} 已删除"}
     except FileNotFoundError:
-        raise APIError(status_code=404, error_code="COMFYUI_003", message=f"工作流模板不存在: {name}")  # noqa: B904
+        raise APIError(status_code=404, error_code="COMFYUI_003", message=f"工作流模板不存在: {name}")
 
 
 @router.post("/generate", summary="提交图像生成任务")
@@ -148,11 +144,11 @@ async def generate_image(body: GenerateRequest) -> dict[str, Any]:
         )
         return {"success": True, "record": record.to_dict()}
     except RuntimeError as e:
-        raise APIError(status_code=503, error_code="COMFYUI_002", message=str(e))  # noqa: B904
+        raise APIError(status_code=503, error_code="COMFYUI_002", message=str(e))
     except FileNotFoundError as e:
-        raise APIError(status_code=404, error_code="COMFYUI_003", message=str(e))  # noqa: B904
+        raise APIError(status_code=404, error_code="COMFYUI_003", message=str(e))
     except Exception as e:
-        raise APIError(status_code=500, error_code="COMFYUI_099", message=f"生成任务提交失败: {e}")  # noqa: B904
+        raise APIError(status_code=500, error_code="COMFYUI_099", message=f"生成任务提交失败: {e}")
 
 
 @router.get("/history", summary="获取生成历史")

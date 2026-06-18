@@ -66,7 +66,7 @@ def _restore_from_lifecycle(task: Any, metadata: dict) -> None:
     TaskWorker._init_lifecycle 注册到 ServiceProvider）。
     """
     try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
 
         provider = get_service_provider()
         lifecycle = provider.get("workspace_lifecycle_manager") if provider else None

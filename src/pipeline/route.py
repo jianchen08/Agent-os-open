@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,15 +39,13 @@ class InputRouteEntry:
     定义一个输入阶段的路由规则：当条件满足时，
     选取指定插件并将管道引向指定目标。
 
-    路由只做决策（返回 target），不生成内容、不写状态。
-    拦截原因等内容生成由执行点（如 tool_core 的工具失败结果）负责。
-
     Attributes:
         name: 路由条目名称
         condition: Python 布尔表达式字符串，空字符串视为始终匹配
         target: 路由目标：core / end / wait
         plugins: 要执行的插件名称列表
         priority: 优先级，数值越小越先匹配
+        result: 拦截原因模板，支持点号路径访问 state 嵌套字段
     """
 
     name: str
@@ -54,6 +53,37 @@ class InputRouteEntry:
     target: str = "core"
     plugins: list[str] = field(default_factory=list)
     priority: int = 0
+    result: str | None = None
+
+    def format_result(self, state: dict[str, Any]) -> str:
+        """格式化拦截原因模板。
+
+        支持点号路径访问 state 嵌套字段，例如模板
+        ``{security.decision.reason}`` 会从 state 中逐层查找
+        ``state["security"]["decision"]["reason"]`` 的值。
+        找不到的路径用空字符串替代。
+
+        Args:
+            state: 管道状态字典
+
+        Returns:
+            填充后的字符串；result 为 None 时返回空字符串
+        """
+        if self.result is None:
+            return ""
+
+        def _resolve(path: str) -> str:
+            """按点号分割路径，从 state 中逐层查找值。"""
+            keys = path.split(".")
+            value: Any = state
+            for key in keys:
+                if isinstance(value, dict) and key in value:
+                    value = value[key]
+                else:
+                    return ""
+            return str(value)
+
+        return re.sub(r"\{([^}]+)\}", lambda m: _resolve(m.group(1)), self.result)
 
 
 @dataclass

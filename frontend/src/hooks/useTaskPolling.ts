@@ -6,12 +6,10 @@
  * 核心行为：
  * - 使用 setInterval 定期调用 longTermTaskStore.fetchTasks() 刷新任务列表
  * - 轮询间隔默认 5 秒
+ * - 所有任务进入终态（completed/failed/cancelled/timeout）时自动停止轮询
  * - enabled 参数控制是否启动
  * - 组件卸载时清理定时器，防止内存泄漏
  * - 页面不可见（document.hidden）时暂停轮询
- *
- * 轮询始终运行（不因任务进入终态而停止）：fallback 的价值恰恰在于
- * WebSocket 实时链路失效时仍能恢复列表一致性，自动停止会破坏这一兜底语义。
  */
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -43,7 +41,7 @@ export interface UseTaskPollingOptions {
  * 任务状态轮询 Hook。
  *
  * 定期从服务端拉取任务列表，保持本地 store 数据新鲜。
- * 作为 WebSocket 实时事件失效时的兜底，轮询不会因任务全部进入终态而停止。
+ * 当所有任务均已进入终态时自动停止轮询以节省资源。
  *
  * @param options - 配置选项
  *
@@ -60,6 +58,7 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): void {
   const { interval = 5000, enabled = true } = options
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stoppedRef = useRef(false)
 
   /** 清除定时器 */
   const clearTimer = useCallback(() => {
@@ -74,10 +73,18 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): void {
       return
     }
 
+    // 重置停止标记（enabled 或任务变化后重新评估）
+    stoppedRef.current = false
+
     /** 单次轮询 tick */
     const tick = () => {
       // 页面不可见时跳过本次轮询
       if (document.hidden) {
+        return
+      }
+
+      // 已停止则不再执行
+      if (stoppedRef.current) {
         return
       }
 
@@ -96,6 +103,15 @@ export function useTaskPolling(options: UseTaskPollingOptions = {}): void {
           autoDismissMs: 5000,
         })
       })
+
+      // 获取最新的任务列表，判断是否需要停止
+      const tasks = useLongTermTaskStore.getState().tasks
+
+      // 任务列表不为空且所有任务均处于终态 → 自动停止轮询
+      if (tasks.length > 0 && tasks.every((task) => isTerminalTask(task.status))) {
+        stoppedRef.current = true
+        clearTimer()
+      }
     }
 
     // 启动定时轮询

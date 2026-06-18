@@ -259,35 +259,9 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
     }),
     {
       name: 'layout-mode',
-      // BUG-FIX-fix_20260625_workspace_tabs_persist:
-      // 问题根因: 此前 partialize 只保存 mode，workspaceTabs 整组刷新即丢，
-      //          所有打开的文件/工具 Tab 都需重新打开，体验差。
-      // 修复方案: 持久化 workspaceTabs；运行时状态（floatingWindows、dockItems、
-      //          activeExecutions、pendingInteractions、connectionStatus、fullscreen）
-      //          在 merge 时强制重置，避免恢复到一个不一致的状态。
       partialize: (state) => ({
         mode: state.mode,
-        workspaceTabs: state.workspaceTabs,
       }),
-      merge: (persisted, current) => {
-        const p = (persisted as Partial<LayoutModeState>) || {}
-        const tabs = Array.isArray(p.workspaceTabs) ? p.workspaceTabs : current.workspaceTabs
-        return {
-          ...current,
-          ...p,
-          workspaceTabs: tabs,
-          // 运行时状态强制重置
-          floatingWindows: [],
-          dockItems: [],
-          fullscreenActive: false,
-          fullscreenTitle: null,
-          fullscreenContent: null,
-          activeExecutions: [],
-          pendingInteractions: [],
-          connectionStatus: { ...current.connectionStatus },
-          workspaceDataVersion: 0,
-        }
-      },
     },
   ),
 )

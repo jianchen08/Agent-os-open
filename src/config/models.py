@@ -51,11 +51,7 @@ _dotenv_loaded = False
 def _load_dotenv_once() -> None:
     """加载项目根目录的 .env 文件到 os.environ（仅执行一次）。
 
-    优先级：.env 文件 > 系统环境变量（强制覆盖已有值）。
-
-    本项目以 .env 作为本地环境配置的唯一真相源。即便系统环境变量已存在
-    同名变量（如容器宿主／IDE 启动配置注入），.env 中的值也会将其覆盖，
-    确保用户通过编辑 .env 文件配置的密钥和选项能够生效。
+    优先级：系统环境变量 > .env 文件（不覆盖已有值）。
     """
     global _dotenv_loaded
     if _dotenv_loaded:
@@ -76,10 +72,10 @@ def _load_dotenv_once() -> None:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                # .env 强制覆盖系统环境变量（见 docstring 设计说明）
-                if key:
+                # 系统环境变量优先，不覆盖
+                if key and key not in os.environ:
                     os.environ[key] = value
-        logger.debug("已加载 .env 文件（强制覆盖）: %s", _ENV_FILE_PATH)
+        logger.debug("已加载 .env 文件: %s", _ENV_FILE_PATH)
     except Exception as exc:
         logger.warning("加载 .env 文件失败: %s", exc)
 
@@ -325,13 +321,8 @@ class ModelConfigLoader:
         # call_timeout: 优先模型配置，回退到 defaults 节
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
-        # 首 token 超时：流式首 chunk 不来时强制超时的秒数（优先模型配置，回退 defaults）
-        first_token_timeout = model_conf.get(
-            "first_token_timeout", defaults.get("first_token_timeout", 60)
-        )
 
         return {
-            "model_id": model_id,
             "provider": provider_name,
             "model_name": model_conf.get("model_name", model_id),
             "api_base": api_base,
@@ -339,7 +330,6 @@ class ModelConfigLoader:
             "context_window": model_conf.get("context_window"),
             "default_params": default_params,
             "call_timeout": call_timeout,
-            "first_token_timeout": first_token_timeout,
         }
 
     def resolve_env_or_model(self, value: str, provider_name: str = "") -> str:
@@ -397,7 +387,8 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     1. ModelConfigLoader 实例缓存和模块级缓存
     2. LLMConfigManager 单例
     3. litellm.Router 和 Adapter 单例
-    4. plugin_resolver 的 tier 缓存
+    4. LLMFactory 实例缓存和模块级单例
+    5. plugin_resolver 的 tier 缓存
     """
     # 1. 清除 ModelConfigLoader 缓存
     invalidate_model_config_cache(config_dir)
@@ -410,7 +401,13 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     from llm.router_factory import reset_router
     reset_router()
 
-    # 4. 清除 tier 缓存，使配置变更实时生效
+    # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
+    import llm.factory as factory_mod
+    if factory_mod._llm_factory_instance is not None:
+        factory_mod._llm_factory_instance.clear_cache()
+        factory_mod._llm_factory_instance = None
+
+    # 清除 tier 缓存，使配置变更实时生效
     try:
         import pipeline.plugin_resolver as pr_mod
         pr_mod._tier_cache.clear()

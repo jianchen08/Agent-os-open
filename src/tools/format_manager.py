@@ -102,7 +102,7 @@ class FormatManager:
         return ET.tostring(root, encoding="unicode")
 
     @staticmethod
-    def _build_xml(parent: ET.Element, data: Any) -> None:  # noqa: PLR0911
+    def _build_xml(parent: ET.Element, data: Any) -> None:
         if data is None:
             parent.set("nil", "true")
             return
@@ -141,7 +141,7 @@ _instance: FormatManager | None = None
 
 
 def get_format_manager() -> FormatManager:
-    global _instance  # noqa: PLW0603
+    global _instance
     if _instance is None:
         _instance = FormatManager()
     return _instance

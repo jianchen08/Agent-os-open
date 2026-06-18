@@ -14,57 +14,57 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from src.core.logging import LogContext
+# ---------------------------------------------------------------------------
+# 上下文变量（线程安全）
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 上下文变量（已统一到 src.core.logging.LogContext，基于 contextvars，async 安全）
-# ---------------------------------------------------------------------------
+_context = threading.local()
 
 
 def set_trace_id(trace_id: str) -> None:
-    """设置当前上下文的 trace_id（转发到 LogContext）。
+    """设置当前线程的 trace_id。
 
     Args:
         trace_id: 追踪 ID
     """
-    LogContext.bind(trace_id=trace_id)
+    _context.trace_id = trace_id
 
 
 def get_trace_id() -> str:
-    """获取当前上下文的 trace_id（转发到 LogContext）。
+    """获取当前线程的 trace_id。
 
     Returns:
         trace_id 字符串，未设置时返回空字符串
     """
-    val = LogContext.get("trace_id")
-    return "" if val == "-" else val
+    return getattr(_context, "trace_id", "")
 
 
 def set_request_id(request_id: str) -> None:
-    """设置当前上下文的 request_id（转发到 LogContext）。
+    """设置当前线程的 request_id。
 
     Args:
         request_id: 请求 ID
     """
-    LogContext.bind(request_id=request_id)
+    _context.request_id = request_id
 
 
 def get_request_id() -> str:
-    """获取当前上下文的 request_id（转发到 LogContext）。
+    """获取当前线程的 request_id。
 
     Returns:
         request_id 字符串，未设置时返回空字符串
     """
-    val = LogContext.get("request_id")
-    return "" if val == "-" else val
+    return getattr(_context, "request_id", "")
 
 
 class ContextFilter(logging.Filter):
-    """日志上下文过滤器（转发到 LogContext）。
+    """日志上下文过滤器。
 
     将 trace_id 和 request_id 注入每条日志记录，
     便于在 JSON 输出中进行请求链路追踪。
@@ -226,7 +226,10 @@ def setup_logging(
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
 ) -> None:
-    """初始化日志系统（已转发到统一日志模块 src.core.logging）。
+    """初始化日志系统。
+
+    配置根日志器，添加控制台和文件 handler，
+    支持开发和生产两种格式模式。
 
     Args:
         log_dir: 日志文件目录，默认 data/logs/
@@ -235,16 +238,66 @@ def setup_logging(
         max_bytes: 单个日志文件最大字节数，默认 10MB
         backup_count: 日志轮转备份数，默认 5
     """
-    from src.core.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
+    # 确保日志目录存在
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
 
-    config = LoggingConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        json_output=json_format,
-        output="both",
-        file_path=str(Path(log_dir) / "app.log"),
-        file_max_bytes=max_bytes,
-        file_backup_count=backup_count,
+    # 获取日志级别
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # 配置根日志器
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # 清除已有 handler（避免重复）
+    root.handlers.clear()
+
+    # 上下文过滤器
+    ctx_filter = ContextFilter()
+
+    # 1. 控制台 handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    if json_format:
+        console_handler.setFormatter(_JsonFormatter())
+    else:
+        console_handler.setFormatter(_ConsoleFormatter())
+    console_handler.addFilter(ctx_filter)
+    root.addHandler(console_handler)
+
+    # 2. 主日志文件 handler（轮转）
+    main_log = log_path / "app.log"
+    file_handler = RotatingFileHandler(
+        str(main_log),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
     )
-    _unified_setup(config, reset=True)
+    file_handler.setLevel(level)
+    if json_format:
+        file_handler.setFormatter(_JsonFormatter())
+    else:
+        file_fmt = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+        file_handler.setFormatter(logging.Formatter(file_fmt))
+    file_handler.addFilter(ctx_filter)
+    root.addHandler(file_handler)
+
+    # 3. 错误日志单独文件
+    error_log = log_path / "error.log"
+    error_handler = RotatingFileHandler(
+        str(error_log),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    error_handler.setLevel(logging.ERROR)
+    if json_format:
+        error_handler.setFormatter(_JsonFormatter())
+    else:
+        error_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+        )
+    error_handler.addFilter(ctx_filter)
+    root.addHandler(error_handler)
 
     logging.info("Logging initialized: dir=%s, level=%s, json=%s", log_dir, log_level, json_format)

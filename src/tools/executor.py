@@ -47,10 +47,11 @@ if TYPE_CHECKING:
     from core.runnable import ToolRunnable
 
 
-from tools.interfaces import ProgressCallback
-
 # 工具处理函数类型
 ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, ToolExecutionResult]]
+
+# 进度回调函数类型
+ProgressCallback = Callable[[str, float, str | None], Coroutine[Any, Any, None]]
 
 # 日志
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ class ToolExecutor(IToolExecutor):
 
         # 性能监控器
         try:
-            from monitoring import get_performance_monitor  # noqa: PLC0415
+            from monitoring import get_performance_monitor
 
             self._performance_monitor = get_performance_monitor()
         except ImportError:
@@ -174,7 +175,7 @@ class ToolExecutor(IToolExecutor):
     # 核心执行
     # ------------------------------------------------------------------
 
-    async def execute(  # noqa: PLR0912,PLR0915
+    async def execute(
         self,
         tool_name: str,
         inputs: dict[str, Any],
@@ -189,7 +190,7 @@ class ToolExecutor(IToolExecutor):
 
         # 生成工具调用 ID（如果未提供）
         if tool_call_id is None:
-            import uuid  # noqa: PLC0415
+            import uuid
 
             tool_call_id = str(uuid.uuid4())
 
@@ -241,7 +242,7 @@ class ToolExecutor(IToolExecutor):
 
         # 如果工具未注册，尝试动态加载
         if tool is None:
-            from tools.loader import get_dynamic_tool_loader  # noqa: PLC0415
+            from tools.loader import get_dynamic_tool_loader
 
             loader = get_dynamic_tool_loader()
             if loader is not None:
@@ -585,6 +586,7 @@ class ToolExecutor(IToolExecutor):
             )
             raise ToolExecutionError(tool_name, str(e), cause=e) from e
 
+    # BUG-FIX-fix_20260422_context_overflow: 工具输出截断阈值，防止巨大输出撑爆 LLM 上下文窗口
     MAX_TOOL_OUTPUT_LENGTH = 100000  # 100K 字符
 
     def _finalize_result(
@@ -603,12 +605,13 @@ class ToolExecutor(IToolExecutor):
             result.metadata = {}
         result.metadata["duration_ms"] = duration_ms
 
+        # BUG-FIX-fix_20260422_context_overflow: 截断过大的工具输出，防止上下文窗口溢出
         result.output = self._truncate_output(result.output)
 
         # 输出结构验证：如果工具定义了 output_schema，验证输出是否符合
         if tool and tool.output_schema and result.success:
             try:
-                import jsonschema as _js  # noqa: PLC0415
+                import jsonschema as _js
                 _js.validate(instance=result.output, schema=tool.output_schema)
             except Exception as schema_err:
                 logger.warning(

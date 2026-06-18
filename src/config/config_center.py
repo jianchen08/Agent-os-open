@@ -19,7 +19,7 @@
     await center.start()
 
 安全策略：
-- 配置变更审批已移至业务层（human_interaction / security_check 插件），ConfigCenter 不再拦截
+- L1 主 Agent / 灵汐默认配置变更需要审批（通过 human_interaction 触发）
 - 非配置类文件（.env、Redis 配置等）不纳入监听范围
 """
 
@@ -30,7 +30,7 @@ import hashlib
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine  # noqa: F401
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -225,8 +225,11 @@ class ConfigCenter:
         # 立即检测 is_running 的时序竞态）。
         self._ready_event = asyncio.Event()
 
-        # 审批逻辑已移至业务层（human_interaction / security_check 插件），
-        # ConfigCenter 不再在加载层拦截配置变更。
+        # 需要审批的配置路径前缀（L1 主 Agent / 灵汐默认配置）
+        self._approval_required_prefixes: list[str] = [
+            "config/agents/main/",
+            "config/agents/orchestrator/",
+        ]
 
     # -- 公共接口 -----------------------------------------------------------
 
@@ -321,6 +324,14 @@ class ConfigCenter:
             )
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # 检查是否需要审批
+        if self._needs_approval(str(abs_path)):
+            logger.warning(
+                "配置变更需要审批（L1 主 Agent / 灵汐默认配置）: %s", abs_path,
+            )
+            # 注意：审批通过后才应调用此方法，此处仅记录日志
+            # 审批逻辑由上层 human_interaction 触发
 
         # 写锁：更新缓存
         path_str = str(abs_path)
@@ -418,7 +429,7 @@ class ConfigCenter:
             self._stop_event.clear()
 
             try:
-                from watchfiles import awatch  # noqa: PLC0415
+                from watchfiles import awatch
             except ImportError:
                 logger.warning(
                     "watchfiles 未安装，回退到 watchdog 模式。"
@@ -506,7 +517,7 @@ class ConfigCenter:
         Args:
             changes: watchfiles 返回的变更集合 {(change_type, path)}。
         """
-        from watchfiles import Change  # noqa: PLC0415
+        from watchfiles import Change
 
         event_map = {
             Change.added: "created",
@@ -584,6 +595,22 @@ class ConfigCenter:
             return
 
         new_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # 检查是否需要审批
+        if self._needs_approval(path_str):
+            logger.warning(
+                "检测到 L1 主 Agent 配置变更，需要审批: %s", path_str,
+            )
+            # 审批通过前不自动加载，仅记录审计
+            self._write_audit(AuditEntry(
+                file_path=path_str,
+                event_type=event_type,
+                config_type=config_type,
+                success=False,
+                error="需要审批（L1 主 Agent 配置变更）",
+                content_hash=new_hash,
+            ))
+            return
 
         # 写锁：检查去重 + 更新缓存
         with _WriteGuard(self._rwlock):
@@ -718,7 +745,7 @@ class ConfigCenter:
     # -- 工具方法 -----------------------------------------------------------
 
     @staticmethod
-    def _determine_config_type(file_path: str) -> str:  # noqa: PLR0911
+    def _determine_config_type(file_path: str) -> str:
         """根据文件路径判断配置类型。
 
         路径规则：
@@ -825,6 +852,20 @@ class ConfigCenter:
         # 排除备份文件
         return bool(name.endswith(".bak") or name.endswith(".bak~"))
 
+    def _needs_approval(self, file_path: str) -> bool:
+        """检查配置变更是否需要审批。
+
+        L1 主 Agent / 灵汐默认配置变更需要通过 human_interaction 审批。
+
+        Args:
+            file_path: 文件路径。
+
+        Returns:
+            是否需要审批。
+        """
+        normalized = file_path.replace("\\", "/")
+        return any(prefix in normalized for prefix in self._approval_required_prefixes)
+
 
 # ---------------------------------------------------------------------------
 # 全局单例（懒初始化）
@@ -840,7 +881,7 @@ def get_config_center() -> ConfigCenter:
     Returns:
         ConfigCenter 实例。
     """
-    global _global_center  # noqa: PLW0603
+    global _global_center
     if _global_center is None:
         with _global_lock:
             if _global_center is None:

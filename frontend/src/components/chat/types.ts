@@ -83,6 +83,8 @@ export interface ChatContainerProps {
   completionTokens?: number
   /** 上一轮总 tokens */
   totalTokens?: number
+  /** 模型名称 */
+  modelName?: string
   /** 思考模式状态 */
   thinkingMode?: ThinkingModeState
   /** 思考模式切换回调 */
@@ -137,8 +139,6 @@ export interface MessageItemProps {
   className?: string
   /** 搜索查询（用于高亮显示） */
   searchQuery?: string
-  /** 当前 Tab 关联任务 ID（工具卡片打开文件用） */
-  taskId?: string
 }
 
 /**
@@ -175,9 +175,8 @@ export interface PendingFile {
     file_id: string
     filename: string
     mime_type: string
-    media_type: string
-    size: number
-    url: string
+    file_type: string
+    base64_data?: string
   }
 }
 

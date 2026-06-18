@@ -7,7 +7,7 @@
 4. 清理失败不阻塞容器完成
 5. 容器无子任务时跳过清理
 6. worktree/分支已不存在的优雅处理
-7. 在 change(status=completed) 流程中集成清理
+7. 在 complete_container 流程中集成清理
 """
 
 from __future__ import annotations
@@ -320,18 +320,15 @@ class TestCleanupSubtaskWorktrees:
         assert result["cleaned_count"] == 1
 
 
-# ── _change_status 集成测试 ──────────────────────────
+# ── _complete_container 集成测试 ──────────────────────────
 
 
 class TestCompleteContainerIntegration:
-    """_change_status(status=completed) 集成清理步骤的测试。
-
-    change action 替代旧 complete_container，status=completed 时调用清理。
-    """
+    """_complete_container 集成清理步骤的测试。"""
 
     @pytest.mark.asyncio
-    async def test_change_completed_calls_cleanup(self) -> None:
-        """change(status=completed) 在完成前调用子任务 worktree 清理。"""
+    async def test_complete_container_calls_cleanup(self) -> None:
+        """complete_container 在完成前调用子任务 worktree 清理。"""
         container, subtasks = _make_container_with_subtasks(
             subtask_workspaces=["/ws/sub_001"],
         )
@@ -344,7 +341,7 @@ class TestCompleteContainerIntegration:
         tool = TaskTool()
         tool._task_service = svc
 
-        with patch.object(svc, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
+        with patch.object(tool, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
             mock_cleanup.return_value = {
                 "total_subtasks": 1,
                 "cleaned_count": 1,
@@ -353,10 +350,9 @@ class TestCompleteContainerIntegration:
                 "errors": [],
             }
 
-            result = await tool._change_status(
+            result = await tool._complete_container(
                 inputs={
                     "task_id": container.id,
-                    "status": "completed",
                     "container_reason": "所有子任务完成",
                 },
                 parent_agent_level=1,
@@ -366,7 +362,7 @@ class TestCompleteContainerIntegration:
         mock_cleanup.assert_called_once_with(container, subtasks)
 
     @pytest.mark.asyncio
-    async def test_change_completed_cleanup_failure_does_not_block(self) -> None:
+    async def test_complete_container_cleanup_failure_does_not_block(self) -> None:
         """清理失败不影响容器完成。"""
         container, subtasks = _make_container_with_subtasks(
             subtask_workspaces=["/ws/sub_001"],
@@ -380,7 +376,7 @@ class TestCompleteContainerIntegration:
         tool = TaskTool()
         tool._task_service = svc
 
-        with patch.object(svc, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
+        with patch.object(tool, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
             # 清理函数返回错误，但不应阻塞容器完成
             mock_cleanup.return_value = {
                 "total_subtasks": 1,
@@ -390,8 +386,8 @@ class TestCompleteContainerIntegration:
                 "errors": ["清理失败"],
             }
 
-            result = await tool._change_status(
-                inputs={"task_id": container.id, "status": "completed", "container_reason": "测试"},
+            result = await tool._complete_container(
+                inputs={"task_id": container.id, "container_reason": "测试"},
                 parent_agent_level=1,
             )
 
@@ -399,7 +395,7 @@ class TestCompleteContainerIntegration:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_change_completed_cleanup_exception_does_not_block(self) -> None:
+    async def test_complete_container_cleanup_exception_does_not_block(self) -> None:
         """清理函数抛异常不影响容器完成。"""
         container, subtasks = _make_container_with_subtasks(
             subtask_workspaces=["/ws/sub_001"],
@@ -413,12 +409,12 @@ class TestCompleteContainerIntegration:
         tool = TaskTool()
         tool._task_service = svc
 
-        with patch.object(svc, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
+        with patch.object(tool, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
             # 清理函数抛出未预期异常
             mock_cleanup.side_effect = RuntimeError("unexpected")
 
-            result = await tool._change_status(
-                inputs={"task_id": container.id, "status": "completed", "container_reason": "测试"},
+            result = await tool._complete_container(
+                inputs={"task_id": container.id, "container_reason": "测试"},
                 parent_agent_level=1,
             )
 
@@ -426,8 +422,8 @@ class TestCompleteContainerIntegration:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_change_completed_returns_cleanup_info(self) -> None:
-        """change(status=completed) 返回清理信息。"""
+    async def test_complete_container_returns_cleanup_info(self) -> None:
+        """complete_container 返回清理信息。"""
         container, subtasks = _make_container_with_subtasks(
             subtask_workspaces=["/ws/sub_001", "/ws/sub_002"],
         )
@@ -440,7 +436,7 @@ class TestCompleteContainerIntegration:
         tool = TaskTool()
         tool._task_service = svc
 
-        with patch.object(svc, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
+        with patch.object(tool, "_cleanup_subtask_worktrees", new_callable=AsyncMock) as mock_cleanup:
             mock_cleanup.return_value = {
                 "total_subtasks": 2,
                 "cleaned_count": 2,
@@ -449,15 +445,15 @@ class TestCompleteContainerIntegration:
                 "errors": [],
             }
 
-            result = await tool._change_status(
-                inputs={"task_id": container.id, "status": "completed"},
+            result = await tool._complete_container(
+                inputs={"task_id": container.id},
                 parent_agent_level=1,
             )
 
         assert result.success is True
         # 返回数据中包含清理信息
-        assert result.output["cleanup"]["total_subtasks"] == 2
-        assert result.output["cleanup"]["cleaned_count"] == 2
+        assert result.data["cleanup"]["total_subtasks"] == 2
+        assert result.data["cleanup"]["cleaned_count"] == 2
 
 
 def _make_container_with_subtrees_with_errors() -> tuple[TaskModel, list[TaskModel]]:

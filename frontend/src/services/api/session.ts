@@ -94,14 +94,6 @@ interface BackendMessageResponse {
   toolResult?: unknown
   toolError?: string
   durationMs?: number
-  attachments?: Array<{
-    id?: string
-    name: string
-    type?: string
-    mime_type?: string
-    url: string
-    size?: number
-  }>
 }
 
 /**
@@ -267,60 +259,9 @@ function mapBackendMessageToMessage(
       ...(backendMessage.agentName ? { agentName: backendMessage.agentName } : {}),
     },
     clientMessageId: (backendMessage.metadata?.client_message_id as string | undefined) ?? undefined,
-    attachments: backendMessage.attachments,
     thinking,
     parts: parts.length > 0 ? parts : undefined,
   }
-}
-
-/**
- * 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序
- *
- * 渲染层（buildFragmentsFromParts）按 part.sequence 数值升序渲染，
- * 因此合并后 parts 的 sequence 数值顺序必须等于其逻辑顺序（thinking→text→tool）。
- *
- * 两条约束：
- * 1. 单条消息内 parts 已是正确逻辑顺序，合并后不能因「全局数值排序」打散——
- *    多条 API 消息各自 parts 从 0 起算，若按数值排序会把所有 thinking 聚到前面、
- *    所有 text 聚到后面，思考内容与所属回复「分家」（见复现测试）。
- * 2. 不破坏流式期间分配的大数 sequence（Date.now()），避免与未合并消息的 React key 碰撞。
- *
- * 策略：按「消息分组」处理，每组保留内部 parts 的原始相对顺序；
- *   - 组内 sequence 无冲突（流式大数，单条消息）→ 原样保留；
- *   - 组内/跨组出现冲突（多条 API 消息各自从 0 起算）→ 从组内最大 sequence +1 续接，
- *     续接发生在出现冲突的具体 part 上，不打乱其它 part 的既有顺序。
- *
- * BUG-FIX-fix_20260622_part_sequence_collision:
- *   保留流式大数 sequence，不全局重编。
- * BUG-FIX-fix_20260624_thinking_text_split:
- *   问题根因: 上一版修复用全局数值排序去重，把「A.thinking(0),B.thinking(0),A.text(1),
- *     B.text(1)」排成 thinking×2→text×2，思考与回复分家。改为按消息分组顺序处理，
- *     保持每条消息内 parts 的原始相对顺序。
- */
-function dedupePartSequences(partsByMessage: any[][]): any[] {
-  const result: any[] = []
-  const seen = new Set<number>()
-  // 组内最大 sequence：续接基准，随处理推进单调递增
-  let maxSeq = 0
-  for (const group of partsByMessage) {
-    for (const p of group) {
-      const seq = p.sequence
-      if (seq != null && !seen.has(seq)) {
-        // 无冲突：保留原 sequence，仅更新基准
-        seen.add(seq)
-        if (seq > maxSeq) maxSeq = seq
-        result.push(p)
-      } else {
-        // 冲突或缺失：从当前最大 sequence +1 续接，保证单调且不与已有值碰撞
-        maxSeq += 1
-        while (seen.has(maxSeq)) maxSeq += 1
-        seen.add(maxSeq)
-        p.sequence = maxSeq
-        result.push(p)
-      }
-    }
-  }
-  return result
 }
 
 /**
@@ -335,17 +276,6 @@ function dedupePartSequences(partsByMessage: any[][]): any[] {
  * BUG-FIX-fix_20260617_prepend_boundary_merge:
  * 导出此函数，供 pipelineMessageStore 在 prepend/initFromAPI 合并完整列表后调用，
  * 确保跨 API 分页边界的连续 assistant 消息也能被正确合并。
- *
- * BUG-FIX-fix_20260622_part_sequence_collision:
- * 问题根因: 原代码用全局计数器 globalSeq++ 重写所有 part 的 sequence，
- *   破坏了流式期间按 Date.now() 分配的唯一 sequence，导致合并后与未合并消息的
- *   part sequence 冲突，渲染层 React key 碰撞，出现「思考+文本+思考+文本」乱序
- *   和文本气泡重复。
- * 修复方案: 保留每个 part 的原始 sequence；仅当合并组内出现 sequence 冲突
- *   （多条 API 消息各自的 parts 都从 0 起算导致同值）时，对冲突 part 在组内
- *   从最大 sequence +1 续接。不破坏流式大数 sequence 的稳定性。
- * 影响范围: 切换页面/向上翻页时连续 assistant 消息的 part 渲染稳定性
- * 修复日期: 2026-06-22
  */
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
@@ -400,11 +330,10 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       .map((m) => m.content)
       .filter((c) => c?.trim())
       .join('\n\n')
-    // 保留每个 part 的原始 sequence（流式大数 / API 局部小数），仅消除组内冲突。
-    // 按消息分组传入（而非 flatMap 打平），dedupePartSequences 据此保持每条消息内
-    // parts 的逻辑顺序，避免思考内容与回复分家。
-    const partsByMessage = group.map((m) => (m.parts || []).map((p: any) => ({ ...p })))
-    const mergedParts = dedupePartSequences(partsByMessage)
+    let globalSeq = 0
+    const mergedParts = group.flatMap((m) =>
+      (m.parts || []).map((p: any) => ({ ...p, sequence: globalSeq++ })),
+    )
     if (!mergedContent && mergedParts.length === 0) {
       for (const m of group) result.push(m)
       continue

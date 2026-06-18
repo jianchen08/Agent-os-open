@@ -94,19 +94,6 @@ export function useRealtimeEvents(): void {
             })
           })
       }
-
-      // BUG-FIX-fix_20260621_workspace_empty_no_retry:
-      // 问题根因: WS 重连只补消息，不重新同步模块。若初始化时因网络问题未创建
-      //          workspace tabs，工作区会持续显示"工作区为空 — 模块激活后自动出现"，
-      //          直到后端推送 SCHEMA_UPDATED 事件或重新登录才恢复。
-      // 修复方案: WS 重连时若工作区 tab 缺失，重新拉取并同步模块。
-      // 影响范围: 网络恢复后工作区面板的自动恢复
-      // 修复日期: 2026-06-21
-      import('@/services/modules/ModuleManager')
-        .then(({ moduleManager }) => moduleManager.syncOnReconnect())
-        .catch(() => {
-          // syncOnReconnect 内部已兜底，此处仅防止未捕获 rejection
-        })
     }
 
     // ---- Execution progress handlers ----
@@ -340,7 +327,6 @@ export function useRealtimeEvents(): void {
 
     // Task lifecycle events
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate as any)
-    globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged as any)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted as any)
 
     // Module schema update events (event-driven, replaces polling)

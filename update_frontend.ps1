@@ -7,18 +7,7 @@ $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 $markFile = Join-Path $ROOT '.frontend_built_at'
 $hashFile = Join-Path $ROOT '.frontend_src_hash'
 $frontendDir = Join-Path $ROOT 'frontend'
-
-# BUG-FIX-fix_20260621_wrong_container_name:
-# 问题根因: 原代码硬编码容器名 'agent-os-frontend-036fa'，但不同项目实例容器名
-#          后缀不同（22404/036fa/...）。当前项目 (22404) 改前端代码后，构建产物
-#          被 docker cp 注入到了错误的容器 (036fa)，导致工作区持续显示
-#          "工作区为空 — 模块激活后自动出现"（旧代码请求 /api/modules/ui 返回 404）。
-# 修复方案: 用 `docker compose ps -q frontend` 动态获取当前 compose 项目的
-#          frontend 容器 ID，不再依赖硬编码容器名。
-# 影响范围: 前端代码热更新（start_web.bat 触发的 update_frontend.ps1）
-# 修复日期: 2026-06-21
-$containerName = (docker compose ps -q frontend 2>$null | Where-Object { $_.Trim() } | Select-Object -First 1)
-if ($containerName) { $containerName = $containerName.Trim() }
+$containerName = 'agent-os-frontend-036fa'
 
 # 1. Determine if update is needed by comparing content hash of frontend/src
 # BUG-FIX-20260618: switched from LastWriteTime to content-hash detection

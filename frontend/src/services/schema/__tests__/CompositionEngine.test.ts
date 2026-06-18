@@ -42,7 +42,7 @@ vi.mock('@/services/schema/parser', () => ({
     return { moduleId, collection, query: {} }
   }),
   resolveDataSource: vi.fn((ref: any) => ({
-    endpoint: `/api/v1/modules/${ref.moduleId}/data/${ref.collection}`,
+    endpoint: `/api/modules/${ref.moduleId}/data/${ref.collection}`,
     method: 'GET',
     params: {},
     supportsPolling: true,
@@ -217,7 +217,7 @@ describe('CompositionEngine - 数据源引用解析', () => {
     }
     const result = engine.resolve(node)
     expect(result.component?.resolvedDataSource).toBeDefined()
-    expect(result.component?.resolvedDataSource?.endpoint).toBe('/api/v1/modules/module/data/items')
+    expect(result.component?.resolvedDataSource?.endpoint).toBe('/api/modules/module/data/items')
     expect(result.component?.resolvedDataSource?.method).toBe('GET')
   })
 

@@ -24,7 +24,7 @@ class TestModuleIdentity:
 
     def test_create_with_required_fields_only(self) -> None:
         """仅提供必填字段 id 和 name 时应成功创建。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         identity = ModuleIdentity(id="test", name="测试模块")
         assert identity.id == "test"
@@ -32,7 +32,7 @@ class TestModuleIdentity:
 
     def test_default_values_filled(self) -> None:
         """未提供的可选字段应自动填充默认值。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         identity = ModuleIdentity(id="test", name="测试")
         assert identity.version == "1.0.0"
@@ -44,7 +44,7 @@ class TestModuleIdentity:
 
     def test_create_with_all_fields(self) -> None:
         """提供所有字段时应成功创建。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         identity = ModuleIdentity(
             id="pm",
@@ -62,7 +62,7 @@ class TestModuleIdentity:
 
     def test_category_literal_values(self) -> None:
         """category 应接受 builtin/extension/custom 三种合法值。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         for valid in ("builtin", "extension", "custom"):
             identity = ModuleIdentity(id="t", name="t", category=valid)
@@ -70,21 +70,21 @@ class TestModuleIdentity:
 
     def test_missing_id_raises_validation_error(self) -> None:
         """缺少必填字段 id 应抛出 ValidationError。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         with pytest.raises(ValidationError):
             ModuleIdentity(name="Test")
 
     def test_missing_name_raises_validation_error(self) -> None:
         """缺少必填字段 name 应抛出 ValidationError。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         with pytest.raises(ValidationError):
             ModuleIdentity(id="test")
 
     def test_serialization_round_trip(self) -> None:
         """序列化后反序列化应保持数据一致。"""
-        from ui_schema.types import ModuleIdentity  # noqa: PLC0415
+        from ui_schema.types import ModuleIdentity
 
         original = ModuleIdentity(
             id="round_trip",
@@ -112,7 +112,7 @@ class TestModuleAction:
 
     def test_create_minimal(self) -> None:
         """最小化创建应成功。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         action = ModuleAction(id="generate", name="生成图片")
         assert action.id == "generate"
@@ -129,15 +129,15 @@ class TestModuleAction:
 
     def test_type_literal_values(self) -> None:
         """type 应接受 command/query/event/stream 四种合法值。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         for valid in ("command", "query", "event", "stream"):
             action = ModuleAction(id="a", name="b", type=valid)
             assert action.type == valid
 
-    def test_alias_mapping_requiresConfirmation(self) -> None:  # noqa: N802
+    def test_alias_mapping_requiresConfirmation(self) -> None:
         """requiresConfirmation 别名映射正确。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         action = ModuleAction(
             id="test",
@@ -154,24 +154,24 @@ class TestModuleAction:
         )
         assert action2.requires_confirmation is True
 
-    def test_alias_mapping_isDangerous(self) -> None:  # noqa: N802
+    def test_alias_mapping_isDangerous(self) -> None:
         """isDangerous 别名映射正确。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         action = ModuleAction(id="t", name="t", isDangerous=True)
         assert action.is_dangerous is True
 
-    def test_alias_mapping_inputSchema(self) -> None:  # noqa: N802
+    def test_alias_mapping_inputSchema(self) -> None:
         """inputSchema 别名映射正确。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         schema_def = {"type": "object", "properties": {"name": {"type": "string"}}}
         action = ModuleAction(id="t", name="t", inputSchema=schema_def)
         assert action.input_schema == schema_def
 
-    def test_alias_mapping_outputSchema(self) -> None:  # noqa: N802
+    def test_alias_mapping_outputSchema(self) -> None:
         """outputSchema 别名映射正确。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         schema_def = {"type": "array"}
         action = ModuleAction(id="t", name="t", outputSchema=schema_def)
@@ -179,7 +179,7 @@ class TestModuleAction:
 
     def test_serialization_by_alias(self) -> None:
         """model_dump(by_alias=True) 应输出驼峰命名。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         action = ModuleAction(
             id="t",
@@ -197,14 +197,14 @@ class TestModuleAction:
 
     def test_missing_id_raises_validation_error(self) -> None:
         """缺少必填字段 id 应抛出 ValidationError。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         with pytest.raises(ValidationError):
             ModuleAction(name="test")
 
     def test_missing_name_raises_validation_error(self) -> None:
         """缺少必填字段 name 应抛出 ValidationError。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         with pytest.raises(ValidationError):
             ModuleAction(id="test")
@@ -220,7 +220,7 @@ class TestChatInteractionConfig:
 
     def test_all_interaction_types(self) -> None:
         """所有 8 种交互类型应可创建。"""
-        from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
+        from ui_schema.types import ChatInteractionConfig
 
         for itype in (
             "form", "chart", "gallery", "table",
@@ -229,23 +229,23 @@ class TestChatInteractionConfig:
             config = ChatInteractionConfig(type=itype)
             assert config.type == itype
 
-    def test_alias_dataSource(self) -> None:  # noqa: N802
+    def test_alias_dataSource(self) -> None:
         """dataSource 别名映射正确。"""
-        from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
+        from ui_schema.types import ChatInteractionConfig
 
         config = ChatInteractionConfig(type="form", dataSource="module://items")
         assert config.data_source == "module://items"
 
-    def test_alias_refreshInterval(self) -> None:  # noqa: N802
+    def test_alias_refreshInterval(self) -> None:
         """refreshInterval 别名映射正确。"""
-        from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
+        from ui_schema.types import ChatInteractionConfig
 
         config = ChatInteractionConfig(type="chart", refreshInterval=30000)
         assert config.refresh_interval == 30000
 
     def test_default_values(self) -> None:
         """可选字段默认值应为 None。"""
-        from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
+        from ui_schema.types import ChatInteractionConfig
 
         config = ChatInteractionConfig(type="form")
         assert config.props is None
@@ -254,7 +254,7 @@ class TestChatInteractionConfig:
 
     def test_missing_type_raises_validation_error(self) -> None:
         """缺少必填字段 type 应抛出 ValidationError。"""
-        from ui_schema.types import ChatInteractionConfig  # noqa: PLC0415
+        from ui_schema.types import ChatInteractionConfig
 
         with pytest.raises(ValidationError):
             ChatInteractionConfig()
@@ -268,9 +268,9 @@ class TestChatInteractionConfig:
 class TestLayoutConfig:
     """LayoutConfig 类型测试。"""
 
-    def test_alias_minWidth_minHeight(self) -> None:  # noqa: N802
+    def test_alias_minWidth_minHeight(self) -> None:
         """minWidth/minHeight 别名映射正确。"""
-        from ui_schema.types import LayoutConfig  # noqa: PLC0415
+        from ui_schema.types import LayoutConfig
 
         layout = LayoutConfig(minWidth=100, minHeight=50)
         assert layout.min_width == 100
@@ -278,7 +278,7 @@ class TestLayoutConfig:
 
     def test_all_fields_none_by_default(self) -> None:
         """所有字段默认值应为 None。"""
-        from ui_schema.types import LayoutConfig  # noqa: PLC0415
+        from ui_schema.types import LayoutConfig
 
         layout = LayoutConfig()
         assert layout.width is None
@@ -300,7 +300,7 @@ class TestRenderingSpaceConfig:
 
     def test_create_with_all_fields(self) -> None:
         """创建包含所有字段的渲染空间配置。"""
-        from ui_schema.types import RenderingSpaceConfig  # noqa: PLC0415
+        from ui_schema.types import RenderingSpaceConfig
 
         space = RenderingSpaceConfig(
             space="workspace",
@@ -318,7 +318,7 @@ class TestRenderingSpaceConfig:
 
     def test_default_values(self) -> None:
         """默认 space 为 workspace，widget 为空字符串。"""
-        from ui_schema.types import RenderingSpaceConfig  # noqa: PLC0415
+        from ui_schema.types import RenderingSpaceConfig
 
         space = RenderingSpaceConfig()
         assert space.space == "workspace"
@@ -339,7 +339,7 @@ class TestDockConfig:
 
     def test_default_values(self) -> None:
         """默认值正确。"""
-        from ui_schema.types import DockConfig  # noqa: PLC0415
+        from ui_schema.types import DockConfig
 
         dock = DockConfig()
         assert dock.icon is None
@@ -347,9 +347,9 @@ class TestDockConfig:
         assert dock.indicator == "none"
         assert dock.indicator_color is None
 
-    def test_alias_indicatorColor(self) -> None:  # noqa: N802
+    def test_alias_indicatorColor(self) -> None:
         """indicatorColor 别名映射正确。"""
-        from ui_schema.types import DockConfig  # noqa: PLC0415
+        from ui_schema.types import DockConfig
 
         dock = DockConfig(indicatorColor="#52c41a")
         assert dock.indicator_color == "#52c41a"
@@ -363,9 +363,9 @@ class TestDockConfig:
 class TestFullscreenConfig:
     """FullscreenConfig 类型测试。"""
 
-    def test_alias_triggerEvent_autoEnter(self) -> None:  # noqa: N802
+    def test_alias_triggerEvent_autoEnter(self) -> None:
         """别名映射正确。"""
-        from ui_schema.types import FullscreenConfig  # noqa: PLC0415
+        from ui_schema.types import FullscreenConfig
 
         config = FullscreenConfig(triggerEvent="on_full_edit", autoEnter=True)
         assert config.trigger_event == "on_full_edit"
@@ -382,7 +382,7 @@ class TestModuleRendering:
 
     def test_default_chat_and_spaces_empty(self) -> None:
         """默认 chat 和 spaces 应为空列表。"""
-        from ui_schema.types import ModuleRendering  # noqa: PLC0415
+        from ui_schema.types import ModuleRendering
 
         rendering = ModuleRendering()
         assert rendering.chat == []
@@ -401,7 +401,7 @@ class TestClientCapabilities:
 
     def test_default_values(self) -> None:
         """默认 required_spaces 和 required_widgets 为空列表。"""
-        from ui_schema.types import ClientCapabilities  # noqa: PLC0415
+        from ui_schema.types import ClientCapabilities
 
         caps = ClientCapabilities()
         assert caps.required_spaces == []
@@ -411,7 +411,7 @@ class TestClientCapabilities:
 
     def test_create_with_fallback(self) -> None:
         """创建包含降级方案的客户端能力。"""
-        from ui_schema.types import ClientCapabilities  # noqa: PLC0415
+        from ui_schema.types import ClientCapabilities
 
         caps = ClientCapabilities(
             required_spaces=["chat", "workspace"],
@@ -423,9 +423,9 @@ class TestClientCapabilities:
         assert caps.fallback["widget"] == "status_card"
         assert caps.min_client_version == "1.0.0"
 
-    def test_alias_minClientVersion(self) -> None:  # noqa: N802
+    def test_alias_minClientVersion(self) -> None:
         """minClientVersion 别名映射正确。"""
-        from ui_schema.types import ClientCapabilities  # noqa: PLC0415
+        from ui_schema.types import ClientCapabilities
 
         caps = ClientCapabilities(minClientVersion="2.0.0")
         assert caps.min_client_version == "2.0.0"
@@ -439,9 +439,9 @@ class TestClientCapabilities:
 class TestModuleUISchema:
     """ModuleUISchema 完整类型测试。"""
 
-    def _make_schema(self, **kwargs) -> ModuleUISchema:  # noqa: F821
+    def _make_schema(self, **kwargs) -> ModuleUISchema:
         """创建测试用 Schema。"""
-        from ui_schema.types import (  # noqa: PLC0415
+        from ui_schema.types import (
             ClientCapabilities,
             ModuleIdentity,
             ModuleRendering,
@@ -459,7 +459,7 @@ class TestModuleUISchema:
 
     def test_create_full_schema(self) -> None:
         """创建完整的 UI Schema。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         schema = self._make_schema(
             actions=[ModuleAction(id="run", name="运行", type="command")],
@@ -471,7 +471,7 @@ class TestModuleUISchema:
 
     def test_default_actions_rendering_clients(self) -> None:
         """不提供 actions/rendering/clients 时应使用默认值。"""
-        from ui_schema.types import ModuleUISchema  # noqa: PLC0415
+        from ui_schema.types import ModuleUISchema
 
         schema = ModuleUISchema(
             identity={"id": "minimal", "name": "Minimal"},
@@ -489,7 +489,7 @@ class TestModuleUISchema:
 
     def test_serialization_by_alias(self) -> None:
         """model_dump(by_alias=True) 输出前端兼容的驼峰命名。"""
-        from ui_schema.types import ModuleAction  # noqa: PLC0415
+        from ui_schema.types import ModuleAction
 
         schema = self._make_schema(
             actions=[
@@ -508,7 +508,7 @@ class TestModuleUISchema:
 
     def test_missing_identity_raises_validation_error(self) -> None:
         """缺少必填字段 identity 应抛出 ValidationError。"""
-        from ui_schema.types import ModuleUISchema  # noqa: PLC0415
+        from ui_schema.types import ModuleUISchema
 
         with pytest.raises(ValidationError):
             ModuleUISchema()

@@ -450,14 +450,14 @@ class MemoryContextService:
     # 压缩结果持久化
     # ------------------------------------------------------------------
 
-    async def _save_compression_result(  # noqa: PLR0912,PLR0915
+    async def _save_compression_result(
         self, old_msgs: list[dict[str, Any]], comp_result: dict[str, Any],
     ) -> None:
         """保存压缩块到 ChunkService + 覆盖状态快照 + 写入长期记忆。"""
         if not self._chunk_service or not self._pipeline_id:
             return
 
-        from memory.types import ChunkData  # noqa: PLC0415
+        from memory.types import ChunkData
 
         l1_content = comp_result.get("l1", "")
         l2_content = comp_result.get("l2", "")
@@ -467,6 +467,11 @@ class MemoryContextService:
         msg_count = len(old_msgs)
         context_window = self._config.get("context_window", 0)
 
+        # BUG-FIX: sequence 范围直接从被压缩消息的 _record_sequence 取实际值，
+        # 而非从已有块递增。重启后压缩同一批消息时，已有块的
+        # sequence_end 会被累加（如 1-1027, 1028-2089），
+        # 但实际覆盖的是同一批消息，导致多个块范围"不重叠"的假象。
+        # 正确做法：直接用消息自身的 sequence 字段。
         sequences = [
             m["_record_sequence"] for m in old_msgs
             if "_record_sequence" in m and isinstance(m["_record_sequence"], int)
@@ -531,7 +536,7 @@ class MemoryContextService:
             except Exception:
                 pass
 
-            import json  # noqa: PLC0415
+            import json
             ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
             snapshot_chunk = ChunkData(
                 pipeline_run_id=self._pipeline_id,
@@ -592,8 +597,8 @@ class MemoryContextService:
         """
         # 优先：通过 router_factory 获取共享 Adapter（统一通道）
         try:
-            from config.models import get_model_config_loader  # noqa: PLC0415
-            from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
+            from config.models import get_model_config_loader
+            from llm.router_factory import get_or_create_adapter
 
             loader = get_model_config_loader()
             adapter = get_or_create_adapter(loader)
@@ -604,7 +609,7 @@ class MemoryContextService:
                 if model_conf:
                     provider = model_conf.get("provider", "")
                     bare_name = model_conf.get("model_name", model_id)
-                    from llm.router_factory import _get_litellm_model_string  # noqa: PLC0415
+                    from llm.router_factory import _get_litellm_model_string
                     litellm_model = _get_litellm_model_string(provider, bare_name)
 
                     async def _call_via_shared_adapter(prompt: str) -> str:
@@ -654,7 +659,7 @@ class MemoryContextService:
         if not self._compression_model_id:
             return None
         try:
-            from config.models import get_model_config_loader  # noqa: PLC0415
+            from config.models import get_model_config_loader
             loader = get_model_config_loader()
             conf = loader.get_llm_core_config(self._compression_model_id)
             if conf and conf.get("context_window"):

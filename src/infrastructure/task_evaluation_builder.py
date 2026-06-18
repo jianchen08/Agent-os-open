@@ -24,7 +24,7 @@ class TaskEvaluationBuilderMixin:
     和 _build_full_task_input 方法，由 TaskWorker 通过多继承组合使用。
     """
 
-    def _build_evaluation_criteria_prompt(  # noqa: PLR0912
+    def _build_evaluation_criteria_prompt(
         self, acceptance_criteria: dict[str, Any],
     ) -> str:
         """根据验收标准中的指标 ID 加载完整指标定义，生成可读的评估说明文本。
@@ -43,7 +43,7 @@ class TaskEvaluationBuilderMixin:
             return ""
 
         try:
-            from evaluation.loader import MetricLoader  # noqa: PLC0415
+            from evaluation.loader import MetricLoader
         except ImportError:
             logger.debug("[TaskWorker] evaluation.loader 不可用，跳过指标原文注入")
             return ""
@@ -111,7 +111,7 @@ class TaskEvaluationBuilderMixin:
             规范化后的验收标准字典或列表
         """
         workspace_normalized = workspace.replace("\\", "/").rstrip("/")
-        from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+        from isolation.workspace import get_workspace_config_root
         _ws_root_name = Path(get_workspace_config_root()).name + "/"
 
         def _to_relative(value_normalized: str) -> str:
@@ -146,7 +146,7 @@ class TaskEvaluationBuilderMixin:
                 return [_normalize_value(item) for item in value]
             if isinstance(value, str):
                 value_normalized = value.replace("\\", "/")
-                if os.path.isabs(value_normalized):  # noqa: PTH117
+                if os.path.isabs(value_normalized):
                     return value_normalized
                 return _to_relative(value_normalized)
             return value
@@ -198,6 +198,7 @@ class TaskEvaluationBuilderMixin:
                 if retry_message:
                     # 读取后清除，避免重试后再读到旧消息
                     _task_for_retry_msg.metadata.pop("retry_message", None)
+                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
                     await task_service.save_task(_task_for_retry_msg)
 
         full_input = user_input
@@ -224,7 +225,7 @@ class TaskEvaluationBuilderMixin:
 
         # 注入场景化工作空间提示
         if ws_meta:
-            _SCENE_PROMPTS = {  # noqa: N806
+            _SCENE_PROMPTS = {
                 "plain": "你在临时工作目录中执行任务。使用相对路径。完成后直接调用 task_evaluate",
                 "worktree": "你在目标项目的隔离副本中执行任务。使用相对路径。修改不影响原始项目。可运行 pytest/mypy/lint。评估通过后系统自动合并回目标项目",
                 "shared": "你在父任务的空间中执行任务。使用相对路径。完成后直接调用 task_evaluate",

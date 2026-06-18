@@ -95,7 +95,7 @@ class ErrorCheckPlugin(IOutputPlugin):
     @property
     def route_signals(self) -> list[str]:
         """本插件可能产出的路由信号类型。"""
-        return ["end", "next_llm", "wait"]
+        return ["end", "next_llm"]
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """执行错误检查。
@@ -115,7 +115,7 @@ class ErrorCheckPlugin(IOutputPlugin):
             return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行错误检查逻辑。
 
         检查顺序：raw_error → tool_missing → empty_response →
@@ -145,12 +145,14 @@ class ErrorCheckPlugin(IOutputPlugin):
         # 检查 LLM 回复中的知识不足指示
         if self._check_knowledge_insufficient:
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
-            if raw_result and self._is_knowledge_insufficient_response(raw_result):  # noqa: SIM102
+            if raw_result and self._is_knowledge_insufficient_response(raw_result):
                 # 结合记忆上下文判断
                 if self._is_knowledge_insufficient(ctx):
                     return self._handle_knowledge_insufficient(ctx)
 
         # 检查格式错误（但 LLM 返回 tool_calls 时不算格式错误）
+        # BUG-FIX: 工具执行结果(core_type=tool_execute)不是LLM生成的内容，
+        # 可能包含文件内容等，不能用LLM输出格式标准检查
         if self._check_format:
             core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
@@ -181,15 +183,6 @@ class ErrorCheckPlugin(IOutputPlugin):
         - tool_missing: 工具不存在或未注册
         - 其他: core_error（网络/超时/认证等）
 
-        错误处理分层（BUG-FIX-fix_20260624_transient_no_end）：
-        - **临时错误**（service_down / rate_limit / network / server_error）：
-          先 next_llm 短退避重试 _max_retries 次；耗尽后产 **wait** 信号
-          挂起等待（suspend_and_wait），由 idle 总超时兜底，绝不直接 end。
-          上游 LLM 抖动是常态，错误就等下次能调用时再调用，不应导致整条
-          pipeline 退出、子任务 failed、主管道死等。
-        - **永久错误**（auth/quota/bad_request/strategy_error）：
-          保持原 end 行为，这些是 LLM 无法自行恢复的。
-
         Args:
             ctx: 插件执行上下文
             error: 原始错误对象
@@ -200,14 +193,15 @@ class ErrorCheckPlugin(IOutputPlugin):
         error_str = str(error)
         retry_count = ctx.state.get("retry.count", 0)
 
+        # BUG-FIX-fix_20260418_all_tools_failed
+        # 问题根因: 工具全部失败时没有专门的错误类别，导致可能被误判为不可重试
+        # 修复方案: 添加 all_tools_failed 类别，标记为可重试让 LLM 有机会降级处理
+        # 影响范围: 所有工具执行流程的错误检查
         category = "core_error"
         if self._check_tool_missing and self._is_tool_missing_error(error_str):
             category = "tool_missing"
         elif "所有工具执行失败" in error_str:
             category = "all_tools_failed"
-
-        # 用统一分类器判断是否为临时错误（service_down/rate_limit/network/server_error）
-        is_transient = self._classify_transient(error)
 
         retryable = self._is_retryable_error(error_str, category)
         consecutive = self._track_consecutive_error(ctx, category)
@@ -216,7 +210,6 @@ class ErrorCheckPlugin(IOutputPlugin):
             "reason": error_str[:200],
             "category": category,
             "retry_count": retry_count,
-            "transient": is_transient,
         }
 
         if retryable and retry_count < self._max_retries:
@@ -237,32 +230,7 @@ class ErrorCheckPlugin(IOutputPlugin):
                     ),
                 ),
             }
-
-        # 临时错误重试耗尽：挂起等待，由 idle 总超时兜底，绝不直接 end。
-        # 这样上游 LLM 恢复后（被触发器/新消息/重发唤醒），pipeline 能继续，
-        # 不会出现"子任务 failed → 主管道死等"的死锁链。
-        if is_transient:
-            logger.warning(
-                "[error_check] 临时错误重试耗尽，挂起等待恢复 "
-                "(category=%s retry=%d/%d): %s",
-                category, retry_count, self._max_retries, error_str[:150],
-            )
-            return {
-                StateKeys.EXECUTION_STATUS: "waiting_recovery",
-                StateKeys.ERROR_ANALYSIS: analysis,
-                "error_check.last_error_type": category,
-                "error_check.consecutive_same_type": consecutive,
-                "__route_signal__": RouteSignal(
-                    route_type="wait",
-                    reason=(
-                        f"Transient {category} exhausted retries "
-                        f"({retry_count}/{self._max_retries}), "
-                        f"suspending for recovery: {error_str[:80]}"
-                    ),
-                ),
-            }
-
-        # 永久不可重试错误（auth/quota/bad_request/strategy）或重试用尽：产出 end 信号
+        # 不可重试或重试用尽：产出 end 信号
         return {
             StateKeys.EXECUTION_STATUS: "failed",
             StateKeys.ERROR_ANALYSIS: analysis,
@@ -277,80 +245,6 @@ class ErrorCheckPlugin(IOutputPlugin):
                 ),
             ),
         }
-
-    @staticmethod
-    def _classify_transient(error: Any) -> bool:
-        """判断错误是否为临时性（可等待恢复）错误。
-
-        用 llm.error_classifier.classify_error 做统一分类，避免在本插件里
-        重复嗅探异常字符串。临时错误种类：
-        - service_down (503)
-        - rate_limit (429)
-        - network (超时/连接失败)
-        - server_error (500)
-
-        这些错误的特点是「不是 LLM/任务本身的问题，是上游临时抖动」，
-        按"错误就等下再调用"的原则处理，由 idle 总超时兜底。
-
-        Args:
-            error: 错误对象（可能是异常、字符串，或 state 里存的
-                   "ExceptionType: message" 格式字符串）
-
-        Returns:
-            是否为临时错误
-        """
-        try:
-            from llm.error_classifier import classify_error  # noqa: PLC0415
-
-            # 优先用真实异常对象分类（类型名匹配最准）
-            if isinstance(error, BaseException):
-                info = classify_error(error)
-                return info.kind.value in (
-                    "service_down", "rate_limit", "network", "server_error",
-                )
-
-            # state["RAW_ERROR"] 存的是字符串。错误消息常以异常类型名开头
-            # （"ServiceUnavailableError: ..."）。解析出类型名后用 type()
-            # 动态构造一个同名异常，让分类器走类型名分支精确匹配。
-            msg = str(error)
-            type_prefix = ""
-            if ":" in msg:
-                type_prefix = msg.split(":", 1)[0].strip()
-
-            def _is_valid_type_name(name: str) -> bool:
-                """判断字符串是否像合法的 Python 异常类型名（首字母大写、无空格）。"""
-                return bool(name) and name[0].isupper() and " " not in name
-
-            if type_prefix and _is_valid_type_name(type_prefix):
-                # 动态创建一个名字正确的异常子类，使 type(exc).__name__ 命中
-                dyn_exc_cls = type(type_prefix, (Exception,), {})
-                info = classify_error(dyn_exc_cls(msg))
-                kind = info.kind.value
-                if kind in ("service_down", "rate_limit", "network", "server_error"):
-                    return True
-
-            # 兜底：分类器未识别时，对几个高置信度的临时关键词做本地嗅探，
-            # 避免把明显的 503/超时/限流漏判成永久错误。
-            msg_lower = msg.lower()
-            transient_markers = (
-                "service temporarily unavailable",
-                "service unavailable",
-                "503",
-                "502 bad gateway",
-                "bad gateway",
-                "rate limit",
-                "rate_limit",
-                "429",
-                "timeout",
-                "timed out",
-                "reading data from socket",
-                "connection reset",
-                "temporarily",
-            )
-            return any(m in msg_lower for m in transient_markers)
-        except Exception:
-            # 分类器不可用时保守按非临时处理，回退到原 end 逻辑
-            return False
 
     def _handle_empty_response(self, ctx: PluginContext) -> dict[str, Any]:
         """处理空响应。

@@ -503,7 +503,7 @@ class TestLongTermFullLifecycle:
         assert refine_check.status == TaskStatus.COMPLETED
         assert validate_check.status == TaskStatus.COMPLETED
 
-        # ── 容器完成验证（模拟灵汐通过 task_manage change status=completed 操作）──
+        # ── 容器完成验证（模拟灵汐通过 task_manage complete_container 操作）──
         svc._transition_with_callback(container, TaskStatus.COMPLETED)
         container.completed_at = datetime.now().isoformat()
         svc._storage.save(container)
@@ -539,7 +539,7 @@ class TestContainerManualCompletion:
         for sub in [sub1, sub2, sub3]:
             _complete_subtask(task_service, sub.id)
 
-        # 模拟主 Agent 通过 task_manage change status=completed 操作
+        # 模拟主 Agent 通过 task_manage complete_container 操作
         task_service._transition_with_callback(container, TaskStatus.COMPLETED)
         container.completed_at = datetime.now().isoformat()
         task_service._storage.save(container)
@@ -563,7 +563,7 @@ class TestContainerManualCompletion:
         _complete_subtask(task_service, sub1.id)
         _fail_subtask(task_service, sub2.id, error="细化失败")
 
-        # 模拟主 Agent 通过 task_manage change status=failed 操作
+        # 模拟主 Agent 通过 task_manage fail_container 操作
         task_service._transition_with_callback(container, TaskStatus.FAILED)
         container.error = "子任务失败，容器标记失败"
         task_service._storage.save(container)

@@ -18,7 +18,7 @@ _DEFAULT_WORKSPACE_ROOT = ".ai_workspaces"
 def _load_isolation_config() -> dict:
     """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
     try:
-        from config.config_center import get_config_center  # noqa: PLC0415
+        from config.config_center import get_config_center
         return get_config_center().get("isolation/isolation_config.yaml") or {}
     except Exception as e:
         logger.warning(f"读取 isolation 配置失败 | error={e}")
@@ -66,7 +66,7 @@ def _is_absolute_path(path_str: str) -> bool:
     return bool(path_str.startswith("/") and not path_str.startswith("//"))
 
 
-def resolve_workspace(  # noqa: PLR0911
+def resolve_workspace(
     task_id: str,
     task_workspace: str | None,
     parent_resolved_workspace: str | None = None,
@@ -98,6 +98,8 @@ def resolve_workspace(  # noqa: PLR0911
     """
     root = config_root or get_workspace_config_root()
 
+    # BUG-FIX-fix_20260422_workspace_nesting: 统一路径分隔符为正斜杠，
+    # 避免 LLM 传入反斜杠路径导致 startswith / == 比较失败，产生双重嵌套
     root = root.replace("\\", "/")
     if task_workspace:
         task_workspace = task_workspace.replace("\\", "/")
@@ -125,6 +127,12 @@ def resolve_workspace(  # noqa: PLR0911
         return parent_resolved_workspace
 
     if task_workspace:
+        # BUG-FIX-fix_20260420_workspace_abs_path:
+        # 问题根因: 子任务分支缺少绝对路径检查，当 task_workspace 是绝对路径(如
+        # D:\Jianguoyun\Agent os\.ai_workspaces\xxx)时，不以相对的 parent/root 前缀
+        # 开头，直接走到拼接逻辑，导致生成
+        # .ai_workspaces/parent/D:\Jianguoyun\Agent os\.ai_workspaces\xxx 这样的错误路径
+        # 修复方案: 增加绝对路径检查，与根任务分支(第76行)保持一致
         if _is_absolute_path(task_workspace):
             logger.debug(
                 f"[resolve_workspace] 子任务 task_workspace 是绝对路径，直接返回 | "
@@ -171,7 +179,7 @@ async def resolve_workspace_chain(
     Returns:
         解析后的工作空间路径字符串
     """
-    from src.db.models import Task  # noqa: PLC0415
+    from src.db.models import Task
 
     task = await session.get(Task, task_id)
     if not task:

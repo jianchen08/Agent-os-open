@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from typing import Any
 
@@ -106,6 +105,7 @@ class TaskPostPipelineMixin:
                     task_id, e,
                 )
         try:
+            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
             await task_service.move_to_evaluating(task_id)
         except Exception as e:
             logger.warning(
@@ -113,6 +113,7 @@ class TaskPostPipelineMixin:
                 task_id, e,
             )
             try:
+                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                 await task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
             except Exception as fail_exc:
                 logger.error(
@@ -123,6 +124,15 @@ class TaskPostPipelineMixin:
             ctx.cleanup(timer_manager)
             return
 
+        # BUG-FIX-fix_20260510_evaluating_stuck:
+        # 问题根因: move_to_evaluating 后直接 return，任务卡在 EVALUATING
+        #   永远不会触发实际评估。Agent 已调用 task_evaluate 但评估未完成，
+        #   管道退出后 move_to_evaluating 只改了状态，没有任何后续机制
+        #   推进评估。唯一兜底是系统重启时的 _recover_evaluating_tasks。
+        # 修复方案: move_to_evaluating 成功后，调用 _rerun_evaluation
+        #   触发实际评估执行（复用系统重启恢复的逻辑）。
+        # 影响范围: 所有管道退出时任务仍有 result 但未到终态的场景
+        # 修复日期: 2026-05-10
         ctx.set_terminal()
         ctx.cleanup(timer_manager)
         refreshed_task = task_service.get_task(task_id)
@@ -134,10 +144,13 @@ class TaskPostPipelineMixin:
                     "TaskWorker: _rerun_evaluation failed for %s: %s",
                     task_id, rerun_exc,
                 )
-                with contextlib.suppress(Exception):
+                try:
+                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(
                         task_id, f"管道退出后评估执行失败: {rerun_exc}",
                     )
+                except Exception:
+                    pass
 
     async def _fail_after_pipeline_exit(
         self,
@@ -163,6 +176,7 @@ class TaskPostPipelineMixin:
         stop_reason = pipeline_state.get("router.stop_reason", "") if pipeline_state else ""
         pipeline_id = pipeline_state.get("pipeline_id", "unknown") if pipeline_state else "unknown"
 
+        # BUG-FIX: 增强诊断 - 记录 engine._last_state 状态
         logger.info(
             "TaskWorker: _fail_after_pipeline_exit 诊断 | task=%s pipeline=%s "
             "state_empty=%s state_not_ended=%s iteration=%s/%s ended=%s "
@@ -174,14 +188,6 @@ class TaskPostPipelineMixin:
             raw_error or "(none)",
             stop_reason or "(none)",
         )
-
-        # 统计 LLM 错误类型分布（从 pipeline state 的单一数据源取）
-        # 供 task metadata、watchdog、通知器等任意消费方使用
-        from collections import Counter  # noqa: PLC0415
-        error_history = pipeline_state.get("llm_error_history", []) if pipeline_state else []
-        error_kinds: dict[str, int] = {}
-        if error_history:
-            error_kinds = dict(Counter(h["kind"] for h in error_history))
 
         # 根据实际原因构建精确的错误信息
         parts: list[str] = []
@@ -216,8 +222,7 @@ class TaskPostPipelineMixin:
             parts.append(
                 f"管道被中断(可能原因: 进程重启或被强制终止)"
                 f"(iterations={iteration_count}/{max_iter},"
-                f" ended={ended},"
-                f" pipeline={pipeline_id[:12] if isinstance(pipeline_id, str) else pipeline_id})"
+                f" ended={ended})"
             )
         else:
             # 其他未知原因
@@ -228,9 +233,6 @@ class TaskPostPipelineMixin:
 
         if error_analysis:
             parts.append(f"错误分析: {error_analysis}")
-        if error_kinds:
-            summary = "、".join(f"{k}:{v}次" for k, v in sorted(error_kinds.items(), key=lambda x: -x[1]))
-            parts.append(f"错误统计: {summary}")
         if task_complete is False:
             parts.append("Agent 标记任务未完成")
 
@@ -255,12 +257,14 @@ class TaskPostPipelineMixin:
         if task_service:
             await task_service.fail_task(
                 task_id, error_msg,
-                extra_meta={"error_kinds": error_kinds} if error_kinds else None,
             )
             logger.info(
                 "TaskWorker: task %s marked failed after pipeline exit: %s",
                 task_id, error_msg,
             )
+        # BUG-FIX: fail_task 后清理 idle 计时器
+        # 防止任务已标记 failed 但 idle 计时器
+        # 仍在检测中不断重建
         ctx.set_terminal()
         ctx.cleanup(timer_manager)
 

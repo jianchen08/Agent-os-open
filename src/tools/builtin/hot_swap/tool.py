@@ -155,7 +155,8 @@ def _action_swap_plugin(params: dict[str, Any]) -> dict[str, Any]:
         new_plugin = _load_plugin_instance(new_plugin_class_path)
 
         # 获取 PluginRegistry 和 HotSwapManager
-        from tools.tool_context import HotSwapManager, PluginRegistry  # noqa: PLC0415
+        from pipeline.hot_swap import HotSwapManager
+        from pipeline.registry import PluginRegistry
 
         plugin_registry = _get_service("plugin_registry")
         if plugin_registry is None:
@@ -218,7 +219,8 @@ def _action_rollback_plugin(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        from tools.tool_context import HotSwapManager, PluginRegistry  # noqa: PLC0415
+        from pipeline.hot_swap import HotSwapManager
+        from pipeline.registry import PluginRegistry
 
         plugin_registry = _get_service("plugin_registry")
         if plugin_registry is None:
@@ -427,20 +429,20 @@ def _load_plugin_instance(class_path: str) -> Any:
         raise ValueError(f"无效的类路径: {class_path}，格式应为 'module.ClassName'")
 
     module_path, class_name = parts
-    import importlib  # noqa: PLC0415
+    import importlib
 
     module = importlib.import_module(module_path)
     plugin_class = getattr(module, class_name)
     return plugin_class()
 
 
-def _get_rollback_manager() -> RollbackManager:  # noqa: F821
+def _get_rollback_manager() -> RollbackManager:
     """获取或创建 RollbackManager 实例（模块级单例）。
 
     Returns:
         RollbackManager 实例
     """
-    from tools.tool_context import RollbackManager  # noqa: PLC0415
+    from pipeline.rollback import RollbackManager
 
     # 尝试获取已有的 manager
     manager = _get_service("rollback_manager")
@@ -448,7 +450,7 @@ def _get_rollback_manager() -> RollbackManager:  # noqa: F821
         return manager
 
     # 使用模块级单例
-    global _rollback_manager_instance  # noqa: PLW0603
+    global _rollback_manager_instance
     if _rollback_manager_instance is not None:
         return _rollback_manager_instance
 
@@ -472,7 +474,7 @@ def _get_service(service_name: str) -> Any:
         服务实例，不可用时返回 None
     """
     try:
-        from channels.cli.cli_main import CLIMain  # noqa: PLC0415
+        from channels.cli.cli_main import CLIMain
 
         app = CLIMain.get_instance()
         if app is not None:

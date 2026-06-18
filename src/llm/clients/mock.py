@@ -180,16 +180,15 @@ class MockClient(LLMClient):
 
         if "你好" in user_lower or "hello" in user_lower:
             return "您好！我是测试模型，很高兴为您服务！"
-        elif "测试" in user_lower or "test" in user_lower:
+        if "测试" in user_lower or "test" in user_lower:
             return "这是一个测试响应。测试模型工作正常！"
-        elif "帮助" in user_lower or "help" in user_lower:
+        if "帮助" in user_lower or "help" in user_lower:
             return "我是一个测试模型，可以帮助您测试系统功能。请告诉我您需要什么帮助。"
-        elif "代码" in user_lower or "code" in user_lower:
+        if "代码" in user_lower or "code" in user_lower:
             return "我可以帮助您处理代码相关的问题。这是一个模拟的代码响应。"
-        elif "文件" in user_lower or "file" in user_lower:
+        if "文件" in user_lower or "file" in user_lower:
             return "我可以帮助您处理文件操作。这是一个模拟的文件处理响应。"
-        else:
-            return f"我收到了您的消息：「{user_message}」。这是一个模拟响应，用于测试系统功能。"
+        return f"我收到了您的消息：「{user_message}」。这是一个模拟响应，用于测试系统功能。"
 
     async def chat(self, message: str) -> str:
         """简单的聊天接口（兼容旧代码）"""

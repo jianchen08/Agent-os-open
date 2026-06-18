@@ -1,0 +1,28 @@
+========================================
+  Agent OS 启动
+========================================
+
+项目目录: D:\myproject\container_036fa50daf44
+
+[OK] Docker 就绪
+[INFO] 预热基础镜像（本地优先，缺失走镜像链）...
+[OK] 本地已有镜像: redis:7-alpine
+[OK] 本地已有镜像: node:20-alpine
+[OK] 本地已有镜像: python:3.11-slim
+[INFO] 启动 Docker 服务...
+[OK] Docker 服务已启动
+[INFO] 检查前端代码更新...
+[OK] Frontend code unchanged
+[OK] Python: C:\Users\jc\AppData\Local\Programs\Python\Python312\python.exe
+Python 3.12.10
+[OK] Python 依赖已安装
+[INFO] 启动 Agent...
+
+========================================
+  启动完成
+========================================
+  后端: http://localhost:8888
+  前端: http://localhost:5189
+  停止: 关闭 Agent 窗口 + docker compose down
+========================================
+Press any key to continue . . . 

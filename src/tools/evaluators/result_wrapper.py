@@ -29,7 +29,7 @@ class ResultWrapper:
         metric_name: str = "",
         evaluator_type: str = "tool",
         evaluator_id: str = "",
-        execution_time_ms: float | None = None,  # noqa: ARG004
+        execution_time_ms: float | None = None,
     ) -> EvaluationExecutionResult:
         """
         包装原始评估结果

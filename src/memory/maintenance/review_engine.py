@@ -261,12 +261,16 @@ class ReviewEngine:
 
         return result
 
-    async def _run_review_full(self, run_id: str) -> dict[str, Any]:  # noqa: PLR0912
+    async def _run_review_full(self, run_id: str) -> dict[str, Any]:
         """完整版复盘：基于 storage/chunk_db/knowledge_service。"""
         summary = self._storage.get_summary(run_id)
         if summary is None:
             return {"status": "error", "run_id": run_id, "message": "Pipeline not found"}
 
+        # BUG-FIX-fix_review_rejects_success_status:
+        # 原实现只认 status=="completed"，但 track 插件实际写入 success/failed，
+        # 导致真实数据里几乎所有 pending pipeline 都被拒（"Pipeline not completed"），
+        # 复盘经验产出永远为 0。与 get_pending_pipelines 用同一套终态集合判断。
         if summary.status not in self._TERMINAL_STATUSES:
             return {"status": "error", "run_id": run_id, "message": "Pipeline not completed"}
 
@@ -322,10 +326,15 @@ class ReviewEngine:
                 await self._knowledge_service.create_knowledge(
                     user_id="system",
                     content=content,
-                    source_type="experience",
+                    source_type="review_experience",
                 )
                 saved_counts["experiences"] += 1
 
+            # BUG-FIX-fix_review_misses_summary_error:
+            # 真实数据中 record.error 几乎总是空（错误只记在 summary.error），
+            # 原实现因此对 success/failed pipeline 产不出任何经验。
+            # 当记录级错误为 0 但 summary.error 非空时，用 summary.error 兜底产一条经验，
+            # 这是复盘最常见的产出路径（整管道级失败：如鉴权失败、连接错误）。
             if saved_counts["experiences"] == 0 and summary.error:
                 content = self._build_experience_content(
                     run_id, summary.status, summary.error,
@@ -340,7 +349,7 @@ class ReviewEngine:
                     await self._knowledge_service.create_knowledge(
                         user_id="system",
                         content=content,
-                        source_type="experience",
+                        source_type="review_experience",
                     )
                     saved_counts["experiences"] += 1
 
@@ -370,7 +379,7 @@ class ReviewEngine:
             }
 
     async def _load_existing_experiences(self) -> set[str] | None:
-        """加载已有经验，按 source_type='experience' 过滤。
+        """加载已有经验，按 source_type='review_experience' 过滤。
 
         Returns:
             已有经验内容集合；加载失败时返回 None（fail-closed），
@@ -382,7 +391,7 @@ class ReviewEngine:
             return {
                 item["content"]
                 for item in items
-                if item.get("source_type") == "experience"
+                if item.get("source_type") == "review_experience"
             }
         except Exception as e:
             # fail-closed：返回 None 让调用方跳过经验存储，避免空集合导致去重失效
@@ -483,7 +492,7 @@ class ReviewEngine:
             try:
                 chunks = await self._chunk_db.find_by_pipeline(run_id)
                 for chunk in chunks:
-                    chunk.extra_data["review_status"] = "completed"
+                    chunk.extra_data["reviewed"] = True
                     self._chunk_db.save_chunk(chunk)
             except Exception:
                 logger.warning("Failed to update chunk reviewed flags for %s", run_id)
@@ -502,12 +511,12 @@ class ReviewEngine:
         if run_ids is None:
             return self._run_review_simple()
 
-        import asyncio  # noqa: PLC0415
+        import asyncio
         results: list[dict[str, Any]] = []
         for rid in run_ids:
             try:
                 asyncio.get_running_loop()
-                import concurrent.futures  # noqa: PLC0415
+                import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     result = pool.submit(
                         asyncio.run, self._run_review_full(rid)

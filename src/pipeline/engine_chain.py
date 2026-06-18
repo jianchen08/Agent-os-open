@@ -89,6 +89,11 @@ async def execute_core_plugin(
             core_result = await core_plugin.execute(core_ctx)
             if isinstance(core_result, dict):
                 state.update(core_result)
+            # BUG-FIX-fix_20260603_stale_raw_error:
+            # Core 重试成功后，_handle_core_error 设置的 raw_error 和
+            # llm_error_info 仍残留在 state 中，导致 error_check 插件和
+            # llm_error_recovery 插件在下一轮产出错误的 end 信号或恢复提示。
+            # 重试成功时清除这些过期错误状态。
             state.pop("raw_error", None)
             state.pop("llm_error_info", None)
             logger.debug("Core plugin executed: core_type=%s", core_type)
@@ -101,7 +106,7 @@ async def execute_core_plugin(
                 core_retry_delay, core_plugin,
             )
             if _is_retryable(core_error_policy, core_attempts, max_core_retries, exc):
-                import random as _rand  # noqa: PLC0415
+                import random as _rand
                 exc_lower = str(exc).lower()
                 is_overload = "overloaded" in exc_lower or "529" in exc_lower
                 if is_overload:
@@ -126,7 +131,7 @@ def _is_retryable(
     exc: Exception,
 ) -> bool:
     """判断核心插件错误是否可重试。"""
-    from pipeline.types import ErrorPolicy as _EP  # noqa: N814,PLC0415
+    from pipeline.types import ErrorPolicy as _EP
     return error_policy == _EP.RETRY and attempts < max_retries + 1
 
 
@@ -149,14 +154,25 @@ def _handle_core_error(
     error_msg_lower = str(exc).lower()
 
     # 判断是否为可恢复错误（不计入连续错误）
-    # 基于 error_classifier 的 ErrorKind 派生，替代旧的字符串嗅探：
-    # transient = 临时性错误（限流/服务不可用/网络），不应计入连续错误强制结束
-    # fixable = LLM 可自行修复的错误（参数错误），也不计入
-    from llm.error_classifier import classify_error  # noqa: PLC0415
-    _info = classify_error(exc)
-    _transient_kinds = ("rate_limit", "service_down", "network", "server_error")
-    is_transient = _info.kind.value in _transient_kinds
-    is_fixable = _info.kind.value == "bad_request"
+    _transient_keywords = (
+        "overloaded", "529", "rate_limit",
+        "rate limit", "timeout", "timed out",
+        "503", "502", "connection",
+    )
+    is_transient = any(kw in error_msg_lower for kw in _transient_keywords)
+
+    _fixable_keywords = (
+        "context window exceeds",
+        "context_length_exceeded",
+        "context length",
+        "invalid function arguments",
+        "invalid params",
+    )
+    is_fixable = (
+        any(kw in error_msg_lower for kw in _fixable_keywords)
+        or ("max_tokens" in error_msg_lower and "exceed" in error_msg_lower)
+        or ("token" in error_msg_lower and "limit" in error_msg_lower)
+    )
 
     should_count = core_type == "llm_call" and not is_transient and not is_fixable
 
@@ -176,29 +192,34 @@ def _handle_core_error(
 
     # 构建 llm_error_info（仅 llm_call 类型）
     if core_type == "llm_call":
-        _build_llm_error_info(state, exc, core_type)
+        _build_llm_error_info(state, str(exc), core_type)
 
 
 def _build_llm_error_info(
-    state: dict[str, Any], exc: Exception, core_type: str,
+    state: dict[str, Any], error_msg: str, core_type: str,
 ) -> None:
-    """构建 llm_error_info 字典并存入 state，并追加到错误历史。
+    """构建 llm_error_info 字典并存入 state，由 llm_error_recovery 插件处理。
 
-    用统一的 error_classifier.classify_error 做分类（替代旧的字符串嗅探），
-    ErrorKind 决定 transient/fixable 语义，供 engine_chain 计数和
-    llm_error_recovery 插件按类型分支处理。
-
-    同时把每轮错误追加到 state[LLM_ERROR_HISTORY]，作为单一数据源，
-    task_post_pipeline / track / watchdog 等任意消费方都从这里取统计。
+    错误分类优先级：infrastructure > context_overflow > llm_fixable > unknown。
+    infrastructure_error 类（认证/权限/连接/key 耗尽）LLM 无法通过调整操作修复，
+    不应追加面向 LLM 的恢复提示。
     """
-    from llm.error_classifier import classify_error  # noqa: PLC0415
-
-    info = classify_error(exc)
-    error_msg = str(exc)
     error_lower = error_msg.lower()
 
-    # context_overflow 是业务约束（上下文超长），不在 ErrorKind 里，
-    # 就地判定后覆盖 error_type（优先级高于 ErrorKind）。
+    is_infrastructure = (
+        "authentication" in error_lower
+        or "autherror" in error_lower
+        or "permission" in error_lower
+        or "api_key" in error_lower
+        or "api key" in error_lower
+        or "connection refused" in error_lower
+        or "connection reset" in error_lower
+        or "connection error" in error_lower
+        or "refused" in error_lower
+        or "key 均失败" in error_msg
+        or "key不可用" in error_msg
+    )
+
     is_context_overflow = (
         "context window exceeds" in error_lower
         or "context_length_exceeded" in error_lower
@@ -207,26 +228,25 @@ def _build_llm_error_info(
         or ("token" in error_lower and "limit" in error_lower)
     )
 
-    if is_context_overflow:
+    is_llm_fixable = (
+        "invalid function arguments" in error_lower
+        or "invalid params" in error_lower
+    )
+
+    if is_infrastructure:
+        error_type = "infrastructure_error"
+    elif is_context_overflow:
         error_type = "context_overflow"
+    elif is_llm_fixable:
+        error_type = "llm_fixable"
     else:
-        error_type = info.kind.value
+        error_type = "unknown"
 
     state["llm_error_info"] = {
         "error_msg": error_msg,
         "error_type": error_type,
         "core_type": core_type,
     }
-
-    # 追加到错误历史（单一数据源，任意消费方可读）
-    from datetime import datetime  # noqa: PLC0415
-    history = state.setdefault(StateKeys.LLM_ERROR_HISTORY, [])
-    history.append({
-        "iteration": state.get(StateKeys.ITERATION, 0),
-        "kind": error_type,
-        "msg": error_msg[:200],
-        "ts": datetime.now().isoformat(),
-    })
 
 
 async def execute_output_chain(
@@ -244,19 +264,10 @@ async def execute_output_chain(
     Returns:
         收集到的路由信号列表
     """
-    from pipeline.engine_route import resolve_output_plugins  # noqa: PLC0415
+    from pipeline.engine_route import resolve_output_plugins
 
     output_plugins = resolve_output_plugins(engine, state, core_type)
     route_signals: list[RouteSignal] = []
-
-    # Core 插件（ToolCore）可直接通过 state 注入路由信号。
-    # 例：human_interaction 对话模式返回后，ToolCore 写入
-    # _pending_route_signal = {"route_type": "wait", ...}
-    # 此处取出与 Output 插件信号一起参与仲裁，walk 优先级高于 next_llm。
-    pending_raw = state.pop("_pending_route_signal", None)
-    if pending_raw and isinstance(pending_raw, dict):
-        route_signals.append(RouteSignal(**pending_raw))
-        logger.debug("Injected route signal from core: %s", pending_raw.get("route_type"))
 
     if not output_plugins:
         return route_signals
@@ -274,7 +285,7 @@ async def execute_output_chain(
     signal_summary = ", ".join(
         f"{s.route_type}({s.reason[:60]})" for s in route_signals
     ) if route_signals else "none"
-    logger.debug(
+    logger.info(
         "Output chain: %d plugins, %d signals [%s], ended=%s",
         len(output_results), len(route_signals), signal_summary,
         state.get(StateKeys.ENDED, False),
@@ -303,11 +314,21 @@ async def handle_no_route_signals(
         state[StateKeys.CORE_TYPE] = "llm_call"
         return "continue"
 
-    # 统一走 consume_pending_notifications（engine_iteration），
-    # 不再内联重复 drain/过滤/拼接逻辑。
-    from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
+    notif_sources = await _collect_pending_notifications(engine, state)
 
-    if consume_pending_notifications(engine, state):
+    if notif_sources:
+        combined = "\n\n".join(notif_sources)
+        state["user_input"] = combined
+        state.setdefault("messages", []).append(
+            {"role": "user", "content": combined}
+        )
+        state[StateKeys.CORE_TYPE] = "llm_call"
+        state.pop("raw_result", None)
+        state.pop("error_analysis", None)
+        logger.info(
+            "[Engine] 管道即将结束但发现 %d 条待处理消息，注入 state 继续循环",
+            len(notif_sources),
+        )
         return "continue"
 
     _has_active_triggers = _check_active_triggers(state, engine.pipeline_id)
@@ -333,6 +354,11 @@ async def handle_no_route_signals(
             {"role": "user", "content": state["user_input"]}
         )
 
+    # BUG-FIX-fix_20260531_pipeline_infinite_loop:
+    # 问题根因: suspend_and_wait 返回 False（管道应结束）时，本函数仍返回 "continue"，
+    #   导致 _run_loop while 循环永不退出，管道每 600s 被 _check_children_terminal
+    #   无意义唤醒一次，每次都调 LLM 浪费 token。
+    # 修复方案: 检查 suspend_and_wait 返回值，False 时返回 "end" 让管道结束。
     resumed = await engine.suspend_and_wait(state)
     if not resumed:
         logger.info(
@@ -343,10 +369,18 @@ async def handle_no_route_signals(
     return "continue"
 
 
+async def _collect_pending_notifications(
+    engine: PipelineEngine,
+    state: dict[str, Any],
+) -> list[str]:
+    """收集待处理通知消息。"""
+    return engine.drain_inject_queue()
+
+
 def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bool:
     """检查是否有活跃的触发器绑定到当前管道。"""
     try:
-        from triggers.manager import get_trigger_manager  # noqa: PLC0415
+        from triggers.manager import get_trigger_manager
         _tm = get_trigger_manager()
         _pipeline_id = state.get(StateKeys.PIPELINE_ID, engine_pipeline_id)
         return any(
@@ -367,7 +401,7 @@ async def run_post_end_output_chain(
         engine: PipelineEngine 实例
         state: 管道状态字典
     """
-    from pipeline.engine_route import resolve_output_plugins  # noqa: PLC0415
+    from pipeline.engine_route import resolve_output_plugins
 
     core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
     output_plugins = resolve_output_plugins(engine, state, core_type)

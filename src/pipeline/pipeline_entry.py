@@ -35,7 +35,12 @@ class PipelineEntry:
     thread_id: str = ""
     tags: dict[str, str] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    # BUG-FIX-fix_20260529_msg_order: 共享消息 sequence 计数器
     msg_sequence: int = 0
+    # BUG-FIX-fix_20260614_seq_race: 保护 msg_sequence 的锁。
+    # next_sequence/init_sequence 会被主事件循环（enqueue_notification、
+    # drain_loop、track 插件等）和 executor 线程（on_chunk 经
+    # run_in_executor 调用）并发访问，Python 整数 += 非原子，必须加锁。
     _seq_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def next_sequence(self) -> int:

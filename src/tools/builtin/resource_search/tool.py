@@ -63,6 +63,7 @@ class ResourceSearchTool:
         self._search_engine = search_engine
         self._dynamic_tool_injector = dynamic_tool_injector
         self._external_search = external_search
+        # BUG-FIX: 使用字典缓存替代动态属性，避免随 tool 数量增长无限创建属性
         self._desc_cache: dict[str, str] = {}
 
     @staticmethod
@@ -137,7 +138,7 @@ class ResourceSearchTool:
             tags=["search", "resource", "system"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行搜索"""
         # 缓存注入的向量检索器（由 ToolCore 通过 _SERVICE_INJECT_MAP 注入）
         injected_retriever = inputs.get("_retriever")
@@ -158,6 +159,7 @@ class ResourceSearchTool:
         session_id = inputs.get("session_id", "")
         parent_record_id = inputs.get("parent_record_id", "")
 
+        # BUG-FIX: 移除冗余的 debug 日志，只保留 info 日志
         logger.info(
             f"[resource_search] execute: query={query}, mode={mode}, detailed={detailed}, resource_type={resource_type}, session_id={session_id}"
         )
@@ -198,6 +200,7 @@ class ResourceSearchTool:
         results = {}
 
         if resource_type in ["agent", "all"]:
+            # BUG-FIX: 使用用户传入的 detailed 参数，而非硬编码 True
             agent_names, agent_descriptions, agent_ids, agent_details = await self._search_agents(
                 query, category, level, limit, detailed=detailed, exact=False
             )
@@ -271,8 +274,9 @@ class ResourceSearchTool:
                     results["tool_c"] = len(tool_names)
 
         if resource_type in ["skill", "all"]:
+            current_workspace = inputs.get("workspace", "")
             skill_names, skill_descriptions, skill_details = await self._search_skills(
-                query, language, limit, detailed, exact,
+                query, language, limit, detailed, exact, workspace=current_workspace
             )
             if skill_names:
                 if detailed and skill_details and any(skill_details):
@@ -302,7 +306,7 @@ class ResourceSearchTool:
             metadata={},
         )
 
-    async def _search_with_engine(  # noqa: PLR0912
+    async def _search_with_engine(
         self,
         search_engine,
         resource_type: str,
@@ -455,7 +459,7 @@ class ResourceSearchTool:
             return {}
 
     @staticmethod
-    def _slim_results(results: dict[str, Any], detailed: bool) -> dict[str, Any]:  # noqa: ARG004
+    def _slim_results(results: dict[str, Any], detailed: bool) -> dict[str, Any]:
         """精简搜索结果，移除对 LLM 无用的字段
 
         Args:
@@ -465,6 +469,7 @@ class ResourceSearchTool:
         Returns:
             精简后的结果字典
         """
+        # BUG-FIX: 无论什么模式都保留 _h 表头，LLM 需要表头理解各列含义
         slim = {}
         for key, value in results.items():
             if key.endswith("_d") or key.endswith("_h") or key.endswith("_c") or key == "message":
@@ -489,7 +494,7 @@ class ResourceSearchTool:
         """获取 Agent 注册表（使用全局单例，统一从 config/agents/ 加载）"""
         if self.agent_registry is None:
             try:
-                from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+                from agents.global_registry import get_global_agent_registry_sync
 
                 self.agent_registry = get_global_agent_registry_sync()
             except Exception as e:
@@ -500,12 +505,12 @@ class ResourceSearchTool:
     def _get_tool_registry(self):
         """获取 Tool 注册表（延迟加载）"""
         if self.tool_registry is None:
-            from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+            from tools.global_registry import get_global_tool_registry_sync
 
             self.tool_registry = get_global_tool_registry_sync()
         return self.tool_registry
 
-    async def _search_agents(  # noqa: PLR0912
+    async def _search_agents(
         self,
         query: str,
         category: str | None,
@@ -519,6 +524,11 @@ class ResourceSearchTool:
         当 query 为空或通配符（"*"、"all"、"所有"等）时，直接返回所有 agent（受 limit 限制）。
         否则调用 _match_query 进行子串/分词匹配。
         """
+        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
+        # 问题根因: _match_query 只支持子串匹配，LLM 用模糊查询（"所有agent"、"team"）无法匹配
+        # 修复方案: 空查询/通配符时直接返回所有 agent，不走 _match_query
+        # 影响范围: resource_search 工具的 agent 搜索功能
+        # 修复日期: 2026-05-24
 
         agent_registry = self._get_agent_registry()
         if not agent_registry:
@@ -587,7 +597,7 @@ class ResourceSearchTool:
 
         return names, descriptions, config_ids, details_list
 
-    async def _search_tools(  # noqa: PLR0912,PLR0915
+    async def _search_tools(
         self,
         query: str,
         category: str | None,
@@ -740,18 +750,18 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从数据库 tool_library 表搜索工具（内存注册表无结果时的回退）"""
         try:
-            from db.models import ToolLibrary  # noqa: PLC0415
+            from db.models import ToolLibrary
         except ImportError:
-            ToolLibrary = None  # noqa: N806
+            ToolLibrary = None
 
         if ToolLibrary is None:
             logger.debug("[resource_search] db.models.ToolLibrary 不可用，跳过数据库工具搜索")
             return [], [], []
 
         try:
-            from sqlalchemy import select  # noqa: PLC0415
+            from sqlalchemy import select
 
-            from infrastructure.db import get_async_session  # noqa: PLC0415
+            from infrastructure.db import get_async_session
 
             names = []
             descriptions = []
@@ -817,7 +827,7 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册到 Registry 的工具）"""
         try:
-            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader  # noqa: PLC0415
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
 
             loader = get_dynamic_tool_loader()
             if not loader:
@@ -883,11 +893,12 @@ class ResourceSearchTool:
         tool_info: tuple[str, str],
     ) -> str:
         """从工具代码中提取描述信息（缓存后复用）"""
+        # BUG-FIX: 使用字典缓存替代 setattr 动态属性
         if tool_name in self._desc_cache:
             return self._desc_cache[tool_name]
 
         try:
-            import importlib  # noqa: PLC0415
+            import importlib
 
             module_path, class_name = tool_info
             module = importlib.import_module(module_path)
@@ -916,11 +927,11 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从 builtin_tools_config.yaml 搜索工具（兜底：覆盖未加载的内置工具）"""
         try:
-            from pathlib import Path  # noqa: F401,PLC0415
+            from pathlib import Path
 
-            import yaml  # noqa: F401,PLC0415
+            import yaml
 
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             config = get_config_center().get("tools/builtin_tools_config.yaml")
             if not config:
                 return [], [], []
@@ -964,7 +975,7 @@ class ResourceSearchTool:
             logger.debug(f"[resource_search] YAML 配置搜索工具失败: {e}")
             return [], [], []
 
-    def _match_query(  # noqa: PLR0911,PLR0912
+    def _match_query(
         self,
         query_lower: str,
         name: str,
@@ -981,6 +992,11 @@ class ResourceSearchTool:
 
         匹配字段包括 name、description、tags，任一字段命中即返回 True。
         """
+        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
+        # 问题根因: _match_query 只支持子串匹配，不支持模糊/通配符查询
+        # 修复方案: 添加通配符支持和分词匹配
+        # 影响范围: resource_search 工具的 agent 搜索功能
+        # 修复日期: 2026-05-24
 
         # exact 模式保持原有行为不变
         if exact:
@@ -1030,7 +1046,7 @@ class ResourceSearchTool:
         """获取 Skill 注册表（延迟加载，对接 skills.registry 模块）。"""
         if self.skill_registry is None:
             try:
-                from skills.registry import get_global_skill_registry  # noqa: PLC0415
+                from skills.registry import get_global_skill_registry
                 self.skill_registry = get_global_skill_registry()
             except Exception as exc:
                 logger.debug("[resource_search] SkillRegistry 加载失败: %s", exc)
@@ -1049,11 +1065,11 @@ class ResourceSearchTool:
             return self._external_search
 
         try:
-            from pathlib import Path  # noqa: F401,PLC0415
+            from pathlib import Path
 
-            import yaml  # noqa: F401,PLC0415
+            import yaml
 
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             config = get_config_center().get("tools/search/resource_search.yaml")
             if not config:
                 return None
@@ -1062,8 +1078,8 @@ class ResourceSearchTool:
             if not ext_config.get("enabled", False):
                 return None
 
-            from tools.builtin.external_resource_search import ExternalResourceSearch  # noqa: PLC0415
-            from tools.builtin.platform_adapters import PLATFORM_ADAPTER_MAP  # noqa: PLC0415
+            from tools.builtin.external_resource_search import ExternalResourceSearch
+            from tools.builtin.platform_adapters import PLATFORM_ADAPTER_MAP
 
             # 根据配置动态实例化平台适配器
             platform_adapters = self._build_platform_adapters(
@@ -1185,19 +1201,19 @@ class ResourceSearchTool:
             logger.warning("[resource_search] 外部搜索失败，跳过: %s", e)
             return [], [], []
 
-    async def _search_skills(  # noqa: PLR0912
+    async def _search_skills(
         self,
         query: str,
         language: str | None,
         limit: int,
         detailed: bool = False,
         exact: bool = False,
+        workspace: str = "",
     ) -> tuple[list[str], list[str], list[dict]]:
         """搜索本地 Skill。
 
-        simple 模式：只返回名称和描述。
-        detailed 模式：返回 SKILL.md 完整内容。
-        （技能文件由 WorkspaceLifecycleManager 在任务启动时统一复制到工作空间。）
+        simple 模式：只返回名称和描述（不挂载）。
+        detailed 模式：返回 SKILL.md 完整内容 + 自动软链到工作空间。
         """
         skill_registry = self._get_skill_registry()
         if not skill_registry or not skill_registry.is_initialized():
@@ -1206,6 +1222,7 @@ class ResourceSearchTool:
         names: list[str] = []
         descriptions: list[str] = []
         details_list: list[dict] = []
+        matched_skill_names: list[str] = []
         query_lower = query.lower()
 
         if detailed and exact:
@@ -1227,6 +1244,7 @@ class ResourceSearchTool:
 
             names.append(skill.skill_name)
             descriptions.append(skill.description)
+            matched_skill_names.append(skill.skill_name)
 
             if detailed:
                 # 用 Skill 对象的懒加载属性读取完整内容
@@ -1237,12 +1255,31 @@ class ResourceSearchTool:
             if len(names) >= limit:
                 break
 
+        # detailed 模式自动软链到工作空间（容器内下次可见）
+        if detailed and matched_skill_names and workspace:
+            try:
+                mounted = skill_registry.mount_to_workspace(
+                    matched_skill_names, workspace,
+                )
+                for i, skill_name in enumerate(matched_skill_names):
+                    if skill_name in mounted and i < len(details_list):
+                        details_list[i]["mounted"] = True
+                        details_list[i]["container_path"] = (
+                            f"/workspace/skills/{skill_name}"
+                        )
+                logger.info(
+                    "[resource_search] Skill 挂载完成 | mounted=%s | workspace=%s",
+                    mounted, workspace,
+                )
+            except Exception as exc:
+                logger.warning("[resource_search] Skill 挂载失败: %s", exc)
+
         return names, descriptions, details_list
 
     def _read_skill_markdown(self, skill_path: str) -> str:
         """读取 Skill 的 SKILL.md 文件内容"""
         try:
-            from pathlib import Path  # noqa: PLC0415
+            from pathlib import Path
 
             skill_dir = Path(skill_path)
             if not skill_dir.exists():
@@ -1280,7 +1317,7 @@ class ResourceSearchTool:
             "[resource_search] 开始注入动态工具: tool_names=%s", tool_names
         )
 
-        from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
+        from tools.auto_loader import get_tool_auto_loader
 
         auto_loader = get_tool_auto_loader()
         if not auto_loader:

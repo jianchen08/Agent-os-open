@@ -8,7 +8,7 @@ import re
 import uuid
 from pathlib import Path
 
-from .review_engine import ErrorRecord, Pipeline
+from src.memory.maintenance.review_engine import ErrorRecord, Pipeline
 
 __all__ = ["PipelineLogParser"]
 

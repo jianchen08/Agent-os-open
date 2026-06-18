@@ -58,13 +58,13 @@ class TestValidSchema:
                     id="create",
                     name="创建",
                     type="command",
-                    api="/api/v1/modules/test/items",
+                    api="/api/modules/test/items",
                 ),
                 ModuleAction(
                     id="query",
                     name="查询",
                     type="query",
-                    api="/api/v1/modules/test/items",
+                    api="/api/modules/test/items",
                 ),
             ],
         )
@@ -242,8 +242,8 @@ class TestActionApiEndpointValidation:
     def test_valid_api_endpoint(self) -> None:
         """合法 API 端点应通过验证。"""
         valid_endpoints = [
-            "/api/v1/modules/test/items",
-            "/api/v1/modules/my-module/logs/stream",
+            "/api/modules/test/items",
+            "/api/modules/my-module/logs/stream",
             "/api/test/a-b-c",
         ]
         for endpoint in valid_endpoints:
@@ -272,7 +272,7 @@ class TestActionApiEndpointValidation:
         """包含大写字母的端点应报告错误。"""
         schema = _make_schema(
             actions=[
-                ModuleAction(id="a", name="a", type="command", api="/api/v1/Modules/test"),
+                ModuleAction(id="a", name="a", type="command", api="/api/Modules/test"),
             ],
         )
         validator = SchemaValidator()

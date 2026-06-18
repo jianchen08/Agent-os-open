@@ -15,8 +15,8 @@ import {
   loginViaAPI,
   loginAndWaitReady,
   login,
+  sendMessage,
 } from '../helpers/auth';
-import { sendChatMessage } from '../utils/test-helpers';
 import {
   navigateTo,
   loginAndNavigateTo,
@@ -93,7 +93,7 @@ test.describe('AC 验证', () => {
   test('AC-4: 发消息→工具调用→任务管理全流程通过', async ({ page }) => {
     await loginAndWaitReady(page);
 
-    await sendChatMessage(page, '请读取 README.md 文件内容');
+    await sendMessage(page, '请读取 README.md 文件内容');
 
     // 等待助手消息
     await waitForAssistantMessage(page);

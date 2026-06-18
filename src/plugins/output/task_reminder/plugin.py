@@ -14,7 +14,6 @@ from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, RouteSignal
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +51,15 @@ class TaskReminder(IOutputPlugin):
     def priority(self) -> int:
         return self._config.get("priority", 35)
 
-    async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911,PLR0912,PLR0915
+    async def execute(self, ctx: PluginContext) -> OutputResult:
         """执行任务评估提醒检测。
 
-        触发条件（BUG-FIX-fix_20260624_task_reminder_loop）：
+        条件：
         1. core_type 为 llm_call（仅 LLM 输出阶段，非工具执行后）
         2. 有 task_id（在任务上下文中）
-        3. **非 L1 调度层**：L1 的纯文本输出是正常调度汇报，不该被催
-        4. **任务没有活跃下级**：有下级任务说明在等子任务，不该催当前任务
-        5. **LLM 这一轮没调工具（只输出纯文本）**：正在调工具说明有进展，不催；
-           只在 LLM"光说不练"时才提醒它该提交 task_evaluate 了
-        6. 提醒次数未超限
+        3. LLM 只输出了纯文本（raw_tool_calls 为空）
+        4. 提醒次数未超限
+        5. 冷却期已过
 
         满足条件时注入系统提醒消息到 messages，触发 next_llm。
         """
@@ -87,21 +84,10 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        # ── 规则 3：L1 调度层永不触发 ──
-        # L1（灵汐）是调度层，它的纯文本输出是正常的调度/沟通汇报，
-        # 不代表"忘了提交评估"。reminder 只对叶子执行者有意义。
-        agent_level = state.get("agent_level", "")
-        if agent_level == "L1":
-            logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
-                iteration, task_id,
-            )
-            return OutputResult()
-
         task_service = state.get("task_service")
         if not task_service:
             try:
-                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                from infrastructure.service_provider import get_service_provider
                 task_service = get_service_provider().get("task_service")
             except Exception:
                 pass
@@ -125,16 +111,6 @@ class TaskReminder(IOutputPlugin):
             except Exception:
                 pass
 
-        # ── 规则 4：有活跃下级任务时不触发（提前到最前面）──
-        # 任务有活跃子任务说明在等子任务完成，当前任务的纯文本输出
-        # 是正常的等待/协调行为，不该被催提交评估。
-        if await self._has_active_children(task_id, ctx):
-            logger.info(
-                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
-                iteration, task_id,
-            )
-            return OutputResult()
-
         evaluation_mode = self._is_evaluation_mode(state)
 
         raw_tool_calls = state.get("raw_tool_calls", [])
@@ -142,17 +118,7 @@ class TaskReminder(IOutputPlugin):
         has_tool_calls = bool(raw_tool_calls)
         has_text = bool(raw_result and str(raw_result).strip())
 
-        # BUG-FIX-fix_20260625_reminder_on_empty_output:
-        # 历史逻辑在 has_text 和 has_tool_calls 同时为 False（本轮 LLM 无输出，
-        # 如流式截断/调用失败）时，回退到 _last_assistant_has_text 去历史消息
-        # 里捞旧文本，把"本轮空输出"误判成"有文本输出"，从而触发 reminder。
-        # 这会导致 LLM 一旦某轮输出为空就被 reminder 反复催促，形成死循环。
-        #
-        # 回退逻辑只保留它原本的用途：本轮 LLM 返回了 tool_calls 但文本被
-        # output_repetition_guard 等前置插件清空（has_tool_calls=True 且 has_text=False）
-        # 时，从 messages 里确认 LLM 确实输出过文本（用于评估模式判定）。
-        # 绝不在本轮完全无输出时用历史文本伪装成有输出。
-        if not has_text and has_tool_calls:
+        if not has_text and not has_tool_calls:
             has_text = self._last_assistant_has_text(state)
 
         # 评估模式：追踪连续仅工具调用/空输出次数，达到阈值后强制注入提醒
@@ -245,9 +211,15 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        # 注：_has_active_children 已在 execute 入口提前检查，此处不再重复。
+        if await self._has_active_children(task_id, ctx):
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
+                iteration, task_id,
+            )
+            return OutputResult()
 
         reminder_count = state.get("evaluate_reminder_count", 0)
+        # BUG-FIX: 提醒耗尽后发送 end 信号，防止管道无限挂起
         if reminder_count >= self._max_reminders:
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached "
@@ -345,7 +317,7 @@ class TaskReminder(IOutputPlugin):
             task_service = ctx.get_service("task_service")
         except KeyError:
             try:
-                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                from infrastructure.service_provider import get_service_provider
                 provider = get_service_provider()
                 task_service = provider.get("task_service")
             except Exception:
@@ -358,7 +330,7 @@ class TaskReminder(IOutputPlugin):
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
         for st in subtasks:
-            status = safe_enum_value(st.status)
+            status = st.status.value if hasattr(st.status, "value") else str(st.status)
             if status in active_statuses:
                 return True
         return False

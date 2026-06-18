@@ -88,7 +88,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
 
     @staticmethod
     def get_tool_definition() -> Tool:
-        from tools.types import ToolLevel  # noqa: PLC0415
+        from tools.types import ToolLevel
 
         return Tool(
             name="file_read",
@@ -200,7 +200,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
             metadata={"action": "batch_read_files"},
         )
 
-    async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
+    async def _read_file(self, inputs: dict[str, Any]) -> ToolResult:
         try:
             path_str = inputs.get("path")
             if not path_str:
@@ -521,7 +521,7 @@ class FileReadTool(BuiltinTool, WorkspaceAwareMixin):
         return segments
 
     @staticmethod
-    def _resolve_segment(current: Any, seg: tuple) -> Any:  # noqa: PLR0911,PLR0912
+    def _resolve_segment(current: Any, seg: tuple) -> Any:
         """执行单个路径段操作，支持键访问和列表筛选。
 
         对于 filter 段，在列表中按 key=value 筛选：

@@ -9,37 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import os
-
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_send_timeout() -> float:
-    """读取 WebSocket 发送超时（秒）。
-
-    优先级：环境变量 WS_SEND_TIMEOUT_SECONDS > 默认 30s。
-
-    BUG-FIX-fix_20260624_ws_send_timeout:
-    历史值硬编码 5s，流式高峰 / 大 payload 经常打不过去 → 连接被误判 stale 剔除，
-    后续推流静默失败。改为 30s 并可由环境变量覆盖。
-    """
-    raw = os.environ.get("WS_SEND_TIMEOUT_SECONDS")
-    if not raw:
-        return 30.0
-    try:
-        val = float(raw)
-        return val if val > 0 else 30.0
-    except ValueError:
-        return 30.0
-
-
-# 模块级常量：进程启动时读一次即可，运行时不允许动态调整以保证行为可预期。
-_SEND_TIMEOUT_SECONDS = _resolve_send_timeout()
 
 
 class WebSocketInteractionNotifier:
@@ -57,6 +31,9 @@ class WebSocketInteractionNotifier:
         self._auto_confirm_delay = auto_confirm_delay
         self._service = None
         self._fallback_tasks: set[asyncio.Task] = set()
+        # BUG-FIX-fix_20260511_auto_confirm_not_cancelled:
+        # 问题根因: _auto_confirm_fallback 任务在用户响应后未被取消，浪费资源且可能竞争。
+        # 修复方案: 增加 request_id → fallback task 的映射，支持按 request_id 取消。
         self._fallback_request_map: dict[str, asyncio.Task] = {}
         self._global_connections: dict[str, WebSocket] = {}
 
@@ -73,6 +50,13 @@ class WebSocketInteractionNotifier:
                 thread_id, len(self._active_connections[thread_id]),
                 {k: len(v) for k, v in self._active_connections.items()},
             )
+        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
+        # 问题根因: 前端刷新后 WebSocket 重新连接，但正在运行的 pipeline
+        #   仍持有旧的 dead TargetedSink，导致后续输出被静默丢弃。
+        # 修复方案: 注册新连接时，自动查找该 thread_id 关联的活跃 pipeline，
+        #   更新其 bridge 的 output_sink 为新的活跃连接。
+        # 影响范围: WebSocketInteractionNotifier.register
+        # 修复日期: 2026-06-01
         try:
             self._resume_pipeline_for_thread(thread_id)
         except Exception as _exc:
@@ -179,9 +163,11 @@ class WebSocketInteractionNotifier:
                 self._auto_confirm_fallback(request_id, msg_data)
             )
             self._fallback_tasks.add(task)
+            # BUG-FIX-fix_20260511_auto_confirm_not_cancelled:
+            # 记录 request_id → task 映射，以便用户响应后能取消该任务。
             self._fallback_request_map[request_id] = task
             task.add_done_callback(
-                lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)  # noqa: ARG005
+                lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)
             )
             task.add_done_callback(self._fallback_tasks.discard)
 
@@ -190,19 +176,14 @@ class WebSocketInteractionNotifier:
     # ── 全局单连接模式方法 ──
 
     def register_global(self, user_id: str, websocket: WebSocket) -> None:
-        """注册全局单连接（新架构：每用户一个 WS 连接）。
-
-        BUG-FIX-fix_20260624_register_global_old_close:
-        历史实现用 ``asyncio.get_event_loop().create_task(...)`` 调度老连接的
-        close，在 Python 3.10+ 没有 running loop 时会拿到新建的临时 loop，
-        close 任务被丢进一个永不运行的 loop 里悬挂，老连接残留半开。
-        改为 ``asyncio.get_running_loop()``，如果当前线程没有 running loop
-        就退化为同步关闭（注册路径必然在 endpoint 协程内，正常路径有 loop）。
-        """
+        """注册全局单连接（新架构：每用户一个 WS 连接）。"""
         old = self._global_connections.get(user_id)
-        if old is not None and old is not websocket:
+        if old is not None:
             logger.info("[GlobalWS] 踢掉旧连接: user=%s", user_id[:12])
-            self._schedule_close(old, code=4000, reason="被新连接替换")
+            try:
+                asyncio.get_event_loop().create_task(old.close(code=4000, reason="被新连接替换"))
+            except Exception:
+                pass
             # 清理旧连接在 _active_connections 中的残留条目，
             # 避免后续 send_to_thread 等方法在第一步找到空连接列表而非直接走 global 回退。
             for tid in list(self._active_connections.keys()):
@@ -213,66 +194,15 @@ class WebSocketInteractionNotifier:
                         del self._active_connections[tid]
         self._global_connections[user_id] = websocket
         logger.info("[GlobalWS] 全局连接已注册: user=%s, 总连接数=%d", user_id[:12], len(self._global_connections))
+        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
+        # 全局连接注册时，尝试恢复该用户所有关联 thread 的 pipeline。
+        # 影响范围: WebSocketInteractionNotifier.register_global
+        # 修复日期: 2026-06-01
         try:
-            # BUG-FIX-fix_20260625_reconnect_no_active_connections:
-            # 原实现只遍历 _active_connections.keys() 恢复 pipeline 输出，但断连的
-            # finally 块（app_factory.py:594-599）会把空连接列表从 _active_connections
-            # 里删掉。于是重连时 _active_connections 是空的 → 没有任何 tid 可恢复 →
-            # 正在运行的 pipeline 的 output_sink 永远指向已断开的旧 WS → 后续流式 chunk
-            # 全部 send_to_thread 返回 False → 表现为「连接断了消息就没了」。
-            # 修复方案: 除了 _active_connections，再从 engine registry 查找所有正在运行/
-            #   挂起的 pipeline，逐个恢复其 sink。registry 不随 WS 断连清空，是可靠来源。
-            resumed_tids: set[str] = set()
             for tid in list(self._active_connections.keys()):
                 self._resume_pipeline_for_thread(tid)
-                resumed_tids.add(tid)
-            # 补充: 从 registry 恢复 _active_connections 里没有的活跃 pipeline
-            try:
-                from pipeline.registry import get_engine_registry  # noqa: PLC0415
-                _reg = get_engine_registry()
-                for _pid, _entry in list(_reg.all_entries().items()):
-                    if _entry.thread_id and _entry.thread_id not in resumed_tids:
-                        self._resume_pipeline_for_thread(_entry.thread_id)
-                        resumed_tids.add(_entry.thread_id)
-            except Exception:
-                logger.debug("[WS-Reconnect] registry 补充恢复失败（非致命）", exc_info=True)
         except Exception as _exc:
             logger.debug("[WS-Reconnect] 全局连接恢复 pipeline 失败: %s", _exc)
-
-    @staticmethod
-    def _schedule_close(websocket: WebSocket, *, code: int, reason: str) -> None:
-        """安全地调度一个 WebSocket close 任务。
-
-        优先用当前 running loop；没有 running loop（例如同步测试场景）则尝试
-        在已有事件循环中调用 ``run_coroutine_threadsafe``；都不行就退化为
-        no-op，避免崩溃。"""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None:
-            with contextlib.suppress(Exception):
-                loop.create_task(websocket.close(code=code, reason=reason))
-            return
-
-        # 没有 running loop：尝试用兜底的 _main_loop_ref（由 lifespan 注册），
-        # 这样从同步上下文调用时也能把 close 投递到主 loop。
-        main_loop = getattr(asyncio, "_main_loop_ref", None)
-        if main_loop is not None and not main_loop.is_closed():
-            with contextlib.suppress(Exception):
-                asyncio.run_coroutine_threadsafe(
-                    websocket.close(code=code, reason=reason), main_loop,
-                )
-            return
-
-        # 完全没有 loop 可用（极端情况）：尽量同步关闭底层 socket
-        with contextlib.suppress(Exception):
-            client_state = getattr(websocket, "client_state", None)
-            logger.debug(
-                "[GlobalWS] 旧连接 close 无可用 loop，跳过异步关闭 client_state=%s",
-                client_state,
-            )
 
     def _resume_pipeline_for_thread(self, thread_id: str) -> None:
         """恢复指定 thread_id 关联的活跃 pipeline 的 WebSocket 输出。
@@ -285,8 +215,8 @@ class WebSocketInteractionNotifier:
             thread_id: 目标会话的 thread_id
         """
         try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
-            from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F401,PLC0415
+            from pipeline.registry import get_engine_registry
+            from pipeline.stream_bridge import TargetedSink, create_targeted_sink
             registry = get_engine_registry()
         except Exception:
             return
@@ -338,7 +268,7 @@ class WebSocketInteractionNotifier:
         try:
             await asyncio.wait_for(
                 ws.send_text(json.dumps(event, ensure_ascii=False, default=str)),
-                timeout=_SEND_TIMEOUT_SECONDS,
+                timeout=5.0,
             )
             return True
         except (asyncio.TimeoutError, Exception) as exc:
@@ -411,7 +341,7 @@ class WebSocketInteractionNotifier:
             sent_any = False
             for ws in conns:
                 try:
-                    await asyncio.wait_for(ws.send_text(payload), timeout=_SEND_TIMEOUT_SECONDS)
+                    await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
                     sent_any = True
                 except (asyncio.TimeoutError, Exception):
                     stale.append(ws)
@@ -429,7 +359,7 @@ class WebSocketInteractionNotifier:
             try:
                 await asyncio.wait_for(
                     ws.send_text(json.dumps(event_data, ensure_ascii=False)),
-                    timeout=_SEND_TIMEOUT_SECONDS,
+                    timeout=5.0,
                 )
                 return True
             except (asyncio.TimeoutError, Exception):
@@ -502,4 +432,8 @@ class WebSocketInteractionNotifier:
         return True
 
 
+# BUG-FIX-fix_20260522_double_instance:
+# 之前有两个独立的 WebSocketInteractionNotifier 实例（_ws_interaction_notifier 和 ws_interaction_notifier），
+# 导致内部逻辑用 _ws_interaction_notifier 注册的连接，外部用 ws_interaction_notifier 发消息发不到。
+# 修复: 统一为一个实例。
 ws_interaction_notifier = WebSocketInteractionNotifier()

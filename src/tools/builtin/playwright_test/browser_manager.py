@@ -91,7 +91,7 @@ class BrowserSession:
         except Exception:
             return False
 
-    async def check_cdp_health(self) -> tuple[bool, str]:  # noqa: PLR0911
+    async def check_cdp_health(self) -> tuple[bool, str]:
         """
         通过实际 CDP 操作检查连接健康状态。
 
@@ -154,7 +154,7 @@ class BrowserManager:
     _sessions: dict[str, BrowserSession] = {}
 
     @classmethod
-    async def create_session(  # noqa: PLR0915
+    async def create_session(
         cls,
         browser_type: str = "chromium",
         headless: bool = True,
@@ -182,7 +182,7 @@ class BrowserManager:
             tuple[session_id, session_info]
         """
         try:
-            from playwright.async_api import async_playwright  # noqa: PLC0415
+            from playwright.async_api import async_playwright
 
             # 自动恢复逻辑：当 auto_persist=True 且用户未显式提供 storage_state 时，
             # 尝试从默认状态目录加载最新的状态文件
@@ -249,7 +249,7 @@ class BrowserManager:
 
                 # 根据错误类型给出针对性提示
                 if "NoneType" in error_msg and "send" in error_msg:
-                    raise RuntimeError(  # noqa: B904
+                    raise RuntimeError(
                         "浏览器启动后 CDP 连接立即断开，通常是因为浏览器进程缺少系统依赖库。"
                         "请运行以下命令安装依赖：\n"
                         "  python3 -m playwright install-deps chromium\n"
@@ -257,14 +257,14 @@ class BrowserManager:
                         f"原始错误: {error_msg}"
                     )
                 if "Target" in error_msg and ("closed" in error_msg.lower()):
-                    raise RuntimeError(  # noqa: B904
+                    raise RuntimeError(
                         "浏览器进程在启动后立即退出，可能原因：\n"
                         "1. 缺少系统依赖库（运行 python3 -m playwright install-deps chromium）\n"
                         "2. 系统资源不足\n"
                         "3. 沙箱环境限制（可尝试 headless=True 或 launch_options 中添加 '--no-sandbox'）\n"
                         f"原始错误: {error_msg}"
                     )
-                raise RuntimeError(  # noqa: B904
+                raise RuntimeError(
                     f"浏览器启动后健康检查失败: {health_check_error}"
                 )
 
@@ -308,21 +308,21 @@ class BrowserManager:
             return session_id, session_info
 
         except ImportError as e:
-            raise ImportError(f"Playwright 未安装: {e}")  # noqa: B904
+            raise ImportError(f"Playwright 未安装: {e}")
         except RuntimeError:
             raise  # 重新抛出上面已包装的 RuntimeError
         except Exception as e:
             error_msg = str(e)
             # 检测 Playwright 的 TargetClosedError（浏览器启动即崩溃）
             if "Target" in error_msg and ("closed" in error_msg.lower() or "Close" in error_msg):
-                raise RuntimeError(  # noqa: B904
+                raise RuntimeError(
                     "浏览器启动失败（进程立即退出），通常是因为缺少系统依赖库。\n"
                     "请运行以下命令安装依赖：\n"
                     "  python3 -m playwright install-deps chromium\n"
                     "或手动安装：sudo apt-get install -y libnspr4 libnss3 libasound2\n"
                     f"原始错误: {error_msg}"
                 )
-            raise RuntimeError(f"创建浏览器会话失败: {e}")  # noqa: B904
+            raise RuntimeError(f"创建浏览器会话失败: {e}")
 
     @classmethod
     def get_session(cls, session_id: str) -> BrowserSession | None:
@@ -419,7 +419,7 @@ class BrowserManager:
         """
         try:
             pattern = os.path.join(directory, "*.json")
-            files = glob.glob(pattern)  # noqa: PTH207
+            files = glob.glob(pattern)
             return sorted(files)
         except Exception as e:
             logger.error(f"扫描状态文件失败: {e}")
@@ -450,7 +450,7 @@ class BrowserManager:
         try:
             # 确保状态目录存在
             state_dir = cls.DEFAULT_STATE_DIR
-            os.makedirs(state_dir, exist_ok=True)  # noqa: PTH103
+            os.makedirs(state_dir, exist_ok=True)
 
             # 生成状态文件路径
             timestamp = int(time.time())
@@ -486,13 +486,13 @@ class BrowserManager:
             最新的状态文件路径，如不存在返回 None
         """
         state_dir = cls.DEFAULT_STATE_DIR
-        if not os.path.isdir(state_dir):  # noqa: PTH112
+        if not os.path.isdir(state_dir):
             return None
 
         try:
             # 查找所有状态文件
             pattern = os.path.join(state_dir, "state_*.json")
-            state_files = glob.glob(pattern)  # noqa: PTH207
+            state_files = glob.glob(pattern)
 
             if not state_files:
                 return None
@@ -520,7 +520,7 @@ class BrowserManager:
         """
         try:
             pattern = os.path.join(state_dir, "state_*.json")
-            state_files = glob.glob(pattern)  # noqa: PTH207
+            state_files = glob.glob(pattern)
 
             if len(state_files) <= cls.MAX_STATE_FILES:
                 return
@@ -531,7 +531,7 @@ class BrowserManager:
             # 删除超出数量的旧文件
             for old_file in state_files[cls.MAX_STATE_FILES:]:
                 try:
-                    os.remove(old_file)  # noqa: PTH107
+                    os.remove(old_file)
                     logger.info(f"清理旧状态文件: {old_file}")
                 except Exception as e:
                     logger.warning(f"清理旧状态文件失败: {old_file}, 错误: {e}")

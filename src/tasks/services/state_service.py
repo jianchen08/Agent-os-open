@@ -12,6 +12,7 @@
 5. 事件发布
 """
 
+import contextlib
 import logging
 from typing import Any
 
@@ -428,10 +429,8 @@ class TaskStateService:
         # 通过状态机执行状态转换
         old_status = task.status
         if new_status and old_status != new_status:
-            try:
+            with contextlib.suppress(ValueError):
                 self.state_machine.transition(new_status)
-            except ValueError:
-                pass
 
         # 持久化更新
         await self.task_repo.update(

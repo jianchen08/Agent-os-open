@@ -75,9 +75,6 @@ class ExecutionRecordData:
     # 前端乐观消息 ID，用于 API 历史加载时与本地临时消息对账（消除重复/丢失）
     client_message_id: str | None = None
 
-    # 附件信息（JSON 序列化存储）
-    attachments_json: str | None = None
-
     created_at: str = ""
 
     def __post_init__(self) -> None:
@@ -591,176 +588,6 @@ class ExecutionRecordStorage:
 
         return records, has_more
 
-    def clone_pipeline_records(
-        self,
-        source_pipeline_id: str,
-        target_pipeline_id: str,
-        new_container_task_id: str,
-        root_task_id: str = "",
-    ) -> int:
-        """全量物理拷贝源管道 records 到目标管道（文件级行替换）。
-
-        用于 pipe 继承，避免从 messages 重建记录的格式分叉风险。
-        文本级行替换 pipeline_run_id 和 container_task_id 两个字段，
-        record_id 保留不动（不同管道间无全局唯一性约束）。
-        替换后反序列化 YAML 验证：结构完好、字段全部替换正确。
-
-        Args:
-            source_pipeline_id: 源管道 ID
-            target_pipeline_id: 目标管道 ID
-            new_container_task_id: 目标管道的 container_task_id（继承者的 task_id）
-            root_task_id: 目标管道的根任务 ID（用作存储目录的 root）。
-                必须与 task_executor._bind_pipeline_run 的 register_pipeline(pipeline_id, root_id)
-                保持一致，否则引擎注册时会触发文件迁移，导致 clone 的文件和引擎读取的文件分裂。
-                为空时回退到 target_pipeline_id 自身（仅适用于无 root 绑定的场景）。
-
-        Returns:
-            拷贝的记录条数
-
-        Raises:
-            ValueError: 源管道无记录、目标文件 YAML 验证失败、字段替换不完整
-        """
-        src_files = self._get_part_files(source_pipeline_id)
-        if not src_files:
-            raise ValueError(
-                f"源管道 {source_pipeline_id} 无执行记录，无法克隆"
-            )
-
-        # 先读取并替换所有源文件内容（register_pipeline 前读，避免其迁移副作用干扰）
-        replaced_items: list[tuple[str, str, int]] = []  # (dst_filename, serialized_yaml, part_num)
-        for src_f in src_files:
-            raw = src_f.read_text(encoding="utf-8")
-
-            # YAML 解析 → 程序化改字段（比文本正则更稳健，能处理引号包裹/不同缩进等格式变体）
-            data = yaml.safe_load(raw)
-            if not isinstance(data, dict):
-                raise ValueError(f"克隆管道记录失败：源文件 {src_f.name} 格式无效")
-            records = data.get("records")
-            if not records or not isinstance(records, list):
-                raise ValueError(f"克隆管道记录失败：源文件 {src_f.name} records 为空或格式无效")
-
-            # 诊断日志：记录源信息
-            first_pid = records[0].get("pipeline_run_id", "(空)") if records else "(空)"
-            logger.info(
-                "克隆源文件 | src_file=%s | src_pid=%s | 首条记录pid=%s | 记录数=%d",
-                src_f, source_pipeline_id, first_pid, len(records),
-            )
-
-            # 逐条替换：pipeline_run_id / container_task_id 改为目标值，
-            # record_id 保留不动（clone 忠实复制源数据，源内重复由 track plugin 落盘环节负责）。
-            for rec in records:
-                rec["pipeline_run_id"] = target_pipeline_id
-                rec["container_task_id"] = new_container_task_id
-
-            # 序列化回 YAML（保持与源文件一致的序列化风格）
-            # 注：safe_dump 输出与原始 YAML 的缩进/换行等细节可能不完全相同，
-            # 但数据结构完全等价，后续 list_by_pipeline 通过 yaml.safe_load 读取，
-            # 对序列化细节无依赖。
-            replaced = yaml.safe_dump(
-                data,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                indent=2,
-            )
-
-            dst_name = src_f.name.replace(source_pipeline_id, target_pipeline_id)
-            part_num = 1
-            stem = src_f.stem
-            if "_" in stem:
-                try:
-                    part_num = int(stem.rsplit("_", 1)[-1])
-                except (ValueError, IndexError):
-                    part_num = 1
-            replaced_items.append((dst_name, replaced, part_num))
-
-        # 注册目标 pipeline 到存储目录，root 必须与 _bind_pipeline_run 一致，
-        # 否则引擎注册时 register_pipeline(pipeline_id, root_id) 会触发文件迁移，
-        # 导致 clone 的文件和引擎读取的文件分裂（继承历史丢失）。
-        _root = root_task_id or target_pipeline_id
-        self.register_pipeline(target_pipeline_id, _root)
-        base_dir = self._data_dir / _root
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        written_files: list[Path] = []  # 已写入的目标文件（失败时回滚用）
-        try:
-            total = 0
-            for dst_name, replaced, part_num in replaced_items:
-                dst_f = base_dir / dst_name
-                dst_f.write_text(replaced, encoding="utf-8")
-                written_files.append(dst_f)
-
-                # YAML 验证：结构完好 + 字段全部替换正确
-                try:
-                    data = yaml.safe_load(replaced)
-                except yaml.YAMLError as e:
-                    raise ValueError(
-                        f"克隆管道记录失败：目标文件 {dst_name} YAML 解析错误 - {e}"
-                    ) from e
-                records = data.get("records") if isinstance(data, dict) else None
-                if not records:
-                    raise ValueError(
-                        f"克隆管道记录失败：目标文件 {dst_name} 的 records 为空或格式异常"
-                    )
-                for i, rec in enumerate(records):
-                    rec_pid = rec.get("pipeline_run_id")
-                    rec_ctid = rec.get("container_task_id")
-                    if rec_pid != target_pipeline_id:
-                        raise ValueError(
-                            f"克隆管道记录验证失败：记录 {i} 的 pipeline_run_id "
-                            f"仍为 '{rec_pid}'，应替换为 '{target_pipeline_id}'"
-                        )
-                    if rec_ctid != new_container_task_id:
-                        raise ValueError(
-                            f"克隆管道记录验证失败：记录 {i} 的 container_task_id "
-                            f"仍为 '{rec_ctid}'，应替换为 '{new_container_task_id}'"
-                        )
-
-                # 更新分片状态
-                self._active_part[target_pipeline_id] = part_num
-                self._records_in_active_file[target_pipeline_id] = len(records)
-                total += len(records)
-        except Exception:
-            # 回滚：删除已写入的目标文件、空目录、root_map 映射，
-            # 避免失败后残留垃圾文件污染后续重试/继承
-            self._rollback_clone(target_pipeline_id, written_files, base_dir)
-            raise
-
-        logger.info(
-            "克隆管道记录完成 | src=%s dst=%s records=%d",
-            source_pipeline_id[:12], target_pipeline_id[:12], total,
-        )
-        return total
-
-    def _rollback_clone(
-        self,
-        target_pipeline_id: str,
-        written_files: list[Path],
-        base_dir: Path,
-    ) -> None:
-        """clone 失败时回滚：删除已写入文件、空目录、root_map 映射。"""
-        for f in written_files:
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
-        # 删除目标目录（仅当为空时，避免误删其他内容）
-        try:
-            if base_dir.exists() and not any(base_dir.iterdir()):
-                base_dir.rmdir()
-        except OSError:
-            pass
-        # 清理 root_map 映射并持久化
-        if self._pipeline_root_map.pop(target_pipeline_id, None) is not None:
-            self._persist_root_map()
-        # 清理内存分片状态
-        self._active_part.pop(target_pipeline_id, None)
-        self._records_in_active_file.pop(target_pipeline_id, None)
-        logger.warning(
-            "克隆管道记录已回滚 | dst=%s | 删除文件=%d",
-            target_pipeline_id[:12], len(written_files),
-        )
-
     def reconstruct_messages(
         self,
         pipeline_run_id: str,
@@ -948,7 +775,7 @@ class ExecutionRecordStorage:
 
         return blocks
 
-    def read_records_from_tail(  # noqa: PLR0911,PLR0912
+    def read_records_from_tail(
         self,
         pipeline_run_id: str,
         limit: int,

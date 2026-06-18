@@ -23,7 +23,7 @@ def _deep_update(target: dict, updates: dict) -> None:
     """将 updates 合并到 target，展开点号键为嵌套字典结构。
 
     插件的 state_updates 中使用点号键（如 "security.decision"），
-    但条件解析器按嵌套字典访问（state["security"]["decision"]）。
+    但条件解析器和 format_result 按嵌套字典访问（state["security"]["decision"]）。
     此函数将 "security.decision" 展开为 target["security"]["decision"]，
     使两种访问方式都能正确工作。
 
@@ -91,7 +91,7 @@ class PluginChain:
 
             # 跳过剩余插件
             if result.skip_remaining:
-                logger.debug(
+                logger.info(
                     "[%s] skip_remaining=True, skipping remaining plugins",
                     plugin.name,
                 )
@@ -117,12 +117,12 @@ class PluginChain:
             插件执行结果
         """
         start = time.monotonic()
-        logger.debug("[%s] started", plugin.name)
+        logger.info("[%s] started", plugin.name)
 
         try:
             raw_result = await plugin.execute(ctx)
             elapsed = time.monotonic() - start
-            logger.debug("[%s] success (%.3fs)", plugin.name, elapsed)
+            logger.info("[%s] success (%.3fs)", plugin.name, elapsed)
 
             # ICorePlugin 返回 dict，需要包装为 PluginResult
             if isinstance(raw_result, dict):
@@ -134,7 +134,7 @@ class PluginChain:
             logger.error("[%s] error (%.3fs): %s", plugin.name, elapsed, exc)
             return await self._handle_error(plugin, ctx, exc)
 
-    async def _handle_error(  # noqa: PLR0911
+    async def _handle_error(
         self, plugin: IPlugin, ctx: PluginContext, exc: Exception
     ) -> PluginResult:
         """根据插件错误策略处理异常。

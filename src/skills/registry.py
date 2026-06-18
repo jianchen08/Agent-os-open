@@ -362,7 +362,7 @@ _global_registry: SkillRegistry | None = None
 
 def get_global_skill_registry() -> SkillRegistry | None:
     """获取全局 Skill 注册表（懒加载单例）。"""
-    global _global_registry  # noqa: PLW0603
+    global _global_registry
     if _global_registry is None:
         try:
             _global_registry = SkillRegistry()

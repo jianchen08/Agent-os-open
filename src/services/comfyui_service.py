@@ -236,7 +236,7 @@ class ComfyUIService:
             按分类的模型列表
         """
         connector = self._require_connector()
-        from connectors.types import ConnectorAction  # noqa: PLC0415
+        from connectors.types import ConnectorAction
 
         action = ConnectorAction(action_type="list_models")
         result = await connector.execute_action(action)
@@ -279,7 +279,7 @@ class ComfyUIService:
 
         workflow = self._build_workflow(template, prompt, negative_prompt, kwargs)
 
-        from connectors.types import ConnectorAction  # noqa: PLC0415
+        from connectors.types import ConnectorAction
 
         action = ConnectorAction(
             action_type="generate_image",
@@ -318,7 +318,7 @@ class ComfyUIService:
         try:
             while True:
                 await asyncio.sleep(1.0)
-                from connectors.types import ConnectorAction  # noqa: PLC0415
+                from connectors.types import ConnectorAction
 
                 action = ConnectorAction(
                     action_type="get_progress",
@@ -336,9 +336,9 @@ class ComfyUIService:
 
                 self._task_progress[record_id] = result.output.get("progress", 0)
 
-            from datetime import datetime, timezone  # noqa: PLC0415
+            from datetime import datetime, timezone
 
-            from connectors.types import ConnectorAction  # noqa: PLC0415
+            from connectors.types import ConnectorAction
 
             action = ConnectorAction(
                 action_type="get_result",
@@ -441,7 +441,7 @@ class ComfyUIService:
             await task
 
         if self._connector and self._connector.is_connected:
-            from connectors.types import ConnectorAction  # noqa: PLC0415
+            from connectors.types import ConnectorAction
 
             action = ConnectorAction(action_type="interrupt_task")
             await self._connector.execute_action(action)
@@ -469,7 +469,7 @@ _global_service: ComfyUIService | None = None
 
 def get_comfyui_service() -> ComfyUIService:
     """获取全局 ComfyUI 服务单例。"""
-    global _global_service  # noqa: PLW0603
+    global _global_service
     if _global_service is None:
         _global_service = ComfyUIService()
     return _global_service

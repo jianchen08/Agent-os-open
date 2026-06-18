@@ -66,24 +66,3 @@ packages/wheels/*
 packages/npm-tarballs/*
 !packages/npm-tarballs/.gitkeep
 `n# ǰ�˹���ע���ǣ��������ɣ�`n.frontend_built_at`n.frontend_built_at
-
-# 本地临时脚本/调试产物（不进仓库）
-_fix_leaks.py
-_parse_probe.ps1
-_verify.ps1
-_vrf_review.py
-
-# 调试日志/运行时产物（不进仓库）
-.dbg/
-src/logs/
-*_debug.log
-_paste_debug.log
-*.ndjson
-docs/working/*_checkpoints.md
-
-# 工具运行状态/产物（不进仓库）
-.workbuddy/
-.playwright-cli/
-verify_after_fix.png
-viewer.out.txt
-todo.md

@@ -3,7 +3,8 @@
 覆盖场景：
 - host 模式：权限检查生效
 - container 模式：容器隔离行为（Mock DockerProvider）
-- 隔离不可用即报错：container 不可用时抛 IsolationError，不降级到 host
+- 降级策略：container 不可用时降级到 host（fallback=allow）
+- 禁止降级：fallback=deny 时抛出 IsolationError
 - IsolationDecider 决策逻辑验证
 - PermissionChecker 权限边界验证
 """
@@ -28,46 +29,71 @@ from isolation.types import IsolationLevel
 class TestIsolationDecider:
     """IsolationDecider 决策逻辑验证。"""
 
-    @staticmethod
-    def _make_decider(default_isolation=IsolationLevel.CONTAINER):
-        """创建使用空配置的 decider，可控默认策略。"""
-        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
-        loader._default = ToolIsolationPolicy(isolation=default_isolation)
-        return IsolationDecider(policy_loader=loader), loader
-
     @pytest.mark.asyncio
-    async def test_default_policy_is_host(self):
-        """默认策略为宿主机隔离（isolation_policy.yaml 的 default: host）。"""
+    async def test_default_policy_is_container(self):
+        """默认策略为容器隔离。"""
         decider = IsolationDecider()
         policy = decider.resolve("unknown_tool")
-        assert policy.isolation == IsolationLevel.HOST
+        assert policy.isolation == IsolationLevel.CONTAINER
 
     @pytest.mark.asyncio
     async def test_decide_without_availability_check(self):
         """不做可用性检查时直接返回策略。"""
         decider = IsolationDecider()
         policy = await decider.decide("some_tool")
-        # 默认无可用性检查，返回默认策略（host）
+        # 默认无可用性检查，返回默认策略
+        assert policy.isolation == IsolationLevel.CONTAINER
+
+    @pytest.mark.asyncio
+    async def test_fallback_allow_when_container_unavailable(self):
+        """container 不可用且 fallback=allow 时降级到 host。"""
+        # 创建一个 fallback=allow 的策略
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
+        decider = IsolationDecider(policy_loader=loader)
+
+        # 修改默认策略为 fallback=allow
+        loader._default = ToolIsolationPolicy(
+            isolation=IsolationLevel.CONTAINER,
+            fallback="allow",
+        )
+
+        available = {IsolationLevel.HOST: True, IsolationLevel.CONTAINER: False}
+        policy = await decider.decide(
+            tool_name="test_tool",
+            available_providers=available,
+        )
         assert policy.isolation == IsolationLevel.HOST
 
     @pytest.mark.asyncio
-    async def test_container_unavailable_host_available_raises(self):
-        """container 不可用 + host 可用 → 抛 IsolationError（不降级到 host）。"""
-        decider, _ = self._make_decider()
-        available = {IsolationLevel.HOST: True, IsolationLevel.CONTAINER: False}
+    async def test_fallback_deny_raises_error(self):
+        """container 不可用且 fallback=deny 时抛出 IsolationError。"""
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
+        decider = IsolationDecider(policy_loader=loader)
 
+        # 默认策略 fallback=deny
+        loader._default = ToolIsolationPolicy(
+            isolation=IsolationLevel.CONTAINER,
+            fallback="deny",
+        )
+
+        available = {IsolationLevel.HOST: True, IsolationLevel.CONTAINER: False}
         with pytest.raises(IsolationError, match="不可用"):
             await decider.decide(
-                tool_name="test_tool",
+                tool_name="strict_tool",
                 available_providers=available,
             )
 
     @pytest.mark.asyncio
-    async def test_all_unavailable_raises(self):
-        """所有级别都不可用时抛出 IsolationError。"""
-        decider, _ = self._make_decider()
-        available = {IsolationLevel.HOST: False, IsolationLevel.CONTAINER: False}
+    async def test_no_fallback_when_all_unavailable_deny(self):
+        """所有级别都不可用且 fallback=deny 时抛出错误。"""
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
+        decider = IsolationDecider(policy_loader=loader)
+        loader._default = ToolIsolationPolicy(
+            isolation=IsolationLevel.CONTAINER,
+            fallback="deny",
+        )
 
+        available = {IsolationLevel.HOST: False, IsolationLevel.CONTAINER: False}
         with pytest.raises(IsolationError):
             await decider.decide(
                 tool_name="no_provider_tool",
@@ -75,36 +101,45 @@ class TestIsolationDecider:
             )
 
     @pytest.mark.asyncio
-    async def test_container_available_returns_container(self):
-        """container 可用时正常返回 container 策略。"""
-        decider, _ = self._make_decider()
-        available = {IsolationLevel.HOST: True, IsolationLevel.CONTAINER: True}
-
-        policy = await decider.decide(
-            tool_name="test_tool",
-            available_providers=available,
+    async def test_all_unavailable_fallback_allow_raises_error(self):
+        """P0-安全: 所有级别不可用 + fallback=allow 时也必须报错，不允许静默降级。"""
+        loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
+        decider = IsolationDecider(policy_loader=loader)
+        loader._default = ToolIsolationPolicy(
+            isolation=IsolationLevel.CONTAINER,
+            fallback="allow",
         )
-        assert policy.isolation == IsolationLevel.CONTAINER
+
+        available = {IsolationLevel.HOST: False, IsolationLevel.CONTAINER: False}
+        with pytest.raises(IsolationError, match="无可用降级目标"):
+            await decider.decide(
+                tool_name="flexible_tool",
+                available_providers=available,
+            )
 
     def test_resolve_by_tool_name(self):
         """精确工具名匹配。"""
         loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         loader._tools["bash_execute"] = ToolIsolationPolicy(
             isolation=IsolationLevel.CONTAINER,
+            fallback="deny",
         )
         decider = IsolationDecider(policy_loader=loader)
         policy = decider.resolve("bash_execute")
         assert policy.isolation == IsolationLevel.CONTAINER
+        assert policy.fallback == "deny"
 
     def test_resolve_by_category(self):
         """分类匹配。"""
         loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
         loader._categories["code_execution"] = ToolIsolationPolicy(
             isolation=IsolationLevel.CONTAINER,
+            fallback="allow",
         )
         decider = IsolationDecider(policy_loader=loader)
         policy = decider.resolve("unknown_tool", tool_category="code_execution")
         assert policy.isolation == IsolationLevel.CONTAINER
+        assert policy.fallback == "allow"
 
 
 # ── 2. PermissionChecker 权限边界 ──────────────────────────────────
@@ -276,15 +311,18 @@ class TestIsolationPolicyLoader:
         loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
         policy = loader.resolve("any_tool")
         assert policy.isolation == IsolationLevel.CONTAINER
+        assert policy.fallback == "deny"
 
     def test_tool_name_priority_over_category(self):
         """工具名匹配优先于分类匹配。"""
         loader = IsolationPolicyLoader(config_path="/nonexistent/policy.yaml")
         loader._tools["special_tool"] = ToolIsolationPolicy(
             isolation=IsolationLevel.HOST,
+            fallback="allow",
         )
         loader._categories["code_execution"] = ToolIsolationPolicy(
             isolation=IsolationLevel.CONTAINER,
+            fallback="deny",
         )
         # 工具名匹配
         policy = loader.resolve("special_tool", category="code_execution")

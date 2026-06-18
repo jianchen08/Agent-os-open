@@ -11,8 +11,9 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { API_BASE, APP_URL } from './helpers/auth';
 
+const API_BASE = 'http://localhost:8888';
+const APP_URL = 'http://localhost:5188';
 const TEST_USER = { username: 'e2euser', password: 'Test123456!' };
 
 // 全局超时

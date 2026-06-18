@@ -39,7 +39,7 @@ def get_global_agent_registry_sync() -> AgentRegistry:
     Returns:
         全局唯一的 AgentRegistry 实例。
     """
-    global _global_agent_registry  # noqa: PLW0603
+    global _global_agent_registry
     if _global_agent_registry is None:
         _global_agent_registry = AgentRegistry()
         if _DEFAULT_CONFIG_DIR.exists():
@@ -70,7 +70,7 @@ async def get_global_agent_registry(
     Returns:
         全局唯一的 AgentRegistry 实例。
     """
-    global _global_agent_registry, _initialized  # noqa: PLW0603
+    global _global_agent_registry, _initialized
 
     if _global_agent_registry is None or force_reload:
         async with _registry_lock:

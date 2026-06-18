@@ -84,7 +84,7 @@
 位置1: {{path:config/rules/document_context_rules.md}}
 位置2: {{path:config/rules/per_domain/{domain}_domain_rules.md}}
 位置3: (项目上下文，由系统注入)
-位置4: {{path:config/processes/orchestrator_three_phase_pattern.md}}  (仅L2)
+位置4: {{path:config/rules/orchestrator_three_phase_pattern.md}}  (仅L2)
        {{path:config/rules/orchestrator_core_principles.md}}       (仅L2)
 位置5: Agent本体内容
 ```

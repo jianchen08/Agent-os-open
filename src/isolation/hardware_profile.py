@@ -39,9 +39,9 @@ def _read_cgroup_memory_limit_gb() -> float | None:
     """
     # cgroup v2（新版 Linux、Docker Desktop 默认）
     v2_path = "/sys/fs/cgroup/memory.max"
-    if os.path.exists(v2_path):  # noqa: PTH110
+    if os.path.exists(v2_path):
         try:
-            with open(v2_path, encoding="utf-8") as f:
+            with open(v2_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
             # v2 里 "max" 表示无限制
             if content == "max":
@@ -52,9 +52,9 @@ def _read_cgroup_memory_limit_gb() -> float | None:
 
     # cgroup v1（旧版）
     v1_path = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-    if os.path.exists(v1_path):  # noqa: PTH110
+    if os.path.exists(v1_path):
         try:
-            with open(v1_path, encoding="utf-8") as f:
+            with open(v1_path, "r", encoding="utf-8") as f:
                 limit = int(f.read().strip())
             # cgroup v1 无限制时是一个超大值（>1TB）
             if limit > 1024**4:
@@ -76,38 +76,6 @@ def _read_sysconf_memory_gb() -> float | None:
         return None
 
 
-def _read_windows_memory_gb() -> float | None:
-    """Windows 内存检测：通过 ctypes 调 GlobalMemoryStatusEx。
-
-    SC_PHYS_PAGES 是 POSIX 接口，Windows 上不可用，需用 Windows API。
-    返回 GB 单位的物理内存总量，失败返回 None。
-    """
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes  # noqa: PLC0415
-
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        return stat.ullTotalPhys / (1024**3)
-    except Exception:
-        return None
-
-
 def _read_cgroup_cpu_count() -> int | None:
     """读取 cgroup 限制的 CPU 数（容器内更准确）。
 
@@ -116,9 +84,9 @@ def _read_cgroup_cpu_count() -> int | None:
     """
     # cgroup v2
     v2_cpu_max = "/sys/fs/cgroup/cpu.max"
-    if os.path.exists(v2_cpu_max):  # noqa: PTH110
+    if os.path.exists(v2_cpu_max):
         try:
-            with open(v2_cpu_max, encoding="utf-8") as f:
+            with open(v2_cpu_max, "r", encoding="utf-8") as f:
                 parts = f.read().strip().split()
             # 格式："quota period" 或 "max period"
             if len(parts) == 2 and parts[0] != "max":
@@ -131,11 +99,11 @@ def _read_cgroup_cpu_count() -> int | None:
     # cgroup v1
     v1_quota = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
     v1_period = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
-    if os.path.exists(v1_quota) and os.path.exists(v1_period):  # noqa: PTH110
+    if os.path.exists(v1_quota) and os.path.exists(v1_period):
         try:
-            with open(v1_quota, encoding="utf-8") as f:
+            with open(v1_quota, "r", encoding="utf-8") as f:
                 quota = int(f.read().strip())
-            with open(v1_period, encoding="utf-8") as f:
+            with open(v1_period, "r", encoding="utf-8") as f:
                 period = int(f.read().strip())
             if quota > 0 and period > 0:
                 return max(1, math.ceil(quota / period))
@@ -160,19 +128,16 @@ def detect_hardware() -> dict[str, Any]:
         }
     """
     # 检测是否在容器内
-    is_container = os.path.exists("/.dockerenv") or os.path.exists("/proc/1/cgroup")  # noqa: PTH110
+    is_container = os.path.exists("/.dockerenv") or os.path.exists("/proc/1/cgroup")
 
-    # 内存：优先 cgroup，再 sysconf（Linux/macOS），再 Windows API
+    # 内存：优先 cgroup
     mem_gb = _read_cgroup_memory_limit_gb()
     source = "cgroup"
     if mem_gb is None:
         mem_gb = _read_sysconf_memory_gb()
         source = "sysconf"
     if mem_gb is None:
-        mem_gb = _read_windows_memory_gb()
-        source = "windows"
-    if mem_gb is None:
-        # 全部检测失败，给保守默认值（按低配处理，最安全）
+        # Windows 或读不到的情况，给保守默认值（按低配处理，最安全）
         mem_gb = 8.0
         source = "default(fallback)"
 
@@ -304,19 +269,6 @@ def compute_resource_profile(hardware: dict[str, Any] | None = None) -> dict[str
     profile["max_concurrent_tasks"] = min(
         profile["max_concurrent_tasks"], cpu_based_concurrency
     )
-
-    # 总量约束：所有容器资源总和不超过宿主机的一半。
-    # 单容器配额 = (宿主机一半) / max_environments，满载时总和恰好 = 一半。
-    # 用实际检测值动态计算，覆盖 _PROFILES 里写死的档位值。
-    max_env = max(1, profile["max_environments"])
-    half_mem_mb = int(mem * 1024 / 2)
-    half_cpu = cpu / 2
-    per_mem_mb = max(128, half_mem_mb // max_env)  # 单容器至少 128m
-    per_cpu = round(half_cpu / max_env, 2)
-    per_cpu = max(0.25, per_cpu)  # 单容器至少 0.25 cpu
-    profile["container_memory"] = f"{per_mem_mb}m"
-    profile["container_cpus"] = str(per_cpu)
-    profile["memory_swap"] = profile["container_memory"]  # 禁止 swap 放大
 
     profile["tier"] = tier
 

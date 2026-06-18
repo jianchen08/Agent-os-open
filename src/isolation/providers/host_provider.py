@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from isolation.checkpoint import CheckpointManager
 from isolation.providers.base import IsolationProvider
 from isolation.types import (
     EnvironmentStatus,
@@ -31,10 +32,7 @@ class HostProvider(IsolationProvider):
 
     在本地直接执行命令和操作，提供：
     - workspace 权限检查：只能写入指定的工作目录
-
-    host 模式不建文件检查点：host 执行本就在编排进程内，工作区由 git 托管
-    （评估前由 on_before_evaluate 提交 commit 作回滚锚点），无需额外文件备份。
-    旧实现的 checkpoint 会落到进程 CWD 对应的容器根，导致跨容器串台，已移除。
+    - 检查点机制：任务失败时从检查点恢复
 
     注意：HOST 模式需要人工审批才能使用。
     """
@@ -43,6 +41,12 @@ class HostProvider(IsolationProvider):
         """初始化宿主机提供者"""
         self._environments: dict[str, IsolationEnvironment] = {}
         self._project_root = Path(project_root).resolve()
+        self._checkpoint_manager = CheckpointManager(str(self._project_root))
+
+    @property
+    def checkpoint_manager(self) -> CheckpointManager:
+        """获取检查点管理器"""
+        return self._checkpoint_manager
 
     def get_level(self) -> IsolationLevel:
         """获取隔离级别"""
@@ -60,6 +64,19 @@ class HostProvider(IsolationProvider):
     ) -> IsolationEnvironment:
         """创建虚拟环境"""
         now = datetime.now(UTC)
+
+        # 创建检查点（如果指定了 workspace）
+        if context.workspace:
+            checkpoint = self._checkpoint_manager.create_checkpoint(
+                task_id=context.task_id,
+                workspace=context.workspace,
+            )
+            logger.info(
+                f"[HostProvider] 检查点已创建 | "
+                f"task_id={context.task_id} | "
+                f"workspace={context.workspace} | "
+                f"files={len(checkpoint.files)}"
+            )
 
         env = IsolationEnvironment(
             env_id=f"host-{context.task_id}",
@@ -85,18 +102,24 @@ class HostProvider(IsolationProvider):
         return env
 
     async def destroy_environment(self, env_id: str, success: bool = True) -> None:
-        """销毁虚拟环境
-
-        host 模式不维护文件检查点，无需清理/恢复；工作区回滚由 git 层负责。
-        """
+        """销毁虚拟环境"""
         env = self._environments.get(env_id)
         if not env:
             return
 
-        if not success:
+        task_id = env.context.task_id
+
+        if success:
+            # 任务成功，清理检查点
+            self._checkpoint_manager.cleanup_checkpoint(task_id)
+            logger.info(
+                f"[HostProvider] 检查点已清理 | task_id={task_id}"
+            )
+        else:
+            # 任务失败，从检查点恢复
+            self._checkpoint_manager.restore_checkpoint(task_id)
             logger.warning(
-                f"[HostProvider] host 任务失败，工作区回滚由 git 层处理 | "
-                f"task_id={env.context.task_id}"
+                f"[HostProvider] 已从检查点恢复 | task_id={task_id}"
             )
 
         self._environments.pop(env_id, None)
@@ -123,7 +146,7 @@ class HostProvider(IsolationProvider):
             error=f"不支持的操作类型: {op_type}",
         )
 
-    async def _execute_command(  # noqa: PLR0911
+    async def _execute_command(
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行Shell命令"""
@@ -213,7 +236,7 @@ class HostProvider(IsolationProvider):
                 error=f"执行命令失败: {str(e)}",
             )
 
-    async def _execute_file_op(  # noqa: PLR0911
+    async def _execute_file_op(
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行文件操作"""
@@ -241,11 +264,11 @@ class HostProvider(IsolationProvider):
                 return ExecutionResult(success=True, output=None)
 
             if op == "delete":
-                os.remove(path)  # noqa: PTH107
+                os.remove(path)
                 return ExecutionResult(success=True, output=None)
 
             if op == "exists":
-                exists = os.path.exists(path)  # noqa: PTH110
+                exists = os.path.exists(path)
                 return ExecutionResult(success=True, output={"exists": exists})
 
             return ExecutionResult(
@@ -264,7 +287,7 @@ class HostProvider(IsolationProvider):
     async def _execute_python_code(self, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码"""
         try:
-            from src.core.sandbox import CodeSandbox  # noqa: PLC0415
+            from src.core.sandbox import CodeSandbox
 
             code = operation.get("code")
             context = operation.get("context")
@@ -278,7 +301,7 @@ class HostProvider(IsolationProvider):
                 )
 
             # 创建沙箱
-            from src.core.sandbox import SandboxConfig  # noqa: PLC0415
+            from src.core.sandbox import SandboxConfig
 
             config = SandboxConfig(timeout_seconds=timeout)
             sandbox = CodeSandbox(config)

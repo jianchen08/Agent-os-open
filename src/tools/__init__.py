@@ -7,10 +7,10 @@
 
 def __getattr__(name: str):
     if name == "ToolRegistry":
-        from tools.registry import ToolRegistry  # noqa: PLC0415
+        from tools.registry import ToolRegistry
         return ToolRegistry
     if name == "ToolDefinition":
-        from tools.types import ToolDefinition  # noqa: PLC0415
+        from tools.types import ToolDefinition
         return ToolDefinition
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

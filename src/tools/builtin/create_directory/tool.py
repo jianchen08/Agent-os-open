@@ -66,7 +66,7 @@ class CreateDirectoryTool(BuiltinTool, WorkspaceAwareMixin):
             injected_params=["workspace"],
         )
 
-    async def execute(self, inputs: dict[str, Any]):  # noqa: PLR0911
+    async def execute(self, inputs: dict[str, Any]):
         """执行目录创建操作"""
         self._init_workspace(inputs)
 

@@ -123,7 +123,7 @@ class SchemaEvaluator:
 
         return "regex"
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行格式验证"""
         data = inputs.get("data")
         path = inputs.get("path")

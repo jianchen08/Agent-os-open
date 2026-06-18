@@ -15,7 +15,7 @@ export enum WebSocketStatus {
 
 /**
  * 从 API_BASE_URL 派生 WebSocket URL
- * http://localhost:8988 -> ws://localhost:8988
+ * http://localhost:8888 -> ws://localhost:8888
  * https://example.com -> wss://example.com
  * 空字符串 -> 从当前页面 location 派生（适用于 Vite 代理模式）
  */

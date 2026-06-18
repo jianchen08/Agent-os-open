@@ -122,7 +122,7 @@ class GameEngineConnector(BaseConnector):
         except Exception as e:
             return ConnectorContext(metadata={"error": str(e)})
 
-    async def execute_action(self, action: ConnectorAction) -> ActionResult:  # noqa: PLR0911
+    async def execute_action(self, action: ConnectorAction) -> ActionResult:
         """执行操作指令。"""
         if not self._session or not self.is_connected:
             return ActionResult(success=False, error="未连接到 Game Engine")

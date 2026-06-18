@@ -40,7 +40,7 @@ def resolve_output_plugins(
     Returns:
         匹配的输出插件实例列表
     """
-    from pipeline.plugin import IOutputPlugin  # noqa: PLC0415
+    from pipeline.plugin import IOutputPlugin
 
     ort = engine.output_route_table
     if hasattr(ort, "has_plugin_routing") and ort.has_plugin_routing():
@@ -61,7 +61,7 @@ def resolve_output_plugins(
     return engine.plugin_registry.get_output_plugins(core_type=core_type)
 
 
-async def apply_route(  # noqa: PLR0911
+async def apply_route(
     engine: PipelineEngine,
     route: RouteSignal,
     state: dict[str, object],
@@ -100,9 +100,19 @@ async def apply_route(  # noqa: PLR0911
         if _is_text_only and not _has_new_input:
             # AI 只输出了文本，没有调用任何工具。
             # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
-            # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
-            from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
-            if consume_pending_notifications(engine, state):
+            notif_sources = engine.drain_inject_queue()
+            if notif_sources:
+                # 有新通知，注入后继续 LLM 调用
+                combined = "\n\n".join(notif_sources)
+                state["user_input"] = combined
+                state.setdefault("messages", []).append(
+                    {"role": "user", "content": combined}
+                )
+                state[StateKeys.CORE_TYPE] = "llm_call"
+                logger.info(
+                    "Route next_llm + text-only output: %d pending notifications found, continuing",
+                    len(notif_sources),
+                )
                 return False
 
             # 无新输入，降级为 wait（挂起等用户反馈）
@@ -117,29 +127,37 @@ async def apply_route(  # noqa: PLR0911
             return True
 
         state[StateKeys.CORE_TYPE] = "llm_call"
-        logger.debug("Route applied: next_llm")
+        logger.info("Route applied: next_llm")
         return False
 
     if route_type == "next_tool":
         state[StateKeys.CORE_TYPE] = "tool_execute"
         if route.target:
             state["tool_name"] = route.target
-        logger.debug("Route applied: next_tool, target=%s", route.target)
+        logger.info("Route applied: next_tool, target=%s", route.target)
         return False
 
     if route_type == "end":
-        # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
-        from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
-        if consume_pending_notifications(engine, state):
-            logger.info("[Engine] route=end 但有待处理通知，取消结束: %s", route.reason)
+        _end_notifs = engine.drain_inject_queue()
+        if _end_notifs:
+            _combined = "\n\n".join(_end_notifs)
+            state["user_input"] = _combined
+            state.setdefault("messages", []).append(
+                {"role": "user", "content": _combined}
+            )
+            state[StateKeys.CORE_TYPE] = "llm_call"
+            logger.info(
+                "[Engine] route=end 但有 %d 条待处理通知，取消结束: %s",
+                len(_end_notifs), route.reason,
+            )
             return False
         state[StateKeys.ENDED] = True
-        logger.debug("Route applied: end, reason=%s", route.reason)
+        logger.info("Route applied: end, reason=%s", route.reason)
         return False
 
     if route_type == "wait":
         state[StateKeys.ENDED] = False
-        logger.debug("Route applied: wait, pipeline suspended")
+        logger.info("Route applied: wait, pipeline suspended")
         # 恢复逻辑已内置到 _suspend_and_wait
         restored = await engine.suspend_and_wait(state)
         if restored:

@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -174,33 +173,8 @@ def _safe_static_item_summary(item: dict | str, state: dict) -> dict:
     Returns:
         含 name/type/path/content/resolved_path 的展示字典。
     """
-    # 字符串占位符形式：解析 {{rules}} / {{path:xxx}} 等，显示实际注入内容
+    # 字符串占位符形式
     if isinstance(item, str):
-        file_content = ""
-        placeholder = item.strip()
-        if placeholder == "{{rules}}":
-            # 与 PromptBuildPlugin 一致：拼成 hard/soft 约束列表
-            constraints = state.get("constraints") or {}
-            parts = []
-            for c in constraints.get("hard", []):
-                parts.append(f"- [必须] {c}")
-            for c in constraints.get("soft", []):
-                parts.append(f"- [建议] {c}")
-            file_content = "\n".join(parts)
-        else:
-            m = re.match(r"\{\{path:([^}]+)\}\}", placeholder)
-            if m:
-                rel = m.group(1).strip()
-                p = Path(rel)
-                target = p if p.is_absolute() else PROJECT_ROOT / p
-                if target.is_file():
-                    try:
-                        text = target.read_text(encoding="utf-8")
-                        file_content = f"<{target.stem}>\n{text}\n</{target.stem}>"
-                    except Exception as e:
-                        file_content = f"[读取失败: {e}]"
-                else:
-                    file_content = f"[文件不存在: {target}]"
         return {
             "name": item,
             "type": "placeholder",
@@ -208,7 +182,6 @@ def _safe_static_item_summary(item: dict | str, state: dict) -> dict:
             "resolved_path": "",
             "exists": False,
             "content": "",
-            "file_content": file_content,
             "tags": [],
             "extensions": [],
             "route_key": "",
@@ -243,36 +216,6 @@ def _safe_static_item_summary(item: dict | str, state: dict) -> dict:
     exists = bool(full_path) and Path(full_path).exists()
     resolved = full_path
 
-    # path/folder 类型：读取实际注入内容（与 PromptBuildPlugin 运行时一致），
-    # 让 viewer 直接显示注入的具体文本，而不是只显示元信息。
-    # path 类型包裹成 <tag_name>内容</tag_name>，目录/folder 拼接多文件。
-    file_content = ""
-    if exists and full_path:
-        target = Path(full_path)
-        try:
-            if target.is_file():
-                text = target.read_text(encoding="utf-8")
-                file_content = f"<{target.stem}>\n{text}\n</{target.stem}>"
-            elif target.is_dir():
-                # 与 PromptBuildPlugin._read_dir_entries 一致：遍历顶层文件拼接
-                exts = tuple(item.get("extensions") or ())
-                parts = []
-                for child in sorted(target.iterdir()):
-                    if not child.is_file():
-                        continue
-                    if exts and child.suffix not in exts:
-                        continue
-                    if child.suffix not in (".md", ".yaml", ".yml", ".txt"):
-                        continue
-                    try:
-                        parts.append(f"<{child.stem}>\n{child.read_text(encoding='utf-8')}\n</{child.stem}>")
-                    except Exception:
-                        pass
-                if parts:
-                    file_content = f'<files dir="{raw_path}">\n' + "\n".join(parts) + "\n</files>"
-        except Exception as e:
-            file_content = f"[读取失败: {e}]"
-
     return {
         "name": var_name,
         "type": var_type or "inline",
@@ -280,7 +223,6 @@ def _safe_static_item_summary(item: dict | str, state: dict) -> dict:
         "resolved_path": resolved,
         "exists": exists,
         "content": item.get("content", ""),
-        "file_content": file_content,
         "tags": item.get("tags", []),
         "extensions": item.get("extensions", []),
         "route_key": item.get("route_key", ""),
@@ -472,24 +414,22 @@ def _clean_surrogates(s):
     return s.encode('utf-8', errors='replace').decode('utf-8')
 
 def _json_dump(data: object) -> str:
-    r"""JSON 序列化 + 防止 <script>/</script> 等标签破坏 HTML。
+    """JSON 序列化 + 防止 </script 等标签破坏 HTML。
 
-    问题：JSON 字符串里如果含字面 `<script>` 或 `</script>`，浏览器会把它当作
-    HTML 标签处理——`</script>` 提前闭合当前脚本块，`<script>` 开启新的脚本块。
-    两者都会导致 viewer 的 JS 失效、点击 agent 无反应。某 agent 的 system_prompt
-    里有 Vue 代码示例 `<script setup>...</script>`，历史版本因此完全点不开。
-
-    解法：把 `<` 转义成 JSON unicode 转义 `\u003c`。JS JSON.parse 能正确还原成
-    `<`（数据完全无损），而 HTML 解析器看到的是 `\u003cscript>`，绝不会当作标签。
-    这是前后端通用、最彻底的防注入方式。
+    注意：不能使用 `<\\/script` 这种 `\\/` 转义，因为 JSON 规范不允许 `\\/` 转义
+    （虽然很多 JS 解析器宽容，但 Python `json.loads` 会拒绝）。改用拆分字符串方式
+    让 HTML 解析器看不到完整标签。
     """
     s = json.dumps(data, ensure_ascii=False, indent=None)
-    # 把 < 转义成 \u003c，防止 <script>、</script>、<style> 等任何 HTML 标签
-    s = s.replace("<", "\\u003c")
+    # 拆分 </script 标签，让浏览器不会把它当作脚本结束
+    s = s.replace("</script", "</scr" + "ipt")
+    # 拆分 <!-- 注释起始
+    s = s.replace("<!--", "<!" + "--")
     return s
 
 
 def _build_inject_map(system_message, yaml_data):
+    import re
     inject_map = []
     sys_prompt = yaml_data.get("system_prompt", "")
     file_refs = set()
@@ -1193,32 +1133,22 @@ function renderStaticItem(item) {{
   }} else if (item.type === 'reference' || item.type === 'content' || item.type === '' || item.type === 'inline') {{
     const content = item.content || '(空)';
     body = `<pre>${{escapeHtml(content)}}</pre>`;
-  }} else if (item.type === 'placeholder') {{
-    // 字符串占位符（{{rules}} / {{path:xxx}} 等）：显示解析后的注入内容
-    if (item.file_content) {{
-      body = `<pre>${{escapeHtml(item.file_content)}}</pre>`;
-    }} else {{
-      body = `<div class="empty">占位符，运行时由 PromptBuildPlugin 解析（当前无内容）</div>`;
-    }}
   }} else if (item.type === 'path') {{
     if (!item.resolved_path) {{
       body = '<div class="empty">path 解析失败（project_root 未设置或路径无效）</div>';
     }} else if (!item.exists) {{
       body = `<div class="empty">文件不存在：${{escapeHtml(item.resolved_path)}}</div>`;
-    }} else if (item.file_content) {{
-      body = `<pre>${{escapeHtml(item.file_content)}}</pre>`;
     }} else {{
-      body = `<div class="empty">文件存在但内容为空</div>`;
+      // viewer 不实际读取（避免重复实现 PromptBuildPlugin），仅展示元信息
+      body = `<div>文件存在。运行时由 PromptBuildPlugin._resolve_path_for_file 读取并注入 system_message。</div>`;
     }}
   }} else if (item.type === 'folder') {{
     if (!item.resolved_path) {{
       body = '<div class="empty">ws_meta.path 为空 — 容器任务工作空间未指定，folder 注入为空（符合运行时无任务工作空间的行为）</div>';
     }} else if (!item.exists) {{
       body = `<div class="empty">目录不存在：${{escapeHtml(item.resolved_path)}}</div>`;
-    }} else if (item.file_content) {{
-      body = `<pre>${{escapeHtml(item.file_content)}}</pre>`;
     }} else {{
-      body = `<div class="empty">目录存在但无 .md/.yaml/.yml/.txt 文件可注入</div>`;
+      body = `<div>目录存在。运行时由 PromptBuildPlugin._resolve_target_path 读取顶层文件并注入 system_message。</div>`;
     }}
   }} else if (item.type === 'tags' || item.type === 'retrieval') {{
     body = `<div>tags: <code>${{escapeHtml((item.tags || []).join(', '))}}</code></div>

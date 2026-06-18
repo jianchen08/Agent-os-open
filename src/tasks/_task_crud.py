@@ -50,7 +50,7 @@ class _TaskCrudMixin:
         if self._storage is None:
             raise RuntimeError("TaskService.create_task 需要门面模式（task_id=None）")
 
-        from tasks.types import create_task as _create_task  # noqa: PLC0415
+        from tasks.types import create_task as _create_task
 
         task = _create_task(
             title=title,
@@ -66,8 +66,13 @@ class _TaskCrudMixin:
 
         self._storage.save(task)
 
+        # BUG-FIX-REQ-2: 容器任务创建后自动进入 running 状态
+        # 问题根因: 容器任务创建后处于 pending 状态，后续 complete/fail 操作
+        #   因状态转换矛盾（pending→completed 被拒，running 后又被要求 PENDING）
+        #   无法正常完成容器生命周期。
+        # 修复方案: 创建后检测 metadata.task_scope=container，自动转为 running。
         if metadata and metadata.get("task_scope") == "container":
-            from tasks.types import TaskStatus  # noqa: PLC0415
+            from tasks.types import TaskStatus
 
             task.status = TaskStatus.RUNNING
             task.updated_at = datetime.now().isoformat()

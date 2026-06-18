@@ -38,12 +38,7 @@ import {
   Info,
   X,
 } from 'lucide-react'
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
-
-// 缩放范围
-const MIN_SCALE = 0.5
-const MAX_SCALE = 5
-const SCALE_STEP = 0.2
+import { memo, useCallback, useEffect, useState } from 'react'
 
 /** 图像数据项 */
 export interface ImageItem {
@@ -108,31 +103,18 @@ export const ImageGallery = memo<ImageGalleryProps>(
   ({ images, className = '', columns = 3 }) => {
     const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
     const [showInfo, setShowInfo] = useState(false)
-    // 缩放和平移状态
-    const [scale, setScale] = useState(1)
-    const [translate, setTranslate] = useState({ x: 0, y: 0 })
-    const isDragging = useRef(false)
-    const dragStart = useRef({ x: 0, y: 0 })
-
-    /** 重置变换状态 */
-    const resetTransform = useCallback(() => {
-      setScale(1)
-      setTranslate({ x: 0, y: 0 })
-    }, [])
 
     /** 打开 Lightbox */
     const openLightbox = useCallback((index: number) => {
       setLightboxIndex(index)
       setShowInfo(false)
-      resetTransform()
-    }, [resetTransform])
+    }, [])
 
     /** 关闭 Lightbox */
     const closeLightbox = useCallback(() => {
       setLightboxIndex(null)
       setShowInfo(false)
-      resetTransform()
-    }, [resetTransform])
+    }, [])
 
     /** 上一张 */
     const goToPrev = useCallback(() => {
@@ -140,8 +122,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
       setLightboxIndex(
         lightboxIndex > 0 ? lightboxIndex - 1 : images.length - 1
       )
-      resetTransform()
-    }, [lightboxIndex, images.length, resetTransform])
+    }, [lightboxIndex, images.length])
 
     /** 下一张 */
     const goToNext = useCallback(() => {
@@ -149,56 +130,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
       setLightboxIndex(
         lightboxIndex < images.length - 1 ? lightboxIndex + 1 : 0
       )
-      resetTransform()
-    }, [lightboxIndex, images.length, resetTransform])
-
-    /** 滚轮缩放 */
-    const handleWheel = useCallback((e: React.WheelEvent) => {
-      e.preventDefault()
-      setScale((prev) => {
-        const delta = e.deltaY < 0 ? SCALE_STEP : -SCALE_STEP
-        const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev + delta))
-        // 缩到 1 时重置平移
-        if (next === 1) setTranslate({ x: 0, y: 0 })
-        return next
-      })
-    }, [])
-
-    /** 拖动开始 */
-    const handleMouseDown = useCallback(
-      (e: React.MouseEvent) => {
-        if (scale <= 1) return
-        isDragging.current = true
-        dragStart.current = {
-          x: e.clientX - translate.x,
-          y: e.clientY - translate.y,
-        }
-      },
-      [scale, translate]
-    )
-
-    /** 拖动中 */
-    const handleMouseMove = useCallback((e: React.MouseEvent) => {
-      if (!isDragging.current) return
-      setTranslate({
-        x: e.clientX - dragStart.current.x,
-        y: e.clientY - dragStart.current.y,
-      })
-    }, [])
-
-    /** 拖动结束 */
-    const handleMouseUp = useCallback(() => {
-      isDragging.current = false
-    }, [])
-
-    /** 双击切换缩放 */
-    const handleDoubleClick = useCallback(() => {
-      if (scale > 1) {
-        resetTransform()
-      } else {
-        setScale(2)
-      }
-    }, [scale, resetTransform])
+    }, [lightboxIndex, images.length])
 
     /** 键盘导航 */
     useEffect(() => {
@@ -379,29 +311,17 @@ export const ImageGallery = memo<ImageGalleryProps>(
             <div
               className="relative flex max-h-[85vh] max-w-[85vw] flex-col items-center"
               onClick={(e) => e.stopPropagation()}
-              onWheel={handleWheel}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-              onDoubleClick={handleDoubleClick}
-              style={{ cursor: scale > 1 ? (isDragging.current ? 'grabbing' : 'grab') : 'zoom-in' }}
             >
               <img
                 src={currentImage.url || currentImage.thumbnailUrl}
                 alt={currentImage.title}
-                className="max-h-[70vh] rounded-lg object-contain select-none"
-                style={{
-                  transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
-                  transition: isDragging.current ? 'none' : 'transform 0.2s ease-out',
-                }}
+                className="max-h-[70vh] rounded-lg object-contain"
                 onError={(e) => {
                   const img = e.currentTarget
                   if (img.src !== currentImage.thumbnailUrl && currentImage.thumbnailUrl) {
                     img.src = currentImage.thumbnailUrl
                   }
                 }}
-                draggable={false}
               />
 
               {/* 底部信息栏 */}
@@ -421,9 +341,6 @@ export const ImageGallery = memo<ImageGalleryProps>(
                     <span>
                       {lightboxIndex + 1} / {images.length}
                     </span>
-                    {scale !== 1 && (
-                      <span>{Math.round(scale * 100)}%</span>
-                    )}
                   </div>
                 </div>
 

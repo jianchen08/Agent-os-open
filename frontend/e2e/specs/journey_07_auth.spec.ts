@@ -6,7 +6,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { APP_URL, API_BASE, TEST_USER, VIEWER_USER, registerUser, loginViaAPI, logout } from '../helpers/auth';
+import { APP_BASE, API_BASE, TEST_USER, VIEWER_USER, registerUser, loginViaAPI, logout } from '../helpers/auth';
 import { ROUTES } from '../helpers/navigation';
 
 test.describe.configure({ timeout: 120_000 });

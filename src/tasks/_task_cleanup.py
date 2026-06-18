@@ -19,14 +19,18 @@ class _TaskCleanupMixin:
     """任务资源清理 Mixin。"""
 
     def _get_execution_record_storage(self):
-        """获取全局 ExecutionRecordStorage 实例。委托到公共接口。"""
-        from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
-        return get_execution_record_storage()
+        """获取全局 ExecutionRecordStorage 实例。"""
+        try:
+            from infrastructure.service_provider import get_service_provider
+            provider = get_service_provider()
+            return provider.get("execution_record_storage")
+        except Exception:
+            return None
 
     def _cancel_pipeline(self, task_id: str) -> None:
         """取消任务关联的运行中管道（best-effort）。"""
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
 
             provider = get_service_provider()
             task_worker = provider.get("task_worker")
@@ -79,19 +83,20 @@ class _TaskCleanupMixin:
         }
 
         try:
-            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+            from isolation.manager import get_isolation_manager
 
             manager = await get_isolation_manager()
-            await manager.destroy_by_task_id(task_id)
-            cleanup_results["container_destroyed"] = True
-            logger.info("[TaskService] 已通过 IsolationManager 销毁环境: %s", task_id)
+            destroyed = await manager.destroy_environment(task_id)
+            cleanup_results["container_destroyed"] = destroyed
+            if destroyed:
+                logger.info("[TaskService] 已通过 IsolationManager 销毁环境: %s", task_id)
         except Exception as e:
             cleanup_results["errors"].append(f"清理隔离环境失败: {str(e)}")
             logger.warning("[TaskService] 清理隔离环境失败: %s, 错误: %s", task_id, e)
 
         lifecycle_cleaned = False
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             lifecycle = provider.get("workspace_lifecycle_manager")
             if lifecycle:
@@ -106,7 +111,7 @@ class _TaskCleanupMixin:
 
         if not lifecycle_cleaned and workspace:
             try:
-                from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+                from isolation.workspace import get_workspace_config_root
 
                 workspace_path = Path(workspace)
                 ws_root = get_workspace_config_root()
@@ -181,7 +186,7 @@ class _TaskCleanupMixin:
             cleanup_results["errors"].append(f"清理 worktree 失败: {str(e)}")
             logger.warning("[TaskService] 清理 worktree 失败: %s, 错误: %s", workspace_path, e)
 
-    async def _cleanup_subtask_worktrees(  # noqa: PLR0912,PLR0915
+    async def _cleanup_subtask_worktrees(
         self,
         container_task: Any,
         subtasks: list[Any],
@@ -249,7 +254,7 @@ class _TaskCleanupMixin:
             try:
                 lifecycle_cleaned = False
                 try:
-                    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+                    from infrastructure.service_provider import get_service_provider
 
                     provider = get_service_provider()
                     lifecycle = provider.get("workspace_lifecycle_manager")
@@ -351,7 +356,7 @@ class _TaskCleanupMixin:
             )
             return False
 
-    async def _cascade_cleanup_subtasks(  # noqa: PLR0912
+    async def _cascade_cleanup_subtasks(
         self,
         task_id: str,
         *,
@@ -463,7 +468,7 @@ class _TaskCleanupMixin:
         Returns:
             操作结果字典
         """
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
         task = self.get_task(task_id)
         if task is None:
@@ -502,7 +507,7 @@ class _TaskCleanupMixin:
             result["cascaded_subtasks"] = cascaded
         return result
 
-    async def hard_delete_task(  # noqa: PLR0912
+    async def hard_delete_task(
         self, task_id: str, reason: str = "用户请求删除"
     ) -> dict[str, Any]:
         """硬删除非容器任务（级联清理 + 删除记录）。
@@ -514,7 +519,7 @@ class _TaskCleanupMixin:
         Returns:
             操作结果字典
         """
-        import contextlib  # noqa: PLC0415
+        import contextlib
 
         task = self.get_task(task_id)
         if task is None:
@@ -556,7 +561,7 @@ class _TaskCleanupMixin:
 
         # WebSocket 通知
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             _provider = get_service_provider()
             _ws_notifier = _provider.get("ws_interaction_notifier")
             if _ws_notifier:

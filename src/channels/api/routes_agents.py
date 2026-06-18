@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -30,35 +30,11 @@ def _get_agent_registry() -> Any:
         AgentRegistry 实例，加载失败则返回 None
     """
     try:
-        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+        from agents.global_registry import get_global_agent_registry_sync
         return get_global_agent_registry_sync()
     except Exception as exc:
         logger.warning("Agent 注册表初始化失败: %s", exc)
         return None
-
-
-def _resolve_agent_model(cfg: Any) -> str:
-    """解析 Agent 配置对应的实际模型标识。
-
-    与运行时 apply_agent_model_override 解析逻辑保持一致：
-    model_tier 解析优先（从 llm.yaml defaults.tiers），model_name 兜底。
-
-    Args:
-        cfg: AgentConfig dataclass
-
-    Returns:
-        模型标识字符串，解析失败返回空字符串
-    """
-    model_id = ""
-    if getattr(cfg, "model_tier", ""):
-        try:
-            from pipeline.plugin_resolver import resolve_tier  # noqa: PLC0415
-            model_id = resolve_tier(cfg.model_tier, {})
-        except Exception as exc:
-            logger.warning("解析 model_tier=%r 失败: %s", cfg.model_tier, exc)
-    if not model_id:
-        model_id = getattr(cfg, "model_name", "") or ""
-    return model_id
 
 
 def _config_to_response(cfg: Any) -> AgentResponse:
@@ -82,7 +58,6 @@ def _config_to_response(cfg: Any) -> AgentResponse:
         tags=cfg.tags,
         is_active=cfg.is_active,
         version=cfg.version,
-        model=_resolve_agent_model(cfg),
     )
 
 
@@ -118,7 +93,7 @@ def list_agents(
     if category:
         configs = [c for c in configs if c.category == category]
     if level:
-        from agents.types import AgentLevel  # noqa: PLC0415
+        from agents.types import AgentLevel
         try:
             level_enum = AgentLevel(level)
             configs = [c for c in configs if c.level == level_enum]

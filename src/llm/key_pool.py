@@ -57,22 +57,11 @@ def _priority_label(priority: int) -> str:
 
 
 class PrioritySemaphore:
-    """优先级信号量 — 高优先级请求优先获取许可，支持动态缩容/扩容。
-
-    弹性并发：收到限流/服务不可用时调用 shrink() 缩小容量（降级），
-    成功调用累积后调用 grow() 恢复容量（回升）。这是真正实现
-    adapter.py docstring 承诺的「自适应并发 1-3」。
-    """
+    """优先级信号量 — 高优先级请求优先获取许可。"""
 
     def __init__(self, value: int = 1) -> None:
         self._value = value
-        self._capacity = value  # 当前容量上限（shrink/grow 修改）
         self._waiters: list[tuple[int, asyncio.Future]] = []
-
-    @property
-    def capacity(self) -> int:
-        """当前容量上限。"""
-        return self._capacity
 
     async def acquire(self) -> None:
         """获取一个许可。高优先级（数值小）的请求优先获取。"""
@@ -100,8 +89,7 @@ class PrioritySemaphore:
 
     def release(self) -> None:
         """释放一个许可。唤醒最高优先级的等待者。"""
-        if self._waiters and self._value < self._capacity:
-            # 容量未满且有等待者：交给等待者，不增加 _value
+        if self._waiters:
             w_priority, fut = self._waiters.pop(0)
             if not fut.done():
                 fut.set_result(None)
@@ -109,40 +97,8 @@ class PrioritySemaphore:
                     "[PrioritySemaphore] 唤醒等待者 | level=%s priority=%d | remaining_waiters=%d",
                     _priority_label(w_priority), w_priority, len(self._waiters),
                 )
-        elif self._value < self._capacity:
-            self._value += 1
-
-    def shrink(self) -> int:
-        """缩小容量 1（弹性降级）。返回缩容后的新容量。
-
-        若有正在等待的请求因容量缩小而无法满足，取消并让其重新排队选 key。
-        """
-        if self._capacity <= 1:
-            return self._capacity
-        self._capacity -= 1
-        # _value 不能超过新容量
-        self._value = min(self._value, self._capacity)
-        logger.info(
-            "[PrioritySemaphore] 缩容 → capacity=%d (value=%d, waiters=%d)",
-            self._capacity, self._value, len(self._waiters),
-        )
-        return self._capacity
-
-    def grow(self) -> int:
-        """扩大容量 1（弹性回升）。返回扩容后的新容量。"""
-        self._capacity += 1
-        # 扩容后可立即满足一个等待者
-        if self._waiters:
-            w_priority, fut = self._waiters.pop(0)
-            if not fut.done():
-                fut.set_result(None)
         else:
             self._value += 1
-        logger.info(
-            "[PrioritySemaphore] 扩容 → capacity=%d (value=%d, waiters=%d)",
-            self._capacity, self._value, len(self._waiters),
-        )
-        return self._capacity
 
 
 @dataclass
@@ -153,7 +109,7 @@ class KeySlot:
         key_id: 标识符（如 zhipu_key_1）
         api_key: 实际的 API key 字符串
         api_base: 可选的 API base URL
-        max_concurrent: 最大并发数（信号量初始容量，弹性降级/回升围绕它波动）
+        max_concurrent: 最大并发数（信号量容量）
         rpm_limit: 每分钟请求数上限（0 表示不限）
         token_quota: Token 配额上限（0 表示不限）
     """
@@ -170,7 +126,7 @@ class KeySlot:
     _request_timestamps: list[float] = field(default_factory=list, repr=False)
     _tokens_used: int = 0
     _cooling_until: float = 0.0
-    _consecutive_down: int = 0  # 连续 SERVICE_DOWN 次数（指数退避用）
+    _rpm_overflows: int = 0  # 本地计数被 429 校准的次数
 
     def _get_semaphore(self) -> PrioritySemaphore:
         if self._semaphore is None:
@@ -230,94 +186,26 @@ class KeySlot:
         """记录一次请求的 token 消耗。"""
         self._tokens_used += prompt_tokens + completion_tokens
 
-    def handle_error(self, info: "ErrorInfo") -> None:
-        """按统一错误类型应用策略（取代旧的 on_rate_limit 万能方法）。
-
-        策略表：
-        - RATE_LIMIT: 冷却 + 并发降级 1 级
-        - QUOTA_EXHAUSTED: 长冷却 3600s
-        - AUTH_FAILED: 长冷却 300s
-        - SERVICE_DOWN: 连续次数计数，第 2 次起置递增短冷却（让 select() 暂时绕开），
-          累计 3 次后并发降级
-        - SERVER_ERROR: 冷却 + 换 key
-        - NETWORK: 仅换 key，不冷却（不是 key 的错）
-        - BAD_REQUEST / UNKNOWN: 不处理（由调用方决定 raise）
-
-        Args:
-            info: error_classifier.classify_error 的返回值
-        """
-        from llm.error_classifier import ErrorKind  # noqa: PLC0415
-
-        kind = info.kind
-        retry_after = info.retry_after
-
-        if kind == ErrorKind.RATE_LIMIT:
-            cool = retry_after if retry_after and retry_after > 0 else 5.0
-            self._cooling_until = _time.monotonic() + cool
-            self._reduce_concurrency()
-            logger.info(
-                "[KeySlot] %s RATE_LIMIT 冷却 %.1fs + 并发降级", self.key_id, cool,
-            )
-        elif kind == ErrorKind.QUOTA_EXHAUSTED:
-            self._cooling_until = _time.monotonic() + 3600.0
+    def on_rate_limit(self, retry_after: float | None = None) -> None:
+        """收到 429 响应：冷却 + 校准本地计数。"""
+        cool_seconds = retry_after if retry_after and retry_after > 0 else 5.0
+        self._cooling_until = _time.monotonic() + cool_seconds
+        # 校准：本地计数偏少，追加溢出计数
+        self._rpm_overflows += 1
+        if self._rpm_overflows > 3 and self.rpm_limit > 0:
+            # 多次被 429，说明本地限流太松，缩紧有效 RPM
             logger.warning(
-                "[KeySlot] %s QUOTA_EXHAUSTED 冷却 3600s", self.key_id,
+                "[KeySlot] %s 被 429 多次 (%d)，可能本地计数不准",
+                self.key_id, self._rpm_overflows,
             )
-        elif kind == ErrorKind.AUTH_FAILED:
-            self._cooling_until = _time.monotonic() + 300.0
-            logger.warning(
-                "[KeySlot] %s AUTH_FAILED 冷却 300s", self.key_id,
-            )
-        elif kind == ErrorKind.SERVICE_DOWN:
-            self._consecutive_down += 1
-            n = self._consecutive_down
-            # 第 1 次当偶发抖动容忍，不冷却（让 adapter 立即退避重试）。
-            # 从第 2 次起置递增短冷却，让 is_cooling=True，select() 暂时绕开
-            # 这个 key（否则单 key 场景下 select() 会无限选回它，陷入
-            # 「选坏 key → 503 → 退避 → 又选回」死循环）。冷却时长指数退避
-            # 封顶 60s，避免长冷却后忘记恢复。
-            if n >= 2:
-                cool = min(10.0 * (2 ** (n - 2)), 60.0)
-                self._cooling_until = _time.monotonic() + cool
-                logger.info(
-                    "[KeySlot] %s SERVICE_DOWN 连续 %d 次，冷却 %.0fs",
-                    self.key_id, n, cool,
-                )
-            # 累计 3 次确认非偶发，并发降级
-            if n >= 3:
-                self._reduce_concurrency()
-                logger.warning(
-                    "[KeySlot] %s SERVICE_DOWN 连续 %d 次，并发降级",
-                    self.key_id, n,
-                )
-            else:
-                logger.info(
-                    "[KeySlot] %s SERVICE_DOWN 第 %d 次（adapter 退避重试）",
-                    self.key_id, n,
-                )
-        elif kind == ErrorKind.SERVER_ERROR:
-            self._cooling_until = _time.monotonic() + 5.0
-            logger.info("[KeySlot] %s SERVER_ERROR 冷却 5s", self.key_id)
-        # NETWORK / BAD_REQUEST / UNKNOWN：不在此处理
-
-    def _reduce_concurrency(self) -> None:
-        """弹性并发降级：信号量缩容 1 级（最低到 1）。"""
-        sem = self._get_semaphore()
-        new_cap = sem.shrink()
         logger.info(
-            "[KeySlot] %s 并发降级 → %d (原 %d)",
-            self.key_id, new_cap, self.max_concurrent,
+            "[KeySlot] %s 收到 429，冷却 %.1fs",
+            self.key_id, cool_seconds,
         )
 
     def on_success(self) -> None:
-        """成功调用：恢复连续失败计数 + 并发回升 1 级（封顶到 max_concurrent）。"""
-        self._consecutive_down = 0
-        sem = self._get_semaphore()
-        if sem.capacity < self.max_concurrent:
-            new_cap = sem.grow()
-            logger.info(
-                "[KeySlot] %s 并发回升 → %d", self.key_id, new_cap,
-            )
+        """成功时重置溢出计数。"""
+        self._rpm_overflows = max(0, self._rpm_overflows - 1)
 
     def _evict_old(self, now: float) -> None:
         """清除 60 秒前的请求时间戳。"""
@@ -350,30 +238,25 @@ class KeyPool:
         return self._slots
 
     def select(self) -> KeySlot | None:
-        """按 slots 声明顺序选第一个可用 key（主备模式）。
+        """选最优可用 key。
 
-        优先级：slots 列表顺序即 key 优先级（由 llm.yaml 的 keys 段声明）。
-        始终选第一个非耗尽的 key；只有它冷却/限流/配额耗尽时才回退到下一个。
-        这样配置中的第一个 key 是主 key，其余为热备——主 key 恢复后自动切回。
-
-        Returns:
-            第一个可用 KeySlot；全部不可用返回 None。
+        优先级：
+        1. 排除冷却中 / RPM 满 / 配额耗尽的
+        2. 在剩余 key 中选 score 最高的
         """
-        available = [s for s in self._slots if not s.is_exhausted]
-        if available:
-            return available[0]
-
-        # 所有 key 都进入 exhausted（冷却/RPM 满/配额耗尽）。
-        # 取第一个未冷却的：它最短时间后恢复，acquire_slot 会等待其信号量。
-        rpm_blocked = [s for s in self._slots if not s.is_cooling]
-        if rpm_blocked:
-            return rpm_blocked[0]
-
-        logger.warning(
-            "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted)",
-            self.pool_id,
-        )
-        return None
+        candidates = [s for s in self._slots if not s.is_exhausted]
+        if not candidates:
+            # 全满了，看有没有只是 RPM 满但没冷却的（最短时间内可用的）
+            rpm_blocked = [s for s in self._slots if not s.is_cooling]
+            if rpm_blocked:
+                candidates = rpm_blocked
+            else:
+                logger.warning(
+                    "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted)",
+                    self.pool_id,
+                )
+                return None
+        return max(candidates, key=lambda s: s.score())
 
     async def acquire_slot(self, timeout: float = 60.0) -> KeySlot:
         """选 key 并获取并发许可，阻塞直到有 key 可用或超时。
@@ -389,11 +272,8 @@ class KeyPool:
         while True:
             slot = self.select()
             if slot is not None:
-                # BUG-FIX: record_request() 必须在 await acquire() 之前，
-                # 否则并发请求可同时通过 select() 的 rpm_remaining>0 检查，
-                # 绕过本地 RPM 限流，全部放行到上游导致 429。
-                slot.record_request()
                 await slot.acquire()
+                slot.record_request()
                 return slot
             if _time.monotonic() >= deadline:
                 unavailable = self.get_unavailable_slots()

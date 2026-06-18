@@ -9,7 +9,7 @@
 
 import { Copy } from 'lucide-react'
 import { useMemo } from 'react'
-import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
@@ -219,7 +219,7 @@ function makeStablePartKey(part: MessagePart, index: number): string {
   }
 }
 
-function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragment[] {
+function buildFragmentsFromParts(message: Message): RenderFragment[] {
   const fragments: RenderFragment[] = []
   const parts = message.parts!
 
@@ -289,19 +289,9 @@ function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragm
           containerTaskId: part.containerTaskId,
         }
         // 构建 ActivityData 并应用工具卡片注册表增强
-        // BUG-FIX-fix_20260625_file_opener_wrong_task_id:
-        // 问题根因: 工具卡片打开文件时用 toolCall.containerTaskId（来自 record），
-        //   但该值在 pipe 继承落盘时会被改写成别的任务、在根任务 pipeline 里为 null，
-        //   导致后端 _resolve_workspace_path 解析到错误容器 → 文件不存在。
-        // 修复方案: 优先用当前 Tab 的 taskId（= 产生这些消息的任务），缺失时回退到
-        //   record 的 containerTaskId（主 Tab 场景），保持现有行为不退化。
         const activity = enhanceActivityWithToolConfig(
           buildActivityFromToolPart(part, toolCall, i),
           toolCall,
-          {
-            onOpenFile: (filePath, _recordCtid) =>
-              getGlobalOpenFileCallback()(filePath, taskId || _recordCtid),
-          },
         )
         fragments.push({
           type: 'tool_call',
@@ -357,8 +347,6 @@ export interface UseMessageRenderOptions {
   isGenerating?: boolean
   /** 版本内容（编辑时使用） */
   versionContent?: string | null
-  /** 当前 Tab 任务 ID，优先作为工具卡片打开文件的工作区解析依据 */
-  taskId?: string
 }
 
 /**
@@ -368,7 +356,7 @@ export interface UseMessageRenderOptions {
  * displayContent 从 fragments 派生，避免对 parts[] 二次遍历。
  */
 export function useMessageRender(options: UseMessageRenderOptions): MessageRenderContext {
-  const { message, isLast = false, isGenerating = false, versionContent, taskId } = options
+  const { message, isLast = false, isGenerating = false, versionContent } = options
 
   /**
    * 从 parts[] 构建渲染片段（唯一路径）
@@ -379,7 +367,7 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
    */
   const { fragments, displayContent } = useMemo(() => {
     if (message.parts && message.parts.length > 0) {
-      const frags = buildFragmentsFromParts(message, taskId)
+      const frags = buildFragmentsFromParts(message)
       const textContent = frags
         .filter((f): f is Extract<RenderFragment, { type: 'text' }> => f.type === 'text')
         .map((f) => f.content)
@@ -400,7 +388,7 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
     // 修复方案: 只依赖 message.parts 数组引用、message.content 和 versionContent，
     //   不依赖整个 message 对象。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [message.parts, message.content, versionContent, taskId])
+  }, [message.parts, message.content, versionContent])
 
   const isStreaming = useMemo(() => {
     return isGenerating && isLast && message.role === 'assistant'

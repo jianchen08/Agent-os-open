@@ -53,28 +53,16 @@ class BridgeCore:
         self.message_id = message_id or uuid.uuid4().hex[:12]
         self._container_task_id: str = ""
         self._entry: Any | None = None
-
-        # 绑定日志上下文，使后续日志自动携带 pipeline_id / task_id
-        from src.core.logging import LogContext  # noqa: PLC0415
-        _ctx: dict[str, str] = {"pipeline_id": pipeline_id}
         try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            from pipeline.registry import get_engine_registry
             self._entry = get_engine_registry().get(pipeline_id)
             if self._entry and hasattr(self._entry, "tags"):
                 self._container_task_id = self._entry.tags.get("task_id", "")
-                if self._container_task_id:
-                    _ctx["task_id"] = self._container_task_id
-                _thread_id = self._entry.tags.get("session_id", "")
-                if _thread_id:
-                    _ctx["session_id"] = _thread_id
         except Exception:
             logger.debug(
                 "BridgeCore: 获取 PipelineEntry 失败 pipeline=%s",
                 pipeline_id[:12], exc_info=True,
             )
-
-        # 绑定日志上下文（contextvars，async 安全）
-        LogContext.bind(**_ctx)
 
         # 状态追踪（仅当前 turn，不跨 turn 累加内容）
         self._stream_started: bool = False
@@ -93,7 +81,7 @@ class BridgeCore:
         if getattr(self, '_entry', None) is not None:
             return self._entry.next_sequence()
         try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            from pipeline.registry import get_engine_registry
             entry = get_engine_registry().get(self.pipeline_id)
             if entry is not None:
                 self._entry = entry
@@ -115,26 +103,12 @@ class BridgeCore:
     # ------------------------------------------------------------------
 
     def _make_event(self, event_type: str, data: dict) -> dict:
-        """构造事件字典，自动注入信封字段和 pipeline_id、message_id、container_task_id。
-
-        按 WebSocket 协议要求（需求文档 §2.1），每个事件信封必须包含：
-        - type: 事件类型
-        - data: 事件数据
-        - source_type: 消息来源类型（system/agent/user/tool）
-        - source_id: 来源标识
-        - timestamp: ISO 8601 时间戳
-        """
+        """构造事件字典，自动注入 pipeline_id、message_id 和 container_task_id。"""
         data.setdefault("pipeline_id", self.pipeline_id)
         data.setdefault("message_id", self.message_id)
         if self._container_task_id:
             data.setdefault("container_task_id", self._container_task_id)
-        return {
-            "type": event_type,
-            "data": data,
-            "source_type": "system",
-            "source_id": self.pipeline_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return {"type": event_type, "data": data}
 
     async def _send_event_internal(self, event: dict) -> bool:
         """内部事件发送实现（失败隔离：只 log warning，不抛异常）。"""
@@ -300,7 +274,7 @@ class BridgeCore:
             state: 管道状态字典
         """
         await self._close_thinking_if_active(None)
-        logger.debug(
+        logger.info(
             "[Bridge] emit_suspend: msg=%s pipeline=%s",
             self.message_id[:12], self.pipeline_id[:12],
         )
@@ -313,6 +287,12 @@ class BridgeCore:
                 "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
             }))
             final_seq = self._get_next_sequence()
+            # BUG-FIX-fix_20260617_suspend_no_stream_end:
+            # 问题根因: 原代码在 full_content 和 parts 都为空时跳过 stream_end，
+            #   导致前端 streamingState 永远不被清理，UI 永久转圈。
+            # 修复方案: stream_end 始终发送（与 emit_finish 对齐），保证挂起必有终止事件。
+            # 影响范围: 系统通知/交互回复等空内容挂起场景
+            # 修复日期: 2026-06-17
             if full_content or parts:
                 await self._send_event(self._make_event("new_message", {
                     "id": self.message_id,

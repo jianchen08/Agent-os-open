@@ -126,7 +126,7 @@ class DegradationManager:
             )
 
         try:
-            from pathlib import Path  # noqa: PLC0415
+            from pathlib import Path
 
             path = Path(file_path)
             if not path.exists():

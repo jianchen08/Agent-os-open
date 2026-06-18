@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -152,10 +153,8 @@ class TaskMonitor:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         self._heartbeats.clear()
         logger.info("任务监控器已停止")
@@ -423,7 +422,7 @@ class TaskMonitor:
             )
             return await self.trigger_component.trigger_next_task(project_id)
 
-        elif task_status == "failed":
+        if task_status == "failed":
             # 任务失败，检查是否需要重试（支持差异化异常处理）
             failure_reason = self._determine_failure_reason(current_task)
             progress_info = self._extract_progress_info(current_task)
@@ -431,7 +430,7 @@ class TaskMonitor:
                 session, root_task, current_task, failure_reason, progress_info
             )
 
-        elif task_status == "blocked":
+        if task_status == "blocked":
             # 任务阻塞，需要用户介入
             logger.warning(f"项目 {project_id} 的任务 {task_id} 已阻塞，停止自动执行")
             await self.project_controller.pause_project(project_id, "任务阻塞")
@@ -442,11 +441,11 @@ class TaskMonitor:
                 "action": "paused",
             }
 
-        elif task_status == "pending":
+        if task_status == "pending":
             # 任务待执行，自动启动任务
             return await self._handle_pending_task(project_id, task_id, current_task)
 
-        elif task_status == ExecutionStatus.RUNNING.value:
+        if task_status == ExecutionStatus.RUNNING.value:
             # 任务执行中，检查超时和卡住
             await self.timeout_component.check_task_health(
                 session, root_task, current_task
@@ -458,14 +457,13 @@ class TaskMonitor:
                 "action": "monitored",
             }
 
-        else:
-            logger.warning(f"未知任务状态: {task_status}")
-            return {
-                "project_id": project_id,
-                "task_id": task_id,
-                "status": task_status,
-                "action": "unknown",
-            }
+        logger.warning(f"未知任务状态: {task_status}")
+        return {
+            "project_id": project_id,
+            "task_id": task_id,
+            "status": task_status,
+            "action": "unknown",
+        }
 
     async def _handle_pending_task(
         self,
@@ -510,7 +508,7 @@ class TaskMonitor:
                             "status": "pending",
                             "action": "started",
                         }
-                    elif status == "deferred":
+                    if status == "deferred":
                         # 服务未就绪，任务已加入待处理队列
                         logger.info(
                             f"任务 {task_id} 已加入待处理队列，等待执行服务就绪"
@@ -522,7 +520,7 @@ class TaskMonitor:
                             "action": "deferred",
                             "message": result.get("message", "任务已加入待处理队列"),
                         }
-                    elif status == "failed_but_queued":
+                    if status == "failed_but_queued":
                         # 启动失败但已加入队列
                         logger.warning(
                             f"任务 {task_id} 启动失败但已加入待处理队列: {result.get('error')}"
@@ -534,26 +532,24 @@ class TaskMonitor:
                             "action": "failed_but_queued",
                             "error": result.get("error"),
                         }
-                    else:
-                        logger.warning(f"任务 {task_id} 回调返回未知状态: {status}")
-                        return {
-                            "project_id": project_id,
-                            "task_id": task_id,
-                            "status": "pending",
-                            "action": "unknown_status",
-                            "callback_result": result,
-                        }
-                else:
-                    # 回调没有返回结果，假设成功
-                    logger.info(f"已触发任务 {task_id} 的启动回调")
-                    # 创建计时器
-                    await self._create_task_timer(task_id, project_id)
+                    logger.warning(f"任务 {task_id} 回调返回未知状态: {status}")
                     return {
                         "project_id": project_id,
                         "task_id": task_id,
                         "status": "pending",
-                        "action": "started",
+                        "action": "unknown_status",
+                        "callback_result": result,
                     }
+                # 回调没有返回结果，假设成功
+                logger.info(f"已触发任务 {task_id} 的启动回调")
+                # 创建计时器
+                await self._create_task_timer(task_id, project_id)
+                return {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "status": "pending",
+                    "action": "started",
+                }
 
             except Exception as e:
                 logger.error(f"启动任务回调失败: {e}")
@@ -669,12 +665,11 @@ class TaskMonitor:
                 "project_id": project_id,
                 "action": "project_completed",
             }
-        else:
-            # 还有未完成的任务或没有子任务
-            return {
-                "project_id": project_id,
-                "action": "waiting_tasks",
-            }
+        # 还有未完成的任务或没有子任务
+        return {
+            "project_id": project_id,
+            "action": "waiting_tasks",
+        }
 
     async def _mark_project_completed(
         self,

@@ -21,10 +21,18 @@ logger = logging.getLogger(__name__)
 # 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
 # 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
 #
+# BUG-FIX-fix_20260614_orphan_tool_result:
+# 历史根因：缓存 key 仅含 provider:name，没有 pipeline_id 维度。
+# 多个并发管道共享同一个 provider+plugin 实例时共用同一缓存值。
+# 当外部插件（duplicate_check / llm_error_recovery 等）向某管道的
+# state["messages"] 追加消息后，该管道的实际消息数与缓存记录的
+# "已验证前缀长度"不一致，孤儿 tool result 可能落在已验证前缀内
+# 被 Phase A/B 跳过 → 发给 API 触发 "tool id not found" (2013)。
+# 修复：缓存 key 追加 pipeline_id 维度，按管道隔离。
 _pairing_validated_len: dict[str, int] = {}
 
 
-def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
+def repair_json_string(s: str) -> str | None:
     """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
 
     处理的常见问题：
@@ -173,7 +181,7 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
 
 
-def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
+def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
     """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
 
     执行两项修正：
@@ -247,7 +255,7 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  
                 msg["tool_call_id"] = id_remap[tc_id]
 
 
-def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
+def _validate_tool_call_pairing(
     messages: list[dict[str, Any]],
     provider: str,
     name: str,
@@ -278,11 +286,6 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     cache_key = f"{provider}:{name}:{pipeline_id}"
     cached_len = _pairing_validated_len.get(cache_key, 0)
     msg_count = len(messages)
-
-    # MiniMax 对配对极度严格，增量缓存一旦过期就漏检，触发 2013 错误。
-    # 每次全量扫描开销极小（线性遍历消息列表），但能根除缓存漂移风险。
-    if provider == "minimax":
-        cached_len = 0
 
     # 消息被截断/重建（数量比缓存少），重置缓存做全量扫描
     if msg_count < cached_len:
@@ -512,7 +515,7 @@ def reset_pairing_cache(
     _pairing_validated_len.pop(f"{provider}:{name}:{pipeline_id}", None)
 
 
-def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
+def normalize_messages_for_provider(
     messages: list[dict[str, Any]],
     *,
     provider: str,
@@ -666,6 +669,16 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
             if intruders:
                 relocated_count += len(intruders)
                 result.extend(tool_group)
+                # BUG-FIX-fix_20260607_intruder_tool_calls_leak:
+                # 问题根因: 当 intruder 是 assistant(tool_calls) 消息时，
+                #   转为 user 角色但保留了 tool_calls 字段，
+                #   产生 role=user name=assistant tool_calls=[...] 的畸形消息，
+                #   MiniMax API 报 "invalid params, tool call result does not follow tool call"。
+                # 修复方案: 转换角色时清除 tool_calls 和 tool_call_id 等不兼容字段，
+                #   仅保留 content 作为纯文本 user 消息。
+                # 影响范围: 任务重试时恢复的对话历史中 assistant(tool_calls) 消息
+                #   位于其他 assistant(tool_calls) 和 tool 之间的情况。
+                # 修复日期: 2026-06-07
                 for intr in intruders:
                     if intr.get("role") not in ("user", "tool"):
                         moved = dict(intr)

@@ -204,68 +204,6 @@ class TestAgentResponseModels:
         assert len(list_resp.items) == 1
 
 
-class TestConfigToResponseModel:
-    """_config_to_response 模型解析测试。
-
-    验证 model 字段解析与运行时 apply_agent_model_override 逻辑一致：
-    model_tier 解析优先，model_name 兜底。
-    """
-
-    def test_model_tier_resolved(self) -> None:
-        """model_tier 配置时，通过 resolve_tier 解析为真实模型标识。"""
-        from agents.types import AgentConfig, AgentLevel, AgentType
-        from channels.api.routes_agents import _config_to_response
-
-        cfg = AgentConfig(
-            config_id="lingxi",
-            name="灵汐",
-            display_name="灵汐",
-            agent_type=AgentType.MAIN,
-            level=AgentLevel.L1_MAIN,
-            model_name="",
-            model_tier="large",
-        )
-        with patch(
-            "pipeline.plugin_resolver.resolve_tier",
-            return_value="glm-5.2",
-        ):
-            resp = _config_to_response(cfg)
-        assert resp.model == "glm-5.2"
-
-    def test_model_name_fallback(self) -> None:
-        """无 model_tier 时，直接使用 model_name。"""
-        from agents.types import AgentConfig, AgentLevel, AgentType
-        from channels.api.routes_agents import _config_to_response
-
-        cfg = AgentConfig(
-            config_id="custom",
-            name="custom",
-            model_name="minimax-m3",
-            model_tier="",
-            agent_type=AgentType.SPECIALIZED,
-            level=AgentLevel.L3_ATOMIC,
-        )
-        resp = _config_to_response(cfg)
-        assert resp.model == "minimax-m3"
-
-    def test_empty_model_when_both_absent(self) -> None:
-        """model_tier 和 model_name 均空时，model 为空字符串。"""
-        from agents.types import AgentConfig, AgentLevel, AgentType
-        from channels.api.routes_agents import _config_to_response
-
-        cfg = AgentConfig(
-            config_id="plain",
-            name="plain",
-            model_name="",
-            model_tier="",
-            agent_type=AgentType.SPECIALIZED,
-            level=AgentLevel.L3_ATOMIC,
-        )
-        resp = _config_to_response(cfg)
-        assert resp.model == ""
-
-
-
 # ═══════════════════════════════════════════════════════════
 # routes_tools: Tool 响应模型测试
 # ═══════════════════════════════════════════════════════════

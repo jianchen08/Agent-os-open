@@ -78,7 +78,7 @@ class WeComOutputAdapter(IOutputAdapter):
         self._accumulated_text += text
 
         # 如果标记了 flush 或 stream end，发送累积内容
-        if chunk.get("flush", False) or chunk.get("type") == "end":  # noqa: SIM102
+        if chunk.get("flush", False) or chunk.get("type") == "end":
             if self._channel_user_id and self._accumulated_text:
                 await self._stream_client.send_message(
                     self._channel_user_id, self._accumulated_text

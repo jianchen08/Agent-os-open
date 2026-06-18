@@ -51,7 +51,6 @@ class PermissionPolicyType(str, Enum):
 
     DEFAULT = "default"
     SUBTASK = "subtask"
-    ROOT_TASK = "root_task"
     SYSTEM_CONFIG = "system_config"
     READONLY = "readonly"
 
@@ -132,7 +131,6 @@ class PermissionPolicyManager:
     """
 
     # 默认权限策略定义
-    # 与 config/isolation/isolation_config.yaml 中的 permission_policies 保持同步
     DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
         "default": {
             "read": {"scope": "project", "allow_all": True},
@@ -143,15 +141,6 @@ class PermissionPolicyManager:
             "read": {"scope": "project", "allow_all": True},
             "write": {"scope": "workspace", "allow_outside": False},
             "description": "子任务策略：同默认策略",
-        },
-        "root_task": {
-            "read": {"scope": "project", "allow_all": True},
-            "write": {
-                "scope": "project",
-                "allow_outside": True,
-                "require_confirmation": True,
-            },
-            "description": "根任务策略：可读写整个项目，需用户确认",
         },
         "system_config": {
             "read": {"scope": "project", "allow_all": True},
@@ -171,21 +160,11 @@ class PermissionPolicyManager:
     }
 
     def __init__(self, custom_policies: dict[str, dict[str, Any]] | None = None):
-        """初始化权限策略管理器。
-
-        策略加载优先级：isolation_config.yaml 的 permission_policies 段 >
-        custom_policies 参数 > 代码内 DEFAULT_POLICIES 兜底。
-
-        Args:
-            custom_policies: 可选的自定义策略字典，优先级高于代码默认值但低于配置文件。
-        """
+        """初始化权限策略管理器"""
         self._policies: dict[str, WorkspacePermissionPolicy] = {}
         self._load_default_policies()
 
-        # 尝试从 isolation_config.yaml 加载，覆盖代码默认值
-        self._load_from_config_file()
-
-        # 加载自定义策略（最高优先级的代码传入值）
+        # 加载自定义策略
         if custom_policies:
             self._load_custom_policies(custom_policies)
 
@@ -222,53 +201,6 @@ class PermissionPolicyManager:
             f"[PermissionPolicyManager] 自定义策略已加载 | "
             f"count={len(custom_policies)}"
         )
-
-    def _load_from_config_file(self) -> None:
-        """从 isolation_config.yaml 的 permission_policies 段加载策略。
-
-        配置中的策略会覆盖同名代码默认策略。加载失败时静默回退到默认值。
-        yaml 中策略键名（如 root_task_policy）会自动去掉 _policy 后缀
-        作为策略名称（如 "root_task"）。
-        """
-        try:
-            from config.config_center import get_config_center  # noqa: PLC0415
-            config = get_config_center().get("isolation/isolation_config.yaml") or {}
-            policies_section = config.get("permission_policies", {})
-            if not policies_section:
-                logger.debug(
-                    "[PermissionPolicyManager] 配置文件中未找到 permission_policies，"
-                    "使用代码默认值"
-                )
-                return
-
-            loaded = 0
-            for config_key, policy_config in policies_section.items():
-                if not isinstance(policy_config, dict):
-                    continue
-                # 将 isolation_config.yaml 的键名（如 "root_task_policy"）
-                # 映射为策略名称（"root_task"）
-                name = config_key.replace("_policy", "")
-                if name == config_key:
-                    continue  # 跳过非策略段（如 special_directories）
-
-                self._policies[name] = self._create_policy_from_config(
-                    name,
-                    policy_config,
-                    PermissionPolicyType(
-                        policy_config.get("policy_type", "default")
-                    ),
-                )
-                loaded += 1
-
-            logger.info(
-                "[PermissionPolicyManager] 从配置文件加载策略完成 | "
-                f"loaded={loaded} | total={len(self._policies)}"
-            )
-        except Exception as e:
-            logger.warning(
-                "[PermissionPolicyManager] 配置文件加载失败，使用代码默认策略 | "
-                f"error={e}"
-            )
 
     def _create_policy_from_config(
         self,
@@ -353,29 +285,3 @@ class PermissionPolicyManager:
     def has_policy(self, policy_name: str) -> bool:
         """检查策略是否存在"""
         return policy_name in self._policies
-
-    @staticmethod
-    def get_policy_name_for_agent_level(agent_level: int | str | None) -> str:
-        """根据 agent 层级返回对应的权限策略名称。
-
-        L1 / 缺省 → root_task（按 root_task_policy: allow_outside=true, read.scope=project）
-        L2+ → subtask（按 subtask_policy: allow_outside=false, write restrict workspace）
-
-        Args:
-            agent_level: parent_agent_level 值（1=主agent, 2+=子任务, None=缺省按L1处理）
-
-        Returns:
-            策略名称字符串（"root_task" / "subtask"）
-        """
-        if agent_level is None:
-            return "root_task"
-        try:
-            level = int(str(agent_level).upper().lstrip("L"))
-        except (ValueError, TypeError):
-            return "root_task"
-        return "root_task" if level <= 1 else "subtask"
-
-
-def get_policy_name_for_agent_level(agent_level: int | str | None) -> str:
-    """便捷函数：根据 agent 层级返回策略名称。"""
-    return PermissionPolicyManager.get_policy_name_for_agent_level(agent_level)

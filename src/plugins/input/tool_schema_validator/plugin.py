@@ -97,7 +97,7 @@ class ToolSchemaValidator(IInputPlugin):
         """插件执行优先级。"""
         return self._config.get("priority", 30)
 
-    async def execute(self, ctx: PluginContext) -> PluginResult:  # noqa: PLR0912,PLR0915
+    async def execute(self, ctx: PluginContext) -> PluginResult:
         """执行 Schema 验证与自动修复。
 
         读取 raw_tool_calls，对每个调用验证参数是否符合工具定义的
@@ -268,7 +268,7 @@ class ToolSchemaValidator(IInputPlugin):
 
         return fixed_args, fix_messages
 
-    def _try_convert(self, value: Any, target_type: str) -> Any:  # noqa: PLR0911,PLR0912
+    def _try_convert(self, value: Any, target_type: str) -> Any:
         """尝试将值转换为目标类型。
 
         Args:
@@ -319,7 +319,7 @@ class ToolSchemaValidator(IInputPlugin):
 
         return value
 
-    def _check_args_truncation(  # noqa: PLR0911
+    def _check_args_truncation(
         self, args: Any, tool_name: str,
     ) -> dict[str, Any] | None:
         """检测 arguments JSON 是否被截断。
@@ -352,7 +352,7 @@ class ToolSchemaValidator(IInputPlugin):
             pass
 
         # 尝试修复
-        from plugins.core.llm_core import _repair_json_string  # noqa: PLC0415
+        from plugins.core.llm_core import _repair_json_string
         repaired = _repair_json_string(args)
         if repaired is None:
             # 完全无法修复 → 不是截断场景，交给 tool_core 处理

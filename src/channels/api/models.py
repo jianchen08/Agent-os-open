@@ -104,19 +104,18 @@ class MessageResponse(BaseModel):
     content: str
     timestamp: str
     sequence: int = 0
-    parentId: str | None = None  # noqa: N815
+    parentId: str | None = None
     metadata: dict[str, Any] | None = None
-    toolCalls: list[dict[str, Any]] | None = None  # noqa: N815
-    toolCallId: str | None = None  # noqa: N815
-    toolName: str | None = None  # noqa: N815
-    toolArgs: dict[str, Any] | None = None  # noqa: N815
-    toolResult: Any = None  # noqa: N815
-    toolError: str | None = None  # noqa: N815
+    toolCalls: list[dict[str, Any]] | None = None
+    toolCallId: str | None = None
+    toolName: str | None = None
+    toolArgs: dict[str, Any] | None = None
+    toolResult: Any = None
+    toolError: str | None = None
     status: str | None = None
-    agentId: str | None = None  # noqa: N815
-    agentName: str | None = None  # noqa: N815
-    durationMs: int | None = None  # noqa: N815
-    attachments: list[dict[str, Any]] | None = None
+    agentId: str | None = None
+    agentName: str | None = None
+    durationMs: int | None = None
 
 
 # ============================================================
@@ -137,9 +136,6 @@ class AgentResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     is_active: bool = True
     version: str = "1.0.0"
-    # 解析后的实际模型标识：model_tier 解析优先，model_name 兜底
-    # 与运行时 apply_agent_model_override 解析逻辑保持一致，供前端显示当前管道模型
-    model: str = ""
 
 
 class AgentListResponse(BaseModel):

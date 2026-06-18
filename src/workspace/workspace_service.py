@@ -21,7 +21,7 @@ _workspace_service: WorkspaceService | None = None
 
 def get_workspace_service() -> WorkspaceService:
     """获取全局工作空间服务单例。"""
-    global _workspace_service  # noqa: PLW0603
+    global _workspace_service
     if _workspace_service is None:
         _workspace_service = WorkspaceService()
     return _workspace_service
@@ -29,7 +29,7 @@ def get_workspace_service() -> WorkspaceService:
 
 def reset_workspace_service() -> None:
     """重置全局单例（测试用）。"""
-    global _workspace_service  # noqa: PLW0603
+    global _workspace_service
     _workspace_service = None
 
 
@@ -101,7 +101,7 @@ class WorkspaceService:
             return {"items": [], "total": 0}
 
         # 延迟导入避免循环依赖
-        from artifacts.artifact_service import get_artifact_service  # noqa: PLC0415
+        from artifacts.artifact_service import get_artifact_service
         artifact_service = get_artifact_service()
 
         items: list[dict[str, Any]] = []
@@ -133,7 +133,7 @@ class WorkspaceService:
         Returns:
             {"tree": [...]}
         """
-        if base_path and os.path.isdir(base_path):  # noqa: PTH112
+        if base_path and os.path.isdir(base_path):
             tree = await asyncio.to_thread(self._scan_directory, base_path, base_path)
         else:
             tree = []
@@ -142,7 +142,7 @@ class WorkspaceService:
         ws = self._workspaces.get(container_task_id)
         if ws:
             ws.file_tree = tree
-            from datetime import UTC, datetime  # noqa: PLC0415
+            from datetime import UTC, datetime
             ws.updated_at = datetime.now(UTC).isoformat()
 
         return {"tree": [n.to_dict() for n in tree]}
@@ -161,7 +161,7 @@ class WorkspaceService:
             容器任务 ID
         """
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -202,7 +202,7 @@ class WorkspaceService:
         使用 list_subtasks 递归查询，避免加载全部任务。
         """
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             task_service = provider.get_or_create(
                 "task_service",
@@ -256,20 +256,12 @@ class WorkspaceService:
 
         nodes: list[FileTreeNode] = []
         try:
-            entries = sorted(os.listdir(path))  # noqa: PTH208
+            entries = sorted(os.listdir(path))
         except (PermissionError, OSError):
             return []
 
         for entry in entries:
-            # BUG-FIX-fix_20260623_hidden_files:
-            # 问题根因: 此前 entry.startswith(".") 把所有隐藏文件/目录
-            #           （.git、.env、.gitignore、.vscode 等）全部过滤掉，
-            #           导致前端文件树永远看不到这些文件。
-            # 修复方案: 不再按前缀过滤隐藏文件，始终返回给前端展示。
-            #          仅保留对文件浏览无用/有害的条目：
-            #          - __pycache__：Python 字节码缓存，无浏览价值
-            #          - Windows 保留设备名 / UNC 设备路径：避免误访问
-            if entry == "__pycache__":
+            if entry.startswith(".") or entry == "__pycache__":
                 continue
 
             stem = entry.split(".")[0].upper()
@@ -286,7 +278,7 @@ class WorkspaceService:
             except ValueError:
                 continue
 
-            if os.path.isdir(full_path):  # noqa: PTH112
+            if os.path.isdir(full_path):
                 children = self._scan_directory(
                     full_path, base_path, max_depth, current_depth + 1
                 )

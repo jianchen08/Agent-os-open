@@ -7,9 +7,9 @@
 - static_files: 静态文件挂载
 """
 
-from channels.websocket.static_files import mount_media_static_files
-from channels.websocket.stream_handler import PipelineContext, _init_pipeline_context
 from channels.websocket.ws_handler import WebSocketInteractionNotifier, ws_interaction_notifier
+from channels.websocket.stream_handler import PipelineContext, _init_pipeline_context
+from channels.websocket.static_files import mount_media_static_files
 
 __all__ = [
     "WebSocketInteractionNotifier",

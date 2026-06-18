@@ -16,15 +16,15 @@ import copy
 import logging
 from typing import Any
 
-from pipeline.engine_registry import EngineRegistry, get_engine_registry  # noqa: F401
-
-# Re-export from sub-modules
-from pipeline.pipeline_entry import MAX_TAGS_PER_PIPELINE, PipelineEntry  # noqa: F401
 from pipeline.plugin import (
     ICorePlugin,
     IOutputPlugin,
     IPlugin,
 )
+
+# Re-export from sub-modules
+from pipeline.pipeline_entry import MAX_TAGS_PER_PIPELINE, PipelineEntry
+from pipeline.engine_registry import EngineRegistry, get_engine_registry
 
 logger = logging.getLogger(__name__)
 

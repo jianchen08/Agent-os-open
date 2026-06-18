@@ -18,6 +18,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 排除的目录（不参与场景检测、复制和大小计算）
+# BUG-FIX-fix_20260611_isolation_data:
+#   加入 "data" — data/ 包含运行时状态（会话映射、记忆、任务数据），
+#   不应被复制到容器空间或纳入 git 跟踪。
+#   参考: reports/worktree_merge_api_store_investigation.md 问题 #3
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data"})
 _SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
 _WIN_RESERVED_NAMES = frozenset({
@@ -32,7 +36,7 @@ _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作
 
 def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 15) -> str:
     """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限。"""
-    import re  # noqa: PLC0415
+    import re
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', project_name)
     safe = safe.replace(" ", "_")
     safe = re.sub(r'_+', '_', safe).strip('._')
@@ -51,10 +55,10 @@ def _force_rmtree(path: str) -> None:
     """
     def _on_error(func, filepath, exc_info):
         if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
+            os.chmod(filepath, stat.S_IWRITE)
             func(filepath)
         else:
-            raise  # noqa: PLE0704
+            raise
 
     try:
         shutil.rmtree(path, onerror=_on_error)
@@ -77,6 +81,7 @@ class _GitOpsMixin:
     - self._resource_merge: Any
     """
 
+    # BUG-FIX: Windows 绝对路径正则（Linux 下 Path.is_absolute() 无法识别盘符路径）
     _WIN_ABS_PATH = __import__("re").compile(r'^[a-zA-Z]:[/\\]')
 
     def _get_workspace_root(self) -> Path:
@@ -86,7 +91,7 @@ class _GitOpsMixin:
         返回的是所有工作空间（worktree/container）的父目录。
         例如配置 root: "D:/myproject" 则返回 Path("D:/myproject")。
         """
-        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT  # noqa: PLC0415
+        from isolation.workspace import _DEFAULT_WORKSPACE_ROOT
         raw = self._config.get("workspace", {}).get("root", _DEFAULT_WORKSPACE_ROOT)
         if self._WIN_ABS_PATH.match(raw):
             return Path(raw)
@@ -99,7 +104,7 @@ class _GitOpsMixin:
         """执行 git 命令（同步，使用 subprocess）"""
         cmd = ["git"] + list(args)
         try:
-            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)  # noqa: PLW1510
+            r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
             if r.returncode != 0:
                 err_parts = []
                 if r.stderr.strip():
@@ -220,7 +225,7 @@ class _GitOpsMixin:
             logger.warning("[WorkspaceLifecycle] _guard_root_branch 检查异常，默认放行", exc_info=True)
             return True
 
-    def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:  # noqa: PLR0912
+    def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:
         """Initialize a new git repo and make the initial commit with all files.
 
         Handles edge cases: stale index.lock, pre-existing but empty .git directory,
@@ -255,6 +260,10 @@ class _GitOpsMixin:
 
         self._ensure_git_user(cwd)
 
+        # BUG-FIX-fix_20260529_gitignore_guard:
+        # git add -A 前确保 .gitignore 存在。
+        # 如果 .gitignore 丢失（sparse checkout 未检出、merge 覆盖等），
+        # git add -A 会跟踪 data/ 等本应排除的目录，后续 git 操作会破坏数据。
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
             logger.warning(
@@ -278,7 +287,7 @@ class _GitOpsMixin:
 
         rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
         if rc != 0:
-            if "index.lock" in (stderr or ""):  # noqa: SIM102
+            if "index.lock" in (stderr or ""):
                 if self._remove_index_lock(cwd):
                     rc, out, stderr = self._run_git("commit", "-m", message, "--allow-empty", cwd=cwd, timeout=_GIT_INIT_TIMEOUT)
             if rc != 0:
@@ -303,16 +312,23 @@ class _GitOpsMixin:
         if rc != 0 or not status.strip():
             return None
 
+        # BUG-FIX-fix_20260611_gitignore_guard:
+        #   复用 _git_init_and_initial_commit 中的保护逻辑。
+        #   如果 .gitignore 丢失（sparse checkout 未检出、merge 覆盖等），
+        #   git add -A 会跟踪 data/ 等本应排除的目录，后续 git 操作会破坏数据。
+        #   参考: reports/worktree_merge_api_store_investigation.md 问题 #2
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
             logger.warning(
                 "[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s",
                 gitignore)
-            with contextlib.suppress(OSError):
+            try:
                 gitignore.write_text(
                     "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n"
                     "node_modules/\n.env\n*.log\n*.bak\n",
                     encoding="utf-8")
+            except OSError:
+                pass
 
         rc, _, _ = self._run_git("add", "-A", cwd=cwd)
         if rc != 0:
@@ -450,8 +466,8 @@ class _GitOpsMixin:
         self._run_git("worktree", "prune", cwd=repo_path)
         if ws_dir.exists():
             def _remove_readonly(func, path, exc_info):
-                import stat  # noqa: PLC0415
-                os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
+                import stat
+                os.chmod(path, stat.S_IWRITE)
                 func(path)
             shutil.rmtree(str(ws_dir), onexc=_remove_readonly)
         self._run_git("branch", "-D", branch, cwd=repo_path)
@@ -488,17 +504,18 @@ class _GitOpsMixin:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if src.is_dir():
                     if os.name == "nt":
-                        subprocess.run(  # noqa: PLW1510
+                        subprocess.run(
                             ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
                             capture_output=True, timeout=10)
                     else:
                         dst.symlink_to(src)
-                elif os.name == "nt":
-                    subprocess.run(  # noqa: PLW1510
-                        ["cmd", "/c", "mklink", str(dst), str(src)],
-                        capture_output=True, timeout=10)
                 else:
-                    dst.symlink_to(src)
+                    if os.name == "nt":
+                        subprocess.run(
+                            ["cmd", "/c", "mklink", str(dst), str(src)],
+                            capture_output=True, timeout=10)
+                    else:
+                        dst.symlink_to(src)
                 logger.info(
                     "[WorkspaceLifecycle] 符号链接已创建: %s -> %s", dst, src)
             except Exception as e:

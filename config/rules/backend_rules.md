@@ -162,9 +162,16 @@ def downgrade() -> None:
 
 ## 3. 错误处理
 
-> 通用错误处理原则见「错误处理铁律」。
+### 3.1 异常处理原则
 
-### 3.1 FastAPI 异常处理
+| 原则 | 说明 |
+|------|------|
+| 具体异常 | 捕获具体异常而非 Exception |
+| 异常链 | 使用 `raise ... from` 保留原始异常 |
+| 资源清理 | 使用 try/finally 或 context manager |
+| 异常传播 | 不捕获应向上传播的异常 |
+
+### 3.2 FastAPI 异常处理
 
 ```python
 from fastapi import FastAPI, HTTPException, Request, status
@@ -185,7 +192,7 @@ async def user_not_found_handler(request: Request, exc: UserNotFoundError):
     )
 ```
 
-### 3.2 错误响应格式
+### 3.3 错误响应格式
 
 ```json
 {
@@ -265,12 +272,21 @@ logger.info("Order created")
 | 外键约束缺失 | 适当使用外键 |
 | 中文表名/字段名 | 使用英文命名 |
 
-### 5.3 其他禁止行为
+### 5.3 错误处理
 
-> 错误处理、日志相关的禁止行为见「错误处理铁律」和「反模式清单」。
+| 禁止行为 | 替代方案 |
+|----------|----------|
+| 捕获 Exception | 捕获具体异常 |
+| bare except | 明确异常类型 |
+| 吞掉异常 | 重新抛出或记录日志 |
+| 返回 None 表示错误 | 抛出异常 |
+| 异常中暴露敏感信息 | 内部记录，外部脱敏 |
+
+### 5.4 日志
 
 | 禁止行为 | 替代方案 |
 |----------|----------|
 | 记录密码/Token | 脱敏或用占位符 |
+| print 调试 | 使用 logging |
 | 日志过多 | 适当降低日志级别 |
 | 日志无上下文 | 添加业务上下文 |

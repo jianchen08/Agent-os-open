@@ -56,15 +56,6 @@ const formatNumber = (num: number): string => {
   return num.toLocaleString('en-US')
 }
 
-/** 格式化录音时长为 mm:ss */
-const formatDuration = (seconds: number): string => {
-  const m = Math.floor(seconds / 60)
-    .toString()
-    .padStart(2, '0')
-  const s = (seconds % 60).toString().padStart(2, '0')
-  return `${m}:${s}`
-}
-
 /**
  * 附件预览组件
  */
@@ -174,8 +165,6 @@ export const ChatInput = ({
   const fileInputRef = useRef<HTMLInputElement>(null)
   /** 追踪最新文本值，用于组件卸载时保存草稿 */
   const textRef = useRef(text)
-  /** 语音实时识别：临时文字在 text 中的起始偏移量，-1 表示无未确认临时文字 */
-  const interimVoiceStartRef = useRef(-1)
 
   /** 思考模式状态：优先使用外部传入的值 */
   const currentThinkingMode: ThinkingModeState = thinkingMode || {
@@ -258,38 +247,16 @@ export const ChatInput = ({
   )
 
   /**
-   * 提交（合并）当前未确认的临时语音文字到正文，并重置临时区间
-   *
-   * 作用：在用户键盘编辑、确认文字到达、停止录音等场景，把灰色临时文字
-   * 正式并入 text，避免区间错乱。
+   * 处理语音转写完成（模型不支持音频时）
    */
-  const commitInterimVoice = useCallback(() => {
-    interimVoiceStartRef.current = -1
-  }, [])
-
-  /**
-   * 处理语音实时临时识别结果（模型不支持音频时）
-   *
-   * 将临时文字实时追加/替换到 text 末尾，区间由 interimVoiceStartRef 标记，
-   * 用户在输入框中可即时看到"正在说的话"。
-   */
-  const handleVoiceInterim = useCallback(
-    (interimText: string) => {
-      if (!interimText) return
+  const handleVoiceTranscriptionComplete = useCallback((transcribedText: string) => {
+    if (transcribedText.trim()) {
       setText((prev) => {
-        // 首次临时结果：记录起点，直接追加
-        if (interimVoiceStartRef.current === -1) {
-          const needSpace = prev && !prev.endsWith(' ')
-          const start = prev.length + (needSpace ? 1 : 0)
-          interimVoiceStartRef.current = start
-          const newText = needSpace ? `${prev} ${interimText}` : `${prev}${interimText}`
-          textRef.current = newText
-          return newText
-        }
-        // 后续临时结果：替换上一段临时文字
-        const base = prev.slice(0, interimVoiceStartRef.current)
-        const newText = `${base}${interimText}`
+        const newText = prev ? `${prev} ${transcribedText}` : transcribedText
         textRef.current = newText
+        if (draftKey) {
+          useChatInputStore.getState().saveDraft(draftKey, newText)
+        }
         return newText
       })
       setTimeout(() => {
@@ -299,45 +266,8 @@ export const ChatInput = ({
           textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
         }
       }, 0)
-    },
-    [],
-  )
-
-  /**
-   * 处理语音转写完成（模型不支持音频时）
-   *
-   * final 到达时：若有未确认临时文字，先剔除临时区间，再追加确认文字；
-   * 否则按原逻辑直接拼接。
-   */
-  const handleVoiceTranscriptionComplete = useCallback(
-    (transcribedText: string) => {
-      if (transcribedText.trim()) {
-        setText((prev) => {
-          // 剔除上一段临时识别文字（若存在），避免与 final 重复
-          let base = prev
-          if (interimVoiceStartRef.current !== -1) {
-            base = prev.slice(0, interimVoiceStartRef.current)
-          }
-          const needSpace = base && !base.endsWith(' ')
-          const newText = needSpace ? `${base} ${transcribedText}` : `${base}${transcribedText}`
-          interimVoiceStartRef.current = -1
-          textRef.current = newText
-          if (draftKey) {
-            useChatInputStore.getState().saveDraft(draftKey, newText)
-          }
-          return newText
-        })
-        setTimeout(() => {
-          const textarea = textareaRef.current
-          if (textarea) {
-            textarea.style.height = 'auto'
-            textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-          }
-        }, 0)
-      }
-    },
-    [draftKey],
-  )
+    }
+  }, [draftKey])
 
   /** 语音输入 Hook */
   const voiceInput = useVoiceInput({
@@ -346,7 +276,6 @@ export const ChatInput = ({
     continuous: true,
     onRecordingComplete: handleVoiceRecordingComplete,
     onTranscriptionComplete: handleVoiceTranscriptionComplete,
-    onInterimResult: handleVoiceInterim,
     onError: (error) => {
       setUploadError(error.message)
     },
@@ -364,8 +293,6 @@ export const ChatInput = ({
   /** 处理文本变化 */
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newText = e.target.value
-    // 用户键盘编辑后，临时语音文字区间可能失效，提交并清空标记
-    commitInterimVoice()
     setText(newText)
     textRef.current = newText
     adjustTextareaHeight()
@@ -499,7 +426,7 @@ export const ChatInput = ({
           name: pf.uploadResult!.filename,
           type: pf.uploadResult!.mime_type,
           size: pf.file.size,
-          url: pf.uploadResult!.url,
+          url: pf.uploadResult!.file_id,
           status: 'completed',
         })
       })
@@ -513,7 +440,6 @@ export const ChatInput = ({
     onSendMessage(params)
     setText('')
     textRef.current = ''
-    interimVoiceStartRef.current = -1
     setAttachments([])
     setPendingFiles([])
     setUploadError(null)
@@ -746,24 +672,6 @@ export const ChatInput = ({
           </div>
         )}
 
-        {/* 录音状态条（容器内顶部，与附件预览区结构对称；不改变与上方消息列表的距离） */}
-        {voiceInput.isRecording && (
-          <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-1">
-            <div className="flex items-center gap-2">
-              <span
-                className="bg-status-error inline-block h-2 w-2 rounded-full"
-                style={{ animation: 'voice-pulse-core 1.2s ease-in-out infinite' }}
-              />
-              <span className="text-muted-foreground text-xs font-medium">
-                {voiceInput.mode === 'server-asr' ? '服务器识别中…' : '正在聆听…'}
-              </span>
-            </div>
-            <span className="text-muted-foreground/70 font-mono text-xs tabular-nums">
-              {formatDuration(voiceInput.recordingDuration)}
-            </span>
-          </div>
-        )}
-
         {/* 文本输入框 */}
         <textarea
           ref={textareaRef}
@@ -822,20 +730,11 @@ export const ChatInput = ({
                 disabled={disabled || isExecuting}
                 state={voiceInput.state}
                 error={voiceInput.error}
-                recordingDuration={voiceInput.recordingDuration}
                 aria-label={voiceInput.isRecording ? '停止语音输入' : '开始语音输入'}
                 onClick={() => {
                   if (voiceInput.isRecording) {
-                    // 停止前提交未确认的临时文字（保留为正文），并保存草稿
-                    if (interimVoiceStartRef.current !== -1) {
-                      commitInterimVoice()
-                      if (draftKey) {
-                        useChatInputStore.getState().saveDraft(draftKey, textRef.current)
-                      }
-                    }
                     voiceInput.stopRecording()
                   } else {
-                    interimVoiceStartRef.current = -1
                     voiceInput.startRecording()
                   }
                 }}
@@ -852,7 +751,7 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 模型名和 Token 统计：模型无效时如实显示「模型无效」，不用默认值冒充 */}
+            {/* 模型名和 Token 统计 */}
             {modelName ? (
               <div className="bg-primary/10 border-primary/20 hidden h-8 items-center gap-2 rounded-lg border px-3 text-xs sm:flex">
                 <Database className="text-primary h-3.5 w-3.5" />
@@ -883,12 +782,7 @@ export const ChatInput = ({
                   </>
                 )}
               </div>
-            ) : (
-              <div className="hidden h-8 items-center gap-2 rounded-lg border border-muted/20 px-3 text-xs text-muted-foreground sm:flex">
-                <AlertCircle className="h-3.5 w-3.5" />
-                <span>模型无效</span>
-              </div>
-            )}
+            ) : null}
           </div>
 
           {/* 发送/停止按钮 */}

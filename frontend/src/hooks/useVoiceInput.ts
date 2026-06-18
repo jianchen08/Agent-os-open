@@ -8,7 +8,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { transcribeAudio } from '@/services/api/asr'
 import type {
   SpeechRecognitionConstructor,
   SpeechRecognitionErrorEvent,
@@ -44,20 +43,12 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     continuous = true,
     onRecordingComplete,
     onTranscriptionComplete,
-    onInterimResult,
     onError,
   } = options
 
   const [state, setState] = useState<VoiceInputState>('idle')
   const [transcript, setTranscript] = useState('')
   const [error, setError] = useState<VoiceInputError | null>(null)
-  const [recordingDuration, setRecordingDuration] = useState(0)
-  /**
-   * 当前识别模式：
-   * - browser：浏览器原生 SpeechRecognition（实时）
-   * - server-asr：服务端 ASR 降级（浏览器识别不可用时自动切换，整段转写）
-   */
-  const [mode, setMode] = useState<'browser' | 'server-asr'>('browser')
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -65,7 +56,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
   const streamRef = useRef<MediaStream | null>(null)
   const isRecordingRef = useRef(false)
   const isManualStopRef = useRef(false)
-  const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const isSpeechRecognitionSupported = Boolean(getSpeechRecognition())
   const isMediaRecorderSupported =
@@ -82,11 +72,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
   const cleanup = useCallback(() => {
     isRecordingRef.current = false
     isManualStopRef.current = true
-
-    if (durationTimerRef.current) {
-      clearInterval(durationTimerRef.current)
-      durationTimerRef.current = null
-    }
 
     if (recognitionRef.current) {
       try {
@@ -129,73 +114,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
   )
 
   /**
-   * 启动服务端 ASR 降级录音
-   *
-   * 当浏览器 Web Speech API 不可用（network/service-not-allowed 错误）时，
-   * 自动切换到 MediaRecorder 录音 + 后端 ASR 转写模式。
-   * 录音停止时上传音频到后端，转写结果通过 onTranscriptionComplete 回调返回。
-   */
-  const startServerASRFallback = useCallback(async () => {
-    setMode('server-asr')
-    setTranscript('')
-    setState('transcribing')
-
-    // 启动录音计时器
-    if (durationTimerRef.current) {
-      clearInterval(durationTimerRef.current)
-    }
-    setRecordingDuration(0)
-    durationTimerRef.current = setInterval(() => {
-      setRecordingDuration((prev) => prev + 1)
-    }, 1000)
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
-
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data)
-        }
-      }
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-        audioChunksRef.current = []
-
-        try {
-          const result = await transcribeAudio(audioBlob, 'audio/webm')
-          if (result?.text) {
-            onTranscriptionComplete?.(result.text)
-          } else {
-            // 后端 ASR 未配置，友好提示
-            onError?.({
-              type: 'not_supported',
-              message: '未配置语音转文字服务，请联系管理员启用 ASR',
-            })
-          }
-        } catch {
-          onError?.({
-            type: 'transcription_failed',
-            message: '语音转文字失败，请重试',
-          })
-        } finally {
-          setState('idle')
-        }
-      }
-
-      mediaRecorderRef.current = mediaRecorder
-      mediaRecorder.start()
-      setState('recording')
-      isRecordingRef.current = true
-    } catch (_err) {
-      handleError('permission_denied', '无法访问麦克风，请检查权限设置')
-    }
-  }, [durationTimerRef, onTranscriptionComplete, onError, handleError])
-
-  /**
    * 初始化语音识别
    */
   const initSpeechRecognition = useCallback(() => {
@@ -223,15 +141,12 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
         }
       }
 
-      // 临时结果实时回调（驱动输入框实时显示候选文字）
-      if (interimTranscript) {
-        setTranscript(interimTranscript)
-        onInterimResult?.(interimTranscript)
-      }
+      setTranscript((prev) => {
+        const newText = finalTranscript || interimTranscript
+        return newText || prev
+      })
 
-      // 最终确认结果回调（由调用方追加到已确认文字）
       if (finalTranscript) {
-        setTranscript(finalTranscript)
         onTranscriptionComplete?.(finalTranscript)
       }
     }
@@ -246,7 +161,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
 
       let errorMessage = '语音识别失败'
       let errorType: VoiceInputError['type'] = 'transcription_failed'
-      let shouldFallbackToServer = false
 
       switch (event.error) {
         case 'not-allowed':
@@ -260,35 +174,20 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
           errorMessage = '无法捕获音频，请检查麦克风设备'
           break
         case 'network':
-          // 浏览器云端语音服务不可达，自动降级到服务端 ASR
-          shouldFallbackToServer = true
+          errorMessage = '网络错误，语音识别服务不可用'
           break
         case 'aborted':
           return
         case 'service-not-allowed':
-          // 语音识别服务不可用，自动降级到服务端 ASR
-          shouldFallbackToServer = true
+          errorMessage = '语音识别服务不可用，请检查浏览器设置'
           break
-      }
-
-      if (shouldFallbackToServer) {
-        // 停止浏览器识别，切换到服务端 ASR 降级模式
-        if (recognitionRef.current) {
-          try {
-            recognitionRef.current.stop()
-          } catch {
-            // 忽略停止错误
-          }
-        }
-        startServerASRFallback()
-        return
       }
 
       handleError(errorType, errorMessage)
     }
 
     return recognition
-  }, [language, continuous, handleError, onTranscriptionComplete, onInterimResult, startServerASRFallback])
+  }, [language, continuous, handleError, onTranscriptionComplete])
 
   /**
    * 开始录音
@@ -296,18 +195,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
   const startRecording = useCallback(async () => {
     setError(null)
     setTranscript('')
-    setRecordingDuration(0)
-    setMode('browser')
     isManualStopRef.current = false
-
-    // 启动录音计时器（两种模式通用）
-    if (durationTimerRef.current) {
-      clearInterval(durationTimerRef.current)
-    }
-    setRecordingDuration(0)
-    durationTimerRef.current = setInterval(() => {
-      setRecordingDuration((prev) => prev + 1)
-    }, 1000)
 
     if (supportsAudio) {
       try {
@@ -394,8 +282,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     isRecording: state === 'recording',
     isTranscribing: state === 'transcribing',
     transcript,
-    recordingDuration,
-    mode,
     error,
     startRecording,
     stopRecording,

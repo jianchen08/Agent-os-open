@@ -415,7 +415,7 @@ class RollbackManager:
 
     async def _save_checkpoint_to_db(self, checkpoint: Checkpoint) -> None:
         """保存检查点到数据库"""
-        from src.db.models import RollbackCheckpoint  # noqa: PLC0415
+        from src.db.models import RollbackCheckpoint
 
         db_checkpoint = RollbackCheckpoint(
             id=checkpoint.id,
@@ -430,7 +430,7 @@ class RollbackManager:
 
     async def _load_checkpoint_from_db(self, checkpoint_id: str) -> Checkpoint | None:
         """从数据库加载检查点"""
-        from src.db.models import RollbackCheckpoint  # noqa: PLC0415
+        from src.db.models import RollbackCheckpoint
 
         result = await self.session.execute(
             select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id)
@@ -450,7 +450,7 @@ class RollbackManager:
 
     async def _list_checkpoints_from_db(self, task_id: str) -> list[Checkpoint]:
         """从数据库列出检查点"""
-        from src.db.models import RollbackCheckpoint  # noqa: PLC0415
+        from src.db.models import RollbackCheckpoint
 
         result = await self.session.execute(
             select(RollbackCheckpoint)
@@ -473,7 +473,7 @@ class RollbackManager:
 
     async def _delete_checkpoint_from_db(self, checkpoint_id: str) -> bool:
         """从数据库删除检查点"""
-        from src.db.models import RollbackCheckpoint  # noqa: PLC0415
+        from src.db.models import RollbackCheckpoint
 
         result = await self.session.execute(
             select(RollbackCheckpoint).where(RollbackCheckpoint.id == checkpoint_id)
@@ -488,7 +488,7 @@ class RollbackManager:
 
     async def _save_operation_to_db(self, operation: OperationLog) -> None:
         """保存操作日志到数据库"""
-        from src.db.models import RollbackOperationLog  # noqa: PLC0415
+        from src.db.models import RollbackOperationLog
 
         db_operation = RollbackOperationLog(
             id=operation.id,
@@ -511,7 +511,7 @@ class RollbackManager:
 
     async def _load_operation_from_db(self, operation_id: str) -> OperationLog | None:
         """从数据库加载操作日志"""
-        from src.db.models import RollbackOperationLog  # noqa: PLC0415
+        from src.db.models import RollbackOperationLog
 
         result = await self.session.execute(
             select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id)
@@ -546,7 +546,7 @@ class RollbackManager:
         status: OperationStatus | None,
     ) -> list[OperationLog]:
         """从数据库列出操作日志"""
-        from src.db.models import RollbackOperationLog  # noqa: PLC0415
+        from src.db.models import RollbackOperationLog
 
         query = select(RollbackOperationLog).where(
             RollbackOperationLog.task_id == task_id
@@ -594,7 +594,7 @@ class RollbackManager:
         self, operation_id: str, status: OperationStatus
     ) -> None:
         """更新数据库中的操作状态"""
-        from src.db.models import RollbackOperationLog  # noqa: PLC0415
+        from src.db.models import RollbackOperationLog
 
         result = await self.session.execute(
             select(RollbackOperationLog).where(RollbackOperationLog.id == operation_id)
@@ -620,7 +620,7 @@ def get_rollback_manager(session: AsyncSession | None = None) -> RollbackManager
     Returns:
         回滚管理器实例
     """
-    global _global_rollback_manager  # noqa: PLW0603
+    global _global_rollback_manager
 
     if session:
         # 如果提供了会话，创建新实例

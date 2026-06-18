@@ -54,7 +54,20 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   ## 工作空间
 
 
-  
+  - 使用相对路径操作文件（如 src/module/file.py）
+
+  - 可运行测试验证代码（pytest、mypy 等）
+
+  - 修改不影响主项目，系统会自动处理合并
+
+  - 完成后调用 task_evaluate 评估
+
+
+  ## 参考规则
+
+
+  上方已通过占位符注入统一上下文读取规则，此处不再重复引用。
+
   '
 static_vars:
   enabled: true
@@ -96,6 +109,9 @@ tool_ids:
 - memory
 - task_evaluate
 - human_interaction
+- design_generate
+- playwright_test
+- design_review
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物

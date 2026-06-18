@@ -21,7 +21,6 @@ workspace:
     - "config"
     - "tests"
     - "frontend"
-    - "skills"
     - "pyproject.toml"
     - "package.json"
     - "Cargo.toml"

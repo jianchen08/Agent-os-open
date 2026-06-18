@@ -103,6 +103,7 @@ class SimpleStateMachine:
 TaskStateMachine = SimpleStateMachine
 
 # 预定义的任务状态转换规则（7 种状态）
+# BUG-FIX-fix_20260607_missing_evaluating: 添加 evaluating 状态的转换规则
 _TASK_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["running", "stopped", "completed", "failed"],
     "running": ["evaluating", "completed", "failed", "stopped", "timeout"],

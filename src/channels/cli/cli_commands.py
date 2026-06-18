@@ -32,8 +32,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from utils.enum_utils import safe_enum_value
-
 logger = logging.getLogger(__name__)
 
 
@@ -488,7 +486,7 @@ class SlashCommandRegistry:
             agent_name = getattr(agent_config, "display_name", agent_name)
             level = getattr(agent_config, "level", None)
             if level:
-                agent_level = safe_enum_value(level)
+                agent_level = level.value if hasattr(level, "value") else str(level)
 
         # 服务状态
         svc_status: list[tuple[str, str]] = []
@@ -575,7 +573,7 @@ class SlashCommandRegistry:
         self._console.print(f"[green][OK] 思考过程显示: {state_str}[/green]")
         return CommandResult(state_updates={"show_thinking": new_val})
 
-    async def _cmd_restore(self, args: str, ctx: dict[str, Any]) -> CommandResult:  # noqa: PLR0911
+    async def _cmd_restore(self, args: str, ctx: dict[str, Any]) -> CommandResult:
         """从检查点恢复管道状态。"""
         services = ctx.get("services", {})
         pipeline_recovery = services.get("pipeline_recovery")
@@ -718,7 +716,7 @@ def parse_inline_shortcuts(text: str) -> tuple[str, dict[str, Any]]:
     Returns:
         (处理后的文本, 附加状态字典)
     """
-    import re  # noqa: PLC0415
+    import re
 
     extras: dict[str, Any] = {
         "file_refs": [],

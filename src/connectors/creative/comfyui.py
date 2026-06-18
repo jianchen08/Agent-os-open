@@ -272,7 +272,7 @@ class ComfyUIConnector(BaseConnector):
     # 操作执行
     # ================================================================
 
-    async def execute_action(self, action: ConnectorAction) -> ActionResult:  # noqa: PLR0911
+    async def execute_action(self, action: ConnectorAction) -> ActionResult:
         """执行操作指令。"""
         if not self._session or not self.is_connected:
             return ActionResult(success=False, error="未连接到 ComfyUI")

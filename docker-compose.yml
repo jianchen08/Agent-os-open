@@ -18,27 +18,19 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     image: agent-os-frontend:latest
-    container_name: agent-os-frontend-22404
-    # on-failure + 上层 deploy 限制：崩溃不再无限重启拉起，
-    # 避免 SIGSEGV 崩溃循环把 daemon 的网络栈/事件流拖垮。
-    restart: on-failure
+    container_name: agent-os-frontend-036fa
+    restart: unless-stopped
     ports:
-      - "5289:5188"
+      - "5189:5188"
     environment:
       # Agent 跑在宿主机，前端通过 host.docker.internal 连接
-      - BACKEND_URL=http://host.docker.internal:8988
-      - BACKEND_WS_URL=ws://host.docker.internal:8988
+      - BACKEND_URL=http://host.docker.internal:8888
+      - BACKEND_WS_URL=ws://host.docker.internal:8888
     depends_on:
       redis:
         condition: service_healthy
     networks:
-      - agent-net-22404
-    deploy:
-      restart_policy:
-        condition: on-failure
-        max_attempts: 3
-        delay: 10s
-        window: 60s
+      - agent-net-036fa
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5188/health').read(); print('ok')"]
       interval: 30s
@@ -51,19 +43,19 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: agent-os-redis-22404
+    container_name: agent-os-redis-036fa
     restart: unless-stopped
     ports:
-      - "6480:6379"
+      - "6380:6379"
     command: >
       redis-server
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
     volumes:
-      - redis-data-22404:/data
+      - redis-data-036fa:/data
     networks:
-      - agent-net-22404
+      - agent-net-036fa
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -72,8 +64,8 @@ services:
       retries: 3
 
 volumes:
-  redis-data-22404:
+  redis-data-036fa:
 
 networks:
-  agent-net-22404:
+  agent-net-036fa:
     driver: bridge

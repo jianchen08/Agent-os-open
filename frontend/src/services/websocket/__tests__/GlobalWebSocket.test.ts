@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 // Mock buildGlobalWebSocketUrl
 vi.mock('@/constants/websocket', () => ({
   buildGlobalWebSocketUrl: (token: string) =>
-    `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
+    `ws://localhost:8888/ws/chat?token=${token}&version=3.0.0`,
 }))
 
 // Mock useLayoutModeStore
@@ -23,24 +23,6 @@ vi.mock('@/stores/layoutModeStore', () => ({
       updateConnectionStatus: mockUpdateConnectionStatus,
     }),
   },
-}))
-
-// Mock useAuthStore：默认 token 未过期，让普通重连测试走指数退避路径
-// （1006+未连接过的兜底逻辑仅在 checkTokenExpiration()=true 时才触发）
-const mockCheckTokenExpiration = vi.fn(() => false)
-const mockRefreshToken = vi.fn(async () => {})
-vi.mock('@/stores/authStore', () => ({
-  useAuthStore: {
-    getState: () => ({
-      checkTokenExpiration: mockCheckTokenExpiration,
-      refreshToken: mockRefreshToken,
-      token: 'test-token',
-    }),
-  },
-  isAuthFailureFromError: () => false,
-}))
-vi.mock('@/services/authCallbacks', () => ({
-  triggerAuthExpired: vi.fn(),
 }))
 
 // Mock logger
@@ -131,7 +113,7 @@ async function createService(): Promise<{
   vi.stubGlobal('WebSocket', MockWebSocket)
   vi.doMock('@/constants/websocket', () => ({
     buildGlobalWebSocketUrl: (token: string) =>
-      `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
+      `ws://localhost:8888/ws/chat?token=${token}&version=3.0.0`,
   }))
   vi.doMock('@/stores/layoutModeStore', () => ({
     useLayoutModeStore: {
@@ -479,11 +461,9 @@ describe('GlobalWebSocketService', () => {
       // 注意：由于 HEARTBEAT_INTERVAL === HEARTBEAT_TIMEOUT === 30s，
       // interval 回调内 _clearHeartbeatTimeout() 总是在 setInterval 触发时先执行，
       // 清除上一轮的 timeout，导致 timeout 永远不会被触发（两者同时到期时 interval 优先）。
-      // 因此此处直接模拟心跳超时导致的 ws.close(2002) 行为，
+      // 因此此处直接模拟心跳超时导致的 ws.close(4001) 行为，
       // 验证 onclose 对心跳超时关闭的处理是否正确。
-      // 心跳超时使用 code=2002（TIMEOUT），与认证拒绝 code=4001 区分（见
-      // BUG-FIX-fix_20260624_ws_reconnect_dead_loop）：心跳超时走普通重连，不触发 token 刷新。
-      ws.close(2002, '心跳超时')
+      ws.close(4001, '心跳超时')
 
       // ws.close(4001) → onclose → _scheduleReconnect → status = 'reconnecting'
       expect(service.status).toBe('reconnecting')

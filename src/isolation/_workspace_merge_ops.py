@@ -26,10 +26,10 @@ def _force_rmtree(path: str) -> None:
     """
     def _on_error(func, filepath, exc_info):
         if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
+            os.chmod(filepath, stat.S_IWRITE)
             func(filepath)
         else:
-            raise  # noqa: PLE0704
+            raise
 
     try:
         shutil.rmtree(path, onerror=_on_error)
@@ -47,36 +47,15 @@ class _MergeOpsMixin:
     # ── 5. 评估前保存 ────────────────────────────────────────────
 
     def on_before_evaluate(self, workspace: str, ws_meta: dict | None = None) -> dict:
-        """评估前保存：git add -A + git commit。
-
-        - worktree 模式：在 worktree 内 commit（带 task 分支隔离）。
-        - plain / shared（host 模式）：在项目目录的当前分支上 commit，
-          使用任务自己的 task_id 作 message，避免被后续任务的 auto-save 抢走 commit 归属。
-        """
+        """评估前保存：git add -A + git commit（plain 模式跳过 git 操作）"""
         ws_path = Path(workspace)
         if not ws_path.exists():
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
         mode = (ws_meta or {}).get("mode", "")
-        # host 模式（plain/shared 都属于 host 流程，区别仅在路径来源）：
-        # 直接在当前分支上 commit，commit message 引用 task_id，保留可追溯性。
-        if mode in ("plain", "shared"):
-            task_id = (ws_meta or {}).get("task_id", "")
-            project_root = (ws_meta or {}).get("project_root", "") or workspace
-            proj_path = Path(project_root)
-            if not proj_path.exists() or not (proj_path / ".git").exists():
-                # 非 git 仓库的 plain 模式（无 task_id 的纯目录）保持旧行为
-                return {"success": True, "commit_hash": None, "has_changes": True}
-            self._ensure_git_user(proj_path)
-            msg_suffix = f" (task {task_id})" if task_id else ""
-            commit_hash = self._git_add_commit_if_dirty(
-                proj_path, f"checkpoint: before evaluate{msg_suffix}"
-            )
-            rc, status, _ = self._run_git("status", "--porcelain", cwd=proj_path)
-            return {
-                "success": True,
-                "commit_hash": commit_hash,
-                "has_changes": bool(status and status.strip()),
-            }
+        if mode == "plain":
+            return {"success": True, "commit_hash": None, "has_changes": True}
+        if mode == "shared":
+            return {"success": True, "commit_hash": None, "has_changes": True}
         self._ensure_git_user(ws_path)
         commit_hash = self._git_add_commit_if_dirty(ws_path, "checkpoint: before evaluate")
         rc, status, _ = self._run_git("status", "--porcelain", cwd=ws_path)
@@ -96,7 +75,7 @@ class _MergeOpsMixin:
         """
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.debug("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
+            logger.info("[WorkspaceLifecycle] plain 模式，跳过合并: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         project_root = ws_meta.get("project_root", "")
         lock = self._get_merge_lock(project_root)
@@ -116,7 +95,7 @@ class _MergeOpsMixin:
                     verified, verify_detail = self._verify_merge_result(
                         workspace, project_root, ws_meta, result)
                     if verified:
-                        logger.debug(
+                        logger.info(
                             "[WorkspaceLifecycle] 合并验证通过 (attempt %d): task_id=%s, method=%s",
                             attempt, task_id, result.get("method"))
                         self._cleanup_worktree(
@@ -140,7 +119,7 @@ class _MergeOpsMixin:
                 result["success"] = False
                 return result
             if mode == "shared":
-                logger.debug("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
+                logger.info("[WorkspaceLifecycle] shared 模式，跳过合并: task_id=%s", task_id)
                 return {"success": True, "action": "none"}
             logger.warning("[WorkspaceLifecycle] 未知 mode: %s, task_id=%s", mode, task_id)
             return {"success": False, "error": f"未知工作模式: {mode}"}
@@ -227,17 +206,18 @@ class _MergeOpsMixin:
                 logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
                 self._run_git("worktree", "prune", cwd=project_root)
             if branch:
+                # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
                 if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
-                    logger.debug("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
+                    logger.info("[WorkspaceLifecycle] 已打 tag: %s，可 git revert 回退", tag)
                 self._run_git("worktree", "prune", cwd=project_root)
                 self._run_git("branch", "-D", branch, cwd=project_root)
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
             try:
                 _force_rmtree(str(ws_path))
-                logger.debug("[WorkspaceLifecycle] 强制清理残留 worktree 目录: %s", workspace)
+                logger.info("[WorkspaceLifecycle] 强制清理残留 worktree 目录: %s", workspace)
             except OSError as e:
                 logger.warning("[WorkspaceLifecycle] 强制清理 worktree 目录失败: %s, %s", workspace, e)
 
@@ -247,19 +227,19 @@ class _MergeOpsMixin:
         """评估失败：reject_count >= max_retries 时回滚，否则允许重试"""
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.debug("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
+            logger.info("[WorkspaceLifecycle] plain 模式评估失败: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         if mode == "shared":
-            logger.debug("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
+            logger.info("[WorkspaceLifecycle] shared 模式评估失败: task_id=%s", task_id)
             return {"success": True, "action": "none"}
         reject_count = ws_meta.get("reject_count", 0) + 1
         max_retries = ws_meta.get("max_retries", self._config.get("max_retries", 3))
         ws_meta["reject_count"] = reject_count
         self._ws_meta_store[task_id] = ws_meta
         if reject_count >= max_retries:
-            logger.debug("[WorkspaceLifecycle] 评估失败超限，回滚: task_id=%s, count=%d", task_id, reject_count)
+            logger.info("[WorkspaceLifecycle] 评估失败超限，回滚: task_id=%s, count=%d", task_id, reject_count)
             return self.on_task_failed(workspace, ws_meta)
-        logger.debug("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
+        logger.info("[WorkspaceLifecycle] 评估失败，重试: task_id=%s, count=%d/%d", task_id, reject_count, max_retries)
         return {"success": True, "action": "retry", "reject_count": reject_count}
 
     # ── 8. 任务异常回滚 ──────────────────────────────────────────
@@ -275,13 +255,13 @@ class _MergeOpsMixin:
             return {"success": False, "error": f"工作空间不存在: {workspace}"}
         mode = ws_meta.get("mode", "")
         if mode == "plain":
-            logger.debug("[WorkspaceLifecycle] plain 模式，跳过: %s", workspace)
+            logger.info("[WorkspaceLifecycle] plain 模式，跳过: %s", workspace)
             return {"success": True, "action": "none"}
         if mode == "shared":
-            logger.debug("[WorkspaceLifecycle] shared 模式，跳过: %s", workspace)
+            logger.info("[WorkspaceLifecycle] shared 模式，跳过: %s", workspace)
             return {"success": True, "action": "none"}
         if mode == "worktree":
-            logger.debug("[WorkspaceLifecycle] worktree 失败保留（不清理）: %s", workspace)
+            logger.info("[WorkspaceLifecycle] worktree 失败保留（不清理）: %s", workspace)
             return {"success": True, "action": "none"}
         logger.warning("[WorkspaceLifecycle] 未知 mode '%s'，跳过: %s", mode, workspace)
         return {"success": True, "action": "none"}
@@ -319,17 +299,8 @@ class _MergeOpsMixin:
             return {"success": False,
                     "error": f"无法获取当前分支: rc={rc}, "
                              f"output={current_branch!r}"}
-        # 校验待合并分支存在：worktree 模式下 branch 来自 ws_meta，
-        # 子任务 inherit 父任务工作空间时可能复用已被清理的分支引用
-        # （分支已删但元数据仍在），此时 git merge 会报模糊的
-        # "not something we can merge"，提前校验给出明确根因。
-        rc_v, _, verify_err = self._run_git(
-            "rev-parse", "--verify", f"{branch}^{{commit}}", cwd=proj_path)
-        if rc_v != 0:
-            return {"success": False,
-                    "error": f"待合并分支不存在(branch={branch})，"
-                             f"可能继承自已清理的父任务 worktree: "
-                             f"{verify_err[:200] if verify_err else 'unknown'}"}
+        # BUG-FIX-fix_20260608_merge_delete_verify:
+        # 记录合并前 HEAD，供验证阶段做 --name-status diff
         rc_pre, pre_merge_head, _ = self._run_git(
             "rev-parse", "HEAD", cwd=proj_path)
         rc, _, stderr = self._run_git(
@@ -345,6 +316,11 @@ class _MergeOpsMixin:
                 "error": f"git merge 失败(branch={branch}): "
                          f"{stderr[:300] if stderr else 'unknown'}"}
 
+    # BUG-FIX-fix_20260529_remove_copy_merge:
+    # _copy_merge 和 _try_three_way_merge 已废弃。
+    # worktree 分支从当前 HEAD 创建，git merge 应为 fast-forward 或干净合并。
+    # 合并失败说明存在真正冲突，正确做法是保留 worktree 并报告失败。
+    # 不再绕过 git 做文件复制，避免覆盖 .gitignore 等基础设施文件。
 
     # def _copy_merge(self, workspace: str, target_dir: str,
     #                 ws_meta: dict | None = None) -> dict:
@@ -355,7 +331,7 @@ class _MergeOpsMixin:
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 
-    def _verify_merge_result(  # noqa: PLR0912
+    def _verify_merge_result(
         self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
     ) -> tuple[bool, str]:
         """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。
@@ -390,6 +366,11 @@ class _MergeOpsMixin:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
+            # BUG-FIX-fix_20260601_chinese_filename_verify:
+            # Windows 上 git 默认用系统编码（GBK/CP936）输出中文文件名，
+            # 即使 _run_git 指定 encoding="utf-8" 也可能导致乱码。
+            # 使用 -c core.quotepath=false 确保 git 输出可读的中文路径，
+            # 同时在验证时做双重检查：先尝试精确匹配，再尝试模糊匹配。
             rc, diff_out, _ = self._run_git(
                 "-c", "core.quotepath=false",
                 "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
@@ -441,6 +422,12 @@ class _MergeOpsMixin:
             return False
         return True
 
+    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
+    # on_task_cleanup 已删除。原方法在引擎结束时无条件调用，
+    # 会 git worktree remove + 删分支 + 扫删所有 __wt_ 孤儿目录，
+    # 把失败任务供重试的 worktree 一并销毁。
+    # worktree 的唯一销毁点现在只保留 on_eval_passed → _cleanup_worktree
+    # （评估通过 + 合并完成后），符合"销毁只发生在任务成功合并后"的契约。
 
     def _cleanup_unstaged_changes(self, project_root: str) -> None:
         """清理 project_root 中的 unstaged 变更。
@@ -463,10 +450,14 @@ class _MergeOpsMixin:
         if not unstaged_lines:
             return
 
-        logger.debug(
+        logger.info(
             "[WorkspaceLifecycle] 清理 %d 个 unstaged 变更: project_root=%s",
             len(unstaged_lines), project_root,
         )
         # 恢复 unstaged 的修改到 HEAD 状态
         self._run_git("checkout", "--", ".", cwd=proj_path)
 
+    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
+    # _cleanup_orphaned_worktrees 已删除。它扫描 workspace root 删除所有
+    # 不在 git worktree list 的 __wt_ 目录，会把失败任务正在用的 worktree
+    # 当孤儿误删。删除后该方法无 src 调用方（仅原 on_task_cleanup 调用）。

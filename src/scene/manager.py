@@ -85,7 +85,7 @@ class SceneManager:
 
         scene_widgets = []
         if widgets:
-            from .models import SceneWidgetConfig  # noqa: PLC0415
+            from .models import SceneWidgetConfig
 
             scene_widgets = [SceneWidgetConfig(**w) for w in widgets]
         elif template:

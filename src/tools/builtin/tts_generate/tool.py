@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def _enrich_tts_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     """动态注入当前可用的 TTS Provider 列表到工具 Schema。"""
-    import copy  # noqa: PLC0415
+    import copy
 
     media_registry = services.get("media_provider_registry")
     if media_registry is None:
@@ -163,14 +163,14 @@ class TtsGenerateTool(BuiltinTool):
             MediaProviderRegistry 实例，获取失败返回 None
         """
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
 
             provider = get_service_provider()
             return provider.get("media_provider_registry")
         except Exception:
             return None
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: F821,PLR0911
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行 TTS 合成。
 
         Args:
@@ -225,7 +225,7 @@ class TtsGenerateTool(BuiltinTool):
                 if provider_name:
                     provider = self._registry.get(provider_name)
                     if provider:
-                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
+                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
                     else:
                         logger.warning(
                             "[TTS] 指定的 Provider '%s' 不存在，使用自动选择",

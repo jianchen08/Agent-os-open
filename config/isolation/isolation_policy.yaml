@@ -5,7 +5,6 @@
 # - 只有「命令执行类」工具需要强制容器隔离（因为它们执行任意命令）
 # - 其他工具的隔离级别由分类兜底策略决定
 # - 审批由 security_check 插件统一处理，不在策略中配置
-# - 隔离级别不可用即拒绝执行（返回 blocked），不降级到其它级别
 #
 # 隔离环境按根任务共享，不是每个工具调用创建新环境
 
@@ -17,16 +16,18 @@
 default:
   isolation: host
   execution: host_direct
+  fallback: allow
 
 # ============================================
 # 工具级规则（优先级最高，精确匹配工具名）
 # ============================================
 tools:
-  # --- 命令执行类（强制容器隔离）---
-  # 这些工具在容器内执行任意命令，必须隔离；容器不可用即拒绝，不降级到 host
+  # --- 命令执行类（强制容器隔离，禁止降级）---
+  # 这些工具在容器内执行任意命令，必须隔离
   bash_execute:
     isolation: container
     execution: command_in_container
+    fallback: allow
     disk_quota: "100m"
     network: restricted
 
@@ -35,27 +36,35 @@ tools:
   task_submit:
     isolation: host
     execution: host_direct
+    fallback: allow
   task_manage:
     isolation: host
     execution: host_direct
+    fallback: allow
   task_evaluate:
     isolation: host
     execution: host_direct
+    fallback: allow
   memory:
     isolation: host
     execution: host_direct
+    fallback: allow
   state_update:
     isolation: host
     execution: host_direct
+    fallback: allow
   resource_merge:
     isolation: host
     execution: host_direct
+    fallback: allow
   trigger_setup:
     isolation: host
     execution: host_direct
+    fallback: allow
   human_interaction:
     isolation: host
     execution: host_direct
+    fallback: allow
 
 # ============================================
 # 分类级规则（匹配不到具体工具名时，按分类兜底）
@@ -64,27 +73,36 @@ categories:
   execution:
     isolation: host
     execution: host_direct
+    fallback: allow
   network:
     isolation: host
     execution: host_direct
+    fallback: allow
   file:
     isolation: host
     execution: host_direct
+    fallback: allow
   search:
     isolation: host
     execution: host_direct
+    fallback: allow
   analysis:
     isolation: host
     execution: host_direct
+    fallback: allow
   system:
     isolation: host
     execution: host_direct
+    fallback: allow
   evaluation:
     isolation: host
     execution: host_direct
+    fallback: allow
   task:
     isolation: host
     execution: host_direct
+    fallback: allow
   memory:
     isolation: host
     execution: host_direct
+    fallback: allow

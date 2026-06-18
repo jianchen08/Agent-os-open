@@ -82,13 +82,8 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 已知的工具名称（用于按需加载判断）
         self._known_tool_names: set[str] = set()
 
-        # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）。
-        # BUG-FIX-fix_20260625_dynamic_tool_global_leak:
-        # 原实现是单个全局 set，导致 A 管道 resource_search 加载的工具
-        # 会泄漏到 B 管道（如 review_agent 子管道错误继承父管道加载的
-        # trigger_review / web_search）。改为按 pipeline_id 分组隔离。
-        # key="" 兼容无 pipeline_id 上下文（启动期/测试）的全局调用。
-        self._dynamic_tool_names: dict[str, set[str]] = {}
+        # 动态加载的工具名称集合（由 auto_loader 在运行时加载的工具）
+        self._dynamic_tool_names: set[str] = set()
 
         # Schema 动态丰富器注册表（tool_name -> enricher callable）
         self._schema_enrichers: dict[str, Callable] = {}
@@ -112,46 +107,24 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self._max_tools = max_tools
         self._unload_threshold = unload_threshold
 
-    def mark_dynamic(self, name: str, pipeline_id: str = "") -> None:
+    def mark_dynamic(self, name: str) -> None:
         """将工具标记为动态加载的工具。
 
         由 ToolAutoLoader 在运行时动态加载工具后调用，
         ToolSchemaPlugin 会查询此集合来决定向 LLM 展示哪些额外工具。
 
-        BUG-FIX-fix_20260625_dynamic_tool_global_leak:
-        动态工具状态按 pipeline_id 隔离。pipeline_id 为空时尝试从
-        _current_pipeline_id contextvar 获取，仍为空则归到全局 "" 桶
-        （兼容启动期/测试场景）。
-
         Args:
             name: 工具名称
-            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
         """
-        if not pipeline_id:
-            pipeline_id = self._current_pid()
-        self._dynamic_tool_names.setdefault(pipeline_id, set()).add(name)
+        self._dynamic_tool_names.add(name)
 
-    def get_dynamic_tool_names(self, pipeline_id: str = "") -> set[str]:
-        """获取指定管道动态加载的工具名称集合。
-
-        Args:
-            pipeline_id: 所属管道 ID，留空则从 contextvar 自动获取
+    def get_dynamic_tool_names(self) -> set[str]:
+        """获取所有动态加载的工具名称集合。
 
         Returns:
-            该管道动态加载的工具名称集合（无则空集合）
+            动态加载的工具名称集合
         """
-        if not pipeline_id:
-            pipeline_id = self._current_pid()
-        return self._dynamic_tool_names.get(pipeline_id, set())
-
-    @staticmethod
-    def _current_pid() -> str:
-        """从 contextvar 获取当前 pipeline_id（隔离动态工具状态用）。"""
-        try:
-            from pipeline.engine_state import _current_pipeline_id  # noqa: PLC0415
-            return _current_pipeline_id.get() or ""
-        except Exception:
-            return ""
+        return self._dynamic_tool_names
 
     def register_schema_enricher(
         self, tool_name: str, enricher: Callable[[Any, dict[str, Any]], Any]
@@ -245,7 +218,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         overwrite: bool = False,
     ) -> str:
         """直接注册 ToolRunnable"""
-        from tools.mcp_adapter import runnable_to_mcp_tool  # noqa: PLC0415
+        from tools.mcp_adapter import runnable_to_mcp_tool
 
         name = runnable.name
         if not name:
@@ -302,13 +275,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def _try_load_tool_on_demand(self, name: str) -> None:
         """按需从内置工具类中加载工具"""
-        import logging  # noqa: PLC0415
+        import logging
 
         logger = logging.getLogger(__name__)
 
         try:
-            from tools.builtin import get_all_builtin_tools  # noqa: PLC0415
-            from tools.types import Tool  # noqa: PLC0415
+            from tools.builtin import get_all_builtin_tools
+            from tools.types import Tool
 
             all_tools = get_all_builtin_tools()
 
@@ -329,7 +302,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
                         return
                 elif isinstance(tool_item, Tool):
                     if tool_item.name == name:
-                        from tools.builtin.lsp_tools import LSPTools  # noqa: PLC0415
+                        from tools.builtin.lsp_tools import LSPTools
                         lsp_instance = LSPTools()
                         handler_map = {
                             "lsp_definition": lsp_instance._lsp_definition,
@@ -353,7 +326,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def _update_usage_stats(self, name: str) -> None:
         """更新工具使用统计"""
-        import time  # noqa: PLC0415
+        import time
 
         # 更新使用次数
         self._usage_count[name] = self._usage_count.get(name, 0) + 1
@@ -371,13 +344,13 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         if len(self._items) <= self._max_tools:
             return
 
-        import logging  # noqa: PLC0415
+        import logging
 
         logger = logging.getLogger(__name__)
 
         # 获取核心工具列表（不能卸载）
         try:
-            from tools.loader import CORE_SYSTEM_TOOLS  # noqa: PLC0415
+            from tools.loader import CORE_SYSTEM_TOOLS
 
             core_tools = set(CORE_SYSTEM_TOOLS)
         except ImportError:
@@ -462,9 +435,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         # 清理相关数据
         self._handlers.pop(name, None)
         self._runnables.pop(name, None)
-        # 从所有管道的动态工具集合中移除（dict[pipeline_id, set] 结构）
-        for _pid_set in self._dynamic_tool_names.values():
-            _pid_set.discard(name)
+        self._dynamic_tool_names.discard(name)
         self._schema_enrichers.pop(name, None)
 
         return tool
@@ -507,7 +478,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
 
     def get_tools_for_llm_yaml(self, names: list[str] | None = None) -> str:
         """获取 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml  # noqa: PLC0415
+        import yaml
 
         tools = list(self._items.values()) if names is None else [self._items[n] for n in names if n in self._items]
 
@@ -529,7 +500,7 @@ class ToolRegistry(SimpleRegistry[str, Tool], IToolRegistry):
         self, format_type: str | None = None, names: list[str] | None = None
     ) -> list[dict[str, Any]] | str:
         """获取指定格式的 LLM 工具描述（统一接口）"""
-        from tools.format_manager import ToolFormat, get_format_manager  # noqa: PLC0415
+        from tools.format_manager import ToolFormat, get_format_manager
 
         # 获取 JSON 格式工具列表
         json_tools = self.get_tools_for_llm(names)

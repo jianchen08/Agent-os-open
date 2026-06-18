@@ -17,7 +17,6 @@ from typing import Any
 
 from src.core.logging.config import LoggingConfig
 from src.core.logging.context import LogContext
-from src.core.logging.filters import ContextFilter
 from src.core.logging.formatters import JsonFormatter, StructuredFormatter
 
 _initialized: bool = False
@@ -97,7 +96,6 @@ def _add_console_handler(
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
     handler.setLevel(level)
-    handler.addFilter(ContextFilter())
     root.addHandler(handler)
 
 
@@ -119,7 +117,6 @@ def _add_file_handler(
     )
     handler.setFormatter(formatter)
     handler.setLevel(level)
-    handler.addFilter(ContextFilter())
     root.addHandler(handler)
 
 
@@ -133,11 +130,9 @@ def _quiet_third_party(level: int) -> None:
         "aiohttp.access",
         "liteLLM",
         "litellm",
-        "watchfiles.main",
-        "python_multipart.multipart",
     ]
     for name in noisy_loggers:
         logging.getLogger(name).setLevel(level)
 
 
-__all__ = ["setup_logging", "get_logger", "LoggingConfig", "LogContext", "ContextFilter", "JsonFormatter", "StructuredFormatter"]
+__all__ = ["setup_logging", "get_logger", "LoggingConfig", "LogContext", "JsonFormatter", "StructuredFormatter"]

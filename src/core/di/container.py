@@ -59,7 +59,7 @@ class ServiceDescriptor:
 
     def validate(self):
         """验证服务描述符"""
-        if self.lifetime == ServiceLifetime.SINGLETON and self.instance is None:  # noqa: SIM102
+        if self.lifetime == ServiceLifetime.SINGLETON and self.instance is None:
             # 单例服务必须有工厂或实例
             if self.factory is None:
                 raise InvalidServiceFactoryError(

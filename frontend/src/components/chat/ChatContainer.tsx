@@ -93,6 +93,7 @@ export const ChatContainer = ({
   onStopGenerate,
   currentTokenUsage: _externalTokenUsage = 0,
   maxTokens: _externalMaxTokens = 0,
+  modelName = '',
   thinkingMode,
   toggleThinkingMode,
   className = '',
@@ -115,35 +116,23 @@ export const ChatContainer = ({
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
   /**
-   * 基于当前激活 Tab 解析模型名
+   * 基于当前激活 Tab 的 agentId 解析模型名
    *
-   * 所有管道（主/子）平权处理，统一按当前标签的 agent 配置获取模型。
-   * 模型随标签切换而变化；查不到时返回空串，由下游如实显示「模型无效」，
-   * 绝不用全局默认模型冒充当前管道模型。
-   *
-   * 子管道 agent 标识有两个来源（按可靠性依次尝试）：
-   * 1. activeTab.agentId：主 Tab 指向主 agent config_id；子 Tab 可能是 task_id
-   *    （后端 sub_agent_created 事件已修正为下发 target_id，但旧缓存/导航路径可能残留 task_id）
-   * 2. pipelineMeta.agentName：子管道注册时为 target_id（真实 config_id），作兜底匹配键
+   * 所有管道（主/子）平权处理，统一按当前激活标签的 agent 配置获取模型。
+   * 模型随标签切换而变化；查不到时回退到会话级模型名。
    */
   const agents = useAgentStore((s) => s.agents)
-  /** 子管道对应的 agent config_id（来自 pipelineMeta.agentName，sub_agent_created 事件下发） */
-  const pipelineAgentName = usePipelineMessageStore((s) => {
-    const pid = activeTab?.pipelineRunId
-    return pid ? s.pipelines[pid]?.agentName ?? '' : ''
-  })
   const effectiveModelName = useMemo(() => {
-    const candidateIds = [activeTab?.agentId, pipelineAgentName].filter(Boolean) as string[]
-    for (const id of candidateIds) {
+    if (activeTab?.agentId) {
       const agent = agents.find(
-        (a) => a.id === id || a.configId === id,
+        (a) => a.id === activeTab.agentId || a.configId === activeTab.agentId,
       )
       if (agent?.model || agent?.config?.model) {
-        return agent.model || agent.config?.model || ''
+        return agent.model || agent.config?.model || modelName
       }
     }
-    return ''
-  }, [activeTab?.agentId, pipelineAgentName, agents])
+    return modelName
+  }, [activeTab?.agentId, agents, modelName])
 
   /**
    * 从 pipelineMessageStore 获取当前激活管道的消息
@@ -209,8 +198,6 @@ export const ChatContainer = ({
 
   /**
    * 根据当前模型名获取动态 context_window
-   *
-   * 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。
    */
   const { contextWindow: modelContextWindow } = useModelContextInfo(effectiveModelName)
 
@@ -338,7 +325,6 @@ export const ChatContainer = ({
         onLoadMore={onLoadMoreMessages}
         sessionId={sessionId}
         searchQuery={searchQuery}
-        taskId={activeTab?.taskId}
       />
 
       {/* 子Tab路由增强（无UI，逻辑层） */}

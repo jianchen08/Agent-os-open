@@ -6,8 +6,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loginAndWaitReady } from '../helpers/auth';
-import { sendChatMessage } from '../utils/test-helpers';
+import { loginAndWaitReady, sendMessage } from '../helpers/auth';
 import { waitForAssistantMessage, waitForInteractionCard } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
@@ -17,7 +16,7 @@ test.describe('旅程08：审批交互', () => {
     await loginAndWaitReady(page);
 
     // 发送可能触发交互确认的消息
-    await sendChatMessage(page, '请确认一下，你准备好回答我的问题了吗？点击确认继续');
+    await sendMessage(page, '请确认一下，你准备好回答我的问题了吗？点击确认继续');
 
     // 等待助手响应
     await waitForAssistantMessage(page);
@@ -46,7 +45,7 @@ test.describe('旅程08：审批交互', () => {
   test('8.2 点击批准按钮后卡片状态应变化', async ({ page }) => {
     await loginAndWaitReady(page);
 
-    await sendChatMessage(page, '请确认一下继续操作');
+    await sendMessage(page, '请确认一下继续操作');
 
     await waitForAssistantMessage(page);
 
@@ -76,7 +75,7 @@ test.describe('旅程08：审批交互', () => {
   test('8.3 交互完成后助手应继续响应', async ({ page }) => {
     await loginAndWaitReady(page);
 
-    await sendChatMessage(page, '请确认一下继续操作');
+    await sendMessage(page, '请确认一下继续操作');
 
     const assistantMsg = await waitForAssistantMessage(page);
 

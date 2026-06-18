@@ -38,13 +38,6 @@ logger = logging.getLogger(__name__)
 # 评估器函数签名：接收指标定义和输入参数，返回输出字典（异步）
 EvaluatorFunc = Callable[..., Awaitable[dict[str, Any]]]
 
-# 指标类型优先级排序映射（TOOL → AGENT → HUMAN）
-_TYPE_PRIORITY: dict[MetricType, int] = {
-    MetricType.TOOL: 1,
-    MetricType.AGENT: 2,
-    MetricType.HUMAN: 3,
-}
-
 
 @contextmanager
 def _chdir(path: str | Path) -> Iterator[None]:
@@ -154,34 +147,6 @@ class EvaluationEngine:
         else:
             metrics_to_run = list(self._loader.metrics.values())
 
-        return await self._evaluate_core(
-            task_id=task_id,
-            metrics_to_run=metrics_to_run,
-            fail_fast=config.fail_fast,
-            resolve_params=lambda m: config.input_params.get(m.id, {}),
-        )
-
-    async def _evaluate_core(
-        self,
-        task_id: str,
-        metrics_to_run: list[MetricDefinition],
-        fail_fast: bool,
-        resolve_params: Callable[[MetricDefinition], dict[str, Any]],
-    ) -> EvaluationResult:
-        """公共评估核心流程。
-
-        按指标类型优先级排序、逐个执行评估、收集结果并计算总体结果。
-        evaluate 和 evaluate_with_metrics 共享此方法，避免逻辑重复。
-
-        Args:
-            task_id: 关联的任务 ID
-            metrics_to_run: 待评估的指标列表（排序前）
-            fail_fast: 是否在首次失败时中断
-            resolve_params: 为每个指标解析输入参数的回调
-
-        Returns:
-            评估结果
-        """
         if not metrics_to_run:
             logger.warning("No metrics to evaluate for task %s", task_id)
             return EvaluationResult(
@@ -190,8 +155,18 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
-        metrics_to_run = sorted(
-            metrics_to_run, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 问题根因: 评估指标按传入顺序执行，不区分类型（tool/agent/human），
+        #           导致 agent 评估可能在 tool 评估之前执行，浪费 Token 且无法快速失败。
+        # 修复方案: 按 MetricType 优先级排序：TOOL(1) → AGENT(2) → HUMAN(3)，
+        #           确保快速、零 Token 的工具评估优先执行。
+        _TYPE_PRIORITY = {
+            MetricType.TOOL: 1,
+            MetricType.AGENT: 2,
+            MetricType.HUMAN: 3,
+        }
+        metrics_to_run.sort(
+            key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
         )
 
         type_order = [m.metric_type.value for m in metrics_to_run]
@@ -204,12 +179,12 @@ class EvaluationEngine:
         for metric_def in metrics_to_run:
             result = await self._evaluate_metric(
                 metric_def=metric_def,
-                input_params=resolve_params(metric_def),
+                input_params=config.input_params.get(metric_def.id, {}),
                 task_id=task_id,
             )
             results.append(result)
 
-            if fail_fast and not result.passed:
+            if config.fail_fast and not result.passed:
                 logger.info(
                     "Fail-fast triggered: %s failed, stopping evaluation",
                     metric_def.id,
@@ -241,13 +216,43 @@ class EvaluationEngine:
         Returns:
             评估结果
         """
-        params = input_params or {}
-        return await self._evaluate_core(
-            task_id=task_id,
-            metrics_to_run=metrics,
-            fail_fast=False,
-            resolve_params=lambda m: {**m.default_config, **params},
+        if not metrics:
+            logger.warning("No metrics to evaluate for task %s", task_id)
+            return EvaluationResult(
+                task_id=task_id,
+                overall_passed=False,
+                summary="无可评估指标",
+            )
+
+        # BUG-FIX-fix_20260513_eval_sequential_retry:
+        # 同 evaluate() 一样按类型优先级排序
+        _TYPE_PRIORITY = {
+            MetricType.TOOL: 1,
+            MetricType.AGENT: 2,
+            MetricType.HUMAN: 3,
+        }
+        metrics = sorted(
+            metrics, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
         )
+
+        input_params = input_params or {}
+        results: list[MetricResult] = []
+
+        for metric_def in metrics:
+            merged_params = {**metric_def.default_config, **input_params}
+            result = await self._evaluate_metric(
+                metric_def=metric_def,
+                input_params=merged_params,
+                task_id=task_id,
+            )
+            results.append(result)
+
+        eval_result = EvaluationResult(
+            task_id=task_id,
+            results=results,
+        )
+        eval_result.compute_overall()
+        return eval_result
 
     async def evaluate_single(
         self,
@@ -438,12 +443,12 @@ class EvaluationEngine:
         if not task_id or not pipeline_id:
             return
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
                 return
-            from tasks.service import TaskService  # noqa: PLC0415
+            from tasks.service import TaskService
             ts = provider.get_or_create(
                 "task_service",
                 TaskService,
@@ -464,7 +469,7 @@ class EvaluationEngine:
 
     # ── 默认评估器实现（Mock） ────────────────────────────
 
-    async def _evaluate_tool(  # noqa: PLR0912
+    async def _evaluate_tool(
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
@@ -496,8 +501,19 @@ class EvaluationEngine:
 
         if handler is not None:
             try:
-                import asyncio  # noqa: PLC0415
+                import asyncio
 
+                # BUG-FIX-fix_20260530_eval_human_interaction_decouple:
+                # 问题根因: 评估器调用 human_interaction 时借用子管道的 pipeline_id，
+                #           导致用户确认后 app_factory 误唤醒子管道引擎（子管道并未挂起），
+                #           而评估器自身的 Event.set() 路径也被干扰。
+                #           评估器的 human_interaction 不应与任何真实管道耦合，
+                #           其等待/唤醒完全通过 asyncio.Event 机制实现。
+                # 修复方案: 使用虚拟 session_id (__eval__{task_id}) 标识评估请求，
+                #           app_factory 根据 __eval__ 前缀跳过 engine.wake()，
+                #           仅依赖 Event.set() 完成评估流程。
+                # 影响范围: 所有 HUMAN 类型评估指标（human_review 等）
+                # 修复日期: 2026-05-30
                 if evaluator_id == "human_interaction":
                     params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
 
@@ -656,7 +672,7 @@ class EvaluationEngine:
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
                 _captured_pid[0] = engine.pipeline_id
-                from pathlib import Path  # noqa: PLC0415
+                from pathlib import Path
                 project_root = _resolve_eval_project_root(
                     task_id, params,
                 ) or str(
@@ -686,6 +702,10 @@ class EvaluationEngine:
                     )
                 return state
 
+            # BUG-FIX-fix_20260513_eval_blocking:
+            # 问题根因: _evaluate_agent 通过 pool.submit(lambda: asyncio.run(...)).result()
+            #           阻塞当前事件循环，导致 WebSocket 连接无法处理。
+            # 修复方案: 直接在当前事件循环中 await 异步管道，无需线程池。
             pipeline_state = await _run_eval_pipeline()
 
             # 提取子管道 ID
@@ -782,8 +802,8 @@ class EvaluationEngine:
         Returns:
             解析后的评估结果字典，解析失败返回 None
         """
-        import json  # noqa: PLC0415
-        import re  # noqa: PLC0415
+        import json
+        import re
 
         def _extract_json_blocks(s: str) -> list[str]:
             """通过括号配对计数从文本中提取所有顶层 JSON 对象"""
@@ -938,7 +958,7 @@ class EvaluationEngine:
 
 def _resolve_template(value: str, context: dict[str, Any]) -> str:
     """解析 {{ a.b.c }} 风格的简单模板占位符（返回字符串）。"""
-    import re  # noqa: PLC0415
+    import re
 
     def _replacer(match: re.Match) -> str:
         expr = match.group(1).strip()
@@ -973,7 +993,7 @@ def _resolve_template_typed(
 
     避免数字字段（如 timeout_seconds）被转为字符串。
     """
-    import re  # noqa: PLC0415
+    import re
 
     stripped = value.strip()
     m = re.fullmatch(r"\{\{\s*(.+?)\s*\}\}", stripped)
@@ -1015,7 +1035,7 @@ def _resolve_eval_project_root(
     """Resolve the project root for evaluator agent pipelines."""
     workspace = params.get("workspace")
     if workspace:
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
         p = Path(workspace)
         if p.is_absolute() and p.exists():
             return str(p)
@@ -1027,7 +1047,7 @@ def _resolve_eval_project_root(
         return None
 
     try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
         provider = get_service_provider()
         ts = provider.get_or_create(
             "task_service",
@@ -1039,7 +1059,7 @@ def _resolve_eval_project_root(
         if task and task.metadata:
             ws = task.metadata.get("workspace")
             if ws:
-                from pathlib import Path  # noqa: PLC0415
+                from pathlib import Path
                 abs_ws = Path.cwd() / ws
                 if abs_ws.exists():
                     return str(abs_ws)
@@ -1071,11 +1091,11 @@ class _DynamicToolResolver:
     @classmethod
     def _do_resolve(cls, evaluator_id: str) -> Any | None:
         try:
-            import importlib  # noqa: PLC0415
-            import inspect  # noqa: PLC0415
+            import importlib
+            import inspect
 
-            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader  # noqa: PLC0415
-            from tools.registry import ToolRegistry  # noqa: PLC0415
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
+            from tools.registry import ToolRegistry
 
             loader = get_dynamic_tool_loader()
             if loader is None:
@@ -1139,7 +1159,7 @@ class _EvaluatorComponentResolver:
     @classmethod
     def _do_resolve(cls, evaluator_id: str) -> Any | None:
         try:
-            import importlib  # noqa: PLC0415
+            import importlib
 
             class_name = "".join(
                 word.capitalize() for word in evaluator_id.split("_")

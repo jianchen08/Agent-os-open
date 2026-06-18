@@ -11,12 +11,13 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { API_BASE, APP_URL } from './helpers/auth';
 
 // ---------------------------------------------------------------------------
 // 公共常量 & 辅助函数
 // ---------------------------------------------------------------------------
 
+const APP_URL = 'http://localhost:5188/';
+const API_BASE = 'http://localhost:8888/api/v1';
 const LOGIN_CREDENTIALS = { username: 'admin', password: 'admin123456' };
 const SCREENSHOT_DIR = 'test-results';
 
@@ -26,7 +27,7 @@ const SCREENSHOT_DIR = 'test-results';
  */
 async function loginAndWaitReady(page: import('@playwright/test').Page) {
   // 1) API 登录获取 token
-  const loginRes = await page.request.post(`${API_BASE}/api/v1/auth/login`, {
+  const loginRes = await page.request.post(`${API_BASE}/auth/login`, {
     data: LOGIN_CREDENTIALS,
   });
   if (!loginRes.ok()) {

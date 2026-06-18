@@ -78,11 +78,11 @@ class DockerProvider(IsolationProvider):
 
         try:
             # 用同步 subprocess 替代 asyncio subprocess（Windows 兼容性）
-            import subprocess as _sp  # noqa: PLC0415
+            import subprocess as _sp
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
                 None,
-                lambda: _sp.run(  # noqa: PLW1510
+                lambda: _sp.run(
                     ["docker", "version", "--format", "{{.Server.Version}}"],
                     capture_output=True,
                     timeout=15,
@@ -112,82 +112,43 @@ class DockerProvider(IsolationProvider):
         Returns:
             (returncode, stdout_bytes, stderr_bytes)
         """
-        import subprocess as _sp  # noqa: PLC0415
+        import subprocess as _sp
 
         def _run():
-            proc = _sp.run(args, capture_output=True, timeout=timeout)  # noqa: PLW1510
+            proc = _sp.run(args, capture_output=True, timeout=timeout)
             return proc.returncode, proc.stdout, proc.stderr
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _run)
 
-    def _make_error_environment(
-        self,
-        context: IsolationContext,
-        now: datetime,
-        error_msg: str,
-    ) -> IsolationEnvironment:
-        """构造一个错误状态的容器环境并注册。
-
-        容器创建失败、或工作空间挂载校验失败时复用：无 container_id，
-        使用带 task_id 的合成 env_id 兜底；后续 execute_in_environment
-        会据 status=ERROR 直接返回 provider_info["error"]，不再尝试执行。
-        """
-        env_id = f"docker-{context.task_id}"
-        env = IsolationEnvironment(
-            env_id=env_id,
-            level=IsolationLevel.CONTAINER,
-            provider_type="docker",
-            status=EnvironmentStatus.ERROR.value,
-            context=context,
-            provider_info={"error": error_msg},
-            created_at=now.isoformat(),
-            last_used_at=now.isoformat(),
-        )
-        self._environments[env_id] = env
-        return env
-
     async def create_environment(
         self,
         context: IsolationContext,
-        container_name: str,
+        container_name: str | None = None,
     ) -> IsolationEnvironment:
         """创建 Docker 容器环境。
 
         Args:
             context: 隔离上下文
-            container_name: 容器名称，由调用方统一确定（保证可复用/可销毁）。
+            container_name: 容器名称。由 IsolationManager 传入（统一 cua- 前缀），
+                           None 时 fallback 到 "agent-os-{task_id}"（向后兼容）。
 
         Returns:
             创建的隔离环境实例
         """
         now = datetime.now(UTC)
-        name = container_name
+        env_id = f"docker-{context.task_id}"
 
-        # 工作空间挂载校验：容器隔离的工作空间只能来自任务数据解析出来的路径。
-        # 缺失或宿主机路径不存在即为功能错误——拒绝创建无挂载容器，避免命令落到
-        # 空/不存在的目录却以 exit 0 静默通过（表现为“目录看不到”）。
-        # 不做任何“换个目录挂载”的变通：挂载点对不上本身就是错误。
-        # BUG-FIX-fix_20260625_isolated_no_workspace
-        if self._workspace_mount:
-            ws_path = context.workspace
-            if not ws_path:
-                logger.error(
-                    "[DockerProvider] 拒绝创建容器：工作空间为空（无法挂载） | task=%s",
-                    context.task_id,
-                )
-                return self._make_error_environment(
-                    context, now, "工作空间为空，无法挂载到容器",
-                )
-            from pathlib import Path  # noqa: PLC0415
-            if not Path(ws_path).exists():
-                logger.error(
-                    "[DockerProvider] 拒绝创建容器：工作空间路径不存在 | task=%s | path=%s",
-                    context.task_id, ws_path,
-                )
-                return self._make_error_environment(
-                    context, now, f"工作空间路径不存在: {ws_path}",
-                )
+        # 使用传入的容器名（统一 cua- 前缀），fallback 到默认命名
+        if container_name:
+            name = container_name
+        else:
+            name = f"agent-os-{context.task_id}"
+            logger.warning(
+                "[DockerProvider] 未传入 container_name，使用默认命名 %s。"
+                "建议由 IsolationManager 统一传入以保持 cua- 前缀一致。",
+                name,
+            )
 
         # 构建 docker run 命令参数
         run_args = self._build_run_args(name, context)
@@ -204,14 +165,20 @@ class DockerProvider(IsolationProvider):
         if rc != 0:
             error_msg = stderr.decode("utf-8", errors="replace")
             logger.error("[DockerProvider] 创建容器失败 | error=%s", error_msg)
-            # 创建失败时无 container_id，复用错误环境构造（与挂载校验失败同源）
-            return self._make_error_environment(context, now, error_msg)
+            env = IsolationEnvironment(
+                env_id=env_id,
+                level=IsolationLevel.CONTAINER,
+                provider_type="docker",
+                status=EnvironmentStatus.ERROR.value,
+                context=context,
+                provider_info={"error": error_msg},
+                created_at=now.isoformat(),
+                last_used_at=now.isoformat(),
+            )
+            self._environments[env_id] = env
+            return env
 
         container_id = stdout.decode("utf-8", errors="replace").strip()
-
-        # 统一使用 container_name 作为 env_id（由 workspace 决定），
-        # 保证同一 workspace 无论容器是否重建，env_id 始终一致。
-        env_id = container_name
 
         # 启动容器
         await self._run_cmd(["docker", "start", container_id], timeout=15)
@@ -282,14 +249,6 @@ class DockerProvider(IsolationProvider):
         if not env:
             return ExecutionResult(
                 success=False, output=None, error=f"环境不存在: {env_id}",
-            )
-
-        # 创建失败的环境（如工作空间未挂载校验未过）直接返回其错误，
-        # 不再尝试执行——否则会以模糊的“容器ID不存在”掩盖真实原因。
-        if env.status == EnvironmentStatus.ERROR.value:
-            return ExecutionResult(
-                success=False, output=None,
-                error=env.provider_info.get("error", "容器环境处于错误状态"),
             )
 
         container_id = env.provider_info.get("container_id")
@@ -365,13 +324,11 @@ class DockerProvider(IsolationProvider):
             # --init: 使用 tini 作为 PID 1，回收 docker exec 产生的僵尸进程，
             # 避免僵尸累积逼近 --pids-limit 导致容器被杀
             "--init",
-            # 资源约束：单容器配额 = (宿主机一半) / max_environments，
-            # 由 hardware_profile 动态计算，满载时所有容器总和 = 宿主机一半。
             "--cpus", self._cpu_limit,
             "--memory", self._memory_limit,
-            # swap = memory，禁止容器通过 swap 超额使用内存
+            # 硬上限：swap 限制 = memory，禁止容器通过 swap 超额使用内存
             "--memory-swap", self._memory_swap,
-            # 进程数上限，防 fork 炸弹吃光系统进程表
+            # 硬上限：进程数限制，防 fork 炸弹吃光系统进程表
             "--pids-limit", str(self._pids_limit),
             "--network", self._network_mode,
             "-i", "-t",
@@ -393,7 +350,7 @@ class DockerProvider(IsolationProvider):
 
     async def _ensure_image(self) -> None:
         """确保 Docker 镜像存在，不存在则拉取。"""
-        import subprocess as _sp  # noqa: PLC0415
+        import subprocess as _sp
 
         try:
             rc, _, _ = await self._run_cmd(
@@ -409,7 +366,7 @@ class DockerProvider(IsolationProvider):
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                lambda: _sp.run(  # noqa: PLW1510
+                lambda: _sp.run(
                     ["docker", "image", "prune", "-f"],
                     capture_output=True, timeout=30,
                 ),

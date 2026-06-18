@@ -58,7 +58,7 @@ class FileJumpProtocol:
         ide_info: IDEInfo | None = None,
     ) -> bool:
         """跳转到文件指定位置"""
-        if not os.path.exists(file_path):  # noqa: PTH110
+        if not os.path.exists(file_path):
             logger.error(f"文件不存在: {file_path}")
             return False
 
@@ -90,7 +90,7 @@ class FileJumpProtocol:
             logger.warning(f"不支持的 IDE 类型: {ide_type}")
             return False
 
-        import platform  # noqa: PLC0415
+        import platform
 
         system = platform.system().lower()
 
@@ -108,9 +108,9 @@ class FileJumpProtocol:
 
         args = []
         for arg in format_info["args"]:
-            arg = arg.replace("{file}", file_path)  # noqa: PLW2901
-            arg = arg.replace("{line}", str(line + 1))  # IDE 通常从 1 开始  # noqa: PLW2901
-            arg = arg.replace("{col}", str(col + 1))  # noqa: PLW2901
+            arg = arg.replace("{file}", file_path)
+            arg = arg.replace("{line}", str(line + 1))  # IDE 通常从 1 开始
+            arg = arg.replace("{col}", str(col + 1))
             args.append(arg)
 
         # 执行命令 - 避免使用shell=True以提高安全性
@@ -131,10 +131,10 @@ class FileJumpProtocol:
     @staticmethod
     def _open_with_default(
         file_path: str,
-        position: Position | None = None,  # noqa: ARG004
+        position: Position | None = None,
     ) -> bool:
         """使用系统默认方式打开文件"""
-        import platform  # noqa: PLC0415
+        import platform
 
         system = platform.system()
 
@@ -212,7 +212,7 @@ class FileJumpProtocol:
     ) -> str:
         """生成文件 URI"""
         # 标准化路径
-        file_path = os.path.abspath(file_path)  # noqa: PTH100
+        file_path = os.path.abspath(file_path)
 
         if ide_type == IDEType.VSCODE:
             uri = f"vscode://file/{file_path}"

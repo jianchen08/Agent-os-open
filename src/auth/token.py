@@ -79,11 +79,11 @@ class TokenManager:
         """
         url = redis_url
         if url is None:
-            import os  # noqa: PLC0415
+            import os
             url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
         try:
-            import redis as redis_lib  # noqa: PLC0415
+            import redis as redis_lib
 
             self._redis = redis_lib.Redis.from_url(
                 url,
@@ -134,10 +134,6 @@ class TokenManager:
         """
         if expires_delta is None:
             expires_delta = timedelta(minutes=self.access_token_expire_minutes)
-
-        # 绑定日志上下文，使后续认证日志自动携带 request_id
-        from src.core.logging import LogContext  # noqa: PLC0415
-        LogContext.bind(request_id=user_id)
 
         return self._create_token(
             user_id=user_id,
@@ -220,7 +216,6 @@ class TokenManager:
             except Exception as exc:
                 logger.debug("TokenManager: Redis 查询失败，降级到内存: %s", exc)
 
-        # 严格小于：iat < revoke_time 才判定为撤销。
         if user_id in self._revoked_users:
             return iat <= self._revoked_users[user_id]
         return False
@@ -256,9 +251,9 @@ class TokenManager:
                 algorithms=[self.algorithm],
             )
         except jwt.ExpiredSignatureError:
-            raise TokenExpiredError()  # noqa: B904
+            raise TokenExpiredError()
         except jwt.InvalidTokenError:
-            raise TokenInvalidError()  # noqa: B904
+            raise TokenInvalidError()
 
         # 验证 token 类型
         if payload.get("type") != token_type:

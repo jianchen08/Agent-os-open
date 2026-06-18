@@ -177,7 +177,7 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
         """删除单个文件"""
         if force:
             # 移除只读属性
-            os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
+            os.chmod(path, stat.S_IWRITE)
         path.unlink()
 
     async def _delete_directory(self, path: Path, recursive: bool, force: bool):
@@ -195,9 +195,9 @@ class DeleteFileTool(BuiltinTool, WorkspaceAwareMixin):
         """递归设置目录和文件为可写状态"""
         if path.is_dir():
             with contextlib.suppress(Exception):
-                os.chmod(path, stat.S_IWRITE | stat.S_IXUSR)  # noqa: PTH101
+                os.chmod(path, stat.S_IWRITE | stat.S_IXUSR)
             for child in path.iterdir():
                 self._make_writable(child)
         else:
             with contextlib.suppress(Exception):
-                os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
+                os.chmod(path, stat.S_IWRITE)

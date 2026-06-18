@@ -70,7 +70,7 @@ class CompressionConfig:
         不再硬编码 Path(__file__).parent...
         """
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
             budgets = yaml_data.get("budgets", {})
             return cls(
@@ -348,7 +348,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                 logger.warning("[ContextCompressor] JSON 提取结果为空，跳过压缩")
                 return None
 
-            import json  # noqa: PLC0415
+            import json
             try:
                 parsed = json.loads(raw_json)
             except json.JSONDecodeError as je:
@@ -413,7 +413,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         if estimated <= max_tokens:
             return text
 
-        import json  # noqa: PLC0415
+        import json
 
         max_chars = int(max_tokens * 1.5)
         truncated = text[:max_chars]
@@ -427,7 +427,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         # 是 JSON：找一个安全的截断点（最后一个完整 key-value 后的逗号）
         # 注意 last_comma 是在 truncated 里找的索引，必须用它切 truncated
         last_comma = truncated.rfind(',\n')
-        if last_comma > 0:  # noqa: SIM108
+        if last_comma > 0:
             safe = truncated[:last_comma] + "\n}"
         else:
             # 找不到安全的逗号（可能是单字段对象或截断点太靠前）
@@ -455,8 +455,8 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         Returns:
             格式化后的 JSON 字符串
         """
-        import json  # noqa: PLC0415
-        import re  # noqa: PLC0415
+        import json
+        import re
 
         if not text:
             return text

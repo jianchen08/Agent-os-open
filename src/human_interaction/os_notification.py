@@ -200,7 +200,7 @@ def _quote(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def play_alert_sound() -> bool:  # noqa: PLR0911
+async def play_alert_sound() -> bool:
     """
     播放系统提示音。
 

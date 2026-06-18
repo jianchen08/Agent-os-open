@@ -79,7 +79,7 @@ class YamlValidateTool(BuiltinTool):
             tags=["yaml", "validate", "config"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911,PLR0912
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行验证"""
         content = inputs.get("content")
         file_path = inputs.get("file_path")

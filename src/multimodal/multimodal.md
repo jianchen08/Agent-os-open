@@ -20,26 +20,6 @@
   → 模型特定格式消息列表
 ```
 
-### 工具多模态回流（MM-3 + MM-5 + MM-4b）
-
-工具产生的多模态结果（图片等）回流到 LLM 的完整链路：
-
-```
-工具执行（image_generate / playwright_test 截图等）
-  → 返回 ToolExecutionResult，metadata 含 multimodal_content 字段
-  → multimodal_content 格式：[{type: "image_url", image_url: {url: "data:mime;base64,..."}}]
-  → ToolCore.execute() 从 metadata.multimodal_content 提取图片
-  → 根据 ModelCapabilityRegistry.is_multimodal_supported(model) 判断：
-    - 视觉模型 → 注入多模态 user 消息（content 为 content_blocks 列表）
-    - 非视觉模型 → 注入文本提示（引导调用 MCP 分析工具）
-  → 同时通过 on_chunk 发射 tool_multimedia_result WS 事件（MM-4b）
-  → BridgeEvents._handle_chunk 格式化为前端事件推送
-  → 下一轮 LLMCore._build_messages() 读取 messages → LLM "看到" 图片
-```
-
-**slim 序列化保护**：`ExecutionResult.to_dict(slim=True)` 排除 `multimodal_content` 字段，
-防止 base64 数据污染发给 LLM 的纯文本上下文。
-
 ### 适配器类型
 
 | 适配器 | 提供商 | 支持格式 |

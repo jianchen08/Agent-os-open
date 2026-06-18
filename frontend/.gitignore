@@ -25,6 +25,3 @@ dist-ssr
 
 *storybook.log
 storybook-static
-
-# Backup files
-*.bak

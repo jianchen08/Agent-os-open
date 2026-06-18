@@ -18,7 +18,6 @@ State 命名空间：
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from isolation.decider import IsolationDecider
@@ -78,13 +77,13 @@ class IsolationGuard(IInputPlugin):
 
         用 subprocess.run 替代 asyncio subprocess，避免 Windows 静默失败。
         """
-        import shutil  # noqa: PLC0415
-        import subprocess  # noqa: PLC0415
+        import shutil
+        import subprocess
         if not shutil.which("docker"):
             return False
         try:
             # 用 docker version 替代 docker info（info 在某些 Docker Desktop 配置下会卡 stdin）
-            result = subprocess.run(  # noqa: PLW1510
+            result = subprocess.run(
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
                 timeout=15,
@@ -133,15 +132,7 @@ class IsolationGuard(IInputPlugin):
         execution_contexts = []
         for tc in tool_calls:
             tool_name = tc.get("name", "")
-            # 解析工具参数（可能为 JSON 字符串），供宿主路径检测使用
-            tc_args = tc.get("args", tc.get("arguments", {}))
-            if isinstance(tc_args, str):
-                import json  # noqa: PLC0415
-                try:
-                    tc_args = json.loads(tc_args)
-                except (json.JSONDecodeError, TypeError):
-                    tc_args = {}
-            context = self._decide_isolation(tool_name, ctx, tool_args=tc_args)
+            context = self._decide_isolation(tool_name, ctx)
             execution_contexts.append(context)
 
         state_updates: dict[str, Any] = {
@@ -161,29 +152,18 @@ class IsolationGuard(IInputPlugin):
 
         return PluginResult(state_updates=state_updates)
 
-    def _decide_isolation(
-        self,
-        tool_name: str,
-        ctx: PluginContext,
-        tool_args: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:  # noqa: PLR0911
+    def _decide_isolation(self, tool_name: str, ctx: PluginContext) -> dict[str, Any]:
         """决定工具的隔离级别。
 
         规则（按优先级）：
         1. 先查工具级 policy（isolation_policy.yaml）确定工具的隔离能力
         2. task metadata 的 isolation_level 只允许降级（container→host），
            不允许提升（host→container），避免把不支持容器的工具塞进容器
-        3. Docker 不可用时：要求容器的工具一律拒绝（返回 blocked），
-           不降级到 host——降级会让属于其它容器/工作区的任务静默落到本进程执行
-        4. 命令含宿主路径（如 D:/...、C:\\...）时，即使 policy 要求容器，
-           也路由到 host 执行——容器内没有宿主路径，进了容器必然报
-           "No such file or directory"。路由到 host 后由 security_check
-           审批把关（安全规则 host_path_access 命中即 needs_approval）。
+        3. Docker 不可用时根据策略 fallback 降级
 
         Args:
             tool_name: 工具名称
             ctx: 插件执行上下文
-            tool_args: 工具参数字典（用于宿主路径检测，可选）
 
         Returns:
             执行上下文字典，包含 provider、level、tool_name、workspace 等信息
@@ -197,12 +177,11 @@ class IsolationGuard(IInputPlugin):
         policy_isolation = policy.isolation
 
         if self._force_host:
-            # P0-安全: force_host 不能把要求容器隔离的工具放到宿主机执行，
-            # 一律拒绝（不降级）。force_host 仅对本身就走 host 的工具有效。
-            if policy_isolation == IsolationLevel.CONTAINER:
+            # P0-安全: force_host 不能绕过 fallback:deny 策略
+            if policy.fallback == "deny" and policy_isolation == IsolationLevel.CONTAINER:
                 logger.warning(
-                    "[IsolationGuard] force_host 被拒绝: "
-                    "工具 %s 要求容器隔离，不降级到 host | tool=%s",
+                    "[IsolationGuard] force_host 被策略阻止: "
+                    "工具 %s 要求容器隔离且禁止降级 | tool=%s",
                     tool_name, tool_name,
                 )
                 return self._build_context(
@@ -227,15 +206,26 @@ class IsolationGuard(IInputPlugin):
                         tool_name, "docker", "task_metadata",
                         workspace=metadata_workspace,
                     )
-                # Docker 不可用：要求容器即拒绝，不降级到 host
-                logger.warning(
-                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，拒绝执行 | tool=%s",
+                # Docker 不可用时按 fallback 决策
+                if policy.fallback == "deny":
+                    logger.warning(
+                        "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
+                        "策略禁止降级 | tool=%s",
+                        tool_name,
+                    )
+                    return self._build_context(
+                        tool_name, "denied", "task_metadata_fallback_denied",
+                        workspace=metadata_workspace,
+                        blocked=True,
+                    )
+                logger.info(
+                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，"
+                    "策略允许降级 | tool=%s",
                     tool_name,
                 )
                 return self._build_context(
-                    tool_name, "denied", "docker_unavailable_container_required",
+                    tool_name, "host", "task_metadata_fallback",
                     workspace=metadata_workspace,
-                    blocked=True,
                 )
             # metadata 强制 host → 降级
             return self._build_context(
@@ -245,33 +235,27 @@ class IsolationGuard(IInputPlugin):
 
         # ── 工具级 policy 决策（metadata 不适用或 policy 为 host）──
         if policy_isolation == IsolationLevel.CONTAINER and self._docker_available:
-            # 宿主路径检测：命令/工作目录含 Windows 盘符路径时，
-            # 容器内必然找不到该路径（容器只有挂载的 /workspace），
-            # 会返回 "No such file or directory"。改为路由到 host 执行，
-            # 由 security_check 的 host_path_access 规则触发用户审批。
-            if tool_name == "bash_execute" and tool_args and self._has_host_path(tool_args):
-                logger.info(
-                    "[IsolationGuard] 命令含宿主路径，路由到 host 执行（等待审批） | "
-                    "tool=%s | reason=host_path_detected",
-                    tool_name,
-                )
-                return self._build_context(
-                    tool_name, "host", "host_path_detected",
-                    workspace=metadata_workspace,
-                )
             return self._build_context(
                 tool_name, "docker", "policy",
                 workspace=metadata_workspace,
             )
 
         if policy_isolation == IsolationLevel.CONTAINER and not self._docker_available:
-            # 要求容器但 Docker 不可用：一律拒绝，不降级
+            if policy.fallback == "allow":
+                logger.info(
+                    "[IsolationGuard] Docker 不可用，策略允许降级 | tool=%s",
+                    tool_name,
+                )
+                return self._build_context(
+                    tool_name, "host", "policy_fallback",
+                    workspace=metadata_workspace,
+                )
             logger.warning(
-                "[IsolationGuard] Docker 不可用且工具要求容器隔离，拒绝执行 | tool=%s",
+                "[IsolationGuard] Docker 不可用且策略禁止降级，阻止执行 | tool=%s",
                 tool_name,
             )
             return self._build_context(
-                tool_name, "denied", "docker_unavailable_container_required",
+                tool_name, "denied", "policy_fallback_denied",
                 workspace=metadata_workspace,
                 blocked=True,
             )
@@ -287,7 +271,7 @@ class IsolationGuard(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        from pipeline.plugin import find_plugin_config  # noqa: PLC0415
+        from pipeline.plugin import find_plugin_config
 
         plugin_configs = ctx.state.get("plugin_configs", {})
         config = find_plugin_config("isolation_guard", plugin_configs)
@@ -359,27 +343,3 @@ class IsolationGuard(IInputPlugin):
                 task_id, e,
             )
         return {}
-
-    # 匹配 Windows 盘符绝对路径，如 D:/、D:\、C:\Users
-    # 正则：盘符前须是行首/空白/引号/等号（排除 URL 中的 p:/、t:/ 片段），
-    # 后跟字母+冒号+斜杠或反斜杠。
-    _HOST_PATH_RE = re.compile(r"(?:^|[\s\"'=`])([A-Za-z]):[\\/]")
-
-    @classmethod
-    def _has_host_path(cls, tool_args: dict[str, Any]) -> bool:
-        """检查工具参数中是否包含宿主机绝对路径（Windows 盘符模式）。
-
-        检查 command 和 working_dir 两个参数。命中即说明命令意图访问
-        宿主机文件系统——容器内只有挂载的 /workspace，宿主路径必然不存在。
-
-        Args:
-            tool_args: 工具参数字典
-
-        Returns:
-            是否包含宿主机路径
-        """
-        for key in ("command", "working_dir"):
-            val = tool_args.get(key)
-            if isinstance(val, str) and cls._HOST_PATH_RE.search(val):
-                return True
-        return False

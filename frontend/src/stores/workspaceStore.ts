@@ -5,10 +5,8 @@
  */
 
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 import type { Artifact } from '@/types/artifact'
 import type { Workspace, FileTreeNode } from '@/types/workspace'
-import { apiClient } from '@/services/api/client'
 import {
   createEntry as apiCreateEntry,
   deleteEntry as apiDeleteEntry,
@@ -60,25 +58,19 @@ interface WorkspaceActions {
 
 const API_BASE = '/api/v1/workspaces'
 
-export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
-  persist(
-    (set, get) => ({
-      workspaces: {},
-      activeWorkspaceId: null,
-      expandedPaths: new Set<string>(),
-      selectedFilePath: null,
-      loading: false,
-      error: null,
+export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()((set, get) => ({
+  workspaces: {},
+  activeWorkspaceId: null,
+  expandedPaths: new Set<string>(),
+  selectedFilePath: null,
+  loading: false,
+  error: null,
 
   fetchWorkspace: async (containerTaskId) => {
     set({ loading: true, error: null })
     try {
-      // BUG-FIX-fix_20260622_workspace_state_loss:
-      // 改用 apiClient 替代裸 fetch，确保：
-      // 1. 自动带 Authorization 头（请求拦截器）
-      // 2. 401 时走统一的 token 刷新链路（避免认证失效时静默失败）
-      // 3. 享受 5xx/429 重试机制
-      const { data } = await apiClient.get(`${API_BASE}/${containerTaskId}`)
+      const resp = await fetch(`${API_BASE}/${containerTaskId}`)
+      const data = await resp.json()
       if (data.error) {
         set({ loading: false, error: data.error.message })
         return null
@@ -97,7 +89,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
 
   fetchFileTree: async (containerTaskId) => {
     try {
-      const { data } = await apiClient.get(`${API_BASE}/${containerTaskId}/file-tree`)
+      const resp = await fetch(`${API_BASE}/${containerTaskId}/file-tree`)
+      const data = await resp.json()
       const tree = (data.tree || []).map(_normalizeFileTreeNode)
       // 更新缓存中的文件树
       set((state) => {
@@ -120,7 +113,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
 
   fetchWorkspaceArtifacts: async (containerTaskId) => {
     try {
-      const { data } = await apiClient.get(`${API_BASE}/${containerTaskId}/artifacts`)
+      const resp = await fetch(`${API_BASE}/${containerTaskId}/artifacts`)
+      const data = await resp.json()
       return (data.items || []).map(_normalizeArtifact)
     } catch {
       return []
@@ -214,41 +208,7 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
       error: null,
     })
   },
-}),
-    // BUG-FIX-fix_20260622_workspace_state_loss:
-    // 问题根因: workspaceStore 全状态纯内存，整页刷新后 activeWorkspaceId、
-    //          expandedPaths（用户展开的目录）、selectedFilePath（选中的文件）全部丢失，
-    //          重登后用户需重新展开目录树、重新选中文件，体验差。
-    // 修复方案: persist 持久化 UI 导航状态。workspaces 缓存也持久化（含 fileTree），
-    //          下次进入时立即显示，后台 fetchFileTree 会用最新数据覆盖。
-    //          注意：loading/error 是运行时状态，不持久化。
-    //          expandedPaths 是 Set，需在 partialize/merge 做 数组↔Set 转换。
-    {
-      name: 'workspace-store',
-      version: 1,
-      partialize: (state) => ({
-        workspaces: state.workspaces,
-        activeWorkspaceId: state.activeWorkspaceId,
-        expandedPaths: Array.from(state.expandedPaths),
-        selectedFilePath: state.selectedFilePath,
-      }),
-      merge: (persisted, current) => {
-        const p = (persisted as Partial<WorkspaceState> & { expandedPaths?: unknown }) || {}
-        return {
-          ...current,
-          ...p,
-          // Set 类型字段从数组还原
-          expandedPaths: new Set<string>(
-            Array.isArray(p.expandedPaths) ? (p.expandedPaths as string[]) : [],
-          ),
-          // 运行时状态强制重置
-          loading: false,
-          error: null,
-        }
-      },
-    },
-  ),
-)
+}))
 
 function _normalizeWorkspace(data: Record<string, any>): Workspace {
   if (!data.id) {

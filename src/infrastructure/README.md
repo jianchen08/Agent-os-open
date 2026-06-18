@@ -51,7 +51,6 @@ MessageQueue (消息队列) → 异步通信
 | `pipeline_checkpoint.py` | PipelineCheckpointManager | 管道检查点管理 |
 | `message_queue.py` | MessageQueue | 异步消息队列 |
 | `recovery.py` | — | 异常恢复机制 |
-| `protocols.py` | MemoryStoreProtocol | 跨层依赖抽象协议（解耦 infrastructure↔channels） |
 | `service_provider.py` | ServiceProvider, get_service_provider | 全局服务注册表 |
 | `session_service.py` | SessionService | 会话管理服务 |
 | `task_worker.py` | TaskWorker | 任务工作器 |

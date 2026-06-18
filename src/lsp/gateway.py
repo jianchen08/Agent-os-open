@@ -252,7 +252,7 @@ _lsp_gateway: LSPGateway | None = None
 
 async def get_lsp_gateway() -> LSPGateway:
     """获取全局 LSP 网关实例"""
-    global _lsp_gateway  # noqa: PLW0603
+    global _lsp_gateway
 
     if _lsp_gateway is None:
         _lsp_gateway = LSPGateway()

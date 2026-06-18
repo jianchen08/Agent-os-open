@@ -5,7 +5,7 @@
 
 典型用法::
 
-    from src.core.logging import LogContext
+    from core.logging.context import LogContext
 
     LogContext.bind(request_id="abc123", task_id="t-001")
     LogContext.bind(session_id="sess-42")
@@ -27,19 +27,15 @@ class LogContext:
 
     追踪字段：
     - request_id / task_id / session_id: 通用请求级追踪
-    - trace_id: 请求链路追踪（贯穿 L1→L2→L3 委托链）
     - pipeline_id / thread_id: 管道引擎执行追踪（用于关联一次 pipeline 执行的全部日志）
-    - agent_name: 当前执行 Agent 名称
     """
 
     _vars: dict[str, contextvars.ContextVar[str]] = {
         "request_id": contextvars.ContextVar("log_request_id", default="-"),
         "task_id": contextvars.ContextVar("log_task_id", default="-"),
         "session_id": contextvars.ContextVar("log_session_id", default="-"),
-        "trace_id": contextvars.ContextVar("log_trace_id", default="-"),
         "pipeline_id": contextvars.ContextVar("log_pipeline_id", default="-"),
         "thread_id": contextvars.ContextVar("log_thread_id", default="-"),
-        "agent_name": contextvars.ContextVar("log_agent_name", default="-"),
     }
 
     # ── 读取 ──────────────────────────────────────────────

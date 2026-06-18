@@ -308,6 +308,24 @@ class TestTemplateLoader:
         with pytest.raises(FileNotFoundError):
             loader.load_from_directory("/nonexistent/dir")
 
+    def test_load_research_template_upstream(
+        self,
+        loader: TemplateLoader,
+        research_template_path: str,
+    ) -> None:
+        """调研报告模板有上游模板引用。"""
+        spec = loader.load_from_markdown(research_template_path)
+        assert "solution_template" in spec.upstream_templates
+
+    def test_load_research_template_downstream(
+        self,
+        loader: TemplateLoader,
+        research_template_path: str,
+    ) -> None:
+        """调研报告模板有下游模板引用。"""
+        spec = loader.load_from_markdown(research_template_path)
+        assert "execution_plan_template" in spec.downstream_templates
+
     def test_placeholder_dedup(self, loader: TemplateLoader) -> None:
         """占位符去重测试。"""
         content = "# Test\n{name} and {name} and {age}"

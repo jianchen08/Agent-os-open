@@ -104,7 +104,7 @@ class PipelineCheckpointManager:
             encoding="utf-8",
         )
 
-        logger.debug(
+        logger.info(
             "Checkpoint saved: checkpoint_id=%s, phase=%s, iteration=%d, keys=%s",
             checkpoint_id, phase, metadata["iteration"],
             list(serialized_state.keys()),

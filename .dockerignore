@@ -15,8 +15,8 @@ __pycache__
 *.so
 *.egg-info
 *.egg
-/dist/
-/build/
+dist/
+build/
 .eggs/
 
 # 虚拟环境

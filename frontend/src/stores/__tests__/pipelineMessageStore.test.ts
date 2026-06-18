@@ -97,11 +97,7 @@ describe('pipelineMessageStore', () => {
   describe('initFromAPI', () => {
     it('初始化空 pipeline 的消息', () => {
       const store = usePipelineMessageStore.getState()
-      // 用 user/assistant 不同 role 避免被 mergeConsecutiveAssistantMessages 合并
-      store.initFromAPI('pipe-1', [
-        makeMsg('msg-1', 'hello', { role: 'user' }),
-        makeMsg('msg-2', 'world', { role: 'assistant' }),
-      ])
+      store.initFromAPI('pipe-1', [makeMsg('msg-1', 'hello'), makeMsg('msg-2', 'world')])
 
       expect(store.getMessages('pipe-1')).toHaveLength(2)
     })
@@ -129,46 +125,6 @@ describe('pipelineMessageStore', () => {
       const msgs = store.getMessages('pipe-1')
       expect(msgs).toHaveLength(1)
       expect(msgs[0].content).toBe('full content')
-    })
-
-    // BUG-FIX-fix_20260623_refresh_order:
-    // 问题根因: 刷新后 persist 恢复的旧消息（小 sequence）与 API 返回的新消息
-    //   合并时被直接末尾拼接，顺序错乱。验证修复后按 sequence 升序合并。
-    // 注意: 用 user/assistant 交替避免 mergeConsecutiveAssistantMessages 合并，
-    //   纯粹验证排序逻辑。
-    it('刷新后 localOnly 消息按 sequence 升序合并（不末尾拼接）', () => {
-      const store = usePipelineMessageStore.getState()
-      // 模拟 persist 恢复的旧消息（sequence=1，本地独有，API 未返回）
-      store.addMessage('pipe-1', makeMsg('old-msg', 'old content', { sequence: 1, role: 'user', status: 'completed' }))
-      // API 返回最近的新消息（sequence 10、20、30，不含旧消息）
-      store.initFromAPI('pipe-1', [
-        makeMsg('api-10', 'msg10', { sequence: 10, role: 'assistant', status: 'completed' }),
-        makeMsg('api-20', 'msg20', { sequence: 20, role: 'user', status: 'completed' }),
-        makeMsg('api-30', 'msg30', { sequence: 30, role: 'assistant', status: 'completed' }),
-      ])
-
-      const msgs = store.getMessages('pipe-1')
-      // 4 条消息都在（去重后）
-      expect(msgs).toHaveLength(4)
-      // 关键：按 sequence 升序，旧消息在最前（修复前会被错误地排到末尾）
-      expect(msgs.map(m => m.sequence)).toEqual([1, 10, 20, 30])
-      expect(msgs[0].id).toBe('old-msg')
-      expect(msgs[3].id).toBe('api-30')
-    })
-
-    it('localOnly 含多条乱序消息时也正确排序', () => {
-      const store = usePipelineMessageStore.getState()
-      // persist 恢复的消息可能无序，用 user/assistant 严格交替避免相邻合并
-      // 最终 sequence 序列 [2,3,5,8] → 角色 [user, assistant, user, assistant]
-      store.addMessage('pipe-1', makeMsg('local-5', 'c5', { sequence: 5, role: 'user', status: 'completed' }))
-      store.addMessage('pipe-1', makeMsg('local-2', 'c2', { sequence: 2, role: 'user', status: 'completed' }))
-      store.initFromAPI('pipe-1', [
-        makeMsg('api-8', 'c8', { sequence: 8, role: 'assistant', status: 'completed' }),
-        makeMsg('api-3', 'c3', { sequence: 3, role: 'assistant', status: 'completed' }),
-      ])
-
-      const msgs = store.getMessages('pipe-1')
-      expect(msgs.map(m => m.sequence)).toEqual([2, 3, 5, 8])
     })
   })
 

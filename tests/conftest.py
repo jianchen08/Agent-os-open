@@ -37,14 +37,6 @@ collect_ignore = [
     "suites/task/test_task_closed_loop.py",
     # 预先存在的 FileWriteTool 路径故障（与消息框架重构无关）：
     "suites/agent/test_agent_self_creation.py",
-    # 预先存在的模块缺失导致的导入错误（源码重构遗留，非 P1 变更引入）：
-    "suites/core/test_websocket.py",       # channels.websocket.protocol 模块不存在
-    "test_isolation_fallback.py",           # isolation.executor 模块不存在
-    "test_task_status_sync.py",             # api 模块路径残留
-    # TaskService 重构后 API 全面不匹配（5 failed + 9 errors），需源码修复后移除：
-    "suites/core/test_core_e2e_verification.py",
-    # conftest 中缺少 MockAgentConfig（预存在导入错误）：
-    "suites/core/test_deep_integration.py",
 ]
 
 # ── 报告输出目录 ──────────────────────────────────────────
@@ -77,27 +69,17 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     # 生成控制台摘要
     console_summary = generator.to_console()
-    try:
-        print(console_summary)
-    except UnicodeEncodeError:
-        # Windows GBK 编码不支持 emoji，回退到纯 ASCII
-        print(console_summary.encode('ascii', 'replace').decode('ascii'))
+    print(console_summary)
 
     # 生成 JSON 报告
     json_path = os.path.join(REPORT_DIR, "test_report.json")
     generator.to_json(json_path)
-    try:
-        print(f"\n[JSON] 报告已生成: {json_path}")
-    except UnicodeEncodeError:
-        print(f"\n[JSON] Report generated: {json_path}")
+    print(f"\n📄 JSON 报告已生成: {json_path}")
 
     # 生成 HTML 报告
     html_path = os.path.join(REPORT_DIR, "test_report.html")
     generator.to_html(html_path)
-    try:
-        print(f"[HTML] 报告已生成: {html_path}")
-    except UnicodeEncodeError:
-        print(f"[HTML] Report generated: {html_path}")
+    print(f"📄 HTML 报告已生成: {html_path}")
 
 
 # ── pytest hook: 每个测试用例执行 ──────────────────────────
@@ -156,11 +138,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
         from tests.test_utils.bug_locator import locate_bug
 
         bug_result = locate_bug(call.excinfo._excinfo)
-        try:
-            print(bug_result.summary())
-        except UnicodeEncodeError:
-            # Windows GBK 编码不支持 emoji，回退到纯 ASCII
-            print(bug_result.summary().encode('ascii', 'replace').decode('ascii'))
+        print(bug_result.summary())
 
 
 # ── fixture: 日志收集器 ────────────────────────────────────

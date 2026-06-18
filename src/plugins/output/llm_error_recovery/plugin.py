@@ -1,9 +1,9 @@
 """LLM 错误恢复 Output 插件。
 
 负责在管道循环的输出阶段读取 state["llm_error_info"]，
-为 LLM 可修复错误（仅 llm_fixable）构建恢复提示并追加到 messages。
-infrastructure_error / context_overflow / unknown 类型不追加提示
-（LLM 无法通过调整操作修复，应由 error_check 路由决策接管）。
+为 LLM 可修复错误构建恢复提示并追加到 messages，
+context_overflow 类型不追加提示（由压缩插件处理），
+infrastructure_error 类型不追加提示（LLM 无法修复，由 error_check 路由决策接管：重试耗尽后产出 end 信号，drain 层发 stream_error 通知前端）。
 
 从 engine.py 中迁移的逻辑：
 - _build_llm_error_hint：根据错误类型生成面向大模型的恢复建议
@@ -94,19 +94,19 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             # 清除错误信息，避免重复处理
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # bad_request：LLM 有能力修复（如非法工具参数），构建恢复提示。
-        # 其余（rate_limit/quota_exhausted/auth_failed/service_down/network/
-        # server_error/unknown）属于基础设施错误，LLM 无法通过调整操作修复，
-        # 追加面向 LLM 的提示无意义。直接清除，由 error_check 路由决策接管。
-        if error_type != "bad_request":
+        # infrastructure_error 类型不追加提示：认证/权限/连接/key 耗尽等错误
+        # LLM 无法通过调整操作修复，追加面向 LLM 的提示无意义（且会浪费一轮调用
+        # 并在 messages 中堆砌无效内容）。直接清除错误信息，由 error_check 插件
+        # 的路由决策接管（重试耗尽产出 end，drain 发 stream_error 通知前端）。
+        if error_type == "infrastructure_error":
             logger.warning(
-                "LLM error recovery: %s detected, "
-                "skipping hint (LLM cannot fix this) | error=%s",
-                error_type, error_msg[:200],
+                "LLM error recovery: infrastructure_error detected, "
+                "skipping hint (LLM cannot fix auth/conn/key issues) | error=%s",
+                error_msg[:200],
             )
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # bad_request：LLM 有能力修复（如非法工具参数），构建恢复提示
+        # 构建恢复提示
         hint = self._build_llm_error_hint(error_msg)
         messages = list(ctx.state.get("messages", []))
 
@@ -173,7 +173,7 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         })
 
     @staticmethod
-    def _build_llm_error_hint(error_msg: str) -> str:  # noqa: PLR0911
+    def _build_llm_error_hint(error_msg: str) -> str:
         """根据 LLM 错误信息生成给大模型的恢复建议。
 
         Args:

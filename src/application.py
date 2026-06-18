@@ -45,7 +45,7 @@ class Application:
         self.project_root: Path = project_root or Path.cwd()
         self.services: dict[str, Any] = {}
 
-    def build_services(self, agent_registry: Any | None = None) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
+    def build_services(self, agent_registry: Any | None = None) -> dict[str, Any]:
         """构建共享服务字典（唯一入口）。
 
         Args:
@@ -60,32 +60,32 @@ class Application:
 
         # ── 1. ToolRegistry ──────────────────────────────
         try:
-            from tools.registry import ToolRegistry  # noqa: PLC0415
+            from tools.registry import ToolRegistry
 
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
-            logger.debug("服务已: tool_registry (%d 个基础工具)", tool_registry.count())
+            logger.info("服务已创建: tool_registry (%d 个基础工具)", tool_registry.count())
 
-            from tools.auto_loader import init_tool_auto_loader  # noqa: PLC0415
+            from tools.auto_loader import init_tool_auto_loader
 
             init_tool_auto_loader(tool_registry)
-            logger.debug("ToolAutoLoader 已初始化")
+            logger.info("ToolAutoLoader 已初始化")
         except Exception as exc:
             logger.warning("创建 tool_registry 服务失败: %s", exc)
-        logger.debug("[STARTUP] 1.ToolRegistry: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 1.ToolRegistry: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 1.5 MediaProviderRegistry ────────────────────
         try:
-            from tools.media.provider_registry import MediaProviderRegistry  # noqa: PLC0415
+            from tools.media.provider_registry import MediaProviderRegistry
 
             media_registry = MediaProviderRegistry()
             config_path = self.project_root / "config" / "models" / "media_providers.yaml"
-            logger.debug("[STARTUP] MediaProviderRegistry config_path=%s exists=%s", config_path, config_path.exists())
+            logger.info("[STARTUP] MediaProviderRegistry config_path=%s exists=%s", config_path, config_path.exists())
             if config_path.exists():
                 media_registry.load_config(config_path)
-                logger.debug("[STARTUP] MediaProviderRegistry config loaded, registering providers...")
+                logger.info("[STARTUP] MediaProviderRegistry config loaded, registering providers...")
                 self._register_media_providers(media_registry)
             services["media_provider_registry"] = media_registry
             logger.info(
@@ -99,10 +99,10 @@ class Application:
         # ── 2. JsonMemoryStore ───────────────────────────
         json_store: Any = None
         try:
-            from memory.storage.json_store import JsonMemoryStore  # noqa: PLC0415
+            from memory.storage.json_store import JsonMemoryStore
 
             json_store = JsonMemoryStore()
-            logger.debug("服务已: JsonMemoryStore")
+            logger.info("服务已创建: JsonMemoryStore")
         except Exception as exc:
             logger.warning("创建 JsonMemoryStore 失败: %s", exc)
 
@@ -116,8 +116,8 @@ class Application:
         # ── 3. PgVectorRetriever（可选）──────────────────
         vector_retriever: Any = None
         try:
-            from infrastructure.db import get_async_session, init_db  # noqa: PLC0415
-            from memory.storage.pgvector_retriever import PgVectorRetriever  # noqa: PLC0415
+            from infrastructure.db import get_async_session, init_db
+            from memory.storage.pgvector_retriever import PgVectorRetriever
 
             session = asyncio.get_event_loop().run_until_complete(get_async_session())
             if session is not None and json_store is not None:
@@ -129,10 +129,10 @@ class Application:
                     embedding_fn=embedding_fn,
                 )
                 asyncio.get_event_loop().run_until_complete(vector_retriever.ensure_tables())
-                logger.debug("服务已: PgVectorRetriever")
+                logger.info("服务已创建: PgVectorRetriever")
         except Exception as exc:
             logger.info("PgVectorRetriever 不可用，降级到 keyword 检索: %s", exc)
-        logger.debug("[STARTUP] 3.PgVector: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 3.PgVector: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         retrievers: dict[str, Any] = {}
@@ -144,16 +144,16 @@ class Application:
 
         if vector_retriever is not None:
             services["retriever"] = vector_retriever
-            logger.debug("服务已: retriever (vector)")
+            logger.info("服务已创建: retriever (vector)")
         elif memory_store is not None and hasattr(memory_store, "search"):
             services["retriever"] = memory_store
-            logger.debug("服务已: retriever (memory_store)")
+            logger.info("服务已创建: retriever (memory_store)")
 
         # ── 4. TagService + ChunkService ─────────────────
         tag_service: Any = None
         chunk_service: Any = None
         try:
-            from memory.tag_service import TagService  # noqa: PLC0415
+            from memory.tag_service import TagService
 
             tag_service = TagService(
                 content_store=json_store,
@@ -162,14 +162,14 @@ class Application:
                 data_dir=str(self.project_root / "data" / "memory"),
             )
             services["tag_service"] = tag_service
-            logger.debug("服务已: tag_service")
+            logger.info("服务已创建: tag_service")
         except Exception as exc:
             logger.warning("创建 tag_service 失败: %s", exc)
-        logger.debug("[STARTUP] 4.TagService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 4.TagService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         try:
-            from memory.chunk_service import ChunkService  # noqa: PLC0415
+            from memory.chunk_service import ChunkService
 
             chunk_service = ChunkService(
                 content_store=json_store,
@@ -178,16 +178,16 @@ class Application:
                 data_dir=str(self.project_root / "data" / "memory"),
             )
             services["chunk_service"] = chunk_service
-            logger.debug("服务已: chunk_service")
+            logger.info("服务已创建: chunk_service")
         except Exception as exc:
             logger.warning("创建 chunk_service 失败: %s", exc)
-        logger.debug("[STARTUP] 4.5.ChunkService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 4.5.ChunkService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 5. MemoryContextService ──────────────────────
         try:
-            from config.models import get_model_config_loader as _get_loader  # noqa: PLC0415
-            from memory.memory_context_service import MemoryContextService  # noqa: PLC0415
+            from config.models import get_model_config_loader as _get_loader
+            from memory.memory_context_service import MemoryContextService
 
             _loader = _get_loader()
             _llm_data = _loader._load_llm_data()
@@ -196,7 +196,7 @@ class Application:
             _llm_conf = _loader.get_llm_core_config(_model_id) if _model_id else {}
             _ctx_window = _llm_conf.get("context_window", 128000)
 
-            from config.defaults import COMPRESS_TRIGGER_RATIO  # noqa: PLC0415
+            from config.defaults import COMPRESS_TRIGGER_RATIO
             context_service = MemoryContextService(
                 config={
                     "context_window": _ctx_window,
@@ -204,27 +204,27 @@ class Application:
                 },
             )
             services["context_service"] = context_service
-            logger.debug("服务已: context_service (context_window=%d)", _ctx_window)
+            logger.info("服务已创建: context_service (context_window=%d)", _ctx_window)
         except Exception as exc:
             logger.warning("创建 context_service 失败: %s", exc)
-        logger.debug("[STARTUP] 5.ContextService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 5.ContextService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 6. TagNetworkRetriever ───────────────────────
         try:
-            from memory.tag_network import TagNetworkConfig, TagNetworkRetriever  # noqa: PLC0415
+            from memory.tag_network import TagNetworkConfig, TagNetworkRetriever
 
             tag_network_retriever = TagNetworkRetriever(config=TagNetworkConfig())
             services["tag_network_retriever"] = tag_network_retriever
-            logger.debug("服务已: tag_network_retriever")
+            logger.info("服务已创建: tag_network_retriever")
         except Exception as exc:
             logger.warning("创建 tag_network_retriever 失败: %s", exc)
-        logger.debug("[STARTUP] 6.TagNetwork: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 6.TagNetwork: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 7. MemoryService ─────────────────────────────
         try:
-            from memory.service import MemoryService  # noqa: PLC0415
+            from memory.service import MemoryService
 
             memory_service = MemoryService(
                 episode_storage=memory_store,
@@ -235,26 +235,26 @@ class Application:
                 tag_service=tag_service,
             )
             services["memory_service"] = memory_service
-            logger.debug("服务已: memory_service (retrievers=%s)", list(retrievers.keys()))
+            logger.info("服务已创建: memory_service (retrievers=%s)", list(retrievers.keys()))
         except Exception as exc:
             logger.warning("创建 memory_service 失败: %s", exc)
-        logger.debug("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
+        logger.info("[STARTUP] 7.MemoryService: %.2fs", _time.monotonic() - _t0)
         _t0 = _time.monotonic()
 
         # ── 8. ExecutionRecordStorage ────────────────────
         try:
-            from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: PLC0415
+            from infrastructure.execution_record_storage import ExecutionRecordStorage
 
             services["execution_record_storage"] = ExecutionRecordStorage(
                 data_dir=str(self.project_root / "data" / "pipelines")
             )
-            logger.debug("服务已: execution_record_storage")
+            logger.info("服务已创建: execution_record_storage")
         except Exception as exc:
             logger.warning("创建 execution_record_storage 服务失败: %s", exc)
 
         # ── 9. MemoryMaintenanceService ─────────────────
         try:
-            from memory.maintenance import MemoryMaintenanceService  # noqa: PLC0415
+            from memory.maintenance import MemoryMaintenanceService
 
             _maintenance_config = self._load_maintenance_config()
 
@@ -308,79 +308,66 @@ class Application:
             services["maintenance_service"] = _maintenance_service
             # 注册维护触发器
             _maintenance_service.register_triggers()
-            logger.debug("服务已: maintenance_service (enabled=%s)", _maintenance_config.get("enabled", False))
+            logger.info("服务已创建: maintenance_service (enabled=%s)", _maintenance_config.get("enabled", False))
         except Exception as exc:
             logger.warning("创建 maintenance_service 服务失败: %s", exc)
 
         # ── 10. EventBus ─────────────────────────────────
         # 使用 core event_bus 全局单例，确保 TaskWorker 和事件发射者使用同一实例
         try:
-            from src.core.event_bus import get_event_bus  # noqa: PLC0415
+            from src.core.event_bus import get_event_bus
 
             event_bus = get_event_bus()
             services["event_bus"] = event_bus
-            logger.debug("服务已: event_bus (core singleton)")
+            logger.info("服务已创建: event_bus (core singleton)")
         except Exception as exc:
             logger.warning("创建 event_bus 服务失败: %s", exc, exc_info=True)
 
         # ── 11. TaskService（通过 EventBus 自动广播状态变更）───
         try:
-            from tasks.service import TaskService  # noqa: PLC0415
+            from tasks.service import TaskService
 
             task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
-            logger.debug("服务已: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
-
-            # 注入 task_repository 到 IsolationManager，启用按 workspace 销毁容器
-            # 用同步版本：asyncio.get_event_loop().run_until_complete() 在 Python 3.12+
-            # 同步上下文里会抛 RuntimeError，导致注入失败、容器永不清理
-            try:
-                from isolation.manager import get_isolation_manager_sync  # noqa: PLC0415
-
-                _manager = get_isolation_manager_sync()
-                _manager.set_task_repository(task_service._storage)
-            except Exception as _exc:
-                logger.warning(
-                    "注入 task_repository 到 IsolationManager 失败: %s", _exc
-                )
+            logger.info("服务已创建: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
         except Exception as exc:
             logger.warning("创建 task_service 服务失败: %s", exc, exc_info=True)
 
         # ── 12. TimerManager ─────────────────────────────
         try:
-            from tasks.timer_manager import TimerManager  # noqa: PLC0415
+            from tasks.timer_manager import TimerManager
 
             timer_manager = TimerManager.get_instance()
             services["timer_manager"] = timer_manager
-            logger.debug("服务已: timer_manager")
+            logger.info("服务已创建: timer_manager")
         except Exception as exc:
             logger.warning("创建 timer_manager 失败: %s", exc)
 
         # ── 13. AgentRegistry ────────────────────────────
         if agent_registry is not None:
             services["agent_registry"] = agent_registry
-            logger.debug("服务已: agent_registry")
+            logger.info("服务已注入: agent_registry")
 
         # ── 14. PipelineCheckpointManager + PipelineRecovery ──
         try:
-            from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager  # noqa: PLC0415
-            from infrastructure.checkpoint.recovery import PipelineRecovery  # noqa: PLC0415
+            from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
+            from infrastructure.checkpoint.recovery import PipelineRecovery
 
             checkpoint_manager = PipelineCheckpointManager()
             recovery = PipelineRecovery(checkpoint_manager)
             services["checkpoint_manager"] = checkpoint_manager
             services["pipeline_recovery"] = recovery
-            logger.debug("服务已: checkpoint_manager, pipeline_recovery")
+            logger.info("服务已创建: checkpoint_manager, pipeline_recovery")
         except Exception as exc:
             logger.warning("创建 checkpoint 服务失败: %s", exc)
 
         # ── 15. SessionService ───────────────────────────
         try:
-            from infrastructure.session import SessionService  # noqa: PLC0415
+            from infrastructure.session import SessionService
 
             session_dir = self.project_root / "data" / "sessions"
             services["session_service"] = SessionService(session_dir=session_dir)
-            logger.debug("服务已: session_service")
+            logger.info("服务已创建: session_service")
         except Exception as exc:
             logger.warning("创建 session_service 失败: %s", exc)
 
@@ -389,20 +376,9 @@ class Application:
         if gateway is not None:
             gateway.services = services
             services["channel_gateway"] = gateway
-            logger.debug("服务已: channel_gateway")
+            logger.info("服务已创建: channel_gateway")
 
-        logger.debug("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
-
-        # ── 17. api_store（会话存储）─────────────────────
-        # 注入 channels.api.memory_store.store 单例到 services，
-        # 供 infrastructure 层通过 MemoryStoreProtocol 消费，
-        # 解耦 infrastructure 对 channels 的逆向依赖。
-        try:
-            from channels.api.memory_store import store as _api_store  # noqa: PLC0415
-            services["api_store"] = _api_store
-            logger.debug("服务已: api_store")
-        except Exception as exc:
-            logger.warning("注入 api_store 失败: %s", exc)
+        logger.info("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
 
         # ── 统一注册到 ServiceProvider ───────────────────
         self._register_to_service_provider(services)
@@ -414,7 +390,7 @@ class Application:
     def _register_to_service_provider(services: dict[str, Any]) -> None:
         """将服务字典注册到 ServiceProvider 单例。"""
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
 
             provider = get_service_provider()
             provider.register_services(services)
@@ -424,10 +400,10 @@ class Application:
     def create_gateway(self) -> Any | None:
         """创建 ChannelGateway 实例。"""
         try:
-            from channels.gateway.channel_gateway import ChannelGateway  # noqa: PLC0415
+            from channels.gateway.channel_gateway import ChannelGateway
 
             gateway = ChannelGateway()
-            logger.debug("ChannelGateway 通过 Application 创建完成")
+            logger.info("ChannelGateway 通过 Application 创建完成")
             return gateway
         except Exception as exc:
             logger.warning("创建 ChannelGateway 失败: %s", exc)
@@ -435,10 +411,10 @@ class Application:
 
     def _register_basic_tools(self, registry: Any) -> None:
         """注册基础工具（无需依赖注入）。"""
-        import datetime  # noqa: PLC0415
-        import math as _math  # noqa: PLC0415
+        import datetime
+        import math as _math
 
-        from tools.types import Tool, ToolSource  # noqa: PLC0415
+        from tools.types import Tool, ToolSource
 
         def current_time(params: dict[str, Any]) -> str:
             return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -507,9 +483,9 @@ class Application:
         Args:
             media_registry: MediaProviderRegistry 实例（已加载配置）
         """
-        from tools.media.base import MediaProviderConfig, MediaType  # noqa: PLC0415
+        from tools.media.base import MediaProviderConfig, MediaType
 
-        _PROVIDER_CLASS_MAP: dict[str, str] = {  # noqa: N806
+        _PROVIDER_CLASS_MAP: dict[str, str] = {
             "ComfyUIProvider": "tools.media.providers.comfyui_provider",
             "EdgeTTSProvider": "tools.media.providers.edge_tts_provider",
             "MiniMaxImageProvider": "tools.media.providers.minimax_provider",
@@ -518,7 +494,7 @@ class Application:
             "MiniMaxTTSProvider": "tools.media.providers.minimax_tts_provider",
         }
 
-        _MEDIA_TYPE_MAP: dict[str, MediaType] = {  # noqa: N806
+        _MEDIA_TYPE_MAP: dict[str, MediaType] = {
             "tts": MediaType.TTS,
             "image": MediaType.IMAGE,
             "video": MediaType.VIDEO,
@@ -537,7 +513,7 @@ class Application:
                     continue
 
                 try:
-                    import importlib  # noqa: PLC0415
+                    import importlib
 
                     module = importlib.import_module(module_path)
                     provider_cls = getattr(module, class_name)
@@ -572,7 +548,7 @@ class Application:
                     )
 
     @staticmethod
-    def _resolve_api_key(class_name: str, raw_config: dict[str, Any]) -> str:  # noqa: ARG004
+    def _resolve_api_key(class_name: str, raw_config: dict[str, Any]) -> str:
         """解析 Provider 所需的 API Key。
 
         依次尝试以下来源：
@@ -588,13 +564,13 @@ class Application:
         Returns:
             解析到的 API Key 字符串
         """
-        _LLM_PROVIDER_MAP: dict[str, str] = {  # noqa: N806
+        _LLM_PROVIDER_MAP: dict[str, str] = {
             "MiniMaxImageProvider": "minimax",
             "MiniMaxMusicProvider": "minimax",
             "MiniMaxVideoProvider": "minimax",
             "MiniMaxTTSProvider": "minimax",
         }
-        _ENV_KEY_MAP: dict[str, str] = {  # noqa: N806
+        _ENV_KEY_MAP: dict[str, str] = {
             "MiniMaxImageProvider": "MINIMAX_API_KEY",
             "MiniMaxMusicProvider": "MINIMAX_API_KEY",
             "MiniMaxVideoProvider": "MINIMAX_API_KEY",
@@ -604,7 +580,7 @@ class Application:
         llm_provider = _LLM_PROVIDER_MAP.get(class_name)
         if llm_provider:
             try:
-                from config.models import get_model_config_loader  # noqa: PLC0415
+                from config.models import get_model_config_loader
 
                 loader = get_model_config_loader()
                 provider_conf = loader.get_provider_config(llm_provider)
@@ -618,7 +594,7 @@ class Application:
 
         env_key = _ENV_KEY_MAP.get(class_name)
         if env_key:
-            import os  # noqa: PLC0415
+            import os
 
             return os.environ.get(env_key, "")
 
@@ -628,7 +604,7 @@ class Application:
     def _build_embedding_fn() -> Any:
         """构建嵌入函数（异步，文本→向量）。"""
         try:
-            from config.models import get_model_config_loader  # noqa: PLC0415
+            from config.models import get_model_config_loader
 
             loader = get_model_config_loader()
             embedding_cfg = loader._load_embedding_data()
@@ -640,7 +616,7 @@ class Application:
                 provider = emb_info.get("provider", "")
 
                 if provider in ("openai", "openai_compatible"):
-                    import os  # noqa: PLC0415
+                    import os
 
                     api_key = os.environ.get(emb_info.get("api_key_env", "OPENAI_API_KEY"), "")
                     base_url = emb_info.get("base_url")
@@ -648,7 +624,7 @@ class Application:
 
                     async def _openai_embed(text: str) -> list[float]:
                         try:
-                            import httpx  # noqa: PLC0415
+                            import httpx
 
                             url = f"{base_url}/embeddings" if base_url else _DEFAULT_OPENAI_EMBEDDINGS_URL
                             async with httpx.AsyncClient() as client:
@@ -682,7 +658,7 @@ class Application:
         services: dict[str, Any] | None = None,
     ) -> Any:
         """创建 PipelineEngine 实例。"""
-        from pipeline.engine import PipelineEngine  # noqa: PLC0415
+        from pipeline.engine import PipelineEngine
 
         svc = services or self.services
         checkpoint_mgr = svc.get("checkpoint_manager")
@@ -693,7 +669,7 @@ class Application:
             services=svc,
             checkpoint_manager=checkpoint_mgr,
         )
-        logger.debug("PipelineEngine 通过 Application 创建完成")
+        logger.info("PipelineEngine 通过 Application 创建完成")
         return engine
 
     def create_task_worker(
@@ -707,7 +683,7 @@ class Application:
         当 services 中缺少 event_bus 或 task_service 时，尝试懒创建并回填，
         避免因初始化顺序或依赖缺失导致 TaskWorker 无法启动。
         """
-        from infrastructure.task_worker import TaskWorker  # noqa: PLC0415
+        from infrastructure.task_worker import TaskWorker
 
         svc = services if services is not None else self.services
 
@@ -716,11 +692,11 @@ class Application:
             logger.warning("services 中缺少 event_bus，尝试懒创建")
             # 使用 core event_bus 全局单例
             try:
-                from src.core.event_bus import get_event_bus  # noqa: PLC0415
+                from src.core.event_bus import get_event_bus
 
                 event_bus = get_event_bus()
                 svc["event_bus"] = event_bus
-                logger.debug("event_bus 懒创建成功 (core singleton)")
+                logger.info("event_bus 懒创建成功 (core singleton)")
             except Exception as exc:
                 logger.error("event_bus 懒创建失败: %s", exc)
                 return None
@@ -729,10 +705,10 @@ class Application:
         if not task_service:
             logger.warning("services 中缺少 task_service，尝试懒创建")
             try:
-                from tasks.service import TaskService  # noqa: PLC0415
+                from tasks.service import TaskService
                 task_service = TaskService(event_bus=event_bus)
                 svc["task_service"] = task_service
-                logger.debug("task_service 懒创建成功")
+                logger.info("task_service 懒创建成功")
             except Exception as exc:
                 logger.error("task_service 懒创建失败: %s", exc)
                 return None
@@ -745,7 +721,7 @@ class Application:
             services=svc,
             event_bus=event_bus,
         )
-        logger.debug("TaskWorker 通过 Application 创建完成")
+        logger.info("TaskWorker 通过 Application 创建完成")
         return task_worker
 
     def create_pipeline_factory(
@@ -754,7 +730,7 @@ class Application:
         plugin_registry: Any,
     ) -> Callable[[], Any]:
         """创建 PipelineEngine 工厂函数。"""
-        from pipeline.engine import PipelineEngine  # noqa: PLC0415
+        from pipeline.engine import PipelineEngine
 
         def factory() -> Any:
             return PipelineEngine(
@@ -765,7 +741,7 @@ class Application:
             )
 
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
 
             provider = get_service_provider()
             provider.register_services({"pipeline_factory": factory})
@@ -788,7 +764,7 @@ class Application:
         if not config_path.exists():
             return {}
         try:
-            import yaml  # noqa: PLC0415
+            import yaml
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             return data.get("maintenance", {}) if isinstance(data, dict) else {}
         except Exception as exc:

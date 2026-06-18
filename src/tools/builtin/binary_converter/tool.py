@@ -73,7 +73,7 @@ def is_convertible_binary(path: Path) -> bool:
     return category in ("document", "image")
 
 
-def convert_binary_to_markdown(path: Path) -> ToolResult:  # noqa: PLR0911
+def convert_binary_to_markdown(path: Path) -> ToolResult:
     """将二进制文件转换为 Markdown 文本。
 
     使用 markitdown 库进行转换。如果 markitdown 未安装，
@@ -109,7 +109,7 @@ def convert_binary_to_markdown(path: Path) -> ToolResult:  # noqa: PLR0911
 
     # 检查 markitdown 是否可用
     try:
-        from markitdown import MarkItDown  # noqa: PLC0415
+        from markitdown import MarkItDown
     except ImportError:
         return create_failure_result(
             error=f"无法转换文件 {path.name}：需要安装 markitdown 库。\n"

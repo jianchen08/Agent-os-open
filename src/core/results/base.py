@@ -19,7 +19,6 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.states import ExecutionStatus
-from utils.enum_utils import safe_enum_value
 
 T = TypeVar("T")  # 输出数据类型
 
@@ -166,7 +165,7 @@ class ExecutionResult(BaseModel, Generic[T]):
 
     # === 序列化方法 ===
 
-    def to_dict(self, slim: bool = False) -> dict[str, Any]:  # noqa: PLR0912
+    def to_dict(self, slim: bool = False) -> dict[str, Any]:
         """转换为字典（统一序列化）
 
         Args:
@@ -187,18 +186,13 @@ class ExecutionResult(BaseModel, Generic[T]):
                 if self.output is not None:
                     result["output"] = self._serialize_output()
                 if self.metadata:
-                    # slim 模式排除大体积字段，避免 base64 污染 LLM 文本上下文
-                    _slim_exclude = {"action", "multimodal_content"}
-                    non_excluded = {
-                        k: v for k, v in self.metadata.items()
-                        if k not in _slim_exclude
-                    }
-                    if non_excluded:
-                        result["metadata"] = non_excluded
+                    non_action = {k: v for k, v in self.metadata.items() if k != "action"}
+                    if non_action:
+                        result["metadata"] = non_action
             return result
 
         # 处理 status：由于 use_enum_values=True，status 可能已经是字符串
-        status_value = safe_enum_value(self.status)
+        status_value = self.status.value if hasattr(self.status, 'value') else self.status
 
         result = {
             "status": status_value,

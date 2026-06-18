@@ -148,7 +148,7 @@ async def generate_task_id(
     Raises:
         IDGenerationError: 无法生成唯一ID时抛出
     """
-    from src.db.models import Task  # noqa: PLC0415
+    from src.db.models import Task
 
     if parent_task_id:
         result = await db.execute(

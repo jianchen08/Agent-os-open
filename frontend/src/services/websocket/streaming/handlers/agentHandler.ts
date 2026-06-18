@@ -54,18 +54,9 @@ export function handleSubAgentCreated(eventData: any) {
   const parentPipelineId = data.parentPipelineId
   let sessionId = ''
 
-  _debugLogger.info(
-    '[SUB_AGENT_CREATED] 开始查找 sessionId: pipelineId=%s parentPipelineId=%s activeSessionId=%s',
-    pipelineId, parentPipelineId, useSessionStore.getState().activeSessionId,
-  )
-
   // 优先级1: 通过 parentPipelineId 在 pipelineSessionMap 中查找父管道所属会话
   if (parentPipelineId && pStore.pipelineSessionMap[parentPipelineId]) {
     sessionId = pStore.pipelineSessionMap[parentPipelineId]
-    _debugLogger.info(
-      '[SUB_AGENT_CREATED] 优先级1 命中 pipelineSessionMap: sessionId=%s',
-      sessionId,
-    )
   }
 
   // 优先级2: 遍历所有 session.pipelineIds 查找父管道所属会话
@@ -74,30 +65,6 @@ export function handleSubAgentCreated(eventData: any) {
     const found = sessions.find(s => s.pipelineIds?.includes(parentPipelineId))
     if (found) {
       sessionId = found.id
-      _debugLogger.info(
-        '[SUB_AGENT_CREATED] 优先级2 命中 session.pipelineIds: sessionId=%s',
-        sessionId,
-      )
-    }
-  }
-
-  // BUG-FIX-fix_20260621_sub_agent_session_fallback:
-  // 问题根因: 原代码在找不到 sessionId 时跳过 registerPipeline，依赖 stream_start 兜底。
-  //          但如果 stream_start 丢失或解析失败，pipelineSessionMap 永远不会被注册，
-  //          导致 findPipelineLocation 三级查找都失败，用户点击子管道时报错"找不到管道归属"。
-  // 修复方案: 子管道和父管道一定属于同一个 session，找不到 sessionId 时使用 parentPipelineId
-  //          的 sessionId 作为 fallback。如果 parentPipelineId 也找不到，使用 activeSessionId。
-  // 影响范围: 子管道创建时 pipelineSessionMap 的注册
-  // 修复日期: 2026-06-21
-  if (!sessionId && parentPipelineId) {
-    // 优先级3: parentPipelineId 存在但 pipelineSessionMap 和 session.pipelineIds 都没找到，
-    // 使用 activeSessionId 作为 fallback（子管道通常属于当前活跃会话）
-    sessionId = useSessionStore.getState().activeSessionId || ''
-    if (sessionId) {
-      _debugLogger.info(
-        '[SUB_AGENT_CREATED] 使用 activeSessionId 作为 fallback: pipelineId=%s sessionId=%s',
-        pipelineId, sessionId,
-      )
     }
   }
 

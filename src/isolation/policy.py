@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml  # noqa: F401
+import yaml
 
 from isolation.types import IsolationLevel
 
@@ -35,6 +35,7 @@ class ToolIsolationPolicy:
     network: str | None = None
     checkpoint: bool = False
     approval: bool = False
+    fallback: str = "deny"
     disk_quota: str | None = None
 
 
@@ -66,7 +67,7 @@ class IsolationPolicyLoader:
         """从 config_center 加载策略配置。"""
         path = self._config_path
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             rel = str(path).replace("\\", "/")
             if "config/" in rel:
                 rel = rel[rel.index("config/") + len("config/"):]
@@ -93,27 +94,20 @@ class IsolationPolicyLoader:
     def _register_watcher(self) -> None:
         """注册 config_center watcher，配置变更时自动 reload。"""
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             get_config_center().watch("isolation/", self._on_config_changed)
             logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")
         except Exception as e:
             logger.warning(f"[IsolationPolicyLoader] 注册 watcher 失败: {e}")
 
-    def _on_config_changed(
-        self, event_type: str, file_path: str, context: dict | None = None,
-    ) -> None:
+    def _on_config_changed(self, changed_path: str) -> None:
         """config_center 回调：检测到 isolation_policy.yaml 变更时自动 reload。
 
         Args:
-            event_type: 事件类型（created/modified/deleted）
-            file_path: 变更的配置文件路径
-            context: 变更上下文（可选）
+            changed_path: 变更的配置文件相对路径
         """
-        if "isolation_policy" in file_path:
-            logger.info(
-                "[IsolationPolicyLoader] 检测到策略配置变更(%s)，自动 reload: %s",
-                event_type, file_path,
-            )
+        if "isolation_policy" in changed_path:
+            logger.info("[IsolationPolicyLoader] 检测到策略配置变更，自动 reload")
             self._load_config()
 
     def resolve(self, tool_name: str, category: str | None = None) -> ToolIsolationPolicy:
@@ -151,6 +145,7 @@ class IsolationPolicyLoader:
             network=data.get("network"),
             checkpoint=data.get("checkpoint", False),
             approval=data.get("approval", False),
+            fallback=data.get("fallback", "deny"),
             disk_quota=data.get("disk_quota"),
         )
 

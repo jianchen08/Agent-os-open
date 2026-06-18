@@ -14,7 +14,7 @@ import { loggers } from '@/utils/logger'
 
 import { resolvePipelineId } from '../router'
 
-import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
+import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, terminatePipeline } from './utils'
 
 const _debugLogger = loggers.websocket
 
@@ -205,41 +205,22 @@ export function handleStreamEnd(eventData: any) {
       const msg = msgs.find((m: any) => m.id === messageId)
 
       if (msg) {
-        // 同步后端权威 sequence（final_sequence）
-        //
-        // stream_start 不携带 sequence，占位消息的 sequence 是前端自算的 localMax+1，
-        // 与后端真实序号不一致。stream_end 携带 final_sequence，必须在此同步到占位消息，
-        // 否则后续 initFromAPI（刷新/切Tab/补漏）按 role::seq 指纹去重时会失败，
-        // 把同一逻辑消息识别为两条 → 末尾气泡重复渲染。
-        //
-        // 与 handleNewMessage 的 sequence 同步路径对齐，消除两条终止路径的不对称。
-        const finalSeq = eventData?.data?.final_sequence ?? eventData?.final_sequence
-        if (finalSeq != null && finalSeq !== msg.sequence) {
-          pipelineStore.getState().updateMessage(pipelineId, messageId, {
-            sequence: finalSeq,
-          } as any)
-        }
-
         // 后端发送了完整 parts[] → 合并而非覆盖
         // BUG-FIX-fix_20260617_stream_end_overwrite:
         // 问题根因: stream_end 的 serverParts 只包含最后一轮 iteration 的内容（后端 state
         //   每轮覆盖）。用 serverParts 完整替换会丢失流式过程中增量构建的前几轮内容。
-        // BUG-FIX-fix_20260624_stream_overwrite_regression:
-        // 问题根因: 上一版用「parts 数组长度」判断保留谁（localParts.length >
-        //   serverParts.length），长度不能反映内容完整性——serverParts 数量 ≥ 本地时
-        //   会用末轮残缺内容覆盖本地完整的多轮流式累积。改为「本地有实质内容就优先
-        //   保留本地」，serverParts 仅作兜底。详见 mergeStreamingParts。
+        // 修复方案: 本地 parts 数量更多时保留本地（流式增量），否则用 server（权威）。
         const serverParts = eventData?.data?.parts
         const localParts = msg.parts || []
         if (serverParts && Array.isArray(serverParts) && serverParts.length > 0) {
           const fullContent = eventData?.data?.full_content
-          const { parts: finalParts, content } = mergeStreamingParts(
-            localParts, serverParts, fullContent, msg.content,
-          )
+          const finalParts = localParts.length > serverParts.length ? localParts : serverParts
           const updatePayload: any = {
             parts: finalParts,
-            content,
             status: 'completed',
+          }
+          if (fullContent != null && fullContent !== '' && fullContent.length > (msg.content || '').length) {
+            updatePayload.content = fullContent
           }
           pipelineStore.getState().updateMessage(pipelineId, messageId, updatePayload)
         } else {

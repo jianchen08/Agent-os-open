@@ -17,14 +17,13 @@ State 命名空间：
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import re
 import urllib.parse
 from typing import Any
 
-from human_interaction.models import Priority, ResponseType  # noqa: F401
+from human_interaction.models import Priority, ResponseType
 from human_interaction.service import (
     InteractionCancelledError,
     InteractionDeniedError,
@@ -38,8 +37,8 @@ from pipeline.types import ErrorPolicy, StateKeys
 logger = logging.getLogger(__name__)
 
 # 项目根目录：src/plugins/input/ → 向上 4 级到项目根
-_PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100,PTH120
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
 # 隔离策略加载器（模块级单例，构造时即从 isolation_policy.yaml 缓存）。
@@ -114,7 +113,7 @@ class SecurityCheckPlugin(IInputPlugin):
         rules_path = self._config.get("rules_path", "config/isolation/security_rules.yaml")
         rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             data = get_config_center().get(rel)
             if data and "rules" in data:
                 return data["rules"]
@@ -156,7 +155,7 @@ class SecurityCheckPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行安全检查逻辑。
 
         Host 模式统一规则：不限制工作目录边界（不管路径），只保留三道底线：
@@ -254,7 +253,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 continue
 
             # 未命中白名单 → 一律弹审批
-            reason = "参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
+            reason = f"参数未命中安全白名单" + (f"（匹配规则: {rule_name}）" if rule_name else "")
             logger.warning(
                 "[%s] 危险工具参数未命中白名单，弹审批 | tool=%s | rule=%s",
                 self.name, tool_name, rule_name or "none",
@@ -291,7 +290,7 @@ class SecurityCheckPlugin(IInputPlugin):
         try:
             interaction_svc = ctx.get_service("human_interaction_service")
         except KeyError:
-            from human_interaction import get_human_interaction_service  # noqa: PLC0415
+            from human_interaction import get_human_interaction_service
             interaction_svc = get_human_interaction_service()
 
         # 提取工具调用的具体参数，显示给用户审批
@@ -416,7 +415,7 @@ class SecurityCheckPlugin(IInputPlugin):
         }
 
     @staticmethod
-    def _format_args_for_approval(tool_calls: list[dict[str, Any]], triggered_tool: str) -> str:  # noqa: ARG004,PLR0912
+    def _format_args_for_approval(tool_calls: list[dict[str, Any]], triggered_tool: str) -> str:
         """格式化工具调用参数，生成审批描述（含具体命令/路径/内容）。
 
         Args:
@@ -434,7 +433,7 @@ class SecurityCheckPlugin(IInputPlugin):
 
             # args 可能是 JSON 字符串
             if isinstance(args, str):
-                import json  # noqa: PLC0415
+                import json
                 try:
                     args = json.loads(args)
                 except (json.JSONDecodeError, TypeError):
@@ -551,7 +550,7 @@ class SecurityCheckPlugin(IInputPlugin):
         检测 ../ 等路径遍历模式，防止通过相对路径绕过工作目录限制。
         使用 Path.resolve() 解析绝对路径，同时检测 URL 编码绕过和符号链接。
         """
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
 
         for key in self._path_params:
             if key not in args:
@@ -611,15 +610,19 @@ class SecurityCheckPlugin(IInputPlugin):
         if not effective_workspace:
             return ""
 
+        # BUG-FIX-fix_20260506_bash_security: 支持多基路径边界检查
+        # 问题根因: working_dir 参数未被检查；Skill 脚本路径在 workspace 外被阻止
+        # 修复方案: 新增 working_dir 参数检查；支持 allowed_base_paths 多基路径
+        # 影响范围: bash_execute 的 working_dir 参数、Skill 脚本执行路径
         allowed_bases = [os.path.realpath(effective_workspace)]
         for extra in self._allowed_base_paths:
-            abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)  # noqa: PTH117
+            abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)
             allowed_bases.append(os.path.realpath(abs_extra))
 
         for key in self._path_params:
             if key in args:
                 path = str(args[key])
-                if os.path.isabs(path):  # noqa: PTH117
+                if os.path.isabs(path):
                     real_path = os.path.normcase(os.path.realpath(path))
                     if not any(
                         real_path == os.path.normcase(base) or real_path.startswith(os.path.normcase(base) + os.sep)
@@ -678,7 +681,10 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # 轨道 2：声明了 dangerous_operations 的工具
         dangerous_ops = self._get_dangerous_operations(ctx, tool_name)
-        return bool(dangerous_ops)
+        if dangerous_ops:
+            return True
+
+        return False
 
     @staticmethod
     def _get_dangerous_operations(
@@ -697,12 +703,14 @@ class SecurityCheckPlugin(IInputPlugin):
             工具声明的 dangerous_operations 列表，无声明或不可用时为空列表
         """
         registry = None
-        with contextlib.suppress(KeyError):
+        try:
             registry = ctx.get_service("tool_registry")
+        except KeyError:
+            pass
 
         if registry is None:
             try:
-                from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+                from tools.global_registry import get_global_tool_registry_sync
                 registry = get_global_tool_registry_sync()
             except Exception:
                 return []

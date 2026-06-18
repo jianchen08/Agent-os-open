@@ -19,7 +19,7 @@ from src.db.models import AgentConfig
 
 def _get_default_chat_model() -> str:
     """获取默认对话模型别名（从 llm.yaml 读取）。"""
-    from src.config.llm_config import get_llm_config  # noqa: PLC0415
+    from src.config.llm_config import get_llm_config
     return get_llm_config().get_default_alias("chat")
 
 
@@ -188,7 +188,7 @@ class AgentService:
         config = config or {}
 
         # 生成 config_id
-        import uuid  # noqa: PLC0415
+        import uuid
 
         config_id = f"agent-{uuid.uuid4().hex[:8]}"
 
@@ -214,7 +214,7 @@ class AgentService:
 
         return self._agent_to_response_dict(agent)
 
-    async def update_agent(  # noqa: PLR0912
+    async def update_agent(
         self,
         agent_id: str,
         name: str | None = None,

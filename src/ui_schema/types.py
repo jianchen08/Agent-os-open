@@ -278,12 +278,8 @@ class ClientCapabilities(BaseModel):
         fallback: 降级方案。
     """
 
-    required_spaces: list[RenderingSpaceType] = Field(
-        default_factory=list, alias="requiredSpaces"
-    )
-    required_widgets: list[str] = Field(
-        default_factory=list, alias="requiredWidgets"
-    )
+    required_spaces: list[RenderingSpaceType] = Field(default_factory=list)
+    required_widgets: list[str] = Field(default_factory=list)
     min_client_version: str | None = Field(
         default=None, alias="minClientVersion"
     )

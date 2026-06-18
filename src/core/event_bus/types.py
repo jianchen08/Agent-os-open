@@ -144,7 +144,7 @@ class ExecutionEvent(BaseModel):
 
     def to_stream_data(self) -> dict[str, str]:
         """转换为 Redis Stream 数据格式（所有值必须是字符串）"""
-        import json  # noqa: PLC0415
+        import json
 
         return {
             "event_id": self.event_id,
@@ -160,7 +160,7 @@ class ExecutionEvent(BaseModel):
     @classmethod
     def from_stream_data(cls, data: dict[str, str]) -> "ExecutionEvent":
         """从 Redis Stream 数据格式反序列化"""
-        import json  # noqa: PLC0415
+        import json
 
         return cls(
             event_id=data.get("event_id", uuid.uuid4().hex[:12]),
@@ -184,7 +184,7 @@ class EventFilter:
     sources: list[str] | None = None
     custom_event_types: list[str] | None = None
 
-    def matches(self, event: ExecutionEvent) -> bool:  # noqa: PLR0911
+    def matches(self, event: ExecutionEvent) -> bool:
         """检查事件是否匹配过滤器"""
         if self.event_types and event.event_type not in self.event_types:
             _logger.debug(

@@ -299,7 +299,7 @@ class PluginHotReloader:
 
         # 优先：订阅 ConfigCenter（生产环境主路径）
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             center = get_config_center()
             if center.is_running:
                 self.integrate_with_config_center(center)
@@ -443,7 +443,7 @@ class PluginHotReloader:
         """
         # Lazily create a single-thread executor on first use
         if self._reload_executor is None:
-            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+            from concurrent.futures import ThreadPoolExecutor
             self._reload_executor = ThreadPoolExecutor(max_workers=1)
 
         self._reload_executor.submit(self._do_reload_safe, event_type, file_path)
@@ -463,7 +463,7 @@ class PluginHotReloader:
                 event_type, file_path,
             )
 
-    def _do_reload(self, event_type: str, file_path: str) -> ReloadEvent:  # noqa: PLR0911
+    def _do_reload(self, event_type: str, file_path: str) -> ReloadEvent:
         """Execute a single reload operation.
 
         For 'deleted': unregister the plugin.
@@ -780,7 +780,7 @@ class PluginHotReloader:
         if config_type == "agent":
             if self._agent_registry is None:
                 raise ValueError("AgentRegistry not configured")
-            from agents.loader import AgentConfigLoader  # noqa: PLC0415
+            from agents.loader import AgentConfigLoader
 
             # Prefer loading from disk if the file exists
             load_path = file_path
@@ -798,7 +798,8 @@ class PluginHotReloader:
             logger.debug("Tool config reload recorded (definition update)")
 
         elif config_type == "model":
-            from config.models import invalidate_all_llm_caches  # noqa: PLC0415
+            # BUG-FIX: 模型配置变更时清除所有 LLM 缓存，使配置实时生效
+            from config.models import invalidate_all_llm_caches
             invalidate_all_llm_caches()
             logger.info("Model config hot-reloaded: %s", file_path)
 
@@ -821,7 +822,8 @@ class PluginHotReloader:
             logger.debug("Tool config unload recorded: %s", record.config_path)
 
         elif record.config_type == "model":
-            from config.models import invalidate_all_llm_caches  # noqa: PLC0415
+            # BUG-FIX: 模型配置删除时同样清除所有 LLM 缓存
+            from config.models import invalidate_all_llm_caches
             invalidate_all_llm_caches()
             logger.info("Model config cache invalidated on delete: %s", record.config_path)
 
@@ -857,7 +859,7 @@ class PluginHotReloader:
     # -- Helpers -----------------------------------------------------------
 
     @staticmethod
-    def _determine_config_type(file_path: str) -> str:  # noqa: PLR0911
+    def _determine_config_type(file_path: str) -> str:
         """Determine config type from file path.
 
         Same logic as ConfigReloader._determine_config_type but also
@@ -986,9 +988,9 @@ def _write_temp_yaml(data: dict[str, Any]) -> Path:
     Returns:
         Path to the temporary file.
     """
-    import tempfile  # noqa: PLC0415
+    import tempfile
 
-    global _temp_counter  # noqa: PLW0603
+    global _temp_counter
     _temp_counter += 1
 
     tmp_dir = Path(tempfile.gettempdir()) / "agent_os_hot_reload"

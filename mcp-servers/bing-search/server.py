@@ -200,24 +200,8 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         return _error(req_id, -32603, f"搜索失败: {e}")
 
 
-def _ensure_utf8_stdio() -> None:
-    """强制 stdin/stdout/stderr 使用 UTF-8。
-
-    Windows 中文系统默认 stdout 编码为 cp936(GBK)，父进程（MCPClient）按 UTF-8
-    解码会因双字节汉字（如 0xCA continuation byte）抛 UnicodeDecodeError。
-    在 stdio JSON-RPC 协议下，统一 UTF-8 是必须的。reconfigure() 仅 Python 3.7+。
-    """
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            try:
-                stream.reconfigure(encoding="utf-8", errors="replace")
-            except (ValueError, OSError):
-                pass
-
-
 def main() -> None:
     """stdio 主循环。"""
-    _ensure_utf8_stdio()
     for line in sys.stdin:
         line = line.strip()
         if not line:

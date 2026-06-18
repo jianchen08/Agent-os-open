@@ -25,10 +25,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml  # noqa: F401
+import yaml
 
 if TYPE_CHECKING:
     from tasks.service import TaskService
@@ -181,7 +181,7 @@ class TimerManager:
         不再依赖 config.system_config 模块。
         """
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             config = get_config_center().get("system/long_term_task.yaml")
             if config and isinstance(config, dict):
                 self._config = self._merge_config(self.DEFAULT_CONFIG, config)
@@ -323,7 +323,7 @@ class TimerManager:
         )
 
         self._timers[task_id] = timer
-        logger.debug("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
+        logger.info("创建计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return timer
 
@@ -370,7 +370,7 @@ class TimerManager:
         )
 
         self._timers[task_id] = new_timer
-        logger.debug("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
+        logger.info("重置计时器: task_id=%s, timeout=%ss", task_id, timeout)
 
         return new_timer
 
@@ -395,7 +395,7 @@ class TimerManager:
 
         timer.status = TimerStatus.CANCELLED
         del self._timers[task_id]
-        logger.debug("取消计时器: task_id=%s", task_id)
+        logger.info("取消计时器: task_id=%s", task_id)
 
         return True
 
@@ -443,7 +443,7 @@ class TimerManager:
         """获取计时器总数"""
         return len(self._timers)
 
-    async def restore_from_storage(  # noqa: PLR0912
+    async def restore_from_storage(
         self,
         task_service: TaskService,
         callback: Callable[[str], None] | None = None,

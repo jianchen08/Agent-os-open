@@ -65,7 +65,7 @@ class IDEGetSelectionTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行获取选区操作。"""
-        from connectors.degradation import DegradationManager  # noqa: PLC0415
+        from connectors.degradation import DegradationManager
 
         # 尝试通过连接器获取上下文
         connector = self._get_active_connector()

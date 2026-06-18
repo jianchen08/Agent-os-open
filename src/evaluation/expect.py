@@ -82,7 +82,7 @@ class ExpectEvaluator:
                 failed_conditions.append(f"{cond.field}: {e}")
 
         # 组合逻辑
-        if expect.logic == "or":  # noqa: SIM108
+        if expect.logic == "or":
             overall = any(condition_results)
         else:  # and
             overall = all(condition_results)
@@ -119,7 +119,7 @@ class ExpectEvaluator:
                 return None
         return current
 
-    def _check_condition(self, actual: Any, cond: ExpectCondition) -> bool:  # noqa: PLR0911
+    def _check_condition(self, actual: Any, cond: ExpectCondition) -> bool:
         """检查单个条件是否满足。
 
         Args:

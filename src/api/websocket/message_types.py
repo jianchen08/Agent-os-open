@@ -100,3 +100,35 @@ def create_interaction_cancelled_message(
         message["data"]["reason"] = reason
 
     return message
+
+
+def create_task_status_changed_message(
+    *,
+    task_id: str,
+    status: str,
+    previous_status: str,
+    title: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    """创建任务状态变更消息。
+
+    Args:
+        task_id: 任务 ID
+        status: 新状态
+        previous_status: 原状态
+        title: 任务标题
+        updated_at: 更新时间（ISO8601）
+
+    Returns:
+        标准化的任务状态变更消息字典
+    """
+    return {
+        "type": "task_status_changed",
+        "data": {
+            "task_id": task_id,
+            "status": status,
+            "previous_status": previous_status,
+            "title": title,
+            "updated_at": updated_at,
+        },
+    }

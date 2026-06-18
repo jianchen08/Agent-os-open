@@ -125,17 +125,14 @@ export function enhanceActivityWithToolConfig(
     enhanced.customColor = config.runningColor
   }
 
-  // 自动提取文件路径并注入打开文件回调
+  // 自动提取文件路径并注入打开文件回调（携带 containerTaskId）
   if (config.hasFilePath) {
     const filePath = extractFilePath(toolCall)
     if (filePath) {
       enhanced.filePath = filePath
-      // onOpenFile 回调签名第二参为 record 上的 containerTaskId；
-      // 调用方可通过 options.onOpenFile 接管并改用当前 Tab 的 taskId（优先于 record 值），
-      // 修复 pipe 继承/根任务 pipeline 中 containerTaskId 不可靠导致文件打不开的问题。
       const openFileCallback = options?.onOpenFile || getGlobalOpenFileCallback()
-      const recordTaskId = toolCall.containerTaskId
-      enhanced.onOpenFile = () => openFileCallback(filePath, recordTaskId)
+      const taskId = toolCall.containerTaskId
+      enhanced.onOpenFile = () => openFileCallback(filePath, taskId)
     }
   }
 

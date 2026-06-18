@@ -195,7 +195,7 @@ class CLIInputAdapter(IInputAdapter):
         """返回当前提示符文本（含前导换行）。"""
         return f"\n{self._prompt_str}"
 
-    async def receive(self) -> dict[str, Any]:  # noqa: PLR0911
+    async def receive(self) -> dict[str, Any]:
         """从 stdin 读取用户输入，返回初始 state。
 
         支持：
@@ -239,7 +239,7 @@ class CLIInputAdapter(IInputAdapter):
                 "iteration": 1,
             }
         except Exception as _read_exc:
-            import logging as _logging  # noqa: PLC0415
+            import logging as _logging
             _logging.getLogger(__name__).warning(
                 "[InputAdapter] receive() unexpected error: %s",
                 _read_exc, exc_info=True,
@@ -288,7 +288,7 @@ class CLIInputAdapter(IInputAdapter):
             }
 
         # 普通输入 -- 解析行内快捷语法
-        from channels.cli.cli_commands import parse_inline_shortcuts  # noqa: PLC0415
+        from channels.cli.cli_commands import parse_inline_shortcuts
         processed_text, inline_extras = parse_inline_shortcuts(stripped)
 
         state: dict[str, Any] = {

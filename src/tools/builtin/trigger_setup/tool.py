@@ -203,7 +203,7 @@ class TriggerSetupTool(BuiltinTool):
             ],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行触发器设置或取消"""
         action = inputs.get("action", "setup")
         pipeline_id = inputs.get("pipeline_id")

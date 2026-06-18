@@ -120,7 +120,7 @@ class CodeValidator:
     def __init__(self, config: SandboxConfig):
         self.config = config
 
-    def validate(self, code: str) -> tuple[bool, list[str]]:  # noqa: PLR0912
+    def validate(self, code: str) -> tuple[bool, list[str]]:
         """
         验证代码安全性
 
@@ -157,7 +157,7 @@ class CodeValidator:
                 if isinstance(node.func, ast.Name):
                     if node.func.id in self.config.blocked_builtins:
                         issues.append(f"禁止使用函数: {node.func.id}")
-                elif isinstance(node.func, ast.Attribute):  # noqa: SIM102
+                elif isinstance(node.func, ast.Attribute):
                     # 检查 os.system 等
                     if isinstance(node.func.value, ast.Name):
                         module = node.func.value.id
@@ -312,7 +312,7 @@ class CodeSandbox:
 
     def _prepare_globals(self, context: dict[str, Any] | None = None) -> dict[str, Any]:
         """准备全局变量"""
-        import builtins  # noqa: PLC0415
+        import builtins
 
         # 创建受限的 __import__ 函数
         allowed_modules = set(self._config.allowed_modules)

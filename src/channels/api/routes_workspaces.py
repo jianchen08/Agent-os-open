@@ -31,8 +31,8 @@ def _get_connector_registry() -> Any:
     Returns:
         ConnectorRegistry 实例
     """
-    from connectors.registry import ConnectorRegistry  # noqa: PLC0415
-    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+    from connectors.registry import ConnectorRegistry
+    from infrastructure.service_provider import get_service_provider
 
     provider = get_service_provider()
     return provider.get_or_create(
@@ -79,7 +79,7 @@ async def open_file_in_ide(
             "file_path": file_path,
         }
 
-    from connectors.types import ConnectorAction  # noqa: PLC0415
+    from connectors.types import ConnectorAction
 
     params: dict[str, Any] = {"file_path": file_path}
     if line is not None:
@@ -171,6 +171,11 @@ async def get_file_content(
     raw_path = Path(path)
     project_root = _get_project_root()
 
+    # BUG-FIX-fix_20260603_file_card_open_fail:
+    # 问题根因: 工具卡片点击时，file_read 的参数可能是其他项目/容器的绝对路径
+    #           （如 D:\myproject\a7bb41e6210f\xxx.md），不在当前项目根范围内，
+    #           安全检查会拒绝。但用户只是想查看工具调用时读取的文件内容。
+    # 修复方案: 绝对路径直接使用，仅对相对路径做安全检查（防路径穿越）。
     if raw_path.is_absolute():
         full_path = raw_path.resolve()
     elif workspace_path_str:
@@ -197,7 +202,7 @@ async def get_file_content(
             "message": f"文件不存在或不是普通文件: {path}",
         }
 
-    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
+    MAX_SIZE = 10 * 1024 * 1024
     file_size = full_path.stat().st_size
     if file_size > MAX_SIZE:
         return {
@@ -241,7 +246,7 @@ async def save_file_content(
     if not str(full_path).startswith(str(workspace_path)):
         return {"success": False, "message": "路径超出工作空间范围"}
 
-    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
+    MAX_SIZE = 10 * 1024 * 1024
     if len(content.encode("utf-8")) > MAX_SIZE:
         return {"success": False, "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024*1024)}MB 限制"}
 
@@ -273,7 +278,7 @@ def _validate_path_in_workspace(workspace_path: Path, rel_path: str) -> Path | N
 
 
 @workspaces_router.post("/{container_task_id}/create-entry", summary="创建文件或文件夹")
-async def create_entry(  # noqa: PLR0911
+async def create_entry(
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -323,7 +328,7 @@ async def create_entry(  # noqa: PLR0911
 
 
 @workspaces_router.delete("/{container_task_id}/entries", summary="删除文件或文件夹")
-async def delete_entry(  # noqa: PLR0911
+async def delete_entry(
     container_task_id: str,
     path: str = Query(..., description="要删除的文件或文件夹相对路径"),
     _user: dict = Depends(require_auth),
@@ -359,7 +364,7 @@ async def delete_entry(  # noqa: PLR0911
 
     try:
         if full_path.is_dir():
-            import shutil  # noqa: PLC0415
+            import shutil
             shutil.rmtree(full_path)
         else:
             full_path.unlink()
@@ -371,7 +376,7 @@ async def delete_entry(  # noqa: PLR0911
 
 
 @workspaces_router.post("/{container_task_id}/rename-entry", summary="重命名文件或文件夹")
-async def rename_entry(  # noqa: PLR0911
+async def rename_entry(
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -436,7 +441,7 @@ async def rename_entry(  # noqa: PLR0911
 
 
 @workspaces_router.post("/{container_task_id}/move-entry", summary="移动文件或文件夹")
-async def move_entry(  # noqa: PLR0911
+async def move_entry(
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -493,7 +498,7 @@ async def move_entry(  # noqa: PLR0911
     new_rel_path = str(Path(destination_dir) / full_source.name)
 
     try:
-        import shutil  # noqa: PLC0415
+        import shutil
         shutil.move(str(full_source), str(dest_full_path))
         return {
             "success": True,
@@ -559,7 +564,7 @@ async def open_workspace_in_ide(
         }
 
     # 3. 通过连接器发送 open_folder 操作
-    from connectors.types import ConnectorAction  # noqa: PLC0415
+    from connectors.types import ConnectorAction
 
     action = ConnectorAction(
         action_type="open_folder",
@@ -627,7 +632,7 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
         return str(_get_project_root())
 
     try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
 
         provider = get_service_provider()
         task_service = provider.get_or_create(

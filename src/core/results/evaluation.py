@@ -20,7 +20,7 @@
 - EvaluationExecutionResult：EvaluationExecutionResult类
 """
 
-from datetime import datetime  # noqa: F401
+from datetime import datetime
 from enum import Enum
 from typing import Any
 

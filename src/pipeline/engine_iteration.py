@@ -67,12 +67,12 @@ async def run_iteration(
         IterationAction.CONTINUE 继续循环；IterationAction.BREAK 中断循环。
     """
 
-    # 1. 消费待处理通知（tool_execute 时由统一函数内部跳过；前置追加到现有 user_input）
-    consume_pending_notifications(engine, state, prepend=True)
+    # 1. 消费待处理通知（tool_execute 迭代中跳过，避免破坏工具调用配对）
+    _consume_notifications(engine, state, iteration)
 
     # 2. 解析插件列表 + 执行 Input 链
     plugin_names = engine.input_route_table.resolve_plugins(state)
-    logger.debug("Input route resolved plugins: %s", plugin_names)
+    logger.info("Input route resolved plugins: %s", plugin_names)
     await execute_input_chain(engine, state, plugin_names)
 
     # Input 插件可能设 ENDED 提前终止
@@ -93,6 +93,55 @@ async def run_iteration(
     return await _execute_core_and_route(engine, state, core_type, iteration)
 
 
+def _consume_notifications(
+    engine: PipelineEngine,
+    state: dict[str, Any],
+    iteration: int,
+) -> None:
+    """消费待处理通知并注入 state。
+
+    tool_execute 迭代中跳过消费，避免在 assistant(tool_calls) 与 tool(result)
+    之间插入 user 消息，破坏配对（会触发 Minimax API 2013 错误）。
+
+    非空通知注入后，core_type 强制为 llm_call。
+    """
+    _core_type = state.get(StateKeys.CORE_TYPE, state.get("core_type"))
+    if _core_type == "tool_execute":
+        return
+
+    _iter_notifs = engine.drain_inject_queue()
+    if not _iter_notifs:
+        return
+
+    # 过滤空白通知，避免空消息进入对话历史
+    _filtered = [n for n in _iter_notifs if n and n.strip()]
+    if not _filtered:
+        return
+
+    _combined = "\n\n".join(_filtered)
+    _existing_input = state.get("user_input", "")
+    if _existing_input:
+        state["user_input"] = f"{_combined}\n\n{_existing_input}"
+    else:
+        state["user_input"] = _combined
+    state.setdefault("messages", []).append(
+        {"role": "user", "content": _combined}
+    )
+    state[StateKeys.CORE_TYPE] = "llm_call"
+    state.pop("raw_result", None)
+    state.pop("error_analysis", None)
+    # 同步前端乐观消息 ID 到 state，供 track 插件持久化时写入 user_record
+    _pending_cmids = getattr(engine, "_pending_client_message_id", "")
+    if _pending_cmids:
+        state["client_message_id"] = _pending_cmids
+        engine._pending_client_message_id = ""
+    logger.info(
+        "[Engine] 迭代 %d 开始时消费 %d 条待处理通知，注入 state: %s",
+        iteration, len(_iter_notifs),
+        _combined[:80] if _combined else "(empty)",
+    )
+
+
 async def _dispatch_input_target(
     engine: PipelineEngine,
     state: dict[str, Any],
@@ -108,7 +157,7 @@ async def _dispatch_input_target(
         IterationAction.CONTINUE 继续迭代；IterationAction.BREAK 结束循环。
     """
     target, matched_entry = engine.input_route_table.resolve_target(state)
-    logger.debug(
+    logger.info(
         "Input route resolved target: %s (entry=%s)",
         target, matched_entry.name if matched_entry else "none",
     )
@@ -122,70 +171,6 @@ async def _dispatch_input_target(
     return IterationAction.CONTINUE
 
 
-def consume_pending_notifications(
-    engine: PipelineEngine,
-    state: dict[str, Any],
-    *,
-    prepend: bool = False,
-) -> bool:
-    """统一的待处理通知注入入口（state 注入的唯一函数）。
-
-    将 drain_inject_queue 取出的消息过滤空白后注入 state：
-    - user_input: prepend=True 时前置追加到现有 user_input，否则覆盖
-    - messages:   追加 {role: user} 记录
-    - core_type:  强制 llm_call；tool_execute 时跳过整个注入
-                  （避免在 assistant(tool_calls) 与 tool(result) 之间插入 user 消息，
-                   破坏配对会触发 Minimax API 2013 错误）
-    - raw_result/error_analysis: pop 掉，避免旧结果污染本轮
-    - client_message_id: 同步前端乐观消息 ID 到 state（供 track 插件持久化）
-
-    Args:
-        engine: PipelineEngine 实例
-        state: 管道状态字典（原地修改）
-        prepend: True=前置追加到现有 user_input（迭代开头调用用）；
-                 False=覆盖现有 user_input（target=end/无路由兜底用）
-
-    Returns:
-        True 表示有待处理通知已注入（调用方应继续循环）；
-        False 表示无待处理通知或被 tool_execute 跳过（调用方可真正结束/挂起）。
-    """
-    if state.get(StateKeys.CORE_TYPE) == "tool_execute":
-        return False
-
-    _notifs = engine.drain_inject_queue()
-    if not _notifs:
-        return False
-
-    _filtered = [n for n in _notifs if n and n.strip()]
-    if not _filtered:
-        return False
-
-    _combined = "\n\n".join(_filtered)
-    _existing_input = state.get("user_input", "")
-    if prepend and _existing_input:
-        state["user_input"] = f"{_combined}\n\n{_existing_input}"
-    else:
-        state["user_input"] = _combined
-    state.setdefault("messages", []).append(
-        {"role": "user", "content": _combined}
-    )
-    state[StateKeys.CORE_TYPE] = "llm_call"
-    state.pop("raw_result", None)
-    state.pop("error_analysis", None)
-
-    # 同步前端乐观消息 ID 到 state，供 track 插件持久化时写入 user_record
-    _pending_cmids = getattr(engine, "_pending_client_message_id", "")
-    if _pending_cmids:
-        state["client_message_id"] = _pending_cmids
-        engine._pending_client_message_id = ""
-
-    logger.info(
-        "[Engine] 消费 %d 条待处理通知，注入 state 继续循环 (prepend=%s)",
-        len(_filtered), prepend,
-    )
-    return True
-
-
 def _handle_target_end(
     engine: PipelineEngine,
     state: dict[str, Any],
@@ -193,19 +178,37 @@ def _handle_target_end(
 ) -> IterationAction:
     """处理 target=end：待处理通知优先，否则真正结束。
 
-    引擎调度层职责：根据路由决策（end）决定循环去留。
-    - 有待处理通知 → consume_pending_notifications 注入后继续循环
-    - 无通知 → 设 ENDED 结束循环
-
-    不生成内容（不写 RAW_RESULT）、不内联注入消息——通知注入统一走
-    consume_pending_notifications。
+    若 drain_inject_queue 返回非空通知，注入后取消结束（CONTINUE）；
+    否则格式化结果到 RAW_RESULT，设 ENDED 并 BREAK。
     """
-    if consume_pending_notifications(engine, state):
-        return IterationAction.CONTINUE
+    _end_notifs = engine.drain_inject_queue()
+    if not _end_notifs:
+        if matched_entry and matched_entry.result:
+            state[StateKeys.RAW_RESULT] = matched_entry.format_result(state)
+            logger.info("Input route end with result: %s", state[StateKeys.RAW_RESULT])
+        state[StateKeys.ENDED] = True
+        logger.info("Pipeline ended by input route (target=end)")
+        return IterationAction.BREAK
 
-    state[StateKeys.ENDED] = True
-    logger.info("Pipeline ended by input route (target=end)")
-    return IterationAction.BREAK
+    # 有待处理通知 → 过滤空白 → 注入 → 取消结束
+    _filtered = [n for n in _end_notifs if n and n.strip()]
+    if not _filtered:
+        if matched_entry and matched_entry.result:
+            state[StateKeys.RAW_RESULT] = matched_entry.format_result(state)
+        state[StateKeys.ENDED] = True
+        return IterationAction.BREAK
+
+    _combined = "\n\n".join(_filtered)
+    state["user_input"] = _combined
+    state.setdefault("messages", []).append(
+        {"role": "user", "content": _combined}
+    )
+    state[StateKeys.CORE_TYPE] = "llm_call"
+    logger.info(
+        "[Engine] target=end 但有 %d 条待处理通知，继续循环",
+        len(_filtered),
+    )
+    return IterationAction.CONTINUE
 
 
 async def _handle_target_wait(
@@ -217,7 +220,7 @@ async def _handle_target_wait(
     挂起前保存 _suspended_state 与 _wake_event（避免 inject_message 窗口丢消息）。
     唤醒后若存在 raw_tool_calls 则走 tool_execute，否则 llm_call。
     """
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
     engine._suspended_state = engine._suspend_copy_state(state)
     # 在设置 _suspended_state 的同时创建 _wake_event，避免 inject_message
@@ -238,7 +241,7 @@ async def _handle_target_wait(
         logger.info("Pipeline ended: suspend_and_wait returned False (no new content)")
         return IterationAction.BREAK
 
-    logger.debug("Pipeline woken up, resuming loop iteration")
+    logger.info("Pipeline woken up, resuming loop iteration")
     # 唤醒时若有待执行的工具调用，必须先执行完工具再处理注入的消息，
     # 否则通知会插入 assistant(tool_calls) 与 tool(result) 之间破坏配对。
     if state.get(StateKeys.RAW_TOOL_CALLS):
@@ -268,7 +271,7 @@ async def _execute_core_and_route(
         return IterationAction.BREAK if _no_route_action == "end" else IterationAction.CONTINUE
 
     resolved = engine.output_route_table.arbitrate(route_signals, state)
-    logger.debug(
+    logger.info(
         "Route arbitrated: type=%s, target=%s, reason=%s",
         resolved.route_type, resolved.target, resolved.reason,
     )

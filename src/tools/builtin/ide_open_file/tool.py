@@ -78,8 +78,8 @@ class IDEOpenFileTool(BuiltinTool):
 
     async def execute(self, inputs: dict[str, Any]) -> ToolResult:
         """执行打开文件操作。"""
-        from connectors.degradation import DegradationManager  # noqa: PLC0415
-        from connectors.types import ConnectorAction  # noqa: PLC0415
+        from connectors.degradation import DegradationManager
+        from connectors.types import ConnectorAction
 
         file_path = inputs.get("file_path", "")
         if not file_path:

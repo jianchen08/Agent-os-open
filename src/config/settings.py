@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 服务器配置
     api_host: str = Field(default="localhost", validation_alias="API_HOST")
-    api_port: int = Field(default=8988, validation_alias="API_PORT")
+    api_port: int = Field(default=8888, validation_alias="API_PORT")
     frontend_port: int = Field(default=5188, validation_alias="FRONTEND_PORT")
 
     # 应用配置
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # JWT 配置
     jwt_secret_key: str = Field(
-        default="dev-insecure-key-do-not-use-in-production",
+        default="your-secret-key-change-in-production",
         validation_alias="APP_JWT_SECRET_KEY",
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="APP_JWT_ALGORITHM")
@@ -185,7 +185,7 @@ def get_settings() -> Settings:
 
 def reset_settings() -> None:
     """重置配置实例（主要用于测试）"""
-    global settings  # noqa: PLW0603
+    global settings
     settings = Settings()
 
 

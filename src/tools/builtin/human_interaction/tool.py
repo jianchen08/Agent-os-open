@@ -7,7 +7,7 @@
 - HumanInteractionTool：HumanInteractionTool类
 """
 
-import asyncio  # noqa: F401
+import asyncio
 import contextlib
 import logging
 from asyncio import CancelledError
@@ -124,7 +124,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。工作空间范围限制仅对子任务（L2+）生效；主 agent（L1）可展示项目内任意路径。",
+                        "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知模式推送文件、选择/对话模式展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。使用此参数时必须选择 choice 或 conversation 模式，不支持 notification 模式。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。",
                     },
                 },
                 "required": ["mode", "title"],
@@ -180,8 +180,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         - file_paths 为 None 或空列表 → 合法，直接返回 None
         - file_paths 类型必须为 list → 否则返回错误
         - file_paths 超过 MAX_FILE_PATHS 个 → 返回错误
-        - 逐个路径校验：统一读权限检查（按 agent_level + permission_policies 声明决策）、
-          文件不存在、路径是目录、文件超过大小限制 → 收集错误
+        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制、路径超出工作空间范围 → 收集错误
 
         Args:
             inputs: 工具执行时接收的输入参数字典
@@ -215,16 +214,17 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
         errors: list[str] = []
-        agent_level = inputs.get("parent_agent_level", None)
+        workspace_root = self._workspace.resolve()
         for path_str in file_paths:
             path = self.resolve_path(path_str)
             real_path = path.resolve()
 
-            # 统一读权限检查（按 agent 层级 + permission_policies 声明决策）
-            ok, err = self.check_path_allowed(str(real_path), "read", agent_level)
-            if not ok:
+            try:
+                real_path.relative_to(workspace_root)
+            except ValueError:
                 errors.append(
-                    f"路径 \"{path_str}\" 超出允许范围（{err}）。"
+                    f"路径 \"{path_str}\" 超出工作空间范围（{workspace_root}），"
+                    "不允许访问工作空间之外的文件。"
                     "请确认路径是否正确，或改用工作空间内的相对路径"
                 )
                 continue
@@ -284,7 +284,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             resolved.append(str(resolved_path))
         return resolved
 
-    async def _execute_choice_mode(  # noqa: PLR0912
+    async def _execute_choice_mode(
         self,
         inputs: dict[str, Any],
         service,

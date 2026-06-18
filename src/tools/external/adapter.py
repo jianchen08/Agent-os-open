@@ -145,7 +145,7 @@ class ExternalToolAdapter(IExternalToolAdapter):
 
         # 使用 Pydantic 进行基本验证
         try:
-            from pydantic import TypeAdapter  # noqa: PLC0415
+            from pydantic import TypeAdapter
 
             adapter = TypeAdapter(dict)
             validated = adapter.validate_python(inputs)

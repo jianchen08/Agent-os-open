@@ -119,7 +119,7 @@ class YamlRunnable:
 
     def _execute(self, input: dict[str, Any]) -> Any:
         """同步执行实现（子类可覆盖）"""
-        import asyncio  # noqa: PLC0415
+        import asyncio
 
         try:
             loop = asyncio.get_running_loop()
@@ -128,7 +128,7 @@ class YamlRunnable:
 
         if loop and loop.is_running():
             # 在异步上下文中，创建新任务
-            import concurrent.futures  # noqa: PLC0415
+            import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(asyncio.run, self._aexecute(input))

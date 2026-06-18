@@ -347,12 +347,6 @@ class ReasoningClient(LLMClient):
         if self._http_client:
             await self._http_client.aclose()
 
-    def as_langchain(self):
-        """获取 LangChain 适配器"""
-        from src.llm.adapters.reasoning_adapter import ReasoningLangChainAdapter
-
-        return ReasoningLangChainAdapter(self)
-
 
 class DeepSeekReasoningClient(ReasoningClient):
     """DeepSeek R1 思考模型客户端"""

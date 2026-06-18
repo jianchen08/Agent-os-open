@@ -4,6 +4,12 @@
  * 所有审批相关的 React 组件从这里导出
  */
 
+export { ReviewableDocument } from './ReviewableDocument'
+export type { ReviewableDocumentProps } from './ReviewableDocument'
+
+export { AnnotationBubble } from './AnnotationBubble'
+export type { AnnotationBubbleProps } from './AnnotationBubble'
+
 export { ReviewPanel } from './ReviewPanel'
 export type { ReviewPanelProps } from './ReviewPanel'
 

@@ -4,9 +4,9 @@
 加载和管理成本控制相关配置
 """
 
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 
-import yaml  # noqa: F401
+import yaml
 from pydantic import BaseModel, Field
 
 from src.core.constants import CostControl
@@ -104,13 +104,13 @@ def load_cost_control_config(config_path: str | None = None) -> CostControlConfi
     Returns:
         成本控制配置对象
     """
-    global _config  # noqa: PLW0603
+    global _config
 
     if config_path is None:
         config_path = "config/cost_control.yaml"
 
     try:
-        from config.config_center import get_config_center  # noqa: PLC0415
+        from config.config_center import get_config_center
         rel = config_path.replace("config/", "", 1) if config_path.startswith("config/") else config_path
         data = get_config_center().get(rel) or {}
     except Exception:
@@ -142,7 +142,7 @@ def load_cost_control_config(config_path: str | None = None) -> CostControlConfi
 
 def get_cost_control_config() -> CostControlConfig:
     """获取成本控制配置（单例）"""
-    global _config  # noqa: PLW0603
+    global _config
     if _config is None:
         _config = load_cost_control_config()
     return _config
@@ -150,5 +150,5 @@ def get_cost_control_config() -> CostControlConfig:
 
 def reset_cost_control_config() -> None:
     """重置配置（用于测试）"""
-    global _config  # noqa: PLW0603
+    global _config
     _config = None

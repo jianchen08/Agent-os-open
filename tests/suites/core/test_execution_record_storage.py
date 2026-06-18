@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -559,199 +558,135 @@ class TestPipelineRunSummary:
 # ── 继承历史落盘测试（pipe 继承场景）──
 
 
-class TestClonePipelineRecords:
-    """验证 pipe 继承的物理拷贝路径（clone_pipeline_records）。
+class TestInheritedHistoryPersist:
+    """验证 pipe 继承来的历史对话在新 pipeline 首次执行时被落盘。
 
-    取代了原 _persist_inherited_history 机制：继承不再走
-    「messages → 落盘」往返，而是直接把源管道 records 物理拷贝到目标管道，
-    文本行替换 pipeline_run_id / container_task_id。
+    覆盖 _persist_inherited_history 的核心场景：
+    1. 触发：_inherited_history=True + records 为空 → 历史落盘
+    2. 幂等：第二次执行不重复落盘（_initialized_pipeline_ids 守卫）
+    3. sequence 连续：历史落盘后事件保存续号
+    4. 不触发：无 _inherited_history 标志（workspace-only 继承）不落盘
     """
 
-    @staticmethod
-    def _make_src_storage(
-        tmp_path: Path, src_pid: str,
-        num_records: int = 3,
-        with_tool_calls_json: bool = False,
-    ) -> tuple[ExecutionRecordStorage, list[ExecutionRecordData]]:
-        """用 tmp_path 创建含源记录的 storage 实例。"""
-        storage = ExecutionRecordStorage(data_dir=str(tmp_path))
-        storage.register_pipeline(src_pid, src_pid)
-        created: list[ExecutionRecordData] = []
-        for i in range(num_records):
-            rec = ExecutionRecordData(
-                record_id=f"rec_{i:04d}",
-                pipeline_run_id=src_pid,
-                type="ai",
-                sequence=i + 1,
-                iteration=i,
-                role="assistant",
-                content=f"msg_{i}",
-                container_task_id=f"old_task_{i}",
-            )
-            if with_tool_calls_json and i == 0:
-                rec.tool_calls_json = json.dumps([
-                    {"id": "call_1", "name": "file_read", "arguments": '{"path": "a.py"}'},
-                ])
-            storage.save(rec)
-            created.append(rec)
-        return storage, created
-
-    def test_clone_replaces_two_fields_and_keeps_record_id(
-        self, tmp_path,
+    @pytest.mark.asyncio
+    async def test_inherited_history_gets_persisted(
+        self, base_state: dict[str, Any]
     ):
-        """克隆后 pipeline_run_id / container_task_id 全部替换，
-        record_id 保留不动（不同管道间无全局唯一性约束）。"""
-        src_pid, dst_pid, dst_ctid = "src-run", "dst-run", "new-task-001"
-        storage, src_records = self._make_src_storage(tmp_path, src_pid)
-
-        count = storage.clone_pipeline_records(src_pid, dst_pid, dst_ctid)
-
-        dst_records, _ = storage.list_by_pipeline(dst_pid)
-        assert count == len(dst_records) == len(src_records)
-        assert all(r.pipeline_run_id == dst_pid for r in dst_records)
-        assert all(r.container_task_id == dst_ctid for r in dst_records)
-        # record_id 保留不动
-        assert {r.record_id for r in dst_records} == {r.record_id for r in src_records}
-
-    def test_clone_source_not_modified(
-        self, tmp_path,
-    ):
-        """克隆不修改源管道的任何记录（数据安全红线）。"""
-        src_pid = "src-run"
-        storage, src_records = self._make_src_storage(tmp_path, src_pid)
-        src_before = [(r.record_id, r.pipeline_run_id, r.container_task_id) for r in src_records]
-
-        storage.clone_pipeline_records(src_pid, "dst-run", "new-task-001")
-
-        src_after_records, _ = storage.list_by_pipeline(src_pid)
-        src_after = [(r.record_id, r.pipeline_run_id, r.container_task_id) for r in src_after_records]
-        assert src_before == src_after
-
-    def test_clone_tool_calls_json_format_preserved(
-        self, tmp_path,
-    ):
-        """克隆保持 tool_calls_json 的原始格式（扁平结构不变形）。
-
-        这是本重构的核心目的：消除「messages 往返导致 tool_calls 格式
-        从扁平变嵌套」的根因。源是什么格式，克隆后就是什么格式。
-        """
-        src_pid = "src-run"
-        storage, _ = self._make_src_storage(tmp_path, src_pid, with_tool_calls_json=True)
-
-        storage.clone_pipeline_records(src_pid, "dst-run", "new-task-001")
-
-        dst_records, _ = storage.list_by_pipeline("dst-run")
-        ai_with_tc = [r for r in dst_records if r.type == "ai" and r.tool_calls_json]
-        assert len(ai_with_tc) >= 1
-        for r in ai_with_tc:
-            parsed = json.loads(r.tool_calls_json)
-            assert parsed, "tool_calls_json 解析为空"
-            assert "name" in parsed[0], (
-                f"克隆后 tool_calls_json 顶层缺 name（格式变形）: {parsed[0]}"
-            )
-
-    def test_clone_empty_source_raises(self, tmp_path):
-        """源管道无记录时克隆应报错（而非静默成功）。"""
-        storage = ExecutionRecordStorage(data_dir=str(tmp_path))
-        storage.register_pipeline("empty-src", "empty-src")
-        with pytest.raises(ValueError, match="无执行记录"):
-            storage.clone_pipeline_records("empty-src", "dst-run", "new-task-001")
-
-    def test_clone_round_trip_preserves_all_fields(
-        self, tmp_path,
-    ):
-        """解析→修改→序列化 round-trip 后所有 record 字段保留完整。"""
-        src_pid = "src-run"
-        storage, src_records = self._make_src_storage(tmp_path, src_pid, num_records=5)
-
-        storage.clone_pipeline_records(src_pid, "dst-run", "new-task-001")
-
-        dst_records, _ = storage.list_by_pipeline("dst-run")
-        assert len(dst_records) == 5
-        # 与源相比，只有 pipeline_run_id / container_task_id 变化，其余字段不变
-        for src, dst in zip(src_records, dst_records):
-            assert src.record_id == dst.record_id
-            assert src.type == dst.type
-            assert src.sequence == dst.sequence
-            assert src.role == dst.role
-            assert src.content == dst.content
-
-    def test_clone_failure_rolls_back_all_residue(
-        self, tmp_path, monkeypatch,
-    ):
-        """clone 验证失败时回滚：删除目标文件、目录、root_map 映射。
-
-        失败后不留垃圾，确保后续重试/继承从干净状态开始。
-        """
-        src_pid = "src-run"
-        storage, _ = self._make_src_storage(tmp_path, src_pid, num_records=3)
-        dst_pid = "dst-run"
-
-        # 篡改序列化结果，使第一条记录的 pipeline_run_id 仍是源值 → 验证失败
-        import infrastructure.execution_record_storage as ers_mod
-        orig_dump = ers_mod.yaml.safe_dump
-
-        def broken_dump(data, **kw):
-            text = orig_dump(data, **kw)
-            # 把第一条的 pipeline_run_id 改回源值，制造验证失败
-            return text.replace(
-                f"pipeline_run_id: {dst_pid}",
-                f"pipeline_run_id: {src_pid}",
-                1,
-            )
-
-        monkeypatch.setattr(ers_mod.yaml, "safe_dump", broken_dump)
-
-        with pytest.raises(ValueError, match="pipeline_run_id 仍为"):
-            storage.clone_pipeline_records(src_pid, dst_pid, "new-task-001")
-
-        # 验证回滚干净：目标目录不存在或为空
-        dst_dir = tmp_path / dst_pid
-        if dst_dir.exists():
-            assert not any(dst_dir.iterdir()), "目标目录仍有残留文件"
-        # root_map 不含目标映射
-        assert dst_pid not in storage._pipeline_root_map
-        # 内存分片状态已清理
-        assert dst_pid not in storage._active_part
-        assert dst_pid not in storage._records_in_active_file
-        # 源未受影响
-        src_records, _ = storage.list_by_pipeline(src_pid)
-        assert len(src_records) == 3
-
-    def test_clone_root_task_id_matches_engine_registration(
-        self, tmp_path,
-    ):
-        """clone 用 root_task_id 作目录，与引擎后续 register_pipeline 一致。
-
-        回归 BUG-fix_20260625：clone 写到 {target_pipeline_id}/ 目录，
-        但 _bind_pipeline_run 又 register_pipeline(pipeline_id, root_task_id)
-        触发文件迁移，导致 clone 文件和引擎读取文件分裂、继承历史丢失。
-        修复：clone 时直接用 root_task_id 作目录 root。
-        """
-        src_pid, dst_pid, dst_ctid = "src-run", "dst-run", "new-task-001"
-        root_task_id = "root-task-xyz"
-        storage, _ = self._make_src_storage(tmp_path, src_pid, num_records=4)
-
-        # clone 时用 root_task_id（模拟 task_submit 传入）
-        storage.clone_pipeline_records(
-            src_pid, dst_pid, dst_ctid, root_task_id=root_task_id,
+        """新 pipeline 携带继承历史时，历史消息应落盘到新 pipeline 文件。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
         )
+        # 模拟 build_initial_state 装载的继承历史（3 条）+ 新 user_input（1 条）
+        base_state[StateKeys.PIPELINE_ID] = "run-inherit"
+        base_state[StateKeys.ITERATION] = 1
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "原始用户提问"},
+            {"role": "assistant", "content": "原始 AI 回复"},
+            {"role": "user", "content": "继承后的新输入"},
+        ]
+        base_state["user_input"] = "继承后的新输入"
 
-        # clone 后文件应在 {root_task_id}/ 目录下
-        dst_dir = tmp_path / root_task_id
-        assert dst_dir.exists(), f"clone 文件应在 {root_task_id}/ 目录下"
-        dst_files = list(dst_dir.glob(f"{dst_pid}*.yaml"))
-        assert dst_files, "目标文件应存在于 root_task_id 目录"
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
 
-        # 模拟引擎注册：_bind_pipeline_run 调 register_pipeline(pipeline_id, root_task_id)
-        # 应幂等（root 相同），不触发文件迁移
-        storage.register_pipeline(dst_pid, root_task_id)
+        records = storage.list_by_pipeline("run-inherit")[0]
+        # 3 条继承历史全部落盘，新 user_input 因去重不重复存
+        assert len(records) == 3
+        roles = [r.role for r in records]
+        assert roles == ["user", "assistant", "user"]
+        # iteration=0 标记为继承历史
+        assert all(r.iteration == 0 for r in records)
 
-        # 验证：文件仍在原位，能正确读出全部克隆记录
-        dst_records, _ = storage.list_by_pipeline(dst_pid)
-        assert len(dst_records) == 4, (
-            f"register_pipeline 后记录应完整，实际 {len(dst_records)} 条"
+    @pytest.mark.asyncio
+    async def test_idempotent_on_second_execute(
+        self, base_state: dict[str, Any]
+    ):
+        """同一 pipeline 第二次执行不重复落盘继承历史。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
         )
-        assert all(r.pipeline_run_id == dst_pid for r in dst_records)
-        assert all(r.container_task_id == dst_ctid for r in dst_records)
+        base_state[StateKeys.PIPELINE_ID] = "run-idem"
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "历史消息"},
+        ]
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)  # 第一次：落盘
+        base_state[StateKeys.ITERATION] = 2
+        await plugin.execute(ctx)  # 第二次：应跳过（_initialized_pipeline_ids 守卫）
+
+        records = storage.list_by_pipeline("run-idem")[0]
+        # 只有 1 条历史，不会因第二次执行翻倍
+        history_records = [r for r in records if r.iteration == 0]
+        assert len(history_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_sequence_continuous_after_history(
+        self, base_state: dict[str, Any]
+    ):
+        """历史落盘后，本轮事件保存的 sequence 应续在历史号之后。"""
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        base_state[StateKeys.PIPELINE_ID] = "run-seq"
+        base_state[StateKeys.ITERATION] = 1
+        base_state["_inherited_history"] = True
+        base_state["messages"] = [
+            {"role": "user", "content": "历史1"},
+            {"role": "assistant", "content": "历史2"},
+        ]
+        # 本轮 LLM 事件
+        base_state[StateKeys.RAW_RESULT] = "本轮 AI 回复"
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
+
+        records = storage.list_by_pipeline("run-seq")[0]
+        # 2 条历史（seq 1,2）+ 1 条本轮 AI（seq 3）
+        assert len(records) == 3
+        seqs = [r.sequence for r in records]
+        assert seqs == [1, 2, 3]
+        # 本轮事件的 iteration=1，历史 iteration=0
+        assert records[-1].iteration == 1
+        assert records[-1].type == "ai"
+
+    @pytest.mark.asyncio
+    async def test_no_inherited_history_flag_skips_persist(
+        self, base_state: dict[str, Any]
+    ):
+        """无 _inherited_history 标志（如 workspace-only 继承）不触发历史落盘。
+
+        判别依据：落盘的记录数应等于本轮事件产生的记录数，
+        不会把 messages 列表里的内容额外落盘。
+        （注意：现有 user 消息保存逻辑本身用 iteration=0，属正常约定，
+        故不能用 iteration=0 区分历史；改用记录数对账。）
+        """
+        storage = ExecutionRecordStorage()
+        ctx = PluginContext(
+            state=base_state,
+            _services={"execution_record_storage": storage},
+        )
+        base_state[StateKeys.PIPELINE_ID] = "run-ws-only"
+        base_state[StateKeys.ITERATION] = 1
+        # messages 里有 1 条，但没有 _inherited_history 标志
+        base_state["messages"] = [{"role": "user", "content": "历史消息(不应被落盘)"}]
+        base_state["user_input"] = "本轮真实输入"
+
+        plugin = TrackPlugin()
+        await plugin.execute(ctx)
+
+        records = storage.list_by_pipeline("run-ws-only")[0]
+        # 只应落盘本轮 user_input（iteration==1 的 user 保存逻辑），
+        # messages 里的"历史消息(不应被落盘)"不应出现
+        contents = [r.content for r in records]
+        assert "本轮真实输入" in contents
+        assert "历史消息(不应被落盘)" not in contents
 

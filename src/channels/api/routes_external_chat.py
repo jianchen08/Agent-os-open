@@ -16,11 +16,7 @@ from channels.api.deps import APIError, require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api/v1/external",
-    tags=["外部系统"],
-    dependencies=[Depends(require_auth)],
-)
+router = APIRouter(prefix="/api/v1/external", tags=["外部系统"])
 
 
 # ============================================================
@@ -47,14 +43,14 @@ class ExternalChatResponse(BaseModel):
 
 def _get_agent_registry() -> Any:
     """从 ServiceProvider 获取全局 AgentRegistry 实例。"""
-    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+    from infrastructure.service_provider import get_service_provider
 
     return get_service_provider().get("agent_registry")
 
 
 def _get_pipeline_factory() -> Any:
     """从 ServiceProvider 获取管道工厂（创建 PipelineEngine 的可调用对象）。"""
-    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+    from infrastructure.service_provider import get_service_provider
 
     return get_service_provider().get("pipeline_factory")
 

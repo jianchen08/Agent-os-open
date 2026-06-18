@@ -14,7 +14,6 @@ from src.tasks.state_machine import (
     _TASK_TRANSITIONS,
     InvalidTransitionError,
 )
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +38,8 @@ class _TaskStateMixin:
         if task is None:
             return False
 
-        current = safe_enum_value(task.status)
-        target = safe_enum_value(target_status)
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        target = target_status.value if hasattr(target_status, "value") else str(target_status)
         allowed = _TASK_TRANSITIONS.get(current, [])
 
         return target in allowed
@@ -61,7 +60,7 @@ class _TaskStateMixin:
         if task is None:
             return []
 
-        current = safe_enum_value(task.status)
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
         return _TASK_TRANSITIONS.get(current, [])
 
     async def force_transition(self, task_id: str, target_status: Any) -> None:
@@ -70,17 +69,13 @@ class _TaskStateMixin:
         与 start_task / complete_task 等具体方法不同，此方法接受任意 TaskStatus，
         通过 _TASK_TRANSITIONS 校验合法性后执行转换。
 
-        例外：容器任务（task_scope == "container"）跳过状态机校验，允许 L1
-        主 Agent / 任务管理工具在任意终态之间自由互转。容器本身只是子任务的
-        "集合"，不承载执行语义，强加状态机会导致 UI 无法纠正错误的容器状态。
-
         Args:
             task_id: 任务 ID
             target_status: 目标状态（TaskStatus 枚举）
 
         Raises:
             KeyError: 任务不存在
-            InvalidTransitionError: 当前状态不允许转换到目标状态（仅非容器任务）
+            InvalidTransitionError: 当前状态不允许转换到目标状态
         """
         if self._storage is None:
             raise KeyError(f"任务不存在: {task_id}")
@@ -89,21 +84,18 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        current = safe_enum_value(task.status)
-        target = safe_enum_value(target_status)
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        target = target_status.value if hasattr(target_status, "value") else str(target_status)
 
-        # 容器任务：跳过状态机校验（仅作为子任务集合，状态由 L1 自由维护）
-        is_container = (task.metadata or {}).get("task_scope") == "container"
+        allowed = _TASK_TRANSITIONS.get(current, [])
 
-        if not is_container:
-            allowed = _TASK_TRANSITIONS.get(current, [])
-            if target not in allowed:
-                raise InvalidTransitionError(
-                    current, target,
-                    f"不允许从 ''{current}'' 转换到 ''{target}''，合法目标: {allowed}",
-                )
+        if target not in allowed:
+            raise InvalidTransitionError(
+                current, target,
+                f"不允许从 ''{current}'' 转换到 ''{target}''，合法目标: {allowed}",
+            )
 
         task.status = TaskStatus(target)
         task.updated_at = datetime.now().isoformat()
@@ -129,9 +121,9 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        current = safe_enum_value(task.status)
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
         allowed = {"running", "pending"}
         if current not in allowed:
             raise InvalidTransitionError(
@@ -170,9 +162,9 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        current = safe_enum_value(task.status)
+        current = task.status.value if hasattr(task.status, "value") else str(task.status)
         if current != "stopped":
             raise InvalidTransitionError(
                 current, "running",
@@ -190,7 +182,7 @@ class _TaskStateMixin:
 
         # 唤醒挂起的管道引擎
         try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            from pipeline.registry import get_engine_registry
             entries = get_engine_registry().find_by_tag("task_id", task_id)
             for entry in entries:
                 if entry.engine is not None and entry.engine.is_suspended:
@@ -224,9 +216,9 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         if old_status not in ("pending", "running"):
             raise InvalidTransitionError(
                 old_status, "running",
@@ -256,9 +248,9 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         if old_status not in ("running", "evaluating"):
             raise InvalidTransitionError(
                 old_status, "evaluating",
@@ -271,19 +263,12 @@ class _TaskStateMixin:
 
         await self._emit_state_change(task_id, old_status, "evaluating")
 
-    async def fail_task(
-        self,
-        task_id: str,
-        reason: str = "",
-        extra_meta: dict | None = None,
-    ) -> None:
+    async def fail_task(self, task_id: str, reason: str = "") -> None:
         """将任务标记为失败。
 
         Args:
             task_id: 任务 ID
             reason: 失败原因
-            extra_meta: 额外的结构化元数据（如错误类型统计），合并进 task.metadata。
-                        供 watchdog/通知器/前端等任意消费方取用。
         """
         if self._storage is None:
             return
@@ -292,13 +277,11 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         task.status = TaskStatus.FAILED
         task.updated_at = datetime.now().isoformat()
-        if extra_meta:
-            task.metadata.update(extra_meta)
         if reason:
             task.metadata["fail_reason"] = reason
             # 追加而非覆盖，保留完整错误链
@@ -308,45 +291,14 @@ class _TaskStateMixin:
                 task.error = reason
         self._storage.save(task)
 
-        logger.info(
-            "TaskService: fail_task 状态已落盘 | task=%s old=%s reason=%s",
-            task_id, old_status, reason[:120] if reason else "",
-        )
+        await self._emit_state_change(task_id, old_status, "failed")
 
-        # 以下三步各自隔离：单步失败不阻断后续步，避免某步异常导致
-        # 通知/级联/清理整体丢失（这正是"子任务失败不通知父任务"的隐蔽根因）。
-        # 1. 发射状态变更 → 触发 _on_task_state_changed → _notify_suspended_pipelines
-        try:
-            await self._emit_state_change(task_id, old_status, "failed")
-        except Exception as exc:
-            logger.error(
-                "TaskService: fail_task 状态变更通知失败（父任务可能收不到失败通知）| "
-                "task=%s error=%s",
-                task_id, exc, exc_info=exc,
-            )
-
-        # 2. 父任务失败时级联取消所有非终态的子任务
-        try:
-            _cascade_count = await self.fail_task_cascade(task_id, reason=reason)
-            if _cascade_count > 0:
-                logger.info(
-                    "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
-                    task_id, _cascade_count,
-                )
-        except Exception as exc:
-            logger.error(
-                "TaskService: fail_task 级联取消子任务失败 | task=%s error=%s",
-                task_id, exc, exc_info=exc,
-            )
-
-        # 3. 任务失败后尝试销毁容器（仅当 workspace 无其他活跃任务时）
-        # 失败任务重试时 get_or_create_environment 会自动重建容器
-        try:
-            await self._try_destroy_container_if_idle(task_id)
-        except Exception as exc:
-            logger.error(
-                "TaskService: fail_task 容器销毁检查失败 | task=%s error=%s",
-                task_id, exc, exc_info=exc,
+        # 父任务失败时级联取消所有非终态的子任务
+        _cascade_count = await self.fail_task_cascade(task_id, reason=reason)
+        if _cascade_count > 0:
+            logger.info(
+                "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
+                task_id, _cascade_count,
             )
 
     async def cancel_task(self, task_id: str, reason: str = "") -> None:
@@ -363,9 +315,9 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         task.status = TaskStatus.STOPPED
         task.updated_at = datetime.now().isoformat()
         if reason:
@@ -419,9 +371,9 @@ class _TaskStateMixin:
         if self._storage is None:
             return 0
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})  # noqa: N806
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})
 
         subtasks = self._storage.list_by_parent(task_id)
         cancelled_count = 0
@@ -451,10 +403,10 @@ class _TaskStateMixin:
         Returns:
             (清理的幽灵任务数, 级联取消的子任务数)
         """
-        from pathlib import Path as _Path  # noqa: PLC0415
+        from pathlib import Path as _Path
 
-        from tasks.storage import TaskStorage  # noqa: PLC0415
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.storage import TaskStorage
+        from tasks.types import TaskStatus
 
         _data_dir = str(_Path(data_dir).resolve())
         try:
@@ -463,9 +415,9 @@ class _TaskStateMixin:
             logger.warning("[GhostCleanup] 初始化 TaskStorage 失败: %s", exc)
             return (0, 0)
 
-        _GHOST_STATES = frozenset({TaskStatus.RUNNING})  # noqa: N806
-        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})  # noqa: N806
-        _REASON = "服务重启后引擎状态丢失"  # noqa: N806
+        _GHOST_STATES = frozenset({TaskStatus.RUNNING})
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})
+        _REASON = "服务重启后引擎状态丢失"
 
         ghost_tasks: list = []
         for state in _GHOST_STATES:
@@ -528,35 +480,14 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         task.status = TaskStatus.COMPLETED
         task.updated_at = datetime.now().isoformat()
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "completed")
-
-        # 任务完成后尝试销毁容器（仅当 workspace 无其他活跃任务时）
-        await self._try_destroy_container_if_idle(task_id)
-
-    async def _try_destroy_container_if_idle(self, task_id: str) -> None:
-        """任务终态后尝试销毁其 workspace 的容器。
-
-        委托 IsolationManager.destroy_if_workspace_idle：仅当该 workspace
-        已无其他活跃任务时才真正销毁。失败任务重试时容器会自动重建。
-        异常不向上抛出，避免影响任务状态转换主流程。
-        """
-        try:
-            from isolation.manager import get_isolation_manager  # noqa: PLC0415
-
-            manager = await get_isolation_manager()
-            await manager.destroy_if_workspace_idle(task_id)
-        except Exception as e:
-            logger.debug(
-                "TaskService: 终态销毁容器检查失败（非致命）| task=%s, error=%s",
-                task_id, e,
-            )
 
     async def complete_evaluation(
         self, task_id: str, passed: bool, result: dict | None = None
@@ -614,7 +545,7 @@ class _TaskStateMixin:
             return
 
         try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            from pipeline.registry import get_engine_registry
             _reg = get_engine_registry()
             _entry = _reg.get(pipeline_run_id)
             if not _entry or not _entry.engine:
@@ -662,7 +593,7 @@ class _TaskStateMixin:
         if result is not None:
             task.result = result
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.now(UTC)
@@ -684,9 +615,9 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus  # noqa: PLC0415
+        from tasks.types import TaskStatus
 
-        old_status = safe_enum_value(task.status)
+        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
         task.status = TaskStatus.PENDING
         task.updated_at = datetime.now().isoformat()
         self._storage.save(task)

@@ -20,14 +20,13 @@ def mount_media_static_files(app: FastAPI) -> None:
     """将媒体输出目录挂载为 FastAPI 静态文件服务。
 
     挂载 output/ 下的 images、tts、video、music 等子目录到 /media/* 路径。
-    同时挂载用户上传文件目录到 /uploads/* 路径。
     必须在所有路由注册之后调用，以避免路由冲突。
 
     Args:
         app: FastAPI 应用实例
     """
     try:
-        from fastapi.staticfiles import StaticFiles  # noqa: PLC0415
+        from fastapi.staticfiles import StaticFiles
 
         output_dir = Path(os.environ.get("MEDIA_OUTPUT_DIR", "./output"))
         if output_dir.exists():
@@ -53,16 +52,5 @@ def mount_media_static_files(app: FastAPI) -> None:
                 "[STARTUP] Media static files mounted at /media/* (dirs: %s)",
                 [n for n, p in media_dirs.items() if p.exists()],
             )
-
-        # 挂载用户上传文件目录（多模态文件上传）
-        uploads_dir = Path(os.environ.get("UPLOADS_DIR", "./data/uploads"))
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        app.mount(
-            "/uploads",
-            StaticFiles(directory=str(uploads_dir)),
-            name="uploads",
-        )
-        logger.info("[STARTUP] Uploads static files mounted at /uploads/*")
-
     except Exception as exc:
         logger.warning("[STARTUP] Media static files mount failed: %s", exc)

@@ -199,18 +199,6 @@ rules:
       - type: regex
         value: "^(?!git\\s).+"
 
-  # ── 宿主路径访问：命令含 Windows 盘符路径时强制审批 ──
-  # bash_execute 被 isolation_guard 路由到 host 执行（容器内无宿主路径），
-  # 此时必须弹审批，不能走下面的 safe_commands 白名单（否则 ls D:/... 会被直接放行）。
-  # 正则 [A-Za-z]:[\\/] 匹配 D:/、D:\、C:\Users 等 Windows 盘符绝对路径。
-  - name: "host_path_access"
-    tools: ["bash_execute"]
-    params: ["command", "working_dir"]
-    action: needs_approval
-    patterns:
-      - type: regex
-        value: "[A-Za-z]:[\\\\/]"
-
   # ── 参数白名单：安全命令直接放行，不弹审批 ──
   # 危险工具（如 bash_execute）的参数如果命中白名单，视为安全操作直接放行。
   # 用正则前缀匹配：命令以这些开头 = 安全。

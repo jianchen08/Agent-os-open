@@ -12,7 +12,7 @@ import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
-import { registerFileEditor } from '@/stores/fileEditorRegistry'
+import { registerFileReview, getFileReviewData } from '@/stores/fileReviewRegistry'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -212,46 +212,55 @@ export function useInteractionHandler(sessionId: string | undefined) {
         })
       })
 
-      // BUG-FIX-fix_20260625_workspace_tabs_persist:
-      // 问题根因: 交互附带的文件原走 __file_review__ 特殊 Tab，绑定 requestId/sessionId 写入
-      //          fileReviewRegistry，刷新页面后这套交互一次性数据无法恢复，整组 Tab 丢失。
-      // 修复方案: 与文件树点开文件统一为 __file_editor__ 类型，每个文件一个 Tab，
-      //          数据落 fileEditorRegistry（已 localStorage 持久化），刷新后 Tab 自然恢复。
-      //          tabId 形如 `file-${containerId}-${path}`，重复推送同一文件自动去重激活。
       if (parsed.fileContents && Object.keys(parsed.fileContents).length > 0) {
         const layoutStore = useLayoutModeStore.getState()
+
+        // 检查是否已有相同文件的标签页打开，如果有则直接跳转
         const filePaths = Object.keys(parsed.fileContents)
-        const containerId = '_local'
-        let firstTabId: string | null = null
-
-        for (const filePath of filePaths) {
-          const fileName = filePath.split(/[/\\]/).pop() || filePath
-          const tabId = `file-${containerId}-${filePath.replace(/[/\\]/g, '_')}`
-          if (!firstTabId) firstTabId = tabId
-
-          const existing = layoutStore.workspaceTabs.find((t) => t.id === tabId)
-          if (existing) {
-            continue
+        const existingTab = layoutStore.workspaceTabs.find((t) => {
+          // 匹配文件编辑器标签（tabId 格式：file-local-${sanitizedPath}）
+          if (t.moduleId === '__file_editor__') {
+            return filePaths.some((fp) => {
+              const editorTabId = `file-local-${fp.replace(/[/\\]/g, '_')}`
+              return t.id === editorTabId
+            })
           }
+          // 匹配文件审阅标签（tabId 格式：review-${requestId}），检查注册表中文件路径是否相同
+          if (t.moduleId === '__file_review__') {
+            const reviewData = getFileReviewData(t.id)
+            if (reviewData) {
+              const reviewFiles = Object.keys(reviewData.fileContents)
+              return filePaths.length === reviewFiles.length
+                && filePaths.every((fp) => reviewFiles.includes(fp))
+            }
+          }
+          return false
+        })
 
-          registerFileEditor(tabId, {
-            filePath,
-            fileName,
-            content: parsed.fileContents[filePath] ?? '',
-            containerTaskId: containerId,
+        if (existingTab) {
+          // 已有相同文件的标签，直接激活跳转
+          layoutStore.setActiveTab(existingTab.id)
+        } else {
+          // 没有已打开的相同文件标签，创建新的审阅标签
+          const tabId = `review-${parsed.requestId}`
+          registerFileReview(tabId, {
+            requestId: parsed.requestId,
+            mode: parsed.mode as 'choice' | 'conversation' | 'notification',
+            title: parsed.title || '',
+            pipelineId: parsed.pipelineId || '',
+            fileContents: parsed.fileContents,
+            options: parsed.options,
+            sessionId: parsed.sessionId,
           })
           layoutStore.addWorkspaceTab({
             id: tabId,
-            title: fileName,
+            title: parsed.title || '文件审阅',
             icon: '📄',
-            moduleId: '__file_editor__',
-            isActive: false,
+            moduleId: '__file_review__',
+            isActive: true,
             isPinned: false,
           })
-        }
-
-        if (firstTabId) {
-          layoutStore.setActiveTab(firstTabId)
+          layoutStore.setActiveTab(tabId)
         }
         useLayoutModeStore.getState().setMode('five-space')
         useUIStore.getState().setWorkspaceCollapsed(false)

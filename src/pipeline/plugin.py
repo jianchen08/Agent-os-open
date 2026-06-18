@@ -29,7 +29,7 @@ class IPlugin(ABC):
 
     error_policy: ErrorPolicy = ErrorPolicy.ABORT
 
-    @classmethod  # noqa: B027
+    @classmethod
     def register_types(cls, slots: PluginTypeSlot) -> None:
         """插件可覆盖此方法，在加载时注册自定义类型/变量。默认空实现。
 
@@ -137,7 +137,7 @@ class PluginContext:
 
     def __post_init__(self) -> None:
         if self.plugin_types is None:
-            from pipeline.plugin_types import PluginTypeSlot  # noqa: PLC0415
+            from pipeline.plugin_types import PluginTypeSlot
             self.plugin_types = PluginTypeSlot()
 
     def get_service(self, name: str) -> Any:

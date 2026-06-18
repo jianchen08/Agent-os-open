@@ -24,8 +24,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from tools.builtin.task_submit.tool import TaskSubmitTool, _normalize_description  # noqa: E402
+from tools.builtin.task_submit.tool import TaskSubmitTool  # noqa: E402
 from tools.types import Tool  # noqa: E402
+
 
 # ─────────────────────────── 工具函数 ───────────────────────────
 
@@ -320,56 +321,6 @@ def test_build_metadata_no_pipe_mark_for_workspace_only_list():
         f"mode=['workspace'] 不应设置 inherit_pipe_from，"
         f"实际 metadata={metadata}"
     )
-
-
-# ─────────────────────────── description 归一化验证 ───────────────────────────
-
-
-def test_normalize_description_list_to_string():
-    """LLM 返回 list 形式的 description 应被归一化为 str。
-
-    回归场景：LLM 偶尔把多行文本写成数组（如 ['在当前执行环境...', '']），
-    若不归一化会静默持久化进 YAML，最终在 API 层 TaskResponse.description
-    （pydantic 强制 str）校验失败导致 500。
-    """
-    result = _normalize_description(["在当前执行环境", ""])
-    assert isinstance(result, str)
-    assert result == "在当前执行环境\n", (
-        f"list 应按换行连接，实际={result!r}"
-    )
-
-
-def test_normalize_description_string_passthrough():
-    """正常 str 输入应原样返回。"""
-    assert _normalize_description("正常描述") == "正常描述"
-
-
-def test_normalize_description_empty_string():
-    """空串原样返回。"""
-    assert _normalize_description("") == ""
-
-
-def test_normalize_description_none_to_empty():
-    """None 应归一化为空串。"""
-    assert _normalize_description(None) == ""
-
-
-def test_normalize_description_list_with_multiple_items():
-    """多元素 list 用换行连接。"""
-    result = _normalize_description(["第一行", "第二行", "第三行"])
-    assert result == "第一行\n第二行\n第三行"
-
-
-def test_normalize_description_tuple():
-    """tuple 与 list 同等处理。"""
-    result = _normalize_description(("第一行", "第二行"))
-    assert result == "第一行\n第二行"
-
-
-def test_normalize_description_non_string_scalar():
-    """非 str 标量（int/dict）转为字符串，避免 len() 校验失效。"""
-    assert _normalize_description(42) == "42"
-    assert _normalize_description(True) == "True"
 
 
 if __name__ == "__main__":

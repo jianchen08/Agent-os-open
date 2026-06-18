@@ -16,10 +16,12 @@ import inspect
 import json
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from isolation.providers.docker_provider import DockerProvider
 from isolation.types import (
+    EnvironmentStatus,
     IsolationContext,
     IsolationLevel,
     OperationType,
@@ -62,30 +64,13 @@ class IsolationExecutor:
         self._config = config or {}
         self._docker_provider = docker_provider or DockerProvider(
             config={
-                "image": self._config.get("docker_image", "python:3.12-slim"),
+                "image": self._config.get("docker_image", "agentos:latest"),
                 "cpu_limit": self._config.get("cpu_limit", "1.0"),
                 "memory_limit": self._config.get("memory_limit", "512m"),
                 "network_mode": self._config.get("network_mode", "bridge"),
             },
         )
-        self._docker_available: bool | None = None
         self._containers: dict[str, str] = {}  # task_id → env_id
-
-    async def initialize(self) -> None:
-        """检查 Docker 可用性。
-
-        在管道启动前调用，提前检测 Docker 环境。
-        如果 Docker 不可用，后续所有执行将回退到 host 模式。
-        """
-        available, reason = await self._docker_provider.is_available()
-        self._docker_available = available
-        if available:
-            logger.info("[IsolationExecutor] Docker 可用，容器隔离已就绪")
-        else:
-            logger.warning(
-                "[IsolationExecutor] Docker 不可用: %s，所有工具将在宿主机执行",
-                reason,
-            )
 
     async def execute_tool(
         self,
@@ -95,44 +80,40 @@ class IsolationExecutor:
         tool_func: Callable[..., Any],
         timeout: float,
     ) -> dict[str, Any]:
-        """执行单个工具调用，根据隔离上下文选择执行环境。
+        """执行单个工具调用。隔离包装器：读 provider，docker 就 docker exec，host 就调 tool_func。
 
-        从 state["execution_contexts"] 查找当前工具的隔离决策，
-        如果 provider == "docker" 则在容器中执行命令，
-        否则直接在宿主机调用 tool_func。
+        不做检测、不做 fallback、不做二次判断。
+        isolation_guard 已决策，这里只执行。
 
         Args:
             state: 管道状态字典
             tool_name: 工具名称
             tool_args: 工具调用参数
-            tool_func: 工具函数（宿主机直接调用时使用）
+            tool_func: 工具函数（host 模式调用）
             timeout: 执行超时时间（秒）
 
         Returns:
-            工具执行结果字典，包含 tool_name、success、data/error、duration_ms
+            工具执行结果字典
         """
-        # 惰性初始化：首次执行时检查 Docker 可用性
-        if self._docker_available is None:
-            available, reason = await self._docker_provider.is_available()
-            self._docker_available = available
-            if available:
-                logger.info("[IsolationExecutor] Docker 可用，容器隔离已就绪")
-            else:
-                logger.warning(
-                    "[IsolationExecutor] Docker 不可用: %s，所有工具将在宿主机执行",
-                    reason,
-                )
-
-        # 查找当前工具的执行上下文
         context = self._find_execution_context(state, tool_name)
         provider = context.get("provider", "host") if context else "host"
 
-        if provider == "docker" and self._docker_available:
+        logger.info("[IsolationExecutor] tool=%s provider=%s", tool_name, provider)
+
+        if provider == "denied" or (context and context.get("blocked")):
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": f"工具 {tool_name} 被隔离策略阻止",
+                "duration_ms": 0,
+            }
+
+        if provider == "docker":
             return await self._execute_in_docker(
                 state, tool_name, tool_args, timeout,
             )
 
-        # host 模式：注入隔离上下文信息，让工具感知当前隔离级别
+        # host: 直接调工具
         if tool_args.get("_isolation_provider") is None:
             tool_args = dict(tool_args)
             tool_args["_isolation_provider"] = provider
@@ -219,12 +200,22 @@ class IsolationExecutor:
                 "[IsolationExecutor] Host 执行完成 | tool=%s | %.1fms",
                 tool_name, duration_ms,
             )
-            return {
+            # BUG-FIX-fix_20260615_eval_pipeline_not_end:
+            # 问题根因: result 是 ToolExecutionResult 时原样塞进 data，
+            #   stop_check 用 isinstance(data, dict) 守卫会跳过，导致评估通过后
+            #   end 信号永不发出。与 tool_core._execute_single_tool 对齐：调
+            #   to_dict(slim=True) 归一化，并把 metadata 拷到顶层。
+            return_dict = {
                 "tool_name": tool_name,
                 "success": True,
-                "data": result,
+                "data": result.to_dict(slim=True)
+                if hasattr(result, "to_dict") else result,
                 "duration_ms": round(duration_ms, 1),
             }
+            if hasattr(result, "metadata") and isinstance(result.metadata, dict) \
+                    and result.metadata:
+                return_dict["metadata"] = result.metadata
+            return return_dict
         except asyncio.CancelledError:
             duration_ms = (time.monotonic() - start) * 1000
             logger.info(
@@ -287,10 +278,10 @@ class IsolationExecutor:
             env_id = await self._ensure_container(task_id, workspace)
         except Exception as exc:
             logger.warning(
-                "[IsolationExecutor] 容器创建失败，回退 host | tool=%s | error=%s",
+                "[IsolationExecutor] 容器创建失败，返回错误 | tool=%s | error=%s",
                 tool_name, exc,
             )
-            # Docker 不可用，标记并返回错误（由调用者决定回退策略）
+            # Docker 不可用，返回错误（由调用者决定后续策略）
             return {
                 "tool_name": tool_name,
                 "success": False,
@@ -300,11 +291,13 @@ class IsolationExecutor:
 
         # 构建命令操作
         command = self._build_command(tool_name, tool_args)
+        # workspace 为空时使用 /tmp，避免 chdir 失败
+        working_dir = "/workspace" if workspace else "/tmp"
         operation = {
             "type": "command",
             "command": command,
             "timeout": timeout,
-            "working_dir": "/workspace",
+            "working_dir": working_dir,
         }
 
         start = time.monotonic()
@@ -325,25 +318,24 @@ class IsolationExecutor:
                 "data": output,
                 "duration_ms": round(duration_ms, 1),
             }
-        else:
-            logger.warning(
-                "[IsolationExecutor] Docker 执行失败 | tool=%s | error=%s",
-                tool_name, result.error,
-            )
-            return {
-                "tool_name": tool_name,
-                "success": False,
-                "error": result.error,
-                "duration_ms": round(duration_ms, 1),
-            }
+        logger.warning(
+            "[IsolationExecutor] Docker 执行失败 | tool=%s | error=%s",
+            tool_name, result.error,
+        )
+        return {
+            "tool_name": tool_name,
+            "success": False,
+            "error": result.error,
+            "duration_ms": round(duration_ms, 1),
+        }
 
     async def _ensure_container(
         self, task_id: str, workspace: str | None = None,
     ) -> str:
         """确保 task 有可用的 Docker 容器，复用已有容器。
 
-        如果 task 已有容器（_containers 中存在），直接返回 env_id；
-        否则创建新容器并记录映射。
+        如果 task 已有容器（_containers 中存在），先检查容器是否仍在运行；
+        若已停止则清除缓存并重建。否则创建新容器并记录映射。
 
         Args:
             task_id: 任务 ID
@@ -355,8 +347,34 @@ class IsolationExecutor:
         Raises:
             Exception: 容器创建失败时抛出
         """
+        # 命中缓存时检查容器存活状态，失效则重建
         if task_id in self._containers:
-            return self._containers[task_id]
+            cached_env_id = self._containers[task_id]
+            try:
+                status = await self._docker_provider.get_environment_status(cached_env_id)
+            except Exception as exc:
+                logger.warning(
+                    "[IsolationExecutor] 容器状态检查异常，按失效处理 | task=%s | error=%s",
+                    task_id, exc,
+                )
+                status = EnvironmentStatus.ERROR
+
+            if status == EnvironmentStatus.READY:
+                return cached_env_id
+
+            # 容器已停止/异常，清除失效缓存并销毁残留环境，然后重建
+            logger.warning(
+                "[IsolationExecutor] 容器已停止，自动重建 | task=%s | env=%s | status=%s",
+                task_id, cached_env_id, status.value if hasattr(status, 'value') else status,
+            )
+            self._containers.pop(task_id, None)
+            try:
+                await self._docker_provider.destroy_environment(cached_env_id, success=False)
+            except Exception as exc:
+                logger.debug(
+                    "[IsolationExecutor] 清理失效容器环境失败（非致命）| error=%s",
+                    exc,
+                )
 
         # 构建 IsolationContext
         context = IsolationContext(
@@ -385,8 +403,8 @@ class IsolationExecutor:
     ) -> str:
         """将工具调用转换为容器内执行的命令字符串。
 
-        将工具名称和参数序列化为 JSON，
-        通过 Python 脚本在容器内调用工具函数。
+        bash_execute: 直接提取 command 参数
+        其他工具: 序列化为 JSON 通过 stdin 传递（暂不支持，返回空）
 
         Args:
             tool_name: 工具名称
@@ -395,11 +413,16 @@ class IsolationExecutor:
         Returns:
             可在容器内执行的 shell 命令字符串
         """
-        args_json = json.dumps(tool_args, ensure_ascii=False, default=str)
-        # 使用 Python 脚本调用工具，将参数通过 stdin 传递
-        script = (
-            f"import sys, json; "
-            f"args = json.loads({json.dumps(args_json)}); "
-            f"print(json.dumps(args))"
+        # bash_execute: 直接取 command 字段
+        if tool_name == "bash_execute":
+            command = tool_args.get("command", "")
+            if isinstance(command, str) and command.strip():
+                return command
+            return "echo 'empty command'"
+
+        # 其他工具暂不支持容器内直接执行（需要工具镜像预装代码）
+        logger.warning(
+            "[IsolationExecutor] 工具 %s 不支持容器内执行，返回 echo",
+            tool_name,
         )
-        return f'python3 -c "{script}"'
+        return f"echo '[isolated] tool={tool_name} not supported in container'"

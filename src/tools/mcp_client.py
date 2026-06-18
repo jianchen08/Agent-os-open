@@ -214,16 +214,7 @@ class MCPClient:
                     details={"server": self.name},
                 )
 
-            # 强制 UTF-8 解码 + errors='replace' 兜底：
-            # Windows 中文系统子进程 stdout 默认 cp936(GBK)，若子进程未自行 reconfigure，
-            # 双字节汉字首字节（如 0xCA continuation byte）会让默认 UTF-8 解码抛
-            # UnicodeDecodeError，使整个工具调用失败。errors='replace' 保证协议帧可解析，
-            # 最坏情况下个别字节被替换为 □ 而非整次调用崩溃。
-            line_str = (
-                line.decode("utf-8", errors="replace").strip()
-                if isinstance(line, bytes)
-                else line.strip()
-            )
+            line_str = line.decode().strip() if isinstance(line, bytes) else line.strip()
             if not line_str:
                 continue
 

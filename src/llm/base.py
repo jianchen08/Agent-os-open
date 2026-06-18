@@ -1,7 +1,8 @@
-"""
-LLM 客户端抽象基类
+"""LLM 客户端抽象基类。
 
-定义统一的 LLM 调用接口，同时提供 LangChain BaseChatModel 兼容层
+定义统一的 LLM 调用接口（generate / stream / generate_with_tools）。
+生产实现见 LiteLLMAdapter（src/llm/adapter.py），思考模型实现见
+clients/reasoning.py。
 """
 
 import logging
@@ -9,14 +10,6 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -76,121 +69,6 @@ class Tool(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any] = Field(default_factory=dict)
-
-
-# ============================================
-# 消息转换工具函数
-# ============================================
-
-
-def message_to_langchain(msg: Message | BaseMessage) -> BaseMessage:
-    """
-    将内部 Message 或 LangChain BaseMessage 转换为 LangChain BaseMessage
-
-    Args:
-        msg: 内部 Message 对象或 LangChain BaseMessage 对象
-
-    Returns:
-        LangChain BaseMessage 对象
-    """
-    # 优先检查是否已经是 LangChain BaseMessage
-    if isinstance(msg, BaseMessage):
-        return msg
-
-    # 处理内部 Message 对象
-    msg_role = getattr(msg, "role", None)
-    content = getattr(msg, "content", "") or ""
-
-    if msg_role == "system":
-        return SystemMessage(content=content)
-    elif msg_role == "user":
-        return HumanMessage(content=content)
-    elif msg_role == "assistant":
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            lc_tool_calls = [
-                {
-                    "id": tc.get("id", "") if isinstance(tc, dict) else tc.id,
-                    "name": tc.get("name", "") if isinstance(tc, dict) else tc.name,
-                    "args": tc.get("arguments", {}) if isinstance(tc, dict) else tc.arguments,
-                }
-                for tc in tool_calls
-            ]
-            return AIMessage(content=content, tool_calls=lc_tool_calls)
-        return AIMessage(content=content)
-    elif msg_role == "tool":
-        return ToolMessage(
-            content=content,
-            tool_call_id=getattr(msg, "tool_call_id", "") or "",
-            name=getattr(msg, "name", "") or "",
-        )
-
-    # 处理可能的工具消息对象（通过属性判断）
-    if hasattr(msg, "tool_call_id"):
-        return ToolMessage(
-            content=content,
-            tool_call_id=getattr(msg, "tool_call_id", "") or "",
-            name=getattr(msg, "name", "") or "",
-        )
-
-    # 处理可能的助手消息对象
-    tool_calls = getattr(msg, "tool_calls", [])
-    if tool_calls:
-        lc_tool_calls = [
-            {
-                "id": tc.get("id", "") if isinstance(tc, dict) else tc.id,
-                "name": tc.get("name", "") if isinstance(tc, dict) else tc.name,
-                "args": tc.get("arguments", {}) if isinstance(tc, dict) else tc.arguments,
-            }
-            for tc in tool_calls
-        ]
-        return AIMessage(content=content, tool_calls=lc_tool_calls)
-
-    # 默认返回 HumanMessage
-    return HumanMessage(content=content or str(msg))
-
-
-def langchain_to_message(lc_msg: BaseMessage) -> Message:
-    """将 LangChain BaseMessage 转换为内部 Message"""
-    if isinstance(lc_msg, SystemMessage):
-        return Message(role="system", content=lc_msg.content)
-    elif isinstance(lc_msg, HumanMessage):
-        return Message(role="user", content=lc_msg.content)
-    elif isinstance(lc_msg, AIMessage):
-        tool_calls = None
-        if lc_msg.tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc.get("id", ""),
-                    name=tc.get("name", ""),
-                    arguments=tc.get("args", {}),
-                )
-                for tc in lc_msg.tool_calls
-            ]
-        return Message(
-            role="assistant",
-            content=lc_msg.content if isinstance(lc_msg.content, str) else "",
-            tool_calls=tool_calls,
-        )
-    elif isinstance(lc_msg, ToolMessage):
-        return Message(
-            role="tool",
-            content=lc_msg.content if isinstance(lc_msg.content, str) else "",
-            tool_call_id=lc_msg.tool_call_id,
-            name=lc_msg.name,
-        )
-    else:
-        return Message(role="user", content=str(lc_msg.content))
-
-
-def messages_to_langchain(messages: list[Message]) -> list[BaseMessage]:
-    """批量转换消息"""
-    return [message_to_langchain(msg) for msg in messages]
-
-
-def langchain_to_messages(lc_messages: list[BaseMessage]) -> list[Message]:
-    """批量转换 LangChain 消息"""
-    return [langchain_to_message(msg) for msg in lc_messages]
 
 
 # ============================================
@@ -620,100 +498,3 @@ class LLMClient(ABC):
         params = self.default_params.copy()
         params.update(kwargs)
         return params
-
-    async def ainvoke(
-        self,
-        messages: list[Message],
-        config: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> AIMessage:
-        """
-        异步调用（LangChain 兼容接口）
-
-        这是一个默认实现，子类可以覆盖以提供更好的性能或特殊功能。
-        默认实现会复用 generate_with_tools 或 generate 方法，确保日志记录正常工作。
-
-        Args:
-            messages: 消息列表
-            config: 配置参数
-            **kwargs: 额外参数
-
-        Returns:
-            AIMessage
-        """
-
-        # 合并 config 和 kwargs
-        if config:
-            kwargs.update(config)
-
-        # 检查是否有工具参数
-        tools = kwargs.pop("tools", None)
-
-        # 转换 LangChain 消息为内部格式
-
-        # 处理消息格式
-        native_messages = []
-        for msg in messages:
-            if hasattr(msg, "type"):  # LangChain 消息
-                if msg.type == "system":
-                    native_messages.append(Message(role="system", content=msg.content))
-                elif msg.type == "human":
-                    native_messages.append(Message(role="user", content=msg.content))
-                elif msg.type == "ai":
-                    native_messages.append(
-                        Message(role="assistant", content=msg.content)
-                    )
-                elif msg.type == "tool":
-                    native_messages.append(
-                        Message(
-                            role="tool",
-                            content=msg.content,
-                            tool_call_id=getattr(msg, "tool_call_id", None),
-                            name=getattr(msg, "name", None),
-                        )
-                    )
-                else:
-                    native_messages.append(
-                        Message(role="user", content=str(msg.content))
-                    )
-            else:  # 已经是内部 Message 格式
-                native_messages.append(msg)
-
-        # 调用带日志记录的方法
-        if tools:
-            response = await self.generate_with_tools(native_messages, tools, **kwargs)
-        else:
-            response = await self.generate(native_messages, **kwargs)
-
-        # 转换响应为 AIMessage
-        tool_calls = None
-        if response.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.name,
-                    "args": tc.arguments,
-                }
-                for tc in response.tool_calls
-            ]
-
-        return AIMessage(
-            content=response.content or "",
-            tool_calls=tool_calls or [],
-            response_metadata={
-                "model_name": response.model,
-                "finish_reason": response.finish_reason,
-                "token_usage": response.usage.model_dump(),
-            },
-        )
-
-    def as_langchain(self) -> BaseChatModel:
-        """
-        获取 LangChain 兼容的 BaseChatModel
-
-        Returns:
-            BaseChatModel 实例
-        """
-        from src.llm.adapters import LLMClientAdapter
-
-        return LLMClientAdapter(self)

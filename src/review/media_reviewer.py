@@ -12,14 +12,8 @@ import logging
 import os
 from pathlib import Path
 
-try:
-    import av  # PyAV — 可选依赖，仅视频审阅功能需要
-except ImportError:
-    av = None  # type: ignore[assignment]
-try:
-    from PIL import Image
-except ImportError:
-    Image = None  # type: ignore[assignment]
+import av
+from PIL import Image
 
 from review.models import (
     ImageReviewResult,
@@ -80,7 +74,7 @@ class ImageReviewer:
         Raises:
             FileNotFoundError: 文件不存在
         """
-        if not os.path.isfile(file_path):  # noqa: PTH113
+        if not os.path.isfile(file_path):
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
         cfg = config or MediaReviewConfig()
@@ -211,7 +205,7 @@ class ImageReviewer:
                 return exif_dict
 
             # 直接取所有 EXIF 标签
-            from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
+            from PIL.ExifTags import Base as ExifBase
 
             tag_map: dict[int, str] = {
                 ExifBase.Make: "Make",
@@ -238,14 +232,14 @@ class ImageReviewer:
                     # 对浮点/分数字典做安全转换
                     if isinstance(value, tuple):
                         try:
-                            from fractions import Fraction  # noqa: PLC0415
+                            from fractions import Fraction
                             value = float(Fraction(value[0], value[1]))
                         except (ZeroDivisionError, TypeError, IndexError):
                             value = str(value)
                     exif_dict[tag_name] = value
 
             # GPS 信息单独提取
-            from PIL.ExifTags import GPSTags  # noqa: PLC0415
+            from PIL.ExifTags import GPSTags
 
             gps_info = raw_exif.get_ifd(ExifBase.GPSInfo)
             if gps_info:
@@ -283,7 +277,7 @@ class VideoReviewer:
         Raises:
             FileNotFoundError: 文件不存在
         """
-        if not os.path.isfile(file_path):  # noqa: PTH113
+        if not os.path.isfile(file_path):
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
         cfg = config or MediaReviewConfig()
@@ -349,13 +343,13 @@ class VideoReviewer:
         Raises:
             FileNotFoundError: 文件不存在
         """
-        if not os.path.isfile(file_path):  # noqa: PTH113
+        if not os.path.isfile(file_path):
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
         # 确定输出目录
         if output_dir is None:
             output_dir = str(Path(file_path).parent)
-        os.makedirs(output_dir, exist_ok=True)  # noqa: PTH103
+        os.makedirs(output_dir, exist_ok=True)
 
         video_stem = Path(file_path).stem
         extracted_paths: list[str] = []

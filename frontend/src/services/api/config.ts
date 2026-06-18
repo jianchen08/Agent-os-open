@@ -16,8 +16,6 @@
  * - updateModel(modelId, config, options): 模型列表 - 更新模型配置
  * - deleteModel(modelId, options): 模型列表 - 删除模型
  * - updateProviderConfig(providerId, config, options): 提供商配置 - 更新提供商配置
- * - addProvider(providerId, config, options): 提供商列表 - 添加提供商
- * - deleteProvider(providerId, options): 提供商列表 - 删除提供商
  * - getAPIConfig(options): APIConfig - 获取 API 配置
  * - saveAPIConfig(config, options): APIConfig - 保存 API 配置
  * - getConcurrencyConfig(options): ConcurrencyConfigResponse - 获取并发配置
@@ -53,45 +51,20 @@ export interface ModelConfig {
   display_name: string
   /** API 基础 URL */
   api_base?: string
-  /** 上下文窗口大小（token 数） */
-  context_window?: number
-  /** 是否推理模型（支持 thinking/reasoning） */
-  reasoning_model?: boolean
   /** 默认参数 */
-  default_params?: Record<string, unknown>
-}
-
-/**
- * 提供商 API Key 条目
- *
- * 注意：后端返回时 api_key 已脱敏（mask），前端拿到的是掩码值如 `sk-****1234`。
- */
-export interface ProviderKeyEntry {
-  /** Key 标识 */
-  id: string
-  /** API 密钥（后端返回时已脱敏） */
-  api_key: string
-  /** 每分钟请求数限制（0 = 不限） */
-  rpm?: number
-  /** Token 配额（0 = 不限） */
-  token_quota?: number
-  /** 最大并发数 */
-  max_concurrent?: number
+  default_params?: Record<string, any>
 }
 
 /**
  * 提供商配置类型
- *
- * 与后端 llm.yaml 中 providers 的结构对齐。
- * 注意：api_key 字段在 keys 数组中，后端返回时已脱敏。
  */
 export interface ProviderConfig {
-  /** 提供商类型（如 openai/deepseek/zai/minimax） */
-  type: string
+  /** API 密钥（隐藏显示） */
+  api_key: string
   /** API 基础 URL */
   api_base?: string
-  /** API Key 列表（后端返回时 api_key 已脱敏） */
-  keys: ProviderKeyEntry[]
+  /** 额外配置 */
+  extra?: Record<string, any>
 }
 
 /**
@@ -289,58 +262,15 @@ export async function deleteModel(
 
 export async function updateProviderConfig(
   providerId: string,
-  config: Record<string, unknown>,
+  config: Partial<ProviderConfig>,
   options: RetryOptions = {},
 ): Promise<Record<string, ProviderConfig>> {
   return requestWithRetry(async () => {
-    const response = await apiClient.put<{ providers: Record<string, ProviderConfig> }>(
+    const response = await apiClient.put<Record<string, ProviderConfig>>(
       `${API_ENDPOINTS.CONFIG.LLM_PROVIDERS}/${providerId}`,
-      { config },
+      config,
     )
-    return response.data.providers
-  }, options)
-}
-
-/**
- * 添加提供商
- *
- * 后端会将 api_key 写入 .env 文件，llm.yaml 中对应 key 改为 `${PROVIDER_ID}_API_KEY` 引用。
- *
- * @param providerId 提供商唯一标识（如 deepseek）
- * @param config 提供商配置（含 type、api_base、api_key 等）
- * @param options 重试选项
- * @returns 更新后的提供商列表
- */
-export async function addProvider(
-  providerId: string,
-  config: { type: string; api_base?: string; api_key?: string; [key: string]: unknown },
-  options: RetryOptions = {},
-): Promise<Record<string, ProviderConfig>> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.post<{ providers: Record<string, ProviderConfig> }>(
-      API_ENDPOINTS.CONFIG.LLM_PROVIDERS,
-      { provider_id: providerId, config },
-    )
-    return response.data.providers
-  }, options)
-}
-
-/**
- * 删除提供商
- *
- * @param providerId 提供商唯一标识
- * @param options 重试选项
- * @returns 更新后的提供商列表
- */
-export async function deleteProvider(
-  providerId: string,
-  options: RetryOptions = {},
-): Promise<Record<string, ProviderConfig>> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.delete<{ providers: Record<string, ProviderConfig> }>(
-      `${API_ENDPOINTS.CONFIG.LLM_PROVIDERS}/${providerId}`,
-    )
-    return response.data.providers
+    return response.data
   }, options)
 }
 

@@ -215,7 +215,7 @@ class ThinkingModeService:
         """
         recommendations = []
 
-        for model_name in SUPPORTED_THINKING_MODELS.keys():
+        for model_name in SUPPORTED_THINKING_MODELS:
             model_info = self.model_service.get_model_info(model_name)
             if not model_info:
                 continue
@@ -292,19 +292,17 @@ class ThinkingModeService:
 
         if thinking_type == "parameter_switch":
             return "通过参数启用思考模式，同一模型支持普通和思考两种模式"
-        elif thinking_type == "model_switch":
+        if thinking_type == "model_switch":
             return "需要切换到专门的思考模型，提供更强的推理能力"
-        else:
-            return "支持思考模式"
+        return "支持思考模式"
 
     def _get_switch_description(self, thinking_type: str) -> str:
         """获取切换方式描述"""
         if thinking_type == "parameter_switch":
             return "通过参数切换，保持同一模型"
-        elif thinking_type == "model_switch":
+        if thinking_type == "model_switch":
             return "切换到专门的思考模型"
-        else:
-            return "未知切换方式"
+        return "未知切换方式"
 
     def _calculate_suitability_score(
         self, model_info: dict[str, Any], task_type: str, complexity: str
@@ -331,9 +329,8 @@ class ThinkingModeService:
         elif task_type == "coding":
             if "deepseek" in provider or "openai" in provider:
                 score += 15
-        elif task_type == "creative":
-            if "anthropic" in provider:
-                score += 15
+        elif task_type == "creative" and "anthropic" in provider:
+            score += 15
 
         # 根据复杂度调整分数
         if complexity == "complex":
@@ -361,16 +358,14 @@ class ThinkingModeService:
         if "openai" in provider:
             if reasoning_effort == "high":
                 return "高成本"
-            elif reasoning_effort == "low":
+            if reasoning_effort == "low":
                 return "中等成本"
-            else:
-                return "中高成本"
-        elif "deepseek" in provider:
+            return "中高成本"
+        if "deepseek" in provider:
             return "低成本"
-        elif "anthropic" in provider:
+        if "anthropic" in provider:
             return "中等成本"
-        else:
-            return "未知成本"
+        return "未知成本"
 
 
 def get_thinking_mode_service() -> ThinkingModeService:

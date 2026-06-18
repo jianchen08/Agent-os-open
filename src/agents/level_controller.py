@@ -9,7 +9,7 @@
 import logging
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from pathlib import Path  # noqa: F401
+from pathlib import Path
 from typing import Any, TypedDict
 
 import yaml
@@ -115,15 +115,12 @@ class LevelController:
             工具权限配置字典
         """
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+            from config.config_center import get_config_center
             config = get_config_center().get("tool_permissions.yaml") or {}
             if not config:
                 self.logger.info("工具权限配置文件不存在，使用默认配置")
                 return self._get_default_permissions()
             return config.get("tool_permissions", {})
-        except ImportError as e:
-            self.logger.info("config_center 未安装，使用默认工具权限: %s", e)
-            return self._get_default_permissions()
         except yaml.YAMLError as e:
             self.logger.warning("工具权限配置文件解析失败: %s", e)
             return self._get_default_permissions()
@@ -255,7 +252,7 @@ class LevelController:
         Returns:
             基础工具名称集合
         """
-        return {"file_read", "file_write", "bash_execute", "web_search"}
+        return {"file_read", "file_write", "bash", "web_search"}
 
     def validate_task_submission(
         self,

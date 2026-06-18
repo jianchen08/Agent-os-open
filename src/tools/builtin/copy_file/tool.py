@@ -129,7 +129,7 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
             metadata={"action": "batch_copy_files"},
         )
 
-    async def _copy_single(self, inputs: dict[str, Any]):  # noqa: PLR0911
+    async def _copy_single(self, inputs: dict[str, Any]):
         """复制单个文件"""
         try:
             source_str = inputs.get("source")
@@ -214,7 +214,7 @@ class CopyFileTool(BuiltinTool, WorkspaceAwareMixin):
             if not overwrite:
                 raise FileExistsError(f"目标目录已存在: {dest}")
             # 覆盖模式下，先删除目标目录
-            import shutil as sh  # noqa: PLC0415
+            import shutil as sh
             sh.rmtree(dest)
 
         # 复制目录

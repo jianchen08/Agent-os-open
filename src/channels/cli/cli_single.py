@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class CLISingleMixin:
     """CLIApplication 的单次运行方法混入类。"""
 
-    async def run_single(self, message: str) -> None:  # noqa: PLR0912,PLR0915
+    async def run_single(self, message: str) -> None:
         """非交互模式：发送单条消息，等待后台任务闭环后退出。
 
         流程：
@@ -119,7 +119,7 @@ class CLISingleMixin:
             if tw and hasattr(tw, "stop"):
                 await tw.stop()
             try:
-                from llm.adapter import cleanup_litellm_resources  # noqa: PLC0415
+                from llm.adapter import cleanup_litellm_resources
 
                 await cleanup_litellm_resources()
             except Exception:
@@ -143,7 +143,7 @@ class CLISingleMixin:
         Returns:
             任务 ID 到终态的映射
         """
-        import asyncio  # noqa: PLC0415
+        import asyncio
 
         final_statuses: dict[str, str] = {}
         for _ in range(max_checks):

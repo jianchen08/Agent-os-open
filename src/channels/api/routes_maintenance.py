@@ -17,17 +17,11 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
-
-from channels.api.deps import require_auth
+from fastapi import APIRouter
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api/v1/maintenance",
-    tags=["维护管理"],
-    dependencies=[Depends(require_auth)],
-)
+router = APIRouter(prefix="/api/v1/maintenance", tags=["维护管理"])
 
 
 def _get_maintenance_service() -> Any:
@@ -37,7 +31,7 @@ def _get_maintenance_service() -> Any:
         MemoryMaintenanceService 实例，服务不可用返回 None
     """
     try:
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
         provider = get_service_provider()
         return provider.get("maintenance_service")
     except Exception as exc:

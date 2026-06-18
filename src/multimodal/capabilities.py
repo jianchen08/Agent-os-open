@@ -68,7 +68,7 @@ class ModelCapabilityRegistry:
         Returns:
             ModelCapability 实例（未配置时返回全 False 的默认能力）
         """
-        from src.config.llm_config import get_llm_config  # noqa: PLC0415
+        from src.config.llm_config import get_llm_config
 
         mgr = get_llm_config()
         model = mgr.find_model_by_name_or_alias(model_name)
@@ -97,7 +97,7 @@ class ModelCapabilityRegistry:
     @classmethod
     def get_adapter_for_model(cls, model_name: str) -> MultimodalAdapter:
         """根据模型名称获取适配器（provider 从 llm.yaml 配置推断）"""
-        from src.llm.router_factory import get_provider_for_model  # noqa: PLC0415
+        from src.llm.router_factory import get_provider_for_model
 
         provider = get_provider_for_model(model_name) or "default"
         return cls.get_adapter(provider)

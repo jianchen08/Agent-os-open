@@ -311,7 +311,7 @@ class Context:
         else:
             self.extra[layer_id] = data
 
-    def to_prompt(self) -> str:  # noqa: PLR0912
+    def to_prompt(self) -> str:
         """转换为提示词（按稳定性排序：稳定→动态）。
 
         Returns:

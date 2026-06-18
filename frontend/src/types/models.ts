@@ -208,12 +208,10 @@ export interface Message {
   metadata?: Record<string, unknown>
   /** 附件列表（用户消息可选） */
   attachments?: Array<{
-    id?: string
+    id: string
     name: string
-    type?: string
-    mime_type?: string
+    type: string
     url: string
-    size?: number
   }>
   /** 思考内容（AI 消息可选） */
   thinking?: ThinkingContent
@@ -228,15 +226,6 @@ export interface Message {
   _thinkingSplitLength?: number
   /** 合并前的原始消息 ID 列表（合并连续 assistant 消息时填充） */
   _originalIds?: string[]
-  /**
-   * 前端最后更新时间戳（ms）
-   *
-   * 由 updateMessage/finalizeMessage 等本地写入路径维护，记录消息最近一次
-   * 在前端被修改的时刻。assistant 消息的「乐观窗口起点」以本字段判定
-   * （见 isWithinOptimisticGrace）；user 乐观消息由 addMessage 创建不写此字段，
-   * 用 timestamp 判定。
-   */
-  _lastUpdated?: number
   /** 统一 Part 列表（按 sequence 排序，唯一渲染数据源） */
   parts?: import('./messageParts').MessagePart[]
   /** 消息类型（可选，用于任务消息） */

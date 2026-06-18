@@ -94,6 +94,9 @@ class DynamicToolLoader:
 
         logger.info("[动态加载] 开始自动发现工具...")
 
+        # BUG-FIX-fix_20260510: 使用 src 目录而非项目根目录作为基准
+        # sys.path 包含 "Agent os/src"，模块路径应为 "tools.builtin.xxx" 而非 "src.tools.builtin.xxx"
+        # 否则 importlib.import_module("src.tools.builtin...") 会因 sys.path 中无 "Agent os" 而失败
         src_root = Path(__file__).parent.parent
 
         # 扫描所有 Python 文件
@@ -128,7 +131,7 @@ class DynamicToolLoader:
 
                 # 检查是否是 BuiltinTool 子类（但不是 BuiltinTool 本身或抽象基类）
                 try:
-                    from tools.builtin.base import BuiltinTool  # noqa: PLC0415
+                    from tools.builtin.base import BuiltinTool
 
                     if not issubclass(attr, BuiltinTool):
                         continue
@@ -202,7 +205,7 @@ class DynamicToolLoader:
 
         return tool_name in self._tool_modules
 
-    async def load_tool(self, tool_name: str) -> str:  # noqa: PLR0912
+    async def load_tool(self, tool_name: str) -> str:
         """动态加载工具"""
         # 确保已完成发现
         if not self._discovered:
@@ -222,7 +225,7 @@ class DynamicToolLoader:
         if tool_name not in self._tool_modules:
             raise ToolNotFoundError(tool_name)
 
-        logger.debug(f"[动态加载] 开始加载工具 | tool_name={tool_name}")
+        logger.info(f"[动态加载] 开始加载工具 | tool_name={tool_name}")
 
         # 标记正在加载
         self._loading[tool_name] = True
@@ -254,7 +257,7 @@ class DynamicToolLoader:
                     raise
             else:
                 tool_definition = tool_instance.get_tool_definition()
-                tool_instance = tool_instance  # noqa: PLW0127
+                tool_instance = tool_instance
 
             # 注册工具
             if tool_instance is not None:
@@ -274,7 +277,7 @@ class DynamicToolLoader:
             # 标记已加载
             self._loaded.add(tool_name)
 
-            logger.debug(
+            logger.info(
                 f"[动态加载] 工具加载成功 | "
                 f"tool_name={tool_name} | registered_name={registered_name}"
             )
@@ -325,8 +328,14 @@ class DynamicToolLoader:
                 except ToolNotFoundError:
                     logger.warning(f"[动态加载] 无法加载工具 | tool_name={tool_name}")
 
+    # BUG-FIX-fix_20260513_tool_injection_race: 非核心工具动态加载竞态条件
+    # 问题根因: _ensure_dynamic_tools_loaded 使用 create_task 异步加载但不等待完成，
+    #           导致后续同步获取工具时工具尚未注册
+    # 修复方案: 提取同步加载路径，确保工具在获取前完成注册
+    # 影响范围: 所有不在 CORE_SYSTEM_TOOLS 中的工具（playwright_test、list_directory 等）
+    # 修复日期: 2026-05-13
 
-    def load_tool_sync(self, tool_name: str) -> str:  # noqa: PLR0912
+    def load_tool_sync(self, tool_name: str) -> str:
         """同步动态加载工具（从 load_tool 提取的纯同步路径）"""
         if not self._discovered:
             self._discover_tools()
@@ -342,7 +351,7 @@ class DynamicToolLoader:
         if tool_name not in self._tool_modules:
             raise ToolNotFoundError(tool_name)
 
-        logger.debug(f"[动态加载-同步] 开始加载工具 | tool_name={tool_name}")
+        logger.info(f"[动态加载-同步] 开始加载工具 | tool_name={tool_name}")
 
         self._loading[tool_name] = True
 
@@ -380,7 +389,7 @@ class DynamicToolLoader:
 
             self._loaded.add(tool_name)
 
-            logger.debug(
+            logger.info(
                 f"[动态加载-同步] 工具加载成功 | "
                 f"tool_name={tool_name} | registered_name={registered_name}"
             )
@@ -463,12 +472,12 @@ def get_dynamic_tool_loader() -> DynamicToolLoader | None:
 
 def set_dynamic_tool_loader(loader: DynamicToolLoader) -> None:
     """设置全局动态工具加载器"""
-    global _global_loader  # noqa: PLW0603
+    global _global_loader
     _global_loader = loader
 
 
 def init_dynamic_tool_loader(registry: ToolRegistry) -> DynamicToolLoader:
     """初始化全局动态工具加载器"""
-    global _global_loader  # noqa: PLW0603
+    global _global_loader
     _global_loader = DynamicToolLoader(registry)
     return _global_loader

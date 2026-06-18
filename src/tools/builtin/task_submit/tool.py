@@ -21,7 +21,6 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
     _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
 
 
-def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
+def _validate_workspace_path(workspace: str) -> str | None:
     """验证目标空间路径的安全性。
 
     检查规则：
@@ -112,7 +111,7 @@ def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
 
     # ── 3. 配置文件工作空间根目录检查 ──
     try:
-        from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
+        from isolation.workspace import get_workspace_config_root
         ws_root = get_workspace_config_root()
         ws_root_normalized = os.path.normpath(ws_root)
         if normalized_lower == ws_root_normalized.lower():
@@ -124,30 +123,6 @@ def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
         logger.warning("[TaskSubmit] 读取工作空间配置根目录失败，跳过该检查 | error=%s", e)
 
     return None
-
-
-def _normalize_description(value: Any) -> str:
-    """将 LLM 返回的 description 归一化为 str。
-
-    LLM 偶尔会把多行文本写成数组（如 ``["line1", ""]``），而 ``TaskModel`` 是
-    dataclass 无运行时类型校验，list 会被静默持久化，最终在 API 层
-    ``TaskResponse.description``（pydantic 强制 str）校验失败导致 500。
-    在入口归一化，避免脏数据落盘，同时让 ``len(description)`` 超长检查生效。
-
-    Args:
-        value: LLM 返回的原始 description 值
-
-    Returns:
-        归一化后的字符串；None 返回空串；list/tuple 用换行连接；
-        其他非 str 类型转为字符串。
-    """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return "\n".join(str(item) for item in value)
-    return str(value)
 
 
 class TaskSubmitTool(BuiltinTool):
@@ -167,16 +142,21 @@ class TaskSubmitTool(BuiltinTool):
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        委托到 tasks.service_access 公共接口，
-        支持缓存已获取的实例避免重复创建。
+        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
 
         Returns:
             TaskService 实例，创建失败时返回 None
         """
         if self._task_service is not None:
             return self._task_service
-        from tasks.service_access import get_task_service  # noqa: PLC0415
-        service = get_task_service()
+        from infrastructure.service_provider import get_service_provider
+        provider = get_service_provider()
+        service = provider.get_or_create(
+            "task_service",
+            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
+                event_bus=provider.get("event_bus"),
+            ),
+        )
         if service is not None:
             self._task_service = service
         return self._task_service
@@ -427,7 +407,7 @@ class TaskSubmitTool(BuiltinTool):
             },
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912,PLR0915
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行任务提交。
 
         流程：
@@ -438,12 +418,12 @@ class TaskSubmitTool(BuiltinTool):
         5. 通过 EventBus 发布 task.submitted 事件
         6. 返回提交结果
         """
-        import time as _time  # noqa: PLC0415
+        import time as _time
         _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
         goal = inputs.get("goal")
         if isinstance(goal, str):
-            import json  # noqa: PLC0415
+            import json
             try:
                 goal = json.loads(goal)
             except (json.JSONDecodeError, ValueError):
@@ -505,10 +485,12 @@ class TaskSubmitTool(BuiltinTool):
 
         target_type = inputs.get("target_type")
         target_id = inputs.get("target_id")
-        description = _normalize_description(goal.get("description", ""))
+        description = goal.get("description", "")
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
 
+        # BUG-FIX-fix_20260530_description_lost: 诊断日志
+        # 追踪 description 在 task_submit 入口的值
         logger.info(
             "[TaskSubmit] description 追踪 | has_inputs_desc=%s | has_goal_desc=%s | final_desc_len=%d | preview=%s",
             bool(inputs.get("description")),
@@ -518,7 +500,10 @@ class TaskSubmitTool(BuiltinTool):
         )
 
         # ── 描述长度硬限制（防止超大消息体打爆 LLM API） ──
-        _MAX_DESC_LEN = 2000  # noqa: N806
+        # BUG-FIX-fix_20260604_description_too_large:
+        # L2 orchestrator 曾将 658 行审查报告塞入 goal.description，
+        # 导致子 Agent 的 LLM API 返回 "messages 参数非法"。
+        _MAX_DESC_LEN = 2000
         if len(description) > _MAX_DESC_LEN:
             logger.warning(
                 "[TaskSubmit] 描述超长拒绝 | len=%d | max=%d | preview=%.100s",
@@ -532,6 +517,9 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="DESCRIPTION_TOO_LONG",
             )
 
+        # BUG-FIX-fix_20260420_eval_inject: LLM 可能传入非 dict 类型的
+        # acceptance_criteria（如字符串、列表），导致跳过自动补全又跳过验证。
+        # 统一规范化为 dict，非 dict 视为空以触发自动补全。
         if not isinstance(acceptance_criteria, dict):
             logger.warning(
                 "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict 以触发自动补全",
@@ -539,6 +527,11 @@ class TaskSubmitTool(BuiltinTool):
             )
             acceptance_criteria = {}
 
+        # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
+        # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
+        # BUG-FIX-fix_20260424_use_recommended_only: 当目标 agent 定义了
+        # recommended_metrics 时，只使用这些指标，忽略 LLM 传入的额外指标。
+        # 原因：上级不知道下级的具体文件路径，LLM 可能添加路径错误的 file_check。
         if target_type == "agent" and target_id:
             auto_criteria = self._auto_fill_criteria(
                 target_id, context=inputs,
@@ -594,6 +587,9 @@ class TaskSubmitTool(BuiltinTool):
             )
             del inputs["workspace"]
 
+        # BUG-FIX-fix_20260523_l2_isolation_override:
+        # 子任务无权决定隔离级别，由系统根据父任务链自动继承。
+        # LLM 可能传入 isolation_level="host"，导致子任务绕过沙箱隔离。
         if parent_task_id and inputs.get("isolation_level"):
             logger.info(
                 "[TaskSubmit] 子任务清除 LLM 传入的 isolation_level | parent_task_id=%s | isolation_level=%s",
@@ -603,27 +599,6 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
-            # BUG-DIAG-fix_20260619_l2_parent_task_id_lost:
-            # L2 调 task_submit 时 parent_task_id 理应自动注入（来自 state["task_id"]）。
-            # 此处触发说明注入链断裂。诊断字段定位断裂点：
-            # - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
-            # - inputs 无 task_id 键 → param_inject 完全没处理此调用
-            # - task_id 键存在但为空 → state["task_id"] 在引擎 state 中缺失
-            _diag_keys = [k for k in inputs if k in (
-                "task_id", "parent_task_id", "session_id", "pipeline_id",
-                "parent_agent_level", "workspace",
-            )]
-            logger.error(
-                "[TaskSubmit][DIAG] L%d 无可注入 parent_task_id，注入链断裂诊断 | "
-                "injected_task_id=%r | inputs_has_task_id=%s | "
-                "inputs[task_id]=%r | diag_keys=%s | all_input_keys=%s",
-                parent_agent_level,
-                injected_task_id,
-                "task_id" in inputs,
-                inputs.get("task_id"),
-                _diag_keys,
-                sorted(inputs.keys()),
-            )
             logger.warning(
                 "[TaskSubmit] L%d Agent 无可注入的 parent_task_id，拒绝创建根任务",
                 parent_agent_level,
@@ -673,6 +648,8 @@ class TaskSubmitTool(BuiltinTool):
                 )
             # pipe 与 workspace 相互独立，可同时生效
             if "pipe" in _mode_set:
+                # BUG-FIX: pipe 模式需要查找源任务的 pipeline_run_id，
+                # 传递给 task_executor 以恢复对话历史
                 _inherit_pipe_pipeline_id = ""
                 _pipe_task_service = self._get_task_service()
                 if _pipe_task_service:
@@ -740,22 +717,7 @@ class TaskSubmitTool(BuiltinTool):
                             "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                         ),
                     )
-                from pathlib import Path  # noqa: PLC0415
-                # 同容器才能 inherit：源任务的工作空间必须属于当前容器，
-                # 否则跨容器继承会导致产出落到错误的容器、合并串台（bdcd592d 根因）。
-                _source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
-                _current_container = Path(__file__).resolve().parents[4]
-                if _source_root:
-                    try:
-                        Path(_source_root).resolve().relative_to(_current_container)
-                    except ValueError:
-                        return create_failure_result(
-                            error=(
-                                f"任务 {inherit_from} 属于其它容器({_source_root})，"
-                                f"不能跨容器继承工作空间。"
-                                f"请去掉 inherit_workspace_from 参数重新提交。"
-                            ),
-                        )
+                from pathlib import Path
                 old_ws_path = old_ws_meta.get("path", "")
                 if not old_ws_path or not Path(old_ws_path).exists():
                     return create_failure_result(
@@ -765,19 +727,6 @@ class TaskSubmitTool(BuiltinTool):
                             "使用空工作空间开始。"
                         ),
                     )
-                # worktree 模式：目录在但 .git 没了 → 源 worktree 已被清理，
-                # 产物文件还在裸目录里但 git 身份（branch）已失效，继续 inherit
-                # 会在后续合并时找不到 branch 而失败（bdcd592d 串台事故根因）。
-                # 报错说明现状，让 agent 自行决定是否去该目录捞取已有产物。
-                if old_ws_meta.get("mode") == "worktree":
-                    if not (Path(old_ws_path) / ".git").exists():
-                        return create_failure_result(
-                            error=(
-                                f"任务 {inherit_from} 的工作空间: git 身份已失效,"
-                                f"目录里产物可能仍在可手动读取或者处理: {old_ws_path}。"
-                                f"请去掉 inherit_workspace_from 参数重新提交。"
-                            ),
-                        )
                 workspace = old_ws_path
                 _inherit_resolved = True
                 logger.info(
@@ -824,6 +773,11 @@ class TaskSubmitTool(BuiltinTool):
             return create_failure_result(
                 error="目标 ID 不能为空",
                 error_code="MISSING_TARGET_ID",
+            )
+        if not acceptance_criteria:
+            return create_failure_result(
+                error="必须提供 acceptance_criteria",
+                error_code="MISSING_METRICS",
             )
 
         # ── 2.5 目标 Agent 存在性与级别校验 ──
@@ -874,19 +828,20 @@ class TaskSubmitTool(BuiltinTool):
         # ── 6. 创建任务 ──
         raw_priority = inputs.get("priority", 5)
         try:
-            from tasks.types import TaskPriority as TP  # noqa: N817,PLC0415
+            from tasks.types import TaskPriority as TP
             TP(raw_priority)
         except (ValueError, AttributeError):
             raw_priority = 5
 
         try:
             child_agent_level = min(parent_agent_level + 1, 3)
-            from agents.types import AgentLevel  # noqa: PLC0415
+            from agents.types import AgentLevel
             level_values = {"L1": 1, "L2": 2, "L3": 3}
             level_str = f"L{child_agent_level}"
             child_level = AgentLevel(level_str) if level_str in level_values else AgentLevel.L3_ATOMIC
 
             pipeline_id = inputs.get("pipeline_id")
+            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
             task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
@@ -909,7 +864,7 @@ class TaskSubmitTool(BuiltinTool):
         logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
 
         # ── 7. 提交到后台执行器 ──
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
         task_worker = get_service_provider().get("task_worker")
         if not task_worker:
             await task_service.hard_delete(task.id)
@@ -947,67 +902,18 @@ class TaskSubmitTool(BuiltinTool):
             "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
         }
 
+        # BUG-FIX: pipe 模式传递源任务的 pipeline_run_id
+        # task_executor 据此恢复源任务的对话历史
         if _inherit_pipe_pipeline_id:
             task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
 
+        # BUG-FIX-fix_20260530_description_lost: 诊断日志
         logger.info(
             "[TaskSubmit] task_data description 追踪 | task_id=%s | desc_in_task_data=%s | desc_len=%d",
             task.id,
             bool(task_data.get("description")),
             len(task_data.get("description", "")),
         )
-
-        # ── 7. 同步初始化工作空间 ──
-        # 工作空间解析必须在 submit 返回前完成，确保 ws_meta 写入 task.metadata。
-        # 失败则清理任务记录并返回错误，不让 LLM 误以为任务可执行。
-        task, ws_err = await self._init_workspace(
-            task, workspace, task_data, task_service,
-        )
-        if ws_err:
-            await task_service.hard_delete(task.id)
-            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
-
-        # ── 7.5 pipe 继承：同步 clone 源管道历史 ──
-        # 历史准备（clone）必须在 submit 返回前完成：clone 失败则任务提交失败，
-        # 让父 LLM 知道子任务起不来。预生成 pipeline_id 并 clone 到目标管道，
-        # task_executor 复用该 id（不再重复 clone）。
-        if _inherit_pipe_pipeline_id:
-            import uuid as _uuid  # noqa: PLC0415
-            _pre_pipeline_id = _uuid.uuid4().hex[:12]
-            try:
-                exec_storage = get_service_provider().get("execution_record_storage")
-                if exec_storage:
-                    # root_task_id 必须与 task_executor._bind_pipeline_run 的
-                    # register_pipeline(pipeline_id, root_id) 一致，否则引擎注册时
-                    # 会触发文件迁移，导致 clone 文件和引擎读取文件分裂。
-                    _root_task_id = ""
-                    if task_service:
-                        _root_task_id = task_service.get_root_task_id(task.id) or ""
-                    exec_storage.clone_pipeline_records(
-                        source_pipeline_id=_inherit_pipe_pipeline_id,
-                        target_pipeline_id=_pre_pipeline_id,
-                        new_container_task_id=task.id,
-                        root_task_id=_root_task_id,
-                    )
-                    # clone 成功：把预生成 id 传给 task_executor 复用
-                    task_data["_pre_pipeline_id"] = _pre_pipeline_id
-                    logger.info(
-                        "[TaskSubmit] pipe 继承历史 clone 完成 | task=%s | src=%s | dst=%s | root=%s",
-                        task.id, _inherit_pipe_pipeline_id[:12], _pre_pipeline_id[:12],
-                        _root_task_id[:12] if _root_task_id else "(none)",
-                    )
-            except Exception as clone_exc:
-                # clone 失败：清理任务记录，返回失败给父 LLM
-                logger.error(
-                    "[TaskSubmit] pipe 继承历史 clone 失败 | task=%s | error=%s",
-                    task.id, clone_exc, exc_info=True,
-                )
-                await task_service.hard_delete(task.id)
-                return create_failure_result(
-                    error=f"继承管道历史失败：{clone_exc}",
-                    error_code="INHERIT_PIPE_FAILED",
-                )
-
         if not task_worker.submit_task(task_data):
             await task_service.hard_delete(task.id)
             return create_failure_result(
@@ -1020,9 +926,14 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
+        # BUG-FIX-fix_20260522_task_status_realtime:
+        # 问题根因1: self._services 不存在，导致广播失败。
+        # 问题根因2: task.user_id 未被设置（create_task 不接受 user_id），
+        #            应用 inputs 中注入的 user_id。
+        # 修复方案: 直接 import ws_interaction_notifier 单例 + 使用 inputs["user_id"]。
         try:
             _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
+            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
             if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
                 await _ws_notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
@@ -1059,8 +970,7 @@ class TaskSubmitTool(BuiltinTool):
             "target_type": target_type,
             "target_id": target_id,
             "submit_status": "submitted",
-            "workspace": workspace or "",
-            "resolved_workspace": (task.metadata or {}).get("ws_meta", {}).get("path", ""),
+            # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
             "message": (
                 f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
                 "该任务需要一定时间完成。"
@@ -1077,7 +987,7 @@ class TaskSubmitTool(BuiltinTool):
             },
         )
 
-    async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
+    async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """处理容器任务提交。
 
         容器任务不指定执行者，只创建一个 pending 状态的父任务框架。
@@ -1120,8 +1030,9 @@ class TaskSubmitTool(BuiltinTool):
             )
 
         try:
-            description = _normalize_description(goal.get("description", ""))
+            description = goal.get("description", "")
             pipeline_id = inputs.get("pipeline_id")
+            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
             task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
@@ -1150,15 +1061,15 @@ class TaskSubmitTool(BuiltinTool):
                     if root_id:
                         exec_storage.register_pipeline(pipeline_id, root_id)
 
+                # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
+                # 容器任务管道也注册到 api_store，保持 pipeline_ids 完整
                 _session_id = inputs.get("session_id", "")
                 if _session_id:
                     try:
-                        from channels.api.memory_store import store as api_store  # noqa: PLC0415
+                        from channels.api.memory_store import store as api_store
                         _session = api_store.get_session(_session_id)
                         if _session:
-                            # BUG-FIX-fix_20260622_subpipeline_overwrites_active:
-                            # 容器子管道注册时不覆盖主管道 active，避免会话历史丢失
-                            _session.register_pipeline(pipeline_id, set_active=False)
+                            _session.register_pipeline(pipeline_id)
                             api_store.set_session(_session_id, _session)
                     except Exception as _reg_exc:
                         logger.warning(
@@ -1172,9 +1083,12 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
+        # BUG-FIX-fix_20260522_task_status_realtime:
+        # 问题根因1: self._services 不存在，直接 import 单例。
+        # 问题根因2: task.user_id 未被设置，使用 inputs 中注入的 user_id。
         try:
             _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
+            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
             if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
                 await _ws_notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
@@ -1200,29 +1114,16 @@ class TaskSubmitTool(BuiltinTool):
                 task.id, _ws_exc,
             )
 
-        from isolation.workspace import resolve_container_workspace_path  # noqa: PLC0415
+        # BUG-FIX-fix_20260519_container_workspace_path:
+        # 路径计算逻辑集中在 isolation.workspace 模块。
+        # 优先使用 LLM 传入的 isolation_level，没有才用配置文件。
+        from isolation.workspace import resolve_container_workspace_path
         container_workspace_path = resolve_container_workspace_path(
             inputs.get("workspace"), task.id,
             isolation_mode=inputs.get("isolation_level"),
         )
 
-        # ── 同步初始化容器工作空间 ──
-        # 与非容器任务一致：submit 返回前必须完成工作空间创建。
-        _container_task_data = {"isolation_mode": inputs.get("isolation_level", "")}
-        task, ws_err = await self._init_workspace(
-            task, inputs.get("workspace") or "", _container_task_data, task_service,
-            is_container=True,
-        )
-        if ws_err:
-            await task_service.hard_delete(task.id)
-            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
-
-        # on_task_start 可能重算路径，以 ws_meta 为准
-        _ws_meta_path = (task.metadata or {}).get("ws_meta", {}).get("path", "")
-        if _ws_meta_path:
-            container_workspace_path = _ws_meta_path
-
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider
         task_worker = get_service_provider().get("task_worker")
         if task_worker:
             task_worker.submit_task({
@@ -1243,9 +1144,10 @@ class TaskSubmitTool(BuiltinTool):
             "status": task.status.value,
             "task_scope": "container",
             "submit_status": "submitted",
-            "workspace": inputs.get("workspace") or "",
-            "resolved_workspace": container_workspace_path,
         }
+
+        if parent_agent_level == 1:
+            result_data["workspace_path"] = container_workspace_path
 
         result_data["message"] = (
             f"容器任务 [{task.title}]（ID: {task.id}）已提交"
@@ -1260,85 +1162,6 @@ class TaskSubmitTool(BuiltinTool):
             data=result_data,
             metadata={"action": "task_submit_container"},
         )
-
-    @staticmethod
-    async def _init_workspace(
-        task: Any,
-        workspace: str,
-        task_data: dict[str, Any],
-        task_service: Any,
-        *,
-        is_container: bool = False,
-    ) -> tuple[Any, str | None]:
-        """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。
-
-        - 非容器：调 ``lifecycle.on_task_start``
-        - 容器：调 ``lifecycle.init_container_workspace``
-        通过 run_in_executor 在线程池执行，不阻塞事件循环和其他管道。
-
-        Args:
-            task: TaskModel 实例
-            workspace: 目标工作空间路径
-            task_data: 任务数据字典（isolation_mode 等决策字段）
-            task_service: TaskService 实例
-            is_container: 是否为容器任务
-
-        Returns:
-            (更新后的 task, None) 成功；(task, error_msg) 失败。
-            调用方负责在失败时 hard_delete。
-        """
-        import asyncio  # noqa: PLC0415
-
-        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-        provider = get_service_provider()
-        lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
-        if lifecycle is None:
-            return task, "工作空间管理器不可用，任务提交失败"
-
-        # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/host 模式）
-        if "isolation_mode" not in task_data:
-            iso_level = (task.metadata or {}).get("isolation_level", "")
-            if iso_level:
-                task_data["isolation_mode"] = iso_level
-
-        fn = lifecycle.init_container_workspace if is_container else lifecycle.on_task_start
-        try:
-            loop = asyncio.get_running_loop()
-            ws_meta = await loop.run_in_executor(None, fn, task.id, workspace, task_data)
-        except Exception as ws_err:
-            logger.error(
-                "[TaskSubmit] 工作空间初始化失败 | task_id=%s | container=%s | error=%s",
-                task.id, is_container, ws_err,
-            )
-            return task, f"工作空间初始化失败: {ws_err}"
-
-        # on_task_start 内部已调 _persist_ws_meta 写入 task.metadata；
-        # init_container_workspace 只写内存 _ws_meta_store，不持久化，
-        # 需要在此手动写入 task.metadata 以便后续统一读取。
-        if is_container and isinstance(ws_meta, dict) and ws_meta.get("path"):
-            task.metadata = task.metadata or {}
-            task.metadata["ws_meta"] = ws_meta
-            try:
-                await task_service.save_task(task)
-            except Exception as save_err:
-                logger.warning(
-                    "[TaskSubmit] 容器 ws_meta 持久化失败 (non-fatal) | task_id=%s | error=%s",
-                    task.id, save_err,
-                )
-
-        # 重新读取 task 获取 lifecycle 写入的最新 metadata（含 ws_meta）
-        refreshed = task_service.get_task(task.id)
-        if refreshed:
-            task = refreshed
-        if not (task.metadata or {}).get("ws_meta"):
-            logger.error(
-                "[TaskSubmit] 工作空间初始化完成但 ws_meta 缺失 | task_id=%s",
-                task.id,
-            )
-            return task, "工作空间初始化异常：ws_meta 未生成"
-
-        return task, None
 
     def _validate_parent_task_id(
         self, parent_agent_level: int, parent_task_id: str | None, task_scope: str
@@ -1400,7 +1223,7 @@ class TaskSubmitTool(BuiltinTool):
                 missing_ids.append(dep_id)
         return missing_ids
 
-    def _build_metadata(  # noqa: PLR0912
+    def _build_metadata(
         self,
         inputs: dict[str, Any],
         goal: dict[str, Any],
@@ -1422,6 +1245,7 @@ class TaskSubmitTool(BuiltinTool):
         metadata: dict[str, Any] = {}
 
         # 存储验收标准（供 task_evaluate 使用）
+        # BUG-FIX-fix_20260420_eval_inject: 防御性检查，确保非 dict 类型不会静默丢失
         if acceptance_criteria:
             if isinstance(acceptance_criteria, dict):
                 metadata["acceptance_criteria"] = acceptance_criteria
@@ -1443,6 +1267,9 @@ class TaskSubmitTool(BuiltinTool):
             metadata["submitted_by_level"] = parent_agent_level
 
         # 存储执行相关参数
+        # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
+        # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套
+        # 例外：inherit_workspace_from 解析的 workspace 必须存储，因为这是显式指定的
         if inputs.get("workspace") and (not inputs.get("parent_task_id") or inputs.get("inherit_workspace_from")):
             metadata["workspace"] = inputs["workspace"]
         if inputs.get("max_retries"):
@@ -1456,6 +1283,9 @@ class TaskSubmitTool(BuiltinTool):
         if inputs.get("target_id"):
             metadata["target_id"] = inputs["target_id"]
 
+        # BUG-FIX-fix_20260526_missing_user_id:
+        # task_notifier 通过 task.metadata["user_id"] 推送状态变更，
+        # 不存 user_id 导致所有状态推送静默失败。
         if inputs.get("user_id"):
             metadata["user_id"] = inputs["user_id"]
 
@@ -1503,7 +1333,7 @@ class TaskSubmitTool(BuiltinTool):
         agent_config = self._get_agent_config_from_registry(target_id)
 
         if agent_config is not None:
-            level_value = safe_enum_value(agent_config.level)
+            level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
             level_map = {"L1": 1, "L2": 2, "L3": 3}
             agent_level = level_map.get(level_value, 0)
             agent_level_str = level_value
@@ -1553,7 +1383,7 @@ class TaskSubmitTool(BuiltinTool):
             AgentConfig 实例，未找到返回 None
         """
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from infrastructure.service_provider import get_service_provider
             provider = get_service_provider()
             agent_registry = provider.get("agent_registry")
             if agent_registry is not None:
@@ -1578,9 +1408,9 @@ class TaskSubmitTool(BuiltinTool):
         Returns:
             (是否找到, 级别字符串, 级别数字) 元组
         """
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
 
-        import yaml  # noqa: PLC0415
+        import yaml
 
         _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
@@ -1615,7 +1445,7 @@ class TaskSubmitTool(BuiltinTool):
         agent_level = level_map.get(agent_level_str, 0)
         return (True, agent_level_str, agent_level)
 
-    def _auto_fill_criteria(  # noqa: PLR0912,PLR0915
+    def _auto_fill_criteria(
         self,
         target_id: str,
         context: dict[str, Any] | None = None,
@@ -1632,10 +1462,13 @@ class TaskSubmitTool(BuiltinTool):
         Returns:
             验收标准字典，找不到时返回空 dict
         """
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
 
-        import yaml  # noqa: PLC0415
+        import yaml
 
+        # BUG-FIX-fix_20260420_eval_inject: 使用文件路径推导项目根目录，
+        # 而非 Path.cwd()，避免工作目录变化导致找不到配置。
+        # task_submit.py 位于 src/tools/builtin/task_submit/，向上 5 层即为项目根目录。
         _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
 
@@ -1721,7 +1554,7 @@ class TaskSubmitTool(BuiltinTool):
                     for k, v in default_params.items():
                         if isinstance(v, str):
                             for var_name, var_val in tmpl_vars.items():
-                                v = v.replace("{" + var_name + "}", var_val)  # noqa: PLW2901
+                                v = v.replace("{" + var_name + "}", var_val)
                         replaced[k] = v
                     default_params = replaced
                 criteria[metric_id] = {"input_params": default_params}

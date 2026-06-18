@@ -64,9 +64,8 @@ async def _request_with_connect_retry(
                 break
             await asyncio.sleep(PROXY_CONNECT_BACKOFF * (2 ** attempt))
     # 重试用尽，抛出最后的连接异常
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("_request_with_connect_retry: 重试用尽但未捕获异常")
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -107,32 +106,25 @@ async def proxy_api(request: Request, path: str):
     headers.pop("host", None)
     headers.pop("content-length", None)
 
-    resp: httpx.Response | None = None
-    try:
-        resp = await _request_with_connect_retry(
-            method=request.method,
-            url=url,
-            content=body,
-            headers=headers,
-            params=dict(request.query_params),
-        )
+    resp = await _request_with_connect_retry(
+        method=request.method,
+        url=url,
+        content=body,
+        headers=headers,
+        params=dict(request.query_params),
+    )
 
-        # 过滤 hop-by-hop headers
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
+    # 过滤 hop-by-hop headers
+    resp_headers = {}
+    for k, v in resp.headers.items():
+        if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
+            resp_headers[k] = v
 
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=resp_headers,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -187,63 +179,22 @@ async def proxy_websocket(websocket: WebSocket, path: str):
 async def proxy_media(request: Request, path: str):
     """将 /media/* 请求代理到后端"""
     url = f"{BACKEND_URL}/media/{path}"
+    resp = await _request_with_connect_retry(
+        method="GET",
+        url=url,
+        follow_redirects=True,
+    )
 
-    resp: httpx.Response | None = None
-    try:
-        resp = await _request_with_connect_retry(
-            method="GET",
-            url=url,
-            follow_redirects=True,
-        )
+    resp_headers = {}
+    for k, v in resp.headers.items():
+        if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
+            resp_headers[k] = v
 
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
-
-
-# ---------------------------------------------------------------------------
-# 上传文件反向代理 → 后端容器（图片/文件等多模态附件）
-# ---------------------------------------------------------------------------
-@app.api_route("/uploads/{path:path}", methods=["GET"])
-async def proxy_uploads(request: Request, path: str):
-    """将 /uploads/* 请求代理到后端（用户上传的图片/文件）"""
-    url = f"{BACKEND_URL}/uploads/{path}"
-
-    resp: httpx.Response | None = None
-    try:
-        resp = await _request_with_connect_retry(
-            method="GET",
-            url=url,
-            follow_redirects=True,
-        )
-
-        resp_headers = {}
-        for k, v in resp.headers.items():
-            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-                resp_headers[k] = v
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=resp_headers,
-        )
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
-    finally:
-        if resp is not None:
-            await resp.aclose()
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=resp_headers,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +238,4 @@ if __name__ == "__main__":
     _asyncio.run(_wait_for_backend())
 
     port = int(os.environ.get("PORT", "5188"))
-    # 强制使用标准 asyncio 事件循环，避免 uvloop（C 扩展）在 WSL2 虚拟化
-    # CPU 上触发 SIGSEGV（退出码 139）。uvloop 性能略高，但稳定性不如纯 Python。
-    uvicorn.run(app, host="0.0.0.0", port=port, loop="asyncio")
+    uvicorn.run(app, host="0.0.0.0", port=port)

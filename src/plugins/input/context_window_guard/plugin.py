@@ -82,7 +82,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # ③ System YAML fallback
         try:
-            from memory.context_compressor import CompressionConfig  # noqa: PLC0415
+            from memory.context_compressor import CompressionConfig
 
             sys_config = CompressionConfig.from_yaml_config(context_window=128000)
             return sys_config.compress_trigger_ratio
@@ -105,7 +105,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if explicit:
             return explicit
         try:
-            from config.models import get_model_config_loader  # noqa: PLC0415
+            from config.models import get_model_config_loader
 
             loader = get_model_config_loader()
             defaults = loader._load_llm_data().get("defaults", {})
@@ -187,7 +187,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             track_usage = ctx.state.get("track.llm_usage", {})
             prev_input = track_usage.get("input_tokens", 0)
             if prev_input > 0:
-                logger.debug(
+                logger.info(
                     "[%s] 估算: llm_usage 为空，从 track 回退: prev_input=%d",
                     self.name, prev_input,
                 )
@@ -200,7 +200,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
 
             if current_non_sys <= tracked:
-                logger.debug(
+                logger.info(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
                     self.name, prev_input, prev_input, tracked, current_non_sys,
                 )
@@ -211,7 +211,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
 
             effective = prev_input + delta_tokens
-            logger.debug(
+            logger.info(
                 "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
                 self.name, effective, prev_input, delta_tokens, tracked, current_non_sys, len(delta_msgs),
             )
@@ -220,7 +220,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 策略 2：压缩块拼接估算
         assembled = await self._estimate_assembled_tokens(ctx, messages)
         if assembled >= 0:
-            logger.debug(
+            logger.info(
                 "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
                 self.name, assembled, len(messages),
             )
@@ -228,7 +228,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
-        logger.debug(
+        logger.info(
             "[%s] 估算(全量字符): %d tokens, msg_count=%d",
             self.name, estimated, len(messages),
         )
@@ -303,7 +303,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 主入口
     # ------------------------------------------------------------------
 
-    async def execute(self, ctx: PluginContext) -> PluginResult:  # noqa: PLR0911
+    async def execute(self, ctx: PluginContext) -> PluginResult:
         """检查上下文大小并在超阈值时触发记忆系统压缩。
 
         Args:
@@ -347,7 +347,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 阈值检查
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
-        logger.debug(
+        logger.info(
             "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, "
             "ratio=%.2f, msg_count=%d, service=%s",
             self.name, estimated_tokens, trigger_tokens, context_window,
@@ -443,7 +443,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    async def _trim_covered_messages(  # noqa: PLR0911
+    async def _trim_covered_messages(
         self, ctx: PluginContext, messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """裁剪被已有压缩块覆盖的旧消息（重启场景）。
@@ -527,7 +527,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         except (KeyError, AttributeError):
             pass
 
-        from memory.memory_context_service import MemoryContextService  # noqa: PLC0415
+        from memory.memory_context_service import MemoryContextService
 
         try:
             context_window = ctx.state.get("context_window", 128000)
@@ -567,7 +567,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 compression_model_id=self._compression_model,
                 model_name=model_name,
             )
-            logger.debug(
+            logger.info(
                 "[%s] setup 完成: chunk_service=%s, memory_service=%s, llm_core=%s, "
                 "compression_model=%s, pipeline_id=%s",
                 self.name,

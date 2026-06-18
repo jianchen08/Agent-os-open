@@ -1,8 +1,8 @@
 """UI Schema API 路由测试。
 
 覆盖：
-- GET /api/v1/modules/ui 返回 Schema 列表
-- GET /api/v1/modules/ui/{module_id} 返回指定模块 Schema
+- GET /api/modules/ui 返回 Schema 列表
+- GET /api/modules/ui/{module_id} 返回指定模块 Schema
 - module_id 不存在返回 404
 - client_type 过滤参数功能
 """
@@ -53,17 +53,17 @@ def _get_auth_token(client) -> str:
 
 
 # ============================================================
-# GET /api/v1/modules/ui - 列表接口
+# GET /api/modules/ui - 列表接口
 # ============================================================
 
 
 class TestListUISchemas:
-    """GET /api/v1/modules/ui 测试。"""
+    """GET /api/modules/ui 测试。"""
 
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_list_returns_items_and_total(self, mock_get_parser: MagicMock) -> None:
-        """GET /api/v1/modules/ui 返回 items 和 total。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        """GET /api/modules/ui 返回 items 和 total。"""
+        from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
         mock_parser.list_schemas.return_value = [
@@ -72,14 +72,14 @@ class TestListUISchemas:
         ]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui",
+            "/api/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -92,20 +92,20 @@ class TestListUISchemas:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_list_empty_when_no_schemas(self, mock_get_parser: MagicMock) -> None:
         """没有 Schema 时返回空列表。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
         mock_parser.list_schemas.return_value = []
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui",
+            "/api/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -116,20 +116,20 @@ class TestListUISchemas:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_list_schema_serialization_by_alias(self, mock_get_parser: MagicMock) -> None:
         """返回的 Schema 应使用驼峰命名（by_alias）。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
         mock_parser.list_schemas.return_value = [_make_schema("alias-test", "Alias Test")]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui",
+            "/api/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -138,31 +138,31 @@ class TestListUISchemas:
 
 
 # ============================================================
-# GET /api/v1/modules/ui/{module_id} - 详情接口
+# GET /api/modules/ui/{module_id} - 详情接口
 # ============================================================
 
 
 class TestGetUISchema:
-    """GET /api/v1/modules/ui/{module_id} 测试。"""
+    """GET /api/modules/ui/{module_id} 测试。"""
 
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_get_existing_module(self, mock_get_parser: MagicMock) -> None:
         """获取存在的模块应返回 200 和 Schema 数据。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         schema = _make_schema("mod1", "Mod1")
         mock_parser = MagicMock()
         mock_parser.get_schema.return_value = schema
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui/mod1",
+            "/api/modules/ui/mod1",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -173,20 +173,20 @@ class TestGetUISchema:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_get_nonexistent_module_returns_404(self, mock_get_parser: MagicMock) -> None:
         """获取不存在的模块应返回 404。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
         mock_parser.get_schema.return_value = None
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui/nonexistent",
+            "/api/modules/ui/nonexistent",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
@@ -203,7 +203,7 @@ class TestClientTypeFilter:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_filter_by_ide_client_type(self, mock_get_parser: MagicMock) -> None:
         """IDE 客户端过滤：只保留 chat 和 workspace 空间。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         schema = _make_schema(
             "filter-mod",
@@ -218,14 +218,14 @@ class TestClientTypeFilter:
         mock_parser.list_schemas.return_value = [schema]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui?client_type=ide",
+            "/api/modules/ui?client_type=ide",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -240,7 +240,7 @@ class TestClientTypeFilter:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_filter_by_mobile_removes_dock(self, mock_get_parser: MagicMock) -> None:
         """Mobile 客户端过滤：移除 dock 配置。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         schema = _make_schema(
             "mobile-mod",
@@ -251,14 +251,14 @@ class TestClientTypeFilter:
         mock_parser.list_schemas.return_value = [schema]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui?client_type=mobile",
+            "/api/modules/ui?client_type=mobile",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -269,21 +269,21 @@ class TestClientTypeFilter:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_filter_by_unsupported_client_type_no_filter(self, mock_get_parser: MagicMock) -> None:
         """不支持的 client_type 应不做过滤。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         schema = _make_schema("unknown-ct", "Unknown CT")
         mock_parser = MagicMock()
         mock_parser.list_schemas.return_value = [schema]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui?client_type=unknown_client",
+            "/api/modules/ui?client_type=unknown_client",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -293,7 +293,7 @@ class TestClientTypeFilter:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_filter_by_client_type_required_spaces_check(self, mock_get_parser: MagicMock) -> None:
         """client_type 过滤时检查 required_spaces 兼容性。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         # 模块要求 dock 空间，但 IDE 不支持 dock
         schema = _make_schema(
@@ -305,14 +305,14 @@ class TestClientTypeFilter:
         mock_parser.list_schemas.return_value = [schema]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui?client_type=ide",
+            "/api/modules/ui?client_type=ide",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -323,7 +323,7 @@ class TestClientTypeFilter:
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_no_client_type_returns_all(self, mock_get_parser: MagicMock) -> None:
         """不传 client_type 应返回所有 Schema。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
         mock_parser.list_schemas.return_value = [
@@ -333,14 +333,14 @@ class TestClientTypeFilter:
         ]
         mock_get_parser.return_value = mock_parser
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/v1/modules/ui",
+            "/api/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -357,24 +357,24 @@ class TestUIRoutesAuth:
 
     def test_unauthenticated_request_returns_401(self) -> None:
         """未认证请求应返回 401。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
 
-        resp = client.get("/api/v1/modules/ui")
+        resp = client.get("/api/modules/ui")
         assert resp.status_code == 401
 
     def test_unauthenticated_get_by_id_returns_401(self) -> None:
         """未认证获取单个模块应返回 401。"""
-        from fastapi.testclient import TestClient  # noqa: PLC0415
+        from fastapi.testclient import TestClient
 
-        from channels.api.app import create_app  # noqa: PLC0415
+        from channels.api.app import create_app
 
         app = create_app()
         client = TestClient(app)
 
-        resp = client.get("/api/v1/modules/ui/some_id")
+        resp = client.get("/api/modules/ui/some_id")
         assert resp.status_code == 401

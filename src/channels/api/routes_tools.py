@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/v1/tools", tags=["工具"])
 def _get_tool_registry() -> Any:
     """惰性获取全局 ToolRegistry 实例，未初始化时尝试同步加载。"""
     try:
-        from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
+        from tools.global_registry import get_global_tool_registry_sync
 
         registry = get_global_tool_registry_sync()
         _ensure_registry_loaded(registry)
@@ -42,7 +42,7 @@ def _ensure_registry_loaded(registry: Any) -> None:
         return
 
     try:
-        from tools.loader import DynamicToolLoader, get_dynamic_tool_loader  # noqa: PLC0415
+        from tools.loader import DynamicToolLoader, get_dynamic_tool_loader
 
         loader = get_dynamic_tool_loader()
         if loader is None:
@@ -139,14 +139,14 @@ def list_tools(
         tools = registry.search(search)
     elif category:
         try:
-            from tools.types import ToolCategory  # noqa: PLC0415
+            from tools.types import ToolCategory
             cat_enum = ToolCategory(category)
             tools = registry.list_by_category(cat_enum)
         except (ValueError, AttributeError):
             tools = registry.list_all()
     elif source:
         try:
-            from tools.types import ToolSource  # noqa: PLC0415
+            from tools.types import ToolSource
             src_enum = ToolSource(source)
             tools = registry.list_by_source(src_enum)
         except (ValueError, AttributeError):

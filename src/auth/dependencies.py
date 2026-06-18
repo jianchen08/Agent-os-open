@@ -11,7 +11,6 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.auth.models import TokenPayload, UserInDB
-from src.auth.permission_matrix import Action, Resource
 from src.auth.rbac import Permission, RBACManager, Role
 from src.auth.token import TokenManager
 from src.core.exceptions import (
@@ -43,7 +42,7 @@ def init_auth_dependencies(
         user_repository: 用户仓库
         rbac_manager: RBAC 管理器（可选）
     """
-    global _token_manager, _user_repository, _rbac_manager  # noqa: PLW0603
+    global _token_manager, _user_repository, _rbac_manager
     _token_manager = token_manager
     _user_repository = user_repository
     _rbac_manager = rbac_manager or RBACManager()
@@ -97,19 +96,19 @@ async def get_token_payload(
         )
         return payload
     except TokenExpiredError:
-        raise HTTPException(  # noqa: B904
+        raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token 已过期",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except TokenRevokedError:
-        raise HTTPException(  # noqa: B904
+        raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token 已被撤销",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except TokenInvalidError:
-        raise HTTPException(  # noqa: B904
+        raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token 无效",
             headers={"WWW-Authenticate": "Bearer"},
@@ -222,7 +221,7 @@ def require_permission(permission: Permission) -> Callable:
             rbac_manager.check_permission(user.role, permission)
             return user
         except PermissionDeniedError:
-            raise HTTPException(  # noqa: B904
+            raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"需要 '{permission.value}' 权限",
             )
@@ -251,42 +250,12 @@ def require_resource_permission(resource: str, permission: Permission) -> Callab
             rbac_manager.check_resource_permission(user.role, resource, permission)
             return user
         except PermissionDeniedError:
-            raise HTTPException(  # noqa: B904
+            raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"需要资源 '{resource}' 的 '{permission.value}' 权限",
             )
 
     return resource_permission_checker
-
-
-def require_resource_action(resource: Resource, action: Action) -> Callable:
-    """创建资源级操作权限检查依赖。
-
-    基于 资源×操作 权限矩阵进行细粒度权限控制。
-
-    Args:
-        resource: 目标资源（如 Resource.TASKS）
-        action: 目标操作（如 Action.DELETE）
-
-    Returns:
-        依赖函数
-    """
-
-    async def resource_action_checker(
-        user: UserInDB = Depends(get_current_active_user),
-        rbac_manager: RBACManager = Depends(get_rbac_manager),
-    ) -> UserInDB:
-        """检查资源操作权限"""
-        try:
-            rbac_manager.check_resource_action_permission(user.role, resource, action)
-            return user
-        except PermissionDeniedError:
-            raise HTTPException(  # noqa: B904
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"需要资源 '{resource.value}' 的 '{action.value}' 权限",
-            )
-
-    return resource_action_checker
 
 
 # 常用依赖快捷方式

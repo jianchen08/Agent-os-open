@@ -78,7 +78,7 @@ class SingletonMixin:
     _lock: threading.Lock = threading.Lock()
     _initialized: bool = False
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> SingletonMixin:  # noqa: ARG004
+    def __new__(cls, *args: Any, **kwargs: Any) -> SingletonMixin:
         """确保只有一个实例被创建"""
         if cls._instance is None:
             with cls._lock:

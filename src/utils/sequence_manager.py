@@ -28,7 +28,7 @@ class SequenceManager:
         self._lock = asyncio.Lock()
         self._initialized = False
 
-    async def initialize_from_db(self, db_session: AsyncSession):  # noqa: PLR0912,PLR0915
+    async def initialize_from_db(self, db_session: AsyncSession):
         """
         从数据库恢复各会话的当前序列号
 
@@ -45,7 +45,7 @@ class SequenceManager:
         async with self._lock:
             try:
                 # 从 src.utils.id_encoder 导入一次，避免重复导入
-                from src.utils.id_encoder import parse_nested_id  # noqa: PLC0415
+                from src.utils.id_encoder import parse_nested_id
 
                 # 1. 查询所有会话，恢复用户级别的会话序列号
                 session_result = await db_session.execute(select(Session))
@@ -230,7 +230,7 @@ _global_sequence_manager: SequenceManager | None = None
 
 def get_sequence_manager() -> SequenceManager:
     """获取全局序列号管理器实例"""
-    global _global_sequence_manager  # noqa: PLW0603
+    global _global_sequence_manager
 
     if _global_sequence_manager is None:
         _global_sequence_manager = SequenceManager()

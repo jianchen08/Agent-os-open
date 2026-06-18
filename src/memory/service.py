@@ -23,7 +23,7 @@ from memory.types import (
     Episode,
     InjectType,
     Knowledge,
-    MemoryType,  # noqa: F401
+    MemoryType,
     RetrievalMethod,
     SearchResult,
 )
@@ -104,6 +104,7 @@ class MemoryService:
             "last_retrieval_at": None,
         }
 
+        # BUG-FIX-REQ-5: 自动注册内置 keyword 检索器
         self._ensure_default_retrievers()
 
     def register_retriever(self, method: str, retriever: IRetriever) -> None:
@@ -423,41 +424,13 @@ class MemoryService:
         filter: dict[str, Any],
         top_k: int,
     ) -> list[SearchResult]:
-        """全量注入 - 使用默认检索器返回筛选后的所有结果。
-
-        BUG-FIX-fix_20260620_retrieve_full_vector_unregistered:
-        问题根因: _default_method 默认取 vector_search.default_method='vector'，
-          但 vector 检索器在 vector_search.enabled=false 时不注册。full 模式
-          是兜底注入路径，检索器缺失时直接抛 ValueError 会让上层 prompt_build
-          插件崩溃，且因调用栈无 try 包裹，异常吞掉后协程行为不可预测，
-          是多次 prompt_build 卡死的强相关因素。
-        修复方案: full 模式下默认检索器不可用时，降级到任意已注册检索器
-          （优先 keyword），并打 WARNING 让降级可见；所有检索器都不可用时
-          返回空列表（full 语义允许空结果，不该阻断调用方）。
-        """
+        """全量注入 - 使用默认检索器返回筛选后的所有结果。"""
         method_name = self._default_method if isinstance(self._default_method, str) else "keyword"
         retriever = self._retrievers.get(method_name)
-
         if not retriever:
             available = list(self._retrievers.keys())
-            # 降级：full 是兜底注入，不该因检索器缺失崩溃。
-            # 优先用 keyword（_ensure_default_retrievers 保证注册），否则任取一个。
-            retriever = self._retrievers.get("keyword")
-            if retriever is None and available:
-                retriever = self._retrievers[available[0]]
-            if retriever is None:
-                logger.warning(
-                    "[MemoryService] 全量注入降级失败：无任何已注册检索器 "
-                    "(requested=%s)，返回空结果。请检查 memory_storage.yaml 配置。",
-                    method_name,
-                )
-                return []
-            logger.warning(
-                "[MemoryService] 全量注入降级：%s 检索器未注册，改用 %s "
-                "(available=%s)。如需向量检索请启用 vector_search 并注册 vector 检索器。",
-                method_name,
-                "keyword" if self._retrievers.get("keyword") is retriever else type(retriever).__name__,
-                available,
+            raise ValueError(
+                f"全量注入失败：检索器 '{method_name}' 未注册。可用检索器: {available}"
             )
 
         memory_type = filter.get("memory_type", "semantic")
@@ -518,25 +491,10 @@ class MemoryService:
 
         retriever = self._retrievers.get(method_name)
         if not retriever:
-            # BUG-FIX-fix_20260623_vector_fallback_not_implemented:
-            # 配置了 fallback_to_keyword=True 时，vector/tagwave 检索器未注册
-            # 应降级到 keyword 检索而非直接抛 ValueError。
-            if self._config.get("vector_search", {}).get("fallback_to_keyword", False):
-                fallback = self._retrievers.get("keyword")
-                if fallback:
-                    logger.warning(
-                        "[MemoryService] %s 检索器未注册，降级到 keyword 检索。",
-                        method_name,
-                    )
-                    self._retrieval_stats["fallback_hits"] += 1
-                    retriever = fallback
-                else:
-                    return []
-            else:
-                available = list(self._retrievers.keys())
-                raise ValueError(
-                    f"检索器 '{method_name}' 未注册。可用检索器: {available}"
-                )
+            available = list(self._retrievers.keys())
+            raise ValueError(
+                f"检索器 '{method_name}' 未注册。可用检索器: {available}"
+            )
 
         results = await retriever.retrieve(
             query=query,

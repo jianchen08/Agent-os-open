@@ -44,7 +44,7 @@ def create_event_bus(
     if bus_type == EventBusType.REDIS_STREAMS:
         # 获取 Redis URL
         if redis_url is None:
-            from src.config.settings import get_settings  # noqa: PLC0415
+            from src.config.settings import get_settings
 
             settings = get_settings()
             redis_url = settings.redis_url
@@ -78,10 +78,10 @@ def get_event_bus(
     Returns:
         事件总线实例
     """
-    global _event_bus_instance  # noqa: PLW0603
+    global _event_bus_instance
 
     if _event_bus_instance is None:
-        from src.config.settings import get_settings  # noqa: PLC0415
+        from src.config.settings import get_settings
 
         settings = get_settings()
 
@@ -108,7 +108,7 @@ def get_event_bus(
                     **kwargs,
                 )
                 # 尝试连接
-                import asyncio  # noqa: PLC0415
+                import asyncio
                 try:
                     asyncio.get_running_loop()
                     # 如果能获取到运行中的循环，尝试连接
@@ -140,7 +140,7 @@ def reset_event_bus() -> None:
     """
     重置全局事件总线（用于测试）
     """
-    global _event_bus_instance  # noqa: PLW0603
+    global _event_bus_instance
     _event_bus_instance = None
     logger.debug("全局事件总线已重置")
 
@@ -149,7 +149,7 @@ async def shutdown_event_bus() -> None:
     """
     关闭全局事件总线
     """
-    global _event_bus_instance  # noqa: PLW0603
+    global _event_bus_instance
 
     if _event_bus_instance is not None:
         await _event_bus_instance.disconnect()

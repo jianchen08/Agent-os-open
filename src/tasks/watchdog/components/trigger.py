@@ -122,7 +122,7 @@ class TaskTrigger:
                                 "task_id": task_id,
                                 "task_triggered": True,
                             }
-                        elif status in ("deferred", "failed_but_queued"):
+                        if status in ("deferred", "failed_but_queued"):
                             # 服务未就绪或启动失败但已加入队列，回滚任务状态
                             logger.info(
                                 f"任务 {task_id} 已加入待处理队列，回滚任务状态为 pending"
@@ -144,38 +144,36 @@ class TaskTrigger:
                                 "message": result.get("message", "任务已加入待处理队列"),
                                 "queued": True,
                             }
-                        else:
-                            # 其他状态，回滚任务状态
-                            logger.warning(
-                                f"任务 {task_id} 回调返回非成功状态: {status}"
+                        # 其他状态，回滚任务状态
+                        logger.warning(
+                            f"任务 {task_id} 回调返回非成功状态: {status}"
+                        )
+                        await session.execute(
+                            update(Task)
+                            .where(Task.id == task_id)
+                            .values(
+                                status="pending",
+                                updated_at=datetime.now(),
                             )
-                            await session.execute(
-                                update(Task)
-                                .where(Task.id == task_id)
-                                .values(
-                                    status="pending",
-                                    updated_at=datetime.now(),
-                                )
-                            )
-                            await session.commit()
-                            return {
-                                "project_id": project_id,
-                                "task_id": task_id,
-                                "task_triggered": False,
-                                "status": status,
-                                "callback_result": result,
-                            }
-                    else:
-                        # 回调没有返回结果，假设成功
-                        logger.info(f"已触发项目 {project_id} 的下一个任务 {task_id}")
-                        # 更新心跳
-                        if self.heartbeat_callback:
-                            self.heartbeat_callback(project_id)
+                        )
+                        await session.commit()
                         return {
                             "project_id": project_id,
                             "task_id": task_id,
-                            "task_triggered": True,
+                            "task_triggered": False,
+                            "status": status,
+                            "callback_result": result,
                         }
+                    # 回调没有返回结果，假设成功
+                    logger.info(f"已触发项目 {project_id} 的下一个任务 {task_id}")
+                    # 更新心跳
+                    if self.heartbeat_callback:
+                        self.heartbeat_callback(project_id)
+                    return {
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "task_triggered": True,
+                    }
 
                 except Exception as e:
                     logger.error(f"任务管理器回调失败: {e}")
@@ -264,22 +262,21 @@ class TaskTrigger:
                             "project_id": project_id,
                             "task_triggered": True,
                         }
-                    else:
-                        # 回滚状态
-                        await session.execute(
-                            update(Task)
-                            .where(Task.id == task_id)
-                            .values(
-                                status="pending",
-                                updated_at=datetime.now(),
-                            )
+                    # 回滚状态
+                    await session.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(
+                            status="pending",
+                            updated_at=datetime.now(),
                         )
-                        await session.commit()
-                        return {
-                            "task_id": task_id,
-                            "task_triggered": False,
-                            "callback_result": result,
-                        }
+                    )
+                    await session.commit()
+                    return {
+                        "task_id": task_id,
+                        "task_triggered": False,
+                        "callback_result": result,
+                    }
 
                 except Exception as e:
                     logger.error(f"任务管理器回调失败: {e}")

@@ -19,7 +19,7 @@ _annotation_service: AnnotationService | None = None
 
 def get_annotation_service() -> AnnotationService:
     """获取全局批注服务单例。"""
-    global _annotation_service  # noqa: PLW0603
+    global _annotation_service
     if _annotation_service is None:
         _annotation_service = AnnotationService()
     return _annotation_service
@@ -27,7 +27,7 @@ def get_annotation_service() -> AnnotationService:
 
 def reset_annotation_service() -> None:
     """重置全局单例（测试用）。"""
-    global _annotation_service  # noqa: PLW0603
+    global _annotation_service
     _annotation_service = None
 
 
@@ -155,7 +155,7 @@ class AnnotationService:
             return None
 
         annotation.status = AnnotationStatus.RESOLVED
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime
         annotation.resolved_at = datetime.now(UTC).isoformat()
 
         logger.info("[AnnotationService] 标记批注已解决 | id=%s", annotation_id)

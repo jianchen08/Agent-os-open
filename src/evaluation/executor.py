@@ -76,6 +76,11 @@ class EvaluationExecutor:
         )
         self._mapper = mapper or ResultMapper()
 
+    # BUG-FIX-fix_20260513_eval_sequential_retry:
+    # 问题根因: fail_fast 默认 False，导致工具评估失败后仍继续执行 agent 评估，
+    #           浪费 Token 且无法实现"前面不通过后面不执行"的快速失败策略。
+    # 修复方案: 默认启用 fail_fast，与 engine.py 中的类型排序配合实现
+    #           TOOL → AGENT → HUMAN 的顺序评估和快速失败。
     async def run_evaluation(
         self,
         task_id: str,
@@ -135,6 +140,7 @@ class EvaluationExecutor:
                         for r in result.results
                     ],
                 }
+                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
                 await self._task_service.complete_evaluation(
                     task_id, overall_passed, result=eval_data,
                 )

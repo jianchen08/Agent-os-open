@@ -330,7 +330,7 @@ def get_token_counter(encoding_name: str = "cl100k_base") -> TokenCounter:
     Returns:
         Token 计数器实例
     """
-    global _default_counter  # noqa: PLW0603
+    global _default_counter
 
     if _default_counter is None or _default_counter.encoding.name != encoding_name:
         _default_counter = TokenCounter(encoding_name)

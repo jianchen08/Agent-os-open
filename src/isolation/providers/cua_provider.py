@@ -58,13 +58,13 @@ class CuaProvider(IsolationProvider):
         """
         try:
             # 尝试导入 docker
-            import importlib  # noqa: PLC0415
+            import importlib
 
             if importlib.util.find_spec("docker") is None:
                 return False, "Docker SDK 未安装。请运行: pip install docker"
 
             # 尝试连接 Docker daemon
-            import docker  # noqa: PLC0415
+            import docker
 
             client = docker.from_env()
             client.ping()
@@ -100,7 +100,7 @@ class CuaProvider(IsolationProvider):
             raise RuntimeError(f"Docker 不可用: {error}")
 
         try:
-            import docker  # noqa: PLC0415
+            import docker
 
             # 初始化 Docker 客户端
             if self._docker_client is None:
@@ -151,7 +151,7 @@ class CuaProvider(IsolationProvider):
 
         except Exception as e:
             logger.error(f"创建 Docker 容器失败: {e}", exc_info=True)
-            raise RuntimeError(f"创建 Docker 容器失败: {str(e)}")  # noqa: B904
+            raise RuntimeError(f"创建 Docker 容器失败: {str(e)}")
 
     async def destroy_environment(self, env_id: str) -> None:
         """销毁容器

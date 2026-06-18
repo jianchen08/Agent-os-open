@@ -208,7 +208,7 @@ class GodotConnector(ExternalToolAdapter):
                 raise ValueError("create 操作需要提供 resource_data")
 
         # 验证脚本执行参数
-        if operation == "execute_script":  # noqa: SIM102
+        if operation == "execute_script":
             if not validated.get("script_content") and not validated.get("script_path"):
                 raise ValueError("必须提供 script_content 或 script_path")
 

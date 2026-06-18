@@ -21,7 +21,7 @@ class TestPipelineConfig:
         assert config.output_routes == []
         assert config.plugins == []
         assert config.core_plugins == {}
-        assert config.max_iterations == 500
+        assert config.max_iterations == 100
 
     def test_custom_values(self) -> None:
         """自定义值测试。"""

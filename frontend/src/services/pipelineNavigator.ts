@@ -139,19 +139,12 @@ export async function navigateToPipeline(
     return true
   }
 
-  // BUG-FIX-fix_20260620_remove_session_fallback:
-  // 问题根因: findPipelineLocation 找不到管道时降级到当前会话，
-  //          会在错误的会话下创建幽灵标签，子管道消息污染无关会话。
-  // 修复方案: 找不到管道归属时直接失败，不再降级到当前会话。
+  // 定位管道（找不到时降级到当前会话）
   const location = await findPipelineLocation(pipelineId)
-  if (!location) {
-    console.error('[navigateToPipeline] 找不到管道归属，拒绝降级到当前会话: pipelineId=%s', pipelineId)
-    return false
-  }
-  const targetSessionId = location.sessionId
+  const targetSessionId = location?.sessionId || currentSid
 
-  // 如果在其他会话，先切换会话
-  if (targetSessionId !== currentSid) {
+  // 如果在其他会话，先切换会话（校验目标会话确实存在，避免 pipelineSessionMap 映射到错误会话）
+  if (location && targetSessionId !== currentSid) {
     const sessions = useSessionStore.getState().sessions
     const sessionExists = sessions.some(s => s.id === targetSessionId)
     if (sessionExists) {
@@ -159,11 +152,7 @@ export async function navigateToPipeline(
       await useSessionListStore.getState().setActiveSession(targetSessionId)
       useAgentTabStore.getState().initSessionTabs(targetSessionId)
     }
-    // session 不存在时中止（数据不一致，拒绝在当前会话创建幽灵标签）
-    if (!sessionExists) {
-      console.error('[navigateToPipeline] 目标会话已不存在: sessionId=%s pipelineId=%s', targetSessionId, pipelineId)
-      return false
-    }
+    // session 不存在时留在当前会话继续创建标签
   }
 
   // 刷新 tabStore 引用（会话切换后状态已更新）

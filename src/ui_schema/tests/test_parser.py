@@ -29,7 +29,7 @@ class TestSchemaParserLoadDirectory:
 
     def test_parse_yaml_with_ui_section(self) -> None:
         """解析包含 ui 部分的 YAML 配置。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -64,7 +64,7 @@ class TestSchemaParserLoadDirectory:
 
     def test_parse_yaml_without_ui_section(self) -> None:
         """不包含 ui 部分的 YAML 应被跳过。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -78,7 +78,7 @@ class TestSchemaParserLoadDirectory:
 
     def test_parse_multiple_yaml_files(self) -> None:
         """目录中多个 YAML 文件应全部加载。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -100,7 +100,7 @@ class TestSchemaParserLoadDirectory:
 
     def test_nonexistent_directory_returns_empty(self) -> None:
         """不存在的目录应返回空列表。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         parser = SchemaParser()
         schemas = parser.load_directory(Path("/nonexistent/dir"))
@@ -108,7 +108,7 @@ class TestSchemaParserLoadDirectory:
 
     def test_empty_directory_returns_empty(self) -> None:
         """空目录应返回空列表。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             parser = SchemaParser()
@@ -128,7 +128,7 @@ class TestSchemaParserLoadFile:
 
     def test_load_single_file(self) -> None:
         """加载单个 YAML 文件。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -151,7 +151,7 @@ class TestSchemaParserLoadFile:
 
     def test_load_file_not_found(self) -> None:
         """加载不存在的文件应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         parser = SchemaParser()
         result = parser.load_file(Path("/nonexistent/file.yaml"))
@@ -159,7 +159,7 @@ class TestSchemaParserLoadFile:
 
     def test_load_file_without_ui_returns_none(self) -> None:
         """加载没有 ui 部分的文件应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -173,7 +173,7 @@ class TestSchemaParserLoadFile:
 
     def test_load_file_with_invalid_yaml(self) -> None:
         """加载无效 YAML 文件应返回 None（不抛出异常）。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -187,7 +187,7 @@ class TestSchemaParserLoadFile:
 
     def test_load_file_with_empty_content(self) -> None:
         """加载空文件应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -209,7 +209,7 @@ class TestSchemaParserNestedStructure:
 
     def test_parse_identity_nested(self) -> None:
         """identity 嵌套结构正确解析。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -237,7 +237,7 @@ class TestSchemaParserNestedStructure:
 
     def test_parse_actions_nested(self) -> None:
         """actions 嵌套结构正确解析。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -253,7 +253,7 @@ class TestSchemaParserNestedStructure:
                             "name": "创建项目",
                             "type": "command",
                             "label": "创建",
-                            "api": "/api/v1/modules/action-test/items",
+                            "api": "/api/modules/action-test/items",
                             "requiresConfirmation": False,
                             "isDangerous": False,
                         },
@@ -261,7 +261,7 @@ class TestSchemaParserNestedStructure:
                             "id": "delete_item",
                             "name": "删除项目",
                             "type": "command",
-                            "api": "/api/v1/modules/action-test/items",
+                            "api": "/api/modules/action-test/items",
                             "requiresConfirmation": True,
                             "isDangerous": True,
                         },
@@ -280,7 +280,7 @@ class TestSchemaParserNestedStructure:
 
     def test_parse_rendering_nested(self) -> None:
         """rendering 嵌套结构正确解析（chat + spaces + dock + fullscreen）。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -345,7 +345,7 @@ class TestSchemaParserNestedStructure:
 
     def test_parse_clients_nested(self) -> None:
         """clients 嵌套结构正确解析。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -384,7 +384,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_actions_defaults_to_empty_list(self) -> None:
         """缺少 actions 应默认为空列表。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -407,7 +407,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_rendering_defaults(self) -> None:
         """缺少 rendering 应使用默认值。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -426,7 +426,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_clients_defaults(self) -> None:
         """缺少 clients 应使用默认值。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -443,7 +443,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_identity_id_returns_none(self) -> None:
         """缺少 identity.id 应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -458,7 +458,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_identity_name_returns_none(self) -> None:
         """缺少 identity.name 应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -473,7 +473,7 @@ class TestSchemaParserDefaultValues:
 
     def test_missing_identity_section_returns_none(self) -> None:
         """完全缺少 identity 部分应返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -498,7 +498,7 @@ class TestSchemaParserCache:
 
     def test_get_schema_returns_cached(self) -> None:
         """get_schema 返回已缓存的 Schema。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -515,14 +515,14 @@ class TestSchemaParserCache:
 
     def test_get_schema_nonexistent_returns_none(self) -> None:
         """get_schema 对不存在的 ID 返回 None。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         parser = SchemaParser()
         assert parser.get_schema("nonexistent") is None
 
     def test_list_schemas_returns_all(self) -> None:
         """list_schemas 返回所有已缓存的 Schema。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -549,7 +549,7 @@ class TestSchemaParserHotReload:
 
     def test_hot_reload_detects_changes(self) -> None:
         """热重载应检测到文件变更。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -590,7 +590,7 @@ class TestSchemaParserHotReload:
 
     def test_hot_reload_no_changes(self) -> None:
         """未修改文件不应检测到变更。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -608,7 +608,7 @@ class TestSchemaParserHotReload:
 
     def test_reload_updates_cache(self) -> None:
         """重新加载应更新缓存。"""
-        from ui_schema.parser import SchemaParser  # noqa: PLC0415
+        from ui_schema.parser import SchemaParser
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

@@ -1,9 +1,8 @@
 /**
  * 文件编辑器 Tab 数据注册表
  *
- * 跨组件数据传递层：FiveSpaceLayout / useInteractionHandler 等写入 → CodeEditor/FilePreview 读取。
- * 使用 module-level Map 存储 + localStorage write-through 持久化，保证刷新页面后
- * 已打开的文件 Tab 仍能从注册表中恢复内容。
+ * 跨组件数据传递层：FiveSpaceLayout 写入 → CodeEditor/FilePreview 读取。
+ * 使用 module-level Map 存储，不依赖 Zustand，轻量无副作用。
  *
  * @module stores/fileEditorRegistry
  */
@@ -20,68 +19,17 @@ export interface FileEditorData {
   size?: number
   /** 容器任务 ID（用于 API 调用） */
   containerTaskId: string
-  /** 是否正在加载（运行时状态，不持久化） */
+  /** 是否正在加载 */
   loading?: boolean
 }
 
 /** 文件变更监听器回调类型 */
 export type FileChangeListener = (newContent: string, newSize?: number) => void
 
-/** localStorage 持久化 key */
-const STORAGE_KEY = 'file-editor-registry'
+/** 内部存储：tabId → FileEditorData */
+const editorDataMap = new Map<string, FileEditorData>()
 
-/** 单文件最大持久化体积（256 KB），超出则跳过落盘 */
-const MAX_PERSIST_SIZE = 256 * 1024
-
-/**
- * 从 localStorage 还原 editorDataMap
- *
- * 防御性解析：JSON 损坏、字段缺失、quota 异常都静默回退到空 Map。
- */
-function _loadFromStorage(): Map<string, FileEditorData> {
-  if (typeof localStorage === 'undefined') return new Map()
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return new Map()
-    const parsed = JSON.parse(raw) as Record<string, FileEditorData>
-    const map = new Map<string, FileEditorData>()
-    for (const [tabId, data] of Object.entries(parsed)) {
-      if (data && typeof data.filePath === 'string') {
-        map.set(tabId, data)
-      }
-    }
-    return map
-  } catch {
-    return new Map()
-  }
-}
-
-/**
- * 把 editorDataMap 序列化写入 localStorage
- *
- * - 剥离 loading 等运行时字段
- * - 超过 MAX_PERSIST_SIZE 的文件跳过持久化（避免单个大文件撑爆 localStorage）
- * - quota 异常静默忽略
- */
-function _saveToStorage(): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    const obj: Record<string, Omit<FileEditorData, 'loading'>> = {}
-    for (const [tabId, data] of editorDataMap) {
-      if ((data.content?.length ?? 0) > MAX_PERSIST_SIZE) continue
-      const { loading: _l, ...rest } = data
-      obj[tabId] = rest
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj))
-  } catch {
-    // 配额溢出或权限受限，静默丢弃
-  }
-}
-
-/** 内部存储：tabId → FileEditorData（启动时从 localStorage 还原） */
-const editorDataMap: Map<string, FileEditorData> = _loadFromStorage()
-
-/** 文件变更监听器存储：tabId → Set<listener>（运行时状态，不持久化） */
+/** 文件变更监听器存储：tabId → Set<listener> */
 const fileChangeListeners = new Map<string, Set<FileChangeListener>>()
 
 /**
@@ -92,7 +40,6 @@ const fileChangeListeners = new Map<string, Set<FileChangeListener>>()
  */
 export function registerFileEditor(tabId: string, data: FileEditorData): void {
   editorDataMap.set(tabId, data)
-  _saveToStorage()
 }
 
 /**
@@ -118,7 +65,6 @@ export function updateFileEditorData(
   const existing = editorDataMap.get(tabId)
   if (existing) {
     editorDataMap.set(tabId, { ...existing, ...partial })
-    _saveToStorage()
   }
 }
 
@@ -132,7 +78,6 @@ export function updateFileEditorData(
 export function removeFileEditorData(tabId: string): void {
   editorDataMap.delete(tabId)
   fileChangeListeners.delete(tabId)
-  _saveToStorage()
 }
 
 /**

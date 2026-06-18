@@ -84,7 +84,7 @@ class ReasoningCheckPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行推理检查逻辑。
 
         Args:

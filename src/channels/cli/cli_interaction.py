@@ -261,7 +261,7 @@ def _show_request_panel(
     console.print(panel)
 
 
-async def run_sub_conversation(  # noqa: PLR0915
+async def run_sub_conversation(
     console: Console,
     input_adapter: CLIInputAdapter,
     notifier: CLIInteractionNotifier,

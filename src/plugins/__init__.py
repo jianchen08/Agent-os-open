@@ -35,7 +35,7 @@ def get_hot_reloader():
     Returns:
         PluginHotReloader class.
     """
-    from plugins.hot_reload import PluginHotReloader  # noqa: PLC0415
+    from plugins.hot_reload import PluginHotReloader
     return PluginHotReloader
 
 

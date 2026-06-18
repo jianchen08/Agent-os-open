@@ -14,25 +14,14 @@ import contextlib
 import logging
 from dataclasses import asdict
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from tasks.types import TaskModel, TaskStatus
-from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
-
-
-# 注册 Enum 的 YAML representer，确保 safe_dump 能正确序列化所有枚举类型
-# 修复 metadata 等嵌套结构中残留枚举值导致 RepresenterError 的问题
-def _enum_representer(dumper: yaml.Dumper, data: Enum) -> Any:
-    return dumper.represent_data(data.value)
-
-
-yaml.add_multi_representer(Enum, _enum_representer, Dumper=yaml.SafeDumper)
 
 
 class TaskStorage:
@@ -197,9 +186,9 @@ class TaskStorage:
             可序列化的任务字典
         """
         d = asdict(task)
-        d["status"] = safe_enum_value(task.status)
-        d["priority"] = safe_enum_value(task.priority)
-        d["agent_level"] = safe_enum_value(task.agent_level)
+        d["status"] = task.status.value if hasattr(task.status, "value") else task.status
+        d["priority"] = task.priority.value if hasattr(task.priority, "value") else task.priority
+        d["agent_level"] = task.agent_level.value if hasattr(task.agent_level, "value") else task.agent_level
         return d
 
     @staticmethod
@@ -214,16 +203,8 @@ class TaskStorage:
         Returns:
             TaskModel 实例
         """
-        from agents.types import AgentLevel  # noqa: PLC0415
-        from tasks.types import TaskPriority  # noqa: PLC0415
-
-        # 兼容历史脏数据：description 曾被 LLM 写成 list，反序列化时归一化为 str，
-        # 否则 API 层 TaskResponse.description（pydantic 强制 str）校验失败。
-        raw_desc = data.get("description", "")
-        if not isinstance(raw_desc, str):
-            data["description"] = "\n".join(
-                str(item) for item in raw_desc
-            ) if isinstance(raw_desc, (list, tuple)) else str(raw_desc)
+        from agents.types import AgentLevel
+        from tasks.types import TaskPriority
 
         if isinstance(data.get("status"), str):
             data["status"] = TaskStatus(data["status"])

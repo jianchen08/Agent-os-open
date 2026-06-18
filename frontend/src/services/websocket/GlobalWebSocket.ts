@@ -10,8 +10,7 @@
 
 import { buildGlobalWebSocketUrl } from '@/constants/websocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useAuthStore, isAuthFailureFromError } from '@/stores/authStore'
-import { triggerAuthExpired } from '@/services/authCallbacks'
+import { useAuthStore } from '@/stores/authStore'
 import { loggers } from '@/utils/logger'
 
 const _wsLogger = loggers.websocket
@@ -106,8 +105,7 @@ class GlobalWebSocketService {
           this.ws = null
         }
         this._status = 'disconnected'
-        // 连接超时属于网络层问题，非认证拒绝，走普通重连（不刷新 token）
-        this._scheduleReconnect(false)
+        this._scheduleReconnect()
       }
     }, CONNECTION_TIMEOUT)
 
@@ -173,24 +171,7 @@ class GlobalWebSocketService {
       }
 
       if (!this._disposed) {
-        // BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-        // 后端在 token 无效/过期时以 code=4001 关闭连接（见 app_factory.py:244/248）。
-        // 把 close code 传给重连逻辑：4001 = 认证被拒，需先刷新 token 再连；
-        // 其他 code（网络断开、心跳超时等）= 正常重连，无需触碰 token。
-        //
-        // BUG-FIX-fix_20260625_ws_handshake_close_code_lost:
-        // 后端旧实现在 accept() 前 close(4001)，浏览器拿到的是 HTTP 403 + close code 1006
-        // 而非 4001，导致认证拒绝被误判为普通断连。后端已改为 accept() 后 close(4001)，
-        // 正常情况下前端能收到 4001。但某些代理/网关可能吞掉 close code 导致 1006，
-        // 故对 1006 + 从未连接过 + 本地 token 确实已过期 三者同时成立时，
-        // 也视为认证拒绝。token 未过期时（如服务端宕机）仍走普通指数退避。
-        let authRejected = event.code === 4001
-        if (!authRejected && event.code === 1006 && !wasConnected) {
-          // 仅当本地判定 token 已过期时才怀疑认证拒绝
-          const { checkTokenExpiration } = useAuthStore.getState()
-          authRejected = checkTokenExpiration()
-        }
-        this._scheduleReconnect(authRejected)
+        this._scheduleReconnect()
       }
     }
   }
@@ -365,13 +346,7 @@ class GlobalWebSocketService {
         this._heartbeatTimeoutTimer = setTimeout(() => {
           _wsLogger.warn('[GlobalWS] 心跳超时，连接可能已断开，主动关闭重连')
           if (this.ws) {
-            // BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-            // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
-            // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
-            // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
-            // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
-            // 应走普通重连（直接用当前 token 重连），不触发刷新。
-            this.ws.close(2002, '心跳超时')
+            this.ws.close(4001, '心跳超时')
           }
         }, HEARTBEAT_TIMEOUT)
       }
@@ -397,27 +372,7 @@ class GlobalWebSocketService {
     this._clearHeartbeatTimeout()
   }
 
-  /**
-   * 调度重连
-   *
-   * @param authRejected 后端是否因认证问题关闭连接（close code === 4001）。
-   *   - true：需先刷新 token 再连；刷新真失效则登出并停止重连。
-   *   - false（默认）：网络/心跳超时等普通断连，直接用当前 token 重连。
-   *
-   * BUG-FIX-fix_20260624_ws_reconnect_dead_loop:
-   * 问题根因: token 过期 → WS 握手被后端以 code=4001 关闭（客户端看到 HTTP 403）
-   *   → onclose → _scheduleReconnect → 检测过期 → refreshToken。若刷新失败（含
-   *   refresh_token 被 401 单次轮换击穿），旧实现 catch 块**用同一个过期 token 继续重连**
-   *   → 后端再 4001 → 再重连…死循环，连接永远建不起来 → 后端推送全部丢失。
-   *   这就是「推送不了」的根因。
-   * 修复方案: 用 close code 精确区分认证拒绝与普通断连；认证拒绝时必须刷新成功才连，
-   *   失败按错误类型分流：
-   *   - 真认证失效（refresh_token 被 401/403 拒绝）→ triggerAuthExpired 走登出，停止重连
-   *     （没有有效 token，连了也是 4001）。
-   *   - 瞬时故障（网络/超时/5xx）→ 不连、不登出，按指数退避等下一轮（下次再尝试刷新），
-   *     **绝不拿已知过期的旧 token 去连**，从源头切断 4001 死循环。
-   */
-  private _scheduleReconnect(authRejected: boolean = false): void {
+  private _scheduleReconnect(): void {
     if (this._disposed) return
 
     // 标记为重连中，更新 UI 状态
@@ -436,40 +391,29 @@ class GlobalWebSocketService {
       )
     }
     this._reconnectAttempts++
-    console.info('[GlobalWS] %dms 后重连（第 %d 次, authRejected=%s）', delay, this._reconnectAttempts, authRejected)
+    console.info('[GlobalWS] %dms 后重连（第 %d 次）', delay, this._reconnectAttempts)
     this._reconnectTimer = setTimeout(async () => {
-      if (this._disposed || !this._token) return
-
-      // 普通断连（非认证拒绝）：直接重连，不触碰 token
-      if (!authRejected) {
-        this.connect(this._token)
-        return
-      }
-
-      // 认证拒绝：必须先刷新 token 再连
-      const authStore = useAuthStore.getState()
-      _wsLogger.info('[GlobalWS] 连接被认证拒绝(4001)，刷新 token 后再重连')
-      try {
-        await authStore.refreshToken()
-        // 刷新成功：用新 token 重连（refreshToken 已更新 store 与 localStorage）
-        const newToken = authStore.token
-        if (newToken && newToken !== this._token) {
-          this._token = newToken
-          _wsLogger.info('[GlobalWS] Token 已刷新，用新 token 重连')
+      if (!this._disposed && this._token) {
+        // BUG-FIX-fix_20260614_expired_token_reconnect_loop:
+        // 问题根因: token 过期后 WS 被后端拒绝 (403)，前端重连时用同一个过期 token
+        //   无限重试 → 前端输出卡在半路时无法恢复连接 → 流式数据断流。
+        // 修复方案: 重连前检查 token 是否过期，过期则先刷新再连接。
+        try {
+          const authStore = useAuthStore.getState()
+          if (authStore.checkTokenExpiration()) {
+            _wsLogger.info('[GlobalWS] Token 已过期，刷新后再重连')
+            await authStore.refreshToken()
+            const newToken = authStore.token
+            if (newToken && newToken !== this._token) {
+              this._token = newToken
+              _wsLogger.info('[GlobalWS] Token 已刷新')
+            }
+          }
+        } catch {
+          // 刷新失败，仍尝试用旧 token（后端会明确拒绝）
+          _wsLogger.warn('[GlobalWS] Token 刷新失败，尝试用旧 token 重连')
         }
         this.connect(this._token)
-      } catch (refreshError) {
-        if (isAuthFailureFromError(refreshError)) {
-          // refresh_token 真正失效：没有可用 token，连了也是 4001。
-          // 走登出流程，停止重连，让用户重新登录。
-          _wsLogger.warn('[GlobalWS] refresh_token 真正失效，触发登出并停止重连')
-          triggerAuthExpired()
-        } else {
-          // 瞬时故障（网络/超时/5xx）：不登出，按退避等下一轮再试刷新。
-          // 关键：不用过期 token 连接，避免 4001 死循环。
-          _wsLogger.warn('[GlobalWS] Token 刷新瞬时失败，等待下一轮重连（不登出）')
-          this._scheduleReconnect(true)
-        }
       }
     }, delay)
   }
