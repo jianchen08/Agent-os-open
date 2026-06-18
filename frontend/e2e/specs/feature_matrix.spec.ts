@@ -7,7 +7,8 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { login, loginAndWaitReady, sendMessage, API_BASE, registerUser, loginViaAPI } from '../helpers/auth';
+import { login, loginAndWaitReady, API_BASE, registerUser, loginViaAPI } from '../helpers/auth';
+import { sendChatMessage } from '../utils/test-helpers';
 import { navigateTo, loginAndNavigateTo, ROUTES } from '../helpers/navigation';
 import {
   waitForAssistantMessage,
@@ -26,7 +27,7 @@ test.describe.configure({ timeout: 120_000 });
 test.describe('功能矩阵 - 1.对话与聊天', () => {
   test('FP-1.1 主对话：流式响应渲染', async ({ page }) => {
     await loginAndWaitReady(page);
-    await sendMessage(page, '请简短回复你好');
+    await sendChatMessage(page, '请简短回复你好');
     const msg = await waitForAssistantMessage(page);
     const text = await msg.textContent().catch(() => '');
     expect(text!.length, '助手流式响应不应为空').toBeGreaterThan(0);
@@ -49,7 +50,7 @@ test.describe('功能矩阵 - 1.对话与聊天', () => {
 
   test('FP-1.4 审批交互弹窗', async ({ page }) => {
     await loginAndWaitReady(page);
-    await sendMessage(page, '请确认继续');
+    await sendChatMessage(page, '请确认继续');
     await waitForAssistantMessage(page);
     const card = await waitForInteractionCard(page, 10_000);
     // 交互卡片可能出现也可能不出现，取决于后端配置
@@ -58,7 +59,7 @@ test.describe('功能矩阵 - 1.对话与聊天', () => {
 
   test('FP-1.5 媒体消息渲染', async ({ page }) => {
     await loginAndWaitReady(page);
-    await sendMessage(page, '请用 markdown 展示一张图片: https://picsum.photos/100/100');
+    await sendChatMessage(page, '请用 markdown 展示一张图片: https://picsum.photos/100/100');
     const msg = await waitForAssistantMessage(page);
     const text = await msg.textContent().catch(() => '');
     expect(text!.length, '媒体消息响应不为空').toBeGreaterThan(0);
@@ -159,7 +160,7 @@ test.describe('功能矩阵 - 3.Agent管理', () => {
 test.describe('功能矩阵 - 4.工具系统', () => {
   test('FP-4.1 文件操作工具（file_read/file_write）', async ({ page }) => {
     await loginAndWaitReady(page);
-    await sendMessage(page, '请读取 package.json 文件内容');
+    await sendChatMessage(page, '请读取 package.json 文件内容');
     await waitForAssistantMessage(page);
     try {
       const toolCard = await waitForToolCard(page, 45_000);

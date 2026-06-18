@@ -28,11 +28,7 @@ from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
 
 from channels.websocket.ws_handler import ws_interaction_notifier
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# 日志配置由统一入口 src.core.logging.setup_logging() 负责（在 app_factory.py 中调用）
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]

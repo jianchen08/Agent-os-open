@@ -157,18 +157,6 @@ export async function login(page: Page): Promise<void> {
 }
 
 /**
- * 发送聊天消息
- */
-export async function sendMessage(page: Page, text: string): Promise<void> {
-  const input = page.locator('[data-testid="chat-input-textarea"]');
-  await expect(input, '输入框应可见').toBeVisible({ timeout: 10_000 });
-  await input.fill(text);
-  const sendBtn = page.locator('[data-testid="chat-send-button"]');
-  await sendBtn.click();
-  console.log(`📨 已发送消息: "${text.substring(0, 40)}..."`);
-}
-
-/**
  * 登出当前用户
  */
 export async function logout(page: Page): Promise<void> {

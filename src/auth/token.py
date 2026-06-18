@@ -135,6 +135,10 @@ class TokenManager:
         if expires_delta is None:
             expires_delta = timedelta(minutes=self.access_token_expire_minutes)
 
+        # 绑定日志上下文，使后续认证日志自动携带 request_id
+        from src.core.logging import LogContext
+        LogContext.bind(request_id=user_id)
+
         return self._create_token(
             user_id=user_id,
             role=role,

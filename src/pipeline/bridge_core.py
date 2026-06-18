@@ -53,16 +53,28 @@ class BridgeCore:
         self.message_id = message_id or uuid.uuid4().hex[:12]
         self._container_task_id: str = ""
         self._entry: Any | None = None
+
+        # 绑定日志上下文，使后续日志自动携带 pipeline_id / task_id
+        from src.core.logging import LogContext
+        _ctx: dict[str, str] = {"pipeline_id": pipeline_id}
         try:
             from pipeline.registry import get_engine_registry
             self._entry = get_engine_registry().get(pipeline_id)
             if self._entry and hasattr(self._entry, "tags"):
                 self._container_task_id = self._entry.tags.get("task_id", "")
+                if self._container_task_id:
+                    _ctx["task_id"] = self._container_task_id
+                _thread_id = self._entry.tags.get("session_id", "")
+                if _thread_id:
+                    _ctx["session_id"] = _thread_id
         except Exception:
             logger.debug(
                 "BridgeCore: 获取 PipelineEntry 失败 pipeline=%s",
                 pipeline_id[:12], exc_info=True,
             )
+
+        # 绑定日志上下文（contextvars，async 安全）
+        LogContext.bind(**_ctx)
 
         # 状态追踪（仅当前 turn，不跨 turn 累加内容）
         self._stream_started: bool = False

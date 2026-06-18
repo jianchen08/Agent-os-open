@@ -53,15 +53,15 @@ from channels.websocket.static_files import mount_media_static_files
 from pipeline.message_handler import parse_frontend_message, MessageParseError
 from pipeline.message_bus import handle_incoming_message
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# 配置日志（统一到 src.core.logging）
+from src.core.logging import setup_logging as _setup_unified_logging, LoggingConfig, StructuredFormatter
 
+_setup_unified_logging(LoggingConfig(output="console"), reset=True)
+
+# EventBus 调试文件（使用统一格式化器）
 _fh = logging.FileHandler("debug_eventbus.log", encoding="utf-8", mode="w")
 _fh.setLevel(logging.DEBUG)
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+_fh.setFormatter(StructuredFormatter())
 logging.getLogger().addHandler(_fh)
 
 logger = logging.getLogger(__name__)

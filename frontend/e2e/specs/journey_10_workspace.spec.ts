@@ -7,7 +7,8 @@
 
 import { test, expect } from '@playwright/test';
 import { loginAndNavigateTo, navigateTo, ROUTES } from '../helpers/navigation';
-import { loginAndWaitReady, sendMessage } from '../helpers/auth';
+import { loginAndWaitReady } from '../helpers/auth';
+import { sendChatMessage } from '../utils/test-helpers';
 import { waitForAssistantMessage, waitForToolCard, waitForToolCompleted } from '../helpers/assertions';
 
 test.describe.configure({ timeout: 120_000 });
@@ -17,7 +18,7 @@ test.describe('旅程10：工作空间', () => {
     await loginAndWaitReady(page);
 
     // 发送创建文件的消息
-    await sendMessage(page, '请帮我创建一个名为 e2e_workspace_test.txt 的文件，内容写 hello workspace');
+    await sendChatMessage(page, '请帮我创建一个名为 e2e_workspace_test.txt 的文件，内容写 hello workspace');
 
     // 等待助手响应
     await waitForAssistantMessage(page);

@@ -81,7 +81,7 @@ def setup_logging(
     debug: bool = False,
     log_dir: Path | str | None = None,
 ) -> None:
-    """初始化统一日志系统（终端 + 文件）。
+    """初始化统一日志系统（已转发到 src.core.logging）。
 
     在所有入口点调用一次即可。重复调用不会重复初始化。
 
@@ -94,29 +94,18 @@ def setup_logging(
         return
     _LOGGING_INITIALIZED = True
 
-    log_dir = _PROJECT_ROOT / "logs" if log_dir is None else Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    _log_dir = _PROJECT_ROOT / "logs" if log_dir is None else Path(log_dir)
+    _log_dir.mkdir(parents=True, exist_ok=True)
 
-    log_level = logging.DEBUG if debug else logging.INFO
-    log_format = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    from src.core.logging import setup_logging as _unified_setup, LoggingConfig
 
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        datefmt="%H:%M:%S",
+    config = LoggingConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        json_output=False,
+        output="both",
+        file_path=str(_log_dir / "agent_os.log"),
     )
-
-    from logging.handlers import RotatingFileHandler
-
-    file_handler = RotatingFileHandler(
-        filename=log_dir / "agent_os.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(log_format, datefmt="%H:%M:%S"))
-    logging.getLogger().addHandler(file_handler)
+    _unified_setup(config, reset=True)
 
     logger.info(
         "Logging initialized: console_level=%s, file=agent_os.log (DEBUG)",

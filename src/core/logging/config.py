@@ -39,7 +39,11 @@ class LoggingConfig:
     file_max_bytes: int = 50 * 1024 * 1024  # 50 MB
     file_backup_count: int = 5
     third_party_level: int = WARNING
-    context_fields: tuple[str, ...] = ("request_id", "task_id", "session_id")
+    context_fields: tuple[str, ...] = (
+        "trace_id", "request_id", "task_id",
+        "session_id", "pipeline_id", "thread_id",
+        "agent_name",
+    )
 
     @classmethod
     def from_env(cls) -> LoggingConfig:

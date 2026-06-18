@@ -51,9 +51,6 @@ class StructuredFormatter(logging.Formatter):
 
         return super().format(record)
 
-    def formatException(self, ei: tuple[type, BaseException, Any] | tuple[Any, ...]) -> str:
-        return super().formatException(ei)
-
     @staticmethod
     def _extract_extras(record: logging.LogRecord) -> str:
         """提取用户自定义的 extra 字段，拼接为 key=value 字符串。"""
@@ -118,7 +115,7 @@ class JsonFormatter(logging.Formatter):
             log_entry[field_name] = LogContext.get(field_name)
 
         # 注入 extra 字段
-        standard = _standard_record_keys()
+        standard = _STANDARD_RECORD_KEYS
         for key, val in record.__dict__.items():
             if key.startswith("_") or key in standard:
                 continue
@@ -149,12 +146,16 @@ def _json_safe(value: Any) -> Any:
 
 
 def _standard_record_keys() -> set[str]:
-    """返回 logging.LogRecord 的标准属性名集合。"""
+    """返回 logging.LogRecord 的标准属性名集合（模块级缓存，仅初始化一次）。"""
     record = logging.LogRecord(
         name="", level=0, pathname="", lineno=0,
         msg="", args=None, exc_info=None,
     )
     return set(record.__dict__.keys()) | {"message", "asctime", "context", "taskName"}
+
+
+# 模块级常量：标准 LogRecord 属性名集合（避免每条日志创建临时对象）
+_STANDARD_RECORD_KEYS: set[str] = _standard_record_keys()
 
 
 __all__ = ["StructuredFormatter", "JsonFormatter"]

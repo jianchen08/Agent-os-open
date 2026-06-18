@@ -98,6 +98,10 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
             old_status: 原状态
             new_status: 新状态
         """
+        # 绑定日志上下文，使后续日志自动携带 task_id
+        from src.core.logging import LogContext
+        LogContext.bind(task_id=task_id)
+
         for cb in self._state_callbacks:
             try:
                 await cb(task_id, old_status, new_status)

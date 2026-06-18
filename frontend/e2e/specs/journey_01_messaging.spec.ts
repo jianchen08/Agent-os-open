@@ -8,7 +8,8 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loginAndWaitReady, sendMessage } from '../helpers/auth';
+import { loginAndWaitReady } from '../helpers/auth';
+import { sendChatMessage } from '../utils/test-helpers';
 import {
   waitForAssistantMessage,
   waitForToolCard,
@@ -23,7 +24,7 @@ test.describe('旅程01：对话流程', () => {
     await loginAndWaitReady(page);
 
     // 发送需要较长回答的问题
-    await sendMessage(page, '请用至少200字介绍一下React的主要特性');
+    await sendChatMessage(page, '请用至少200字介绍一下React的主要特性');
 
     // 等待助手消息出现
     const assistantMsg = await waitForAssistantMessage(page);
@@ -39,7 +40,7 @@ test.describe('旅程01：对话流程', () => {
     await loginAndWaitReady(page);
 
     // 发送会触发工具调用的请求
-    await sendMessage(page, '请读取 package.json 文件的内容，然后总结一下');
+    await sendChatMessage(page, '请读取 package.json 文件的内容，然后总结一下');
 
     // 等待助手消息出现
     const assistantMsg = await waitForAssistantMessage(page);
@@ -74,12 +75,12 @@ test.describe('旅程01：对话流程', () => {
     await loginAndWaitReady(page);
 
     // 发送第一条消息
-    await sendMessage(page, '你好，请简短回复');
+    await sendChatMessage(page, '你好，请简短回复');
     const msg1 = await waitForAssistantMessage(page);
     expect((await msg1.textContent().catch(() => ''))?.length ?? 0, '第一条助手消息不为空').toBeGreaterThan(0);
 
     // 发送第二条消息
-    await sendMessage(page, '请再简短回复一次');
+    await sendChatMessage(page, '请再简短回复一次');
     const allAssistantMsgs = page.locator('[data-role="assistant"]');
     const count = await allAssistantMsgs.count();
     expect(count, '应有多条助手消息').toBeGreaterThanOrEqual(2);
@@ -89,7 +90,7 @@ test.describe('旅程01：对话流程', () => {
   test('1.4 消息角色标识正确（用户/助手）', async ({ page }) => {
     await loginAndWaitReady(page);
 
-    await sendMessage(page, '测试角色标识');
+    await sendChatMessage(page, '测试角色标识');
 
     // 验证用户消息角色
     const userMsg = page.locator('[data-role="user"]').first();
@@ -110,7 +111,7 @@ test.describe('旅程01：对话流程', () => {
     await loginAndWaitReady(page);
 
     // 发送会触发工具调用的消息
-    await sendMessage(page, '帮我创建一个名为 e2e_test_file.txt 的文件，内容写 hello world');
+    await sendChatMessage(page, '帮我创建一个名为 e2e_test_file.txt 的文件，内容写 hello world');
 
     // 等待助手消息出现
     await waitForAssistantMessage(page);
