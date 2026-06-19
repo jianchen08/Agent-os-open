@@ -112,7 +112,6 @@ class ExternalResourceSearch:
         self._max_results = max_results
         self._cache: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
-        # BUG-FIX: 延迟加载缓存，避免在 __init__ 中执行同步 I/O 阻塞事件循环
         self._cache_loaded = False
 
     # -----------------------------------------------------------------------
@@ -139,7 +138,6 @@ class ExternalResourceSearch:
         if not query:
             return []
 
-        # BUG-FIX: 首次使用时异步加载缓存
         await self._ensure_cache_loaded()
 
         results: list[dict[str, Any]] = []
@@ -169,7 +167,6 @@ class ExternalResourceSearch:
             name: 资源名称
             success: 是否使用成功
         """
-        # BUG-FIX: 确保缓存已异步加载
         await self._ensure_cache_loaded()
 
         with self._lock:
@@ -193,7 +190,6 @@ class ExternalResourceSearch:
 
             entry["last_used"] = datetime.now().isoformat()
 
-        # BUG-FIX: 使用异步保存代替同步 _save_cache，在锁外执行避免阻塞
         await self._async_save_cache()
 
         logger.info(
@@ -226,7 +222,6 @@ class ExternalResourceSearch:
     # 缓存管理
     # -----------------------------------------------------------------------
 
-    # BUG-FIX: 异步加载缓存，避免同步 I/O 阻塞事件循环
     async def _ensure_cache_loaded(self) -> None:
         """确保缓存已加载，首次调用时异步加载"""
         if not self._cache_loaded:
@@ -267,7 +262,6 @@ class ExternalResourceSearch:
         except Exception as e:
             logger.warning("[external_search] 缓存写入失败: %s", e)
 
-    # BUG-FIX: 异步保存缓存，避免同步 I/O 阻塞事件循环
     async def _async_save_cache(self) -> None:
         """将缓存异步写入 JSON 文件"""
         try:
@@ -350,7 +344,6 @@ class ExternalResourceSearch:
         Returns:
             合并后的搜索结果列表
         """
-        # BUG-FIX: 使用 asyncio.gather 并行搜索所有平台，而非串行 for 循环
         if not self._platforms:
             return []
 
@@ -410,7 +403,6 @@ class ExternalResourceSearch:
 
         return all_results[:limit]
 
-    # BUG-FIX: 改为 async 以支持异步缓存写入
     async def _update_cache_entry(self, name: str, entry: dict[str, Any]) -> None:
         """
         更新缓存条目（仅在新资源时写入，已有资源保留使用统计）
@@ -430,7 +422,6 @@ class ExternalResourceSearch:
             else:
                 self._cache[name] = entry
 
-        # BUG-FIX: 在锁外异步保存，避免同步 I/O 阻塞事件循环
         await self._async_save_cache()
 
     # -----------------------------------------------------------------------
@@ -454,7 +445,6 @@ class ExternalResourceSearch:
 
         try:
             prompt = self._build_review_prompt(resource)
-            # BUG-FIX: 使用 asyncio.wait_for 为 LLM 调用添加超时保护
             response = await asyncio.wait_for(
                 self._llm_caller.completion(
                     model=self._review_model,

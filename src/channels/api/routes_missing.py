@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from channels.api.deps import require_auth
 from human_interaction import get_human_interaction_service
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,6 @@ async def get_task_tree(
         return _empty_tree(session_id)
 
     try:
-        # BUG-FIX-fix_20260512_async_list_all: 添加 await
         all_tasks = await task_service.list_all(limit=500, reverse=False)
     except Exception as exc:
         logger.warning("get_task_tree: list_all 失败: %s", exc)
@@ -93,15 +93,6 @@ async def get_task_tree(
     # 策略 1：直接匹配 task.metadata["session_id"]
     # 策略 2：通过 parent_pipeline_id 关联会话的 pipeline_ids
     # 策略 3：pipeline_run_id 在会话的 pipeline_ids 中
-    # BUG-FIX-fix_20260603_task_tree_visibility:
-    # 问题根因: _pipeline_root_map 的 value 是根任务ID（如 "94f7afbd2cc8"），
-    #           而 related_pipeline_ids 是管道运行ID（如 "0fc481ee9ebe"），
-    #           两者属于不同的 ID 空间，所以子管道 ID 永远匹配不上，
-    #           导致通过管道关联的子任务无法被任务树 API 找到。
-    # 修复方案: 从任务自身的 pipeline_run_id / parent_pipeline_id 字段递归扩展
-    #           管道 ID 集合，不依赖 _pipeline_root_map 的跨 ID 空间匹配。
-    # 影响范围: 任务管理面板的任务树按会话过滤功能。
-    # 修复日期: 2026-06-03
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
@@ -172,7 +163,6 @@ async def get_task_tree(
     flat_items = [_task_to_tree_item(t, session_id) for t in all_tasks]
 
     # 构建树形结构：根任务 → 子任务
-    # BUG-FIX-fix_20260513_orphan_tasks: parent_task_id 指向不存在的任务时视为根任务
     task_id_set = {t.id for t in all_tasks}
     children_map: dict[str, list[dict[str, Any]]] = {}
     root_items: list[dict[str, Any]] = []
@@ -199,29 +189,7 @@ async def get_task_tree(
     }
 
 
-def _get_task_service() -> Any:
-    """通过 ServiceProvider 获取全局 TaskService 实例。
-
-    BUG-FIX-fix_20260506_006: 使用 get_or_create 替代 get，支持懒加载创建
-    问题根因: 使用 provider.get() 只能获取已注册的实例，TaskService
-              从未在启动时显式注册，导致总是返回 None，API 返回空树
-    修复方案: 使用 get_or_create 懒加载创建 TaskService 实例，
-              与 task_submit.py 中的获取方式保持一致
-
-    Returns:
-        TaskService 实例，服务不可用或创建失败时返回 None
-    """
-    try:
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
-                event_bus=provider.get("event_bus"),
-            ),
-        )
-    except Exception:
-        return None
+from tasks.service_access import get_task_service as _get_task_service
 
 
 def _empty_tree(session_id: str | None) -> dict[str, Any]:
@@ -255,16 +223,12 @@ def _task_to_tree_item(task: Any, session_id: str | None = None) -> dict[str, An
         树节点字典，包含 id、title、status、type、pipeline_run_id、
         ws_mode、ws_path 等字段
     """
-    status_val = task.status.value if hasattr(task.status, "value") else str(task.status)
+    status_val = safe_enum_value(task.status)
 
     # 安全提取 ws_meta 工作空间元信息
     _metadata = getattr(task, "metadata", None) or {}
     _ws_meta = _metadata.get("ws_meta", {}) or {}
 
-    # BUG-FIX-fix_20260509_agent_level: 修复 agent_level 序列化格式
-    # 问题根因: str(AgentLevel.L2_SUBTASK) 输出 "AgentLevel.L2_SUBTASK"，
-    #          前端无法正确解析为数字层级
-    # 修复方案: 使用 .value 属性获取 "L1"/"L2"/"L3" 字符串
     _agent_level = getattr(task, "agent_level", None)
     _agent_level_str = _agent_level.value if _agent_level and hasattr(_agent_level, "value") else str(_agent_level or "")
 
@@ -751,7 +715,8 @@ async def get_monitoring_tasks(
         包含 items、total、page、page_size 的字典
     """
     from channels.api.memory_store import store
-    from channels.api.routes_tasks import _get_task_service
+
+    # _get_task_service 已在模块级别从 tasks.service_access 导入
 
     # 监控页面状态映射：将后端特殊状态映射为前端 TaskInfo 兼容的状态值
     # 注意：monitoring TaskInfo 使用 'running' 而非 'in_progress'
@@ -771,7 +736,7 @@ async def get_monitoring_tasks(
 
         d = asdict(tm)
         # 提取枚举的原始字符串值
-        raw_status = tm.status.value if hasattr(tm.status, "value") else str(tm.status)
+        raw_status = safe_enum_value(tm.status)
         d["status"] = raw_status
         if hasattr(tm, "priority") and hasattr(tm.priority, "value"):
             d["priority"] = tm.priority.value
@@ -915,16 +880,6 @@ async def manual_trigger(trigger_id: str, _user: dict = Depends(require_auth)) -
 # Interaction 路由 - /api/v1/interaction
 # ---------------------------------------------------------------------------
 interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"])
-
-
-# BUG-FIX-fix_20260605_interaction_stub_routes:
-# 问题根因: /api/v1/interaction/* 路由全部为存根实现，前端点击选项后
-#           后端未调用 HumanInteractionService.respond() / submit_response()，
-#           导致 asyncio.Event.set() 永远不触发，wait_for_choice() 永久阻塞，
-#           用户看到"工具执行中"状态一直停留。
-# 修复方案: 将存根路由替换为调用 HumanInteractionService 的真实实现。
-# 影响范围: 前端人类交互面板的所有操作（选择/审批/拒绝/取消/查看）。
-# 修复日期: 2026-06-05
 
 
 @interaction_router.post("/response", summary="提交交互响应")
@@ -1563,12 +1518,6 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
     Returns:
         {taskId, currentPhase, phaseStatus}
     """
-    # BUG-FIX-fix_20260524_phase_api_hardcode:
-    # 问题根因: get_task_phase 硬编码返回 currentPhase="prepare" 和 phaseStatus="pending"，
-    #           无论任务实际处于什么状态，前端始终显示"准备阶段"。
-    # 修复方案: 从 TaskService 读取实际任务状态，映射到正确的阶段和阶段状态。
-    # 影响范围: 前端任务详情页的阶段显示。
-    # 修复日期: 2026-05-24
     _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {
         "pending": ("prepare", "pending"),
         "scheduled": ("prepare", "pending"),
@@ -1587,7 +1536,7 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
         try:
             task = task_service.get_task(task_id)
             if task:
-                status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+                status_str = safe_enum_value(task.status)
                 phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
                 return {
                     "taskId": task_id,

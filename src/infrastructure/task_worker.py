@@ -225,10 +225,6 @@ class TaskWorker(
             self._services["workspace_lifecycle_manager"] = lifecycle
             # 注册到 ServiceProvider，供 task_evaluate / _task_cleanup 等跨模块
             # 通过 provider.get("workspace_lifecycle_manager") 获取同一实例。
-            # BUG-FIX-fix_20260618_lifecycle_not_in_provider:
-            # 原先只写入 self._services 局部 dict，未注册到全局 ServiceProvider，
-            # 导致 _try_merge_before_complete 兜底 provider.get(...) 永远拿不到
-            # lifecycle，worktree 合并被静默跳过，任务标记 completed 但产出未合并。
             try:
                 from infrastructure.service_provider import get_service_provider
                 get_service_provider().register("workspace_lifecycle_manager", lifecycle)
@@ -276,9 +272,6 @@ class TaskWorker(
                     await bg_task
         self._tasks.clear()
 
-        # BUG-FIX-fix_20260523_stop_state:
-        # 将仍在 running/pending 的任务标记为 paused（而非 failed），
-        # 以便重启后用户可通过前端 resume 或 agent retry 恢复执行。
         if self._task_service:
             try:
                 from tasks.types import TaskStatus
@@ -287,9 +280,6 @@ class TaskWorker(
                     try:
                         task = self._task_service.get_task(tid)
                         if task and (task.status in (TaskStatus.RUNNING, TaskStatus.PENDING)):
-                            # BUG-FIX-fix_20260603_pause_metadata:
-                            # 传入 paused_by="system" 以区分用户手动暂停。
-                            # 重启时只恢复系统暂停的任务，用户暂停的保持 SUSPENDED。
                             await self._task_service.pause_task(tid, paused_by="system")
                             logger.info("TaskWorker.stop: task %s marked as paused (system)", tid)
                     except Exception as e:
@@ -346,16 +336,7 @@ class TaskWorker(
             except Exception as e:
                 logger.error("TaskWorker: 执行失败 | task=%s | error=%s", td.get("task_id"), e)
                 self._contexts.pop(td.get("task_id"), None)  # 启动失败时清理
-            # BUG-FIX-fix_20260601_isolated_engine:
-            # 正常路径（fire-and-forget）不再在此处 pop context。
-            # context 由 _cleanup_after_engine 回调在引擎完成后负责清理。
 
-        # BUG-FIX-fix_20260524_submit_task_loop:
-        # ToolCore 通过 asyncio.to_thread + asyncio.run 在工作线程执行工具，
-        # 导致 submit_task 可能从非主事件循环的线程调用。
-        # asyncio.create_task 会在当前线程的临时事件循环上创建任务，
-        # asyncio.run 结束后临时循环关闭，任务被丢弃。
-        # 修复：检测是否在主循环线程中，若不在则用 call_soon_threadsafe 调度。
         loop = self._main_loop
         if loop is None or loop.is_closed():
             logger.error("TaskWorker: 主事件循环不可用 | task=%s", task_id)

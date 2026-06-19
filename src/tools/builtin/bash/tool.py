@@ -47,9 +47,6 @@ class SecurityChecker:
     """
 
     # 危险命令正则模式（防止命令注入绕过）
-    # BUG-FIX-fix_20260324_143000_security: 使用正则表达式替代简单字符串匹配
-    # 问题根因: 原实现使用简单字符串包含检测，容易被管道符、命令替换、分号等方式绕过
-    # 修复方案: 使用正则表达式模式匹配，检测词边界、管道、命令替换等危险结构
     DANGEROUS_PATTERNS: ClassVar[list[str]] = [
         r"\brm\s+-rf\b",           # rm -rf（词边界匹配）
         r"\brm\s+-rf\s+/",         # rm -rf /（明确删除根目录）
@@ -430,10 +427,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                     summary = self.process_manager.get_summary(pid)
 
                     if summary:
-                        # BUG-FIX-fix_20260324_143000_elapsed: 修复时间计算错误
-                        # 问题根因: 使用本次轮询时间 elapsed，而非进程总运行时间
-                        # 修复方案: 使用 time.time() - proc_info.start_time 计算进程总运行时间
-                        # 影响范围: 进程超时返回的 elapsed 值
                         return create_success_result(
                             data={
                                 "status": "running",
@@ -541,10 +534,6 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 # 再次触发回调
                 summary = self.process_manager.get_summary(pid)
 
-                # BUG-FIX-fix_20260324_143000_elapsed: 修复时间计算错误
-                # 问题根因: 混淆计算 elapsed + (time.time() - proc_info.start_time)，导致重复累加
-                # 修复方案: 使用 time.time() - proc_info.start_time 计算进程总运行时间
-                # 影响范围: continue 操作超时返回的 elapsed 值
                 return create_success_result(
                     data={
                         "status": "running",

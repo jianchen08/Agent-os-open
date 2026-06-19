@@ -89,11 +89,6 @@ async def execute_core_plugin(
             core_result = await core_plugin.execute(core_ctx)
             if isinstance(core_result, dict):
                 state.update(core_result)
-            # BUG-FIX-fix_20260603_stale_raw_error:
-            # Core 重试成功后，_handle_core_error 设置的 raw_error 和
-            # llm_error_info 仍残留在 state 中，导致 error_check 插件和
-            # llm_error_recovery 插件在下一轮产出错误的 end 信号或恢复提示。
-            # 重试成功时清除这些过期错误状态。
             state.pop("raw_error", None)
             state.pop("llm_error_info", None)
             logger.debug("Core plugin executed: core_type=%s", core_type)
@@ -354,11 +349,6 @@ async def handle_no_route_signals(
             {"role": "user", "content": state["user_input"]}
         )
 
-    # BUG-FIX-fix_20260531_pipeline_infinite_loop:
-    # 问题根因: suspend_and_wait 返回 False（管道应结束）时，本函数仍返回 "continue"，
-    #   导致 _run_loop while 循环永不退出，管道每 600s 被 _check_children_terminal
-    #   无意义唤醒一次，每次都调 LLM 浪费 token。
-    # 修复方案: 检查 suspend_and_wait 返回值，False 时返回 "end" 让管道结束。
     resumed = await engine.suspend_and_wait(state)
     if not resumed:
         logger.info(

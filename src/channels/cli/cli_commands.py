@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from utils.enum_utils import safe_enum_value
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -486,7 +487,7 @@ class SlashCommandRegistry:
             agent_name = getattr(agent_config, "display_name", agent_name)
             level = getattr(agent_config, "level", None)
             if level:
-                agent_level = level.value if hasattr(level, "value") else str(level)
+                agent_level = safe_enum_value(level)
 
         # 服务状态
         svc_status: list[tuple[str, str]] = []

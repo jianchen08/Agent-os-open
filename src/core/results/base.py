@@ -19,6 +19,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.states import ExecutionStatus
+from utils.enum_utils import safe_enum_value
 
 T = TypeVar("T")  # 输出数据类型
 
@@ -192,7 +193,7 @@ class ExecutionResult(BaseModel, Generic[T]):
             return result
 
         # 处理 status：由于 use_enum_values=True，status 可能已经是字符串
-        status_value = self.status.value if hasattr(self.status, 'value') else self.status
+        status_value = safe_enum_value(self.status)
 
         result = {
             "status": status_value,

@@ -104,7 +104,6 @@ class MemoryService:
             "last_retrieval_at": None,
         }
 
-        # BUG-FIX-REQ-5: 自动注册内置 keyword 检索器
         self._ensure_default_retrievers()
 
     def register_retriever(self, method: str, retriever: IRetriever) -> None:

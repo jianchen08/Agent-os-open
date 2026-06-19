@@ -23,6 +23,9 @@ from channels.api.models import (
     TaskSubmitResponse,
     TaskUpdate,
 )
+from infrastructure.service_access import get_execution_record_storage
+from tasks.service_access import get_task_service
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,11 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter  # noqa: E402
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
+
+
+# A-3/A-6: 委托到公共接口，保持模块内调用兼容
+_get_task_service = get_task_service
+_get_execution_record_storage = get_execution_record_storage
 
 
 def _map_status_for_api(status: str) -> str:
@@ -44,70 +52,11 @@ def _map_status_for_api(status: str) -> str:
     return status
 
 
-def _get_task_service() -> Any:
-    """获取全局 TaskService 实例。
-
-    BUG-FIX-fix_20260524_task_service_type_mismatch:
-    问题根因: 旧代码注册 TaskStorage 作为 "task_service"，导致其他模块通过
-              ServiceProvider 获取到 TaskStorage 实例而非 TaskService，
-              缺少 start_task/fail_task/get_task/bind_pipeline_run 等方法，
-              引发 AttributeError 或状态不同步。
-    修复方案: 使用 TaskService 替代 TaskStorage，与 task_submit/task_manage 保持一致。
-              TaskService 内部持有 TaskStorage 实例，通过门面模式提供完整 API。
-    影响范围: 所有通过 ServiceProvider 获取 task_service 的模块。
-    修复日期: 2026-05-24
-    """
-    try:
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
-        )
-    except Exception as exc:
-        logger.warning(
-            "_get_task_service: TaskService 初始化失败，将返回 None | error=%s",
-            exc,
-        )
-        return None
-
-
-def _get_execution_record_storage() -> Any:
-    """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。
-
-    Returns:
-        ExecutionRecordStorage 实例，服务不可用返回 None
-    """
-    try:
-        from pathlib import Path
-
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        storage = provider.get("execution_record_storage")
-        if storage is not None:
-            return storage
-        return provider.get_or_create(
-            "execution_record_storage",
-            lambda: __import__(
-                "infrastructure.execution_record_storage",
-                fromlist=["ExecutionRecordStorage"],
-            ).ExecutionRecordStorage(
-                data_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "pipelines"),
-            ),
-        )
-    except Exception as exc:
-        logger.warning(
-            "_get_execution_record_storage: ExecutionRecordStorage 初始化失败，将返回 None | error=%s",
-            exc,
-        )
-        return None
-
-
 def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
     """将 TaskModel dataclass 转为字典。"""
     from dataclasses import asdict
     d = asdict(task_model)
-    raw_status = task_model.status.value if hasattr(task_model.status, "value") else str(task_model.status)
+    raw_status = safe_enum_value(task_model.status)
     d["status"] = _map_status_for_api(raw_status)
     if hasattr(task_model, "priority") and hasattr(task_model.priority, "value"):
         d["priority"] = task_model.priority.value
@@ -153,7 +102,6 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     response_model=TaskListResponse,
     summary="获取任务列表",
 )
-# BUG-FIX-fix_20260512_async_list_all: 改为 async def 以支持 await task_service.list_all()
 async def list_tasks(
     status: str | None = Query(default=None, description="按状态筛选"),
     priority: int | None = Query(
@@ -183,19 +131,12 @@ async def list_tasks(
     tasks: list[dict[str, Any]] = []
     if task_service is not None:
         try:
-            # BUG-FIX-fix_20260512_async_list_all: 添加 await
-            # BUG-FIX-fix_20260512_session_filter: 传递 session_id 到 list_all 减少不必要数据获取
             ts_tasks = await task_service.list_all(limit=1000, session_id=session_id)
             for tm in ts_tasks:
                 tasks.append(_task_model_to_dict(tm))
         except Exception as exc:
             logger.warning("从 TaskStorage 加载任务失败: %s", exc)
 
-    # BUG-FIX-fix_20260513_task_session_filter: 通过 pipeline_ids 关联任务与会话
-    # BUG-FIX-fix_20260603_task_tree_visibility:
-    # 问题根因: _pipeline_root_map 的 value 是根任务ID，而 pipeline_ids 是管道运行ID，
-    #           跨 ID 空间匹配永远不命中。改为从任务自身字段递归扩展管道 ID 集合。
-    # 修复日期: 2026-06-03
     if session_id:
         pipeline_ids = set()
         thread_data = store.threads.get(session_id)
@@ -247,7 +188,6 @@ async def list_tasks(
     "/debug/all",
     summary="获取任务调试数据（全字段）",
 )
-# BUG-FIX-fix_20260512_async_list_all: 改为 async def 以支持 await task_service.list_all()
 async def get_tasks_debug(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
@@ -268,11 +208,9 @@ async def get_tasks_debug(
     if task_service is None:
         return {"items": [], "total": 0}
     try:
-        # BUG-FIX-fix_20260512_async_list_all: 添加 await
         all_tasks = await task_service.list_all(limit=limit, reverse=(sort_order == "desc"))
         if status:
             all_tasks = [t for t in all_tasks if t.status.value == status]
-        # BUG-FIX-fix_20260512_session_filter: 按 session_id 过滤
         if session_id:
             all_tasks = [t for t in all_tasks if t.metadata.get("session_id") == session_id]
         items = [_task_model_to_dict(t) for t in all_tasks]
@@ -317,7 +255,7 @@ async def create_task(
             message="创建任务必须指定执行 Agent（agent_id），禁止静默降级到默认 Agent",
         )
 
-    from tasks.types import Task as TaskModel, TaskPriority, TaskStatus
+    from tasks.types import TaskModel, TaskPriority, TaskStatus
 
     task_model = TaskModel(
         title=body.title,
@@ -682,11 +620,6 @@ def _cancel_child_pipelines(task_id: str, task_service: Any) -> int:
     """
     cancelled = 0
     try:
-        # BUG-FIX-fix_20260523_cancel_task:
-        # 问题根因: task_service 是 TaskStorage 实例，没有 list_subtasks 方法（该方法属于 TaskService）。
-        # 修复方案: 改用 TaskStorage.list_by_parent(task_id) 获取子任务列表。
-        # 影响范围: 取消任务时级联取消子管道。
-        # 修复日期: 2026-05-23
         subtasks = task_service.list_by_parent(task_id)
     except Exception:
         return 0
@@ -733,7 +666,6 @@ async def pause_task(
         )
 
     try:
-        # BUG-FIX-fix_20260512_async_compat: pause_task 现在是 async
         await task_service.pause_task(task_id)
     except KeyError:
         raise APIError(
@@ -802,7 +734,6 @@ async def resume_task(
         )
 
     try:
-        # BUG-FIX-fix_20260512_async_compat: resume_task 现在是 async
         await task_service.resume_task(task_id)
     except KeyError:
         raise APIError(
@@ -896,7 +827,6 @@ async def cancel_task(
     # 只有非终态任务可以取消（pending/running/stopped/evaluating）
     from tasks.types import TaskStatus
 
-    # BUG-FIX-fix_20260607_suspended_to_stopped: SUSPENDED 不存在于 TaskStatus，改为 STOPPED
     cancellable_statuses = {
         TaskStatus.PENDING, TaskStatus.RUNNING,
         TaskStatus.STOPPED, TaskStatus.EVALUATING,
@@ -910,25 +840,12 @@ async def cancel_task(
 
     reason = (body or {}).get("reason", "用户请求取消")
 
-    # BUG-FIX-fix_20260523_cancel_task:
-    # 问题根因: 原代码调用 fail_task 将状态设为 FAILED，无法区分"取消"和"失败"。
-    # 修复方案: 改用 cancel_task 方法，将状态设为 CANCELLED。
-    # 影响范围: 任务取消功能，前端状态展示。
-    # 修复日期: 2026-05-23
-    # 步骤1: 将任务标记为 cancelled（记录取消原因）
     await task_service.cancel_task(task_id, reason=f"已取消: {reason}")
 
     # 步骤2: 级联取消所有子任务
     cascaded = await task_service.cancel_task_cascade(task_id, reason=reason)
 
     # 步骤3: 取消运行中管道
-    # BUG-FIX-fix_20260524_cancel_container_task_route:
-    # 问题根因: 对容器任务调用 _cancel_running_pipeline(task_id) 会误操作父管道，
-    #           因为容器任务的 pipeline_run_id 指向父管道。
-    # 修复方案: 如果是容器任务，跳过 _cancel_running_pipeline，
-    #           只执行 _cancel_child_pipelines 来取消子任务的管道。
-    # 影响范围: API 层取消容器任务的流程。
-    # 修复日期: 2026-05-24
     is_container = task.metadata.get("task_scope") == "container"
     pipeline_cancelled = False if is_container else _cancel_running_pipeline(task_id)
     _cancel_child_pipelines(task_id, task_service)
@@ -938,18 +855,11 @@ async def cancel_task(
         _user.get("username"), task_id, pipeline_cancelled, cascaded,
     )
 
-    # BUG-FIX-fix_20260523_cancel_task:
-    # 问题根因: 原返回格式为 {success, task_id, cancelled, message, cascaded_subtasks}，
-    #           但前端 cancelLongTermTask 将响应当作 Task 对象直接替换 store 中的任务，
-    #           导致任务数据被损坏（字段缺失）。
-    # 修复方案: 获取更新后的任务数据，使用 _task_to_response 格式化后返回 Task 对象格式。
-    # 影响范围: 前端取消任务后的数据展示。
-    # 修复日期: 2026-05-23
     updated_task = task_service.get_task(task_id)
     if updated_task is not None:
         from dataclasses import asdict as _asdict
         task_dict = _asdict(updated_task)
-        raw_status = updated_task.status.value if hasattr(updated_task.status, "value") else str(updated_task.status)
+        raw_status = safe_enum_value(updated_task.status)
         task_dict["status"] = _map_status_for_api(raw_status)
         if hasattr(updated_task, "priority") and hasattr(updated_task.priority, "value"):
             task_dict["priority"] = updated_task.priority.value

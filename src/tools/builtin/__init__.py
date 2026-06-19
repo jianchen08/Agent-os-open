@@ -332,14 +332,6 @@ def register_core_tools(
             continue
 
         # 处理需要 session 的工具
-        # BUG-FIX-fix_20260316_task_manage_not_found
-        # 问题根因: 原代码只注册工具定义，没有注册 handler，导致执行时找不到处理函数
-        # 修复方案: 当 session 存在时，实例化工具并注册 handler
-        # 注意：工具名称必须与 Tool.get_tool_definition() 中的 name 字段一致
-        # - task_submit -> TaskSubmitTool (name="task_submit")
-        # - task_manage -> TaskTool (name="task_manage")
-        # - task_evaluate -> TaskEvaluateTool (name="task_evaluate")
-        # - memory -> MemoryTool (name="memory")
         if tool_name in ["task_submit", "task_manage", "task_evaluate", "memory"]:
             tool_import_map = {
                 "task_submit": ("tools.builtin.task_submit", "TaskSubmitTool"),

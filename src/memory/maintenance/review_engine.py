@@ -267,10 +267,6 @@ class ReviewEngine:
         if summary is None:
             return {"status": "error", "run_id": run_id, "message": "Pipeline not found"}
 
-        # BUG-FIX-fix_review_rejects_success_status:
-        # 原实现只认 status=="completed"，但 track 插件实际写入 success/failed，
-        # 导致真实数据里几乎所有 pending pipeline 都被拒（"Pipeline not completed"），
-        # 复盘经验产出永远为 0。与 get_pending_pipelines 用同一套终态集合判断。
         if summary.status not in self._TERMINAL_STATUSES:
             return {"status": "error", "run_id": run_id, "message": "Pipeline not completed"}
 
@@ -330,11 +326,6 @@ class ReviewEngine:
                 )
                 saved_counts["experiences"] += 1
 
-            # BUG-FIX-fix_review_misses_summary_error:
-            # 真实数据中 record.error 几乎总是空（错误只记在 summary.error），
-            # 原实现因此对 success/failed pipeline 产不出任何经验。
-            # 当记录级错误为 0 但 summary.error 非空时，用 summary.error 兜底产一条经验，
-            # 这是复盘最常见的产出路径（整管道级失败：如鉴权失败、连接错误）。
             if saved_counts["experiences"] == 0 and summary.error:
                 content = self._build_experience_content(
                     run_id, summary.status, summary.error,

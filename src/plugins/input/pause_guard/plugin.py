@@ -114,7 +114,6 @@ class PauseGuardPlugin(IInputPlugin):
         from pipeline.types import RouteSignal
         from tasks.types import TaskStatus
 
-        # BUG-FIX-fix_20260607_suspended_to_stopped: TaskStatus 中暂停状态为 STOPPED
         if task.status == TaskStatus.STOPPED:
             logger.info("[%s] Task %s is paused, suspending pipeline", self.name, task_id)
             return {

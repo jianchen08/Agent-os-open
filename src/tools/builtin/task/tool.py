@@ -26,6 +26,7 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +54,13 @@ class TaskTool(BuiltinTool):
     def _get_execution_record_storage(self):
         """获取全局 ExecutionRecordStorage 实例。
 
-        通过 ServiceProvider 统一获取。
+        委托到 infrastructure.service_access 公共接口。
 
         Returns:
             ExecutionRecordStorage 实例，获取失败时返回 None
         """
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get("execution_record_storage")
+        from infrastructure.service_access import get_execution_record_storage
+        return get_execution_record_storage()
 
     @staticmethod
     def _calc_elapsed_seconds(task: TaskModel) -> float | None:
@@ -126,6 +126,9 @@ class TaskTool(BuiltinTool):
     def _get_task_service(self) -> TaskService:
         """获取共享的 TaskService 实例。
 
+        委托到 tasks.service_access 公共接口，
+        支持缓存已获取的实例避免重复创建。
+
         Returns:
             TaskService 实例
 
@@ -134,12 +137,8 @@ class TaskTool(BuiltinTool):
         """
         if self._task_service is not None:
             return self._task_service
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        service = provider.get_or_create(
-            "task_service",
-            lambda: TaskService(event_bus=provider.get("event_bus")),
-        )
+        from tasks.service_access import get_task_service
+        service = get_task_service()
         if service is not None:
             self._task_service = service
             return self._task_service
@@ -593,7 +592,7 @@ class TaskTool(BuiltinTool):
             titles = [t.title for t in filtered]
             statuses = [t.status.value for t in filtered]
             priorities = [
-                t.priority.value if hasattr(t.priority, "value") else t.priority
+                safe_enum_value(t.priority)
                 for t in filtered
             ]
             target_names = [t.metadata.get("target_name", "") for t in filtered]
@@ -951,7 +950,6 @@ class TaskTool(BuiltinTool):
             reason = inputs.get("reason", "用户请求停止")
             old_status = task.status.value
 
-            # BUG-FIX: pause_task 的参数是 paused_by 而非 reason
             await service.pause_task(task_id, paused_by=f"停止(用户): {reason}")
 
             # 级联停止子任务（仅对有子任务的任务）

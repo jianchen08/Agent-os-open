@@ -240,7 +240,6 @@ class CLIRunnerMixin:
                     and hasattr(task_service, "bind_pipeline_run")
                 ):
                     try:
-                        # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
                         await task_service.bind_pipeline_run(
                             submitted_task_id, pipeline_run_id
                         )

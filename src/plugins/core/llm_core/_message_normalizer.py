@@ -21,14 +21,6 @@ logger = logging.getLogger(__name__)
 # 增量扫描缓存：记录上次验证完成时各 provider 的消息数量
 # 使用 (provider, name, pipeline_id) 作为 key，避免不同管道共享缓存
 #
-# BUG-FIX-fix_20260614_orphan_tool_result:
-# 历史根因：缓存 key 仅含 provider:name，没有 pipeline_id 维度。
-# 多个并发管道共享同一个 provider+plugin 实例时共用同一缓存值。
-# 当外部插件（duplicate_check / llm_error_recovery 等）向某管道的
-# state["messages"] 追加消息后，该管道的实际消息数与缓存记录的
-# "已验证前缀长度"不一致，孤儿 tool result 可能落在已验证前缀内
-# 被 Phase A/B 跳过 → 发给 API 触发 "tool id not found" (2013)。
-# 修复：缓存 key 追加 pipeline_id 维度，按管道隔离。
 _pairing_validated_len: dict[str, int] = {}
 
 
@@ -669,16 +661,6 @@ def normalize_messages_for_provider(
             if intruders:
                 relocated_count += len(intruders)
                 result.extend(tool_group)
-                # BUG-FIX-fix_20260607_intruder_tool_calls_leak:
-                # 问题根因: 当 intruder 是 assistant(tool_calls) 消息时，
-                #   转为 user 角色但保留了 tool_calls 字段，
-                #   产生 role=user name=assistant tool_calls=[...] 的畸形消息，
-                #   MiniMax API 报 "invalid params, tool call result does not follow tool call"。
-                # 修复方案: 转换角色时清除 tool_calls 和 tool_call_id 等不兼容字段，
-                #   仅保留 content 作为纯文本 user 消息。
-                # 影响范围: 任务重试时恢复的对话历史中 assistant(tool_calls) 消息
-                #   位于其他 assistant(tool_calls) 和 tool 之间的情况。
-                # 修复日期: 2026-06-07
                 for intr in intruders:
                     if intr.get("role") not in ("user", "tool"):
                         moved = dict(intr)

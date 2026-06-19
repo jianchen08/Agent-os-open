@@ -115,12 +115,6 @@ class ToolSchemaPlugin(IInputPlugin):
 
         logger.debug("[%s] active_tool_ids=%s (count=%d)", self.name, active_tool_ids, len(active_tool_ids))
 
-        # BUG-FIX-fix_20260513_tool_injection_race: 非核心工具动态加载竞态条件
-        # 问题根因: ToolSchemaPlugin 在获取工具前未触发动态加载，
-        #           导致非核心工具（如 playwright_test）未注册而被静默跳过
-        # 修复方案: 在获取工具前主动调用同步加载，确保所有需要的工具已注册
-        # 影响范围: 所有不在 CORE_SYSTEM_TOOLS 中的工具
-        # 修复日期: 2026-05-13
         if active_tool_ids:
             try:
                 from tools.loader import get_dynamic_tool_loader

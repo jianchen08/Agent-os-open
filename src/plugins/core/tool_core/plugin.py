@@ -326,35 +326,8 @@ class ToolCore(ICorePlugin):
         start = time.monotonic()
 
         try:
-            # BUG-FIX-fix_20260523_tool_blocking:
-            # 问题根因: async工具（如enhanced_search）内部执行同步阻塞操作（rglob/read_text），
-            #   直接await会在主事件循环中运行，阻塞整个循环。
-            #   导致: 1) drain_loop/WebSocket无法推送事件，前端卡死
-            #         2) asyncio.wait_for的定时器回调无法执行，超时机制完全失效
-            # 修复方案: 所有工具（同步+异步）统一通过asyncio.to_thread在线程中执行。
-            #   异步工具通过asyncio.run()创建独立事件循环，隔离阻塞操作。
-            #   主事件循环保持空闲，可正常处理超时定时器和其他异步任务。
             #
-            # BUG-FIX-fix_20260525_human_interaction_cross_loop:
-            # 问题根因: human_interaction 内部使用 asyncio.Event.wait() 等待前端响应，
-            #   asyncio.to_thread + asyncio.run() 创建了独立事件循环，
-            #   Event.set() 在主事件循环中调用，无法唤醒独立循环中的 Event.wait()。
-            #   导致 human_interaction 永远等到 tool_core 的 wait_for 超时才返回。
-            # 修复方案: 对 human_interaction 这类纯异步（无阻塞操作）的工具，
-            #   直接 await 执行，不经过 to_thread。
             #
-            # BUG-FIX-fix_20260601_asyncio_cascade_cancel:
-            # 问题根因: asyncio.run() 的 Runner.__exit__ 调用 _cancel_all_tasks(loop)
-            #   取消事件循环中**所有**任务。当工具执行期间创建了嵌套管道引擎时
-            #   （如 task_submit/task_manage），这些引擎会被级联取消，
-            #   导致所有子任务因 "sink dead" 被终止。
-            # 修复方案: 使用 _asyncio_tool_runner() 替代 asyncio.run()，
-            #   只运行工具协程并返回，不调用 _cancel_all_tasks()。
-            # 工具执行模式：
-            # - run_on_main_loop=True: 纯异步工具，在主循环直接执行
-            #   避免 to_thread 每次创建独立事件循环
-            # 优先通过 handler.__self__ 获取工具实例检查类属性；
-            # handler 不可用时回退到工具名检查（bash_execute + human_interaction）
             handler_for_check = self._tool_registry.get_handler(tool_name) if self._tool_registry else None
             tool_self = handler_for_check.__self__ if handler_for_check and hasattr(handler_for_check, '__self__') else None
             _is_main_loop = (
@@ -434,10 +407,6 @@ class ToolCore(ICorePlugin):
                 "[%s] Tool timeout: %s (%.1fms, limit=%.1fs)",
                 self.name, tool_name, duration_ms, timeout,
             )
-            # BUG-FIX-fix_20260605_human_interaction_timeout_msg:
-            # 问题根因: human_interaction 外层超时时返回通用 "Tool timed after Xs"
-            #           错误信息，LLM 无法理解"人类未交互"，可能误判为通过。
-            # 修复方案: human_interaction 超时返回明确的人类未交互信息。
             if tool_name == "human_interaction":
                 error_msg = (
                     f"人类交互超时（等待了{timeout:.0f}秒），"
@@ -600,10 +569,6 @@ class ToolCore(ICorePlugin):
             if not isinstance(tool_args, dict):
                 tool_args = {}
 
-            # 允许工具通过 timeout_seconds 参数覆盖默认超时
-            # human_interaction 除外：它内部自行管理超时（wait_for_choice），
-            # 外层必须使用 _tool_timeouts 中配置的固定值（1800s），避免 LLM 传入的
-            # 小 timeout_seconds 导致 asyncio.wait_for 先于内部超时杀掉工具。
             timeout = self._default_timeout
             if tool_name in self._tool_timeouts:
                 timeout = self._tool_timeouts[tool_name]
@@ -788,11 +753,6 @@ class ToolCore(ICorePlugin):
                     ),
                 })
 
-        # BUG-FIX-fix_20260418_all_tools_failed
-        # 问题根因: 工具全部失败时 raw_error 始终为 None，导致 error_check 插件
-        #           无法识别，Output 插件链无 route_signal，管道异常退出
-        # 修复方案: 检测所有工具失败的情况，设置 raw_error 让 error_check 能处理
-        # 影响范围: 所有工具执行流程
         all_failed = results and all(not r.get("success") for r in results)
         raw_error = None
         if all_failed:
@@ -802,7 +762,6 @@ class ToolCore(ICorePlugin):
             )
             raw_error = f"所有工具执行失败: {error_summary}"
 
-        # BUG-FIX-fix_20260418_task_inject: 检测 task_failed 标记，直接结束管道
         has_task_failed = False
         for r in results:
             tool_data = r.get("data", {})
@@ -823,18 +782,12 @@ class ToolCore(ICorePlugin):
             tool_data = r.get("data", {})
             if not isinstance(tool_data, dict):
                 continue
-            # BUG-FIX: metadata 可能从 ToolExecutionResult 传递到 r["metadata"]，
-            # 也可能嵌套在 tool_data（normalized output）中，两个位置都要检查。
             meta = tool_data.get("metadata") or r.get("metadata", {})
             if isinstance(meta, dict) and meta.get("action") == "task_submit":
                 tid = tool_data.get("task_id")
                 if tid and tid not in submitted_task_ids:
                     submitted_task_ids.append(tid)
             tool_name = r.get("tool_name", "")
-            # BUG-FIX-fix_20260615_eval_pipeline_not_end:
-            # slim 归一化后 overall_passed 落在 tool_data['output'] 子层，顶层
-            # 取不到，导致 task_evaluation_completed 永不置真、child_task_guard
-            # 当轮终止路径哑火。与 stop_check 契约统一：读 metadata.result。
             if tool_name == "task_evaluate" \
                     and isinstance(meta, dict) \
                     and meta.get("result") == "completed":

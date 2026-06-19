@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from tasks.types import TaskModel, TaskStatus
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +187,9 @@ class TaskStorage:
             可序列化的任务字典
         """
         d = asdict(task)
-        d["status"] = task.status.value if hasattr(task.status, "value") else task.status
-        d["priority"] = task.priority.value if hasattr(task.priority, "value") else task.priority
-        d["agent_level"] = task.agent_level.value if hasattr(task.agent_level, "value") else task.agent_level
+        d["status"] = safe_enum_value(task.status)
+        d["priority"] = safe_enum_value(task.priority)
+        d["agent_level"] = safe_enum_value(task.agent_level)
         return d
 
     @staticmethod

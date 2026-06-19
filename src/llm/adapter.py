@@ -353,10 +353,6 @@ class _BaseLiteLLMAdapter:
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 60))
         inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 300))
 
-        # BUG-FIX-fix_20260606_socket_level_timeout:
-        # asyncio.wait_for 的 cancel 无法中断 httpx 在 C 层的 socket recv()，
-        # 导致流式调用在 API 不响应时永久卡死。解决：将 inter_chunk_timeout
-        # 透传给 litellm → httpx.Timeout(read=N)，在 socket 层面强制超时。
         call_kwargs["timeout"] = inter_chunk_timeout
 
         stream_repetition = False
@@ -365,11 +361,6 @@ class _BaseLiteLLMAdapter:
             kwargs.pop("max_thinking_chars", 180000)
         )
 
-        # BUG-FIX-fix_20260529_minimax_thinking_stream:
-        # 流式 <think/> 标签状态机。MiniMax 等模型的思考内容通过 <think/> 标签
-        # 包裹在 delta.content 中返回（而非 delta.reasoning_content），且标签会
-        # 跨多个 chunk 切分。状态机通过 "<think" / "</think" 字符串查找跟踪开/闭状态，
-        # 确保 thinking 内容正确路由到 thinking 通道、正文路由到 text 通道。
         _in_think_tag: bool = False
 
         aiter = response.__aiter__()

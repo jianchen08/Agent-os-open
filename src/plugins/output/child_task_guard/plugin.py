@@ -16,6 +16,7 @@ from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, RouteSignal
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ class ChildTaskGuard(IOutputPlugin):
             try:
                 subtasks = task_service.list_subtasks(task_id)
                 for st in subtasks:
-                    status = st.status.value if hasattr(st.status, "value") else str(st.status)
+                    status = safe_enum_value(st.status)
                     if status in active_statuses:
                         seen_ids.add(st.id)
             except Exception as exc:
@@ -170,6 +171,8 @@ class ChildTaskGuard(IOutputPlugin):
     def _get_task_service(self, ctx: PluginContext) -> Any:
         """获取 TaskService 实例。
 
+        优先从插件上下文获取，fallback 到公共 service_access 接口。
+
         Args:
             ctx: 插件执行上下文
 
@@ -181,9 +184,5 @@ class ChildTaskGuard(IOutputPlugin):
         except KeyError:
             pass
 
-        try:
-            from infrastructure.service_provider import get_service_provider
-            provider = get_service_provider()
-            return provider.get("task_service")
-        except Exception:
-            return None
+        from tasks.service_access import get_task_service
+        return get_task_service()

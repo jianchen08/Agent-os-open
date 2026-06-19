@@ -66,11 +66,6 @@ class _TaskCrudMixin:
 
         self._storage.save(task)
 
-        # BUG-FIX-REQ-2: 容器任务创建后自动进入 running 状态
-        # 问题根因: 容器任务创建后处于 pending 状态，后续 complete/fail 操作
-        #   因状态转换矛盾（pending→completed 被拒，running 后又被要求 PENDING）
-        #   无法正常完成容器生命周期。
-        # 修复方案: 创建后检测 metadata.task_scope=container，自动转为 running。
         if metadata and metadata.get("task_scope") == "container":
             from tasks.types import TaskStatus
 

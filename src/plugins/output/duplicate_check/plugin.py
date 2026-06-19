@@ -178,12 +178,6 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 f"检测到重复工具调用{tool_desc}，已跳过执行。"
                 f"请不要再次使用相同的工具和参数，请尝试其他方法。"
             )
-            # BUG-FIX-fix_20260614_orphan_tool_result:
-            # 拦截时清空 RAW_TOOL_CALLS=[]，但 llm_core 已 append 的
-            # assistant(tool_calls) 仍留在 state["messages"] 末尾。该 assistant
-            # 永远等不到对应 tool result → 成为未配对消息 → 下轮被注入的
-            # tool result（来自其他路径）成为孤儿 → Minimax 报 "tool id not found"。
-            # 修复：拦截即撤销本次工具调用意图，同步移除末尾的 assistant(tool_calls)。
             stripped = self._strip_trailing_tool_call_assistant(ctx)
             self._inject_warning(ctx, warning)
             updates[StateKeys.RAW_TOOL_CALLS] = []

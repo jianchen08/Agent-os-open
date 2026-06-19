@@ -113,7 +113,6 @@ def resolve_conversation_history(
         return []
 
     history: list[dict[str, Any]] = []
-    # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
     _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
     for r in records:
         role = r.role or _type_to_role.get(r.type, "user")

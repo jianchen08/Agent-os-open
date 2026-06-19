@@ -18,10 +18,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 排除的目录（不参与场景检测、复制和大小计算）
-# BUG-FIX-fix_20260611_isolation_data:
-#   加入 "data" — data/ 包含运行时状态（会话映射、记忆、任务数据），
-#   不应被复制到容器空间或纳入 git 跟踪。
-#   参考: reports/worktree_merge_api_store_investigation.md 问题 #3
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data"})
 _SKIP_EXTENSIONS = frozenset({".bak", ".pyc", ".pyo"})
 _WIN_RESERVED_NAMES = frozenset({
@@ -81,7 +77,6 @@ class _GitOpsMixin:
     - self._resource_merge: Any
     """
 
-    # BUG-FIX: Windows 绝对路径正则（Linux 下 Path.is_absolute() 无法识别盘符路径）
     _WIN_ABS_PATH = __import__("re").compile(r'^[a-zA-Z]:[/\\]')
 
     def _get_workspace_root(self) -> Path:
@@ -260,10 +255,6 @@ class _GitOpsMixin:
 
         self._ensure_git_user(cwd)
 
-        # BUG-FIX-fix_20260529_gitignore_guard:
-        # git add -A 前确保 .gitignore 存在。
-        # 如果 .gitignore 丢失（sparse checkout 未检出、merge 覆盖等），
-        # git add -A 会跟踪 data/ 等本应排除的目录，后续 git 操作会破坏数据。
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
             logger.warning(
@@ -312,11 +303,6 @@ class _GitOpsMixin:
         if rc != 0 or not status.strip():
             return None
 
-        # BUG-FIX-fix_20260611_gitignore_guard:
-        #   复用 _git_init_and_initial_commit 中的保护逻辑。
-        #   如果 .gitignore 丢失（sparse checkout 未检出、merge 覆盖等），
-        #   git add -A 会跟踪 data/ 等本应排除的目录，后续 git 操作会破坏数据。
-        #   参考: reports/worktree_merge_api_store_investigation.md 问题 #2
         gitignore = cwd / ".gitignore"
         if not gitignore.exists():
             logger.warning(

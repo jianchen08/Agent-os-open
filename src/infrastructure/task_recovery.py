@@ -84,7 +84,6 @@ class TaskRecoveryMixin:
 
         # ── 3. 已是 stopped 的任务保持原样 ──
         # 无论是用户手动暂停还是系统暂停，都应保持 stopped，不自动恢复
-        # BUG-FIX-fix_20260607_suspended_to_stopped: TaskStatus 中暂停状态为 STOPPED 而非 SUSPENDED
         paused_tasks = self._task_service.list_by_status(TaskStatus.STOPPED)
         for task in paused_tasks:
             paused_by = (task.metadata or {}).get("paused_by", "unknown")
@@ -146,7 +145,6 @@ class TaskRecoveryMixin:
                     task.id, e,
                 )
                 try:
-                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await self._task_service.fail_task(
                         task.id, f"评估恢复失败: {e}",
                     )
@@ -278,11 +276,6 @@ class TaskRecoveryMixin:
             task_id, remaining, timeout,
         )
 
-        # BUG-FIX-fix_20260531_idle_timer_race:
-        # 问题根因: 评估管道在等待人类交互时(最长300s)，idle timer
-        #   仍在倒计时，300s后触发将任务标记为 failed，覆盖评估结果。
-        #   导致用户点击"通过"后任务状态仍为 failed。
-        # 修复方案: 评估期间取消 idle timer，评估完成后恢复。
         _idle_timer_cancelled = False
         if hasattr(self, "_cancel_idle_timer_async"):
             try:
@@ -295,7 +288,6 @@ class TaskRecoveryMixin:
             except Exception:
                 pass
 
-        # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
         result = await _asyncio.wait_for(
             executor.run_evaluation(
                 task_id=task_id,
@@ -338,7 +330,6 @@ class TaskRecoveryMixin:
                 "failed=%s",
                 task_id, failed_metrics,
             )
-            # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
             await self._task_service.complete_evaluation(
                 task_id, passed=False, result={
                     "overall_passed": False,

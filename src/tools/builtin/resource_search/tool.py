@@ -63,7 +63,6 @@ class ResourceSearchTool:
         self._search_engine = search_engine
         self._dynamic_tool_injector = dynamic_tool_injector
         self._external_search = external_search
-        # BUG-FIX: 使用字典缓存替代动态属性，避免随 tool 数量增长无限创建属性
         self._desc_cache: dict[str, str] = {}
 
     @staticmethod
@@ -159,7 +158,6 @@ class ResourceSearchTool:
         session_id = inputs.get("session_id", "")
         parent_record_id = inputs.get("parent_record_id", "")
 
-        # BUG-FIX: 移除冗余的 debug 日志，只保留 info 日志
         logger.info(
             f"[resource_search] execute: query={query}, mode={mode}, detailed={detailed}, resource_type={resource_type}, session_id={session_id}"
         )
@@ -200,7 +198,6 @@ class ResourceSearchTool:
         results = {}
 
         if resource_type in ["agent", "all"]:
-            # BUG-FIX: 使用用户传入的 detailed 参数，而非硬编码 True
             agent_names, agent_descriptions, agent_ids, agent_details = await self._search_agents(
                 query, category, level, limit, detailed=detailed, exact=False
             )
@@ -469,7 +466,6 @@ class ResourceSearchTool:
         Returns:
             精简后的结果字典
         """
-        # BUG-FIX: 无论什么模式都保留 _h 表头，LLM 需要表头理解各列含义
         slim = {}
         for key, value in results.items():
             if key.endswith("_d") or key.endswith("_h") or key.endswith("_c") or key == "message":
@@ -524,11 +520,6 @@ class ResourceSearchTool:
         当 query 为空或通配符（"*"、"all"、"所有"等）时，直接返回所有 agent（受 limit 限制）。
         否则调用 _match_query 进行子串/分词匹配。
         """
-        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
-        # 问题根因: _match_query 只支持子串匹配，LLM 用模糊查询（"所有agent"、"team"）无法匹配
-        # 修复方案: 空查询/通配符时直接返回所有 agent，不走 _match_query
-        # 影响范围: resource_search 工具的 agent 搜索功能
-        # 修复日期: 2026-05-24
 
         agent_registry = self._get_agent_registry()
         if not agent_registry:
@@ -893,7 +884,6 @@ class ResourceSearchTool:
         tool_info: tuple[str, str],
     ) -> str:
         """从工具代码中提取描述信息（缓存后复用）"""
-        # BUG-FIX: 使用字典缓存替代 setattr 动态属性
         if tool_name in self._desc_cache:
             return self._desc_cache[tool_name]
 
@@ -992,11 +982,6 @@ class ResourceSearchTool:
 
         匹配字段包括 name、description、tags，任一字段命中即返回 True。
         """
-        # BUG-FIX-fix_20260524_resource_search_agent: resource_search 搜索 agent 返回空
-        # 问题根因: _match_query 只支持子串匹配，不支持模糊/通配符查询
-        # 修复方案: 添加通配符支持和分词匹配
-        # 影响范围: resource_search 工具的 agent 搜索功能
-        # 修复日期: 2026-05-24
 
         # exact 模式保持原有行为不变
         if exact:

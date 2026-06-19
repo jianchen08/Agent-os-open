@@ -171,11 +171,6 @@ async def get_file_content(
     raw_path = Path(path)
     project_root = _get_project_root()
 
-    # BUG-FIX-fix_20260603_file_card_open_fail:
-    # 问题根因: 工具卡片点击时，file_read 的参数可能是其他项目/容器的绝对路径
-    #           （如 D:\myproject\a7bb41e6210f\xxx.md），不在当前项目根范围内，
-    #           安全检查会拒绝。但用户只是想查看工具调用时读取的文件内容。
-    # 修复方案: 绝对路径直接使用，仅对相对路径做安全检查（防路径穿越）。
     if raw_path.is_absolute():
         full_path = raw_path.resolve()
     elif workspace_path_str:

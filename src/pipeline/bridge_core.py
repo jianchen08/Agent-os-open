@@ -299,12 +299,6 @@ class BridgeCore:
                 "thread_id": getattr(self.output_sink, '_thread_id', '') or "",
             }))
             final_seq = self._get_next_sequence()
-            # BUG-FIX-fix_20260617_suspend_no_stream_end:
-            # 问题根因: 原代码在 full_content 和 parts 都为空时跳过 stream_end，
-            #   导致前端 streamingState 永远不被清理，UI 永久转圈。
-            # 修复方案: stream_end 始终发送（与 emit_finish 对齐），保证挂起必有终止事件。
-            # 影响范围: 系统通知/交互回复等空内容挂起场景
-            # 修复日期: 2026-06-17
             if full_content or parts:
                 await self._send_event(self._make_event("new_message", {
                     "id": self.message_id,

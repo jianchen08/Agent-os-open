@@ -48,7 +48,7 @@ def _notify_session_update(thread_id: str, action: str) -> None:
                         "data": {"action": action, "thread_id": thread_id},
                     }))
     except Exception:
-        pass
+        logger.warning("推送会话变更事件失败: thread_id=%s, action=%s", thread_id, action, exc_info=True)
 import contextlib
 
 from channels.api.memory_store import _parse_iso_time, store
@@ -59,9 +59,10 @@ from channels.api.models import (
     ThreadUpdate,
 )
 from infrastructure.execution_record_storage import ExecutionRecordStorage
-from infrastructure.service_provider import get_service_provider
+from infrastructure.service_access import get_execution_record_storage
 from infrastructure.session.models import SessionModel
 from infrastructure.session.session_service import SessionService
+from tasks.service_access import get_task_service
 
 logger = logging.getLogger(__name__)
 
@@ -71,45 +72,22 @@ _session_svc = SessionService()
 router = APIRouter(prefix="/api/v1/threads", tags=["线程"])
 
 
-def _get_execution_record_storage() -> ExecutionRecordStorage | None:
+def _get_execution_record_storage() -> Any:
     """从 ServiceProvider 获取全局 ExecutionRecordStorage 实例。
 
-    当 ServiceProvider 中未注册时，使用 get_or_create 懒加载。
-
-    Returns:
-        ExecutionRecordStorage 实例，服务不可用返回 None
+    委托到 infrastructure.service_access 公共接口。
+    保留此包装函数以维持模块内调用兼容性。
     """
-    provider = get_service_provider()
-
-    # 1. 尝试从已注册服务获取
-    storage = provider.get("execution_record_storage")
-    if storage is not None:
-        return storage
-
-    # 2. 懒加载 fallback：ServiceProvider 未注册时直接创建
-    return provider.get_or_create(
-        "execution_record_storage",
-        lambda: ExecutionRecordStorage(
-            data_dir=str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "pipelines"),
-        ),
-    )
+    return get_execution_record_storage()
 
 
 def _get_task_service() -> Any:
     """通过 ServiceProvider 获取全局 TaskService 实例。
 
-    Returns:
-        TaskService 实例，服务不可用或创建失败时返回 None
+    委托到 tasks.service_access 公共接口。
+    保留此包装函数以维持模块内调用兼容性。
     """
-    try:
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(),
-        )
-    except Exception:
-        return None
+    return get_task_service()
 
 
 async def _build_execution_graph(
@@ -502,6 +480,9 @@ def delete_thread(
     all_pipeline_ids = set(pipeline_ids)
     prev_size = 0
 
+    # B-3: 获取一次 provider 复用，避免多次重复调用
+    task_service = get_task_service()
+
     while len(all_pipeline_ids) > prev_size:
         prev_size = len(all_pipeline_ids)
 
@@ -510,10 +491,8 @@ def delete_thread(
                 if root_id in all_pipeline_ids or root_id == thread_id:
                     all_pipeline_ids.add(child_id)
 
-        try:
-            provider = get_service_provider()
-            task_service = provider.get("task_service")
-            if task_service:
+        if task_service:
+            try:
                 for task in task_service.get_all_tasks():
                     if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
                         all_pipeline_ids.add(task.id)
@@ -522,8 +501,8 @@ def delete_thread(
                         for sub in task_service.list_subtasks(task.id):
                             if sub.pipeline_run_id:
                                 all_pipeline_ids.add(sub.pipeline_run_id)
-        except Exception:
-            pass
+            except Exception:
+                logger.warning("收集关联管道时查询任务失败", exc_info=True)
 
     if exec_storage:
         for pid in all_pipeline_ids:
@@ -542,18 +521,17 @@ def delete_thread(
     except Exception:
         logger.warning("清理检查点文件失败", exc_info=True)
 
-    try:
-        provider = get_service_provider()
-        task_service = provider.get("task_service")
-        if task_service:
+    # 复用已获取的 task_service，无需再次调用 provider
+    if task_service:
+        try:
             for task in task_service.get_all_tasks():
                 if task.parent_pipeline_id in all_pipeline_ids or task.parent_pipeline_id == thread_id:
                     try:
                         task_service.hard_delete_sync(task.id)
                     except Exception:
                         logger.warning("删除关联任务 %s 失败", task.id, exc_info=True)
-    except Exception:
-        logger.warning("清理关联任务失败", exc_info=True)
+        except Exception:
+            logger.warning("清理关联任务失败", exc_info=True)
 
     try:
         provider = get_service_provider()
@@ -563,7 +541,7 @@ def delete_thread(
                 with contextlib.suppress(Exception):
                     task_worker.cancel_pipeline(pid)
     except Exception:
-        pass
+        logger.warning("取消关联管道失败", exc_info=True)
 
     _notify_session_update(thread_id, "deleted")
     return {"message": "线程已删除"}

@@ -318,7 +318,6 @@ class CLIInteractiveMixin:
                         session.active_pipeline_id
                     )[0]
                     if prev_records:
-                        # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role
                         _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
                         for r in prev_records:
                             role = r.role or _type_to_role.get(r.type, "user")
@@ -613,7 +612,6 @@ class CLIInteractiveMixin:
         session.register_pipeline(pipeline_id)
         session_svc._persist_session_state(session)
 
-        # BUG-FIX: session_id 作为 thread_id 注入管道 state
         _thread_id = session.session_id if session else ""
 
         self._pipeline_task = asyncio.create_task(

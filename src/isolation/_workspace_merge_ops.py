@@ -206,7 +206,6 @@ class _MergeOpsMixin:
                 logger.warning("[WorkspaceLifecycle] git worktree remove 失败: %s, %s", workspace, e)
                 self._run_git("worktree", "prune", cwd=project_root)
             if branch:
-                # BUG-FIX: 只在 git_merge 成功时打 tag（commit graph 上有 merge 关系）
                 if tag_task_id and merge_method == "git_merge":
                     tag = f"task-merge/{tag_task_id[:8]}"
                     self._run_git("tag", tag, branch, cwd=project_root)
@@ -299,8 +298,6 @@ class _MergeOpsMixin:
             return {"success": False,
                     "error": f"无法获取当前分支: rc={rc}, "
                              f"output={current_branch!r}"}
-        # BUG-FIX-fix_20260608_merge_delete_verify:
-        # 记录合并前 HEAD，供验证阶段做 --name-status diff
         rc_pre, pre_merge_head, _ = self._run_git(
             "rev-parse", "HEAD", cwd=proj_path)
         rc, _, stderr = self._run_git(
@@ -316,11 +313,6 @@ class _MergeOpsMixin:
                 "error": f"git merge 失败(branch={branch}): "
                          f"{stderr[:300] if stderr else 'unknown'}"}
 
-    # BUG-FIX-fix_20260529_remove_copy_merge:
-    # _copy_merge 和 _try_three_way_merge 已废弃。
-    # worktree 分支从当前 HEAD 创建，git merge 应为 fast-forward 或干净合并。
-    # 合并失败说明存在真正冲突，正确做法是保留 worktree 并报告失败。
-    # 不再绕过 git 做文件复制，避免覆盖 .gitignore 等基础设施文件。
 
     # def _copy_merge(self, workspace: str, target_dir: str,
     #                 ws_meta: dict | None = None) -> dict:
@@ -366,11 +358,6 @@ class _MergeOpsMixin:
                 return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
 
         if method == "git_merge" and branch:
-            # BUG-FIX-fix_20260601_chinese_filename_verify:
-            # Windows 上 git 默认用系统编码（GBK/CP936）输出中文文件名，
-            # 即使 _run_git 指定 encoding="utf-8" 也可能导致乱码。
-            # 使用 -c core.quotepath=false 确保 git 输出可读的中文路径，
-            # 同时在验证时做双重检查：先尝试精确匹配，再尝试模糊匹配。
             rc, diff_out, _ = self._run_git(
                 "-c", "core.quotepath=false",
                 "diff", "--name-only", branch + "~1", branch, cwd=proj_path)
@@ -422,12 +409,6 @@ class _MergeOpsMixin:
             return False
         return True
 
-    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
-    # on_task_cleanup 已删除。原方法在引擎结束时无条件调用，
-    # 会 git worktree remove + 删分支 + 扫删所有 __wt_ 孤儿目录，
-    # 把失败任务供重试的 worktree 一并销毁。
-    # worktree 的唯一销毁点现在只保留 on_eval_passed → _cleanup_worktree
-    # （评估通过 + 合并完成后），符合"销毁只发生在任务成功合并后"的契约。
 
     def _cleanup_unstaged_changes(self, project_root: str) -> None:
         """清理 project_root 中的 unstaged 变更。
@@ -457,7 +438,3 @@ class _MergeOpsMixin:
         # 恢复 unstaged 的修改到 HEAD 状态
         self._run_git("checkout", "--", ".", cwd=proj_path)
 
-    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
-    # _cleanup_orphaned_worktrees 已删除。它扫描 workspace root 删除所有
-    # 不在 git worktree list 的 __wt_ 目录，会把失败任务正在用的 worktree
-    # 当孤儿误删。删除后该方法无 src 调用方（仅原 on_task_cleanup 调用）。

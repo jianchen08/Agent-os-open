@@ -359,13 +359,6 @@ class MemoryTool(BuiltinTool):
         if not name:
             return create_failure_result("缺少 name 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit:
-        # 问题根因: _knowledge_importer 从未被注入（全代码库无 set_knowledge_importer 调用方），
-        #   导致 import_text/import_file/update/delete 全部返回"知识导入器未初始化"。
-        # 修复方案: 无 dedicated importer 时，降级使用 MemoryService 的 store_knowledge，
-        #   避免任务因工具不可用而失败。
-        # 影响范围: 记忆工具的 import/update/delete 操作。
-        # 修复日期: 2026-06-06
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.import_text(
@@ -422,7 +415,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.import_file(
@@ -488,7 +480,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 result = await self._knowledge_importer.update_knowledge(
@@ -550,7 +541,6 @@ class MemoryTool(BuiltinTool):
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        # BUG-FIX-fix_20260606_knowledge_importer_uninit: 同 _import_text
         if self._knowledge_importer:
             try:
                 success = await self._knowledge_importer.delete_knowledge(

@@ -207,9 +207,6 @@ class WebTool(BuiltinTool):
                 return False, f"不支持的协议: {parsed.scheme}"
 
             # 检查禁止域名（支持子域名匹配）
-            # BUG-FIX-fix_20260316: 修复域名检查逻辑误判问题
-            # 问题根因: 使用 `in` 操作符会误判，如 blocked="spam.com" 会匹配 "notspam.com"
-            # 修复方案: 使用精确匹配或子域名后缀匹配
             for blocked in self.blocked_domains:
                 if domain == blocked or domain.endswith("." + blocked):
                     return False, f"域名在禁止列表中: {domain}"

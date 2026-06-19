@@ -467,11 +467,6 @@ class MemoryContextService:
         msg_count = len(old_msgs)
         context_window = self._config.get("context_window", 0)
 
-        # BUG-FIX: sequence 范围直接从被压缩消息的 _record_sequence 取实际值，
-        # 而非从已有块递增。重启后压缩同一批消息时，已有块的
-        # sequence_end 会被累加（如 1-1027, 1028-2089），
-        # 但实际覆盖的是同一批消息，导致多个块范围"不重叠"的假象。
-        # 正确做法：直接用消息自身的 sequence 字段。
         sequences = [
             m["_record_sequence"] for m in old_msgs
             if "_record_sequence" in m and isinstance(m["_record_sequence"], int)

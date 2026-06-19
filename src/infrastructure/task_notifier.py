@@ -12,6 +12,8 @@ import contextlib
 import logging
 from typing import Any
 
+from utils.enum_utils import safe_enum_value
+
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
@@ -405,7 +407,7 @@ class TaskNotifierMixin:
         notifications = []
         for child in children:
             cid = child.id if hasattr(child, "id") else ""
-            status_val = child.status.value if hasattr(child.status, "value") else str(child.status)
+            status_val = safe_enum_value(child.status)
             title = child.title if hasattr(child, "title") else "未知任务"
             error = getattr(child, "error", "") or ""
 

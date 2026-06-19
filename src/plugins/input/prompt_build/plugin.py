@@ -253,11 +253,6 @@ class PromptBuildPlugin(IInputPlugin):
 
         content = ""
 
-        # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
-        # 问题根因: YAML 中字符串占位符项（如 '{{path:...}}'）被 loader 解析为
-        #           type="placeholder" 的 dict，但 _resolve_single_var_content 未处理该类型，
-        #           导致 static_vars 中的占位符项也被静默跳过。
-        # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本进行解析。
         if var_type == "placeholder":
             placeholder_text = var_def.get("name", "")
             if placeholder_text and "{{" in placeholder_text:
@@ -932,11 +927,6 @@ class PromptBuildPlugin(IInputPlugin):
                 var_type = var_def.get("type", "")
                 var_name = var_def.get("name", var_type)
 
-                # BUG-FIX-fix_20260606_dynamic_vars_placeholder:
-                # 问题根因: YAML 中字符串占位符项（如 '{{timestamp:...}}'）被 loader 解析为
-                #           type="placeholder" 的 dict，但 _build_dynamic_vars 未处理该类型，
-                #           导致占位符项被静默跳过，动态变量始终为空。
-                # 修复方案: 对 placeholder 类型，取 name 字段作为占位符文本调用 _resolve_placeholders。
                 if var_type == "placeholder":
                     placeholder_text = var_def.get("name", "")
                     if placeholder_text:

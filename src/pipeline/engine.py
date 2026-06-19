@@ -51,6 +51,7 @@ from pipeline.plugin_resolver import apply_agent_model_override
 from pipeline.registry import PluginRegistry, get_engine_registry
 from pipeline.route import InputRouteTable, OutputRouteTable
 from pipeline.types import StateKeys
+from utils.enum_utils import safe_enum_value
 
 if TYPE_CHECKING:
     from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
@@ -300,12 +301,10 @@ class PipelineEngine:
             self._pipeline_id[:12], state.get("task_id", "?"),
         )
         pipeline_run_id = state.get(StateKeys.PIPELINE_ID, self._pipeline_id)
-        # BUG-FIX-fix_20260513_pipeline_cross_talk:
         self._pipeline_id = pipeline_run_id
         _pipeline_id_token = _current_pipeline_id.set(pipeline_run_id)
         # 重置连续错误计数器
         self._consecutive_core_errors = 0
-        # BUG-FIX-fix_20260508_sub_pipeline_streaming:
         if not resumed:
             self.save_streaming_context(state)
         else:
@@ -547,6 +546,31 @@ class PipelineEngine:
     # 管道日志设置
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _create_file_handler(
+        log_path: Path,
+        mode: str,
+        fmt: logging.Formatter,
+        level: int = logging.DEBUG,
+    ) -> logging.FileHandler:
+        """创建 FileHandler 的工厂函数（B-4: 提取重复创建逻辑）。
+
+        Args:
+            log_path: 日志文件路径
+            mode: 文件打开模式（"w" 覆盖 / "a" 追加）
+            fmt: 日志格式化器
+            level: 日志级别，默认 DEBUG
+
+        Returns:
+            配置好的 FileHandler 实例
+        """
+        handler = logging.FileHandler(
+            str(log_path), encoding="utf-8", mode=mode,
+        )
+        handler.setLevel(level)
+        handler.setFormatter(fmt)
+        return handler
+
     def _setup_pipeline_logging(
         self,
         pipeline_run_id: str,
@@ -582,12 +606,9 @@ class PipelineEngine:
             _pipeline_filter = _PipelineLogFilter(pipeline_run_id)
 
             # ---- 1. 主日志（DEBUG~INFO，排除 WARNING+，避免与 error 重复） ----
-            _main_handler = logging.FileHandler(
-                str(_pipeline_dir / f"pipeline_{pipeline_run_id}.log"),
-                encoding="utf-8", mode=log_mode,
+            _main_handler = self._create_file_handler(
+                _pipeline_dir / f"pipeline_{pipeline_run_id}.log", log_mode, _log_fmt,
             )
-            _main_handler.setLevel(logging.DEBUG)
-            _main_handler.setFormatter(_log_fmt)
             _main_handler.addFilter(_pipeline_filter)
             # 排除 WARNING 及以上级别，这些内容只写 error 日志
             _main_handler.addFilter(
@@ -595,21 +616,16 @@ class PipelineEngine:
             )
 
             # ---- 2. 错误/中断/警告日志（WARNING+ 级别，独立文件夹） ----
-            _error_handler = logging.FileHandler(
-                str(_error_dir / f"pipeline_{pipeline_run_id}.log"),
-                encoding="utf-8", mode=log_mode,
+            _error_handler = self._create_file_handler(
+                _error_dir / f"pipeline_{pipeline_run_id}.log", log_mode, _log_fmt,
+                level=logging.WARNING,
             )
-            _error_handler.setLevel(logging.WARNING)
-            _error_handler.setFormatter(_log_fmt)
             _error_handler.addFilter(_pipeline_filter)
 
             # ---- 3. 任务执行日志（独立文件夹） ----
-            _task_handler = logging.FileHandler(
-                str(_task_dir / f"pipeline_{pipeline_run_id}.log"),
-                encoding="utf-8", mode=log_mode,
+            _task_handler = self._create_file_handler(
+                _task_dir / f"pipeline_{pipeline_run_id}.log", log_mode, _log_fmt,
             )
-            _task_handler.setLevel(logging.DEBUG)
-            _task_handler.setFormatter(_log_fmt)
             _task_handler.addFilter(self._TaskLogFilter(pipeline_run_id))
 
             _all_loggers = [
@@ -847,10 +863,6 @@ class PipelineEngine:
             True 表示成功恢复（应继续循环），False 表示无恢复数据（应结束管道）。
         """
         pipeline_id = state.get(StateKeys.PIPELINE_ID, "")
-        # BUG-FIX-fix_20260605_unify_pipeline_suspended_signal:
-        # 所有挂起路径最终都走到这里，统一在此处发 pipeline_suspended chunk。
-        # drain_loop 收到后视为"本轮流式完成"信号，发 stream_end 后退出。
-        # 不再在各调用方（engine_route / engine_chain / input_routes）分散 emit。
         _on_chunk_cb = state.get("on_chunk")
         if _on_chunk_cb:
             try:
@@ -884,13 +896,7 @@ class PipelineEngine:
                 pipeline_id, self._watching_task_ids,
             )
             max_wait_rounds = 50
-            # BUG-FIX-fix_20260603_wake_event_threadsafe:
-            # 捕获引擎线程的事件循环引用，供 inject_message 通过
-            # call_soon_threadsafe 安全地跨线程 set() wake_event。
             self._engine_loop = asyncio.get_running_loop()
-            # BUG-FIX-fix_20260604_wake_overwrite:
-            # 确保 _wake_event 存在（_run_loop:481 已创建，但其他调用路径可能为 None），
-            # 循环中不复用重建 Event，只 clear() 复用，避免覆盖已 set 的 Event。
             if self._wake_event is None:
                 self._wake_event = asyncio.Event()
             for wait_round in range(max_wait_rounds):
@@ -947,11 +953,6 @@ class PipelineEngine:
             self._inject_notifications_to_suspended_state(_queued)
 
         if self._suspended_state is not None:
-            # BUG-FIX-fix_20260525_idle_wake_empty_llm:
-            # 安全网: 唤醒后检查 suspended_state 中是否有实质性内容。
-            # 如果 user_input 为空，说明唤醒原因不是真实用户输入或系统通知，
-            # 而是 engine.resume() 或其他机制直接取走了旧 state。
-            # 此时应丢弃唤醒，返回 False 让 _run_loop 结束。
             _pending_input = self._suspended_state.get("user_input", "").strip()
             if not _pending_input:
                 logger.info(
@@ -1040,7 +1041,7 @@ class PipelineEngine:
                 task = task_service.get_task(tid)
                 if task is None:
                     continue
-                status = task.status.value if hasattr(task.status, "value") else str(task.status)
+                status = safe_enum_value(task.status)
                 if status not in terminal_statuses:
                     return False
             except Exception as exc:

@@ -81,7 +81,6 @@ class BrowserSearchTool(BuiltinTool):
     _playwright: Any = None
     _browser: Any = None
     _context: Any = None
-    # BUG-FIX: 添加 asyncio.Lock 防止并发调用 _ensure_browser 导致重复启动浏览器
     _lock: asyncio.Lock = asyncio.Lock()
 
     # ── 工具定义 ──────────────────────────────────────────────────────
@@ -172,7 +171,6 @@ class BrowserSearchTool(BuiltinTool):
 
     async def _ensure_browser(self) -> tuple[Any, Any]:
         """确保浏览器实例已启动，返回 (context, page)"""
-        # BUG-FIX: 使用 asyncio.Lock 保护并发调用，防止重复启动浏览器
         async with self._lock:
             if self._browser is None or not self._browser.is_connected():
                 await self._launch_browser()
@@ -199,7 +197,6 @@ class BrowserSearchTool(BuiltinTool):
             ],
         )
         self._context = await self._browser.new_context(
-            # BUG-FIX: 从 UA 池中随机选择，而非始终使用 USER_AGENTS[0]
             user_agent=random.choice(USER_AGENTS),
             viewport={"width": 1920, "height": 1080},
             locale="zh-CN",
@@ -304,7 +301,6 @@ class BrowserSearchTool(BuiltinTool):
 
     def _build_search_url(self, query: str, engine: str) -> str:
         """构建搜索引擎 URL"""
-        # BUG-FIX: 使用 quote_plus 进行完整的 URL 编码，而非仅替换空格
         encoded = quote_plus(query)
         if engine == "bing":
             return f"https://www.bing.com/search?q={encoded}&setlang=zh-CN"

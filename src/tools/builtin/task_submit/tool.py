@@ -21,6 +21,7 @@ from tools.types import (
     create_failure_result,
     create_success_result,
 )
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -142,21 +143,16 @@ class TaskSubmitTool(BuiltinTool):
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        通过 ServiceProvider 统一获取，支持显式注册、sys 全局变量和懒加载创建。
+        委托到 tasks.service_access 公共接口，
+        支持缓存已获取的实例避免重复创建。
 
         Returns:
             TaskService 实例，创建失败时返回 None
         """
         if self._task_service is not None:
             return self._task_service
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        service = provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
-                event_bus=provider.get("event_bus"),
-            ),
-        )
+        from tasks.service_access import get_task_service
+        service = get_task_service()
         if service is not None:
             self._task_service = service
         return self._task_service
@@ -489,8 +485,6 @@ class TaskSubmitTool(BuiltinTool):
         acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
 
-        # BUG-FIX-fix_20260530_description_lost: 诊断日志
-        # 追踪 description 在 task_submit 入口的值
         logger.info(
             "[TaskSubmit] description 追踪 | has_inputs_desc=%s | has_goal_desc=%s | final_desc_len=%d | preview=%s",
             bool(inputs.get("description")),
@@ -500,9 +494,6 @@ class TaskSubmitTool(BuiltinTool):
         )
 
         # ── 描述长度硬限制（防止超大消息体打爆 LLM API） ──
-        # BUG-FIX-fix_20260604_description_too_large:
-        # L2 orchestrator 曾将 658 行审查报告塞入 goal.description，
-        # 导致子 Agent 的 LLM API 返回 "messages 参数非法"。
         _MAX_DESC_LEN = 2000
         if len(description) > _MAX_DESC_LEN:
             logger.warning(
@@ -517,9 +508,6 @@ class TaskSubmitTool(BuiltinTool):
                 error_code="DESCRIPTION_TOO_LONG",
             )
 
-        # BUG-FIX-fix_20260420_eval_inject: LLM 可能传入非 dict 类型的
-        # acceptance_criteria（如字符串、列表），导致跳过自动补全又跳过验证。
-        # 统一规范化为 dict，非 dict 视为空以触发自动补全。
         if not isinstance(acceptance_criteria, dict):
             logger.warning(
                 "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict 以触发自动补全",
@@ -527,11 +515,6 @@ class TaskSubmitTool(BuiltinTool):
             )
             acceptance_criteria = {}
 
-        # BUG-FIX-fix_20260419_auto_criteria: LLM 可能不传 acceptance_criteria，
-        # 当 target_id 是已知 agent 时，自动从 agent 配置的 recommended_metrics 中补全。
-        # BUG-FIX-fix_20260424_use_recommended_only: 当目标 agent 定义了
-        # recommended_metrics 时，只使用这些指标，忽略 LLM 传入的额外指标。
-        # 原因：上级不知道下级的具体文件路径，LLM 可能添加路径错误的 file_check。
         if target_type == "agent" and target_id:
             auto_criteria = self._auto_fill_criteria(
                 target_id, context=inputs,
@@ -587,9 +570,6 @@ class TaskSubmitTool(BuiltinTool):
             )
             del inputs["workspace"]
 
-        # BUG-FIX-fix_20260523_l2_isolation_override:
-        # 子任务无权决定隔离级别，由系统根据父任务链自动继承。
-        # LLM 可能传入 isolation_level="host"，导致子任务绕过沙箱隔离。
         if parent_task_id and inputs.get("isolation_level"):
             logger.info(
                 "[TaskSubmit] 子任务清除 LLM 传入的 isolation_level | parent_task_id=%s | isolation_level=%s",
@@ -648,8 +628,6 @@ class TaskSubmitTool(BuiltinTool):
                 )
             # pipe 与 workspace 相互独立，可同时生效
             if "pipe" in _mode_set:
-                # BUG-FIX: pipe 模式需要查找源任务的 pipeline_run_id，
-                # 传递给 task_executor 以恢复对话历史
                 _inherit_pipe_pipeline_id = ""
                 _pipe_task_service = self._get_task_service()
                 if _pipe_task_service:
@@ -841,7 +819,6 @@ class TaskSubmitTool(BuiltinTool):
             child_level = AgentLevel(level_str) if level_str in level_values else AgentLevel.L3_ATOMIC
 
             pipeline_id = inputs.get("pipeline_id")
-            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
             task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
@@ -902,12 +879,9 @@ class TaskSubmitTool(BuiltinTool):
             "_source_ws_meta": old_ws_meta if _inherit_resolved else None,
         }
 
-        # BUG-FIX: pipe 模式传递源任务的 pipeline_run_id
-        # task_executor 据此恢复源任务的对话历史
         if _inherit_pipe_pipeline_id:
             task_data["_inherit_pipe_pipeline_id"] = _inherit_pipe_pipeline_id
 
-        # BUG-FIX-fix_20260530_description_lost: 诊断日志
         logger.info(
             "[TaskSubmit] task_data description 追踪 | task_id=%s | desc_in_task_data=%s | desc_len=%d",
             task.id,
@@ -926,11 +900,6 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        # BUG-FIX-fix_20260522_task_status_realtime:
-        # 问题根因1: self._services 不存在，导致广播失败。
-        # 问题根因2: task.user_id 未被设置（create_task 不接受 user_id），
-        #            应用 inputs 中注入的 user_id。
-        # 修复方案: 直接 import ws_interaction_notifier 单例 + 使用 inputs["user_id"]。
         try:
             _user_id = inputs.get("user_id", "") or ""
             from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
@@ -970,7 +939,6 @@ class TaskSubmitTool(BuiltinTool):
             "target_type": target_type,
             "target_id": target_id,
             "submit_status": "submitted",
-            # BUG-FIX-P1：返回消息与 Agent 指令冲突，改为说明异步等待机制
             "message": (
                 f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
                 "该任务需要一定时间完成。"
@@ -1032,7 +1000,6 @@ class TaskSubmitTool(BuiltinTool):
         try:
             description = goal.get("description", "")
             pipeline_id = inputs.get("pipeline_id")
-            # BUG-FIX-fix_20260512_async_compat: create_task 现在是 async
             task = await task_service.create_task(
                 title=goal["title"],
                 description=description,
@@ -1061,8 +1028,6 @@ class TaskSubmitTool(BuiltinTool):
                     if root_id:
                         exec_storage.register_pipeline(pipeline_id, root_id)
 
-                # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
-                # 容器任务管道也注册到 api_store，保持 pipeline_ids 完整
                 _session_id = inputs.get("session_id", "")
                 if _session_id:
                     try:
@@ -1083,9 +1048,6 @@ class TaskSubmitTool(BuiltinTool):
 
         logger.info("[TaskSubmit] 容器任务提交成功 | task_id=%s | title=%s", task.id, task.title)
 
-        # BUG-FIX-fix_20260522_task_status_realtime:
-        # 问题根因1: self._services 不存在，直接 import 单例。
-        # 问题根因2: task.user_id 未被设置，使用 inputs 中注入的 user_id。
         try:
             _user_id = inputs.get("user_id", "") or ""
             from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
@@ -1114,9 +1076,6 @@ class TaskSubmitTool(BuiltinTool):
                 task.id, _ws_exc,
             )
 
-        # BUG-FIX-fix_20260519_container_workspace_path:
-        # 路径计算逻辑集中在 isolation.workspace 模块。
-        # 优先使用 LLM 传入的 isolation_level，没有才用配置文件。
         from isolation.workspace import resolve_container_workspace_path
         container_workspace_path = resolve_container_workspace_path(
             inputs.get("workspace"), task.id,
@@ -1245,7 +1204,6 @@ class TaskSubmitTool(BuiltinTool):
         metadata: dict[str, Any] = {}
 
         # 存储验收标准（供 task_evaluate 使用）
-        # BUG-FIX-fix_20260420_eval_inject: 防御性检查，确保非 dict 类型不会静默丢失
         if acceptance_criteria:
             if isinstance(acceptance_criteria, dict):
                 metadata["acceptance_criteria"] = acceptance_criteria
@@ -1267,9 +1225,6 @@ class TaskSubmitTool(BuiltinTool):
             metadata["submitted_by_level"] = parent_agent_level
 
         # 存储执行相关参数
-        # BUG-FIX-fix_20260422_workspace_nesting: 子任务不存储 LLM 传递的 workspace，
-        # 子任务的 workspace 由祖先链自动解析，存储会导致路径双重嵌套
-        # 例外：inherit_workspace_from 解析的 workspace 必须存储，因为这是显式指定的
         if inputs.get("workspace") and (not inputs.get("parent_task_id") or inputs.get("inherit_workspace_from")):
             metadata["workspace"] = inputs["workspace"]
         if inputs.get("max_retries"):
@@ -1283,9 +1238,6 @@ class TaskSubmitTool(BuiltinTool):
         if inputs.get("target_id"):
             metadata["target_id"] = inputs["target_id"]
 
-        # BUG-FIX-fix_20260526_missing_user_id:
-        # task_notifier 通过 task.metadata["user_id"] 推送状态变更，
-        # 不存 user_id 导致所有状态推送静默失败。
         if inputs.get("user_id"):
             metadata["user_id"] = inputs["user_id"]
 
@@ -1333,7 +1285,7 @@ class TaskSubmitTool(BuiltinTool):
         agent_config = self._get_agent_config_from_registry(target_id)
 
         if agent_config is not None:
-            level_value = agent_config.level.value if hasattr(agent_config.level, "value") else str(agent_config.level)
+            level_value = safe_enum_value(agent_config.level)
             level_map = {"L1": 1, "L2": 2, "L3": 3}
             agent_level = level_map.get(level_value, 0)
             agent_level_str = level_value
@@ -1466,9 +1418,6 @@ class TaskSubmitTool(BuiltinTool):
 
         import yaml
 
-        # BUG-FIX-fix_20260420_eval_inject: 使用文件路径推导项目根目录，
-        # 而非 Path.cwd()，避免工作目录变化导致找不到配置。
-        # task_submit.py 位于 src/tools/builtin/task_submit/，向上 5 层即为项目根目录。
         _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
 

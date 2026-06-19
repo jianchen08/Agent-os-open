@@ -160,10 +160,6 @@ class ParamInjectPlugin(IInputPlugin):
             if self._inject_timestamp and "timestamp" not in args:
                 args["timestamp"] = datetime.now(UTC).isoformat()
 
-            # BUG-FIX-fix_20260418_task_inject: 注入 task_id
-            # 问题根因: task_evaluate 声明 injected_params=["task_id"] 但实际注入链断裂
-            # 修复方案: 在 ParamInjectPlugin 中补充 task_id 注入，从 state 获取
-            # 影响范围: 所有声明 injected_params 含 task_id 的工具
             if "task_id" not in args:
                 task_id = ctx.state.get(StateKeys.TASK_ID, "")
                 if task_id:

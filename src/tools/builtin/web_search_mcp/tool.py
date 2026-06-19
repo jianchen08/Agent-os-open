@@ -226,7 +226,6 @@ class WebSearchMCPTool(BuiltinTool):
 
         server_config = self._build_server_config()
 
-        # BUG-FIX: 每次调用创建独立 loader，避免共享 MCP 连接的并发冲突
         loader = MCPToolLoader()
         try:
             return await self._do_search(loader, server_config, query, max_results, search_mode)

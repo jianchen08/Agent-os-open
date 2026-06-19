@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # 评估器函数签名：接收指标定义和输入参数，返回输出字典（异步）
 EvaluatorFunc = Callable[..., Awaitable[dict[str, Any]]]
 
+# 指标类型优先级排序映射（TOOL → AGENT → HUMAN）
+_TYPE_PRIORITY: dict[MetricType, int] = {
+    MetricType.TOOL: 1,
+    MetricType.AGENT: 2,
+    MetricType.HUMAN: 3,
+}
+
 
 @contextmanager
 def _chdir(path: str | Path) -> Iterator[None]:
@@ -155,16 +162,6 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
-        # BUG-FIX-fix_20260513_eval_sequential_retry:
-        # 问题根因: 评估指标按传入顺序执行，不区分类型（tool/agent/human），
-        #           导致 agent 评估可能在 tool 评估之前执行，浪费 Token 且无法快速失败。
-        # 修复方案: 按 MetricType 优先级排序：TOOL(1) → AGENT(2) → HUMAN(3)，
-        #           确保快速、零 Token 的工具评估优先执行。
-        _TYPE_PRIORITY = {
-            MetricType.TOOL: 1,
-            MetricType.AGENT: 2,
-            MetricType.HUMAN: 3,
-        }
         metrics_to_run.sort(
             key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
         )
@@ -224,13 +221,7 @@ class EvaluationEngine:
                 summary="无可评估指标",
             )
 
-        # BUG-FIX-fix_20260513_eval_sequential_retry:
-        # 同 evaluate() 一样按类型优先级排序
-        _TYPE_PRIORITY = {
-            MetricType.TOOL: 1,
-            MetricType.AGENT: 2,
-            MetricType.HUMAN: 3,
-        }
+        # 按 MetricType 优先级排序
         metrics = sorted(
             metrics, key=lambda m: _TYPE_PRIORITY.get(m.metric_type, 99)
         )
@@ -503,17 +494,6 @@ class EvaluationEngine:
             try:
                 import asyncio
 
-                # BUG-FIX-fix_20260530_eval_human_interaction_decouple:
-                # 问题根因: 评估器调用 human_interaction 时借用子管道的 pipeline_id，
-                #           导致用户确认后 app_factory 误唤醒子管道引擎（子管道并未挂起），
-                #           而评估器自身的 Event.set() 路径也被干扰。
-                #           评估器的 human_interaction 不应与任何真实管道耦合，
-                #           其等待/唤醒完全通过 asyncio.Event 机制实现。
-                # 修复方案: 使用虚拟 session_id (__eval__{task_id}) 标识评估请求，
-                #           app_factory 根据 __eval__ 前缀跳过 engine.wake()，
-                #           仅依赖 Event.set() 完成评估流程。
-                # 影响范围: 所有 HUMAN 类型评估指标（human_review 等）
-                # 修复日期: 2026-05-30
                 if evaluator_id == "human_interaction":
                     params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
 
@@ -702,10 +682,6 @@ class EvaluationEngine:
                     )
                 return state
 
-            # BUG-FIX-fix_20260513_eval_blocking:
-            # 问题根因: _evaluate_agent 通过 pool.submit(lambda: asyncio.run(...)).result()
-            #           阻塞当前事件循环，导致 WebSocket 连接无法处理。
-            # 修复方案: 直接在当前事件循环中 await 异步管道，无需线程池。
             pipeline_state = await _run_eval_pipeline()
 
             # 提取子管道 ID

@@ -556,13 +556,6 @@ class EventBusBase(abc.ABC):
         Returns:
             事件ID
         """
-        # BUG-FIX-fix_20260521_emit_normalize:
-        # 问题根因: emit("task.submitted") 中点号格式无法匹配 EventType.TASK_SUBMITTED
-        #          （值为 "task_submitted" 下划线格式），导致事件被当作 CUSTOM 处理，
-        #          而 TaskOrchestrator 订阅的是 EventFilter(event_types=[EventType.TASK_SUBMITTED])，
-        #          两者永远匹配不上，任务卡在 pending。
-        # 修复方案: 与 subscribe_simple() 保持对称，先尝试原值，再尝试归一化（点号→下划线），
-        #          最后才回退为 CUSTOM。
         try:
             event_enum = EventType(event_type)
         except ValueError:
@@ -580,11 +573,6 @@ class EventBusBase(abc.ABC):
             event_type, event_enum.value, session_id, data_summary,
         )
 
-        # BUG-FIX-fix_20260523_batch_event_lost:
-        # InMemoryEventBus 的批处理模式使用 call_later(0.1s) 延迟处理，
-        # 在 task_submit 的 await emit() 返回后，批处理定时器回调可能无法
-        # 在正确的事件循环上下文中执行，导致事件被静默丢弃。
-        # 修复：task_* 类事件直接走 _publish_direct，绕过批处理。
         _normalized_type = event_type.replace(".", "_")
         _priority = EventPriority.NORMAL
         if _normalized_type.startswith("task"):

@@ -19,13 +19,9 @@ class _TaskCleanupMixin:
     """任务资源清理 Mixin。"""
 
     def _get_execution_record_storage(self):
-        """获取全局 ExecutionRecordStorage 实例。"""
-        try:
-            from infrastructure.service_provider import get_service_provider
-            provider = get_service_provider()
-            return provider.get("execution_record_storage")
-        except Exception:
-            return None
+        """获取全局 ExecutionRecordStorage 实例。委托到公共接口。"""
+        from infrastructure.service_access import get_execution_record_storage
+        return get_execution_record_storage()
 
     def _cancel_pipeline(self, task_id: str) -> None:
         """取消任务关联的运行中管道（best-effort）。"""

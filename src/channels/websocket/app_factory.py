@@ -142,7 +142,6 @@ async def _resolve_sub_pipeline_agent_config(pipeline_id: str) -> Any | None:
     return None
 
 
-
 def _resolve_agent_from_thread(thread_id: str) -> Any | None:
     """从线程/会话的 agent_id 字段解析 Agent 配置。
 
@@ -291,7 +290,6 @@ def create_combined_app() -> FastAPI:
             # _running 置位完成，否则下游 PluginHotReloader 检测 is_running
             # 会因时序竞态拿到 False 而走 fallback 分支（双监听）。
             # 注意：禁止预置 center._running=True，那会让 start() 早退、
-            # watchfiles 监听循环永不启动（BUG-FIX-fix_20260614_config_center_running）。
             asyncio.create_task(center.start())
             _config_center_started = await center.wait_ready(timeout=5.0)
             if _config_center_started:
@@ -344,15 +342,6 @@ def create_combined_app() -> FastAPI:
                 os.getpid(), id(asyncio.get_running_loop()),
             )
 
-    # BUG-FIX-fix_20260524_lifespan_not_called:
-    # 问题根因: 之前使用 app.router.lifespan_context = _combined_lifespan 设置 lifespan，
-    #          但这种方式在当前 FastAPI 版本中不会生效，uvicorn 启动时不会调用 lifespan。
-    #          导致 TaskWorker.start() 从未被调用，task.submitted 事件无人监听，
-    #          任务永远停留在 pending 状态。
-    # 修复方案: 将 lifespan 作为参数传递给 FastAPI() 构造函数（通过 create_app(lifespan=...)），
-    #          确保 uvicorn 在应用启动时正确调用 lifespan 上下文管理器。
-    # 影响范围: 所有通过前端提交的子任务（task_submit）
-    # 修复日期: 2026-05-24
     app = create_app(lifespan=_combined_lifespan)
 
     # WebSocket 连接管理
@@ -429,11 +418,6 @@ def create_combined_app() -> FastAPI:
                     continue
 
                 if msg_type == "user_input":
-                    # BUG-FIX-fix_20260511_task_worker_global_ws:
-                    # 问题根因: /ws/chat 全局端点缺少 TaskWorker 懒启动逻辑，
-                    #           导致通过全局 WS 提交的任务没有订阅者，
-                    #           pipeline_run_id 永远不会被绑定。
-                    # 修复方案: 添加与 /ws/chat/{thread_id} 相同的 TaskWorker 懒启动。
                     global _task_worker_started
                     if not _task_worker_started:
                         _task_worker_started = True
@@ -499,8 +483,6 @@ def create_combined_app() -> FastAPI:
                     from pipeline.registry import get_engine_registry
                     _registry = get_engine_registry()
 
-                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
-                    # 重启后 registry 中 entry.thread_id 为空，需在此处补上。
                     if _target_pid and thread_id:
                         _existing_entry = _registry.get(_target_pid)
                         if _existing_entry and not _existing_entry.thread_id:
@@ -533,8 +515,6 @@ def create_combined_app() -> FastAPI:
                                 if _sess and not _sess.active_pipeline_id:
                                     _sess.active_pipeline_id = _target_pid
 
-                    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
-                    # 管道已存在时（跳过了 register_pipeline），确保 thread_id 被更新。
                     if _target_pid:
                         _existing_entry = _registry.get(_target_pid)
                         if _existing_entry and not _existing_entry.thread_id:
@@ -614,15 +594,6 @@ def create_combined_app() -> FastAPI:
                         logger.warning("[GlobalWS] interaction_response 缺少 request_id")
                     continue
                 elif msg_type == "stop_generation":
-                    # BUG-FIX-fix_20260512_stop_generation_global_ws:
-                    # 问题根因: 旧代码只发送假的 stopped 状态，没有实际取消流式任务
-                    #           和管道引擎运行，导致停止按钮无效。
-                    # 修复方案:
-                    #   1. 设置对应 thread_id 的 stop_event
-                    #   2. 取消对应 thread_id 的流式任务
-                    #   3. 尝试查找并取消关联的管道引擎
-                    #   4. 尝试取消 TaskWorker 中的关联后台任务
-                    #   5. 发送 state_change 回前端
                     logger.info("[GlobalWS] 用户请求停止生成: thread_id=%s user=%s", thread_id[:12], user_id[:12])
 
                     # 1. 通过 Registry 取消关联管道的 drain_task
@@ -651,10 +622,6 @@ def create_combined_app() -> FastAPI:
                                 # 唤醒引擎使其退出挂起等待
                                 if hasattr(_eng, "_wake_event") and _eng._wake_event is not None:
                                     _eng._wake_event.set()
-                                # BUG-FIX-fix_20260522_stop_state_not_reset:
-                                # 从 PipelineContext 缓存中移除已取消的引擎，
-                                # 确保下次发消息时 get_or_create_engine 创建新实例，
-                                # 而非返回带有残留 _suspended_state / _wake_event 的损坏引擎。
                                 if _pipeline_ctx and hasattr(_pipeline_ctx, "_engines"):
                                     _pipeline_ctx._engines.pop(_pid, None)
                                 logger.info("[GlobalWS] 已取消管道引擎并清理缓存: pipeline=%s state=%s", _pid[:12], _st)
@@ -677,9 +644,6 @@ def create_combined_app() -> FastAPI:
                                             _t_pipeline = getattr(_t, "pipeline_run_id", "") or ""
                                             _t_parent = getattr(_t, "parent_pipeline_id", "") or ""
                                             if _t_pipeline in _all_pipeline_ids or _t_parent in _all_pipeline_ids:
-                                                # BUG-FIX-fix_20260522_stop_generation_pipeline:
-                                                #   在取消管道前先调用 fail_task 标记任务失败，
-                                                #   确保任务状态被正确更新，而非仅中断执行。
                                                 try:
                                                     await _task_svc.fail_task(_active_tid, reason=f"用户取消: {_stop_msg.metadata.get('reason', 'stop_generation')}")
                                                 except Exception as _ft_err:
@@ -714,7 +678,6 @@ def create_combined_app() -> FastAPI:
     mount_media_static_files(app)
 
     return app
-
 
 
 # ---------------------------------------------------------------------------

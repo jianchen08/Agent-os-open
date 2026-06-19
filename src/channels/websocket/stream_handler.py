@@ -81,8 +81,6 @@ class PipelineContext:
         self.plugin_registry = plugin_registry
         self.app = app
         self._engines: dict[str, Any] = {}
-        # BUG-FIX-fix_20260523_engine_memory_leak:
-        # 记录每个引擎的最后活跃时间，供 cleanup_idle_engines 清理使用。
         self._engine_last_active: dict[str, float] = {}
         if engine is not None:
             engine._pipeline_id = ""
@@ -95,7 +93,6 @@ class PipelineContext:
         确保管道之间状态完全隔离，通知不会串线。
         """
         if pipeline_id in self._engines:
-            # BUG-FIX-fix_20260523_engine_memory_leak: 更新最后活跃时间
             self._engine_last_active[pipeline_id] = time.monotonic()
             return self._engines[pipeline_id]
         new_engine = self.app.create_pipeline_engine(
@@ -163,8 +160,6 @@ class PipelineContext:
 # Module-level var (_task_worker set by _init_pipeline_context)
 _task_worker = None
 _cached_call_timeout: int | None = None
-
-
 
 
 def _init_pipeline_context() -> PipelineContext:
@@ -311,7 +306,6 @@ def _init_pipeline_context() -> PipelineContext:
         return PipelineContext(available=False)
 
 
-
 # ---------------------------------------------------------------------------
 # 流式响应辅助函数
 # ---------------------------------------------------------------------------
@@ -451,6 +445,5 @@ async def handle_stream_request(ctx: StreamContext) -> None:
         ctx.engine is not None, ctx.bridge is not None,
         bool(ctx.user_content), ctx.pipeline_ctx is not None,
     )
-
 
 

@@ -100,8 +100,6 @@ class SearchResultProcessor:
     """
 
     # 默认黑名单域名（广告、低质量站点）
-    # BUG-FIX: 原黑名单包含 "ad." 等带点后缀的短模式，会通过 `in` 操作符误匹配
-    # download.com、cadillac.com 等合法域名。改为精确的子域名关键词。
     DEFAULT_BLOCKED_DOMAINS = [
         "adservice",
         "adserver",
@@ -205,8 +203,6 @@ class SearchResultProcessor:
             parsed = urlparse(url)
             domain = parsed.netloc.lower()
 
-            # BUG-FIX: 原实现使用 `blocked in domain` 做子串匹配，"ad." 会误匹配
-            # download.com 等合法域名。改为提取域名各子段进行精确匹配。
             domain_parts = domain.split(".")
             return any(blocked in domain_parts for blocked in self.blocked_domains)
         except Exception:
@@ -283,8 +279,6 @@ class SearchResultProcessor:
             }
 
             # 重建 URL
-            # BUG-FIX: 原实现丢弃了 scheme，导致 http://example.com 和
-            # https://example.com 被视为同一 URL。保留 scheme 以正确区分。
             normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".lower().rstrip("/")
 
             if filtered_params:
@@ -311,9 +305,6 @@ class SearchResultProcessor:
         for result in results[1:]:
             is_duplicate = False
 
-            # BUG-FIX: 原实现使用 deduped.remove(existing) + deduped.append(result)，
-            # list.remove 是 O(n) 操作，在外层循环中导致 O(n^3) 总复杂度。
-            # 改为使用 enumerate 索引直接赋值替换，降为 O(n^2)。
             for i, existing in enumerate(deduped):
                 similarity = self._calculate_similarity(result, existing)
 
@@ -528,7 +519,6 @@ class SearchResultFilter:
             url = result.get("url", "")
             try:
                 domain = urlparse(url).netloc.lower()
-                # BUG-FIX: 使用域名段精确匹配，避免子串误匹配
                 domain_parts = domain.split(".")
                 return not any(b in domain_parts for b in blocked_set)
             except Exception:

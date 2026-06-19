@@ -102,7 +102,6 @@ class NestedRecordManager:
             parent_record_id=parent_record_id,
             auto_commit=db is not self._db_session,
         )
-        # BUG-FIX-fix_20260320_stream_sequence: save_execution_record 现在返回字典
         record_id = record_id["record_id"]
 
         logger.info(

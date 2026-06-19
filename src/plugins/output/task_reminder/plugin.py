@@ -14,6 +14,7 @@ from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ErrorPolicy, RouteSignal
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +220,6 @@ class TaskReminder(IOutputPlugin):
             return OutputResult()
 
         reminder_count = state.get("evaluate_reminder_count", 0)
-        # BUG-FIX: 提醒耗尽后发送 end 信号，防止管道无限挂起
         if reminder_count >= self._max_reminders:
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached "
@@ -330,7 +330,7 @@ class TaskReminder(IOutputPlugin):
 
         active_statuses = {"pending", "running", "evaluating", "scheduled"}
         for st in subtasks:
-            status = st.status.value if hasattr(st.status, "value") else str(st.status)
+            status = safe_enum_value(st.status)
             if status in active_statuses:
                 return True
         return False

@@ -131,10 +131,6 @@ class LLMCore(ICorePlugin):
         self._default_params: dict[str, Any] = self._config.get(
             "default_params", {"temperature": 0.7, "max_tokens": 4096}
         )
-        # BUG-FIX-fix_20260603_call_timeout_from_config:
-        # call_timeout 在 llm.yaml 中配置（如 call_timeout: 300），
-        # 但在 LLMCore 中从未被读取，导致适配器使用硬编码默认值 300。
-        # 现在从配置读取并透传为 inter_chunk_timeout。
         self._call_timeout: float = float(
             self._config.get("call_timeout", 300)
         )
@@ -521,12 +517,6 @@ class LLMCore(ICorePlugin):
             pipeline_id=ctx.state.get(StateKeys.PIPELINE_ID, ""),
         )
 
-        # BUG-FIX-fix_20260614_orphan_tool_result:
-        # 历史根因: normalize 仅清理本次 LLM 请求的内存副本，state["messages"]
-        #   始终保留脏数据（孤儿 tool result / 未配对 assistant(tool_calls)）。
-        #   下轮迭代对同一份脏数据重新扫描，且配对缓存命中后跳过检查 → 死循环。
-        # 修复: 检测到清理发生（normalized 比 raw 短）时，把清理后的历史段
-        #   写回 state["messages"]，让清理永久生效。
         if len(normalized_messages) < len(messages):
             self._writeback_cleaned_history(ctx.state, messages, normalized_messages)
 

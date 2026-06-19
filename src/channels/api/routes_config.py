@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from channels.api.deps import APIError, require_auth
 from config.config_center import get_config_center
@@ -31,6 +32,50 @@ _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _CONTEXT_WINDOW_YAML = _CONFIG_SYSTEM_DIR / "context_window_config.yaml"
 _API_YAML = _CONFIG_SYSTEM_DIR / "api_config.yaml"
 _CONCURRENCY_YAML = _CONFIG_SYSTEM_DIR / "concurrency_config.yaml"
+
+
+# ---------------------------------------------------------------------------
+# Pydantic Schema 模型（S-2: 替代裸 dict[str, Any] 请求体，限制可写入字段）
+# ---------------------------------------------------------------------------
+
+class LlmDefaultsUpdateRequest(BaseModel):
+    """LLM 默认模型配置更新请求。"""
+    chat: str | None = None
+    embedding: str | None = None
+    tiers: dict[str, Any] | None = None
+
+
+class ModelAddRequest(BaseModel):
+    """添加模型请求，key 为模型 ID，value 为模型配置。"""
+    models: dict[str, dict[str, Any]] = Field(description="模型 ID → 配置")
+
+
+class ModelConfigUpdateRequest(BaseModel):
+    """单模型配置更新请求，允许任意字段（透传合并到现有配置）。"""
+    config: dict[str, Any] = Field(description="模型配置字段")
+
+
+class ProviderConfigUpdateRequest(BaseModel):
+    """提供商配置更新请求，允许任意字段（透传合并到现有配置）。"""
+    config: dict[str, Any] = Field(description="提供商配置字段")
+
+
+class ContextWindowUpdateRequest(BaseModel):
+    """上下文窗口配置更新请求，仅允许白名单字段。"""
+    max_context_length: int | None = None
+    compress_trigger_ratio: float | None = None
+    budgets: dict[str, Any] | None = None
+    compression: dict[str, Any] | None = None
+    layer_order: list[str] | None = None
+    include_tools_description_in_prompt: bool | None = None
+    static_vars: dict[str, Any] | None = None
+    dynamic_vars: dict[str, Any] | None = None
+    custom_layers: dict[str, Any] | None = None
+
+
+class GenericConfigUpdateRequest(BaseModel):
+    """通用配置更新请求，data 为完整配置内容（白名单校验路径）。"""
+    data: dict[str, Any] = Field(description="配置文件完整内容")
 
 
 # ---------------------------------------------------------------------------
@@ -131,18 +176,19 @@ def get_defaults() -> dict[str, Any]:
 
 
 @router.put("/llm/defaults", summary="更新默认模型配置")
-def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
+def save_defaults(body: LlmDefaultsUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     if "defaults" not in data:
         data["defaults"] = {}
-    for key in ("chat", "embedding"):
-        if key in body:
-            data["defaults"][key] = body[key]
-    if "tiers" in body:
-        data["defaults"]["tiers"] = body["tiers"]
+    if body.chat is not None:
+        data["defaults"]["chat"] = body.chat
+    if body.embedding is not None:
+        data["defaults"]["embedding"] = body.embedding
+    if body.tiers is not None:
+        data["defaults"]["tiers"] = body.tiers
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
-    logger.info("LLM 默认配置已更新: %s", body)
+    logger.info("LLM 默认配置已更新: %s", body.model_dump(exclude_none=True))
     return {
         "chat": data["defaults"].get("chat", ""),
         "embedding": data["defaults"].get("embedding", ""),
@@ -151,24 +197,24 @@ def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/llm/models", summary="添加模型")
-def add_model(body: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def add_model(body: ModelAddRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
-    for model_id, model_conf in body.items():
+    for model_id, model_conf in body.models.items():
         models[model_id] = model_conf
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
-    logger.info("添加模型: %s", list(body.keys()))
+    logger.info("添加模型: %s", list(body.models.keys()))
     return {"models": models}
 
 
 @router.put("/llm/models/{model_id}", summary="更新模型配置")
-def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def update_model(model_id: str, body: ModelConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
     if model_id not in models:
         raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
-    models[model_id].update(body)
+    models[model_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新模型配置: %s", model_id)
@@ -189,12 +235,12 @@ def delete_model(model_id: str) -> dict[str, Any]:
 
 
 @router.put("/llm/providers/{provider_id}", summary="更新提供商配置")
-def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def update_provider(provider_id: str, body: ProviderConfigUpdateRequest) -> dict[str, Any]:
     data = _read_yaml(_LLM_YAML)
     providers = data.setdefault("providers", {})
     if provider_id not in providers:
         providers[provider_id] = {}
-    providers[provider_id].update(body)
+    providers[provider_id].update(body.config)
     _write_yaml(_LLM_YAML, data)
     invalidate_all_llm_caches()
     logger.info("更新提供商配置: %s", provider_id)
@@ -266,7 +312,7 @@ def get_context_window_config() -> dict[str, Any]:
 
 
 @router.put("/context-window", summary="更新上下文窗口配置")
-def update_context_window_config(body: dict[str, Any]) -> dict[str, Any]:
+def update_context_window_config(body: ContextWindowUpdateRequest) -> dict[str, Any]:
     """合并前端提交的字段到现有配置，支持 budgets/compression 等嵌套对象。"""
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
     _EDITABLE_KEYS = {
@@ -274,11 +320,12 @@ def update_context_window_config(body: dict[str, Any]) -> dict[str, Any]:
         "include_tools_description_in_prompt", "static_vars", "dynamic_vars",
         "custom_layers",
     }
+    body_data = body.model_dump(exclude_none=True)
     for key in _EDITABLE_KEYS:
-        if key in body:
-            data[key] = body[key]
+        if key in body_data:
+            data[key] = body_data[key]
     _write_yaml(_CONTEXT_WINDOW_YAML, data)
-    logger.info("上下文窗口配置已更新: %s", list(body.keys()))
+    logger.info("上下文窗口配置已更新: %s", list(body_data.keys()))
     return get_context_window_config()
 
 
@@ -314,10 +361,10 @@ def get_api_config() -> dict[str, Any]:
 
 
 @router.put("/api", summary="更新 API 配置")
-def save_api_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_API_YAML, body)
+def save_api_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_API_YAML, body.data)
     logger.info("API 配置已更新")
-    return body
+    return body.data
 
 
 # ---------------------------------------------------------------------------
@@ -354,10 +401,10 @@ def get_concurrency_config() -> dict[str, Any]:
 
 
 @router.put("/concurrency", summary="更新并发配置")
-def save_concurrency_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_CONCURRENCY_YAML, body)
+def save_concurrency_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_CONCURRENCY_YAML, body.data)
     logger.info("并发配置已更新")
-    return body
+    return body.data
 
 
 # ---------------------------------------------------------------------------
@@ -395,10 +442,10 @@ def get_cost_control_config() -> dict[str, Any]:
 
 
 @router.put("/cost-control", summary="更新成本控制配置")
-def save_cost_control_config(body: dict[str, Any]) -> dict[str, Any]:
-    _write_yaml(_COST_CONTROL_YAML, body)
+def save_cost_control_config(body: GenericConfigUpdateRequest) -> dict[str, Any]:
+    _write_yaml(_COST_CONTROL_YAML, body.data)
     logger.info("成本控制配置已更新")
-    return body
+    return body.data
 
 
 # ---------------------------------------------------------------------------
@@ -435,12 +482,12 @@ def get_generic_config(config_path: str) -> dict[str, Any]:
 
 
 @router.put("/generic/{config_path:path}", summary="更新通用配置")
-def save_generic_config(config_path: str, body: dict[str, Any]) -> dict[str, Any]:
+def save_generic_config(config_path: str, body: GenericConfigUpdateRequest) -> dict[str, Any]:
     """根据路径写入 YAML 配置文件（白名单校验），并触发 config_center reload。"""
     if config_path not in _GENERIC_CONFIG_WHITELIST:
         raise HTTPException(status_code=404, detail=f"未知配置路径: {config_path}")
     file_path = _GENERIC_CONFIG_WHITELIST[config_path]
-    _write_yaml(file_path, body)
+    _write_yaml(file_path, body.data)
 
     # 触发 config_center reload，使 watcher 生效（热更新）
     try:
@@ -453,7 +500,7 @@ def save_generic_config(config_path: str, body: dict[str, Any]) -> dict[str, Any
     except Exception as e:
         logger.warning("通用配置 reload 失败: %s | error=%s", config_path, e)
 
-    return body
+    return body.data
 
 # ---------------------------------------------------------------------------
 # 手动热重载端点

@@ -90,8 +90,6 @@ async def try_revive_pipeline(
     if agent_config is None and provider and task_id:
         agent_config = _load_agent_config(task_id, provider)
 
-    # BUG-FIX-fix_20260609_agent_fallback:
-    # 找不到 agent_config 直接返回失败，禁止静默降级。
     if agent_config is None:
         logger.error(
             "[Reviver] 管道复活失败：无法确定 Agent 配置: pipeline=%s",

@@ -31,9 +31,6 @@ class WebSocketInteractionNotifier:
         self._auto_confirm_delay = auto_confirm_delay
         self._service = None
         self._fallback_tasks: set[asyncio.Task] = set()
-        # BUG-FIX-fix_20260511_auto_confirm_not_cancelled:
-        # 问题根因: _auto_confirm_fallback 任务在用户响应后未被取消，浪费资源且可能竞争。
-        # 修复方案: 增加 request_id → fallback task 的映射，支持按 request_id 取消。
         self._fallback_request_map: dict[str, asyncio.Task] = {}
         self._global_connections: dict[str, WebSocket] = {}
 
@@ -50,13 +47,6 @@ class WebSocketInteractionNotifier:
                 thread_id, len(self._active_connections[thread_id]),
                 {k: len(v) for k, v in self._active_connections.items()},
             )
-        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
-        # 问题根因: 前端刷新后 WebSocket 重新连接，但正在运行的 pipeline
-        #   仍持有旧的 dead TargetedSink，导致后续输出被静默丢弃。
-        # 修复方案: 注册新连接时，自动查找该 thread_id 关联的活跃 pipeline，
-        #   更新其 bridge 的 output_sink 为新的活跃连接。
-        # 影响范围: WebSocketInteractionNotifier.register
-        # 修复日期: 2026-06-01
         try:
             self._resume_pipeline_for_thread(thread_id)
         except Exception as _exc:
@@ -163,8 +153,6 @@ class WebSocketInteractionNotifier:
                 self._auto_confirm_fallback(request_id, msg_data)
             )
             self._fallback_tasks.add(task)
-            # BUG-FIX-fix_20260511_auto_confirm_not_cancelled:
-            # 记录 request_id → task 映射，以便用户响应后能取消该任务。
             self._fallback_request_map[request_id] = task
             task.add_done_callback(
                 lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)
@@ -194,10 +182,6 @@ class WebSocketInteractionNotifier:
                         del self._active_connections[tid]
         self._global_connections[user_id] = websocket
         logger.info("[GlobalWS] 全局连接已注册: user=%s, 总连接数=%d", user_id[:12], len(self._global_connections))
-        # BUG-FIX-fix_20260601_ws_reconnect_resume_pipeline:
-        # 全局连接注册时，尝试恢复该用户所有关联 thread 的 pipeline。
-        # 影响范围: WebSocketInteractionNotifier.register_global
-        # 修复日期: 2026-06-01
         try:
             for tid in list(self._active_connections.keys()):
                 self._resume_pipeline_for_thread(tid)
@@ -432,8 +416,4 @@ class WebSocketInteractionNotifier:
         return True
 
 
-# BUG-FIX-fix_20260522_double_instance:
-# 之前有两个独立的 WebSocketInteractionNotifier 实例（_ws_interaction_notifier 和 ws_interaction_notifier），
-# 导致内部逻辑用 _ws_interaction_notifier 注册的连接，外部用 ws_interaction_notifier 发消息发不到。
-# 修复: 统一为一个实例。
 ws_interaction_notifier = WebSocketInteractionNotifier()

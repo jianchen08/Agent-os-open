@@ -53,7 +53,6 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     if entry is None:
         return None, ""
     engine = entry.engine
-    # BUG-FIX-fix_20260524_msg_render: 增加 running/suspended 状态检查
     if getattr(engine, "is_suspended", False):
         return engine, "suspended"
     if getattr(engine, "is_running", False):
@@ -129,7 +128,6 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
 
     engine, state = _find_engine(pipeline_id)
 
-    # BUG-FIX-fix_20260531_sink_dead_thread_id_lost: 主动更新 registry 中缺失的 thread_id
     if thread_id and pipeline_id:
         try:
             from pipeline.registry import get_engine_registry as _reg_get

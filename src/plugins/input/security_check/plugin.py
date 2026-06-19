@@ -610,10 +610,6 @@ class SecurityCheckPlugin(IInputPlugin):
         if not effective_workspace:
             return ""
 
-        # BUG-FIX-fix_20260506_bash_security: 支持多基路径边界检查
-        # 问题根因: working_dir 参数未被检查；Skill 脚本路径在 workspace 外被阻止
-        # 修复方案: 新增 working_dir 参数检查；支持 allowed_base_paths 多基路径
-        # 影响范围: bash_execute 的 working_dir 参数、Skill 脚本执行路径
         allowed_bases = [os.path.realpath(effective_workspace)]
         for extra in self._allowed_base_paths:
             abs_extra = extra if os.path.isabs(extra) else os.path.join(_PROJECT_ROOT, extra)

@@ -94,9 +94,6 @@ class DynamicToolLoader:
 
         logger.info("[动态加载] 开始自动发现工具...")
 
-        # BUG-FIX-fix_20260510: 使用 src 目录而非项目根目录作为基准
-        # sys.path 包含 "Agent os/src"，模块路径应为 "tools.builtin.xxx" 而非 "src.tools.builtin.xxx"
-        # 否则 importlib.import_module("src.tools.builtin...") 会因 sys.path 中无 "Agent os" 而失败
         src_root = Path(__file__).parent.parent
 
         # 扫描所有 Python 文件
@@ -328,12 +325,6 @@ class DynamicToolLoader:
                 except ToolNotFoundError:
                     logger.warning(f"[动态加载] 无法加载工具 | tool_name={tool_name}")
 
-    # BUG-FIX-fix_20260513_tool_injection_race: 非核心工具动态加载竞态条件
-    # 问题根因: _ensure_dynamic_tools_loaded 使用 create_task 异步加载但不等待完成，
-    #           导致后续同步获取工具时工具尚未注册
-    # 修复方案: 提取同步加载路径，确保工具在获取前完成注册
-    # 影响范围: 所有不在 CORE_SYSTEM_TOOLS 中的工具（playwright_test、list_directory 等）
-    # 修复日期: 2026-05-13
 
     def load_tool_sync(self, tool_name: str) -> str:
         """同步动态加载工具（从 load_tool 提取的纯同步路径）"""

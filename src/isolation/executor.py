@@ -27,6 +27,7 @@ from isolation.types import (
     OperationType,
     TaskType,
 )
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -180,9 +181,6 @@ class IsolationExecutor:
         """
         start = time.monotonic()
         try:
-            # BUG-FIX-fix_20260523_tool_blocking:
-            # 与 tool_core/plugin.py 同步修复，async工具统一通过线程执行，
-            # 防止同步阻塞操作卡死主事件循环、超时机制失效。
             if inspect.iscoroutinefunction(tool_func):
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -200,11 +198,6 @@ class IsolationExecutor:
                 "[IsolationExecutor] Host 执行完成 | tool=%s | %.1fms",
                 tool_name, duration_ms,
             )
-            # BUG-FIX-fix_20260615_eval_pipeline_not_end:
-            # 问题根因: result 是 ToolExecutionResult 时原样塞进 data，
-            #   stop_check 用 isinstance(data, dict) 守卫会跳过，导致评估通过后
-            #   end 信号永不发出。与 tool_core._execute_single_tool 对齐：调
-            #   to_dict(slim=True) 归一化，并把 metadata 拷到顶层。
             return_dict = {
                 "tool_name": tool_name,
                 "success": True,
@@ -365,7 +358,7 @@ class IsolationExecutor:
             # 容器已停止/异常，清除失效缓存并销毁残留环境，然后重建
             logger.warning(
                 "[IsolationExecutor] 容器已停止，自动重建 | task=%s | env=%s | status=%s",
-                task_id, cached_env_id, status.value if hasattr(status, 'value') else status,
+                task_id, cached_env_id, safe_enum_value(status),
             )
             self._containers.pop(task_id, None)
             try:

@@ -14,6 +14,7 @@ from src.tasks.state_machine import (
     _TASK_TRANSITIONS,
     InvalidTransitionError,
 )
+from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,8 @@ class _TaskStateMixin:
         if task is None:
             return False
 
-        current = task.status.value if hasattr(task.status, "value") else str(task.status)
-        target = target_status.value if hasattr(target_status, "value") else str(target_status)
+        current = safe_enum_value(task.status)
+        target = safe_enum_value(target_status)
         allowed = _TASK_TRANSITIONS.get(current, [])
 
         return target in allowed
@@ -60,7 +61,7 @@ class _TaskStateMixin:
         if task is None:
             return []
 
-        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        current = safe_enum_value(task.status)
         return _TASK_TRANSITIONS.get(current, [])
 
     async def force_transition(self, task_id: str, target_status: Any) -> None:
@@ -86,8 +87,8 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        current = task.status.value if hasattr(task.status, "value") else str(task.status)
-        target = target_status.value if hasattr(target_status, "value") else str(target_status)
+        current = safe_enum_value(task.status)
+        target = safe_enum_value(target_status)
 
         allowed = _TASK_TRANSITIONS.get(current, [])
 
@@ -123,7 +124,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        current = safe_enum_value(task.status)
         allowed = {"running", "pending"}
         if current not in allowed:
             raise InvalidTransitionError(
@@ -164,7 +165,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        current = task.status.value if hasattr(task.status, "value") else str(task.status)
+        current = safe_enum_value(task.status)
         if current != "stopped":
             raise InvalidTransitionError(
                 current, "running",
@@ -218,7 +219,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         if old_status not in ("pending", "running"):
             raise InvalidTransitionError(
                 old_status, "running",
@@ -250,7 +251,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         if old_status not in ("running", "evaluating"):
             raise InvalidTransitionError(
                 old_status, "evaluating",
@@ -279,7 +280,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         task.status = TaskStatus.FAILED
         task.updated_at = datetime.now().isoformat()
         if reason:
@@ -317,7 +318,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         task.status = TaskStatus.STOPPED
         task.updated_at = datetime.now().isoformat()
         if reason:
@@ -482,7 +483,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         task.status = TaskStatus.COMPLETED
         task.updated_at = datetime.now().isoformat()
         self._storage.save(task)
@@ -617,7 +618,7 @@ class _TaskStateMixin:
 
         from tasks.types import TaskStatus
 
-        old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        old_status = safe_enum_value(task.status)
         task.status = TaskStatus.PENDING
         task.updated_at = datetime.now().isoformat()
         self._storage.save(task)

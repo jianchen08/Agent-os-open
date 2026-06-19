@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_EVAL_TIMEOUT = 1200.0
-# BUG-FIX-fix_20260513_eval_sequential_retry:
-# 新增全局评估调用次数上限，防止 Agent 无限循环调用评估工具。
-# 当总调用次数超过此值时，直接标记任务失败。
 _DEFAULT_MAX_EVAL_CALLS = 15
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -109,7 +106,6 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
 
     if task.status == TaskStatus.RUNNING:
         try:
-            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
             await task_service.move_to_evaluating(task_id)
         except Exception:
             pass
@@ -121,7 +117,6 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
         if inputs.get("result") is not None:
             task.result = inputs["result"]
 
-        # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
         await task_service.complete_evaluation(task_id, passed=True)
         return {"success": True, "status": "completed"}
     except Exception as e:
@@ -246,8 +241,6 @@ class TaskEvaluateTool(BuiltinTool):
                 error="任务不存在", error_code="TASK_NOT_FOUND"
             )
 
-        # BUG-FIX-fix_20260513_eval_sequential_retry:
-        # 检查全局评估调用次数上限，防止 Agent 无限循环调用评估工具。
         max_eval_calls = _DEFAULT_MAX_EVAL_CALLS
         if task.metadata and isinstance(task.metadata, dict):
             max_eval_calls = task.metadata.get(
@@ -330,13 +323,11 @@ class TaskEvaluateTool(BuiltinTool):
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
 
-            # BUG-FIX: 将 summary 注入到单指标评估参数中
             single_params: dict[str, dict[str, Any]] = {}
             summary_from_input = inputs.get("summary", "")
             if summary_from_input:
                 single_params[metric_id] = {"summary": summary_from_input}
 
-            # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
             result = await asyncio.wait_for(
                 executor.run_evaluation(
                     task_id=task_id,
@@ -373,7 +364,6 @@ class TaskEvaluateTool(BuiltinTool):
         # 注册评估子管道 + 追加历史记录
         self._register_eval_pipelines(task_service, task, result)
         self._append_eval_history(task, result)
-        # BUG-FIX-fix_20260512_async_compat: _save_task 现在是 async
         await self._save_task(task_service, task)
 
         # 当前指标未通过 → 返回结果，Agent 继续改进
@@ -463,8 +453,6 @@ class TaskEvaluateTool(BuiltinTool):
                 })(),
             )
 
-        # BUG-FIX: 将 Agent 提交的 summary 注入到每个评估指标的参数中，
-        # 确保评估 Agent 能看到任务执行摘要。
         summary_from_input = inputs.get("summary", "")
         if summary_from_input:
             for _mid, p in input_params.items():
@@ -482,7 +470,6 @@ class TaskEvaluateTool(BuiltinTool):
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
-            # BUG-FIX-fix_20260512_async_compat: run_evaluation 现在是 async，直接 await
             result = await asyncio.wait_for(
                 executor.run_evaluation(
                     task_id=task.id,
@@ -546,12 +533,6 @@ class TaskEvaluateTool(BuiltinTool):
 
         _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")
 
-        # BUG-FIX-fix_20260513_eval_sequential_retry:
-        # 渐进重试逻辑：每个指标的 retry_count 是"连续失败次数"，
-        # 当指标通过时重置为 0。这样偶尔的失败不会累积。
-        # 两个上限：
-        #   1. per-metric: 连续失败 N 次（默认 3）→ 任务失败
-        #   2. overall: 全局评估调用次数（默认 15）→ 任务失败
         for r in eval_result.results:
             mid = r.metric_id
             if not r.passed:
@@ -591,7 +572,6 @@ class TaskEvaluateTool(BuiltinTool):
         # 追加本次评估记录到历史（保留所有评估尝试）
         self._append_eval_history(task, eval_result)
 
-        # BUG-FIX-fix_20260512_async_compat: _save_task 现在是 async
         await self._save_task(task_service, task)
 
         if not has_failure:
@@ -599,8 +579,6 @@ class TaskEvaluateTool(BuiltinTool):
         if exhausted:
             return await self._fail_task(task_service, task, eval_result, max_retries)
         min_remaining = max_retries - min(retry_counts.values())
-        # BUG-FIX-fix_20260513_eval_sequential_retry:
-        # 在反馈中同时显示 per-metric 和 overall 两个剩余次数
         eval_total = task.metadata.get("eval_total_calls", 0) if task.metadata else 0
         max_eval_calls = task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS) if task.metadata else _DEFAULT_MAX_EVAL_CALLS
         overall_remaining = max_eval_calls - eval_total
@@ -666,10 +644,6 @@ class TaskEvaluateTool(BuiltinTool):
                 )
                 try:
                     eval_data = self._build_result_data(eval_result)
-                    # BUG-FIX-fix_20260601_merge_fail_result_inconsistency:
-                    # 合并失败时，eval_data 中的 overall_passed 仍为 true，
-                    # 但任务状态将变为 failed，导致 result 和 status 矛盾。
-                    # 修复: 将 overall_passed 设为 false 并追加合并失败原因。
                     eval_data["overall_passed"] = False
                     eval_data["merge_failure"] = merge_error
                     eval_data["summary"] = (
@@ -750,7 +724,6 @@ class TaskEvaluateTool(BuiltinTool):
         try:
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 eval_data = self._build_result_data(eval_result)
-                # BUG-FIX-fix_20260512_async_compat: complete_evaluation 现在是 async
                 await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
             else:
                 logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
@@ -786,7 +759,6 @@ class TaskEvaluateTool(BuiltinTool):
             task: TaskModel 实例
         """
         try:
-            # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
             await task_service.save_task(task)
         except Exception as e:
             logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
@@ -886,20 +858,13 @@ class TaskEvaluateTool(BuiltinTool):
     def _get_task_service(self) -> Any:
         """获取共享的 TaskService 实例。
 
-        通过 ServiceProvider 统一获取。懒加载创建时从 ServiceProvider
-        获取 EventBus 并注入，确保终态事件能正确广播到 TaskWorker。
+        委托到 tasks.service_access 公共接口。
 
         Returns:
             TaskService 实例，获取失败返回 None
         """
-        from infrastructure.service_provider import get_service_provider
-        provider = get_service_provider()
-        return provider.get_or_create(
-            "task_service",
-            lambda: __import__("tasks.service", fromlist=["TaskService"]).TaskService(
-                event_bus=provider.get("event_bus"),
-            ),
-        )
+        from tasks.service_access import get_task_service
+        return get_task_service()
 
     def _create_executor(self, task_service: Any) -> Any:
         """创建 EvaluationExecutor 实例。
@@ -1185,7 +1150,6 @@ class TaskEvaluateTool(BuiltinTool):
                 p.setdefault("criteria", task_desc)
             if workspace_abs:
                 p["workspace"] = workspace_abs
-            # BUG-FIX: Substitute template variables {{workspace}}, {{task_id}}, {tool_id}
             for key, val in list(p.items()):
                 if isinstance(val, str):
                     if workspace_abs:

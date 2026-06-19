@@ -151,8 +151,6 @@ class ErrorCheckPlugin(IOutputPlugin):
                     return self._handle_knowledge_insufficient(ctx)
 
         # 检查格式错误（但 LLM 返回 tool_calls 时不算格式错误）
-        # BUG-FIX: 工具执行结果(core_type=tool_execute)不是LLM生成的内容，
-        # 可能包含文件内容等，不能用LLM输出格式标准检查
         if self._check_format:
             core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
@@ -193,10 +191,6 @@ class ErrorCheckPlugin(IOutputPlugin):
         error_str = str(error)
         retry_count = ctx.state.get("retry.count", 0)
 
-        # BUG-FIX-fix_20260418_all_tools_failed
-        # 问题根因: 工具全部失败时没有专门的错误类别，导致可能被误判为不可重试
-        # 修复方案: 添加 all_tools_failed 类别，标记为可重试让 LLM 有机会降级处理
-        # 影响范围: 所有工具执行流程的错误检查
         category = "core_error"
         if self._check_tool_missing and self._is_tool_missing_error(error_str):
             category = "tool_missing"

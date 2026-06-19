@@ -237,9 +237,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     task_id, host_path, container_ws,
                 )
                 return meta
-        # BUG-FIX-fix_20260425_container_workspace_init:
-        # 容器子任务优先查找容器空间，基于容器空间做 worktree/copy
-        # 但当 _inherit_workspace_resolved 时跳过容器查找，使用继承的工作空间
         container_ws = None
         if not task_data.get("_inherit_workspace_resolved"):
             container_ws = self._find_container_workspace(task_id)
@@ -341,11 +338,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
 
         ws_base = self._get_workspace_root()
 
-        # BUG-FIX-fix_20260521_existing_project_copy:
-        # 问题根因: existing_project 分支将整个项目复制到 .ai_workspaces/taskid_repo，
-        #          每次任务都复制一份完整项目，导致磁盘空间爆炸。
-        # 修复方案: 直接从目标项目（root_path）创建 worktree，
-        #          worktree 放在配置的工作空间基目录（ws_base）下，不复制文件。
         if not root_path.exists():
             root_path.mkdir(parents=True, exist_ok=True)
         if not (root_path / ".git").exists():
@@ -420,10 +412,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     t = loop.create_task(coro)
                     t.add_done_callback(self._log_persist_failure)
                 except RuntimeError:
-                    # BUG-FIX-fix_20260529_on_task_start_blocks_eventloop:
-                    # on_task_start 现在通过 run_in_executor 在线程池中执行，
-                    # 线程池线程没有运行中的事件循环，get_running_loop() 会抛 RuntimeError。
-                    # 回退方案: 获取主线程的事件循环来调度 save_task。
                     try:
                         loop = asyncio.get_event_loop()
                         if not loop.is_closed():

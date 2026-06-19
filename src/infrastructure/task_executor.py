@@ -300,13 +300,6 @@ class TaskExecutorMixin:
                     _ctx.suspended_engine = None
                     _ctx.active = False
                     _ctx.cleanup(_timer_mgr)
-                    # BUG-FIX-fix_20260619_worktree_destroyed_on_retry:
-                    # 不在引擎结束时调用 lifecycle.on_task_cleanup。
-                    # 该方法会无条件 git worktree remove + 删分支 + 扫删所有 __wt_ 孤儿目录，
-                    # 导致任务失败后重试时 worktree 已被销毁、无法复用（重试必然失败）。
-                    # worktree 的唯一销毁点应在「评估通过 + 合并完成」后，
-                    # 由 on_eval_passed → _cleanup_worktree 负责。
-                    # 从 TaskWorker 的 _contexts 中移除（fire-and-forget 不再由 _run_and_cleanup 负责）
                     self._contexts.pop(_task_id, None)
                     logger.info("TaskWorker: pipeline done | task=%s", _task_id)
 
@@ -565,7 +558,6 @@ class TaskExecutorMixin:
         if not task_service:
             return
         try:
-            # BUG-FIX-fix_20260512_async_compat: bind_pipeline_run 现在是 async
             await task_service.bind_pipeline_run(task_id, pipeline_id)
             logger.info(
                 "TaskWorker: bound task %s to pipeline_run %s (early binding)",
@@ -578,9 +570,6 @@ class TaskExecutorMixin:
                 if root_id:
                     exec_storage.register_pipeline(pipeline_id, root_id)
 
-            # BUG-FIX-fix_20260603_api_store_pipeline_mapping:
-            # 将子管道 ID 注册到 api_store 的 session.pipeline_ids，
-            # 使 store.json 的 pipeline_ids 包含所有子管道，便于级联清理。
             if thread_id:
                 try:
                     from channels.api.memory_store import store as api_store
@@ -672,8 +661,6 @@ class TaskExecutorMixin:
             if not prev_records:
                 return None
             conversation_history: list[dict[str, Any]] = []
-            # BUG-FIX-fix_20260530_role_mapping: 基于 record.type 映射 role，
-            # 避免 role 为空字符串时 assistant 消息被错误标记为 user
             _type_to_role = {"user": "user", "ai": "assistant", "tool": "tool", "system": "system"}
             for r in prev_records:
                 role = r.role or _type_to_role.get(r.type, "user")
@@ -727,13 +714,6 @@ class TaskExecutorMixin:
         Returns:
             是否成功发起取消（无运行中管道时返回 False）
         """
-        # BUG-FIX-fix_20260524_cancel_container_pipeline:
-        # 问题根因: 容器任务的 pipeline_run_id 是父管道的 ID，
-        #           cancel_pipeline(container_task_id) 会错误地注销父管道引擎。
-        # 修复方案: 容器任务没有自己的管道引擎，跳过 pipeline_id 查找和引擎注销，
-        #           直接进入 context/bg_task 取消逻辑。
-        # 影响范围: 容器任务取消流程。
-        # 修复日期: 2026-05-24
         pipeline_id = None
         is_container = False
         if self._task_service:

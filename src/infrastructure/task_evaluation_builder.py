@@ -198,7 +198,6 @@ class TaskEvaluationBuilderMixin:
                 if retry_message:
                     # 读取后清除，避免重试后再读到旧消息
                     _task_for_retry_msg.metadata.pop("retry_message", None)
-                    # BUG-FIX-fix_20260512_async_compat: save_task 现在是 async
                     await task_service.save_task(_task_for_retry_msg)
 
         full_input = user_input

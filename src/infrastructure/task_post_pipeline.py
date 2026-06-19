@@ -105,7 +105,6 @@ class TaskPostPipelineMixin:
                     task_id, e,
                 )
         try:
-            # BUG-FIX-fix_20260512_async_compat: move_to_evaluating 现在是 async
             await task_service.move_to_evaluating(task_id)
         except Exception as e:
             logger.warning(
@@ -113,7 +112,6 @@ class TaskPostPipelineMixin:
                 task_id, e,
             )
             try:
-                # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                 await task_service.fail_task(task_id, f"管道退出后状态转移失败: {e}")
             except Exception as fail_exc:
                 logger.error(
@@ -124,15 +122,6 @@ class TaskPostPipelineMixin:
             ctx.cleanup(timer_manager)
             return
 
-        # BUG-FIX-fix_20260510_evaluating_stuck:
-        # 问题根因: move_to_evaluating 后直接 return，任务卡在 EVALUATING
-        #   永远不会触发实际评估。Agent 已调用 task_evaluate 但评估未完成，
-        #   管道退出后 move_to_evaluating 只改了状态，没有任何后续机制
-        #   推进评估。唯一兜底是系统重启时的 _recover_evaluating_tasks。
-        # 修复方案: move_to_evaluating 成功后，调用 _rerun_evaluation
-        #   触发实际评估执行（复用系统重启恢复的逻辑）。
-        # 影响范围: 所有管道退出时任务仍有 result 但未到终态的场景
-        # 修复日期: 2026-05-10
         ctx.set_terminal()
         ctx.cleanup(timer_manager)
         refreshed_task = task_service.get_task(task_id)
@@ -145,7 +134,6 @@ class TaskPostPipelineMixin:
                     task_id, rerun_exc,
                 )
                 try:
-                    # BUG-FIX-fix_20260512_async_compat: fail_task 现在是 async
                     await task_service.fail_task(
                         task_id, f"管道退出后评估执行失败: {rerun_exc}",
                     )
@@ -176,7 +164,6 @@ class TaskPostPipelineMixin:
         stop_reason = pipeline_state.get("router.stop_reason", "") if pipeline_state else ""
         pipeline_id = pipeline_state.get("pipeline_id", "unknown") if pipeline_state else "unknown"
 
-        # BUG-FIX: 增强诊断 - 记录 engine._last_state 状态
         logger.info(
             "TaskWorker: _fail_after_pipeline_exit 诊断 | task=%s pipeline=%s "
             "state_empty=%s state_not_ended=%s iteration=%s/%s ended=%s "
@@ -262,9 +249,6 @@ class TaskPostPipelineMixin:
                 "TaskWorker: task %s marked failed after pipeline exit: %s",
                 task_id, error_msg,
             )
-        # BUG-FIX: fail_task 后清理 idle 计时器
-        # 防止任务已标记 failed 但 idle 计时器
-        # 仍在检测中不断重建
         ctx.set_terminal()
         ctx.cleanup(timer_manager)
 
