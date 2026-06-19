@@ -213,6 +213,14 @@ def _build_llm_error_info(
         or "refused" in error_lower
         or "key 均失败" in error_msg
         or "key不可用" in error_msg
+        or "rate limit" in error_lower
+        or "ratelimiterror" in error_lower
+        or "budgetexceeded" in error_lower
+        or "budget exceeded" in error_lower
+        or "insufficient" in error_lower
+        or "上限" in error_msg
+        or "额度" in error_msg
+        or "用完" in error_msg
     )
 
     is_context_overflow = (

@@ -109,13 +109,26 @@ class CheckpointManager:
             files_to_backup = []
             for file_path in workspace_path.rglob("*"):
                 if file_path.is_file() and not self._should_ignore(file_path):
-                    files_to_backup.append(
-                        str(file_path.relative_to(self.project_root))
-                    )
+                    # 优先相对于 workspace 计算，因为 workspace 可能是
+                    # project_root 的 worktree（兄弟目录而非子目录），
+                    # 此时相对于 project_root 会抛 ValueError。
+                    try:
+                        rel = file_path.relative_to(workspace_path)
+                    except ValueError:
+                        try:
+                            rel = file_path.relative_to(self.project_root)
+                        except ValueError:
+                            # 既不在 workspace 也不在 project_root 下，
+                            # 用绝对路径兜底，避免中断整个备份流程
+                            rel = file_path
+                    files_to_backup.append(str(rel))
 
         # 备份文件
         for file_rel_path in files_to_backup:
-            original_file = self.project_root / file_rel_path
+            # 先尝试从 workspace 解析（worktree 场景），再回退 project_root
+            original_file = workspace_path / file_rel_path
+            if not original_file.exists():
+                original_file = self.project_root / file_rel_path
             if not original_file.exists():
                 continue
 

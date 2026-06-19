@@ -7,7 +7,6 @@
 """
 
 from isolation.decider import IsolationDecider, IsolationError
-from isolation.executor import IsolationExecutor
 from isolation.manager import IsolationManager, get_isolation_manager
 from isolation.permission_checker import PermissionChecker, check_write_permission
 from isolation.permission_policy import (
@@ -48,7 +47,6 @@ __all__ = [
     "IsolationPolicyLoader",
     "ToolIsolationPolicy",
     "IsolationProvider",
-    "IsolationExecutor",
     # 权限策略
     "PermissionScope",
     "PermissionPolicyType",

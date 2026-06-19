@@ -1,15 +1,18 @@
-"""测试 fix_20260614_infrastructure_error_class：LLM 错误基础设施分类。
+"""测试 LLM 错误分类与恢复提示注入策略。
 
-背景：LLM 调用失败时，认证/权限/连接/key 耗尽等基础设施类错误
-LLM 无法通过调整操作修复。原实现把这类错误当作 unknown 类型，
+背景：LLM 调用失败时，认证/权限/连接/key 耗尽/限流/配额等基础设施类错误
+LLM 无法通过调整操作修复。原实现把这些错误当作 unknown 类型，
 给 LLM 追加「请检查你的操作是否正确」的恢复提示，毫无意义且浪费调用。
 
-修复：新增 infrastructure_error 分类，这类错误不追加面向 LLM 的提示，
-由既有连续错误熔断逻辑（engine_chain._handle_core_error）接管。
+修复：
+1. 新增 infrastructure_error 分类（含 rate_limit / budget_exceeded / 上限 / 额度）
+2. infrastructure_error 和 unknown 类型不追加面向 LLM 的提示
+3. 仅 llm_fixable（非法工具参数）保留提示注入
 
 测试覆盖：
 1. _build_llm_error_info 的分类逻辑（infrastructure 优先级最高）
-2. LLMErrorRecoveryPlugin 的 infrastructure_error 分支（不追加 messages）
+2. LLMErrorRecoveryPlugin 的 infrastructure/unknown 分支（不追加 messages）
+3. llm_fixable 分支（仍追加提示）
 """
 
 from __future__ import annotations
@@ -94,9 +97,12 @@ class TestNonInfrastructureClassification:
     def test_unknown_generic(self) -> None:
         assert _classify("some random unexpected error") == "unknown"
 
-    def test_rate_limit_unknown(self) -> None:
-        # rate limit 不在 infrastructure 关键词中，仍是 unknown（既有 hint 会处理）
-        assert _classify("rate limit exceeded: 429") == "unknown"
+    def test_rate_limit_now_infrastructure(self) -> None:
+        # rate limit / 上限 / 额度 / 用完 现在是 infrastructure_error
+        assert _classify("rate limit exceeded: 429") == "infrastructure_error"
+        assert _classify("RateLimitError: ZaiException - 已达到 5 小时的使用上限") == "infrastructure_error"
+        assert _classify("BudgetExceededError: 每周额度已用完") == "infrastructure_error"
+        assert _classify("Insufficient Balance: 余额不足") == "infrastructure_error"
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +177,8 @@ class TestPluginOtherBranchesUntouched:
         assert "messages" not in result.state_updates
         assert result.state_updates.get("llm_error_info") is None
 
-    def test_unknown_still_appends_hint(self) -> None:
-        """unknown 类型仍追加提示（对比验证 infrastructure 的行为差异）。"""
+    def test_unknown_no_longer_appends_hint(self) -> None:
+        """unknown 类型不再追加提示（LLM 无法修复未知错误，注入无意义）。"""
         state = {
             "messages": [{"role": "user", "content": "x"}],
             "llm_error_info": {
@@ -182,10 +188,9 @@ class TestPluginOtherBranchesUntouched:
             },
         }
         result = _run_execute(state)
-        # unknown 仍追加 messages
-        assert "messages" in result.state_updates
-        appended = result.state_updates["messages"][-1]
-        assert "[系统错误]" in appended["content"] or "[系统提示]" in appended["content"]
+        # unknown 不再追加 messages
+        assert "messages" not in result.state_updates
+        assert result.state_updates.get("llm_error_info") is None
 
     def test_llm_fixable_still_appends_hint(self) -> None:
         state = {

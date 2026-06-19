@@ -1,9 +1,9 @@
 """LLM 错误恢复 Output 插件。
 
 负责在管道循环的输出阶段读取 state["llm_error_info"]，
-为 LLM 可修复错误构建恢复提示并追加到 messages，
-context_overflow 类型不追加提示（由压缩插件处理），
-infrastructure_error 类型不追加提示（LLM 无法修复，由 error_check 路由决策接管：重试耗尽后产出 end 信号，drain 层发 stream_error 通知前端）。
+为 LLM 可修复错误（仅 llm_fixable）构建恢复提示并追加到 messages。
+infrastructure_error / context_overflow / unknown 类型不追加提示
+（LLM 无法通过调整操作修复，应由 error_check 路由决策接管）。
 
 从 engine.py 中迁移的逻辑：
 - _build_llm_error_hint：根据错误类型生成面向大模型的恢复建议
@@ -94,19 +94,19 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
             # 清除错误信息，避免重复处理
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # infrastructure_error 类型不追加提示：认证/权限/连接/key 耗尽等错误
-        # LLM 无法通过调整操作修复，追加面向 LLM 的提示无意义（且会浪费一轮调用
-        # 并在 messages 中堆砌无效内容）。直接清除错误信息，由 error_check 插件
-        # 的路由决策接管（重试耗尽产出 end，drain 发 stream_error 通知前端）。
-        if error_type == "infrastructure_error":
+        # infrastructure_error / unknown 类型不追加提示：
+        # 认证/权限/连接/key 耗尽/限流/配额等基础设施错误，LLM 无法通过调整操作修复。
+        # 追加面向 LLM 的提示无意义（浪费一轮调用并在 messages 中堆砌无效内容）。
+        # 直接清除错误信息，由 error_check 插件的路由决策接管。
+        if error_type in ("infrastructure_error", "unknown"):
             logger.warning(
-                "LLM error recovery: infrastructure_error detected, "
-                "skipping hint (LLM cannot fix auth/conn/key issues) | error=%s",
-                error_msg[:200],
+                "LLM error recovery: %s detected, "
+                "skipping hint (LLM cannot fix this) | error=%s",
+                error_type, error_msg[:200],
             )
             return OutputResult(state_updates={"llm_error_info": None})
 
-        # 构建恢复提示
+        # llm_fixable：LLM 有能力修复（如非法工具参数），构建恢复提示
         hint = self._build_llm_error_hint(error_msg)
         messages = list(ctx.state.get("messages", []))
 

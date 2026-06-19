@@ -227,7 +227,7 @@ def _init_pipeline_context() -> PipelineContext:
                 except Exception as exc:
                     logger.warning("register_core_tools 失败: %s", exc)
                 tool_core.register_tools_from_registry(tool_registry)
-            # IsolationExecutor 已由 ToolCore 内部创建，无需外部注入
+            # Docker 容器隔离通过 IsolationManager 统一管理
 
         # 获取默认 Agent 配置（灵汐）
         agent_config = None

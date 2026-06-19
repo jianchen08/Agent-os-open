@@ -13,31 +13,16 @@ task_worker:
   terminal_wait_timeout: 3600
 
 input_routes:
-  # 安全拦截 → 结束，并把原因写入 RAW_RESULT
-  - name: security_blocked
-    condition: "security.decision.get('allowed') == False"
-    target: end
-    plugins: []
-    priority: 0
-    result: "工具执行被安全检查拦截: {security.decision.reason}"
+  # 工具级拦截（权限/隔离/安全）不再用 target=end 终结管道。
+  # 拦截决策由对应 input 插件写入 state，tool_core 在执行工具前统一检查，
+  # 被拦截的工具转为「失败结果」返回给 LLM，让 LLM 自行调整策略，
+  # 而不是把单次工具越权放大成整个任务管道失败。
+  #
+  # 历史问题：原本这里有三条 target=end 路由（security_blocked / level_blocked
+  # / isolation_blocked），把拦截原因写进 RAW_RESULT 并 ENDED=True，导致
+  # 「权限不足」变成最终输出、任务被错误终结、停止后重发消息 agent 身份丢失。
 
-  # 越权拦截 → 结束
-  - name: level_blocked
-    condition: "security.level_decision.get('allowed') == False"
-    target: end
-    plugins: []
-    priority: 0
-    result: "权限不足，无法调用工具: {security.level_decision.reason}"
-
-  # 隔离策略拦截 → 结束
-  - name: isolation_blocked
-    condition: "isolation.blocked == True"
-    target: end
-    plugins: []
-    priority: 0
-    result: "工具执行被隔离策略阻止: {isolation.block_reason}"
-
-  # 工具执行 → 安全检查后执行 core
+  # 工具执行 → 安全检查后执行 core（tool_core 内部处理拦截转失败结果）
   - name: tool_execute
     condition: "core_type == 'tool_execute'"
     target: core

@@ -82,10 +82,9 @@ class _TaskCleanupMixin:
             from isolation.manager import get_isolation_manager
 
             manager = await get_isolation_manager()
-            destroyed = await manager.destroy_environment(task_id)
-            cleanup_results["container_destroyed"] = destroyed
-            if destroyed:
-                logger.info("[TaskService] 已通过 IsolationManager 销毁环境: %s", task_id)
+            await manager.destroy_by_task_id(task_id)
+            cleanup_results["container_destroyed"] = True
+            logger.info("[TaskService] 已通过 IsolationManager 销毁环境: %s", task_id)
         except Exception as e:
             cleanup_results["errors"].append(f"清理隔离环境失败: {str(e)}")
             logger.warning("[TaskService] 清理隔离环境失败: %s, 错误: %s", task_id, e)

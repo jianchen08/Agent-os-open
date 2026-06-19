@@ -191,7 +191,6 @@ def load_pipeline_config(
             target=entry_data.get("target", "core"),
             plugins=entry_data.get("plugins", []),
             priority=entry_data.get("priority", 0),
-            result=entry_data.get("result"),
         ))
     input_route_table = InputRouteTable(input_entries)
 

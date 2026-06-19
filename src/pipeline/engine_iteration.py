@@ -171,32 +171,31 @@ async def _dispatch_input_target(
     return IterationAction.CONTINUE
 
 
-def _handle_target_end(
-    engine: PipelineEngine,
-    state: dict[str, Any],
-    matched_entry: Any,
-) -> IterationAction:
-    """处理 target=end：待处理通知优先，否则真正结束。
+def consume_pending_notifications(engine: PipelineEngine, state: dict[str, Any]) -> bool:
+    """消费待处理通知：非空则注入 state 继续循环，空则返回 False。
 
-    若 drain_inject_queue 返回非空通知，注入后取消结束（CONTINUE）；
-    否则格式化结果到 RAW_RESULT，设 ENDED 并 BREAK。
+    统一的"通知注入"入口——把 drain_inject_queue 取出的待处理消息过滤空白后
+    注入 messages/user_input/core_type。这是引擎调度层唯一的消息注入点，
+    消除原先散落在 _handle_target_end / apply_route 的三处重复逻辑。
+
+    引擎调度层原则：可改状态字段（CORE_TYPE 等），但通知注入集中在此函数，
+    不再在各路由分支内联重复。
+
+    Args:
+        engine: PipelineEngine 实例
+        state: 管道状态字典（原地修改）
+
+    Returns:
+        True 表示有待处理通知已注入（调用方应继续循环）；
+        False 表示无待处理通知（调用方可真正结束/挂起）。
     """
-    _end_notifs = engine.drain_inject_queue()
-    if not _end_notifs:
-        if matched_entry and matched_entry.result:
-            state[StateKeys.RAW_RESULT] = matched_entry.format_result(state)
-            logger.info("Input route end with result: %s", state[StateKeys.RAW_RESULT])
-        state[StateKeys.ENDED] = True
-        logger.info("Pipeline ended by input route (target=end)")
-        return IterationAction.BREAK
+    _notifs = engine.drain_inject_queue()
+    if not _notifs:
+        return False
 
-    # 有待处理通知 → 过滤空白 → 注入 → 取消结束
-    _filtered = [n for n in _end_notifs if n and n.strip()]
+    _filtered = [n for n in _notifs if n and n.strip()]
     if not _filtered:
-        if matched_entry and matched_entry.result:
-            state[StateKeys.RAW_RESULT] = matched_entry.format_result(state)
-        state[StateKeys.ENDED] = True
-        return IterationAction.BREAK
+        return False
 
     _combined = "\n\n".join(_filtered)
     state["user_input"] = _combined
@@ -205,10 +204,32 @@ def _handle_target_end(
     )
     state[StateKeys.CORE_TYPE] = "llm_call"
     logger.info(
-        "[Engine] target=end 但有 %d 条待处理通知，继续循环",
+        "[Engine] 消费 %d 条待处理通知，注入 state 继续循环",
         len(_filtered),
     )
-    return IterationAction.CONTINUE
+    return True
+
+
+def _handle_target_end(
+    engine: PipelineEngine,
+    state: dict[str, Any],
+    matched_entry: Any,
+) -> IterationAction:
+    """处理 target=end：待处理通知优先，否则真正结束。
+
+    引擎调度层职责：根据路由决策（end）决定循环去留。
+    - 有待处理通知 → consume_pending_notifications 注入后继续循环
+    - 无通知 → 设 ENDED 结束循环
+
+    不生成内容（不写 RAW_RESULT）、不内联注入消息——通知注入统一走
+    consume_pending_notifications。
+    """
+    if consume_pending_notifications(engine, state):
+        return IterationAction.CONTINUE
+
+    state[StateKeys.ENDED] = True
+    logger.info("Pipeline ended by input route (target=end)")
+    return IterationAction.BREAK
 
 
 async def _handle_target_wait(

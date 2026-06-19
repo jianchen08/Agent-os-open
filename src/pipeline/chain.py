@@ -23,7 +23,7 @@ def _deep_update(target: dict, updates: dict) -> None:
     """将 updates 合并到 target，展开点号键为嵌套字典结构。
 
     插件的 state_updates 中使用点号键（如 "security.decision"），
-    但条件解析器和 format_result 按嵌套字典访问（state["security"]["decision"]）。
+    但条件解析器按嵌套字典访问（state["security"]["decision"]）。
     此函数将 "security.decision" 展开为 target["security"]["decision"]，
     使两种访问方式都能正确工作。
 

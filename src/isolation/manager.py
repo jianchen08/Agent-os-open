@@ -423,6 +423,7 @@ class IsolationManager:
         isolation_level: IsolationLevel | None = None,
         metadata: dict | None = None,
         parent_task_id: str | None = None,
+        tool_name: str | None = None,
     ) -> IsolationEnvironment:
         """获取或创建隔离环境"""
         # 1. 查找根任务 ID（容器归属者）
@@ -469,10 +470,12 @@ class IsolationManager:
                 f"使用指定的隔离级别: {level.value} (requires_approval={requires_approval})"
             )
         else:
-            # 使用决策器根据操作类型决策隔离策略
+            # 使用决策器根据工具名决策隔离策略
+            # 注意：decider 需要的是 tool_name（如 bash_execute）而非 task_type（atomic），
+            # 否则 policy 匹配不到工具级规则会落到 default=host。
             tool_category = operation_type.value if operation_type else None
             policy = await self._decider.decide(
-                tool_name=task_type.value,
+                tool_name=tool_name or task_type.value,
                 tool_category=tool_category,
                 available_providers=available,
             )
@@ -480,7 +483,7 @@ class IsolationManager:
             requires_approval = policy.approval
             logger.info(
                 f"为任务 {task_id} 选择隔离级别: {level.value} (requires_approval={requires_approval})"
-                f"(task_type={task_type.value}, operation_type={operation_type.value if operation_type else None})"
+                f"(tool_name={tool_name}, task_type={task_type.value}, operation_type={operation_type.value if operation_type else None})"
             )
 
         # 6. 创建新环境
@@ -540,13 +543,52 @@ class IsolationManager:
         )
         return env
 
+    def set_task_repository(self, repo: Any) -> None:
+        """注入任务仓储，启用根任务容器复用。
+
+        注入后，_find_root_task_id 会自动查询 repo 获取 parent_task_id，
+        无需调用方显式传入。repo 需实现 get(task_id) -> {.id, .parent_task_id}。
+
+        Args:
+            repo: 任务仓储实例（如 TaskService._storage）
+        """
+        self._task_repository = repo
+        logger.info("[IsolationManager] task_repository 已注入，根任务容器复用已启用")
+
     async def _find_root_task_id(
         self, task_id: str, parent_task_id: str | None = None
     ) -> str:
-        """向上查找根任务 ID"""
-        if not parent_task_id:
-            return task_id
+        """向上查找根任务 ID
 
+        查找逻辑：
+        1. 若显式传了 parent_task_id，沿 parent 链回溯到根
+        2. 若未传 parent_task_id 但已注入 task_repository，
+           先从 repo 查出当前 task 的 parent_task_id，再回溯
+        3. 都没拿到 → 返回当前 task_id 作为 fallback
+        """
+        # 显式传了 parent_task_id → 直接回溯
+        if parent_task_id:
+            return await self._walk_to_root(task_id, parent_task_id)
+
+        # 未传 parent_task_id → 从 repo 中自动查找
+        if self._task_repository:
+            try:
+                task = await self._task_repository.get(task_id)
+                if task and task.parent_task_id:
+                    return await self._walk_to_root(task_id, task.parent_task_id)
+            except Exception as e:
+                logger.warning(
+                    f"[IsolationManager] 从 repo 查找任务 %s 失败: %s，回退到当前 task_id",
+                    task_id, e,
+                )
+
+        logger.debug(
+            f"[IsolationManager] 无法查找根任务（无 parent_task_id 且 repo 未注入），使用当前 task_id: {task_id}"
+        )
+        return task_id
+
+    async def _walk_to_root(self, task_id: str, parent_task_id: str) -> str:
+        """沿 parent_task_id 链向上回溯到根任务"""
         if not self._task_repository:
             logger.warning(
                 f"[IsolationManager] 未设置 task_repository，无法查找根任务，使用当前任务 ID: {task_id}"
@@ -559,7 +601,7 @@ class IsolationManager:
             depth = 0
 
             while depth < max_depth:
-                task = await self._task_repository.get_by_id(current_task_id)
+                task = await self._task_repository.get(current_task_id)
                 if not task:
                     logger.warning(
                         f"[IsolationManager] 任务不存在: {current_task_id}，返回当前任务 ID: {task_id}"
@@ -669,12 +711,12 @@ class IsolationManager:
 
         if self._task_repository:
             try:
-                task = await self._task_repository.get_by_id(task_id)
+                task = await self._task_repository.get(task_id)
                 if task:
                     current_id = task_id
                     while task and task.parent_task_id:
                         current_id = task.parent_task_id
-                        task = await self._task_repository.get_by_id(current_id)
+                        task = await self._task_repository.get(current_id)
                     root_task_id = current_id
             except Exception as e:
                 logger.warning(
@@ -759,6 +801,8 @@ class IsolationManager:
         parent_workspace: str | None = None,
         is_root_task: bool = True,
         isolation_level: IsolationLevel | None = None,
+        parent_task_id: str | None = None,
+        tool_name: str | None = None,
     ) -> ExecutionResult:
         """在隔离环境中执行操作"""
         # 获取或创建环境
@@ -771,6 +815,8 @@ class IsolationManager:
             parent_workspace=parent_workspace,
             is_root_task=is_root_task,
             isolation_level=isolation_level,
+            parent_task_id=parent_task_id,
+            tool_name=tool_name,
         )
 
         logger.debug(

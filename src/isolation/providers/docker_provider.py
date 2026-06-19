@@ -124,31 +124,20 @@ class DockerProvider(IsolationProvider):
     async def create_environment(
         self,
         context: IsolationContext,
-        container_name: str | None = None,
+        container_name: str,
     ) -> IsolationEnvironment:
         """创建 Docker 容器环境。
 
         Args:
             context: 隔离上下文
-            container_name: 容器名称。由 IsolationManager 传入（统一 cua- 前缀），
-                           None 时 fallback 到 "agent-os-{task_id}"（向后兼容）。
+            container_name: 容器名称，由调用方统一确定（保证可复用/可销毁）。
 
         Returns:
             创建的隔离环境实例
         """
         now = datetime.now(UTC)
         env_id = f"docker-{context.task_id}"
-
-        # 使用传入的容器名（统一 cua- 前缀），fallback 到默认命名
-        if container_name:
-            name = container_name
-        else:
-            name = f"agent-os-{context.task_id}"
-            logger.warning(
-                "[DockerProvider] 未传入 container_name，使用默认命名 %s。"
-                "建议由 IsolationManager 统一传入以保持 cua- 前缀一致。",
-                name,
-            )
+        name = container_name
 
         # 构建 docker run 命令参数
         run_args = self._build_run_args(name, context)

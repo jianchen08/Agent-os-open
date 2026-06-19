@@ -5,7 +5,7 @@
 - 逐个执行已注册的工具函数
 - 使用 asyncio.wait_for 设置超时保护
 - 收集执行结果并写入 state
-- 支持 IsolationExecutor 在 Docker 容器中执行
+- 支持 IsolationManager 在 Docker 容器中执行 bash_execute
 """
 
 from __future__ import annotations
@@ -23,9 +23,6 @@ from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
 from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
-
-if TYPE_CHECKING:
-    from isolation.executor import IsolationExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +83,6 @@ class ToolCore(ICorePlugin):
         _tools: 已注册的工具函数映射，键为工具名，值为可调用对象
         _tool_registry: 外部工具注册表引用（可选，用于批量注册）
         _default_timeout: 工具执行默认超时时间（秒）
-        _isolation_executor: 隔离执行器实例（可选，用于 Docker 容器执行）
     """
 
     error_policy = ErrorPolicy.RETRY
@@ -103,19 +99,6 @@ class ToolCore(ICorePlugin):
         self._tool_registry: ToolRegistry | None = None
         self._default_timeout: float = self._config.get("timeout", 30.0)
         self._tool_timeouts: dict[str, float] = self._config.get("tool_timeouts", {})
-        # 隔离执行器：ToolCore 自己创建，作为基础设施而非外部注入。
-        # 这样 CLI/Web/任何模式都自动支持 Docker 隔离，不会再遗漏。
-        self._isolation_executor = None
-        try:
-            from isolation.executor import IsolationExecutor
-            self._isolation_executor = IsolationExecutor()
-            logger.info("[tool_core] IsolationExecutor 已初始化（内置）executor=%s", type(self._isolation_executor).__name__)
-        except Exception as exc:
-            import traceback
-            logger.warning(
-                "[tool_core] IsolationExecutor 初始化失败: %s，工具将在宿主机执行\n%s",
-                exc, traceback.format_exc(),
-            )
 
     @property
     def name(self) -> str:
@@ -155,19 +138,6 @@ class ToolCore(ICorePlugin):
                     "[%s] Tool imported from registry: %s",
                     self.name, tool_def.name,
                 )
-
-    def set_isolation_executor(self, executor: IsolationExecutor) -> None:
-        """设置隔离执行器。
-
-        注入 IsolationExecutor 实例后，ToolCore 将优先通过
-        执行器执行工具，根据 state["execution_contexts"] 中的
-        隔离决策在 Docker 或宿主机中执行。
-
-        Args:
-            executor: IsolationExecutor 实例
-        """
-        self._isolation_executor = executor
-        logger.info("[%s] IsolationExecutor 已注入", self.name)
 
     def _get_schema_timeout_default(self, tool_name: str) -> float | None:
         """从工具 schema 中获取 timeout_seconds 的默认值。
@@ -253,6 +223,129 @@ class ToolCore(ICorePlugin):
             return result
 
         return str(result)
+
+    def _check_tool_blocked(
+        self, tool_name: str, state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """统一工具拦截检查：被策略拦截的工具返回失败结果，否则返回 None。
+
+        工具级拦截（权限/隔离/安全）应转为「工具失败结果」返回给 LLM，
+        让 LLM 看到该工具不可用并自行调整策略，而不是在 input 路由层用
+        target=end 终结整个管道（那会把单次工具越权放大成任务失败）。
+
+        检查三类决策（由对应 input 插件写入 state）：
+        - security.level_decision (level_guard)：Agent 层级越权
+        - isolation.blocked / execution_contexts[blocked] (isolation_guard)：隔离策略
+        - security.decision (security_check)：安全检查
+
+        Args:
+            tool_name: 工具名称
+            state: 管道状态字典
+
+        Returns:
+            被拦截时返回失败结果 dict（success=False），未被拦截返回 None
+        """
+        # level_guard 越权拦截
+        level_decision = state.get("security.level_decision")
+        if isinstance(level_decision, dict) and level_decision.get("allowed") is False:
+            blocked = level_decision.get("blocked_tools") or []
+            if tool_name in blocked or not blocked:
+                reason = level_decision.get("reason", "权限不足")
+                logger.warning("[tool_core] 工具 %s 被 level_guard 拦截: %s", tool_name, reason)
+                return {
+                    "tool_name": tool_name,
+                    "success": False,
+                    "error": f"工具被权限策略拦截: {reason}",
+                    "duration_ms": 0,
+                }
+
+        # isolation_guard 拦截：execution_contexts 中标记 blocked 的工具
+        for ctx_entry in state.get("execution_contexts", []):
+            if ctx_entry.get("tool_name") == tool_name and ctx_entry.get("blocked"):
+                reason = ctx_entry.get("reason", "隔离策略阻止")
+                logger.warning("[tool_core] 工具 %s 被 isolation_guard 拦截: %s", tool_name, reason)
+                return {
+                    "tool_name": tool_name,
+                    "success": False,
+                    "error": f"工具被隔离策略拦截: {reason}",
+                    "duration_ms": 0,
+                }
+
+        # security_check 拦截
+        sec_decision = state.get("security.decision")
+        if isinstance(sec_decision, dict) and sec_decision.get("allowed") is False:
+            reason = sec_decision.get("reason", "安全检查拦截")
+            logger.warning("[tool_core] 工具 %s 被 security_check 拦截: %s", tool_name, reason)
+            return {
+                "tool_name": tool_name,
+                "success": False,
+                "error": f"工具被安全检查拦截: {reason}",
+                "duration_ms": 0,
+            }
+
+        return None
+
+    async def _execute_in_isolated_container(
+        self,
+        state: dict[str, Any],
+        tool_args: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        """在 IsolationManager 管理的 Docker 容器中执行 bash_execute。
+
+        通过 IsolationManager 的根任务复用机制，同根任务的子任务
+        共享一个容器，避免创建大量冗余容器。
+
+        Args:
+            state: 管道状态（含 task_id, workspace 等）
+            tool_args: 工具参数（command 字段）
+            timeout: 超时时间（秒）
+
+        Returns:
+            与 ToolCore 期望一致的 dict: {tool_name, success, data/error, duration_ms}
+        """
+        import time as _time
+
+        from isolation.manager import get_isolation_manager
+        from isolation.types import TaskType
+
+        task_id = state.get("task_id", "unknown")
+        workspace = state.get("workspace")
+
+        operation = {
+            "type": "command",
+            "command": tool_args.get("command", ""),
+            "timeout": timeout,
+            "working_dir": "/workspace",
+        }
+
+        manager = await get_isolation_manager()
+        _start = _time.monotonic()
+        exec_result = await manager.execute_in_isolation(
+            task_id=task_id,
+            task_type=TaskType.ATOMIC,
+            operation=operation,
+            workspace=workspace,
+            tool_name="bash_execute",
+        )
+        duration_ms = (_time.monotonic() - _start) * 1000
+
+        if exec_result.success:
+            output = exec_result.output
+            data = output.get("stdout", "") if isinstance(output, dict) else str(output or "")
+            return {
+                "tool_name": "bash_execute",
+                "success": True,
+                "data": data,
+                "duration_ms": round(duration_ms, 1),
+            }
+        else:
+            return {
+                "tool_name": "bash_execute",
+                "success": False,
+                "error": exec_result.error or "容器执行失败",
+                "duration_ms": round(duration_ms, 1),
+            }
 
     async def _execute_single_tool(
         self,
@@ -584,6 +677,29 @@ class ToolCore(ICorePlugin):
                 if schema_default is not None:
                     timeout = schema_default
 
+            # 统一工具拦截检查：被权限/隔离/安全策略拦截的工具转为失败结果，
+            # 让 LLM 自行调整，而不是终结整个管道。
+            _blocked_result = self._check_tool_blocked(tool_name, ctx.state)
+            if _blocked_result is not None:
+                if on_chunk:
+                    on_chunk({
+                        "type": "tool_start",
+                        "tool_name": tool_name,
+                        "args": tool_args,
+                        "call_id": tc_call_id,
+                    })
+                    on_chunk({
+                        "type": "tool_result",
+                        "tool_name": tool_name,
+                        "result": _blocked_result.get("error", ""),
+                        "success": False,
+                        "duration_ms": 0,
+                        "call_id": tc_call_id,
+                    })
+                results.append(_blocked_result)
+                last_result_text = f"Error: {_blocked_result['error']}"
+                continue
+
             # 根据 execution_contexts 决定执行路径
             # provider=docker → 容器执行；provider=host → 宿主机执行
             execution_contexts = ctx.state.get("execution_contexts", [])
@@ -594,16 +710,13 @@ class ToolCore(ICorePlugin):
                 and not ctx_entry.get("blocked", False)
             )
 
-            logger.info("[tool_core] executor=%s tool=%s use_docker=%s", self._isolation_executor is not None, tool_name, use_docker)
-            if use_docker and self._isolation_executor is not None and tool_name != "human_interaction":
+            logger.info("[tool_core] tool=%s use_docker=%s", tool_name, use_docker)
+            if use_docker and tool_name == "bash_execute":
                 if on_chunk:
                     on_chunk({"type": "tool_start", "tool_name": tool_name, "args": tool_args, "call_id": tc_call_id})
-                func = self._get_tool(tool_name)
-                result = await self._isolation_executor.execute_tool(
+                result = await self._execute_in_isolated_container(
                     state=ctx.state,
-                    tool_name=tool_name,
                     tool_args=tool_args,
-                    tool_func=func,  # type: ignore[arg-type]
                     timeout=timeout,
                 )
                 if on_chunk:

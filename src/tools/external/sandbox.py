@@ -227,14 +227,13 @@ class ExternalToolSandbox(IExternalToolSandbox):
         try:
             from isolation.manager import get_isolation_manager
             from isolation.types import (
-                IsolationContext,
                 IsolationLevel,
                 OperationType,
                 TaskType,
             )
 
             manager = await get_isolation_manager()
-            context = IsolationContext(
+            env = await manager.get_or_create_environment(
                 task_id=sandbox_id,
                 task_type=TaskType.ATOMIC,
                 operation_type=OperationType.CODE_EXECUTION,
@@ -245,7 +244,6 @@ class ExternalToolSandbox(IExternalToolSandbox):
                     "memory_limit_mb": limits.memory_limit_mb,
                 },
             )
-            env = await manager.create_environment(context)
             return env
 
         except ImportError:
@@ -285,12 +283,18 @@ class ExternalToolSandbox(IExternalToolSandbox):
         # 真实隔离环境
         try:
             from isolation.manager import get_isolation_manager
+            from isolation.types import TaskType
 
             manager = await get_isolation_manager()
-            result = await manager.execute_in_environment(
-                env_id=env.env_id,
-                operation="execute",
-                command=command,
+            operation = {
+                "type": "command",
+                "command": command,
+            }
+            result = await manager.execute_in_isolation(
+                task_id=sandbox_id,
+                task_type=TaskType.ATOMIC,
+                operation=operation,
+                tool_name=sandbox.get("tool_name"),
             )
 
             return {

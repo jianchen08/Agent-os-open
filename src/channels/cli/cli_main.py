@@ -343,7 +343,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             except Exception as exc:
                 logger.warning("register_core_tools failed: %s", exc)
             tool_core.register_tools_from_registry(tool_registry)
-            # IsolationExecutor 已由 ToolCore 内部创建，无需外部注入
+            # Docker 容器隔离通过 IsolationManager 统一管理
 
     def _load_agent_config(self, agent_registry: Any) -> None:
         """从 AgentRegistry 加载 Agent 配置。

@@ -330,6 +330,19 @@ class Application:
             task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
             logger.info("服务已创建: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
+
+            # 注入 task_repository 到 IsolationManager，启用根任务容器复用
+            try:
+                from isolation.manager import get_isolation_manager
+
+                _manager = asyncio.get_event_loop().run_until_complete(
+                    get_isolation_manager()
+                )
+                _manager.set_task_repository(task_service._storage)
+            except Exception as _exc:
+                logger.warning(
+                    "注入 task_repository 到 IsolationManager 失败: %s", _exc
+                )
         except Exception as exc:
             logger.warning("创建 task_service 服务失败: %s", exc, exc_info=True)
 
