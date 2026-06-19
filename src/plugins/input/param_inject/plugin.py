@@ -160,10 +160,33 @@ class ParamInjectPlugin(IInputPlugin):
             if self._inject_timestamp and "timestamp" not in args:
                 args["timestamp"] = datetime.now(UTC).isoformat()
 
-            if "task_id" not in args:
+            # BUG-FIX-fix_20260418_task_inject: 注入 task_id
+            # 问题根因: task_evaluate 声明 injected_params=["task_id"] 但实际注入链断裂
+            # 修复方案: 在 ParamInjectPlugin 中补充 task_id 注入，从 state 获取
+            # 影响范围: 所有声明 injected_params 含 task_id 的工具
+            #
+            # BUG-FIX-fix_20260619_l2_parent_task_id_lost:
+            # 原条件 `if "task_id" not in args` 在 LLM 传入空值
+            # （task_id=null/""）时仍判定为「已存在」而跳过注入，
+            # 导致 L2 task_submit 拿不到 parent_task_id，报
+            # L2_REQUIRES_PARENT_TASK。注入参数是系统权威值，
+            # 只要 args 中没有有效值就注入。
+            if not args.get("task_id"):
                 task_id = ctx.state.get(StateKeys.TASK_ID, "")
                 if task_id:
                     args["task_id"] = task_id
+                else:
+                    # 诊断：state 中无 task_id，说明引擎 state 未携带本任务 ID。
+                    # task_submit/task_evaluate 等依赖该注入的工具将无法确定父任务。
+                    _tool_name = injected_tc.get("name", "?")
+                    if _tool_name in ("task_submit", "task_evaluate", "task_manage"):
+                        logger.warning(
+                            "[param_inject] task_id 注入失败 | tool=%s | "
+                            "state[TASK_ID]=%r | pipeline_id=%s",
+                            _tool_name,
+                            ctx.state.get(StateKeys.TASK_ID),
+                            ctx.state.get(StateKeys.PIPELINE_ID, "")[:12],
+                        )
 
             # 注入 pipeline_id（仅当参数不存在且 state 中有值时才注入）
             if "pipeline_id" not in args:

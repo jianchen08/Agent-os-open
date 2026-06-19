@@ -213,6 +213,54 @@ class TestParamInjectPlugin:
         assert tool_calls[0]["args"]["session_id"] == "custom-id"
 
     @pytest.mark.asyncio
+    async def test_injects_task_id_when_absent(self, ctx, base_state):
+        """task_id 缺失时从 state 注入。"""
+        base_state[StateKeys.CORE_TYPE] = "tool_execute"
+        base_state[StateKeys.TASK_ID] = "task-001"
+        base_state[StateKeys.RAW_TOOL_CALLS] = [
+            {"name": "task_submit", "args": {"goal": {"title": "x"}}},
+        ]
+        plugin = ParamInjectPlugin()
+        result = await plugin.execute(ctx)
+
+        tool_calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert tool_calls[0]["args"]["task_id"] == "task-001"
+
+    @pytest.mark.asyncio
+    async def test_injects_task_id_overriding_empty_value(self, ctx, base_state):
+        """LLM 传入空 task_id（null/""）时仍注入 state 的有效值。
+
+        回归 fix_20260619_l2_parent_task_id_lost：
+        原条件 `if "task_id" not in args` 会因 args 含空值键而跳过注入，
+        导致 L2 task_submit 拿不到 parent_task_id。空值应被视为「无值」并注入。
+        """
+        base_state[StateKeys.CORE_TYPE] = "tool_execute"
+        base_state[StateKeys.TASK_ID] = "task-002"
+        base_state[StateKeys.RAW_TOOL_CALLS] = [
+            # 模拟 LLM 传入空字符串 task_id
+            {"name": "task_submit", "args": {"task_id": "", "goal": {"title": "x"}}},
+        ]
+        plugin = ParamInjectPlugin()
+        result = await plugin.execute(ctx)
+
+        tool_calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert tool_calls[0]["args"]["task_id"] == "task-002"
+
+    @pytest.mark.asyncio
+    async def test_keeps_valid_task_id_from_args(self, ctx, base_state):
+        """args 中已有有效 task_id 时不覆盖。"""
+        base_state[StateKeys.CORE_TYPE] = "tool_execute"
+        base_state[StateKeys.TASK_ID] = "state-task"
+        base_state[StateKeys.RAW_TOOL_CALLS] = [
+            {"name": "task_submit", "args": {"task_id": "args-task", "goal": {"title": "x"}}},
+        ]
+        plugin = ParamInjectPlugin()
+        result = await plugin.execute(ctx)
+
+        tool_calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert tool_calls[0]["args"]["task_id"] == "args-task"
+
+    @pytest.mark.asyncio
     async def test_injects_timestamp(self, ctx, base_state):
         """测试注入时间戳。"""
         base_state[StateKeys.CORE_TYPE] = "tool_execute"

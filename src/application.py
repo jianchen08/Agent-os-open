@@ -331,13 +331,13 @@ class Application:
             services["task_service"] = task_service
             logger.info("服务已创建: task_service (event_bus=%s)", "enabled" if services.get("event_bus") else "disabled")
 
-            # 注入 task_repository 到 IsolationManager，启用根任务容器复用
+            # 注入 task_repository 到 IsolationManager，启用按 workspace 销毁容器
+            # 用同步版本：asyncio.get_event_loop().run_until_complete() 在 Python 3.12+
+            # 同步上下文里会抛 RuntimeError，导致注入失败、容器永不清理
             try:
-                from isolation.manager import get_isolation_manager
+                from isolation.manager import get_isolation_manager_sync
 
-                _manager = asyncio.get_event_loop().run_until_complete(
-                    get_isolation_manager()
-                )
+                _manager = get_isolation_manager_sync()
                 _manager.set_task_repository(task_service._storage)
             except Exception as _exc:
                 logger.warning(

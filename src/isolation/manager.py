@@ -10,7 +10,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from isolation.decider import IsolationDecider
@@ -167,7 +167,8 @@ class IsolationManager:
 
         self._environments: dict[str, IsolationEnvironment] = {}
         self._reuse_map: dict[str, str] = {}
-        self._root_task_env_map: dict[str, str] = {}
+        # workspace 标识 → env_id，同 workspace 复用同一容器
+        self._workspace_env_map: dict[str, str] = {}
         self._running = False
 
     async def start(self):
@@ -189,9 +190,9 @@ class IsolationManager:
 
         项目启动时：
         1. 查找所有 cua-* 容器
-        2. 从容器名提取 task_id，查询数据库验证任务状态
-        3. 仅恢复数据库中存在且未完成的任务容器
-        4. 已完成/不存在/被删除的任务容器直接销毁
+        2. 从容器名提取 workspace 标识，验证该 workspace 是否还有活跃任务
+        3. 仅恢复有活跃任务的容器
+        4. 无活跃任务的容器直接销毁
         """
         try:
             from docker.errors import DockerException, NotFound
@@ -201,11 +202,11 @@ class IsolationManager:
             client = docker.from_env()
             containers = client.containers.list(all=True)
 
-            active_task_ids = await self._load_active_task_ids()
-            if active_task_ids is None:
+            active_ws_keys = await self._load_active_workspace_keys()
+            if active_ws_keys is None:
                 # fail-closed：加载失败时跳过销毁逻辑，仅尝试恢复 exited 容器
                 logger.warning(
-                    "[IsolationManager] 活跃任务ID加载失败，跳过容器销毁逻辑，仅尝试恢复 exited 容器"
+                    "[IsolationManager] 活跃 workspace 加载失败，跳过容器销毁逻辑，仅尝试恢复 exited 容器"
                 )
 
             resumed_count = 0
@@ -214,12 +215,12 @@ class IsolationManager:
                 if not container.name.startswith(self.CONTAINER_NAME_PREFIX):
                     continue
 
-                task_id = container.name[len(self.CONTAINER_NAME_PREFIX) :]
+                ws_key = container.name[len(self.CONTAINER_NAME_PREFIX) :]
 
-                # 仅当成功加载活跃任务ID时才执行销毁逻辑，避免 fail-open 误销毁在用容器
-                if active_task_ids is not None and task_id not in active_task_ids:
+                # 仅当成功加载活跃 workspace 时才执行销毁逻辑，避免 fail-open 误销毁在用容器
+                if active_ws_keys is not None and ws_key not in active_ws_keys:
                     logger.info(
-                        f"[IsolationManager] 任务 {task_id} 非活跃状态或不存在，"
+                        f"[IsolationManager] workspace {ws_key} 无活跃任务，"
                         f"销毁容器: {container.name}"
                     )
                     try:
@@ -332,29 +333,43 @@ class IsolationManager:
         except Exception as e:
             logger.debug("[IsolationManager] 镜像清理失败（非致命）: %s", e)
 
-    async def _load_active_task_ids(self) -> set[str] | None:
-        """从数据库加载所有非终态任务的 ID 集合
+    async def _load_active_workspace_keys(self) -> set[str] | None:
+        """从 YAML 任务存储加载所有非终态任务的 workspace 标识集合
 
         Returns:
-            活跃任务 ID 集合；加载失败时返回 None（fail-closed），
+            活跃 workspace 标识集合；加载失败时返回 None（fail-closed），
             调用方需检查 None 以避免误销毁在用容器。
         """
+        if self._task_repository is None:
+            logger.warning("[IsolationManager] task_repository 未注入，无法加载活跃 workspace")
+            return None
         try:
-            from sqlalchemy import select
+            from tasks.types import TaskStatus
 
-            from infrastructure.db import get_async_session
-            from src.core.states.execution import ExecutionStatus
-            from src.db.models import Task
-
-            terminal_statuses = {s.value for s in ExecutionStatus if s.is_terminal}
-            session = await get_async_session()
-            result = await session.execute(
-                select(Task.id).where(Task.status.notin_(terminal_statuses))
-            )
-            return {row[0] for row in result.all()}
+            terminal_statuses = {
+                TaskStatus.COMPLETED, TaskStatus.FAILED,
+                TaskStatus.STOPPED, TaskStatus.TIMEOUT,
+            }
+            # task_repository 可能是 TaskStorage（有 _tasks）或 TaskService（有 _storage）
+            storage = getattr(self._task_repository, "_storage", None) or self._task_repository
+            tasks_dict = getattr(storage, "_tasks", None)
+            if tasks_dict is None:
+                logger.warning("[IsolationManager] task_repository 无 _tasks 属性，无法加载活跃 workspace")
+                return None
+            active_ws_keys: set[str] = set()
+            for t in tasks_dict.values():
+                if t.status in terminal_statuses:
+                    continue
+                ws_meta = (t.metadata or {}).get("ws_meta") or {}
+                workspace = ws_meta.get("path")
+                if workspace:
+                    key = PurePath(workspace).name
+                    if key:
+                        active_ws_keys.add(key)
+            return active_ws_keys
         except Exception as e:
             # fail-closed：返回 None 让调用方跳过销毁逻辑，避免空集合导致在用容器被误销毁
-            logger.warning(f"[IsolationManager] 加载活跃任务ID失败: {e}")
+            logger.warning(f"[IsolationManager] 加载活跃 workspace 失败: {e}")
             return None
 
     async def stop(self):
@@ -372,7 +387,7 @@ class IsolationManager:
         """停止所有活跃任务的容器（不删除）
 
         项目关闭时，查找所有 cua-* 容器，
-        仅停止数据库中非终态任务对应的容器
+        仅停止仍有活跃任务的 workspace 对应的容器
         """
         try:
             from docker.errors import DockerException
@@ -382,15 +397,17 @@ class IsolationManager:
             client = docker.from_env()
             containers = client.containers.list(all=True)
 
-            active_task_ids = await self._load_active_task_ids()
+            active_ws_keys = await self._load_active_workspace_keys()
+            if active_ws_keys is None:
+                active_ws_keys = set()
 
             stopped_count = 0
             for container in containers:
                 if not container.name.startswith(self.CONTAINER_NAME_PREFIX):
                     continue
 
-                task_id = container.name[len(self.CONTAINER_NAME_PREFIX) :]
-                if task_id not in active_task_ids:
+                ws_key = container.name[len(self.CONTAINER_NAME_PREFIX) :]
+                if ws_key not in active_ws_keys:
                     continue
 
                 if container.status == "running":
@@ -426,22 +443,22 @@ class IsolationManager:
         tool_name: str | None = None,
     ) -> IsolationEnvironment:
         """获取或创建隔离环境"""
-        # 1. 查找根任务 ID（容器归属者）
-        root_task_id = await self._find_root_task_id(task_id, parent_task_id)
-        container_name = f"{self.CONTAINER_NAME_PREFIX}{root_task_id}"
+        # 1. 按 workspace 生成容器名（同 workspace 共享一个容器）
+        ws_key = PurePath(workspace).name if workspace else task_id
+        container_name = self._workspace_to_container_name(workspace, task_id)
 
         logger.info(
-            f"[IsolationManager] 任务 {task_id} 的根任务为 {root_task_id}，容器名称: {container_name}"
+            f"[IsolationManager] 任务 {task_id} 的 workspace={workspace}，容器名称: {container_name}"
         )
 
-        # 2. 检查是否已有该根任务的容器（优先复用）
-        if root_task_id in self._root_task_env_map:
-            env_id = self._root_task_env_map[root_task_id]
+        # 2. 检查是否已有该 workspace 的容器（优先复用）
+        if ws_key in self._workspace_env_map:
+            env_id = self._workspace_env_map[ws_key]
             existing = self._environments.get(env_id)
             if existing and existing.status == EnvironmentStatus.READY.value:
                 existing.last_used_at = datetime.now(UTC).isoformat()
                 logger.info(
-                    f"[IsolationManager] 复用根任务容器: {container_name} (env_id={env_id})"
+                    f"[IsolationManager] 复用 workspace 容器: {container_name} (env_id={env_id})"
                 )
                 return existing
 
@@ -449,7 +466,7 @@ class IsolationManager:
         existing_env = await self._find_existing_container(container_name)
         if existing_env:
             self._environments[existing_env.env_id] = existing_env
-            self._root_task_env_map[root_task_id] = existing_env.env_id
+            self._workspace_env_map[ws_key] = existing_env.env_id
             logger.info(f"[IsolationManager] 恢复已有容器: {container_name}")
             return existing_env
 
@@ -506,7 +523,7 @@ class IsolationManager:
                 logger.error(
                     f"[IsolationManager] 隔离环境数量已达上限 {current_count}/{max_env} "
                     f"(tier={self._resource_profile.get('tier','?')}), "
-                    f"拒绝为任务 {root_task_id} 创建新环境。"
+                    f"拒绝为 workspace {ws_key} 创建新环境。"
                     f"可通过环境变量 AO_MAX_ENVIRONMENTS 调整上限。"
                 )
                 raise RuntimeError(
@@ -516,7 +533,7 @@ class IsolationManager:
                 )
 
         context = IsolationContext(
-            task_id=root_task_id,
+            task_id=task_id,
             task_type=task_type,
             operation_type=operation_type,
             parent_env_id=parent_env_id,
@@ -536,7 +553,7 @@ class IsolationManager:
             env = await provider.create_environment(context)
 
         self._environments[env.env_id] = env
-        self._root_task_env_map[root_task_id] = env.env_id
+        self._workspace_env_map[ws_key] = env.env_id
 
         logger.info(
             f"创建新隔离环境: {env.env_id} (level={level.value}, container_name={container_name})"
@@ -544,87 +561,39 @@ class IsolationManager:
         return env
 
     def set_task_repository(self, repo: Any) -> None:
-        """注入任务仓储，启用根任务容器复用。
+        """注入任务仓储，启用按 workspace 销毁容器。
 
-        注入后，_find_root_task_id 会自动查询 repo 获取 parent_task_id，
-        无需调用方显式传入。repo 需实现 get(task_id) -> {.id, .parent_task_id}。
+        注入后，destroy_by_task_id 会查询 repo 获取任务的 workspace，
+        再按 workspace 标识销毁对应容器。repo 需实现同步 get(task_id)。
 
         Args:
-            repo: 任务仓储实例（如 TaskService._storage）
+            repo: 任务仓储实例（如 TaskService._storage，TaskStorage）
         """
         self._task_repository = repo
-        logger.info("[IsolationManager] task_repository 已注入，根任务容器复用已启用")
+        logger.info("[IsolationManager] task_repository 已注入，按 workspace 管理容器")
 
-    async def _find_root_task_id(
-        self, task_id: str, parent_task_id: str | None = None
-    ) -> str:
-        """向上查找根任务 ID
+    @staticmethod
+    def _workspace_to_container_name(workspace: str | None, task_id: str) -> str:
+        """根据 workspace 路径生成容器名。
 
-        查找逻辑：
-        1. 若显式传了 parent_task_id，沿 parent 链回溯到根
-        2. 若未传 parent_task_id 但已注入 task_repository，
-           先从 repo 查出当前 task 的 parent_task_id，再回溯
-        3. 都没拿到 → 返回当前 task_id 作为 fallback
+        同一 workspace 共享一个容器，避免每个任务创建独立容器。
+        容器名取 workspace 路径的最后一段（如 container_036fa__wt_726def4a），
+        兜底用 task_id。
+
+        Args:
+            workspace: workspace 绝对路径
+            task_id: 任务 ID（workspace 为空时兜底）
+
+        Returns:
+            容器名（含 cua- 前缀）
         """
-        # 显式传了 parent_task_id → 直接回溯
-        if parent_task_id:
-            return await self._walk_to_root(task_id, parent_task_id)
+        if workspace:
+            from pathlib import PurePath
 
-        # 未传 parent_task_id → 从 repo 中自动查找
-        if self._task_repository:
-            try:
-                task = await self._task_repository.get(task_id)
-                if task and task.parent_task_id:
-                    return await self._walk_to_root(task_id, task.parent_task_id)
-            except Exception as e:
-                logger.warning(
-                    f"[IsolationManager] 从 repo 查找任务 %s 失败: %s，回退到当前 task_id",
-                    task_id, e,
-                )
-
-        logger.debug(
-            f"[IsolationManager] 无法查找根任务（无 parent_task_id 且 repo 未注入），使用当前 task_id: {task_id}"
-        )
-        return task_id
-
-    async def _walk_to_root(self, task_id: str, parent_task_id: str) -> str:
-        """沿 parent_task_id 链向上回溯到根任务"""
-        if not self._task_repository:
-            logger.warning(
-                f"[IsolationManager] 未设置 task_repository，无法查找根任务，使用当前任务 ID: {task_id}"
-            )
-            return task_id
-
-        try:
-            current_task_id = parent_task_id
-            max_depth = 10
-            depth = 0
-
-            while depth < max_depth:
-                task = await self._task_repository.get(current_task_id)
-                if not task:
-                    logger.warning(
-                        f"[IsolationManager] 任务不存在: {current_task_id}，返回当前任务 ID: {task_id}"
-                    )
-                    return task_id
-
-                if not task.parent_task_id:
-                    logger.info(
-                        f"[IsolationManager] 找到根任务: {task.id} (depth={depth})"
-                    )
-                    return task.id
-
-                current_task_id = task.parent_task_id
-                depth += 1
-
-            logger.warning(
-                f"[IsolationManager] 查找根任务超过最大深度 {max_depth}，返回当前任务 ID: {task_id}"
-            )
-            return task_id
-
-        except Exception as e:
-            logger.error(f"[IsolationManager] 查找根任务失败: {e}")
-            return task_id
+            name = PurePath(workspace).name or task_id
+        else:
+            name = task_id
+        return f"{IsolationManager.CONTAINER_NAME_PREFIX}{name}"
 
     async def _find_existing_container(
         self, container_name: str
@@ -703,40 +672,103 @@ class IsolationManager:
             return None
 
     async def destroy_by_task_id(self, task_id: str, success: bool = True) -> None:
-        """根据任务 ID 销毁关联的隔离容器
+        """根据任务 ID 销毁关联的隔离容器（强制销毁）
 
-        优先通过内存映射查找，找不到则直接通过 Docker API 查找容器名删除。
+        从任务元数据读取 workspace，按 workspace 标识销毁对应容器。
+        同一 workspace 的所有任务共享容器，销毁时一次清理。
+        用于任务显式删除场景——无论 workspace 是否还有其他任务都销毁。
         """
-        root_task_id = task_id
+        ws_key = self._resolve_workspace_key(task_id)
+        if ws_key is None:
+            logger.warning(f"[IsolationManager] 任务 {task_id} 无 workspace 信息，跳过容器销毁")
+            return
 
-        if self._task_repository:
-            try:
-                task = await self._task_repository.get(task_id)
-                if task:
-                    current_id = task_id
-                    while task and task.parent_task_id:
-                        current_id = task.parent_task_id
-                        task = await self._task_repository.get(current_id)
-                    root_task_id = current_id
-            except Exception as e:
-                logger.warning(
-                    f"[IsolationManager] 查找根任务失败: {e}，使用当前任务 ID: {task_id}"
-                )
-
-        env_id = self._root_task_env_map.get(root_task_id)
+        env_id = self._workspace_env_map.get(ws_key)
         if env_id:
             logger.info(
-                f"[IsolationManager] 任务 {task_id} (根任务 {root_task_id}) "
+                f"[IsolationManager] 任务 {task_id} (workspace {ws_key}) "
                 f"通过内存映射销毁容器 {env_id}"
             )
             await self.destroy_environment(env_id, success=success)
             return
 
-        await self._destroy_container_by_name(root_task_id)
+        await self._destroy_container_by_name(ws_key)
 
-    async def _destroy_container_by_name(self, root_task_id: str) -> None:
+    async def destroy_if_workspace_idle(self, task_id: str) -> None:
+        """任务进入终态时尝试销毁容器（仅当 workspace 无其他活跃任务时）
+
+        同一 workspace 的任务共享容器。单个任务终态时不能贸然销毁——
+        需检查该 workspace 是否还有其他非终态任务：
+        - 有活跃任务 → 保留容器（兄弟任务还在用）
+        - 无活跃任务 → 销毁容器（整个 workspace 已结束）
+
+        失败任务重启时，get_or_create_environment 会自动重建容器。
+        """
+        ws_key = self._resolve_workspace_key(task_id)
+        if ws_key is None:
+            return
+
+        active_ws_keys = await self._load_active_workspace_keys()
+        if active_ws_keys is None:
+            # 加载失败 fail-closed，不销毁避免误删在用容器
+            logger.debug(
+                f"[IsolationManager] 任务 {task_id} 终态，但活跃 workspace 加载失败，跳过销毁"
+            )
+            return
+
+        if ws_key in active_ws_keys:
+            logger.info(
+                f"[IsolationManager] 任务 {task_id} 终态，但 workspace {ws_key} "
+                f"仍有活跃任务，保留容器"
+            )
+            return
+
+        logger.info(
+            f"[IsolationManager] 任务 {task_id} 终态且 workspace {ws_key} "
+            f"无活跃任务，销毁容器"
+        )
+        env_id = self._workspace_env_map.get(ws_key)
+        if env_id:
+            await self.destroy_environment(env_id, success=True)
+        else:
+            await self._destroy_container_by_name(ws_key)
+
+    def _resolve_workspace_key(self, task_id: str) -> str | None:
+        """从任务仓储解析 task 的 workspace 标识（路径最后一段）。
+
+        子任务可能未加载到内存，沿 parent_task_id 链向上查找，
+        直到找到带 ws_meta 的祖先任务（子任务共享父工作空间）。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            workspace 标识（如 container_036fa__wt_726def4a），无信息返回 None
+        """
+        if not self._task_repository:
+            return None
+        try:
+            # TaskStorage.get 是同步方法，不能 await
+            current_id = task_id
+            visited: set[str] = set()
+            while current_id and current_id not in visited:
+                visited.add(current_id)
+                task = self._task_repository.get(current_id)
+                if task is None:
+                    break
+                ws_meta = (task.metadata or {}).get("ws_meta") or {}
+                workspace = ws_meta.get("path")
+                if workspace:
+                    return PurePath(workspace).name or None
+                # 子任务未加载或无 ws_meta，向上找父任务
+                current_id = task.parent_task_id
+        except Exception as e:
+            logger.warning(f"[IsolationManager] 解析任务 {task_id} 的 workspace 失败: {e}")
+        return None
+
+    async def _destroy_container_by_name(self, ws_key: str) -> None:
         """通过 Docker API 直接查找并删除容器"""
-        container_name = f"{self.CONTAINER_NAME_PREFIX}{root_task_id}"
+        container_name = f"{self.CONTAINER_NAME_PREFIX}{ws_key}"
         try:
             from docker.errors import NotFound
 
@@ -784,11 +816,11 @@ class IsolationManager:
         for key in keys_to_remove:
             del self._reuse_map[key]
 
-        root_keys_to_remove = [
-            k for k, v in self._root_task_env_map.items() if v == env_id
+        ws_keys_to_remove = [
+            k for k, v in self._workspace_env_map.items() if v == env_id
         ]
-        for key in root_keys_to_remove:
-            del self._root_task_env_map[key]
+        for key in ws_keys_to_remove:
+            del self._workspace_env_map[key]
 
     async def execute_in_isolation(
         self,
@@ -906,6 +938,19 @@ async def get_isolation_manager(config_path: str | None = None) -> IsolationMana
         if _global_manager is None:
             _global_manager = IsolationManager(config_path=config_path)
         return _global_manager
+
+
+def get_isolation_manager_sync(config_path: str | None = None) -> IsolationManager:
+    """同步获取全局隔离管理器单例。
+
+    供 build_services 等同步初始化上下文使用（asyncio.get_event_loop()
+    在 Python 3.12+ 同步上下文里会抛 RuntimeError）。
+    与 async 版本共享同一个 _global_manager 单例。
+    """
+    global _global_manager
+    if _global_manager is None:
+        _global_manager = IsolationManager(config_path=config_path)
+    return _global_manager
 
 
 async def start_isolation_manager():

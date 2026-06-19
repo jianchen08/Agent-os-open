@@ -579,6 +579,27 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
         if parent_agent_level >= 2 and task_scope != "container" and parent_task_id is None:
+            # BUG-DIAG-fix_20260619_l2_parent_task_id_lost:
+            # L2 调 task_submit 时 parent_task_id 理应自动注入（来自 state["task_id"]）。
+            # 此处触发说明注入链断裂。诊断字段定位断裂点：
+            # - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
+            # - inputs 无 task_id 键 → param_inject 完全没处理此调用
+            # - task_id 键存在但为空 → state["task_id"] 在引擎 state 中缺失
+            _diag_keys = [k for k in inputs.keys() if k in (
+                "task_id", "parent_task_id", "session_id", "pipeline_id",
+                "parent_agent_level", "workspace",
+            )]
+            logger.error(
+                "[TaskSubmit][DIAG] L%d 无可注入 parent_task_id，注入链断裂诊断 | "
+                "injected_task_id=%r | inputs_has_task_id=%s | "
+                "inputs[task_id]=%r | diag_keys=%s | all_input_keys=%s",
+                parent_agent_level,
+                injected_task_id,
+                "task_id" in inputs,
+                inputs.get("task_id"),
+                _diag_keys,
+                sorted(inputs.keys()),
+            )
             logger.warning(
                 "[TaskSubmit] L%d Agent 无可注入的 parent_task_id，拒绝创建根任务",
                 parent_agent_level,
@@ -751,11 +772,6 @@ class TaskSubmitTool(BuiltinTool):
             return create_failure_result(
                 error="目标 ID 不能为空",
                 error_code="MISSING_TARGET_ID",
-            )
-        if not acceptance_criteria:
-            return create_failure_result(
-                error="必须提供 acceptance_criteria",
-                error_code="MISSING_METRICS",
             )
 
         # ── 2.5 目标 Agent 存在性与级别校验 ──

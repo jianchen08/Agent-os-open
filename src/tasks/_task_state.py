@@ -302,6 +302,10 @@ class _TaskStateMixin:
                 task_id, _cascade_count,
             )
 
+        # 任务失败后尝试销毁容器（仅当 workspace 无其他活跃任务时）
+        # 失败任务重试时 get_or_create_environment 会自动重建容器
+        await self._try_destroy_container_if_idle(task_id)
+
     async def cancel_task(self, task_id: str, reason: str = "") -> None:
         """将任务标记为已取消。
 
@@ -489,6 +493,27 @@ class _TaskStateMixin:
         self._storage.save(task)
 
         await self._emit_state_change(task_id, old_status, "completed")
+
+        # 任务完成后尝试销毁容器（仅当 workspace 无其他活跃任务时）
+        await self._try_destroy_container_if_idle(task_id)
+
+    async def _try_destroy_container_if_idle(self, task_id: str) -> None:
+        """任务终态后尝试销毁其 workspace 的容器。
+
+        委托 IsolationManager.destroy_if_workspace_idle：仅当该 workspace
+        已无其他活跃任务时才真正销毁。失败任务重试时容器会自动重建。
+        异常不向上抛出，避免影响任务状态转换主流程。
+        """
+        try:
+            from isolation.manager import get_isolation_manager
+
+            manager = await get_isolation_manager()
+            await manager.destroy_if_workspace_idle(task_id)
+        except Exception as e:
+            logger.debug(
+                "TaskService: 终态销毁容器检查失败（非致命）| task=%s, error=%s",
+                task_id, e,
+            )
 
     async def complete_evaluation(
         self, task_id: str, passed: bool, result: dict | None = None

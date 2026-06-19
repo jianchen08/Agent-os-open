@@ -115,6 +115,7 @@ tool_ids:
 - task_manage
 - task_evaluate
 - file_read
+- file_write
 - list_directory
 - memory
 - human_interaction

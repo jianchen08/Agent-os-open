@@ -313,11 +313,13 @@ class DockerProvider(IsolationProvider):
             # --init: 使用 tini 作为 PID 1，回收 docker exec 产生的僵尸进程，
             # 避免僵尸累积逼近 --pids-limit 导致容器被杀
             "--init",
+            # 资源约束：单容器配额 = (宿主机一半) / max_environments，
+            # 由 hardware_profile 动态计算，满载时所有容器总和 = 宿主机一半。
             "--cpus", self._cpu_limit,
             "--memory", self._memory_limit,
-            # 硬上限：swap 限制 = memory，禁止容器通过 swap 超额使用内存
+            # swap = memory，禁止容器通过 swap 超额使用内存
             "--memory-swap", self._memory_swap,
-            # 硬上限：进程数限制，防 fork 炸弹吃光系统进程表
+            # 进程数上限，防 fork 炸弹吃光系统进程表
             "--pids-limit", str(self._pids_limit),
             "--network", self._network_mode,
             "-i", "-t",
