@@ -15,6 +15,10 @@
 # pip 依赖安装策略（两层兜底）：
 #   1) 本地离线包优先（packages/wheels 非空时）
 #   2) 远程多镜像链回退（阿里云 → 清华 → 官方）
+#
+# 注意：用纯 uvicorn（不带 [standard]），避免安装 uvloop / httptools 等 C 扩展。
+# 这些 C 扩展在 WSL2 虚拟化 CPU 上会触发 SIGSEGV/SIGILL（退出码 139/132），
+# 导致前端容器反复崩溃重启。纯 Python uvicorn + asyncio 事件循环更稳。
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ COPY packages/wheels/ /opt/wheels/
 RUN if [ "$(ls /opt/wheels/*.whl 2>/dev/null)" ]; then \
         echo "[INFO] 使用本地离线 wheels"; \
         pip install --no-cache-dir --no-index --find-links=/opt/wheels/ \
-            uvicorn[standard]==0.38.0 \
+            uvicorn==0.38.0 \
             fastapi==0.121.3 \
             httpx==0.28.1 \
             websockets==16.0; \
@@ -66,19 +70,19 @@ RUN if [ "$(ls /opt/wheels/*.whl 2>/dev/null)" ]; then \
         pip install --no-cache-dir \
             -i https://mirrors.aliyun.com/pypi/simple/ \
             --trusted-host mirrors.aliyun.com \
-            uvicorn[standard]==0.38.0 \
+            uvicorn==0.38.0 \
             fastapi==0.121.3 \
             httpx==0.28.1 \
             websockets==16.0 \
         || pip install --no-cache-dir \
             -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
             --trusted-host pypi.tuna.tsinghua.edu.cn \
-            uvicorn[standard]==0.38.0 \
+            uvicorn==0.38.0 \
             fastapi==0.121.3 \
             httpx==0.28.1 \
             websockets==16.0 \
         || pip install --no-cache-dir \
-            uvicorn[standard]==0.38.0 \
+            uvicorn==0.38.0 \
             fastapi==0.121.3 \
             httpx==0.28.1 \
             websockets==16.0; \

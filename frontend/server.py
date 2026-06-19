@@ -238,4 +238,6 @@ if __name__ == "__main__":
     _asyncio.run(_wait_for_backend())
 
     port = int(os.environ.get("PORT", "5188"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # 强制使用标准 asyncio 事件循环，避免 uvloop（C 扩展）在 WSL2 虚拟化
+    # CPU 上触发 SIGSEGV（退出码 139）。uvloop 性能略高，但稳定性不如纯 Python。
+    uvicorn.run(app, host="0.0.0.0", port=port, loop="asyncio")

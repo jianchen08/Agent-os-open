@@ -1,124 +1,143 @@
 @echo off
 setlocal enabledelayedexpansion
-chcp 65001 >nul 2>&1
 title Agent OS
 
 cd /d "%~dp0"
 
 echo ========================================
-echo   Agent OS 启动
+echo   Agent OS Starting
 echo ========================================
 echo.
-echo 项目目录: %cd%
+echo Project dir: %cd%
 echo.
 
 :: ===========================================================================
-:: 1. 检查 Docker（本项目必须有 Docker）
+:: 1. Check Docker (required by this project)
 ::
-:: 注意：docker info 在 daemon 假死时会无限期阻塞（不是返回失败码），
-:: 直接调用会导致脚本永久卡住。这里用独立的 check_docker.ps1 做带超时的
-:: 健康检查（每次最多等 90 秒），避免阻塞。
+:: Note: `docker info` can block forever when the daemon hangs (it does NOT
+:: return a non-zero code). Calling it directly would hang the script forever.
+:: We use a separate check_docker.ps1 with a timeout-based health check
+:: (up to 90s per probe) to avoid blocking.
 :: ===========================================================================
 where docker >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] 未找到 Docker，本项目需要 Docker 才能运行
-    echo [INFO] 下载: https://www.docker.com/products/docker-desktop/
+    echo [ERROR] Docker not found. This project requires Docker to run.
+    echo [INFO]  Download: https://www.docker.com/products/docker-desktop/
     pause
     exit /b 1
 )
 
-:: daemon 健康检查（带 90 秒超时，给 Docker Desktop 冷启动足够时间）
+:: Daemon health check (90s timeout, gives Docker Desktop cold-start time)
 :check_daemon
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_docker.ps1" -Timeout 90 >nul 2>&1
 set "DAEMON_STATUS=!errorlevel!"
 if "!DAEMON_STATUS!"=="0" goto :docker_ready
 
-:: 退出码: 0=就绪 1=未就绪(启动中) 3=超时(假死)
-if "!DAEMON_STATUS!"=="3" (
-    echo [WARN] docker daemon 90 秒内无响应（假死），请手动重启 Docker Desktop
-    echo [WARN] 操作: 右键托盘 Docker 图标 -^> Quit Docker Desktop -^> 重新打开
-)
+:: Exit codes: 0=ready 1=not ready (starting) 3=timeout (hung)
+if "!DAEMON_STATUS!"=="3" goto :daemon_hung
 
-:: 首次进入等待时启动 Docker Desktop
+:: --- daemon not ready yet (status 1): it is starting up, just wait ---
+:: Launch Docker Desktop on first wait entry
 if not defined DOCKER_WAIT_COUNT (
-    echo [INFO] 正在启动 Docker Desktop...
+    echo [INFO] Starting Docker Desktop...
     start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
     set "DOCKER_WAIT_COUNT=0"
 )
 
 set /a "DOCKER_WAIT_COUNT+=1"
-:: 最多等待 4 轮（每轮含 90 秒探测 + 10 秒间隔，约 7 分钟）
-if !DOCKER_WAIT_COUNT! gtr 4 (
-    echo [ERROR] Docker daemon 长时间未就绪，无法启动项目
-    echo [ERROR] 请手动重启 Docker Desktop 后重新运行本脚本:
-    echo [ERROR]   1. 右键托盘 Docker 图标 -^> Quit Docker Desktop
-    echo [ERROR]   2. 等待托盘图标消失（约 10 秒）
-    echo [ERROR]   3. 重新打开 Docker Desktop，等待图标变绿
-    echo [ERROR] 若仍异常: wsl --shutdown 后重启 Docker Desktop
-    echo [ERROR] 诊断日志: %%LOCALAPPDATA%%\Docker\log\host\com.docker.backend.exe.log
-    pause
-    exit /b 1
-)
-echo [INFO] 等待 Docker daemon 就绪... (!DOCKER_WAIT_COUNT!/4)
+:: Wait at most 4 rounds (each round = 90s probe + 10s gap, ~7 minutes total)
+if !DOCKER_WAIT_COUNT! gtr 4 goto :daemon_failed
+echo [INFO] Waiting for Docker daemon to be ready... (!DOCKER_WAIT_COUNT!/4)
 timeout /t 10 /nobreak >nul
 goto :check_daemon
 
+:: --- daemon hung (status 3): offer an automated restart instead of a dead wait ---
+:daemon_hung
+echo [WARN] docker daemon did not respond within 90s (hung, not just starting).
+if defined DAEMON_RESTARTED (
+    echo [WARN] Auto-restart was already attempted once and daemon is still hung. Giving up.
+    goto :daemon_failed
+)
+echo [INFO] Launching auto-recovery (will ask for confirmation, since it stops running containers)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0restart_docker.ps1"
+set "RESTART_RC=!errorlevel!"
+if "!RESTART_RC!"=="0" (
+    echo [OK] Docker daemon recovered after restart.
+    set "DAEMON_RESTARTED=1"
+    goto :check_daemon
+)
+if "!RESTART_RC!"=="2" (
+    echo [INFO] Restart declined by user. Aborting.
+    goto :daemon_failed
+)
+echo [WARN] Auto-restart did not bring the daemon back. Aborting.
+goto :daemon_failed
+
+:daemon_failed
+echo [ERROR] Docker daemon not ready. Cannot start the project.
+echo [ERROR] Please restart Docker Desktop manually and re-run this script:
+echo [ERROR]   1. right-click the Docker tray icon -^> Quit Docker Desktop
+echo [ERROR]   2. wait for the tray icon to disappear (~10s)
+echo [ERROR]   3. reopen Docker Desktop and wait for the icon to turn green
+echo [ERROR] If still failing: run `wsl --shutdown`, then restart Docker Desktop
+echo [ERROR] Diag log: %%LOCALAPPDATA%%\Docker\log\host\com.docker.backend.exe.log
+pause
+exit /b 1
+
 :docker_ready
-echo [OK] Docker 就绪
+echo [OK] Docker ready
 
 :: ===========================================================================
-:: 2. Docker 服务（Redis + Frontend）
+:: 2. Docker services (Redis + Frontend)
 :: ===========================================================================
-:: 预热基础镜像：优先用本地已有镜像，缺失则按多镜像链拉取（Docker Hub → daocloud）
-:: 避免首次构建/启动卡在 Docker Hub 网络问题
-echo [INFO] 预热基础镜像（本地优先，缺失走镜像链）...
-call :pull_image_with_fallback "redis:7-alpine"
-call :pull_image_with_fallback "node:20-alpine"
-call :pull_image_with_fallback "python:3.11-slim"
-
-echo [INFO] 启动 Docker 服务...
+:: Base images (node/python) are only needed when rebuilding the frontend.
+:: Once agent-os-frontend:latest exists, compose up does NOT need them, so we
+:: skip pre-warming here. `docker compose up` pulls redis via the configured
+:: registry-mirrors (daemon.json) if missing, which is fast.
+echo [INFO] Starting Docker services...
 docker compose up -d
-echo [OK] Docker 服务已启动
+echo [OK] Docker services started
 
-:: 前端代码更新：镜像存在时检查 src 是否有更新，有则构建并注入运行中的容器
+:: Frontend code update: when the image exists, check if src changed; if so, rebuild
+:: and inject into the running container.
 docker image inspect agent-os-frontend:latest >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] 前端镜像不存在，需要首次构建（需要网络拉取基础镜像）
-    echo [INFO] 尝试构建...
+    echo [INFO] Frontend image not found, first build needed (requires pulling the base image)
+    echo [INFO] Attempting build...
     docker compose build frontend
     if errorlevel 1 (
-        echo [ERROR] 前端镜像构建失败。
-        echo [ERROR] 已尝试：本地离线包（packages/）→ 多镜像链（阿里云/清华/淘宝）→ 官方源
-        echo [ERROR] 排查建议:
-        echo [ERROR]   1. 预下载离线包到 packages/wheels 和 packages/npm-tarballs 后重新构建
-        echo [ERROR]   2. 配置 Docker daemon.json 的 registry-mirrors（国内镜像加速）
+        echo [ERROR] Frontend image build failed.
+        echo [ERROR] Tried: local offline packages (packages/) -> mirror chain (aliyun/tuna/taobao) -> official source
+        echo [ERROR] Troubleshooting:
+        echo [ERROR]   1. Pre-download offline packages into packages/wheels and packages/npm-tarballs, then rebuild
+        echo [ERROR]   2. Configure registry-mirrors in Docker daemon.json (CN mirror acceleration)
         pause
         exit /b 1
     )
-    echo [OK] 前端镜像构建完成
+    echo [OK] Frontend image built
     docker compose up -d frontend
-    echo [INFO] 清理旧镜像...
+    echo [INFO] Pruning old images...
     docker image prune -f 2>nul
     powershell -NoProfile -Command "Get-Date | Out-File -FilePath '.frontend_built_at' -Encoding ascii"
 ) else (
-    echo [INFO] 检查前端代码更新...
+    echo [INFO] Checking frontend code updates...
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_frontend.ps1"
 )
 
 :: ===========================================================================
-:: 3. Python + 依赖（优先 3.12，避免 3.14 asyncio subprocess bug）
+:: 3. Python + dependencies (prefer 3.12, avoid the 3.14 asyncio subprocess bug)
 :: ===========================================================================
 set "PYEXE="
 
-:: 方式1：查找带版本号的命令别名（python312/python311/python313）
+:: Method 1: look for versioned command aliases (python312/python311/python313)
 for %%v in (312 311 313) do (
     for /f "delims=" %%p in ('where python%%v 2^>nul') do (
         if not defined PYEXE set "PYEXE=%%p"
     )
 )
 
-:: 方式2：探测常见安装路径（where python312 在多数机器找不到，需路径兜底）
-:: 用 set 预存路径 + if exist 串联，避免 for 循环里 %ProgramFiles(x86)% 括号转义问题
+:: Method 2: probe common install paths (where python312 is rarely found, need path fallback)
+:: Use pre-stored paths + if-exist chain to avoid %ProgramFiles(x86)% bracket escaping issues inside for loops
 set "P312A=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 set "P312B=%ProgramFiles%\Python312\python.exe"
 set "P311A=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
@@ -132,7 +151,7 @@ if not defined PYEXE if exist "%P311B%" set "PYEXE=%P311B%"
 if not defined PYEXE if exist "%P313A%" set "PYEXE=%P313A%"
 if not defined PYEXE if exist "%P313B%" set "PYEXE=%P313B%"
 
-:: 方式3：最后回退到默认 python（可能是 3.14，有 asyncio subprocess bug 风险）
+:: Method 3: finally fall back to default python (may be 3.14, risks the asyncio subprocess bug)
 if not defined PYEXE (
     where python >nul 2>&1
     if not errorlevel 1 for /f "delims=" %%p in ('where python') do (
@@ -141,7 +160,7 @@ if not defined PYEXE (
 )
 
 if not defined PYEXE (
-    echo [ERROR] 未找到 Python，请安装 Python 3.11+
+    echo [ERROR] Python not found. Please install Python 3.11+
     pause
     exit /b 1
 )
@@ -149,72 +168,72 @@ echo [OK] Python: %PYEXE%
 "%PYEXE%" --version 2>&1
 
 if not exist ".py_deps_installed" (
-    echo [INFO] 安装 Python 依赖...
+    echo [INFO] Installing Python dependencies...
     "%PYEXE%" -m pip install -r requirements.txt 2>nul
     if errorlevel 1 "%PYEXE%" -m pip install -r requirements.txt --user 2>nul
     echo. > ".py_deps_installed"
-    echo [OK] 依赖安装完成
+    echo [OK] Dependencies installed
 ) else (
-    echo [OK] Python 依赖已安装
+    echo [OK] Python dependencies already installed
 )
 
 :: ===========================================================================
-:: 4. Agent（宿主机）
+:: 4. Agent (host machine)
 :: ===========================================================================
-echo [INFO] 启动 Agent...
+echo [INFO] Starting Agent...
 start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6380/0&& "%PYEXE%" -m channels.websocket.app_factory"
 
 echo.
 echo ========================================
-echo   启动完成
+echo   Startup complete
 echo ========================================
-echo   后端: http://localhost:8888
-echo   前端: http://localhost:5189
-echo   停止: 关闭 Agent 窗口 + docker compose down
+echo   Backend:  http://localhost:8888
+echo   Frontend: http://localhost:5189
+echo   Stop:     close the Agent window + run `docker compose down`
 echo ========================================
 pause
 exit /b 0
 
 
 :: ===========================================================================
-:: 子程序：拉取镜像（本地优先，缺失走多镜像链回退）
-:: 用法: call :pull_image_with_fallback "image:tag"
-:: 策略:
-::   1) 本地已存在 → 跳过
-::   2) docker pull <image>（Docker Hub）
-::   3) docker pull <daocloud 镜像> → docker tag 回原名
-::   4) 全部失败 → 仅告警，不阻断（让 compose/build 自己再试）
+:: Subroutine: pull an image (local first, fall back to a mirror chain)
+:: Usage: call :pull_image_with_fallback "image:tag"
+:: Strategy:
+::   1) already local -> skip
+::   2) docker pull <image> (Docker Hub)
+::   3) docker pull <daocloud mirror> -> docker tag back to the original name
+::   4) all failed -> warn only, do not block (let compose/build retry)
 :: ===========================================================================
 :pull_image_with_fallback
 set "IMG=%~1"
 
-:: 本地已有则跳过
+:: Skip if already local
 docker image inspect "%IMG%" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 本地已有镜像: %IMG%
+    echo [OK] Image already local: %IMG%
     exit /b 0
 )
 
-echo [INFO] 本地无 %IMG%，尝试拉取...
+echo [INFO] %IMG% not local, pulling...
 docker pull "%IMG%" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 拉取成功: %IMG%
+    echo [OK] Pulled: %IMG%
     exit /b 0
 )
 
-:: 回退：daocloud 镜像加速 + tag 回原名
-echo [WARN] Docker Hub 拉取失败，尝试 daocloud 镜像...
+:: Fallback: daocloud mirror acceleration + tag back to original name
+echo [WARN] Docker Hub pull failed, trying daocloud mirror...
 docker pull "docker.m.daocloud.io/library/%IMG%" >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] 镜像 %IMG% 拉取失败（Docker Hub 与 daocloud 均不可用）
-    echo [WARN] 后续 compose/build 会再次尝试，若仍失败请配置 daemon.json registry-mirrors
+    echo [WARN] Image %IMG% pull failed (both Docker Hub and daocloud unavailable)
+    echo [WARN] compose/build will retry later; if it still fails, configure daemon.json registry-mirrors
     exit /b 0
 )
 
 docker tag "docker.m.daocloud.io/library/%IMG%" "%IMG%" >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] tag 重命名失败: docker.m.daocloud.io/library/%IMG% -^> %IMG%
+    echo [WARN] tag rename failed: docker.m.daocloud.io/library/%IMG% -^> %IMG%
     exit /b 0
 )
-echo [OK] 拉取成功（daocloud 回退）: %IMG%
+echo [OK] Pulled (daocloud fallback): %IMG%
 exit /b 0
