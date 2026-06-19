@@ -13,6 +13,7 @@ from src.core.di.decorators import inject, inject_method, scoped, singleton, tra
 from src.core.di.global_container import (
     dispose_global_container,
     get_global_container,
+    get_service,
     reset_global_container,
     set_global_container,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "set_global_container",
     "reset_global_container",
     "dispose_global_container",
+    "get_service",
     "DIError",
     "ServiceNotFoundError",
     "ServiceAlreadyRegisteredError",

@@ -96,7 +96,7 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
   if (ref.moduleId === 'workspace') {
     endpoint = `/api/v1/workspaces/${ref.collection}/file-tree`
   } else {
-    endpoint = `/api/modules/${ref.moduleId}/data/${ref.collection}`
+    endpoint = `/api/v1/modules/${ref.moduleId}/data/${ref.collection}`
   }
 
   const params: Record<string, unknown> = { ...ref.query }

@@ -18,11 +18,21 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from enum import Enum
 
 from tasks.types import TaskModel, TaskStatus
 from utils.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
+
+
+# 注册 Enum 的 YAML representer，确保 safe_dump 能正确序列化所有枚举类型
+# 修复 metadata 等嵌套结构中残留枚举值导致 RepresenterError 的问题
+def _enum_representer(dumper: yaml.Dumper, data: Enum) -> Any:
+    return dumper.represent_data(data.value)
+
+
+yaml.add_multi_representer(Enum, _enum_representer, Dumper=yaml.SafeDumper)
 
 
 class TaskStorage:

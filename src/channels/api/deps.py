@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import Header, HTTPException, Query, Request, status
+from fastapi import Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from channels.api.auth import get_current_user
@@ -23,26 +23,22 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 
-def _extract_token(authorization: str, token: str) -> str:
-    """从 Authorization 头或 query 参数提取 Bearer token。
+def _extract_token(authorization: str) -> str:
+    """从 Authorization 头提取 Bearer token。
 
     Args:
         authorization: Authorization 请求头值
-        token: query 参数中的 token
 
     Returns:
         提取到的 token 字符串
     """
     if authorization and authorization.startswith("Bearer "):
         return authorization[7:]
-    if token:
-        return token
     return ""
 
 
 async def require_auth(
     authorization: str = Header(default="", description="Bearer token"),
-    token: str = Query(default="", description="Bearer token (备选)"),
 ) -> dict[str, Any]:
     """FastAPI 依赖：验证 Bearer token 并返回用户信息。
 
@@ -54,7 +50,6 @@ async def require_auth(
 
     Args:
         authorization: Authorization 请求头
-        token: query 参数中的 Bearer token
 
     Returns:
         包含 sub 和 username 的用户信息字典
@@ -62,7 +57,7 @@ async def require_auth(
     Raises:
         HTTPException: token 缺失或无效 (401)
     """
-    actual_token = _extract_token(authorization, token)
+    actual_token = _extract_token(authorization)
     if not actual_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -82,14 +77,13 @@ async def require_auth(
 
 async def optional_auth(
     authorization: str = Header(default="", description="Bearer token"),
-    token: str = Query(default="", description="Bearer token (备选)"),
 ) -> dict[str, Any] | None:
     """FastAPI 依赖：可选认证，不强制要求 token。
 
     Returns:
         用户信息字典或 None
     """
-    actual_token = _extract_token(authorization, token)
+    actual_token = _extract_token(authorization)
     if not actual_token:
         return None
     return get_current_user(actual_token)

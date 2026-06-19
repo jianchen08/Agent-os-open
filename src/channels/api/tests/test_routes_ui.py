@@ -1,8 +1,8 @@
 """UI Schema API 路由测试。
 
 覆盖：
-- GET /api/modules/ui 返回 Schema 列表
-- GET /api/modules/ui/{module_id} 返回指定模块 Schema
+- GET /api/v1/modules/ui 返回 Schema 列表
+- GET /api/v1/modules/ui/{module_id} 返回指定模块 Schema
 - module_id 不存在返回 404
 - client_type 过滤参数功能
 """
@@ -53,16 +53,16 @@ def _get_auth_token(client) -> str:
 
 
 # ============================================================
-# GET /api/modules/ui - 列表接口
+# GET /api/v1/modules/ui - 列表接口
 # ============================================================
 
 
 class TestListUISchemas:
-    """GET /api/modules/ui 测试。"""
+    """GET /api/v1/modules/ui 测试。"""
 
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_list_returns_items_and_total(self, mock_get_parser: MagicMock) -> None:
-        """GET /api/modules/ui 返回 items 和 total。"""
+        """GET /api/v1/modules/ui 返回 items 和 total。"""
         from fastapi.testclient import TestClient
 
         mock_parser = MagicMock()
@@ -79,7 +79,7 @@ class TestListUISchemas:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui",
+            "/api/v1/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -105,7 +105,7 @@ class TestListUISchemas:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui",
+            "/api/v1/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -129,7 +129,7 @@ class TestListUISchemas:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui",
+            "/api/v1/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -138,12 +138,12 @@ class TestListUISchemas:
 
 
 # ============================================================
-# GET /api/modules/ui/{module_id} - 详情接口
+# GET /api/v1/modules/ui/{module_id} - 详情接口
 # ============================================================
 
 
 class TestGetUISchema:
-    """GET /api/modules/ui/{module_id} 测试。"""
+    """GET /api/v1/modules/ui/{module_id} 测试。"""
 
     @patch("channels.api.routes_ui._get_schema_parser")
     def test_get_existing_module(self, mock_get_parser: MagicMock) -> None:
@@ -162,7 +162,7 @@ class TestGetUISchema:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui/mod1",
+            "/api/v1/modules/ui/mod1",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -186,7 +186,7 @@ class TestGetUISchema:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui/nonexistent",
+            "/api/v1/modules/ui/nonexistent",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
@@ -225,7 +225,7 @@ class TestClientTypeFilter:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui?client_type=ide",
+            "/api/v1/modules/ui?client_type=ide",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -258,7 +258,7 @@ class TestClientTypeFilter:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui?client_type=mobile",
+            "/api/v1/modules/ui?client_type=mobile",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -283,7 +283,7 @@ class TestClientTypeFilter:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui?client_type=unknown_client",
+            "/api/v1/modules/ui?client_type=unknown_client",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -312,7 +312,7 @@ class TestClientTypeFilter:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui?client_type=ide",
+            "/api/v1/modules/ui?client_type=ide",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -340,7 +340,7 @@ class TestClientTypeFilter:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/ui",
+            "/api/v1/modules/ui",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -364,7 +364,7 @@ class TestUIRoutesAuth:
         app = create_app()
         client = TestClient(app)
 
-        resp = client.get("/api/modules/ui")
+        resp = client.get("/api/v1/modules/ui")
         assert resp.status_code == 401
 
     def test_unauthenticated_get_by_id_returns_401(self) -> None:
@@ -376,5 +376,5 @@ class TestUIRoutesAuth:
         app = create_app()
         client = TestClient(app)
 
-        resp = client.get("/api/modules/ui/some_id")
+        resp = client.get("/api/v1/modules/ui/some_id")
         assert resp.status_code == 401

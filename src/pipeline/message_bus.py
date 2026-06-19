@@ -16,7 +16,6 @@ agent 由数据源决定，不在此解析。
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,8 +26,6 @@ if TYPE_CHECKING:
     from pipeline.sink import IOutputSink
 
 from pipeline.message_types import (
-    MessageSource,
-    MessageType,
     PipelineMessage,
     PipelineRequest,
 )
@@ -54,11 +51,11 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
         return None, ""
     engine = entry.engine
     # BUG-FIX-fix_20260524_msg_render: 增加 running/suspended 状态检查
-    if getattr(engine, "is_suspended", False):
+    if engine.is_suspended:
         return engine, "suspended"
-    if getattr(engine, "is_running", False):
+    if engine.is_running:
         return engine, "running"
-    if not getattr(engine, "_run_started", False):
+    if engine.is_idle:
         return engine, "idle"
     return None, ""
 
@@ -190,8 +187,8 @@ async def _inject_to_engine(
             if _notif_bridge is not None:
                 try:
                     await _notif_bridge.emit_notification(message, source=msg_source, level="info")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("[MessageBus] bridge 通知推送失败: %s", exc)
             else:
                 # bridge 不存在（idle/首次）→ sink 直推
                 _push_sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
@@ -207,8 +204,8 @@ async def _inject_to_engine(
                                 "notificationType": f"{msg_source}_notification",
                             },
                         })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("[MessageBus] sink 推送通知失败: %s", exc)
 
         if state == "idle":
             return await _start_idle_engine(
@@ -223,7 +220,7 @@ async def _inject_to_engine(
         logger.info("[MessageBus] 已注入引擎: pipeline=%s source=%s method=%s queue=%d",
                      pipeline_id[:12], msg_source,
                      "wake" if state == "suspended" else "notification",
-                     len(engine._inject_queue))
+                     engine.inject_queue_size)
         method = "wake" if state == "suspended" else "notification"
 
         if state == "running" and msg_source == "user":
@@ -254,7 +251,7 @@ async def _start_idle_engine(
         return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
 
     # 引擎自带身份（上次 run() 绑定的）
-    _resolved_agent = getattr(engine, "_agent_config", None) or agent_config
+    _resolved_agent = engine.agent_config or agent_config
 
     # 注册表 tags.agent_id（创建者注册时写入）
     if _resolved_agent is None:
@@ -277,9 +274,9 @@ async def _start_idle_engine(
         _diag_reg_count = len(_diag_reg.list_all()) if _diag_reg else 0
         logger.error(
             "[MessageBus] idle agent 解析失败诊断: pipeline=%s thread=%s "
-            "engine._agent_config=%s entry_exists=%s tags=%s agent_registry_count=%d",
+            "engine.agent_config=%s entry_exists=%s tags=%s agent_registry_count=%d",
             pipeline_id[:12], thread_id[:12] if thread_id else "?",
-            getattr(engine, "_agent_config", None) is not None,
+            engine.agent_config is not None,
             _diag_entry is not None, _diag_tags, _diag_reg_count,
         )
         return InjectResult(
@@ -368,24 +365,38 @@ async def _revive_pipeline_message(
 # ---------------------------------------------------------------------------
 # Re-export：保持外部导入路径不变
 # ---------------------------------------------------------------------------
-from pipeline.drain_manager import (  # noqa: E402
-    create_sink as _create_sink,
-    restart_drain as _restart_drain,
-    start_bg_drain as _start_bg_drain,
+from pipeline.drain_manager import (  # noqa: E402, F401
+    create_sink as _create_sink,  # noqa: F401
+    restart_drain as _restart_drain,  # noqa: F401
+    start_bg_drain as _start_bg_drain,  # noqa: F401
 )
 from pipeline.pipeline_reviver import restore_pipelines_on_startup  # noqa: E402
 
 # 兼容别名：旧测试 patch("pipeline.message_bus._try_revive_pipeline") 需要此名称
 _try_revive_pipeline = _revive_pipeline_message
 
+async def emit(
+    message: PipelineMessage,
+    **kwargs: Any,
+) -> InjectResult:
+    """向管道发送消息的便捷公共接口。
+
+    send_pipeline_message 的简洁别名，推荐外部模块（特别是 tools/）使用此接口，
+    避免直接依赖 send_pipeline_message 的长函数名。
+
+    Args:
+        message: 标准内部消息对象
+        **kwargs: 传递给 send_pipeline_message 的关键字参数
+
+    Returns:
+        InjectResult 注入结果
+    """
+    return await send_pipeline_message(message, **kwargs)
+
+
 __all__ = [
     "InjectResult",
     "send_pipeline_message",
+    "emit",
     "restore_pipelines_on_startup",
-    "_find_engine",
-    "_auto_complete_interaction",
-    "_create_sink",
-    "_restart_drain",
-    "_start_bg_drain",
-    "_try_revive_pipeline",
 ]

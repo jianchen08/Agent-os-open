@@ -1,15 +1,15 @@
 """UI Schema API 路由。
 
 提供模块 UI Schema 的查询接口：
-- ``GET /api/modules/ui`` - 返回所有启用模块的 UI Schema 列表
-- ``GET /api/modules/ui/{module_id}`` - 返回指定模块的 UI Schema
+- ``GET /api/v1/modules/ui`` - 返回所有启用模块的 UI Schema 列表
+- ``GET /api/v1/modules/ui/{module_id}`` - 返回指定模块的 UI Schema
 
 同时根据模块 YAML 中的 ``data:`` 声明自动注册 CRUD 路由：
-- ``GET    /api/modules/{module_id}/data/{collection}`` - 列表查询
-- ``GET    /api/modules/{module_id}/data/{collection}/{record_id}`` - 单条查询
-- ``POST   /api/modules/{module_id}/data/{collection}`` - 创建记录
-- ``PUT    /api/modules/{module_id}/data/{collection}/{record_id}`` - 更新记录
-- ``DELETE /api/modules/{module_id}/data/{collection}/{record_id}`` - 删除记录
+- ``GET    /api/v1/modules/{module_id}/data/{collection}`` - 列表查询
+- ``GET    /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 单条查询
+- ``POST   /api/v1/modules/{module_id}/data/{collection}`` - 创建记录
+- ``PUT    /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 更新记录
+- ``DELETE /api/v1/modules/{module_id}/data/{collection}/{record_id}`` - 删除记录
 
 支持按客户端能力过滤（query param ``client_type``）。
 """
@@ -28,7 +28,7 @@ from ui_schema.types import ModuleUISchema
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/modules/ui", tags=["UI Schema"])
+router = APIRouter(prefix="/api/v1/modules/ui", tags=["UI Schema"])
 
 _schema_parser: Any | None = None
 _last_scan_time: float = 0
@@ -234,7 +234,7 @@ def get_module_data_router() -> APIRouter:
     if _module_data_router is not None:
         return _module_data_router
 
-    _module_data_router = APIRouter(prefix="/api/modules", tags=["模块数据"])
+    _module_data_router = APIRouter(prefix="/api/v1/modules", tags=["模块数据"])
 
     @_module_data_router.get(
         "/task-manager/data/tree",
@@ -247,7 +247,7 @@ def get_module_data_router() -> APIRouter:
         """通过通用数据协议获取任务树。
 
         与 /api/v1/projects/tree 功能完全一致，
-        但使用 /api/modules/{module_id}/data/{collection} 路径格式，
+        但使用 /api/v1/modules/{module_id}/data/{collection} 路径格式，
         符合通用数据协议规范，供前端 FileTreeWidget 通过
         task-manager://tree 协议访问。
 

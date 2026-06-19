@@ -56,6 +56,21 @@ def _isolate_config(
     return tmp_yaml
 
 
+def _put_config(client: Any, url: str, data: dict[str, Any], headers: dict[str, str]) -> Any:
+    """封装 PUT 配置请求，使用后端 GenericConfigUpdateRequest 的 {"data": ...} 包装格式。
+
+    Args:
+        client: FastAPI TestClient
+        url: 配置端点 URL
+        data: 配置数据（裸 dict）
+        headers: 认证头
+
+    Returns:
+        PUT 响应
+    """
+    return client.put(url, json={"data": data}, headers=headers)
+
+
 # ---------------------------------------------------------------------------
 # 测试用例
 # ---------------------------------------------------------------------------
@@ -88,10 +103,8 @@ def test_concurrency_config_rw(
         },
     }
 
-    put_resp = test_client.put(
-        "/api/v1/config/concurrency",
-        json=config_data,
-        headers=auth_headers,
+    put_resp = _put_config(
+        test_client, "/api/v1/config/concurrency", config_data, auth_headers,
     )
     assert put_resp.status_code == 200, f"PUT 并发配置失败: {put_resp.text}"
     assert put_resp.json() == config_data, "PUT 响应内容与请求不一致"
@@ -130,10 +143,8 @@ def test_config_file_actually_written(
         },
     }
 
-    test_client.put(
-        "/api/v1/config/cost-control",
-        json=config_data,
-        headers=auth_headers,
+    _put_config(
+        test_client, "/api/v1/config/cost-control", config_data, auth_headers,
     )
 
     assert isolated_yaml.exists(), "配置文件未写入磁盘"
@@ -176,10 +187,8 @@ def test_cost_control_config_rw(
         },
     }
 
-    put_resp = test_client.put(
-        "/api/v1/config/cost-control",
-        json=config_data,
-        headers=auth_headers,
+    put_resp = _put_config(
+        test_client, "/api/v1/config/cost-control", config_data, auth_headers,
     )
     assert put_resp.status_code == 200, f"PUT 成本控制配置失败: {put_resp.text}"
     assert put_resp.json() == config_data, "PUT 响应内容与请求不一致"
@@ -222,10 +231,8 @@ def test_api_config_rw(
         },
     }
 
-    put_resp = test_client.put(
-        "/api/v1/config/api",
-        json=config_data,
-        headers=auth_headers,
+    put_resp = _put_config(
+        test_client, "/api/v1/config/api", config_data, auth_headers,
     )
     assert put_resp.status_code == 200, f"PUT API 配置失败: {put_resp.text}"
     assert put_resp.json() == config_data, "PUT 响应内容与请求不一致"
@@ -261,10 +268,8 @@ def test_config_overwrite_idempotent(
     }
 
     for _ in range(2):
-        test_client.put(
-            "/api/v1/config/concurrency",
-            json=config_data,
-            headers=auth_headers,
+        _put_config(
+            test_client, "/api/v1/config/concurrency", config_data, auth_headers,
         )
 
     get_resp = test_client.get(

@@ -310,7 +310,7 @@ class AutoCRUDGenerator:
             primary_key = "id"
             fields = {"id": {"type": "uuid", "primary": True, "auto": True}, **fields}
 
-        prefix = f"/api/modules/{module_id}/data/{collection}"
+        prefix = f"/api/v1/modules/{module_id}/data/{collection}"
         router = APIRouter(
             prefix=prefix,
             tags=[f"Auto CRUD - {module_id}/{collection}"],

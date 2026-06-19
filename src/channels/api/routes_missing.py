@@ -1392,9 +1392,9 @@ async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_au
 
 
 # ---------------------------------------------------------------------------
-# Client Register 路由 - /api/client
+# Client Register 路由 - /api/v1/client
 # ---------------------------------------------------------------------------
-client_router = APIRouter(prefix="/api/client", tags=["客户端"])
+client_router = APIRouter(prefix="/api/v1/client", tags=["客户端"])
 
 _client_registry: dict[str, dict[str, Any]] = {}
 

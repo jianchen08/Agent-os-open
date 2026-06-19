@@ -83,7 +83,7 @@ class TestAutoCRUDGeneratorRegister:
         router = generator.register("mod1", "coll1", _crud_definition())
         assert router is not None
         # 检查路由前缀
-        assert router.prefix == "/api/modules/mod1/data/coll1"
+        assert router.prefix == "/api/v1/modules/mod1/data/coll1"
 
     def test_register_invalid_fields_returns_none(self) -> None:
         """缺少 fields 的定义应返回 None。"""
@@ -149,7 +149,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon", "quantity": 3},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -173,7 +173,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Potion"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -193,7 +193,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"type": "weapon"},  # 缺少 name
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -211,7 +211,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Test", "type": "invalid_type"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -229,7 +229,7 @@ class TestCRUDCreate:
         token = _get_auth_token(client)
 
         resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Test", "quantity": -1},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -253,13 +253,13 @@ class TestCRUDRead:
         # 先创建几条记录
         for name in ["Sword", "Shield", "Potion"]:
             client.post(
-                "/api/modules/test_mod/data/items",
+                "/api/v1/modules/test_mod/data/items",
                 json={"name": name, "type": "weapon"},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         resp = client.get(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -280,7 +280,7 @@ class TestCRUDRead:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -288,7 +288,7 @@ class TestCRUDRead:
 
         # 获取记录
         resp = client.get(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -308,7 +308,7 @@ class TestCRUDRead:
         token = _get_auth_token(client)
 
         resp = client.get(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
@@ -327,14 +327,14 @@ class TestCRUDRead:
         # 创建 5 条记录
         for i in range(5):
             client.post(
-                "/api/modules/test_mod/data/items",
+                "/api/v1/modules/test_mod/data/items",
                 json={"name": f"Item{i}", "type": "weapon"},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         # 第 1 页，每页 2 条
         resp = client.get(
-            "/api/modules/test_mod/data/items?_page=1&_page_size=2",
+            "/api/v1/modules/test_mod/data/items?_page=1&_page_size=2",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -358,19 +358,19 @@ class TestCRUDRead:
 
         # 创建不同类型的记录
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Helmet", "type": "armor"},
             headers={"Authorization": f"Bearer {token}"},
         )
 
         # 按 type 筛选
         resp = client.get(
-            "/api/modules/test_mod/data/items?type=weapon",
+            "/api/v1/modules/test_mod/data/items?type=weapon",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -391,19 +391,19 @@ class TestCRUDRead:
 
         # 创建记录
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Banana", "type": "potion", "quantity": 5},
             headers={"Authorization": f"Bearer {token}"},
         )
         client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Apple", "type": "potion", "quantity": 3},
             headers={"Authorization": f"Bearer {token}"},
         )
 
         # 按 name 升序
         resp = client.get(
-            "/api/modules/test_mod/data/items?_sort=name&_order=asc",
+            "/api/v1/modules/test_mod/data/items?_sort=name&_order=asc",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -428,7 +428,7 @@ class TestCRUDUpdate:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon", "quantity": 1},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -436,7 +436,7 @@ class TestCRUDUpdate:
 
         # 更新记录
         resp = client.put(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             json={"quantity": 10, "name": "Big Sword"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -458,7 +458,7 @@ class TestCRUDUpdate:
         token = _get_auth_token(client)
 
         resp = client.put(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -481,7 +481,7 @@ class TestCRUDDelete:
 
         # 创建记录
         create_resp = client.post(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             json={"name": "Sword", "type": "weapon"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -489,7 +489,7 @@ class TestCRUDDelete:
 
         # 删除记录
         resp = client.delete(
-            f"/api/modules/test_mod/data/items/{record_id}",
+            f"/api/v1/modules/test_mod/data/items/{record_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -498,7 +498,7 @@ class TestCRUDDelete:
 
         # 确认已删除
         list_resp = client.get(
-            "/api/modules/test_mod/data/items",
+            "/api/v1/modules/test_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert list_resp.json()["total"] == 0
@@ -515,7 +515,7 @@ class TestCRUDDelete:
         token = _get_auth_token(client)
 
         resp = client.delete(
-            "/api/modules/test_mod/data/items/nonexistent-id",
+            "/api/v1/modules/test_mod/data/items/nonexistent-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
@@ -556,14 +556,14 @@ class TestAccessControl:
 
         # GET 应该可用
         resp = client.get(
-            "/api/modules/ro_mod/data/items",
+            "/api/v1/modules/ro_mod/data/items",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
 
         # POST 应返回 405
         resp = client.post(
-            "/api/modules/ro_mod/data/items",
+            "/api/v1/modules/ro_mod/data/items",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -571,7 +571,7 @@ class TestAccessControl:
 
         # PUT 应返回 405
         resp = client.put(
-            "/api/modules/ro_mod/data/items/some-id",
+            "/api/v1/modules/ro_mod/data/items/some-id",
             json={"name": "Test"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -579,7 +579,7 @@ class TestAccessControl:
 
         # DELETE 应返回 405
         resp = client.delete(
-            "/api/modules/ro_mod/data/items/some-id",
+            "/api/v1/modules/ro_mod/data/items/some-id",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 405
