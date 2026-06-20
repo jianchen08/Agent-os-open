@@ -16,26 +16,15 @@
 
 from __future__ import annotations
 
-
-
 import asyncio
-
 import concurrent.futures
-
 import contextlib
-
-import functools
-
+import functools  # noqa: F401
 import json
-
 import logging
-
 import os
-
-import uuid as _uuid
-
+import uuid as _uuid  # noqa: F401
 from pathlib import Path
-
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -44,12 +33,8 @@ if TYPE_CHECKING:
 
 
 from infrastructure.task_context import TaskExecutionContext
-
 from isolation.workspace_lifecycle import WorkspaceLifecycleManager
-
-from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
-
-
+from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +78,7 @@ class TaskExecutorMixin:
 
         try:
 
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
 
             _iso_cfg = get_config_center().get("isolation/isolation_config.yaml") or {}
 
@@ -107,7 +92,7 @@ class TaskExecutorMixin:
 
 
 
-    async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:
+    async def _execute_background_task(self, task_data: dict[str, Any], ctx: TaskExecutionContext) -> None:  # noqa: PLR0911,PLR0912,PLR0915
 
         """执行后台任务的完整生命周期（start → run pipeline → wait terminal）。
 
@@ -137,7 +122,7 @@ class TaskExecutorMixin:
 
             try:
 
-                from channels.websocket.ws_handler import ws_interaction_notifier as _global_notifier
+                from channels.websocket.ws_handler import ws_interaction_notifier as _global_notifier  # noqa: PLC0415
 
                 _notifier = _global_notifier
 
@@ -155,7 +140,7 @@ class TaskExecutorMixin:
 
         if _parent_pipeline_id:
 
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
             _entry = get_engine_registry().get(_parent_pipeline_id)
 
@@ -397,7 +382,7 @@ class TaskExecutorMixin:
 
         try:
 
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
 
 
@@ -481,9 +466,8 @@ class TaskExecutorMixin:
 
 
 
-            from pipeline.message_bus import send_pipeline_message
-
-            from pipeline.stream_bridge import create_targeted_sink
+            from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
+            from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
 
 
 
@@ -643,11 +627,11 @@ class TaskExecutorMixin:
 
                 _data_dir = os.environ.get("DATA_DIR", "") or str(Path(__file__).resolve().parents[2] / "data")
 
-                os.makedirs(_data_dir, exist_ok=True)
+                os.makedirs(_data_dir, exist_ok=True)  # noqa: PTH103
 
                 with open(str(Path(_data_dir) / "diag_inherit.log"), "a", encoding="utf-8") as _f:
 
-                    from datetime import datetime
+                    from datetime import datetime  # noqa: PLC0415
 
                     _f.write(f"{datetime.now().isoformat()} | BRANCH=HISTORY task={task_id} | "
 
@@ -689,7 +673,7 @@ class TaskExecutorMixin:
 
                 # _start_bg_drain 为兼容空实现，保留调用仅为不破坏导入链。
 
-                from pipeline.message_bus import _start_bg_drain
+                from pipeline.message_bus import _start_bg_drain  # noqa: PLC0415
 
                 _start_bg_drain(pipeline_id, _sink, engine, engine_task=engine_future)
 
@@ -697,7 +681,7 @@ class TaskExecutorMixin:
 
                 # drain_loop 通过它判断引擎是否结束，避免死循环空转
 
-                from pipeline.registry import get_engine_registry
+                from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
                 _entry = get_engine_registry().get(pipeline_id)
 
@@ -711,11 +695,11 @@ class TaskExecutorMixin:
 
                 _data_dir2 = os.environ.get("DATA_DIR", "") or str(Path(__file__).resolve().parents[2] / "data")
 
-                os.makedirs(_data_dir2, exist_ok=True)
+                os.makedirs(_data_dir2, exist_ok=True)  # noqa: PTH103
 
                 with open(str(Path(_data_dir2) / "diag_inherit.log"), "a", encoding="utf-8") as _f:
 
-                    from datetime import datetime
+                    from datetime import datetime  # noqa: PLC0415
 
                     _f.write(f"{datetime.now().isoformat()} | BRANCH=NO_HISTORY task={task_id} | "
 
@@ -741,7 +725,7 @@ class TaskExecutorMixin:
 
 
 
-                from pipeline.message_types import MessageType, PipelineMessage
+                from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
 
                 _pipe_msg = PipelineMessage(
 
@@ -889,7 +873,7 @@ class TaskExecutorMixin:
 
 
 
-        _CONTAINER_INIT_RETRIES = 3
+        _CONTAINER_INIT_RETRIES = 3  # noqa: N806
 
         _init_ok = False
 
@@ -1087,9 +1071,9 @@ class TaskExecutorMixin:
 
 
 
-        _WAIT_INTERVAL = 1.0
+        _WAIT_INTERVAL = 1.0  # noqa: N806
 
-        _WAIT_MAX = 30.0
+        _WAIT_MAX = 30.0  # noqa: N806
 
         _waited = 0.0
 
@@ -1409,7 +1393,7 @@ class TaskExecutorMixin:
 
             # 旧记录没有 tool_calls_json，需要从 tool 记录反向重建
 
-            from infrastructure.task_worker import _reconstruct_tool_calls
+            from infrastructure.task_worker import _reconstruct_tool_calls  # noqa: PLC0415
 
             _reconstruct_tool_calls(conversation_history)
 
@@ -1431,11 +1415,11 @@ class TaskExecutorMixin:
 
             _data_dir3 = os.environ.get("DATA_DIR", "") or str(Path(__file__).resolve().parents[2] / "data")
 
-            os.makedirs(_data_dir3, exist_ok=True)
+            os.makedirs(_data_dir3, exist_ok=True)  # noqa: PTH103
 
             with open(str(Path(_data_dir3) / "diag_inherit.log"), "a", encoding="utf-8") as _f:
 
-                from datetime import datetime as _dt
+                from datetime import datetime as _dt  # noqa: PLC0415
 
                 _f.write(f"{_dt.now().isoformat()} | RESTORE_EXCEPTION: {exc} | pid={existing_pipeline_id}\n")
 
@@ -1457,7 +1441,7 @@ class TaskExecutorMixin:
 
 
 
-    def cancel_pipeline(self, task_id: str) -> bool:
+    def cancel_pipeline(self, task_id: str) -> bool:  # noqa: PLR0912
 
         """取消任务关联的运行中管道。
 
@@ -1521,7 +1505,7 @@ class TaskExecutorMixin:
 
         if pipeline_id:
 
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
             registry = get_engine_registry()
 
@@ -1575,7 +1559,7 @@ class TaskExecutorMixin:
 
         if not cancelled_any:
 
-            from pipeline.registry import get_engine_registry as _get_reg
+            from pipeline.registry import get_engine_registry as _get_reg  # noqa: PLC0415
 
             entries = _get_reg().find_by_tag("task_id", task_id)
 
@@ -1641,7 +1625,7 @@ class TaskExecutorMixin:
 
         """
 
-        from tasks.workspace import resolve_task_workspace
+        from tasks.workspace import resolve_task_workspace  # noqa: PLC0415
 
 
 
@@ -1665,7 +1649,7 @@ class TaskExecutorMixin:
 
         # 新任务：从配置读取 workspace.root
 
-        from isolation.workspace import get_workspace_config_root
+        from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
 
         root = get_workspace_config_root()
 

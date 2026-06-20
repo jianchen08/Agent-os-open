@@ -5,15 +5,8 @@
 前端原始 JSON 不可直接透传到管道。
 """
 
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from enum import StrEnum
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from agents.types import AgentConfig
-    from pipeline.sink import IOutputSink
+from __future__ import annotationsfrom dataclasses import dataclass, fieldfrom enum import StrEnumfrom typing import TYPE_CHECKING, Anyif TYPE_CHECKING:
+    from agents.types import AgentConfig    from pipeline.sink import IOutputSink
 
 
 class MessageSource(StrEnum):

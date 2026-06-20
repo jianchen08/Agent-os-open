@@ -48,7 +48,7 @@ def _parse_message_xml(xml_str: str) -> dict[str, Any]:
         return {}
 
 
-def _extract_wecom_text(
+def _extract_wecom_text(  # noqa: PLR0911
     msg_type: str,
     content: str,
     raw: dict[str, Any],

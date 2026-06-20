@@ -166,7 +166,7 @@ class PipelineRecovery:
         # 优先按 ID 查找原始 Agent
         if agent_config_id:
             try:
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
                 provider = get_service_provider()
                 agent_registry = provider.get("agent_registry")

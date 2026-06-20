@@ -250,7 +250,7 @@ class RedisStreamsEventBus(EventBusBase):
         Returns:
             消息 ID
         """
-        import os
+        import os  # noqa: PLC0415
 
         # 检查是否在测试环境中，如果是，使用直接发布
         if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -330,7 +330,7 @@ class RedisStreamsEventBus(EventBusBase):
         await self._notify_local_subscribers(event)
 
         # 记录到死信队列（可选）
-        try:
+        try:  # noqa: SIM105
             await self._send_to_dead_letter_queue(event, str(last_error))
         except Exception:
             pass  # 死信队列失败不影响本地通知
@@ -363,7 +363,7 @@ class RedisStreamsEventBus(EventBusBase):
             await self._process_batch()
         else:
             # 检查是否在测试环境中，如果是，立即处理批次
-            import os
+            import os  # noqa: PLC0415
 
             if os.environ.get("PYTEST_CURRENT_TEST"):
                 await self._process_batch()
@@ -387,7 +387,7 @@ class RedisStreamsEventBus(EventBusBase):
                 0.1, lambda: asyncio.create_task(self._process_batch())
             )
 
-    async def _process_batch(self) -> None:
+    async def _process_batch(self) -> None:  # noqa: PLR0912
         """
         处理批处理队列中的事件
         """

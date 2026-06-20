@@ -55,10 +55,10 @@ class BridgeCore:
         self._entry: Any | None = None
 
         # 绑定日志上下文，使后续日志自动携带 pipeline_id / task_id
-        from src.core.logging import LogContext
+        from src.core.logging import LogContext  # noqa: PLC0415
         _ctx: dict[str, str] = {"pipeline_id": pipeline_id}
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             self._entry = get_engine_registry().get(pipeline_id)
             if self._entry and hasattr(self._entry, "tags"):
                 self._container_task_id = self._entry.tags.get("task_id", "")
@@ -93,7 +93,7 @@ class BridgeCore:
         if getattr(self, '_entry', None) is not None:
             return self._entry.next_sequence()
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(self.pipeline_id)
             if entry is not None:
                 self._entry = entry

@@ -161,7 +161,7 @@ class FeishuOutputAdapter(IOutputAdapter):
         self._accumulated_text += text
 
         # 如果标记了 flush 或 stream end，发送累积内容
-        if chunk.get("flush", False) or chunk.get("type") == "end":
+        if chunk.get("flush", False) or chunk.get("type") == "end":  # noqa: SIM102
             if self._channel_user_id and self._accumulated_text:
                 await self._stream_client.send_message(
                     self._channel_user_id, self._accumulated_text
@@ -235,7 +235,7 @@ def _extract_text(msg_type: str, content_str: str) -> str:
     Returns:
         提取的纯文本
     """
-    import json
+    import json  # noqa: PLC0415
 
     try:
         parsed = json.loads(content_str)

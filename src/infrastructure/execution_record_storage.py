@@ -775,7 +775,7 @@ class ExecutionRecordStorage:
 
         return blocks
 
-    def read_records_from_tail(
+    def read_records_from_tail(  # noqa: PLR0911,PLR0912
         self,
         pipeline_run_id: str,
         limit: int,

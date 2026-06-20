@@ -32,7 +32,7 @@ def normalize_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def normalize_input_types(
+def normalize_input_types(  # noqa: PLR0912
     inputs: dict[str, Any], schema: dict[str, Any]
 ) -> dict[str, Any]:
     """规范化输入参数类型，修复 LLM 返回的类型不一致问题。"""
@@ -105,7 +105,7 @@ def try_parse_json_string(value: str) -> dict | None:
     return None
 
 
-def normalize_nested_object(
+def normalize_nested_object(  # noqa: PLR0912
     obj: dict[str, Any], schema: dict[str, Any]
 ) -> None:
     """递归规范化嵌套对象中的字符串类型字段。"""
@@ -149,7 +149,7 @@ def normalize_nested_object(
                 normalize_nested_object(value, prop_schema)
 
 
-def fix_task_submit_inputs(inputs: dict[str, Any]) -> None:
+def fix_task_submit_inputs(inputs: dict[str, Any]) -> None:  # noqa: PLR0912
     """自动修复 task_submit 工具的常见 LLM 输入错误。"""
 
     fix_object_field(inputs, "acceptance_criteria")
@@ -269,7 +269,7 @@ def fix_acceptance_criteria_inputs(inputs: dict[str, Any]) -> None:
             )
 
 
-def fix_object_field(inputs: dict[str, Any], field_name: str) -> None:
+def fix_object_field(inputs: dict[str, Any], field_name: str) -> None:  # noqa: PLR0912
     """修复 LLM 将 object 类型字段传为 JSON 字符串的问题。"""
     if field_name not in inputs:
         return

@@ -164,7 +164,7 @@ class LLMCore(ICorePlugin):
         """插件执行优先级。"""
         return 50
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行 LLM 调用，返回原始结果。
 
         调用 LLM 后，将 assistant 回复 append 到 messages 中。
@@ -190,7 +190,7 @@ class LLMCore(ICorePlugin):
             on_chunk = StreamRepetitionMonitor(on_chunk)
 
         try:
-            from llm.key_pool import set_agent_priority
+            from llm.key_pool import set_agent_priority  # noqa: PLC0415
             agent_level = ctx.state.get("agent_level", "L3")
             set_agent_priority(agent_level)
 
@@ -367,7 +367,7 @@ class LLMCore(ICorePlugin):
             # 工具调用错误后重置消息配对缓存，确保下次全量扫描
             exc_msg = str(exc)
             if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
-                from plugins.core.llm_core._message_normalizer import (
+                from plugins.core.llm_core._message_normalizer import (  # noqa: PLC0415
                     reset_pairing_cache,
                 )
                 # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）
@@ -412,7 +412,7 @@ class LLMCore(ICorePlugin):
         for m in history:
             # 清理内部标记字段，不发给 LLM
             if "_record_sequence" in m:
-                m = {k: v for k, v in m.items() if k != "_record_sequence"}
+                m = {k: v for k, v in m.items() if k != "_record_sequence"}  # noqa: PLW2901
             messages.append(m)
 
         # 4. 动态变量（每轮变化的上下文：时间戳、session_id 等）
@@ -488,7 +488,7 @@ class LLMCore(ICorePlugin):
         provider_prefix = provider_map.get(self._provider, self._provider)
         return f"{provider_prefix}/{self._model}"
 
-    async def _call_llm(
+    async def _call_llm(  # noqa: PLR0912
         self,
         messages: list[dict[str, Any]],
         ctx: PluginContext,

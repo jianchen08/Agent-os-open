@@ -62,7 +62,7 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
     _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
 
 
-def _validate_workspace_path(workspace: str) -> str | None:
+def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
     """验证目标空间路径的安全性。
 
     检查规则：
@@ -112,7 +112,7 @@ def _validate_workspace_path(workspace: str) -> str | None:
 
     # ── 3. 配置文件工作空间根目录检查 ──
     try:
-        from isolation.workspace import get_workspace_config_root
+        from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
         ws_root = get_workspace_config_root()
         ws_root_normalized = os.path.normpath(ws_root)
         if normalized_lower == ws_root_normalized.lower():
@@ -151,7 +151,7 @@ class TaskSubmitTool(BuiltinTool):
         """
         if self._task_service is not None:
             return self._task_service
-        from tasks.service_access import get_task_service
+        from tasks.service_access import get_task_service  # noqa: PLC0415
         service = get_task_service()
         if service is not None:
             self._task_service = service
@@ -403,7 +403,7 @@ class TaskSubmitTool(BuiltinTool):
             },
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912,PLR0915
         """执行任务提交。
 
         流程：
@@ -414,12 +414,12 @@ class TaskSubmitTool(BuiltinTool):
         5. 通过 EventBus 发布 task.submitted 事件
         6. 返回提交结果
         """
-        import time as _time
+        import time as _time  # noqa: PLC0415
         _t0 = _time.monotonic()
         task_scope = inputs.get("task_scope", "non_container")
         goal = inputs.get("goal")
         if isinstance(goal, str):
-            import json
+            import json  # noqa: PLC0415
             try:
                 goal = json.loads(goal)
             except (json.JSONDecodeError, ValueError):
@@ -494,7 +494,7 @@ class TaskSubmitTool(BuiltinTool):
         )
 
         # ── 描述长度硬限制（防止超大消息体打爆 LLM API） ──
-        _MAX_DESC_LEN = 2000
+        _MAX_DESC_LEN = 2000  # noqa: N806
         if len(description) > _MAX_DESC_LEN:
             logger.warning(
                 "[TaskSubmit] 描述超长拒绝 | len=%d | max=%d | preview=%.100s",
@@ -585,7 +585,7 @@ class TaskSubmitTool(BuiltinTool):
             # - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
             # - inputs 无 task_id 键 → param_inject 完全没处理此调用
             # - task_id 键存在但为空 → state["task_id"] 在引擎 state 中缺失
-            _diag_keys = [k for k in inputs.keys() if k in (
+            _diag_keys = [k for k in inputs if k in (
                 "task_id", "parent_task_id", "session_id", "pipeline_id",
                 "parent_agent_level", "workspace",
             )]
@@ -716,7 +716,7 @@ class TaskSubmitTool(BuiltinTool):
                             "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                         ),
                     )
-                from pathlib import Path
+                from pathlib import Path  # noqa: PLC0415
                 old_ws_path = old_ws_meta.get("path", "")
                 if not old_ws_path or not Path(old_ws_path).exists():
                     return create_failure_result(
@@ -822,14 +822,14 @@ class TaskSubmitTool(BuiltinTool):
         # ── 6. 创建任务 ──
         raw_priority = inputs.get("priority", 5)
         try:
-            from tasks.types import TaskPriority as TP
+            from tasks.types import TaskPriority as TP  # noqa: N817,PLC0415
             TP(raw_priority)
         except (ValueError, AttributeError):
             raw_priority = 5
 
         try:
             child_agent_level = min(parent_agent_level + 1, 3)
-            from agents.types import AgentLevel
+            from agents.types import AgentLevel  # noqa: PLC0415
             level_values = {"L1": 1, "L2": 2, "L3": 3}
             level_str = f"L{child_agent_level}"
             child_level = AgentLevel(level_str) if level_str in level_values else AgentLevel.L3_ATOMIC
@@ -857,7 +857,7 @@ class TaskSubmitTool(BuiltinTool):
         logger.info("[TaskSubmit] PERF | create_task=%.1fms", (_t_create - _t0) * 1000)
 
         # ── 7. 提交到后台执行器 ──
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         task_worker = get_service_provider().get("task_worker")
         if not task_worker:
             await task_service.hard_delete(task.id)
@@ -918,7 +918,7 @@ class TaskSubmitTool(BuiltinTool):
 
         try:
             _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
+            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
             if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
                 await _ws_notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
@@ -971,7 +971,7 @@ class TaskSubmitTool(BuiltinTool):
             },
         )
 
-    async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_long_term(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """处理容器任务提交。
 
         容器任务不指定执行者，只创建一个 pending 状态的父任务框架。
@@ -1047,7 +1047,7 @@ class TaskSubmitTool(BuiltinTool):
                 _session_id = inputs.get("session_id", "")
                 if _session_id:
                     try:
-                        from channels.api.memory_store import store as api_store
+                        from channels.api.memory_store import store as api_store  # noqa: PLC0415
                         _session = api_store.get_session(_session_id)
                         if _session:
                             _session.register_pipeline(pipeline_id)
@@ -1066,7 +1066,7 @@ class TaskSubmitTool(BuiltinTool):
 
         try:
             _user_id = inputs.get("user_id", "") or ""
-            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier
+            from channels.websocket.ws_handler import ws_interaction_notifier as _ws_notifier  # noqa: PLC0415
             if _ws_notifier and _user_id and hasattr(_ws_notifier, "send_to_user"):
                 await _ws_notifier.send_to_user(_user_id, {
                     "type": "task_status_update",
@@ -1092,13 +1092,13 @@ class TaskSubmitTool(BuiltinTool):
                 task.id, _ws_exc,
             )
 
-        from isolation.workspace import resolve_container_workspace_path
+        from isolation.workspace import resolve_container_workspace_path  # noqa: PLC0415
         container_workspace_path = resolve_container_workspace_path(
             inputs.get("workspace"), task.id,
             isolation_mode=inputs.get("isolation_level"),
         )
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         task_worker = get_service_provider().get("task_worker")
         if task_worker:
             task_worker.submit_task({
@@ -1198,7 +1198,7 @@ class TaskSubmitTool(BuiltinTool):
                 missing_ids.append(dep_id)
         return missing_ids
 
-    def _build_metadata(
+    def _build_metadata(  # noqa: PLR0912
         self,
         inputs: dict[str, Any],
         goal: dict[str, Any],
@@ -1351,7 +1351,7 @@ class TaskSubmitTool(BuiltinTool):
             AgentConfig 实例，未找到返回 None
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
             agent_registry = provider.get("agent_registry")
             if agent_registry is not None:
@@ -1376,9 +1376,9 @@ class TaskSubmitTool(BuiltinTool):
         Returns:
             (是否找到, 级别字符串, 级别数字) 元组
         """
-        from pathlib import Path
+        from pathlib import Path  # noqa: PLC0415
 
-        import yaml
+        import yaml  # noqa: PLC0415
 
         _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
@@ -1413,7 +1413,7 @@ class TaskSubmitTool(BuiltinTool):
         agent_level = level_map.get(agent_level_str, 0)
         return (True, agent_level_str, agent_level)
 
-    def _auto_fill_criteria(
+    def _auto_fill_criteria(  # noqa: PLR0912,PLR0915
         self,
         target_id: str,
         context: dict[str, Any] | None = None,
@@ -1430,9 +1430,9 @@ class TaskSubmitTool(BuiltinTool):
         Returns:
             验收标准字典，找不到时返回空 dict
         """
-        from pathlib import Path
+        from pathlib import Path  # noqa: PLC0415
 
-        import yaml
+        import yaml  # noqa: PLC0415
 
         _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         config_dir = _project_root / "config" / "agents"
@@ -1519,7 +1519,7 @@ class TaskSubmitTool(BuiltinTool):
                     for k, v in default_params.items():
                         if isinstance(v, str):
                             for var_name, var_val in tmpl_vars.items():
-                                v = v.replace("{" + var_name + "}", var_val)
+                                v = v.replace("{" + var_name + "}", var_val)  # noqa: PLW2901
                         replaced[k] = v
                     default_params = replaced
                 criteria[metric_id] = {"input_params": default_params}

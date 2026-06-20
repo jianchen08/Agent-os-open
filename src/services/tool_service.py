@@ -48,7 +48,7 @@ class ToolService:
     def _init_default_tools(self):
         """同步初始化默认工具"""
         try:
-            from datetime import datetime
+            from datetime import datetime  # noqa: PLC0415
 
             # 从工具注册表加载内置工具
             try:
@@ -56,7 +56,7 @@ class ToolService:
                 if self.tool_registry is not None:
                     registry = self.tool_registry
                 else:
-                    from src.tools.global_registry import get_global_tool_registry_sync
+                    from src.tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
 
                     registry = get_global_tool_registry_sync()
 
@@ -304,7 +304,7 @@ class ToolService:
         """添加角色权限"""
         self.permission_manager.add_role_permission(role, permission)
 
-    async def list_tools(
+    async def list_tools(  # noqa: PLR0912
         self,
         page: int = 1,
         page_size: int = 20,
@@ -339,7 +339,7 @@ class ToolService:
                     if self.tool_registry is not None:
                         registry = self.tool_registry
                     else:
-                        from src.tools.global_registry import (
+                        from src.tools.global_registry import (  # noqa: PLC0415
                             get_global_tool_registry_sync,
                         )
 
@@ -466,7 +466,7 @@ class ToolService:
             if self.tool_registry is not None:
                 registry = self.tool_registry
             else:
-                from src.tools.global_registry import get_global_tool_registry_sync
+                from src.tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
 
                 registry = get_global_tool_registry_sync()
 
@@ -533,12 +533,12 @@ class ToolService:
         """
         try:
             if name in self.tools:
-                from src.core.exceptions import ToolAlreadyExistsError
+                from src.core.exceptions import ToolAlreadyExistsError  # noqa: PLC0415
 
                 raise ToolAlreadyExistsError(f"工具 '{name}' 已存在")
 
             # 创建新工具
-            from src.tools.types import ToolCategory
+            from src.tools.types import ToolCategory  # noqa: PLC0415
 
             tool = Tool(
                 name=name,
@@ -607,7 +607,7 @@ class ToolService:
             if description is not None:
                 tool.description = description
             if category is not None:
-                from src.tools.types import ToolCategory
+                from src.tools.types import ToolCategory  # noqa: PLC0415
                 tool.category = ToolCategory(category)
             if parameters is not None:
                 tool.parameters = parameters
@@ -760,7 +760,7 @@ _tool_service = None
 
 def get_tool_service() -> ToolService:
     """获取工具服务实例"""
-    global _tool_service
+    global _tool_service  # noqa: PLW0603
     if _tool_service is None:
         _tool_service = ToolService()
     return _tool_service

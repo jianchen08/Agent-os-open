@@ -161,17 +161,17 @@ class MultimodalPreprocessor(IInputPlugin):
         Returns:
             OpenAI vision 格式的图片内容块，或文本描述块
         """
-        if not os.path.isfile(file_path):
+        if not os.path.isfile(file_path):  # noqa: PTH113
             return {"type": "text", "text": f"[文件不存在: {file_path}]"}
 
-        file_size = os.path.getsize(file_path)
+        file_size = os.path.getsize(file_path)  # noqa: PTH202
         if file_size > self._max_file_size:
             return {
                 "type": "text",
                 "text": f"[文件过大: {file_path} ({file_size} bytes)]",
             }
 
-        _, ext = os.path.splitext(file_path)
+        _, ext = os.path.splitext(file_path)  # noqa: PTH122
         mime_type = _EXT_TO_MIME.get(ext.lower())
         if not mime_type:
             return {"type": "text", "text": f"[不支持的文件类型: {ext}]"}

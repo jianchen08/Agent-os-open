@@ -68,8 +68,8 @@ class ExpectConditionEvaluator:
         "not_equals": lambda a, b: a != b,
         "contains": lambda a, b: b in a if isinstance(a, str) else False,
         "not_contains": lambda a, b: b not in a if isinstance(a, str) else True,
-        "is_true": lambda a, b: bool(a) is True,
-        "is_false": lambda a, b: bool(a) is False,
+        "is_true": lambda a, b: bool(a) is True,  # noqa: ARG005
+        "is_false": lambda a, b: bool(a) is False,  # noqa: ARG005
         "greater_than": lambda a, b: a > b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "less_than": lambda a, b: a < b if isinstance(a, (int, float)) and isinstance(b, (int, float)) else False,
         "in": lambda a, b: a in b if isinstance(b, (list, tuple, set)) else False,
@@ -340,7 +340,7 @@ def get_expect_evaluator() -> ExpectConditionEvaluator:
     Returns:
         ExpectConditionEvaluator 实例
     """
-    global _expect_evaluator
+    global _expect_evaluator  # noqa: PLW0603
     if _expect_evaluator is None:
         _expect_evaluator = ExpectConditionEvaluator()
     return _expect_evaluator
@@ -352,5 +352,5 @@ def reset_expect_evaluator() -> None:
 
     主要用于测试场景。
     """
-    global _expect_evaluator
+    global _expect_evaluator  # noqa: PLW0603
     _expect_evaluator = None

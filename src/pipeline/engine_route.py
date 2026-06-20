@@ -40,7 +40,7 @@ def resolve_output_plugins(
     Returns:
         匹配的输出插件实例列表
     """
-    from pipeline.plugin import IOutputPlugin
+    from pipeline.plugin import IOutputPlugin  # noqa: PLC0415
 
     ort = engine.output_route_table
     if hasattr(ort, "has_plugin_routing") and ort.has_plugin_routing():
@@ -61,7 +61,7 @@ def resolve_output_plugins(
     return engine.plugin_registry.get_output_plugins(core_type=core_type)
 
 
-async def apply_route(
+async def apply_route(  # noqa: PLR0911
     engine: PipelineEngine,
     route: RouteSignal,
     state: dict[str, object],
@@ -101,7 +101,7 @@ async def apply_route(
             # AI 只输出了文本，没有调用任何工具。
             # 检查是否有新通知注入（如 task_event_receiver 的完成通知）
             # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
-            from pipeline.engine_iteration import consume_pending_notifications
+            from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
             if consume_pending_notifications(engine, state):
                 return False
 
@@ -129,7 +129,7 @@ async def apply_route(
 
     if route_type == "end":
         # 通知注入统一走 consume_pending_notifications，不在路由分支内联重复。
-        from pipeline.engine_iteration import consume_pending_notifications
+        from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
         if consume_pending_notifications(engine, state):
             logger.info("[Engine] route=end 但有待处理通知，取消结束: %s", route.reason)
             return False

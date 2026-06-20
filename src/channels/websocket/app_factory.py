@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import socket
-import sys
+import sys  # noqa: F401
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,44 +25,36 @@ from typing import Any
 # 必须在所有其他导入之前完成，确保后续模块能正确读取环境变量
 try:
     from dotenv import load_dotenv
-    _env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
-    if os.path.exists(_env_path):
+    _env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")  # noqa: PTH120
+    if os.path.exists(_env_path):  # noqa: PTH110
         load_dotenv(_env_path, override=False)
         logging.getLogger(__name__).info("已加载 .env 文件: %s", _env_path)
 except ImportError:
     pass  # python-dotenv 未安装时跳过
 
-import uvicorn
 from contextlib import asynccontextmanager
+
+import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from channels.api.app import create_app
 from channels.api.auth import verify_token
-from channels.api.memory_store import store as api_store
-
-from pipeline.stream_bridge import TargetedSink, create_targeted_sink
-
-from channels.websocket.ws_handler import ws_interaction_notifier
+from channels.api.memory_store import store as api_store  # noqa: F401
 from channels.websocket import stream_handler
-
+from channels.websocket.static_files import mount_media_static_files
 from channels.websocket.stream_handler import (
     PipelineContext,
     _init_pipeline_context,
 )
-from channels.websocket.static_files import mount_media_static_files
-from pipeline.message_handler import parse_frontend_message, MessageParseError
+from channels.websocket.ws_handler import ws_interaction_notifier
 from pipeline.message_bus import send_pipeline_message
+from pipeline.message_handler import MessageParseError, parse_frontend_message
+from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F401
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# 配置日志 — 接入统一日志系统（支持结构化输出 + JSON 格式 + 链路追踪）
+from src.core.logging import LogContext, LoggingConfig, setup_logging as _setup_unified_logging
 
-_fh = logging.FileHandler("debug_eventbus.log", encoding="utf-8", mode="w")
-_fh.setLevel(logging.DEBUG)
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-logging.getLogger().addHandler(_fh)
+_setup_unified_logging(LoggingConfig.from_env(), reset=True)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +66,7 @@ _task_worker_started: bool = False
 def _get_call_timeout() -> float:
     """获取管道调用超时时间（秒）。"""
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         _sp = get_service_provider()
         _timeout = _sp.get("call_timeout") if _sp else None
         if _timeout:
@@ -84,7 +76,7 @@ def _get_call_timeout() -> float:
     return 120.0
 
 
-def create_combined_app() -> FastAPI:
+def create_combined_app() -> FastAPI:  # noqa: PLR0915
     """创建合并了 WebSocket 功能的 FastAPI 应用。
 
     将 WebSocket 路由注册到 FastAPI 中，实现单端口统一服务。
@@ -93,7 +85,7 @@ def create_combined_app() -> FastAPI:
     Returns:
         配置好的 FastAPI 应用实例
     """
-    global _pipeline_ctx
+    global _pipeline_ctx  # noqa: PLW0603
 
     # 初始化管道引擎上下文（需要在创建 lifespan 之前完成，因为 lifespan 中要用到 _task_worker）
     _pipeline_ctx = _init_pipeline_context()
@@ -103,12 +95,12 @@ def create_combined_app() -> FastAPI:
         logger.error("管道引擎未就绪！消息发送功能将不可用。请检查上方日志中的错误信息。")
 
     @asynccontextmanager
-    async def _combined_lifespan(app: FastAPI):
+    async def _combined_lifespan(app: FastAPI):  # noqa: PLR0912,PLR0915
         """应用生命周期管理，替代已弃用的 on_event('startup')。
 
         在应用启动时立即启动 TaskWorker，确保纯 API 场景下任务可正常执行。
         """
-        global _task_worker_started
+        global _task_worker_started  # noqa: PLW0603
         logger.info(
             "[Lifespan] 应用启动开始 | pid=%d | loop_id=%s",
             os.getpid(), id(asyncio.get_running_loop()),
@@ -124,7 +116,7 @@ def create_combined_app() -> FastAPI:
                     logger.warning("TaskWorker start failed (app startup): %s", exc, exc_info=True)
 
         try:
-            from pipeline.message_bus import restore_pipelines_on_startup
+            from pipeline.message_bus import restore_pipelines_on_startup  # noqa: PLC0415
             count = await restore_pipelines_on_startup()
             if count:
                 logger.info("启动恢复: 已恢复 %d 个管道", count)
@@ -133,13 +125,13 @@ def create_combined_app() -> FastAPI:
 
         # 会话系统启动恢复：从 api_store 注册所有会话管道（含 agent_id）
         try:
-            from channels.api.routes_threads import restore_session_pipelines
+            from channels.api.routes_threads import restore_session_pipelines  # noqa: PLC0415
             _session_count = restore_session_pipelines()
         except Exception as exc:
             logger.debug("restore_session_pipelines skipped: %s", exc)
 
         try:
-            from triggers.manager import get_trigger_manager
+            from triggers.manager import get_trigger_manager  # noqa: PLC0415
             main_loop = asyncio.get_running_loop()
             get_trigger_manager().set_main_loop(main_loop)
             asyncio._main_loop_ref = main_loop
@@ -150,7 +142,7 @@ def create_combined_app() -> FastAPI:
         # 启动 ConfigCenter 文件监听（异步）
         _config_center_started = False
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             center = get_config_center()
             # create_task 调度 start()，但非阻塞——需等待 start() 内部
             # _running 置位完成，否则下游 PluginHotReloader 检测 is_running
@@ -171,10 +163,10 @@ def create_combined_app() -> FastAPI:
         # 启动 PluginHotReloader（用全局单例 registry，订阅 ConfigCenter 回调）
         _hot_reloader = None
         try:
-            from plugins.hot_reload import PluginHotReloader
-            from agents.global_registry import get_global_agent_registry_sync
-            from tools.global_registry import get_global_tool_registry_sync
-            from channels.api.routes_plugins import set_hot_reloader
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+            from channels.api.routes_plugins import set_hot_reloader  # noqa: PLC0415
+            from plugins.hot_reload import PluginHotReloader  # noqa: PLC0415
+            from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
 
             _hot_reloader = PluginHotReloader(
                 config_dir="config",
@@ -199,7 +191,7 @@ def create_combined_app() -> FastAPI:
                     pass
             # 停止 ConfigCenter 文件监听
             try:
-                from config.config_center import get_config_center
+                from config.config_center import get_config_center  # noqa: PLC0415
                 get_config_center().stop()
                 logger.info("[Lifespan] ConfigCenter 已停止")
             except Exception:
@@ -239,7 +231,7 @@ def create_combined_app() -> FastAPI:
             logger.info("WebSocket 连接已断开（根路径）")
 
     @app.websocket("/ws/chat")
-    async def websocket_chat_global(websocket: WebSocket) -> None:
+    async def websocket_chat_global(websocket: WebSocket) -> None:  # noqa: PLR0912,PLR0915
         """全局单连接 WebSocket 端点（v3 协议）。"""
         token = websocket.query_params.get("token", "")
         if not token:
@@ -293,13 +285,21 @@ def create_combined_app() -> FastAPI:
                     }))
                     continue
 
+                # 绑定链路追踪上下文，使后续日志可关联到当前会话
+                LogContext.bind(
+                    request_id=msg_data.get("request_id", uuid.uuid4().hex[:12]),
+                    session_id=thread_id,
+                    thread_id=thread_id,
+                    trace_id=msg_data.get("trace_id", ""),
+                )
+
                 if msg_type == "user_input":
                     # BUG-FIX-fix_20260511_task_worker_global_ws:
                     # 问题根因: /ws/chat 全局端点缺少 TaskWorker 懒启动逻辑，
                     #           导致通过全局 WS 提交的任务没有订阅者，
                     #           pipeline_run_id 永远不会被绑定。
                     # 修复方案: 添加与 /ws/chat/{thread_id} 相同的 TaskWorker 懒启动。
-                    global _task_worker_started
+                    global _task_worker_started  # noqa: PLW0603
                     if not _task_worker_started:
                         _task_worker_started = True
                         try:
@@ -348,7 +348,7 @@ def create_combined_app() -> FastAPI:
 
                     _history = conversation_histories.get(thread_id, [])
 
-                    from pipeline.registry import get_engine_registry
+                    from pipeline.registry import get_engine_registry  # noqa: PLC0415
                     _registry = get_engine_registry()
 
                     # BUG-FIX-fix_20260531_sink_dead_thread_id_lost:
@@ -404,7 +404,7 @@ def create_combined_app() -> FastAPI:
                         "data": {"message_id": _msg_id, "error": _result.error or "管道不可用", "pipeline_id": _target_pid},
                     }, ensure_ascii=False))
                     continue
-                elif msg_type == "interaction_response":
+                if msg_type == "interaction_response":
                     try:
                         _pipeline_msg = parse_frontend_message(msg_data)
                     except MessageParseError as _parse_err:
@@ -418,7 +418,7 @@ def create_combined_app() -> FastAPI:
                     )
                     if request_id:
                         try:
-                            from human_interaction import get_human_interaction_service
+                            from human_interaction import get_human_interaction_service  # noqa: PLC0415
                             human_svc = get_human_interaction_service()
                             if human_svc:
                                 respond_result = await human_svc.respond(request_id, resp_data)
@@ -434,7 +434,7 @@ def create_combined_app() -> FastAPI:
                                         request_id, pipeline_id, request_record.get("status"),
                                     )
                                     if pipeline_id and not pipeline_id.startswith("__eval__"):
-                                        from pipeline.message_bus import _find_engine
+                                        from pipeline.message_bus import _find_engine  # noqa: PLC0415
                                         engine, _ = _find_engine(pipeline_id)
                                         if engine and hasattr(engine, "wake"):
                                             engine.wake()
@@ -461,7 +461,7 @@ def create_combined_app() -> FastAPI:
                     else:
                         logger.warning("[GlobalWS] interaction_response 缺少 request_id")
                     continue
-                elif msg_type == "stop_generation":
+                if msg_type == "stop_generation":
                     # BUG-FIX-fix_20260512_stop_generation_global_ws:
                     # 问题根因: 旧代码只发送假的 stopped 状态，没有实际取消流式任务
                     #           和管道引擎运行，导致停止按钮无效。
@@ -486,8 +486,8 @@ def create_combined_app() -> FastAPI:
                         continue
                     _all_pipeline_ids: set[str] = {_pipeline_id}
                     try:
-                        from pipeline.message_bus import _find_engine
-                        from pipeline.registry import get_engine_registry as _get_reg
+                        from pipeline.message_bus import _find_engine  # noqa: PLC0415
+                        from pipeline.registry import get_engine_registry as _get_reg  # noqa: PLC0415
                         for _pid in _all_pipeline_ids:
                             # 即时停止后台 drain_loop（bridge.stop 哨兵 + task.cancel）
                             _get_reg().cancel_drain_task(_pid)
@@ -602,8 +602,9 @@ def _cleanup_ghost_running_tasks() -> int:
     委托给 TaskService.cleanup_ghost_tasks() 静态方法，
     app_factory.py 只负责传入数据目录，不持有任务生命周期逻辑。
     """
-    import asyncio
-    from tasks.service import TaskService
+    import asyncio  # noqa: PLC0415
+
+    from tasks.service import TaskService  # noqa: PLC0415
 
     _data_dir = str(Path(__file__).resolve().parents[3] / "data" / "tasks")
     cleaned, cascaded = asyncio.run(TaskService.cleanup_ghost_tasks(_data_dir))

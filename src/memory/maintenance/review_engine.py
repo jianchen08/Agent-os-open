@@ -261,7 +261,7 @@ class ReviewEngine:
 
         return result
 
-    async def _run_review_full(self, run_id: str) -> dict[str, Any]:
+    async def _run_review_full(self, run_id: str) -> dict[str, Any]:  # noqa: PLR0912
         """完整版复盘：基于 storage/chunk_db/knowledge_service。"""
         summary = self._storage.get_summary(run_id)
         if summary is None:
@@ -502,12 +502,12 @@ class ReviewEngine:
         if run_ids is None:
             return self._run_review_simple()
 
-        import asyncio
+        import asyncio  # noqa: PLC0415
         results: list[dict[str, Any]] = []
         for rid in run_ids:
             try:
                 asyncio.get_running_loop()
-                import concurrent.futures
+                import concurrent.futures  # noqa: PLC0415
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     result = pool.submit(
                         asyncio.run, self._run_review_full(rid)

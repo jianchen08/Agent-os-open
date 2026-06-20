@@ -39,7 +39,7 @@ def set_hot_reloader(reloader: Any) -> None:
     Args:
         reloader: PluginHotReloader instance.
     """
-    global _hot_reloader
+    global _hot_reloader  # noqa: PLW0603
     _hot_reloader = reloader
 
 

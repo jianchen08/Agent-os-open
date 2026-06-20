@@ -136,9 +136,9 @@ class E2BProvider(IsolationProvider):
 
                 # 清理临时目录
                 try:
-                    import shutil
+                    import shutil  # noqa: PLC0415
 
-                    if os.path.exists(work_dir):
+                    if os.path.exists(work_dir):  # noqa: PTH110
                         shutil.rmtree(work_dir)
                         logger.info(f"清理沙箱工作目录: {work_dir}")
                 except Exception as e:
@@ -374,6 +374,6 @@ class E2BProvider(IsolationProvider):
 
         # 检查工作目录是否存在
         work_dir = env.provider_info.get("work_dir")
-        if work_dir and os.path.exists(work_dir):
+        if work_dir and os.path.exists(work_dir):  # noqa: PTH110
             return EnvironmentStatus(env.status)
         return EnvironmentStatus.STOPPED

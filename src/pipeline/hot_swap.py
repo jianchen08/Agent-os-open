@@ -220,7 +220,7 @@ class HotSwapManager:
 
         if old_plugin is not None:
             # 检查插件接口类型是否一致
-            from pipeline.plugin import ICorePlugin, IInputPlugin, IOutputPlugin
+            from pipeline.plugin import ICorePlugin, IInputPlugin, IOutputPlugin  # noqa: PLC0415
 
             old_interfaces: set[type] = set()
             new_interfaces: set[type] = set()
@@ -258,10 +258,10 @@ class HotSwapManager:
             _ = plugin.priority
 
             # 对于 Input/Output 插件，尝试一次空 execute
-            from pipeline.plugin import ICorePlugin
+            from pipeline.plugin import ICorePlugin  # noqa: PLC0415
             if not isinstance(plugin, ICorePlugin):
                 # 构造一个最小化的 PluginContext 用于检查
-                from pipeline.plugin import PluginContext
+                from pipeline.plugin import PluginContext  # noqa: PLC0415
                 mock_ctx = PluginContext(state={}, _services={})
                 await plugin.execute(mock_ctx)
 

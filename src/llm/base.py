@@ -117,14 +117,13 @@ class LLMClient(ABC):
 
         if any(x in model_lower for x in ["gpt", "openai"]):
             return "openai"
-        elif any(x in model_lower for x in ["claude", "anthropic"]):
+        if any(x in model_lower for x in ["claude", "anthropic"]):
             return "anthropic"
-        elif any(x in model_lower for x in ["glm", "zhipu", "智谱"]):
+        if any(x in model_lower for x in ["glm", "zhipu", "智谱"]):
             return "zhipu"
-        elif "ollama" in model_lower:
+        if "ollama" in model_lower:
             return "ollama"
-        else:
-            return "openai"  # 默认
+        return "openai"  # 默认
 
     @abstractmethod
     async def _generate_internal(
@@ -445,13 +444,13 @@ class LLMClient(ABC):
         session_id: str | None,
     ) -> None:
         """调用前检查预算"""
-        from src.core.exceptions import (
+        from src.core.exceptions import (  # noqa: PLC0415
             BudgetExceededException,
             BudgetExhaustedError,
             QuotaExhaustedException,
         )
-        from src.core.tokenizer import get_token_counter
-        from src.cost_control.budget_manager import get_budget_manager
+        from src.core.tokenizer import get_token_counter  # noqa: PLC0415
+        from src.cost_control.budget_manager import get_budget_manager  # noqa: PLC0415
 
         # 估算 Token 数
         counter = get_token_counter()
@@ -470,7 +469,7 @@ class LLMClient(ABC):
                 session_id=session_id,
             )
         except (BudgetExceededException, QuotaExhaustedException) as e:
-            raise BudgetExhaustedError(
+            raise BudgetExhaustedError(  # noqa: B904
                 message=str(e),
                 remaining_tokens=0,
                 usage_percent=getattr(e, "usage_percent", 100.0),
@@ -483,7 +482,7 @@ class LLMClient(ABC):
         session_id: str | None,
     ) -> None:
         """调用后记录用量"""
-        from src.cost_control.budget_manager import get_budget_manager
+        from src.cost_control.budget_manager import get_budget_manager  # noqa: PLC0415
 
         budget_manager = get_budget_manager()
         await budget_manager.record_usage(

@@ -20,7 +20,7 @@ _artifact_service: ArtifactService | None = None
 
 def get_artifact_service() -> ArtifactService:
     """获取全局制品服务单例。"""
-    global _artifact_service
+    global _artifact_service  # noqa: PLW0603
     if _artifact_service is None:
         _artifact_service = ArtifactService()
     return _artifact_service
@@ -28,7 +28,7 @@ def get_artifact_service() -> ArtifactService:
 
 def reset_artifact_service() -> None:
     """重置全局单例（测试用）。"""
-    global _artifact_service
+    global _artifact_service  # noqa: PLW0603
     _artifact_service = None
 
 

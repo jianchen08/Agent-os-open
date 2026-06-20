@@ -49,7 +49,7 @@ def _reconstruct_tool_calls(messages: list[dict[str, Any]]) -> None:
     Args:
         messages: 恢复的对话历史消息列表（原地修改）
     """
-    import logging as _logging
+    import logging as _logging  # noqa: PLC0415
     _log = _logging.getLogger(__name__)
 
     i = 0
@@ -176,7 +176,7 @@ class TaskWorker(
 
         # 通过 ServiceProvider 注册全局引用，供 task_manage cancel 调用
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             get_service_provider().register("task_worker", self)
         except Exception:
             logger.warning("TaskWorker: ServiceProvider 注册失败，不阻塞启动", exc_info=True)
@@ -203,14 +203,14 @@ class TaskWorker(
                   不依赖外部 services 注入，lifecycle 是 TaskWorker 自身的职责。
         """
         try:
-            from pathlib import Path as _Path
+            from pathlib import Path as _Path  # noqa: PLC0415
 
-            from tools.builtin.resource_merge import ResourceMergeTool
+            from tools.builtin.resource_merge import ResourceMergeTool  # noqa: PLC0415
 
             project_root = str(_Path.cwd())
             resource_merge = ResourceMergeTool(base_path=project_root)
 
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             iso_config: dict[str, Any] = get_config_center().get("isolation/isolation_config.yaml") or {}
 
             ws_meta_store: dict[str, Any] = {}
@@ -226,7 +226,7 @@ class TaskWorker(
             # 注册到 ServiceProvider，供 task_evaluate / _task_cleanup 等跨模块
             # 通过 provider.get("workspace_lifecycle_manager") 获取同一实例。
             try:
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
                 get_service_provider().register("workspace_lifecycle_manager", lifecycle)
             except Exception:
                 logger.warning(
@@ -274,7 +274,7 @@ class TaskWorker(
 
         if self._task_service:
             try:
-                from tasks.types import TaskStatus
+                from tasks.types import TaskStatus  # noqa: PLC0415
                 remaining_ids = list(self._contexts.keys())
                 for tid in remaining_ids:
                     try:

@@ -31,9 +31,9 @@ _NO_PROVIDER_MESSAGE = (
 
 def _enrich_video_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     """动态注入当前可用的视频 Provider 列表到工具 Schema。"""
-    import copy
+    import copy  # noqa: PLC0415
 
-    from tools.media.base import MediaType
+    from tools.media.base import MediaType  # noqa: PLC0415
 
     media_registry = services.get("media_provider_registry")
     if media_registry is None:
@@ -213,7 +213,7 @@ class VideoGenerateTool(BuiltinTool):
             MediaProviderRegistry 实例，获取失败返回 None
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             return provider.get("media_provider_registry")
@@ -236,15 +236,15 @@ class VideoGenerateTool(BuiltinTool):
             return None
 
         try:
-            from tools.media.base import MediaType
-            from tools.media.fallback import FallbackStrategy
+            from tools.media.base import MediaType  # noqa: PLC0415
+            from tools.media.fallback import FallbackStrategy  # noqa: PLC0415
 
             # 处理指定的 Provider
             provider_name = (inputs or {}).get("provider")
             if provider_name:
                 provider = self._provider_registry.get(provider_name)
                 if provider:
-                    return ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
+                    return ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
                 logger.warning(
                     "[VideoGenerate] 指定的 Provider '%s' 不存在，使用自动选择",
                     provider_name,

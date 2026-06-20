@@ -31,8 +31,8 @@ def _get_connector_registry() -> Any:
     Returns:
         ConnectorRegistry 实例
     """
-    from connectors.registry import ConnectorRegistry
-    from infrastructure.service_provider import get_service_provider
+    from connectors.registry import ConnectorRegistry  # noqa: PLC0415
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     provider = get_service_provider()
     return provider.get_or_create(
@@ -79,7 +79,7 @@ async def open_file_in_ide(
             "file_path": file_path,
         }
 
-    from connectors.types import ConnectorAction
+    from connectors.types import ConnectorAction  # noqa: PLC0415
 
     params: dict[str, Any] = {"file_path": file_path}
     if line is not None:
@@ -197,7 +197,7 @@ async def get_file_content(
             "message": f"文件不存在或不是普通文件: {path}",
         }
 
-    MAX_SIZE = 10 * 1024 * 1024
+    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
     file_size = full_path.stat().st_size
     if file_size > MAX_SIZE:
         return {
@@ -241,7 +241,7 @@ async def save_file_content(
     if not str(full_path).startswith(str(workspace_path)):
         return {"success": False, "message": "路径超出工作空间范围"}
 
-    MAX_SIZE = 10 * 1024 * 1024
+    MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
     if len(content.encode("utf-8")) > MAX_SIZE:
         return {"success": False, "message": f"内容过大（{len(content.encode('utf-8'))} 字节），超过 {MAX_SIZE // (1024*1024)}MB 限制"}
 
@@ -273,7 +273,7 @@ def _validate_path_in_workspace(workspace_path: Path, rel_path: str) -> Path | N
 
 
 @workspaces_router.post("/{container_task_id}/create-entry", summary="创建文件或文件夹")
-async def create_entry(
+async def create_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -323,7 +323,7 @@ async def create_entry(
 
 
 @workspaces_router.delete("/{container_task_id}/entries", summary="删除文件或文件夹")
-async def delete_entry(
+async def delete_entry(  # noqa: PLR0911
     container_task_id: str,
     path: str = Query(..., description="要删除的文件或文件夹相对路径"),
     _user: dict = Depends(require_auth),
@@ -359,7 +359,7 @@ async def delete_entry(
 
     try:
         if full_path.is_dir():
-            import shutil
+            import shutil  # noqa: PLC0415
             shutil.rmtree(full_path)
         else:
             full_path.unlink()
@@ -371,7 +371,7 @@ async def delete_entry(
 
 
 @workspaces_router.post("/{container_task_id}/rename-entry", summary="重命名文件或文件夹")
-async def rename_entry(
+async def rename_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -436,7 +436,7 @@ async def rename_entry(
 
 
 @workspaces_router.post("/{container_task_id}/move-entry", summary="移动文件或文件夹")
-async def move_entry(
+async def move_entry(  # noqa: PLR0911
     container_task_id: str,
     body: dict[str, Any],
     _user: dict = Depends(require_auth),
@@ -493,7 +493,7 @@ async def move_entry(
     new_rel_path = str(Path(destination_dir) / full_source.name)
 
     try:
-        import shutil
+        import shutil  # noqa: PLC0415
         shutil.move(str(full_source), str(dest_full_path))
         return {
             "success": True,
@@ -559,7 +559,7 @@ async def open_workspace_in_ide(
         }
 
     # 3. 通过连接器发送 open_folder 操作
-    from connectors.types import ConnectorAction
+    from connectors.types import ConnectorAction  # noqa: PLC0415
 
     action = ConnectorAction(
         action_type="open_folder",
@@ -627,7 +627,7 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
         return str(_get_project_root())
 
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
         task_service = provider.get_or_create(

@@ -24,7 +24,7 @@ def get_global_container() -> Container:
     Returns:
         全局容器实例
     """
-    global _global_container
+    global _global_container  # noqa: PLW0603
 
     if _global_container is None:
         _global_container = Container()
@@ -40,14 +40,14 @@ def set_global_container(container: Container) -> None:
     Args:
         container: 容器实例
     """
-    global _global_container
+    global _global_container  # noqa: PLW0603
     _global_container = container
     logger.info("Global DI container set")
 
 
 def reset_global_container() -> None:
     """重置全局容器（主要用于测试）"""
-    global _global_container
+    global _global_container  # noqa: PLW0603
     _global_container = None
     logger.info("Global DI container reset")
 
@@ -66,7 +66,7 @@ def get_service(name: str, default: Any = None) -> Any:
         服务实例，未找到时返回 default
     """
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
         result = provider.get(name)
@@ -78,7 +78,7 @@ def get_service(name: str, default: Any = None) -> Any:
 
 async def dispose_global_container() -> None:
     """销毁全局容器"""
-    global _global_container
+    global _global_container  # noqa: PLW0603
 
     if _global_container is not None:
         await _global_container.dispose()

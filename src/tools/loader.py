@@ -128,7 +128,7 @@ class DynamicToolLoader:
 
                 # 检查是否是 BuiltinTool 子类（但不是 BuiltinTool 本身或抽象基类）
                 try:
-                    from tools.builtin.base import BuiltinTool
+                    from tools.builtin.base import BuiltinTool  # noqa: PLC0415
 
                     if not issubclass(attr, BuiltinTool):
                         continue
@@ -202,7 +202,7 @@ class DynamicToolLoader:
 
         return tool_name in self._tool_modules
 
-    async def load_tool(self, tool_name: str) -> str:
+    async def load_tool(self, tool_name: str) -> str:  # noqa: PLR0912
         """动态加载工具"""
         # 确保已完成发现
         if not self._discovered:
@@ -254,7 +254,7 @@ class DynamicToolLoader:
                     raise
             else:
                 tool_definition = tool_instance.get_tool_definition()
-                tool_instance = tool_instance
+                tool_instance = tool_instance  # noqa: PLW0127
 
             # 注册工具
             if tool_instance is not None:
@@ -326,7 +326,7 @@ class DynamicToolLoader:
                     logger.warning(f"[动态加载] 无法加载工具 | tool_name={tool_name}")
 
 
-    def load_tool_sync(self, tool_name: str) -> str:
+    def load_tool_sync(self, tool_name: str) -> str:  # noqa: PLR0912
         """同步动态加载工具（从 load_tool 提取的纯同步路径）"""
         if not self._discovered:
             self._discover_tools()
@@ -463,12 +463,12 @@ def get_dynamic_tool_loader() -> DynamicToolLoader | None:
 
 def set_dynamic_tool_loader(loader: DynamicToolLoader) -> None:
     """设置全局动态工具加载器"""
-    global _global_loader
+    global _global_loader  # noqa: PLW0603
     _global_loader = loader
 
 
 def init_dynamic_tool_loader(registry: ToolRegistry) -> DynamicToolLoader:
     """初始化全局动态工具加载器"""
-    global _global_loader
+    global _global_loader  # noqa: PLW0603
     _global_loader = DynamicToolLoader(registry)
     return _global_loader

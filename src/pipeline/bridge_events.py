@@ -41,7 +41,7 @@ class BridgeEventsMixin:
                 "duration_ms": duration_ms,
             }))
 
-    async def _handle_chunk(self, chunk: dict) -> None:
+    async def _handle_chunk(self, chunk: dict) -> None:  # noqa: PLR0912
         """处理单个 chunk 事件，转换为前端协议格式并发送。
 
         Phase 1 改造：不再累加到 _accumulated_content / _collected_parts，
@@ -107,6 +107,13 @@ class BridgeEventsMixin:
 
         elif chunk_type == "tool_result":
             await self._handle_tool_result(chunk)
+
+        elif chunk_type == "tool_multimedia_result":
+            await self._send_event(self._make_event("tool_multimedia_result", {
+                "count": chunk.get("count", 0),
+                "multimedia": chunk.get("multimedia", []),
+                "sequence": self._next_part_seq(),
+            }))
 
         elif chunk_type == "iteration":
             await self._close_thinking_if_active(None)

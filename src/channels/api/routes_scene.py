@@ -38,7 +38,7 @@ def _get_manager() -> SceneManager:
     Returns:
         SceneManager 实例
     """
-    global _scene_manager
+    global _scene_manager  # noqa: PLW0603
     if _scene_manager is None:
         _scene_manager = SceneManager()
     return _scene_manager

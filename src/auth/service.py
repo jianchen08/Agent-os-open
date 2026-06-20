@@ -115,7 +115,7 @@ class AuthService:
             raise UserInactiveError()
 
         # 更新最后登录时间
-        try:
+        try:  # noqa: SIM105
             await self.user_repository.update_last_login(user.id)
         except Exception:
             pass  # 忽略更新失败

@@ -33,7 +33,7 @@ class CLIRunnerMixin:
     # 流式输出回调
     # ------------------------------------------------------------------
 
-    def _build_on_chunk_callback(self, console: Console) -> Any:
+    def _build_on_chunk_callback(self, console: Console) -> Any:  # noqa: PLR0915
         """构建流式输出的 on_chunk 回调。
 
         处理五种 chunk 类型：
@@ -55,7 +55,7 @@ class CLIRunnerMixin:
         self._text_output_received = False
         self._last_chunk_time = 0
 
-        def on_chunk(chunk: dict[str, Any]) -> None:
+        def on_chunk(chunk: dict[str, Any]) -> None:  # noqa: PLR0911,PLR0912,PLR0915
             """流式回调：将管道事件实时输出到终端。"""
             # 子对话期间抑制管道输出，缓冲到 _streaming_buffer
             if self._suppress_streaming:
@@ -102,7 +102,7 @@ class CLIRunnerMixin:
                             _displayed_tool_indices.add(tc_idx)
                             args_str = getattr(func, "arguments", "")
                             try:
-                                import json as _json
+                                import json as _json  # noqa: PLC0415
 
                                 args = (
                                     _json.loads(args_str) if args_str else {}
@@ -185,7 +185,7 @@ class CLIRunnerMixin:
                             "arguments", tc.get("args", "")
                         )
                         try:
-                            import json
+                            import json  # noqa: PLC0415
 
                             args = (
                                 json.loads(args_str)
@@ -386,7 +386,7 @@ class CLIRunnerMixin:
         self._suppress_streaming = True
         try:
             human_svc = self._services.get("human_interaction_service")
-            from channels.cli.cli_interaction import run_sub_conversation
+            from channels.cli.cli_interaction import run_sub_conversation  # noqa: PLC0415
 
             await run_sub_conversation(
                 console=console,
@@ -409,7 +409,7 @@ class CLIRunnerMixin:
         self._input_adapter.drain_stdin()
         return None
 
-    async def _wait_for_next_event(
+    async def _wait_for_next_event(  # noqa: PLR0912,PLR0915
         self,
         cli_notifier: Any,
         console: Console,
@@ -515,7 +515,7 @@ class CLIRunnerMixin:
                     human_svc = self._services.get(
                         "human_interaction_service"
                     )
-                    from channels.cli.cli_interaction import (
+                    from channels.cli.cli_interaction import (  # noqa: PLC0415
                         run_sub_conversation,
                     )
 
@@ -653,7 +653,7 @@ class CLIRunnerMixin:
         if task_service is None:
             return stats
         try:
-            from tasks.types import TaskStatus
+            from tasks.types import TaskStatus  # noqa: PLC0415
 
             stats["running"] = len(
                 task_service.list_by_status(TaskStatus.RUNNING)

@@ -147,7 +147,7 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             要写入 state 的字段字典，含 system_message、compression_messages、dynamic_vars
         """
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt  # noqa: PLC0415
         _t0 = _dt.now()
 
         updates: dict[str, Any] = {}
@@ -274,7 +274,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         return "\n\n".join(parts)
 
-    async def _resolve_single_var_content(
+    async def _resolve_single_var_content(  # noqa: PLR0912,PLR0915
         self, ctx: PluginContext, var_def: dict, session_id: str, constraints: dict,
     ) -> str:
         """解析单个变量的内容，供 _load_static_vars 和占位符替换共用。
@@ -493,7 +493,7 @@ class PromptBuildPlugin(IInputPlugin):
             return None
         return Path(base) / rel_path
 
-    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
+    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:  # noqa: PLR0912
         """解析单个 {{占位符}} 并返回替换内容。
 
         将占位符语法转换为兼容的 var_def 字典，复用 _resolve_single_var_content。
@@ -580,7 +580,7 @@ class PromptBuildPlugin(IInputPlugin):
         for idx, match in enumerate(matches):
             # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
             # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
-            from datetime import datetime as _ph_t
+            from datetime import datetime as _ph_t  # noqa: PLC0415
             _ph_s = _ph_t.now()
             logger.info(
                 "[%s] resolve_placeholder BEGIN | idx=%d/%d | %s",
@@ -632,7 +632,7 @@ class PromptBuildPlugin(IInputPlugin):
         if not static_vars_def:
             return ""
 
-        from datetime import datetime as _rt
+        from datetime import datetime as _rt  # noqa: PLC0415
 
         parts: list[str] = []
         session_id = ctx.state.get("context.session_id", "")
@@ -716,7 +716,7 @@ class PromptBuildPlugin(IInputPlugin):
         # 检索调用是 prompt_build 卡死的头号嫌疑点：此处 await 若永不返回，
         # 整个 prompt_build 协程永久挂起、零日志（与历史多次卡死现象一致）。
         # 加 BEGIN/END 边界日志，下次卡死时可精确定位是否卡在 retrieve。
-        from datetime import datetime as _rt
+        from datetime import datetime as _rt  # noqa: PLC0415
         _rt_s = _rt.now()
         logger.info(
             "[%s] memory_service.retrieve BEGIN | tags=%s top_k=%d method=%s",
@@ -779,7 +779,7 @@ class PromptBuildPlugin(IInputPlugin):
                 file_path = matched.get("path", "")
                 if file_path:
                     try:
-                        from pathlib import Path
+                        from pathlib import Path  # noqa: PLC0415
                         p = Path(file_path)
                         if p.exists():
                             return await asyncio.to_thread(p.read_text, "utf-8")
@@ -792,7 +792,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         return ""
 
-    async def _load_compression_messages(
+    async def _load_compression_messages(  # noqa: PLR0912,PLR0915
         self,
         ctx: PluginContext,
     ) -> list[dict[str, Any]]:
@@ -811,7 +811,7 @@ class PromptBuildPlugin(IInputPlugin):
         except KeyError:
             return messages
 
-        from pipeline.types import StateKeys
+        from pipeline.types import StateKeys  # noqa: PLC0415
         pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         if not pipeline_run_id:
             return messages
@@ -831,7 +831,7 @@ class PromptBuildPlugin(IInputPlugin):
             return messages
 
         # ── 预算计算 ──
-        from memory.context_compressor import CompressionConfig
+        from memory.context_compressor import CompressionConfig  # noqa: PLC0415
         context_window = ctx.state.get("context_window", 128000)
         config = CompressionConfig.from_yaml_config(context_window)
         budgets = config.get_budgets()
@@ -983,7 +983,7 @@ class PromptBuildPlugin(IInputPlugin):
             return 0
         return max(1, len(text) // 2)
 
-    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:
+    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:  # noqa: PLR0912,PLR0915
         """构建动态变量消息。
 
         产出完整的消息 dict（含 role/name/content），

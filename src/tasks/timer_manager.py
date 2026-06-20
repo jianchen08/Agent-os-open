@@ -25,10 +25,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
-import yaml
+import yaml  # noqa: F401
 
 if TYPE_CHECKING:
     from tasks.service import TaskService
@@ -181,7 +181,7 @@ class TimerManager:
         不再依赖 config.system_config 模块。
         """
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             config = get_config_center().get("system/long_term_task.yaml")
             if config and isinstance(config, dict):
                 self._config = self._merge_config(self.DEFAULT_CONFIG, config)
@@ -443,7 +443,7 @@ class TimerManager:
         """获取计时器总数"""
         return len(self._timers)
 
-    async def restore_from_storage(
+    async def restore_from_storage(  # noqa: PLR0912
         self,
         task_service: TaskService,
         callback: Callable[[str], None] | None = None,

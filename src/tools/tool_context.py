@@ -20,7 +20,6 @@ from __future__ import annotations
 
 # ── 管道类型 re-export ──────────────────────────────────
 # 集中导入，tools/builtin/ 不再直接 from pipeline import
-
 from pipeline.config_store import PipelineConfig, PipelineConfigStore
 from pipeline.engine import PipelineEngine
 from pipeline.hot_swap import HotSwapManager

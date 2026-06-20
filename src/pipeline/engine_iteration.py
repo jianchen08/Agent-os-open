@@ -241,7 +241,7 @@ async def _handle_target_wait(
     挂起前保存 _suspended_state 与 _wake_event（避免 inject_message 窗口丢消息）。
     唤醒后若存在 raw_tool_calls 则走 tool_execute，否则 llm_call。
     """
-    import asyncio
+    import asyncio  # noqa: PLC0415
 
     engine._suspended_state = engine._suspend_copy_state(state)
     # 在设置 _suspended_state 的同时创建 _wake_event，避免 inject_message

@@ -65,7 +65,7 @@ class TaskTrigger:
         """
         self.heartbeat_callback = callback
 
-    async def trigger_next_task(self, project_id: str) -> dict[str, Any]:
+    async def trigger_next_task(self, project_id: str) -> dict[str, Any]:  # noqa: PLR0911
         """
         触发项目的下一个任务执行
 

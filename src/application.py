@@ -45,7 +45,7 @@ class Application:
         self.project_root: Path = project_root or Path.cwd()
         self.services: dict[str, Any] = {}
 
-    def build_services(self, agent_registry: Any | None = None) -> dict[str, Any]:
+    def build_services(self, agent_registry: Any | None = None) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """构建共享服务字典（唯一入口）。
 
         Args:
@@ -60,14 +60,14 @@ class Application:
 
         # ── 1. ToolRegistry ──────────────────────────────
         try:
-            from tools.registry import ToolRegistry
+            from tools.registry import ToolRegistry  # noqa: PLC0415
 
             tool_registry = ToolRegistry()
             self._register_basic_tools(tool_registry)
             services["tool_registry"] = tool_registry
             logger.info("服务已创建: tool_registry (%d 个基础工具)", tool_registry.count())
 
-            from tools.auto_loader import init_tool_auto_loader
+            from tools.auto_loader import init_tool_auto_loader  # noqa: PLC0415
 
             init_tool_auto_loader(tool_registry)
             logger.info("ToolAutoLoader 已初始化")
@@ -78,7 +78,7 @@ class Application:
 
         # ── 1.5 MediaProviderRegistry ────────────────────
         try:
-            from tools.media.provider_registry import MediaProviderRegistry
+            from tools.media.provider_registry import MediaProviderRegistry  # noqa: PLC0415
 
             media_registry = MediaProviderRegistry()
             config_path = self.project_root / "config" / "models" / "media_providers.yaml"
@@ -99,7 +99,7 @@ class Application:
         # ── 2. JsonMemoryStore ───────────────────────────
         json_store: Any = None
         try:
-            from memory.storage.json_store import JsonMemoryStore
+            from memory.storage.json_store import JsonMemoryStore  # noqa: PLC0415
 
             json_store = JsonMemoryStore()
             logger.info("服务已创建: JsonMemoryStore")
@@ -116,8 +116,8 @@ class Application:
         # ── 3. PgVectorRetriever（可选）──────────────────
         vector_retriever: Any = None
         try:
-            from infrastructure.db import get_async_session, init_db
-            from memory.storage.pgvector_retriever import PgVectorRetriever
+            from infrastructure.db import get_async_session, init_db  # noqa: PLC0415
+            from memory.storage.pgvector_retriever import PgVectorRetriever  # noqa: PLC0415
 
             session = asyncio.get_event_loop().run_until_complete(get_async_session())
             if session is not None and json_store is not None:
@@ -153,7 +153,7 @@ class Application:
         tag_service: Any = None
         chunk_service: Any = None
         try:
-            from memory.tag_service import TagService
+            from memory.tag_service import TagService  # noqa: PLC0415
 
             tag_service = TagService(
                 content_store=json_store,
@@ -169,7 +169,7 @@ class Application:
         _t0 = _time.monotonic()
 
         try:
-            from memory.chunk_service import ChunkService
+            from memory.chunk_service import ChunkService  # noqa: PLC0415
 
             chunk_service = ChunkService(
                 content_store=json_store,
@@ -186,8 +186,8 @@ class Application:
 
         # ── 5. MemoryContextService ──────────────────────
         try:
-            from config.models import get_model_config_loader as _get_loader
-            from memory.memory_context_service import MemoryContextService
+            from config.models import get_model_config_loader as _get_loader  # noqa: PLC0415
+            from memory.memory_context_service import MemoryContextService  # noqa: PLC0415
 
             _loader = _get_loader()
             _llm_data = _loader._load_llm_data()
@@ -196,7 +196,7 @@ class Application:
             _llm_conf = _loader.get_llm_core_config(_model_id) if _model_id else {}
             _ctx_window = _llm_conf.get("context_window", 128000)
 
-            from config.defaults import COMPRESS_TRIGGER_RATIO
+            from config.defaults import COMPRESS_TRIGGER_RATIO  # noqa: PLC0415
             context_service = MemoryContextService(
                 config={
                     "context_window": _ctx_window,
@@ -212,7 +212,7 @@ class Application:
 
         # ── 6. TagNetworkRetriever ───────────────────────
         try:
-            from memory.tag_network import TagNetworkConfig, TagNetworkRetriever
+            from memory.tag_network import TagNetworkConfig, TagNetworkRetriever  # noqa: PLC0415
 
             tag_network_retriever = TagNetworkRetriever(config=TagNetworkConfig())
             services["tag_network_retriever"] = tag_network_retriever
@@ -224,7 +224,7 @@ class Application:
 
         # ── 7. MemoryService ─────────────────────────────
         try:
-            from memory.service import MemoryService
+            from memory.service import MemoryService  # noqa: PLC0415
 
             memory_service = MemoryService(
                 episode_storage=memory_store,
@@ -243,7 +243,7 @@ class Application:
 
         # ── 8. ExecutionRecordStorage ────────────────────
         try:
-            from infrastructure.execution_record_storage import ExecutionRecordStorage
+            from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: PLC0415
 
             services["execution_record_storage"] = ExecutionRecordStorage(
                 data_dir=str(self.project_root / "data" / "pipelines")
@@ -254,7 +254,7 @@ class Application:
 
         # ── 9. MemoryMaintenanceService ─────────────────
         try:
-            from memory.maintenance import MemoryMaintenanceService
+            from memory.maintenance import MemoryMaintenanceService  # noqa: PLC0415
 
             _maintenance_config = self._load_maintenance_config()
 
@@ -315,7 +315,7 @@ class Application:
         # ── 10. EventBus ─────────────────────────────────
         # 使用 core event_bus 全局单例，确保 TaskWorker 和事件发射者使用同一实例
         try:
-            from src.core.event_bus import get_event_bus
+            from src.core.event_bus import get_event_bus  # noqa: PLC0415
 
             event_bus = get_event_bus()
             services["event_bus"] = event_bus
@@ -325,7 +325,7 @@ class Application:
 
         # ── 11. TaskService（通过 EventBus 自动广播状态变更）───
         try:
-            from tasks.service import TaskService
+            from tasks.service import TaskService  # noqa: PLC0415
 
             task_service = TaskService(event_bus=services.get("event_bus"))
             services["task_service"] = task_service
@@ -335,7 +335,7 @@ class Application:
             # 用同步版本：asyncio.get_event_loop().run_until_complete() 在 Python 3.12+
             # 同步上下文里会抛 RuntimeError，导致注入失败、容器永不清理
             try:
-                from isolation.manager import get_isolation_manager_sync
+                from isolation.manager import get_isolation_manager_sync  # noqa: PLC0415
 
                 _manager = get_isolation_manager_sync()
                 _manager.set_task_repository(task_service._storage)
@@ -348,7 +348,7 @@ class Application:
 
         # ── 12. TimerManager ─────────────────────────────
         try:
-            from tasks.timer_manager import TimerManager
+            from tasks.timer_manager import TimerManager  # noqa: PLC0415
 
             timer_manager = TimerManager.get_instance()
             services["timer_manager"] = timer_manager
@@ -363,8 +363,8 @@ class Application:
 
         # ── 14. PipelineCheckpointManager + PipelineRecovery ──
         try:
-            from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager
-            from infrastructure.checkpoint.recovery import PipelineRecovery
+            from infrastructure.checkpoint.pipeline_checkpoint import PipelineCheckpointManager  # noqa: PLC0415
+            from infrastructure.checkpoint.recovery import PipelineRecovery  # noqa: PLC0415
 
             checkpoint_manager = PipelineCheckpointManager()
             recovery = PipelineRecovery(checkpoint_manager)
@@ -376,7 +376,7 @@ class Application:
 
         # ── 15. SessionService ───────────────────────────
         try:
-            from infrastructure.session import SessionService
+            from infrastructure.session import SessionService  # noqa: PLC0415
 
             session_dir = self.project_root / "data" / "sessions"
             services["session_service"] = SessionService(session_dir=session_dir)
@@ -398,7 +398,7 @@ class Application:
         # 供 infrastructure 层通过 MemoryStoreProtocol 消费，
         # 解耦 infrastructure 对 channels 的逆向依赖。
         try:
-            from channels.api.memory_store import store as _api_store
+            from channels.api.memory_store import store as _api_store  # noqa: PLC0415
             services["api_store"] = _api_store
             logger.info("服务已注入: api_store")
         except Exception as exc:
@@ -414,7 +414,7 @@ class Application:
     def _register_to_service_provider(services: dict[str, Any]) -> None:
         """将服务字典注册到 ServiceProvider 单例。"""
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             provider.register_services(services)
@@ -424,7 +424,7 @@ class Application:
     def create_gateway(self) -> Any | None:
         """创建 ChannelGateway 实例。"""
         try:
-            from channels.gateway.channel_gateway import ChannelGateway
+            from channels.gateway.channel_gateway import ChannelGateway  # noqa: PLC0415
 
             gateway = ChannelGateway()
             logger.info("ChannelGateway 通过 Application 创建完成")
@@ -435,10 +435,10 @@ class Application:
 
     def _register_basic_tools(self, registry: Any) -> None:
         """注册基础工具（无需依赖注入）。"""
-        import datetime
-        import math as _math
+        import datetime  # noqa: PLC0415
+        import math as _math  # noqa: PLC0415
 
-        from tools.types import Tool, ToolSource
+        from tools.types import Tool, ToolSource  # noqa: PLC0415
 
         def current_time(params: dict[str, Any]) -> str:
             return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -507,9 +507,9 @@ class Application:
         Args:
             media_registry: MediaProviderRegistry 实例（已加载配置）
         """
-        from tools.media.base import MediaProviderConfig, MediaType
+        from tools.media.base import MediaProviderConfig, MediaType  # noqa: PLC0415
 
-        _PROVIDER_CLASS_MAP: dict[str, str] = {
+        _PROVIDER_CLASS_MAP: dict[str, str] = {  # noqa: N806
             "ComfyUIProvider": "tools.media.providers.comfyui_provider",
             "EdgeTTSProvider": "tools.media.providers.edge_tts_provider",
             "MiniMaxImageProvider": "tools.media.providers.minimax_provider",
@@ -518,7 +518,7 @@ class Application:
             "MiniMaxTTSProvider": "tools.media.providers.minimax_tts_provider",
         }
 
-        _MEDIA_TYPE_MAP: dict[str, MediaType] = {
+        _MEDIA_TYPE_MAP: dict[str, MediaType] = {  # noqa: N806
             "tts": MediaType.TTS,
             "image": MediaType.IMAGE,
             "video": MediaType.VIDEO,
@@ -537,7 +537,7 @@ class Application:
                     continue
 
                 try:
-                    import importlib
+                    import importlib  # noqa: PLC0415
 
                     module = importlib.import_module(module_path)
                     provider_cls = getattr(module, class_name)
@@ -572,7 +572,7 @@ class Application:
                     )
 
     @staticmethod
-    def _resolve_api_key(class_name: str, raw_config: dict[str, Any]) -> str:
+    def _resolve_api_key(class_name: str, raw_config: dict[str, Any]) -> str:  # noqa: ARG004
         """解析 Provider 所需的 API Key。
 
         依次尝试以下来源：
@@ -588,13 +588,13 @@ class Application:
         Returns:
             解析到的 API Key 字符串
         """
-        _LLM_PROVIDER_MAP: dict[str, str] = {
+        _LLM_PROVIDER_MAP: dict[str, str] = {  # noqa: N806
             "MiniMaxImageProvider": "minimax",
             "MiniMaxMusicProvider": "minimax",
             "MiniMaxVideoProvider": "minimax",
             "MiniMaxTTSProvider": "minimax",
         }
-        _ENV_KEY_MAP: dict[str, str] = {
+        _ENV_KEY_MAP: dict[str, str] = {  # noqa: N806
             "MiniMaxImageProvider": "MINIMAX_API_KEY",
             "MiniMaxMusicProvider": "MINIMAX_API_KEY",
             "MiniMaxVideoProvider": "MINIMAX_API_KEY",
@@ -604,7 +604,7 @@ class Application:
         llm_provider = _LLM_PROVIDER_MAP.get(class_name)
         if llm_provider:
             try:
-                from config.models import get_model_config_loader
+                from config.models import get_model_config_loader  # noqa: PLC0415
 
                 loader = get_model_config_loader()
                 provider_conf = loader.get_provider_config(llm_provider)
@@ -618,7 +618,7 @@ class Application:
 
         env_key = _ENV_KEY_MAP.get(class_name)
         if env_key:
-            import os
+            import os  # noqa: PLC0415
 
             return os.environ.get(env_key, "")
 
@@ -628,7 +628,7 @@ class Application:
     def _build_embedding_fn() -> Any:
         """构建嵌入函数（异步，文本→向量）。"""
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             loader = get_model_config_loader()
             embedding_cfg = loader._load_embedding_data()
@@ -640,7 +640,7 @@ class Application:
                 provider = emb_info.get("provider", "")
 
                 if provider in ("openai", "openai_compatible"):
-                    import os
+                    import os  # noqa: PLC0415
 
                     api_key = os.environ.get(emb_info.get("api_key_env", "OPENAI_API_KEY"), "")
                     base_url = emb_info.get("base_url")
@@ -648,7 +648,7 @@ class Application:
 
                     async def _openai_embed(text: str) -> list[float]:
                         try:
-                            import httpx
+                            import httpx  # noqa: PLC0415
 
                             url = f"{base_url}/embeddings" if base_url else _DEFAULT_OPENAI_EMBEDDINGS_URL
                             async with httpx.AsyncClient() as client:
@@ -682,7 +682,7 @@ class Application:
         services: dict[str, Any] | None = None,
     ) -> Any:
         """创建 PipelineEngine 实例。"""
-        from pipeline.engine import PipelineEngine
+        from pipeline.engine import PipelineEngine  # noqa: PLC0415
 
         svc = services or self.services
         checkpoint_mgr = svc.get("checkpoint_manager")
@@ -707,7 +707,7 @@ class Application:
         当 services 中缺少 event_bus 或 task_service 时，尝试懒创建并回填，
         避免因初始化顺序或依赖缺失导致 TaskWorker 无法启动。
         """
-        from infrastructure.task_worker import TaskWorker
+        from infrastructure.task_worker import TaskWorker  # noqa: PLC0415
 
         svc = services if services is not None else self.services
 
@@ -716,7 +716,7 @@ class Application:
             logger.warning("services 中缺少 event_bus，尝试懒创建")
             # 使用 core event_bus 全局单例
             try:
-                from src.core.event_bus import get_event_bus
+                from src.core.event_bus import get_event_bus  # noqa: PLC0415
 
                 event_bus = get_event_bus()
                 svc["event_bus"] = event_bus
@@ -729,7 +729,7 @@ class Application:
         if not task_service:
             logger.warning("services 中缺少 task_service，尝试懒创建")
             try:
-                from tasks.service import TaskService
+                from tasks.service import TaskService  # noqa: PLC0415
                 task_service = TaskService(event_bus=event_bus)
                 svc["task_service"] = task_service
                 logger.info("task_service 懒创建成功")
@@ -754,7 +754,7 @@ class Application:
         plugin_registry: Any,
     ) -> Callable[[], Any]:
         """创建 PipelineEngine 工厂函数。"""
-        from pipeline.engine import PipelineEngine
+        from pipeline.engine import PipelineEngine  # noqa: PLC0415
 
         def factory() -> Any:
             return PipelineEngine(
@@ -765,7 +765,7 @@ class Application:
             )
 
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             provider.register_services({"pipeline_factory": factory})
@@ -788,7 +788,7 @@ class Application:
         if not config_path.exists():
             return {}
         try:
-            import yaml
+            import yaml  # noqa: PLC0415
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             return data.get("maintenance", {}) if isinstance(data, dict) else {}
         except Exception as exc:

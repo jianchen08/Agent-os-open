@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import logging
 import random
-import re
+import re  # noqa: F401
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -180,7 +180,7 @@ class BrowserSearchTool(BuiltinTool):
     async def _launch_browser(self) -> None:
         """启动 Playwright 浏览器（懒初始化）"""
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import async_playwright  # noqa: PLC0415
         except ImportError as exc:
             raise ImportError(
                 "Playwright 未安装。请运行: pip install playwright && playwright install chromium"

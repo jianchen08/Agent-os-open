@@ -14,11 +14,11 @@ import contextlib
 import logging
 from dataclasses import asdict
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
-from enum import Enum
 
 from tasks.types import TaskModel, TaskStatus
 from utils.enum_utils import safe_enum_value
@@ -214,8 +214,8 @@ class TaskStorage:
         Returns:
             TaskModel 实例
         """
-        from agents.types import AgentLevel
-        from tasks.types import TaskPriority
+        from agents.types import AgentLevel  # noqa: PLC0415
+        from tasks.types import TaskPriority  # noqa: PLC0415
 
         if isinstance(data.get("status"), str):
             data["status"] = TaskStatus(data["status"])

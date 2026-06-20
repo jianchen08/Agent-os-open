@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 from typing import Any
 
 from tools.builtin.base import BuiltinTool
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 def _enrich_image_schema(tool: Tool, services: dict[str, Any]) -> Tool:
     """动态注入当前可用的图像 Provider 列表到工具 Schema。"""
-    import copy
+    import copy  # noqa: PLC0415
 
     media_registry = services.get("media_provider_registry")
     if media_registry is None:
@@ -182,6 +184,32 @@ class ImageGenerateTool(BuiltinTool):
         """获取图像生成工具的 Schema 丰富器。"""
         return _enrich_image_schema
 
+    @staticmethod
+    def _build_multimodal_content(file_path: str) -> list[dict[str, Any]] | None:
+        """读取生成的图片文件，构建 OpenAI vision 格式的多模态内容块。
+
+        Args:
+            file_path: 图片文件路径
+
+        Returns:
+            多模态内容块列表，文件不存在或读取失败时返回 None
+        """
+        if not file_path or not os.path.isfile(file_path):  # noqa: PTH113
+            return None
+        try:
+            with open(file_path, "rb") as f:
+                b64_data = base64.b64encode(f.read()).decode("utf-8")
+        except OSError:
+            logger.warning("[ImageGenerate] 读取图片文件失败: %s", file_path)
+            return None
+
+        ext = os.path.splitext(file_path)[1].lower()  # noqa: PTH122
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                     ".webp": "image/webp", ".gif": "image/gif"}
+        mime_type = mime_map.get(ext, "image/png")
+
+        return [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}}]
+
     def _resolve_registry(self) -> MediaProviderRegistry | None:
         """从 ServiceProvider 懒加载获取 MediaProviderRegistry。
 
@@ -189,7 +217,7 @@ class ImageGenerateTool(BuiltinTool):
             MediaProviderRegistry 实例，获取失败返回 None
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             registry = provider.get("media_provider_registry")
@@ -204,7 +232,7 @@ class ImageGenerateTool(BuiltinTool):
             logger.warning("[ImageGenerate] 获取 MediaProviderRegistry 失败: %s", exc)
             return None
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: F821,PLR0912
         """执行图像生成。
 
         通过 MediaProviderRegistry 获取 IMAGE ProviderChain，
@@ -266,7 +294,7 @@ class ImageGenerateTool(BuiltinTool):
                 if provider_name:
                     provider = self._registry.get(provider_name)
                     if provider:
-                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)
+                        chain = ProviderChain(providers=[provider], strategy=FallbackStrategy.SEQUENTIAL)  # noqa: F821
                     else:
                         logger.warning(
                             "[ImageGenerate] 指定的 Provider '%s' 不存在，使用自动选择",
@@ -275,20 +303,25 @@ class ImageGenerateTool(BuiltinTool):
 
                 result = await chain.execute_generate(prompt, **kwargs)
 
+                file_path = str(result.file_path)
                 # 构建成功结果
                 output_data: dict[str, Any] = {
-                    "file_path": str(result.file_path),
+                    "file_path": file_path,
                     "media_type": result.media_type.value,
                     "provider": result.provider_name,
                 }
                 if result.metadata:
                     output_data["metadata"] = result.metadata
 
+                # MM-3: 构建多模态内容块，供管道引擎注入下一轮 LLM 调用
+                multimodal_content = self._build_multimodal_content(file_path)
+
                 return create_success_result(
                     data=output_data,
                     metadata={
                         "action": "image_generate",
                         "media_type": "image",
+                        **({"multimodal_content": multimodal_content} if multimodal_content else {}),
                     },
                 )
 

@@ -101,7 +101,7 @@ async def execute_core_plugin(
                 core_retry_delay, core_plugin,
             )
             if _is_retryable(core_error_policy, core_attempts, max_core_retries, exc):
-                import random as _rand
+                import random as _rand  # noqa: PLC0415
                 exc_lower = str(exc).lower()
                 is_overload = "overloaded" in exc_lower or "529" in exc_lower
                 if is_overload:
@@ -126,7 +126,7 @@ def _is_retryable(
     exc: Exception,
 ) -> bool:
     """判断核心插件错误是否可重试。"""
-    from pipeline.types import ErrorPolicy as _EP
+    from pipeline.types import ErrorPolicy as _EP  # noqa: N814,PLC0415
     return error_policy == _EP.RETRY and attempts < max_retries + 1
 
 
@@ -267,7 +267,7 @@ async def execute_output_chain(
     Returns:
         收集到的路由信号列表
     """
-    from pipeline.engine_route import resolve_output_plugins
+    from pipeline.engine_route import resolve_output_plugins  # noqa: PLC0415
 
     output_plugins = resolve_output_plugins(engine, state, core_type)
     route_signals: list[RouteSignal] = []
@@ -378,7 +378,7 @@ async def _collect_pending_notifications(
 def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bool:
     """检查是否有活跃的触发器绑定到当前管道。"""
     try:
-        from triggers.manager import get_trigger_manager
+        from triggers.manager import get_trigger_manager  # noqa: PLC0415
         _tm = get_trigger_manager()
         _pipeline_id = state.get(StateKeys.PIPELINE_ID, engine_pipeline_id)
         return any(
@@ -399,7 +399,7 @@ async def run_post_end_output_chain(
         engine: PipelineEngine 实例
         state: 管道状态字典
     """
-    from pipeline.engine_route import resolve_output_plugins
+    from pipeline.engine_route import resolve_output_plugins  # noqa: PLC0415
 
     core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
     output_plugins = resolve_output_plugins(engine, state, core_type)

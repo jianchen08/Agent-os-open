@@ -30,7 +30,7 @@ import hashlib
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine  # noqa: F401
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -429,7 +429,7 @@ class ConfigCenter:
             self._stop_event.clear()
 
             try:
-                from watchfiles import awatch
+                from watchfiles import awatch  # noqa: PLC0415
             except ImportError:
                 logger.warning(
                     "watchfiles 未安装，回退到 watchdog 模式。"
@@ -517,7 +517,7 @@ class ConfigCenter:
         Args:
             changes: watchfiles 返回的变更集合 {(change_type, path)}。
         """
-        from watchfiles import Change
+        from watchfiles import Change  # noqa: PLC0415
 
         event_map = {
             Change.added: "created",
@@ -745,7 +745,7 @@ class ConfigCenter:
     # -- 工具方法 -----------------------------------------------------------
 
     @staticmethod
-    def _determine_config_type(file_path: str) -> str:
+    def _determine_config_type(file_path: str) -> str:  # noqa: PLR0911
         """根据文件路径判断配置类型。
 
         路径规则：
@@ -881,7 +881,7 @@ def get_config_center() -> ConfigCenter:
     Returns:
         ConfigCenter 实例。
     """
-    global _global_center
+    global _global_center  # noqa: PLW0603
     if _global_center is None:
         with _global_lock:
             if _global_center is None:

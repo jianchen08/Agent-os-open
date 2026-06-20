@@ -89,8 +89,8 @@ class CompletionItem(BaseModel):
     kind: int | None = Field(None, description="补全项类型")
     detail: str | None = Field(None, description="补全项详情")
     documentation: str | None = Field(None, description="补全项文档")
-    sortText: str | None = Field(None, description="排序文本")
-    insertText: str | None = Field(None, description="插入文本")
+    sortText: str | None = Field(None, description="排序文本")  # noqa: N815
+    insertText: str | None = Field(None, description="插入文本")  # noqa: N815
 
 
 class LSPRequest(BaseModel):

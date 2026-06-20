@@ -104,18 +104,18 @@ class MessageResponse(BaseModel):
     content: str
     timestamp: str
     sequence: int = 0
-    parentId: str | None = None
+    parentId: str | None = None  # noqa: N815
     metadata: dict[str, Any] | None = None
-    toolCalls: list[dict[str, Any]] | None = None
-    toolCallId: str | None = None
-    toolName: str | None = None
-    toolArgs: dict[str, Any] | None = None
-    toolResult: Any = None
-    toolError: str | None = None
+    toolCalls: list[dict[str, Any]] | None = None  # noqa: N815
+    toolCallId: str | None = None  # noqa: N815
+    toolName: str | None = None  # noqa: N815
+    toolArgs: dict[str, Any] | None = None  # noqa: N815
+    toolResult: Any = None  # noqa: N815
+    toolError: str | None = None  # noqa: N815
     status: str | None = None
-    agentId: str | None = None
-    agentName: str | None = None
-    durationMs: int | None = None
+    agentId: str | None = None  # noqa: N815
+    agentName: str | None = None  # noqa: N815
+    durationMs: int | None = None  # noqa: N815
 
 
 # ============================================================

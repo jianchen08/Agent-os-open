@@ -197,7 +197,7 @@ class TaskMonitor:
             await self._check_pending_preparation_tasks(session)
 
             # 2. 查询所有开启自动执行且状态为 running 或 planning 的根任务
-            from sqlalchemy import String, cast
+            from sqlalchemy import String, cast  # noqa: PLC0415
 
             query = select(Task).where(
                 and_(
@@ -246,7 +246,7 @@ class TaskMonitor:
         Args:
             session: 数据库会话
         """
-        from sqlalchemy import String, cast
+        from sqlalchemy import String, cast  # noqa: PLC0415
 
         query = select(Task).where(
             and_(
@@ -279,8 +279,8 @@ class TaskMonitor:
             session: 数据库会话
             prep_task: 准备任务对象
         """
-        from src.utils.id_encoder import generate_nested_id
-        from src.utils.sequence_manager import get_next_sequence
+        from src.utils.id_encoder import generate_nested_id  # noqa: PLC0415
+        from src.utils.sequence_manager import get_next_sequence  # noqa: PLC0415
 
         # 从准备任务的 metadata 中获取原始目标
         task_metadata = prep_task.task_metadata or {}
@@ -354,7 +354,7 @@ class TaskMonitor:
         }
 
         # 创建根任务
-        from src.db.models import Task as TaskModel
+        from src.db.models import Task as TaskModel  # noqa: PLC0415
 
         root_task = TaskModel(**root_task_data)
         session.add(root_task)
@@ -375,7 +375,7 @@ class TaskMonitor:
             f"prep_task_id={prep_task.id}"
         )
 
-    async def _check_project(
+    async def _check_project(  # noqa: PLR0911
         self,
         session: AsyncSession,
         root_task: Task,
@@ -465,7 +465,7 @@ class TaskMonitor:
             "action": "unknown",
         }
 
-    async def _handle_pending_task(
+    async def _handle_pending_task(  # noqa: PLR0911
         self,
         project_id: str,
         task_id: str,
@@ -799,7 +799,7 @@ class TaskMonitor:
         except Exception as e:
             logger.error(f"更新根任务评估指标失败: {e}", exc_info=True)
 
-    def _determine_failure_reason(self, task: Task) -> "FailureReason":
+    def _determine_failure_reason(self, task: Task) -> "FailureReason":  # noqa: PLR0911
         """
         根据任务元数据判断失败原因
 
@@ -816,7 +816,7 @@ class TaskMonitor:
         Returns:
             失败原因枚举值
         """
-        from src.tasks.watchdog.components.failure_handler import FailureReason
+        from src.tasks.watchdog.components.failure_handler import FailureReason  # noqa: PLC0415
 
         task_metadata = task.task_metadata or {}
 
@@ -869,7 +869,7 @@ class TaskMonitor:
         Args:
             project_id: 项目 ID
         """
-        import time
+        import time  # noqa: PLC0415
 
         self._heartbeats[project_id] = time.time()
 
@@ -883,7 +883,7 @@ class TaskMonitor:
         Returns:
             心跳年龄（秒），如果不存在返回 None
         """
-        import time
+        import time  # noqa: PLC0415
 
         heartbeat = self._heartbeats.get(project_id)
         if heartbeat is None:

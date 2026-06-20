@@ -398,7 +398,7 @@ class EvaluationService:
     ) -> None:
         """触发人工审批（重试耗尽时调用 TaskApprovalService）"""
         try:
-            from src.tasks.services.approval_service import TaskApprovalService
+            from src.tasks.services.approval_service import TaskApprovalService  # noqa: PLC0415
 
             logger.info(f"[EvaluationService] 触发人工审批 | task_id={task_id}")
 
@@ -515,7 +515,7 @@ class EvaluationService:
                 f"状态: 已完成 | 评估: {passed_count}/{total_count} 通过"
             )
 
-            from src.utils.id_encoder import decode_base36
+            from src.utils.id_encoder import decode_base36  # noqa: PLC0415
 
             sequence = decode_base36(new_record_id.split("-")[-1])
             depth = len(new_record_id.split("-")) - 2

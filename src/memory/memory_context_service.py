@@ -450,14 +450,14 @@ class MemoryContextService:
     # 压缩结果持久化
     # ------------------------------------------------------------------
 
-    async def _save_compression_result(
+    async def _save_compression_result(  # noqa: PLR0912,PLR0915
         self, old_msgs: list[dict[str, Any]], comp_result: dict[str, Any],
     ) -> None:
         """保存压缩块到 ChunkService + 覆盖状态快照 + 写入长期记忆。"""
         if not self._chunk_service or not self._pipeline_id:
             return
 
-        from memory.types import ChunkData
+        from memory.types import ChunkData  # noqa: PLC0415
 
         l1_content = comp_result.get("l1", "")
         l2_content = comp_result.get("l2", "")
@@ -531,7 +531,7 @@ class MemoryContextService:
             except Exception:
                 pass
 
-            import json
+            import json  # noqa: PLC0415
             ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
             snapshot_chunk = ChunkData(
                 pipeline_run_id=self._pipeline_id,
@@ -592,8 +592,8 @@ class MemoryContextService:
         """
         # 优先：通过 router_factory 获取共享 Adapter（统一通道）
         try:
-            from config.models import get_model_config_loader
-            from llm.router_factory import get_or_create_adapter
+            from config.models import get_model_config_loader  # noqa: PLC0415
+            from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
 
             loader = get_model_config_loader()
             adapter = get_or_create_adapter(loader)
@@ -604,7 +604,7 @@ class MemoryContextService:
                 if model_conf:
                     provider = model_conf.get("provider", "")
                     bare_name = model_conf.get("model_name", model_id)
-                    from llm.router_factory import _get_litellm_model_string
+                    from llm.router_factory import _get_litellm_model_string  # noqa: PLC0415
                     litellm_model = _get_litellm_model_string(provider, bare_name)
 
                     async def _call_via_shared_adapter(prompt: str) -> str:
@@ -654,7 +654,7 @@ class MemoryContextService:
         if not self._compression_model_id:
             return None
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
             loader = get_model_config_loader()
             conf = loader.get_llm_core_config(self._compression_model_id)
             if conf and conf.get("context_window"):

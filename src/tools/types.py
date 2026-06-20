@@ -300,7 +300,7 @@ class Tool(BaseModel):
         Returns:
             过滤后的 schema
         """
-        import copy
+        import copy  # noqa: PLC0415
 
         if not self.injected_params and not self.param_level_restrictions:
             if agent_level is not None and self.param_level_restrictions:
@@ -326,7 +326,7 @@ class Tool(BaseModel):
 
         return schema
 
-    def _apply_level_restrictions(self, schema: dict[str, Any], agent_level: int) -> None:
+    def _apply_level_restrictions(self, schema: dict[str, Any], agent_level: int) -> None:  # noqa: PLR0912
         """根据 Agent 层级过滤 schema：隐藏参数 + 过滤枚举值。
 
         支持两种限制类型：
@@ -390,7 +390,7 @@ class Tool(BaseModel):
 
     def to_llm_yaml_format(self) -> str:
         """转换为 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml
+        import yaml  # noqa: PLC0415
 
         # 使用排除注入参数后的 schema
         llm_schema = self._get_llm_schema()
@@ -461,8 +461,8 @@ class Tool(BaseModel):
 
     def compute_checksum(self) -> str:
         """计算工具定义的校验和"""
-        import hashlib
-        import json
+        import hashlib  # noqa: PLC0415
+        import json  # noqa: PLC0415
 
         # 只包含影响工具行为的核心字段
         data = {
@@ -483,7 +483,7 @@ class Tool(BaseModel):
         handler: Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]],
     ) -> "ToolRunnable":
         """转换为 ToolRunnable"""
-        from core.runnable import ToolRunnable
+        from core.runnable import ToolRunnable  # noqa: PLC0415
 
         return ToolRunnable(
             name=self.name,
@@ -508,7 +508,7 @@ def create_success_result(
     duration_ms: int | None = None,
 ) -> "ToolExecutionResult":
     """创建成功结果"""
-    from core.results import ToolExecutionResult
+    from core.results import ToolExecutionResult  # noqa: PLC0415
 
     return ToolExecutionResult.create_completed(
         output=data,
@@ -523,7 +523,7 @@ def create_failure_result(
     metadata: dict[str, Any] | None = None,
 ) -> "ToolExecutionResult":
     """创建失败结果"""
-    from core.results import ToolExecutionResult
+    from core.results import ToolExecutionResult  # noqa: PLC0415
 
     return ToolExecutionResult.create_failed(
         error=error,
@@ -538,8 +538,8 @@ def create_failure_result_with_code(
     metadata: dict[str, Any] | None = None,
 ) -> "ToolExecutionResult":
     """使用标准错误代码创建失败结果"""
-    from core.errors import get_error_message
-    from core.results import ToolExecutionResult
+    from core.errors import get_error_message  # noqa: PLC0415
+    from core.results import ToolExecutionResult  # noqa: PLC0415
 
     error_message = get_error_message(error_code.value)
     if details:

@@ -17,7 +17,7 @@ _CWD_ABS = str(Path.cwd()).replace("\\", "/") + "/"
 _CWD_ABS_WIN = str(Path.cwd()) + "\\" if os.name == "nt" else None
 
 
-def sanitize_eval_paths(data: Any) -> Any:
+def sanitize_eval_paths(data: Any) -> Any:  # noqa: PLR0912
     """递归脱敏评估数据中的绝对路径，将其替换为相对路径。
 
     遍历字典/列表中所有字符串值，检测包含当前工作目录的绝对路径

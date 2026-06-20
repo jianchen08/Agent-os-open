@@ -79,11 +79,11 @@ class TokenManager:
         """
         url = redis_url
         if url is None:
-            import os
+            import os  # noqa: PLC0415
             url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
         try:
-            import redis as redis_lib
+            import redis as redis_lib  # noqa: PLC0415
 
             self._redis = redis_lib.Redis.from_url(
                 url,
@@ -136,7 +136,7 @@ class TokenManager:
             expires_delta = timedelta(minutes=self.access_token_expire_minutes)
 
         # 绑定日志上下文，使后续认证日志自动携带 request_id
-        from src.core.logging import LogContext
+        from src.core.logging import LogContext  # noqa: PLC0415
         LogContext.bind(request_id=user_id)
 
         return self._create_token(
@@ -255,9 +255,9 @@ class TokenManager:
                 algorithms=[self.algorithm],
             )
         except jwt.ExpiredSignatureError:
-            raise TokenExpiredError()
+            raise TokenExpiredError()  # noqa: B904
         except jwt.InvalidTokenError:
-            raise TokenInvalidError()
+            raise TokenInvalidError()  # noqa: B904
 
         # 验证 token 类型
         if payload.get("type") != token_type:

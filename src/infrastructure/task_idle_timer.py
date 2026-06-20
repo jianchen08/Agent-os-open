@@ -14,7 +14,7 @@ idle 语义：
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
+import concurrent.futures  # noqa: F401
 import contextlib
 import logging
 from typing import Any
@@ -189,7 +189,7 @@ class TaskIdleTimerMixin:
             True 表示引擎仍在运行；False 表示引擎已停止或未找到
         """
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             registry = get_engine_registry()
             entries = registry.find_by_tag("task_id", task_id)
             if not entries:

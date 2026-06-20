@@ -108,9 +108,9 @@ class MemoryStore:
         path = self._persist_file()
         if not path:
             return
-        if not os.path.exists(path):
-            persist_dir = os.path.dirname(path)
-            if os.path.exists(persist_dir) and os.listdir(persist_dir):
+        if not os.path.exists(path):  # noqa: PTH110
+            persist_dir = os.path.dirname(path)  # noqa: PTH120
+            if os.path.exists(persist_dir) and os.listdir(persist_dir):  # noqa: PTH110,PTH208
                 _log.warning(
                     "store.json 不存在但 persist_dir 非空，可能数据丢失: %s",
                     persist_dir)
@@ -155,23 +155,23 @@ class MemoryStore:
             return
         with self._persist_lock:
             try:
-                if path and os.path.exists(path):
+                if path and os.path.exists(path):  # noqa: PTH110
                     backup_path = path + ".bak"
                     try:
-                        import shutil
+                        import shutil  # noqa: PLC0415
                         shutil.copy2(path, backup_path)
                     except Exception:
                         _log.warning("备份 store.json 失败，继续写入")
 
                 data = {"threads": self.threads}
-                os.makedirs(os.path.dirname(path), exist_ok=True)
+                os.makedirs(os.path.dirname(path), exist_ok=True)  # noqa: PTH103,PTH120
                 tmp_path = path + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                if os.path.exists(path):
-                    os.replace(tmp_path, path)
+                if os.path.exists(path):  # noqa: PTH110
+                    os.replace(tmp_path, path)  # noqa: PTH105
                 else:
-                    os.rename(tmp_path, path)
+                    os.rename(tmp_path, path)  # noqa: PTH104
             except Exception as e:
                 _log.warning("持久化保存失败: %s [path=%s]", e, path)
 

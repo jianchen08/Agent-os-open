@@ -10,51 +10,27 @@
 
 from __future__ import annotations
 
-
-
-import asyncio
-
+import asyncio  # noqa: F401
 import logging
-
-from datetime import datetime
-
+from datetime import datetime  # noqa: F401
 from typing import Any
-
-
 
 from fastapi import Depends, Query
 
-
-
 from channels.api.deps import APIError, require_auth, validate_pagination
-
 from channels.api.memory_store import store
-
 from channels.api.models import (
-
     TaskCreate,
-
     TaskEvaluateRequest,
-
     TaskEvaluateResponse,
-
     TaskListResponse,
-
     TaskResponse,
-
     TaskSubmitResponse,
-
     TaskUpdate,
-
 )
-
 from infrastructure.service_access import get_execution_record_storage
-
 from tasks.service_access import get_task_service
-
 from utils.enum_utils import safe_enum_value
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +39,6 @@ logger = logging.getLogger(__name__)
 # FastAPI 在模块级别使用 -> 注解时需要 APIRouter 实例
 
 from fastapi import APIRouter  # noqa: E402
-
-
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
 
@@ -110,7 +84,7 @@ def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
 
     """将 TaskModel dataclass 转为字典。"""
 
-    from dataclasses import asdict
+    from dataclasses import asdict  # noqa: PLC0415
 
     d = asdict(task_model)
 
@@ -512,7 +486,7 @@ async def create_task(
 
 
 
-    from tasks.types import TaskModel, TaskPriority, TaskStatus
+    from tasks.types import TaskModel, TaskPriority, TaskStatus  # noqa: F401,PLC0415
 
 
 
@@ -711,7 +685,7 @@ def update_task(
 
             if body.status is not None:
 
-                from tasks.types import TaskStatus
+                from tasks.types import TaskStatus  # noqa: PLC0415
 
                 updates["status"] = TaskStatus(body.status)
 
@@ -1069,7 +1043,7 @@ def evaluate_task(
 
     try:
 
-        from evaluation.loader import MetricLoader
+        from evaluation.loader import MetricLoader  # noqa: PLC0415
 
         loader = MetricLoader()
 
@@ -1197,7 +1171,7 @@ def _cancel_running_pipeline(task_id: str) -> bool:
 
     try:
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         task_worker = get_service_provider().get("task_worker")
 
@@ -1343,7 +1317,7 @@ async def pause_task(
 
     except KeyError:
 
-        raise APIError(
+        raise APIError(  # noqa: B904
 
             status_code=404,
 
@@ -1355,11 +1329,11 @@ async def pause_task(
 
     except Exception as exc:
 
-        from tasks.state_machine import InvalidTransitionError
+        from tasks.state_machine import InvalidTransitionError  # noqa: PLC0415
 
         if isinstance(exc, InvalidTransitionError):
 
-            raise APIError(
+            raise APIError(  # noqa: B904
 
                 status_code=400,
 
@@ -1369,7 +1343,7 @@ async def pause_task(
 
             )
 
-        raise APIError(
+        raise APIError(  # noqa: B904
 
             status_code=500,
 
@@ -1479,7 +1453,7 @@ async def resume_task(
 
     except KeyError:
 
-        raise APIError(
+        raise APIError(  # noqa: B904
 
             status_code=404,
 
@@ -1491,11 +1465,11 @@ async def resume_task(
 
     except Exception as exc:
 
-        from tasks.state_machine import InvalidTransitionError
+        from tasks.state_machine import InvalidTransitionError  # noqa: PLC0415
 
         if isinstance(exc, InvalidTransitionError):
 
-            raise APIError(
+            raise APIError(  # noqa: B904
 
                 status_code=400,
 
@@ -1505,7 +1479,7 @@ async def resume_task(
 
             )
 
-        raise APIError(
+        raise APIError(  # noqa: B904
 
             status_code=500,
 
@@ -1657,7 +1631,7 @@ async def cancel_task(
 
     # 只有非终态任务可以取消（pending/running/stopped/evaluating）
 
-    from tasks.types import TaskStatus
+    from tasks.types import TaskStatus  # noqa: PLC0415
 
 
 
@@ -1721,7 +1695,7 @@ async def cancel_task(
 
     if updated_task is not None:
 
-        from dataclasses import asdict as _asdict
+        from dataclasses import asdict as _asdict  # noqa: PLC0415
 
         task_dict = _asdict(updated_task)
 
@@ -1775,7 +1749,7 @@ async def _submit_task_event(task_id: str, task_service: Any) -> bool:
 
         metadata = task.metadata or {}
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         task_worker = get_service_provider().get("task_worker")
 
@@ -1821,7 +1795,7 @@ def _get_agent_registry() -> Any:
 
     try:
 
-        from agents.registry import AgentRegistry
+        from agents.registry import AgentRegistry  # noqa: PLC0415
 
         if AgentRegistry.has_instance():
 

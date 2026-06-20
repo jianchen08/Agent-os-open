@@ -105,7 +105,7 @@ class AgentRegistry:
         Returns:
             成功加载返回 AgentConfig，否则返回 None。
         """
-        from .loader import AgentConfigLoader
+        from .loader import AgentConfigLoader  # noqa: PLC0415
 
         yaml_path = self._find_yaml_by_filename(config_id)
         if yaml_path is None:
@@ -259,7 +259,7 @@ class AgentRegistry:
         Returns:
             成功加载的配置数量。
         """
-        from .loader import AgentConfigLoader
+        from .loader import AgentConfigLoader  # noqa: PLC0415
 
         dir_path = Path(dir_path)
         self._config_dir = dir_path
@@ -315,7 +315,7 @@ class AgentRegistry:
         if yaml_path is None:
             return None
 
-        from .loader import AgentConfigLoader
+        from .loader import AgentConfigLoader  # noqa: PLC0415
 
         try:
             config = AgentConfigLoader.load_from_yaml(yaml_path)

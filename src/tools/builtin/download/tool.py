@@ -67,7 +67,7 @@ def _is_private_ip(ip_str: str) -> bool:
 
 def _sanitize_filename(name: str) -> str:
     """清洗文件名：去除路径分隔符，防止路径穿越"""
-    name = os.path.basename(name)
+    name = os.path.basename(name)  # noqa: PTH119
     # 仅保留安全字符
     name = re.sub(r'[^\w\s\.\-\u4e00-\u9fff]', '_', name)
     # 去除前后空白和点
@@ -81,7 +81,7 @@ def _extract_filename_from_url(url: str) -> str:
     """从 URL 中提取文件名"""
     parsed = urlparse(url)
     path = unquote(parsed.path)
-    name = os.path.basename(path)
+    name = os.path.basename(path)  # noqa: PTH119
     if name:
         return _sanitize_filename(name)
     return "download"
@@ -124,7 +124,7 @@ def _validate_url(url: str, allow_domains: list[str] | None = None) -> tuple[boo
 
     # 4. SSRF 防护：DNS 解析后检查是否为内网 IP
     try:
-        import socket
+        import socket  # noqa: PLC0415
         resolved_ips = socket.getaddrinfo(hostname, None)
         for entry in resolved_ips:
             ip_str = entry[4][0]
@@ -243,7 +243,7 @@ class DownloadTool(BuiltinTool):
             ],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行下载"""
         url = inputs.get("url", "").strip()
         save_path = inputs.get("save_path", "").strip()
@@ -322,7 +322,7 @@ class DownloadTool(BuiltinTool):
                 },
                 metadata={
                     "url": url,
-                    "filename": os.path.basename(str(result.get("path", ""))),
+                    "filename": os.path.basename(str(result.get("path", ""))),  # noqa: PTH119
                     "segments": result.get("segments", 1),
                     "resumed": result.get("resumed", False),
                 },
@@ -453,7 +453,7 @@ class DownloadTool(BuiltinTool):
                 content_length=content_length,
             )
 
-    async def _segmented_download(
+    async def _segmented_download(  # noqa: PLR0915
         self,
         client: httpx.AsyncClient,
         url: str,
@@ -553,7 +553,7 @@ class DownloadTool(BuiltinTool):
                             )
                             await asyncio.sleep(wait)
                         else:
-                            raise RuntimeError(
+                            raise RuntimeError(  # noqa: B904
                                 f"分片 {seg_idx} 下载失败（已重试 {max_retries} 次）: {e}"
                             )
 
@@ -571,11 +571,11 @@ class DownloadTool(BuiltinTool):
                         if not chunk:
                             break
                         out.write(chunk)
-                os.remove(part_file)
+                os.remove(part_file)  # noqa: PTH107
 
         # 清理状态文件
         if state_path.exists():
-            os.remove(state_path)
+            os.remove(state_path)  # noqa: PTH107
 
         actual_size = final_path.stat().st_size
         logger.info(f"下载完成: {final_path} ({_format_size(actual_size)})，共 {num_segments} 个分片")
@@ -653,7 +653,7 @@ class DownloadTool(BuiltinTool):
                     logger.warning(f"第 {attempt} 次重试: {e}，等待 {wait}s")
                     await asyncio.sleep(wait)
                 else:
-                    raise RuntimeError(f"下载失败（已重试 {max_retries} 次）: {e}")
+                    raise RuntimeError(f"下载失败（已重试 {max_retries} 次）: {e}")  # noqa: B904
         return None
 
     # ────────────────────────────────────────────────────────

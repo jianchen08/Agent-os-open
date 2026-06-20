@@ -155,7 +155,7 @@ class MemoryMaintenanceService:
             ReviewEngine 实例
         """
         if self._review_engine is None:
-            from .review_engine import ReviewEngine
+            from .review_engine import ReviewEngine  # noqa: PLC0415
             # 注意：ReviewEngine.__init__ 不接受 config 参数
             self._review_engine = ReviewEngine(
                 storage=self._storage,
@@ -173,7 +173,7 @@ class MemoryMaintenanceService:
             CleanupEngine 实例
         """
         if self._cleanup_engine is None:
-            from .cleanup_engine import CleanupEngine
+            from .cleanup_engine import CleanupEngine  # noqa: PLC0415
             self._cleanup_engine = CleanupEngine(
                 storage=self._storage,
                 chunk_db=self._chunk_db,
@@ -199,8 +199,8 @@ class MemoryMaintenanceService:
             return []
 
         try:
-            from triggers import TriggerConfig, TriggerManager
-            from triggers.types import TriggerType
+            from triggers import TriggerConfig, TriggerManager  # noqa: PLC0415
+            from triggers.types import TriggerType  # noqa: PLC0415
         except ImportError:
             logger.warning(
                 "[Maintenance] TriggerManager 不可用，"
@@ -424,7 +424,7 @@ def _get_trigger_manager_safe() -> Any:
         TriggerManager 实例，不可用时返回 None
     """
     try:
-        from triggers import get_trigger_manager
+        from triggers import get_trigger_manager  # noqa: PLC0415
         return get_trigger_manager()
     except ImportError:
         return None

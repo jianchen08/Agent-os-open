@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -155,7 +157,7 @@ class WebSocketInteractionNotifier:
             self._fallback_tasks.add(task)
             self._fallback_request_map[request_id] = task
             task.add_done_callback(
-                lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)
+                lambda t, _rid=request_id: self._fallback_request_map.pop(_rid, None)  # noqa: ARG005
             )
             task.add_done_callback(self._fallback_tasks.discard)
 
@@ -168,10 +170,8 @@ class WebSocketInteractionNotifier:
         old = self._global_connections.get(user_id)
         if old is not None:
             logger.info("[GlobalWS] 踢掉旧连接: user=%s", user_id[:12])
-            try:
+            with contextlib.suppress(Exception):
                 asyncio.get_event_loop().create_task(old.close(code=4000, reason="被新连接替换"))
-            except Exception:
-                pass
             # 清理旧连接在 _active_connections 中的残留条目，
             # 避免后续 send_to_thread 等方法在第一步找到空连接列表而非直接走 global 回退。
             for tid in list(self._active_connections.keys()):
@@ -199,8 +199,8 @@ class WebSocketInteractionNotifier:
             thread_id: 目标会话的 thread_id
         """
         try:
-            from pipeline.registry import get_engine_registry
-            from pipeline.stream_bridge import TargetedSink, create_targeted_sink
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+            from pipeline.stream_bridge import TargetedSink, create_targeted_sink  # noqa: F401,PLC0415
             registry = get_engine_registry()
         except Exception:
             return

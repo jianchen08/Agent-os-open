@@ -63,7 +63,7 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
         """本插件关注所有路由信号。"""
         return []
 
-    async def execute(self, ctx: PluginContext) -> OutputResult:
+    async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911
         """执行经验沉淀逻辑。
 
         检查任务是否完成，如果完成则从 ChunkData 提炼知识并存储。

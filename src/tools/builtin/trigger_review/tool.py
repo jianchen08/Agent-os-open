@@ -11,32 +11,18 @@
 
 
 import asyncio
-
 import logging
-
 from typing import Any
 
-
-
 from tools.builtin.base import BuiltinTool
-
 from tools.types import (
-
     Tool,
-
     ToolCategory,
-
     ToolLevel,
-
     ToolSource,
-
     create_failure_result,
-
     create_success_result,
-
 )
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +86,7 @@ class TriggerReviewTool(BuiltinTool):
 
 
 
-    async def execute(self, inputs: dict[str, Any]):
+    async def execute(self, inputs: dict[str, Any]):  # noqa: PLR0915
 
         """执行复盘触发。
 
@@ -130,7 +116,7 @@ class TriggerReviewTool(BuiltinTool):
 
         try:
 
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
 
@@ -238,13 +224,8 @@ class TriggerReviewTool(BuiltinTool):
 
             try:
 
-                from agents.loader import AgentConfigLoader
-
-
-
-                from tools.tool_context import emit
-
-                from tools.tool_context import get_engine_registry
+                from agents.loader import AgentConfigLoader  # noqa: F401,PLC0415
+                from tools.tool_context import emit, get_engine_registry  # noqa: PLC0415
 
             except ImportError as exc:
 
@@ -260,7 +241,7 @@ class TriggerReviewTool(BuiltinTool):
 
             try:
 
-                from agents.global_registry import get_global_agent_registry_sync
+                from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
 
 
 
@@ -284,7 +265,7 @@ class TriggerReviewTool(BuiltinTool):
 
             try:
 
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
 
 
@@ -320,7 +301,7 @@ class TriggerReviewTool(BuiltinTool):
 
 
 
-                from tools.tool_context import MessageType, PipelineMessage
+                from tools.tool_context import MessageType, PipelineMessage  # noqa: PLC0415
 
                 _review_msg = PipelineMessage(
 

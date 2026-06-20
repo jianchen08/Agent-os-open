@@ -10,7 +10,7 @@ import asyncio
 import fnmatch
 import json
 import logging
-import os
+import os  # noqa: F401
 import re
 import subprocess
 from pathlib import Path
@@ -31,12 +31,11 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 _DEFAULT_MAX_DEPTH: int = 20
 
 # 敏感系统目录黑名单统一由共享模块维护（security_check 与本工具复用同一份）
-from isolation.sensitive_paths import is_sensitive_path
-
-from tools.builtin.base import BuiltinTool
-from tools.builtin.shared import format_size
-from tools.builtin.workspace_aware import WorkspaceAwareMixin
-from tools.types import (
+from isolation.sensitive_paths import is_sensitive_path  # noqa: E402
+from tools.builtin.base import BuiltinTool  # noqa: E402
+from tools.builtin.shared import format_size  # noqa: E402
+from tools.builtin.workspace_aware import WorkspaceAwareMixin  # noqa: E402
+from tools.types import (  # noqa: E402
     Tool,
     ToolCategory,
     ToolLevel,
@@ -67,7 +66,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
     def _check_ripgrep(self) -> bool:
         """检查ripgrep是否可用"""
         try:
-            proc = subprocess.run(["rg", "--version"], capture_output=True, timeout=5)
+            proc = subprocess.run(["rg", "--version"], capture_output=True, timeout=5)  # noqa: PLW1510
             return proc.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
@@ -204,7 +203,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
 
         return None
 
-    async def _search_with_ripgrep(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_with_ripgrep(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0912,PLR0915
         """
         使用ripgrep进行搜索（高性能）
 
@@ -379,7 +378,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             return True
         return False
 
-    async def _search_filename(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_filename(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0912
         """文件名搜索，支持 glob 通配符 (*, ?, []) 和正则表达式"""
         try:
             query = inputs.get("query")
@@ -392,7 +391,7 @@ class EnhancedSearchTool(BuiltinTool, WorkspaceAwareMixin):
             # 路径存在性已在 _validate_search_path 中检查
 
             # 确定匹配策略（优先级: regex > glob > substring）
-            _GLOB_CHARS = frozenset("*?[]")
+            _GLOB_CHARS = frozenset("*?[]")  # noqa: N806
             has_glob = any(c in query for c in _GLOB_CHARS)
 
             if use_regex:

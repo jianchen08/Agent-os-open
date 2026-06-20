@@ -45,7 +45,7 @@ class InjectResult:
 
 def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
     """查找目标管道引擎实例。返回 (engine, state) 元组。"""
-    from pipeline.registry import get_engine_registry
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
     entry = get_engine_registry().get(pipeline_id)
     if entry is None:
         return None, ""
@@ -63,7 +63,7 @@ def _find_engine(pipeline_id: str) -> tuple[Any | None, str]:
 async def _auto_complete_interaction(pipeline_id: str) -> None:
     """自动完成管道的 pending conversation 模式交互请求。"""
     try:
-        from human_interaction import get_human_interaction_service
+        from human_interaction import get_human_interaction_service  # noqa: PLC0415
         service = get_human_interaction_service()
         if service is None:
             return
@@ -138,7 +138,7 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
     # BUG-FIX-fix_20260531_sink_dead_thread_id_lost: 主动更新 registry 中缺失的 thread_id
     if thread_id and pipeline_id:
         try:
-            from pipeline.registry import get_engine_registry as _reg_get
+            from pipeline.registry import get_engine_registry as _reg_get  # noqa: PLC0415
             _reg_entry = _reg_get().get(pipeline_id)
             if _reg_entry and not _reg_entry.thread_id:
                 _reg_entry.thread_id = thread_id
@@ -172,7 +172,7 @@ async def _inject_to_engine(
     client_message_id: str = "",
 ) -> InjectResult:
     """向已存在的引擎注入消息。"""
-    from pipeline.drain_manager import create_sink
+    from pipeline.drain_manager import create_sink  # noqa: PLC0415
     try:
 
         msg_source = (metadata or {}).get("source", "user")
@@ -182,7 +182,7 @@ async def _inject_to_engine(
         # 非 user 消息：通过 bridge 推送 system_notification（和 AI stream 走同一通道，保证时序）。
         # emit_notification 是 async，在 inject_message 之前调度，保证 notification 在 stream chunk 之前。
         if msg_source != "user":
-            from pipeline.registry import get_engine_registry as _reg_for_push
+            from pipeline.registry import get_engine_registry as _reg_for_push  # noqa: PLC0415
             _notif_bridge = _reg_for_push().get_bridge(pipeline_id)
             if _notif_bridge is not None:
                 try:
@@ -245,7 +245,7 @@ async def _start_idle_engine(
     agent 来源：引擎自带 self._agent_config（上次 run() 绑定的身份），或
     注册表 tags.agent_id（创建者注册时写入）。都没有说明创建者未正确注册，报错。
     """
-    from pipeline.drain_manager import create_sink
+    from pipeline.drain_manager import create_sink  # noqa: PLC0415
     _sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
     if _sink is None:
         return InjectResult(success=False, error="无法创建 sink", method="failed", pipeline_id=pipeline_id)
@@ -255,8 +255,8 @@ async def _start_idle_engine(
 
     # 注册表 tags.agent_id（创建者注册时写入）
     if _resolved_agent is None:
-        from pipeline.registry import get_engine_registry
-        from agents.global_registry import get_global_agent_registry_sync
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
         _entry = get_engine_registry().get(pipeline_id)
         _agent_id = _entry.tags.get("agent_id") if _entry else None
         if _agent_id:
@@ -266,8 +266,8 @@ async def _start_idle_engine(
 
     if _resolved_agent is None:
         # 诊断：输出每一步状态，定位注册失败点
-        from pipeline.registry import get_engine_registry
-        from agents.global_registry import get_global_agent_registry_sync
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
         _diag_entry = get_engine_registry().get(pipeline_id)
         _diag_tags = _diag_entry.tags if _diag_entry else "NO_ENTRY"
         _diag_reg = get_global_agent_registry_sync()
@@ -285,7 +285,7 @@ async def _start_idle_engine(
             method="failed", pipeline_id=pipeline_id,
         )
 
-    from pipeline.registry import get_engine_registry
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
     _registry = get_engine_registry()
 
     # BUG-FIX-fix_20260619_idle_lost_task_id:
@@ -337,16 +337,16 @@ async def _revive_pipeline_message(
     thread_id: str = "", client_message_id: str = "", **kwargs: Any,
 ) -> InjectResult:
     """走 revive 路径的消息注入。"""
-    from pipeline.drain_manager import create_sink
+    from pipeline.drain_manager import create_sink  # noqa: PLC0415
     revive_bridge = None
     _revive_sink = output_sink or create_sink(pipeline_id, thread_id=thread_id)
     if _revive_sink is not None:
-        from pipeline.stream_bridge import PipelineStreamBridge
+        from pipeline.stream_bridge import PipelineStreamBridge  # noqa: PLC0415
         revive_bridge = PipelineStreamBridge(
             pipeline_id=pipeline_id, output_sink=_revive_sink,
         )
 
-    from pipeline.pipeline_reviver import try_revive_pipeline
+    from pipeline.pipeline_reviver import try_revive_pipeline  # noqa: PLC0415
     revive_result = await try_revive_pipeline(
         pipeline_id, message, agent_config=agent_config, workspace=workspace,
         task_id=task_id, conversation_history=conversation_history,
@@ -356,7 +356,7 @@ async def _revive_pipeline_message(
     )
 
     if revive_result.success and revive_bridge is not None:
-        from pipeline.registry import get_engine_registry
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
         get_engine_registry().set_bridge(pipeline_id, revive_bridge)
         revive_result.bridge = revive_bridge
     return revive_result

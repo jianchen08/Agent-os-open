@@ -42,45 +42,45 @@ class ReasoningConfig:
 
     @classmethod
     def get_thinking_config(
-        cls, model_name: str, enable_thinking: bool = True
+        cls, model_name: str, enable_thinking: bool = True  # noqa: ARG003
     ) -> tuple[str, dict[str, Any]]:
         """获取思考模式配置"""
         return model_name, {}
 
     @classmethod
-    def get_base_model_for_thinking(cls, thinking_model: str) -> str | None:
+    def get_base_model_for_thinking(cls, thinking_model: str) -> str | None:  # noqa: ARG003
         """根据思考模型获取对应的基础模型"""
         return None
 
     @classmethod
-    def get_thinking_model_for_base(cls, base_model: str) -> str | None:
+    def get_thinking_model_for_base(cls, base_model: str) -> str | None:  # noqa: ARG003
         """根据基础模型获取对应的思考模型"""
         return None
 
     @classmethod
-    def supports_reasoning_effort(cls, model_name: str) -> bool:
+    def supports_reasoning_effort(cls, model_name: str) -> bool:  # noqa: ARG003
         """检查模型是否支持 reasoning_effort 参数"""
         return False
 
     @classmethod
-    def supports_tools(cls, model_name: str) -> bool:
+    def supports_tools(cls, model_name: str) -> bool:  # noqa: ARG003
         """检查思考模型是否支持工具调用"""
         return False
 
     @classmethod
     def get_optimal_params(
-        cls, model_name: str, task_type: str = "general", complexity: str = "medium"
+        cls, model_name: str, task_type: str = "general", complexity: str = "medium"  # noqa: ARG003
     ) -> dict[str, Any]:
         """获取最优参数配置"""
         return {}
 
     @classmethod
-    def validate_params(cls, model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def validate_params(cls, model_name: str, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG003
         """验证和修正参数"""
         return params
 
     @classmethod
-    def get_usage_recommendations(cls, model_name: str) -> dict[str, Any]:
+    def get_usage_recommendations(cls, model_name: str) -> dict[str, Any]:  # noqa: ARG003
         """获取使用建议"""
         return {}
 

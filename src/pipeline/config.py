@@ -326,7 +326,7 @@ def _resolve_plugin_class(plugin_conf: dict[str, Any]) -> type | None:
     return plugin_cls
 
 
-def build_plugin_registry(
+def build_plugin_registry(  # noqa: PLR0912,PLR0915
     config: PipelineConfig,
     model_loader: Any | None = None,
     router: Any | None = None,
@@ -449,7 +449,7 @@ def build_plugin_registry(
             plugin_cls = _import_class(class_path)
             # llm_call: 优先使用 KeyPoolAdapter（按 key 粒度并发控制）
             if core_type == "llm_call" and model_loader is not None:
-                from llm.router_factory import get_or_create_adapter
+                from llm.router_factory import get_or_create_adapter  # noqa: PLC0415
                 _adapter = get_or_create_adapter(model_loader)
                 core_instance: ICorePlugin = plugin_cls(config=plugin_config, adapter=_adapter)
             elif core_type == "llm_call" and router is not None:

@@ -78,11 +78,11 @@ class DockerProvider(IsolationProvider):
 
         try:
             # 用同步 subprocess 替代 asyncio subprocess（Windows 兼容性）
-            import subprocess as _sp
+            import subprocess as _sp  # noqa: PLC0415
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
                 None,
-                lambda: _sp.run(
+                lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "version", "--format", "{{.Server.Version}}"],
                     capture_output=True,
                     timeout=15,
@@ -112,10 +112,10 @@ class DockerProvider(IsolationProvider):
         Returns:
             (returncode, stdout_bytes, stderr_bytes)
         """
-        import subprocess as _sp
+        import subprocess as _sp  # noqa: PLC0415
 
         def _run():
-            proc = _sp.run(args, capture_output=True, timeout=timeout)
+            proc = _sp.run(args, capture_output=True, timeout=timeout)  # noqa: PLW1510
             return proc.returncode, proc.stdout, proc.stderr
 
         loop = asyncio.get_event_loop()
@@ -346,7 +346,7 @@ class DockerProvider(IsolationProvider):
 
     async def _ensure_image(self) -> None:
         """确保 Docker 镜像存在，不存在则拉取。"""
-        import subprocess as _sp
+        import subprocess as _sp  # noqa: PLC0415
 
         try:
             rc, _, _ = await self._run_cmd(
@@ -362,7 +362,7 @@ class DockerProvider(IsolationProvider):
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                lambda: _sp.run(
+                lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "image", "prune", "-f"],
                     capture_output=True, timeout=30,
                 ),

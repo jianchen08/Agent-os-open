@@ -10,7 +10,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath  # noqa: F401
 from typing import Any
 
 from isolation.decider import IsolationDecider
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 def _load_provider_config() -> dict[str, Any]:
     """从配置文件加载提供者配置（通过 ConfigCenter 统一缓存）。"""
     try:
-        from config.config_center import get_config_center
+        from config.config_center import get_config_center  # noqa: PLC0415
         config = get_config_center().get("isolation/isolation_config.yaml") or {}
         providers_config = config.get("providers", {})
         logger.info("[IsolationManager] 从 ConfigCenter 加载提供者配置")
@@ -129,7 +129,7 @@ class IsolationManager:
         # 硬件自适应：启动时检测硬件，计算资源配额
         # profile 决定容器内存/CPU/数量上限，保护低配机不被压垮
         try:
-            from isolation.hardware_profile import get_resource_profile
+            from isolation.hardware_profile import get_resource_profile  # noqa: PLC0415
             self._resource_profile = get_resource_profile()
         except Exception as e:
             logger.warning(f"[IsolationManager] 硬件检测失败，使用保守默认值: {e}")
@@ -149,7 +149,7 @@ class IsolationManager:
             providers_config = None
             if config_path:
                 try:
-                    from config.config_center import get_config_center
+                    from config.config_center import get_config_center  # noqa: PLC0415
                     # config_path 可能是绝对路径或相对路径，ConfigCenter 统一解析
                     rel = str(config_path).replace("\\", "/")
                     if "config/" in rel:
@@ -185,7 +185,7 @@ class IsolationManager:
 
         logger.info("隔离环境管理器已启动")
 
-    async def _resume_containers(self):
+    async def _resume_containers(self):  # noqa: PLR0912
         """恢复未完成任务的容器，清理已完成/不存在任务的容器
 
         项目启动时：
@@ -195,9 +195,9 @@ class IsolationManager:
         4. 无活跃任务的容器直接销毁
         """
         try:
-            from docker.errors import DockerException, NotFound
+            from docker.errors import DockerException, NotFound  # noqa: PLC0415
 
-            import docker
+            import docker  # noqa: PLC0415
 
             client = docker.from_env()
             containers = client.containers.list(all=True)
@@ -244,7 +244,7 @@ class IsolationManager:
                         break
 
                 if workspace_path:
-                    from pathlib import Path
+                    from pathlib import Path  # noqa: PLC0415
 
                     workspace_dir = Path(workspace_path)
                     if not workspace_dir.exists():
@@ -286,7 +286,7 @@ class IsolationManager:
         - 静默失败不阻塞启动
         """
         await asyncio.sleep(5)  # 延迟 5s，等 Docker daemon 完全就绪
-        import subprocess as _sp
+        import subprocess as _sp  # noqa: PLC0415
 
         try:
             loop = asyncio.get_event_loop()
@@ -294,7 +294,7 @@ class IsolationManager:
             # 1. 清理悬挂镜像
             rc, _, stderr = await loop.run_in_executor(
                 None,
-                lambda: _sp.run(
+                lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "image", "prune", "-f"],
                     capture_output=True, timeout=60,
                 ),
@@ -311,7 +311,7 @@ class IsolationManager:
             # 2. 清理过期构建缓存（保留近 72 小时）
             rc2, _, stderr2 = await loop.run_in_executor(
                 None,
-                lambda: _sp.run(
+                lambda: _sp.run(  # noqa: PLW1510
                     ["docker", "builder", "prune", "-f",
                      "--filter", "until=72h"],
                     capture_output=True, timeout=60,
@@ -344,7 +344,7 @@ class IsolationManager:
             logger.warning("[IsolationManager] task_repository 未注入，无法加载活跃 workspace")
             return None
         try:
-            from tasks.types import TaskStatus
+            from tasks.types import TaskStatus  # noqa: PLC0415
 
             terminal_statuses = {
                 TaskStatus.COMPLETED, TaskStatus.FAILED,
@@ -390,9 +390,9 @@ class IsolationManager:
         仅停止仍有活跃任务的 workspace 对应的容器
         """
         try:
-            from docker.errors import DockerException
+            from docker.errors import DockerException  # noqa: PLC0415
 
-            import docker
+            import docker  # noqa: PLC0415
 
             client = docker.from_env()
             containers = client.containers.list(all=True)
@@ -428,7 +428,7 @@ class IsolationManager:
         except Exception as e:
             logger.warning(f"[IsolationManager] 停止容器失败: {e}")
 
-    async def get_or_create_environment(
+    async def get_or_create_environment(  # noqa: PLR0912,PLR0915
         self,
         task_id: str,
         task_type: TaskType,
@@ -594,7 +594,7 @@ class IsolationManager:
             容器名（含 cua- 前缀）
         """
         if workspace:
-            from pathlib import PurePath
+            from pathlib import PurePath  # noqa: PLC0415
 
             name = PurePath(workspace).name or task_id
         else:
@@ -606,9 +606,9 @@ class IsolationManager:
     ) -> IsolationEnvironment | None:
         """查找已存在的容器"""
         try:
-            from docker.errors import NotFound
+            from docker.errors import NotFound  # noqa: PLC0415
 
-            import docker
+            import docker  # noqa: PLC0415
 
             client = docker.from_env()
 
@@ -632,7 +632,7 @@ class IsolationManager:
                         break
 
                 if workspace_path:
-                    from pathlib import Path
+                    from pathlib import Path  # noqa: PLC0415
 
                     workspace_dir = Path(workspace_path)
                     if not workspace_dir.exists():
@@ -778,9 +778,9 @@ class IsolationManager:
         """通过 Docker API 直接查找并删除容器"""
         container_name = f"{self.CONTAINER_NAME_PREFIX}{ws_key}"
         try:
-            from docker.errors import NotFound
+            from docker.errors import NotFound  # noqa: PLC0415
 
-            import docker
+            import docker  # noqa: PLC0415
 
             client = docker.from_env()
             try:
@@ -941,7 +941,7 @@ _global_manager: IsolationManager | None = None
 
 async def get_isolation_manager(config_path: str | None = None) -> IsolationManager:
     """获取全局隔离管理器（线程安全，通过 asyncio.Lock 防止并发重复创建）"""
-    global _global_manager
+    global _global_manager  # noqa: PLW0603
     async with _manager_lock:
         if _global_manager is None:
             _global_manager = IsolationManager(config_path=config_path)
@@ -955,7 +955,7 @@ def get_isolation_manager_sync(config_path: str | None = None) -> IsolationManag
     在 Python 3.12+ 同步上下文里会抛 RuntimeError）。
     与 async 版本共享同一个 _global_manager 单例。
     """
-    global _global_manager
+    global _global_manager  # noqa: PLW0603
     if _global_manager is None:
         _global_manager = IsolationManager(config_path=config_path)
     return _global_manager
@@ -969,7 +969,7 @@ async def start_isolation_manager():
 
 async def stop_isolation_manager():
     """停止全局隔离管理器"""
-    global _global_manager
+    global _global_manager  # noqa: PLW0603
     async with _manager_lock:
         if _global_manager:
             await _global_manager.stop()

@@ -187,7 +187,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         self._ws_meta_store[task_id] = meta
         return meta
 
-    def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:
+    def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:  # noqa: PLR0912,PLR0915
         """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)
 
         BUG-FIX-fix_20260422_scenario_detect_base_path:
@@ -242,7 +242,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             container_ws = self._find_container_workspace(task_id)
         if container_ws:
             container_path = Path(container_ws).resolve()
-            if not (container_path / ".git").exists():
+            if not (container_path / ".git").exists():  # noqa: SIM102
                 if not self._git_init_and_initial_commit(container_path, "chore: init container repo"):
                     raise RuntimeError(f"容器空间 git 初始化失败: {container_path}")
             self._ensure_git_user(container_path)

@@ -205,7 +205,7 @@ def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
 
 def build_router(model_loader: Any) -> litellm.Router:
     """构建 litellm.Router 实例。"""
-    global _key_pools, _model_to_provider
+    global _key_pools, _model_to_provider  # noqa: PLW0602
 
     llm_data = model_loader._load_llm_data()
     defaults = llm_data.get("defaults", {})
@@ -259,7 +259,7 @@ def get_provider_for_model(model_id: str) -> str:
 
 def build_adapter(model_loader: Any) -> Any:
     """构建 KeyPoolAdapter — 按 key 粒度并发控制 + RPM 限流 + 配额追踪。"""
-    from llm.adapter import KeyPoolAdapter
+    from llm.adapter import KeyPoolAdapter  # noqa: PLC0415
 
     llm_data = model_loader._load_llm_data()
     concurrency_section = llm_data.get("concurrency", {})
@@ -281,7 +281,7 @@ def build_adapter(model_loader: Any) -> Any:
 
 def get_or_create_router(model_loader: Any) -> litellm.Router:
     """获取或创建共享的 Router 单例。"""
-    global _router_instance
+    global _router_instance  # noqa: PLW0603
     if _router_instance is None:
         _router_instance = build_router(model_loader)
     return _router_instance
@@ -289,7 +289,7 @@ def get_or_create_router(model_loader: Any) -> litellm.Router:
 
 def get_or_create_adapter(model_loader: Any) -> Any:
     """获取或创建共享的 Adapter 单例。"""
-    global _adapter_instance
+    global _adapter_instance  # noqa: PLW0603
     if _adapter_instance is None:
         _adapter_instance = build_adapter(model_loader)
     return _adapter_instance
@@ -305,7 +305,7 @@ def reset_router() -> None:
     修复方案：恢复 reset_router，仅清除本模块的模块级单例，让下次调用
     get_or_create_router / get_or_create_adapter 时按新配置重新构建。
     """
-    global _router_instance, _adapter_instance
+    global _router_instance, _adapter_instance  # noqa: PLW0603
     _router_instance = None
     _adapter_instance = None
     _key_pools.clear()

@@ -136,7 +136,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
     @staticmethod
     def get_tool_definition() -> Tool:
         """获取工具定义"""
-        from tools.types import ToolLevel
+        from tools.types import ToolLevel  # noqa: PLC0415
 
         return Tool(
             name="file_write",
@@ -200,7 +200,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
             injected_params=["workspace"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行工具"""
         self._init_workspace(inputs)
 
@@ -257,7 +257,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
         except Exception:
             # 清理临时文件
             try:
-                import os
+                import os  # noqa: PLC0415
 
                 os.close(fd)
                 if Path(temp_path).exists():
@@ -266,7 +266,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 pass
             raise
 
-    async def _write(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _write(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911,PLR0912
         """写入操作"""
         try:
             path_str = inputs.get("path")
@@ -392,7 +392,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="WRITE_FAILED",
             )
 
-    async def _search_replace(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _search_replace(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """搜索替换操作"""
         try:
             path_str = inputs.get("path")
@@ -479,7 +479,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="SEARCH_REPLACE_FAILED",
             )
 
-    async def _insert(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _insert(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """插入操作"""
         try:
             path_str = inputs.get("path")
@@ -571,7 +571,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="INSERT_FAILED",
             )
 
-    async def _delete_lines(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _delete_lines(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911,PLR0912
         """删除行操作"""
         try:
             path_str = inputs.get("path")
@@ -679,7 +679,7 @@ class FileWriteTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="DELETE_FAILED",
             )
 
-    async def _append(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _append(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """追加操作"""
         try:
             path_str = inputs.get("path")

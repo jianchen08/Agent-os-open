@@ -179,7 +179,7 @@ def apply_agent_plugin_configs(
         _ensure_context_build_level(plugin_registry, agent_config)
 
 
-def apply_agent_model_override(
+def apply_agent_model_override(  # noqa: PLR0912,PLR0915
     plugin_registry: Any,
     agent_config: Any | None,
     services: dict[str, Any],
@@ -204,7 +204,7 @@ def apply_agent_model_override(
     if _ml and hasattr(_ml, "_llm_data"):
         _ml._llm_data = None
     try:
-        from config.models import get_model_config_loader
+        from config.models import get_model_config_loader  # noqa: PLC0415
         _global_loader = get_model_config_loader()
         _global_loader._llm_data = None
     except Exception:
@@ -229,7 +229,7 @@ def apply_agent_model_override(
         _resolved_loader = services.get("model_loader") if services else None
         if _resolved_loader is None:
             try:
-                from config.models import get_model_config_loader
+                from config.models import get_model_config_loader  # noqa: PLC0415
                 _resolved_loader = get_model_config_loader()
             except Exception:
                 _resolved_loader = None
@@ -255,7 +255,7 @@ def apply_agent_model_override(
 
     if model_loader is None:
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             model_loader = get_model_config_loader()
         except Exception:
@@ -306,7 +306,7 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     Returns:
         对应的模型标识字符串，未找到返回空字符串
     """
-    global _tier_cache
+    global _tier_cache  # noqa: PLW0602
 
     if tier in _tier_cache:
         return _tier_cache[tier]
@@ -314,7 +314,7 @@ def resolve_tier(tier: str, services: dict[str, Any]) -> str:
     model_loader = services.get("model_loader") if services else None
     if model_loader is None:
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             model_loader = get_model_config_loader()
         except Exception:

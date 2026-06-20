@@ -63,7 +63,7 @@ def _simple_evaluate(task: Any, notes: str = "") -> tuple[bool, str]:
     return True, detail
 
 
-async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
+async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911
     """同步任务评估函数（供测试和简单场景使用）。
 
     Args:
@@ -72,7 +72,7 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
     Returns:
         评估结果字典
     """
-    from tasks.types import TaskStatus
+    from tasks.types import TaskStatus  # noqa: PLC0415
 
     action = inputs.get("action")
     task_id = inputs.get("task_id")
@@ -87,7 +87,7 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error_code": "INVALID_ACTION", "error": f"不支持的操作: {action}"}
 
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         task_service = provider.get_or_create(
             "task_service",
@@ -105,10 +105,8 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:
     valid_statuses = _VALID_EVALUATE_STATUSES if action == "evaluate_single" else _VALID_AUTO_COMPLETE_STATUSES
 
     if task.status == TaskStatus.RUNNING:
-        try:
+        with contextlib.suppress(Exception):
             await task_service.move_to_evaluating(task_id)
-        except Exception:
-            pass
 
     if task.status not in valid_statuses and task.status != TaskStatus.RUNNING:
         return {"success": False, "error_code": "INVALID_STATUS", "error": f"不支持的状态: {task.status}"}
@@ -194,7 +192,7 @@ class TaskEvaluateTool(BuiltinTool):
             injected_params=["session_id", "user_id", "tool_record_id", "task_id"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """执行任务评估。
 
         通过 injected_params 获取 task_id 等运行时参数，
@@ -272,7 +270,7 @@ class TaskEvaluateTool(BuiltinTool):
             error=f"不支持的操作: {action}", error_code="INVALID_ACTION"
         )
 
-    async def _evaluate_single(
+    async def _evaluate_single(  # noqa: PLR0911
         self,
         inputs: dict[str, Any],
         task_service: Any,
@@ -315,10 +313,10 @@ class TaskEvaluateTool(BuiltinTool):
             )
             return await self._auto_complete(inputs, task_service, task)
 
-        import litellm
+        import litellm  # noqa: PLC0415
 
         try:
-            import asyncio
+            import asyncio  # noqa: PLC0415
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
@@ -466,7 +464,7 @@ class TaskEvaluateTool(BuiltinTool):
         )
 
         try:
-            import asyncio
+            import asyncio  # noqa: PLC0415
             asyncio.get_running_loop()
             executor = self._create_executor(task_service)
             timeout = self._get_eval_timeout(task)
@@ -496,7 +494,7 @@ class TaskEvaluateTool(BuiltinTool):
                 error=f"评估失败: {e}", error_code="EVAL_FAILED"
             )
 
-    async def _handle_evaluation_result(
+    async def _handle_evaluation_result(  # noqa: PLR0912,PLR0915
         self,
         inputs: dict[str, Any],
         task_service: Any,
@@ -531,7 +529,7 @@ class TaskEvaluateTool(BuiltinTool):
         has_failure = False
         exhausted = False
 
-        _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")
+        _UNRECOVERABLE_PATTERNS = ("command not found", "no such file or directory", "module not found", "is not recognized")  # noqa: N806
 
         for r in eval_result.results:
             mid = r.metric_id
@@ -691,7 +689,7 @@ class TaskEvaluateTool(BuiltinTool):
         TaskWorker._init_lifecycle 注册到 ServiceProvider），并复用
         WorkspaceLifecycleManager.merge_worktree_before_complete 公共方法。
         """
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         lifecycle = get_service_provider().get("workspace_lifecycle_manager")
         if lifecycle is None:
             logger.warning(
@@ -781,7 +779,7 @@ class TaskEvaluateTool(BuiltinTool):
                     "task=%s", task.id,
                 )
                 return
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
@@ -822,7 +820,7 @@ class TaskEvaluateTool(BuiltinTool):
             task: TaskModel 实例
             eval_result: EvaluationResult 实例
         """
-        from datetime import datetime
+        from datetime import datetime  # noqa: PLC0415
 
         metrics = []
         for r in eval_result.results:
@@ -863,7 +861,7 @@ class TaskEvaluateTool(BuiltinTool):
         Returns:
             TaskService 实例，获取失败返回 None
         """
-        from tasks.service_access import get_task_service
+        from tasks.service_access import get_task_service  # noqa: PLC0415
         return get_task_service()
 
     def _create_executor(self, task_service: Any) -> Any:
@@ -878,9 +876,9 @@ class TaskEvaluateTool(BuiltinTool):
         Returns:
             EvaluationExecutor 实例
         """
-        import asyncio
+        import asyncio  # noqa: PLC0415
 
-        from evaluation.executor import EvaluationExecutor
+        from evaluation.executor import EvaluationExecutor  # noqa: PLC0415
 
         pipeline_factory = self._get_pipeline_factory()
         agent_registry = self._get_agent_registry()
@@ -890,12 +888,12 @@ class TaskEvaluateTool(BuiltinTool):
         try:
             main_loop = asyncio.get_running_loop()
             if main_loop is not None:
-                import threading
+                import threading  # noqa: F401,PLC0415
                 main_thread_loop = getattr(asyncio, "_main_loop_ref", None)
                 if main_thread_loop is None:
                     with contextlib.suppress(RuntimeError):
                         main_thread_loop = asyncio.get_event_loop()
-                if main_thread_loop is not None and main_thread_loop is not main_loop:
+                if main_thread_loop is not None and main_thread_loop is not main_loop:  # noqa: SIM102
                     if not main_thread_loop.is_closed():
                         main_loop = main_thread_loop
         except RuntimeError:
@@ -915,7 +913,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         通过 ServiceProvider 统一获取，保留从 _agent_os_services 构建的兜底逻辑。
         """
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         factory = provider.get("pipeline_factory")
         if factory is not None:
@@ -927,7 +925,7 @@ class TaskEvaluateTool(BuiltinTool):
             return None
 
         try:
-            from tools.tool_context import PipelineEngine
+            from tools.tool_context import PipelineEngine  # noqa: PLC0415
 
             input_routes = services.get("input_route_table")
             output_routes = services.get("output_route_table")
@@ -953,7 +951,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         通过 ServiceProvider 统一获取。
         """
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         return provider.get("agent_registry")
 
@@ -963,13 +961,13 @@ class TaskEvaluateTool(BuiltinTool):
 
         通过 ServiceProvider 统一获取，保留从全局注册表模块获取的兜底逻辑。
         """
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         registry = provider.get("tool_registry")
         if registry is not None:
             return registry
         try:
-            from tools.global_registry import get_global_tool_registry_sync
+            from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
             return get_global_tool_registry_sync()
         except Exception:
             return None
@@ -1091,7 +1089,7 @@ class TaskEvaluateTool(BuiltinTool):
                 return list(ac.keys())
         return []
 
-    def _get_input_params(self, task: Any) -> dict[str, dict[str, Any]]:
+    def _get_input_params(self, task: Any) -> dict[str, dict[str, Any]]:  # noqa: PLR0912
         """从任务模型的 acceptance_criteria 中提取各指标的输入参数。
 
         对于 input_params 为空的指标，自动从任务描述中构建 criteria。
@@ -1153,8 +1151,8 @@ class TaskEvaluateTool(BuiltinTool):
             for key, val in list(p.items()):
                 if isinstance(val, str):
                     if workspace_abs:
-                        val = val.replace("{{workspace}}", workspace_abs)
-                    val = val.replace("{{task_id}}", task.id)
+                        val = val.replace("{{workspace}}", workspace_abs)  # noqa: PLW2901
+                    val = val.replace("{{task_id}}", task.id)  # noqa: PLW2901
                     p[key] = val
 
         # Resolve {tool_id} template from workspace files
@@ -1171,7 +1169,7 @@ class TaskEvaluateTool(BuiltinTool):
         return params
 
     @staticmethod
-    def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:
+    def _resolve_tool_id_from_workspace(task: Any, workspace_abs: str | None) -> str | None:  # noqa: ARG004
         """从工作空间文件中推断 tool_id，用于替换 {tool_id} 模板变量。
 
         在 src/tools/builtin/ 目录下查找 .py 文件（排除 test_ 前缀和 __init__.py），
@@ -1179,7 +1177,7 @@ class TaskEvaluateTool(BuiltinTool):
         """
         if not workspace_abs:
             return None
-        from pathlib import Path
+        from pathlib import Path  # noqa: PLC0415
         tools_dir = Path(workspace_abs) / "src" / "tools" / "builtin"
         if not tools_dir.exists():
             return None

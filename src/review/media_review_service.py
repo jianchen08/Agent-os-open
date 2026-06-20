@@ -211,10 +211,10 @@ class MediaReviewService:
             ValueError: 不支持的 media_type
             FileNotFoundError: 文件不存在
         """
-        if not os.path.isfile(file_path):
+        if not os.path.isfile(file_path):  # noqa: PTH113
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        file_size = os.path.getsize(file_path)
+        file_size = os.path.getsize(file_path)  # noqa: PTH202
         base: dict[str, Any] = {
             "media_type": media_type,
             "file_path": file_path,
@@ -272,7 +272,7 @@ class MediaReviewService:
         Returns:
             合并后的元数据字典
         """
-        from PIL import Image
+        from PIL import Image  # noqa: PLC0415
 
         try:
             img = Image.open(file_path)
@@ -287,7 +287,7 @@ class MediaReviewService:
                 raw_exif = img.getexif()
                 if raw_exif:
                     for tag_id, value in raw_exif.items():
-                        from PIL.ExifTags import Base as ExifBase
+                        from PIL.ExifTags import Base as ExifBase  # noqa: PLC0415
                         tag_name = ExifBase(tag_id).name
                         if isinstance(value, bytes):
                             continue

@@ -63,7 +63,7 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         # 门面模式的存储层（仅 task_id=None 时初始化）
         self._storage: Any = None
         if task_id is None:
-            from tasks.storage import TaskStorage
+            from tasks.storage import TaskStorage  # noqa: PLC0415
 
             _dir = data_dir or _default_data_dir()
             self._storage = TaskStorage(data_dir=_dir)
@@ -99,7 +99,7 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
             new_status: 新状态
         """
         # 绑定日志上下文，使后续日志自动携带 task_id
-        from src.core.logging import LogContext
+        from src.core.logging import LogContext  # noqa: PLC0415
         LogContext.bind(task_id=task_id)
 
         for cb in self._state_callbacks:
@@ -142,8 +142,8 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
             if not thread_id:
                 return
 
-            from api.websocket.message_bus import SourceType, get_message_bus
-            from api.websocket.message_types import create_task_status_changed_message
+            from api.websocket.message_bus import SourceType, get_message_bus  # noqa: PLC0415
+            from api.websocket.message_types import create_task_status_changed_message  # noqa: PLC0415
 
             message = create_task_status_changed_message(
                 task_id=task_id,

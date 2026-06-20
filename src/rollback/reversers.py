@@ -366,7 +366,7 @@ class APIReverser(BaseReverser):
         self, reverse_action: dict[str, Any]
     ) -> dict[str, Any]:
         """执行 HTTP 逆操作"""
-        import aiohttp
+        import aiohttp  # noqa: PLC0415
 
         method = reverse_action.get("method", "DELETE")
         url = reverse_action.get("url")
@@ -482,7 +482,7 @@ _global_reverser_registry: ReverserRegistry | None = None
 
 def get_reverser_registry() -> ReverserRegistry:
     """获取全局逆操作器注册表"""
-    global _global_reverser_registry
+    global _global_reverser_registry  # noqa: PLW0603
     if _global_reverser_registry is None:
         _global_reverser_registry = ReverserRegistry()
     return _global_reverser_registry

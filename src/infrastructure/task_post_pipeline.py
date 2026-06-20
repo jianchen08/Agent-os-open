@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -133,12 +134,10 @@ class TaskPostPipelineMixin:
                     "TaskWorker: _rerun_evaluation failed for %s: %s",
                     task_id, rerun_exc,
                 )
-                try:
+                with contextlib.suppress(Exception):
                     await task_service.fail_task(
                         task_id, f"管道退出后评估执行失败: {rerun_exc}",
                     )
-                except Exception:
-                    pass
 
     async def _fail_after_pipeline_exit(
         self,

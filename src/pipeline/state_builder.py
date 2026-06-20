@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
 from pipeline.types import StateKeys, TargetType
@@ -128,14 +128,14 @@ def resolve_conversation_history(
             msg["tool_input"] = r.tool_input
         if getattr(r, "tool_calls_json", None):
             try:
-                import json as _json
+                import json as _json  # noqa: PLC0415
 
                 msg["tool_calls"] = _json.loads(r.tool_calls_json)
             except (ValueError, TypeError):
                 pass
         history.append(msg)
 
-    from infrastructure.task_worker import _reconstruct_tool_calls
+    from infrastructure.task_worker import _reconstruct_tool_calls  # noqa: PLC0415
 
     _reconstruct_tool_calls(history)
 

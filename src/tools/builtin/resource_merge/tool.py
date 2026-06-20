@@ -293,7 +293,7 @@ class ResourceMergeTool(BuiltinTool):
             error_code="INVALID_MERGE_STRATEGY",
         )
 
-    async def _merge_copy(
+    async def _merge_copy(  # noqa: PLR0912
         self, inputs: dict[str, Any], workspace: Path
     ) -> ToolResult:
         """通过文件复制方式将 workspace 变更合并到目标目录
@@ -394,7 +394,7 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="MERGE_FAILED",
             )
 
-    async def _git_merge(
+    async def _git_merge(  # noqa: PLR0911
         self, inputs: dict[str, Any], workspace: Path
     ) -> ToolResult:
         """通过 git merge 策略将 workspace 分支合并到主仓库
@@ -640,7 +640,7 @@ class ResourceMergeTool(BuiltinTool):
         """cleanup 操作：移除 worktree 并删除分支"""
 
         def _remove_readonly_func(func, path, _):
-            os.chmod(path, stat.S_IWRITE)
+            os.chmod(path, stat.S_IWRITE)  # noqa: PTH101
             func(path)
 
         try:

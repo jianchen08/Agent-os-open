@@ -26,8 +26,8 @@ def get_execution_record_storage() -> Any:
         ExecutionRecordStorage 实例，服务不可用返回 None
     """
     try:
-        from infrastructure.execution_record_storage import ExecutionRecordStorage
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: PLC0415
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
         storage = provider.get("execution_record_storage")

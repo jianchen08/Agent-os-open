@@ -8,10 +8,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
-import yaml
+import yaml  # noqa: F401
 from pydantic import BaseModel, Field
 
 from core.results import ToolExecutionResult
@@ -32,7 +32,7 @@ class ToolCacheConfig(BaseModel):
     def load_from_file(cls, path: str = "config/builtin_tools_config.yaml"):
         """从配置文件加载（通过 ConfigCenter 统一缓存）"""
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             rel = path.replace("config/", "", 1) if path.startswith("config/") else path
             data = get_config_center().get(rel) or {}
         except Exception:
@@ -87,7 +87,7 @@ class ToolCache:
         """获取缓存实例（延迟初始化）。"""
         if self._cache is None and self._cache_config.enabled:
             try:
-                from cache.multi_level_cache import get_global_cache
+                from cache.multi_level_cache import get_global_cache  # noqa: PLC0415
 
                 self._cache = get_global_cache()
             except ImportError:

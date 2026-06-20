@@ -50,7 +50,7 @@ class CleanupEngine:
     # 清理主流程
     # ============================================
 
-    async def cleanup_by_age_and_capacity(
+    async def cleanup_by_age_and_capacity(  # noqa: PLR0912
         self,
         review_engine: Any | None = None,
     ) -> dict[str, Any]:
@@ -114,7 +114,7 @@ class CleanupEngine:
                         should_delete_l0 = True
                         # 容量紧张但不算很老，只删 L0
 
-                elif review_status == "pending":
+                elif review_status == "pending":  # noqa: SIM102
                     # 未复盘：不能盲目删
                     if age_days > self._config.cleanup_min_age_days:
                         # 很老还没复盘，先复盘再清理
@@ -233,7 +233,7 @@ class CleanupEngine:
 
         # L0 已删，从 L1 块读取
         try:
-            import asyncio
+            import asyncio  # noqa: PLC0415
             chunks = asyncio.get_event_loop().run_until_complete(
                 self._chunk_db.find_by_pipeline(pipeline_id),
             )
@@ -332,7 +332,7 @@ class CleanupEngine:
     # 索引重建
     # ============================================
 
-    async def rebuild_index(self) -> dict[str, Any]:
+    async def rebuild_index(self) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """重建向量索引。
 
         从内容存储中读取所有记忆条目，重新生成嵌入向量

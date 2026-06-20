@@ -400,7 +400,7 @@ class PerformanceMonitor:
 
     def get_current_stats(self) -> dict[str, Any]:
         """获取当前统计信息（同步版本）"""
-        import asyncio
+        import asyncio  # noqa: PLC0415
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -541,7 +541,7 @@ def get_performance_monitor() -> PerformanceMonitor:
     Returns:
         PerformanceMonitor: 性能监控器实例
     """
-    global _performance_monitor
+    global _performance_monitor  # noqa: PLW0603
     if _performance_monitor is None:
         _performance_monitor = PerformanceMonitor()
     return _performance_monitor

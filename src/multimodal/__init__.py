@@ -62,6 +62,7 @@ from .capabilities import ModelCapabilityRegistry
 
 # 文件存储
 from .storage import (
+    DiskFileStorage,
     IFileStorage,
     LocalFileStorage,
     StorageError,
@@ -88,6 +89,7 @@ __all__ = [
     "ModelCapabilityRegistry",
     # 存储
     "IFileStorage",
+    "DiskFileStorage",
     "LocalFileStorage",
     "StorageError",
 ]

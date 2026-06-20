@@ -39,7 +39,7 @@ class WorkspaceAwareMixin:
         else:
             self._project_root = self._infer_project_root(self._workspace)
 
-    def resolve_path(self, path_str: str) -> Path:
+    def resolve_path(self, path_str: str) -> Path:  # noqa: PLR0911
         """解析路径，处理绝对路径、相对路径及前缀去重。
 
         绝对路径直接返回；相对路径与 self._workspace 拼接。

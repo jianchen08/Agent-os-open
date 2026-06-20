@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_bing_server():
     """向上搜索找到 mcp-servers/bing-search/server.py"""
-    from pathlib import Path as _P
+    from pathlib import Path as _P  # noqa: N814,PLC0415
 
     # 1. 从当前模块向上搜索（适用于宿主机和容器）
     try:
@@ -63,8 +63,8 @@ def _get_search_command() -> tuple[str, list[str]]:
     宿主机: python -m mcp_webgate。
     都没装则降级到 bing-search。
     """
-    import shutil
-    from pathlib import Path as _P
+    import shutil  # noqa: PLC0415
+    from pathlib import Path as _P  # noqa: N814,PLC0415
 
     # 容器内全局安装路径(优先,所有用户可访问)
     global_bin = "/usr/local/bin/mcp-webgate"
@@ -232,12 +232,13 @@ class WebSearchMCPTool(BuiltinTool):
         finally:
             await loader.disconnect_all()
 
-    async def _do_search(
+    async def _do_search(  # noqa: PLR0911,PLR0912
         self, loader: MCPToolLoader, server_config: MCPServerConfig,
         query: str, max_results: int, search_mode: str,
     ) -> ToolResult:
         """执行搜索，mcp-webgate 失败时自动降级到 bing-search"""
-        import json, traceback
+        import json  # noqa: F401,PLC0415
+        import traceback  # noqa: F401,PLC0415
 
         is_webgate = (
             "mcp_webgate" in str(server_config.args)
@@ -379,7 +380,7 @@ class WebSearchMCPTool(BuiltinTool):
     @staticmethod
     def _extract_mcp_content(result: Any) -> Any:
         """从 MCP 标准返回格式中提取实际数据"""
-        import json
+        import json  # noqa: PLC0415
 
         if not isinstance(result, dict):
             return result

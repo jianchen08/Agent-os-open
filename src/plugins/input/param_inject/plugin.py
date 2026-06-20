@@ -106,7 +106,7 @@ class ParamInjectPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行参数注入逻辑。
 
         Args:

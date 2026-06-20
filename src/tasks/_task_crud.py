@@ -50,7 +50,7 @@ class _TaskCrudMixin:
         if self._storage is None:
             raise RuntimeError("TaskService.create_task 需要门面模式（task_id=None）")
 
-        from tasks.types import create_task as _create_task
+        from tasks.types import create_task as _create_task  # noqa: PLC0415
 
         task = _create_task(
             title=title,
@@ -67,7 +67,7 @@ class _TaskCrudMixin:
         self._storage.save(task)
 
         if metadata and metadata.get("task_scope") == "container":
-            from tasks.types import TaskStatus
+            from tasks.types import TaskStatus  # noqa: PLC0415
 
             task.status = TaskStatus.RUNNING
             task.updated_at = datetime.now().isoformat()

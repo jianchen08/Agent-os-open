@@ -49,7 +49,7 @@ class HealthChecker:
             包含 status 和可选 detail 的字典
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             redis = provider.get("redis")
@@ -73,7 +73,7 @@ class HealthChecker:
             包含 status 和各通道详情的字典
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             gateway = provider.get("gateway")
@@ -107,7 +107,7 @@ class HealthChecker:
             包含 status 的字典
         """
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
             engine = provider.get("engine")
@@ -129,8 +129,8 @@ class HealthChecker:
         Returns:
             包含 status、docker_available、active_environments 等信息的字典
         """
-        import shutil
-        import subprocess
+        import shutil  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
 
         available = False
         reason = ""
@@ -138,7 +138,7 @@ class HealthChecker:
             reason = "Docker CLI 未安装"
         else:
             try:
-                result = subprocess.run(
+                result = subprocess.run(  # noqa: PLW1510
                     ["docker", "info"],
                     capture_output=True,
                     timeout=10,
@@ -156,7 +156,7 @@ class HealthChecker:
 
         env_count = 0
         try:
-            from isolation.manager import _global_manager
+            from isolation.manager import _global_manager  # noqa: PLC0415
             if _global_manager is not None:
                 stats = _global_manager.get_stats()
                 env_count = stats.get("total_environments", 0)

@@ -99,7 +99,7 @@ class ReadExecutionDetailTool(BuiltinTool):
             injected_params=["storage"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> Any:
+    async def execute(self, inputs: dict[str, Any]) -> Any:  # noqa: PLR0911
         """执行工具逻辑，根据 level 参数分派到对应的处理方法。
 
         Args:

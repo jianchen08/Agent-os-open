@@ -9,7 +9,7 @@
 
 import logging
 import math
-from typing import Any, Union
+from typing import Any, Union  # noqa: F401
 
 from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
@@ -214,7 +214,7 @@ class ScientificCalculatorTool(BuiltinTool):
         result = eval(expr, {"__builtins__": {}}, allowed_names)
         return result
 
-    async def execute(
+    async def execute(  # noqa: PLR0911,PLR0912
         self,
         inputs: dict[str, Any],
         context: Any = None,

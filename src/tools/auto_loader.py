@@ -107,8 +107,8 @@ class ToolAutoLoader:
             return None
 
         try:
-            from db.models import ToolLibrary
-            from sqlalchemy import select
+            from db.models import ToolLibrary  # noqa: PLC0415
+            from sqlalchemy import select  # noqa: PLC0415
 
             result = await self._db_session.execute(
                 select(ToolLibrary).where(ToolLibrary.name == tool_name)
@@ -209,7 +209,7 @@ class ToolAutoLoader:
 
         self._tool_guides[tool_name] = "\n\n".join(guide_parts)
 
-    async def _load_from_python_code(self, tool_name: str) -> Tool | None:
+    async def _load_from_python_code(self, tool_name: str) -> Tool | None:  # noqa: PLR0912
         """从 Python 代码动态加载工具（使用文件索引加速查找）。
 
         加载成功后注册到 ToolRegistry 并标记为动态工具，
@@ -479,8 +479,8 @@ class ToolAutoLoader:
             return []
 
         try:
-            from db.models import ToolLibrary
-            from sqlalchemy import or_, select
+            from db.models import ToolLibrary  # noqa: PLC0415
+            from sqlalchemy import or_, select  # noqa: PLC0415
 
             # 使用 ilike 进行模糊搜索
             stmt = (

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _pairing_validated_len: dict[str, int] = {}
 
 
-def repair_json_string(s: str) -> str | None:
+def repair_json_string(s: str) -> str | None:  # noqa: PLR0911,PLR0912,PLR0915
     """尝试修复常见的 JSON 格式问题，返回修复后的 JSON 字符串。
 
     处理的常见问题：
@@ -173,7 +173,7 @@ def _is_valid_tool_call_id(tc_id: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
 
 
-def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
+def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:  # noqa: PLR0912
     """确保 assistant 消息中的 tool_calls 使用统一的内部格式。
 
     执行两项修正：
@@ -247,7 +247,7 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> None:
                 msg["tool_call_id"] = id_remap[tc_id]
 
 
-def _validate_tool_call_pairing(
+def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     messages: list[dict[str, Any]],
     provider: str,
     name: str,
@@ -507,7 +507,7 @@ def reset_pairing_cache(
     _pairing_validated_len.pop(f"{provider}:{name}:{pipeline_id}", None)
 
 
-def normalize_messages_for_provider(
+def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     messages: list[dict[str, Any]],
     *,
     provider: str,

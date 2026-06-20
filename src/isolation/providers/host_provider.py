@@ -146,7 +146,7 @@ class HostProvider(IsolationProvider):
             error=f"不支持的操作类型: {op_type}",
         )
 
-    async def _execute_command(
+    async def _execute_command(  # noqa: PLR0911
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行Shell命令"""
@@ -236,7 +236,7 @@ class HostProvider(IsolationProvider):
                 error=f"执行命令失败: {str(e)}",
             )
 
-    async def _execute_file_op(
+    async def _execute_file_op(  # noqa: PLR0911
         self, operation: dict[str, Any], context: IsolationContext | None = None
     ) -> ExecutionResult:
         """执行文件操作"""
@@ -264,11 +264,11 @@ class HostProvider(IsolationProvider):
                 return ExecutionResult(success=True, output=None)
 
             if op == "delete":
-                os.remove(path)
+                os.remove(path)  # noqa: PTH107
                 return ExecutionResult(success=True, output=None)
 
             if op == "exists":
-                exists = os.path.exists(path)
+                exists = os.path.exists(path)  # noqa: PTH110
                 return ExecutionResult(success=True, output={"exists": exists})
 
             return ExecutionResult(
@@ -287,7 +287,7 @@ class HostProvider(IsolationProvider):
     async def _execute_python_code(self, operation: dict[str, Any]) -> ExecutionResult:
         """执行 Python 代码"""
         try:
-            from src.core.sandbox import CodeSandbox
+            from src.core.sandbox import CodeSandbox  # noqa: PLC0415
 
             code = operation.get("code")
             context = operation.get("context")
@@ -301,7 +301,7 @@ class HostProvider(IsolationProvider):
                 )
 
             # 创建沙箱
-            from src.core.sandbox import SandboxConfig
+            from src.core.sandbox import SandboxConfig  # noqa: PLC0415
 
             config = SandboxConfig(timeout_seconds=timeout)
             sandbox = CodeSandbox(config)

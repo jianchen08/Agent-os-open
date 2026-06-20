@@ -27,7 +27,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from tools.builtin.task_submit.tool import TaskSubmitTool  # noqa: E402
 from tools.types import Tool  # noqa: E402
 
-
 # ─────────────────────────── 工具函数 ───────────────────────────
 
 

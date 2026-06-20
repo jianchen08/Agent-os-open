@@ -307,7 +307,7 @@ class ProcessManager:
         except Exception as e:
             logger.exception(f"输出读取任务异常 | pid={pid} | error={e}")
 
-    async def send_input(self, pid: int, input_text: str) -> tuple[bool, str | None]:
+    async def send_input(self, pid: int, input_text: str) -> tuple[bool, str | None]:  # noqa: PLR0911
         """向进程发送输入。"""
         if pid not in self.active_processes:
             return False, f"进程 {pid} 不存在或已结束"
@@ -463,7 +463,7 @@ class ProcessManager:
         修复日期: 2026-03-24
         """
         # 设置最大进程数限制
-        MAX_PROCESSES = 100
+        MAX_PROCESSES = 100  # noqa: N806
 
         if len(self.active_processes) > MAX_PROCESSES:
             logger.info(f"进程数超过限制 ({len(self.active_processes)} > {MAX_PROCESSES})，开始清理")
@@ -583,7 +583,7 @@ class ProcessManager:
     def _sample_handles(self, pid: int) -> int | None:
         """采样进程句柄数。失败返回 None（不作为失控判据）。"""
         try:
-            import psutil
+            import psutil  # noqa: PLC0415
             p = psutil.Process(pid)
             # num_handles 是 Windows 专属；其他平台用 num_fds 兜底
             if hasattr(p, "num_handles"):
@@ -613,10 +613,7 @@ class ProcessManager:
         if recent[-1] < self._handle_threshold:
             return False  # 没超阈值
         # 连续 rounds 次都在增长
-        for i in range(1, len(recent)):
-            if recent[i] <= recent[i - 1]:
-                return False  # 出现回落或持平，不算持续增长
-        return True
+        return all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
 
     async def _watchdog_kill(self, pid: int, info: ProcessInfo, reason: str) -> None:
         """看门狗强制终止进程（best-effort，失败仅记日志）。"""
@@ -647,9 +644,9 @@ class ProcessManager:
         pid = proc_info.pid
         try:
             if platform.system() == "Windows":
-                import _winapi
+                import _winapi  # noqa: PLC0415
                 # SYNCHRONIZE 用于 WaitForSingleObject，QUERY_LIMITED_INFORMATION 获取退出码
-                ACCESS = _winapi.SYNCHRONIZE | 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+                ACCESS = _winapi.SYNCHRONIZE | 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION  # noqa: N806
                 handle = _winapi.OpenProcess(ACCESS, False, pid)
                 if handle == 0:
                     return  # 无法打开进程，保守处理
@@ -704,7 +701,7 @@ class ProcessManager:
 
         try:
             if platform.system() == "Windows":
-                import _winapi
+                import _winapi  # noqa: PLC0415
                 _winapi.WriteFile(fd, data)
             else:
                 os.write(fd, data)

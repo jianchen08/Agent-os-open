@@ -12,23 +12,13 @@
 
 from __future__ import annotations
 
-
-
 import logging
-
 from pathlib import Path
-
 from typing import Any
-
-
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-
-
 from channels.api.deps import APIError, require_auth, validate_pagination
-
-
 
 _recovered_user_ids: set[str] = set()
 
@@ -58,13 +48,10 @@ def _notify_session_update(thread_id: str, action: str) -> None:
 
     try:
 
-        import asyncio
+        import asyncio  # noqa: PLC0415
 
-
-
-        from pipeline.stream_bridge import create_targeted_sink
-
-        from channels.websocket.ws_handler import ws_interaction_notifier
+        from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
+        from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
 
 
 
@@ -100,33 +87,19 @@ def _notify_session_update(thread_id: str, action: str) -> None:
 
         pass
 
-import contextlib
+import contextlib  # noqa: E402
 
-
-
-from channels.api.memory_store import _parse_iso_time, store
-
-from channels.api.models import (
-
+from channels.api.memory_store import _parse_iso_time, store  # noqa: E402
+from channels.api.models import (  # noqa: E402
     MessageResponse,
-
     ThreadCreate,
-
     ThreadResponse,
-
     ThreadUpdate,
-
 )
-
-from infrastructure.execution_record_storage import ExecutionRecordStorage
-
-from infrastructure.service_provider import get_service_provider
-
-from infrastructure.session.models import SessionModel
-
-from infrastructure.session.session_service import SessionService
-
-
+from infrastructure.execution_record_storage import ExecutionRecordStorage  # noqa: E402
+from infrastructure.service_provider import get_service_provider  # noqa: E402
+from infrastructure.session.models import SessionModel  # noqa: E402
+from infrastructure.session.session_service import SessionService  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +179,7 @@ def _get_task_service() -> Any:
 
     try:
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
 
@@ -241,7 +214,7 @@ def _safe_get_service(service_name: str) -> Any:
         return None
 
 
-async def _build_execution_graph(
+async def _build_execution_graph(  # noqa: PLR0912,PLR0915
 
     pipeline_ids: list[str],
 
@@ -387,7 +360,7 @@ async def _build_execution_graph(
 
             try:
 
-                from datetime import datetime
+                from datetime import datetime  # noqa: PLC0415
 
                 dt_start = datetime.fromisoformat(start_time)
 
@@ -643,7 +616,7 @@ def list_threads(
 
     """
 
-    from channels.api.models import ThreadListResponse
+    from channels.api.models import ThreadListResponse  # noqa: PLC0415
 
 
 
@@ -781,7 +754,7 @@ def create_thread(
 
     # 后续消息处理时 Engine 会沿用这个 pipeline_id
 
-    import uuid as _uuid
+    import uuid as _uuid  # noqa: PLC0415
 
     pipeline_id = _uuid.uuid4().hex[:12]
 
@@ -953,7 +926,7 @@ def update_thread(
 
 )
 
-def delete_thread(
+def delete_thread(  # noqa: PLR0912
 
     thread_id: str,
 
@@ -1145,7 +1118,7 @@ def delete_thread(
 
 
 
-def _record_to_message_response(
+def _record_to_message_response(  # noqa: PLR0912,PLR0915
 
     record: Any,
 
@@ -1181,7 +1154,7 @@ def _record_to_message_response(
 
     """
 
-    import json as _json
+    import json as _json  # noqa: PLC0415
 
 
 
@@ -1507,7 +1480,7 @@ def _ensure_session(thread_id: str) -> SessionModel | None:
 
 
 
-def _try_recover_pipeline_ids(
+def _try_recover_pipeline_ids(  # noqa: PLR0912
 
     thread_id: str,
 
@@ -1599,7 +1572,7 @@ def _try_recover_pipeline_ids(
 
             for s in all_summaries:
 
-                if getattr(s, "thread_id", None) == thread_id and s.run_id:
+                if getattr(s, "thread_id", None) == thread_id and s.run_id:  # noqa: SIM102
 
                     if s.run_id not in recovered:
 
@@ -1733,7 +1706,7 @@ def list_messages(
 
     """
 
-    from channels.api.models import MessageListResponse
+    from channels.api.models import MessageListResponse  # noqa: PLC0415
 
 
 
@@ -2073,7 +2046,7 @@ def get_thread_state(
 
 )
 
-def get_thread_history(
+def get_thread_history(  # noqa: PLR0912
 
     thread_id: str,
 
@@ -2427,7 +2400,7 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
 
     """
 
-    import logging
+    import logging  # noqa: PLC0415
 
     _logger = logging.getLogger(__name__)
 
@@ -2453,7 +2426,7 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
 
     try:
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         _sp = get_service_provider()
 
@@ -2471,19 +2444,19 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
 
         if not _irt or not _ort or not _pr:
 
-            from pipeline.config import load_pipeline_config, build_plugin_registry
+            from pipeline.config import build_plugin_registry, load_pipeline_config  # noqa: PLC0415
 
             _cfg = load_pipeline_config("config/pipelines/default.yaml")
 
-            if not _irt: _irt = _cfg.input_route_table
+            if not _irt: _irt = _cfg.input_route_table  # noqa: E701
 
-            if not _ort: _ort = _cfg.output_route_table
+            if not _ort: _ort = _cfg.output_route_table  # noqa: E701
 
             if not _pr:
 
-                try: _pr = build_plugin_registry(_cfg)
+                try: _pr = build_plugin_registry(_cfg)  # noqa: E701
 
-                except Exception as _be: _logger.error("[session] build_plugin_registry 失败: %s", _be)
+                except Exception as _be: _logger.error("[session] build_plugin_registry 失败: %s", _be)  # noqa: E701
 
             _logger.info("[session] 兜底加载后: irt=%s ort=%s pr=%s",
 
@@ -2499,7 +2472,7 @@ def _register_session_pipeline(pipeline_id: str, thread_id: str, agent_id: str) 
 
         }
 
-        from pipeline.registry import get_engine_registry
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
         _result = get_engine_registry().register_pipeline(
 
@@ -2551,7 +2524,7 @@ def restore_session_pipelines() -> int:
 
     """
 
-    import logging
+    import logging  # noqa: PLC0415
 
     _logger = logging.getLogger(__name__)
 
@@ -2569,7 +2542,7 @@ def restore_session_pipelines() -> int:
 
                 continue
 
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
             if get_engine_registry().get(_pid):
 
@@ -2617,13 +2590,13 @@ def _sync_agent_to_registry_tags(thread_id: str, agent_id: str) -> None:
 
     """
 
-    import logging
+    import logging  # noqa: PLC0415
 
     _logger = logging.getLogger(__name__)
 
     try:
 
-        from pipeline.registry import get_engine_registry
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
 
         _registry = get_engine_registry()
 

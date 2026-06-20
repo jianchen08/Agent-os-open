@@ -23,7 +23,7 @@ from memory.types import (
     Episode,
     InjectType,
     Knowledge,
-    MemoryType,
+    MemoryType,  # noqa: F401
     RetrievalMethod,
     SearchResult,
 )

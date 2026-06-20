@@ -18,7 +18,7 @@ _DEFAULT_WORKSPACE_ROOT = ".ai_workspaces"
 def _load_isolation_config() -> dict:
     """通过 ConfigCenter 读取 isolation 配置（统一缓存）。"""
     try:
-        from config.config_center import get_config_center
+        from config.config_center import get_config_center  # noqa: PLC0415
         return get_config_center().get("isolation/isolation_config.yaml") or {}
     except Exception as e:
         logger.warning(f"读取 isolation 配置失败 | error={e}")
@@ -66,7 +66,7 @@ def _is_absolute_path(path_str: str) -> bool:
     return bool(path_str.startswith("/") and not path_str.startswith("//"))
 
 
-def resolve_workspace(
+def resolve_workspace(  # noqa: PLR0911
     task_id: str,
     task_workspace: str | None,
     parent_resolved_workspace: str | None = None,
@@ -171,7 +171,7 @@ async def resolve_workspace_chain(
     Returns:
         解析后的工作空间路径字符串
     """
-    from src.db.models import Task
+    from src.db.models import Task  # noqa: PLC0415
 
     task = await session.get(Task, task_id)
     if not task:

@@ -33,7 +33,7 @@ async def send_frontend_event(
     if not pipeline_id:
         return False
 
-    from pipeline.registry import get_engine_registry
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
     registry = get_engine_registry()
 
     bridge = registry.get_bridge(pipeline_id)
@@ -45,7 +45,7 @@ async def send_frontend_event(
         return False
 
     try:
-        from channels.websocket.ws_handler import ws_interaction_notifier as _notifier
+        from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
     except Exception as _import_err:
         logger.debug(
             "send_frontend_event: ws_interaction_notifier 不可用 pipeline=%s err=%s",
@@ -56,7 +56,7 @@ async def send_frontend_event(
     if not _notifier:
         return False
 
-    from pipeline.sink import create_targeted_sink
+    from pipeline.sink import create_targeted_sink  # noqa: PLC0415
     sink = create_targeted_sink(_notifier, entry.thread_id)
     if sink is None:
         return False

@@ -82,7 +82,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
             # 不抛出异常，避免影响程序运行
             self.handleError(record)
 
-    def doRollover(self):
+    def doRollover(self):  # noqa: N802
         """
         执行日志轮转，处理 Windows 文件占用问题
         """
@@ -92,26 +92,26 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
 
         try:
             # 尝试重命名文件
-            if os.path.exists(self.baseFilename):
+            if os.path.exists(self.baseFilename):  # noqa: PTH110
                 # 检查备份文件数量
                 for i in range(self.backupCount - 1, 0, -1):
                     sfn = f"{self.baseFilename}.{i}"
                     dfn = f"{self.baseFilename}.{i + 1}"
-                    if os.path.exists(sfn):
+                    if os.path.exists(sfn):  # noqa: PTH110
                         try:
-                            if os.path.exists(dfn):
-                                os.remove(dfn)
-                            os.rename(sfn, dfn)
+                            if os.path.exists(dfn):  # noqa: PTH110
+                                os.remove(dfn)  # noqa: PTH107
+                            os.rename(sfn, dfn)  # noqa: PTH104
                         except (OSError, PermissionError):
                             # 文件被占用，跳过
                             pass
 
                 dfn = f"{self.baseFilename}.1"
-                if os.path.exists(dfn):
+                if os.path.exists(dfn):  # noqa: PTH110
                     with contextlib.suppress(OSError, PermissionError):
-                        os.remove(dfn)
+                        os.remove(dfn)  # noqa: PTH107
                 try:
-                    os.rename(self.baseFilename, dfn)
+                    os.rename(self.baseFilename, dfn)  # noqa: PTH104
                 except (OSError, PermissionError):
                     # 文件被占用，清空当前文件继续写入
                     with open(self.baseFilename, 'w', encoding=self.encoding):
@@ -133,14 +133,14 @@ def setup_logging(console_level: str = None):
     Args:
         console_level: 控制台日志级别 (DEBUG/INFO/WARNING/ERROR)，默认从环境变量读取
     """
-    global _logging_configured
+    global _logging_configured  # noqa: PLW0603
 
     # 避免重复配置
     if _logging_configured:
         return logging.getLogger(__name__)
 
     # 转发到统一日志系统 src.core.logging
-    from src.core.logging import setup_logging as _unified_setup, LoggingConfig
+    from src.core.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
 
     level_str = console_level or os.getenv("LOG_LEVEL", "INFO")
     config = LoggingConfig.from_env()
@@ -167,7 +167,7 @@ logger = None
 
 
 def _get_logger():
-    global logger
+    global logger  # noqa: PLW0603
     if logger is None:
         logger = setup_logging()
     return logger

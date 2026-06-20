@@ -138,7 +138,7 @@ def get_progress_calculator() -> ProgressCalculator:
     Returns:
         ProgressCalculator 实例
     """
-    global _progress_calculator
+    global _progress_calculator  # noqa: PLW0603
     if _progress_calculator is None:
         _progress_calculator = ProgressCalculator()
     return _progress_calculator

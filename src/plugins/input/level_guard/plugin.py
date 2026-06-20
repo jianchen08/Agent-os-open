@@ -91,7 +91,7 @@ class LevelGuardPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行层级权限检查逻辑。
 
         只对任务类工具（TASK_CONTROL_TOOLS）做硬限制：检查它是否在

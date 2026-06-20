@@ -31,7 +31,7 @@ def _get_maintenance_service() -> Any:
         MemoryMaintenanceService 实例，服务不可用返回 None
     """
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         return provider.get("maintenance_service")
     except Exception as exc:

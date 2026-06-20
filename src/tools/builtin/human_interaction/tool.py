@@ -7,7 +7,7 @@
 - HumanInteractionTool：HumanInteractionTool类
 """
 
-import asyncio
+import asyncio  # noqa: F401
 import contextlib
 import logging
 from asyncio import CancelledError
@@ -284,7 +284,7 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             resolved.append(str(resolved_path))
         return resolved
 
-    async def _execute_choice_mode(
+    async def _execute_choice_mode(  # noqa: PLR0912
         self,
         inputs: dict[str, Any],
         service,

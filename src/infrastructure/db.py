@@ -62,7 +62,7 @@ def get_engine() -> Any | None:
     Returns:
         AsyncEngine 实例，SQLAlchemy 不可用或未配置时返回 None
     """
-    global _engine
+    global _engine  # noqa: PLW0603
 
     if not _SQLALCHEMY_AVAILABLE:
         return None
@@ -135,7 +135,7 @@ async def init_db() -> bool:
         return False
 
     try:
-        from sqlalchemy import text
+        from sqlalchemy import text  # noqa: PLC0415
 
         async with engine.begin() as conn:
             # 创建情景记忆表
@@ -181,7 +181,7 @@ async def close_engine() -> None:
 
     应在应用关闭时调用，确保所有连接正确释放。
     """
-    global _engine
+    global _engine  # noqa: PLW0603
 
     if _engine is not None:
         try:

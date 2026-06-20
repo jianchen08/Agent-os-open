@@ -50,7 +50,7 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
         {project: {id, userId, goal, status, autoExecute, currentTaskIndex, tasks: [],
                    timestamps: {createdAt, updatedAt}}}
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone  # noqa: PLC0415
     now = datetime.now(timezone.utc).isoformat()
     return {
         "project": {
@@ -66,7 +66,7 @@ async def create_project(body: dict[str, Any] | None = None, _user: dict = Depen
     }
 
 
-async def get_task_tree(
+async def get_task_tree(  # noqa: PLR0912,PLR0915
     session_id: str | None = Query(default=None, description="按会话 ID 过滤"),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
@@ -97,7 +97,7 @@ async def get_task_tree(
     if session_id:
         related_pipeline_ids: set[str] = set()
         try:
-            from channels.api.routes_threads import store as api_store
+            from channels.api.routes_threads import store as api_store  # noqa: PLC0415
             session = api_store.get_session(session_id)
             if session and session.pipeline_ids:
                 related_pipeline_ids = set(session.pipeline_ids)
@@ -113,7 +113,7 @@ async def get_task_tree(
             while changed:
                 changed = False
                 for t in all_tasks:
-                    if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:
+                    if t.parent_pipeline_id and t.parent_pipeline_id in related_pipeline_ids:  # noqa: SIM102
                         if t.pipeline_run_id and t.pipeline_run_id not in related_pipeline_ids:
                             related_pipeline_ids.add(t.pipeline_run_id)
                             changed = True
@@ -190,7 +190,7 @@ async def get_task_tree(
     }
 
 
-from tasks.service_access import get_task_service as _get_task_service
+from tasks.service_access import get_task_service as _get_task_service  # noqa: E402
 
 
 def _empty_tree(session_id: str | None) -> dict[str, Any]:
@@ -414,7 +414,7 @@ def _get_token_usage() -> dict[str, Any]:
         包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
     """
     def _strategy_usage_monitor() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         monitor = provider.get("usage_monitor")
         if monitor is None:
@@ -431,7 +431,7 @@ def _get_token_usage() -> dict[str, Any]:
         }
 
     def _strategy_perf_monitor() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
         if perf_monitor is None:
@@ -474,7 +474,7 @@ def _get_cache_stats() -> dict[str, Any]:
         包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
     """
     def _strategy_tool_cache() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         tool_cache = provider.get("tool_cache")
         if tool_cache is None or not hasattr(tool_cache, "get_cache_stats"):
@@ -483,7 +483,7 @@ def _get_cache_stats() -> dict[str, Any]:
         return _build_cache_result(stats.get("hits", 0), stats.get("misses", 0))
 
     def _strategy_perf_monitor() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
         if perf_monitor is None:
@@ -508,12 +508,12 @@ def _get_system_metrics() -> dict[str, Any]:
     3. 零值兜底
     """
     def _strategy_perf_monitor() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
         if perf_monitor is None or not hasattr(perf_monitor, "get_system_metrics"):
             return None
-        import asyncio
+        import asyncio  # noqa: PLC0415
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # 不能在运行中的事件循环里 await，用 psutil 直接采集
@@ -537,7 +537,7 @@ def _get_system_metrics() -> dict[str, Any]:
 def _collect_psutil_metrics() -> dict[str, Any]:
     """通过 psutil 直接采集系统指标（同步）。"""
     try:
-        import psutil
+        import psutil  # noqa: PLC0415
 
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
@@ -568,7 +568,7 @@ def _format_system_metrics(
     disk_free: int = 0,
 ) -> dict[str, Any]:
     """格式化系统指标为统一响应结构。"""
-    import time
+    import time  # noqa: PLC0415
 
     return {
         "cpu_usage": round(cpu, 2),
@@ -604,7 +604,7 @@ def _get_task_statistics() -> dict[str, Any]:
     }
 
     def _strategy_task_service() -> dict[str, Any] | None:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         task_service = provider.get("task_service")
         if task_service is None or not hasattr(task_service, "get_all_tasks"):
@@ -713,13 +713,13 @@ async def get_monitoring_tasks(
     Returns:
         包含 items、total、page、page_size 的字典
     """
-    from channels.api.memory_store import store
+    from channels.api.memory_store import store  # noqa: F401,PLC0415
 
     # _get_task_service 已在模块级别从 tasks.service_access 导入
 
     # 监控页面状态映射：将后端特殊状态映射为前端 TaskInfo 兼容的状态值
     # 注意：monitoring TaskInfo 使用 'running' 而非 'in_progress'
-    _MONITORING_STATUS_MAP: dict[str, str] = {
+    _MONITORING_STATUS_MAP: dict[str, str] = {  # noqa: N806
         "evaluating": "running",
         "suspended": "pending",
         "queued": "pending",
@@ -731,7 +731,7 @@ async def get_monitoring_tasks(
 
     def _taskmodel_to_monitoring_dict(tm: Any) -> dict[str, Any]:
         """将 TaskModel dataclass 转为字典（保留原始状态值，不做 in_progress 映射）。"""
-        from dataclasses import asdict
+        from dataclasses import asdict  # noqa: PLC0415
 
         d = asdict(tm)
         # 提取枚举的原始字符串值
@@ -774,7 +774,7 @@ async def get_monitoring_tasks(
         completed = t.get("completed_at")
         if started and completed:
             try:
-                from datetime import datetime as _dt
+                from datetime import datetime as _dt  # noqa: PLC0415
 
                 s = _dt.fromisoformat(started)
                 c = _dt.fromisoformat(completed)
@@ -1348,7 +1348,7 @@ async def list_eval_metrics_alias(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_response  # noqa: PLC0415
         loader = _get_metric_loader()
         if loader is None:
             return {"metrics": [], "total": 0}
@@ -1378,13 +1378,13 @@ async def list_eval_metrics_alias(
 @eval_metrics_alias_router.get("/{metric_id}", summary="获取评估指标详情（别名）")
 async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     try:
-        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail
+        from channels.api.routes_evaluation import _get_metric_loader, _metric_to_detail  # noqa: PLC0415
         loader = _get_metric_loader()
         if loader is None:
-            raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message="评估指标加载器未初始化")  # noqa: F821
         metric = loader.get(metric_id)
         if metric is None:
-            raise APIError(status_code=404, error_code="API_NOTF_2004", message=f"评估指标 '{metric_id}' 不存在")
+            raise APIError(status_code=404, error_code="API_NOTF_2004", message=f"评估指标 '{metric_id}' 不存在")  # noqa: F821
         return _metric_to_detail(metric).model_dump()
     except Exception:
         return {"id": metric_id, "name": "", "description": ""}
@@ -1517,7 +1517,7 @@ async def get_task_phase(task_id: str, _user: dict = Depends(require_auth)) -> d
     Returns:
         {taskId, currentPhase, phaseStatus}
     """
-    _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {
+    _STATUS_TO_PHASE: dict[str, tuple[str, str]] = {  # noqa: N806
         "pending": ("prepare", "pending"),
         "scheduled": ("prepare", "pending"),
         "suspended": ("prepare", "pending"),

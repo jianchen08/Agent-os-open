@@ -89,7 +89,7 @@ def setup_logging(
         debug: 是否启用 DEBUG 级别（终端也会显示管道内部日志）
         log_dir: 日志目录路径，默认为项目根目录下的 logs/
     """
-    global _LOGGING_INITIALIZED
+    global _LOGGING_INITIALIZED  # noqa: PLW0603
     if _LOGGING_INITIALIZED:
         return
     _LOGGING_INITIALIZED = True
@@ -97,7 +97,7 @@ def setup_logging(
     _log_dir = _PROJECT_ROOT / "logs" if log_dir is None else Path(log_dir)
     _log_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.core.logging import setup_logging as _unified_setup, LoggingConfig
+    from src.core.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
 
     config = LoggingConfig(
         level=logging.DEBUG if debug else logging.INFO,
@@ -113,7 +113,7 @@ def setup_logging(
     )
 
     if not debug:
-        _SUPPRESSED_NS = (
+        _SUPPRESSED_NS = (  # noqa: N806
             "pipeline.", "httpcore", "httpx", "LiteLLM", "openai",
             "isolation.", "infrastructure.",
             "tools.", "plugins.", "llm.",
@@ -125,7 +125,7 @@ def setup_logging(
 
         def _console_filter(record: logging.LogRecord) -> bool:
             # 外部库（非内部命名空间）→ 全部放行
-            if not any(record.name.startswith(_ns) for _ns in _SUPPRESSED_NS):
+            if not any(record.name.startswith(_ns) for _ns in _SUPPRESSED_NS):  # noqa: SIM103
                 return True
             # 内部命名空间：错误已通过 output adapter 结构化显示，
             # 不再重复输出到终端，避免长 traceback 泄露
@@ -224,8 +224,8 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             config_path: 管道配置 YAML 文件路径。
                 默认使用 ``config/pipelines/default.yaml``。
         """
-        from config.models import get_model_config_loader
-        from pipeline.config import build_plugin_registry, load_pipeline_config
+        from config.models import get_model_config_loader  # noqa: PLC0415
+        from pipeline.config import build_plugin_registry, load_pipeline_config  # noqa: PLC0415
 
         # 确定配置路径
         if config_path is None:
@@ -271,7 +271,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         )
 
         # 获取共享 Router
-        from llm.router_factory import get_or_create_router
+        from llm.router_factory import get_or_create_router  # noqa: PLC0415
         router = get_or_create_router(model_loader)
 
         # 使用配置中的路由表
@@ -279,7 +279,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         self._output_route_table = pipeline_config.output_route_table
 
         # 加载 Agent 配置（使用全局单例 registry，热重载统一生效）
-        from agents.global_registry import get_global_agent_registry_sync
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
         agent_registry = get_global_agent_registry_sync()
 
         # 创建共享服务 → 注入 PipelineEngine
@@ -335,7 +335,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         tool_registry = self._services.get("tool_registry")
         if tool_registry is not None:
             try:
-                from tools.builtin import register_core_tools
+                from tools.builtin import register_core_tools  # noqa: PLC0415
                 registered = register_core_tools(tool_registry, session=None)
                 logger.info(
                     "ToolCore registered %d core tools", len(registered)
@@ -380,7 +380,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
         context_svc = self._services.get("context_service")
         if context_svc is not None and hasattr(llm_core_plugin, "_adapter"):
-            from llm.adapter import LLMResponse
+            from llm.adapter import LLMResponse  # noqa: PLC0415
 
             async def _llm_call_fn(prompt: str) -> str:
                 if router is not None:
@@ -413,16 +413,16 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
             config_path: 管道配置文件路径
         """
         try:
-            from infrastructure.service_provider import get_service_provider
-            from tasks.service import TaskService
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+            from tasks.service import TaskService  # noqa: PLC0415
             _provider = get_service_provider()
             task_service = self._services.get("task_service") or _provider.get_or_create(
                 "task_service", lambda: TaskService(event_bus=_provider.get("event_bus")),
             )
 
-            import yaml as _yaml
+            import yaml as _yaml  # noqa: PLC0415
 
-            from infrastructure.task_worker import TaskWorker
+            from infrastructure.task_worker import TaskWorker  # noqa: PLC0415
             _tw_config: dict[str, Any] = {}
             try:
                 with open(config_path, encoding="utf-8") as _f:
@@ -456,7 +456,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
 
             # 注册 pipeline_factory 到 ServiceProvider
             try:
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
                 get_service_provider().register(
                     "pipeline_factory", _eval_pipeline_factory
                 )
@@ -483,7 +483,7 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         Returns:
             服务字典
         """
-        from application import Application
+        from application import Application  # noqa: PLC0415
 
         app = Application(project_root=_PROJECT_ROOT)
         services = app.build_services(agent_registry=agent_registry)
@@ -493,14 +493,14 @@ class CLIApplication(CLIRunnerMixin, CLISingleMixin, CLIInteractiveMixin):
         self._event_bus = services.get("event_bus")
 
         # CLI 渠道特有服务（不属于后端通用服务）
-        try:
-            import human_interaction.desktop_notifier  # noqa: F401
+        try:  # noqa: SIM105
+            import human_interaction.desktop_notifier  # noqa: F401,PLC0415
         except Exception:
             pass
 
         try:
-            from channels.cli.cli_interaction import CLIInteractionNotifier
-            from human_interaction import get_human_interaction_service
+            from channels.cli.cli_interaction import CLIInteractionNotifier  # noqa: PLC0415
+            from human_interaction import get_human_interaction_service  # noqa: PLC0415
 
             cli_notifier = CLIInteractionNotifier(
                 console=self._output_adapter.console
@@ -572,7 +572,7 @@ def main() -> None:
             asyncio.run(app.run())
     finally:
         try:
-            from llm.adapter import cleanup_litellm_resources_sync
+            from llm.adapter import cleanup_litellm_resources_sync  # noqa: PLC0415
             cleanup_litellm_resources_sync()
         except Exception:
             pass

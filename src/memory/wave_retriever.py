@@ -332,7 +332,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # EPA 分析
     # ======================================================================
 
-    def _extract_epa(self, text: str) -> dict[str, list[str]]:
+    def _extract_epa(self, text: str) -> dict[str, list[str]]:  # noqa: PLR0912
         """EPA 分析：将文本分解为 Entity、Property、Action 三个维度。
 
         基于关键词和简单规则提取，不依赖 NLP 库。
@@ -560,7 +560,7 @@ class WaveRetriever(IRetriever):  # type: ignore[misc]
     # 浪潮扩散
     # ======================================================================
 
-    def _wave_diffusion(
+    def _wave_diffusion(  # noqa: PLR0912
         self,
         initial_results: list[SearchResult],
         all_items: list[dict[str, Any]],

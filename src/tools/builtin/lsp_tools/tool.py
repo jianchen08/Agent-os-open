@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from core.results import ToolExecutionResult
+from core.results import ToolExecutionResult  # noqa: F401
 from tools.types import (
     Tool,
     ToolCategory,
@@ -50,7 +50,7 @@ class LSPTools:
         """检查 LSP 服务器是否不可用，若不可用返回失败结果，否则返回 None"""
         language = gateway._detect_language(file_path)
         if not gateway.get_client(language):
-            from lsp.gateway import LSP_SERVERS
+            from lsp.gateway import LSP_SERVERS  # noqa: PLC0415
 
             server_config = LSP_SERVERS.get(language)
             server_name = server_config.name if server_config else language
@@ -113,7 +113,7 @@ class LSPTools:
             injected_params=["workspace"],
         )
 
-    async def _lsp_definition(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _lsp_definition(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行跳转到定义"""
         workspace = inputs.get("workspace")
         if workspace:
@@ -133,9 +133,9 @@ class LSPTools:
             return create_failure_result(error, error_code="INVALID_PATH")
 
         try:
-            from lsp.file_jump import FileJumpProtocol
-            from lsp.gateway import get_lsp_gateway
-            from lsp.types import Position
+            from lsp.file_jump import FileJumpProtocol  # noqa: PLC0415
+            from lsp.gateway import get_lsp_gateway  # noqa: PLC0415
+            from lsp.types import Position  # noqa: PLC0415
 
             gateway = await get_lsp_gateway()
 
@@ -219,7 +219,7 @@ class LSPTools:
             injected_params=["workspace"],
         )
 
-    async def _lsp_references(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _lsp_references(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行查找引用"""
         workspace = inputs.get("workspace")
         if workspace:
@@ -239,8 +239,8 @@ class LSPTools:
             return create_failure_result(error, error_code="INVALID_PATH")
 
         try:
-            from lsp.gateway import get_lsp_gateway
-            from lsp.types import Position
+            from lsp.gateway import get_lsp_gateway  # noqa: PLC0415
+            from lsp.types import Position  # noqa: PLC0415
 
             gateway = await get_lsp_gateway()
             position = Position(line=line, character=character)
@@ -310,7 +310,7 @@ class LSPTools:
             injected_params=["workspace"],
         )
 
-    async def _lsp_diagnostics(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _lsp_diagnostics(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行获取诊断"""
         workspace = inputs.get("workspace")
         if workspace:
@@ -328,7 +328,7 @@ class LSPTools:
             return create_failure_result(error, error_code="INVALID_PATH")
 
         try:
-            from lsp.gateway import get_lsp_gateway
+            from lsp.gateway import get_lsp_gateway  # noqa: PLC0415
 
             gateway = await get_lsp_gateway()
             diagnostics = await gateway.get_diagnostics(str(validated_path))
@@ -407,7 +407,7 @@ class LSPTools:
             injected_params=["workspace"],
         )
 
-    async def _file_jump(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _file_jump(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """执行文件跳转"""
         workspace = inputs.get("workspace")
         if workspace:
@@ -427,8 +427,8 @@ class LSPTools:
             return create_failure_result(error, error_code="INVALID_PATH")
 
         try:
-            from lsp.file_jump import FileJumpProtocol
-            from lsp.types import Position
+            from lsp.file_jump import FileJumpProtocol  # noqa: PLC0415
+            from lsp.types import Position  # noqa: PLC0415
 
             position = None
             if line is not None:

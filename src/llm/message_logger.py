@@ -71,7 +71,7 @@ class LLMMessageLogger:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             return f"REQ_{timestamp}_{self._request_counter:06d}"
 
-    def _format_message_full(self, msg: Any | dict[str, Any] | str) -> str:
+    def _format_message_full(self, msg: Any | dict[str, Any] | str) -> str:  # noqa: PLR0912
         """格式化单条消息 - 完整格式，保留多行"""
         if isinstance(msg, str):
             return msg
@@ -537,7 +537,7 @@ _message_logger: LLMMessageLogger | None = None
 
 def get_message_logger() -> LLMMessageLogger:
     """获取消息日志记录器单例"""
-    global _message_logger
+    global _message_logger  # noqa: PLW0603
     if _message_logger is None:
         _message_logger = LLMMessageLogger()
     return _message_logger

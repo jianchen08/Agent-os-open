@@ -152,7 +152,7 @@ def create_targeted_sink(
     # 优先使用传入的 thread_id，仅当为空时从 registry 兜底
     if not thread_id and pipeline_id:
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(pipeline_id)
             if entry:
                 thread_id = entry.thread_id

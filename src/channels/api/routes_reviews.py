@@ -27,7 +27,7 @@ _media_review_service: MediaReviewService | None = None
 
 def get_media_review_service() -> MediaReviewService:
     """获取全局媒体审阅服务单例。"""
-    global _media_review_service
+    global _media_review_service  # noqa: PLW0603
     if _media_review_service is None:
         _media_review_service = MediaReviewService()
     return _media_review_service
@@ -162,7 +162,7 @@ async def media_review(
         ImageReviewResult 或 VideoReviewResult 的字典形式
     """
     # 保存上传文件到临时目录
-    suffix = os.path.splitext(file.filename or "")[1] if file.filename else ""
+    suffix = os.path.splitext(file.filename or "")[1] if file.filename else ""  # noqa: PTH122
     tmp_dir = tempfile.mkdtemp(prefix="media_review_")
     tmp_path = os.path.join(tmp_dir, file.filename or f"upload{suffix}")
 
@@ -174,7 +174,7 @@ async def media_review(
         # 确定 media_type
         effective_media_type = media_type
         if not effective_media_type:
-            from review.media_review_service import _infer_media_type
+            from review.media_review_service import _infer_media_type  # noqa: PLC0415
 
             try:
                 effective_media_type = _infer_media_type(tmp_path)
@@ -202,10 +202,10 @@ async def media_review(
         return {"error": {"code": "INTERNAL", "message": f"媒体审阅失败: {exc}"}}
     finally:
         # 清理临时文件
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
-        if os.path.isdir(tmp_dir):
-            os.rmdir(tmp_dir)
+        if os.path.isfile(tmp_path):  # noqa: PTH113
+            os.remove(tmp_path)  # noqa: PTH107
+        if os.path.isdir(tmp_dir):  # noqa: PTH112
+            os.rmdir(tmp_dir)  # noqa: PTH106
 
 
 @reviews_router.get("/{review_id}/media-metadata", summary="获取审批关联的媒体元数据")
@@ -253,7 +253,7 @@ async def get_media_metadata(
         if isinstance(file_info, dict):
             media_type = file_info.get("media_type", "")
 
-        if not file_path or not os.path.isfile(file_path):
+        if not file_path or not os.path.isfile(file_path):  # noqa: PTH113
             metadata_list.append({
                 "file_path": file_path,
                 "error": "文件不存在或路径无效",
@@ -262,7 +262,7 @@ async def get_media_metadata(
 
         try:
             if not media_type:
-                from review.media_review_service import _infer_media_type
+                from review.media_review_service import _infer_media_type  # noqa: PLC0415
 
                 media_type = _infer_media_type(file_path)
             meta = media_svc.get_media_metadata(file_path, media_type)
@@ -332,7 +332,7 @@ async def add_attachments(
         # 如果未指定 media_type，尝试推断
         if not media_type:
             try:
-                from review.media_review_service import _infer_media_type
+                from review.media_review_service import _infer_media_type  # noqa: PLC0415
 
                 media_type = _infer_media_type(file_path)
             except ValueError:
@@ -347,7 +347,7 @@ async def add_attachments(
 
         # 可选自动审阅
         review_result_dict: dict[str, Any] | None = None
-        if auto_review and os.path.isfile(file_path):
+        if auto_review and os.path.isfile(file_path):  # noqa: PTH113
             try:
                 result = await media_svc.review_media(file_path, media_type)
                 review_result_dict = result.to_dict()

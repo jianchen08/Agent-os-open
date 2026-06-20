@@ -26,10 +26,10 @@ def _force_rmtree(path: str) -> None:
     """
     def _on_error(func, filepath, exc_info):
         if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)
+            os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
             func(filepath)
         else:
-            raise
+            raise  # noqa: PLE0704
 
     try:
         shutil.rmtree(path, onerror=_on_error)
@@ -323,7 +323,7 @@ class _MergeOpsMixin:
 
     # ── 10. 合并验证 ─────────────────────────────────────────────
 
-    def _verify_merge_result(
+    def _verify_merge_result(  # noqa: PLR0912
         self, workspace: str, project_root: str, ws_meta: dict, merge_result: dict,
     ) -> tuple[bool, str]:
         """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。

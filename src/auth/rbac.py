@@ -4,9 +4,15 @@ RBAC 权限控制
 基于角色的访问控制实现
 """
 
+from __future__ import annotations
+
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from src.core.exceptions import PermissionDeniedError
+
+if TYPE_CHECKING:
+    from auth.permission_matrix import Action, Resource
 
 
 class Permission(str, Enum):
@@ -164,7 +170,7 @@ class RBACManager:
         # 检查角色自身及其继承角色的资源权限
         roles_to_check = [role] + ROLE_INHERITANCE.get(role, [])
         for r in roles_to_check:
-            if r in self._resource_permissions[resource]:
+            if r in self._resource_permissions[resource]:  # noqa: SIM102
                 if permission in self._resource_permissions[resource][r]:
                     return True
 
@@ -191,6 +197,51 @@ class RBACManager:
             role = self._normalize_role(role)
             raise PermissionDeniedError(
                 f"角色 '{role}' 没有资源 '{resource}' 的 '{permission.value}' 权限"
+            )
+
+    def has_resource_action_permission(
+        self,
+        role: Role | str,
+        resource: Resource,
+        action: Action | str,
+    ) -> bool:
+        """检查角色是否对指定资源拥有指定操作权限。
+
+        基于 RESOURCE_PERMISSION_MATRIX 判断。lazy import permission_matrix 避免循环导入。
+
+        Args:
+            role: 用户角色
+            resource: 目标资源
+            action: 目标操作
+
+        Returns:
+            是否有权限
+        """
+        from src.auth.permission_matrix import has_resource_action_permission  # noqa: PLC0415
+
+        return has_resource_action_permission(role, resource, action)
+
+    def check_resource_action_permission(
+        self,
+        role: Role | str,
+        resource: Resource,
+        action: Action | str,
+    ) -> None:
+        """检查资源操作权限，无权限时抛出异常。
+
+        Args:
+            role: 用户角色
+            resource: 目标资源
+            action: 目标操作
+
+        Raises:
+            PermissionDeniedError: 权限不足
+        """
+        if not self.has_resource_action_permission(role, resource, action):
+            normalized_role = self._normalize_role(role)
+            action_value = action.value if hasattr(action, "value") else action
+            raise PermissionDeniedError(
+                f"角色 '{normalized_role}' 没有资源 '{resource.value}' 的 '{action_value}' 权限"
             )
 
     def is_role_higher_or_equal(
@@ -236,4 +287,4 @@ class RBACManager:
         try:
             return Role(role)
         except ValueError:
-            raise ValueError(f"无效的角色: '{role}'")
+            raise ValueError(f"无效的角色: '{role}'")  # noqa: B904

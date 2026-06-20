@@ -137,7 +137,7 @@ class ResourceSearchTool:
             tags=["search", "resource", "system"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0912,PLR0915
         """执行搜索"""
         # 缓存注入的向量检索器（由 ToolCore 通过 _SERVICE_INJECT_MAP 注入）
         injected_retriever = inputs.get("_retriever")
@@ -303,7 +303,7 @@ class ResourceSearchTool:
             metadata={},
         )
 
-    async def _search_with_engine(
+    async def _search_with_engine(  # noqa: PLR0912
         self,
         search_engine,
         resource_type: str,
@@ -456,7 +456,7 @@ class ResourceSearchTool:
             return {}
 
     @staticmethod
-    def _slim_results(results: dict[str, Any], detailed: bool) -> dict[str, Any]:
+    def _slim_results(results: dict[str, Any], detailed: bool) -> dict[str, Any]:  # noqa: ARG004
         """精简搜索结果，移除对 LLM 无用的字段
 
         Args:
@@ -490,7 +490,7 @@ class ResourceSearchTool:
         """获取 Agent 注册表（使用全局单例，统一从 config/agents/ 加载）"""
         if self.agent_registry is None:
             try:
-                from agents.global_registry import get_global_agent_registry_sync
+                from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
 
                 self.agent_registry = get_global_agent_registry_sync()
             except Exception as e:
@@ -501,12 +501,12 @@ class ResourceSearchTool:
     def _get_tool_registry(self):
         """获取 Tool 注册表（延迟加载）"""
         if self.tool_registry is None:
-            from tools.global_registry import get_global_tool_registry_sync
+            from tools.global_registry import get_global_tool_registry_sync  # noqa: PLC0415
 
             self.tool_registry = get_global_tool_registry_sync()
         return self.tool_registry
 
-    async def _search_agents(
+    async def _search_agents(  # noqa: PLR0912
         self,
         query: str,
         category: str | None,
@@ -588,7 +588,7 @@ class ResourceSearchTool:
 
         return names, descriptions, config_ids, details_list
 
-    async def _search_tools(
+    async def _search_tools(  # noqa: PLR0912,PLR0915
         self,
         query: str,
         category: str | None,
@@ -741,18 +741,18 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从数据库 tool_library 表搜索工具（内存注册表无结果时的回退）"""
         try:
-            from db.models import ToolLibrary
+            from db.models import ToolLibrary  # noqa: PLC0415
         except ImportError:
-            ToolLibrary = None
+            ToolLibrary = None  # noqa: N806
 
         if ToolLibrary is None:
             logger.debug("[resource_search] db.models.ToolLibrary 不可用，跳过数据库工具搜索")
             return [], [], []
 
         try:
-            from sqlalchemy import select
+            from sqlalchemy import select  # noqa: PLC0415
 
-            from infrastructure.db import get_async_session
+            from infrastructure.db import get_async_session  # noqa: PLC0415
 
             names = []
             descriptions = []
@@ -818,7 +818,7 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从 DynamicToolLoader 已发现的工具中搜索（覆盖已扫描但未注册到 Registry 的工具）"""
         try:
-            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader  # noqa: PLC0415
 
             loader = get_dynamic_tool_loader()
             if not loader:
@@ -888,7 +888,7 @@ class ResourceSearchTool:
             return self._desc_cache[tool_name]
 
         try:
-            import importlib
+            import importlib  # noqa: PLC0415
 
             module_path, class_name = tool_info
             module = importlib.import_module(module_path)
@@ -917,11 +917,11 @@ class ResourceSearchTool:
     ) -> tuple[list[str], list[str], list[dict]]:
         """从 builtin_tools_config.yaml 搜索工具（兜底：覆盖未加载的内置工具）"""
         try:
-            from pathlib import Path
+            from pathlib import Path  # noqa: F401,PLC0415
 
-            import yaml
+            import yaml  # noqa: F401,PLC0415
 
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             config = get_config_center().get("tools/builtin_tools_config.yaml")
             if not config:
                 return [], [], []
@@ -965,7 +965,7 @@ class ResourceSearchTool:
             logger.debug(f"[resource_search] YAML 配置搜索工具失败: {e}")
             return [], [], []
 
-    def _match_query(
+    def _match_query(  # noqa: PLR0911,PLR0912
         self,
         query_lower: str,
         name: str,
@@ -1031,7 +1031,7 @@ class ResourceSearchTool:
         """获取 Skill 注册表（延迟加载，对接 skills.registry 模块）。"""
         if self.skill_registry is None:
             try:
-                from skills.registry import get_global_skill_registry
+                from skills.registry import get_global_skill_registry  # noqa: PLC0415
                 self.skill_registry = get_global_skill_registry()
             except Exception as exc:
                 logger.debug("[resource_search] SkillRegistry 加载失败: %s", exc)
@@ -1050,11 +1050,11 @@ class ResourceSearchTool:
             return self._external_search
 
         try:
-            from pathlib import Path
+            from pathlib import Path  # noqa: F401,PLC0415
 
-            import yaml
+            import yaml  # noqa: F401,PLC0415
 
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             config = get_config_center().get("tools/search/resource_search.yaml")
             if not config:
                 return None
@@ -1063,8 +1063,8 @@ class ResourceSearchTool:
             if not ext_config.get("enabled", False):
                 return None
 
-            from tools.builtin.external_resource_search import ExternalResourceSearch
-            from tools.builtin.platform_adapters import PLATFORM_ADAPTER_MAP
+            from tools.builtin.external_resource_search import ExternalResourceSearch  # noqa: PLC0415
+            from tools.builtin.platform_adapters import PLATFORM_ADAPTER_MAP  # noqa: PLC0415
 
             # 根据配置动态实例化平台适配器
             platform_adapters = self._build_platform_adapters(
@@ -1186,7 +1186,7 @@ class ResourceSearchTool:
             logger.warning("[resource_search] 外部搜索失败，跳过: %s", e)
             return [], [], []
 
-    async def _search_skills(
+    async def _search_skills(  # noqa: PLR0912
         self,
         query: str,
         language: str | None,
@@ -1264,7 +1264,7 @@ class ResourceSearchTool:
     def _read_skill_markdown(self, skill_path: str) -> str:
         """读取 Skill 的 SKILL.md 文件内容"""
         try:
-            from pathlib import Path
+            from pathlib import Path  # noqa: PLC0415
 
             skill_dir = Path(skill_path)
             if not skill_dir.exists():
@@ -1302,7 +1302,7 @@ class ResourceSearchTool:
             "[resource_search] 开始注入动态工具: tool_names=%s", tool_names
         )
 
-        from tools.auto_loader import get_tool_auto_loader
+        from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
 
         auto_loader = get_tool_auto_loader()
         if not auto_loader:

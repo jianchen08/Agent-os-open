@@ -82,7 +82,7 @@ def _is_mock(obj: Any) -> bool:
         是否为 Mock 对象
     """
     try:
-        from unittest.mock import MagicMock, Mock
+        from unittest.mock import MagicMock, Mock  # noqa: PLC0415
         return isinstance(obj, (Mock, MagicMock))
     except ImportError:
         return False

@@ -95,7 +95,7 @@ class ToolSyncService:
         Returns:
             同步结果
         """
-        from src.tools.builtin import get_all_builtin_tools
+        from src.tools.builtin import get_all_builtin_tools  # noqa: PLC0415
 
         result = SyncResult(
             added=[], updated=[], deprecated=[], unchanged=[], errors=[]
@@ -350,7 +350,7 @@ class ToolSyncService:
         Returns:
             工具定义
         """
-        from src.tools.types import ToolCategory, ToolLevel
+        from src.tools.types import ToolCategory, ToolLevel  # noqa: PLC0415
 
         # 解析 examples
         examples = []

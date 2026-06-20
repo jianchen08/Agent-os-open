@@ -107,7 +107,7 @@ class TrackPlugin(IOutputPlugin):
             当前计数器值
         """
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entry = get_engine_registry().get(pipeline_run_id)
             if entry is not None:
                 return entry.msg_sequence
@@ -129,7 +129,7 @@ class TrackPlugin(IOutputPlugin):
             递增后的 sequence 值
         """
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             registry = get_engine_registry()
             entry = registry.get(pipeline_run_id)
             if entry is not None:
@@ -233,11 +233,11 @@ class TrackPlugin(IOutputPlugin):
             usage: Token 用量字典
         """
         try:
-            from channels.websocket.ws_handler import ws_interaction_notifier as _notifier
+            from channels.websocket.ws_handler import ws_interaction_notifier as _notifier  # noqa: PLC0415
             if _notifier:
                 _thread_id = ctx.state.get("thread_id", "")
                 if _thread_id:
-                    from pipeline.stream_bridge import create_targeted_sink
+                    from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
                     _sink = create_targeted_sink(_notifier, _thread_id)
                     if _sink:
                         await _sink.send_event({
@@ -295,7 +295,7 @@ class TrackPlugin(IOutputPlugin):
             "last_cached_tokens": current_usage.get("cached_tokens", 0),
         }
 
-    def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:
+    def _try_persist_record(self, ctx: PluginContext, elapsed: float) -> None:  # noqa: PLR0912,PLR0915
         """将逐动作执行记录持久化到存储后端。
 
         根据当前 core_type 分阶段写入：
@@ -350,7 +350,7 @@ class TrackPlugin(IOutputPlugin):
                 if max_seq > self._local_sequences.get(pipeline_run_id, 0):
                     self._local_sequences[pipeline_run_id] = max_seq
                 try:
-                    from pipeline.registry import get_engine_registry
+                    from pipeline.registry import get_engine_registry  # noqa: PLC0415
                     entry = get_engine_registry().get(pipeline_run_id)
                     if entry is not None:
                         entry.init_sequence(max_seq)
@@ -423,7 +423,7 @@ class TrackPlugin(IOutputPlugin):
             # 保证前端 stream_start 下发的 message_id === 持久化的 record_id（硬约束）。
             # 只有第一轮 iteration 使用 preset_ai_record_id，后续由自动生成新 ID
             _has_prev_ai = ctx.state.get("track.last_ai_sequence") is not None
-            if _has_prev_ai:
+            if _has_prev_ai:  # noqa: SIM108
                 # 后续 iteration：不复用 preset_ai_record_id，让 storage 自动生成新 ID
                 preset_record_id = ""
             else:
@@ -444,7 +444,7 @@ class TrackPlugin(IOutputPlugin):
                 storage.save(ai_record)
                 ctx.state["track.last_ai_sequence"] = ai_record.sequence
                 try:
-                    from pipeline.registry import get_engine_registry
+                    from pipeline.registry import get_engine_registry  # noqa: PLC0415
                     _entry = get_engine_registry().get(pipeline_run_id)
                     if _entry and _entry.bridge:
                         _entry.bridge._last_ai_sequence = ai_record.sequence
@@ -554,7 +554,7 @@ class TrackPlugin(IOutputPlugin):
 
         # 共享 sequence 计数器：与事件驱动保存共用同一计数器，保证连续
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             _entry = get_engine_registry().get(pipeline_run_id)
         except Exception:
             _entry = None

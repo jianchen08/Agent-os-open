@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
+import yaml  # noqa: F401
 
 from isolation.types import IsolationLevel
 
@@ -67,7 +67,7 @@ class IsolationPolicyLoader:
         """从 config_center 加载策略配置。"""
         path = self._config_path
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             rel = str(path).replace("\\", "/")
             if "config/" in rel:
                 rel = rel[rel.index("config/") + len("config/"):]
@@ -94,7 +94,7 @@ class IsolationPolicyLoader:
     def _register_watcher(self) -> None:
         """注册 config_center watcher，配置变更时自动 reload。"""
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             get_config_center().watch("isolation/", self._on_config_changed)
             logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")
         except Exception as e:

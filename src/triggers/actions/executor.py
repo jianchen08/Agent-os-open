@@ -148,7 +148,7 @@ class ActionExecutor:
         self, user_id: str, title: str, message: str, priority: str
     ):
         try:
-            from src.api.services.notification_service import NotificationService
+            from src.api.services.notification_service import NotificationService  # noqa: PLC0415
 
             if user_id:
                 service = NotificationService()
@@ -206,7 +206,7 @@ class ActionExecutor:
             try:
                 template = Template(str(body))
                 rendered = template.render(**context)
-                import json
+                import json  # noqa: PLC0415
 
                 body = json.loads(rendered)
             except Exception as e:

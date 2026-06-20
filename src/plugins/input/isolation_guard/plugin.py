@@ -77,13 +77,13 @@ class IsolationGuard(IInputPlugin):
 
         用 subprocess.run 替代 asyncio subprocess，避免 Windows 静默失败。
         """
-        import shutil
-        import subprocess
+        import shutil  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
         if not shutil.which("docker"):
             return False
         try:
             # 用 docker version 替代 docker info（info 在某些 Docker Desktop 配置下会卡 stdin）
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: PLW1510
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
                 timeout=15,
@@ -152,7 +152,7 @@ class IsolationGuard(IInputPlugin):
 
         return PluginResult(state_updates=state_updates)
 
-    def _decide_isolation(self, tool_name: str, ctx: PluginContext) -> dict[str, Any]:
+    def _decide_isolation(self, tool_name: str, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """决定工具的隔离级别。
 
         规则（按优先级）：
@@ -271,7 +271,7 @@ class IsolationGuard(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        from pipeline.plugin import find_plugin_config
+        from pipeline.plugin import find_plugin_config  # noqa: PLC0415
 
         plugin_configs = ctx.state.get("plugin_configs", {})
         config = find_plugin_config("isolation_guard", plugin_configs)

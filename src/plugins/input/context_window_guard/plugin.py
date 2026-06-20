@@ -82,7 +82,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # ③ System YAML fallback
         try:
-            from memory.context_compressor import CompressionConfig
+            from memory.context_compressor import CompressionConfig  # noqa: PLC0415
 
             sys_config = CompressionConfig.from_yaml_config(context_window=128000)
             return sys_config.compress_trigger_ratio
@@ -105,7 +105,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if explicit:
             return explicit
         try:
-            from config.models import get_model_config_loader
+            from config.models import get_model_config_loader  # noqa: PLC0415
 
             loader = get_model_config_loader()
             defaults = loader._load_llm_data().get("defaults", {})
@@ -303,7 +303,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 主入口
     # ------------------------------------------------------------------
 
-    async def execute(self, ctx: PluginContext) -> PluginResult:
+    async def execute(self, ctx: PluginContext) -> PluginResult:  # noqa: PLR0911
         """检查上下文大小并在超阈值时触发记忆系统压缩。
 
         Args:
@@ -443,7 +443,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    async def _trim_covered_messages(
+    async def _trim_covered_messages(  # noqa: PLR0911
         self, ctx: PluginContext, messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """裁剪被已有压缩块覆盖的旧消息（重启场景）。
@@ -527,7 +527,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         except (KeyError, AttributeError):
             pass
 
-        from memory.memory_context_service import MemoryContextService
+        from memory.memory_context_service import MemoryContextService  # noqa: PLC0415
 
         try:
             context_window = ctx.state.get("context_window", 128000)

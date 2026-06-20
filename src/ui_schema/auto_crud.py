@@ -118,7 +118,7 @@ def _coerce_value(value: Any, field_type: str) -> Any:
         return value
 
 
-def _validate_field_value(
+def _validate_field_value(  # noqa: PLR0911
     field_name: str,
     value: Any,
     field_def: dict[str, Any],
@@ -421,7 +421,7 @@ class AutoCRUDGenerator:
         _collection = collection
         endpoint_summary = f"获取 {module_id}/{collection} 列表"
 
-        from channels.api.deps import require_auth as _require_auth
+        from channels.api.deps import require_auth as _require_auth  # noqa: PLC0415
 
         @router.get("", summary=endpoint_summary)
         def list_records(
@@ -492,7 +492,7 @@ class AutoCRUDGenerator:
         """
         endpoint_summary = f"获取 {module_id}/{collection} 单条记录"
 
-        from channels.api.deps import require_auth as _require_auth
+        from channels.api.deps import require_auth as _require_auth  # noqa: PLC0415
 
         @router.get(
             "/{record_id}",
@@ -532,7 +532,7 @@ class AutoCRUDGenerator:
         """
         endpoint_summary = f"创建 {module_id}/{collection} 记录"
 
-        from channels.api.deps import require_auth as _require_auth
+        from channels.api.deps import require_auth as _require_auth  # noqa: PLC0415
 
         @router.post("", summary=endpoint_summary)
         def create_record(
@@ -600,7 +600,7 @@ class AutoCRUDGenerator:
         """
         endpoint_summary = f"更新 {module_id}/{collection} 记录"
 
-        from channels.api.deps import require_auth as _require_auth
+        from channels.api.deps import require_auth as _require_auth  # noqa: PLC0415
 
         @router.put(
             "/{record_id}",
@@ -665,7 +665,7 @@ class AutoCRUDGenerator:
         """
         endpoint_summary = f"删除 {module_id}/{collection} 记录"
 
-        from channels.api.deps import require_auth as _require_auth
+        from channels.api.deps import require_auth as _require_auth  # noqa: PLC0415
 
         @router.delete(
             "/{record_id}",

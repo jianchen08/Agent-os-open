@@ -46,9 +46,9 @@ def _get_schema_parser() -> Any:
     Returns:
         SchemaParser 实例
     """
-    global _schema_parser, _last_scan_time
+    global _schema_parser, _last_scan_time  # noqa: PLW0603
 
-    from ui_schema.parser import SchemaParser
+    from ui_schema.parser import SchemaParser  # noqa: PLC0415
 
     if _schema_parser is None:
         _schema_parser = SchemaParser()
@@ -230,7 +230,7 @@ def get_module_data_router() -> APIRouter:
     Returns:
         包含模块数据路由的 APIRouter
     """
-    global _module_data_router
+    global _module_data_router  # noqa: PLW0603
     if _module_data_router is not None:
         return _module_data_router
 
@@ -257,7 +257,7 @@ def get_module_data_router() -> APIRouter:
         Returns:
             包含 children（树形结构）、items（扁平列表）、total 的字典
         """
-        from channels.api.routes_missing import get_task_tree
+        from channels.api.routes_missing import get_task_tree  # noqa: PLC0415
         return await get_task_tree(session_id=session_id, _user=_user)
 
     return _module_data_router
@@ -279,7 +279,7 @@ def register_data_crud_routes() -> list[Any]:
     Returns:
         生成的 APIRouter 列表，需要通过 app.include_router 注册。
     """
-    global _crud_generator, _crud_routers_loaded
+    global _crud_generator, _crud_routers_loaded  # noqa: PLW0603
     if _crud_routers_loaded:
         if _crud_generator is None:
             return []
@@ -297,7 +297,7 @@ def register_data_crud_routes() -> list[Any]:
             logger.info("未发现任何 data 声明，跳过 CRUD 路由注册")
             return []
 
-        from ui_schema.auto_crud import AutoCRUDGenerator
+        from ui_schema.auto_crud import AutoCRUDGenerator  # noqa: PLC0415
 
         _crud_generator = AutoCRUDGenerator()
 

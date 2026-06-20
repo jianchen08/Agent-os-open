@@ -20,7 +20,6 @@ from typing import Any
 
 from src.core.logging import LogContext
 
-
 # ---------------------------------------------------------------------------
 # 上下文变量（已统一到 src.core.logging.LogContext，基于 contextvars，async 安全）
 # ---------------------------------------------------------------------------
@@ -236,7 +235,7 @@ def setup_logging(
         max_bytes: 单个日志文件最大字节数，默认 10MB
         backup_count: 日志轮转备份数，默认 5
     """
-    from src.core.logging import setup_logging as _unified_setup, LoggingConfig
+    from src.core.logging import LoggingConfig, setup_logging as _unified_setup  # noqa: PLC0415
 
     config = LoggingConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),

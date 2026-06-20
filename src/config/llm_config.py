@@ -441,7 +441,7 @@ def get_llm_config() -> LLMConfigManager:
     Returns:
         LLMConfigManager 实例
     """
-    global _llm_config_instance
+    global _llm_config_instance  # noqa: PLW0603
     if _llm_config_instance is None:
         _llm_config_instance = LLMConfigManager()
     return _llm_config_instance
@@ -467,5 +467,5 @@ def get_model_context_window(model_alias: str) -> int:
 
 def reset_llm_config() -> None:
     """重置 LLM 配置单例（用于测试）"""
-    global _llm_config_instance
+    global _llm_config_instance  # noqa: PLW0603
     _llm_config_instance = None

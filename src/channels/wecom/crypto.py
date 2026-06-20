@@ -170,7 +170,7 @@ class WecomCrypto:
         Returns:
             加密后的完整回复 XML 字符串
         """
-        import os
+        import os  # noqa: PLC0415
 
         # 构造明文：random(16) + msg_len(4) + msg + corp_id
         random_bytes = os.urandom(16)

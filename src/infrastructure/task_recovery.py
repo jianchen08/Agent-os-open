@@ -41,7 +41,7 @@ class TaskRecoveryMixin:
             return
 
         # 局部导入：避免模块级循环依赖
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         suspended_count = 0
 
@@ -111,7 +111,7 @@ class TaskRecoveryMixin:
         if not self._task_service:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         evaluating_tasks = self._task_service.list_by_status(
             TaskStatus.EVALUATING,
@@ -184,7 +184,7 @@ class TaskRecoveryMixin:
 
     def _try_merge_worktree(self, task_id: str) -> str | None:
         """获取 lifecycle 并执行合并门控，lifecycle 不可用时返回 None。"""
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         lifecycle = get_service_provider().get("workspace_lifecycle_manager")
         if lifecycle is None:
             logger.warning(
@@ -200,9 +200,9 @@ class TaskRecoveryMixin:
         保持任务在 evaluating 状态，直接创建 EvaluationExecutor
         对剩余未通过的指标执行评估，完成后转换为终态。
         """
-        import asyncio as _asyncio
+        import asyncio as _asyncio  # noqa: PLC0415
 
-        from evaluation.executor import EvaluationExecutor
+        from evaluation.executor import EvaluationExecutor  # noqa: PLC0415
 
         task_id = task.id
         metadata = task.metadata or {}
@@ -348,7 +348,7 @@ class TaskRecoveryMixin:
                 },
             )
 
-    def _build_recovery_input_params(
+    def _build_recovery_input_params(  # noqa: PLR0912
         self, task: Any, metric_ids: list[str],
     ) -> dict[str, dict[str, Any]]:
         """为评估恢复构建 input_params。

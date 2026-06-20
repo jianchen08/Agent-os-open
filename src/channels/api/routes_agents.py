@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -30,7 +30,7 @@ def _get_agent_registry() -> Any:
         AgentRegistry 实例，加载失败则返回 None
     """
     try:
-        from agents.global_registry import get_global_agent_registry_sync
+        from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
         return get_global_agent_registry_sync()
     except Exception as exc:
         logger.warning("Agent 注册表初始化失败: %s", exc)
@@ -93,7 +93,7 @@ def list_agents(
     if category:
         configs = [c for c in configs if c.category == category]
     if level:
-        from agents.types import AgentLevel
+        from agents.types import AgentLevel  # noqa: PLC0415
         try:
             level_enum = AgentLevel(level)
             configs = [c for c in configs if c.level == level_enum]

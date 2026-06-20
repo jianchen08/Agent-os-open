@@ -113,7 +113,7 @@ class _Parser:
             return not bool(operand)
         return self._parse_comparison()
 
-    def _parse_comparison(self) -> Any:
+    def _parse_comparison(self) -> Any:  # noqa: PLR0911
         left = self._parse_primary()
         tok = self._peek()
         if tok is None:
@@ -159,7 +159,7 @@ class _Parser:
             return left <= right
         raise ValueError(f"Unknown operator: {op}")
 
-    def _parse_primary(self) -> Any:
+    def _parse_primary(self) -> Any:  # noqa: PLR0912
         tok = self._peek()
         if tok is None:
             raise ValueError("Unexpected end of expression")

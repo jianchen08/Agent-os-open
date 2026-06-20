@@ -438,12 +438,12 @@ class EvaluationEngine:
         if not task_id or not pipeline_id:
             return
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             provider = get_service_provider()
             exec_storage = provider.get("execution_record_storage")
             if not exec_storage:
                 return
-            from tasks.service import TaskService
+            from tasks.service import TaskService  # noqa: PLC0415
             ts = provider.get_or_create(
                 "task_service",
                 TaskService,
@@ -464,7 +464,7 @@ class EvaluationEngine:
 
     # ── 默认评估器实现（Mock） ────────────────────────────
 
-    async def _evaluate_tool(
+    async def _evaluate_tool(  # noqa: PLR0912
         self,
         metric_def: MetricDefinition,
         params: dict[str, Any],
@@ -496,7 +496,7 @@ class EvaluationEngine:
 
         if handler is not None:
             try:
-                import asyncio
+                import asyncio  # noqa: PLC0415
 
                 if evaluator_id == "human_interaction":
                     params["pipeline_id"] = f"__eval__{task_id or 'unknown'}"
@@ -656,7 +656,7 @@ class EvaluationEngine:
             async def _run_eval_pipeline() -> dict[str, Any]:
                 engine = self._pipeline_factory()
                 _captured_pid[0] = engine.pipeline_id
-                from pathlib import Path
+                from pathlib import Path  # noqa: PLC0415
                 project_root = _resolve_eval_project_root(
                     task_id, params,
                 ) or str(
@@ -782,8 +782,8 @@ class EvaluationEngine:
         Returns:
             解析后的评估结果字典，解析失败返回 None
         """
-        import json
-        import re
+        import json  # noqa: PLC0415
+        import re  # noqa: PLC0415
 
         def _extract_json_blocks(s: str) -> list[str]:
             """通过括号配对计数从文本中提取所有顶层 JSON 对象"""
@@ -938,7 +938,7 @@ class EvaluationEngine:
 
 def _resolve_template(value: str, context: dict[str, Any]) -> str:
     """解析 {{ a.b.c }} 风格的简单模板占位符（返回字符串）。"""
-    import re
+    import re  # noqa: PLC0415
 
     def _replacer(match: re.Match) -> str:
         expr = match.group(1).strip()
@@ -973,7 +973,7 @@ def _resolve_template_typed(
 
     避免数字字段（如 timeout_seconds）被转为字符串。
     """
-    import re
+    import re  # noqa: PLC0415
 
     stripped = value.strip()
     m = re.fullmatch(r"\{\{\s*(.+?)\s*\}\}", stripped)
@@ -1015,7 +1015,7 @@ def _resolve_eval_project_root(
     """Resolve the project root for evaluator agent pipelines."""
     workspace = params.get("workspace")
     if workspace:
-        from pathlib import Path
+        from pathlib import Path  # noqa: PLC0415
         p = Path(workspace)
         if p.is_absolute() and p.exists():
             return str(p)
@@ -1027,7 +1027,7 @@ def _resolve_eval_project_root(
         return None
 
     try:
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         provider = get_service_provider()
         ts = provider.get_or_create(
             "task_service",
@@ -1039,7 +1039,7 @@ def _resolve_eval_project_root(
         if task and task.metadata:
             ws = task.metadata.get("workspace")
             if ws:
-                from pathlib import Path
+                from pathlib import Path  # noqa: PLC0415
                 abs_ws = Path.cwd() / ws
                 if abs_ws.exists():
                     return str(abs_ws)
@@ -1071,11 +1071,11 @@ class _DynamicToolResolver:
     @classmethod
     def _do_resolve(cls, evaluator_id: str) -> Any | None:
         try:
-            import importlib
-            import inspect
+            import importlib  # noqa: PLC0415
+            import inspect  # noqa: PLC0415
 
-            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader
-            from tools.registry import ToolRegistry
+            from tools.loader import get_dynamic_tool_loader, init_dynamic_tool_loader  # noqa: PLC0415
+            from tools.registry import ToolRegistry  # noqa: PLC0415
 
             loader = get_dynamic_tool_loader()
             if loader is None:
@@ -1139,7 +1139,7 @@ class _EvaluatorComponentResolver:
     @classmethod
     def _do_resolve(cls, evaluator_id: str) -> Any | None:
         try:
-            import importlib
+            import importlib  # noqa: PLC0415
 
             class_name = "".join(
                 word.capitalize() for word in evaluator_id.split("_")

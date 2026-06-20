@@ -34,8 +34,8 @@ def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
     修复方案: 优先使用调用方传入的 thread_id，仅当为空时才从 registry 兜底读取。
     """
     try:
-        from pipeline.stream_bridge import create_targeted_sink
-        from channels.websocket.ws_handler import ws_interaction_notifier
+        from channels.websocket.ws_handler import ws_interaction_notifier  # noqa: PLC0415
+        from pipeline.stream_bridge import create_targeted_sink  # noqa: PLC0415
 
         if not ws_interaction_notifier:
             logger.warning(
@@ -46,7 +46,7 @@ def create_sink(pipeline_id: str, thread_id: str = "") -> Any | None:
 
         # 优先使用传入的 thread_id，仅当为空时从 registry 兜底
         if not thread_id:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             registry = get_engine_registry()
             entry = registry.get(pipeline_id)
             thread_id = entry.thread_id if entry else ""

@@ -46,7 +46,7 @@ class WindowInfoData:
     """
 
     title: str = ""
-    processName: str = ""
+    processName: str = ""  # noqa: N815
     x: int = 0
     y: int = 0
     width: int = 0

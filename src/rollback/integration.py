@@ -225,7 +225,7 @@ def get_rollback_integration(session=None) -> TaskRollbackIntegration:
     Returns:
         TaskRollbackIntegration 实例
     """
-    global _integration
+    global _integration  # noqa: PLW0603
     if _integration is None:
         _integration = TaskRollbackIntegration(session)
     return _integration

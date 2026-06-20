@@ -23,38 +23,21 @@
 
 
 import logging
-
 from typing import Any
 
-
-
 from core.results import ToolExecutionResult
-
 from tasks.service import TaskService
-
 from tasks.state_machine import InvalidTransitionError
-
 from tasks.types import TaskModel, TaskStatus
-
 from tools.builtin.base import BuiltinTool
-
 from tools.types import (
-
     Tool,
-
     ToolCategory,
-
     ToolLevel,
-
     ToolSource,
-
     create_failure_result,
-
     create_success_result,
-
 )
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +101,7 @@ class TaskTool(BuiltinTool):
 
         """
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
 
@@ -136,7 +119,7 @@ class TaskTool(BuiltinTool):
 
             return None
 
-        from datetime import datetime
+        from datetime import datetime  # noqa: PLC0415
 
         started = datetime.fromisoformat(task.started_at)
 
@@ -270,7 +253,7 @@ class TaskTool(BuiltinTool):
 
             return self._task_service
 
-        from infrastructure.service_provider import get_service_provider
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
         provider = get_service_provider()
 
@@ -576,7 +559,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
 
         """执行任务管理操作。
 
@@ -676,7 +659,7 @@ class TaskTool(BuiltinTool):
 
     @staticmethod
 
-    def _check_permission(
+    def _check_permission(  # noqa: PLR0911
 
         task: TaskModel,
 
@@ -1072,7 +1055,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _get_task_list(
+    async def _get_task_list(  # noqa: PLR0912,PLR0915
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
@@ -1130,13 +1113,13 @@ class TaskTool(BuiltinTool):
 
                 elif parent_agent_level == 2:
 
-                    if pipeline_id:
+                    if pipeline_id:  # noqa: SIM102
 
                         if pipeline_id not in (task.parent_pipeline_id, task.pipeline_run_id):
 
                             continue
 
-                    if inputs.get("parent_task_id"):
+                    if inputs.get("parent_task_id"):  # noqa: SIM102
 
                         if task.parent_task_id != inputs["parent_task_id"]:
 
@@ -1250,7 +1233,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _continue_task(
+    async def _continue_task(  # noqa: PLR0911
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
@@ -1452,9 +1435,7 @@ class TaskTool(BuiltinTool):
 
         try:
 
-            from tools.tool_context import emit
-
-            from tools.tool_context import MessageType, PipelineMessage
+            from tools.tool_context import MessageType, PipelineMessage, emit  # noqa: PLC0415
 
             _cont_msg = PipelineMessage(
 
@@ -1578,7 +1559,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _retry_from_terminal(
+    async def _retry_from_terminal(  # noqa: PLR0912
 
         self, task: TaskModel, message: str, service: TaskService
 
@@ -1664,7 +1645,7 @@ class TaskTool(BuiltinTool):
 
         try:
 
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             task_worker = get_service_provider().get("task_worker")
 
@@ -1796,7 +1777,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _stop_task(
+    async def _stop_task(  # noqa: PLR0911
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
@@ -2126,7 +2107,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _complete_task(
+    async def _complete_task(  # noqa: PLR0911
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
@@ -2154,7 +2135,7 @@ class TaskTool(BuiltinTool):
 
         """
 
-        from datetime import datetime
+        from datetime import datetime  # noqa: PLC0415
 
 
 
@@ -2336,7 +2317,7 @@ class TaskTool(BuiltinTool):
 
 
 
-    async def _fail_task(
+    async def _fail_task(  # noqa: PLR0911
 
         self, inputs: dict[str, Any], parent_agent_level: int
 
@@ -2364,7 +2345,7 @@ class TaskTool(BuiltinTool):
 
         """
 
-        from datetime import datetime
+        from datetime import datetime  # noqa: PLC0415
 
 
 

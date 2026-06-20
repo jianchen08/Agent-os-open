@@ -10,12 +10,12 @@ Web 操作工具
 
 import logging
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-import yaml
+import yaml  # noqa: F401
 
 from core.results import ToolExecutionResult
 from tools.builtin.base import BuiltinTool
@@ -72,7 +72,7 @@ class WebTool(BuiltinTool):
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "WebTool":
         """从配置文件创建 WebTool 实例（通过 ConfigCenter 统一缓存）"""
-        from config.config_center import get_config_center
+        from config.config_center import get_config_center  # noqa: PLC0415
         rel = (config_path or cls.DEFAULT_CONFIG_PATH).replace("config/", "", 1)
         try:
             config = get_config_center().get(rel) or {}
@@ -225,7 +225,7 @@ class WebTool(BuiltinTool):
         except Exception as e:
             return False, f"URL 解析失败: {str(e)}"
 
-    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _http_get(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """HTTP GET 请求"""
         try:
             url = inputs["url"]
@@ -266,7 +266,7 @@ class WebTool(BuiltinTool):
                     text = content.decode("utf-8", errors="ignore")
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
-                            import trafilatura
+                            import trafilatura  # noqa: PLC0415
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,
@@ -311,7 +311,7 @@ class WebTool(BuiltinTool):
                 error_code="GET_FAILED",
             )
 
-    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _http_post(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """HTTP POST 请求"""
         try:
             url = inputs["url"]
@@ -354,7 +354,7 @@ class WebTool(BuiltinTool):
                     text = content.decode("utf-8", errors="ignore")
                     if "<html" in text[:500].lower() or "<!doctype" in text[:500].lower():
                         try:
-                            import trafilatura
+                            import trafilatura  # noqa: PLC0415
                             extracted = trafilatura.extract(
                                 text,
                                 include_tables=True,
@@ -399,7 +399,7 @@ class WebTool(BuiltinTool):
                 error_code="POST_FAILED",
             )
 
-    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _fetch_page(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """抓取网页内容"""
         try:
             url = inputs["url"]
@@ -439,7 +439,7 @@ class WebTool(BuiltinTool):
 
                 # 如果需要提取文本
                 if extract_text:
-                    import trafilatura
+                    import trafilatura  # noqa: PLC0415
 
                     extracted = trafilatura.extract(
                         html_text,

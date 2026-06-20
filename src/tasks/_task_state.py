@@ -85,7 +85,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         target = safe_enum_value(target_status)
@@ -122,7 +122,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         allowed = {"running", "pending"}
@@ -163,7 +163,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         current = safe_enum_value(task.status)
         if current != "stopped":
@@ -183,7 +183,7 @@ class _TaskStateMixin:
 
         # 唤醒挂起的管道引擎
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             entries = get_engine_registry().find_by_tag("task_id", task_id)
             for entry in entries:
                 if entry.engine is not None and entry.engine.is_suspended:
@@ -217,7 +217,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         if old_status not in ("pending", "running"):
@@ -249,7 +249,7 @@ class _TaskStateMixin:
         if task is None:
             raise KeyError(f"任务不存在: {task_id}")
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         if old_status not in ("running", "evaluating"):
@@ -278,7 +278,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.FAILED
@@ -347,7 +347,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.STOPPED
@@ -403,9 +403,9 @@ class _TaskStateMixin:
         if self._storage is None:
             return 0
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
-        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})  # noqa: N806
 
         subtasks = self._storage.list_by_parent(task_id)
         cancelled_count = 0
@@ -435,10 +435,10 @@ class _TaskStateMixin:
         Returns:
             (清理的幽灵任务数, 级联取消的子任务数)
         """
-        from pathlib import Path as _Path
+        from pathlib import Path as _Path  # noqa: PLC0415
 
-        from tasks.storage import TaskStorage
-        from tasks.types import TaskStatus
+        from tasks.storage import TaskStorage  # noqa: PLC0415
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         _data_dir = str(_Path(data_dir).resolve())
         try:
@@ -447,9 +447,9 @@ class _TaskStateMixin:
             logger.warning("[GhostCleanup] 初始化 TaskStorage 失败: %s", exc)
             return (0, 0)
 
-        _GHOST_STATES = frozenset({TaskStatus.RUNNING})
-        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})
-        _REASON = "服务重启后引擎状态丢失"
+        _GHOST_STATES = frozenset({TaskStatus.RUNNING})  # noqa: N806
+        _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED})  # noqa: N806
+        _REASON = "服务重启后引擎状态丢失"  # noqa: N806
 
         ghost_tasks: list = []
         for state in _GHOST_STATES:
@@ -512,7 +512,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.COMPLETED
@@ -532,7 +532,7 @@ class _TaskStateMixin:
         异常不向上抛出，避免影响任务状态转换主流程。
         """
         try:
-            from isolation.manager import get_isolation_manager
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
 
             manager = await get_isolation_manager()
             await manager.destroy_if_workspace_idle(task_id)
@@ -598,7 +598,7 @@ class _TaskStateMixin:
             return
 
         try:
-            from pipeline.registry import get_engine_registry
+            from pipeline.registry import get_engine_registry  # noqa: PLC0415
             _reg = get_engine_registry()
             _entry = _reg.get(pipeline_run_id)
             if not _entry or not _entry.engine:
@@ -646,7 +646,7 @@ class _TaskStateMixin:
         if result is not None:
             task.result = result
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.now(UTC)
@@ -668,7 +668,7 @@ class _TaskStateMixin:
         if task is None:
             return
 
-        from tasks.types import TaskStatus
+        from tasks.types import TaskStatus  # noqa: PLC0415
 
         old_status = safe_enum_value(task.status)
         task.status = TaskStatus.PENDING

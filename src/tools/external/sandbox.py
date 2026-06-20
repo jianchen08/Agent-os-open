@@ -113,7 +113,7 @@ class ExternalToolSandbox(IExternalToolSandbox):
 
         except asyncio.TimeoutError:
             sandbox["status"] = "error"
-            raise ExternalTimeoutError(
+            raise ExternalTimeoutError(  # noqa: B904
                 message=f"沙箱执行超时 ({effective_timeout}s)",
                 tool_name=sandbox["tool_name"],
                 timeout_seconds=effective_timeout,
@@ -225,8 +225,8 @@ class ExternalToolSandbox(IExternalToolSandbox):
             隔离环境对象（或 None）
         """
         try:
-            from isolation.manager import get_isolation_manager
-            from isolation.types import (
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+            from isolation.types import (  # noqa: PLC0415
                 IsolationLevel,
                 OperationType,
                 TaskType,
@@ -282,8 +282,8 @@ class ExternalToolSandbox(IExternalToolSandbox):
 
         # 真实隔离环境
         try:
-            from isolation.manager import get_isolation_manager
-            from isolation.types import TaskType
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
+            from isolation.types import TaskType  # noqa: PLC0415
 
             manager = await get_isolation_manager()
             operation = {
@@ -313,7 +313,7 @@ class ExternalToolSandbox(IExternalToolSandbox):
     async def _destroy_isolation_environment(self, env: Any) -> None:
         """通过 isolation 模块销毁隔离环境。"""
         try:
-            from isolation.manager import get_isolation_manager
+            from isolation.manager import get_isolation_manager  # noqa: PLC0415
 
             manager = await get_isolation_manager()
             await manager.destroy_environment(env.env_id)

@@ -115,7 +115,7 @@ class ErrorCheckPlugin(IOutputPlugin):
             return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行错误检查逻辑。
 
         检查顺序：raw_error → tool_missing → empty_response →
@@ -145,7 +145,7 @@ class ErrorCheckPlugin(IOutputPlugin):
         # 检查 LLM 回复中的知识不足指示
         if self._check_knowledge_insufficient:
             raw_result = ctx.state.get(StateKeys.RAW_RESULT)
-            if raw_result and self._is_knowledge_insufficient_response(raw_result):
+            if raw_result and self._is_knowledge_insufficient_response(raw_result):  # noqa: SIM102
                 # 结合记忆上下文判断
                 if self._is_knowledge_insufficient(ctx):
                     return self._handle_knowledge_insufficient(ctx)

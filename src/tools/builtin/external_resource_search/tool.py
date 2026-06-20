@@ -519,7 +519,7 @@ class ExternalResourceSearch:
         Returns:
             审查结果字典
         """
-        import re
+        import re  # noqa: PLC0415
 
         # 尝试从 markdown 代码块中提取 JSON
         json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)

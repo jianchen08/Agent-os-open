@@ -78,7 +78,7 @@ class MemoryTool(BuiltinTool):
             return self._memory_service
 
         # 降级：创建空壳 MemoryService（无存储，仅内存字典）
-        from memory.service import MemoryService
+        from memory.service import MemoryService  # noqa: PLC0415
         self._memory_service = MemoryService()
         logger.warning("[MemoryTool] memory_service 未注入，使用内存降级模式（重启数据丢失）")
         return self._memory_service
@@ -201,7 +201,7 @@ class MemoryTool(BuiltinTool):
             injected_params=["session_id", "_session", "_memory_service", "agent_config_id"],
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """执行记忆操作"""
         ms = self._get_memory_service(inputs)
         if ms is None:
@@ -343,7 +343,7 @@ class MemoryTool(BuiltinTool):
             return content
         return content[:500] + "..."
 
-    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _import_text(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """导入文本知识，自动将 agent_config_id 注入为标签"""
         content = inputs.get("content")
         name = inputs.get("name")
@@ -403,7 +403,7 @@ class MemoryTool(BuiltinTool):
         except Exception as e:
             return create_failure_result(f"导入文本失败（MemoryService降级）: {str(e)}")
 
-    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """导入文件知识，自动将 agent_config_id 注入为标签"""
         file_path = inputs.get("file_path")
         tags = list(inputs.get("tags", []))
@@ -435,8 +435,8 @@ class MemoryTool(BuiltinTool):
                 return create_failure_result(f"导入文件失败: {str(e)}")
 
         # 降级：读取文件内容后用 MemoryService 存储
-        import os as _os
-        if not _os.path.exists(file_path):
+        import os as _os  # noqa: PLC0415
+        if not _os.path.exists(file_path):  # noqa: PTH110
             return create_failure_result(f"文件不存在: {file_path}")
         try:
             with open(file_path, encoding="utf-8") as f:
@@ -451,7 +451,7 @@ class MemoryTool(BuiltinTool):
                 content=file_content,
                 source_type="file_import",
                 extra_data={
-                    "name": _os.path.basename(file_path),
+                    "name": _os.path.basename(file_path),  # noqa: PTH119
                     "tags": tags,
                     "source_file": file_path,
                 },
@@ -471,7 +471,7 @@ class MemoryTool(BuiltinTool):
         except Exception as e:
             return create_failure_result(f"导入文件失败（MemoryService降级）: {str(e)}")
 
-    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+    async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911
         """更新知识"""
         file_path = inputs.get("file_path")
         new_content = inputs.get("content")

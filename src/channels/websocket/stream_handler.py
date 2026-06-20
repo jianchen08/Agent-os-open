@@ -8,25 +8,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
+import json  # noqa: F401
 import logging
-import os
-import sys
+import os  # noqa: F401
+import sys  # noqa: F401
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import uuid  # noqa: F401
+from dataclasses import dataclass, field  # noqa: F401
+from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
 from typing import Any
 
 # PYTHONPATH 已在 Dockerfile/环境变量中设置为 /app/src，无需 sys.path.insert
+from fastapi import WebSocket  # noqa: F401
 
-from fastapi import WebSocket
-
-from channels.api.memory_store import store as api_store
-from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink
-
+from channels.api.memory_store import store as api_store  # noqa: F401
 from channels.websocket.ws_handler import ws_interaction_notifier
+from pipeline.stream_bridge import PipelineStreamBridge, TargetedSink  # noqa: F401
 
 # 日志配置由统一入口 src.core.logging.setup_logging() 负责（在 app_factory.py 中调用）
 logger = logging.getLogger(__name__)
@@ -162,7 +161,7 @@ _task_worker = None
 _cached_call_timeout: int | None = None
 
 
-def _init_pipeline_context() -> PipelineContext:
+def _init_pipeline_context() -> PipelineContext:  # noqa: PLR0912,PLR0915
     """初始化管道引擎上下文。
 
     按照以下步骤组装管道：
@@ -179,8 +178,8 @@ def _init_pipeline_context() -> PipelineContext:
         PipelineContext 实例
     """
     try:
-        from config.models import ModelConfigLoader
-        from pipeline.config import build_plugin_registry, load_pipeline_config
+        from config.models import ModelConfigLoader  # noqa: PLC0415
+        from pipeline.config import build_plugin_registry, load_pipeline_config  # noqa: PLC0415
 
         # 确定管道配置路径
         config_path = _PROJECT_ROOT / "config" / "pipelines" / "default.yaml"
@@ -195,7 +194,7 @@ def _init_pipeline_context() -> PipelineContext:
 
         logger.info("加载管道配置: %s", config_path)
 
-        from application import Application
+        from application import Application  # noqa: PLC0415
         model_loader = ModelConfigLoader()
 
         # 加载管道配置
@@ -205,7 +204,7 @@ def _init_pipeline_context() -> PipelineContext:
         plugin_registry = build_plugin_registry(pipeline_config, model_loader=model_loader)
 
         # 加载 Agent 配置
-        from agents.registry import AgentRegistry
+        from agents.registry import AgentRegistry  # noqa: PLC0415
         agent_registry = AgentRegistry()
         agent_config_dir = _PROJECT_ROOT / "config" / "agents"
         if agent_config_dir.exists():
@@ -221,7 +220,7 @@ def _init_pipeline_context() -> PipelineContext:
             tool_registry = services.get("tool_registry")
             if tool_registry is not None:
                 try:
-                    from tools.builtin import register_core_tools
+                    from tools.builtin import register_core_tools  # noqa: PLC0415
                     registered = register_core_tools(tool_registry, session=None)
                     logger.info("ToolCore 注册了 %d 个核心工具", len(registered))
                 except Exception as exc:
@@ -250,7 +249,7 @@ def _init_pipeline_context() -> PipelineContext:
 
         # 注册路由表和插件注册表到 ServiceProvider，供 MessageBus 重建管道使用
         try:
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
             _sp = get_service_provider()
             _sp.register("input_route_table", pipeline_config.input_route_table)
             _sp.register("output_route_table", pipeline_config.output_route_table)
@@ -277,10 +276,10 @@ def _init_pipeline_context() -> PipelineContext:
 
         # 注册 WebSocket 交互通知器到 HumanInteractionService
         try:
-            from human_interaction import get_human_interaction_service
+            from human_interaction import get_human_interaction_service  # noqa: PLC0415
             # 导入 desktop_notifier — 触发 install_hook()，接入 OS 桌面通知（含提示音）
-            try:
-                import human_interaction.desktop_notifier  # noqa: F401
+            try:  # noqa: SIM105
+                import human_interaction.desktop_notifier  # noqa: F401,PLC0415
             except Exception:
                 pass
             human_svc = get_human_interaction_service()
@@ -313,11 +312,11 @@ def _init_pipeline_context() -> PipelineContext:
 
 def _get_call_timeout() -> int:
     """从 llm.yaml defaults.call_timeout 读取超时秒数，默认 120 秒。"""
-    global _cached_call_timeout
+    global _cached_call_timeout  # noqa: PLW0603
     if _cached_call_timeout is not None:
         return _cached_call_timeout
     try:
-        from config.models import ModelConfigLoader
+        from config.models import ModelConfigLoader  # noqa: PLC0415
         loader = ModelConfigLoader()
         defaults = loader._load_llm_data().get("defaults", {})
         _cached_call_timeout = int(defaults.get("call_timeout", 120))
@@ -342,7 +341,7 @@ def _register_pipeline_thread(pipeline_id: str, engine: Any, thread_id: str) -> 
     如果 pipeline_id 已注册，更新其 thread_id；
     否则，新建注册条目。
     """
-    from pipeline.registry import get_engine_registry
+    from pipeline.registry import get_engine_registry  # noqa: PLC0415
     _registry = get_engine_registry()
     _entry = _registry.get(pipeline_id)
     if _entry:
@@ -384,10 +383,8 @@ async def _cancel_engine_task(engine_task: asyncio.Task) -> None:
     安全地取消 asyncio.Task，捕获 CancelledError 和其他异常。
     """
     engine_task.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError, Exception):
         await engine_task
-    except (asyncio.CancelledError, Exception):
-        pass
 
 
 @dataclass
@@ -436,9 +433,6 @@ async def handle_stream_request(ctx: StreamContext) -> None:
     - new_message 发送
     - 取消/超时/异常处理
     """
-    pipeline_id = ctx.pipeline_id
-    message_id = ctx.message_id
-    thread_id = ctx.thread_id
 
     logger.warning(
         "[handle_stream] 无可用路径: engine=%s bridge=%s user_content=%s pipeline_ctx=%s",

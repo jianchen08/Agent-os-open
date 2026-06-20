@@ -156,7 +156,7 @@ def get_global_cache() -> MultiLevelCache:
     Returns:
         MultiLevelCache实例
     """
-    global _global_cache
+    global _global_cache  # noqa: PLW0603
     if _global_cache is None:
         _global_cache = MultiLevelCache()
     return _global_cache

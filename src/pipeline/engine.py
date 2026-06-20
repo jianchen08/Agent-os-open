@@ -44,67 +44,35 @@
 
 from __future__ import annotations
 
-
-
 import asyncio
-
 import contextlib
-
 import contextvars
-
 import logging
-
 import time as _time
-
 import uuid as _uuid
-
 from pathlib import Path
-
 from typing import TYPE_CHECKING, Any
 
-
-
 from pipeline.engine_chain import (  # noqa: F401
-
     execute_core_plugin,
-
     execute_input_chain,
-
     execute_output_chain,
-
     handle_no_route_signals,
-
     run_post_end_output_chain,
-
 )
-
 from pipeline.engine_iteration import IterationAction, run_iteration  # noqa: F401
-
 from pipeline.engine_route import (  # noqa: F401
-
     apply_route,
-
     resolve_output_plugins,
-
 )
-
 from pipeline.engine_state import (  # noqa: F401
-
     _current_pipeline_id,
-
     _PipelineLogFilter,
-
 )
-
 from pipeline.plugin_resolver import apply_agent_model_override
-
 from pipeline.registry import PluginRegistry, get_engine_registry
-
 from pipeline.route import InputRouteTable, OutputRouteTable
-
 from pipeline.types import StateKeys
-
-
 
 if TYPE_CHECKING:
 
@@ -204,7 +172,7 @@ class PipelineEngine:
 
         else:
 
-            from agents.global_registry import get_global_agent_registry_sync
+            from agents.global_registry import get_global_agent_registry_sync  # noqa: PLC0415
 
             self._agent_registry = get_global_agent_registry_sync()
 
@@ -430,7 +398,7 @@ class PipelineEngine:
 
 
 
-        from pipeline.state_builder import build_initial_state
+        from pipeline.state_builder import build_initial_state  # noqa: PLC0415
 
         state = build_initial_state(
 
@@ -460,7 +428,7 @@ class PipelineEngine:
 
 
 
-        from pipeline.plugin_resolver import apply_agent_plugin_configs
+        from pipeline.plugin_resolver import apply_agent_plugin_configs  # noqa: PLC0415
 
         apply_agent_plugin_configs(self.plugin_registry, agent_config)
 
@@ -520,7 +488,7 @@ class PipelineEngine:
 
 
 
-    async def _run_loop(self, state: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:
+    async def _run_loop(self, state: dict[str, Any], *, resumed: bool = False) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
 
         """管道核心循环。
 
@@ -580,7 +548,7 @@ class PipelineEngine:
 
         try:
 
-            from monitoring.logging_config import set_trace_id
+            from monitoring.logging_config import set_trace_id  # noqa: PLC0415
 
             set_trace_id(self._pipeline_id)
 
@@ -764,7 +732,7 @@ class PipelineEngine:
 
                 if self._agent_config is not None:
 
-                    from pipeline.plugin_resolver import _tier_cache, apply_agent_model_override
+                    from pipeline.plugin_resolver import _tier_cache, apply_agent_model_override  # noqa: PLC0415
 
                     _tier_cache.clear()
 
@@ -898,7 +866,7 @@ class PipelineEngine:
 
             if self._bridge is not None:
 
-                try:
+                with contextlib.suppress(Exception):
 
                     await self._bridge.emit_error(
 
@@ -906,9 +874,6 @@ class PipelineEngine:
 
                     )
 
-                except Exception:
-
-                    pass
 
             await self._mark_task_failed_on_engine_exit(state, f"Pipeline engine cancelled (source={_cancel_source})")
 
@@ -950,13 +915,10 @@ class PipelineEngine:
 
             if self._bridge is not None:
 
-                try:
+                with contextlib.suppress(Exception):
 
                     await self._bridge.emit_error(exc)
 
-                except Exception:
-
-                    pass
 
             # 构造含上下文的错误信息，写入任务 error 字段
 
@@ -1438,7 +1400,7 @@ class PipelineEngine:
 
 
 
-    async def _cleanup_run_loop(
+    async def _cleanup_run_loop(  # noqa: PLR0912
 
         self,
 
@@ -1540,7 +1502,7 @@ class PipelineEngine:
 
             try:
 
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
                 _cs = get_service_provider().get_service("chunk_service")
 
@@ -1684,7 +1646,7 @@ class PipelineEngine:
 
 
 
-    async def _suspend_and_wait(self, state: dict[str, Any]) -> bool:
+    async def _suspend_and_wait(self, state: dict[str, Any]) -> bool:  # noqa: PLR0912,PLR0915
 
         """挂起管道，等待外部通过 wake() 或 message_bus 唤醒。
 
@@ -2100,7 +2062,7 @@ class PipelineEngine:
 
         try:
 
-            from infrastructure.service_provider import get_service_provider
+            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
             provider = get_service_provider()
 
@@ -2184,7 +2146,7 @@ class PipelineEngine:
 
         """轻量级挂起状态拷贝，仅深拷贝 messages（唯一会被修改的嵌套结构）。"""
 
-        import copy
+        import copy  # noqa: PLC0415
 
         new_state = dict(state)
 
@@ -2540,7 +2502,7 @@ class PipelineEngine:
 
         try:
 
-            from human_interaction import get_human_interaction_service
+            from human_interaction import get_human_interaction_service  # noqa: PLC0415
 
             svc = get_human_interaction_service()
 
@@ -2570,7 +2532,7 @@ class PipelineEngine:
 
         """保存管道检查点（委托到 pipeline.checkpoint）。"""
 
-        from pipeline.checkpoint import save_checkpoint as _save
+        from pipeline.checkpoint import save_checkpoint as _save  # noqa: PLC0415
 
         return await _save(
 
@@ -2590,7 +2552,7 @@ class PipelineEngine:
 
         """从检查点恢复管道状态（委托到 pipeline.checkpoint）。"""
 
-        from pipeline.checkpoint import restore_from_checkpoint as _restore
+        from pipeline.checkpoint import restore_from_checkpoint as _restore  # noqa: PLC0415
 
         success, state = await _restore(self._checkpoint_manager, checkpoint_id)
 

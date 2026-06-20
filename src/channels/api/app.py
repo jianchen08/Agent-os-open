@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -14,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from channels.api.deps import APIError, api_error_handler, generic_error_handler
 from channels.api.models import HealthResponse
+from src.core.logging import LogContext
 from ui_schema.auth_types import AutoCRUDError
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ def create_app(lifespan: Any = None) -> FastAPI:
     Returns:
         配置好的 FastAPI 应用实例
     """
-    global _start_time
+    global _start_time  # noqa: PLW0603
     _start_time = time.time()
 
     app = FastAPI(
@@ -129,38 +131,44 @@ def _add_middleware(app: FastAPI) -> None:
         request: Request,
         call_next,
     ) -> Response:
-        """请求级中间件：IP 限流 + 请求日志。"""
+        """请求级中间件：IP 限流 + 请求日志 + 链路追踪上下文绑定。"""
         # 跳过健康检查和文档路径
         path = request.url.path
         if path in ("/health", "/api/docs", "/api/redoc", "/api/openapi.json"):
             return await call_next(request)
 
-        # IP 限流
-        client_ip = request.client.host if request.client else "unknown"
-        from channels.api.deps import rate_limiter
-        if not rate_limiter.is_allowed(client_ip):
-            logger.warning("限流: IP %s 请求过于频繁", client_ip)
-            return Response(
-                content='{"error":{"code":"SYS_LOAD_8002","message":"请求过于频繁，请稍后重试"}}',
-                status_code=429,
-                media_type="application/json",
+        # 为每个请求生成 request_id，绑定链路追踪上下文
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+        trace_id = request.headers.get("X-Trace-ID", request_id)
+
+        with LogContext.scoped(request_id=request_id, trace_id=trace_id):
+            # IP 差异化限流（按请求类别：读/写/删除/认证/上传）
+            client_ip = request.client.host if request.client else "unknown"
+            from channels.api.rate_limiter import tiered_rate_limiter  # noqa: PLC0415
+
+            if not tiered_rate_limiter.is_request_allowed(client_ip, request.method, path):
+                logger.warning("限流: IP %s 请求 %s %s 过于频繁", client_ip, request.method, path)
+                return Response(
+                    content='{"error":{"code":"SYS_LOAD_8002","message":"请求过于频繁，请稍后重试"}}',
+                    status_code=429,
+                    media_type="application/json",
+                )
+
+            # 请求日志
+            start = time.time()
+            response = await call_next(request)
+            duration_ms = round((time.time() - start) * 1000, 1)
+
+            logger.info(
+                "%s %s %s %d %.1fms",
+                request.method,
+                path,
+                f"ip={client_ip}",
+                response.status_code,
+                duration_ms,
             )
 
-        # 请求日志
-        start = time.time()
-        response = await call_next(request)
-        duration_ms = round((time.time() - start) * 1000, 1)
-
-        logger.info(
-            "%s %s %s %d %.1fms",
-            request.method,
-            path,
-            f"ip={client_ip}",
-            response.status_code,
-            duration_ms,
-        )
-
-        return response
+            return response
 
 
 def _add_exception_handlers(app: FastAPI) -> None:
@@ -170,22 +178,22 @@ def _add_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, generic_error_handler)
 
 
-def _register_routes(app: FastAPI) -> None:
+def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
     """注册所有 API 路由。"""
-    from channels.api.routes_agents import router as agents_router
-    from channels.api.routes_auth import router as auth_router
-    from channels.api.routes_config import router as config_router
-    from channels.api.routes_evaluation import router as metrics_router
-    from channels.api.routes_external_chat import router as external_chat_router
-    from channels.api.routes_memory import router as memory_router
-    from channels.api.routes_plugins import router as plugins_router
-    from channels.api.routes_tasks import router as tasks_router
-    from channels.api.routes_thinking_mode import (
+    from channels.api.routes_agents import router as agents_router  # noqa: PLC0415
+    from channels.api.routes_auth import router as auth_router  # noqa: PLC0415
+    from channels.api.routes_config import router as config_router  # noqa: PLC0415
+    from channels.api.routes_evaluation import router as metrics_router  # noqa: PLC0415
+    from channels.api.routes_external_chat import router as external_chat_router  # noqa: PLC0415
+    from channels.api.routes_memory import router as memory_router  # noqa: PLC0415
+    from channels.api.routes_plugins import router as plugins_router  # noqa: PLC0415
+    from channels.api.routes_tasks import router as tasks_router  # noqa: PLC0415
+    from channels.api.routes_thinking_mode import (  # noqa: PLC0415
         router as thinking_mode_router,
     )
-    from channels.api.routes_threads import router as threads_router
-    from channels.api.routes_tools import router as tools_router
-    from channels.api.routes_ui import router as ui_router
+    from channels.api.routes_threads import router as threads_router  # noqa: PLC0415
+    from channels.api.routes_tools import router as tools_router  # noqa: PLC0415
+    from channels.api.routes_ui import router as ui_router  # noqa: PLC0415
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -203,22 +211,22 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(external_chat_router)
 
     # ---- 模块数据路由（手动注册的自定义端点） ----
-    from channels.api.routes_ui import get_module_data_router
+    from channels.api.routes_ui import get_module_data_router  # noqa: PLC0415
 
     app.include_router(get_module_data_router())
 
     # ---- 自动注册 Data CRUD 路由（基于 YAML data 声明） ----
-    from channels.api.routes_ui import register_data_crud_routes
+    from channels.api.routes_ui import register_data_crud_routes  # noqa: PLC0415
 
     for crud_router in register_data_crud_routes():
         app.include_router(crud_router)
 
     # ---- 补全缺失路由（前端期望但之前未注册） ----
-    from channels.api.routes_artifacts import (
+    from channels.api.routes_artifacts import (  # noqa: PLC0415
         annotations_router_v1,
         artifacts_router,
     )
-    from channels.api.routes_missing import (
+    from channels.api.routes_missing import (  # noqa: PLC0415
         agent_calls_router,
         client_router,
         cost_control_router,
@@ -236,8 +244,8 @@ def _register_routes(app: FastAPI) -> None:
         triggers_router,
         users_router,
     )
-    from channels.api.routes_reviews import reviews_router
-    from channels.api.routes_workspaces import workspaces_router
+    from channels.api.routes_reviews import reviews_router  # noqa: PLC0415
+    from channels.api.routes_workspaces import workspaces_router  # noqa: PLC0415
 
     app.include_router(projects_router)
     app.include_router(users_router)
@@ -263,11 +271,11 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(workspaces_router)
 
     # ---- ComfyUI 路由（新增） ----
-    from channels.api.routes_comfyui import router as comfyui_router
+    from channels.api.routes_comfyui import router as comfyui_router  # noqa: PLC0415
 
     app.include_router(comfyui_router)
 
     # ---- 维护管理路由 ----
-    from channels.api.routes_maintenance import router as maintenance_router
+    from channels.api.routes_maintenance import router as maintenance_router  # noqa: PLC0415
 
     app.include_router(maintenance_router)

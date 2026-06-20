@@ -146,7 +146,7 @@ class ChildTaskGuard(IOutputPlugin):
 
         if pipeline_id:
             try:
-                from tasks.types import TaskStatus as TS
+                from tasks.types import TaskStatus as TS  # noqa: N817,PLC0415
                 for status_val in (TS.RUNNING, TS.PENDING, TS.EVALUATING):
                     for t in task_service.list_by_status(status_val):
                         if getattr(t, "parent_pipeline_id", None) == pipeline_id:
@@ -184,5 +184,5 @@ class ChildTaskGuard(IOutputPlugin):
         except KeyError:
             pass
 
-        from tasks.service_access import get_task_service
+        from tasks.service_access import get_task_service  # noqa: PLC0415
         return get_task_service()

@@ -17,13 +17,12 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any  # noqa: F401
 
 from pipeline.plugin import ICorePlugin, PluginContext
 from pipeline.types import ErrorPolicy, StateKeys
 from tools.format_manager import get_format_manager
 from tools.registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # asyncio 工具执行器 — 修复 _cancel_all_tasks 级联取消
@@ -304,10 +303,10 @@ class ToolCore(ICorePlugin):
         Returns:
             与 ToolCore 期望一致的 dict: {tool_name, success, data/error, duration_ms}
         """
-        import time as _time
+        import time as _time  # noqa: PLC0415
 
-        from isolation.manager import get_isolation_manager
-        from isolation.types import TaskType
+        from isolation.manager import get_isolation_manager  # noqa: PLC0415
+        from isolation.types import TaskType  # noqa: PLC0415
 
         task_id = state.get("task_id", "unknown")
         workspace = state.get("workspace")
@@ -339,15 +338,14 @@ class ToolCore(ICorePlugin):
                 "data": data,
                 "duration_ms": round(duration_ms, 1),
             }
-        else:
-            return {
-                "tool_name": "bash_execute",
-                "success": False,
-                "error": exec_result.error or "容器执行失败",
-                "duration_ms": round(duration_ms, 1),
-            }
+        return {
+            "tool_name": "bash_execute",
+            "success": False,
+            "error": exec_result.error or "容器执行失败",
+            "duration_ms": round(duration_ms, 1),
+        }
 
-    async def _execute_single_tool(
+    async def _execute_single_tool(  # noqa: PLR0912,PLR0915
         self,
         tool_name: str,
         tool_args: dict[str, Any],
@@ -419,8 +417,6 @@ class ToolCore(ICorePlugin):
         start = time.monotonic()
 
         try:
-            #
-            #
             handler_for_check = self._tool_registry.get_handler(tool_name) if self._tool_registry else None
             tool_self = handler_for_check.__self__ if handler_for_check and hasattr(handler_for_check, '__self__') else None
             _is_main_loop = (
@@ -556,7 +552,7 @@ class ToolCore(ICorePlugin):
         成功后缓存到本地注册表供后续调用。
         """
         try:
-            from tools.auto_loader import get_tool_auto_loader
+            from tools.auto_loader import get_tool_auto_loader  # noqa: PLC0415
 
             auto_loader = get_tool_auto_loader()
             if auto_loader is None:
@@ -581,7 +577,7 @@ class ToolCore(ICorePlugin):
             logger.warning("[%s] 自动加载工具失败: %s — %s", self.name, tool_name, e)
             return None
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912,PLR0915
         """执行工具调用。
 
         从 state["raw_tool_calls"] 读取工具调用列表，逐个执行，
@@ -623,7 +619,7 @@ class ToolCore(ICorePlugin):
                     tool_args = json.loads(tool_args)
                 except (json.JSONDecodeError, TypeError):
                     # 尝试容错修复 JSON（MiniMax 等模型返回格式不稳定）
-                    from plugins.core.llm_core import _repair_json_string
+                    from plugins.core.llm_core import _repair_json_string  # noqa: PLC0415
                     repaired = _repair_json_string(tool_args)
                     if repaired is not None:
                         logger.info(
@@ -758,7 +754,7 @@ class ToolCore(ICorePlugin):
         # 如果没有 assistant tool_calls 消息，先构建 assistant tool_calls 消息
         # 预先解析 tool_call_id 列表，确保 assistant 消息和 tool 结果使用一致的 id
         tc_ids: list[str] = []
-        for i, tc in enumerate(tool_calls):
+        for i, tc in enumerate(tool_calls):  # noqa: B007
             tc_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
 
         if not has_tool_call_msg and tool_calls:
@@ -815,8 +811,43 @@ class ToolCore(ICorePlugin):
                 if isinstance(_img, dict) and _img.get("base64"):
                     pending_images.append(_img)
 
+        # MM-3/MM-5: 从工具返回的 metadata.multimodal_content 收集多模态内容
+        for _r in results:
+            _meta = _r.get("metadata", {})
+            if not isinstance(_meta, dict):
+                continue
+            _mm_content = _meta.get("multimodal_content")
+            if not isinstance(_mm_content, list):
+                continue
+            for _block in _mm_content:
+                if not isinstance(_block, dict):
+                    continue
+                if _block.get("type") == "image_url":
+                    _url = (_block.get("image_url") or {}).get("url", "")
+                    if _url.startswith("data:") and ";base64," in _url:
+                        _mime_part, _b64_part = _url[5:].split(";base64,", 1)
+                        pending_images.append({
+                            "base64": _b64_part,
+                            "mime_type": _mime_part,
+                            "path": "",
+                        })
+
+        # MM-4b: 工具产生多模态结果时推送 tool_multimedia_result WS 事件
+        if pending_images and on_chunk:
+            on_chunk({
+                "type": "tool_multimedia_result",
+                "count": len(pending_images),
+                "multimedia": [
+                    {
+                        "mime_type": _img.get("mime_type", "image/png"),
+                        "path": _img.get("path", ""),
+                    }
+                    for _img in pending_images
+                ],
+            })
+
         if pending_images:
-            from multimodal.capabilities import ModelCapabilityRegistry
+            from multimodal.capabilities import ModelCapabilityRegistry  # noqa: PLC0415
             _model_name = ctx.state.get("llm_model", "")
             _supports_vision = ModelCapabilityRegistry.is_multimodal_supported(
                 _model_name

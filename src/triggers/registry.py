@@ -120,7 +120,7 @@ class TriggerRegistry:
 
         # 对于时间触发器，检查是否已过期
         if isinstance(trigger, TimeTrigger) and trigger.schedule_config.get("type") == "date":
-            from datetime import datetime
+            from datetime import datetime  # noqa: PLC0415
 
             run_date_str = trigger.schedule_config.get("datetime")
             if run_date_str:
@@ -137,7 +137,7 @@ class TriggerRegistry:
                     )
 
         # 注册到事件总线（如果是事件触发器）
-        from src.core.event_bus.types import EventFilter, EventType
+        from src.core.event_bus.types import EventFilter, EventType  # noqa: PLC0415
 
         self._subscription_ids[trigger.id] = []
         if isinstance(trigger, (EventTrigger, ConditionTrigger)):

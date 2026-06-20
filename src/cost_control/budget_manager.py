@@ -487,7 +487,7 @@ _budget_manager: BudgetManager | None = None
 
 def get_budget_manager() -> BudgetManager:
     """获取预算管理器单例"""
-    global _budget_manager
+    global _budget_manager  # noqa: PLW0603
     if _budget_manager is None:
         _budget_manager = BudgetManager()
     return _budget_manager
@@ -495,5 +495,5 @@ def get_budget_manager() -> BudgetManager:
 
 def reset_budget_manager() -> None:
     """重置预算管理器（用于测试）"""
-    global _budget_manager
+    global _budget_manager  # noqa: PLW0603
     _budget_manager = None

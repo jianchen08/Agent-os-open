@@ -75,7 +75,7 @@ class OutputRepetitionGuard(IOutputPlugin):
             return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """核心工作逻辑，检测输出重复并生成对应的状态更新。"""
         # 管道已结束时跳过：post-end 阶段不应判定重复
         if ctx.state.get(StateKeys.ENDED, False):

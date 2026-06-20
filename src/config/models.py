@@ -57,7 +57,7 @@ def _load_dotenv_once() -> None:
     （适用于生产部署时由 Docker/K8s/CI 注入密钥），.env 仅作本地开发兜底。
     用户配置密钥的推荐方式见仓库根目录的 ``.env.example``。
     """
-    global _dotenv_loaded
+    global _dotenv_loaded  # noqa: PLW0603
     if _dotenv_loaded:
         return
     _dotenv_loaded = True
@@ -68,7 +68,7 @@ def _load_dotenv_once() -> None:
     try:
         with open(_ENV_FILE_PATH, encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
+                line = line.strip()  # noqa: PLW2901
                 if not line or line.startswith("#"):
                     continue
                 if "=" not in line:
@@ -398,22 +398,22 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     invalidate_model_config_cache(config_dir)
 
     # 2. 清除 LLMConfigManager 单例（延迟导入避免循环依赖）
-    from config.llm_config import reset_llm_config
+    from config.llm_config import reset_llm_config  # noqa: PLC0415
     reset_llm_config()
 
     # 3. 清除 Router 和 Adapter 单例（延迟导入）
-    from llm.router_factory import reset_router
+    from llm.router_factory import reset_router  # noqa: PLC0415
     reset_router()
 
     # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
-    import llm.factory as factory_mod
+    import llm.factory as factory_mod  # noqa: PLC0415
     if factory_mod._llm_factory_instance is not None:
         factory_mod._llm_factory_instance.clear_cache()
         factory_mod._llm_factory_instance = None
 
     # 清除 tier 缓存，使配置变更实时生效
     try:
-        import pipeline.plugin_resolver as pr_mod
+        import pipeline.plugin_resolver as pr_mod  # noqa: PLC0415
         pr_mod._tier_cache.clear()
     except Exception:
         pass

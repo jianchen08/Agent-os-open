@@ -43,14 +43,14 @@ class ExternalChatResponse(BaseModel):
 
 def _get_agent_registry() -> Any:
     """从 ServiceProvider 获取全局 AgentRegistry 实例。"""
-    from infrastructure.service_provider import get_service_provider
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     return get_service_provider().get("agent_registry")
 
 
 def _get_pipeline_factory() -> Any:
     """从 ServiceProvider 获取管道工厂（创建 PipelineEngine 的可调用对象）。"""
-    from infrastructure.service_provider import get_service_provider
+    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
 
     return get_service_provider().get("pipeline_factory")
 

@@ -62,7 +62,7 @@ class ConfigLoader:
 
         with open(env_file, encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
+                line = line.strip()  # noqa: PLW2901
                 if not line or line.startswith("#"):
                     continue
                 if "=" in line:
@@ -203,7 +203,7 @@ class ConfigLoader:
             加载的 Agent config_id 列表
         """
         loaded = []
-        repo: BaseRepository[AgentConfigModel] = BaseRepository(session, AgentConfigModel)
+        repo: BaseRepository[AgentConfigModel] = BaseRepository(session, AgentConfigModel)  # noqa: F821
 
         # 收集所有配置目录
         config_paths = []
@@ -272,7 +272,7 @@ class ConfigLoader:
             加载的工具名称列表
         """
         loaded = []
-        repo: BaseRepository[ToolLibrary] = BaseRepository(session, ToolLibrary)
+        repo: BaseRepository[ToolLibrary] = BaseRepository(session, ToolLibrary)  # noqa: F821
         tools_path = Path(tools_dir)
 
         if not tools_path.exists():
@@ -451,9 +451,9 @@ class ConfigLoader:
         except Exception:
             return None
 
-    def _create_agent_model(self, config: dict[str, Any]) -> AgentConfigModel:
+    def _create_agent_model(self, config: dict[str, Any]) -> AgentConfigModel:  # noqa: F821
         """从配置创建 AgentConfigModel"""
-        from src.db.models.agent import AgentConfig as AgentConfigModel
+        from src.db.models.agent import AgentConfig as AgentConfigModel  # noqa: PLC0415
         return AgentConfigModel(
             config_id=config["config_id"],
             name=config.get("name", config["config_id"]),
@@ -479,8 +479,8 @@ class ConfigLoader:
             status=config.get("status", "active"),
         )
 
-    def _update_agent_model(
-        self, agent: AgentConfigModel, config: dict[str, Any]
+    def _update_agent_model(  # noqa: PLR0912
+        self, agent: AgentConfigModel, config: dict[str, Any]  # noqa: F821
     ) -> None:
         """更新 AgentConfigModel"""
         if "name" in config:

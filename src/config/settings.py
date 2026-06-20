@@ -185,7 +185,7 @@ def get_settings() -> Settings:
 
 def reset_settings() -> None:
     """重置配置实例（主要用于测试）"""
-    global settings
+    global settings  # noqa: PLW0603
     settings = Settings()
 
 

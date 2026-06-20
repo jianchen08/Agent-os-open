@@ -485,7 +485,7 @@ class BashTool(BuiltinTool, WorkspaceAwareMixin):
                 error_code="EXECUTION_FAILED",
             )
 
-    async def _handle_continue(self, inputs: dict[str, Any]) -> ToolResult:
+    async def _handle_continue(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
         """处理 continue 操作"""
         pid = inputs.get("pid")
         if not pid:

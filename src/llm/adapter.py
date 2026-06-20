@@ -321,7 +321,7 @@ class _BaseLiteLLMAdapter:
             usage=usage,
         )
 
-    async def _call_streaming(
+    async def _call_streaming(  # noqa: PLR0915
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -388,7 +388,7 @@ class _BaseLiteLLMAdapter:
                     " model=%s",
                     type(self).__name__, first_chunk_timeout, model,
                 )
-                raise litellm.Timeout(
+                raise litellm.Timeout(  # noqa: B904
                     message=(
                         "Stream first chunk timeout:"
                         f" no data for {first_chunk_timeout:.0f}s"
@@ -399,7 +399,7 @@ class _BaseLiteLLMAdapter:
 
             # 边收边处理，保持真正的流式
             # _process_chunk 内联处理每个 chunk
-            async def _process_chunk(chunk: Any) -> bool:
+            async def _process_chunk(chunk: Any) -> bool:  # noqa: PLR0911,PLR0912,PLR0915
                 """处理单个 chunk，返回是否应该 break。"""
                 nonlocal stream_repetition, _in_think_tag, stream_usage, thinking_truncated
                 # 流式诊断：只写文件，不显示在 CLI
@@ -649,7 +649,7 @@ class _BaseLiteLLMAdapter:
                         type(self).__name__, inter_chunk_timeout, model,
                         len(result_parts) + len(thinking_parts),
                     )
-                    raise litellm.Timeout(
+                    raise litellm.Timeout(  # noqa: B904
                         message=(
                             "Stream inter-chunk timeout:"
                             f" no data for {inter_chunk_timeout:.0f}s"
@@ -772,7 +772,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         优先用 router_factory 的映射表（model_id → provider），
         兜底用 litellm 前缀反查。
         """
-        from llm.router_factory import (
+        from llm.router_factory import (  # noqa: PLC0415
             get_key_pool,
             get_provider_for_model,
         )
@@ -793,9 +793,9 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             return model.split("/", 1)[1]
         return model
 
-    async def _do_completion(self, **kwargs: Any) -> Any:
-        from llm.key_pool import KeySlot
-        from llm.router_factory import get_key_pool
+    async def _do_completion(self, **kwargs: Any) -> Any:  # noqa: PLR0912,PLR0915
+        from llm.key_pool import KeySlot  # noqa: PLC0415
+        from llm.router_factory import get_key_pool  # noqa: PLC0415
 
         model_str = kwargs.get("model", "")
         provider_name = self._resolve_provider(model_str)
@@ -809,7 +809,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         max_retries = len(pool.slots)
         last_exc: Exception | None = None
 
-        from llm.exceptions import KeyPoolExhaustedError
+        from llm.exceptions import KeyPoolExhaustedError  # noqa: PLC0415
 
         try:
             for attempt in range(max_retries):
@@ -941,7 +941,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 fb_exc,
             )
             if last_exc is not None:
-                raise last_exc
+                raise last_exc  # noqa: B904
             raise fb_exc
 
     async def _route_call(self, **kwargs: Any) -> Any:
@@ -956,8 +956,8 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         影响范围: KeyPoolAdapter 的所有 LLM 调用路径
         修复日期: 2026-05-30
         """
-        from config.models import get_model_config_loader
-        from llm.router_factory import get_or_create_router
+        from config.models import get_model_config_loader  # noqa: PLC0415
+        from llm.router_factory import get_or_create_router  # noqa: PLC0415
 
         model_loader = get_model_config_loader()
         router = get_or_create_router(model_loader)
@@ -970,7 +970,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         不经过 Router，直接构建 litellm 参数，确保使用 slot 的 key。
         """
-        from llm.router_factory import (
+        from llm.router_factory import (  # noqa: PLC0415
             _PROVIDER_MAP,
             get_provider_for_model,
         )

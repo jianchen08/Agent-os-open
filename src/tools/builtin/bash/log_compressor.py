@@ -66,7 +66,7 @@ class LogCompressor:
         """初始化日志压缩器"""
         self.max_lines = max_lines
 
-    def detect_output_type(self, command: str, lines: list[str]) -> OutputType:
+    def detect_output_type(self, command: str, lines: list[str]) -> OutputType:  # noqa: PLR0911
         """检测输出类型"""
         cmd_lower = command.lower()
 
@@ -92,7 +92,7 @@ class LogCompressor:
 
         return OutputType.GENERAL
 
-    def extract_progress(self, lines: list[str], output_type: OutputType) -> str | None:
+    def extract_progress(self, lines: list[str], output_type: OutputType) -> str | None:  # noqa: PLR0912
         """提取进度信息"""
         # 从最近50行查找进度
         recent_lines = lines[-50:] if len(lines) > 50 else lines

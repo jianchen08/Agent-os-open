@@ -104,7 +104,7 @@ class CircuitBreaker(IInputPlugin):
         Args:
             ctx: 插件执行上下文
         """
-        from pipeline.plugin import find_plugin_config
+        from pipeline.plugin import find_plugin_config  # noqa: PLC0415
 
         plugin_configs = ctx.state.get("plugin_configs", {})
         config = find_plugin_config("circuit_breaker", plugin_configs)

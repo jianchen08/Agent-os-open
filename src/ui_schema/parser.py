@@ -78,7 +78,7 @@ class SchemaParser:
         logger.info("从 %s 加载了 %d 个 UI Schema", dir_path, len(schemas))
         return schemas
 
-    def load_file(self, file_path: str | Path) -> ModuleUISchema | None:
+    def load_file(self, file_path: str | Path) -> ModuleUISchema | None:  # noqa: PLR0911
         """加载单个 YAML 配置文件。
 
         Args:

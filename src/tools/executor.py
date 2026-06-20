@@ -112,7 +112,7 @@ class ToolExecutor(IToolExecutor):
 
         # 性能监控器
         try:
-            from monitoring import get_performance_monitor
+            from monitoring import get_performance_monitor  # noqa: PLC0415
 
             self._performance_monitor = get_performance_monitor()
         except ImportError:
@@ -174,7 +174,7 @@ class ToolExecutor(IToolExecutor):
     # 核心执行
     # ------------------------------------------------------------------
 
-    async def execute(
+    async def execute(  # noqa: PLR0912,PLR0915
         self,
         tool_name: str,
         inputs: dict[str, Any],
@@ -189,7 +189,7 @@ class ToolExecutor(IToolExecutor):
 
         # 生成工具调用 ID（如果未提供）
         if tool_call_id is None:
-            import uuid
+            import uuid  # noqa: PLC0415
 
             tool_call_id = str(uuid.uuid4())
 
@@ -241,7 +241,7 @@ class ToolExecutor(IToolExecutor):
 
         # 如果工具未注册，尝试动态加载
         if tool is None:
-            from tools.loader import get_dynamic_tool_loader
+            from tools.loader import get_dynamic_tool_loader  # noqa: PLC0415
 
             loader = get_dynamic_tool_loader()
             if loader is not None:
@@ -608,7 +608,7 @@ class ToolExecutor(IToolExecutor):
         # 输出结构验证：如果工具定义了 output_schema，验证输出是否符合
         if tool and tool.output_schema and result.success:
             try:
-                import jsonschema as _js
+                import jsonschema as _js  # noqa: PLC0415
                 _js.validate(instance=result.output, schema=tool.output_schema)
             except Exception as schema_err:
                 logger.warning(

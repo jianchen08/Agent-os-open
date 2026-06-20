@@ -134,7 +134,7 @@ class PluginChain:
             logger.error("[%s] error (%.3fs): %s", plugin.name, elapsed, exc)
             return await self._handle_error(plugin, ctx, exc)
 
-    async def _handle_error(
+    async def _handle_error(  # noqa: PLR0911
         self, plugin: IPlugin, ctx: PluginContext, exc: Exception
     ) -> PluginResult:
         """根据插件错误策略处理异常。

@@ -744,7 +744,7 @@ _service_instance: HumanInteractionService | None = None
 
 def get_human_interaction_service() -> HumanInteractionService:
     """获取服务单例。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     if _service_instance is None:
         _service_instance = HumanInteractionService()
     return _service_instance
@@ -752,11 +752,11 @@ def get_human_interaction_service() -> HumanInteractionService:
 
 def set_human_interaction_service(service: HumanInteractionService) -> None:
     """设置服务单例。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     _service_instance = service
 
 
 def reset_human_interaction_service() -> None:
     """重置服务单例（用于测试）。"""
-    global _service_instance
+    global _service_instance  # noqa: PLW0603
     _service_instance = None

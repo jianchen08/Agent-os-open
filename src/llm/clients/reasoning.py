@@ -77,7 +77,7 @@ class ReasoningClient(LLMClient):
 
         except Exception as e:
             logger.error(f"思考模型生成失败: {e}")
-            raise LLMError(f"思考模型生成失败: {str(e)}")
+            raise LLMError(f"思考模型生成失败: {str(e)}")  # noqa: B904
 
     async def _stream_internal(
         self,
@@ -121,7 +121,7 @@ class ReasoningClient(LLMClient):
 
         except Exception as e:
             logger.error(f"思考模型流式生成失败: {e}")
-            raise LLMError(f"思考模型流式生成失败: {str(e)}")
+            raise LLMError(f"思考模型流式生成失败: {str(e)}")  # noqa: B904
 
     async def _stream_with_reasoning_internal(
         self,
@@ -168,7 +168,7 @@ class ReasoningClient(LLMClient):
 
         except Exception as e:
             logger.error(f"思考模型流式生成失败: {e}")
-            raise LLMError(f"思考模型流式生成失败: {str(e)}")
+            raise LLMError(f"思考模型流式生成失败: {str(e)}")  # noqa: B904
 
     async def _generate_with_tools_internal(
         self,
@@ -254,7 +254,7 @@ class ReasoningClient(LLMClient):
             if "tool_calls" in message:
                 tool_calls_data = message["tool_calls"]
                 if tool_calls_data:
-                    from src.llm.base import ToolCall
+                    from src.llm.base import ToolCall  # noqa: PLC0415
 
                     tool_calls = []
                     for tc in tool_calls_data:
@@ -320,7 +320,7 @@ class ReasoningClient(LLMClient):
 
         except (KeyError, IndexError) as e:
             logger.error(f"解析响应失败: {e}")
-            raise LLMError(f"解析响应失败: {str(e)}")
+            raise LLMError(f"解析响应失败: {str(e)}")  # noqa: B904
 
     def _extract_content_from_chunk(self, chunk: dict[str, Any]) -> tuple:
         """

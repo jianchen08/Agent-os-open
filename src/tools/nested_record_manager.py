@@ -35,7 +35,7 @@ class NestedRecordManager:
         try:
             db = self._db_session
             if db is None:
-                from infrastructure.db import get_async_session
+                from infrastructure.db import get_async_session  # noqa: PLC0415
 
                 db_session = await get_async_session()
                 return await self._create_nested_record_in_session(
@@ -66,9 +66,9 @@ class NestedRecordManager:
         tool_call_id: str | None = None,
     ) -> str | None:
         """在指定会话中创建嵌套执行记录。"""
-        from db.models import ExecutionRecord
-        from db.repositories.execution_record_repo import ExecutionRecordRepository
-        from sqlalchemy import select
+        from db.models import ExecutionRecord  # noqa: PLC0415
+        from db.repositories.execution_record_repo import ExecutionRecordRepository  # noqa: PLC0415
+        from sqlalchemy import select  # noqa: PLC0415
 
         repo = ExecutionRecordRepository(db)
 
@@ -124,7 +124,7 @@ class NestedRecordManager:
         try:
             db = self._db_session
             if db is None:
-                from infrastructure.db import get_async_session
+                from infrastructure.db import get_async_session  # noqa: PLC0415
 
                 db_session = await get_async_session()
                 await self._update_nested_record_in_session(
@@ -150,9 +150,9 @@ class NestedRecordManager:
         duration_ms: int | None = None,
     ) -> None:
         """在指定会话中更新嵌套执行记录。"""
-        from db.models import ExecutionRecord
-        from sqlalchemy import select
-        from sqlalchemy.orm.attributes import flag_modified
+        from db.models import ExecutionRecord  # noqa: PLC0415
+        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
         result = await db.execute(
             select(ExecutionRecord).where(ExecutionRecord.id == record_id)

@@ -315,7 +315,7 @@ def get_context_window_config() -> dict[str, Any]:
 def update_context_window_config(body: ContextWindowUpdateRequest) -> dict[str, Any]:
     """合并前端提交的字段到现有配置，支持 budgets/compression 等嵌套对象。"""
     data = _read_yaml(_CONTEXT_WINDOW_YAML)
-    _EDITABLE_KEYS = {
+    _EDITABLE_KEYS = {  # noqa: N806
         "max_context_length", "compress_trigger_ratio", "budgets", "compression", "layer_order",
         "include_tools_description_in_prompt", "static_vars", "dynamic_vars",
         "custom_layers",
@@ -491,7 +491,7 @@ def save_generic_config(config_path: str, body: GenericConfigUpdateRequest) -> d
 
     # 触发 config_center reload，使 watcher 生效（热更新）
     try:
-        from config.config_center import get_config_center
+        from config.config_center import get_config_center  # noqa: PLC0415
         rel = str(file_path).replace("\\", "/")
         if "config/" in rel:
             rel = rel[rel.index("config/") + len("config/"):]

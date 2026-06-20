@@ -26,8 +26,8 @@ def get_task_service() -> Any:
         TaskService 实例，服务不可用或创建失败时返回 None
     """
     try:
-        from infrastructure.service_provider import get_service_provider
-        from tasks.service import TaskService
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+        from tasks.service import TaskService  # noqa: PLC0415
 
         provider = get_service_provider()
         return provider.get_or_create(

@@ -169,13 +169,13 @@ def install_hook() -> None:
     每次 set_notifier 被调用时，自动将桌面通知器作为旁路接入：
     原始通知器正常工作，桌面通知器独立接收同样的信号。
     """
-    global _hooked
+    global _hooked  # noqa: PLW0603
     if _hooked:
         return
 
     try:
-        from human_interaction.composite_notifier import CompositeNotifier
-        from human_interaction.service import HumanInteractionService
+        from human_interaction.composite_notifier import CompositeNotifier  # noqa: PLC0415
+        from human_interaction.service import HumanInteractionService  # noqa: PLC0415
 
         _original_set_notifier = HumanInteractionService.set_notifier
 

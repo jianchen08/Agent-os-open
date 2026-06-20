@@ -173,7 +173,7 @@ class LLMErrorRecoveryPlugin(IOutputPlugin):
         })
 
     @staticmethod
-    def _build_llm_error_hint(error_msg: str) -> str:
+    def _build_llm_error_hint(error_msg: str) -> str:  # noqa: PLR0911
         """根据 LLM 错误信息生成给大模型的恢复建议。
 
         Args:

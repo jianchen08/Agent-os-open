@@ -9,7 +9,7 @@
 import logging
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from typing import Any, TypedDict
 
 import yaml
@@ -115,7 +115,7 @@ class LevelController:
             工具权限配置字典
         """
         try:
-            from config.config_center import get_config_center
+            from config.config_center import get_config_center  # noqa: PLC0415
             config = get_config_center().get("tool_permissions.yaml") or {}
             if not config:
                 self.logger.info("工具权限配置文件不存在，使用默认配置")

@@ -52,7 +52,7 @@ class TaskReminder(IOutputPlugin):
     def priority(self) -> int:
         return self._config.get("priority", 35)
 
-    async def execute(self, ctx: PluginContext) -> OutputResult:
+    async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911,PLR0912,PLR0915
         """执行任务评估提醒检测。
 
         条件：
@@ -88,7 +88,7 @@ class TaskReminder(IOutputPlugin):
         task_service = state.get("task_service")
         if not task_service:
             try:
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
                 task_service = get_service_provider().get("task_service")
             except Exception:
                 pass
@@ -317,7 +317,7 @@ class TaskReminder(IOutputPlugin):
             task_service = ctx.get_service("task_service")
         except KeyError:
             try:
-                from infrastructure.service_provider import get_service_provider
+                from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
                 provider = get_service_provider()
                 task_service = provider.get("task_service")
             except Exception:

@@ -39,9 +39,9 @@ def _read_cgroup_memory_limit_gb() -> float | None:
     """
     # cgroup v2（新版 Linux、Docker Desktop 默认）
     v2_path = "/sys/fs/cgroup/memory.max"
-    if os.path.exists(v2_path):
+    if os.path.exists(v2_path):  # noqa: PTH110
         try:
-            with open(v2_path, "r", encoding="utf-8") as f:
+            with open(v2_path, encoding="utf-8") as f:
                 content = f.read().strip()
             # v2 里 "max" 表示无限制
             if content == "max":
@@ -52,9 +52,9 @@ def _read_cgroup_memory_limit_gb() -> float | None:
 
     # cgroup v1（旧版）
     v1_path = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-    if os.path.exists(v1_path):
+    if os.path.exists(v1_path):  # noqa: PTH110
         try:
-            with open(v1_path, "r", encoding="utf-8") as f:
+            with open(v1_path, encoding="utf-8") as f:
                 limit = int(f.read().strip())
             # cgroup v1 无限制时是一个超大值（>1TB）
             if limit > 1024**4:
@@ -85,7 +85,7 @@ def _read_windows_memory_gb() -> float | None:
     if os.name != "nt":
         return None
     try:
-        import ctypes
+        import ctypes  # noqa: PLC0415
 
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = [
@@ -116,9 +116,9 @@ def _read_cgroup_cpu_count() -> int | None:
     """
     # cgroup v2
     v2_cpu_max = "/sys/fs/cgroup/cpu.max"
-    if os.path.exists(v2_cpu_max):
+    if os.path.exists(v2_cpu_max):  # noqa: PTH110
         try:
-            with open(v2_cpu_max, "r", encoding="utf-8") as f:
+            with open(v2_cpu_max, encoding="utf-8") as f:
                 parts = f.read().strip().split()
             # 格式："quota period" 或 "max period"
             if len(parts) == 2 and parts[0] != "max":
@@ -131,11 +131,11 @@ def _read_cgroup_cpu_count() -> int | None:
     # cgroup v1
     v1_quota = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
     v1_period = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
-    if os.path.exists(v1_quota) and os.path.exists(v1_period):
+    if os.path.exists(v1_quota) and os.path.exists(v1_period):  # noqa: PTH110
         try:
-            with open(v1_quota, "r", encoding="utf-8") as f:
+            with open(v1_quota, encoding="utf-8") as f:
                 quota = int(f.read().strip())
-            with open(v1_period, "r", encoding="utf-8") as f:
+            with open(v1_period, encoding="utf-8") as f:
                 period = int(f.read().strip())
             if quota > 0 and period > 0:
                 return max(1, math.ceil(quota / period))
@@ -160,7 +160,7 @@ def detect_hardware() -> dict[str, Any]:
         }
     """
     # 检测是否在容器内
-    is_container = os.path.exists("/.dockerenv") or os.path.exists("/proc/1/cgroup")
+    is_container = os.path.exists("/.dockerenv") or os.path.exists("/proc/1/cgroup")  # noqa: PTH110
 
     # 内存：优先 cgroup，再 sysconf（Linux/macOS），再 Windows API
     mem_gb = _read_cgroup_memory_limit_gb()

@@ -162,7 +162,7 @@ class TimeTrigger(BaseTrigger):
                 run_date = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
         except ValueError as e:
-            raise ValueError(f"无效的日期时间格式: {run_date_str}, {e}")
+            raise ValueError(f"无效的日期时间格式: {run_date_str}, {e}")  # noqa: B904
 
         return APSchedulerDateTrigger(run_date=run_date)
 

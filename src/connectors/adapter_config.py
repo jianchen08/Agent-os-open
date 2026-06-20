@@ -68,7 +68,7 @@ def load_adapter_configs(
     path = Path(config_path) if config_path else _ADAPTER_CONFIG_PATH
 
     try:
-        from config.config_center import get_config_center
+        from config.config_center import get_config_center  # noqa: PLC0415
         rel = str(path).replace("\\", "/")
         if "config/" in rel:
             rel = rel[rel.index("config/") + len("config/"):]

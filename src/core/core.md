@@ -122,10 +122,11 @@ EventBus
 | `states/lifecycle.py` | — | 生命周期管理 |
 | `states/machine.py` | StateMachineConfig, StateMachine | 通用状态机 |
 
-| `logging/__init__.py` | get_logger, setup_logging | 统一日志入口 |
+| `logging/__init__.py` | get_logger, setup_logging, ContextFilter | 统一日志入口 |
 | `logging/config.py` | LoggingConfig | 日志配置数据类 |
 | `logging/formatters.py` | StructuredFormatter, JsonFormatter | 结构化/JSON 格式化器 |
 | `logging/context.py` | LogContext | 请求ID/任务ID上下文管理 |
+| `logging/filters.py` | ContextFilter | LogRecord 上下文注入过滤器 |
 
 ### 子目录
 

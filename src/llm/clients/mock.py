@@ -133,7 +133,7 @@ class MockClient(LLMClient):
 
         # 检查是否需要调用工具（简单的关键词匹配）
         tool_calls = []
-        if any(
+        if any(  # noqa: SIM102
             keyword in user_message.lower()
             for keyword in ["文件", "读取", "写入", "搜索"]
         ):
@@ -170,7 +170,7 @@ class MockClient(LLMClient):
             finish_reason="tool_calls" if tool_calls else "stop",
         )
 
-    def _generate_mock_response(self, user_message: str) -> str:
+    def _generate_mock_response(self, user_message: str) -> str:  # noqa: PLR0911
         """生成模拟响应内容"""
         if not user_message:
             return "您好！我是测试模型，请问有什么可以帮助您的吗？"
