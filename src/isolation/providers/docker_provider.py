@@ -136,7 +136,6 @@ class DockerProvider(IsolationProvider):
             创建的隔离环境实例
         """
         now = datetime.now(UTC)
-        env_id = f"docker-{context.task_id}"
         name = container_name
 
         # 构建 docker run 命令参数
@@ -154,8 +153,10 @@ class DockerProvider(IsolationProvider):
         if rc != 0:
             error_msg = stderr.decode("utf-8", errors="replace")
             logger.error("[DockerProvider] 创建容器失败 | error=%s", error_msg)
+            # 创建失败时无 container_id，使用带 task_id 的合成 ID 兜底
+            fallback_env_id = f"docker-{context.task_id}"
             env = IsolationEnvironment(
-                env_id=env_id,
+                env_id=fallback_env_id,
                 level=IsolationLevel.CONTAINER,
                 provider_type="docker",
                 status=EnvironmentStatus.ERROR.value,
@@ -164,10 +165,14 @@ class DockerProvider(IsolationProvider):
                 created_at=now.isoformat(),
                 last_used_at=now.isoformat(),
             )
-            self._environments[env_id] = env
+            self._environments[fallback_env_id] = env
             return env
 
         container_id = stdout.decode("utf-8", errors="replace").strip()
+
+        # 统一使用 container_name 作为 env_id（由 workspace 决定），
+        # 保证同一 workspace 无论容器是否重建，env_id 始终一致。
+        env_id = container_name
 
         # 启动容器
         await self._run_cmd(["docker", "start", container_id], timeout=15)

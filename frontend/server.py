@@ -64,8 +64,9 @@ async def _request_with_connect_retry(
                 break
             await asyncio.sleep(PROXY_CONNECT_BACKOFF * (2 ** attempt))
     # 重试用尽，抛出最后的连接异常
-    assert last_exc is not None
-    raise last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("_request_with_connect_retry: 重试用尽但未捕获异常")
 
 
 # ---------------------------------------------------------------------------
@@ -106,25 +107,32 @@ async def proxy_api(request: Request, path: str):
     headers.pop("host", None)
     headers.pop("content-length", None)
 
-    resp = await _request_with_connect_retry(
-        method=request.method,
-        url=url,
-        content=body,
-        headers=headers,
-        params=dict(request.query_params),
-    )
+    resp: httpx.Response | None = None
+    try:
+        resp = await _request_with_connect_retry(
+            method=request.method,
+            url=url,
+            content=body,
+            headers=headers,
+            params=dict(request.query_params),
+        )
 
-    # 过滤 hop-by-hop headers
-    resp_headers = {}
-    for k, v in resp.headers.items():
-        if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-            resp_headers[k] = v
+        # 过滤 hop-by-hop headers
+        resp_headers = {}
+        for k, v in resp.headers.items():
+            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
+                resp_headers[k] = v
 
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=resp_headers,
-    )
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=resp_headers,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
+    finally:
+        if resp is not None:
+            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -179,22 +187,30 @@ async def proxy_websocket(websocket: WebSocket, path: str):
 async def proxy_media(request: Request, path: str):
     """将 /media/* 请求代理到后端"""
     url = f"{BACKEND_URL}/media/{path}"
-    resp = await _request_with_connect_retry(
-        method="GET",
-        url=url,
-        follow_redirects=True,
-    )
 
-    resp_headers = {}
-    for k, v in resp.headers.items():
-        if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
-            resp_headers[k] = v
+    resp: httpx.Response | None = None
+    try:
+        resp = await _request_with_connect_retry(
+            method="GET",
+            url=url,
+            follow_redirects=True,
+        )
 
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=resp_headers,
-    )
+        resp_headers = {}
+        for k, v in resp.headers.items():
+            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
+                resp_headers[k] = v
+
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=resp_headers,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
+    finally:
+        if resp is not None:
+            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------

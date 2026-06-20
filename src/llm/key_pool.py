@@ -238,25 +238,30 @@ class KeyPool:
         return self._slots
 
     def select(self) -> KeySlot | None:
-        """选最优可用 key。
+        """按 slots 声明顺序选第一个可用 key（主备模式）。
 
-        优先级：
-        1. 排除冷却中 / RPM 满 / 配额耗尽的
-        2. 在剩余 key 中选 score 最高的
+        优先级：slots 列表顺序即 key 优先级（由 llm.yaml 的 keys 段声明）。
+        始终选第一个非耗尽的 key；只有它冷却/限流/配额耗尽时才回退到下一个。
+        这样配置中的第一个 key 是主 key，其余为热备——主 key 恢复后自动切回。
+
+        Returns:
+            第一个可用 KeySlot；全部不可用返回 None。
         """
-        candidates = [s for s in self._slots if not s.is_exhausted]
-        if not candidates:
-            # 全满了，看有没有只是 RPM 满但没冷却的（最短时间内可用的）
-            rpm_blocked = [s for s in self._slots if not s.is_cooling]
-            if rpm_blocked:
-                candidates = rpm_blocked
-            else:
-                logger.warning(
-                    "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted)",
-                    self.pool_id,
-                )
-                return None
-        return max(candidates, key=lambda s: s.score())
+        available = [s for s in self._slots if not s.is_exhausted]
+        if available:
+            return available[0]
+
+        # 所有 key 都进入 exhausted（冷却/RPM 满/配额耗尽）。
+        # 取第一个未冷却的：它最短时间后恢复，acquire_slot 会等待其信号量。
+        rpm_blocked = [s for s in self._slots if not s.is_cooling]
+        if rpm_blocked:
+            return rpm_blocked[0]
+
+        logger.warning(
+            "[KeyPool] %s 所有 key 均不可用 (cooling/exhausted)",
+            self.pool_id,
+        )
+        return None
 
     async def acquire_slot(self, timeout: float = 60.0) -> KeySlot:
         """选 key 并获取并发许可，阻塞直到有 key 可用或超时。

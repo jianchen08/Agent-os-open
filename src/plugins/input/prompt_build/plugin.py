@@ -147,23 +147,49 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             要写入 state 的字段字典，含 system_message、compression_messages、dynamic_vars
         """
+        from datetime import datetime as _dt
+        _t0 = _dt.now()
+
         updates: dict[str, Any] = {}
 
         # 按 layer_order 顺序组装系统消息内容（不含压缩块）
+        _s = _dt.now()
+        logger.info("[%s] step=build_system_content BEGIN", self.name)
         system_content = await self._build_system_content(ctx)
+        logger.info(
+            "[%s] step=build_system_content END | elapsed=%.3fs len=%d",
+            self.name, (_dt.now() - _s).total_seconds(), len(system_content),
+        )
 
         # 产出 SystemMessage（纯 prompt，永不变化）
         updates["system_message"] = {"role": "system", "content": system_content}
 
         # 加载压缩块和状态快照为独立消息
         if self._config.get("include_compressed_layers", True):
+            _s = _dt.now()
+            logger.info("[%s] step=load_compression_messages BEGIN", self.name)
             compression_msgs = await self._load_compression_messages(ctx)
+            logger.info(
+                "[%s] step=load_compression_messages END | elapsed=%.3fs count=%d",
+                self.name, (_dt.now() - _s).total_seconds(), len(compression_msgs),
+            )
             updates["compression_messages"] = compression_msgs
 
         # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
+        _s = _dt.now()
+        logger.info("[%s] step=build_dynamic_vars BEGIN", self.name)
         dynamic_vars_msg = await self._build_dynamic_vars(ctx)
+        logger.info(
+            "[%s] step=build_dynamic_vars END | elapsed=%.3fs empty=%s",
+            self.name, (_dt.now() - _s).total_seconds(), not dynamic_vars_msg,
+        )
         if dynamic_vars_msg:
             updates["prompt.dynamic_vars"] = dynamic_vars_msg
+
+        logger.info(
+            "[%s] _do_work 全部完成 | total_elapsed=%.3fs",
+            self.name, (_dt.now() - _t0).total_seconds(),
+        )
 
         logger.debug(
             "[%s] SystemMessage built | content_len=%d | compression_msgs=%d | dynamic_vars=%s",
@@ -562,6 +588,8 @@ class PromptBuildPlugin(IInputPlugin):
         if not static_vars_def:
             return ""
 
+        from datetime import datetime as _rt
+
         parts: list[str] = []
         session_id = ctx.state.get("context.session_id", "")
         constraints = ctx.state.get("constraints", {})
@@ -583,7 +611,18 @@ class PromptBuildPlugin(IInputPlugin):
 
             var_name = var_def.get("name", var_def.get("type", ""))
 
+            # 逐变量加边界日志：卡死时定位到具体哪个静态变量（path/folder/tags/retrieval）
+            _sv_t = _rt.now()
+            logger.info(
+                "[%s] static_var BEGIN | name=%s type=%s",
+                self.name, var_name, var_def.get("type", ""),
+            )
             content = await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
+            logger.info(
+                "[%s] static_var END | name=%s | elapsed=%.3fs len=%d",
+                self.name, var_name, (_rt.now() - _sv_t).total_seconds(),
+                len(content) if content else 0,
+            )
 
             if content:
                 parts.append(f"### {var_name}\n{content}")
@@ -630,6 +669,15 @@ class PromptBuildPlugin(IInputPlugin):
 
         user_id = ctx.state.get("user_id", "")
 
+        # 检索调用是 prompt_build 卡死的头号嫌疑点：此处 await 若永不返回，
+        # 整个 prompt_build 协程永久挂起、零日志（与历史多次卡死现象一致）。
+        # 加 BEGIN/END 边界日志，下次卡死时可精确定位是否卡在 retrieve。
+        from datetime import datetime as _rt
+        _rt_s = _rt.now()
+        logger.info(
+            "[%s] memory_service.retrieve BEGIN | tags=%s top_k=%d method=%s",
+            self.name, tags, top_k, "keyword",
+        )
         results = await memory_service.retrieve(
             user_id=user_id,
             filter={"tags": tags, "memory_type": "semantic"},
@@ -637,6 +685,11 @@ class PromptBuildPlugin(IInputPlugin):
             retrieval_method="keyword",
             query=" ".join(tags),
             top_k=top_k,
+        )
+        logger.info(
+            "[%s] memory_service.retrieve END | elapsed=%.3fs results=%d",
+            self.name, (_rt.now() - _rt_s).total_seconds(),
+            len(results) if results else 0,
         )
 
         if not results:

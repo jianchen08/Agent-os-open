@@ -467,6 +467,12 @@ class IsolationManager:
         if existing_env:
             self._environments[existing_env.env_id] = existing_env
             self._workspace_env_map[ws_key] = existing_env.env_id
+            # 同步注册到 provider，确保 execute_in_environment 能在 provider 侧命中。
+            # _find_existing_container 绕过 provider 直接构造了 env，
+            # 若不注册则 provider._environments 中无此记录。
+            provider = self._providers.get(existing_env.level)
+            if provider is not None:
+                provider._environments[existing_env.env_id] = existing_env
             logger.info(f"[IsolationManager] 恢复已有容器: {container_name}")
             return existing_env
 
@@ -640,8 +646,10 @@ class IsolationManager:
 
                 now = datetime.now(UTC)
 
+                # 统一使用 container_name 作为 env_id（与 create_environment 一致），
+                # 同一 workspace 对应同一 container_name，env_id 稳定不变。
                 env = IsolationEnvironment(
-                    env_id=container.id,
+                    env_id=container_name,
                     level=IsolationLevel.CONTAINER,
                     provider_type="cua",
                     status=EnvironmentStatus.READY.value,

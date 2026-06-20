@@ -91,11 +91,17 @@ class TaskIdleTimerMixin:
                     if timer_manager else "?"
                 )
                 loop = asyncio.get_running_loop()
-                loop.create_task(
+                _fail_task = loop.create_task(
                     task_service.fail_task(
                         task_id,
                         f"idle: 管道已退出且无活跃子任务 ({threshold}s)",
                     )
+                )
+                # fail_task 是 fire-and-forget 协程，内部若抛异常（如
+                # _emit_state_change / _notify_suspended_pipelines 失败）
+                # 默认进黑洞无人知晓，导致父任务死等。挂回调把异常打出来。
+                _fail_task.add_done_callback(
+                    lambda fut, tid=task_id: self._log_fail_task_exception(fut, tid)
                 )
                 logger.warning(
                     "TaskWorker: [IDLE-TIMEOUT] 确认真正 idle，标记 failed: "
@@ -131,6 +137,38 @@ class TaskIdleTimerMixin:
                     "TaskWorker: [IDLE-TIMEOUT] 无事件循环，"
                     "无法重建计时器: task_id=%s", task_id,
                 )
+
+    def _log_fail_task_exception(self, task_future: Any, task_id: str) -> None:
+        """fail_task 协程完成回调：捕获并打印协程内部异常。
+
+        fail_task 经 loop.create_task 调度（fire-and-forget），其内部
+        若抛异常（_emit_state_change / _notify_suspended_pipelines 等）
+        默认只在 GC 时打印一行到 stderr，无人捕获。父任务因此收不到
+        子任务失败通知而无限等待。此回调把异常以 ERROR 级别显式打出，
+        含 task_id 与完整 traceback，使失败可见、可定位。
+
+        Args:
+            task_future: create_task 返回的 Task/Future 对象
+            task_id: 关联的任务 ID（闭包捕获，避免回调时变量漂移）
+        """
+        if task_future.cancelled():
+            logger.warning(
+                "TaskWorker: [IDLE-TIMEOUT] fail_task 协程被取消: task_id=%s",
+                task_id,
+            )
+            return
+        exc = task_future.exception()
+        if exc is not None:
+            logger.error(
+                "TaskWorker: [IDLE-TIMEOUT] fail_task 协程内部异常，"
+                "子任务失败可能未通知到父任务: task_id=%s error=%s",
+                task_id, exc, exc_info=exc,
+            )
+        else:
+            logger.info(
+                "TaskWorker: [IDLE-TIMEOUT] fail_task 协程执行完成: task_id=%s",
+                task_id,
+            )
 
     def _engine_is_running(self, task_id: str) -> bool:
         """检查任务关联的管道引擎是否仍在运行。

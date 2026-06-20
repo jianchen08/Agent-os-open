@@ -292,19 +292,46 @@ class _TaskStateMixin:
                 task.error = reason
         self._storage.save(task)
 
-        await self._emit_state_change(task_id, old_status, "failed")
+        logger.info(
+            "TaskService: fail_task 状态已落盘 | task=%s old=%s reason=%s",
+            task_id, old_status, reason[:120] if reason else "",
+        )
 
-        # 父任务失败时级联取消所有非终态的子任务
-        _cascade_count = await self.fail_task_cascade(task_id, reason=reason)
-        if _cascade_count > 0:
-            logger.info(
-                "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
-                task_id, _cascade_count,
+        # 以下三步各自隔离：单步失败不阻断后续步，避免某步异常导致
+        # 通知/级联/清理整体丢失（这正是"子任务失败不通知父任务"的隐蔽根因）。
+        # 1. 发射状态变更 → 触发 _on_task_state_changed → _notify_suspended_pipelines
+        try:
+            await self._emit_state_change(task_id, old_status, "failed")
+        except Exception as exc:
+            logger.error(
+                "TaskService: fail_task 状态变更通知失败（父任务可能收不到失败通知）| "
+                "task=%s error=%s",
+                task_id, exc, exc_info=exc,
             )
 
-        # 任务失败后尝试销毁容器（仅当 workspace 无其他活跃任务时）
+        # 2. 父任务失败时级联取消所有非终态的子任务
+        try:
+            _cascade_count = await self.fail_task_cascade(task_id, reason=reason)
+            if _cascade_count > 0:
+                logger.info(
+                    "TaskService: fail_task cascade 完成 | parent=%s, cancelled_subtasks=%d",
+                    task_id, _cascade_count,
+                )
+        except Exception as exc:
+            logger.error(
+                "TaskService: fail_task 级联取消子任务失败 | task=%s error=%s",
+                task_id, exc, exc_info=exc,
+            )
+
+        # 3. 任务失败后尝试销毁容器（仅当 workspace 无其他活跃任务时）
         # 失败任务重试时 get_or_create_environment 会自动重建容器
-        await self._try_destroy_container_if_idle(task_id)
+        try:
+            await self._try_destroy_container_if_idle(task_id)
+        except Exception as exc:
+            logger.error(
+                "TaskService: fail_task 容器销毁检查失败 | task=%s error=%s",
+                task_id, exc, exc_info=exc,
+            )
 
     async def cancel_task(self, task_id: str, reason: str = "") -> None:
         """将任务标记为已取消。

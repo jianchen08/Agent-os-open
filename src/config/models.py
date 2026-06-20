@@ -52,6 +52,10 @@ def _load_dotenv_once() -> None:
     """加载项目根目录的 .env 文件到 os.environ（仅执行一次）。
 
     优先级：系统环境变量 > .env 文件（不覆盖已有值）。
+
+    这是 python-dotenv 与主流开源项目的标准约定：系统环境变量是权威来源
+    （适用于生产部署时由 Docker/K8s/CI 注入密钥），.env 仅作本地开发兜底。
+    用户配置密钥的推荐方式见仓库根目录的 ``.env.example``。
     """
     global _dotenv_loaded
     if _dotenv_loaded:
@@ -72,7 +76,7 @@ def _load_dotenv_once() -> None:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                # 系统环境变量优先，不覆盖
+                # 系统环境变量优先，不覆盖已有值（见 docstring）
                 if key and key not in os.environ:
                     os.environ[key] = value
         logger.debug("已加载 .env 文件: %s", _ENV_FILE_PATH)
