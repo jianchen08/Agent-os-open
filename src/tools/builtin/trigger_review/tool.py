@@ -242,9 +242,9 @@ class TriggerReviewTool(BuiltinTool):
 
 
 
-                from pipeline.message_bus import emit
+                from tools.tool_context import emit
 
-                from pipeline.registry import get_engine_registry
+                from tools.tool_context import get_engine_registry
 
             except ImportError as exc:
 
@@ -320,7 +320,7 @@ class TriggerReviewTool(BuiltinTool):
 
 
 
-                from pipeline.message_types import MessageType, PipelineMessage
+                from tools.tool_context import MessageType, PipelineMessage
 
                 _review_msg = PipelineMessage(
 

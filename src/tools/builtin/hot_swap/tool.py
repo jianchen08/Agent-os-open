@@ -155,8 +155,8 @@ def _action_swap_plugin(params: dict[str, Any]) -> dict[str, Any]:
         new_plugin = _load_plugin_instance(new_plugin_class_path)
 
         # 获取 PluginRegistry 和 HotSwapManager
-        from pipeline.hot_swap import HotSwapManager
-        from pipeline.registry import PluginRegistry
+        from tools.tool_context import HotSwapManager
+        from tools.tool_context import PluginRegistry
 
         plugin_registry = _get_service("plugin_registry")
         if plugin_registry is None:
@@ -219,8 +219,8 @@ def _action_rollback_plugin(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        from pipeline.hot_swap import HotSwapManager
-        from pipeline.registry import PluginRegistry
+        from tools.tool_context import HotSwapManager
+        from tools.tool_context import PluginRegistry
 
         plugin_registry = _get_service("plugin_registry")
         if plugin_registry is None:
@@ -442,7 +442,7 @@ def _get_rollback_manager() -> RollbackManager:
     Returns:
         RollbackManager 实例
     """
-    from pipeline.rollback import RollbackManager
+    from tools.tool_context import RollbackManager
 
     # 尝试获取已有的 manager
     manager = _get_service("rollback_manager")

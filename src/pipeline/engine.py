@@ -1088,6 +1088,56 @@ class PipelineEngine:
 
 
 
+    @staticmethod
+
+    def _create_log_handler(
+
+        file_path: str,
+
+        mode: str,
+
+        level: int,
+
+        formatter: logging.Formatter,
+
+        filters: list[Any],
+
+    ) -> logging.FileHandler:
+
+        """创建配置好的 FileHandler（工厂函数，统一日志 Handler 创建逻辑）。
+
+        Args:
+
+            file_path: 日志文件路径
+
+            mode: 文件打开模式（"w" 覆盖 / "a" 追加）
+
+            level: 日志级别
+
+            formatter: 日志格式化器
+
+            filters: 过滤器列表
+
+        Returns:
+
+            配置完成的 FileHandler 实例
+
+        """
+
+        handler = logging.FileHandler(file_path, encoding="utf-8", mode=mode)
+
+        handler.setLevel(level)
+
+        handler.setFormatter(formatter)
+
+        for f in filters:
+
+            handler.addFilter(f)
+
+        return handler
+
+
+
     def _setup_pipeline_logging(
 
         self,
@@ -1158,25 +1208,13 @@ class PipelineEngine:
 
             # ---- 1. 主日志（DEBUG~INFO，排除 WARNING+，避免与 error 重复） ----
 
-            _main_handler = logging.FileHandler(
+            _main_handler = self._create_log_handler(
 
                 str(_pipeline_dir / f"pipeline_{pipeline_run_id}.log"),
 
-                encoding="utf-8", mode=log_mode,
+                log_mode, logging.DEBUG, _log_fmt,
 
-            )
-
-            _main_handler.setLevel(logging.DEBUG)
-
-            _main_handler.setFormatter(_log_fmt)
-
-            _main_handler.addFilter(_pipeline_filter)
-
-            # 排除 WARNING 及以上级别，这些内容只写 error 日志
-
-            _main_handler.addFilter(
-
-                lambda record: record.levelno < logging.WARNING
+                [_pipeline_filter, lambda r: r.levelno < logging.WARNING],
 
             )
 
@@ -1184,37 +1222,29 @@ class PipelineEngine:
 
             # ---- 2. 错误/中断/警告日志（WARNING+ 级别，独立文件夹） ----
 
-            _error_handler = logging.FileHandler(
+            _error_handler = self._create_log_handler(
 
                 str(_error_dir / f"pipeline_{pipeline_run_id}.log"),
 
-                encoding="utf-8", mode=log_mode,
+                log_mode, logging.WARNING, _log_fmt,
+
+                [_pipeline_filter],
 
             )
-
-            _error_handler.setLevel(logging.WARNING)
-
-            _error_handler.setFormatter(_log_fmt)
-
-            _error_handler.addFilter(_pipeline_filter)
 
 
 
             # ---- 3. 任务执行日志（独立文件夹） ----
 
-            _task_handler = logging.FileHandler(
+            _task_handler = self._create_log_handler(
 
                 str(_task_dir / f"pipeline_{pipeline_run_id}.log"),
 
-                encoding="utf-8", mode=log_mode,
+                log_mode, logging.DEBUG, _log_fmt,
+
+                [self._TaskLogFilter(pipeline_run_id)],
 
             )
-
-            _task_handler.setLevel(logging.DEBUG)
-
-            _task_handler.setFormatter(_log_fmt)
-
-            _task_handler.addFilter(self._TaskLogFilter(pipeline_run_id))
 
 
 
