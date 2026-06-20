@@ -10,6 +10,7 @@ files/capabilities。
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -378,6 +379,29 @@ async def update_user_settings(body: dict[str, Any] | None = None, _user: dict =
 monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"])
 
 
+def _with_fallback_strategies(
+    strategies: list[Callable[[], dict[str, Any] | None]],
+    default: dict[str, Any],
+) -> dict[str, Any]:
+    """按顺序尝试多个数据获取策略，返回第一个成功结果。
+
+    统一封装监控函数中反复出现的「主策略→降级1→降级2→默认空响应」三级降级链。
+    每个策略函数返回 None 表示失败（触发下一个策略），返回 dict 表示成功。
+
+    Args:
+        strategies: 策略函数列表，按优先级从高到低排列
+        default: 所有策略都失败时的兜底响应
+
+    Returns:
+        第一个成功的策略结果，或 default
+    """
+    for strategy in strategies:
+        result = strategy()
+        if result is not None:
+            return result
+    return default
+
+
 def _get_token_usage() -> dict[str, Any]:
     """获取全局 token 用量统计。
 
@@ -389,49 +413,52 @@ def _get_token_usage() -> dict[str, Any]:
     Returns:
         包含 total_tokens, prompt_tokens, completion_tokens, request_count 的字典
     """
-    # 策略 1：从 UsageMonitor 获取
-    try:
+    def _strategy_usage_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider
-
         provider = get_service_provider()
         monitor = provider.get("usage_monitor")
-        if monitor is not None:
-            stats = monitor.get_statistics()
-            records = monitor.get_recent_records(limit=10000)
-            prompt_total = sum(r.prompt_tokens for r in records)
-            completion_total = sum(r.completion_tokens for r in records)
-            return {
-                "total_tokens": stats.total_tokens,
-                "prompt_tokens": prompt_total,
-                "completion_tokens": completion_total,
-                "request_count": stats.total_requests,
-            }
-    except Exception:
-        pass
+        if monitor is None:
+            return None
+        stats = monitor.get_statistics()
+        records = monitor.get_recent_records(limit=10000)
+        prompt_total = sum(r.prompt_tokens for r in records)
+        completion_total = sum(r.completion_tokens for r in records)
+        return {
+            "total_tokens": stats.total_tokens,
+            "prompt_tokens": prompt_total,
+            "completion_tokens": completion_total,
+            "request_count": stats.total_requests,
+        }
 
-    # 策略 2：从 PerformanceMonitor 的 LLM 统计获取
-    try:
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider
-
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is not None:
-            llm_stats = getattr(perf_monitor, "_llm_stats", {})
-            return {
-                "total_tokens": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "request_count": llm_stats.get("request_count", 0),
-            }
-    except Exception:
-        pass
+        if perf_monitor is None:
+            return None
+        llm_stats = getattr(perf_monitor, "_llm_stats", {})
+        return {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "request_count": llm_stats.get("request_count", 0),
+        }
 
-    # 策略 3：零值兜底
+    return _with_fallback_strategies(
+        [_strategy_usage_monitor, _strategy_perf_monitor],
+        {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "request_count": 0},
+    )
+
+
+def _build_cache_result(hits: int, misses: int) -> dict[str, Any]:
+    """从 hits/misses 构建统一的缓存统计响应。"""
+    total = hits + misses
+    hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
     return {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "request_count": 0,
+        "cache_hits": hits,
+        "cache_misses": misses,
+        "hit_rate": hit_rate,
+        "total_requests": total,
     }
 
 
@@ -446,55 +473,30 @@ def _get_cache_stats() -> dict[str, Any]:
     Returns:
         包含 cache_hits, cache_misses, hit_rate, total_requests 的字典
     """
-    # 策略 1：从 ToolCache 获取
-    try:
+    def _strategy_tool_cache() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider
-
         provider = get_service_provider()
         tool_cache = provider.get("tool_cache")
-        if tool_cache is not None and hasattr(tool_cache, "get_cache_stats"):
-            stats = tool_cache.get_cache_stats()
-            hits = stats.get("hits", 0)
-            misses = stats.get("misses", 0)
-            total = hits + misses
-            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
-            return {
-                "cache_hits": hits,
-                "cache_misses": misses,
-                "hit_rate": hit_rate,
-                "total_requests": total,
-            }
-    except Exception:
-        pass
+        if tool_cache is None or not hasattr(tool_cache, "get_cache_stats"):
+            return None
+        stats = tool_cache.get_cache_stats()
+        return _build_cache_result(stats.get("hits", 0), stats.get("misses", 0))
 
-    # 策略 2：从 PerformanceMonitor 的工具统计获取
-    try:
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider
-
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is not None:
-            tool_stats = getattr(perf_monitor, "_tool_stats", {})
-            hits = tool_stats.get("cache_hits", 0)
-            misses = tool_stats.get("cache_misses", 0)
-            total = hits + misses
-            hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
-            return {
-                "cache_hits": hits,
-                "cache_misses": misses,
-                "hit_rate": hit_rate,
-                "total_requests": total,
-            }
-    except Exception:
-        pass
+        if perf_monitor is None:
+            return None
+        tool_stats = getattr(perf_monitor, "_tool_stats", {})
+        return _build_cache_result(
+            tool_stats.get("cache_hits", 0), tool_stats.get("cache_misses", 0),
+        )
 
-    # 策略 3：零值兜底
-    return {
-        "cache_hits": 0,
-        "cache_misses": 0,
-        "hit_rate": 0.0,
-        "total_requests": 0,
-    }
+    return _with_fallback_strategies(
+        [_strategy_tool_cache, _strategy_perf_monitor],
+        {"cache_hits": 0, "cache_misses": 0, "hit_rate": 0.0, "total_requests": 0},
+    )
 
 
 def _get_system_metrics() -> dict[str, Any]:
@@ -505,30 +507,31 @@ def _get_system_metrics() -> dict[str, Any]:
     2. psutil 直接采集
     3. 零值兜底
     """
-    # 策略 1：从 PerformanceMonitor 获取
-    try:
+    def _strategy_perf_monitor() -> dict[str, Any] | None:
         from infrastructure.service_provider import get_service_provider
-
         provider = get_service_provider()
         perf_monitor = provider.get("performance_monitor")
-        if perf_monitor is not None and hasattr(perf_monitor, "get_system_metrics"):
-            import asyncio
+        if perf_monitor is None or not hasattr(perf_monitor, "get_system_metrics"):
+            return None
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 不能在运行中的事件循环里 await，用 psutil 直接采集
+            return _collect_psutil_metrics()
+        metrics = loop.run_until_complete(perf_monitor.get_system_metrics())
+        return _format_system_metrics(
+            cpu=metrics.cpu_usage,
+            memory_percent=metrics.memory_usage,
+            disk_percent=metrics.disk_usage,
+        )
 
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 不能在运行中的事件循环里 await，用 psutil 直接采集
-                return _collect_psutil_metrics()
-            metrics = loop.run_until_complete(perf_monitor.get_system_metrics())
-            return _format_system_metrics(
-                cpu=metrics.cpu_usage,
-                memory_percent=metrics.memory_usage,
-                disk_percent=metrics.disk_usage,
-            )
-    except Exception:
-        pass
+    def _strategy_psutil() -> dict[str, Any] | None:
+        return _collect_psutil_metrics()
 
-    # 策略 2：psutil 直接采集
-    return _collect_psutil_metrics()
+    return _with_fallback_strategies(
+        [_strategy_perf_monitor, _strategy_psutil],
+        _format_system_metrics(),
+    )
 
 
 def _collect_psutil_metrics() -> dict[str, Any]:
@@ -594,39 +597,35 @@ def _get_task_statistics() -> dict[str, Any]:
     1. TaskService.get_all_tasks()
     2. 零值兜底
     """
-    try:
-        from infrastructure.service_provider import get_service_provider
+    _default = {
+        "total": 0, "succeeded": 0, "failed": 0,
+        "running": 0, "pending": 0,
+        "avg_duration": 0, "success_rate": 0,
+    }
 
+    def _strategy_task_service() -> dict[str, Any] | None:
+        from infrastructure.service_provider import get_service_provider
         provider = get_service_provider()
         task_service = provider.get("task_service")
-        if task_service is not None and hasattr(task_service, "get_all_tasks"):
-            tasks = task_service.get_all_tasks()
-            total = len(tasks)
-            succeeded = sum(1 for t in tasks if getattr(t, "status", "") == "completed")
-            failed = sum(1 for t in tasks if getattr(t, "status", "") == "failed")
-            running = sum(1 for t in tasks if getattr(t, "status", "") == "running")
-            pending = sum(1 for t in tasks if getattr(t, "status", "") == "pending")
-            return {
-                "total": total,
-                "succeeded": succeeded,
-                "failed": failed,
-                "running": running,
-                "pending": pending,
-                "avg_duration": 0,
-                "success_rate": round(succeeded / total * 100, 2) if total > 0 else 0,
-            }
-    except Exception:
-        pass
+        if task_service is None or not hasattr(task_service, "get_all_tasks"):
+            return None
+        tasks = task_service.get_all_tasks()
+        total = len(tasks)
+        succeeded = sum(1 for t in tasks if getattr(t, "status", "") == "completed")
+        failed = sum(1 for t in tasks if getattr(t, "status", "") == "failed")
+        running = sum(1 for t in tasks if getattr(t, "status", "") == "running")
+        pending = sum(1 for t in tasks if getattr(t, "status", "") == "pending")
+        return {
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "running": running,
+            "pending": pending,
+            "avg_duration": 0,
+            "success_rate": round(succeeded / total * 100, 2) if total > 0 else 0,
+        }
 
-    return {
-        "total": 0,
-        "succeeded": 0,
-        "failed": 0,
-        "running": 0,
-        "pending": 0,
-        "avg_duration": 0,
-        "success_rate": 0,
-    }
+    return _with_fallback_strategies([_strategy_task_service], _default)
 
 
 @monitoring_router.get("", summary="获取监控汇总数据")

@@ -1452,9 +1452,9 @@ class TaskTool(BuiltinTool):
 
         try:
 
-            from pipeline.message_bus import emit
+            from tools.tool_context import emit
 
-            from pipeline.message_types import MessageType, PipelineMessage
+            from tools.tool_context import MessageType, PipelineMessage
 
             _cont_msg = PipelineMessage(
 
