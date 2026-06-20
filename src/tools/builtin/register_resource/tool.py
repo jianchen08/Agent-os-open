@@ -343,7 +343,7 @@ def _register_pipeline_config(
         注册结果字典
     """
     try:
-        from tools.tool_context import PipelineConfig, PipelineConfigStore
+        from pipeline.config_store import PipelineConfig, PipelineConfigStore
 
         registry = _get_service("pipeline_config_store")
         if registry is None:

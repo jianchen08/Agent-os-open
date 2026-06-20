@@ -80,7 +80,6 @@ state["raw_tool_calls"] 为空 → 无信号（返回空 OutputResult）
 | `__init__.py` | 模块导出 | ToolRegistry, ToolDefinition |
 | `types.py` | ToolDefinition dataclass | ToolDefinition |
 | `registry.py` | ToolRegistry 简化版注册表 | ToolRegistry |
-| `tool_context.py` | pipeline 类型桥接层（解耦 builtin/ 对 pipeline 的直接依赖） | PipelineMessage, MessageType, emit, HotSwapManager, PluginRegistry, RollbackManager, PipelineConfig, PipelineConfigStore, PipelineEngine, get_engine_registry |
 | `README.md` | 模块文档 | — |
 | `tools.md` | 模块文档（规范化副本） | — |
 
@@ -97,14 +96,11 @@ state["raw_tool_calls"] 为空 → 无信号（返回空 OutputResult）
 ```
 tools/types.py ← tools/registry.py ← plugins/core/tool_core.py
                                     ← plugins/output/pending_tools.py
-
-tools/tool_context.py ← tools/builtin/*/tool.py   (pipeline 类型桥接)
 ```
 
 - `tools/` 不依赖 `pipeline/`，是独立的数据层
 - `tool_core.py` 和 `pending_tools.py` 依赖 `pipeline/plugin.py`（插件接口）和 `pipeline/types.py`（StateKeys, RouteSignal）
 - `tool_core.py` 依赖 `tools/registry.py`（批量注册）
-- `tools/builtin/` 下的工具通过 `tools/tool_context.py` 间接访问 pipeline 类型，不直接 `from pipeline import`
 
 ### 相关文档索引
 

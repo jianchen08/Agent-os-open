@@ -61,6 +61,18 @@ class ProcessManager:
         # 输入处理器
         self.input_handler = InputHandler()
 
+        # ── 看门狗配置（防止失控进程拖垮系统）──
+        # 触发条件（满足任一即杀，后台自动处理，不通知 Agent）：
+        #   1. 资源失控：句柄 > HANDLE_THRESHOLD 且连续 HANDLE_GROW_ROUNDS 次采样都在增长
+        #      （双条件避免误杀 build：build 飙高后会回落，不满足"持续增长"）
+        #   2. 孤儿进程：running 状态超过 ORPHAN_TIMEOUT 秒无任何外部访问
+        #      （合法长期进程只要 Agent 周期性 continue/input/read_log 就不会被判孤儿）
+        self._watchdog_interval: float = 10.0       # 采样间隔（秒）
+        self._handle_threshold: int = 100000         # 句柄绝对阈值
+        self._handle_grow_rounds: int = 3            # 连续增长采样次数
+        self._orphan_timeout: float = 1800.0         # 孤儿判定：30 分钟无访问
+        self._watchdog_task: asyncio.Task | None = None
+
     def _generate_log_filename(self, command: str) -> str:
         """生成日志文件名"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -230,7 +242,10 @@ class ProcessManager:
             status="running",
             output_task=output_task,
             stdin_fd=stdin_fd,
+            last_access_time=time.time(),
         )
+        # 确保看门狗在运行（首次启动进程时启动，幂等）
+        self._ensure_watchdog()
 
         # 添加任务完成回调以清理引用
         output_task.add_done_callback(
@@ -298,6 +313,7 @@ class ProcessManager:
             return False, f"进程 {pid} 不存在或已结束"
 
         proc_info = self.active_processes[pid]
+        self._touch_access(pid)
 
         if proc_info.status != "running":
             return False, f"进程状态为 {proc_info.status}，无法接受输入"
@@ -381,6 +397,7 @@ class ProcessManager:
         self._cleanup_if_needed()
         info = self.active_processes.get(pid)
         if info is not None and info.status == "running":
+            self._touch_access(pid)
             self._sync_poll_process(info)
         return info
 
@@ -396,6 +413,7 @@ class ProcessManager:
         if not proc_info:
             return ""
         if proc_info.status == "running":
+            self._touch_access(pid)
             self._sync_poll_process(proc_info)
         lines = self._read_log_lines(proc_info.log_file)
         raw_output = "\n".join(lines)
@@ -414,6 +432,7 @@ class ProcessManager:
         if not proc_info:
             return None
         if proc_info.status == "running":
+            self._touch_access(pid)
             self._sync_poll_process(proc_info)
         lines = self._read_log_lines(proc_info.log_file)
         summary = self.log_compressor.compress(lines, proc_info.command)
@@ -463,6 +482,150 @@ class ProcessManager:
 
         for pid in finished_pids:
             del self.active_processes[pid]
+
+    # ── 访问追踪 ──────────────────────────────────────────────────
+
+    def _touch_access(self, pid: int) -> None:
+        """记录进程被外部访问（看门狗据此判定是否孤儿）。
+
+        任何 get_process_info / get_output / get_summary / send_input 调用
+        都更新 last_access_time。合法长期进程（dev server / 下载）只要
+        Agent 周期性 continue/input/read_log 查看就不会被判孤儿。
+        """
+        info = self.active_processes.get(pid)
+        if info is not None:
+            info.last_access_time = time.time()
+
+    # ── 看门狗：监控失控进程 ──────────────────────────────────────
+    #
+    # 解决问题：bash_execute 超时后返回 running 状态但不杀进程（设计意图，
+    # 为了让 Agent 用 continue 续接长期任务）。但当 Agent 抛弃进程（拿到结果
+    # 转去干别的）或 Agent 协程自身卡死时，进程成了孤儿无限运行，可能耗尽
+    # 系统资源（如 find / 爆 900 万句柄拖垮 WSL/Docker）。
+    #
+    # 看门狗后台周期采样所有 running 进程，满足任一条件直接杀（不通知 Agent）：
+    #   1. 资源失控：句柄 > 阈值 且 连续 N 次采样都在增长
+    #   2. 孤儿进程：running 超 30 分钟无任何外部访问
+
+    def _ensure_watchdog(self) -> None:
+        """确保看门狗后台任务在运行（幂等，重复调用安全）。"""
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._watchdog_task = loop.create_task(self._watchdog_loop())
+            logger.info("[Watchdog] 后台看门狗已启动")
+        except RuntimeError:
+            # 无事件循环（非异步上下文），跳过
+            pass
+
+    async def _watchdog_loop(self) -> None:
+        """看门狗主循环：周期采样 running 进程，发现失控即杀。"""
+        while True:
+            await asyncio.sleep(self._watchdog_interval)
+            try:
+                await self._watchdog_check_once()
+            except asyncio.CancelledError:
+                logger.info("[Watchdog] 看门狗任务被取消，退出")
+                return
+            except Exception as e:
+                # 看门狗自身异常不能崩，否则失去保护
+                logger.error("[Watchdog] 看门狗巡检异常（非致命，继续）: %s", e, exc_info=True)
+
+    async def _watchdog_check_once(self) -> None:
+        """单次巡检：扫描所有 running 进程，判定失控并处理。"""
+        now = time.time()
+        # 快照当前 running 进程（迭代中 terminate 会修改字典）
+        running = [
+            (pid, info) for pid, info in list(self.active_processes.items())
+            if info.status == "running"
+        ]
+        if not running:
+            return
+
+        for pid, info in running:
+            # 先同步检测是否已退出（避免对已死进程做无谓采样）
+            self._sync_poll_process(info)
+            if info.status != "running":
+                continue
+
+            # ── 判据1：孤儿进程（无访问超时）──
+            idle_secs = now - info.last_access_time
+            if idle_secs >= self._orphan_timeout:
+                logger.error(
+                    "[Watchdog] 孤儿进程终止 | pid=%s cmd=%.60s | "
+                    "无访问 %.0fs（阈值 %.0fs）| 句柄历史=%s",
+                    pid, info.command, idle_secs, self._orphan_timeout,
+                    info.handle_samples[-3:],
+                )
+                await self._watchdog_kill(pid, info, "orphan")
+                continue
+
+            # ── 判据2：资源失控（句柄超阈值 + 持续增长）──
+            handles = self._sample_handles(pid)
+            if handles is not None:
+                info.handle_samples.append(handles)
+                # 只保留最近 N+1 次采样，防止无限增长
+                keep = self._handle_grow_rounds + 1
+                if len(info.handle_samples) > keep:
+                    info.handle_samples = info.handle_samples[-keep:]
+
+                if self._is_resource_out_of_control(info.handle_samples):
+                    logger.error(
+                        "[Watchdog] 资源失控进程终止 | pid=%s cmd=%.60s | "
+                        "句柄=%d（阈值 %d）| 采样历史=%s",
+                        pid, info.command, handles, self._handle_threshold,
+                        info.handle_samples,
+                    )
+                    await self._watchdog_kill(pid, info, "resource")
+                    continue
+
+    def _sample_handles(self, pid: int) -> int | None:
+        """采样进程句柄数。失败返回 None（不作为失控判据）。"""
+        try:
+            import psutil
+            p = psutil.Process(pid)
+            # num_handles 是 Windows 专属；其他平台用 num_fds 兜底
+            if hasattr(p, "num_handles"):
+                try:
+                    return p.num_handles()
+                except Exception:
+                    pass
+            if hasattr(p, "num_fds"):
+                try:
+                    return p.num_fds()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    def _is_resource_out_of_control(self, samples: list[int]) -> bool:
+        """判定资源是否失控：超阈值 且 连续 N 次都在增长。
+
+        双条件避免误杀大型 build：build 句柄会飙高但很快回落（不满足"连续增长"），
+        find / 等失控命令句柄持续单调上涨（满足两个条件）。
+        """
+        rounds = self._handle_grow_rounds
+        if len(samples) < rounds + 1:
+            return False  # 采样不足，不判定
+        recent = samples[-(rounds + 1):]
+        if recent[-1] < self._handle_threshold:
+            return False  # 没超阈值
+        # 连续 rounds 次都在增长
+        for i in range(1, len(recent)):
+            if recent[i] <= recent[i - 1]:
+                return False  # 出现回落或持平，不算持续增长
+        return True
+
+    async def _watchdog_kill(self, pid: int, info: ProcessInfo, reason: str) -> None:
+        """看门狗强制终止进程（best-effort，失败仅记日志）。"""
+        try:
+            # 复用现有 terminate 逻辑（含 process.terminate/kill）
+            await self.terminate_process(pid, force=True)
+            logger.info("[Watchdog] 已终止 pid=%s reason=%s", pid, reason)
+        except Exception as e:
+            logger.error("[Watchdog] 终止 pid=%s 失败: %s", pid, e)
 
     # ── 进程状态同步检测 ──────────────────────────────────────────
 

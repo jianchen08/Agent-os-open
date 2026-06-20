@@ -84,3 +84,9 @@ class ProcessInfo:
     metadata: dict[str, Any] = field(default_factory=dict)
     output_task: asyncio.Task | None = None  # 输出读取任务引用，防止垃圾回收
     stdin_fd: int | None = None  # stdin 管道的原始文件描述符，防御性后备写入
+    # 最近一次被外部访问的时间（任何 get/send_input/terminate 调用都更新）。
+    # 看门狗据此判定进程是否已被 Agent 遗弃：running 状态长时间无访问 → 孤儿 → 杀。
+    # 合法长期进程（dev server / 下载）只要 Agent 周期性 continue 查看，就不会被判孤儿。
+    last_access_time: float = 0.0
+    # 句柄采样历史（看门狗判定资源失控用：超阈值 + 持续增长 → 杀）
+    handle_samples: list[int] = field(default_factory=list)

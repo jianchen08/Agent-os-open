@@ -927,7 +927,7 @@ class TaskEvaluateTool(BuiltinTool):
             return None
 
         try:
-            from tools.tool_context import PipelineEngine
+            from pipeline.engine import PipelineEngine
 
             input_routes = services.get("input_route_table")
             output_routes = services.get("output_route_table")

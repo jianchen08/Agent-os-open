@@ -168,7 +168,16 @@ class PromptBuildPlugin(IInputPlugin):
         if self._config.get("include_compressed_layers", True):
             _s = _dt.now()
             logger.info("[%s] step=load_compression_messages BEGIN", self.name)
-            compression_msgs = await self._load_compression_messages(ctx)
+            try:
+                compression_msgs = await asyncio.wait_for(
+                    self._load_compression_messages(ctx), timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] load_compression_messages 超时(60s)！压缩块加载卡死，用空列表继续",
+                    self.name,
+                )
+                compression_msgs = []
             logger.info(
                 "[%s] step=load_compression_messages END | elapsed=%.3fs count=%d",
                 self.name, (_dt.now() - _s).total_seconds(), len(compression_msgs),
@@ -178,9 +187,18 @@ class PromptBuildPlugin(IInputPlugin):
         # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
         _s = _dt.now()
         logger.info("[%s] step=build_dynamic_vars BEGIN", self.name)
-        dynamic_vars_msg = await self._build_dynamic_vars(ctx)
+        try:
+            dynamic_vars_msg = await asyncio.wait_for(
+                self._build_dynamic_vars(ctx), timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "[%s] build_dynamic_vars 超时(30s)！动态变量构建卡死，用空继续",
+                self.name,
+            )
+            dynamic_vars_msg = ""
         logger.info(
-            "[%s] step=build_dynamic_vars END | elapsed=%.3fs empty=%s",
+                "[%s] step=build_dynamic_vars END | elapsed=%.3fs empty=%s",
             self.name, (_dt.now() - _s).total_seconds(), not dynamic_vars_msg,
         )
         if dynamic_vars_msg:
@@ -559,8 +577,34 @@ class PromptBuildPlugin(IInputPlugin):
         if not matches:
             return text
 
-        for match in matches:
-            content = await self._resolve_placeholder(ctx, match)
+        for idx, match in enumerate(matches):
+            # 逐步日志 + 超时保护：卡死时定位到具体哪个占位符，并 fail 而非永久挂起
+            # （历史多次出现 prompt_build 协程永久挂起拖垮整个进程的僵尸引擎问题）
+            from datetime import datetime as _ph_t
+            _ph_s = _ph_t.now()
+            logger.info(
+                "[%s] resolve_placeholder BEGIN | idx=%d/%d | %s",
+                self.name, idx + 1, len(matches),
+                match[:80] + ("..." if len(match) > 80 else ""),
+            )
+            try:
+                content = await asyncio.wait_for(
+                    self._resolve_placeholder(ctx, match),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] resolve_placeholder 超时(30s)！占位符解析卡死，"
+                    "跳过此占位符避免永久挂起 | idx=%d/%d | placeholder=%s",
+                    self.name, idx + 1, len(matches),
+                    match[:120],
+                )
+                content = ""
+            logger.info(
+                "[%s] resolve_placeholder END | idx=%d | elapsed=%.3fs | len=%d",
+                self.name, idx + 1, (_ph_t.now() - _ph_s).total_seconds(),
+                len(content) if content else 0,
+            )
             placeholder = "{{" + match + "}}"
             text = text.replace(placeholder, content)
 

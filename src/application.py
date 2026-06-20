@@ -393,17 +393,6 @@ class Application:
 
         logger.info("[STARTUP] 8-16.rest: %.2fs", _time.monotonic() - _t0)
 
-        # ── 17. api_store（会话存储）─────────────────────
-        # 注入 channels.api.memory_store.store 单例到 services，
-        # 供 infrastructure 层通过 MemoryStoreProtocol 消费，
-        # 解耦 infrastructure 对 channels 的逆向依赖。
-        try:
-            from channels.api.memory_store import store as _api_store
-            services["api_store"] = _api_store
-            logger.info("服务已注入: api_store")
-        except Exception as exc:
-            logger.warning("注入 api_store 失败: %s", exc)
-
         # ── 统一注册到 ServiceProvider ───────────────────
         self._register_to_service_provider(services)
 
