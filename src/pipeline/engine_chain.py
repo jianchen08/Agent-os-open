@@ -326,21 +326,11 @@ async def handle_no_route_signals(
         state[StateKeys.CORE_TYPE] = "llm_call"
         return "continue"
 
-    notif_sources = await _collect_pending_notifications(engine, state)
+    # 统一走 consume_pending_notifications（engine_iteration），
+    # 不再内联重复 drain/过滤/拼接逻辑。
+    from pipeline.engine_iteration import consume_pending_notifications  # noqa: PLC0415
 
-    if notif_sources:
-        combined = "\n\n".join(notif_sources)
-        state["user_input"] = combined
-        state.setdefault("messages", []).append(
-            {"role": "user", "content": combined}
-        )
-        state[StateKeys.CORE_TYPE] = "llm_call"
-        state.pop("raw_result", None)
-        state.pop("error_analysis", None)
-        logger.info(
-            "[Engine] 管道即将结束但发现 %d 条待处理消息，注入 state 继续循环",
-            len(notif_sources),
-        )
+    if consume_pending_notifications(engine, state):
         return "continue"
 
     _has_active_triggers = _check_active_triggers(state, engine.pipeline_id)
@@ -374,14 +364,6 @@ async def handle_no_route_signals(
         state[StateKeys.ENDED] = True
         return "end"
     return "continue"
-
-
-async def _collect_pending_notifications(
-    engine: PipelineEngine,
-    state: dict[str, Any],
-) -> list[str]:
-    """收集待处理通知消息。"""
-    return engine.drain_inject_queue()
 
 
 def _check_active_triggers(state: dict[str, Any], engine_pipeline_id: str) -> bool:

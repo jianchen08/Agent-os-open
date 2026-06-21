@@ -82,13 +82,13 @@ models:
       max_image_size: 20971520
       max_video_size: 104857600
 defaults:
-  chat: minimax-m3
+  chat: glm-5.2
   embedding: embedding-3
   call_timeout: 300
   compression: minimax-m3
   tiers:
-    large: minimax-m3
-    medium: minimax-m3
+    large: glm-5.2
+    medium: glm-5.2
     small: minimax-m3
     fallback_chain:
       chat:
