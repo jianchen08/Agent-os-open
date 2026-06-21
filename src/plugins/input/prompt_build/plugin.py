@@ -1,20 +1,21 @@
 """提示词构建 Input 插件 — 从旧代码 agents/prompt_builder.py 迁移。
 
-负责在管道循环的输入阶段组装 SystemMessage，
-按旧代码 layer_order 顺序拼接各层内容。
+负责在管道循环的输入阶段组装 SystemMessage 及相关消息。
 
 产出：
     - state["system_message"]: 一条 SystemMessage（不含历史消息和动态变量）
+    - state["compression_messages"]: 压缩层独立消息列表（L1/L2/KEYWORDS）
     - state["prompt.dynamic_vars"]: 动态变量消息 dict（LLMCore 直接追加在历史消息之后）
 
-构建顺序（与旧代码 context_window_config.yaml 的 layer_order 一致）：
-    1. system_prompt      <- state["context.system_prompt"]
-    2. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
-    3. static_vars        <- agent_config 或 state 读取
-    4. knowledge.context  <- 知识注入插件产出
+构建顺序（_build_system_content）：
+    1. system_prompt      <- state["context.system_prompt"]（占位符 {{xxx}} 在此替换）
+    2. language           <- config.language（语言指令，可选）
+    3. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
+    4. static_vars        <- agent_config 或 state 读取（知识检索统一为 tags/retrieval 类型）
     5. memory.retrieved   <- 记忆检索插件产出
-    6. l2_memory          <- 三元组摘要（从 ChunkService 读取，含关键词）
-    7. l1_memory          <- 八段摘要（从 ChunkService 读取，含关键词）
+
+注意：knowledge.context 已不再单独拼入（统一到 static_vars）；压缩层（L1/L2）作为
+compression_messages 独立消息输出，不合并到 system_message。
 """
 
 from __future__ import annotations
@@ -223,11 +224,9 @@ class PromptBuildPlugin(IInputPlugin):
         """按旧代码 layer_order 顺序组装系统消息内容。
 
         顺序：system_prompt -> tools_description -> static_vars ->
-              memory.retrieved -> l2_memory -> l1_memory
+              knowledge.context -> memory.retrieved
         不含 recent_messages 和 dynamic_vars。
-
-        知识检索已统一到 static_vars 的 tags/retrieval 类型中，
-        不再单独读取 knowledge.context。
+        压缩层（L2/L1/KEYWORDS）通过 compression_messages 独立消息输出。
 
         Args:
             ctx: 插件执行上下文
@@ -268,7 +267,12 @@ class PromptBuildPlugin(IInputPlugin):
             if static_vars_text:
                 parts.append(static_vars_text)
 
-        # 4. memory.retrieved（记忆检索插件产出）
+        # 4. knowledge.context（知识注入插件产出 —— 与 static_vars tags/retrieval 互补）
+        knowledge_context = ctx.state.get("knowledge.context", "")
+        if knowledge_context:
+            parts.append(knowledge_context)
+
+        # 5. memory.retrieved（记忆检索插件产出）
         memory_retrieved = ctx.state.get("memory.retrieved", "")
         if memory_retrieved:
             parts.append(memory_retrieved)
@@ -427,7 +431,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         互斥选择逻辑（不是先后也不是回退）：
             - 文件：用 project_root 解析（项目文件注入）
-            - 文件夹：用 ws_meta.path 解析（任务工作空间文件夹）
+            - 文件夹：用 workspace 解析（state["workspace"] = ws_meta.path）
             - 找不到就跳过
 
         Args:
@@ -447,8 +451,8 @@ class PromptBuildPlugin(IInputPlugin):
         if not project_root:
             project_root = (ctx._services or {}).get("project_root", "")
 
-        ws_meta = ctx.state.get("ws_meta") or {}
-        ws_path = ws_meta.get("path")
+        # 文件夹 base：state["workspace"]（engine.run(workspace=ws_meta.path) 注入）
+        ws_path = ctx.state.get("workspace", "")
 
         # 文件：用 project_root 解析
         if project_root:
@@ -456,7 +460,7 @@ class PromptBuildPlugin(IInputPlugin):
             if target.is_file():
                 return target
 
-        # 文件夹：用 ws_meta.path 解析（互斥，无回退）
+        # 文件夹：用 ws_meta.path / workspace 解析（互斥，无回退到 project_root）
         if ws_path:
             target = Path(ws_path) / rel_path
             if target.is_dir():

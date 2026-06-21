@@ -364,6 +364,13 @@ class TaskEvaluateTool(BuiltinTool):
         self._append_eval_history(task, result)
         await self._save_task(task_service, task)
 
+        # 无评估结果（指标未找到或未加载）→ 返回明确错误，不误导 Agent 重试
+        if not result.results:
+            return create_failure_result(
+                error=f"指标 '{metric_id}' 未找到：该指标不存在于评估指标注册表中，请确认指标 ID 是否正确",
+                error_code="METRIC_NOT_FOUND",
+            )
+
         # 当前指标未通过 → 返回结果，Agent 继续改进
         if not result.overall_passed:
             return create_success_result(
@@ -571,6 +578,13 @@ class TaskEvaluateTool(BuiltinTool):
         self._append_eval_history(task, eval_result)
 
         await self._save_task(task_service, task)
+
+        # 无评估结果（所有指标 ID 均未在评估指标注册表中找到）→ 不误导完成
+        if not eval_result.results:
+            return create_failure_result(
+                error="未找到任何有效的评估指标，所有指定的指标 ID 均不存在于评估指标注册表中，请确认指标配置是否正确",
+                error_code="METRIC_NOT_FOUND",
+            )
 
         if not has_failure:
             return await self._complete_task(task_service, task, eval_result)
@@ -1154,6 +1168,7 @@ class TaskEvaluateTool(BuiltinTool):
                         val = val.replace("{{workspace}}", workspace_abs)  # noqa: PLW2901
                     val = val.replace("{{task_id}}", task.id)  # noqa: PLW2901
                     p[key] = val
+            params[metric_id] = p
 
         # Resolve {tool_id} template from workspace files
         _tool_id_val = self._resolve_tool_id_from_workspace(task, workspace_abs)
@@ -1164,7 +1179,6 @@ class TaskEvaluateTool(BuiltinTool):
                     if isinstance(val, str) and "{tool_id}" in val:
                         p[key] = val.replace("{tool_id}", _tool_id_val)
                 params[metric_id] = p
-            params[metric_id] = p
 
         return params
 

@@ -226,13 +226,31 @@ class TestPromptBuildLayerOrder:
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await plugin.execute(ctx)
-        content = result.state_updates["system_message"]["content"]
 
-        # 验证三层都存在且顺序正确：关键词 → L2 → L1
-        kw_pos = content.index("历史关键词索引")
-        l2_pos = content.index("三元组摘要")
-        l1_pos = content.index("八段摘要")
-        assert kw_pos < l2_pos < l1_pos
+        # 压缩层作为独立消息输出在 compression_messages（而非 system_message.content）
+        compression_msgs = result.state_updates.get("compression_messages", [])
+        assert compression_msgs, "compression_messages 不应为空"
+
+        # 验证存在的层级按正确顺序排列：keywords → L2 → L1
+        # 预算充足时某些层级可能不出现，只验证存在的层级顺序
+        def _find_level(msgs: list, marker: str) -> int:
+            """查找包含 marker 的消息索引，不存在返回 -1。"""
+            for i, m in enumerate(msgs):
+                if marker in m.get("content", ""):
+                    return i
+            return -1
+
+        kw_pos = _find_level(compression_msgs, 'level="KEYWORDS"')
+        l2_pos = _find_level(compression_msgs, 'level="L2"')
+        l1_pos = _find_level(compression_msgs, 'level="L1"')
+        assert l1_pos >= 0, "至少应有 L1 压缩块"
+
+        if kw_pos >= 0 and l2_pos >= 0:
+            assert kw_pos < l2_pos, "keywords 应在 L2 之前"
+        if l2_pos >= 0 and l1_pos >= 0:
+            assert l2_pos < l1_pos, "L2 应在 L1 之前"
+        if kw_pos >= 0 and l1_pos >= 0:
+            assert kw_pos < l1_pos, "keywords 应在 L1 之前"
 
 
 # ══════════════════════════════════════════════════
@@ -355,11 +373,8 @@ class TestPromptBuildFolderInjection:
         assert "不应出现" not in content
 
     @pytest.mark.asyncio
-    async def test_folder_relative_path_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """相对路径与 state["ws_meta"]["path"] 拼接，读取目录下文件。
-
-        模拟实际 worktree 场景：state["workspace"] 是 ``.``，真实路径在 ws_meta.path。
-        """
+    async def test_folder_relative_path_joined_with_workspace(self, tmp_path) -> None:
+        """文件夹相对路径与 state["workspace"] 拼接，读取目录下文件。"""
         docs = tmp_path / "docs"
         docs.mkdir()
         (docs / "a.md").write_text("文档A", encoding="utf-8")
@@ -367,14 +382,7 @@ class TestPromptBuildFolderInjection:
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {
-            "path": str(tmp_path),
-            "mode": "worktree",
-            "branch": "task/2eee5194e20f",
-            "project_root": str(tmp_path.parent),
-        }
-        # 故意把 workspace 设为相对值, 验证实现会忽略它、直接用 ws_meta.path
-        state["workspace"] = "."
+        state["workspace"] = str(tmp_path)  # engine.run(workspace=ws_meta.path) 注入
         state["context.static_vars"] = [
             {"type": "path", "name": "项目文档", "path": "docs"}
         ]
@@ -391,26 +399,49 @@ class TestPromptBuildFolderInjection:
         assert "--- b.md ---" in content
 
     @pytest.mark.asyncio
-    async def test_folder_no_ws_meta_returns_empty(self, tmp_path) -> None:
-        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
-        # 在 workspace 与 CWD 下都放同名目录, 验证两个都不会被注入
+    async def test_folder_no_ws_meta_and_no_workspace_returns_empty(self, tmp_path) -> None:
+        """无 ws_meta.path 且无 workspace 时返回空（不读 CWD）。"""
+        # 在 CWD 下放同名目录, 验证不会去 CWD 找
         (tmp_path / "docs").mkdir()
         (tmp_path / "docs" / "a.md").write_text("不应出现", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
+        state.pop("workspace", None)
         state.pop("ws_meta", None)
         state["context.static_vars"] = [
-            {"type": "path", "name": "无ws_meta", "path": "docs"}
+            {"type": "path", "name": "无base", "path": "docs"}
         ]
         ctx = make_ctx(state)
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        assert "无ws_meta" not in content
+        assert "无base" not in content
         assert "不应出现" not in content
+
+    @pytest.mark.asyncio
+    async def test_folder_workspace_fallback(self, tmp_path) -> None:
+        """ws_meta.path 缺失时回退到 state["workspace"]（engine.run 传入）。"""
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "readme.md").write_text("workspace 回退成功", encoding="utf-8")
+
+        plugin = PromptBuildPlugin()
+        state = make_base_state()
+        # 无 ws_meta，但有 workspace
+        state.pop("ws_meta", None)
+        state["workspace"] = str(tmp_path)
+        state["context.static_vars"] = [
+            {"type": "path", "name": "回退测试", "path": "docs"}
+        ]
+        ctx = make_ctx(state)
+
+        result = await plugin.execute(ctx)
+        content = result.state_updates["system_message"]["content"]
+
+        assert "回退测试" in content
+        assert "workspace 回退成功" in content
 
     @pytest.mark.asyncio
     async def test_folder_absolute_path_used_as_is(self, tmp_path) -> None:
@@ -981,7 +1012,9 @@ class TestFullAssemblyPipeline:
         system_content = final_messages[0]["content"]
 
         assert "Agent OS" in system_content
-        assert "八段摘要" in system_content
+        # 压缩层作为独立消息在 final_messages 中（非 system_message）
+        all_content = "\n".join(m.get("content", "") for m in final_messages)
+        assert "过程摘要" in all_content
 
     @pytest.mark.asyncio
     async def test_full_pipeline_tools_in_function_calling_mode(self) -> None:
@@ -1059,7 +1092,7 @@ class TestFullAssemblyPipeline:
 
     @pytest.mark.asyncio
     async def test_layer_order_matches_old_code(self) -> None:
-        """验证 layer_order: 关键词 → L2 → L1 按预算溢出降级。"""
+        """验证 layer_order: system_message 层内顺序 + 压缩层独立消息追加。"""
         from datetime import datetime, UTC
 
         prompt_plugin = PromptBuildPlugin(config={
@@ -1067,6 +1100,7 @@ class TestFullAssemblyPipeline:
             "include_static_vars": True,
             "include_compressed_layers": True,
         })
+        llm_core = LLMCore(config={"provider": "openai", "model_name": "gpt-4"})
         state = make_base_state()
         state["pipeline_id"] = "test-pipeline-001"
         state["context_window"] = 500
@@ -1106,23 +1140,45 @@ class TestFullAssemblyPipeline:
         ctx = make_ctx(state, chunk_service=chunk_service)
 
         result = await prompt_plugin.execute(ctx)
-        content = result.state_updates["system_message"]["content"]
+        state.update(result.state_updates)
 
-        positions = {
-            "system_prompt": content.index("AI 助手"),
-            "tools": content.index("工具"),
-            "static_vars": content.index("静态变量"),
-            "knowledge": content.index("知识内容"),
-            "memory": content.index("记忆内容"),
-            "keywords": content.index("历史关键词索引"),
-            "l2": content.index("三元组摘要"),
-            "l1": content.index("八段摘要"),
+        # 1. system_message 内部顺序验证
+        system_content = state["system_message"]["content"]
+        sys_positions = {
+            "system_prompt": system_content.index("AI 助手"),
+            "tools": system_content.index("工具"),
+            "static_vars": system_content.index("静态变量"),
+            "knowledge": system_content.index("知识内容"),
+            "memory": system_content.index("记忆内容"),
         }
-
-        order = list(positions.values())
-        assert order == sorted(order), (
-            f"layer_order 不一致: {list(positions.keys())}"
+        sys_order = list(sys_positions.values())
+        assert sys_order == sorted(sys_order), (
+            f"system_message 层内顺序不一致: {list(sys_positions.keys())}"
         )
+
+        # 2. 压缩层独立消息顺序验证（keywords → L2 → L1）
+        compression_msgs = state.get("compression_messages", [])
+        assert compression_msgs, "compression_messages 不应为空"
+
+        def _find_level(msgs: list, marker: str) -> int:
+            for i, m in enumerate(msgs):
+                if marker in m.get("content", ""):
+                    return i
+            return -1
+
+        kw_pos = _find_level(compression_msgs, 'level="KEYWORDS"')
+        l2_pos = _find_level(compression_msgs, 'level="L2"')
+        l1_pos = _find_level(compression_msgs, 'level="L1"')
+        assert l1_pos >= 0, "至少应有 L1 压缩块"
+        if kw_pos >= 0 and l2_pos >= 0:
+            assert kw_pos < l2_pos, "keywords 应在 L2 之前"
+        if l2_pos >= 0 and l1_pos >= 0:
+            assert l2_pos < l1_pos, "L2 应在 L1 之前"
+
+        # 3. 最终消息列表顺序：system → compression → history
+        final_messages = llm_core._build_messages(state)
+        assert final_messages[0]["role"] == "system"
+        assert "过程摘要" in "\n".join(m.get("content", "") for m in final_messages)
 
 
 class TestRoutedVars:

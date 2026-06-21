@@ -484,6 +484,7 @@ class LLMCore(ICorePlugin):
                     break
 
         # 5. 动态变量（每轮变化的上下文：时间戳、session_id 等）
+        #    合并到 system_message 末尾，避免作为独立 user 消息污染对话历史
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):
@@ -491,11 +492,14 @@ class LLMCore(ICorePlugin):
             else:
                 content = str(dynamic_vars_msg)
             if content:
-                messages.append({
-                    "role": "user",
-                    "name": "dynamic_context",
-                    "content": content,
-                })
+                if messages and messages[0].get("role") == "system":
+                    messages[0]["content"] = messages[0]["content"] + "\n\n" + content
+                else:
+                    messages.append({
+                        "role": "system",
+                        "name": "dynamic_context",
+                        "content": content,
+                    })
 
         return messages
 
