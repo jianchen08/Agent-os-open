@@ -133,6 +133,8 @@ def _quiet_third_party(level: int) -> None:
         "aiohttp.access",
         "liteLLM",
         "litellm",
+        "watchfiles.main",
+        "python_multipart.multipart",
     ]
     for name in noisy_loggers:
         logging.getLogger(name).setLevel(level)

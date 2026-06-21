@@ -342,7 +342,13 @@ class WebSearchMCPTool(BuiltinTool):
             )
         except Exception as e2:
             logger.exception("bing-search 降级也失败")
-            return create_failure_result(error=f"[fallback] 搜索失败: {e2}", error_code="SEARCH_FAILED")
+            # 携带 error 类型名，便于区分 UnicodeDecodeError（编码）/ TimeoutError
+            # （超时）/ MCPConnectionError（子进程）等不同根因
+            err_type = type(e2).__name__
+            return create_failure_result(
+                error=f"[fallback] 搜索失败 ({err_type}): {e2}",
+                error_code="SEARCH_FAILED",
+            )
 
     # ── 精简版 webgate 结果解析（仅提取 sources + snippets → 统一 results 格式）──
 

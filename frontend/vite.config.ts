@@ -9,13 +9,13 @@ import { defineConfig, loadEnv } from 'vite'
  */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || 'http://localhost:8889'
+  const apiTarget = process.env.VITE_API_BASE_URL || env.VITE_API_BASE_URL || ''
 
   return {
     plugins: [react()],
     server: {
       host: '0.0.0.0',
-      port: 5189,
+      port: 5289,
       strictPort: false,
       proxy: {
         '/api': {
@@ -28,6 +28,10 @@ export default defineConfig(({ mode }) => {
           ws: true,
         },
         '/media': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+        '/uploads': {
           target: apiTarget,
           changeOrigin: true,
         },

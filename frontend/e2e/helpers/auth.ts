@@ -11,7 +11,7 @@
 import { expect, type Page } from '@playwright/test';
 
 /** 后端 API 基础地址 */
-export const API_BASE = 'http://localhost:8888';
+export const API_BASE = 'http://localhost:8988';
 /** 前端应用地址 */
 export const APP_URL = 'http://localhost:5188';
 

@@ -489,6 +489,12 @@ function HomePage(): ReactNode {
         status: 'completed',
         clientMessageId: userMessageId,
         parentId: null,
+        attachments: params.attachments?.map((att) => ({
+          id: att.id,
+          name: att.name,
+          type: att.type,
+          url: att.url,
+        })),
       }
 
       pipelineStore.addMessage(targetPipelineId, userMessage)
@@ -511,6 +517,14 @@ function HomePage(): ReactNode {
             enableThinking: params.enableThinking,
             pipelineId: targetPipelineId,
             clientMessageId: userMessage.id,
+            attachments: params.attachments?.map((att) => ({
+              file_id: att.id,
+              filename: att.name,
+              mime_type: att.type,
+              media_type: att.type?.startsWith('image/') ? 'image' : att.type?.startsWith('audio/') ? 'audio' : att.type?.startsWith('video/') ? 'video' : 'document',
+              size: att.size || 0,
+              url: att.url,
+            })),
           },
         )
       } catch {

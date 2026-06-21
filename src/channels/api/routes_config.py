@@ -346,7 +346,7 @@ def get_api_config() -> dict[str, Any]:
         return _read_yaml(_API_YAML)
     return {
         "endpoint": {
-            "base_url": "http://localhost:8888",
+            "base_url": "http://localhost:8988",
             "version": "v1",
             "timeout": 30,
         },

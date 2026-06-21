@@ -87,13 +87,13 @@ defaults:
   call_timeout: 300
   compression: minimax-m3
   tiers:
-    large: glm-5.2
-    medium: glm-5.2
+    large: minimax-m3
+    medium: minimax-m3
     small: minimax-m3
-  fallback_chain:
-    chat:
-    - minimax-m3
-    - minimax-m3
+    fallback_chain:
+      chat:
+      - minimax-m3
+      - minimax-m3
 providers:
   zhipu_coding:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/

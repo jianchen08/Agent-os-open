@@ -8,7 +8,7 @@ test.describe('简单工具卡片测试', () => {
   test('验证工具卡片渲染', async ({ page }) => {
     // 先通过 API 登录获取 token
     console.log('正在通过 API 登录...');
-    const loginResponse = await page.request.post('http://localhost:8888/api/v1/auth/login', {
+    const loginResponse = await page.request.post('http://localhost:8988/api/v1/auth/login', {
       data: {
         username: 'admin',
         password: 'admin123456'

@@ -90,12 +90,26 @@ echo [OK] Docker 就绪
 :: ===========================================================================
 :: 2. Docker 服务（Redis + Frontend）
 :: ===========================================================================
-:: 基础镜像（node/python）仅在重新构建前端时才需要。
-:: 一旦 agent-os-frontend:latest 已存在，compose up 不再需要它们，所以
+:: 基础镜像仅在重新构建前端时才需要。
+:: 一旦 agent-os-frontend:latest 已存在，compose up 不再需要它们。
 :: 这里跳过预热。docker compose up 若缺 redis 会通过 daemon.json 配置的
 :: 镜像加速源拉取，很快。
 echo [INFO] 启动 Docker 服务...
-docker compose up -d
+:: 检查容器是否已存在（包括停止的容器），存在则直接启动，避免冲突
+docker ps -a --format "{{.Names}}" | findstr "agent-os-redis-22404" >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] 复用已有容器 agent-os-redis-22404
+    docker start agent-os-redis-22404 >nul 2>&1
+) else (
+    docker compose up -d --no-recreate redis
+)
+docker ps -a --format "{{.Names}}" | findstr "agent-os-frontend-22404" >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] 复用已有容器 agent-os-frontend-22404
+    docker start agent-os-frontend-22404 >nul 2>&1
+) else (
+    docker compose up -d --no-recreate frontend
+)
 echo [OK] Docker 服务已启动
 
 :: 前端代码更新：镜像存在时检查 src 是否有更新，有则构建并注入运行中的容器
@@ -180,14 +194,14 @@ if not exist ".py_deps_installed" (
 :: 4. Agent（宿主机）
 :: ===========================================================================
 echo [INFO] 启动 Agent...
-start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6380/0&& "%PYEXE%" -m channels.websocket.app_factory"
+start "Agent OS Backend" /D "%cd%" cmd /c "set PYTHONPATH=src&& set REDIS_URL=redis://localhost:6480/0&& "%PYEXE%" -m channels.websocket.app_factory"
 
 echo.
 echo ========================================
 echo   启动完成
 echo ========================================
-echo   后端: http://localhost:8888
-echo   前端: http://localhost:5189
+echo   后端: http://localhost:8988
+echo   前端: http://localhost:5289
 echo   停止: 关闭 Agent 窗口 + docker compose down
 echo ========================================
 pause

@@ -72,7 +72,7 @@ async def run_iteration(
 
     # 2. 解析插件列表 + 执行 Input 链
     plugin_names = engine.input_route_table.resolve_plugins(state)
-    logger.info("Input route resolved plugins: %s", plugin_names)
+    logger.debug("Input route resolved plugins: %s", plugin_names)
     await execute_input_chain(engine, state, plugin_names)
 
     # Input 插件可能设 ENDED 提前终止
@@ -135,7 +135,7 @@ def _consume_notifications(
     if _pending_cmids:
         state["client_message_id"] = _pending_cmids
         engine._pending_client_message_id = ""
-    logger.info(
+    logger.debug(
         "[Engine] 迭代 %d 开始时消费 %d 条待处理通知，注入 state: %s",
         iteration, len(_iter_notifs),
         _combined[:80] if _combined else "(empty)",
@@ -262,7 +262,7 @@ async def _handle_target_wait(
         logger.info("Pipeline ended: suspend_and_wait returned False (no new content)")
         return IterationAction.BREAK
 
-    logger.info("Pipeline woken up, resuming loop iteration")
+    logger.debug("Pipeline woken up, resuming loop iteration")
     # 唤醒时若有待执行的工具调用，必须先执行完工具再处理注入的消息，
     # 否则通知会插入 assistant(tool_calls) 与 tool(result) 之间破坏配对。
     if state.get(StateKeys.RAW_TOOL_CALLS):

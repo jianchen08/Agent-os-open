@@ -10,12 +10,16 @@ State 命名空间：
 
 from __future__ import annotations
 
+import base64
+import logging
 import os
 import re
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import ErrorPolicy
+
+logger = logging.getLogger(__name__)
 
 # 图片URL正则：匹配 http(s)://...jpg/png/gif/webp/svg
 _IMAGE_URL_PATTERN = re.compile(
@@ -81,7 +85,7 @@ class MultimodalPreprocessor(IInputPlugin):
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """执行多模态预处理。
 
-        从管道状态中获取用户输入，检测多模态内容并转换为
+        从管道状态中获取用户输入和附件，检测多模态内容并转换为
         OpenAI vision 格式的 content blocks。
 
         Args:
@@ -92,18 +96,90 @@ class MultimodalPreprocessor(IInputPlugin):
         """
         state = ctx.state
         user_input = state.get("user_input", "")
+        attachments = state.get("attachments", [])
 
-        if not user_input:
-            return PluginResult()
+        # 处理 state 中的附件
+        attachment_blocks = self._process_attachments(attachments)
 
-        multimodal_content = self._detect_multimodal(user_input)
-        if not multimodal_content:
+        # 检测文本中的多模态内容
+        text_multimodal = self._detect_multimodal(user_input) if user_input else []
+
+        # 合并附件和文本中的多模态内容
+        all_blocks = attachment_blocks + text_multimodal
+
+        if not all_blocks:
             return PluginResult()
 
         return PluginResult(state_updates={
-            "multimodal_content": multimodal_content,
+            "multimodal_content": all_blocks,
             "has_multimodal": True,
         })
+
+    def _process_attachments(self, attachments: list[dict]) -> list[dict]:
+        """处理 state 中的附件列表。
+
+        将附件转换为 OpenAI vision 格式的 content blocks。
+        对于相对路径（如 /uploads/xxx），读取本地文件并转为 base64 data URL。
+
+        Args:
+            attachments: 附件列表，每个附件包含 url、type 等字段
+
+        Returns:
+            多模态内容块列表
+        """
+        content_blocks: list[dict] = []
+
+        for attachment in attachments:
+            url = attachment.get("url")
+            mime_type = attachment.get("mime_type") or attachment.get("type", "")
+
+            if not url:
+                continue
+
+            # 处理图片类型
+            if mime_type.startswith("image/"):
+                # 如果是相对路径，转为 base64 data URL
+                if url.startswith("/"):
+                    image_url = self._local_file_to_data_url(url, mime_type)
+                else:
+                    image_url = url
+
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                })
+
+        return content_blocks
+
+    def _local_file_to_data_url(self, file_path: str, mime_type: str) -> str:
+        """将本地文件转为 base64 data URL。
+
+        Args:
+            file_path: 文件路径（如 /uploads/xxx.jpg）
+            mime_type: MIME 类型
+
+        Returns:
+            base64 data URL 字符串
+        """
+        try:
+            # 从环境变量获取上传目录
+            uploads_dir = os.environ.get("UPLOADS_DIR", "./data/uploads")
+            # 构建完整路径
+            filename = os.path.basename(file_path)
+            full_path = os.path.join(uploads_dir, filename)
+
+            if not os.path.isfile(full_path):
+                logger.warning("文件不存在: %s", full_path)
+                return ""
+
+            with open(full_path, "rb") as f:
+                file_data = f.read()
+
+            b64_data = base64.b64encode(file_data).decode("utf-8")
+            return f"data:{mime_type};base64,{b64_data}"
+        except Exception as e:
+            logger.error("读取文件失败: %s, error=%s", file_path, e)
+            return ""
 
     def _detect_multimodal(self, text: str) -> list[dict]:
         """检测文本中的多模态内容。

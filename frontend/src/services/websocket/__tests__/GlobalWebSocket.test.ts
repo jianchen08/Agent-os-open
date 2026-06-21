@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 // Mock buildGlobalWebSocketUrl
 vi.mock('@/constants/websocket', () => ({
   buildGlobalWebSocketUrl: (token: string) =>
-    `ws://localhost:8888/ws/chat?token=${token}&version=3.0.0`,
+    `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
 }))
 
 // Mock useLayoutModeStore
@@ -113,7 +113,7 @@ async function createService(): Promise<{
   vi.stubGlobal('WebSocket', MockWebSocket)
   vi.doMock('@/constants/websocket', () => ({
     buildGlobalWebSocketUrl: (token: string) =>
-      `ws://localhost:8888/ws/chat?token=${token}&version=3.0.0`,
+      `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
   }))
   vi.doMock('@/stores/layoutModeStore', () => ({
     useLayoutModeStore: {

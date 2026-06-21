@@ -233,7 +233,7 @@ fi
 # ========== 分配端口 ==========
 echo "[INFO] 正在查找可用端口..."
 
-BACKEND_PORT=$(find_available_port 8888) || {
+BACKEND_PORT=$(find_available_port 8988) || {
     echo "[ERROR] 无法找到可用的后端端口"
     exit 1
 }

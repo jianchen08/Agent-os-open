@@ -288,7 +288,7 @@ async def execute_output_chain(
     signal_summary = ", ".join(
         f"{s.route_type}({s.reason[:60]})" for s in route_signals
     ) if route_signals else "none"
-    logger.info(
+    logger.debug(
         "Output chain: %d plugins, %d signals [%s], ended=%s",
         len(output_results), len(route_signals), signal_summary,
         state.get(StateKeys.ENDED, False),

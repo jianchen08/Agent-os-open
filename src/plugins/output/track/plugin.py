@@ -354,7 +354,7 @@ class TrackPlugin(IOutputPlugin):
                     entry = get_engine_registry().get(pipeline_run_id)
                     if entry is not None:
                         entry.init_sequence(max_seq)
-                        logger.info(
+                        logger.debug(
                             "TrackPlugin: resumed shared sequence to %d for pipeline %s",
                             max_seq, pipeline_run_id,
                         )
@@ -370,6 +370,15 @@ class TrackPlugin(IOutputPlugin):
         if user_input and user_input != self._last_saved_user_input:
             if iteration == 1:
                 self._last_saved_user_input = user_input
+                # 序列化附件信息
+                attachments_json = None
+                attachments = ctx.state.get(StateKeys.ATTACHMENTS)
+                if attachments and isinstance(attachments, list):
+                    try:
+                        attachments_json = json.dumps(attachments, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        logger.warning("附件序列化失败", exc_info=True)
+                
                 user_record = ExecutionRecordData(
                     pipeline_run_id=pipeline_run_id,
                     type="user",
@@ -379,6 +388,7 @@ class TrackPlugin(IOutputPlugin):
                     content=str(user_input),
                     container_task_id=container_task_id or None,
                     client_message_id=ctx.state.get("client_message_id") or None,
+                    attachments_json=attachments_json,
                 )
                 try:
                     storage.save(user_record)
@@ -401,7 +411,7 @@ class TrackPlugin(IOutputPlugin):
                     )
                     try:
                         storage.save(notification_record)
-                        logger.info(
+                        logger.debug(
                             "Injected content saved at iteration %d (%d chars)",
                             iteration, len(new_content),
                         )
@@ -611,7 +621,7 @@ class TrackPlugin(IOutputPlugin):
         if _last_user_content:
             self._last_saved_user_input = _last_user_content
 
-        logger.info(
+        logger.debug(
             "TrackPlugin: 继承历史落盘完成 | pipeline=%s | saved=%d | total_msgs=%d",
             pipeline_run_id[:12], saved_count, len(messages),
         )

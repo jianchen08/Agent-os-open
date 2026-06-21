@@ -1360,6 +1360,22 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
 
 
 
+    # 恢复附件信息
+
+    attachments: list[dict[str, Any]] | None = None
+
+    if getattr(record, "attachments_json", None):
+
+        try:
+
+            attachments = _json.loads(record.attachments_json)
+
+        except (_json.JSONDecodeError, TypeError):
+
+            pass
+
+
+
     return MessageResponse(
 
         id=record.record_id,
@@ -1397,6 +1413,8 @@ def _record_to_message_response(  # noqa: PLR0912,PLR0915
         agentName=agent_name,
 
         durationMs=None,
+
+        attachments=attachments,
 
     )
 

@@ -94,6 +94,14 @@ interface BackendMessageResponse {
   toolResult?: unknown
   toolError?: string
   durationMs?: number
+  attachments?: Array<{
+    id?: string
+    name: string
+    type?: string
+    mime_type?: string
+    url: string
+    size?: number
+  }>
 }
 
 /**
@@ -259,6 +267,7 @@ function mapBackendMessageToMessage(
       ...(backendMessage.agentName ? { agentName: backendMessage.agentName } : {}),
     },
     clientMessageId: (backendMessage.metadata?.client_message_id as string | undefined) ?? undefined,
+    attachments: backendMessage.attachments,
     thinking,
     parts: parts.length > 0 ? parts : undefined,
   }

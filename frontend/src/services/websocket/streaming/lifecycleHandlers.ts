@@ -63,8 +63,26 @@ export function handleReconnected(): void {
   const streamingPipelineIds = Object.keys(streamingState).filter(
     (pipelineId) => streamingState[pipelineId]?.isStreaming,
   )
+  // BUG-FIX-fix_20260621_streaming_state_leak:
+  // 问题根因: 原代码仅跳过补漏 fetch，未调用 terminatePipeline 清理 streamingState，
+  //   导致旧 isStreaming=true 残留。用户发新消息时 stream_start 到达，
+  //   streamingState 中已有旧记录，占位创建/更新失败，AI 回复无法显示。
+  // 修复方案: 对每个 streaming 管道调用 terminatePipeline 清理 streamingState，
+  //   同时将残留的 streaming 占位消息标记为 completed（避免 UI 永久转圈）。
+  // 影响范围: WS 重连后发送消息无 AI 回复的偶发 Bug
+  // 修复日期: 2026-06-21
   for (const pipelineId of streamingPipelineIds) {
-    logger.info('[streaming] 跳过流式管道 %s 的补漏 fetch（避免竞态）', pipelineId.slice(0, 12))
+    // 将残留的 streaming 占位消息标记为 completed，避免 UI 永久转圈
+    const messages = pipelineStore.messagesByPipeline[pipelineId] || []
+    for (const msg of messages as any[]) {
+      if (msg.role === 'assistant' && msg.status === 'streaming') {
+        pipelineStore.updateMessage(pipelineId, msg.id, { status: 'completed' } as any)
+      }
+    }
+    // 清理 streamingState（同时处理 threadId）
+    const threadId = pipelineStore.pipelineSessionMap[pipelineId]
+    terminatePipeline(pipelineId, threadId !== pipelineId ? threadId : undefined)
+    logger.info('[streaming] 终止残留流式管道 %s，清理 streamingState', pipelineId.slice(0, 12))
   }
 
   // BUG-FIX-fix_20260617_streaming_gap_no_notify:

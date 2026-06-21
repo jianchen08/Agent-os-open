@@ -27,6 +27,7 @@ def build_initial_state(
     pipeline_id: str,
     services: dict[str, Any],
     extra_state: dict[str, Any],
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """构建管道初始状态字典。
 
@@ -39,6 +40,7 @@ def build_initial_state(
         pipeline_id: 管道唯一标识，用于恢复历史记录
         services: 服务字典（包含 execution_record_storage 等）
         extra_state: 额外状态键值对
+        attachments: 附件列表（图片/文件等）
 
     Returns:
         管道初始状态字典
@@ -53,6 +55,7 @@ def build_initial_state(
         StateKeys.ENDED: False,
         "user_input": user_input,
         "messages": resolved_history,
+        StateKeys.ATTACHMENTS: attachments or [],
     }
 
     # 标记本次管道是否携带继承来的历史对话（pipe 继承）。
@@ -66,9 +69,9 @@ def build_initial_state(
         _last = resolved_history[-1] if resolved_history else {}
         if not (_last.get("role") == "user" and _last.get("content") == user_input):
             state["messages"].append({"role": "user", "content": user_input})
-            logger.info("[StateBuilder] appended user_input to messages (dedup skipped)")
+            logger.debug("[StateBuilder] appended user_input to messages (dedup skipped)")
         else:
-            logger.info("[StateBuilder] dedup: skipped appending user_input (last msg is same)")
+            logger.debug("[StateBuilder] dedup: skipped appending user_input (last msg is same)")
 
     if agent_config and hasattr(agent_config, "to_state"):
         agent_state = agent_config.to_state()

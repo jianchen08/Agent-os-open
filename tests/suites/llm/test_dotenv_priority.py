@@ -1,11 +1,8 @@
-"""验证 .env 加载优先级：系统环境变量优先，.env 不覆盖已有值。
+"""验证 .env 加载优先级：.env 文件强制覆盖系统环境变量。
 
-遵循 python-dotenv 与主流开源项目标准约定：
-- 系统环境变量是权威来源（适用于生产部署时由 Docker/K8s/CI 注入密钥）
-- .env 仅作本地开发兜底，不覆盖已存在的系统环境变量
-
-这保证开源用户可以通过环境变量注入密钥，而不被代码仓库里的 .env（不提交）
-或默认值干扰。用户配置密钥的参考模板见仓库根目录的 .env.example。
+本项目以 .env 作为本地环境配置的唯一真相源。即便系统环境变量已存在
+同名变量（如容器宿主／IDE 启动配置注入），.env 中的值也会将其覆盖，
+确保用户通过编辑 .env 文件配置的密钥和选项能够生效。
 """
 from __future__ import annotations
 
@@ -19,11 +16,7 @@ from config import models as models_module
 
 @pytest.fixture
 def isolated_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """用临时 .env 文件 + 重置加载标记，隔离测试。
-
-    - 指向 tmp_path/.env，不碰真实 .env
-    - 重置 _dotenv_loaded，让每次测试都重新加载
-    """
+    """用临时 .env 文件 + 重置加载标记，隔离测试。"""
     env_file = tmp_path / ".env"
     monkeypatch.setattr(models_module, "_ENV_FILE_PATH", env_file)
     monkeypatch.setattr(models_module, "_dotenv_loaded", False)
@@ -35,24 +28,24 @@ def _write_env(env_file: Path, lines: list[str]) -> None:
     env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-class TestSystemVarPriority:
-    """系统环境变量必须优先于 .env 文件（核心安全语义）。"""
+class TestEnvOverridesSystemVar:
+    """.env 文件值必须强制覆盖已存在的系统环境变量。"""
 
-    def test_existing_system_var_not_overwritten(
+    def test_env_overrides_preexisting_system_var(
         self, isolated_dotenv: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """已存在的系统环境变量不被 .env 覆盖（核心规则）。"""
+        """已存在的系统环境变量必须被 .env 覆盖（核心规则）。"""
         monkeypatch.setenv("DOTENV_TEST_KEY", "system_value")
         _write_env(isolated_dotenv, ["DOTENV_TEST_KEY=env_value"])
 
         models_module._load_dotenv_once()
 
-        assert os.environ["DOTENV_TEST_KEY"] == "system_value"
+        assert os.environ["DOTENV_TEST_KEY"] == "env_value"
 
     def test_env_sets_var_when_system_absent(
         self, isolated_dotenv: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """系统未设置时，.env 正常注入（基础功能）。"""
+        """系统未设置时，.env 正常注入。"""
         monkeypatch.delenv("DOTENV_NEW_KEY", raising=False)
         _write_env(isolated_dotenv, ["DOTENV_NEW_KEY=from_env"])
 
@@ -62,7 +55,7 @@ class TestSystemVarPriority:
 
 
 class TestEnvFileParsing:
-    """.env 文件解析健壮性（注释/空行）。"""
+    """.env 文件解析健壮性。"""
 
     def test_skips_comments_and_blank_lines(
         self, isolated_dotenv: Path, monkeypatch: pytest.MonkeyPatch

@@ -77,17 +77,27 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     # 生成控制台摘要
     console_summary = generator.to_console()
-    print(console_summary)
+    try:
+        print(console_summary)
+    except UnicodeEncodeError:
+        # Windows GBK 编码不支持 emoji，回退到纯 ASCII
+        print(console_summary.encode('ascii', 'replace').decode('ascii'))
 
     # 生成 JSON 报告
     json_path = os.path.join(REPORT_DIR, "test_report.json")
     generator.to_json(json_path)
-    print(f"\n📄 JSON 报告已生成: {json_path}")
+    try:
+        print(f"\n[JSON] 报告已生成: {json_path}")
+    except UnicodeEncodeError:
+        print(f"\n[JSON] Report generated: {json_path}")
 
     # 生成 HTML 报告
     html_path = os.path.join(REPORT_DIR, "test_report.html")
     generator.to_html(html_path)
-    print(f"📄 HTML 报告已生成: {html_path}")
+    try:
+        print(f"[HTML] 报告已生成: {html_path}")
+    except UnicodeEncodeError:
+        print(f"[HTML] Report generated: {html_path}")
 
 
 # ── pytest hook: 每个测试用例执行 ──────────────────────────
@@ -146,7 +156,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
         from tests.test_utils.bug_locator import locate_bug
 
         bug_result = locate_bug(call.excinfo._excinfo)
-        print(bug_result.summary())
+        try:
+            print(bug_result.summary())
+        except UnicodeEncodeError:
+            # Windows GBK 编码不支持 emoji，回退到纯 ASCII
+            print(bug_result.summary().encode('ascii', 'replace').decode('ascii'))
 
 
 # ── fixture: 日志收集器 ────────────────────────────────────

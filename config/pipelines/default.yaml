@@ -42,6 +42,7 @@ input_routes:
     condition: "core_type == 'llm_call'"
     target: core
     plugins:
+      - multimodal_preprocessor
       - context_window_guard
       - tool_schema
       - param_inject
@@ -94,6 +95,10 @@ output_routes:
 # Agent 可通过 plugins.disabled / plugins.enabled 覆盖
 plugins:
   # ── Input 插件链（按 priority 排序）──
+  - name: multimodal_preprocessor
+    config:
+      priority: 35
+      max_file_size: 20971520  # 20MB
   - name: context_window_guard
     config:
       enabled: true

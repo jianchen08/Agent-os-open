@@ -26,14 +26,12 @@ export interface FileUploadResponse {
   filename: string
   /** MIME类型 */
   mime_type: string
+  /** 媒体类型（image/document/audio/video） */
+  media_type: string
   /** 文件大小（字节） */
   size: number
-  /** 文件类型（image/document） */
-  file_type: 'image' | 'document'
-  /** Base64编码的文件内容 */
-  base64_data: string
-  /** 上传时间 */
-  uploaded_at: string
+  /** 文件访问 URL */
+  url: string
 }
 
 /**
@@ -101,7 +99,8 @@ export async function uploadFile(file: File, modelName?: string): Promise<FileUp
     formData.append('model_name', modelName)
   }
 
-  const response = await apiClient.post<FileUploadResponse>('/api/v1/files/upload', formData, {
+  // 后端实际端点是 /api/v1/artifacts/upload
+  const response = await apiClient.post<FileUploadResponse>('/api/v1/artifacts/upload', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },

@@ -214,6 +214,39 @@ async def proxy_media(request: Request, path: str):
 
 
 # ---------------------------------------------------------------------------
+# 上传文件反向代理 → 后端容器（图片/文件等多模态附件）
+# ---------------------------------------------------------------------------
+@app.api_route("/uploads/{path:path}", methods=["GET"])
+async def proxy_uploads(request: Request, path: str):
+    """将 /uploads/* 请求代理到后端（用户上传的图片/文件）"""
+    url = f"{BACKEND_URL}/uploads/{path}"
+
+    resp: httpx.Response | None = None
+    try:
+        resp = await _request_with_connect_retry(
+            method="GET",
+            url=url,
+            follow_redirects=True,
+        )
+
+        resp_headers = {}
+        for k, v in resp.headers.items():
+            if k.lower() not in ("content-encoding", "transfer-encoding", "content-length"):
+                resp_headers[k] = v
+
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=resp_headers,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return JSONResponse({"detail": "后端服务不可达"}, status_code=502)
+    finally:
+        if resp is not None:
+            await resp.aclose()
+
+
+# ---------------------------------------------------------------------------
 # SPA 路由回退（必须放在最后！）
 # ---------------------------------------------------------------------------
 @app.get("/{path:path}")

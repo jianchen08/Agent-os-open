@@ -116,6 +116,7 @@ class MessageResponse(BaseModel):
     agentId: str | None = None  # noqa: N815
     agentName: str | None = None  # noqa: N815
     durationMs: int | None = None  # noqa: N815
+    attachments: list[dict[str, Any]] | None = None
 
 
 # ============================================================

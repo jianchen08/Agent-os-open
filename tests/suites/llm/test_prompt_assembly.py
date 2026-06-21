@@ -343,7 +343,7 @@ class TestPromptBuildFolderInjection:
         state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree", "branch": "task/test"}
         state["workspace"] = "."  # 模拟实际场景：workspace 是相对值, 真实路径在 ws_meta
         state["context.static_vars"] = [
-            {"type": "folder", "name": "空路径目录", "path": ""}
+            {"type": "path", "name": "空路径目录", "path": ""}
         ]
         ctx = make_ctx(state)
 
@@ -376,7 +376,7 @@ class TestPromptBuildFolderInjection:
         # 故意把 workspace 设为相对值, 验证实现会忽略它、直接用 ws_meta.path
         state["workspace"] = "."
         state["context.static_vars"] = [
-            {"type": "folder", "name": "项目文档", "path": "docs"}
+            {"type": "path", "name": "项目文档", "path": "docs"}
         ]
         ctx = make_ctx(state)
 
@@ -402,7 +402,7 @@ class TestPromptBuildFolderInjection:
         state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
         state.pop("ws_meta", None)
         state["context.static_vars"] = [
-            {"type": "folder", "name": "无ws_meta", "path": "docs"}
+            {"type": "path", "name": "无ws_meta", "path": "docs"}
         ]
         ctx = make_ctx(state)
 
@@ -426,7 +426,7 @@ class TestPromptBuildFolderInjection:
         (tmp_path / "unrelated").mkdir()
         state["workspace"] = str(tmp_path / "unrelated")
         state["context.static_vars"] = [
-            {"type": "folder", "name": "外部文档", "path": str(docs)}
+            {"type": "path", "name": "外部文档", "path": str(docs)}
         ]
         ctx = make_ctx(state)
 
@@ -451,7 +451,7 @@ class TestPromptBuildFolderInjection:
         state["workspace"] = "."
         state["context.static_vars"] = [
             {
-                "type": "folder",
+                "type": "path",
                 "name": "仅Markdown",
                 "path": "docs",
                 "extensions": [".md"],
@@ -482,7 +482,7 @@ class TestPromptBuildFolderInjection:
         state.pop("workspace", None)
         state.pop("ws_meta", None)
         state["context.static_vars"] = [
-            {"type": "folder", "name": "无base", "path": "cwd_fake"}
+            {"type": "path", "name": "无base", "path": "cwd_fake"}
         ]
         ctx = make_ctx(state)
 
@@ -502,7 +502,7 @@ class TestPromptBuildFolderInjection:
         state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
         state["workspace"] = "."
         state["context.static_vars"] = [
-            {"type": "folder", "name": "不存在的目录", "path": "missing"}
+            {"type": "path", "name": "不存在的目录", "path": "missing"}
         ]
         ctx = make_ctx(state)
 

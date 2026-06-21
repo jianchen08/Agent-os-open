@@ -208,10 +208,12 @@ export interface Message {
   metadata?: Record<string, unknown>
   /** 附件列表（用户消息可选） */
   attachments?: Array<{
-    id: string
+    id?: string
     name: string
-    type: string
+    type?: string
+    mime_type?: string
     url: string
+    size?: number
   }>
   /** 思考内容（AI 消息可选） */
   thinking?: ThinkingContent

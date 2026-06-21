@@ -117,12 +117,12 @@ class PluginChain:
             插件执行结果
         """
         start = time.monotonic()
-        logger.info("[%s] started", plugin.name)
+        logger.debug("[%s] started", plugin.name)
 
         try:
             raw_result = await plugin.execute(ctx)
             elapsed = time.monotonic() - start
-            logger.info("[%s] success (%.3fs)", plugin.name, elapsed)
+            logger.debug("[%s] success (%.3fs)", plugin.name, elapsed)
 
             # ICorePlugin 返回 dict，需要包装为 PluginResult
             if isinstance(raw_result, dict):

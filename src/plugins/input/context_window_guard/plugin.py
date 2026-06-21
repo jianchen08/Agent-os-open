@@ -187,7 +187,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             track_usage = ctx.state.get("track.llm_usage", {})
             prev_input = track_usage.get("input_tokens", 0)
             if prev_input > 0:
-                logger.info(
+                logger.debug(
                     "[%s] 估算: llm_usage 为空，从 track 回退: prev_input=%d",
                     self.name, prev_input,
                 )
@@ -200,7 +200,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
 
             if current_non_sys <= tracked:
-                logger.info(
+                logger.debug(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
                     self.name, prev_input, prev_input, tracked, current_non_sys,
                 )
@@ -211,7 +211,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
 
             effective = prev_input + delta_tokens
-            logger.info(
+            logger.debug(
                 "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
                 self.name, effective, prev_input, delta_tokens, tracked, current_non_sys, len(delta_msgs),
             )
@@ -220,7 +220,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 策略 2：压缩块拼接估算
         assembled = await self._estimate_assembled_tokens(ctx, messages)
         if assembled >= 0:
-            logger.info(
+            logger.debug(
                 "[%s] 估算(压缩块拼接): %d tokens, msg_count=%d",
                 self.name, assembled, len(messages),
             )
@@ -228,7 +228,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
-        logger.info(
+        logger.debug(
             "[%s] 估算(全量字符): %d tokens, msg_count=%d",
             self.name, estimated, len(messages),
         )
@@ -347,7 +347,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 阈值检查
         estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
         trigger_tokens = int(context_window * self._trigger_ratio)
-        logger.info(
+        logger.debug(
             "[%s] 阈值检查: estimated=%d, trigger=%d, context_window=%d, "
             "ratio=%.2f, msg_count=%d, service=%s",
             self.name, estimated_tokens, trigger_tokens, context_window,

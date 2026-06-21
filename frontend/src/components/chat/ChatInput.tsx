@@ -426,7 +426,7 @@ export const ChatInput = ({
           name: pf.uploadResult!.filename,
           type: pf.uploadResult!.mime_type,
           size: pf.file.size,
-          url: pf.uploadResult!.file_id,
+          url: pf.uploadResult!.url,
           status: 'completed',
         })
       })

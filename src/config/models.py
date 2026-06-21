@@ -51,13 +51,13 @@ _dotenv_loaded = False
 def _load_dotenv_once() -> None:
     """加载项目根目录的 .env 文件到 os.environ（仅执行一次）。
 
-    优先级：系统环境变量 > .env 文件（不覆盖已有值）。
+    优先级：.env 文件 > 系统环境变量（强制覆盖已有值）。
 
-    这是 python-dotenv 与主流开源项目的标准约定：系统环境变量是权威来源
-    （适用于生产部署时由 Docker/K8s/CI 注入密钥），.env 仅作本地开发兜底。
-    用户配置密钥的推荐方式见仓库根目录的 ``.env.example``。
+    本项目以 .env 作为本地环境配置的唯一真相源。即便系统环境变量已存在
+    同名变量（如容器宿主／IDE 启动配置注入），.env 中的值也会将其覆盖，
+    确保用户通过编辑 .env 文件配置的密钥和选项能够生效。
     """
-    global _dotenv_loaded  # noqa: PLW0603
+    global _dotenv_loaded
     if _dotenv_loaded:
         return
     _dotenv_loaded = True
@@ -68,7 +68,7 @@ def _load_dotenv_once() -> None:
     try:
         with open(_ENV_FILE_PATH, encoding="utf-8") as f:
             for line in f:
-                line = line.strip()  # noqa: PLW2901
+                line = line.strip()
                 if not line or line.startswith("#"):
                     continue
                 if "=" not in line:
@@ -76,10 +76,10 @@ def _load_dotenv_once() -> None:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                # 系统环境变量优先，不覆盖已有值（见 docstring）
-                if key and key not in os.environ:
+                # .env 强制覆盖系统环境变量（见 docstring 设计说明）
+                if key:
                     os.environ[key] = value
-        logger.debug("已加载 .env 文件: %s", _ENV_FILE_PATH)
+        logger.debug("已加载 .env 文件（强制覆盖）: %s", _ENV_FILE_PATH)
     except Exception as exc:
         logger.warning("加载 .env 文件失败: %s", exc)
 
@@ -398,22 +398,22 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     invalidate_model_config_cache(config_dir)
 
     # 2. 清除 LLMConfigManager 单例（延迟导入避免循环依赖）
-    from config.llm_config import reset_llm_config  # noqa: PLC0415
+    from config.llm_config import reset_llm_config
     reset_llm_config()
 
     # 3. 清除 Router 和 Adapter 单例（延迟导入）
-    from llm.router_factory import reset_router  # noqa: PLC0415
+    from llm.router_factory import reset_router
     reset_router()
 
     # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
-    import llm.factory as factory_mod  # noqa: PLC0415
+    import llm.factory as factory_mod
     if factory_mod._llm_factory_instance is not None:
         factory_mod._llm_factory_instance.clear_cache()
         factory_mod._llm_factory_instance = None
 
     # 清除 tier 缓存，使配置变更实时生效
     try:
-        import pipeline.plugin_resolver as pr_mod  # noqa: PLC0415
+        import pipeline.plugin_resolver as pr_mod
         pr_mod._tier_cache.clear()
     except Exception:
         pass

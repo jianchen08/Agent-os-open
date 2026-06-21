@@ -40,7 +40,7 @@ export function ApiSettingsPage() {
       })
       .catch(() => {
         // BUG-FIX-fix_20260617_hardcoded_fallback:
-        // 问题根因: 原代码失败时预填硬编码 base_url: 'http://localhost:8888'，
+        // 问题根因: 原代码失败时预填硬编码 base_url: 'http://localhost:8988'，
         //          用户可能误以为这是真实配置并保存，导致错误配置写入后端。
         // 修复方案: 失败时不预填任何默认值，保持 config 为 null，
         //          由下方 if (!config) 分支显示"无法加载配置"，阻止用户编辑和保存。

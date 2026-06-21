@@ -239,19 +239,13 @@ class PipelineEngine:
 
 
     async def run(
-
         self,
-
         user_input: str | None = None,
-
         agent_config: Any | None = None,
-
         conversation_history: list[dict[str, Any]] | None = None,
-
         initial_state: dict[str, Any] | None = None,
-
+        attachments: list[dict[str, Any]] | None = None,
         **extra_state: Any,
-
     ) -> dict[str, Any]:
 
         """执行管道。
@@ -401,19 +395,13 @@ class PipelineEngine:
         from pipeline.state_builder import build_initial_state  # noqa: PLC0415
 
         state = build_initial_state(
-
             user_input=user_input or "",
-
             agent_config=agent_config,
-
             conversation_history=conversation_history,
-
             pipeline_id=self._pipeline_id,
-
             services=self._services,
-
             extra_state=extra_state,
-
+            attachments=attachments,
         )
 
 

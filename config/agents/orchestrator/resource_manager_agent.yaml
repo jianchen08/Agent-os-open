@@ -18,8 +18,8 @@ system_prompt: "{{path:config/rules/information_integrity_rules.md}}\n{{path:con
   - 不涉及代码逻辑修改\n\n轻量修改的典型场景：\n| 操作 | 示例 |\n|------|------|\n| 增删 tool_ids | 给 agent 加一个工具 |\n| 修改描述/参数 | 改 description、display_name |\n| 增删上下文 | 加 static_vars / dynamic_vars 项 |\n| 调整约束 | 加 hard_constraints\
   \ / soft_constraints 条目 |\n| 修改标签 | 加 tags |\n\n**完整流程**（任一条件满足）：\n- 需要创建新资源\n- 大改 system_prompt（超过 5 行变更）\n- 涉及多文件联动修改\n- 需要编写或修改 Python 代码\n- 涉及团队套件或团队变更\n\n## 执行流程\n\n### 轻量模式（快速路径）\n\n当任务分析判定为轻量修改时，直接执行以下步骤，**不走\
   \ Phase 1-3**：\n\n**轻量→完整升级条件**（满足任一则升级为完整模式转给 agent_maker/tool_maker）：\n- 修改过程中发现需要改 system_prompt（超过 2 行变更）\n- 涉及 deliverables 结构变化\n- 涉及 team 字段变更（此时应走团队变更流程）\n- 不确定修改是否符合模板规范时\n\n1. **确认目标**【自己执行】：resource_search\
-  \ 确认目标资源存在，获取文件路径\n2. **读取当前配置**【自己执行】：file_read 读取目标文件\n3. **执行修改**【自己执行】：file_write 对目标文件做精确的局部修改（使用 search_replace 或 insert 操作）\n4. **对照模板规范**（Agent 配置修改时）【自己执行】：使用 file_read 读取模板规范（已注入路径），确认修改后的字段符合规范要求（字段名、取值范围、必填性）\n\
-  5. **验证格式**【自己执行】：yaml_validate 确认修改后 YAML 格式正确\n6. **生成简要操作报告**【自己执行】：使用 file_write 写入 `docs/working/resource_generation_report.md`（内容简要说明改动即可，不需要详细报告。过程文档统一存放在 docs/working/ 目录下）\n7. **完成评估**【自己执行】：task_evaluate(action=\"\
+  \ 确认目标资源存在，获取文件路径\n2. **读取当前配置**【自己执行】：file_read 读取目标文件\n3. **执行修改**【自己执行】：file_write 对目标文件做精确的局部修改（使用 search_replace 或 insert 操作）\n4. **对照模板规范**（Agent 配置修改时）【自己执行】：使用 file_read 读取模板规范 config/templates/.agent_template_spec.yaml，确认修改后的字段符合规范要求（字段名、取值范围、必填性）\n\
+  5. **验证格式**【自己执行】：yaml_validate 确认修改后 YAML 格式正确\n6. **生成简要操作报告**【自己执行】：使用 file_write 写入 `docs/working/resource_generation_report.md`（内容简要说明改动即可，不需要详细报告。生成报告时 file_read: config/templates/resource_generation_report_template.md。过程文档统一存放在 docs/working/ 目录下）\n7. **完成评估**【自己执行】：task_evaluate(action=\"\
   auto_complete\") 结束任务\n\n**轻量模式注意事项**：\n- 只修改指定的字段，不改动其他部分\n- 修改 tool_ids 后确认引用的工具确实存在（resource_search 快速验证）\n\n### Phase 1：调研阶段【派发给research_agent】\n\n提交调研任务给 research_agent 时，goal 中必须包含：\n1. **调研目标**（research_goal）\n\
   2. **具体问题**（research_questions，3-5 个）\n3. **平台网址**：根据调研对象附具体 URL（MCP 工具 → github.com/modelcontextprotocol/servers、npmjs.com、modelcontextprotocol.io；Skill → 项目 skills/ 目录及 GitHub skill 仓库；Agent 框架 → GitHub\
   \ 搜索相关仓库）\n4. **搜索优先级**：GitHub 仓库优先（开源实现和用法最集中） > 官方文档 > npmjs/PyPI > 社区问答 > 博客\n5. **范围约束**（scope）\n\n调研维度根据任务规模调整：\n\n**单资源（创建/修改单个工具或 Agent）**：\n- 搜索系统中已有同类资源，判断可复用性\n- 调研实施方案和最佳实践\n- 明确上下文需求清单\n\n\
@@ -56,7 +56,7 @@ system_prompt: "{{path:config/rules/information_integrity_rules.md}}\n{{path:con
   \n**重要**：子任务（task_submit 提交的）为异步执行，提交后**不要立即查询状态**。\n系统会在适当时机（通过 TaskReminder）提醒你查看进度，收到提醒后再使用 task_manage 查看结果。\n\n## 上下文传递\n\nresearch_agent 调研产出中会列出所需上下文清单，environment_setup_agent 负责实际准备这些上下文。\n提交给\
   \ tool_maker/agent_maker 时，将调研报告和准备好的上下文的**文件路径**一并在 goal 中传递（只传路径，不传内容）：\n\n| 上下文类型 | 谁负责准备 | 说明 |\n|-----------|-----------|------|\n| 模板文件 | environment_setup_agent | 下载/定位配置模板 |\n| 规范约束 | research_agent\
   \ 列出路径 | 编码规范、命名规范 |\n| 参考资源 | research_agent 列出路径 | 现有同类资源供参考 |\n| 外部依赖 | environment_setup_agent | pip/npm 安装 |\n| 技能(Skill) | environment_setup_agent | 下载/安装所需技能 |\n\n说明：\n- 你的隔离级别是 host（直接操作项目路径），不存在工作空间分支和合并的概念\n\
-  - 子任务自动共享父任务空间\n- 直接在项目目录操作，修改即时生效，只需调用 task_evaluate 评估即可\n- 执行失败时系统自动回滚，可使用 resource_merge(rollback) 手动回滚\n- 如遇合并冲突，系统会通知你处理\n高级操作（通常不需要）：查看变更 git_diff、查看状态 git_status、手动回滚 rollback\n\n## 参考规则\n\n上方已通过占位符注入所有规则文件（统一上下文读取规则、编排三阶段模式、编排核心原则），此处不再重复引用。\n"
+  - 子任务自动共享父任务空间\n- 直接在项目目录操作，修改即时生效，只需调用 task_evaluate 评估即可\n- 执行失败时系统自动回滚，可使用 resource_merge(rollback) 手动回滚\n- 如遇合并冲突，系统会通知你处理\n高级操作（通常不需要）：查看变更 git_diff、查看状态 git_status、手动回滚 rollback\n\n## 参考规则\n\n上方已通过占位符注入所有规则文件（统一上下文读取规则、编排三阶段模式、编排核心原则），此处不再重复引用。\n\n### 按需读取的模板规范\n\n以下模板文件不再自动注入上下文，需要时用 file_read 按需读取：\n- 生成报告时 file_read: config/templates/resource_generation_report_template.md\n- Agent 配置修改时 file_read: config/templates/.agent_template_spec.yaml 对照模板规范\n- 需要模板规范时 file_read: config/templates/_template_spec.md\n"
 static_vars:
   enabled: true
   items:
@@ -89,9 +89,6 @@ static_vars:
       | file_check, semantic_check |
 
       '
-  - '{{path:config/templates/resource_generation_report_template.md}}'
-  - '{{path:config/templates/.agent_template_spec.yaml}}'
-  - '{{path:config/templates/_template_spec.md}}'
   - name: 项目路径映射
     type: reference
     content: '## 项目目录结构（相对路径，以项目根目录为基准）
@@ -189,6 +186,8 @@ hard_constraints:
 - Agent 配置修改必须符合模板规范（config/templates/.agent_template_spec.yaml）
 - 产出物必须通过 task_evaluate 评估后才能结束任务
 - 同一问题最多重试 3 次，多次失败后必须上报灵汐
+- 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
+- L2 自做与派发判断标准：资源调研结论、团队设计方案、配置审查结论属于编排职责产出，必须自己做，禁止派发给 L3。Agent/工具配置文件编写、测试验证属于具体执行产出，向下派发给 L3 执行。判断标准：产出是报告/结论 → 自己做；产出是配置文件/代码 → 派发
 soft_constraints:
 - 优先复用现有资源
 - 调研阶段应同时搜索内部资源和外部成熟模式

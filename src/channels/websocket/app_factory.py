@@ -617,7 +617,7 @@ def main() -> None:
     端口优先级：
     1. 命令行参数 --port
     2. 环境变量 BACKEND_PORT
-    3. 默认值 8888
+    3. 默认值 8988
 
     如果指定端口被占用，自动查找下一个可用端口。
     """
@@ -625,7 +625,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help="后端服务端口")
     args = parser.parse_args()
 
-    default_port = 8888
+    default_port = 8988
     preferred_port = args.port or int(os.environ.get("BACKEND_PORT", default_port))
 
     actual_port = find_available_port(preferred_port)

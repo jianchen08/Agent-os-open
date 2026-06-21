@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # 服务器配置
     api_host: str = Field(default="localhost", validation_alias="API_HOST")
-    api_port: int = Field(default=8888, validation_alias="API_PORT")
+    api_port: int = Field(default=8988, validation_alias="API_PORT")
     frontend_port: int = Field(default=5188, validation_alias="FRONTEND_PORT")
 
     # 应用配置

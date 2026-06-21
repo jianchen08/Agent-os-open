@@ -175,8 +175,9 @@ export interface PendingFile {
     file_id: string
     filename: string
     mime_type: string
-    file_type: string
-    base64_data?: string
+    media_type: string
+    size: number
+    url: string
   }
 }
 

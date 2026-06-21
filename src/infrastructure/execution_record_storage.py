@@ -75,6 +75,9 @@ class ExecutionRecordData:
     # 前端乐观消息 ID，用于 API 历史加载时与本地临时消息对账（消除重复/丢失）
     client_message_id: str | None = None
 
+    # 附件信息（JSON 序列化存储）
+    attachments_json: str | None = None
+
     created_at: str = ""
 
     def __post_init__(self) -> None:

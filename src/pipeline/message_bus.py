@@ -125,6 +125,7 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
     thread_id = msg.thread_id
     metadata = msg.metadata
     client_message_id = msg.client_message_id
+    attachments = msg.attachments
 
     if not pipeline_id:
         return InjectResult(success=False, error="pipeline_id 不能为空", method="failed")
@@ -151,6 +152,7 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
             request.agent_config, request.workspace, request.task_id,
             request.conversation_history, request.output_sink, thread_id,
             client_message_id=client_message_id,
+            attachments=attachments,
         )
 
     logger.warning("[MessageBus] 引擎未找到，尝试 revive | pipeline=%s", pipeline_id[:12])
@@ -161,6 +163,7 @@ async def _inject_request(request: PipelineRequest) -> InjectResult:
         streaming=request.streaming, on_chunk=None,
         output_sink=request.output_sink, thread_id=thread_id,
         client_message_id=client_message_id,
+        attachments=attachments,
     )
 
 
@@ -170,6 +173,7 @@ async def _inject_to_engine(
     task_id: str, conversation_history: list[dict] | None,
     output_sink: IOutputSink | None, thread_id: str,
     client_message_id: str = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> InjectResult:
     """向已存在的引擎注入消息。"""
     from pipeline.drain_manager import create_sink  # noqa: PLC0415
@@ -214,6 +218,7 @@ async def _inject_to_engine(
                 conversation_history=conversation_history,
                 output_sink=output_sink, thread_id=thread_id,
                 client_message_id=client_message_id,
+                attachments=attachments,
             )
 
         engine.inject_message(message, source=msg_source, client_message_id=client_message_id)
@@ -239,6 +244,7 @@ async def _start_idle_engine(
     conversation_history: list[dict] | None = None,
     output_sink: IOutputSink | None = None, thread_id: str = "",
     client_message_id: str = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> InjectResult:
     """启动 idle 状态的引擎。
 
@@ -317,6 +323,7 @@ async def _start_idle_engine(
         task_id=task_id, workspace=workspace, project_root="",
         streaming=True, on_chunk=None,
         client_message_id=client_message_id,
+        attachments=attachments,
     ))
     _idle_entry = _registry.get(pipeline_id)
     if _idle_entry:

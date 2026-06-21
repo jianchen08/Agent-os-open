@@ -53,7 +53,7 @@ call :stop_project_instance
 :: ========== 查找可用端口 ==========
 echo [INFO] 正在查找可用端口...
 
-set "BACKEND_PORT=8888"
+set "BACKEND_PORT=8988"
 call :find_available_port BACKEND_PORT
 if !errorlevel! neq 0 (
     echo [ERROR] 无法找到可用的后端端口

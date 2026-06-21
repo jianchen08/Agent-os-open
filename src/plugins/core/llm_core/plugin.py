@@ -32,6 +32,55 @@ from plugins.core.stream_repeat_monitor import StreamRepetitionMonitor
 
 logger = logging.getLogger(__name__)
 
+# 日志中单条 content 最大长度，超过则截断
+_LOG_CONTENT_MAX_LEN = 200
+
+
+def _summarize_content_for_log(content: Any) -> str:
+    """将消息内容转换为日志友好的简短摘要。
+
+    处理多模态 content（list[dict]）和纯文本 content：
+    - 纯文本：直接截断到 _LOG_CONTENT_MAX_LEN
+    - 多模态列表：展示每个 block 的类型和摘要，base64 数据只保留前缀和长度
+
+    Args:
+        content: 消息内容，可能是 str 或 list[dict]
+
+    Returns:
+        截断后的日志字符串
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        if len(content) > _LOG_CONTENT_MAX_LEN:
+            return f"{content[:_LOG_CONTENT_MAX_LEN]}...(truncated, total={len(content)})"
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                parts.append(str(block)[:_LOG_CONTENT_MAX_LEN])
+                continue
+            btype = block.get("type", "unknown")
+            if btype == "text":
+                text = str(block.get("text", ""))
+                if len(text) > _LOG_CONTENT_MAX_LEN:
+                    parts.append(f"{{text: {text[:_LOG_CONTENT_MAX_LEN]}...(truncated, len={len(text)})}}")
+                else:
+                    parts.append(f"{{text: {text}}}")
+            elif btype == "image_url":
+                url = (block.get("image_url") or {}).get("url", "")
+                if url.startswith("data:"):
+                    # base64 data URL：只记录 mime 和长度，不打印二进制内容
+                    head = url.split(",", 1)[0]
+                    parts.append(f"{{image_url: {head},<base64 len={len(url)}>}}")
+                else:
+                    parts.append(f"{{image_url: {url}}}")
+            else:
+                parts.append(f"{{{btype}}}")
+        return "[" + ", ".join(parts) + "]"
+    return str(content)[:_LOG_CONTENT_MAX_LEN]
+
 
 def _is_retryable_error(exc: Exception) -> bool:
     """判断异常是否可重试。
@@ -283,7 +332,7 @@ class LLMCore(ICorePlugin):
             )
             if tool_calls:
                 for tc in tool_calls:
-                    logger.info(
+                    logger.debug(
                         "[%s] tool_call: %s(%s)",
                         self.name, tc.get("name", "?"),
                         str(tc.get("args", tc.get("arguments", "")))[:200],
@@ -338,7 +387,7 @@ class LLMCore(ICorePlugin):
 
             _pipeline_id = ctx.state.get("pipeline_id", "?")
             _iteration = ctx.state.get("iteration", -1)
-            logger.info(
+            logger.debug(
                 "[%s] pipeline=%s iter=%d LLM returned: "
                 "text=%d chars, tool_calls=%d, thinking=%d chars",
                 self.name, _pipeline_id, _iteration,
@@ -388,7 +437,8 @@ class LLMCore(ICorePlugin):
         1. state["system_message"] -- prompt_build 产出的纯 SystemMessage
         2. state["compression_messages"] -- 压缩块独立消息（L2→L1→state_snapshot）
         3. state["messages"] -- 管道维护的对话历史（最近消息）
-        4. state["prompt.dynamic_vars"] -- 动态变量（追加在最后）
+        4. state["multimodal_content"] -- 多模态内容（图片/文件等，合并到最后一条用户消息）
+        5. state["prompt.dynamic_vars"] -- 动态变量（追加在最后）
 
         Args:
             state: 管道状态字典
@@ -415,7 +465,25 @@ class LLMCore(ICorePlugin):
                 m = {k: v for k, v in m.items() if k != "_record_sequence"}  # noqa: PLW2901
             messages.append(m)
 
-        # 4. 动态变量（每轮变化的上下文：时间戳、session_id 等）
+        # 4. 多模态内容（合并到最后一条用户消息）
+        multimodal_content = state.get("multimodal_content")
+        if multimodal_content and messages:
+            # 找到最后一条用户消息
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    # 将纯文本内容转换为 content blocks 格式
+                    existing_content = messages[i].get("content", "")
+                    if isinstance(existing_content, str):
+                        # 转换为 content blocks 数组
+                        messages[i]["content"] = [
+                            {"type": "text", "text": existing_content}
+                        ] + multimodal_content
+                    elif isinstance(existing_content, list):
+                        # 已经是 content blocks，直接追加
+                        messages[i]["content"].extend(multimodal_content)
+                    break
+
+        # 5. 动态变量（每轮变化的上下文：时间戳、session_id 等）
         dynamic_vars_msg = state.get("prompt.dynamic_vars")
         if dynamic_vars_msg:
             if isinstance(dynamic_vars_msg, dict):

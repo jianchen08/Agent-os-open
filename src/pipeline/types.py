@@ -48,6 +48,7 @@ class StateKeys:
     PIPELINE_ID = "pipeline_id"
     CONVERSATION_MODE = "conversation_mode"
     CONVERSATION_ROUND = "conversation_round"
+    ATTACHMENTS = "attachments"
 
 
 class ErrorPolicy(Enum):
