@@ -514,25 +514,26 @@ class TestPromptBuildFolderInjection:
 
 
 # ══════════════════════════════════════════════════
-# 3.6 prompt_build path 类型（同样拼接 ws_meta.path）
+# 3.6 prompt_build path 类型（文件用 project_root 解析）
 # ══════════════════════════════════════════════════
 
 
 class TestPromptBuildPathInjection:
-    """path 类型静态变量注入：相对路径同样拼接 ws_meta.path（worktree 路径）。
+    """path 类型静态变量注入：文件（相对路径）用 project_root 解析。
 
-    与 folder 类型共享同一条 base 解析规则（**只认 ws_meta.path，无任何回退**）：
-        1. 相对路径必须拼 ``state["ws_meta"]["path"]``（worktree 路径）
-        2. 缺失 ws_meta → 跳过
-        3. 绝对路径直接使用
-        4. 严禁回退到 ``state["workspace"]`` 或 CWD
+    路径解析规则（**互斥，无回退**）：
+        1. 文件相对路径 → 拼接 ``project_root``（state 或 services）
+        2. 文件夹相对路径 → 拼接 ``ws_meta.path``（由 TestPromptBuildFolderInjection 覆盖）
+        3. 两者互斥：文件不读 ws_meta.path，文件夹不读 project_root
+        4. 缺失 project_root → 返回空，**绝不**用 CWD 解析
+        5. 绝对路径直接使用
     """
 
     @pytest.mark.asyncio
-    async def test_path_no_cwd_fallback_returns_empty(
+    async def test_path_no_project_root_returns_empty(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """无 ws_meta 也无 workspace 时，相对路径绝不回退到 CWD，应返回空。"""
+        """无 project_root（state 和 services 均无）时，相对路径绝不回退到 CWD。"""
         cwd_file = tmp_path / "rules.md"
         cwd_file.write_text("CWD 内容, 不应被注入", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
@@ -544,7 +545,7 @@ class TestPromptBuildPathInjection:
         state["context.static_vars"] = [
             {"type": "path", "name": "无base", "path": "rules.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state)  # 不传 services → project_root 为空
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -554,22 +555,17 @@ class TestPromptBuildPathInjection:
         assert "不应被注入" not in content
 
     @pytest.mark.asyncio
-    async def test_path_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """相对路径与 state["ws_meta"]["path"] 拼接，读取单个文件。"""
+    async def test_path_relative_joined_with_project_root(self, tmp_path) -> None:
+        """文件相对路径与 project_root（services）拼接，读取单个文件。"""
         (tmp_path / "rules.md").write_text("## 项目规范\n1. 必须有类型注解", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {
-            "path": str(tmp_path),
-            "mode": "worktree",
-            "branch": "task/2eee5194e20f",
-        }
-        state["workspace"] = "."  # 实际场景 workspace 是相对值
         state["context.static_vars"] = [
             {"type": "path", "name": "项目规则", "path": "rules.md"}
         ]
-        ctx = make_ctx(state)
+        # 通过 services 提供 project_root（模拟实际运行时 Application 注入）
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -578,20 +574,18 @@ class TestPromptBuildPathInjection:
         assert "类型注解" in content
 
     @pytest.mark.asyncio
-    async def test_path_nested_relative_joined_with_ws_meta_path(self, tmp_path) -> None:
-        """多层相对路径（如 docs/sub/spec.md）也能正确拼接到 ws_meta.path。"""
+    async def test_path_nested_relative_joined_with_project_root(self, tmp_path) -> None:
+        """多层相对路径（如 docs/sub/spec.md）也能正确拼接到 project_root。"""
         nested = tmp_path / "docs" / "sub"
         nested.mkdir(parents=True)
         (nested / "spec.md").write_text("嵌套规范", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
-        state["workspace"] = "."
         state["context.static_vars"] = [
             {"type": "path", "name": "嵌套规则", "path": "docs/sub/spec.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -600,21 +594,20 @@ class TestPromptBuildPathInjection:
 
     @pytest.mark.asyncio
     async def test_path_absolute_used_as_is(self, tmp_path) -> None:
-        """绝对路径直接使用，不与 ws_meta.path 拼接。"""
+        """绝对路径直接使用，不与 project_root 拼接。"""
         external = tmp_path / "external"
         external.mkdir()
         (external / "info.md").write_text("外部信息", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        # 故意把 ws_meta / workspace 指到无关目录，确认不影响绝对路径
+        # 故意把 project_root / ws_meta 指到无关目录，确认不影响绝对路径
         state["ws_meta"] = {"path": str(tmp_path / "unrelated"), "mode": "worktree"}
         (tmp_path / "unrelated").mkdir()
-        state["workspace"] = str(tmp_path / "unrelated")
         state["context.static_vars"] = [
             {"type": "path", "name": "外部文档", "path": str(external / "info.md")}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path / "unrelated"))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -622,23 +615,24 @@ class TestPromptBuildPathInjection:
         assert "外部信息" in content
 
     @pytest.mark.asyncio
-    async def test_path_no_ws_meta_returns_empty(self, tmp_path) -> None:
-        """无 ws_meta.path 时，相对路径直接跳过（不读 workspace，也不读 CWD）。"""
+    async def test_path_file_not_via_ws_meta_path(self, tmp_path) -> None:
+        """文件即使在 ws_meta.path 下存在，也不通过 ws_meta.path 解析（互斥规则：文件只用 project_root）。"""
         (tmp_path / "rules.md").write_text("不应出现", encoding="utf-8")
 
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["workspace"] = str(tmp_path)  # 旧场景有 workspace, 但新规则不读它
-        state.pop("ws_meta", None)
+        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
+        state["workspace"] = "."
         state["context.static_vars"] = [
-            {"type": "path", "name": "无ws_meta", "path": "rules.md"}
+            {"type": "path", "name": "仅ws_meta", "path": "rules.md"}
         ]
+        # 不传 services → project_root 为空，且 ws_meta.path 不用于文件解析
         ctx = make_ctx(state)
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
 
-        assert "无ws_meta" not in content
+        assert "仅ws_meta" not in content
         assert "不应出现" not in content
 
     @pytest.mark.asyncio
@@ -650,7 +644,7 @@ class TestPromptBuildPathInjection:
         state["context.static_vars"] = [
             {"type": "path", "name": "空路径文件", "path": ""}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root="D:\\project")
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]
@@ -659,15 +653,13 @@ class TestPromptBuildPathInjection:
 
     @pytest.mark.asyncio
     async def test_path_file_not_found_returns_empty(self, tmp_path) -> None:
-        """目标文件不存在时静默返回空（不抛错）。"""
+        """目标文件在 project_root 下不存在时静默返回空（不抛错）。"""
         plugin = PromptBuildPlugin()
         state = make_base_state()
-        state["ws_meta"] = {"path": str(tmp_path), "mode": "worktree"}
-        state["workspace"] = "."
         state["context.static_vars"] = [
             {"type": "path", "name": "不存在的文件", "path": "missing.md"}
         ]
-        ctx = make_ctx(state)
+        ctx = make_ctx(state, project_root=str(tmp_path))
 
         result = await plugin.execute(ctx)
         content = result.state_updates["system_message"]["content"]

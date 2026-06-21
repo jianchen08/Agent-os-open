@@ -425,9 +425,10 @@ class PromptBuildPlugin(IInputPlugin):
     def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
         """把相对路径解析为最终目标 Path。
 
-        选择逻辑：
+        互斥选择逻辑（不是先后也不是回退）：
             - 文件：用 project_root 解析（项目文件注入）
-            - 目录：用 ws_meta.path 解析（任务工作空间文件夹注入），找不到就跳过
+            - 文件夹：用 ws_meta.path 解析（任务工作空间文件夹）
+            - 找不到就跳过
 
         Args:
             ctx: 插件执行上下文
@@ -449,19 +450,18 @@ class PromptBuildPlugin(IInputPlugin):
         ws_meta = ctx.state.get("ws_meta") or {}
         ws_path = ws_meta.get("path")
 
-        # 1. 用 project_root 解析，如果是文件则返回（项目文件注入）
+        # 文件：用 project_root 解析
         if project_root:
             target = Path(project_root) / rel_path
             if target.is_file():
                 return target
 
-        # 2. 用 ws_meta.path 解析（任务工作空间文件夹注入）
+        # 文件夹：用 ws_meta.path 解析（互斥，无回退）
         if ws_path:
             target = Path(ws_path) / rel_path
             if target.is_dir():
                 return target
 
-        # 目录在 ws_meta.path 中找不到 → 返回 None，不回退 project_root
         return None
 
     async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:  # noqa: PLR0912
