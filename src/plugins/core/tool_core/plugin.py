@@ -962,6 +962,13 @@ class ToolCore(ICorePlugin):
         if has_task_failed:
             return_dict[StateKeys.ENDED] = True
         if conversation_activated:
-            return_dict[StateKeys.CONVERSATION_MODE] = True
+            # 直接路由信号：告诉管道仲裁器"立即 wait"。
+            # _execute_core_and_route 取出此信号与 Output 插件信号一起仲裁，
+            # wait(priority=10) 优先于 next_llm(priority=50)，管道立即挂起。
+            # 用户消息到达后 inject_message 唤醒 → 工具结果 + 用户消息一起发 LLM。
+            return_dict["_pending_route_signal"] = {
+                "route_type": "wait",
+                "reason": "human_interaction: user arrived, entering conversation",
+            }
 
         return return_dict

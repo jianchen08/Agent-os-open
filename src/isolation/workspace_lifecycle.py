@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                     "[WorkspaceLifecycle] 复用已有工作空间: task_id=%s, mode=%s, path=%s",
                     task_id, existing.get("mode"), ws_path,
                 )
+                self._copy_skills_to_workspace(ws_path)
                 return existing
             logger.info(
                 "[WorkspaceLifecycle] 已有 ws_meta 但路径不存在，重新创建: task_id=%s, path=%s",
@@ -148,6 +150,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             meta = self._start_subtask(task_id, workspace, task_data)
         else:
             meta = self._start_root_task(task_id, workspace, task_data)
+        self._copy_skills_to_workspace(meta["path"])
         self._persist_ws_meta(task_id)
         return meta
 
@@ -186,6 +189,50 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 "project_root": parent_meta.get("project_root", "")}
         self._ws_meta_store[task_id] = meta
         return meta
+
+    # ── 技能文件复制 ──────────────────────────────────────────────
+
+    def _copy_skills_to_workspace(self, ws_path: str) -> None:
+        """将项目 skills/ 目录复制到工作空间。
+
+        任务启动时调用一次，让 Agent 在 host / worktree / Docker 容器
+        所有模式下都能通过 skills/<技能名>/scripts/*.py 访问技能脚本。
+
+        Args:
+            ws_path: 工作空间绝对路径（来自 ws_meta["path"]）
+        """
+        skills_src = self._base_path / "skills"
+        if not skills_src.exists() or not skills_src.is_dir():
+            logger.debug(
+                "[WorkspaceLifecycle] skills/ 目录不存在，跳过复制: %s",
+                skills_src,
+            )
+            return
+        skills_dst = Path(ws_path) / "skills"
+        # 工作空间就是项目目录本身时，源和目标相同，无需复制
+        if skills_src.resolve() == skills_dst.resolve():
+            logger.debug(
+                "[WorkspaceLifecycle] 工作空间即为项目目录，skills/ 已在原位，跳过复制: %s",
+                skills_dst,
+            )
+            return
+        if skills_dst.exists():
+            logger.debug(
+                "[WorkspaceLifecycle] 技能已存在，跳过复制: %s",
+                skills_dst,
+            )
+            return
+        try:
+            shutil.copytree(skills_src, skills_dst, symlinks=True)
+            logger.info(
+                "[WorkspaceLifecycle] 技能已复制: %s → %s",
+                skills_src, skills_dst,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[WorkspaceLifecycle] 技能复制失败: %s → %s | error=%s",
+                skills_src, skills_dst, exc,
+            )
 
     def _start_root_task(self, task_id: str, workspace: str, task_data: dict) -> dict:  # noqa: PLR0912,PLR0915
         """根任务启动：场景A(新项目) / 场景B(无.git) / 场景C(有.git)

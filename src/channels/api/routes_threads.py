@@ -214,6 +214,66 @@ def _safe_get_service(service_name: str) -> Any:
         return None
 
 
+def _expand_pipeline_ids_with_task_data(pipeline_ids: list[str]) -> list[str]:
+    """利用任务数据的 parent_pipeline_id 链，将 pipeline_ids 扩展为完整集合。
+
+    后端任务系统中，子任务的 parent_pipeline_id 指向父管道，
+    通过迭代扩展：已知管道 → 找到 parent_pipeline_id 匹配的任务 → 加入其 pipeline_run_id，
+    直到不动点。这样 session.pipeline_ids 就能覆盖所有子管道，
+    前端 findPipelineLocation 的 Level 2 查找即可直接命中。
+
+    Args:
+        pipeline_ids: 当前已知的管道 ID 列表
+
+    Returns:
+        扩展后的完整管道 ID 列表（包含所有子孙管道）
+    """
+    if not pipeline_ids:
+        return []
+
+    task_service = _get_task_service()
+    if task_service is None:
+        return list(pipeline_ids)
+
+    try:
+        all_tasks = task_service.get_all_tasks()
+    except Exception:
+        return list(pipeline_ids)
+
+    return _expand_pipeline_ids_with_tasks(pipeline_ids, all_tasks or [])
+
+
+def _expand_pipeline_ids_with_tasks(
+    pipeline_ids: list[str], all_tasks: list[Any],
+) -> list[str]:
+    """使用已获取的任务列表扩展 pipeline_ids（避免重复调用 get_all_tasks）。
+
+    Args:
+        pipeline_ids: 当前已知的管道 ID 列表
+        all_tasks: 所有任务对象列表
+
+    Returns:
+        扩展后的完整管道 ID 列表
+    """
+    if not pipeline_ids or not all_tasks:
+        return list(pipeline_ids)
+
+    expanded: set[str] = set(pipeline_ids)
+
+    # 迭代扩展直到不动点
+    changed = True
+    while changed:
+        changed = False
+        for task in all_tasks:
+            ppid = getattr(task, "parent_pipeline_id", "") or ""
+            prid = getattr(task, "pipeline_run_id", "") or ""
+            if ppid and ppid in expanded and prid and prid not in expanded:
+                expanded.add(prid)
+                changed = True
+
+    return list(expanded)
+
+
 async def _build_execution_graph(  # noqa: PLR0912,PLR0915
 
     pipeline_ids: list[str],
@@ -642,7 +702,23 @@ def list_threads(
 
     page_items = threads[skip:skip + limit]
 
-    thread_responses = [_build_thread_response(t) for t in page_items]
+    # 对分页内的每个线程，通过任务数据的 parent_pipeline_id 链扩展 pipeline_ids，
+    # 确保子管道 ID 全部包含在内，前端 findPipelineLocation 可直接命中。
+    # 先批量获取所有任务，避免每线程重复调用 get_all_tasks()。
+    all_tasks_cache: list[Any] | None = None
+    expanded_page_items: list[dict[str, Any]] = []
+    for t in page_items:
+        raw_ids = t.get("pipeline_ids", []) or []
+        if raw_ids:
+            if all_tasks_cache is None:
+                task_service = _get_task_service()
+                all_tasks_cache = task_service.get_all_tasks() if task_service else []
+            expanded_ids = _expand_pipeline_ids_with_tasks(raw_ids, all_tasks_cache)
+        else:
+            expanded_ids = raw_ids
+        expanded_page_items.append({**t, "pipeline_ids": expanded_ids})
+
+    thread_responses = [_build_thread_response(t) for t in expanded_page_items]
 
 
 
@@ -838,7 +914,10 @@ def get_thread(
 
         )
 
-    return _build_thread_response(thread)
+    # 扩展 pipeline_ids，包含所有子管道（通过任务 parent_pipeline_id 链追溯）
+    raw_ids = thread.get("pipeline_ids", []) or []
+    expanded_ids = _expand_pipeline_ids_with_task_data(raw_ids)
+    return _build_thread_response({**thread, "pipeline_ids": expanded_ids})
 
 
 

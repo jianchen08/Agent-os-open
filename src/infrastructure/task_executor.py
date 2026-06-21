@@ -402,6 +402,8 @@ class TaskExecutorMixin:
 
                     "task_id": task_id,
 
+                    "workspace": workspace,
+
                     "parent_pipeline": _parent_pipeline_id or "",
 
                     # agent_id 从任务数据（target_id）绑定，供引擎重建时直接读取

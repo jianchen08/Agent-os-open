@@ -272,6 +272,15 @@ async def execute_output_chain(
     output_plugins = resolve_output_plugins(engine, state, core_type)
     route_signals: list[RouteSignal] = []
 
+    # Core 插件（ToolCore）可直接通过 state 注入路由信号。
+    # 例：human_interaction 对话模式返回后，ToolCore 写入
+    # _pending_route_signal = {"route_type": "wait", ...}
+    # 此处取出与 Output 插件信号一起参与仲裁，walk 优先级高于 next_llm。
+    pending_raw = state.pop("_pending_route_signal", None)
+    if pending_raw and isinstance(pending_raw, dict):
+        route_signals.append(RouteSignal(**pending_raw))
+        logger.debug("Injected route signal from core: %s", pending_raw.get("route_type"))
+
     if not output_plugins:
         return route_signals
 

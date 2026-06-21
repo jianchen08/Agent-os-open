@@ -271,9 +271,8 @@ class ResourceSearchTool:
                     results["tool_c"] = len(tool_names)
 
         if resource_type in ["skill", "all"]:
-            current_workspace = inputs.get("workspace", "")
             skill_names, skill_descriptions, skill_details = await self._search_skills(
-                query, language, limit, detailed, exact, workspace=current_workspace
+                query, language, limit, detailed, exact,
             )
             if skill_names:
                 if detailed and skill_details and any(skill_details):
@@ -1193,12 +1192,12 @@ class ResourceSearchTool:
         limit: int,
         detailed: bool = False,
         exact: bool = False,
-        workspace: str = "",
     ) -> tuple[list[str], list[str], list[dict]]:
         """搜索本地 Skill。
 
-        simple 模式：只返回名称和描述（不挂载）。
-        detailed 模式：返回 SKILL.md 完整内容 + 自动软链到工作空间。
+        simple 模式：只返回名称和描述。
+        detailed 模式：返回 SKILL.md 完整内容。
+        （技能文件由 WorkspaceLifecycleManager 在任务启动时统一复制到工作空间。）
         """
         skill_registry = self._get_skill_registry()
         if not skill_registry or not skill_registry.is_initialized():
@@ -1207,7 +1206,6 @@ class ResourceSearchTool:
         names: list[str] = []
         descriptions: list[str] = []
         details_list: list[dict] = []
-        matched_skill_names: list[str] = []
         query_lower = query.lower()
 
         if detailed and exact:
@@ -1229,7 +1227,6 @@ class ResourceSearchTool:
 
             names.append(skill.skill_name)
             descriptions.append(skill.description)
-            matched_skill_names.append(skill.skill_name)
 
             if detailed:
                 # 用 Skill 对象的懒加载属性读取完整内容
@@ -1239,25 +1236,6 @@ class ResourceSearchTool:
 
             if len(names) >= limit:
                 break
-
-        # detailed 模式自动软链到工作空间（容器内下次可见）
-        if detailed and matched_skill_names and workspace:
-            try:
-                mounted = skill_registry.mount_to_workspace(
-                    matched_skill_names, workspace,
-                )
-                for i, skill_name in enumerate(matched_skill_names):
-                    if skill_name in mounted and i < len(details_list):
-                        details_list[i]["mounted"] = True
-                        details_list[i]["container_path"] = (
-                            f"/workspace/skills/{skill_name}"
-                        )
-                logger.info(
-                    "[resource_search] Skill 挂载完成 | mounted=%s | workspace=%s",
-                    mounted, workspace,
-                )
-            except Exception as exc:
-                logger.warning("[resource_search] Skill 挂载失败: %s", exc)
 
         return names, descriptions, details_list
 
