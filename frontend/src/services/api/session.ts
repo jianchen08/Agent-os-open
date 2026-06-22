@@ -274,6 +274,38 @@ function mapBackendMessageToMessage(
 }
 
 /**
+ * 消除合并组内 part.sequence 的冲突，保留原始 sequence 优先
+ *
+ * 规则：
+ * 1. 保留每个 part 的原始 sequence（流式 Date.now() 大数 / API 局部小数）
+ * 2. 按 sequence 升序排列（保持时序，与渲染层排序一致）
+ * 3. 仅当出现 sequence 冲突（同值出现多次）或缺失时，对该 part 从组内
+ *    最大 sequence +1 续接，确保最终 sequence 单调且唯一
+ *
+ * 不破坏流式期间分配的大数 sequence，避免与未合并消息的 React key 碰撞。
+ *
+ * BUG-FIX-fix_20260622_part_sequence_collision
+ */
+function dedupePartSequences(parts: any[]): any[] {
+  if (parts.length <= 1) return parts
+  const sorted = [...parts].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+  const seen = new Set<number>()
+  let nextSeq = sorted.reduce((max, p) => Math.max(max, p.sequence ?? 0), 0)
+  for (const p of sorted) {
+    const seq = p.sequence
+    if (seq == null || seen.has(seq)) {
+      // 冲突或缺失：从组内最大 sequence +1 续接
+      nextSeq += 1
+      p.sequence = nextSeq
+      seen.add(nextSeq)
+    } else {
+      seen.add(seq)
+    }
+  }
+  return sorted
+}
+
+/**
  * 合并连续的 assistant 消息 + 吸收夹在中间的 tool 消息（仅用于历史 API 加载）
  *
  * 后端将同一次 LLM 响应的 text 和 tool_calls 拆成多条 ExecutionRecordData，
@@ -285,6 +317,17 @@ function mapBackendMessageToMessage(
  * BUG-FIX-fix_20260617_prepend_boundary_merge:
  * 导出此函数，供 pipelineMessageStore 在 prepend/initFromAPI 合并完整列表后调用，
  * 确保跨 API 分页边界的连续 assistant 消息也能被正确合并。
+ *
+ * BUG-FIX-fix_20260622_part_sequence_collision:
+ * 问题根因: 原代码用全局计数器 globalSeq++ 重写所有 part 的 sequence，
+ *   破坏了流式期间按 Date.now() 分配的唯一 sequence，导致合并后与未合并消息的
+ *   part sequence 冲突，渲染层 React key 碰撞，出现「思考+文本+思考+文本」乱序
+ *   和文本气泡重复。
+ * 修复方案: 保留每个 part 的原始 sequence；仅当合并组内出现 sequence 冲突
+ *   （多条 API 消息各自的 parts 都从 0 起算导致同值）时，对冲突 part 在组内
+ *   从最大 sequence +1 续接。不破坏流式大数 sequence 的稳定性。
+ * 影响范围: 切换页面/向上翻页时连续 assistant 消息的 part 渲染稳定性
+ * 修复日期: 2026-06-22
  */
 export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages
@@ -339,10 +382,8 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): Message[
       .map((m) => m.content)
       .filter((c) => c?.trim())
       .join('\n\n')
-    let globalSeq = 0
-    const mergedParts = group.flatMap((m) =>
-      (m.parts || []).map((p: any) => ({ ...p, sequence: globalSeq++ })),
-    )
+    // 保留每个 part 的原始 sequence（流式大数 / API 局部小数），仅消除组内冲突
+    const mergedParts = dedupePartSequences(group.flatMap((m) => (m.parts || []).map((p: any) => ({ ...p }))))
     if (!mergedContent && mergedParts.length === 0) {
       for (const m of group) result.push(m)
       continue

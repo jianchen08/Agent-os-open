@@ -198,6 +198,63 @@ function filterBlankMessages(messages: Message[]): Message[] {
 }
 
 /**
+ * 判断消息是否处于流式状态（不可参与合并）
+ *
+ * BUG-FIX-fix_20260622_streaming_msg_merged:
+ * 问题根因: initFromAPI / prependMessages 在合并连续 assistant 消息时，
+ *   会把正在流式输出的 assistant 消息（status='streaming' 或 parts 含
+ *   state='streaming' 的 part）卷入相邻历史消息的合并组，导致流式 part
+ *   被重编、被丢弃或与历史消息混合，表现为切换页面后文本气泡重复。
+ * 修复方案: 流式消息作为「分隔符」打断合并组，自身不参与合并。
+ * 影响范围: 切换页面/向上翻页时流式消息的渲染稳定性
+ * 修复日期: 2026-06-22
+ */
+function isStreamingMessage(msg: Message): boolean {
+  if (msg.role !== 'assistant') return false
+  if (msg.status === 'streaming') return true
+  const parts = msg.parts as MessagePart[] | undefined
+  if (parts && parts.length > 0) {
+    return parts.some((p) => {
+      const state = (p as { state?: string }).state
+      return state === 'streaming' || state === 'calling'
+    })
+  }
+  return false
+}
+
+/**
+ * 合并连续 assistant 消息，但保护流式消息不被卷入合并
+ *
+ * 流式消息作为分隔符：它本身不合并，且会打断其前后的连续 assistant 组。
+ * 这样历史消息（API 返回的已完成消息）仍能跨边界合并，而正在流式的消息
+ * 保持独立完整。
+ *
+ * BUG-FIX-fix_20260622_streaming_msg_merged
+ */
+function mergePreservingStreaming(messages: Message[]): Message[] {
+  if (messages.length <= 1) return messages
+  const result: Message[] = []
+  let segment: Message[] = []
+  const flush = () => {
+    if (segment.length > 0) {
+      const merged = mergeConsecutiveAssistantMessages(segment)
+      for (const m of merged) result.push(m)
+      segment = []
+    }
+  }
+  for (const msg of messages) {
+    if (isStreamingMessage(msg)) {
+      flush()
+      result.push(msg)
+    } else {
+      segment.push(msg)
+    }
+  }
+  flush()
+  return result
+}
+
+/**
  * 排序键优先级：sequence → timestamp → id（确保 sequence/timestamp 相同时排序稳定）。
  */
 function compareMessages(a: Message, b: Message): number {
@@ -622,7 +679,10 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
 
       // BUG-FIX-fix_20260617_init_boundary_merge:
       // 合并 API 数据与本地流式消息后，边界处可能有连续 assistant 消息需要合并
-      finalMessages = mergeConsecutiveAssistantMessages(finalMessages)
+      // BUG-FIX-fix_20260622_streaming_msg_merged:
+      // 流式消息（status='streaming' 或 parts 含 streaming part）不参与合并，
+      // 它们作为分隔符打断连续 assistant 组，避免 part 被重编或丢弃。
+      finalMessages = mergePreservingStreaming(finalMessages)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       finalMessages = filterBlankMessages(finalMessages)
 
@@ -686,7 +746,10 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       // 修复方案: prepend 后对完整列表重新执行 assistant 合并，消除分页边界。
       // 影响范围: 向上翻页时的消息渲染
       // 修复日期: 2026-06-17
-      merged = mergeConsecutiveAssistantMessages(merged)
+      //
+      // BUG-FIX-fix_20260622_streaming_msg_merged:
+      // 流式消息不参与合并，保护其 part sequence 不被重编。
+      merged = mergePreservingStreaming(merged)
       // 过滤空白 assistant 消息（无 content 无 parts），避免空气泡
       merged = filterBlankMessages(merged)
       const topCursor = merged[0]?.sequence ?? 0
