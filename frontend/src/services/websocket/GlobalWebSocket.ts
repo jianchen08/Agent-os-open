@@ -398,6 +398,15 @@ class GlobalWebSocketService {
         // 问题根因: token 过期后 WS 被后端拒绝 (403)，前端重连时用同一个过期 token
         //   无限重试 → 前端输出卡在半路时无法恢复连接 → 流式数据断流。
         // 修复方案: 重连前检查 token 是否过期，过期则先刷新再连接。
+        //
+        // BUG-FIX-fix_20260622_workspace_state_loss:
+        // 问题根因: 早期 refreshToken 失败会内部调用 logout()，导致 WS 重连风暴期间
+        //   （网络抖动 → 多次重连 → 多次刷新尝试 → 任一失败即 logout）
+        //   用户被强制踢出登录并丢失工作区状态。
+        // 修复方案: 配合 authStore.refreshToken 已不再自杀（P0-1.2），此处 catch
+        //   仅记日志并用旧 token 继续重连，**绝不触发 logout**。
+        //   真正认证失效（refresh_token 被 401/403 拒绝）由 client.ts 拦截器在
+        //   下一次 API 请求时统一处理，WS 路径不参与登出决策。
         try {
           const authStore = useAuthStore.getState()
           if (authStore.checkTokenExpiration()) {
@@ -410,8 +419,10 @@ class GlobalWebSocketService {
             }
           }
         } catch {
-          // 刷新失败，仍尝试用旧 token（后端会明确拒绝）
-          _wsLogger.warn('[GlobalWS] Token 刷新失败，尝试用旧 token 重连')
+          // 刷新失败（网络错误/超时/5xx/真认证失效），仍尝试用旧 token 重连。
+          // 注意：此处不调用 logout，避免重连风暴期间误踢用户。
+          // 后端会拒绝无效 token 并关闭 WS，前端按指数退避继续重试，直到 token 刷新成功。
+          _wsLogger.warn('[GlobalWS] Token 刷新失败，尝试用旧 token 重连（不登出）')
         }
         this.connect(this._token)
       }

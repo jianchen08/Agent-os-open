@@ -13,6 +13,30 @@ import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/
 import type { User } from '../types/models'
 
 /**
+ * 判断错误是否为「真正认证失效」（应触发 logout）
+ *
+ * BUG-FIX-fix_20260622_refresh_misclassify_logout:
+ * 与 client.ts 的 isDefinitelyAuthFailure 同义，供 authStore 内部使用。
+ * 只有当请求被后端明确拒绝（HTTP 401/403）才视为认证失效；
+ * 网络错误/超时/5xx/无 response 视为暂时性故障，不应 logout。
+ *
+ * 支持两种错误形态：
+ * - axios 错误：直接读 error.response.status
+ * - 被 refreshToken 包装的错误：读 error.cause.response.status（保留原始 cause）
+ */
+export function isAuthFailureFromError(error: unknown): boolean {
+  if (!error) return false
+  // 直接的 axios 错误
+  const directStatus = (error as { response?: { status?: number } })?.response?.status
+  if (directStatus === 401 || directStatus === 403) return true
+  // 被 refreshToken 包装的错误（Error with cause）
+  const cause = (error as { cause?: unknown })?.cause
+  const causeStatus = (cause as { response?: { status?: number } })?.response?.status
+  if (causeStatus === 401 || causeStatus === 403) return true
+  return false
+}
+
+/**
  * 认证状态接口
  */
 interface AuthState {
@@ -265,8 +289,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
     localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
-    // BUG-FIX-fix_20260528_session_persist: 登出时清理持久化的活跃会话ID
-    localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION)
+    // BUG-FIX-fix_20260622_workspace_state_loss:
+    // 问题根因: 登出时删除 LAST_ACTIVE_SESSION 导致重登后无法自动恢复到原会话，
+    //          用户感受到"工作区状态丢失"。
+    // 修复方案: 登出只清认证 key，保留工作区状态（LAST_ACTIVE_SESSION、
+    //          pipeline-messages、agent-tabs、layout-mode 等）。
+    //          这些状态会在 sessionListStore.fetchSessions 恢复时被使用，
+    //          让重登后自动回到退出前的会话。
+    //          注：会话被主动删除时由 sessionListStore 单独清理此 key（合理）。
+    // localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION)  // ← 不再删除
 
     // 清除状态
     set({
@@ -314,17 +345,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         token: response.access_token,
         refreshTokenValue: response.refresh_token || currentRefreshToken,
       })
-    } catch (_error: unknown) {
-      // BUG-FIX-fix_20260507_002: 刷新失败时 await destroyGrowthLoop 确保完全清理
+    } catch (error: unknown) {
+      // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+      // 问题根因: 原 refreshToken 失败时直接 await get().logout()，导致以下场景被误踢出：
+      //   1. WebSocket 重连时检测到 token 过期 → 调 refreshToken → 网络抖动刷新失败 → logout
+      //   2. 网络断开/超时/CORS/5xx 期间任何刷新尝试失败 → logout
+      //   3. 后端临时重启 → 刷新请求失败 → logout
+      // 修复方案: refreshToken 失败时不再主动 logout，只抛出错误。
+      //          由调用方根据错误类型（401/403 vs 网络错误）决定是否 logout：
+      //          - client.ts 拦截器：仅 401/403 才 clearAuthAndRedirect
+      //          - initializeAuth：仅 401/403 才 logout，网络错误保留旧 token 继续尝试
+      //          - GlobalWebSocket：刷新失败用旧 token 继续重连，绝不触发 logout
+      // 影响范围: 所有 refreshToken 调用路径（client.ts / initializeAuth / WS 重连）
       try {
         const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
         destroyGrowthLoop()
       } catch {
         // 动态导入失败，忽略
       }
-      // 刷新失败，清除认证状态
-      await get().logout()
-      throw new Error('令牌刷新失败，请重新登录')
+      // 刷新失败，抛出错误让调用方决策，不主动 logout。
+      // 用 cause 保留原始错误，调用方可通过 isAuthFailureFromError 判断错误类型。
+      throw new Error('令牌刷新失败，请重新登录', { cause: error })
     }
   },
 
@@ -367,10 +408,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await get().fetchCurrentUser()
               set({ isInitializing: false })
               return
-            } catch (_refreshError) {
-              await get().logout()
-              set({ isInitializing: false })
-              return
+            } catch (refreshError) {
+              // BUG-FIX-fix_20260622_refresh_misclassify_logout:
+              // 问题根因: 原逻辑对刷新失败的任何错误都 logout，但启动时若后端临时不可用
+              //          （网络抖动/重启/5xx），会被误判为认证失效并强制登出。
+              // 修复方案: 仅当后端明确返回 401/403（refresh_token 真失效）才 logout；
+              //          网络错误/超时/5xx 时保留旧 token，标记未认证但不清状态，
+              //          等用户下次操作或网络恢复后再尝试。
+              if (isAuthFailureFromError(refreshError)) {
+                // refresh_token 真正失效，登出
+                await get().logout()
+                set({ isInitializing: false })
+                return
+              } else {
+                // 暂时性故障（网络/超时/5xx）：保留旧 token，不登出，
+                // 让用户停留在未认证状态，网络恢复后可继续使用旧会话状态。
+                // 不设置 isAuthenticated=true（旧 token 已过期），但保留工作区状态。
+                set({ isInitializing: false })
+                return
+              }
             }
           } else {
             // 没有refresh_token，清除所有数据

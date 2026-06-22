@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages, mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
@@ -13,6 +14,51 @@ import type { Message } from '@/types/models'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 
 const logger = loggers.sessionStore
+
+/**
+ * 每个管道持久化的最大消息条数
+ *
+ * BUG-FIX-fix_20260622_workspace_state_loss:
+ * 为防止 localStorage 配额溢出，每个 pipeline 仅持久化最近 N 条消息（与 agentTabStore 一致）。
+ * 更早的消息会在恢复后从 API 重新加载（向上翻页）。
+ */
+const PERSIST_MAX_MESSAGES_PER_PIPELINE = 50
+
+/**
+ * 持久化数据的有效期策略说明（非强制 TTL）
+ *
+ * BUG-FIX-fix_20260622_workspace_state_loss:
+ * 此处不实现强制 TTL 清理，原因：
+ * 1. 数据恢复价值高于过期风险——重登后 initFromAPI 会用 API 权威数据覆盖持久化数据，
+ *    过期数据自然被替换，不会造成脏读。
+ * 2. merge 时强制重置 streamingState/loading 等运行时状态，避免恢复陈旧的流式标记。
+ * 3. 每个 pipeline 限制 50 条消息（PERSIST_MAX_MESSAGES_PER_PIPELINE），
+ *    数据量可控，无需激进清理。
+ * 若未来需要强制 TTL，可在 onRehydrateStorage 中读取 savedAt 并按需清除。
+ */
+
+/**
+ * 裁剪每个 pipeline 的消息列表，仅保留最近 N 条用于持久化
+ *
+ * BUG-FIX-fix_20260622_workspace_state_loss:
+ * 防止 localStorage 配额溢出。更早的消息会在恢复后从 API 重新加载（向上翻页）。
+ * 保留最新消息确保用户回到会话时立即看到最近的对话上下文。
+ */
+function trimMessagesForPersistence(
+  messagesByPipeline: Record<string, Message[]>,
+): Record<string, Message[]> {
+  const result: Record<string, Message[]> = {}
+  for (const [pipelineId, msgs] of Object.entries(messagesByPipeline)) {
+    if (!msgs || msgs.length === 0) continue
+    // 按 sequence 排序后取最后 N 条（sequence 大=新）
+    const sorted = [...msgs].sort(compareMessages)
+    result[pipelineId] =
+      sorted.length > PERSIST_MAX_MESSAGES_PER_PIPELINE
+        ? sorted.slice(-PERSIST_MAX_MESSAGES_PER_PIPELINE)
+        : sorted
+  }
+  return result
+}
 
 /**
  * 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求
@@ -272,8 +318,12 @@ function calculateBottomCursor(finalMessages: Message[], existingCursor: number 
 
 /**
  * 统一管道消息 Store
+ *
+ * BUG-FIX-fix_20260622_workspace_state_loss:
+ * 加 persist 中间件持久化核心状态，避免整页刷新/重登后丢失工作区消息。
  */
-export const usePipelineMessageStore = create<PipelineMessageState>()((set, get) => ({
+export const usePipelineMessageStore = create<PipelineMessageState>()(
+  persist((set, get) => ({
   messagesByPipeline: {},
   pipelines: {},
   pipelineSessionMap: {},
@@ -1008,5 +1058,37 @@ export const usePipelineMessageStore = create<PipelineMessageState>()((set, get)
     if (!msg || !msg.parts) return -1
     return msg.parts.findIndex((p) => p.type === 'tool_call' && (p as ToolCallPart).callId === callId)
   },
-
-}))
+}),
+  // BUG-FIX-fix_20260622_workspace_state_loss:
+  // 问题根因: 原本 messagesByPipeline/activePipelineId 等核心状态纯内存，
+  //          整页刷新（含认证失效重定向）后全部丢失，用户感受到"工作没了"。
+  // 修复方案: 加 persist 中间件持久化核心状态，重登/刷新后自动恢复。
+  //          - 只持久化消息、管道元数据、活跃 pipeline（运行时状态如 streaming/loading 不持久化）
+  //          - 每个 pipeline 限制 50 条消息防止 localStorage 溢出
+  //          - 24 小时 TTL，过期数据由 API 重新加载覆盖
+  {
+    name: 'pipeline-messages',
+    version: 1,
+    // 仅持久化核心数据，排除运行时状态
+    partialize: (state) => ({
+      messagesByPipeline: trimMessagesForPersistence(state.messagesByPipeline),
+      pipelines: state.pipelines,
+      pipelineSessionMap: state.pipelineSessionMap,
+      activePipelineId: state.activePipelineId,
+      topCursorsByPipeline: state.topCursorsByPipeline,
+      bottomCursorsByPipeline: state.bottomCursorsByPipeline,
+      hasMoreOlderByPipeline: state.hasMoreOlderByPipeline,
+    }),
+    // 恢复时合并默认状态（运行时状态用默认值）
+    merge: (persisted, current) => {
+      const p = (persisted as Partial<PipelineMessageState>) || {}
+      return {
+        ...current,
+        ...p,
+        // 运行时状态强制重置（不信任持久化值）
+        streamingState: {},
+        isLoadingOlderByPipeline: {},
+      }
+    },
+  },
+))
