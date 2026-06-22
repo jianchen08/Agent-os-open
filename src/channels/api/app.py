@@ -20,7 +20,14 @@ from ui_schema.auth_types import AutoCRUDError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CORS_ORIGINS = ["*"]
+# DEBT: CORS 允许源应通过配置文件或环境变量管理。ceiling: 当前硬编码开发环境源。
+# upgrade: 增加 CORS_ORIGINS 环境变量支持，生产环境严格限制。
+import os
+
+_DEFAULT_CORS_ORIGINS = os.environ.get(
+    "CORS_ORIGINS",
+    "http://localhost:5188,http://localhost:5289,http://localhost:5173",
+).split(",")
 
 # 应用启动时间
 _start_time: float = 0.0

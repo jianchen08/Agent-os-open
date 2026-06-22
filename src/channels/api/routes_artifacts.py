@@ -22,8 +22,16 @@ from multimodal.types import AttachmentInfo, MediaType  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
-artifacts_router = APIRouter(prefix="/api/v1/artifacts", tags=["制品"])
-annotations_router_v1 = APIRouter(prefix="/api/v1", tags=["批注"])
+artifacts_router = APIRouter(
+    prefix="/api/v1/artifacts",
+    tags=["制品"],
+    dependencies=[Depends(require_auth)],
+)
+annotations_router_v1 = APIRouter(
+    prefix="/api/v1",
+    tags=["批注"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 # ---------------------------------------------------------------------------

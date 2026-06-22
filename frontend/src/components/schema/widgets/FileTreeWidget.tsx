@@ -323,24 +323,6 @@ function getStatusIcon(
 }
 
 /**
- * 根据 text-* 颜色类名返回对应的半透明背景色类名，提高状态标签对比度
- *
- * @param colorClass - text-status-* 颜色类名
- * @returns bg-* 背景色类名
- */
-function statusBgClass(colorClass: string): string {
-  const bgMap: Record<string, string> = {
-    'text-status-success': 'bg-status-success/15',
-    'text-status-error': 'bg-status-error/15',
-    'text-status-warning': 'bg-status-warning/15',
-    'text-status-info': 'bg-status-info/15',
-    'text-status-running': 'bg-status-running/15',
-    'text-status-pending': 'bg-status-pending/15',
-  }
-  return bgMap[colorClass] ?? ''
-}
-
-/**
  * 递归收集所有节点 ID（用于初始展开）
  *
  * @param nodes - 树节点数组
@@ -1490,7 +1472,7 @@ function TreeNode({
               </span>
             )}
             {statusInfo && (
-              <span className={`shrink-0 rounded px-1 text-[10px] font-medium ${statusInfo.color} ${statusBgClass(statusInfo.color)}`}>
+              <span className={`shrink-0 text-[10px] ${statusInfo.color}`}>
                 {statusInfo.label}
               </span>
             )}

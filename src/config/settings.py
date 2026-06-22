@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # JWT 配置
     jwt_secret_key: str = Field(
-        default="your-secret-key-change-in-production",
+        default="dev-insecure-key-do-not-use-in-production",
         validation_alias="APP_JWT_SECRET_KEY",
     )
     jwt_algorithm: str = Field(default="HS256", validation_alias="APP_JWT_ALGORITHM")

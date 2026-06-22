@@ -14,12 +14,16 @@ from typing import Any
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from channels.api.deps import APIError
+from channels.api.deps import APIError, require_auth
 from services.comfyui_service import get_comfyui_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/comfyui", tags=["ComfyUI"])
+router = APIRouter(
+    prefix="/api/v1/comfyui",
+    tags=["ComfyUI"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 class ConnectRequest(BaseModel):

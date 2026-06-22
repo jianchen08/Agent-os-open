@@ -75,19 +75,22 @@ class MemoryStore:
         self._load_persisted_data()
 
     def _create_default_users(self) -> None:
-        """创建演示用户和管理员用户。"""
-        self.users["demo"] = {
-            "id": "demo_user_001",
-            "username": "demo",
-            "password": "demo12345",
-            "email": "demo@example.com",
-            "role": "user",
-            "created_at": _now_iso(),
-        }
+        """创建默认管理员用户。
+
+        密码使用 bcrypt 哈希存储，从不保存明文。
+        默认账号仅在首次启动且无已注册用户时创建，密码从环境变量读取。
+        """
+        import os  # noqa: PLC0415
+
+        from src.auth.password import hash_password  # noqa: PLC0415
+
+        admin_password = os.environ.get(
+            "DEFAULT_ADMIN_PASSWORD", "ChangeMe-Admin-$(date +%s)"
+        )
         self.users["admin"] = {
             "id": "admin_user_001",
             "username": "admin",
-            "password": "admin123",
+            "password": hash_password(admin_password),
             "email": "admin@example.com",
             "role": "admin",
             "created_at": _now_iso(),
@@ -228,9 +231,11 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """创建新用户并存入内存。
 
+        密码使用 bcrypt 哈希存储，从不保存明文。
+
         Args:
             username: 用户名
-            password: 密码
+            password: 明文密码（将被哈希）
             email: 可选邮箱
 
         Returns:
@@ -242,11 +247,13 @@ class MemoryStore:
         if username in self.users:
             raise ValueError(f"用户名 '{username}' 已存在")
 
+        from src.auth.password import hash_password  # noqa: PLC0415
+
         user_id = uuid.uuid4().hex[:12]
         user = {
             "id": user_id,
             "username": username,
-            "password": password,
+            "password": hash_password(password),
             "email": email,
             "created_at": _now_iso(),
         }

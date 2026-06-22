@@ -19,7 +19,11 @@ from review.review_service import get_review_service
 
 logger = logging.getLogger(__name__)
 
-reviews_router = APIRouter(prefix="/api/v1/reviews", tags=["审批"])
+reviews_router = APIRouter(
+    prefix="/api/v1/reviews",
+    tags=["审批"],
+    dependencies=[Depends(require_auth)],
+)
 
 # 全局媒体审阅服务实例
 _media_review_service: MediaReviewService | None = None

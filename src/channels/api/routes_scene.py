@@ -26,7 +26,11 @@ from scene.templates import list_templates
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/scenes", tags=["场景管理"])
+router = APIRouter(
+    prefix="/api/v1/scenes",
+    tags=["场景管理"],
+    dependencies=[Depends(require_auth)],
+)
 
 # 全局 SceneManager 实例
 _scene_manager: SceneManager | None = None

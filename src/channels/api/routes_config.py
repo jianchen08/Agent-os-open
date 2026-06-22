@@ -21,7 +21,11 @@ from config.models import invalidate_all_llm_caches
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/config", tags=["配置管理"])
+router = APIRouter(
+    prefix="/api/v1/config",
+    tags=["配置管理"],
+    dependencies=[Depends(require_auth)],
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _CONFIG_ROOT = _PROJECT_ROOT / "config"

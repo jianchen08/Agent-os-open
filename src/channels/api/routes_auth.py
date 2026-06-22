@@ -25,6 +25,7 @@ from channels.api.models import (
     TokenResponse,
     UserResponse,
 )
+from src.auth.password import verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,11 @@ def login(request: LoginRequest) -> TokenResponse:
         HTTPException: 用户名或密码错误
     """
     user = store.get_user_by_username(request.username)
-    if user is None or user["password"] != request.password:
+    # 使用 bcrypt 验证密码，禁止明文比对
+    stored_password = user.get("password", "") if user else ""
+    if not user or not stored_password or not verify_password(
+        request.password, stored_password
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -212,7 +217,7 @@ def refresh_token(
             detail="refresh token 已被撤销",
         )
 
-    payload = verify_token(actual_token)
+    payload = verify_token(actual_token, token_type="refresh")
     if payload is None or payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

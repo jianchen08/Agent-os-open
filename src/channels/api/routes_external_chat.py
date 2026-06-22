@@ -16,7 +16,11 @@ from channels.api.deps import APIError, require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/external", tags=["外部系统"])
+router = APIRouter(
+    prefix="/api/v1/external",
+    tags=["外部系统"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 # ============================================================

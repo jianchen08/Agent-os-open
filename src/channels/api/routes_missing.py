@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Projects 路由 - /api/v1/projects
 # ---------------------------------------------------------------------------
-projects_router = APIRouter(prefix="/api/v1/projects", tags=["项目"])
+projects_router = APIRouter(prefix="/api/v1/projects", tags=["项目"], dependencies=[Depends(require_auth)])
 
 
 @projects_router.get("", summary="获取项目列表")
@@ -324,7 +324,7 @@ async def delete_project(project_id: str, _user: dict = Depends(require_auth)) -
 # ---------------------------------------------------------------------------
 # Users 路由 - /api/v1/users
 # ---------------------------------------------------------------------------
-users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"])
+users_router = APIRouter(prefix="/api/v1/users", tags=["用户管理"], dependencies=[Depends(require_auth)])
 
 
 @users_router.get("", summary="获取用户列表")
@@ -376,7 +376,7 @@ async def update_user_settings(body: dict[str, Any] | None = None, _user: dict =
 # ---------------------------------------------------------------------------
 # Monitoring 路由 - /api/v1/monitoring
 # ---------------------------------------------------------------------------
-monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"])
+monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["监控"], dependencies=[Depends(require_auth)])
 
 
 def _with_fallback_strategies(
@@ -821,7 +821,7 @@ async def get_event_list(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Triggers 路由 - /api/v1/triggers
 # ---------------------------------------------------------------------------
-triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"])
+triggers_router = APIRouter(prefix="/api/v1/triggers", tags=["触发器"], dependencies=[Depends(require_auth)])
 
 
 @triggers_router.get("", summary="获取触发器列表")
@@ -878,7 +878,7 @@ async def manual_trigger(trigger_id: str, _user: dict = Depends(require_auth)) -
 # ---------------------------------------------------------------------------
 # Interaction 路由 - /api/v1/interaction
 # ---------------------------------------------------------------------------
-interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"])
+interaction_router = APIRouter(prefix="/api/v1/interaction", tags=["人类交互"], dependencies=[Depends(require_auth)])
 
 
 @interaction_router.post("/response", summary="提交交互响应")
@@ -980,7 +980,7 @@ async def mark_viewed(
 # ---------------------------------------------------------------------------
 # Agent Calls 路由 - /api/v1/agent-calls
 # ---------------------------------------------------------------------------
-agent_calls_router = APIRouter(prefix="/api/v1/agent-calls", tags=["Agent调用记录"])
+agent_calls_router = APIRouter(prefix="/api/v1/agent-calls", tags=["Agent调用记录"], dependencies=[Depends(require_auth)])
 
 
 @agent_calls_router.get("", summary="获取调用记录列表")
@@ -1001,7 +1001,7 @@ async def get_agent_call(execution_id: str, _user: dict = Depends(require_auth))
 # ---------------------------------------------------------------------------
 # Execution Records 路由 - /api/v1/execution
 # ---------------------------------------------------------------------------
-execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"])
+execution_router = APIRouter(prefix="/api/v1/execution", tags=["执行记录"], dependencies=[Depends(require_auth)])
 
 
 @execution_router.get("/records", summary="获取执行记录列表")
@@ -1141,7 +1141,7 @@ async def inject_agent_message(
 # ---------------------------------------------------------------------------
 # Sessions 路由 - /api/v1/sessions
 # ---------------------------------------------------------------------------
-sessions_router = APIRouter(prefix="/api/v1/sessions", tags=["会话"])
+sessions_router = APIRouter(prefix="/api/v1/sessions", tags=["会话"], dependencies=[Depends(require_auth)])
 
 
 @sessions_router.get("/{session_id}/total-token-usage", summary="获取会话总Token用量")
@@ -1157,7 +1157,7 @@ async def get_session_context_token_usage(session_id: str, parent_execution_reco
 # ---------------------------------------------------------------------------
 # Knowledge Base 路由 - /api/v1/knowledge-base
 # ---------------------------------------------------------------------------
-knowledge_base_router = APIRouter(prefix="/api/v1/knowledge-base", tags=["知识库"])
+knowledge_base_router = APIRouter(prefix="/api/v1/knowledge-base", tags=["知识库"], dependencies=[Depends(require_auth)])
 
 
 @knowledge_base_router.get("", summary="获取知识库列表")
@@ -1213,7 +1213,7 @@ async def delete_knowledge_base_item(item_id: str, _user: dict = Depends(require
 # ---------------------------------------------------------------------------
 # Floating Chat 路由 - /api/v1/floating-chat
 # ---------------------------------------------------------------------------
-floating_chat_router = APIRouter(prefix="/api/v1/floating-chat", tags=["悬浮窗"])
+floating_chat_router = APIRouter(prefix="/api/v1/floating-chat", tags=["悬浮窗"], dependencies=[Depends(require_auth)])
 
 
 @floating_chat_router.get("/status", summary="获取悬浮窗状态")
@@ -1229,7 +1229,7 @@ async def launch_floating_chat(_user: dict = Depends(require_auth)) -> dict[str,
 # ---------------------------------------------------------------------------
 # Cost Control 路由 - /api/v1/cost-control
 # ---------------------------------------------------------------------------
-cost_control_router = APIRouter(prefix="/api/v1/cost-control", tags=["成本控制"])
+cost_control_router = APIRouter(prefix="/api/v1/cost-control", tags=["成本控制"], dependencies=[Depends(require_auth)])
 
 
 @cost_control_router.get("/budget/status", summary="获取预算状态")
@@ -1284,7 +1284,7 @@ async def reset_budget(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Evaluation 路由 - /api/v1/evaluation
 # ---------------------------------------------------------------------------
-evaluation_router = APIRouter(prefix="/api/v1/evaluation", tags=["评估"])
+evaluation_router = APIRouter(prefix="/api/v1/evaluation", tags=["评估"], dependencies=[Depends(require_auth)])
 
 
 @evaluation_router.post("/evaluate", summary="执行评估")
@@ -1335,7 +1335,7 @@ async def get_trends(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Evaluation Metrics 别名路由 - /api/v1/evaluation-metrics
 # ---------------------------------------------------------------------------
-eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"])
+eval_metrics_alias_router = APIRouter(prefix="/api/v1/evaluation-metrics", tags=["评估指标别名"], dependencies=[Depends(require_auth)])
 
 
 @eval_metrics_alias_router.get("", summary="获取评估指标列表（别名）")
@@ -1393,7 +1393,7 @@ async def get_eval_metric_alias(metric_id: str, _user: dict = Depends(require_au
 # ---------------------------------------------------------------------------
 # Client Register 路由 - /api/v1/client
 # ---------------------------------------------------------------------------
-client_router = APIRouter(prefix="/api/v1/client", tags=["客户端"])
+client_router = APIRouter(prefix="/api/v1/client", tags=["客户端"], dependencies=[Depends(require_auth)])
 
 _client_registry: dict[str, dict[str, Any]] = {}
 
@@ -1433,7 +1433,7 @@ async def register_client(body: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Files Capabilities 路由 - /api/v1/files
 # ---------------------------------------------------------------------------
-files_router = APIRouter(prefix="/api/v1/files", tags=["文件"])
+files_router = APIRouter(prefix="/api/v1/files", tags=["文件"], dependencies=[Depends(require_auth)])
 
 
 @files_router.get("/capabilities", summary="获取模型文件能力")
@@ -1501,7 +1501,7 @@ async def get_supported_file_types(_user: dict = Depends(require_auth)) -> dict[
 # Task Phase & AC 路由 - /api/v1/tasks/{id}/phase, /api/v1/tasks/{id}/ac
 # ---------------------------------------------------------------------------
 
-task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"])
+task_phase_router = APIRouter(prefix="/api/v1/tasks", tags=["任务阶段"], dependencies=[Depends(require_auth)])
 
 
 @task_phase_router.get("/{task_id}/phase", summary="获取任务当前阶段")

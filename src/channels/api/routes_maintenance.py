@@ -17,11 +17,17 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from channels.api.deps import require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/maintenance", tags=["维护管理"])
+router = APIRouter(
+    prefix="/api/v1/maintenance",
+    tags=["维护管理"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 def _get_maintenance_service() -> Any:
