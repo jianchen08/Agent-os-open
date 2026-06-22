@@ -1185,7 +1185,10 @@ class TaskExecutorMixin:
 
                     if session:
 
-                        session.register_pipeline(pipeline_id)
+                        # BUG-FIX-fix_20260622_subpipeline_overwrites_active:
+                        # 子管道（L2）注册时绝不能覆盖主管道的 active 指针，
+                        # 否则一旦子管道未落盘执行记录，会话历史将整体丢失。
+                        session.register_pipeline(pipeline_id, set_active=False)
 
                         _api_store.set_session(thread_id, session)
 

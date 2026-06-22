@@ -1050,7 +1050,9 @@ class TaskSubmitTool(BuiltinTool):
                         from channels.api.memory_store import store as api_store  # noqa: PLC0415
                         _session = api_store.get_session(_session_id)
                         if _session:
-                            _session.register_pipeline(pipeline_id)
+                            # BUG-FIX-fix_20260622_subpipeline_overwrites_active:
+                            # 容器子管道注册时不覆盖主管道 active，避免会话历史丢失
+                            _session.register_pipeline(pipeline_id, set_active=False)
                             api_store.set_session(_session_id, _session)
                     except Exception as _reg_exc:
                         logger.warning(

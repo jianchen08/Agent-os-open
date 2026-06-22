@@ -254,24 +254,41 @@ def _expand_pipeline_ids_with_tasks(
 
     Returns:
         扩展后的完整管道 ID 列表
+
+    BUG-FIX-fix_20260622_pipeline_ids_order_lost:
+    问题根因: 原实现用 set 收集后 list() 返回，set 无序导致主管道
+              （原始 pipeline_ids[0]）可能被排到任意位置。前端依赖
+              pipelineIds[0] 作为主管道（agentTabStore.getMainPipelineId），
+              顺序被打乱后主 Tab 会加载到子管道消息。
+    修复方案: 用 list + seen 集合去重，保持"原始顺序在前，扩展项追加在后"，
+              确保 pipeline_ids[0] 永远是主管道。
+    影响范围: 会话列表/详情的 pipeline_ids 顺序，前端主管道定位
+    修复日期: 2026-06-22
     """
     if not pipeline_ids or not all_tasks:
         return list(pipeline_ids)
 
-    expanded: set[str] = set(pipeline_ids)
+    # 保持顺序的去重：seen 用于 O(1) 判重，ordered 保留插入顺序
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for pid in pipeline_ids:
+        if pid and pid not in seen:
+            seen.add(pid)
+            ordered.append(pid)
 
-    # 迭代扩展直到不动点
+    # 迭代扩展直到不动点，新增项追加到末尾（不改变原始顺序）
     changed = True
     while changed:
         changed = False
         for task in all_tasks:
             ppid = getattr(task, "parent_pipeline_id", "") or ""
             prid = getattr(task, "pipeline_run_id", "") or ""
-            if ppid and ppid in expanded and prid and prid not in expanded:
-                expanded.add(prid)
+            if ppid and ppid in seen and prid and prid not in seen:
+                seen.add(prid)
+                ordered.append(prid)
                 changed = True
 
-    return list(expanded)
+    return ordered
 
 
 async def _build_execution_graph(  # noqa: PLR0912,PLR0915
