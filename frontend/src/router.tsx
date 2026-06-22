@@ -419,10 +419,13 @@ function HomePage(): ReactNode {
       }
 
       const listStore = useSessionListStore.getState()
-      const sessions = listStore.sessions || []
+      const sessions = useSessionStore.getState().sessions || []
       const session = sessions.find(s => s.id === sid)
-      if (session && (!session.title || session.title.startsWith('新会话'))) {
-        listStore.renameSession(sid, params.content.slice(0, 50))
+      if (session && (session.title === '灵汐' || session.title === '新会话')) {
+        const title = params.content.replace(/\n/g, ' ').trim().slice(0, 30)
+        if (title) {
+          listStore.renameSession(sid, title)
+        }
       }
 
       const pipelineStore = usePipelineMessageStore.getState()
