@@ -45,6 +45,8 @@ models:
       thinking:
         type: enabled
       reasoning_effort: max
+      reasoning_retention:
+        sample_interval: 3
   deepseek-v4-pro:
     provider: deepseek
     model_name: deepseek-v4-pro
@@ -59,6 +61,8 @@ models:
       thinking:
         type: enabled
       reasoning_effort: max
+      reasoning_retention:
+        sample_interval: 3
   minimax-m3:
     provider: minimax
     model_name: MiniMax-M3
@@ -87,8 +91,8 @@ defaults:
   call_timeout: 300
   compression: minimax-m3
   tiers:
-    large: deepseek-v4-pro
-    medium: minimax-m3
+    large: glm-5.2
+    medium: glm-5.2
     small: minimax-m3
     fallback_chain:
       chat:

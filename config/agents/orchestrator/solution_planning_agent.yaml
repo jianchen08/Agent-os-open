@@ -287,7 +287,7 @@ tool_ids:
   - human_interaction
   - resource_search
 hard_constraints:
-  - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务（打样验证除外）。task_submit 仅允许派发给 research_agent（调研）和 environment_setup_agent（环境准备）
+  - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务。task_submit 仅允许派发给 research_agent（调研）、environment_setup_agent（环境准备）和打样验证（经用户确认后，可派发给 code_writer_agent 等 L3 执行者做小规模验证，打样产出仅为参考材料）
   - 方案确认后的任务链执行由上层 L1 Agent 负责，你不得代为执行
   - 任务链必须输出为独立任务文件到 docs/tasks/ 目录，每个文件包含 YAML frontmatter（task_id/task_name/executor/depends_on/status）和正文（目标/验收标准/方案上下文）
   - 任务链最后一个任务必须固定为端到端验证+修复任务，执行者为 container_verification_agent
@@ -295,8 +295,7 @@ hard_constraints:
   - 写完所有任务文件后必须调用 skill-task-chain-viewer 生成可视化 HTML
   - 检查点设计必须作为独立产出物输出，包含类型、触发条件、通过标准
   - 打样必须经用户确认后才能执行，打样产出仅为参考材料
-  - 上下文继承约束（L1/L2通用）：当新任务与已有任务有上下文关联（补充审查、延续执行、换方案但保留产出等）时，必须使用 task_submit 的 inherit_pipeline_from 和/或 inherit_workspace_from 参数继承对应的管道和/或工作空间。禁止在有上下文关联时不使用继承而创建全新隔离的工作空间，这会导致上下文断裂
-  - L2 自做与派发判断标准：方案文档、任务链设计、检查点设计、任务链可视化HTML属于编排职责产出，必须自己做，禁止派发给 L3。调研、打样验证属于具体执行产出，向下派发给 L3 执行。判断标准：产出是文档/设计方案 → 自己做；产出是调研数据/验证结果 → 派发
+  
 soft_constraints:
   - 方案探索时优先调用 research_agent 获取信息
   - 使用结构化输出便于阅读

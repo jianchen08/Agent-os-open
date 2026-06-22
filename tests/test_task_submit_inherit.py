@@ -52,22 +52,34 @@ def _build_mock_provider(
     old_task: MagicMock | None = None,
     new_task: MagicMock | None = None,
 ) -> MagicMock:
-    """构建 mock provider，包含 TaskService / TaskWorker / AgentRegistry。"""
+    """构建 mock provider，包含 TaskService / TaskWorker / AgentRegistry / Lifecycle。"""
     if new_task is None:
         new_task = MagicMock()
         new_task.id = "task_mock_001"
         new_task.title = "测试任务"
         new_task.status.value = "pending"
+        new_task.metadata = {}
 
     mock_task_service = MagicMock()
     mock_task_service.create_task = AsyncMock(return_value=new_task)
-    mock_task_service.get_task.return_value = old_task
+    mock_task_service.get_task.return_value = new_task
+    mock_task_service.hard_delete = AsyncMock()
 
     mock_task_worker = MagicMock()
     mock_task_worker.submit_task.return_value = True
 
     mock_agent_config = MagicMock()
     mock_agent_config.level.value = "L2"
+
+    # 工作空间生命周期 mock：on_task_start 写入 ws_meta 到 new_task.metadata
+    mock_lifecycle = MagicMock()
+
+    def _on_task_start(task_id, workspace, task_data):  # noqa: ANN001
+        new_task.metadata = new_task.metadata or {}
+        new_task.metadata["ws_meta"] = {"path": f"/tmp/ws_{task_id}", "mode": "plain"}
+        return new_task.metadata["ws_meta"]
+
+    mock_lifecycle.on_task_start.side_effect = _on_task_start
 
     def provider_get(key):
         if key == "task_worker":
@@ -78,6 +90,8 @@ def _build_mock_provider(
             return reg
         if key == "task_service":
             return mock_task_service
+        if key == "workspace_lifecycle_manager":
+            return mock_lifecycle
         return None
 
     mock_provider = MagicMock()
@@ -445,13 +459,25 @@ class TestInheritPipeConversationHistoryBug:
         mock_new_task = MagicMock()
         mock_new_task.id = "new_task_001"
         mock_new_task.title = "新任务"
+        mock_new_task.metadata = {}
         mock_task_service.create_task.return_value = mock_new_task
+        mock_task_service.hard_delete = AsyncMock()
 
         mock_task_worker = MagicMock()
         mock_task_worker.submit_task.return_value = True
 
         mock_agent_config = MagicMock()
         mock_agent_config.level.value = "L2"
+
+        # 工作空间生命周期 mock（task_submit 现在同步调用 on_task_start）
+        mock_lifecycle = MagicMock()
+
+        def _on_task_start(task_id, workspace, task_data):  # noqa: ANN001
+            mock_new_task.metadata = mock_new_task.metadata or {}
+            mock_new_task.metadata["ws_meta"] = {"path": f"/tmp/ws_{task_id}", "mode": "plain"}
+            return mock_new_task.metadata["ws_meta"]
+
+        mock_lifecycle.on_task_start.side_effect = _on_task_start
 
         def provider_get(key):
             if key == "task_worker":
@@ -462,6 +488,8 @@ class TestInheritPipeConversationHistoryBug:
                 return reg
             if key == "task_service":
                 return mock_task_service
+            if key == "workspace_lifecycle_manager":
+                return mock_lifecycle
             return None
 
         mock_provider = MagicMock()

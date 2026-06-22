@@ -38,6 +38,8 @@ tool_ids:
 - file_read
 - file_write
 - copy_file
+- move_file
+- delete_file
 - create_directory
 - list_directory
 - resource_search

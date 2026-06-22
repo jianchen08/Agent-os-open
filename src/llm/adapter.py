@@ -233,6 +233,15 @@ class _BaseLiteLLMAdapter:
         # 防御性兜底：确保 minimax 不会收到非法 system 消息
         self._ensure_minimax_role_safety(model, messages)
 
+        # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
+        # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
+        from llm.provider_adapters import get_provider_adapter  # noqa: PLC0415
+        adapter = get_provider_adapter(model)
+        messages = adapter.adapt_messages_before_send(messages, **kwargs)
+
+        # 弹出 adapter 专属参数（不发给 litellm / API）
+        kwargs.pop("reasoning_retention", None)
+
         if stream:
             return await self._call_streaming(
                 model, messages, tools=tools, on_chunk=on_chunk, **kwargs

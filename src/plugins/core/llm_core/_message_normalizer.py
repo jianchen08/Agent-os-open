@@ -279,6 +279,11 @@ def _validate_tool_call_pairing(  # noqa: PLR0912,PLR0915
     cached_len = _pairing_validated_len.get(cache_key, 0)
     msg_count = len(messages)
 
+    # MiniMax 对配对极度严格，增量缓存一旦过期就漏检，触发 2013 错误。
+    # 每次全量扫描开销极小（线性遍历消息列表），但能根除缓存漂移风险。
+    if provider == "minimax":
+        cached_len = 0
+
     # 消息被截断/重建（数量比缓存少），重置缓存做全量扫描
     if msg_count < cached_len:
         cached_len = 0

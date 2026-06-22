@@ -173,21 +173,6 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             val = 1
         return f"L{val}"
 
-    def _is_root_agent(self, inputs: dict[str, Any]) -> bool:
-        """判断当前调用是否来自主 agent（L1 / root_task）。
-
-        主 agent 按 root_task_policy（allow_outside=true、read.scope=project）
-        不受工作空间范围限制。判定依据为 parent_agent_level == 1，
-        缺省（参数未注入）时按主 agent 处理，避免误伤合法调用。
-
-        Args:
-            inputs: 工具执行时接收的输入参数字典
-
-        Returns:
-            True 表示当前为主 agent 调用
-        """
-        return self._parse_agent_level(inputs) == "L1"
-
     def _validate_file_paths(self, inputs: dict[str, Any]) -> ToolExecutionResult | None:
         """校验 file_paths 参数的合法性。
 
@@ -195,9 +180,8 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
         - file_paths 为 None 或空列表 → 合法，直接返回 None
         - file_paths 类型必须为 list → 否则返回错误
         - file_paths 超过 MAX_FILE_PATHS 个 → 返回错误
-        - 逐个路径校验：文件不存在、路径是目录、文件超过大小限制 → 收集错误
-        - 工作空间范围校验：仅子任务（L2+）受约束，主 agent（L1 / root_task）
-          按 root_task_policy（allow_outside=true）放行，可读取工作空间外文件
+        - 逐个路径校验：统一读权限检查（按 agent_level + permission_policies 声明决策）、
+          文件不存在、路径是目录、文件超过大小限制 → 收集错误
 
         Args:
             inputs: 工具执行时接收的输入参数字典
@@ -231,24 +215,19 @@ class HumanInteractionTool(BuiltinTool, WorkspaceAwareMixin):
             )
 
         errors: list[str] = []
-        workspace_root = self._workspace.resolve()
-        # 主 agent（root_task）按权限策略可读写整个项目，不受工作空间范围约束；
-        # 子任务（L2+）保留范围校验（subtask_policy: allow_outside=false）。
-        enforce_workspace_scope = not self._is_root_agent(inputs)
+        agent_level = inputs.get("parent_agent_level", None)
         for path_str in file_paths:
             path = self.resolve_path(path_str)
             real_path = path.resolve()
 
-            if enforce_workspace_scope:
-                try:
-                    real_path.relative_to(workspace_root)
-                except ValueError:
-                    errors.append(
-                        f"路径 \"{path_str}\" 超出工作空间范围（{workspace_root}），"
-                        "不允许访问工作空间之外的文件。"
-                        "请确认路径是否正确，或改用工作空间内的相对路径"
-                    )
-                    continue
+            # 统一读权限检查（按 agent 层级 + permission_policies 声明决策）
+            ok, err = self.check_path_allowed(str(real_path), "read", agent_level)
+            if not ok:
+                errors.append(
+                    f"路径 \"{path_str}\" 超出允许范围（{err}）。"
+                    "请确认路径是否正确，或改用工作空间内的相对路径"
+                )
+                continue
 
             if not real_path.exists():
                 errors.append(

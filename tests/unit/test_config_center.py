@@ -452,41 +452,6 @@ class TestRollback:
 
 
 # ---------------------------------------------------------------------------
-# 审批机制（L1 Agent）
-# ---------------------------------------------------------------------------
-
-
-class TestApproval:
-    """L1 主 Agent / 灵汐默认配置变更需审批。"""
-
-    def test_needs_approval_for_l1_agents(self, center):
-        """L1 Agent 配置路径应需要审批。"""
-        assert center._needs_approval("/config/agents/main/灵汐.yaml") is True
-        assert center._needs_approval("/config/agents/orchestrator/orch.yaml") is True
-
-    def test_no_approval_for_other_agents(self, center):
-        """非 L1 Agent 配置路径不需要审批。"""
-        assert center._needs_approval("/config/agents/executor/coder.yaml") is False
-        assert center._needs_approval("/config/system/test.yaml") is False
-
-    def test_handle_file_change_skips_approval_paths(self, center, config_dir):
-        """自动监听到 L1 Agent 变更时不应自动加载到缓存。"""
-        main_file = config_dir / "agents" / "main" / "灵汐.yaml"
-        main_file.parent.mkdir(parents=True, exist_ok=True)
-        _write_yaml(main_file, {"config_id": "lingxi", "name": "灵汐"})
-
-        # _handle_file_change 中审批路径会提前返回
-        # 验证：即使文件有效，也不应更新缓存
-        center._handle_file_change("modified", str(main_file))
-
-        # 直接检查内部缓存（get() 会从磁盘回退读取，不能用于判断缓存是否更新）
-        with _ReadGuard(center._rwlock):
-            cached = center._config_cache.get(str(main_file))
-        # 由于需要审批，缓存不应被更新
-        assert cached is None
-
-
-# ---------------------------------------------------------------------------
 # 排除规则
 # ---------------------------------------------------------------------------
 

@@ -758,6 +758,8 @@ class ToolCore(ICorePlugin):
             tc_ids.append(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
 
         if not has_tool_call_msg and tool_calls:
+            # 从 state 取 reasoning_content（与 LLMCore 保持一致，统一存）
+            _rc_for_rebuild = ctx.state.get(StateKeys.RAW_THINKING)
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": "",
@@ -767,16 +769,17 @@ class ToolCore(ICorePlugin):
                         "type": "function",
                         "function": {
                             "name": tc.get("name", ""),
-                            "arguments": {
-                                k: v for k, v in (tc.get("args") or tc.get("arguments") or {}).items()
-                                if not k.startswith("_")
-                            } if isinstance(tc.get("args") or tc.get("arguments"), dict)
-                            else tc.get("args", tc.get("arguments", "")),
+                            # arguments 必须是 JSON 字符串（OpenAI API 规范），
+                            # 与 LLMCore 保持一致：直接透传原始值，不做 dict 转换。
+                            # 历史问题：曾把 args(dict) 直接放入 arguments，触发 400。
+                            "arguments": tc.get("args", tc.get("arguments", "")),
                         },
                     }
                     for i, tc in enumerate(tool_calls)
                 ],
             }
+            if _rc_for_rebuild:
+                assistant_msg["reasoning_content"] = _rc_for_rebuild
             current_messages.append(assistant_msg)
 
         # 追加 tool 结果消息

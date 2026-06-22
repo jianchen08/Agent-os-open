@@ -391,8 +391,7 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     1. ModelConfigLoader 实例缓存和模块级缓存
     2. LLMConfigManager 单例
     3. litellm.Router 和 Adapter 单例
-    4. LLMFactory 实例缓存和模块级单例
-    5. plugin_resolver 的 tier 缓存
+    4. plugin_resolver 的 tier 缓存
     """
     # 1. 清除 ModelConfigLoader 缓存
     invalidate_model_config_cache(config_dir)
@@ -405,13 +404,7 @@ def invalidate_all_llm_caches(config_dir: str | Path | None = None) -> None:
     from llm.router_factory import reset_router
     reset_router()
 
-    # 4. 清除 LLMFactory 实例缓存和模块级单例（延迟导入）
-    import llm.factory as factory_mod
-    if factory_mod._llm_factory_instance is not None:
-        factory_mod._llm_factory_instance.clear_cache()
-        factory_mod._llm_factory_instance = None
-
-    # 清除 tier 缓存，使配置变更实时生效
+    # 4. 清除 tier 缓存，使配置变更实时生效
     try:
         import pipeline.plugin_resolver as pr_mod
         pr_mod._tier_cache.clear()

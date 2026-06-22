@@ -16,7 +16,65 @@ class WorkspaceAwareMixin:
 
     提供路径解析、项目根推断、工作目录获取等通用能力，
     各工具通过继承此 Mixin 即可获得一致的 workspace 处理行为。
+
+    新增统一的路径权限校验入口 check_path_allowed，
+    所有工具无需各自实现 workspace 范围检查，调用此方法即可
+    按 permission_policies 声明（root_task / subtask / default）决策。
     """
+
+    # ── 权限策略管理器（模块级缓存，避免每次调用重新解析配置）──
+    _policy_manager = None
+
+    @classmethod
+    def _get_policy_manager(cls):
+        """获取缓存的 PermissionPolicyManager 单例（从配置文件加载策略）。"""
+        if cls._policy_manager is None:
+            from isolation.permission_policy import PermissionPolicyManager  # noqa: PLC0415
+            cls._policy_manager = PermissionPolicyManager()
+        return cls._policy_manager
+
+    def check_path_allowed(
+        self,
+        path: str,
+        operation: str = "read",
+        agent_level: int | str | None = None,
+    ) -> tuple[bool, str]:
+        """统一的路径权限校验入口。
+
+        根据 agent 层级选取对应策略（L1/缺省→root_task, L2+→subtask），
+        再按操作类型（read/write）调用 PermissionChecker 决策。
+        通过返回 (True, "")，拒绝返回 (False, 错误原因)。
+
+        Args:
+            path: 待校验的文件路径（绝对路径或相对于 project_root 的相对路径）
+            operation: "read" 或 "write"
+            agent_level: 调用方 agent 层级（1=主agent, 2+=子任务, None=按L1处理）
+
+        Returns:
+            (通过与否, 错误描述)
+        """
+        # 确保 workspace/project_root 已初始化
+        workspace = getattr(self, "_workspace", None)
+        project_root = getattr(self, "_project_root", None)
+        if workspace is None or project_root is None:
+            return False, "workspace 未初始化，无法校验路径权限"
+
+        policy_manager = self._get_policy_manager()
+        policy_name = policy_manager.get_policy_name_for_agent_level(agent_level)
+        policy = policy_manager.get_policy(policy_name)
+
+        from isolation.permission_checker import PermissionChecker  # noqa: PLC0415
+        checker = PermissionChecker(str(project_root))
+
+        if operation == "write":
+            ok, err = checker.check_write_permission(
+                path, str(workspace), policy,
+            )
+        else:
+            ok, err = checker.check_read_permission(
+                path, str(workspace), policy,
+            )
+        return ok, err
 
     def _init_workspace(self, inputs: dict[str, Any]) -> None:
         """从输入参数初始化工作空间和项目根路径。

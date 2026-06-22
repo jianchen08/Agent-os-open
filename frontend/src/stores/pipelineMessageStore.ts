@@ -356,8 +356,19 @@ function mergeApiWithExisting(
     return { finalMessages: sorted, preservedCount: 0 }
   }
 
-  // API 权威消息在前（按后端顺序），本地独有消息追加在后（按到达顺序）
-  return { finalMessages: [...sorted, ...localOnly], preservedCount: localOnly.length }
+  // BUG-FIX-fix_20260623_refresh_order:
+  // 问题根因: 原代码用 [...sorted, ...localOnly] 直接末尾拼接，未按 sequence
+  //   合并排序。刷新后 persist 恢复的 localOnly 消息（旧 sequence）会被错误地
+  //   排到所有 API 返回的新消息之后，导致页面刷新后消息顺序错乱、与后端数据不一致。
+  // 修复方案: 用 mergeSorted 按 sequence 升序归并 API 权威消息与本地独有消息，
+  //   与 appendMessages/prependMessages 保持一致。initFromAPI 后续的
+  //   mergePreservingStreaming/filterBlankMessages 不改变顺序，最终渲染顺序正确。
+  //   注意：mergeSorted 要求两个输入各自升序，localOnly 来自 existing（可能无序，
+  //   如 persist 恢复或并发写入），需先排序。
+  // 影响范围: 页面刷新、会话切换后消息顺序
+  // 修复日期: 2026-06-23
+  const sortedLocalOnly = [...localOnly].sort(compareMessages)
+  return { finalMessages: mergeSorted(sorted, sortedLocalOnly), preservedCount: localOnly.length }
 }
 
 /**

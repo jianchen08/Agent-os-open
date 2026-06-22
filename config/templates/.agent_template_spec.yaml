@@ -711,22 +711,24 @@ context_variables:
 
 # ==================== 产出物定义 ====================
 #
+# 产出物分为两类：
+#
+# **实际产出**：任务的最终交付物（代码、配置、文档等），是任务目标本身
+# **报告产出**：给上级查看的执行过程报告（编排报告、审查报告、调试报告等）
+#
 # 不同层级的 Agent 产出物定义：
 #
 # ===== L1 (main) =====
 #   无产出物（只负责分解和调度，不产出文件）
-#   但需在"常用 Agent 映射"表中列出各 Agent 的产出物摘要，便于派发任务时设置验收标准。
+#   但需在"常用 Agent 映射"表中列出各 Agent 的实际产出和报告产出摘要，便于派发任务时设置验收标准。
 #
 # ===== L2 (orchestrator) =====
-#   根据具体任务定义产出物：
-#   - 如果任务由下层 Agent 生成产出物，可将下层产出物作为本层产出物
-#   - 如果需要整合下层产出物，可定义整合后的产出物
-#   - 示例：solution_planning_agent 的产出物是 "方案文档" 和 "任务链"
+#   报告产出为主：编排报告、审查结论等
+#   实际产出：方案文档、任务链、检查点设计等编排产出
 #
 # ===== L3 (specialized/atomic) =====
-#   根据具体任务定义产出物：
-#   - 必须明确定义产出物名称、路径、类型
-#   - 示例：research_agent 的产出物是 "调研报告"
+#   实际产出为主：代码文件、配置文件、调研报告等
+#   报告产出：视任务而定（如调试报告）
 #
 # ===== 映射表体现 =====
 #   L1 主 Agent 应在 static_vars 中配置"常用 Agent 映射"表，格式如下：
@@ -734,10 +736,14 @@ context_variables:
 #     type: "reference"
 #     content: |
 #       ## 常用 Agent 映射
-#       | 场景 | Agent | 说明 | 产出物路径 | 隔离级别 | 推荐指标 |
-#       |------|-------|------|-----------|----------|----------|
-#       | 调研/分析 | research_agent | ... | `docs/{title}_research_report.md` | container | file_check, semantic_check(重要任务可选) |
-#       | Agent创建 | resource_manager_agent | ... | 视资源类型而定 | host | file_check, semantic_check(重要任务) |
+#       | Agent ID | 实际产出 | 报告产出 | 命名规则 | 隔离级别 | 推荐指标 |
+#       |----------|---------|---------|----------|----------|----------|
+#       | research_agent | 调研报告 | - | docs/working/{title}_research_report.md | container | file_check |
+#       | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md | container | file_check |
+#       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
+#       | code_writer_agent | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
+#       | code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
+#       | test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
 #       ### 隔离规则
 #       - container（默认）：不指定 isolation_level，产出物自动在工作空间中
 #       - host：必须指定 isolation_level="host"，Agent 直接操作项目路径
@@ -763,20 +769,22 @@ deliverables:
 #       description: 产出物描述
 #       template_source: 模板来源（可选: "knowledge"）
 #       template_name: 模板名称（可选）
-#       output_path: 输出路径（支持 {title} 等模板变量和 {{workspace}}/{{task_id}}/{{agent_id}} 等运行时占位符，格式: {{workspace}}/docs/{title}_{产出物类型}.md）
+#       output_path: 输出路径（支持 {title} 等模板变量和 {{workspace}}/{{task_id}}/{{agent_id}} 等运行时占位符，格式: {{workspace}}/docs/working/{title}_{产出物类型}.md）
 #       type: 文件类型（如 "markdown", "json", "python"）
 #       required: 是否必须产出
+#       category: 产出物类别（"actual" 实际产出 或 "report" 报告产出）
 # - 示例:
 #   deliverables:
 #     - name: "research_report"
 #       description: "调研报告文件"
 #       template_source: "knowledge"
 #       template_name: "research_report"
-#       output_path: "{{workspace}}/docs/{title}_research_report.md"
+#       output_path: "{{workspace}}/docs/working/{title}_research_report.md"
 #       type: "markdown"
 #       required: true
+#       category: "actual"
 # - 决策建议:
-#   - L1 Agent: 无需定义 deliverables，但需在映射表中体现各 Agent 的产出物摘要
+#   - L1 Agent: 无需定义 deliverables，但需在映射表中体现各 Agent 的实际产出和报告产出摘要
 #   - L2/L3 Agent: 根据任务产出定义 deliverables，产出物信息将被 L1 映射表引用
 
 # ==================== 推荐评估指标 ====================

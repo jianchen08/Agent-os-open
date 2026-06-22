@@ -32,9 +32,9 @@ static_vars:
   items:
   - '{{rules}}'
   - '{{path:config/templates/test_code_template.md}}'
-  - '{{routed:route_key=coding_domain|frontend={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|backend={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|_default={''type'': ''path'', ''path'': ''config/rules/testing_rules.md''}}}'
+  - '{{path:config/rules/frontend_rules.md}}'
+  - '{{path:config/rules/backend_rules.md}}'
+  - '{{path:config/rules/testing_rules.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -68,8 +68,6 @@ tool_ids:
 - fetch
 - task_evaluate
 - resource_search
-- playwright_test
-- mcp__4_5v_mcp__analyze_image
 - lsp_definition
 - lsp_references
 - lsp_diagnostics

@@ -174,8 +174,8 @@ recommended_metrics:
   default_params:
     criteria: 验证报告必须包含 tool_capability_assessment、semantic_evaluation、user_journey 字段，且验证场景与用户真实使用一致
 version: 2.1.0
-is_active: false
-status: inactive
+is_active: true
+status: active
 max_iterations: 500
 max_reminders: 3
 timeout_seconds: 3600

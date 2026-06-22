@@ -26,9 +26,9 @@ static_vars:
   enabled: true
   items:
   - '{{rules}}'
-  - '{{routed:route_key=coding_domain|frontend={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/frontend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|backend={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}|fullstack={''type'': ''path'', ''path'': ''config/rules/backend_rules.md''}}}'
-  - '{{routed:route_key=coding_domain|_default={''type'': ''path'', ''path'': ''config/rules/testing_rules.md''}}}'
+  - '{{path:config/rules/frontend_rules.md}}'
+  - '{{path:config/rules/backend_rules.md}}'
+  - '{{path:config/rules/testing_rules.md}}'
 dynamic_vars:
   enabled: true
   items:
@@ -60,8 +60,6 @@ tool_ids:
 - bash_execute
 - task_evaluate
 - resource_search
-- design_generate
-- playwright_test
 - lsp_definition
 - lsp_references
 - lsp_diagnostics

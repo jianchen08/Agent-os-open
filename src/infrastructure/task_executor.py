@@ -290,7 +290,31 @@ class TaskExecutorMixin:
 
             ws_meta = {}
 
-            if lifecycle:
+            # 工作空间已在 task_submit 阶段完成初始化（on_task_start/init_container_workspace），
+
+            # ws_meta 已写入 task.metadata。此处优先复用，仅在异常情况下兜底重建。
+
+            _task_for_ws = task_service.get_task(task_id) if task_service else None
+
+            if _task_for_ws and _task_for_ws.metadata:
+
+                _existing_ws_meta = _task_for_ws.metadata.get("ws_meta")
+
+                if isinstance(_existing_ws_meta, dict) and _existing_ws_meta.get("path"):
+
+                    ws_meta = _existing_ws_meta
+
+                    workspace = ws_meta.get("path", workspace)
+
+                    logger.info(
+
+                        "TaskWorker: 复用 task_submit 阶段初始化的工作空间: task_id=%s, mode=%s, path=%s",
+
+                        task_id, ws_meta.get("mode"), ws_meta.get("path"),
+
+                    )
+
+            if not ws_meta and lifecycle:
 
                 try:
 
@@ -306,9 +330,9 @@ class TaskExecutorMixin:
 
                     workspace = ws_meta.get("path", workspace)
 
-                    logger.info(
+                    logger.warning(
 
-                        "TaskWorker: lifecycle on_task_start, task_id=%s, mode=%s",
+                        "TaskWorker: ws_meta 缺失，兜底重建工作空间: task_id=%s, mode=%s",
 
                         task_id, ws_meta.get("mode"),
 
@@ -851,13 +875,34 @@ class TaskExecutorMixin:
 
     ) -> None:
 
-        """处理容器任务：初始化容器工作空间后跳过管道执行。"""
+        """处理容器任务：容器工作空间已在 task_submit 阶段初始化，此处仅复用校验。
+
+        若 ws_meta 已存在（正常流程），跳过初始化；仅在异常缺失时兜底重建。
+        """
 
         lifecycle: WorkspaceLifecycleManager | None = (
 
             self._services.get("workspace_lifecycle_manager")
 
         )
+
+        # ── 优先复用 task_submit 阶段已写入的 ws_meta ──
+
+        _existing_ws_meta = (task.metadata or {}).get("ws_meta") if task and task.metadata else None
+
+        if isinstance(_existing_ws_meta, dict) and _existing_ws_meta.get("path"):
+
+            logger.info(
+
+                "TaskWorker: 容器复用 task_submit 阶段初始化的工作空间: task_id=%s, path=%s",
+
+                task_id, _existing_ws_meta.get("path"),
+
+            )
+
+            return
+
+        # ── 防御性兜底：ws_meta 缺失时重建（仅异常情况触发） ──
 
         if not lifecycle:
 
@@ -911,9 +956,9 @@ class TaskExecutorMixin:
 
                     await self._task_service.save_task(task)
 
-                    logger.info(
+                    logger.warning(
 
-                        "TaskWorker: 容器空间已初始化: task_id=%s, workspace=%s (attempt %d)",
+                        "TaskWorker: 容器 ws_meta 缺失，兜底重建: task_id=%s, workspace=%s (attempt %d)",
 
                         task_id, container_workspace_path, _attempt,
 

@@ -19,7 +19,7 @@
     await center.start()
 
 安全策略：
-- L1 主 Agent / 灵汐默认配置变更需要审批（通过 human_interaction 触发）
+- 配置变更审批已移至业务层（human_interaction / security_check 插件），ConfigCenter 不再拦截
 - 非配置类文件（.env、Redis 配置等）不纳入监听范围
 """
 
@@ -225,11 +225,8 @@ class ConfigCenter:
         # 立即检测 is_running 的时序竞态）。
         self._ready_event = asyncio.Event()
 
-        # 需要审批的配置路径前缀（L1 主 Agent / 灵汐默认配置）
-        self._approval_required_prefixes: list[str] = [
-            "config/agents/main/",
-            "config/agents/orchestrator/",
-        ]
+        # 审批逻辑已移至业务层（human_interaction / security_check 插件），
+        # ConfigCenter 不再在加载层拦截配置变更。
 
     # -- 公共接口 -----------------------------------------------------------
 
@@ -324,14 +321,6 @@ class ConfigCenter:
             )
 
         content_hash = hashlib.sha256(content.encode()).hexdigest()
-
-        # 检查是否需要审批
-        if self._needs_approval(str(abs_path)):
-            logger.warning(
-                "配置变更需要审批（L1 主 Agent / 灵汐默认配置）: %s", abs_path,
-            )
-            # 注意：审批通过后才应调用此方法，此处仅记录日志
-            # 审批逻辑由上层 human_interaction 触发
 
         # 写锁：更新缓存
         path_str = str(abs_path)
@@ -596,22 +585,6 @@ class ConfigCenter:
 
         new_hash = hashlib.sha256(content.encode()).hexdigest()
 
-        # 检查是否需要审批
-        if self._needs_approval(path_str):
-            logger.warning(
-                "检测到 L1 主 Agent 配置变更，需要审批: %s", path_str,
-            )
-            # 审批通过前不自动加载，仅记录审计
-            self._write_audit(AuditEntry(
-                file_path=path_str,
-                event_type=event_type,
-                config_type=config_type,
-                success=False,
-                error="需要审批（L1 主 Agent 配置变更）",
-                content_hash=new_hash,
-            ))
-            return
-
         # 写锁：检查去重 + 更新缓存
         with _WriteGuard(self._rwlock):
             old_hash = self._content_hashes.get(path_str)
@@ -851,20 +824,6 @@ class ConfigCenter:
 
         # 排除备份文件
         return bool(name.endswith(".bak") or name.endswith(".bak~"))
-
-    def _needs_approval(self, file_path: str) -> bool:
-        """检查配置变更是否需要审批。
-
-        L1 主 Agent / 灵汐默认配置变更需要通过 human_interaction 审批。
-
-        Args:
-            file_path: 文件路径。
-
-        Returns:
-            是否需要审批。
-        """
-        normalized = file_path.replace("\\", "/")
-        return any(prefix in normalized for prefix in self._approval_required_prefixes)
 
 
 # ---------------------------------------------------------------------------

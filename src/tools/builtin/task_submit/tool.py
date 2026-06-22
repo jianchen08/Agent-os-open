@@ -904,6 +904,17 @@ class TaskSubmitTool(BuiltinTool):
             bool(task_data.get("description")),
             len(task_data.get("description", "")),
         )
+
+        # ── 7. 同步初始化工作空间 ──
+        # 工作空间解析必须在 submit 返回前完成，确保 ws_meta 写入 task.metadata。
+        # 失败则清理任务记录并返回错误，不让 LLM 误以为任务可执行。
+        task, ws_err = await self._init_workspace(
+            task, workspace, task_data, task_service,
+        )
+        if ws_err:
+            await task_service.hard_delete(task.id)
+            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
+
         if not task_worker.submit_task(task_data):
             await task_service.hard_delete(task.id)
             return create_failure_result(
@@ -955,6 +966,8 @@ class TaskSubmitTool(BuiltinTool):
             "target_type": target_type,
             "target_id": target_id,
             "submit_status": "submitted",
+            "workspace": workspace or "",
+            "resolved_workspace": (task.metadata or {}).get("ws_meta", {}).get("path", ""),
             "message": (
                 f"任务 [{task.title}]（ID: {task.id}）已提交，目标执行者：{target_id}，状态：异步执行中。"
                 "该任务需要一定时间完成。"
@@ -1100,6 +1113,22 @@ class TaskSubmitTool(BuiltinTool):
             isolation_mode=inputs.get("isolation_level"),
         )
 
+        # ── 同步初始化容器工作空间 ──
+        # 与非容器任务一致：submit 返回前必须完成工作空间创建。
+        _container_task_data = {"isolation_mode": inputs.get("isolation_level", "")}
+        task, ws_err = await self._init_workspace(
+            task, inputs.get("workspace") or "", _container_task_data, task_service,
+            is_container=True,
+        )
+        if ws_err:
+            await task_service.hard_delete(task.id)
+            return create_failure_result(error=ws_err, error_code="WORKSPACE_INIT_FAILED")
+
+        # on_task_start 可能重算路径，以 ws_meta 为准
+        _ws_meta_path = (task.metadata or {}).get("ws_meta", {}).get("path", "")
+        if _ws_meta_path:
+            container_workspace_path = _ws_meta_path
+
         from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
         task_worker = get_service_provider().get("task_worker")
         if task_worker:
@@ -1121,10 +1150,9 @@ class TaskSubmitTool(BuiltinTool):
             "status": task.status.value,
             "task_scope": "container",
             "submit_status": "submitted",
+            "workspace": inputs.get("workspace") or "",
+            "resolved_workspace": container_workspace_path,
         }
-
-        if parent_agent_level == 1:
-            result_data["workspace_path"] = container_workspace_path
 
         result_data["message"] = (
             f"容器任务 [{task.title}]（ID: {task.id}）已提交"
@@ -1139,6 +1167,71 @@ class TaskSubmitTool(BuiltinTool):
             data=result_data,
             metadata={"action": "task_submit_container"},
         )
+
+    @staticmethod
+    async def _init_workspace(
+        task: Any,
+        workspace: str,
+        task_data: dict[str, Any],
+        task_service: Any,
+        *,
+        is_container: bool = False,
+    ) -> tuple[Any, str | None]:
+        """同步初始化工作空间，确保 ws_meta 写入 task.metadata 后才返回。
+
+        - 非容器：调 ``lifecycle.on_task_start``
+        - 容器：调 ``lifecycle.init_container_workspace``
+        通过 run_in_executor 在线程池执行，不阻塞事件循环和其他管道。
+
+        Args:
+            task: TaskModel 实例
+            workspace: 目标工作空间路径
+            task_data: 任务数据字典（isolation_mode 等决策字段）
+            task_service: TaskService 实例
+            is_container: 是否为容器任务
+
+        Returns:
+            (更新后的 task, None) 成功；(task, error_msg) 失败。
+            调用方负责在失败时 hard_delete。
+        """
+        import asyncio  # noqa: PLC0415
+
+        from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
+
+        provider = get_service_provider()
+        lifecycle = provider.get("workspace_lifecycle_manager") if provider else None
+        if lifecycle is None:
+            return task, "工作空间管理器不可用，任务提交失败"
+
+        # 注入 isolation_mode（lifecycle 内部依赖此字段决策 worktree/host 模式）
+        if "isolation_mode" not in task_data:
+            iso_level = (task.metadata or {}).get("isolation_level", "")
+            if iso_level:
+                task_data["isolation_mode"] = iso_level
+
+        fn = lifecycle.init_container_workspace if is_container else lifecycle.on_task_start
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, fn, task.id, workspace, task_data)
+        except Exception as ws_err:
+            logger.error(
+                "[TaskSubmit] 工作空间初始化失败 | task_id=%s | container=%s | error=%s",
+                task.id, is_container, ws_err,
+            )
+            return task, f"工作空间初始化失败: {ws_err}"
+
+        # 重新读取 task 获取 lifecycle 写入的最新 metadata（含 ws_meta）
+        refreshed = task_service.get_task(task.id)
+        if refreshed:
+            task = refreshed
+        if not (task.metadata or {}).get("ws_meta"):
+            logger.error(
+                "[TaskSubmit] 工作空间初始化完成但 ws_meta 缺失 | task_id=%s",
+                task.id,
+            )
+            return task, "工作空间初始化异常：ws_meta 未生成"
+
+        return task, None
 
     def _validate_parent_task_id(
         self, parent_agent_level: int, parent_task_id: str | None, task_scope: str

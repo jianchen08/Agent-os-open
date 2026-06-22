@@ -851,6 +851,16 @@ class TaskTool(BuiltinTool):
 
             metadata = dict(task.metadata)
 
+            # ── 工作空间信息（直接从任务元数据读取，不二次解析） ──
+
+            result["workspace"] = metadata.get("workspace", "")
+
+            ws_meta = metadata.get("ws_meta")
+
+            if isinstance(ws_meta, dict) and ws_meta.get("path"):
+
+                result["resolved_workspace"] = ws_meta["path"]
+
 
 
             eval_summary = None

@@ -399,9 +399,11 @@ class TestFileWriteToolWrite:
         tool = FileWriteTool(base_path=str(tmp_path))
         result = await tool.execute({
             "action": "write",
-            "path": str(test_file),
+            "path": "new_file.txt",
             "content": "Hello World",
             "create_backup": False,
+            "workspace": str(tmp_path),
+            "project_root": str(tmp_path),
         })
 
         assert result.success is True
@@ -1272,6 +1274,8 @@ class TestFileWriteToolRelativePath:
             "path": "relative.txt",
             "content": "relative write",
             "create_backup": False,
+            "workspace": str(tmp_path),
+            "project_root": str(tmp_path),
         })
 
         assert result.success is True

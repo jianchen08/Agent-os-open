@@ -854,24 +854,6 @@ class TestConfigCenterHelpers:
         for p in included:
             assert center._is_excluded(p) is False, f"{p.name} 不应被排除"
 
-    def test_needs_approval(self, tmp_path: Path) -> None:
-        """_needs_approval 正确识别需要审批的路径。"""
-        center = ConfigCenter(config_root=tmp_path)
-
-        approval_paths = [
-            "config/agents/main/灵汐.yaml",
-            "config/agents/orchestrator/orchestrator.yaml",
-        ]
-        for p in approval_paths:
-            assert center._needs_approval(p) is True, f"{p} 应需要审批"
-
-        no_approval = [
-            "config/agents/executor/coder.yaml",
-            "config/models/llm.yaml",
-        ]
-        for p in no_approval:
-            assert center._needs_approval(p) is False, f"{p} 不应需要审批"
-
     def test_is_running_property(self, tmp_path: Path) -> None:
         """is_running 属性正确反映状态。"""
         center = ConfigCenter(config_root=tmp_path)

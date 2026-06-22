@@ -365,6 +365,8 @@ class LLMCore(ICorePlugin):
                     tc["id"] = resolved_ids[i]
 
                 # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
+                # 统一保留 reasoning_content 到内存（不管 provider）：
+                # 发送给 API 时由 ProviderAdapter 按 provider 决定是否剥离
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": result_text or "",
@@ -380,10 +382,15 @@ class LLMCore(ICorePlugin):
                         for i, tc in enumerate(tool_calls)
                     ],
                 }
+                if thinking_text:
+                    assistant_msg["reasoning_content"] = thinking_text
                 history.append(assistant_msg)
             elif result_text:
                 # LLM 普通文本回复 -> append assistant 消息
-                history.append({"role": "assistant", "content": result_text})
+                _plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
+                if thinking_text:
+                    _plain_msg["reasoning_content"] = thinking_text
+                history.append(_plain_msg)
 
             _pipeline_id = ctx.state.get("pipeline_id", "?")
             _iteration = ctx.state.get("iteration", -1)
