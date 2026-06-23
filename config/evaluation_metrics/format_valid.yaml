@@ -1,0 +1,89 @@
+# 格式验证评估指标
+# 使用 schema_evaluator 验证文件格式正确性（YAML/JSON/Markdown等）
+
+# BUG-FIX-fix_20260623_missing_format_valid:
+# 问题根因: format_valid 被多个 Agent YAML 配置引用（code_writer/general_agent/
+#           solution_planning/environment_setup 等），但 config/evaluation_metrics/
+#           目录中缺少 format_valid.yaml 文件，导致 MetricLoader 加载后不包含
+#           该指标，task_submit 附带的评估指标无法找到定义。
+# 修复方案: 创建 format_valid.yaml，使用 schema_evaluator 工具进行格式验证。
+# 影响范围: 所有使用 format_valid 指标的任务评估
+
+id: format_valid
+name: 格式验证
+description: 验证文件格式是否正确（YAML/JSON/Markdown/正则匹配等）
+
+# ===== 评估器配置 =====
+evaluator_id: schema_evaluator
+evaluator_type: tool
+
+default_config: {}
+
+# ===== 评估判断标准 =====
+expect:
+  conditions:
+    - field: "success"
+      operator: "is_true"
+  logic: "and"
+  pass_message: "格式验证通过"
+  fail_message: "格式验证失败"
+
+# ===== 输入参数定义 =====
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      description: "文件路径（相对路径或绝对路径）"
+    content:
+      type: string
+      description: "要验证的内容（与 path 二选一）"
+    format:
+      type: string
+      enum: ["auto", "json", "yaml", "regex"]
+      description: "格式类型，auto 时根据文件扩展名自动推断"
+      default: "auto"
+    pattern:
+      type: string
+      description: "正则匹配模式（format=regex 时使用）"
+  oneOf:
+    - required: ["path"]
+    - required: ["content"]
+
+# ===== 使用边界 =====
+when_to_use:
+  - 需要验证文件格式是否正确（YAML/JSON 语法）
+  - 需要验证文件内容是否符合特定模式（正则）
+  - 需要检查文件是否为空或可读
+when_not_use:
+  - 需要检查文件是否存在（应使用 file_check）
+  - 需要执行命令验证（应使用 bash_check）
+  - 需要语义理解内容质量（应使用 semantic_check）
+examples:
+  - params:
+      path: config/agents/main/main_agent.yaml
+    description: "验证 YAML 配置文件格式"
+  - params:
+      path: src/main.py
+      format: regex
+      pattern: "^(def|class|import)\\s"
+    description: "验证 Python 文件以合法语句开头"
+caveats:
+  - 默认使用 auto 模式，根据文件扩展名自动推断校验格式
+  - path 和 content 二选一，同时提供时以 path 为准
+
+# ===== 依赖关系 =====
+is_red_line: false
+default_weight: 1.0
+level: 1
+includes: []
+requires: []
+
+# ===== 元数据 =====
+source: builtin
+status: active
+tags:
+  - format
+  - validation
+  - yaml
+  - json

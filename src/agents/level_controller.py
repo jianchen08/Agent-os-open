@@ -121,6 +121,9 @@ class LevelController:
                 self.logger.info("工具权限配置文件不存在，使用默认配置")
                 return self._get_default_permissions()
             return config.get("tool_permissions", {})
+        except ImportError as e:
+            self.logger.info("config_center 未安装，使用默认工具权限: %s", e)
+            return self._get_default_permissions()
         except yaml.YAMLError as e:
             self.logger.warning("工具权限配置文件解析失败: %s", e)
             return self._get_default_permissions()
@@ -252,7 +255,7 @@ class LevelController:
         Returns:
             基础工具名称集合
         """
-        return {"file_read", "file_write", "bash", "web_search"}
+        return {"file_read", "file_write", "bash_execute", "web_search"}
 
     def validate_task_submission(
         self,

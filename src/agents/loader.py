@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,32 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 环境变量占位符模式：${VAR_NAME}
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _substitute_env_vars(value: Any) -> Any:
+    """递归替换字典/列表/字符串中的环境变量占位符。
+
+    将 ``${ENV_VAR}`` 格式的占位符替换为 ``os.environ.get("ENV_VAR", "")``。
+    若环境变量不存在，替换为空字符串（与 src/config/models.py 保持一致）。
+
+    Args:
+        value: 待替换的值（可能是 dict / list / str / 其他）。
+
+    Returns:
+        替换后的值，类型与输入一致。
+    """
+    if isinstance(value, str):
+        def _replace(match: re.Match[str]) -> str:
+            return os.environ.get(match.group(1), "")
+        return _ENV_VAR_PATTERN.sub(_replace, value)
+    if isinstance(value, dict):
+        return {k: _substitute_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute_env_vars(item) for item in value]
+    return value
 
 
 class AgentConfigLoader:
@@ -267,6 +295,9 @@ class AgentConfigLoader:
 
         if not isinstance(data, dict):
             raise ValueError(f"YAML 内容不是字典类型 ({path})")
+
+        # 环境变量替换：${ENV_VAR} → os.environ.get("ENV_VAR", "")
+        data = _substitute_env_vars(data)
 
         # 必填字段检查
         if not data.get("config_id"):

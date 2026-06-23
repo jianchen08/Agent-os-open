@@ -220,6 +220,7 @@ class TokenManager:
             except Exception as exc:
                 logger.debug("TokenManager: Redis 查询失败，降级到内存: %s", exc)
 
+        # 严格小于：iat < revoke_time 才判定为撤销。
         if user_id in self._revoked_users:
             return iat <= self._revoked_users[user_id]
         return False

@@ -518,10 +518,25 @@ class MemoryService:
 
         retriever = self._retrievers.get(method_name)
         if not retriever:
-            available = list(self._retrievers.keys())
-            raise ValueError(
-                f"检索器 '{method_name}' 未注册。可用检索器: {available}"
-            )
+            # BUG-FIX-fix_20260623_vector_fallback_not_implemented:
+            # 配置了 fallback_to_keyword=True 时，vector/tagwave 检索器未注册
+            # 应降级到 keyword 检索而非直接抛 ValueError。
+            if self._config.get("vector_search", {}).get("fallback_to_keyword", False):
+                fallback = self._retrievers.get("keyword")
+                if fallback:
+                    logger.warning(
+                        "[MemoryService] %s 检索器未注册，降级到 keyword 检索。",
+                        method_name,
+                    )
+                    self._retrieval_stats["fallback_hits"] += 1
+                    retriever = fallback
+                else:
+                    return []
+            else:
+                available = list(self._retrievers.keys())
+                raise ValueError(
+                    f"检索器 '{method_name}' 未注册。可用检索器: {available}"
+                )
 
         results = await retriever.retrieve(
             query=query,

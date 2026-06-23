@@ -570,7 +570,6 @@ def _parse_qq_content(raw: dict[str, Any]) -> tuple[str, str]:
     import re  # noqa: PLC0415
 
     message = raw.get("message", "")
-    raw.get("message_type", "private")
 
     # 默认内容类型映射
     content_type = "text"

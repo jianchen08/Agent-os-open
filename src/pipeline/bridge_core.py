@@ -115,12 +115,26 @@ class BridgeCore:
     # ------------------------------------------------------------------
 
     def _make_event(self, event_type: str, data: dict) -> dict:
-        """构造事件字典，自动注入 pipeline_id、message_id 和 container_task_id。"""
+        """构造事件字典，自动注入信封字段和 pipeline_id、message_id、container_task_id。
+
+        按 WebSocket 协议要求（需求文档 §2.1），每个事件信封必须包含：
+        - type: 事件类型
+        - data: 事件数据
+        - source_type: 消息来源类型（system/agent/user/tool）
+        - source_id: 来源标识
+        - timestamp: ISO 8601 时间戳
+        """
         data.setdefault("pipeline_id", self.pipeline_id)
         data.setdefault("message_id", self.message_id)
         if self._container_task_id:
             data.setdefault("container_task_id", self._container_task_id)
-        return {"type": event_type, "data": data}
+        return {
+            "type": event_type,
+            "data": data,
+            "source_type": "system",
+            "source_id": self.pipeline_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
     async def _send_event_internal(self, event: dict) -> bool:
         """内部事件发送实现（失败隔离：只 log warning，不抛异常）。"""
