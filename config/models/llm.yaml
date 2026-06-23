@@ -231,8 +231,8 @@ providers:
     keys:
     - id: yichengc_main
       api_key: ${YICHENGC_API_KEY}
-      max_concurrent: 1
-      rpm: 1
+      max_concurrent: 3
+      rpm: 0
       token_quota: 0
 embeddings: {}
 concurrency:
