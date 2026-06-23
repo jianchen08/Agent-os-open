@@ -142,7 +142,7 @@ models:
       max_image_size: 20971520
   glm-5.2-yichengc:
     provider: yichengc
-    model_name: GLM-5.2
+    model_name: glm-5.2
     display_name: GLM-5.2-一程
     api_base: https://ai.1cc.ai/v1
     context_window: 1000000
@@ -231,8 +231,8 @@ providers:
     keys:
     - id: yichengc_main
       api_key: ${YICHENGC_API_KEY}
-      max_concurrent: 2
-      rpm: 5
+      max_concurrent: 1
+      rpm: 1
       token_quota: 0
 embeddings: {}
 concurrency:

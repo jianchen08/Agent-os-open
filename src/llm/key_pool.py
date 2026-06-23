@@ -277,8 +277,11 @@ class KeyPool:
         while True:
             slot = self.select()
             if slot is not None:
-                await slot.acquire()
+                # BUG-FIX: record_request() 必须在 await acquire() 之前，
+                # 否则并发请求可同时通过 select() 的 rpm_remaining>0 检查，
+                # 绕过本地 RPM 限流，全部放行到上游导致 429。
                 slot.record_request()
+                await slot.acquire()
                 return slot
             if _time.monotonic() >= deadline:
                 unavailable = self.get_unavailable_slots()

@@ -254,8 +254,8 @@ def build_router(model_loader: Any) -> litellm.Router:
     router_kwargs: dict[str, Any] = {
         "model_list": model_list,
         "num_retries": 1,
-        "allowed_fails": 2,
-        "cooldown_time": 120,
+        "allowed_fails": 5,
+        "cooldown_time": 15,
         "retry_after": 5,
         "stream_timeout": call_timeout,
         "timeout": call_timeout,
