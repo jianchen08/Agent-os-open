@@ -201,6 +201,21 @@ def _validate_record(
     return errors
 
 
+def _normalize_access(access: str) -> str:
+    """将 access 模式标准化为下划线格式。
+
+    支持连字符和下划线两种写法，统一输出下划线格式。
+    例如: "read-only" → "read_only", "read_only" → "read_only"
+
+    Args:
+        access: 原始 access 字符串。
+
+    Returns:
+        标准化后的 access 字符串。
+    """
+    return access.replace("-", "_").lower()
+
+
 def _find_primary_key(fields: dict[str, dict[str, Any]]) -> str | None:
     """查找主键字段名。
 
@@ -299,10 +314,19 @@ class AutoCRUDGenerator:
             )
             return None
 
-        access = definition.get("access", "crud")
+        access = _normalize_access(definition.get("access", "crud"))
         filters = definition.get("filters", [])
         sort_fields = definition.get("sort", [])
         pagination_enabled = definition.get("pagination", False)
+
+        # 合法的 access 模式（需求 F-UI-29）
+        valid_access = {"read_only", "read_write", "read_create", "crud", "write_only"}
+        if access not in valid_access:
+            logger.warning(
+                "未知的 access 模式 '%s'，回退为 crud: module=%s, collection=%s",
+                access, module_id, collection,
+            )
+            access = "crud"
 
         primary_key = _find_primary_key(fields)
         if primary_key is None:
@@ -320,31 +344,35 @@ class AutoCRUDGenerator:
         _get_store(module_id, collection)
 
         # ---- 注册 GET（列表）路由 ----
-        if access in ("crud", "read-only"):
+        # read_only / read_write / read_create / crud 均允许读
+        if access in ("read_only", "read_write", "read_create", "crud"):
             self._register_list_route(
                 router, module_id, collection, fields,
                 filters, sort_fields, pagination_enabled, primary_key,
             )
 
         # ---- 注册 GET（单条）路由 ----
-        if access in ("crud", "read-only"):
+        if access in ("read_only", "read_write", "read_create", "crud"):
             self._register_get_route(
                 router, module_id, collection, primary_key,
             )
 
         # ---- 注册 POST（创建）路由 ----
-        if access in ("crud", "write-only"):
+        # read_create / crud / write_only 均允许创建
+        if access in ("read_create", "crud", "write_only"):
             self._register_create_route(
                 router, module_id, collection, fields, primary_key,
             )
 
         # ---- 注册 PUT（更新）路由 ----
-        if access == "crud":
+        # read_write / crud 均允许更新
+        if access in ("read_write", "crud"):
             self._register_update_route(
                 router, module_id, collection, fields, primary_key,
             )
 
         # ---- 注册 DELETE（删除）路由 ----
+        # 仅 crud 允许删除
         if access == "crud":
             self._register_delete_route(
                 router, module_id, collection, primary_key,

@@ -286,6 +286,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: PLR0915
 
     app.include_router(comfyui_router)
 
+    # ---- 场景管理路由 ----
+    from channels.api.routes_scene import router as scene_router  # noqa: PLC0415
+
+    app.include_router(scene_router)
+
     # ---- 维护管理路由 ----
     from channels.api.routes_maintenance import router as maintenance_router  # noqa: PLC0415
 
