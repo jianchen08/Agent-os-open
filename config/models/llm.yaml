@@ -91,8 +91,8 @@ defaults:
   call_timeout: 300
   compression: minimax-m3
   tiers:
-    large: glm-5.2
-    medium: glm-5.2
+    large: minimax-m3
+    medium: minimax-m3
     small: minimax-m3
     fallback_chain:
       chat:

@@ -34,8 +34,11 @@ def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = 
         编码后的 JWT 字符串
     """
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=30))
-    to_encode.update({"exp": expire, "type": "access"})
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=30))
+    # 必须写入 iat：TokenManager.verify_token 会读取 iat 做用户撤销校验，
+    # 缺失会导致 KeyError，令牌验证直接失败（401）。
+    to_encode.update({"exp": expire, "iat": now, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -50,8 +53,10 @@ def create_refresh_token(data: dict[str, Any], expires_delta: timedelta | None =
         编码后的 JWT 字符串
     """
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(days=7))
-    to_encode.update({"exp": expire, "type": "refresh"})
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(days=7))
+    # 同 create_access_token，写入 iat 以匹配 TokenManager.verify_token 的契约。
+    to_encode.update({"exp": expire, "iat": now, "type": "refresh"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 

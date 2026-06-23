@@ -19,6 +19,16 @@ from infrastructure.session.models import SessionModel
 
 _log = logging.getLogger(__name__)
 
+# 本模块的 store 单例在 import 时即创建默认用户，其密码依赖环境变量。
+# 不同入口 import 顺序不可控（可能早于 app_factory 的 load_dotenv），
+# 故在此主动确保 .env 已加载，避免读到空环境变量而无法创建 admin。
+try:
+    from config.models import _load_dotenv_once  # noqa: PLC0415
+
+    _load_dotenv_once()
+except Exception:  # noqa: BLE001
+    _log.warning("加载 .env 失败，默认用户可能无法正确创建", exc_info=True)
+
 
 def _now_iso() -> str:
     """返回当前 UTC 时间的 ISO 格式字符串。"""
@@ -77,16 +87,22 @@ class MemoryStore:
     def _create_default_users(self) -> None:
         """创建默认管理员用户。
 
+        仅当显式配置了环境变量 DEFAULT_ADMIN_PASSWORD 时才创建 admin 账号，
         密码使用 bcrypt 哈希存储，从不保存明文。
-        默认账号仅在首次启动且无已注册用户时创建，密码从环境变量读取。
+        未配置时不创建任何默认用户，避免落入无人知晓的兜底密码陷阱。
         """
         import os  # noqa: PLC0415
 
         from src.auth.password import hash_password  # noqa: PLC0415
 
-        admin_password = os.environ.get(
-            "DEFAULT_ADMIN_PASSWORD", "ChangeMe-Admin-$(date +%s)"
-        )
+        admin_password = os.environ.get("DEFAULT_ADMIN_PASSWORD")
+        if not admin_password:
+            _log.warning(
+                "未配置 DEFAULT_ADMIN_PASSWORD，不创建默认 admin 账号。"
+                "请在 .env 中设置 DEFAULT_ADMIN_PASSWORD 后重启，否则 admin 登录将失败（401）。"
+            )
+            return
+
         self.users["admin"] = {
             "id": "admin_user_001",
             "username": "admin",
